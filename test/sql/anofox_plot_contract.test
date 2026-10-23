@@ -302,6 +302,141 @@ SELECT anofox_plot_cv(f) LIKE '<svg%1 fold%' FROM (VALUES
 ----
 true
 
+# ── schedule / Gantt (#176) ───────────────────────────────────────────────────
+# One lane per resource (natural order: L2 above L1, #378 review), tasks
+# coloured by status; anofox_plot detects it.
+query II
+SELECT anofox_plot_schedule(s) LIKE '<svg%>L2</text>%>L1</text>%',
+       anofox_plot(s) LIKE '<svg%' FROM (VALUES
+  ('L1', 'O1', 0, 10, 'on time', 12), ('L1', 'O2', 10, 25, 'late', 20),
+  ('L2', 'O3', 0, 15, 'on time', 18)
+) s(resource, task, start, "end", status, due);
+----
+true	true
+
+# A real bar, not an error bar: adjacent tasks on the same resource draw as
+# one continuous run of <rect> marks with a <title> tooltip each (not the
+# ::SCATTER + ::XMIN/::XMAX "whiskers" look this replaces, #171). The legend
+# reads "on time" (a space, not the internal on_time key).
+query III
+SELECT anofox_plot_schedule(s) LIKE '%<rect%<rect%',
+       anofox_plot_schedule(s) LIKE '%<title>O1 · L1: 0 – 10 · on time · due 12</title>%',
+       anofox_plot_schedule(s) LIKE '%>on time</text>%' FROM (VALUES
+  ('L1', 'O1', 0, 10, 'on time', 12), ('L1', 'O2', 10, 25, 'late', 20)
+) s(resource, task, start, "end", status, due);
+----
+true	true	true
+
+# A due-date connector + end tick (two segment marks) only for the late task
+# (O2, end 25 past due 20); the on-time task (O1) keeps due 12 in its
+# tooltip alone, no connector of its own — a dot for every task on a shared
+# lane can't be matched back to one. Both marks are drawn in ink, not the
+# status red a connector over its own red bar would be invisible in.
+query III
+SELECT anofox_plot_schedule(s) LIKE '%data-geom="segment"%',
+       (len(string_split(anofox_plot_schedule(s), 'data-geom="segment"')) - 1) = 2,
+       anofox_plot_schedule(s) LIKE '%<title>O2: due 20</title>%' FROM (VALUES
+  ('L1', 'O1', 0, 10, 'on time', 12), ('L1', 'O2', 10, 25, 'late', 20)
+) s(resource, task, start, "end", status, due);
+----
+true	true	true
+
+# Both due marks are ink (#0A0A0A), not the status red (#DC2626) a
+# connector over its own red bar would be invisible in (#378 review): the
+# red only ever appears as the rect's fill, never as a stroke.
+query II
+SELECT anofox_plot_schedule(s) LIKE '%stroke="#0A0A0A"%',
+       NOT anofox_plot_schedule(s) LIKE '%stroke="#DC2626"%' FROM (VALUES
+  ('L1', 'O1', 0, 10, 'late', 8)
+) s(resource, task, start, "end", status, due);
+----
+true	true
+
+# A widened bar (start = end) still reports its true, un-widened end in the
+# tooltip, not the widened draw width (#378 review).
+query I
+SELECT anofox_plot_schedule(s) LIKE '%<title>O2 · L1: 20 – 20</title>%' FROM (VALUES
+  ('L1', 'O1', 0, 10), ('L1', 'O2', 20, 20)
+) s(resource, task, start, "end");
+----
+true
+
+# Several model_id values facet into one panel each, to compare algorithms;
+# "late" is counted across every model, not per panel.
+query III
+SELECT anofox_plot_schedule(s) LIKE '%>exact</text>%' AND anofox_plot_schedule(s) LIKE '%>today</text>%',
+       anofox_plot_schedule(s) LIKE '<svg%late tasks%due dates marked%',
+       anofox_plot_schedule(s) LIKE '<svg%1 late across all models%' FROM (VALUES
+  ('today', 'L1', 'O1', 0, 10, 12, 'on time'), ('today', 'L1', 'O2', 10, 30, 20, 'late'),
+  ('exact', 'L1', 'O1', 0, 10, 12, 'on time'), ('exact', 'L1', 'O2', 10, 18, 20, 'on time')
+) s(model_id, resource, task, start, "end", due, status);
+----
+true	true	true
+
+# A NULL model_id among named ones gets its own "(none)" panel.
+query I
+SELECT anofox_plot_schedule(s) LIKE '%>(none)</text>%' FROM (VALUES
+  ('exact', 'L1', 'O1', 0, 10), (NULL, 'L1', 'O2', 0, 10)
+) s(model_id, resource, task, start, "end");
+----
+true
+
+# No status column: every bar is the synthetic `scheduled` level, no legend.
+query I
+SELECT anofox_plot_schedule(s) LIKE '<svg%' AND anofox_plot_schedule(s) NOT LIKE '%>late</text>%' FROM (VALUES
+  ('L1', 'O1', 0, 10), ('L1', 'O2', 10, 25)
+) s(resource, task, start, "end");
+----
+true
+
+# NULL start/end is dropped, end before start is dropped, start = end is
+# widened to a minimum visible bar — each counted in a data-warnings entry.
+query I
+SELECT anofox_plot_schedule(s) LIKE '%data-warnings%NULL start or end%'
+   AND anofox_plot_schedule(s) LIKE '%data-warnings%end before start%'
+   AND anofox_plot_schedule(s) LIKE '%data-warnings%widened%' FROM (VALUES
+  ('L1', 'O1', 0, 10), ('L1', 'O2', NULL, 20), ('L1', 'O3', 20, 15), ('L1', 'O4', 30, 30)
+) s(resource, task, start, "end");
+----
+true
+
+statement error
+SELECT anofox_plot_schedule(s) FROM (VALUES ('L1', 0, 10)) s(resource, start, "end");
+----
+needs column(s) task
+
+statement error
+SELECT anofox_plot_schedule(s) FROM (
+  SELECT 'm' || i AS model_id, 'L1' AS resource, 'O1' AS task, 0 AS start, 10 AS "end" FROM range(7) r(i)
+) s;
+----
+GROUP BY model_id
+
+# A numeric start/end with a DATE due is a type mismatch, not epoch seconds.
+statement error
+SELECT anofox_plot_schedule(s) FROM (VALUES
+  ('L1', 'O1', 0, 10, DATE '2024-01-01')
+) s(resource, task, start, "end", due);
+----
+must be the same type
+
+# A TIMESTAMP off midnight: the tooltip shows the time, the axis says "time".
+query II
+SELECT anofox_plot_schedule(s) LIKE '%06:00%14:30%',
+       anofox_plot_schedule(s) LIKE '%>time</text>%' FROM (VALUES
+  ('L1', 'O1', TIMESTAMP '2024-01-01 06:00', TIMESTAMP '2024-01-01 14:30')
+) s(resource, task, start, "end");
+----
+true	true
+
+# Plain DATEs (every value at midnight): the axis says "date".
+query I
+SELECT anofox_plot_schedule(s) LIKE '%>date</text>%' FROM (VALUES
+  ('L1', 'O1', DATE '2024-01-01', DATE '2024-01-03')
+) s(resource, task, start, "end");
+----
+true
+
 # ── events and integer periods (#66) ─────────────────────────────────────────
 statement ok
 CREATE TABLE alarms AS SELECT * FROM (VALUES

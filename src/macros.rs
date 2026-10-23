@@ -302,6 +302,20 @@ UNION ALL SELECT 1, 'test', i FROM range(10, 13) r(i)) f",
         tags: &[("anofox.consumes", "cv"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_schedule",
+        params: &["tbl"],
+        named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("schedule", "'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Gantt chart of a `schedule` table: one lane per resource, a bar per task from \
+start to end, coloured by status (on time/late, else muted), a late task's connector to its due \
+date, faceted by model_id (algorithm) when there are several (up to 6; else GROUP BY model_id or \
+WHERE model_id = ...). Columns: resource, task, start, end, model_id, due, status — one row per \
+task. Replaces drawing a schedule as a scatter with xmin/xmax error bars.",
+        example: "SELECT anofox_plot_schedule(s) FROM (VALUES ('L1', 'O1', 0, 10, 'on time'), \
+('L1', 'O2', 10, 25, 'late'), ('L2', 'O3', 0, 15, 'on time')) s(resource, task, start, \"end\", status)",
+        tags: &[("anofox.consumes", "schedule"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot_events",
         params: &["tbl"],
         named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "260")],
@@ -388,14 +402,15 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
         description: "Plot any anofox contract table (contract version 1), choosing the chart from its columns: \
 term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual -> diagnostics 2x2, \
 metric+value -> summary, check_name|thresholds + status + value -> checks, partial_residual -> partial \
-(component + residual), fold_id + (split | test_start | train_end) -> cv (provisional), component+value | \
-trend -> decomposition, p_value/test_id -> tests, row+col | column_a+column_b -> matrix, kind|severity + \
-ds|period -> events. Use the specific anofox_plot_* macro for options.",
+(component + residual), fold_id + (split | test_start | train_end) -> cv (provisional), resource+start+end \
+-> schedule (Gantt), component+value | trend -> decomposition, p_value/test_id -> tests, row+col | \
+column_a+column_b -> matrix, kind|severity + ds|period -> events. Use the specific anofox_plot_* macro \
+for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
         tags: &[
             (
                 "anofox.consumes",
-                "terms,prediction,curve,summary,obs,test,partial_residuals,cv,decomposition,events,check,matrix",
+                "terms,prediction,curve,summary,obs,test,partial_residuals,cv,schedule,decomposition,events,check,matrix",
             ),
             CONTRACT_TAG,
         ],

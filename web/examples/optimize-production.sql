@@ -120,23 +120,33 @@ FROM pp_kpi() GROUP BY line ORDER BY line;
 SELECT 'Run plan'::TAB;
 
 SELECT 12::COL;
-SELECT ('**' || pp_line() || '**, ' || pp_vol() || ', ' || pp_co() || '. Each bar is an order from start to finish (hours after Mon 06:00), the short bar before it the changeover; dashed lines mark midnight. Today''s due-date order (top) pays for a changeover at almost every step; **' || pp_rule() || '** (bottom) runs related flavours back to back wherever the truck slots allow.')::MARKDOWN;
+SELECT ('**' || pp_line() || '**, ' || pp_vol() || ', ' || pp_co() || '. Each bar is an order from start to finish (hours after Mon 06:00), the sliver before it the changeover, the dot its truck slot. Today''s due-date order (top) pays for a changeover at almost every step; **' || pp_rule() || '** (bottom) runs related flavours back to back wherever the truck slots allow.')::MARKDOWN;
 
+-- A real Gantt (anofox_plot_schedule, #176) — one lane per line (here just
+-- pp_line(), since this panel already drills into one), a bar per order
+-- coloured by status, a late order's connector to its truck slot, faceted
+-- by model_id (today vs. the selected rule) to compare the two run orders
+-- directly. Replaces the ::SCATTER + ::XMIN/::XMAX "error bars" this used
+-- to draw (#171).
 SELECT 12::COL;
-SELECT 520::HEIGHT;
+SELECT 460::HEIGHT;
 WITH g AS (SELECT * FROM pp_run() WHERE line = pp_line() AND rule IN (pp_today(), pp_rule()))
-SELECT round((s + e) / 120, 2) ::XAXIS, pos ::SCATTER, round(s / 60, 2) ::XMIN, round(e / 60, 2) ::XMAX,
-       status ::CATEGORY, plan ::FACET, 1 ::FACET_NCOL, 'reverse'::YSCALE,
-       18 + 24 * ((pos - 1) % 5) ::XLINE,
-       'Run plan: x = hours after Mon 06:00, y = position in the sequence'::TITLE
+SELECT anofox_plot_schedule(s, x_label := 'hours after Mon 06:00'),
+       ('Run plan: ' || pp_line() || ', today''s due-date order vs. ' || pp_rule())::TITLE
 FROM (
-    SELECT CASE WHEN rule = pp_today() THEN '1 today: due-date order' ELSE '2 ' || rule END AS plan, pos,
-           start_min AS s, end_min AS e,
-           CASE WHEN late_min > 0 THEN 'order late' ELSE 'order on time' END AS status FROM g
+    SELECT CASE WHEN rule = pp_today() THEN '1 today: due-date order' ELSE '2 ' || rule END AS model_id,
+           line AS resource, order_id AS task,
+           round(start_min / 60, 2) AS start, round(end_min / 60, 2) AS "end",
+           round(due_min / 60, 2) AS due,
+           CASE WHEN late_min > 0 THEN 'late' ELSE 'on time' END AS status
+    FROM g
     UNION ALL
-    SELECT CASE WHEN rule = pp_today() THEN '1 today: due-date order' ELSE '2 ' || rule END, pos,
-           start_min - changeover_min, start_min, 'changeover' FROM g WHERE changeover_min > 0
-) ORDER BY plan, status, pos;
+    SELECT CASE WHEN rule = pp_today() THEN '1 today: due-date order' ELSE '2 ' || rule END,
+           line, order_id || ' changeover',
+           round((start_min - changeover_min) / 60, 2), round(start_min / 60, 2),
+           NULL, 'changeover'
+    FROM g WHERE changeover_min > 0
+) s;
 
 SELECT 12::COL;
 SELECT 'late_min > 0'::FLAG;

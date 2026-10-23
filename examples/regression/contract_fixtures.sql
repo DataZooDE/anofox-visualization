@@ -122,6 +122,17 @@ UNION ALL SELECT 3, 'train', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP F
 UNION ALL SELECT 3, 'test', (DATE '2024-01-01' + INTERVAL (i) DAY)::TIMESTAMP FROM range(34, 41) r(i);
 SELECT 'cv' AS name, anofox_plot_cv(f) AS svg FROM folds f;
 
+-- schedule: two algorithms' run plans on the same line, a Gantt each (#176) -
+CREATE TABLE sched AS SELECT * FROM (VALUES
+  ('1 today', 'L1', 'O1', 0, 40, 40, 'on time'),
+  ('1 today', 'L1', 'O2', 40, 90, 60, 'late'),
+  ('1 today', 'L1', 'O3', 90, 130, 150, 'on time'),
+  ('2 sequenced', 'L1', 'O1', 0, 40, 40, 'on time'),
+  ('2 sequenced', 'L1', 'O3', 40, 80, 150, 'on time'),
+  ('2 sequenced', 'L1', 'O2', 80, 110, 60, 'late')
+) t(model_id, resource, task, start, "end", due, status);
+SELECT 'schedule' AS name, anofox_plot_schedule(s) AS svg FROM sched s;
+
 -- decomposition (provisional, #188): trend + weekly seasonality + remainder -
 CREATE TABLE decomp AS
 SELECT (DATE '2024-01-01' + i::INTEGER) AS ds, c.component,

@@ -30,11 +30,11 @@ ORDER BY ALL;
 ----
 
 # Two scalars (anofox_render, anofox_contract_version), six column macros and
-# sixteen contract plot macros.
+# seventeen contract plot macros.
 query I
 SELECT count(*) FROM duckdb_functions() WHERE function_name LIKE 'anofox_%';
 ----
-24
+25
 
 # The contract macros say which schema they consume (duckdb_functions().tags).
 query I
@@ -43,7 +43,7 @@ WHERE function_name LIKE 'anofox_plot%'
   AND list_contains(map_keys(tags), 'anofox.consumes')
   AND list_contains(map_keys(tags), 'anofox.contract');
 ----
-16
+17
 
 query I
 SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_plot_prediction';
