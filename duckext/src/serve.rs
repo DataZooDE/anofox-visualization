@@ -2885,8 +2885,15 @@ fn run_panel(
                 c.exec(set)?;
             }
             for (setup, sql) in &stmts[..r.panel] {
+                // Best effort, as on a fresh connection (and then not kept).
                 if *setup && sets_variables(sql) {
-                    c.execute_prepared(sql, &[])?;
+                    if let Err(e) = c.execute_prepared(sql, &[]) {
+                        setup_failed = true;
+                        eprintln!(
+                            "[anofox-serve] setup statement failed in '{dash_id}': {}",
+                            access::diag(&e)
+                        );
+                    }
                 }
             }
             if abort.abandoned() {

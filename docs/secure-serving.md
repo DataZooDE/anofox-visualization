@@ -356,7 +356,9 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   (default: `threads`; `0` = off; least recently used first out). They belong
   to the snapshot, so a refresh drops them. Each holds its setup's TEMP
   tables in memory: count `warm` × the largest setup table against
-  `memory_limit`.
+  `memory_limit`. Like a cache hit, a reused connection answers faster. Since
+  the key includes the login, that tells a viewer only about their own earlier
+  requests (or, without `auth`, that someone asked with the same values).
 - Options (third argument, JSON): `max_rows` (default 100,000 — exceeding it is
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
