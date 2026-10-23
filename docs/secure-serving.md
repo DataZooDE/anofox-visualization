@@ -340,7 +340,10 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 - A fresh connection per request: one viewer's variables or temp objects never
   leak into another's. Setup statements (`CREATE TEMP …`) of the dashboard are
   re-run per request; only TEMP objects can be created (the data is read-only),
-  so materialise anything heavy before serving.
+  so materialise anything heavy before serving. A panel request runs every
+  setup statement before its panel, so a `CREATE TEMP TABLE … AS` is rebuilt
+  for every panel on every click; use `CREATE TEMP VIEW` (`dashboard --check
+  <folder>` warns: `folder/setup-table`).
 - Options (third argument, JSON): `max_rows` (default 100,000 — exceeding it is
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),

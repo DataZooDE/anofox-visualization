@@ -1934,8 +1934,12 @@ more than 10 tags (`header/too-many-tags`), an empty `@owner`
 (`header/long-description`), reported as statement 0. `dashboard --check
 <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
-same title (`folder/duplicate-title`, ignoring case) and a file name the
-servers skip (`folder/bad-id`).
+same title (`folder/duplicate-title`, ignoring case), a file name the
+servers skip (`folder/bad-id`), and a setup statement that materialises a
+table (`CREATE [TEMP] TABLE … AS`, `folder/setup-table`). The locked server
+runs a panel's setup for every panel request, so such a table is rebuilt for
+every panel on every click; a `CREATE VIEW` costs only what each panel reads
+(#387: 17.6 s against 0.76 s per click on a 30-panel, 20M-row dashboard).
 
 ### Layout (from SQL)
 
