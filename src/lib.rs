@@ -218,6 +218,9 @@ pub enum TableOpt {
     Highlight,
     /// `::SUBTOTAL`: a subtotal row after each group of a column (`'region'`).
     Subtotal,
+    /// `::TOOLBAR`: the next table's toolbar — `'none'` hides it entirely, or
+    /// a comma-separated allow-list of parts to keep (`'search,export'`).
+    Toolbar,
 }
 
 /// The role a result column plays in the visualization.
