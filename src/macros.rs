@@ -395,6 +395,34 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
         tags: &[("anofox.consumes", "graph"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_assignment",
+        params: &["tbl"],
+        named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("assignment", "'x', x, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "An optimizer's item -> bin/wave assignment from an `assignment` table (anofox-optimize's \
+pack_* / wave_* as a long-form bridge): one row per item (model_id, bin | wave, item, size, capacity). Items are \
+stacked per bin/wave (CATEGORY: item, BARCHART_STACKED: size), the capacity drawn as a quiet reference line so the \
+fill level is visible; several model_id's are faceted to compare algorithms. x := overrides bin/wave when both are \
+present.",
+        example: "SELECT anofox_plot_assignment(a) FROM (VALUES (1, 'x1', 3, 10), (1, 'x2', 4, 10), (2, 'x3', 6, 10)) \
+a(bin, item, size, capacity)",
+        tags: &[("anofox.consumes", "assignment"), CONTRACT_TAG],
+    },
+    MacroSpec {
+        name: "anofox_plot_distribution",
+        params: &["tbl"],
+        named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("distribution", "'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "A categorical distribution from a `distribution` table (anofox-decide's decide_choice_distribution \
+MAP / decide_table's distribution column, reached with `SELECT t.question_id AS id, u.e.key AS option, u.e.value AS \
+probability FROM t, unnest(map_entries(t.distribution)) AS u(e)`; question_id and model are also read as id and \
+model_id): one row per option (id, option, probability, model_id optional). One id draws a plain bar per option; \
+several ids draw a 100% stacked bar per id (CATEGORY: option). Several model_id's are faceted to compare models.",
+        example: "SELECT anofox_plot_distribution(d) FROM (VALUES ('q1', 'yes', 0.7), ('q1', 'no', 0.3)) \
+d(id, option, probability)",
+        tags: &[("anofox.consumes", "distribution"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot",
         params: &["tbl"],
         named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
@@ -404,13 +432,14 @@ term+estimate -> terms, curve_type -> curve, yhat -> prediction, fitted+residual
 metric+value -> summary, check_name|thresholds + status + value -> checks, partial_residual -> partial \
 (component + residual), fold_id + (split | test_start | train_end) -> cv (provisional), resource+start+end \
 -> schedule (Gantt), component+value | trend -> decomposition, p_value/test_id -> tests, row+col | \
-column_a+column_b -> matrix, kind|severity + ds|period -> events. Use the specific anofox_plot_* macro \
+column_a+column_b -> matrix, kind|severity + ds|period -> events, (bin|wave)+item+size -> assignment, \
+option+probability -> distribution. Use the specific anofox_plot_* macro \
 for options.",
         example: "SELECT anofox_plot(c) FROM (VALUES ('x1', 0.5, 0.2, 0.8)) c(term, estimate, conf_low, conf_high)",
         tags: &[
             (
                 "anofox.consumes",
-                "terms,prediction,curve,summary,obs,test,partial_residuals,cv,schedule,decomposition,events,check,matrix",
+                "terms,prediction,curve,summary,obs,test,partial_residuals,cv,schedule,decomposition,events,check,matrix,assignment,distribution",
             ),
             CONTRACT_TAG,
         ],

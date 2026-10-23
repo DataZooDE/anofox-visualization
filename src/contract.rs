@@ -9,8 +9,12 @@
 //! observed/level/trend/seasonal/remainder panels, provisional), point-in-time
 //! `events` (alarms, parameter changes), a correlation-style heatmap
 //! (`matrix`: row, col, value; anofox-tabular's `profile_correlations` as it
-//! comes, mirrored to the full matrix) and an `auto` dispatch on the column
-//! signature.
+//! comes, mirrored to the full matrix), an optimizer's item → bin/wave
+//! `assignment` (anofox-optimize's `pack_*` / `wave_*`: items stacked per
+//! bin/wave with the capacity as a reference line), a categorical
+//! `distribution` (anofox-decide's choice/score distributions: bars per id,
+//! or a 100% stacked bar over several ids) and an `auto` dispatch on the
+//! column signature.
 //!
 //! A spec `{"plot": "terms", "rows": [{term:…, estimate:…}, …], "options":
 //! {…}, "width": W, "height": H}` is turned into role-annotated [`Column`]s —
@@ -24,10 +28,12 @@ use crate::{Column, Kind, Place, RenderError, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 use serde_json::{Map, Value as J};
 
+mod assignment;
 mod checks;
 mod curves;
 mod cv;
 mod decomposition;
+mod distribution;
 mod events;
 mod graph;
 mod look;
@@ -61,6 +67,8 @@ pub const PLOTS: &[&str] = &[
     "checks",
     "matrix",
     "diagram",
+    "assignment",
+    "distribution",
     "auto",
 ];
 
@@ -168,7 +176,15 @@ fn render_plot(
     // Plots drawn directly with ggplot-rs (see `stats`).
     let direct = |f: &dyn Fn() -> stats::Out| crate::guard(|| f().map_err(fail));
     let labels = look::Labels::from(options);
-    let cols = match name {
+    // `extra_warnings`: text the column-building step wants on `data-warnings`
+    // (dropped rows, a chart shape adapted to the data) alongside whatever
+    // the plotting engine itself reports (empty for every plot but
+    // `assignment` / `distribution` today). `marks`: explicit per-x quiet
+    // markers a schema hands over directly (only `assignment`'s capacity
+    // today, see `assignment::Marks`) — never inferred from a `RefLine`
+    // column's value count, which keeps meaning "shared line(s)" for every
+    // other schema.
+    let (cols, extra_warnings, marks) = match name {
         "terms" => return direct(&|| terms::terms(&t, options, w, h, o, place)),
         "prediction" => return direct(&|| stats::prediction(&t, options, w, h, o, place)),
         "curve" => match curve_type(&t).map_err(fail)?.as_str() {
@@ -180,7 +196,7 @@ fn render_plot(
             ty @ ("acf" | "pacf") => {
                 return direct(&|| curves::acf(&t, ty, options, w, h, o, place))
             }
-            _ => curve(&t),
+            _ => curve(&t).map(|c| (c, Vec::new(), None)),
         },
         "summary" => return direct(&|| stats::summary(&t, options, w, h, o, place)),
         "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
@@ -198,9 +214,11 @@ fn render_plot(
         "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
         "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),
         "matrix" => return direct(&|| matrix::matrix(&t, options, w, h, o, place)),
+        "assignment" => assignment::columns(&t, options),
+        "distribution" => distribution::columns(&t).map(|(c, w)| (c, w, None)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
-            obs(&t, &kind, label_top(options))
+            obs(&t, &kind, label_top(options)).map(|c| (c, Vec::new(), None))
         }
         "diagnostics" => {
             return crate::guard(|| {
@@ -223,7 +241,11 @@ fn render_plot(
         },
         _ => axis_labels(&cols),
     };
-    let refs = take_refs(&cols);
+    let mut refs = take_refs(&cols);
+    if let Some((mname, pairs)) = marks {
+        refs.marks = pairs;
+        refs.marks_name = mname;
+    }
     let cols: Vec<Column> = cols
         .into_iter()
         .filter(|c| !matches!(c.role, Role::RefLine | Role::Identity))
@@ -234,9 +256,19 @@ fn render_plot(
     match crate::panel_plot(&cols, w, h, o).map_err(fail)? {
         Some(plot) => {
             let plot = tweak(plot, o, &refs, &labels, &xl, &yl, false);
-            crate::guard(|| stats::finish(plot, w, h, place).map_err(fail))
+            crate::guard(|| {
+                stats::finish(plot, w, h, place)
+                    .map(|(svg, mut w0)| {
+                        w0.extend(extra_warnings);
+                        (svg, w0)
+                    })
+                    .map_err(fail)
+            })
         }
-        None => crate::render_placed(&cols, place, width, height, o),
+        None => crate::render_placed(&cols, place, width, height, o).map(|(svg, mut w0)| {
+            w0.extend(extra_warnings);
+            (svg, w0)
+        }),
     }
 }
 
@@ -254,6 +286,15 @@ struct Refs {
     sym_y: Option<(f64, f64)>,
     /// Text above stem tips (Cook's index plot): (x, y, text).
     tips: Vec<(f64, f64, String)>,
+    /// Per-x quiet markers, set directly by a schema that needs them (only
+    /// `assignment`'s capacity today — see
+    /// [`assignment::varying_capacity_marks`]), never inferred from a
+    /// `RefLine` column's value count: `RefLine` keeps meaning "one or more
+    /// *shared* horizontal lines" for every other schema (Cook's cut-offs,
+    /// several thresholds, …), which must stay lines even when there is more
+    /// than one of them.
+    marks: Vec<(Value, f64)>,
+    marks_name: String,
 }
 
 fn take_refs(cols: &[Column]) -> Refs {
@@ -459,6 +500,29 @@ fn tweak(
             alpha: 1.0,
         });
     }
+    if !refs.marks.is_empty() {
+        // A quiet point per x, in the reference colour (never a palette
+        // slot a ::CATEGORY is already using) — named by a caption, since
+        // it has no legend entry of its own.
+        plot = plot
+            .geom_point_with(GeomPoint {
+                color: look::REF,
+                size: 4.0,
+                alpha: 1.0,
+            })
+            .layer_data(vec![
+                (
+                    "x".to_string(),
+                    refs.marks.iter().map(|(x, _)| x.clone()).collect(),
+                ),
+                (
+                    "y".to_string(),
+                    refs.marks.iter().map(|(_, y)| Value::Float(*y)).collect(),
+                ),
+            ])
+            .layer_aes(Aes::new().x("x").y("y"))
+            .caption(&format!("{} (grey)", refs.marks_name));
+    }
     let plot = plot.xlab(&labels.x_or(xl)).ylab(&labels.y_or(yl));
     match &labels.title {
         Some(t) => plot.title(t),
@@ -558,6 +622,10 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "tests"
     } else if (has("row") && has("col")) || (has("column_a") && has("column_b")) {
         "matrix"
+    } else if has("item") && has("size") && (has("bin") || has("wave")) {
+        "assignment"
+    } else if has("option") && has("probability") {
+        "distribution"
     } else {
         let keys: Vec<&str> = rows
             .first()
@@ -570,7 +638,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              test (p_value / statistic, method), partial residuals (term, x, \
              partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
              ds), schedule (resource, task, start, end), decomposition (ds | period, component, \
-             value), matrix (row, col, value) or events (ds | period, kind){}",
+             value), matrix (row, col, value), events (ds | period, kind), \
+             assignment (bin | wave, item, size) or distribution (id, option, probability){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -620,16 +689,35 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["row", "col", "value"],
         &["column_a", "column_b"],
     ),
+    (
+        "assignment",
+        &["bin", "item", "size"],
+        // `item` alone is too generic: `item_id` near-misses it (#255's
+        // length rule) in any ordinary item/product table, which has no
+        // bin/wave/size at all. `bin` (wave stands in, see STAND_INS) is
+        // the one column no other schema or everyday table carries.
+        &["bin"],
+    ),
+    (
+        "distribution",
+        &["id", "option", "probability"],
+        // `probability` alone is too generic a name (anofox-decide's own
+        // per-row `decide_probability` output is not a distribution table):
+        // only `option` identifies it (#180).
+        &["option"],
+    ),
 ];
 
 /// Columns [`detect`] also reads in place of a required one: `events` takes
 /// `period` for `ds` and `severity` for `kind`; `matrix` takes a pair list's
-/// `column_a` / `column_b` for `row` / `col`.
+/// `column_a` / `column_b` for `row` / `col`; `assignment` takes `wave` for
+/// `bin` (pick-wave batching, not bin packing).
 const STAND_INS: &[(&str, &str)] = &[
     ("ds", "period"),
     ("kind", "severity"),
     ("row", "column_a"),
     ("col", "column_b"),
+    ("bin", "wave"),
 ];
 
 /// Identifying columns that skip the long-name shortcut below despite being
@@ -1358,6 +1446,19 @@ mod tests {
         assert!(e.contains("matches none"), "{e}");
     }
 
+    /// `model` is not a global `model_id` alias (#375 review): a `summary`
+    /// row that already has `model_name` (forecast's own facet key) and an
+    /// unrelated `model` column keeps its two models apart — `model` does
+    /// not rename onto `model_id` and collapse them.
+    #[test]
+    fn unrelated_model_column_does_not_collide_with_model_name() {
+        let glance = r#"[{"model":"x","model_name":"ets","metric":"mape","value":0.12},
+            {"model":"y","model_name":"arima","metric":"mape","value":0.09}]"#;
+        let svg = go("summary", glance, "{}").unwrap();
+        dump("summary_model_vs_model_name", &svg);
+        assert!(svg.contains(">ets<") && svg.contains(">arima<"), "{svg}");
+    }
+
     #[test]
     fn prediction_models_and_curves() {
         let p = r#"[{"x":1,"y":1.0,"yhat":1.1,"yhat_lower":0.8,"yhat_upper":1.4,"model_id":"ols","split":"train"},
@@ -1640,6 +1741,20 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("got a list"), "{e}");
+        // An ordinary item/product table (no bin/wave/size) does not get an
+        // "assignment" hint just because `item_id` near-misses `item`: the
+        // identifying column is `bin`, not `item` (review of #375).
+        let e = go(
+            "auto",
+            r#"[{"item_id":"sku-1","store":"north","sales":12}]"#,
+            "{}",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("match no plottable schema") && !e.contains("closest"),
+            "{e}"
+        );
     }
 
     /// Write `svg` under `$ANOFOX_DUMP/<name>.svg` for a visual check.
@@ -1992,6 +2107,228 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("closest: matrix, missing col"), "{e}");
+    }
+
+    #[test]
+    fn assignment_stacks_items_with_capacity_and_facets_models() {
+        // pack_*-shaped rows: one row per item, bin, size, capacity.
+        const BINS: &str = r#"[
+            {"model_id":"first_fit_decreasing","bin":1,"item":"c01","size":4,"capacity":10},
+            {"model_id":"first_fit_decreasing","bin":1,"item":"c02","size":5,"capacity":10},
+            {"model_id":"first_fit_decreasing","bin":2,"item":"c03","size":7,"capacity":10},
+            {"model_id":"best_of","bin":1,"item":"c01","size":4,"capacity":10},
+            {"model_id":"best_of","bin":1,"item":"c02","size":5,"capacity":10},
+            {"model_id":"best_of","bin":1,"item":"c03","size":1,"capacity":10}]"#;
+        assert_eq!(detect(&rows(BINS)).unwrap(), "assignment");
+        let svg = go("auto", BINS, "{}").unwrap();
+        dump("assignment_bins", &svg);
+        // Items stacked (one `data-series` rect per item), the capacity as a
+        // quiet hline, and the two models faceted.
+        assert!(svg.contains("data-series=\"c01\""), "{svg}");
+        assert!(svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(
+            svg.contains(">best_of</text>") && svg.contains(">first_fit_decreasing</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // wave_*-shaped rows (pick-wave batching): a single model, no facet.
+        const WAVES: &str = r#"[
+            {"wave":1,"item":"o1","size":3,"capacity":20},
+            {"wave":1,"item":"o2","size":4,"capacity":20},
+            {"wave":2,"item":"o3","size":6,"capacity":20}]"#;
+        assert_eq!(detect(&rows(WAVES)).unwrap(), "assignment");
+        let svg = go("assignment", WAVES, "{}").unwrap();
+        dump("assignment_waves", &svg);
+        assert!(svg.contains("data-series=\"o1\""), "{svg}");
+        assert!(svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        let e = go("assignment", r#"[{"item":"a","size":1}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("bin") && e.contains("wave"), "{e}");
+    }
+
+    #[test]
+    fn assignment_bin_order_capacity_and_nulls() {
+        // Review of #375 (1): the x axis follows numeric order, not row
+        // order — bin 10 (given first, as a producer might hand it over
+        // unsorted) still draws after bin 0, 1, 2; an integral DOUBLE bin
+        // (10.0) shows "10", not "10.0".
+        const UNSORTED: &str = r#"[
+            {"bin":10.0,"item":"j","size":1},
+            {"bin":2,"item":"b","size":1},
+            {"bin":1,"item":"a","size":1},
+            {"bin":0,"item":"z","size":1}]"#;
+        let svg = go("assignment", UNSORTED, "{}").unwrap();
+        dump("assignment_bin_order", &svg);
+        let pos = |needle: &str| {
+            svg.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in {svg}"))
+        };
+        let (p0, p1, p2, p10) = (
+            pos(">0</text>"),
+            pos(">1</text>"),
+            pos(">2</text>"),
+            pos(">10</text>"),
+        );
+        assert!(
+            p0 < p1 && p1 < p2 && p2 < p10,
+            "{p0} {p1} {p2} {p10}: {svg}"
+        );
+        assert!(!svg.contains(">10.0</text>"), "{svg}");
+
+        // (2) A capacity that varies by bin draws as a marker per bin
+        // (ggplot-rs's own point geom), not one misleading shared hline.
+        const VARYING_CAP: &str = r#"[
+            {"bin":1,"item":"a","size":3,"capacity":10},
+            {"bin":2,"item":"b","size":4,"capacity":20}]"#;
+        let svg = go("assignment", VARYING_CAP, "{}").unwrap();
+        dump("assignment_varying_capacity", &svg);
+        assert!(!svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(svg.contains("data-geom=\"point\""), "{svg}");
+
+        // (4) A NULL bin is dropped and reported on data-warnings; the row
+        // with a NULL item still stacks. `go()` returns only the SVG body
+        // (contract::render), not the outer `data-warnings` attribute that
+        // the full anofox_render pipeline writes — render_spec_checked goes
+        // through that pipeline, like the `compare` warning test above.
+        const WITH_NULLS: &str = r#"[
+            {"bin":1,"item":"a","size":3,"capacity":10},
+            {"bin":null,"item":"b","size":4,"capacity":10},
+            {"bin":1,"item":null,"size":2,"capacity":10}]"#;
+        let svg =
+            crate::render_spec_checked(&format!(r#"{{"plot":"assignment","rows":{WITH_NULLS}}}"#))
+                .unwrap();
+        dump("assignment_with_nulls", &svg);
+        assert!(svg.contains("data-warnings"), "{svg}");
+        assert!(svg.contains("1 row with a NULL `bin` dropped"), "{svg}");
+
+        // Review of #375 round 2: a dropped NULL-bin row's own (different)
+        // capacity must not flip an otherwise-constant table to points —
+        // the constant/varying decision is made over the kept rows.
+        const NULL_BIN_DIFFERENT_CAPACITY: &str = r#"[
+            {"bin":1,"item":"a","size":3,"capacity":10},
+            {"bin":1,"item":"b","size":4,"capacity":10},
+            {"bin":null,"item":"z","size":1,"capacity":999}]"#;
+        let svg = go("assignment", NULL_BIN_DIFFERENT_CAPACITY, "{}").unwrap();
+        assert!(svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(!svg.contains("data-geom=\"point\""), "{svg}");
+    }
+
+    #[test]
+    fn distribution_bars_and_stacked_percent() {
+        // One id: a plain bar per option.
+        const ONE: &str = r#"[
+            {"id":"q1","option":"yes","probability":0.7},
+            {"id":"q1","option":"no","probability":0.3}]"#;
+        assert_eq!(detect(&rows(ONE)).unwrap(), "distribution");
+        let svg = go("auto", ONE, "{}").unwrap();
+        dump("distribution_one_id", &svg);
+        assert_eq!(svg.matches("data-geom=\"col\"").count(), 2, "{svg}");
+        assert!(
+            svg.contains(">yes</text>") && svg.contains(">no</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // Several ids (decide_table's MAP, unnested): a 100% stacked bar.
+        const MANY: &str = r#"[
+            {"id":"q1","option":"yes","probability":0.7},
+            {"id":"q1","option":"no","probability":0.3},
+            {"id":"q2","option":"yes","probability":0.4},
+            {"id":"q2","option":"no","probability":0.6}]"#;
+        let svg = go("distribution", MANY, "{}").unwrap();
+        dump("distribution_many_ids", &svg);
+        assert!(
+            svg.contains("data-series=\"yes\"") && svg.contains("data-series=\"no\""),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(">q1</text>") && svg.contains(">q2</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        let e = go("distribution", r#"[{"id":"q1"}]"#, "{}")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("option") && e.contains("probability"), "{e}");
+    }
+
+    #[test]
+    fn distribution_reads_decides_own_spellings() {
+        // anofox-decide's decide_table unnested with the documented bridge
+        // (SELECT id, u.e.key AS option, u.e.value AS probability FROM t,
+        // unnest(map_entries(t.distribution)) AS u(e)) already produces
+        // `id`/`option`/`probability` directly; `question_id` (decide's own
+        // row key before that bridge) and `model` (decide's column for
+        // which calibrated model answered) are read as `id` / `model_id`
+        // too, so a table that skips the bridge's own aliasing still plots.
+        const DECIDE: &str = r#"[
+            {"model":"stub","question_id":"q1","option":"yes","probability":0.7},
+            {"model":"stub","question_id":"q1","option":"no","probability":0.3},
+            {"model":"stub","question_id":"q2","option":"yes","probability":0.4},
+            {"model":"stub","question_id":"q2","option":"no","probability":0.6},
+            {"model":"laya","question_id":"q1","option":"yes","probability":0.6},
+            {"model":"laya","question_id":"q1","option":"no","probability":0.4},
+            {"model":"laya","question_id":"q2","option":"yes","probability":0.5},
+            {"model":"laya","question_id":"q2","option":"no","probability":0.5}]"#;
+        assert_eq!(detect(&rows(DECIDE)).unwrap(), "distribution");
+        let svg = go("auto", DECIDE, "{}").unwrap();
+        dump("distribution_decide_spellings", &svg);
+        assert!(
+            svg.contains(">stub</text>") && svg.contains(">laya</text>"),
+            "model facets by its alias: {svg}"
+        );
+        assert!(
+            svg.contains(">q1</text>") && svg.contains(">q2</text>"),
+            "question_id read as id: {svg}"
+        );
+    }
+
+    #[test]
+    fn distribution_nulls_and_many_ids_warning() {
+        // A NULL option is kept (an unlabelled stack segment); a NULL id in
+        // a many-ids table cannot sit on the id axis, so it is dropped and
+        // reported.
+        const WITH_NULLS: &str = r#"[
+            {"id":"q1","option":"yes","probability":0.7},
+            {"id":"q1","option":null,"probability":0.3},
+            {"id":null,"option":"yes","probability":0.5},
+            {"id":"q2","option":"yes","probability":0.4},
+            {"id":"q2","option":"no","probability":0.6}]"#;
+        // `go()` returns only the SVG body (contract::render), not the
+        // outer `data-warnings` attribute the full anofox_render pipeline
+        // writes — render_spec_checked goes through that pipeline, like the
+        // `compare` warning test above.
+        let svg = crate::render_spec_checked(&format!(
+            r#"{{"plot":"distribution","rows":{WITH_NULLS}}}"#
+        ))
+        .unwrap();
+        dump("distribution_with_nulls", &svg);
+        assert!(svg.contains("data-warnings"), "{svg}");
+        assert!(svg.contains("1 row with a NULL `id` dropped"), "{svg}");
+        assert!(
+            svg.contains(">q1</text>") && svg.contains(">q2</text>"),
+            "{svg}"
+        );
+
+        // Above 40 ids the axis is unreadable: a data-warning, not a hard
+        // error — the chart still draws.
+        let many: String = format!(
+            "[{}]",
+            (0..41)
+                .map(|i| format!(r#"{{"id":"q{i}","option":"yes","probability":0.5}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let svg =
+            crate::render_spec_checked(&format!(r#"{{"plot":"distribution","rows":{many}}}"#))
+                .unwrap();
+        assert!(svg.contains("data-warnings"), "{svg}");
+        assert!(svg.contains("41 ids plotted"), "{svg}");
     }
 
     #[test]

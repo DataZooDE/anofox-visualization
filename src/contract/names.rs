@@ -127,7 +127,16 @@ pub(super) const ALIASES: &[(&str, &[&str])] = &[
     ("std_residual", &["std_resid", "standard_resid"]),
     ("leverage", &["hat", "hat_diag"]),
     ("cooks_d", &["cooksd", "cooks_distance", "cook_d"]),
-    ("id", &["unique_id"]),
+    // `question_id`: anofox-decide's distribution bridge (`decide_table`
+    // unnested through `unnest(map_entries(distribution))`).
+    ("id", &["unique_id", "question_id"]),
+    // `model` is NOT a global `model_id` alias (#375 review): it is too
+    // generic a name — a table that already has `model_name` (forecast's
+    // own facet key) and happens to carry an unrelated `model` column would
+    // have that column rename onto `model_id` and collide with the real
+    // facet. anofox-decide's own `model` spelling is read by the
+    // `distribution` schema's own model key instead (see
+    // `contract::distribution`), after `model_id` / `model_name`.
 ];
 
 /// In a prediction table (one with `yhat`) an interval bounds the forecast.
