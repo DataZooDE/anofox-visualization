@@ -505,10 +505,15 @@ for i in 12 13 14 15; do [ "$(panel $i '{"run":"r1"}' views)" = 200 ] || fail "g
 # `?view.<id>=<label>` never reaches the server (a purely client-side URL
 # concern, #214's security review item 1): `/d/<id>` ignores the query
 # string entirely, so a crafted value is never reflected and the page is
-# byte-identical with or without it.
-curl -s "http://127.0.0.1:$PORT/d/views" > "$T/vpage_plain"
-curl -s "http://127.0.0.1:$PORT/d/views?view.yoy=%3Cscript%3Ealert(1)%3C%2Fscript%3E" > "$T/vpage_xss"
+# byte-identical with or without it, apart from the per-response CSP nonce
+# (#252), which is masked before comparing.
+nonce_mask() { sed -E 's/nonce="[^"]*"/nonce="N"/g'; }
+curl -s "http://127.0.0.1:$PORT/d/views" | nonce_mask > "$T/vpage_plain"
+curl -s "http://127.0.0.1:$PORT/d/views?view.yoy=%3Cscript%3Ealert(1)%3C%2Fscript%3E" | nonce_mask > "$T/vpage_xss"
 cmp -s "$T/vpage_plain" "$T/vpage_xss" || fail "?view.x=<script> changed the served page"
+grep -q 'nonce="N"' "$T/vpage_plain" || fail "#252: the served page's inline scripts carry no nonce"
+curl -s -D - -o /dev/null "http://127.0.0.1:$PORT/d/views" | grep -qi "^content-security-policy: default-src 'none'; script-src 'self' 'nonce-" || fail "#252: no CSP header on the dashboard page"
+curl -s -D - -o /dev/null "http://127.0.0.1:$PORT/" | grep -qi "frame-ancestors 'none'" || fail "#252: the landing page may be framed"
 grep -qi "<script>alert(1)" "$T/vpage_xss" && fail "?view.x=<script> was reflected in the page"
 echo "OK: ::VIEW -- @requires hides only its own alternative; every alternative hidden hides the group; ?view.* never reflected"
 if [ -n "${NODE_PATH:-}" ]; then
