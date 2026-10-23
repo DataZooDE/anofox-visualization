@@ -64,6 +64,10 @@ pub struct Diagnostic {
     /// `view/mixed-names` | `view/empty` | `view/open-ended` |
     /// `view/stray-end` (warnings) | `view/input-inside` | `view/unnamed`
     /// (notes).
+    /// `::FIT` ([`fit_diags`], #400, warnings): `layout/fit-ambiguous` (before
+    /// the first ::TAB of a tabbed dashboard, a second ::FIT for one section,
+    /// or cast beside a panel's columns) | `layout/fit-too-many` (more rows
+    /// than a 1366×768 screen holds at the 120 px minimum panel height).
     /// Access policy ([`check_policy`]): `policy/invalid` | `policy/refused`
     /// (errors) | `policy/denied-column` | `policy/duckdb-version` (warnings:
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
@@ -1280,7 +1284,359 @@ where
         }
     }
 
-    diags.extend(view_diags(&sql::plan(script)));
+    let plan = sql::plan(script);
+    diags.extend(view_diags(&plan));
+    diags.extend(fit_diags(&plan));
+    diags
+}
+
+/// `::FIT` (#400) — the heuristic sanity checks: the reference screen and the
+/// panel / row sizes the browser's fit-to-screen mode works with.
+mod fit_ref {
+    /// The reference viewport height (a 1366×768 laptop).
+    pub const VIEWPORT_H: f64 = 768.0;
+    /// What sits above and below a fitted tab's panels there: the app bar,
+    /// the toolbar, the tab bar and the page padding (measured in the
+    /// browser at 1366×768, rounded up).
+    pub const CHROME_H: f64 = 230.0;
+    /// The smallest panel the browser fits; anything smaller falls back to
+    /// scrolling (web/app.js FIT_MIN_PANEL).
+    pub const PANEL_MIN: f64 = 120.0;
+    /// A KPI tile's minimum height under fit (web/app.js FIT_MIN_KPI).
+    pub const KPI_MIN: f64 = 96.0;
+    /// The grid's row gap (theme-base.css `.grid` gap: 1.15rem).
+    pub const ROW_GAP: f64 = 18.0;
+    /// A ::SECTION / lone ::LABEL heading row.
+    pub const HEADING_H: f64 = 40.0;
+    /// A ::GROUP box's padding and title around its tiles.
+    pub const GROUP_PAD: f64 = 40.0;
+}
+
+/// One statement of a `::FIT` scope as the row estimate sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FitItem {
+    /// A panel: its grid span (of 12), whether it is a KPI tile, whether it
+    /// sits inside a `::GROUP` box.
+    Panel {
+        span: u32,
+        kpi: bool,
+        grouped: bool,
+    },
+    Heading,
+    GroupStart,
+    GroupEnd,
+}
+
+/// A literal directive's number (`SELECT 6 AS c0` → 6).
+fn literal_number(sql: &str) -> Option<f64> {
+    let t = sql.trim().trim_end_matches(';').trim();
+    if !t.get(..7)?.eq_ignore_ascii_case("SELECT ") {
+        return None;
+    }
+    let body = t[7..].trim();
+    let num = body.strip_suffix("AS c0").unwrap_or(body).trim();
+    num.trim_matches('\'').trim().parse().ok()
+}
+
+/// The height (px) a `::FIT` scope's panels need at their minimum readable
+/// size: the 12-column grid packed in order (a `::GROUP` box or an
+/// automatic strip of ≥ 2 KPI tiles is one block whose tiles wrap as in its
+/// flex box), each row as tall as its tallest minimum, plus the row gaps.
+fn fit_needed_height(items: &[FitItem]) -> (f64, usize) {
+    use fit_ref::*;
+    let min_h = |kpi: bool| if kpi { KPI_MIN } else { PANEL_MIN };
+    let mut rows: Vec<f64> = Vec::new();
+    let (mut used, mut cur) = (0u32, 0.0f64);
+    // An open box (explicit ::GROUP, or an automatic KPI strip): its own rows.
+    let mut boxed: Option<(Vec<f64>, u32, f64, bool)> = None; // (rows, used, cur, auto)
+    let flush = |rows: &mut Vec<f64>, used: &mut u32, cur: &mut f64| {
+        if *used > 0 {
+            rows.push(*cur);
+        }
+        *used = 0;
+        *cur = 0.0;
+    };
+    let close_box = |rows: &mut Vec<f64>, b: (Vec<f64>, u32, f64, bool)| {
+        let (mut inner, used, cur, _) = b;
+        if used > 0 {
+            inner.push(cur);
+        }
+        if !inner.is_empty() {
+            let gaps = ROW_GAP * (inner.len() as f64 - 1.0);
+            rows.push(inner.iter().sum::<f64>() + gaps + GROUP_PAD);
+        }
+    };
+    for (k, it) in items.iter().enumerate() {
+        // an automatic KPI strip ends at the first non-KPI statement
+        if let Some(b) = &boxed {
+            let auto_ends = b.3
+                && !matches!(
+                    it,
+                    FitItem::Panel {
+                        kpi: true,
+                        grouped: false,
+                        ..
+                    }
+                );
+            if auto_ends {
+                close_box(&mut rows, boxed.take().unwrap());
+            }
+        }
+        match *it {
+            FitItem::Heading => {
+                flush(&mut rows, &mut used, &mut cur);
+                rows.push(HEADING_H);
+            }
+            FitItem::GroupStart => {
+                flush(&mut rows, &mut used, &mut cur);
+                if let Some(b) = boxed.take() {
+                    close_box(&mut rows, b);
+                }
+                boxed = Some((Vec::new(), 0, 0.0, false));
+            }
+            FitItem::GroupEnd => {
+                if let Some(b) = boxed.take() {
+                    close_box(&mut rows, b);
+                }
+            }
+            FitItem::Panel { span, kpi, grouped } => {
+                let run = items[k..]
+                    .iter()
+                    .take_while(|x| {
+                        matches!(
+                            x,
+                            FitItem::Panel {
+                                kpi: true,
+                                grouped: false,
+                                ..
+                            }
+                        )
+                    })
+                    .count();
+                if boxed.is_none() && !grouped && kpi && run >= 2 {
+                    flush(&mut rows, &mut used, &mut cur);
+                    boxed = Some((Vec::new(), 0, 0.0, true));
+                }
+                if let Some(b) = boxed.as_mut() {
+                    // a box is a flex row: tiles ~1/6, panels ~1/3 of it
+                    let w = if kpi { 2 } else { 4 };
+                    if b.1 + w > 12 {
+                        b.0.push(b.2);
+                        b.1 = 0;
+                        b.2 = 0.0;
+                    }
+                    b.1 += w;
+                    b.2 = b.2.max(min_h(kpi));
+                } else {
+                    let span = span.clamp(1, 12);
+                    if used + span > 12 {
+                        flush(&mut rows, &mut used, &mut cur);
+                    }
+                    used += span;
+                    cur = cur.max(min_h(kpi));
+                }
+            }
+        }
+    }
+    if let Some(b) = boxed.take() {
+        close_box(&mut rows, b);
+    }
+    flush(&mut rows, &mut used, &mut cur);
+    let gaps = ROW_GAP * (rows.len().max(1) as f64 - 1.0);
+    (rows.iter().sum::<f64>() + gaps, rows.len())
+}
+
+/// `::FIT` checks (#400), over the whole plan:
+///
+/// - `layout/fit-ambiguous` — a `::FIT` whose scope is unclear: before the
+///   first `::TAB` of a dashboard that has tabs (the whole dashboard, or the
+///   first tab?), a second `::FIT` in the same section or inside a section
+///   an outer `::FIT` already fits, or a `::FIT` cast beside a panel's own
+///   columns instead of its own `SELECT 'fit'::FIT;`.
+/// - `layout/fit-too-many` — the fitted section has more rows of panels
+///   than a 1366×768 screen holds at the minimum readable panel height
+///   ([`fit_ref`]): the browser falls back to scrolling there.
+fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    use fit_ref::*;
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let has_role = |p: &sql::Panel, r: Role| p.roles.iter().any(|(_, x)| *x == r);
+    if !plan.iter().any(|p| !p.setup && has_role(p, Role::Fit)) {
+        return diags;
+    }
+    let has_tabs = plan.iter().any(|p| !p.setup && p.tab_kind().is_some());
+    // Each statement's section (top tab, sub-tab) and its place in the grid.
+    let mut cols = 2.0f64; // web/app.js dpCols
+    let (mut pending_span, mut depth) = (0u32, 0i32);
+    let (mut tab, mut sub): (Option<usize>, Option<usize>) = (None, None);
+    let mut at: Vec<(Option<usize>, Option<usize>, Option<FitItem>)> = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        let mut item = None;
+        if !p.setup {
+            match p.tab_kind() {
+                Some(false) => (tab, sub, depth) = (Some(i), None, 0),
+                Some(true) => (sub, depth) = (Some(i), 0),
+                None => {}
+            }
+            // only the first (default) alternative of a ::VIEW group shows
+            let hidden_alt = p.view.as_ref().is_some_and(|v| v.alt > 0);
+            if has_role(p, Role::Columns) {
+                if let Some(n) = literal_number(&p.sql).filter(|n| *n >= 1.0) {
+                    cols = n;
+                }
+            } else if has_role(p, Role::Span) {
+                pending_span = literal_number(&p.sql).unwrap_or(0.0).max(0.0) as u32;
+            } else if has_role(p, Role::GroupStart) {
+                depth += 1;
+                item = Some(FitItem::GroupStart);
+            } else if has_role(p, Role::GroupEnd) {
+                depth = (depth - 1).max(0);
+                item = Some(FitItem::GroupEnd);
+            } else if has_role(p, Role::Section)
+                || (p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label))
+            {
+                item = Some(FitItem::Heading);
+            } else if p.contract.is_some() || is_content_panel(&p.roles) {
+                let span = if pending_span > 0 {
+                    pending_span
+                } else {
+                    ((12.0 / cols).round() as u32).max(1)
+                };
+                pending_span = 0;
+                item = Some(FitItem::Panel {
+                    span,
+                    kpi: is_kpi(&p.roles),
+                    grouped: depth > 0,
+                });
+            }
+            if hidden_alt && matches!(item, Some(FitItem::Panel { .. } | FitItem::Heading)) {
+                item = None;
+            }
+        }
+        at.push((tab, sub, item));
+    }
+    let items_where = |f: &dyn Fn(Option<usize>, Option<usize>) -> bool| -> Vec<FitItem> {
+        at.iter()
+            .filter(|(t, s, _)| f(*t, *s))
+            .filter_map(|(_, _, it)| *it)
+            .collect()
+    };
+
+    // The ::FIT markers and their sections: (stmt, tab, sub, view alt).
+    type Scope = (Option<usize>, Option<usize>, Option<(usize, usize)>);
+    let mut fits: Vec<(usize, Scope)> = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        if p.setup || !has_role(p, Role::Fit) {
+            continue;
+        }
+        if p.roles.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "layout/fit-ambiguous",
+                message: "::FIT is a section directive of its own — `SELECT 'fit'::FIT;` after \
+                          the ::TAB it fits — not a column beside a panel's own columns, where \
+                          the panel is not drawn"
+                    .into(),
+                sql: short(i),
+            });
+            continue;
+        }
+        let (t, s, _) = at[i];
+        let view = p.view.as_ref().map(|v| (v.group, v.alt));
+        if has_tabs && t.is_none() {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "layout/fit-ambiguous",
+                message: "::FIT before the first ::TAB of a tabbed dashboard: it is unclear \
+                          whether the whole dashboard or only the first tab should fit the \
+                          window (it fits every tab) — move it under each ::TAB that should \
+                          fit"
+                .into(),
+                sql: short(i),
+            });
+        }
+        let inside = |outer: &Scope, inner: &Scope| -> bool {
+            // `outer` fits a section that contains `inner`'s
+            (outer.0 == inner.0 || outer.0.is_none())
+                && (outer.1.is_none() || outer.1 == inner.1)
+                && (outer.2.is_none() || outer.2 == inner.2)
+        };
+        let me: Scope = (t, s, view);
+        if let Some((j, _)) = fits.iter().find(|(_, o)| inside(o, &me) || inside(&me, o)) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "layout/fit-ambiguous",
+                message: format!(
+                    "a second ::FIT for a section statement {} already fits — drop one (each \
+                     ::TAB / ::SUBTAB / ::VIEW needs at most one, and an outer ::FIT already \
+                     covers its sub-tabs and views)",
+                    j + 1
+                ),
+                sql: short(i),
+            });
+            continue;
+        }
+        fits.push((i, me));
+    }
+
+    // layout/fit-too-many: the panels shown at once under each ::FIT.
+    let budget = VIEWPORT_H - CHROME_H;
+    for &(i, (t, s, _)) in &fits {
+        if has_tabs && t.is_none() {
+            continue; // already reported as ambiguous
+        }
+        // the sub-tabs whose screens this ::FIT covers
+        let subs: Vec<Option<usize>> = match (t, s) {
+            (_, Some(s)) => vec![Some(s)],
+            (Some(t), None) => {
+                let mut v: Vec<Option<usize>> = at
+                    .iter()
+                    .filter(|(tt, ss, _)| *tt == Some(t) && ss.is_some())
+                    .map(|(_, ss, _)| *ss)
+                    .collect();
+                v.dedup();
+                if v.is_empty() {
+                    v.push(None);
+                }
+                v
+            }
+            (None, None) => vec![None],
+        };
+        let mut worst = (0.0f64, 0usize);
+        for sb in subs {
+            let items = if t.is_none() && !has_tabs {
+                items_where(&|_, _| true)
+            } else {
+                items_where(&|tt, ss| tt == t && (ss.is_none() || ss == sb))
+            };
+            let need = fit_needed_height(&items);
+            if need.0 > worst.0 {
+                worst = need;
+            }
+        }
+        if worst.0 > budget {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "layout/fit-too-many",
+                message: format!(
+                    "this ::FIT section needs ~{need:.0} px for its {rows} rows of panels at the \
+                     {min:.0} px minimum, more than the ~{budget:.0} px a {w}×{h} screen leaves — \
+                     it falls back to scrolling there; move panels to another ::TAB or put \
+                     more on a row (::COLUMNS / ::COL)",
+                    need = worst.0,
+                    rows = worst.1,
+                    min = PANEL_MIN,
+                    w = 1366,
+                    h = VIEWPORT_H,
+                ),
+                sql: short(i),
+            });
+        }
+    }
     diags
 }
 
@@ -3934,6 +4290,125 @@ mod design_tests {
             &check("-- @group\nSELECT 1;", |_| Ok(vec![])),
             "header/empty-group"
         ));
+    }
+
+    const FIT_CHART: &str = "SELECT 1 AS x ::XAXIS, 2 AS y ::BARCHART;\n";
+
+    fn fit_codes(script: &str) -> Vec<Diagnostic> {
+        check(script, |_| Ok(vec![]))
+            .into_iter()
+            .filter(|d| d.code.starts_with("layout/fit-"))
+            .collect()
+    }
+
+    /// #400: a ::FIT tab with more rows of panels than a 1366×768 screen
+    /// holds at the 120 px minimum is flagged (it would fall back to
+    /// scrolling); one that fits, a packed one and an unfitted tab are not.
+    #[test]
+    fn fit_too_many_panels_is_a_warning() {
+        let ok = format!(
+            "SELECT 'A'::TAB;\nSELECT 'fit'::FIT;\n{}SELECT 'B'::TAB;\n{}",
+            FIT_CHART.repeat(4),
+            FIT_CHART.repeat(20)
+        );
+        assert!(fit_codes(&ok).is_empty(), "{:?}", fit_codes(&ok));
+
+        let over = format!(
+            "SELECT 'A'::TAB;\nSELECT 'fit'::FIT;\n{}",
+            FIT_CHART.repeat(12)
+        );
+        let d = fit_codes(&over);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, "layout/fit-too-many");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(d[0].stmt, 2, "reported on the ::FIT");
+        assert!(d[0].message.contains("6 rows"), "{}", d[0].message);
+
+        // four to a row: 3 rows fit
+        let packed = format!(
+            "SELECT 4::COLUMNS;\nSELECT 'A'::TAB;\nSELECT 'fit'::FIT;\n{}",
+            FIT_CHART.repeat(12)
+        );
+        assert!(fit_codes(&packed).is_empty(), "{:?}", fit_codes(&packed));
+
+        // no tabs: the ::FIT covers the whole dashboard
+        let flat = format!("{}SELECT 'fit'::FIT;\n{}", FIT_CHART, FIT_CHART.repeat(11));
+        assert!(has(&fit_codes(&flat), "layout/fit-too-many"));
+
+        // a sub-tab's screen = its tab's own panels + the sub-tab's
+        let sub = format!(
+            "SELECT 'A'::TAB;\n{}SELECT 'S1'::SUBTAB;\nSELECT 'fit'::FIT;\n{}SELECT 'S2'::SUBTAB;\n{}",
+            FIT_CHART.repeat(4),
+            FIT_CHART.repeat(6),
+            FIT_CHART.repeat(30)
+        );
+        assert!(has(&fit_codes(&sub), "layout/fit-too-many"));
+        let sub_ok = sub.replace(&FIT_CHART.repeat(6), &FIT_CHART.repeat(2));
+        assert!(fit_codes(&sub_ok).is_empty(), "{:?}", fit_codes(&sub_ok));
+    }
+
+    #[test]
+    fn fit_needed_height_packs_rows_and_kpi_strips() {
+        let chart = FitItem::Panel {
+            span: 6,
+            kpi: false,
+            grouped: false,
+        };
+        let kpi = FitItem::Panel {
+            span: 6,
+            kpi: true,
+            grouped: false,
+        };
+        // 4 charts two to a row: 2 × 120 + 1 gap
+        assert_eq!(fit_needed_height(&[chart; 4]), (258.0, 2));
+        // a strip of 4 KPI tiles is one boxed row (96 + its padding), then a chart row
+        let (h, rows) = fit_needed_height(&[kpi, kpi, kpi, kpi, chart]);
+        assert_eq!(rows, 2);
+        assert_eq!(h, 96.0 + 40.0 + 18.0 + 120.0);
+        // a heading is a row of its own
+        assert_eq!(fit_needed_height(&[FitItem::Heading, chart]).1, 2);
+        assert_eq!(literal_number("SELECT 4 AS c0 "), Some(4.0));
+        assert_eq!(literal_number("SELECT 'x' AS c0"), None);
+    }
+
+    /// #400: ::FIT placement that leaves its scope unclear.
+    #[test]
+    fn fit_ambiguous_placement_is_a_warning() {
+        let tabs = |pre: &str, a: &str, b: &str| {
+            format!("{pre}SELECT 'A'::TAB;\n{a}{FIT_CHART}SELECT 'B'::TAB;\n{b}{FIT_CHART}")
+        };
+        let fit = "SELECT 'fit'::FIT;\n";
+        // before the first ::TAB of a tabbed dashboard
+        let d = fit_codes(&tabs(fit, "", ""));
+        assert!(has(&d, "layout/fit-ambiguous"), "{d:?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert_eq!(d[0].stmt, 1);
+        // one per tab is fine
+        assert!(fit_codes(&tabs("", fit, fit)).is_empty());
+        // two in one tab
+        let twice = format!("{fit}{fit}");
+        let d = fit_codes(&tabs("", &twice, ""));
+        assert!(has(&d, "layout/fit-ambiguous"), "{d:?}");
+        assert_eq!(d[0].stmt, 3, "the second one");
+        // a tab's ::FIT already covers its sub-tabs
+        let nested = format!(
+            "SELECT 'A'::TAB;\n{fit}SELECT 'S1'::SUBTAB;\n{fit}{FIT_CHART}SELECT 'S2'::SUBTAB;\n{FIT_CHART}"
+        );
+        assert!(has(&fit_codes(&nested), "layout/fit-ambiguous"));
+        // sibling sub-tabs each with their own is fine
+        let siblings = format!(
+            "SELECT 'A'::TAB;\nSELECT 'S1'::SUBTAB;\n{fit}{FIT_CHART}SELECT 'S2'::SUBTAB;\n{fit}{FIT_CHART}"
+        );
+        assert!(
+            fit_codes(&siblings).is_empty(),
+            "{:?}",
+            fit_codes(&siblings)
+        );
+        // no tabs: anywhere is the whole dashboard, unambiguous
+        assert!(fit_codes(&format!("{FIT_CHART}{fit}{FIT_CHART}")).is_empty());
+        // cast beside a panel's own columns
+        let d = fit_codes("SELECT 1 AS x ::XAXIS, 2 AS y ::BARCHART, 'fit'::FIT;");
+        assert!(has(&d, "layout/fit-ambiguous"), "{d:?}");
     }
 
     #[test]
