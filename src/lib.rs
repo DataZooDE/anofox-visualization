@@ -371,6 +371,14 @@ pub enum Role {
     /// Layout: `::ENDVIEW` closes the current `::VIEW` group (`::TAB`,
     /// `::SUBTAB` and `::SECTION` also close it).
     ViewEnd,
+    /// Layout: `::FIT` makes the enclosing `::TAB` / `::SUBTAB` / `::VIEW`
+    /// section (with no tabs at all: the whole dashboard) fit the browser
+    /// window while it is the one shown — its rows of panels scale to fill
+    /// the height left under the app and tab bars, charts are re-rendered at
+    /// that size, and the page does not scroll (#400). The value is a marker
+    /// (`'fit'::FIT`); `?fit=1` / `?fit=0` override it, and it is ignored on
+    /// a phone (< 600 px wide). Browser only — static renderers skip it.
+    Fit,
     /// Bubble size for a scatter — maps a measure to point area (`::SIZE`).
     Size,
     /// Format the y-axis tick labels (`::YFORMAT`) — the column's (string) value

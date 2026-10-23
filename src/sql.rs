@@ -999,6 +999,35 @@ mod requires_tests {
     }
 
     #[test]
+    fn fit_survives_planning_in_its_section() {
+        // #400: a `'fit'::FIT` marker is planned as its own (non-setup)
+        // directive statement inside its ::TAB's section, and the wire
+        // token the browser matches on is "FIT" — like ::HEIGHT / ::TAB.
+        let p = plan(
+            "SELECT 'Overview'::TAB;
+             SELECT 'fit'::FIT;
+             SELECT 1 AS x ::XAXIS, 2 AS y ::BARCHART;
+             SELECT 'Details'::TAB;
+             SELECT 3 ::METRIC",
+        );
+        assert_eq!(p.len(), 5);
+        assert!(!p[1].setup);
+        assert_eq!(p[1].roles, vec![(0, Role::Fit)]);
+        assert_eq!(p[1].roles[0].1.token(), "FIT");
+        assert!(crate::roles::is_directive_panel(&p[1].roles));
+        assert_eq!(p[1].tabs, vec![0], "in the Overview tab's section");
+        assert_eq!(p[1].sql.trim(), "SELECT 'fit' AS c0");
+        let fits = p
+            .iter()
+            .filter(|q| q.roles.iter().any(|(_, r)| *r == Role::Fit))
+            .count();
+        assert_eq!(fits, 1);
+        // the alias plans to the same role
+        let q = plan("SELECT 'fit'::FIT_SCREEN");
+        assert_eq!(q[0].roles, vec![(0, Role::Fit)]);
+    }
+
+    #[test]
     fn a_tab_passes_its_requires_to_its_section() {
         let p = plan(
             "SELECT 1 ::METRIC;
