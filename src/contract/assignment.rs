@@ -11,12 +11,14 @@
 //! that axis, so it is dropped; the count is reported as a data-warning.
 //! `item` may be NULL (it still stacks, as its own unlabelled segment).
 //!
-//! Capacity: one value for the whole table draws once, as a quiet reference
-//! line (`::REFLINE`). Several values (it varies by bin and/or model) would
-//! make one shared line misleading, so each row's capacity instead draws as
-//! a marker at its own bin — a second `::Value` layer (`Kind::Point`), the
-//! same combo-chart overlay the role renderer already gives any extra
-//! measure column; still an existing role, no hand-written SVG.
+//! Capacity: always a `::REFLINE` column; one value for the whole table
+//! draws once, as a quiet reference line. Several values (it varies by bin
+//! and/or model) would make one shared line misleading, so
+//! `contract::take_refs`/`tweak` draw each row's own capacity as a quiet
+//! point at its own bin instead — in the reference colour (never a palette
+//! slot `::CATEGORY` is already using) and named by a caption, since it has
+//! no legend entry. Still an existing role (`::REFLINE`) and ggplot-rs's own
+//! point geom; no hand-written SVG.
 
 use super::{opt_str, Row, Table};
 use crate::{Column, Kind, Role};
@@ -130,27 +132,15 @@ pub(super) fn columns(t: &Table, options: &Row) -> Result<(Vec<Column>, Vec<Stri
     ];
 
     if t.has("capacity") {
-        let cap_v = t.num("capacity")?;
-        let mut distinct: Vec<f64> = Vec::new();
-        for v in &cap_v {
-            if let Some(f) = v.as_f64().filter(|f| f.is_finite()) {
-                if !distinct.iter().any(|x| (x - f).abs() < 1e-9) {
-                    distinct.push(f);
-                }
-            }
-        }
-        if distinct.len() == 1 {
-            cols.push(Column::new("capacity", Role::RefLine, gather(&cap_v)));
-        } else if distinct.len() > 1 {
-            // Varies by bin (and/or model): a shared hline would misstate
-            // most bins, so each row's own capacity draws as a marker at
-            // its bin instead.
-            cols.push(Column::new(
-                "capacity",
-                Role::Value(Kind::Point),
-                gather(&cap_v),
-            ));
-        }
+        // A shared value draws once, as a quiet reference line; one that
+        // varies by bin/model draws as a quiet marker per bin instead (both
+        // in contract.rs's shared `take_refs`/`tweak`, which already knows
+        // the x each row belongs to — see its doc comment on `Refs::marks`).
+        cols.push(Column::new(
+            "capacity",
+            Role::RefLine,
+            gather(&t.num("capacity")?),
+        ));
     }
     if let Some(m) = t.model_key().filter(|m| t.distinct(m) > 1) {
         cols.push(Column::new(m, Role::Facet, gather(&t.text(m))));
@@ -308,38 +298,24 @@ mod tests {
         assert_eq!(dropped, 1);
     }
 
-    /// A capacity shared by every row draws once, as a RefLine.
+    /// Capacity — constant or varying — is always a RefLine column, one
+    /// value per row; `contract::take_refs`/`tweak` (not this module) decide
+    /// whether that becomes a single shared line or a marker per bin, so
+    /// both cases are covered at the render level
+    /// (`assignment_bin_order_capacity_and_nulls` in `contract.rs`).
     #[test]
-    fn constant_capacity_is_a_single_refline() {
-        let r = rows(
-            r#"[{"bin":1,"item":"a","size":3,"capacity":10},
-                {"bin":2,"item":"b","size":4,"capacity":10}]"#,
-        );
-        let t = table(&r);
-        let (cols, _) = columns(&t, &Row::new()).unwrap();
-        assert!(cols
-            .iter()
-            .any(|c| c.role == Role::RefLine && c.name == "capacity"));
-        assert!(cols
-            .iter()
-            .all(|c| !(c.name == "capacity" && matches!(c.role, Role::Value(_)))));
-    }
-
-    /// A capacity that varies by bin draws as a marker per bin (a second
-    /// Value column), not a single misleading hline.
-    #[test]
-    fn varying_capacity_is_a_marker_per_bin() {
+    fn capacity_is_always_a_refline_column_one_value_per_row() {
         let r = rows(
             r#"[{"bin":1,"item":"a","size":3,"capacity":10},
                 {"bin":2,"item":"b","size":4,"capacity":20}]"#,
         );
         let t = table(&r);
         let (cols, _) = columns(&t, &Row::new()).unwrap();
-        assert!(cols.iter().all(|c| c.role != Role::RefLine));
         let cap = cols
             .iter()
-            .find(|c| c.name == "capacity" && matches!(c.role, Role::Value(Kind::Point)))
-            .expect("capacity drawn as a Point marker");
+            .find(|c| c.name == "capacity")
+            .expect("a capacity column");
+        assert_eq!(cap.role, Role::RefLine);
         assert_eq!(cap.values.len(), 2);
     }
 }

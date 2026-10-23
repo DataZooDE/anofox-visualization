@@ -275,6 +275,13 @@ struct Refs {
     sym_y: Option<(f64, f64)>,
     /// Text above stem tips (Cook's index plot): (x, y, text).
     tips: Vec<(f64, f64, String)>,
+    /// A RefLine that is not one shared value: (x, y) markers, one per x
+    /// (e.g. `assignment`'s capacity when it varies by bin/model) — a
+    /// single hline would misstate most of them, so each x's own value
+    /// draws as a quiet point instead, named by `marks_name` (a caption,
+    /// since it has no legend entry).
+    marks: Vec<(Value, f64)>,
+    marks_name: String,
 }
 
 fn take_refs(cols: &[Column]) -> Refs {
@@ -282,8 +289,44 @@ fn take_refs(cols: &[Column]) -> Refs {
     for c in cols {
         match c.role {
             Role::RefLine => {
+                let mut distinct: Vec<f64> = Vec::new();
                 for v in &c.values {
                     if let Some(f) = v.as_f64().filter(|f| f.is_finite()) {
+                        if !distinct.iter().any(|x: &f64| (x - f).abs() < 1e-12) {
+                            distinct.push(f);
+                        }
+                    }
+                }
+                let xs = cols.iter().find(|c| c.role == Role::X);
+                if distinct.len() > 1 {
+                    if let Some(xs) = xs {
+                        for (i, v) in c.values.iter().enumerate() {
+                            let (Some(f), Some(xv)) =
+                                (v.as_f64().filter(|f| f.is_finite()), xs.values.get(i))
+                            else {
+                                continue;
+                            };
+                            if !r
+                                .marks
+                                .iter()
+                                .any(|(mx, my): &(Value, f64)| mx == xv && (my - f).abs() < 1e-12)
+                            {
+                                r.marks.push((xv.clone(), f));
+                            }
+                        }
+                        r.marks_name = c.name.clone();
+                    } else {
+                        // No x to key a marker by: fall back to the old,
+                        // if-misleading, shared-lines behaviour rather than
+                        // silently dropping the reference.
+                        for f in distinct {
+                            if !r.h.iter().any(|x| (x - f).abs() < 1e-12) {
+                                r.h.push(f);
+                            }
+                        }
+                    }
+                } else {
+                    for f in distinct {
                         if !r.h.iter().any(|x| (x - f).abs() < 1e-12) {
                             r.h.push(f);
                         }
@@ -479,6 +522,29 @@ fn tweak(
             linetype: Linetype::Dashed,
             alpha: 1.0,
         });
+    }
+    if !refs.marks.is_empty() {
+        // A quiet point per x, in the reference colour (never a palette
+        // slot a ::CATEGORY is already using) — named by a caption, since
+        // it has no legend entry of its own.
+        plot = plot
+            .geom_point_with(GeomPoint {
+                color: look::REF,
+                size: 4.0,
+                alpha: 1.0,
+            })
+            .layer_data(vec![
+                (
+                    "x".to_string(),
+                    refs.marks.iter().map(|(x, _)| x.clone()).collect(),
+                ),
+                (
+                    "y".to_string(),
+                    refs.marks.iter().map(|(_, y)| Value::Float(*y)).collect(),
+                ),
+            ])
+            .layer_aes(Aes::new().x("x").y("y"))
+            .caption(&format!("{} (grey)", refs.marks_name));
     }
     let plot = plot.xlab(&labels.x_or(xl)).ylab(&labels.y_or(yl));
     match &labels.title {
