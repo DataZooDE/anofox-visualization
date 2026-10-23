@@ -335,6 +335,125 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   folder, or don't give panels a viewer-chosen pattern. The server's own
   `@requires` check counts only matches inside the folder, see above.)
 
+**The served nav keeps `path_vars` across dashboards (#407).** Clicking
+another dashboard in the served nav (`web/app.js`'s `.served-nav`, injected
+whenever 2+ dashboards are served or `nav_picker` is set) carries the
+*current* value of every `path_vars` variable along — `/d/monitor_features?v.model=car_price_unlabelled` —
+so switching pages doesn't fall back to the target's own default:
+
+- The server tells the page which variables are `path_vars`
+  (`window.__served.pathVars`, config, not secret — every viewer already
+  knows the server runs with a data folder from the dashboard's own SQL).
+  The page reads the *current* value of each from `dpVars` (whatever a
+  `::DROPDOWN`/`::BUTTONS` bound to it, or the `nav_picker` below, last set)
+  and appends it to every nav link's `href` as `?v.<name>=<value>` — real
+  hrefs, kept current on every run (`syncUrlState` → `refreshServedNavHrefs`
+  in `web/app.js`), not just a click handler, so a middle-click / "open in
+  new tab" carries it too. A variable with no value yet is left off the
+  link; the target then falls back to its own default, same as opening it
+  fresh.
+- **Only `path_vars` values are ever carried** — never another viewer input,
+  a selection or a filter — and they are already validated server-side on
+  *every* request regardless of where they came from (`check_path_values`,
+  above): the client only URL-encodes them, it adds no new trust boundary.
+- A target dashboard that doesn't read a given `path_vars` name simply
+  ignores it: `/api/panel` accepts any well-formed variable name
+  (`parse_panel_request` only checks it's an identifier and not reserved,
+  never that *this* dashboard uses it) and a panel is sent only the
+  variables its own dependency analysis says it reads (#210) — so an unused
+  `?v.<name>=` on the URL, or in the request body, is dead weight, not a
+  `400`. (A dashboard that restricts viewer variables with its own
+  `-- @vars` is the one exception: list the path variable there too, or a
+  carried-over value is silently dropped for that dashboard, same as any
+  other viewer input it doesn't allow.)
+- **A `path_vars` name a scoped credential locks (an embed link's `vars`) is
+  never carried** (security review of #410, M1): `window.__served.pathVars`
+  leaves it out (`served_index`, `var_locked`). Its value always wins over
+  whatever a nav link, the viewer or `nav_picker` would otherwise set
+  (`Scope::lock_vars`, `locked_panel`), so carrying it would be pointless —
+  and, for `nav_picker` below, worse than pointless.
+- `serve --dashboards` (the script-free static render, mode B) has no
+  `path_vars` or `data` folder at all — it whitelists literal `-- @param`
+  values instead, a different mechanism — and no persistent cross-dashboard
+  nav bar either (only the `/` list page, `page::landing`): there is nothing
+  to carry a value across there. This note exists so a future `data`/
+  `path_vars` on that server isn't assumed to inherit this nav behaviour for
+  free.
+
+**A nav-bar picker for a `path_vars` variable (`nav_picker`, #407).** Every
+per-model dashboard repeating the same `::DROPDOWN` is instead one dropdown
+in the nav bar that sets the variable for every page:
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "data": "/srv/models", "path_vars": ["model"],
+  "nav_picker": {"var": "model", "label": "Model",
+                 "sql": "SELECT model_id, title FROM models ORDER BY title"}
+}');
+```
+
+- `var` must be one of `path_vars` — refused at start otherwise (`options.nav_picker.var '…' must be one of options.path_vars`).
+- `sql` is **author/config text, run on the server — never from the
+  viewer.** It must be exactly one query, checked the same way every
+  `data`-folder statement is (`json_serialize_sql`, SELECT-only), and must
+  return exactly two columns, `(value, label)`; anything else refuses the
+  server start. It runs **once per snapshot** (at startup and on every
+  refresh, like a dashboard's own setup) on the locked, read-only snapshot
+  instance, with `anofox_data` set and no viewer context at all — no
+  claims, no viewer variables, the same result for every viewer, never
+  re-run per request. Keep its own text free of viewer-chosen values for
+  the same reason a setup statement should be (there is none to use here).
+- Every `value` it returns is checked against the exact rule a `path_vars`
+  value must already satisfy (`[A-Za-z0-9_.-]`, not starting with `.`, or a
+  non-negative integer) — a row that fails is **dropped and logged**, never
+  sent to a page. This is the same rule the server enforces on every
+  `/api/panel` request regardless of where a value came from, so a picker
+  value can never reach the server as anything but what a hand-typed
+  `?v.<var>=` could already send.
+- **`nav_picker` refuses to start together with `options.policy`.** The
+  access policy rewrites *dashboard* statements only
+  (`Enforcer::rewrite_script`); `nav_picker.sql` runs directly, outside that
+  rewrite, so it would silently read past the policy's row and column rules
+  for whatever table it queries. Rather than guess at a viewer scope to run
+  it under, the server refuses the combination outright — remove the
+  policy, or don't use `nav_picker`. (It has no such conflict with `auth`
+  alone, or with `"policy": "none"`: those already trust every dashboard
+  panel to filter on the claims itself, and `nav_picker.sql` is author text
+  of the same trust level.)
+- Up to 2,000 options, each label at most 200 characters — the whole list is
+  inlined into every served page (`window.__served.navPicker`), not fetched
+  lazily; a longer result refuses the server start (keep the picker's list
+  short, or filter it in `sql`).
+- **`nav_picker`'s option list is the same for every viewer who can open a
+  page with it on — there is no per-viewer filtering of it, by claims or
+  otherwise** (`nav_picker.sql` runs once per snapshot, before any viewer's
+  request even exists — see above). Don't use `nav_picker` on a variable
+  whose *values themselves* are confidential per viewer beyond what a
+  credential's own scope already covers (e.g. one tenant's model names that
+  another tenant must never see): filter that in the dashboards' own SQL via
+  the claims instead, or leave that variable off `nav_picker` and keep its
+  own `::DROPDOWN`/`::BUTTONS`, which *is* data the request already decided
+  this viewer may read.
+- **`nav_picker` is omitted entirely for a credential that locks its `var`**
+  (security review of #410, M1 — an embed link's `vars`): the locked value
+  always overrides whatever the picker would otherwise set
+  (`Scope::lock_vars`, `locked_panel`), so showing it would both do nothing
+  for that viewer *and* disclose every other option's value — e.g. every
+  tenant's model name — to a credential that can only ever end up on its one
+  locked tenant. `served_index` checks this (`var_locked`) the same way it
+  decides whether to carry the variable on a nav link, above.
+- The nav renders it with `document.createElement` / `textContent`
+  (`renderNavPicker`, `web/app.js`) — never `innerHTML` — so a label can
+  hold arbitrary text without needing its own escaping, and the CSP header
+  below still allows no inline handlers (`onchange` is attached in script,
+  like every other control). Choosing a value runs `SET VARIABLE
+  <var> = '<value>'` and a re-run (`makeControl`'s own pattern), so the
+  panels that depend on it re-run exactly as a `::DROPDOWN` change would;
+  the part-2 nav links above then pick up the new value on the next
+  `syncUrlState`.
+- `serve --dashboards` has no `nav_picker` either, for the same reason it
+  has no `path_vars`.
+
 **Content-Security-Policy header (#252).** Every HTML page of the locked server
 (the dashboard page, the `/` list, the login pages), of `dashboard serve` and
 of the authoring servers carries a
@@ -386,7 +505,7 @@ of the authoring servers carries a
   `threads` (HTTP worker pool = concurrent requests, default 4), `warm` (see
   above), `frame_ancestors` (see below), `cache_mb`
   (see below), `attach`, `load`, `hosts` (see below), `refresh_s`, `data`,
-  `path_vars` (see above), `auth`, `log`, `log_vars` (see
+  `path_vars`, `nav_picker` (see above), `auth`, `log`, `log_vars` (see
   [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)),
   `policy` (see [Row and column policies](#row-and-column-policies-access-control-p2)),
   and for [deployment](deployment.md):

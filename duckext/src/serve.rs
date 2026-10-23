@@ -567,6 +567,11 @@ pub struct LockedOptions {
     /// Variables whose values name a file or folder inside `data`: each must
     /// be a plain name (`[A-Za-z0-9_.-]`, not starting with `.`).
     pub path_vars: Vec<String>,
+    /// `nav_picker` (#407 part 3): a dropdown in the served nav bar that sets
+    /// one `path_vars` variable for every page. `var` must be one of
+    /// `path_vars`; `sql` is author text, run once per snapshot (never from
+    /// the viewer) — see [`NavPicker`] and `build_nav_picker`.
+    pub nav_picker: Option<NavPicker>,
     /// `auth`: the viewer login — an auth proxy, JWT/OIDC, embed links, API
     /// keys (every request but `/health` needs it; the claims become
     /// `__claim_*` variables).
@@ -612,6 +617,19 @@ pub struct LockedOptions {
     pub source: Option<Arc<crate::source::SourceOpts>>,
 }
 
+/// `options.nav_picker`: `{"var": "model", "sql": "SELECT model_id, title FROM …", "label": "Model"}`.
+/// `sql` must be exactly one query (checked like every `data`-folder
+/// statement) and is run once per snapshot build (startup + every refresh),
+/// with `anofox_data` set and no viewer context — never per-request, never
+/// with the viewer's claims. Its rows become the picker's options, each
+/// re-checked against the same plain-name rule as a `path_vars` value.
+#[derive(Clone, Debug)]
+pub struct NavPicker {
+    pub var: String,
+    pub sql: String,
+    pub label: Option<String>,
+}
+
 /// The `hash` mask's HMAC key. Never printed.
 #[derive(Clone)]
 pub struct PolicyKey(Arc<Vec<u8>>);
@@ -639,6 +657,7 @@ impl Default for LockedOptions {
             refresh: None,
             data: None,
             path_vars: Vec::new(),
+            nav_picker: None,
             auth: None,
             log: None,
             bind: std::net::Ipv4Addr::LOCALHOST.into(),
@@ -749,6 +768,37 @@ impl LockedOptions {
                         o.path_vars.push(v.to_string());
                     }
                 }
+                "nav_picker" => {
+                    let m = val.as_object().ok_or(
+                        "options.nav_picker must be an object like {\"var\": \"model\", \"sql\": \"SELECT …\", \"label\": \"Model\"}",
+                    )?;
+                    if let Some(other) = m.keys().find(|k| !matches!(k.as_str(), "var" | "sql" | "label")) {
+                        return Err(format!("options.nav_picker: unknown key '{other}' (var, sql, label)"));
+                    }
+                    let var = m
+                        .get("var")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| sv::valid_ident(v))
+                        .ok_or("options.nav_picker.var must be a variable name")?;
+                    let sql = m
+                        .get("sql")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .ok_or("options.nav_picker.sql must be a SELECT query")?;
+                    let label = match m.get("label") {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(serde_json::Value::String(s)) if !s.trim().is_empty() && s.chars().count() <= 100 => {
+                            Some(s.clone())
+                        }
+                        _ => return Err("options.nav_picker.label must be a short (<=100 character) string".into()),
+                    };
+                    o.nav_picker = Some(NavPicker {
+                        var: var.to_string(),
+                        sql: sql.to_string(),
+                        label,
+                    });
+                }
                 "auth" => auth_cfg = Some(val),
                 "audit" => audit = Some(val.as_str().ok_or("options.audit must be \"stderr\" or a file path")?),
                 "log" => log = Some(val.as_str().ok_or("options.log must be \"stderr\" or a file path")?),
@@ -806,7 +856,7 @@ impl LockedOptions {
                 "source" => {
                     o.source = Some(Arc::new(crate::source::parse(val)?));
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, warm, frame_ancestors, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home, source)")),
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, warm, frame_ancestors, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, nav_picker, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home, source)")),
             }
         }
         // A response larger than the in-flight budget could never be sent.
@@ -815,6 +865,30 @@ impl LockedOptions {
             .min(o.max_inflight.max(crate::limits::FREE_BYTES));
         if !o.path_vars.is_empty() && o.data.is_none() {
             return Err("options.path_vars needs options.data".into());
+        }
+        if let Some(np) = &o.nav_picker {
+            if !o.path_vars.iter().any(|p| p.eq_ignore_ascii_case(&np.var)) {
+                return Err(format!(
+                    "options.nav_picker.var '{}' must be one of options.path_vars",
+                    np.var
+                ));
+            }
+            // `nav_picker.sql` runs once per snapshot, directly on the
+            // locked connection — never through the access policy's
+            // per-viewer row/column rewrite (`Enforcer::rewrite_script`
+            // only ever sees `dashboards`). Running it anyway under a
+            // policy would silently bypass that policy's row and column
+            // rules for whatever table it reads, so the safer choice is to
+            // refuse the combination outright rather than guess at a scope
+            // to run it under.
+            if o.policy.is_some() {
+                return Err(
+                    "options.nav_picker cannot be combined with options.policy — nav_picker.sql \
+                     runs once per snapshot outside the access policy's row/column rewrite, so \
+                     it would bypass the policy for whatever table it reads; remove one of them"
+                        .into(),
+                );
+            }
         }
         if let Some(val) = auth_cfg {
             let mut a = Auth::from_json(val, |k| std::env::var(k).ok())
@@ -987,6 +1061,10 @@ struct Snapshot {
     /// Per dashboard, per statement: the request variables the setup before
     /// it reads ([`deps::setup_deps`]): what a warm connection is keyed on.
     warm_deps: Vec<Vec<Deps>>,
+    /// `options.nav_picker`'s options for this snapshot: (value, label) pairs,
+    /// already checked read-only and value-validated ([`build_nav_picker`]).
+    /// Recomputed on every refresh; empty without `nav_picker`.
+    nav_picker_options: Vec<(String, String)>,
     _dir: SnapshotDir,
 }
 
@@ -1748,6 +1826,124 @@ fn valid_path_value(lit: &str) -> bool {
         .is_some_and(sv::valid_dashboard_id)
 }
 
+/// The same rule as [`valid_path_value`], but on a raw value (as a
+/// `nav_picker.sql` row returns it), not a SQL literal's `'…'` quoting.
+fn valid_path_value_text(v: &str) -> bool {
+    (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())) || sv::valid_dashboard_id(v)
+}
+
+/// Does `scope` (an embed link's or API key's credential) fix variable
+/// `name` (`Scope::lock_vars`, case-insensitive — DuckDB names are)? Used by
+/// `served_index` (security review of #410, M1) to decide whether a
+/// `path_vars` name is worth carrying on a nav link, and whether
+/// `nav_picker` may be shown at all: a locked variable's viewer-facing value
+/// never changes no matter what the page sends, so carrying it is pointless,
+/// and showing every `nav_picker` option would disclose values (e.g. every
+/// tenant's model) this credential's viewer can never actually choose.
+fn var_locked(scope: Option<&Scope>, name: &str) -> bool {
+    scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(name)))
+}
+
+/// `nav_picker.sql`'s options are inlined into every served page: cap how
+/// many rows it may return and how long one label may be.
+const NAV_PICKER_MAX_OPTIONS: usize = 2_000;
+const NAV_PICKER_MAX_LABEL: usize = 200;
+
+/// `sql` (the author's `nav_picker.sql`, already checked read-only) wrapped
+/// so every column comes back as text: `COLUMNS(*)::VARCHAR` casts whatever
+/// type the author's query gives a column, so `string_rows` (which reads
+/// VARCHAR vectors only) can read it regardless.
+///
+/// Security review of #410, L1: the closing `)` is on its own line, after a
+/// newline — never appended right after `sql`'s own text — so a `sql` that
+/// ends in a `-- comment` with no newline of its own (a line comment runs to
+/// end of line) can never swallow it and produce a confusing "missing )"
+/// parse error at server start instead of the real refusal from
+/// `read_only_statement`.
+fn wrap_nav_picker_sql(sql: &str) -> String {
+    format!(
+        "SELECT COLUMNS(*)::VARCHAR FROM (\n{}\n) AS __anofox_nav_picker",
+        sql.trim().trim_end_matches(';')
+    )
+}
+
+/// Run and validate `options.nav_picker.sql` against the snapshot just built
+/// on `c` (startup, or every refresh): classified read-only by the same
+/// check every `data`-folder statement gets ([`read_only_statement`]), then
+/// actually executed — once per snapshot, with `anofox_data` set and no
+/// viewer context at all (no claims, no viewer variables): the result is
+/// the same for every viewer and is never re-run per request. Each row must
+/// have exactly two columns (value, label); a value that is not a plain
+/// `path_vars` name — the same rule [`check_path_values`] enforces on every
+/// request — is dropped and logged, never sent to a page.
+fn build_nav_picker(
+    c: &Conn,
+    opts: &LockedOptions,
+    np: &NavPicker,
+) -> Result<Vec<(String, String)>, String> {
+    let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
+    read_only_statement(&np.sql, false, &mut duck)
+        .map_err(|e| format!("options.nav_picker.sql: {e}"))?;
+    if let Some(data) = &opts.data {
+        c.exec(&format!(
+            "SET VARIABLE {DATA_VAR} = {}",
+            sql_string_literal(&data.to_string_lossy())
+        ))?;
+    }
+    let wrapped = wrap_nav_picker_sql(&np.sql);
+    let rows = c
+        .query(&wrapped)
+        .and_then(|mut r| r.string_rows(NAV_PICKER_MAX_OPTIONS + 1))
+        .map_err(|e| format!("options.nav_picker.sql: {e}"))?;
+    nav_picker_rows_to_options(&rows)
+}
+
+/// The pure part of [`build_nav_picker`]: `rows` (already fetched, two
+/// `VARCHAR` columns) to the (value, label) pairs a page gets — dropping any
+/// row whose value isn't a plain `path_vars` name (the exact rule
+/// [`valid_path_value`] enforces on every request), and refusing the whole
+/// result if a row has the wrong column count or the result is too big to
+/// inline into every page.
+fn nav_picker_rows_to_options(
+    rows: &[Vec<Option<String>>],
+) -> Result<Vec<(String, String)>, String> {
+    if rows.len() > NAV_PICKER_MAX_OPTIONS {
+        return Err(format!(
+            "options.nav_picker.sql returned more than {NAV_PICKER_MAX_OPTIONS} rows — its list \
+             is sent to every page, so keep it short"
+        ));
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        if row.len() != 2 {
+            return Err(format!(
+                "options.nav_picker.sql must return exactly two columns (value, label), got {}",
+                row.len()
+            ));
+        }
+        let Some(value) = row[0].as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+            eprintln!("[anofox-serve] options.nav_picker: row {i} has no value, dropped");
+            continue;
+        };
+        if !valid_path_value_text(value) {
+            eprintln!(
+                "[anofox-serve] options.nav_picker: row {i}'s value ({}) is not a plain name, dropped",
+                access::diag(value)
+            );
+            continue;
+        }
+        let mut label = row[1].as_deref().unwrap_or(value).trim().to_string();
+        if label.is_empty() {
+            label = value.to_string();
+        }
+        if label.chars().count() > NAV_PICKER_MAX_LABEL {
+            label = label.chars().take(NAV_PICKER_MAX_LABEL).collect();
+        }
+        out.push((value.to_string(), label));
+    }
+    Ok(out)
+}
+
 /// Load `*.sql` dashboards from `dir`. Returns them plus the union of their
 /// `-- @load` extensions.
 fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
@@ -2163,6 +2359,7 @@ fn build_snapshot(
     // name in the working directory, so open a plain ":memory:"; its default
     // catalog is called "memory", which only matters if a source has that name.)
     let db = Database::open(":memory:", &cfg)?;
+    let nav_picker_options;
     {
         let c = db.connect()?;
         if copied
@@ -2251,6 +2448,10 @@ fn build_snapshot(
         // Fail now, not on every request (e.g. a schema that doesn't exist).
         c.exec(&enter)
             .map_err(|e| format!("options.search_path: {}", e.lines().next().unwrap_or("")))?;
+        nav_picker_options = match &opts.nav_picker {
+            Some(np) => build_nav_picker(&c, opts, np)?,
+            None => Vec::new(),
+        };
     }
     Ok((
         Snapshot {
@@ -2262,6 +2463,7 @@ fn build_snapshot(
             deps: Vec::new(),
             deps_tags: Vec::new(),
             warm_deps: Vec::new(),
+            nav_picker_options,
             _dir: dir,
         },
         warnings,
@@ -3264,9 +3466,10 @@ fn requires_met(
 /// What a viewer sees when a panel fails under an access policy.
 const POLICY_PANEL_ERROR: &str = "this panel could not be shown (the server log has the details)";
 
-/// index.html with `window.__served = {id,title,sql,nav,locked,deps,depsTag}`
-/// injected (script-safe JSON: `<` is emitted as `<`, so `</script>` in a
-/// dashboard's SQL cannot break out).
+/// index.html with `window.__served =
+/// {id,title,sql,nav,locked,deps,depsTag,pathVars,navPicker}` injected
+/// (script-safe JSON: `<` is emitted as `<`, so `</script>` in a dashboard's
+/// SQL — or in a `nav_picker` label — cannot break out).
 /// The served page of `dash`. `scope` limits the navigation to the
 /// dashboards the viewer may read; `session` is an embed link's page session
 /// (the page sends it with each request, see `auth::SESSION_HEADER`).
@@ -3283,9 +3486,44 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
     if let Some(s) = session {
         cfg["session"] = serde_json::json!(s);
     }
+    // #407 part 2: which variables are `path_vars` — config, not secret, so
+    // the page can carry their current values on every nav link. Part 3: the
+    // nav-bar picker's options, computed once per snapshot (never from the
+    // viewer, never per-request) by `build_nav_picker`.
+    //
+    // Security review of #410, M1: a scoped credential (an embed link, an
+    // API key) that locks one of these variables (`Scope::lock_vars`) always
+    // wins — the viewer's (or the picker's, or a carried-over nav link's)
+    // value is dropped and the locked one set instead (`locked_panel`). A
+    // locked `path_vars` name is therefore pointless to carry (its value on
+    // the link is simply ignored), and `nav_picker`'s full option list would
+    // otherwise disclose every other value this credential can never
+    // actually choose (e.g. every tenant's model name to a credential locked
+    // to one tenant). So: never carry a locked path_vars name, and omit
+    // `navPicker` entirely when its variable is locked.
+    let path_vars: Vec<&String> = st
+        .opts
+        .path_vars
+        .iter()
+        .filter(|p| !var_locked(scope, p))
+        .collect();
+    if !path_vars.is_empty() {
+        cfg["pathVars"] = serde_json::json!(path_vars);
+    }
     // What each statement depends on (#210): the page re-requests a panel
     // only when one of its variables changed.
     let gen = st.current.get();
+    if let Some(np) = &st.opts.nav_picker {
+        if !var_locked(scope, &np.var) {
+            cfg["navPicker"] = serde_json::json!({
+                "var": np.var,
+                "label": np.label,
+                "options": gen.snap.nav_picker_options.iter()
+                    .map(|(v, l)| serde_json::json!({"value": v, "label": l}))
+                    .collect::<Vec<_>>(),
+            });
+        }
+    }
     if let Some(di) = st.dashboards.iter().position(|d| d.id == dash.id) {
         if let (Some(ds), Some(tag)) = (gen.snap.deps.get(di), gen.snap.deps_tags.get(di)) {
             cfg["deps"] = serde_json::json!(ds.iter().map(Deps::to_json).collect::<Vec<_>>());
@@ -3939,6 +4177,176 @@ mod tests {
         assert!(LockedOptions::parse(Some(&bad)).is_err());
     }
 
+    /// #407 part 3: `options.nav_picker` config validation — `var` must be
+    /// one of `path_vars`, `sql` must be given, unknown keys and an
+    /// oversize `label` are refused, and the combination with an access
+    /// policy is refused (see the comment on that check in `parse`: the
+    /// policy only ever rewrites `dashboards`, never `nav_picker.sql`).
+    #[test]
+    fn nav_picker_option() {
+        let sub = SnapshotDir::create().unwrap();
+        let dir = sub.0.canonicalize().unwrap();
+        let base = format!(
+            r#"{{"data":{},"path_vars":["model"]"#,
+            serde_json::json!(dir.to_string_lossy())
+        );
+        let with = |extra: &str| format!("{base},{extra}}}");
+
+        let o = LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"var":"model","sql":"SELECT model_id, title FROM models","label":"Model"}"#,
+        )))
+        .unwrap();
+        let np = o.nav_picker.unwrap();
+        assert_eq!(np.var, "model");
+        assert_eq!(np.sql, "SELECT model_id, title FROM models");
+        assert_eq!(np.label, Some("Model".to_string()));
+
+        // `label` is optional.
+        let o = LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"var":"model","sql":"SELECT 1, 2"}"#,
+        )))
+        .unwrap();
+        assert!(o.nav_picker.unwrap().label.is_none());
+
+        // `var` must be one of `path_vars` …
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"var":"other","sql":"SELECT 1,2"}"#
+        )))
+        .is_err());
+        // … and a valid identifier in the first place.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"var":"not a var","sql":"SELECT 1,2"}"#,
+        )))
+        .is_err());
+        // `sql` is required and may not be empty.
+        assert!(
+            LockedOptions::parse(Some(&with(r#""nav_picker":{"var":"model","sql":""}"#))).is_err()
+        );
+        assert!(LockedOptions::parse(Some(&with(r#""nav_picker":{"var":"model"}"#))).is_err());
+        // Unknown key inside `nav_picker`.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"var":"model","sql":"SELECT 1,2","extra":1}"#,
+        )))
+        .is_err());
+        // `label` is capped at 100 characters.
+        let long = "x".repeat(101);
+        assert!(LockedOptions::parse(Some(&with(&format!(
+            r#""nav_picker":{{"var":"model","sql":"SELECT 1,2","label":"{long}"}}"#
+        ))))
+        .is_err());
+        // `nav_picker` needs `path_vars` to actually contain `var` (no
+        // `path_vars` at all is the same refusal as `var` not being in it).
+        assert!(LockedOptions::parse(Some(&format!(
+            r#"{{"data":{},"nav_picker":{{"var":"model","sql":"SELECT 1,2"}}}}"#,
+            serde_json::json!(dir.to_string_lossy())
+        )))
+        .is_err());
+
+        // Refuses to start together with an access policy (it would bypass
+        // the policy's row/column rewrite for whatever table it reads).
+        let f = dir.join(format!("policy-{}.json", sv::random_token()));
+        std::fs::write(&f, r#"{"tables": {"sales": {"rows": true}}}"#).unwrap();
+        let with_policy = format!(
+            r#"{{"data":{},"path_vars":["model"],"policy":{},"nav_picker":{{"var":"model","sql":"SELECT 1,2"}}}}"#,
+            serde_json::json!(dir.to_string_lossy()),
+            serde_json::json!(f.to_string_lossy())
+        );
+        assert!(LockedOptions::parse(Some(&with_policy)).is_err());
+        // `"policy": "none"` is not an access policy — no such refusal.
+        let with_policy_none = format!(
+            r#"{{"data":{},"path_vars":["model"],"policy":"none","nav_picker":{{"var":"model","sql":"SELECT 1,2"}}}}"#,
+            serde_json::json!(dir.to_string_lossy())
+        );
+        assert!(LockedOptions::parse(Some(&with_policy_none)).is_ok());
+    }
+
+    /// #407 part 3: [`nav_picker_rows_to_options`] — the pure row-to-option
+    /// mapping `build_nav_picker` runs after fetching `nav_picker.sql`'s
+    /// rows: wrong column count refuses the whole result, a NULL or
+    /// not-plain-name value is dropped (and the row's label with it), an
+    /// empty/NULL label falls back to the value, an oversize result refuses,
+    /// and a label is capped in characters (not bytes — a multi-byte label
+    /// must not panic).
+    #[test]
+    fn nav_picker_rows_to_options_test() {
+        let row = |v: Option<&str>, l: Option<&str>| vec![v.map(String::from), l.map(String::from)];
+        let rows = vec![
+            row(Some("car-price"), Some("Car price")),
+            row(Some("../etc"), Some("escape attempt — dropped")), // not a plain name
+            row(Some(""), Some("empty value — dropped")),
+            row(None, Some("NULL value — dropped")),
+            row(Some("no-label"), None), // falls back to the value
+            row(Some("empty-label"), Some("  ")),
+            row(Some("123"), Some("an integer value is fine too")),
+        ];
+        let out = nav_picker_rows_to_options(&rows).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("car-price".to_string(), "Car price".to_string()),
+                ("no-label".to_string(), "no-label".to_string()),
+                ("empty-label".to_string(), "empty-label".to_string()),
+                (
+                    "123".to_string(),
+                    "an integer value is fine too".to_string()
+                ),
+            ]
+        );
+        // Wrong column count refuses the whole thing, not just that row.
+        assert!(nav_picker_rows_to_options(&[vec![Some("a".to_string())]]).is_err());
+        assert!(nav_picker_rows_to_options(&[vec![
+            Some("a".to_string()),
+            Some("b".to_string()),
+            Some("c".to_string())
+        ]])
+        .is_err());
+        // Too many rows for the page payload.
+        let many: Vec<_> = (0..NAV_PICKER_MAX_OPTIONS + 1)
+            .map(|i| row(Some(&i.to_string()), Some("x")))
+            .collect();
+        assert!(nav_picker_rows_to_options(&many).is_err());
+        assert_eq!(
+            nav_picker_rows_to_options(&many[..NAV_PICKER_MAX_OPTIONS])
+                .unwrap()
+                .len(),
+            NAV_PICKER_MAX_OPTIONS
+        );
+        // A label longer than the cap is truncated in characters, not bytes
+        // — a multi-byte character right at the boundary must not panic.
+        let wide_label = "é".repeat(NAV_PICKER_MAX_LABEL + 10);
+        let out = nav_picker_rows_to_options(&[row(Some("v"), Some(&wide_label))]).unwrap();
+        assert_eq!(out[0].1.chars().count(), NAV_PICKER_MAX_LABEL);
+    }
+
+    /// Security review of #410, M1: `var_locked` is what `served_index` asks
+    /// before carrying a `path_vars` name on a nav link or showing
+    /// `nav_picker` at all — a scoped credential's locked variable (an embed
+    /// link) always overrides whatever the page would otherwise send
+    /// (`Scope::lock_vars`, `locked_panel`), so neither is worth exposing
+    /// for it: carrying a locked value is a no-op, and showing the full
+    /// `nav_picker` option list to a credential that can only ever end up
+    /// with one of them discloses the others (every tenant's model name to
+    /// a credential locked to one tenant, say).
+    #[test]
+    fn var_locked_matches_scoped_credentials_case_insensitively() {
+        assert!(!var_locked(None, "model"));
+        let scope = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: vec![("Model".into(), "'acme'".into())],
+        };
+        assert!(var_locked(Some(&scope), "model"));
+        assert!(var_locked(Some(&scope), "MODEL"));
+        assert!(var_locked(Some(&scope), "Model"));
+        assert!(!var_locked(Some(&scope), "other"));
+        // A scope with no locked variables at all (e.g. an api_keys
+        // credential, which only ever scopes `dashboards`) locks nothing.
+        let dashboards_only = Scope {
+            dashboards: Some(vec!["d".into()]),
+            vars: Vec::new(),
+        };
+        assert!(!var_locked(Some(&dashboards_only), "model"));
+    }
+
     #[test]
     fn policy_option() {
         let dir = SnapshotDir::create().unwrap();
@@ -4124,6 +4532,46 @@ mod tests {
         assert!(read_only_statement("SELECT 1", false, &mut none).is_err());
         let mut garbage = |_: &str| Ok::<_, String>(vec![vec![Some("not json".to_string())]]);
         assert!(read_only_statement("SELECT 1", false, &mut garbage).is_err());
+    }
+
+    /// Security review of #410, L1: `wrap_nav_picker_sql`'s closing `)` is
+    /// on its own line, so a `nav_picker.sql` ending in a `-- comment` (a
+    /// line comment with no newline of its own) can't swallow it — checked
+    /// structurally (no DuckDB needed) and, where a `duckdb` CLI is
+    /// available, by actually running the wrapped query.
+    #[test]
+    fn nav_picker_wrapped_sql_survives_a_trailing_line_comment() {
+        let sql = "SELECT 1 -- trailing comment, no newline of its own";
+        let wrapped = wrap_nav_picker_sql(sql);
+        assert!(
+            wrapped.contains("\n)"),
+            "the wrapper's closing paren must be on its own line: {wrapped}"
+        );
+        assert!(wrapped.trim_end().ends_with("AS __anofox_nav_picker"));
+        match cli_serialize("SELECT 1") {
+            Some(Ok(out)) if out.contains("\"error\":false") => {}
+            _ if std::env::var_os("CI").is_some() => {
+                panic!("CI needs a working `duckdb` CLI on PATH (json_serialize_sql) for this test")
+            }
+            _ => {
+                eprintln!("skipped: no working duckdb CLI");
+                return;
+            }
+        }
+        assert_eq!(
+            cli_rows(&wrapped).as_deref(),
+            Ok(&[vec![Some("1".to_string())]][..]),
+            "the trailing comment must not comment out the wrapper's closing paren"
+        );
+        // A comment on its own line (a real-world multi-line query) already
+        // worked before this fix — still does.
+        let multiline =
+            "SELECT model_id AS value, title AS label -- a real column comment\nFROM models";
+        assert!(cli_rows(&format!(
+            "CREATE TEMP TABLE models AS SELECT 'm1' AS model_id, 'Model one' AS title; {}",
+            wrap_nav_picker_sql(multiline)
+        ))
+        .is_ok());
     }
 
     #[test]

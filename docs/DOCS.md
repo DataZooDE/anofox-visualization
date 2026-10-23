@@ -3253,6 +3253,25 @@ TEMP TABLE|VIEW … AS <query>`); mount the folder read-only for a hard
 guarantee
 ([`secure-serving.md`](secure-serving.md)).
 
+**The served nav keeps `path_vars`, and can pick one.** Switching dashboards
+in the served nav carries the current value of every `path_vars` variable
+along (`/d/other?v.run=2026-10-01`), so every page stays on the same run
+without its own `?v.run=` link. `nav_picker` adds one dropdown to the nav
+bar, right of the dashboard links, that sets a `path_vars` variable for
+every page instead of each dashboard repeating its own `::DROPDOWN`:
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095,
+  '{"data": "/srv/runs", "path_vars": ["run"],
+    "nav_picker": {"var": "run", "label": "Run",
+                   "sql": "SELECT run_id, label FROM runs ORDER BY run_id DESC"}}');
+```
+
+`nav_picker.sql` is server-side config text (never from a viewer), checked
+query-only and run once per snapshot, like a dashboard's own setup; full
+rules, including why it refuses to combine with an access policy, are in
+[`secure-serving.md`](secure-serving.md).
+
 **Login and per-viewer data.** Behind an auth proxy (oauth2-proxy, Caddy
 `forward_auth`, nginx `auth_request`, Cloudflare Access), `options.auth`
 (`{"mode": "proxy", "shared_secret_env": "…"}`) makes every request carry the

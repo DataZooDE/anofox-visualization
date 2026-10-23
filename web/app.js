@@ -6869,6 +6869,10 @@ function urlStateParams() {
   return out;
 }
 function syncUrlState() {
+  // #407 part 2/3: refreshed here (not just on load) so a nav link's href
+  // and the picker's selection always reflect the latest run's variables —
+  // no-op outside served mode, and `preview` is never true there.
+  refreshServedNavHrefs();
   if (preview) return; // #244: the URL never carries the preview's state
   try {
     const u = new URL(location.href);
@@ -7515,9 +7519,57 @@ function servedNavGroups(nav) {
 // set (#355) — the full title then leads the tooltip instead of repeating
 // the label.
 const SERVED_NAV_MENU_MIN = 9;
+// The current value of variable `name`, however the render loop happens to
+// be tracking it: `dpVars` for one bound to a declared input on *this*
+// dashboard (`name in dpVarDefault`), else `dpXf` — a `pathVars` variable
+// read only through `getvariable()` (no ::DROPDOWN of its own; the nav
+// picker's whole reason to exist, #407 part 3) is never a declared input,
+// so an unclaimed `?v.<name>=` seed lands it in `dpXf` instead
+// (applySelectionSeeds treats every URL seed no input claimed as a named
+// selection). Checking `dpVarDefault` first still prefers `dpVars` on a
+// dashboard that *does* bind the same name to its own input.
+function pathVarValue(name) {
+  return name in dpVarDefault ? dpVars[name] : dpXf[name];
+}
+// #407 part 2: `/d/<id>` plus the current value of every server-declared
+// `pathVars` ("v.<name>=<value>") — only those, so a link never carries a
+// viewer input the target dashboard didn't ask for. A var whose value isn't
+// set yet (no run has picked one) is left out; the target then falls back
+// to its own default, same as opening the link fresh. A `pathVars` entry is
+// never an array/object (`check_path_values` on the server only ever
+// accepts a plain name or int for one) — `String(v)` is safe.
+function servedNavHref(id, served) {
+  const path = "/d/" + encodeURIComponent(id);
+  const parts = [];
+  for (const name of served.pathVars || []) {
+    const v = pathVarValue(name);
+    if (v === undefined || v === null || v === "") continue;
+    parts.push("v." + encodeURIComponent(name) + "=" + encodeURIComponent(String(v)));
+  }
+  return parts.length ? path + "?" + parts.join("&") : path;
+}
+// Every served-nav link's href is rebuilt (not just its click handler) so a
+// middle-click / "open in new tab" and a plain hover preview both carry the
+// current pathVars values too.
+function refreshServedNavHrefs() {
+  const served = window.__served;
+  if (!served) return;
+  if (Array.isArray(served.pathVars) && served.pathVars.length) {
+    document.querySelectorAll(".served-nav a[data-nav-id]").forEach((a) => {
+      a.href = servedNavHref(a.dataset.navId, served);
+    });
+  }
+  const np = served.navPicker;
+  const sel = np && document.querySelector(".served-nav-picker select");
+  if (sel) {
+    const v = String(pathVarValue(np.var) ?? "");
+    if (sel.value !== v && [...sel.options].some((o) => o.value === v)) sel.value = v;
+  }
+}
 function servedNavLink(d, served) {
   const a = document.createElement("a");
-  a.href = "/d/" + encodeURIComponent(d.id);
+  a.href = servedNavHref(d.id, served);
+  a.dataset.navId = d.id;
   const label = navLabel(d.nav, d.title, d.id);
   a.textContent = label;
   if (d.id === served.id) {
@@ -7535,30 +7587,81 @@ function servedNavLink(d, served) {
   }
   return a;
 }
+// #407 part 3: the nav-bar picker for one `path_vars` variable — a plain
+// <select>, right of the dashboard links (CSS pushes it there: it's just
+// the last flex child). Its options come from `window.__served.navPicker`
+// (server-computed, see `build_nav_picker` in duckext/src/serve.rs); labels
+// are set with `textContent`, never `innerHTML`. `renderServedNav` runs
+// before the first `run()`, so `pathVarValue` doesn't hold the viewer's
+// value yet — the initial selection is read straight from `?v.<var>=`
+// instead; `refreshServedNavHrefs` (called from `syncUrlState` after every
+// run) keeps the control in sync with it from then on.
+function renderNavPicker(served) {
+  const np = served.navPicker;
+  if (!np || !Array.isArray(np.options) || !np.options.length) return null;
+  const wrap = document.createElement("label");
+  wrap.className = "served-nav-picker";
+  const cap = document.createElement("span");
+  cap.className = "served-nav-picker-label";
+  cap.textContent = (np.label || np.var) + ":";
+  const sel = document.createElement("select");
+  sel.setAttribute("aria-label", np.label || np.var);
+  const current = new URLSearchParams(location.search).get("v." + np.var) ?? "";
+  for (const o of np.options) {
+    const opt = document.createElement("option");
+    opt.value = o.value;
+    opt.textContent = o.label || o.value;
+    if (o.value === current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  sel.onchange = async () => {
+    const v = sel.value;
+    // Same store `pathVarValue` reads from: `dpVars` only if this dashboard
+    // itself binds `np.var` to a declared input (rare — the whole point of
+    // the picker is a dashboard that doesn't); else `dpXf`, like an
+    // unclaimed `?v.<var>=` URL seed.
+    if (np.var in dpVarDefault) dpVars[np.var] = v;
+    else dpXf[np.var] = v;
+    // `np.var` is server-validated (`sv::valid_ident`, and must be one of
+    // `path_vars`) before the server ever accepts it: safe to interpolate
+    // as an identifier here. Only the value needs literal escaping, same as
+    // every other control (makeControl).
+    await runSql(`SET VARIABLE ${np.var} = '${v.replace(/'/g, "''")}'`);
+    run(false);
+  };
+  wrap.append(cap, sel);
+  return wrap;
+}
 function renderServedNav(served) {
-  if (!served || !Array.isArray(served.nav) || served.nav.length < 2) return;
+  const hasLinks = !!served && Array.isArray(served.nav) && served.nav.length >= 2;
+  const hasPicker = !!served && !!served.navPicker;
+  if (!hasLinks && !hasPicker) return;
   if (document.querySelector(".served-nav")) return;
   const nav = document.createElement("nav");
   nav.className = "served-nav";
   nav.setAttribute("aria-label", "Dashboards");
-  const groups = servedNavGroups(served.nav);
-  if (served.nav.length < SERVED_NAV_MENU_MIN) {
-    for (const { group, items } of groups) {
-      if (!group) {
-        for (const d of items) nav.appendChild(servedNavLink(d, served));
-        continue;
+  if (hasLinks) {
+    const groups = servedNavGroups(served.nav);
+    if (served.nav.length < SERVED_NAV_MENU_MIN) {
+      for (const { group, items } of groups) {
+        if (!group) {
+          for (const d of items) nav.appendChild(servedNavLink(d, served));
+          continue;
+        }
+        // a group's label and links wrap together
+        const g = document.createElement("span");
+        g.className = "served-nav-grp";
+        const l = document.createElement("span");
+        l.className = "served-nav-group";
+        l.textContent = group;
+        g.appendChild(l);
+        for (const d of items) g.appendChild(servedNavLink(d, served));
+        nav.appendChild(g);
       }
-      // a group's label and links wrap together
-      const g = document.createElement("span");
-      g.className = "served-nav-grp";
-      const l = document.createElement("span");
-      l.className = "served-nav-group";
-      l.textContent = group;
-      g.appendChild(l);
-      for (const d of items) g.appendChild(servedNavLink(d, served));
-      nav.appendChild(g);
-    }
-  } else nav.appendChild(servedNavMenu(served, groups));
+    } else nav.appendChild(servedNavMenu(served, groups));
+  }
+  const picker = hasPicker && renderNavPicker(served);
+  if (picker) nav.appendChild(picker);
   const dash = document.querySelector(".dash");
   if (dash && dash.parentNode) dash.parentNode.insertBefore(nav, dash);
 }

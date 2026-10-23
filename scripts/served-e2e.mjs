@@ -10,8 +10,16 @@
 // keyboard (ArrowRight moves + activates, focus stays on the tab), and at
 // --width 390 no horizontal overflow, the view bar visible and tappable, the
 // panel full width.
-// Runs four servers (4 and 10 dashboards, one with options.home, one with a
-// ::VIEW switcher), each started and stopped by this script.
+// #407 parts 2–3 on its own locked server (options.data + path_vars +
+// nav_picker): window.__served.pathVars and .navPicker.options (a non-plain
+// value dropped); the picker starts on the URL's ?v.model=, its own choice
+// updates the URL and a sibling nav link's href (a real href, checked
+// without clicking), and clicking that link opens the sibling already on
+// the carried-over value — axe on the nav bar + picker, no overflow at
+// --width 390.
+// Runs five servers (4 and 10 dashboards, one with options.home, one with a
+// ::VIEW switcher, one with path_vars + nav_picker), each started and
+// stopped by this script.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8930] \
@@ -94,7 +102,11 @@ async function page(url) {
   const p = await ctx.newPage();
   p.on("pageerror", (e) => errs.push(String(e)));
   p.on("request", (r) => allRequests.push(r.url()));
-  await p.goto(url + (theme ? `?theme=${theme}` : ""));
+  // #407 §5 is the first caller whose own `url` already carries a query
+  // string (?v.model=…): a literal "?" there instead of "&" would merge
+  // into one malformed param (URLSearchParams has no second "?" separator),
+  // silently corrupting it — pick the right separator instead.
+  await p.goto(url + (theme ? `${url.includes("?") ? "&" : "?"}theme=${theme}` : ""));
   return p;
 }
 async function axeCheck(p, sel, what) {
@@ -264,10 +276,69 @@ try {
   stop(srv);
 }
 
+// ── 5. #407 parts 2–3: path_vars carried across the served nav, and a
+// nav_picker dropdown that sets one. Two dashboards reading `model` (no
+// ::DROPDOWN of their own — the whole point of nav_picker); its SQL is a
+// literal VALUES list, one row of which isn't a plain path_vars value (the
+// server must drop it, never send it to the page) ──
+const navData = mkdtempSync(path.join(tmpdir(), "dp-served-navdata-"));
+const navDir = folder([
+  ["m1", "-- @title Model one\nSELECT coalesce(getvariable('model'), 'none')::VARCHAR AS m ::TEXT_SMALL;"],
+  ["m2", "-- @title Model two\nSELECT coalesce(getvariable('model'), 'none')::VARCHAR AS m ::TEXT_SMALL;"],
+]);
+const pickerSql = "SELECT * FROM (VALUES ('car-price','Car price'), ('../etc','Bad — dropped'), ('van','Van')) t(value, label)";
+const port4 = port0 + 4;
+srv = await serve(navDir, port4, { data: navData, path_vars: ["model"], nav_picker: { var: "model", label: "Model", sql: pickerSql } });
+try {
+  const html = await (await fetch(`http://127.0.0.1:${port4}/d/m1`)).text();
+  const served = JSON.parse(html.match(/window\.__served=(\{.*?\});<\/script>/s)[1]);
+  check(JSON.stringify(served.pathVars) === '["model"]', `window.__served.pathVars: ${JSON.stringify(served.pathVars)}`);
+  check(
+    JSON.stringify(served.navPicker.options) === JSON.stringify([{ value: "car-price", label: "Car price" }, { value: "van", label: "Van" }]),
+    `window.__served.navPicker.options drops the non-plain-name row: ${JSON.stringify(served.navPicker.options)}`
+  );
+
+  // Opening with a value already on the URL: the picker starts on it, and
+  // the m2 link already carries it (no interaction needed — a real href,
+  // not just a click handler, so a middle-click / open-in-new-tab works).
+  let p = await page(`http://127.0.0.1:${port4}/d/m1?v.model=car-price`);
+  await p.waitForSelector(".served-nav-picker select", { timeout: 60000 });
+  // The nav bar (and the picker's initial value) is built before the first
+  // run() — wait for that run to finish (dpVars populated from the URL,
+  // syncUrlState → refreshServedNavHrefs applied) before reading hrefs.
+  await p.waitForFunction(() => document.querySelector(".panel")?.textContent.includes("car-price"), null, { timeout: 60000 });
+  check((await p.$eval(".served-nav-picker select", (s) => s.value)) === "car-price", "nav_picker: starts on the URL's ?v.model=");
+  check((await p.getAttribute('.served-nav a[data-nav-id="m2"]', "href")) === "/d/m2?v.model=car-price", "nav link already carries ?v.model= on load");
+  await axeCheck(p, ".served-nav", "nav bar + picker");
+  if (shots) await p.screenshot({ path: `${shots}/${tag}-nav-picker.png` });
+  if (width <= 820) {
+    const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    check(overflow <= 1, `nav_picker: no horizontal overflow at ${width}px (${overflow}px)`);
+  }
+
+  // Picking a new value: the metric panel re-runs (no ::DROPDOWN on this
+  // dashboard — nav_picker alone drives it), the URL and the m2 link follow.
+  await p.selectOption(".served-nav-picker select", "van");
+  await p.waitForFunction(() => document.querySelector(".panel")?.textContent.includes("van"), null, { timeout: 60000 });
+  // [?&] : syncUrlState appends v.* params after any other param already on
+  // the URL (e.g. this script's own ?theme=), so v.model isn't necessarily
+  // the first one.
+  check(/[?&]v\.model=van(&|$)/.test(await p.evaluate(() => location.href)), "picking a value updates ?v.model= on the URL");
+  check((await p.getAttribute('.served-nav a[data-nav-id="m2"]', "href")) === "/d/m2?v.model=van", "nav link follows the picker's new value");
+
+  // Clicking the m2 link carries the value over (part 2, a plain navigation).
+  await p.click('.served-nav a[data-nav-id="m2"]');
+  await p.waitForURL(/\/d\/m2\?v\.model=van$/);
+  await p.waitForFunction(() => document.querySelector(".panel")?.textContent.includes("van"), null, { timeout: 60000 });
+  check(true, "m2 opens already on the carried-over model");
+} finally {
+  stop(srv);
+}
+
 check(!errs.length, `no page errors ${errs.join(" | ")}`);
 // #244: never requested on a served (locked) page.
 const assistLeak = allRequests.filter((u) => /assist-ui\.(js|css)|vendor\/anthropic-sdk|assist\/(guide|instructions)\.md/.test(u));
 check(assistLeak.length === 0, `no assistant request on a served page (${JSON.stringify(assistLeak)})`);
 await browser.close();
-for (const d of [small, big, viewsDir]) rmSync(d, { recursive: true, force: true });
+for (const d of [small, big, viewsDir, navDir, navData]) rmSync(d, { recursive: true, force: true });
 if (!process.exitCode) console.log(`served-e2e (${tag}): ok`);

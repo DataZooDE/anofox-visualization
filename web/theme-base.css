@@ -442,6 +442,11 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .served-nav-menu a{display:inline-block;padding:.3rem .5rem}
 .served-owner{font-size:.78rem;color:var(--ax-muted)}
 .served-nav-none{color:var(--ax-muted);font-size:.85rem;margin:.4rem .3rem}
+/* #407 part 3: the nav_picker dropdown — pushed to the far side of the bar
+   when there's room; `.served-nav`'s own flex-wrap drops it to its own line
+   at phone width instead of squeezing the dashboard links. */
+.served-nav-picker{display:inline-flex;align-items:center;gap:.4rem;margin-left:auto;font:600 14px system-ui;color:var(--ax-nav-ink);white-space:nowrap}
+.served-nav-picker select{font:inherit;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-nav-border);border-radius:6px;padding:.3rem .5rem;max-width:14rem}
 
 /* ---- tooltip, crosshair, hover ---- */
 .dp-tip{position:fixed;pointer-events:none;background:var(--ax-tip-bg);backdrop-filter:blur(6px);color:var(--ax-tip-ink);padding:.55rem .7rem;border-radius:8px;font-size:.8rem;font-weight:500;border:1px solid var(--ax-tip-border);box-shadow:var(--ax-tip-shadow);opacity:0;transform:translateY(3px) scale(.98);transition:opacity .11s,transform .11s;z-index:50;white-space:nowrap;min-width:96px}
