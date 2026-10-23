@@ -954,6 +954,14 @@ pub struct DashboardMeta {
     /// dashboards sort after every explicitly ordered one, alphabetically by
     /// id among themselves. See [`DashboardMeta::order_key`].
     pub order: Option<i64>,
+    /// `-- @astables on`: show the "▦ Charts as tables" bar on this
+    /// dashboard even when the viewer has never switched it on themselves
+    /// (#401). `false` without the header, with `-- @astables off` (the same
+    /// as not setting it), or with an unrecognized value (lint warns:
+    /// `header/bad-astables`). A viewer's own on/off choice (the
+    /// `dp-as-tables` remembered state) is independent of this and still
+    /// applies even when the bar is hidden.
+    pub astables: bool,
 }
 
 impl DashboardMeta {
@@ -1080,9 +1088,9 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 /// Parse `-- @title …`, `-- @nav <short label>`, `-- @refresh <s>`,
 /// `-- @param name [a, b] = a`, `-- @load <extension>`, `-- @vars a, b`,
 /// `-- @group a / b`, `-- @tags a, b`, `-- @description <text>`,
-/// `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`, `-- @order N` header
-/// comments (a repeated `@group`/`@nav` wins over the earlier one; `@tags`
-/// lines add up). A `@param` or
+/// `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`, `-- @order N`,
+/// `-- @astables on|off` header comments (a repeated `@group`/`@nav`/
+/// `@astables` wins over the earlier one; `@tags` lines add up). A `@param` or
 /// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
 /// never viewer-settable.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
@@ -1111,6 +1119,13 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             m.certified = Some(r.to_string()).filter(|d| valid_iso_date(d));
         } else if let Some(r) = header_value(l, "order") {
             m.order = r.parse::<i64>().ok();
+        } else if let Some(r) = header_value(l, "astables") {
+            match r {
+                "on" => m.astables = true,
+                "off" => m.astables = false,
+                // an unrecognized value doesn't turn the bar on (lint warns)
+                _ => {}
+            }
         } else if let Some(r) = header_value(l, "tags") {
             for t in split_tags(r) {
                 if m.tags.len() < MAX_TAGS && !m.tags.contains(&t) {
@@ -1754,6 +1769,18 @@ mod tests {
         // a later @nav wins over an earlier one, same as @title/@owner
         let m = parse_dashboard_meta("s", "-- @nav First\n-- @nav Second\nSELECT 1;");
         assert_eq!(m.nav.as_deref(), Some("Second"));
+        // #401: off by default; `on` shows the "Charts as tables" bar; a
+        // bad/missing value (including bare `-- @astables`) is the same as
+        // not setting it; a later @astables wins over an earlier one.
+        assert!(!parse_dashboard_meta("s", "SELECT 1;").astables);
+        assert!(parse_dashboard_meta("s", "-- @astables on\nSELECT 1;").astables);
+        assert!(!parse_dashboard_meta("s", "-- @astables off\nSELECT 1;").astables);
+        assert!(!parse_dashboard_meta("s", "-- @astables\nSELECT 1;").astables);
+        assert!(!parse_dashboard_meta("s", "-- @astables maybe\nSELECT 1;").astables);
+        assert!(
+            !parse_dashboard_meta("s", "-- @astables on\n-- @astables off\nSELECT 1;").astables
+        );
+        assert!(parse_dashboard_meta("s", "-- @astables off\n-- @astables on\nSELECT 1;").astables);
         let m = parse_dashboard_meta(
             "s",
             "-- @description Which stores sell\n-- @description  the most?\n-- @description\nSELECT 1;",

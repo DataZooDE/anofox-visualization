@@ -1867,9 +1867,13 @@ Charts are usable without a mouse and without sight of the screen:
   extremes — *"Bar chart: Sessions by channel; 3 series (api, app, web);
   4 points from W1 to W4; highest 48 (app, W4), lowest 9 (api, W3)."* Each
   mark is labelled with its tooltip text.
-- **Charts as tables.** The *▦ Charts as tables* switch at the top right of
-  every dashboard (also in embed and served views; `?tables=1` turns it on, the
-  choice is remembered) swaps every chart for its data table.
+- **Charts as tables.** Swaps every chart for its data table. Reached from the
+  toolbar's **⋯ → ▦ Charts as tables** menu item (also in embed and served
+  views; `?tables=1` turns it on, the choice is remembered across
+  dashboards). The *▦ Charts as tables* bar at the top of the dashboard
+  itself is off by default and shown only when the author opts a dashboard
+  in with `-- @astables on` (see *Dashboard header comments*) — a viewer who
+  never saw a bar can still reach the feature from the menu.
 - **Reduced motion.** With the system's *reduce motion* setting there are no
   entrance animations, line draw-ins, shimmers or transitions.
 - Tables keep `aria-sort` and keyboard row navigation; the `colorblind` and
@@ -1908,6 +1912,7 @@ with the browser through wasm):
 -- @owner  Sales controlling
 -- @certified 2026-10-15
 -- @refresh 300
+-- @astables on
 ```
 
 | Line | Meaning |
@@ -1921,6 +1926,7 @@ with the browser through wasm):
 | `-- @certified <YYYY-MM-DD>` | The day it was last checked. Shows a **✓ certified** badge (sidebar, served nav, `/` list) and lets viewers filter on it (the sidebar's *✓ certified* chip). A date that isn't `YYYY-MM-DD` counts as not certified. |
 | `-- @order N` | Where it sits, ascending, among its siblings (same group, or ungrouped) in the served nav bar and the `/` start page's card grid — the server's default is alphabetical by file name, which ignores `blueprint.json`'s own `dashboards[]` order. `N` is a plain integer (ties, and dashboards without `@order`, keep sorting by id afterwards). |
 | `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
+| `-- @astables on` \| `off` | Shows the "▦ Charts as tables" bar on this dashboard for every viewer — off (no bar) by default, or with `off`. A viewer can still turn the feature itself on or off from the toolbar's **⋯ → Charts as tables** menu item whether or not the bar is shown; their choice is remembered across dashboards. |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 
@@ -1930,8 +1936,9 @@ longer than 24 characters (`header/long-nav`), an empty `@group`
 more than 10 tags (`header/too-many-tags`), an empty `@owner`
 (`header/empty-owner`), a `@certified` that isn't a `YYYY-MM-DD` date
 (`header/bad-certified`), an `@order` that isn't a plain integer
-(`header/bad-order`) and a `@description` over 160 characters
-(`header/long-description`), reported as statement 0. `dashboard --check
+(`header/bad-order`), a `@description` over 160 characters
+(`header/long-description`) and an `@astables` that isn't `on` or `off`
+(`header/bad-astables`), reported as statement 0. `dashboard --check
 <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
 same title (`folder/duplicate-title`, ignoring case), a file name the

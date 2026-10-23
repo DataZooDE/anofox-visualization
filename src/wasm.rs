@@ -439,12 +439,14 @@ pub fn threshold_rules(spec: &str) -> String {
 }
 
 /// A dashboard's header comments as `{"title","nav","group","tags","refresh",
-/// "description","owner","certified"}`,
+/// "description","owner","certified","astables"}`,
 /// read by the parser the servers use
 /// ([`crate::host::serving::parse_dashboard_meta`]), so the builder's sidebar
 /// and a served folder place a dashboard alike. `title` is "" without
 /// `-- @title`, `nav` and `group` are null without `-- @nav` / `-- @group`
-/// (a reader shows `nav || title` as the compact nav/card label).
+/// (a reader shows `nav || title` as the compact nav/card label). `astables`
+/// is `-- @astables on` (#401): true only when the author turned the
+/// "▦ Charts as tables" bar on for this dashboard.
 #[wasm_bindgen]
 pub fn dashboard_meta(script: &str) -> String {
     guard(|| {
@@ -452,12 +454,12 @@ pub fn dashboard_meta(script: &str) -> String {
         Ok(serde_json::json!({
             "title": m.title, "nav": m.nav, "group": m.group, "tags": m.tags,
             "refresh": m.refresh, "description": m.description, "owner": m.owner,
-            "certified": m.certified,
+            "certified": m.certified, "astables": m.astables,
         })
         .to_string())
     })
     .unwrap_or_else(|_| {
-        r#"{"title":"","nav":null,"group":null,"tags":[],"refresh":0,"description":null,"owner":null,"certified":null}"#.into()
+        r#"{"title":"","nav":null,"group":null,"tags":[],"refresh":0,"description":null,"owner":null,"certified":null,"astables":false}"#.into()
     })
 }
 

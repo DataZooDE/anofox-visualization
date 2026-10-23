@@ -251,15 +251,23 @@ else {
   }
 }
 
-// "Charts as tables".
-await page.click(".dp-astable-btn");
+// "Charts as tables" (#401: off by default, no in-page bar unless the
+// dashboard's own header says `-- @astables on` — this one doesn't, so
+// `.dp-a11y-bar` must be absent). The toolbar's menu item reaches the
+// feature either way; it sits in `header .actions`, which `?embed=1` hides
+// with `display:none` — invisible to Playwright's own actionability click,
+// but a plain DOM .click() still fires its handler, so the toggle is
+// exercised the same way a non-embed viewer would reach it from the ⋯ menu.
+const hasBar = await page.evaluate(() => !!document.querySelector(".dp-a11y-bar"));
+if (hasBar) fail("the Charts-as-tables bar showed without `-- @astables on`");
+await page.evaluate(() => document.getElementById("astables-toggle").click());
 const swapped = await page.evaluate(() => {
   const charts = [...document.querySelectorAll(".dash .panel")].filter((f) => f.querySelector(".panel-svg") && f._dp);
   return { charts: charts.length, tables: charts.filter((f) => f.querySelector(".dp-astable-view:not([hidden]) table")).length, hidden: charts.every((f) => f.querySelector(".panel-svg").hidden) };
 });
 console.log("as tables:", JSON.stringify(swapped));
 if (svgs.length && (!swapped.charts || swapped.tables !== swapped.charts || !swapped.hidden)) fail("charts not swapped for tables");
-await page.click(".dp-astable-btn");
+await page.evaluate(() => document.getElementById("astables-toggle").click());
 
 // Resizable sidebar (issue #59), in the builder (not embed): a focusable
 // separator with its bounds; ←/→ step, the width survives a reload,

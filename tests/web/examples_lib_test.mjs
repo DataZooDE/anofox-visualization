@@ -201,8 +201,11 @@ assert.equal(startDash("my:__proto__", EXAMPLES, []), null);
 
 // dashboard_meta is the servers' parser: group levels, tag clean-up, the cap.
 const m = JSON.parse(wasm.dashboard_meta("-- @title  T\n-- @group Sales/EMEA\n-- @tags A, b ,a\nSELECT 1;"));
-assert.deepEqual(m, { title: "T", nav: null, group: "Sales / EMEA", tags: ["a", "b"], refresh: 0, description: null, owner: null, certified: null });
-assert.deepEqual(JSON.parse(wasm.dashboard_meta("SELECT 1;")), { title: "", nav: null, group: null, tags: [], refresh: 0, description: null, owner: null, certified: null });
+assert.deepEqual(m, { title: "T", nav: null, group: "Sales / EMEA", tags: ["a", "b"], refresh: 0, description: null, owner: null, certified: null, astables: false });
+assert.deepEqual(JSON.parse(wasm.dashboard_meta("SELECT 1;")), { title: "", nav: null, group: null, tags: [], refresh: 0, description: null, owner: null, certified: null, astables: false });
+// -- @astables on (#401): the "Charts as tables" bar is opt-in.
+assert.equal(JSON.parse(wasm.dashboard_meta("-- @astables on\nSELECT 1;")).astables, true);
+assert.equal(JSON.parse(wasm.dashboard_meta("-- @astables off\nSELECT 1;")).astables, false);
 // -- @nav: a short label distinct from -- @title (#355)
 assert.equal(JSON.parse(wasm.dashboard_meta("-- @title Which products depend on this supplier?\n-- @nav Supplier risk\nSELECT 1;")).nav, "Supplier risk");
 assert.equal(JSON.parse(wasm.dashboard_meta("-- @nav \nSELECT 1;")).nav, null, "an empty @nav is null, like @owner");
