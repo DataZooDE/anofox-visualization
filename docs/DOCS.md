@@ -1921,7 +1921,7 @@ with the browser through wasm):
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 
 `dashboard --check` warns about an empty `@nav` (`header/empty-nav`), one
-longer than 40 characters (`header/long-nav`), an empty `@group`
+longer than 24 characters (`header/long-nav`), an empty `@group`
 (`header/empty-group`), one longer than 80 characters (`header/long-group`),
 more than 10 tags (`header/too-many-tags`), an empty `@owner`
 (`header/empty-owner`), a `@certified` that isn't a `YYYY-MM-DD` date
@@ -3230,7 +3230,8 @@ is the installation's name, tagline and logo — `options.app` of
 `--app-logo-dark` of `serve --dashboards` — or *Dashboards* and a count. The dashboards are cards,
 grouped the same way as the nav (`Sales / EMEA`: an *EMEA* sub-heading under
 *Sales*, each group with its count); a card shows the `-- @nav` label when
-set (else the title, with the full title as the card's tooltip), the
+set — the full `@title` is then the card's tooltip — or just the `@title`
+when there is no `@nav` (and no such tooltip), plus the
 `@description`, the owner, **✓ certified**, the day its file last changed and
 the tags. From 9 dashboards on, a search field, tag chips and *✓ certified
 only* filter the cards. It lists only what the viewer's scope allows, like the

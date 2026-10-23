@@ -995,7 +995,7 @@ pub const MAX_TAGS: usize = 10;
 pub const MAX_GROUP_CHARS: usize = 80;
 /// A `-- @nav` longer than this (in characters) is linted — it is meant to
 /// be shorter than the `-- @title` it stands in for in a nav bar or card.
-pub const MAX_NAV_CHARS: usize = 40;
+pub const MAX_NAV_CHARS: usize = 24;
 
 /// The value of a `-- @<name>` header line (`None` when `line` is something
 /// else). The value may be empty: `-- @group` alone gives `Some("")`.

@@ -3304,6 +3304,13 @@ function clearSideFilter(focus) {
   renderSidebar();
   if (focus) s?.focus();
 }
+// The (label, fullTitle) sideItem needs for a recent entry (#355): an
+// example shows its `-- @nav` label when it has one, with its full name as
+// the tooltip (like exRow); a saved ("my:") entry keeps showing its own
+// saved name either way — @nav never applies to it.
+function recentLabel(e) {
+  return e.source === "example" ? [navLabel(e.nav, e.name), e.name] : [e.name, e.name];
+}
 // Recently opened: the last 5 dashboards and examples, per browser.
 function renderRecent(nav, entries, open) {
   const row = document.createElement("div");
@@ -3328,7 +3335,8 @@ function renderRecent(nav, entries, open) {
   if (open)
     for (const e of entries) {
       const key = e.source === "example" ? "ex:" + e.id : myKey(e.id);
-      const it = sideItem(e.name, e.sql, key, e);
+      const [label, fullTitle] = recentLabel(e);
+      const it = sideItem(label, e.sql, key, e, fullTitle);
       it.classList.add("side-ex-item", "side-recent-item");
       if (e.source === "example") {
         const src = document.createElement("span");
