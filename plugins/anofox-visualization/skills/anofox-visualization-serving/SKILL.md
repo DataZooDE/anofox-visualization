@@ -81,6 +81,7 @@ Unknown keys and bad values fail the start, naming the valid ones.
 | `max_queries` | 4 | panel queries running at once; others wait up to `timeout_ms`, then `503` + `Retry-After` |
 | `max_inflight_mb` / `max_response_mb` | 256 / 32 | results held outside DuckDB at once (`503` over it) / one response (`413` over it) |
 | `cache_mb` | 64 | per-snapshot result cache; `0` = off (single-flight stays) |
+| `frame_ancestors` | `'none'` (none sent with an `embed` login) | sites that may frame the pages, e.g. `["https://app.example.com"]` — set it with embed links. Pages also carry a CSP header (#252) |
 | `warm` | `threads` | idle connections kept with a dashboard's setup already run, reused by requests with the same setup inputs and viewer (#388); `0` = off. Each holds its setup's TEMP tables in memory |
 | `memory_limit`, `duckdb_threads` | 80 % RAM, cores | DuckDB settings of the snapshot instance, shared by all queries |
 | `bind` | `127.0.0.1` | `"0.0.0.0"` in a container / behind a load balancer on another host (warns without `auth`) |

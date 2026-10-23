@@ -335,6 +335,21 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   folder, or don't give panels a viewer-chosen pattern. The server's own
   `@requires` check counts only matches inside the folder, see above.)
 
+**Content-Security-Policy header (#252).** Every HTML page of the locked server
+(the dashboard page, the `/` list, the login pages) carries a
+`Content-Security-Policy` response header, not just a meta tag:
+- `default-src 'none'`;
+- scripts only from the server itself, the pinned DuckDB-Wasm and KaTeX CDN
+  paths, and the server's own inline scripts, each with a fresh random nonce
+  per response;
+- `object-src`, `frame-src` and `form-action` are `'none'`; `base-uri 'self'`.
+- `frame-ancestors`: `'none'` (no framing) unless an `embed` login is
+  configured. Embed links are meant to be framed, so with `embed` the server
+  sends no `frame-ancestors` unless you list the sites that may frame the
+  pages: `frame_ancestors: ["https://app.example.com"]`. Each entry is an
+  `https://host[:port]` origin, `'self'` or `'none'`. Set it whenever you use
+  embed links.
+
 **Per-request isolation and limits.**
 
 - A fresh connection per request: one viewer's variables or temp objects never
@@ -366,7 +381,7 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
   `threads` (HTTP worker pool = concurrent requests, default 4), `warm` (see
-  above), `cache_mb`
+  above), `frame_ancestors` (see below), `cache_mb`
   (see below), `attach`, `load`, `hosts` (see below), `refresh_s`, `data`,
   `path_vars` (see above), `auth`, `log`, `log_vars` (see
   [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)),
