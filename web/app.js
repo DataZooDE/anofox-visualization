@@ -1296,6 +1296,26 @@ function sqlLiteralToJson(lit) {
   return t !== "" && Number.isFinite(n) ? n : t;
 }
 
+// #417 S2: the same `path_vars` value rule a locked server's
+// `check_path_values` (duckext/src/serve.rs) enforces server-side on every
+// `vars` entry of a `/api/panel` request — one plain path segment:
+// `[A-Za-z0-9_.-]`, 1..=128 characters, not starting with `.` (so never `.`,
+// `..` or a hidden file; no `/`) — or a bare non-negative integer, or NULL.
+// `lit` is a typed SQL literal (`setv[2]` of the `SET VARIABLE` regex below,
+// or sqlLiteralToJson's own input shape), not a raw value: a string is still
+// `'…'`-quoted. A published site enforces this itself (runSqlInner, below)
+// because there is no server left to enforce it instead.
+function validPathValueLiteral(lit) {
+  const t = String(lit).trim();
+  if (/^null$/i.test(t)) return true;
+  if (t.length && /^[0-9]+$/.test(t)) return true;
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
+    const inner = t.slice(1, -1).replace(/''/g, "'");
+    return inner.length > 0 && inner.length <= 128 && !inner.startsWith(".") && /^[A-Za-z0-9_.-]+$/.test(inner);
+  }
+  return false;
+}
+
 // `at`: the statement's own plan index, when the caller knows it — the same
 // SQL can stand in two tabs, whose `-- @requires` differ (#167); else the
 // first statement with that SQL.
@@ -1873,6 +1893,21 @@ async function runSql(sql, page, kind, setup, at, pv) {
 async function runSqlInner(sql, page, kind, setup, at, pv) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
   if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
+  // #417 S2: a published site has no server to run check_path_values for it
+  // — enforce the same rule here, for every `path_vars` variable, wherever
+  // its value came from (a URL seed into a text/number/date input, the
+  // headless dpXf path setSelectionVars() applies, a ::LINK/followLink deep
+  // link, or the nav_picker — whose own options are already vetted at build
+  // time, so this never rejects a legitimate pick). Not `setup`: the rule is
+  // on VIEWER-supplied values only, same as the server's own `r.vars`, never
+  // on a dashboard's own setup SQL (the author is trusted either way).
+  if (published && setv && !setup) {
+    const pathVars = window.__served && Array.isArray(window.__served.pathVars) ? window.__served.pathVars : [];
+    if (pathVars.some((p) => p.toLowerCase() === setv[1].toLowerCase()) && !validPathValueLiteral(setv[2])) {
+      status(`variable '${setv[1]}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.' — dropped`);
+      return "[]";
+    }
+  }
   // #244 C-1 / sec-review-272-rereview H-1R / H-1R2: before prepareSql and
   // before any page handle — dispatch on the TOKEN this particular call
   // was made under: an explicitly passed `pv` (a lazy/prefetch job, bound
@@ -7786,7 +7821,15 @@ async function siteGo(id, search = "", push = true) {
   Object.assign(dpView, readViewSeed(search));
   const tab = new URLSearchParams(search).get("tab");
   if (tab) dpTab = tab;
-  if (push) history.pushState({ anofoxSite: id }, "", site.basePath + "d/" + encodeURIComponent(id) + search);
+  // A trailing slash, always: `out/d/<id>/index.html` is the real file a
+  // static host serves (`dashboard --site`) — `/d/<id>` with no slash
+  // depends on the host redirecting a bare directory path to its slashed
+  // form, which GitHub Pages and most static hosts do but can't be relied
+  // on (a site-e2e.mjs reload caught this: 404 without it). servedNavHref
+  // itself (shared with the locked server, whose real `/d/<id>` route has
+  // no such requirement) stays as it is; only the URL this push actually
+  // commits to history gets the slash.
+  if (push) history.pushState({ anofoxSite: id }, "", site.basePath + "d/" + encodeURIComponent(id) + "/" + search);
   document.title = meta.title || document.title;
   await run(true, { explicit: true });
   refreshServedNavHrefs();
@@ -7847,9 +7890,10 @@ async function sitePrepare() {
     data: site.data,
   };
   // `anofox_data` itself (#407's locked-server rule, kept: a path_vars value
-  // joined onto it never leaves the site, by the same `[A-Za-z0-9_.-]`
-  // check — readUrlSeed/readViewSeed above, `check_path_values` in
-  // duckext/src/serve.rs) is set in boot(), once `conn` exists.
+  // joined onto it never leaves the site — enforced in runSqlInner()
+  // [validPathValueLiteral], not here; see its own comment, and
+  // `check_path_values` in duckext/src/serve.rs) is set in boot(), once
+  // `conn` exists.
 }
 // The served nav as one button and a grouped, searchable list of links.
 function servedNavMenu(served, groups) {

@@ -1732,35 +1732,9 @@ pub fn refresh(port: u16) -> Result<String, String> {
     Ok(locked.refresh(true)?.unwrap_or_default())
 }
 
-/// Why `dir` is too broad to open to every viewer as `options.data`: the
-/// filesystem root, a system directory, or a folder that contains the home
-/// directory or the temp directory (where the snapshots live).
-fn too_broad(dir: &Path) -> Option<String> {
-    let Some(parent) = dir.parent() else {
-        return Some("the filesystem root".into());
-    };
-    const SYSTEM: [&str; 16] = [
-        "bin", "boot", "dev", "etc", "home", "lib", "lib64", "opt", "proc", "root", "run", "sbin",
-        "sys", "tmp", "usr", "var",
-    ];
-    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if parent.parent().is_none() && SYSTEM.contains(&name) {
-        return Some("a system directory".into());
-    }
-    let home = ["HOME", "USERPROFILE"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .map(PathBuf::from);
-    for (what, p) in home
-        .map(|p| ("the home directory", p))
-        .chain([("the temp directory", std::env::temp_dir())])
-    {
-        if p.canonicalize().is_ok_and(|p| p.starts_with(dir)) {
-            return Some(format!("it contains {what}"));
-        }
-    }
-    None
-}
+// #417: `too_broad` moved to `anofox_visualization::host::serving` (`sv`) so
+// `dashboard --site --data` shares the exact same rule.
+use sv::too_broad;
 
 /// With a data folder open, every dashboard statement must be a query or one
 /// of the setup forms the server needs — classified by DuckDB's own parser,
@@ -4520,25 +4494,8 @@ mod tests {
         assert_eq!(redact("/srv/runs".into(), None), "/srv/runs");
     }
 
-    #[test]
-    fn broad_data_folders_are_refused() {
-        assert!(too_broad(Path::new("/")).is_some());
-        for d in ["/etc", "/usr", "/home", "/tmp", "/var"] {
-            assert!(too_broad(Path::new(d)).is_some(), "{d}");
-        }
-        let tmp = std::env::temp_dir().canonicalize().unwrap();
-        assert!(too_broad(&tmp).is_some());
-        if let Some(home) =
-            std::env::var_os("HOME").and_then(|h| PathBuf::from(h).canonicalize().ok())
-        {
-            assert!(too_broad(&home).is_some());
-            assert!(too_broad(home.parent().unwrap()).is_some());
-            assert!(too_broad(&home.join("runs")).is_none());
-        }
-        assert!(too_broad(&tmp.join("anofox-runs")).is_none());
-        assert!(too_broad(Path::new("/srv/runs")).is_none());
-        assert!(too_broad(Path::new("/data")).is_none());
-    }
+    // too_broad's own test moved with it to
+    // anofox_visualization::host::serving (#417).
 
     #[test]
     fn auth_and_log_options() {

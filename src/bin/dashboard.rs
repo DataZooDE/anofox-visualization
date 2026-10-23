@@ -899,12 +899,30 @@ fn site_build_nav_picker(
 /// Copy `src` into `dst` (already created), recursively. Used for `--site`'s
 /// `out/data/` (a copy of a local `--data <dir>`) and for an unpacked `--app`
 /// web directory.
+/// Copy `src` into `dst` (already created), recursively, refusing a symlink
+/// anywhere inside `src`: `entry.file_type()` is the symlink's own type (it
+/// doesn't follow the link), never the target's, so a symlink would
+/// otherwise silently copy whatever it points at — `--site --data` publishes
+/// `out/data/` on a public host, so a symlink into `~/.ssh`, `/etc`, or
+/// another project would publish that too. The locked server has the same
+/// rule in spirit (`too_broad` refuses the obvious footguns on `options.data`
+/// itself; this is the per-file backstop a symlink *inside* an otherwise
+/// fine folder needs). Refusing (not skipping) matches `too_broad`: a
+/// folder this command can't safely publish whole is worse to publish
+/// partially and silently than to refuse outright.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            return Err(std::io::Error::other(format!(
+                "'{}' is a symlink — refusing to publish it (it may point outside this folder)",
+                entry.path().display()
+            )));
+        }
         let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if ft.is_dir() {
             copy_dir_recursive(&entry.path(), &to)?;
         } else {
             std::fs::copy(entry.path(), &to)?;
@@ -918,10 +936,30 @@ fn is_data_url(s: &str) -> bool {
     s.starts_with("https://") || s.starts_with("http://")
 }
 
-/// `--app <dir|tarball>`: a directory already, or a `.tar.gz`/`.tgz` release
-/// asset unpacked (via the `tar` on PATH — no tar/gzip crate: the core stays
-/// dependency-light) into a fresh temp directory this function returns.
-fn resolve_app_dir(app: &Path) -> Result<PathBuf, String> {
+/// Removes an extracted `--app` tarball's temp directory when dropped. Only
+/// covers `cmd_site`'s normal-completion path: every error here still exits
+/// through `fail()` (`std::process::exit`), which — like every other
+/// `std::process::exit` in this file — skips destructors, so an early
+/// failure after extraction can still leave the temp directory behind. A
+/// hygiene gap, not a security one (it holds a copy of the public `--app`
+/// web build, nothing secret, and the OS reclaims `/tmp` eventually); a
+/// full fix would mean reworking `cmd_site`'s whole `fail()`-exits-
+/// immediately error style, out of scope here.
+struct AppExtractGuard(Option<PathBuf>);
+impl Drop for AppExtractGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+}
+
+/// `--app <dir|tarball>`: a directory already (no guard — nothing of ours to
+/// clean up), or a `.tar.gz`/`.tgz` release asset unpacked (via the `tar` on
+/// PATH — no tar/gzip crate: the core stays dependency-light) into a fresh
+/// temp directory, removed by the returned [`AppExtractGuard`] once the
+/// caller is done with it.
+fn resolve_app_dir(app: &Path) -> Result<(PathBuf, AppExtractGuard), String> {
     let is_archive = matches!(
         app.extension().and_then(|e| e.to_str()),
         Some("gz") | Some("tgz")
@@ -930,7 +968,7 @@ fn resolve_app_dir(app: &Path) -> Result<PathBuf, String> {
         if !app.is_dir() {
             return Err(format!("--app '{}' is not a directory", app.display()));
         }
-        return Ok(app.to_path_buf());
+        return Ok((app.to_path_buf(), AppExtractGuard(None)));
     }
     let tmp = std::env::temp_dir().join(format!(
         "anofox-site-app-{}-{}",
@@ -941,6 +979,7 @@ fn resolve_app_dir(app: &Path) -> Result<PathBuf, String> {
             .unwrap_or_default()
     ));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("mkdir {}: {e}", tmp.display()))?;
+    let guard = AppExtractGuard(Some(tmp.clone()));
     let status = Command::new("tar")
         .arg("-xzf")
         .arg(app)
@@ -959,18 +998,18 @@ fn resolve_app_dir(app: &Path) -> Result<PathBuf, String> {
     // current directory) — so: already rooted at the app files (has its own
     // index.html), else `web/`, else the only directory the archive has.
     if tmp.join("index.html").is_file() {
-        return Ok(tmp);
+        return Ok((tmp, guard));
     }
     let web = tmp.join("web");
     if web.is_dir() {
-        return Ok(web);
+        return Ok((web, guard));
     }
     let mut dirs = std::fs::read_dir(&tmp)
         .map_err(|e| format!("read {}: {e}", tmp.display()))?
         .flatten()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false));
     match (dirs.next(), dirs.next()) {
-        (Some(only), None) => Ok(only.path()),
+        (Some(only), None) => Ok((only.path(), guard)),
         _ => Err(format!(
             "--app '{}': unpacked but no index.html found (not an anofox-visualization-web-<tag>.tar.gz?)",
             app.display()
@@ -1036,6 +1075,16 @@ fn cmd_site(args: &[String]) {
             if !abs.is_dir() {
                 fail(format!("--data '{d}' is not a directory"));
             }
+            // S1 (PR #429 review): a published site copies this folder onto
+            // a public host — refusing a too-broad one here is the same
+            // rule `options.data` enforces on a locked server
+            // (`LockedOptions::parse`), shared via `sv::too_broad`.
+            if let Some(why) = sv::too_broad(&abs) {
+                fail(format!(
+                    "--data '{d}': refusing '{}': {why} — point it at the folder that holds the data only",
+                    abs.display()
+                ));
+            }
             Some(abs.to_string_lossy().into_owned())
         }
         None => None,
@@ -1099,14 +1148,17 @@ fn cmd_site(args: &[String]) {
         .as_ref()
         .map(|np| site_build_nav_picker(np, data_value.as_deref()).unwrap_or_else(|e| fail(e)));
 
-    // 3. The app bundle (`--app`, else next to this binary).
-    let app_src = match app {
+    // 3. The app bundle (`--app`, else next to this binary). `_app_guard`
+    // removes a tarball's extracted temp directory once it drops at the end
+    // of this function (A3, PR #429 review) — see its own doc comment for
+    // what it doesn't cover.
+    let (app_src, _app_guard) = match app {
         Some(a) => resolve_app_dir(Path::new(&a)).unwrap_or_else(|e| fail(e)),
         None => {
             let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("current_exe: {e}")));
             let next_to = exe.parent().map(|p| p.join("web"));
             match next_to.filter(|p| p.is_dir()) {
-                Some(p) => p,
+                Some(p) => (p, AppExtractGuard(None)),
                 None => fail(
                     "no --app given and no 'web' folder next to this binary — pass --app <web dir|tarball> \
                      (the anofox-visualization-web-<tag>.tar.gz release asset, unpacked or not)"
@@ -1158,7 +1210,15 @@ fn cmd_site(args: &[String]) {
         let ft = entry
             .file_type()
             .unwrap_or_else(|e| fail(format!("stat {}: {e}", entry.path().display())));
-        if ft.is_dir() {
+        // S1: the same symlink refusal as copy_dir_recursive's own, for a
+        // symlink sitting right at --app's top level (copy_dir_recursive
+        // only ever sees one *inside* a subdirectory).
+        if ft.is_symlink() {
+            fail(format!(
+                "'{}' is a symlink — refusing to publish it (it may point outside --app)",
+                entry.path().display()
+            ));
+        } else if ft.is_dir() {
             copy_dir_recursive(&entry.path(), &to)
                 .unwrap_or_else(|e| fail(format!("copy app files: {e}")));
         } else {
@@ -1218,16 +1278,11 @@ fn cmd_site(args: &[String]) {
     )
     .unwrap_or_else(|e| fail(format!("write site.json: {e}")));
 
-    // 5. index.html (the home page) + one launcher per dashboard
+    // 5. index.html (the home page, below) + one launcher per dashboard
     //    (`d/<id>/index.html`): a GitHub-Pages-friendly real file per
     //    dashboard id, so a refresh, a shared link and back/forward all
     //    land on a page that can bootstrap itself (there are no server
     //    rewrites on static hosting).
-    let home_id = opts
-        .home
-        .clone()
-        .filter(|h| dashboards.iter().any(|d| &d.id == h))
-        .unwrap_or_else(|| dashboards[0].id.clone());
     let data_origin = data_value
         .as_deref()
         .filter(|d| is_data_url(d))
@@ -1276,8 +1331,6 @@ fn cmd_site(args: &[String]) {
             .replace("src=\"./app.js\"", &format!("src=\"{rel}app.js\""))
         }
     };
-    std::fs::write(out.join("index.html"), page(&home_id, ""))
-        .unwrap_or_else(|e| fail(format!("write index.html: {e}")));
     for d in &dashboards {
         let launcher_dir = out.join("d").join(&d.id);
         std::fs::create_dir_all(&launcher_dir)
@@ -1285,6 +1338,45 @@ fn cmd_site(args: &[String]) {
         std::fs::write(launcher_dir.join("index.html"), page(&d.id, "../../"))
             .unwrap_or_else(|e| fail(format!("write d/{}/index.html: {e}", d.id)));
     }
+    // A2 (PR #429 review): `/` matches the locked server exactly — straight
+    // to `options.home` (a launcher page here; the server's own 302) when
+    // it's set, else the same card-grid landing page every dashboard count
+    // gets there too (`page::landing`, reused verbatim: the same markup,
+    // the same CSS, so there is nothing of its own for this command to keep
+    // in sync).
+    let valid_home = opts
+        .home
+        .as_deref()
+        .filter(|h| dashboards.iter().any(|d| &d.id == h));
+    let index_body = match valid_home {
+        Some(h) => page(h, ""),
+        None => {
+            let theme_set =
+                theme::resolve(opts.theme.as_deref().unwrap_or("")).unwrap_or_else(|e| {
+                    fail(format!("options.theme: {e}")) // already validated in parse_site_options; defensive
+                });
+            let items = dashboards
+                .iter()
+                .map(|d| page::LandingItem {
+                    href: format!("d/{}/", d.id),
+                    meta: &d.meta,
+                    updated: sv::file_date(&folder.join(format!("{}.sql", d.id))),
+                })
+                .collect();
+            let app = opts.app.as_ref().map(|v| {
+                AppBrand::from_json(&v.to_string())
+                    .unwrap_or_else(|e| fail(format!("options.app: {e}")))
+            });
+            let html = page::landing(&page::Landing {
+                theme: &theme_set,
+                app: app.as_ref(),
+                items,
+            });
+            site_landing_csp(&html)
+        }
+    };
+    std::fs::write(out.join("index.html"), index_body)
+        .unwrap_or_else(|e| fail(format!("write index.html: {e}")));
 
     eprintln!(
         "wrote {} ({} dashboard{}) — serve it under any web root, the files are all relative",
@@ -1294,43 +1386,84 @@ fn cmd_site(args: &[String]) {
     );
 }
 
-/// jsdelivr's npm CDN, any package: `@duckdb/duckdb-wasm`'s own `+esm` build
-/// pulls in apache-arrow, which pulls in tslib and flatbuffers, each its own
+/// `@duckdb/duckdb-wasm`'s own `+esm` build (jsdelivr) pulls in apache-arrow,
+/// which pulls in tslib and flatbuffers, each its own
 /// `cdn.jsdelivr.net/npm/<pkg>@<version>/+esm` script — found by actually
-/// running a published site (#417) and watching the CSP reports chase one
-/// transitive dependency after another. A locked server's own `page_csp`
-/// (`host::serving`) pins `CDN_DUCKDB_WASM`/`CDN_KATEX` to their *exact*
-/// versioned paths because a locked/served page never calls local
-/// `conn.query()` at all (it fetches `/api/panel` instead) — this gap never
-/// showed up there, and never will on a page that doesn't run the query
-/// engine itself. A published site does, so pinning every nested dependency
-/// by exact version one at a time is the wrong shape here: it can never be
-/// proven complete (an unrelated patch bump adds one more), so this trades
-/// that for the one jsdelivr npm path *prefix* instead — still one single
-/// trusted CDN host, just not pinned past the package name.
-const CDN_JSDELIVR_NPM: &str = "https://cdn.jsdelivr.net/npm/";
+/// running a published site (#417) and watching the CSP reports name one
+/// transitive dependency after another, then confirmed clean (no further
+/// ones) the same way. A locked server's own `page_csp` (`host::serving`)
+/// never needed any of these: a locked/served page never calls local
+/// `conn.query()` at all (it fetches `/api/panel` instead). Each is pinned
+/// exact, same as `sv::CDN_DUCKDB_WASM`/`sv::CDN_KATEX` — jsdelivr's `+esm`
+/// resolves a *specific* source package version's imports once and serves
+/// that resolution long-term (the same property that already makes pinning
+/// `CDN_DUCKDB_WASM`'s own exact version meaningful); re-pin these three
+/// (and re-run the end-to-end check in the PR this const was added by,
+/// watching for a *new* "violates ... script-src" console error) whenever
+/// `@duckdb/duckdb-wasm`'s pinned version in tests/web/package.json changes.
+const CDN_APACHE_ARROW: &str = "https://cdn.jsdelivr.net/npm/apache-arrow@17.0.0/";
+const CDN_TSLIB: &str = "https://cdn.jsdelivr.net/npm/tslib@2.6.3/";
+const CDN_FLATBUFFERS: &str = "https://cdn.jsdelivr.net/npm/flatbuffers@24.3.25/";
 
 /// The published site's `<meta http-equiv="Content-Security-Policy">`: the
 /// locked server's own header ([`sv::page_csp`]) minus `frame-ancestors` (a
 /// `<meta>` can't carry it — GitHub Pages sets no response headers at all),
 /// minus the per-response nonce (a static site's pages carry no inline
 /// `<script>`: `script-src 'self'` covers `app.js`, the one script every
-/// page loads), and with [`CDN_JSDELIVR_NPM`] in place of the server's
-/// exact-pinned `CDN_DUCKDB_WASM`/`CDN_KATEX` (see its own doc comment —
-/// needed only because a published site, unlike a locked server, runs every
-/// query locally). `data_origin`: a remote `--data` URL's own origin, added
-/// to `connect-src` — the plan's own rule, "no request to hosts other than
-/// its own origin and the data URL".
+/// page loads), plus [`CDN_APACHE_ARROW`]/[`CDN_TSLIB`]/[`CDN_FLATBUFFERS`]
+/// (needed only because a published site, unlike a locked server, runs
+/// every query locally — see their own doc comment). `data_origin`: a
+/// remote `--data` URL's own origin, added to `connect-src` — the plan's
+/// own rule, "no request to hosts other than its own origin and the data
+/// URL".
 fn site_csp(data_origin: Option<&str>) -> String {
     format!(
-        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval' {CDN_JSDELIVR_NPM}; \
-         worker-src blob:; connect-src 'self' {CDN_JSDELIVR_NPM} {} {} {}; img-src 'self' data: blob: https:; \
-         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com {CDN_JSDELIVR_NPM}; \
-         font-src 'self' data: https://fonts.gstatic.com {CDN_JSDELIVR_NPM}; manifest-src 'self'; media-src 'none'; \
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval' {} {} {} {} {}; \
+         worker-src blob:; connect-src 'self' {} {} {} {} {} {} {}; img-src 'self' data: blob: https:; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com {}; \
+         font-src 'self' data: https://fonts.gstatic.com {}; manifest-src 'self'; media-src 'none'; \
          object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'",
+        sv::CDN_DUCKDB_WASM,
+        sv::CDN_KATEX,
+        CDN_APACHE_ARROW,
+        CDN_TSLIB,
+        CDN_FLATBUFFERS,
+        sv::CDN_DUCKDB_WASM,
+        CDN_APACHE_ARROW,
+        CDN_TSLIB,
+        CDN_FLATBUFFERS,
         sv::DUCKDB_EXT,
         sv::USGS,
         data_origin.unwrap_or(""),
+        sv::CDN_KATEX,
+        sv::CDN_KATEX,
+    )
+}
+
+/// `page::landing`'s own output (`html`) with a `<meta
+/// http-equiv="Content-Security-Policy">` injected (A2, PR #429 review) —
+/// much tighter than [`site_csp`]: this page runs no DuckDB-Wasm and makes
+/// no `fetch` at all (every dashboard link is a real navigation to its own
+/// launcher), so none of `site_csp`'s jsdelivr/`connect-src`/`wasm-unsafe-
+/// eval` entries apply. The one loosening: `script-src 'unsafe-inline'`,
+/// for `page::landing`'s own fixed `LANDING_SCRIPT` (9+ dashboards only —
+/// the search/filter box), which is first-party, author-independent
+/// content, never user data (every `::nav`/`::title`/description/tag/owner
+/// `page::landing` prints is HTML-escaped, not inlined into script). A hash
+/// source (`'sha256-…'`) would be tighter still and needs no
+/// `'unsafe-inline'` at all, but the core crate has no sha2/base64-general-
+/// purpose dependency to compute one with — the core crate stays
+/// dependency-light by design (see Cargo.toml's own comments).
+fn site_landing_csp(html: &str) -> String {
+    let csp = "default-src 'none'; script-src 'self' 'unsafe-inline'; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; \
+         manifest-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; \
+         base-uri 'self'; form-action 'self'";
+    html.replacen(
+        "<head>",
+        &format!("<head><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"),
+        1,
     )
 }
 
@@ -1530,9 +1663,25 @@ mod site_tests {
         let csp = site_csp(None);
         assert!(!csp.contains("frame-ancestors"), "{csp}");
         assert!(!csp.contains("nonce-"), "{csp}");
+        let script_src = csp
+            .split(';')
+            .find(|p| p.trim().starts_with("script-src"))
+            .unwrap();
+        for exact in [
+            "cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@",
+            "cdn.jsdelivr.net/npm/katex@",
+            "cdn.jsdelivr.net/npm/apache-arrow@17.0.0/",
+            "cdn.jsdelivr.net/npm/tslib@2.6.3/",
+            "cdn.jsdelivr.net/npm/flatbuffers@24.3.25/",
+        ] {
+            assert!(script_src.contains(exact), "{script_src}");
+        }
+        // every jsdelivr source is pinned to an exact version — never a bare
+        // `cdn.jsdelivr.net/npm/` prefix that would allow any package (A1,
+        // PR #429 review)
         assert!(
-            csp.contains("script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net/npm/;"),
-            "{csp}"
+            !script_src.contains("npm/;") && !script_src.contains("npm/ "),
+            "{script_src}"
         );
         assert!(csp.contains("object-src 'none'"), "{csp}");
     }
@@ -1541,9 +1690,7 @@ mod site_tests {
     fn site_csp_adds_a_remote_data_origin_to_connect_src_only() {
         let csp = site_csp(Some("https://data.example.com"));
         assert!(
-            csp.contains(
-                "connect-src 'self' https://cdn.jsdelivr.net/npm/ https://extensions.duckdb.org"
-            ),
+            csp.contains("connect-src 'self' https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@"),
             "{csp}"
         );
         assert!(csp.contains("https://data.example.com"), "{csp}");
@@ -1561,5 +1708,76 @@ mod site_tests {
         assert!(is_data_url("http://example.com/data"));
         assert!(!is_data_url("/local/path"));
         assert!(!is_data_url("data"));
+    }
+
+    /// A fresh scratch directory under the system temp dir, removed on drop
+    /// — `copy_dir_recursive`'s own tests need real files (it does real
+    /// I/O), not a pure-function stand-in.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "anofox-site-test-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn copy_dir_recursive_refuses_a_symlink() {
+        // S1 (PR #429 review): a symlink inside --data must never be
+        // followed and copied into a public out/data/ — refused outright.
+        let src = TempDir::new("symlink-src");
+        let dst = TempDir::new("symlink-dst");
+        std::fs::write(src.0.join("plain.txt"), b"ok").unwrap();
+        let secret = TempDir::new("symlink-secret");
+        std::fs::write(secret.0.join("id_rsa"), b"not for publishing").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret.0, src.0.join("sneaky")).unwrap();
+        #[cfg(unix)]
+        {
+            let err = copy_dir_recursive(&src.0, &dst.0).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{err}");
+            // Nothing from the symlinked target ever lands in the output.
+            assert!(!dst.0.join("sneaky").join("id_rsa").exists());
+        }
+    }
+
+    #[test]
+    fn copy_dir_recursive_copies_a_plain_tree() {
+        let src = TempDir::new("plain-src");
+        let dst = TempDir::new("plain-dst");
+        std::fs::create_dir_all(src.0.join("sub")).unwrap();
+        std::fs::write(src.0.join("a.txt"), b"a").unwrap();
+        std::fs::write(src.0.join("sub/b.txt"), b"b").unwrap();
+        copy_dir_recursive(&src.0, &dst.0).unwrap();
+        assert_eq!(std::fs::read(dst.0.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(dst.0.join("sub/b.txt")).unwrap(), b"b");
+    }
+
+    #[test]
+    fn site_data_cannot_be_home_or_the_filesystem_root() {
+        // S1: --site --data shares `too_broad` with the locked server's
+        // own `options.data` (full behaviour re-tested in
+        // src/host/serving.rs; this just confirms --site actually wired it
+        // in, since a `--data` check that exists but is never called is as
+        // good as none).
+        assert!(sv::too_broad(std::path::Path::new("/")).is_some());
+        if let Some(home) =
+            std::env::var_os("HOME").and_then(|h| std::path::PathBuf::from(h).canonicalize().ok())
+        {
+            assert!(sv::too_broad(&home).is_some());
+        }
     }
 }

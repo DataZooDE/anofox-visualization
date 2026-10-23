@@ -15,6 +15,7 @@
 //!   ([`sql_literal`]); the SQL itself is owned by the server.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// Header carrying the per-server token for non-browser clients.
 pub const TOKEN_HEADER: &str = "X-Anofox-Token";
@@ -1328,6 +1329,43 @@ fn contains_from_stdin(lower: &str) -> bool {
     false
 }
 
+/// Refuse a `data`/`--site --data` directory that is too broad to safely
+/// publish or serve read-only: the filesystem root, a top-level system
+/// directory (`/etc`, `/home`, `/tmp`, …), the temp directory, or `$HOME`
+/// itself / anything that contains it (so a typo like `--data ~` can't turn
+/// into "every file I own is now world-readable over HTTP"). Moved here
+/// (#417) from `duckext/src/serve.rs` (where it guarded
+/// `LockedOptions::parse`'s `options.data`) so `dashboard --site --data`
+/// shares the exact same rule — a published site copies the folder onto a
+/// public host, so accepting a too-broad one there is worse than serving it
+/// read-only locally.
+pub fn too_broad(dir: &Path) -> Option<String> {
+    let Some(parent) = dir.parent() else {
+        return Some("the filesystem root".into());
+    };
+    const SYSTEM: [&str; 16] = [
+        "bin", "boot", "dev", "etc", "home", "lib", "lib64", "opt", "proc", "root", "run", "sbin",
+        "sys", "tmp", "usr", "var",
+    ];
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if parent.parent().is_none() && SYSTEM.contains(&name) {
+        return Some("a system directory".into());
+    }
+    let home = ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from);
+    for (what, p) in home
+        .map(|p| ("the home directory", p))
+        .chain([("the temp directory", std::env::temp_dir())])
+    {
+        if p.canonicalize().is_ok_and(|p| p.starts_with(dir)) {
+            return Some(format!("it contains {what}"));
+        }
+    }
+    None
+}
+
 // ----------------------------------------------- data-folder read-only ---
 // Moved here from `duckext/src/serve.rs` (#417) so `dashboard --site`'s own
 // pre-publish check — and its build-time `nav_picker` — can share the exact
@@ -2038,5 +2076,25 @@ mod tests {
         assert!(!reads_stdin("SELECT * FROM read_csv('-')"));
         assert!(!reads_stdin("SELECT * FROM read_csv('/dev/std[i]n')"));
         assert!(!reads_stdin("SELECT /proc_stats FROM t")); // no /fd/0 at all
+    }
+
+    #[test]
+    fn broad_data_folders_are_refused() {
+        assert!(too_broad(Path::new("/")).is_some());
+        for d in ["/etc", "/usr", "/home", "/tmp", "/var"] {
+            assert!(too_broad(Path::new(d)).is_some(), "{d}");
+        }
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        assert!(too_broad(&tmp).is_some());
+        if let Some(home) =
+            std::env::var_os("HOME").and_then(|h| PathBuf::from(h).canonicalize().ok())
+        {
+            assert!(too_broad(&home).is_some());
+            assert!(too_broad(home.parent().unwrap()).is_some());
+            assert!(too_broad(&home.join("runs")).is_none());
+        }
+        assert!(too_broad(&tmp.join("anofox-runs")).is_none());
+        assert!(too_broad(Path::new("/srv/runs")).is_none());
+        assert!(too_broad(Path::new("/data")).is_none());
     }
 }
