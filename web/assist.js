@@ -335,7 +335,7 @@ export function looksLikePath(s) {
     /^(\/|\.\.?\/|~\/)/.test(t) ||
     /^[A-Za-z]:[\\/]/.test(t) ||
     GDAL_PREFIX.test(t) ||
-    /\.(csv|tsv|txt|parquet|json|jsonl|ndjson|gz|zst|xlsx|duckdb|db|sqlite|sqlite3|geojson|shp|arrow|avro|gpkg|fgb|kml|kmz|gml|gpx|dbf|shx|osm|pbf|mbtiles|gdb|vrt|tif|tiff|nc|zip|xml|ods)(\?.*)?$/i.test(t) ||
+    /\.(csv|tsv|txt|parquet|json|jsonl|ndjson|gz|zst|xlsx|duckdb|db|sqlite|sqlite3|geojson|shp|arrow|avro|gpkg|fgb|kml|kmz|gml|gpx|dbf|shx|osm|pbf|mbtiles|gdb|vrt|tif|tiff|nc|zip|xml|ods)(\?[\s\S]*)?$/i.test(t) ||
     /^data\//.test(t)
   );
 }
