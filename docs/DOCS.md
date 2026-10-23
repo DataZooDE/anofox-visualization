@@ -208,6 +208,7 @@ terminal.
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
 | `::VIEW` | `::ALT_VIEW` | layout | one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`) |
 | `::ENDVIEW` | `::END_VIEW` | layout | close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it) |
+| `::FIT` | `::FIT_SCREEN` | layout | this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide) |
 | `::PLACEHOLDER` |  | layout | an empty grid cell |
 | `::TRACK` | `::STRIP_BELOW`, `::STRIP_UNDER` | layout | a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar |
 | `::RELOAD` | `::REFRESH` | chrome | auto-refresh interval (seconds) |
@@ -685,7 +686,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 |---|---|---|
 | `anofox_plot_terms(tbl, highlight := NULL, lambda_min := NULL, lambda_1se := NULL, facet := NULL, reference := NULL)` | **term, estimate**, conf_low, conf_high, conf_level, model_id, id, index_name, index_value, window_end | coefficient forest (x "estimate (95% CI)"; models — or groups, `id` — dodged + coloured with the legend in stacking order; rows without an interval as hollow rings, noted under the plot; a coefficient whose interval contains 0 — not significant — is drawn at half opacity (point and interval, "n.s." in its tooltip, "faded = interval crosses 0" under the plot); one model's coefficients are blue above the no-effect line and red below it (the theme's brand and negative colours; several models keep their series colours); a numeric `reference := 1` moves that no-effect line, e.g. for odds ratios; models × groups: one panel per group). With `index_value`: a **λ path** (ridge / elastic net) is one panel with every coefficient overlaid on a log-λ axis and labelled at its line end (`highlight := ['tv', …]` greys the others; λ.min / λ.1se as dashed lines from `lambda_min :=` / `lambda_1se :=` or the table's `lambda_min`/`is_min` columns; `facet := true` keeps one panel per term); a **LARS path** on x = \|β\|₁ / max \|β\|₁; the **quantile process** (x "τ (quantile)") and **rolling coefficients** (x = `window_end`, a date axis) one panel per term, with a dashed full-sample reference (± CI shaded) from the input's index-less rows (e.g. an `ols` tidy table `UNION ALL BY NAME`) or `reference := (SELECT list(t) FROM ols_tidy_by(…) t)` |
 | `anofox_plot_prediction(tbl, x := NULL, y := NULL, facet := NULL, band := NULL, kind := NULL, events := NULL)` | **x \| ds \| period, yhat**, y, yhat_lower, yhat_upper, level, split \| is_training, model_id \| model_name, id, focal, focal_name | observed y as neutral grey points, the fit as a coloured line with a light band (several `level`s: a nested fan, one band per level, "bands: 80 %, 95 % intervals" under the plot; an integer `period` is the x when there is no `ds`); `events := (SELECT list(e) FROM alarms e)` draws an `events` table as vertical lines in the severity's colour (alarm red, warning amber, else grey; the event in its own panel when it carries the facet column or `series`), its kind, label, value and threshold on hover; split changes along x as labelled dashed vertical lines ("hold-out", "forecast", else the split name; when splits interleave along x the non-train points are marked instead). Several models in a panel: one band only (`band := 'model'`, default `ols` or the first model) and a line per model in its stable colour; `kind := 'difference'` plots each model minus the reference. Effects tables (`focal`): y "P(y = 1)" for logistic / binomial, "expected count" for poisson / negbinom, else "predicted y"; x from `focal_name` when present. Several `id`s become panels |
-| `anofox_plot_curve(tbl, base_rate := NULL)` | **curve_type, x, y**, y_low, y_high, model_id \| series \| id, threshold, weight, auc, n_censor \| censored, n_risk, n_event (km), is_min, is_1se (lambda_cv) | roc: square, diagonal, the AUC (trapezoid, or an `auc` column) in each legend label; pr: the recall-0 points trimmed, a dashed base-rate line (`base_rate :=`, else the precision at the lowest threshold with full recall); calibration: square, diagonal, point size by the bin count (`weight`); km: step curves from S(0) = 1, step-ribbon band, small `+` censor marks, a dashed 50 % line with drops at each stratum's median and a number-at-risk table under the curves; acf/pacf: lollipops without lag 0 (ACF), significance bounds (one panel per series); lambda_cv: CV error ± SE on a log-λ axis with λ.min / λ.1se; qq / pdp / lift / null_dist / lowess: line or points (+ band). One `curve_type` per call (`GROUP BY curve_type`) |
+| `anofox_plot_curve(tbl, base_rate := NULL)` | **curve_type, x, y**, y_low, y_high, model_id \| series \| id, threshold, weight, auc, n_censor \| censored, n_risk, n_event (km), is_min, is_1se (lambda_cv), fold, lambda, inner_cv_mean, metric (nested_cv) | roc: square, diagonal, the AUC (trapezoid, or an `auc` column) in each legend label; pr: the recall-0 points trimmed, a dashed base-rate line (`base_rate :=`, else the precision at the lowest threshold with full recall); calibration: square, diagonal, point size by the bin count (`weight`); km: step curves from S(0) = 1, step-ribbon band, small `+` censor marks, a dashed 50 % line with drops at each stratum's median and a number-at-risk table under the curves; acf/pacf: lollipops without lag 0 (ACF), significance bounds (one panel per series); lambda_cv: CV error ± SE on a log-λ axis with λ.min / λ.1se; nested_cv: outer-fold test error points (`series = 'fold'`, x = fold number) plus the across-folds mean ± SE as a quiet horizontal band (`series = 'mean'`), one panel per model/id (`ridge_nested_cv_by` / `elasticnet_nested_cv_by`); qq / pdp / lift / null_dist / lowess: line or points (+ band). One `curve_type` per call (`GROUP BY curve_type`) |
 | `anofox_plot_summary(tbl, metrics := NULL, baseline := 'range')` | **metric, value**, model_id \| model_name, id, conf_low, conf_high | a grid of small panels, one per metric with its own scale; one model order in every panel (best first by the first metric), the value beside each dot, "n/a" for a missing metric, the best model highlighted for metrics with a direction; `baseline := 'range'` zooms to the values and prints the range ("Δ = …") in the panel title, `'zero'` starts the axis at 0; n_observations / n_features / iterations only when `metrics := [...]` asks |
 | `anofox_plot_tests(tbl, alpha := 0.05, value := NULL, label := 'p')` | **p_value \| p_adj \| statistic**, test_id, group1, group2, estimate, conf_low, conf_high, method | comparison forest: one row per test (pairs as "B − A"), x "difference (95% CI)" (else the statistic, else −log10 p; `value :=` forces one), coloured by significance at `alpha`, `p = … **` beside each row (`label := 'stars'`: stars only). Estimates without any interval (pairwise_t_test_by today) fall back to −log10(p) bars with a labelled significance line, said in the axis label. Several groups (`id`, `model_id`, else a text column such as an unnested aggregate's GROUP BY key; text that holds numbers, like pingouin's `BF10`, is not a group) get a panel each. Several tests (`method`: ADF and KPSS, say) are not on one scale: when the forest plots estimates or statistics, each method gets its own panel — its own x axis, the method as its title, the groups on one shared y axis; on the −log10 p axis (`value := 'p'`, or the no-CI fallback), which every test shares, they stay in one panel with rows such as "A · ADF". A column holding a `*_agg` STRUCT / LIST is expanded |
 | `anofox_plot_compare(tbl, value :=, factor :=, tests := NULL, kind := 'box', hide_ns := NULL, label := 'stars')` | the raw rows: the **value** and **factor** columns named by the arguments | box / violin / points per group with significance brackets from `tests :=` (a LIST of test STRUCTs: `(SELECT list(t) FROM tukey_hsd_by(…) t)` or `tukey_hsd_agg(y, g)`; one two-sample STRUCT for two groups); `hide_ns` defaults to true above 3 groups; `label := 'stars' \| 'p'` or a template (`'p = {p.adj}'`, `'{p.signif}'`) |
@@ -905,7 +906,7 @@ a dashboard query written against the CLI renders unchanged there.
 | `<model>_glance_by` (21) | summary | `anofox_plot_summary(s, metrics := NULL)` — one panel per metric |
 | `ols/wls/<glm>_augment_by` | obs | `anofox_plot_diagnostics(o)` (plot.lm 2×2), `anofox_plot_obs(o, kind := …)` |
 | `<model>_prediction_by` (19), `<model>_effects_by` (9) | prediction | `anofox_plot_prediction(p)` — fit + band per `id`, split as colour; several models: a line + band each |
-| `roc_curve_by`, `pr_curve_by`, `calibration_curve_by`, `kaplan_meier_by`, `acf_by`, `pacf_by`, `ridge_cv_by`, `elasticnet_cv_by` | curve | `anofox_plot_curve(c)` — one `curve_type` per call |
+| `roc_curve_by`, `pr_curve_by`, `calibration_curve_by`, `kaplan_meier_by`, `acf_by`, `pacf_by`, `ridge_cv_by`, `elasticnet_cv_by`, `ridge_nested_cv_by`, `elasticnet_nested_cv_by` | curve | `anofox_plot_curve(c)` — one `curve_type` per call |
 | `tukey_hsd_by`, `pairwise_t_test_by`, `dunn_test_by`, and the 40 `*_agg` tests (`t_test_agg`, `shapiro_wilk_agg`, `pearson_agg`, …) | test | `anofox_plot_tests(t)` — comparison forest; `anofox_plot_compare(r, …, tests := …)` — the raw values with significance brackets |
 | `<model>_partial_residuals_by` (8) | — (not a contract schema) | `anofox_plot_partial(p, kind := 'component' \| 'added_variable')` |
 
@@ -937,7 +938,7 @@ SELECT anofox_plot_diagnostics(o) FROM poisson_augment_by('d', grp, y_count, [x1
 -- prediction: 90 % band per group, rows after id 50 held out ('test')
 SELECT anofox_plot_prediction(p)
 FROM ols_prediction_by('d', grp, id, y, [x1, x2], level := 0.9,
-                       split := CASE WHEN id > 50 THEN 'test' END) p;
+                       split := CASE WHEN id > 50 THEN 'test' ELSE 'train' END) p;
 -- … two models in one panel; marginal effect of x1
 SELECT anofox_plot_prediction(p)
 FROM (SELECT * FROM ols_prediction_by('d', grp, id, y_count, [x1, x2])
@@ -1879,9 +1880,13 @@ Charts are usable without a mouse and without sight of the screen:
   extremes — *"Bar chart: Sessions by channel; 3 series (api, app, web);
   4 points from W1 to W4; highest 48 (app, W4), lowest 9 (api, W3)."* Each
   mark is labelled with its tooltip text.
-- **Charts as tables.** The *▦ Charts as tables* switch at the top right of
-  every dashboard (also in embed and served views; `?tables=1` turns it on, the
-  choice is remembered) swaps every chart for its data table.
+- **Charts as tables.** Swaps every chart for its data table. Reached from the
+  toolbar's **⋯ → ▦ Charts as tables** menu item (also in embed and served
+  views; `?tables=1` turns it on, the choice is remembered across
+  dashboards). The *▦ Charts as tables* bar at the top of the dashboard
+  itself is off by default and shown only when the author opts a dashboard
+  in with `-- @astables on` (see *Dashboard header comments*) — a viewer who
+  never saw a bar can still reach the feature from the menu.
 - **Reduced motion.** With the system's *reduce motion* setting there are no
   entrance animations, line draw-ins, shimmers or transitions.
 - Tables keep `aria-sort` and keyboard row navigation; the `colorblind` and
@@ -1920,6 +1925,7 @@ with the browser through wasm):
 -- @owner  Sales controlling
 -- @certified 2026-10-15
 -- @refresh 300
+-- @astables on
 ```
 
 | Line | Meaning |
@@ -1933,6 +1939,7 @@ with the browser through wasm):
 | `-- @certified <YYYY-MM-DD>` | The day it was last checked. Shows a **✓ certified** badge (sidebar, served nav, `/` list) and lets viewers filter on it (the sidebar's *✓ certified* chip). A date that isn't `YYYY-MM-DD` counts as not certified. |
 | `-- @order N` | Where it sits, ascending, among its siblings (same group, or ungrouped) in the served nav bar and the `/` start page's card grid — the server's default is alphabetical by file name, which ignores `blueprint.json`'s own `dashboards[]` order. `N` is a plain integer (ties, and dashboards without `@order`, keep sorting by id afterwards). |
 | `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
+| `-- @astables on` \| `off` | Shows the "▦ Charts as tables" bar on this dashboard for every viewer — off (no bar) by default, or with `off`. A viewer can still turn the feature itself on or off from the toolbar's **⋯ → Charts as tables** menu item whether or not the bar is shown; their choice is remembered across dashboards. |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 
@@ -1942,8 +1949,9 @@ longer than 24 characters (`header/long-nav`), an empty `@group`
 more than 10 tags (`header/too-many-tags`), an empty `@owner`
 (`header/empty-owner`), a `@certified` that isn't a `YYYY-MM-DD` date
 (`header/bad-certified`), an `@order` that isn't a plain integer
-(`header/bad-order`) and a `@description` over 160 characters
-(`header/long-description`), reported as statement 0. `dashboard --check
+(`header/bad-order`), a `@description` over 160 characters
+(`header/long-description`) and an `@astables` that isn't `on` or `off`
+(`header/bad-astables`), reported as statement 0. `dashboard --check
 <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
 same title (`folder/duplicate-title`, ignoring case), a file name the
@@ -1970,6 +1978,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
 | `SELECT 1::ENDVIEW;` | close a `::VIEW` group (optional when a `::TAB`/`::SUBTAB`/`::SECTION` or the end of the script follows) |
+| `SELECT 'fit'::FIT;` | the `::TAB` / `::SUBTAB` / `::VIEW` it is in fits the window, no page scroll — see *Fit to screen* below |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
 | `SELECT day::XAXIS, 'Name'::TRACK …;` right after a chart | a thin strip **under** that chart, in its panel, on the same x axis (see [strips](#fans-shaded-regions-and-strips-under-a-chart)) |
 
@@ -1991,6 +2000,65 @@ on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.
+
+### Fit to screen (`::FIT`)
+
+A wall display or a one-screen overview should not scroll. `SELECT 'fit'::FIT;`
+right after a `::TAB` makes **that** tab fill the browser window while it is
+the one shown, with no page scroll; other tabs scroll as usual. With no tabs at
+all, a `::FIT` anywhere fits the whole dashboard (a `::FIT` before the first
+`::TAB` of a tabbed dashboard fits every tab — `layout/fit-ambiguous` warns).
+
+In a `::SUBTAB` or a `::VIEW` alternative, `::FIT` fits **only that pane's own
+panels**: they share the window height under the app bar and the sub-tab /
+view bar. The parent tab's panels above the bar keep their normal height and
+are not counted; the page may scroll to bring the fitted sub-tab / view into
+view, and once there all of its panels are on screen.
+
+```sql
+SELECT 'Overview'::TAB;
+SELECT 'fit'::FIT;                       -- this tab fills the window, no page scroll
+SELECT count(*)::METRIC, 'Orders'::LABEL FROM orders;
+SELECT sum(amount)::MONEY, 'Revenue'::LABEL FROM orders;
+SELECT region::XAXIS, sum(amount)::BARCHART FROM orders GROUP BY ALL;
+SELECT 360::HEIGHT;
+SELECT day::XAXIS, sum(amount)::LINECHART FROM orders GROUP BY ALL;
+
+SELECT 'Details'::TAB;                   -- no ::FIT: scrolls as before
+SELECT * ::TABLE FROM orders;
+```
+
+- The height under the app bar and the tab bar is measured, and the rows of
+  panels share it **in the ratio of their heights** (`::HEIGHT`, else the
+  default) — a `360::HEIGHT` row stays taller than a default one.
+- Charts are **drawn again at their new size** (text and lines stay their real
+  size, nothing is stretched); a resize, a rotation, entering full screen and
+  switching tabs re-fit (cross-filtering keeps the fitted sizes).
+- Tables, `::PAGED` tables and text boxes keep their content and **scroll
+  inside their panel**; KPI tiles keep at least ~96 px.
+- If a panel would get under ~120 px the tab scrolls as usual and a small
+  notice says so — `dashboard --check` warns about this ahead of time
+  (`layout/fit-too-many`, judged at 1366×768; for a sub-tab / view only its own panels under its own bar), and about a `::FIT` whose
+  scope is unclear (`layout/fit-ambiguous`: before the first `::TAB` of a
+  tabbed dashboard, twice for one tab, or cast beside a panel's columns).
+- **URL override** (kiosk screens): `?fit=1` fits the shown tab even without
+  `::FIT`; `?fit=0` never fits.
+- Phones (narrower than 600 px) ignore `::FIT` and `?fit=1`: the usual single
+  scrolling column.
+- **Downloaded HTML** (⤓ HTML): the file fits itself the same way on load, on
+  resize and on a tab switch. It has no chart engine, so instead of drawing a
+  chart again it **scales the already drawn SVG** to its fitted panel (its
+  `viewBox` with a new height: crisp and undistorted, centred where the shape
+  differs; text and lines grow or shrink with the chart rather than keeping
+  their size).
+- **Pages without the app** (`dashboard <file.sql> out.html`, the script-free
+  page of `serve --dashboards`): CSS only, best-effort. A `::FIT` that applies
+  to the whole dashboard (no `::TAB` / `::SUBTAB`, not inside a `::VIEW`) makes
+  the page the window tall, with the panels in **equal rows** (not in their
+  `::HEIGHT` ratio) of at least 120 px, each SVG scaled into its panel. With
+  more rows than fit, the page scrolls. These pages show every tab on one
+  page, so a tab's, sub-tab's or view's `::FIT` is ignored there. `dashboard
+  --svg` draws one fixed-size image: `::FIT` has no effect.
 
 ### Alternative views of one panel (`::VIEW`)
 

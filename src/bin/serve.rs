@@ -1956,6 +1956,7 @@ fn render_dashboard_page(
         head_extra: meta,
         controls_html: controls,
         panels_html: panels,
+        fit: page::static_fit(&sql::plan(&dash.script)),
     }))
 }
 
