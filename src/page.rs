@@ -172,9 +172,11 @@ pub struct Landing<'a> {
 /// The landing page: a header (the installation's name / logo / tagline, or
 /// "Dashboards" and a count), the dashboards as cards in groups (ungrouped
 /// first, then `-- @group` by name, `A / B` as a sub-heading; each card its
-/// title, description, tags, owner, ✓ certified, updated), and — from
-/// [`LIST_SEARCH_MIN`] dashboards — a search field, tag chips and "certified
-/// only". Server-rendered and escaped; the filters are a small inline script.
+/// `-- @nav` label if set (else `-- @title`, with the full title as the
+/// card's tooltip when `@nav` shortens it), description, tags, owner, ✓
+/// certified, updated), and — from [`LIST_SEARCH_MIN`] dashboards — a search
+/// field, tag chips and "certified only". Server-rendered and escaped; the
+/// filters are a small inline script.
 pub fn landing(l: &Landing) -> String {
     use std::collections::BTreeMap;
     let light = &l.theme.light;
@@ -288,6 +290,7 @@ pub fn landing(l: &Landing) -> String {
         };
         let q = [
             m.title.as_str(),
+            m.nav.as_deref().unwrap_or(""),
             m.description.as_deref().unwrap_or(""),
             m.group.as_deref().unwrap_or(""),
             m.owner.as_deref().unwrap_or(""),
@@ -298,9 +301,13 @@ pub fn landing(l: &Landing) -> String {
         .copied()
         .collect::<Vec<_>>()
         .join(" ");
+        // the compact `-- @nav` label when set (else `-- @title`); the full
+        // title stays reachable as the link's tooltip so a shortened label
+        // doesn't bury the business question it stands for.
+        let label = m.nav_label();
         let card = format!(
             "<li class=\"lp-card\" data-q=\"{q}\" data-tags=\"{tg}\"{cert}>\
-             <a class=\"lp-link\" href=\"{href}\">{title}</a>{desc}\
+             <a class=\"lp-link\" href=\"{href}\"{nav_title}>{label}</a>{desc}\
              {meta_html}{tags}</li>",
             q = esc(&q),
             tg = esc(&m.tags.join("|")),
@@ -310,7 +317,12 @@ pub fn landing(l: &Landing) -> String {
                 ""
             },
             href = esc(&it.href),
-            title = esc(&m.title),
+            nav_title = if m.nav.is_some() {
+                format!(" title=\"{}\"", esc(&m.title))
+            } else {
+                String::new()
+            },
+            label = esc(label),
             meta_html = if meta.is_empty() {
                 String::new()
             } else {
@@ -512,5 +524,36 @@ mod tests {
         assert!(html.contains("src=\"https://example.com/d.png\""));
         assert!(!html.contains("<picture>"));
         assert!(page(&[], None).contains("No dashboards to show."));
+    }
+
+    /// #355: a card shows `-- @nav` in place of `-- @title` when set, with
+    /// the full title kept as the link's tooltip; without `-- @nav` the
+    /// card still shows `-- @title` and carries no such tooltip.
+    #[test]
+    fn landing_card_prefers_nav_label() {
+        let metas = [
+            parse_dashboard_meta(
+                "s",
+                "-- @title Which products depend on this supplier, and how badly?\n\
+                 -- @nav Supplier risk\nSELECT 1;",
+            ),
+            parse_dashboard_meta("o", "-- @title Ops board\nSELECT 1;"),
+        ];
+        let html = page(&metas, None);
+        assert!(
+            html.contains(">Supplier risk<"),
+            "shows the short @nav label"
+        );
+        assert!(
+            !html.contains(">Which products depend"),
+            "the long @title is not the visible label"
+        );
+        assert!(
+            html.contains("title=\"Which products depend on this supplier, and how badly?\""),
+            "the full @title is kept as the card's tooltip"
+        );
+        // without @nav, the title is the label and gets no such tooltip
+        assert!(html.contains(">Ops board<"));
+        assert!(!html.contains("title=\"Ops board\""));
     }
 }

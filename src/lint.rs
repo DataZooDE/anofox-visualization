@@ -69,8 +69,11 @@ pub struct Diagnostic {
     /// the CLI isn't the pinned DuckDB) | `policy/masked-column` (a note).
     /// Header comments ([`header_diags`], warnings): `header/empty-group` |
     /// `header/long-group` | `header/too-many-tags` | `header/empty-owner` |
-    /// `header/bad-certified` | `header/bad-order` | `header/long-description`. A served folder ([`folder_diags`], warnings):
-    /// `folder/duplicate-title` | `folder/bad-id`.
+    /// `header/bad-certified` | `header/bad-order` | `header/long-description` |
+    /// `header/empty-nav` | `header/long-nav`. A served folder
+    /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
+    /// dashboards that would show the same label in the nav / `/` list —
+    /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id`.
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
@@ -1569,15 +1572,16 @@ pub fn check_policy(
 /// takes without a warning.
 pub const MAX_DESCRIPTION_CHARS: usize = 160;
 
-/// The header comments that place and describe a dashboard (`-- @group`,
-/// `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`, `-- @order`):
-/// an empty or over-long group, more tags than are kept, a description over
+/// The header comments that place and describe a dashboard (`-- @nav`,
+/// `-- @group`, `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`,
+/// `-- @order`): an empty `@nav`, an over-long `@nav`, an empty or
+/// over-long group, more tags than are kept, a description over
 /// [`MAX_DESCRIPTION_CHARS`], an empty owner, a certification date that
 /// isn't `YYYY-MM-DD`, an `@order` that isn't a plain integer. Reported as
 /// statement 0 (the header comes before the first statement).
 pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     use crate::host::serving::{
-        header_value, split_tags, valid_iso_date, MAX_GROUP_CHARS, MAX_TAGS,
+        header_value, split_tags, valid_iso_date, MAX_GROUP_CHARS, MAX_NAV_CHARS, MAX_TAGS,
     };
     let mut diags = Vec::new();
     let mut warn = |code, message: String, line: &str| {
@@ -1593,7 +1597,27 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
     let mut tags_line = "";
     let (mut desc, mut desc_warned) = (0usize, false);
     for line in script.lines() {
-        if let Some(g) = header_value(line, "group") {
+        if header_value(line, "nav") == Some("") {
+            warn(
+                "header/empty-nav",
+                "`-- @nav` has no label — the nav bar and start-page card fall back to \
+                 `-- @title`, or drop the line"
+                    .into(),
+                line,
+            );
+        } else if let Some(n) =
+            header_value(line, "nav").filter(|n| n.chars().count() > MAX_NAV_CHARS)
+        {
+            warn(
+                "header/long-nav",
+                format!(
+                    "`-- @nav` is {} characters long — keep it to {MAX_NAV_CHARS} or fewer \
+                     (it is a nav bar / card label, `-- @title` can stay the long form)",
+                    n.chars().count()
+                ),
+                line,
+            );
+        } else if let Some(g) = header_value(line, "group") {
             if g.split('/').all(|p| p.trim().is_empty()) {
                 warn(
                     "header/empty-group",
@@ -1679,15 +1703,19 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
 }
 
 /// The files of a served folder, linted together: each `(file name, script)`
-/// gets the diagnostics only the folder shows — a `-- @title` another file
-/// has too (the nav and the `/` list would show the same name twice), and a
-/// file name the servers skip (its id must be `[A-Za-z0-9_.-]`, at most 128,
-/// not starting with `.`). Returned with the file each belongs to.
+/// gets the diagnostics only the folder shows — two dashboards that would
+/// show the same label in the nav / `/` list (`DashboardMeta::nav_label`:
+/// `-- @nav` when set, else `-- @title`, compared case-insensitively — so
+/// two dashboards with the same `@title` but distinct `@nav` labels no
+/// longer collide, while one's `@nav` matching another's `@title` does),
+/// and a file name the servers skip (its id must be `[A-Za-z0-9_.-]`, at
+/// most 128, not starting with `.`). Returned with the file each belongs
+/// to.
 pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
     use crate::host::serving::{parse_dashboard_meta, valid_dashboard_id};
     let mut out = Vec::new();
     let id_of = |f: &str| f.strip_suffix(".sql").unwrap_or(f).to_string();
-    let mut titles: Vec<(String, String)> = Vec::new(); // (title, file)
+    let mut labels: Vec<(String, String)> = Vec::new(); // (nav label, file)
     for (file, script) in files {
         let id = id_of(file);
         if !valid_dashboard_id(&id) {
@@ -1706,8 +1734,9 @@ pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
             ));
             continue;
         }
-        let title = parse_dashboard_meta(&id, script).title;
-        if let Some((_, first)) = titles.iter().find(|(t, _)| t.eq_ignore_ascii_case(&title)) {
+        let meta = parse_dashboard_meta(&id, script);
+        let label = meta.nav_label().to_string();
+        if let Some((_, first)) = labels.iter().find(|(l, _)| l.eq_ignore_ascii_case(&label)) {
             out.push((
                 file.clone(),
                 Diagnostic {
@@ -1715,14 +1744,15 @@ pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
                     stmt: 0,
                     code: "folder/duplicate-title",
                     message: format!(
-                        "`{title}` is also the title of `{first}` — viewers can't tell the two \
-                         apart in the nav; give each its own `-- @title`"
+                        "`{label}` is also how `{first}` shows in the nav and the `/` list — \
+                         viewers can't tell the two apart there; give one of them its own \
+                         `-- @nav` or `-- @title`"
                     ),
                     sql: String::new(),
                 },
             ));
         } else {
-            titles.push((title, file.clone()));
+            labels.push((label, file.clone()));
         }
     }
     out
@@ -3714,6 +3744,13 @@ mod design_tests {
         };
         assert!(codes("-- @owner Finance\n-- @certified 2026-10-15\nSELECT 1;").is_empty());
         assert_eq!(codes("-- @owner \nSELECT 1;"), ["header/empty-owner"]);
+        assert!(codes("-- @nav Weekly sales\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @nav \nSELECT 1;"), ["header/empty-nav"]);
+        assert_eq!(
+            codes(&format!("-- @nav {}\n", "x".repeat(25))),
+            ["header/long-nav"]
+        );
+        assert!(codes(&format!("-- @nav {}\n", "x".repeat(24))).is_empty());
         assert_eq!(
             codes("-- @certified 2026-02-30\n"),
             ["header/bad-certified"]
@@ -3751,6 +3788,42 @@ mod design_tests {
             ]
         );
         assert!(d[0].1.message.contains("a.sql"), "{}", d[0].1.message);
+        // #355: the folder check is on nav_label() (nav, else title), not
+        // the raw title — so an @nav tells two same-titled dashboards
+        // apart, and a colliding @nav still catches them even with
+        // different titles (either direction).
+        let d = folder_diags(&[
+            f("x.sql", "-- @title Sales\n-- @nav Weekly\nSELECT 1;"),
+            f("y.sql", "-- @title Sales\n-- @nav Monthly\nSELECT 1;"),
+        ]);
+        assert!(
+            d.is_empty(),
+            "same @title, distinct @nav: no longer a collision: {d:?}"
+        );
+        let d = folder_diags(&[
+            f("x.sql", "-- @title Weekly revenue\n-- @nav Risk\nSELECT 1;"),
+            f("y.sql", "-- @title Margin trend\n-- @nav risk\nSELECT 1;"),
+        ]);
+        let got: Vec<(&str, &str)> = d.iter().map(|(f, d)| (f.as_str(), d.code)).collect();
+        assert_eq!(
+            got,
+            [("y.sql", "folder/duplicate-title")],
+            "different titles, the same @nav (case-insensitive): a collision"
+        );
+        assert!(d[0].1.message.contains("x.sql"), "{}", d[0].1.message);
+        let d = folder_diags(&[
+            f("x.sql", "-- @title Supplier risk\nSELECT 1;"),
+            f(
+                "y.sql",
+                "-- @title Weekly revenue\n-- @nav Supplier risk\nSELECT 1;",
+            ),
+        ]);
+        let got: Vec<(&str, &str)> = d.iter().map(|(f, d)| (f.as_str(), d.code)).collect();
+        assert_eq!(
+            got,
+            [("y.sql", "folder/duplicate-title")],
+            "one's @nav matches the other's plain @title: still a collision"
+        );
     }
 
     #[test]

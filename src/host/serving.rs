@@ -865,6 +865,12 @@ pub struct Param {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DashboardMeta {
     pub title: String,
+    /// `-- @nav <short label>`: the compact form of `title` for a nav bar
+    /// entry or a start-page card — `title` stays the page's own heading
+    /// and business-question phrasing; `None` when missing or empty, in
+    /// which case every nav/card reader falls back to `title` (see
+    /// [`DashboardMeta::nav_label`]).
+    pub nav: Option<String>,
     pub params: Vec<Param>,
     pub refresh: u32,
     /// Extensions to `LOAD` before serving (`-- @load name`), identifier-only.
@@ -896,13 +902,22 @@ pub struct DashboardMeta {
 }
 
 impl DashboardMeta {
-    /// A served folder's nav entry: `{id, title, group, tags, description,
-    /// owner, certified}` (`window.__served.nav`).
+    /// A served folder's nav entry: `{id, title, nav, group, tags,
+    /// description, owner, certified}` (`window.__served.nav`). `nav` is
+    /// `null` without `-- @nav`; a reader shows `nav || title` (see
+    /// [`DashboardMeta::nav_label`]).
     pub fn nav_json(&self, id: &str) -> serde_json::Value {
         serde_json::json!({
-            "id": id, "title": self.title, "group": self.group, "tags": self.tags,
-            "description": self.description, "owner": self.owner, "certified": self.certified,
+            "id": id, "title": self.title, "nav": self.nav, "group": self.group,
+            "tags": self.tags, "description": self.description, "owner": self.owner,
+            "certified": self.certified,
         })
+    }
+
+    /// The compact nav/card label: `-- @nav` when set, else `-- @title`
+    /// (which itself falls back to the file id — see [`parse_dashboard_meta`]).
+    pub fn nav_label(&self) -> &str {
+        self.nav.as_deref().unwrap_or(&self.title)
     }
 
     /// The sort key both `load_dashboards` (`serve` bin and the extension)
@@ -978,6 +993,9 @@ pub fn valid_iso_date(s: &str) -> bool {
 pub const MAX_TAGS: usize = 10;
 /// A `-- @group` longer than this (in characters) is linted.
 pub const MAX_GROUP_CHARS: usize = 80;
+/// A `-- @nav` longer than this (in characters) is linted — it is meant to
+/// be shorter than the `-- @title` it stands in for in a nav bar or card.
+pub const MAX_NAV_CHARS: usize = 24;
 
 /// The value of a `-- @<name>` header line (`None` when `line` is something
 /// else). The value may be empty: `-- @group` alone gives `Some("")`.
@@ -1004,11 +1022,12 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|t| !t.is_empty())
 }
 
-/// Parse `-- @title …`, `-- @refresh <s>`, `-- @param name [a, b] = a`,
-/// `-- @load <extension>`, `-- @vars a, b`, `-- @group a / b`, `-- @tags a, b`,
-/// `-- @description <text>`, `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`,
-/// `-- @order N` header comments (a repeated `@group` wins over the earlier
-/// one; `@tags` lines add up). A `@param` or
+/// Parse `-- @title …`, `-- @nav <short label>`, `-- @refresh <s>`,
+/// `-- @param name [a, b] = a`, `-- @load <extension>`, `-- @vars a, b`,
+/// `-- @group a / b`, `-- @tags a, b`, `-- @description <text>`,
+/// `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`, `-- @order N` header
+/// comments (a repeated `@group`/`@nav` wins over the earlier one; `@tags`
+/// lines add up). A `@param` or
 /// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
 /// never viewer-settable.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
@@ -1020,6 +1039,8 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
         let l = line.trim();
         if let Some(r) = l.strip_prefix("-- @title ") {
             m.title = r.trim().to_string();
+        } else if let Some(r) = header_value(l, "nav") {
+            m.nav = Some(r.to_string()).filter(|s| !s.is_empty());
         } else if let Some(r) = header_value(l, "group") {
             m.group = normalize_group(r);
         } else if let Some(r) = header_value(l, "description") {
@@ -1641,6 +1662,27 @@ mod tests {
         assert_eq!(j["owner"], "Finance team <fin@example.com>");
         assert_eq!(j["certified"], "2026-10-15");
         assert!(j["group"].is_null() && j["tags"].as_array().unwrap().is_empty());
+        // #355: -- @nav is a short label distinct from -- @title; without
+        // one, nav_label falls back to the title (which itself falls back
+        // to the file id — see the top of this function).
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @title Which products depend on this supplier, and how badly?\n\
+             -- @nav Supplier risk\nSELECT 1;",
+        );
+        assert_eq!(m.nav.as_deref(), Some("Supplier risk"));
+        assert_eq!(m.nav_label(), "Supplier risk");
+        assert_eq!(m.nav_json("s")["nav"], "Supplier risk");
+        let m = parse_dashboard_meta("s", "-- @title Ops board\nSELECT 1;");
+        assert_eq!(m.nav, None);
+        assert_eq!(m.nav_label(), "Ops board");
+        assert!(m.nav_json("s")["nav"].is_null());
+        // an empty @nav is no @nav, same as @owner/@group
+        let m = parse_dashboard_meta("s", "-- @nav \nSELECT 1;");
+        assert_eq!(m.nav, None);
+        // a later @nav wins over an earlier one, same as @title/@owner
+        let m = parse_dashboard_meta("s", "-- @nav First\n-- @nav Second\nSELECT 1;");
+        assert_eq!(m.nav.as_deref(), Some("Second"));
         let m = parse_dashboard_meta(
             "s",
             "-- @description Which stores sell\n-- @description  the most?\n-- @description\nSELECT 1;",

@@ -1038,6 +1038,13 @@ const FILE_SAMPLES = [
 // source: "example", sql}. Filled at boot (inline scripts, then the files).
 const EXAMPLES = [];
 
+// The compact nav bar / card label a dashboard shows (#355): `-- @nav`
+// when set, else the full title, else `fallback` (e.g. the file id). Used
+// everywhere a served nav, a start-page card or the examples sidebar would
+// otherwise show the full `-- @title` business question.
+function navLabel(nav, title, fallback = "") {
+  return nav || title || fallback;
+}
 // A name's slug — an example's stable id in `?dashboard=`
 // ("Who should sales call first?" → "who-should-sales-call-first").
 function slugify(name) {
@@ -1052,14 +1059,18 @@ function slugify(name) {
   return s || "dashboard";
 }
 // One example's entry; `meta` is dashboard_meta's result, `fallback` the
-// name when the script has no `-- @title`.
+// name when the script has no `-- @title`. `nav` is its `-- @nav` short
+// label, when set — the sidebar shows it in place of `name`; the id, the
+// loaded page's own title and every other use of `name` stay the full
+// `-- @title`.
 function exampleEntry(sql, meta, fallback) {
   const name = String(meta?.title || "").trim() || fallback;
+  const nav = String(meta?.nav || "").trim();
   const tags = Array.isArray(meta?.tags) ? meta.tags : [];
   const owner = meta?.owner || "";
   const certified = meta?.certified || "";
   const description = meta?.description || "";
-  return { id: slugify(name), name, group: meta?.group || "", tags, description, owner, certified, source: "example", sql };
+  return { id: slugify(name), name, nav, group: meta?.group || "", tags, description, owner, certified, source: "example", sql };
 }
 function addExample(sql, fallback) {
   let meta = null;
@@ -2960,14 +2971,14 @@ const foldText = (s) =>
 function searchTerms(q) {
   return foldText(q).split(/\s+/).filter(Boolean);
 }
-// Does an entry ({name, title, description, group, tags, owner, certified})
-// match every word (in its name, page title, description, group, tags or
-// owner), carry every selected
+// Does an entry ({name, title, nav, description, group, tags, owner,
+// certified}) match every word (in its name, page title, nav label,
+// description, group, tags or owner), carry every selected
 // tag and — with `certified` — a certification?
 function dashMatches(e, terms, tags, certified = false) {
   if (certified && !e.certified) return false;
   if (tags.length && !tags.every((t) => e.tags.includes(t))) return false;
-  const hay = foldText([e.name, e.title, e.description, e.group, e.owner, ...(e.tags || [])].join("\n"));
+  const hay = foldText([e.name, e.title, e.nav, e.description, e.group, e.owner, ...(e.tags || [])].join("\n"));
   return terms.every((t) => hay.includes(t));
 }
 // The tag chips for the entries in view: the selected ones first, then the
@@ -3197,16 +3208,19 @@ function renderSidebar(focusId) {
   markActive();
   if (focusId) $(focusId)?.focus();
 }
-// A saved dashboard's header ({title, group, tags, description, owner,
-// certified}), cached per SQL text.
+// A saved dashboard's header ({title, nav, group, tags, description, owner,
+// certified}), cached per SQL text. `nav` is here only so a dashboard is
+// also found by its `-- @nav` text (dashMatches); "My dashboards" keeps
+// showing its own saved name, never `title` or `nav`.
 const dashMetaCache = new Map();
 function dashMetaOf(sql) {
   if (!dashMetaCache.has(sql)) {
-    let m = { title: "", group: "", tags: [], description: "", owner: "", certified: "" };
+    let m = { title: "", nav: "", group: "", tags: [], description: "", owner: "", certified: "" };
     try {
       const j = JSON.parse(dashboard_meta(sql));
       m = {
         title: j.title || "",
+        nav: j.nav || "",
         group: j.group || "",
         tags: j.tags || [],
         description: j.description || "",
@@ -3281,6 +3295,13 @@ function clearSideFilter(focus) {
   renderSidebar();
   if (focus) s?.focus();
 }
+// The (label, fullTitle) sideItem needs for a recent entry (#355): an
+// example shows its `-- @nav` label when it has one, with its full name as
+// the tooltip (like exRow); a saved ("my:") entry keeps showing its own
+// saved name either way — @nav never applies to it.
+function recentLabel(e) {
+  return e.source === "example" ? [navLabel(e.nav, e.name), e.name] : [e.name, e.name];
+}
 // Recently opened: the last 5 dashboards and examples, per browser.
 function renderRecent(nav, entries, open) {
   const row = document.createElement("div");
@@ -3305,7 +3326,8 @@ function renderRecent(nav, entries, open) {
   if (open)
     for (const e of entries) {
       const key = e.source === "example" ? "ex:" + e.id : myKey(e.id);
-      const it = sideItem(e.name, e.sql, key, e);
+      const [label, fullTitle] = recentLabel(e);
+      const it = sideItem(label, e.sql, key, e, fullTitle);
       it.classList.add("side-ex-item", "side-recent-item");
       if (e.source === "example") {
         const src = document.createElement("span");
@@ -3536,7 +3558,11 @@ function moveMenu(d) {
 // `key`: "ex:<id>" for an example, "my:<id>" for a saved dashboard.
 // `info`: the entry's header ({description, owner, certified, tags}): the
 // owner as a small line under the name, ✓ when certified; all in the tooltip.
-function sideItem(name, sql, key, info = {}) {
+// `name` is the displayed label (an example passes its `-- @nav` short
+// label here, in place of its full name, when it has one); `fullTitle`
+// (default `name`) is what the tooltip leads with, so a shortened label
+// still reveals the full name on hover.
+function sideItem(name, sql, key, info = {}, fullTitle = name) {
   const b = document.createElement("button");
   b.className = "side-item";
   b.dataset.name = name;
@@ -3546,7 +3572,7 @@ function sideItem(name, sql, key, info = {}) {
   s.textContent = name;
   // long names are clamped in the sidebar: the full name is the tooltip
   b.title = [
-    name,
+    fullTitle,
     info.description || "",
     info.owner ? `Owner: ${info.owner}` : "",
     info.certified ? `Certified on ${info.certified}` : "",
@@ -4492,7 +4518,10 @@ function exRow(entry) {
   const row = document.createElement("div");
   row.className = "side-row side-ex-row";
   row.dataset.key = "ex:" + entry.id;
-  const it = sideItem(entry.name, entry.sql, "ex:" + entry.id, entry);
+  // the sidebar shows `-- @nav` in place of the full name when it has one
+  // (#355); the full name stays the tooltip, the id, the download name and
+  // every menu action below.
+  const it = sideItem(navLabel(entry.nav, entry.name), entry.sql, "ex:" + entry.id, entry, entry.name);
   it.classList.add("side-ex-item"); // indent examples under their area
   const more = document.createElement("button");
   more.className = "side-more";
@@ -7450,9 +7479,9 @@ function markPending(grid, stmts, fresh) {
 
 // Served mode: a persistent nav bar linking every sibling dashboard (/d/<id>),
 // built from window.__served.nav. No-op unless there are 2+ dashboards.
-// The served nav's entries ({id, title, group, tags, owner, certified}) in
-// groups: the ungrouped first, then the groups by name — the order of the
-// server's `/` list. → [{group, items}] ("" = no group).
+// The served nav's entries ({id, title, nav, group, tags, owner, certified})
+// in groups: the ungrouped first, then the groups by name — the order of
+// the server's `/` list. → [{group, items}] ("" = no group).
 function servedNavGroups(nav) {
   const by = new Map();
   for (const d of nav || []) {
@@ -7472,17 +7501,20 @@ function servedNavGroups(nav) {
 // The persistent nav of a served folder (2+ dashboards): the links, grouped;
 // above SERVED_NAV_MENU_MIN dashboards one button that opens a grouped,
 // searchable list instead. A certified dashboard shows ✓; the owner is in
-// the link's tooltip.
+// the link's tooltip. A link shows `-- @nav` in place of `-- @title` when
+// set (#355) — the full title then leads the tooltip instead of repeating
+// the label.
 const SERVED_NAV_MENU_MIN = 9;
 function servedNavLink(d, served) {
   const a = document.createElement("a");
   a.href = "/d/" + encodeURIComponent(d.id);
-  a.textContent = d.title || d.id;
+  const label = navLabel(d.nav, d.title, d.id);
+  a.textContent = label;
   if (d.id === served.id) {
     a.className = "active"; // styled by web/theme-base.css (.served-nav)
     a.setAttribute("aria-current", "page");
   }
-  const tip = [d.description || "", d.owner ? `Owner: ${d.owner}` : "", d.certified ? `Certified on ${d.certified}` : "", (d.tags || []).length ? `Tags: ${d.tags.join(", ")}` : ""].filter(Boolean);
+  const tip = [d.nav ? d.title || d.id : "", d.description || "", d.owner ? `Owner: ${d.owner}` : "", d.certified ? `Certified on ${d.certified}` : "", (d.tags || []).length ? `Tags: ${d.tags.join(", ")}` : ""].filter(Boolean);
   if (tip.length) a.title = tip.join("\n");
   if (d.certified) {
     const c = document.createElement("span");
@@ -7531,7 +7563,7 @@ function servedNavMenu(served, groups) {
   btn.setAttribute("aria-expanded", "false");
   btn.setAttribute("aria-controls", "served-nav-menu");
   const cur = served.nav.find((d) => d.id === served.id);
-  btn.textContent = `${cur?.title || served.title || "Dashboards"} ▾`;
+  btn.textContent = `${navLabel(cur?.nav, cur?.title, served.title) || "Dashboards"} ▾`;
   btn.title = `${served.nav.length} dashboards — pick one`;
   const pop = document.createElement("div");
   pop.className = "served-nav-menu";
@@ -7562,7 +7594,7 @@ function servedNavMenu(served, groups) {
         o.textContent = d.owner;
         li.appendChild(o);
       }
-      li.dataset.q = foldText([d.title, d.id, group, d.description, d.owner, ...(d.tags || []), d.certified ? "certified" : ""].join(" "));
+      li.dataset.q = foldText([d.title, d.nav, d.id, group, d.description, d.owner, ...(d.tags || []), d.certified ? "certified" : ""].join(" "));
       ul.appendChild(li);
     }
     sec.appendChild(ul);

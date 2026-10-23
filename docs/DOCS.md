@@ -1899,6 +1899,7 @@ with the browser through wasm):
 
 ```sql skip
 -- @title  Weekly sales by region
+-- @nav    Weekly sales
 -- @group  Sales / EMEA
 -- @tags   weekly, kpi, emea
 -- @description Orders and revenue per region, week by week.
@@ -1910,6 +1911,7 @@ with the browser through wasm):
 | Line | Meaning |
 |---|---|
 | `-- @title <name>` | The dashboard's name: the sidebar entry of an example, the page title and nav entry on a server (without it, the file id). Name it as a plain business question. |
+| `-- @nav <short label>` | A compact nav bar / start-page card label, shown in place of `@title` there when set (`@title` still stays the page's own heading); without it, the nav bar and cards show `@title`. Use it when the business-question title would wrap in a nav bar. |
 | `-- @group <name>` | Where it sits: one group per dashboard, a ` / ` adds one level (`Sales / EMEA`, drawn as a sub-heading; deeper paths are kept as written and drawn flat). No `@group`, or an empty one, means ungrouped. |
 | `-- @tags a, b` | Free labels for finding it: trimmed, lower-cased, without duplicates, at most 10 (several `@tags` lines add up). |
 | `-- @description <text>` | One line on what the dashboard answers: the line under its title on a server's landing page, and part of the tooltip in the builder's sidebar and the served nav. Several `@description` lines are joined. |
@@ -1920,13 +1922,15 @@ with the browser through wasm):
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 
-`dashboard --check` warns about an empty `@group` (`header/empty-group`), one
-longer than 80 characters (`header/long-group`), more than 10 tags
-(`header/too-many-tags`), an empty `@owner` (`header/empty-owner`), a
-`@certified` that isn't a `YYYY-MM-DD` date (`header/bad-certified`), an
-`@order` that isn't a plain integer (`header/bad-order`) and a
-`@description` over 160 characters (`header/long-description`), reported as
-statement 0. `dashboard --check <folder>` lints every `.sql` of a
+`dashboard --check` warns about an empty `@nav` (`header/empty-nav`), one
+longer than 24 characters (`header/long-nav`), an empty `@group`
+(`header/empty-group`), one longer than 80 characters (`header/long-group`),
+more than 10 tags (`header/too-many-tags`), an empty `@owner`
+(`header/empty-owner`), a `@certified` that isn't a `YYYY-MM-DD` date
+(`header/bad-certified`), an `@order` that isn't a plain integer
+(`header/bad-order`) and a `@description` over 160 characters
+(`header/long-description`), reported as statement 0. `dashboard --check
+<folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
 same title (`folder/duplicate-title`, ignoring case) and a file name the
 servers skip (`folder/bad-id`).
@@ -2818,8 +2822,10 @@ of yours (the id is the slug of the name it was first saved under).
 
 Each example says where it belongs in its own header comments (`-- @title`,
 `-- @group`, `-- @tags`, see *Dashboard header comments*), so
-`web/examples/*.sql` is the single source of truth for the library. Open one
-directly with `?dashboard=<id>`: the id is the slug of its name
+`web/examples/*.sql` is the single source of truth for the library. A long,
+business-question `-- @title` can carry a shorter `-- @nav` for the sidebar
+row — the id, the tooltip and everything below still use the full name.
+Open one directly with `?dashboard=<id>`: the id is the slug of its name
 (`?dashboard=who-should-sales-call-first`). The name works too, and so do the
 names the examples had before they were grouped (`?dashboard=Overview`,
 `?dashboard=Chart%20gallery`, …), so old links keep opening the same example.
@@ -3221,11 +3227,13 @@ cross-dashboard nav bar.
 
 **Grouped folders.** The folder stays flat (ids are file names, so the id,
 policy and path rules don't change); the header comments group it. The nav
-(`window.__served.nav`, items `{id, title, group, tags, owner, certified}`,
-only the dashboards the viewer's scope allows) shows the ungrouped dashboards
-first, then each `-- @group` under its name; a certified one carries ✓, and
-the owner, the certification date and the tags are in the link's tooltip.
-Within a group (and among the ungrouped dashboards), the order is `-- @order
+(`window.__served.nav`, items `{id, title, nav, group, tags, owner,
+certified}`, only the dashboards the viewer's scope allows) shows the
+ungrouped dashboards first, then each `-- @group` under its name, each link
+labelled with its `-- @nav` when it has one (else `-- @title`, with the full
+title then leading the link's tooltip); a certified one carries ✓, and the
+owner, the certification date and the tags are also in the tooltip. Within a
+group (and among the ungrouped dashboards), the order is `-- @order
 N` ascending; dashboards without it sort after every explicitly ordered one,
 alphabetically by id — the server's old (and still the default) behaviour.
 This is also the order the start page's cards use, below.
@@ -3238,7 +3246,9 @@ is the installation's name, tagline and logo — `options.app` of
 `anofox_serve_dashboards`, `--app-name` / `--app-tagline` / `--app-logo` /
 `--app-logo-dark` of `serve --dashboards` — or *Dashboards* and a count. The dashboards are cards,
 grouped the same way as the nav (`Sales / EMEA`: an *EMEA* sub-heading under
-*Sales*, each group with its count); a card shows the title, the
+*Sales*, each group with its count); a card shows the `-- @nav` label when
+set — the full `@title` is then the card's tooltip — or just the `@title`
+when there is no `@nav` (and no such tooltip), plus the
 `@description`, the owner, **✓ certified**, the day its file last changed and
 the tags. From 9 dashboards on, a search field, tag chips and *✓ certified
 only* filter the cards. It lists only what the viewer's scope allows, like the
