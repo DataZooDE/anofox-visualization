@@ -20,7 +20,14 @@
 // (e) ?fit=0 leaves the ::FIT tab scrolling, (f) a cross-filter re-run keeps
 // the fitted sizes. --shots <dir> also writes the fitted tab at 1920×1080 in
 // the light and dark theme (fit-light-1920.png, fit-dark-1920.png).
+// (g) a ::FIT inside a ::SUBTAB fits only that sub-tab: the parent tab's own
+//     panels above it keep their authored height, the sub-tab's panels fill
+//     the window under the app bar and the sub-tab bar (the page may scroll
+//     to reach them; fit-subtab-1920.png). (h) the downloaded HTML (⤓ HTML)
+//     fits itself offline, scaling its pre-rendered SVGs by viewBox (no wasm
+//     to redraw them), and falls back on the overloaded tab.
 import { createRequire } from "module";
+import { readFileSync } from "fs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -54,6 +61,14 @@ SELECT 'fit'::FIT;
 SELECT 120::HEIGHT;
 ${Array.from({ length: 36 }, (_, k) => (k ? "SELECT 120::HEIGHT;\n" : "") + bars(k)).join("")}`;
 
+const SUB_SQL = `SELECT 'Main'::TAB;
+${chart(11)}${chart(12)}SELECT 'Fitted'::SUBTAB;
+SELECT 'fit'::FIT;
+${bars(13)}SELECT 360::HEIGHT;
+${chart(14)}${bars(15)}${chart(16)}SELECT 'Other'::SUBTAB;
+${chart(17)}SELECT 'Second'::TAB;
+${chart(18)}`;
+
 const browser = await chromium.launch();
 const settled = (page) =>
   page.waitForFunction(
@@ -65,11 +80,11 @@ const settled = (page) =>
 // re-fit has run.
 const paneReady = (page) =>
   page.waitForFunction(() => !document.querySelector(".dash .tabpane:not([style*='none']) .dp-lazy"), null, { timeout: 120000 }).then(() => page.waitForTimeout(400));
-async function open(viewport, query = "", theme = "") {
-  const page = await browser.newPage({ viewport, reducedMotion: "reduce", colorScheme: theme || "light" });
+async function open(viewport, query = "", theme = "", sql = SQL) {
+  const page = await browser.newPage({ viewport, reducedMotion: "reduce", colorScheme: theme || "light", acceptDownloads: true });
   const errs = [];
   page.on("pageerror", (e) => errs.push(String(e)));
-  await page.goto(`${base}${query}#sql=${b64(SQL)}`);
+  await page.goto(`${base}${query}#sql=${b64(sql)}`);
   await settled(page);
   await paneReady(page);
   return { page, errs };
@@ -228,6 +243,104 @@ for (const vp of [
   checkFitted(after, "(f) after the re-run:");
   check(!errs.length, `(f) no page errors: ${errs.join(" | ")}`);
   await page.close();
+}
+
+// (g) a ::FIT sub-tab: only its own panels fit
+{
+  const vp = { width: 1920, height: 1080 };
+  // the parent tab's panels (in the tab pane, outside the sub-tab wrap)
+  const parentHeights = (page) =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".dash .tabpane:not([style*='none']) .panel")].filter((p) => !p.closest(".subtabwrap")).map((p) => p.getBoundingClientRect().height)
+    );
+  const base0 = await open(vp, "?fit=0", "", SUB_SQL);
+  const before = await parentHeights(base0.page);
+  await base0.page.close();
+  const { page, errs } = await open(vp, "", "", SUB_SQL);
+  const after = await parentHeights(page);
+  check(before.length === 2 && after.length === 2 && before.every((h, k) => Math.abs(h - after[k]) < 0.5), `(g) the parent tab's panels keep their authored height (${before.map(Math.round)} vs ${after.map(Math.round)})`);
+  const g = await page.evaluate(() => {
+    const pane = document.querySelector(".subtabpane:not([style*='none'])");
+    const bar = pane.parentElement.previousElementSibling;
+    const head = document.querySelector("body > header").getBoundingClientRect().height;
+    const pad = parseFloat(getComputedStyle(document.querySelector(".dash")).paddingBottom);
+    const bcs = getComputedStyle(bar);
+    const region = pane.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + parseFloat(bcs.marginTop);
+    const panels = [...pane.querySelectorAll(".panel")];
+    const charts = panels.map((p) => {
+      const holder = p.querySelector(":scope > .panel-svg");
+      const svg = holder.querySelector(":scope > svg");
+      return { vbH: svg.viewBox.baseVal.height, shownH: svg.getBoundingClientRect().height, vbW: svg.viewBox.baseVal.width, holderW: holder.getBoundingClientRect().width, over: p.scrollHeight > p.clientHeight + 1 };
+    });
+    return { state: document.body.dataset.dpFit, region, room: innerHeight - head - pad, n: panels.length, charts, fitted: panels.every((p) => p.classList.contains("dp-fit")), parentFitted: [...document.querySelectorAll(".tabpane .panel.dp-fit")].filter((p) => !p.closest(".subtabwrap")).length };
+  });
+  check(g.state === "on" && g.fitted && g.n === 4, `(g) the ::FIT sub-tab is fitted (${g.state}, ${g.n} panels)`);
+  check(g.parentFitted === 0, "(g) no parent-tab panel is resized");
+  check(g.region <= g.room + 1 && g.region >= g.room - 24, `(g) the sub-tab bar + its panels fill the window under the app bar (${Math.round(g.region)} of ${Math.round(g.room)} px)`);
+  check(g.charts.every((c) => Math.abs(c.vbH - c.shownH) <= 2 && Math.abs(c.vbW - c.holderW) <= 2 && !c.over), "(g) its charts are redrawn at their panels' size, nothing overflows");
+  // scrolled to the sub-tab: every one of its panels is on screen
+  await page.evaluate(() => {
+    const bar = document.querySelector(".subtabbar");
+    window.scrollTo(0, bar.getBoundingClientRect().top + window.scrollY - document.querySelector("body > header").getBoundingClientRect().height);
+  });
+  const vis = await page.evaluate(() =>
+    [...document.querySelectorAll(".subtabpane:not([style*='none']) .panel")].every((p) => {
+      const r = p.getBoundingClientRect();
+      return r.top >= 0 && r.bottom <= innerHeight + 1;
+    })
+  );
+  check(vis, "(g) scrolled to the sub-tab, all of its panels are inside the window");
+  if (shots) await page.screenshot({ path: `${shots}/fit-subtab-1920.png` });
+  // the other sub-tab (no ::FIT) is not fitted
+  await page.click(".subtabbar .subtab-btn:text-is('Other')");
+  await page.waitForTimeout(400);
+  check((await page.evaluate(() => document.body.dataset.dpFit)) === "off", "(g) the sibling sub-tab without ::FIT is not fitted");
+  check(!errs.length, `(g) no page errors: ${errs.join(" | ")}`);
+  await page.close();
+}
+
+// (h) the downloaded HTML fits itself offline
+{
+  const { page, errs } = await open({ width: 1920, height: 1080 });
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.click("#dlhtml")]);
+  const html = readFileSync(await dl.path(), "utf8");
+  await page.close();
+  for (const vp of [
+    { width: 1366, height: 768 },
+    { width: 1920, height: 1080 },
+  ]) {
+    const tag = `(h) [export ${vp.width}×${vp.height}]`;
+    const off = await browser.newContext({ offline: true, viewport: vp, reducedMotion: "reduce" });
+    const op = await off.newPage();
+    const exportErrs = [];
+    op.on("pageerror", (e) => exportErrs.push(String(e)));
+    await op.route("**/*", (r) => (r.request().url().startsWith("http") ? (r.abort(), undefined) : r.continue()));
+    await op.setContent(html, { waitUntil: "load" });
+    await op.waitForTimeout(300);
+    const m = await measure(op);
+    check(m.state === "on" && !m.scroll && inView(m), `${tag} the ::FIT tab fits (${m.state}, scroll ${m.scroll})`);
+    const svgs = await op.evaluate(() =>
+      [...document.querySelectorAll(".dash .panel.dp-fit")].filter((p) => p.getClientRects().length).map((p) => {
+        const holder = p.querySelector(":scope > .panel-svg");
+        const svg = holder && holder.querySelector(":scope > svg");
+        if (!svg) return null;
+        const r = svg.getBoundingClientRect();
+        return { scaled: svg.hasAttribute("data-dp-scaled"), attrH: +svg.getAttribute("height"), shownH: r.height, par: svg.getAttribute("preserveAspectRatio") || "", transform: getComputedStyle(svg).transform, fits: r.bottom <= p.getBoundingClientRect().bottom + 0.5 };
+      }).filter(Boolean)
+    );
+    check(svgs.length >= 3 && svgs.every((v) => v.scaled && Math.abs(v.attrH - v.shownH) <= 1 && v.fits), `${tag} each chart's SVG is re-scaled to its fitted panel by its height / viewBox: ${JSON.stringify(svgs.map((v) => [v.attrH, Math.round(v.shownH)]))}`);
+    check(svgs.every((v) => !/none/.test(v.par) && (v.transform === "none" || v.transform === "")), `${tag} uniformly (no preserveAspectRatio="none"), no CSS transform`);
+    await op.getByRole("button", { name: "Crowded", exact: true }).click();
+    await op.waitForTimeout(300);
+    const c = await measure(op);
+    check(c.state === "skipped" && c.scroll && c.note, `${tag} the overloaded tab falls back to scrolling with the notice`);
+    await op.getByRole("button", { name: "Details", exact: true }).click();
+    await op.waitForTimeout(300);
+    check((await measure(op)).state === "off", `${tag} the tab without ::FIT is not fitted`);
+    check(!exportErrs.length, `${tag} no page errors: ${exportErrs.join(" | ")}`);
+    await off.close();
+  }
+  check(!errs.length, `(h) no page errors: ${errs.join(" | ")}`);
 }
 
 // screenshots of the fitted tab (light / dark)
