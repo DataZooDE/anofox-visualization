@@ -340,11 +340,33 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 - A fresh connection per request: one viewer's variables or temp objects never
   leak into another's. Setup statements (`CREATE TEMP …`) of the dashboard are
   re-run per request; only TEMP objects can be created (the data is read-only),
-  so materialise anything heavy before serving.
+  so materialise anything heavy before serving. A `CREATE TEMP TABLE … AS` in
+  setup is rebuilt on every connection that runs the setup (without warm
+  connections: every panel request, #387); prefer `CREATE TEMP VIEW`
+  (`dashboard --check <folder>` warns: `folder/setup-table`).
+- **Warm connections** (`warm`, #388). After a clean panel request, its
+  connection, setup already run, waits idle for the next request with the
+  same key. The key is the viewer's login (claims, and with them a policy's
+  per-viewer views), the dashboard, how far into its setup the panel sits,
+  every credential-locked variable, and the values of the request variables
+  that setup reads (the #210 analysis; every variable when it can't tell).
+  So only a request whose fresh connection would end in the same state gets
+  one. On reuse the server resets the variables the previous request set and
+  this one doesn't, sets this request's, and runs the setup's own `SET`s again.
+  A connection is never kept after an error, a timeout, a superseded request
+  or a failing setup statement, nor for a panel with a `-- @requires` on the
+  way (that check depends on files). At most `warm` connections are kept
+  (default: `threads`; `0` = off; least recently used first out). They belong
+  to the snapshot, so a refresh drops them. Each holds its setup's TEMP
+  tables in memory: count `warm` × the largest setup table against
+  `memory_limit`. Like a cache hit, a reused connection answers faster. Since
+  the key includes the login, that tells a viewer only about their own earlier
+  requests (or, without `auth`, that someone asked with the same values).
 - Options (third argument, JSON): `max_rows` (default 100,000 — exceeding it is
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),
-  `threads` (HTTP worker pool = concurrent requests, default 4), `cache_mb`
+  `threads` (HTTP worker pool = concurrent requests, default 4), `warm` (see
+  above), `cache_mb`
   (see below), `attach`, `load`, `hosts` (see below), `refresh_s`, `data`,
   `path_vars` (see above), `auth`, `log`, `log_vars` (see
   [Login via an auth proxy](#login-via-an-auth-proxy-access-control-p1)),

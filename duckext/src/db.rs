@@ -226,8 +226,20 @@ impl Conn {
         timeout: Duration,
         f: impl FnOnce(&Conn) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_deadline_fired(timeout, f).0
+    }
+
+    /// [`Conn::with_deadline`], also telling whether the watchdog fired —
+    /// even when `f` still returned `Ok` (it finished as the deadline hit), a
+    /// fired interrupt may be pending on the connection, so it must not be
+    /// reused.
+    pub fn with_deadline_fired<T>(
+        &self,
+        timeout: Duration,
+        f: impl FnOnce(&Conn) -> Result<T, String>,
+    ) -> (Result<T, String>, bool) {
         if timeout.is_zero() {
-            return f(self);
+            return (f(self), false);
         }
         let (tx, rx) = mpsc::channel::<()>();
         let intr = self.interrupter();
@@ -242,13 +254,14 @@ impl Conn {
         let r = f(self);
         let _ = tx.send(());
         let fired = watchdog.join().unwrap_or(false);
-        match r {
+        let r = match r {
             Err(_) if fired => Err(format!(
                 "query timed out after {:.1}s",
                 timeout.as_secs_f64()
             )),
             other => other,
-        }
+        };
+        (r, fired)
     }
 }
 

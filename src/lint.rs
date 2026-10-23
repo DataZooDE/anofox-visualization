@@ -73,7 +73,9 @@ pub struct Diagnostic {
     /// `header/empty-nav` | `header/long-nav`. A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
-    /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id`.
+    /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
+    /// `folder/setup-table` (a setup `CREATE TABLE … AS`, rebuilt on every
+    /// new server connection when served).
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
@@ -1754,8 +1756,61 @@ pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
         } else {
             labels.push((label, file.clone()));
         }
+        // The locked server runs a panel's setup on every connection that
+        // serves it (#387; warm connections, #388, cut that to a new
+        // connection or a changed variable the setup reads), so a setup
+        // statement that materialises a table is rebuilt there and held in
+        // memory per kept connection; a view costs only what each panel reads.
+        for (i, p) in sql::plan(script).iter().enumerate() {
+            if p.setup && materialises_table(&p.sql) {
+                out.push((
+                    file.clone(),
+                    Diagnostic {
+                        severity: Severity::Warning,
+                        stmt: i,
+                        code: "folder/setup-table",
+                        message: "served, this setup `CREATE TABLE … AS` is rebuilt on every \
+                                  new server connection (each kept connection, and whenever a \
+                                  variable it reads changes) and held in memory by each; use \
+                                  `CREATE VIEW` instead, or build the table into the database \
+                                  the server opens"
+                            .to_string(),
+                        sql: p.sql.clone(),
+                    },
+                ));
+            }
+        }
     }
     out
+}
+
+/// `CREATE [OR REPLACE] [TEMP | TEMPORARY] TABLE [IF NOT EXISTS] … AS …`:
+/// a statement that materialises a query's result (leading comments allowed).
+fn materialises_table(sql: &str) -> bool {
+    let body: String = sql
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let toks: Vec<String> = body
+        .split(|c: char| c.is_whitespace() || c == '(' || c == ';')
+        .filter(|t| !t.is_empty())
+        .map(str::to_ascii_uppercase)
+        .collect();
+    let mut t = toks.iter().map(String::as_str).peekable();
+    if t.next() != Some("CREATE") {
+        return false;
+    }
+    if t.peek() == Some(&"OR") {
+        t.next();
+        if t.next() != Some("REPLACE") {
+            return false;
+        }
+    }
+    if matches!(t.peek(), Some(&"TEMP") | Some(&"TEMPORARY")) {
+        t.next();
+    }
+    t.next() == Some("TABLE") && t.any(|w| w == "AS")
 }
 
 /// A one-line summary: `N error(s), M warning(s)` (`, K note(s)`); empty script-clean message.
@@ -3735,6 +3790,28 @@ mod design_tests {
             [(1, "requires/unknown-variable"), (1, "optional/missing")],
             "{d:?}"
         );
+    }
+
+    #[test]
+    fn folder_setup_table_warns() {
+        // #387: served, a materialising setup is rebuilt per panel request.
+        let script = "CREATE OR REPLACE TEMP TABLE sx AS SELECT 1 AS a;\n\
+                      CREATE TEMP VIEW v AS SELECT 1 AS a;\n\
+                      SELECT a::BARCHART, 'x'::XAXIS FROM sx;";
+        let d = folder_diags(&[("a.sql".to_string(), script.to_string())]);
+        let hits: Vec<_> = d
+            .iter()
+            .filter(|(_, x)| x.code == "folder/setup-table")
+            .collect();
+        assert_eq!(hits.len(), 1, "{d:?}");
+        assert_eq!(hits[0].1.stmt, 0);
+        assert!(materialises_table("-- note\ncreate table t as select 1"));
+        assert!(materialises_table(
+            "CREATE TABLE IF NOT EXISTS t AS (SELECT 1)"
+        ));
+        assert!(!materialises_table("CREATE TABLE t (a INT)"));
+        assert!(!materialises_table("CREATE VIEW v AS SELECT 1"));
+        assert!(!materialises_table("SELECT 'CREATE TABLE x AS'"));
     }
 
     #[test]

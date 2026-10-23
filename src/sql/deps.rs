@@ -313,9 +313,60 @@ pub fn script_deps(stmts: &[Stmt], implicit: &HashMap<String, Deps>) -> Vec<Deps
         .collect()
 }
 
+/// Per statement: the request variables the setup statements before it read
+/// (#388) — what a connection's state after that setup can depend on, so the
+/// locked server may reuse such a connection for another request with the
+/// same values. Every setup statement counts (all of them run), and a `SET` /
+/// `RESET` the analysis can't read makes it [`Deps::All`].
+pub fn setup_deps(stmts: &[Stmt], implicit: &HashMap<String, Deps>) -> Vec<Deps> {
+    let mut acc = Deps::default();
+    let mut out = Vec::with_capacity(stmts.len());
+    for s in stmts {
+        out.push(acc.clone());
+        if s.setup {
+            if matches!(classify(s.sql), Setup::Unknown) {
+                acc.extend(&Deps::All);
+            } else {
+                acc.extend(&reads(s.sql, implicit));
+                acc.extend(&requires_reads(s.requires));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_deps_collects_every_setup_read_before_a_statement() {
+        let st = |setup, sql| Stmt {
+            setup,
+            sql,
+            requires: &[],
+            tabs: &[],
+        };
+        let stmts = [
+            st(true, "SET VARIABLE a = coalesce(getvariable('a'), 1)"),
+            st(true, "CREATE TEMP TABLE w AS SELECT getvariable('k') AS v"),
+            st(false, "SELECT getvariable('b')"),
+            st(true, "SET VARIABLE x = 1; SET y = 2"),
+            st(false, "SELECT 1"),
+        ];
+        let d = setup_deps(&stmts, &HashMap::new());
+        assert_eq!(d[0], Deps::default());
+        assert_eq!(d[1], Deps::Vars(["a".to_string()].into_iter().collect()));
+        assert_eq!(
+            d[2],
+            Deps::Vars(["a".to_string(), "k".to_string()].into_iter().collect())
+        );
+        assert!(
+            !d[2].contains("b"),
+            "a panel's own reads are not setup reads"
+        );
+        assert_eq!(d[3], d[2]);
+    }
 
     fn v(names: &[&str]) -> Deps {
         Deps::Vars(names.iter().map(|s| s.to_lowercase()).collect())

@@ -52,7 +52,7 @@ use anofox_visualization::host::telemetry;
 use anofox_visualization::sql::deps::{self, Deps};
 use anofox_visualization::sql::requires::{self as rq, Requirement};
 use include_dir::{include_dir, Dir};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -491,6 +491,10 @@ pub struct LockedOptions {
     pub hosts: Vec<String>,
     /// Panel result cache size in bytes (`cache_mb`; 0 = off).
     pub cache_bytes: usize,
+    /// Idle connections kept with a dashboard's setup already run (`warm`,
+    /// #388; `None` = `threads`, 0 = off): a later panel request with the
+    /// same setup inputs reuses one instead of re-running the setup.
+    pub warm: Option<usize>,
     /// Rebuild the snapshot this often (`refresh_s`; `None` = never).
     pub refresh: Option<Duration>,
     /// A folder the panels may read (not write: see `check_read_only`) — the
@@ -566,6 +570,7 @@ impl Default for LockedOptions {
             theme: None,
             hosts: Vec::new(),
             cache_bytes: 64 << 20,
+            warm: None,
             refresh: None,
             data: None,
             path_vars: Vec::new(),
@@ -610,6 +615,10 @@ impl LockedOptions {
                 "timeout_ms" => o.timeout = Duration::from_millis(num()?),
                 "max_body_bytes" => o.max_body = num()?.min(64 << 20) as usize,
                 "threads" => o.threads = num()?.min(64) as usize,
+                "warm" => {
+                    let n = val.as_u64().ok_or("options.warm must be a non-negative integer")?;
+                    o.warm = Some(n.min(256) as usize);
+                }
                 "cache_mb" => {
                     let mb = val.as_u64().ok_or("options.cache_mb must be a non-negative integer")?;
                     o.cache_bytes = (mb.min(1 << 16) as usize) << 20;
@@ -720,7 +729,7 @@ impl LockedOptions {
                 "source" => {
                     o.source = Some(Arc::new(crate::source::parse(val)?));
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home, source)")),
+                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, warm, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home, source)")),
             }
         }
         // A response larger than the in-flight budget could never be sent.
@@ -877,7 +886,10 @@ impl Drop for SnapshotDir {
 
 /// The read-only snapshot a locked server queries.
 struct Snapshot {
-    // Field order = drop order: close the database before deleting its files.
+    // Field order = drop order: disconnect the warm connections, close the
+    // database, then delete its files.
+    /// Idle connections with a dashboard's setup already run (#388).
+    warm: WarmPool,
     db: Database,
     /// The database unqualified names resolve in (the source session's
     /// default database, or the first of `options.search_path`).
@@ -895,12 +907,60 @@ struct Snapshot {
     /// Per dashboard: a digest of `deps` (`window.__served.depsTag`, the
     /// `X-Anofox-Deps` response header).
     deps_tags: Vec<String>,
+    /// Per dashboard, per statement: the request variables the setup before
+    /// it reads ([`deps::setup_deps`]): what a warm connection is keyed on.
+    warm_deps: Vec<Vec<Deps>>,
     _dir: SnapshotDir,
 }
 
 struct Enforced {
     enf: Enforcer,
     scripts: Vec<Script>,
+}
+
+/// Idle request connections on which a dashboard's setup already ran
+/// (#388). The locked server runs a panel's setup for every panel request;
+/// a materialising setup statement (`CREATE TEMP TABLE … AS`) made every
+/// panel of a click rebuild it. A connection goes back here only after a
+/// clean run, keyed by everything that shaped it ([`warm_key`]): the next
+/// request with the same key gets a connection in the same state a fresh one
+/// would reach, without the setup. Least recently used first out; the
+/// snapshot owns the pool, so a refresh drops it.
+struct WarmPool {
+    idle: Mutex<VecDeque<Warm>>,
+    cap: usize,
+}
+
+struct Warm {
+    key: String,
+    conn: Conn,
+    /// The variables the last request `SET` on it (reset on reuse when the
+    /// next request doesn't set them).
+    set: Vec<String>,
+}
+
+impl WarmPool {
+    fn new(cap: usize) -> WarmPool {
+        WarmPool {
+            idle: Mutex::new(VecDeque::new()),
+            cap,
+        }
+    }
+    fn take(&self, key: &str) -> Option<Warm> {
+        let mut q = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let i = q.iter().rposition(|w| w.key == key)?;
+        q.remove(i)
+    }
+    fn put(&self, w: Warm) {
+        if self.cap == 0 {
+            return;
+        }
+        let mut q = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        q.push_back(w);
+        while q.len() > self.cap {
+            q.pop_front();
+        }
+    }
 }
 
 /// Check the access policy against a new snapshot and rewrite every dashboard
@@ -956,9 +1016,9 @@ fn analyze_deps(snap: &mut Snapshot, dashboards: &[Dash]) -> Result<(), String> 
         })
         .collect();
     let implicit = deps::catalog_reads(&objects);
-    let (mut all, mut tags) = (Vec::new(), Vec::new());
+    let (mut all, mut tags, mut warm) = (Vec::new(), Vec::new(), Vec::new());
     for (di, d) in dashboards.iter().enumerate() {
-        let of = |stmts: &[(bool, String)]| {
+        let of = |stmts: &[(bool, String)], f: fn(&[deps::Stmt], &_) -> Vec<Deps>| {
             let view: Vec<deps::Stmt> = stmts
                 .iter()
                 .enumerate()
@@ -969,19 +1029,31 @@ fn analyze_deps(snap: &mut Snapshot, dashboards: &[Dash]) -> Result<(), String> 
                     tabs: d.tabs.get(i).map_or(&[][..], Vec::as_slice),
                 })
                 .collect();
-            deps::script_deps(&view, &implicit)
+            f(&view, &implicit)
         };
-        let mut ds = of(&d.stmts);
+        let mut ds = of(&d.stmts, deps::script_deps);
+        let mut ws = of(&d.stmts, deps::setup_deps);
         if let Some(p) = &snap.policy {
-            for (a, b) in ds.iter_mut().zip(of(&p.scripts[di].stmts)) {
+            for (a, b) in ds
+                .iter_mut()
+                .zip(of(&p.scripts[di].stmts, deps::script_deps))
+            {
+                a.extend(&b);
+            }
+            for (a, b) in ws
+                .iter_mut()
+                .zip(of(&p.scripts[di].stmts, deps::setup_deps))
+            {
                 a.extend(&b);
             }
         }
         tags.push(deps_tag(&ds));
         all.push(ds);
+        warm.push(ws);
     }
     snap.deps = all;
     snap.deps_tags = tags;
+    snap.warm_deps = warm;
     Ok(())
 }
 
@@ -2105,12 +2177,14 @@ fn build_snapshot(
     }
     Ok((
         Snapshot {
+            warm: WarmPool::new(opts.warm.unwrap_or(opts.threads)),
             db,
             default_db,
             enter,
             policy: None,
             deps: Vec::new(),
             deps_tags: Vec::new(),
+            warm_deps: Vec::new(),
             _dir: dir,
         },
         warnings,
@@ -2643,6 +2717,8 @@ fn locked_panel(
     }
     let key = panel_key(&r, claims, &key_deps);
     let t0 = std::time::Instant::now();
+    let warm = warm_key(dash, gen.snap.warm_deps.get(di), stmts, &r, claims, scope);
+    let warmed = AtomicBool::new(false);
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
         run_panel(
             st,
@@ -2656,6 +2732,8 @@ fn locked_panel(
             claims,
             abort,
             charge,
+            warm.as_deref(),
+            &warmed,
         )
     });
     info.cache = Some(match how {
@@ -2666,10 +2744,15 @@ fn locked_panel(
     if how == Served::Executed {
         let cancelled = matches!(&out, Err((code, _)) if *code == SUPERSEDED.0);
         eprintln!(
-            "[anofox-serve] ran {}#{} in {} ms{}",
+            "[anofox-serve] ran {}#{} in {} ms{}{}",
             r.dashboard,
             r.panel,
             t0.elapsed().as_millis(),
+            if warmed.load(Ordering::Relaxed) {
+                " (warm)"
+            } else {
+                ""
+            },
             if cancelled { " (superseded)" } else { "" }
         );
     }
@@ -2680,6 +2763,33 @@ fn locked_panel(
 /// variables, then the login's claims and `anofox_data` — set by the server
 /// after the viewer's (who can't name them: both are reserved when the
 /// request is parsed).
+/// [`request_sets`] with each variable's name (to reset it on a warm
+/// connection's next request).
+fn request_sets_named(
+    r: &sv::PanelRequest,
+    claims: Option<&Claims>,
+    data: Option<&Path>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = r
+        .vars
+        .iter()
+        .map(|(name, lit)| (name.clone(), format!("SET VARIABLE {name} = {lit}")))
+        .collect();
+    for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
+        out.push((name.to_string(), format!("SET VARIABLE {name} = {lit}")));
+    }
+    if let Some(data) = data {
+        out.push((
+            DATA_VAR.to_string(),
+            format!(
+                "SET VARIABLE {DATA_VAR} = {}",
+                sql_string_literal(&data.to_string_lossy())
+            ),
+        ));
+    }
+    out
+}
+
 fn request_sets(r: &sv::PanelRequest, claims: Option<&Claims>, data: Option<&Path>) -> Vec<String> {
     let mut out: Vec<String> = r
         .vars
@@ -2719,6 +2829,8 @@ fn run_panel(
     claims: Option<&Claims>,
     abort: &crate::panel_cache::Abort,
     charge: &mut Charge,
+    warm_key: Option<&str>,
+    warmed: &AtomicBool,
 ) -> Result<String, (u16, String)> {
     let dash_id = dash.id.as_str();
     let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
@@ -2743,16 +2855,55 @@ fn run_panel(
         let cap = want.min(max_response);
         charge.hold(cap).map(|_| cap)
     };
-    let conn = gen.snap.db.connect().map_err(|e| (500, e))?;
-    // Declared after `conn`, so dropped before it: no interrupt after that.
+    // A warm connection (#388): its setup already ran with the same inputs.
+    let warm = warm_key.and_then(|k| gen.snap.warm.take(k));
+    let reused = warm.is_some();
+    warmed.store(reused, Ordering::Relaxed);
+    let (conn, was_set) = match warm {
+        Some(w) => (w.conn, w.set),
+        None => (gen.snap.db.connect().map_err(|e| (500, e))?, Vec::new()),
+    };
+    let sets = request_sets_named(r, claims, st.opts.data.as_deref());
+    let mut setup_failed = false;
     let intr = conn.interrupter();
-    let Some(_registered) = abort.register(move || intr.interrupt()) else {
+    let Some(registered) = abort.register(move || intr.interrupt()) else {
         return Err(cancelled());
     };
-    conn.with_deadline(st.opts.timeout, |c| {
+    let (out, fired) = conn.with_deadline_fired(st.opts.timeout, |c| {
+        if reused {
+            // Back to what a fresh connection would hold: the previous
+            // request's variables this one doesn't set are reset, this
+            // request's are set, and the setup's own `SET`s run again after
+            // them (they win over a viewer's, as below).
+            for name in was_set
+                .iter()
+                .filter(|n| !sets.iter().any(|(m, _)| m.eq_ignore_ascii_case(n)))
+            {
+                c.exec(&format!("RESET VARIABLE {name}"))?;
+            }
+            for (_, set) in &sets {
+                c.exec(set)?;
+            }
+            for (setup, sql) in &stmts[..r.panel] {
+                // Best effort, as on a fresh connection (and then not kept).
+                if *setup && sets_variables(sql) {
+                    if let Err(e) = c.execute_prepared(sql, &[]) {
+                        setup_failed = true;
+                        eprintln!(
+                            "[anofox-serve] setup statement failed in '{dash_id}': {}",
+                            access::diag(&e)
+                        );
+                    }
+                }
+            }
+            if abort.abandoned() {
+                return Err(SUPERSEDED.1.to_string());
+            }
+            return run_panel_query(c, st, panel_sql, r, &mut grow);
+        }
         c.exec(&gen.snap.enter)?;
-        for set in request_sets(r, claims, st.opts.data.as_deref()) {
-            c.exec(&set)?;
+        for (_, set) in &sets {
+            c.exec(set)?;
         }
         // The policy's views, for this viewer (before any dashboard SQL). The
         // row filters read the claims set above; the column rules are decided
@@ -2789,6 +2940,7 @@ fn run_panel(
                 // Best effort, like the browser: a failing setup statement is
                 // reported in the log, the panel still runs.
                 if let Err(e) = c.execute_prepared(sql, &[]) {
+                    setup_failed = true;
                     eprintln!(
                         "[anofox-serve] setup statement failed in '{dash_id}': {}",
                         access::diag(&e)
@@ -2803,16 +2955,22 @@ fn run_panel(
         if !met(c, r.panel) {
             return Err(REQUIRES_MISSING.to_string());
         }
-        match &r.page {
-            Some(p) => {
-                let (q, params) = sv::page_sql(panel_sql, p);
-                let params: Vec<&str> = params.iter().map(String::as_str).collect();
-                json_rows(c, &q, &params, st.opts.max_rows, &mut grow)
-            }
-            None => json_rows(c, panel_sql, &[], st.opts.max_rows, &mut grow),
+        run_panel_query(c, st, panel_sql, r, &mut grow)
+    });
+    // No interrupt can reach the connection after this.
+    drop(registered);
+    // Pool it only after a clean run: no interrupt (a superseding viewer or
+    // the deadline) may be pending on it, and every setup statement ran.
+    if let Some(key) = warm_key {
+        if out.is_ok() && !fired && !abort.abandoned() && !setup_failed {
+            gen.snap.warm.put(Warm {
+                key: key.to_string(),
+                conn,
+                set: sets.into_iter().map(|(n, _)| n).collect(),
+            });
         }
-    })
-    .map_err(|e| {
+    }
+    out.map_err(|e| {
         if abort.abandoned() {
             cancelled()
         } else if e == REQUIRES_MISSING {
@@ -2835,6 +2993,93 @@ fn run_panel(
             (400, redact(e, st.opts.data.as_deref()))
         }
     })
+}
+
+/// The panel query itself (a `::PAGED` page or the whole result), as JSON rows.
+fn run_panel_query(
+    c: &Conn,
+    st: &Locked,
+    panel_sql: &str,
+    r: &sv::PanelRequest,
+    grow: &mut dyn FnMut(usize, usize) -> Result<usize, String>,
+) -> Result<String, String> {
+    match &r.page {
+        Some(p) => {
+            let (q, params) = sv::page_sql(panel_sql, p);
+            let params: Vec<&str> = params.iter().map(String::as_str).collect();
+            json_rows(c, &q, &params, st.opts.max_rows, grow)
+        }
+        None => json_rows(c, panel_sql, &[], st.opts.max_rows, grow),
+    }
+}
+
+/// Does a setup statement set or reset a variable (re-run on a warm
+/// connection, after the request's own variables)? Conservative: any
+/// statement starting with `SET` or `RESET`.
+fn sets_variables(sql: &str) -> bool {
+    let head: String = sql
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| !l.starts_with("--") && !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let w = head
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    w == "SET" || w == "RESET"
+}
+
+/// The key of a warm connection (#388) for this request, or `None` when the
+/// panel can't use one: no setup worth keeping before it, or a `-- @requires`
+/// on the way (whether a gated statement runs depends on files, per request).
+/// Everything that shapes the connection is in it: the viewer's login (claims,
+/// and through them a policy's per-viewer views), the dashboard and how far
+/// into its setup the panel sits, and the request variables the setup can
+/// read (`setup_deps`: per statement, [`deps::setup_deps`]; `All` when
+/// unsure) plus every credential-locked
+/// variable. Two requests with the same key get identical setup results.
+fn warm_key(
+    dash: &Dash,
+    setup_deps: Option<&Vec<Deps>>,
+    stmts: &[(bool, String)],
+    r: &sv::PanelRequest,
+    claims: Option<&Claims>,
+    scope: Option<&Scope>,
+) -> Option<String> {
+    let before = stmts.get(..r.panel)?;
+    let last = before.iter().rposition(|(setup, _)| *setup)?;
+    if !before
+        .iter()
+        .any(|(setup, sql)| *setup && !sets_variables(sql))
+    {
+        return None;
+    }
+    if dash
+        .requires
+        .iter()
+        .take(r.panel + 1)
+        .any(|q| !q.is_empty())
+    {
+        return None;
+    }
+    let read = setup_deps
+        .and_then(|d| d.get(r.panel))
+        .unwrap_or(&Deps::All);
+    let locked =
+        |n: &str| scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(n)));
+    let mut vars: Vec<(String, &String)> = r
+        .vars
+        .iter()
+        .filter(|(n, _)| read.contains(n) || locked(n))
+        .map(|(n, lit)| (n.to_ascii_lowercase(), lit))
+        .collect();
+    vars.sort();
+    Some(format!(
+        "{:?}",
+        (claims.map(Claims::key), &r.dashboard, last, vars)
+    ))
 }
 
 /// The error of a panel whose `-- @requires` input is missing: the client
@@ -4242,5 +4487,118 @@ mod tests {
         }
         drop(d);
         assert!(!p.exists());
+    }
+
+    // #388: a warm connection's key.
+    fn warm_req(panel: usize, vars: &str) -> sv::PanelRequest {
+        sv::parse_panel_request(&format!(
+            r#"{{"dashboard":"d","panel":{panel},"vars":{vars}}}"#
+        ))
+        .unwrap()
+    }
+    fn warm_dash(n: usize) -> Dash {
+        let mut d = dash("d", "");
+        d.requires = vec![vec![]; n];
+        d
+    }
+
+    #[test]
+    fn warm_key_tracks_what_shapes_the_setup() {
+        let stmts = vec![
+            (
+                true,
+                "SET VARIABLE a = coalesce(getvariable('a'), 1)".to_string(),
+            ),
+            (
+                true,
+                "CREATE TEMP TABLE w AS SELECT getvariable('a') AS v".to_string(),
+            ),
+            (false, "SELECT v FROM w".to_string()),
+            (false, "SELECT getvariable('b')".to_string()),
+        ];
+        // Per statement: what the setup before it reads (deps::setup_deps).
+        let read_a = Deps::Vars(["a".to_string()].into_iter().collect());
+        let deps = vec![
+            Deps::default(),
+            read_a.clone(),
+            read_a.clone(),
+            read_a.clone(),
+        ];
+        let d = warm_dash(4);
+        let k = |p: usize, vars: &str| {
+            warm_key(&d, Some(&deps), &stmts, &warm_req(p, vars), None, None)
+        };
+        // Same setup inputs: the same key, whatever else the request sets.
+        assert!(k(3, r#"{"a":1,"b":5}"#).is_some());
+        assert_eq!(k(3, r#"{"a":1,"b":5}"#), k(3, r#"{"a":1,"b":6}"#));
+        assert_eq!(k(3, r#"{"a":1}"#), k(2, r#"{"a":1}"#), "same setup prefix");
+        // A different value of a variable the setup reads: another key.
+        assert_ne!(k(3, r#"{"a":1}"#), k(3, r#"{"a":2}"#));
+        // Unsure analysis (All): every variable counts.
+        let all = vec![Deps::All; 4];
+        let ka = |vars: &str| warm_key(&d, Some(&all), &stmts, &warm_req(3, vars), None, None);
+        assert_ne!(ka(r#"{"b":5}"#), ka(r#"{"b":6}"#));
+        // A viewer's login: never shared.
+        let c = |u: &str| Claims {
+            user: u.into(),
+            groups: vec![],
+            attrs: vec![],
+        };
+        let (ca, cb) = (c("ann"), c("bob"));
+        let r = warm_req(3, "{}");
+        assert_ne!(
+            warm_key(&d, Some(&deps), &stmts, &r, Some(&ca), None),
+            warm_key(&d, Some(&deps), &stmts, &r, Some(&cb), None)
+        );
+        // A credential-locked variable always counts, even unread.
+        let sc = |v: &str| Scope {
+            dashboards: None,
+            vars: vec![("b".into(), v.into())],
+        };
+        let (s5, s6) = (sc("5"), sc("6"));
+        let rb = |v: &str| warm_req(3, &format!(r#"{{"b":{v}}}"#));
+        assert_ne!(
+            warm_key(&d, Some(&deps), &stmts, &rb("5"), None, Some(&s5)),
+            warm_key(&d, Some(&deps), &stmts, &rb("6"), None, Some(&s6))
+        );
+    }
+
+    #[test]
+    fn warm_key_none_without_setup_or_with_requires() {
+        let only_set = vec![
+            (true, "SET VARIABLE a = 1".to_string()),
+            (false, "SELECT 1".to_string()),
+        ];
+        let d = warm_dash(2);
+        assert_eq!(
+            warm_key(&d, None, &only_set, &warm_req(1, "{}"), None, None),
+            None
+        );
+        let stmts = vec![
+            (true, "CREATE TEMP VIEW v AS SELECT 1".to_string()),
+            (false, "SELECT * FROM v".to_string()),
+        ];
+        assert!(warm_key(&d, None, &stmts, &warm_req(1, "{}"), None, None).is_some());
+        assert_eq!(
+            warm_key(&d, None, &stmts, &warm_req(0, "{}"), None, None),
+            None
+        );
+        let mut gated = warm_dash(2);
+        gated.requires[0] =
+            anofox_visualization::sql::requires::parse("-- @requires x.parquet\nSELECT 1");
+        assert!(!gated.requires[0].is_empty());
+        assert_eq!(
+            warm_key(&gated, None, &stmts, &warm_req(1, "{}"), None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn sets_variables_is_a_set_or_reset() {
+        assert!(sets_variables("SET VARIABLE a = 1"));
+        assert!(sets_variables("-- default\n  reset variable a"));
+        assert!(!sets_variables("CREATE TEMP TABLE t AS SELECT 1"));
+        assert!(!sets_variables("SELECT 'SET'"));
+        assert!(!sets_variables("SETTINGS_TABLE"));
     }
 }

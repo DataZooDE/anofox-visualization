@@ -619,3 +619,34 @@ grep -q "epoch 2" "$T/out" || fail "FK refresh: $(cat "$T/out")"
 stop
 [ "$before" = "$(fkstate)" ] || fail "FK: the source database changed"
 echo "OK: a database with foreign keys is snapshotted table by table, parents first; a self-referencing table without its constraints; the source is untouched"
+
+# #388: warm connections. A panel request reuses an idle connection whose
+# setup ran with the same setup inputs; it must answer exactly as a fresh one.
+mkdir -p "$T/wdash"
+cat > "$T/wdash/w.sql" <<'SQL'
+-- @vars a, b
+SET VARIABLE a = coalesce(getvariable('a'), 1);
+CREATE OR REPLACE TEMP TABLE w AS SELECT getvariable('a') * 10 AS v;
+SELECT v::BIGINT AS v ::METRIC FROM w;
+SELECT coalesce(getvariable('b'), -1)::BIGINT AS b ::METRIC FROM w;
+SQL
+val() { grep -oE '"c0":-?[0-9]+' "$T/body" | head -1 | cut -d: -f2; }
+warms() { grep -c "ran w#.*(warm)" "$T/out" || true; }
+start "$T/main.duckdb" "-readonly" "SELECT anofox_serve_dashboards($(q "$T/wdash"), $PORT, '{\"cache_mb\":0}');" || fail "warm: server"
+[ "$(panel 2 '{"a":1}' w)" = 200 ] && [ "$(val)" = 10 ] || fail "warm: first a=1: $(cat "$T/body")"
+[ "$(panel 2 '{"a":1}' w)" = 200 ] && [ "$(val)" = 10 ] || fail "warm: second a=1: $(cat "$T/body")"
+[ "$(warms)" -ge 1 ] || fail "warm: the second a=1 request didn't reuse a connection: $(cat "$T/out")"
+[ "$(panel 2 '{"a":2}' w)" = 200 ] && [ "$(val)" = 20 ] || fail "warm: a=2 got another a's setup: $(cat "$T/body")"
+[ "$(panel 2 '{"a":1}' w)" = 200 ] && [ "$(val)" = 10 ] || fail "warm: a=1 after a=2: $(cat "$T/body")"
+[ "$(panel 2 '{}' w)" = 200 ] && [ "$(val)" = 10 ] || fail "warm: the setup's default: $(cat "$T/body")"
+# A variable the setup doesn't read: same warm connection, but the previous
+# request's value must not linger.
+[ "$(panel 3 '{"a":1,"b":5}' w)" = 200 ] && [ "$(val)" = 5 ] || fail "warm: b=5: $(cat "$T/body")"
+[ "$(panel 3 '{"a":1}' w)" = 200 ] && [ "$(val)" = -1 ] || fail "warm: b from an earlier request lingered: $(cat "$T/body")"
+[ "$(panel 3 '{"a":1,"b":7}' w)" = 200 ] && [ "$(val)" = 7 ] || fail "warm: b=7: $(cat "$T/body")"
+stop
+start "$T/main.duckdb" "-readonly" "SELECT anofox_serve_dashboards($(q "$T/wdash"), $PORT, '{\"cache_mb\":0,\"warm\":0}');" || fail "warm 0: server"
+for _ in 1 2 3; do [ "$(panel 2 '{"a":1}' w)" = 200 ] && [ "$(val)" = 10 ] || fail "warm 0: $(cat "$T/body")"; done
+[ "$(warms)" = 0 ] || fail "warm 0 still reused a connection: $(cat "$T/out")"
+stop
+echo "OK: warm connections answer like fresh ones (setup inputs keyed, other variables reset; warm: 0 turns them off)"
