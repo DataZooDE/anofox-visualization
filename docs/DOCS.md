@@ -1959,6 +1959,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
 | `SELECT 1::ENDVIEW;` | close a `::VIEW` group (optional when a `::TAB`/`::SUBTAB`/`::SECTION` or the end of the script follows) |
+| `SELECT 'fit'::FIT;` | the `::TAB` / `::SUBTAB` / `::VIEW` it is in fits the window, no page scroll — see *Fit to screen* below |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
 | `SELECT day::XAXIS, 'Name'::TRACK …;` right after a chart | a thin strip **under** that chart, in its panel, on the same x axis (see [strips](#fans-shaded-regions-and-strips-under-a-chart)) |
 
@@ -1980,6 +1981,44 @@ on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.
+
+### Fit to screen (`::FIT`)
+
+A wall display or a one-screen overview should not scroll. `SELECT 'fit'::FIT;`
+right after a `::TAB` (or `::SUBTAB` / `::VIEW`) makes **that** section fill the
+browser window while it is the one shown; other tabs scroll as usual. With no
+tabs at all, a `::FIT` anywhere fits the whole dashboard.
+
+```sql
+SELECT 'Overview'::TAB;
+SELECT 'fit'::FIT;                       -- this tab fills the window, no page scroll
+SELECT count(*)::METRIC, 'Orders'::LABEL FROM orders;
+SELECT sum(amount)::MONEY, 'Revenue'::LABEL FROM orders;
+SELECT region::XAXIS, sum(amount)::BARCHART FROM orders GROUP BY ALL;
+SELECT 360::HEIGHT;
+SELECT day::XAXIS, sum(amount)::LINECHART FROM orders GROUP BY ALL;
+
+SELECT 'Details'::TAB;                   -- no ::FIT: scrolls as before
+SELECT * ::TABLE FROM orders;
+```
+
+- The height under the app bar and the tab bar is measured, and the rows of
+  panels share it **in the ratio of their heights** (`::HEIGHT`, else the
+  default) — a `360::HEIGHT` row stays taller than a default one.
+- Charts are **drawn again at their new size** (text and lines stay their real
+  size, nothing is stretched); a resize, a rotation, entering full screen and
+  switching tabs re-fit (cross-filtering keeps the fitted sizes).
+- Tables, `::PAGED` tables and text boxes keep their content and **scroll
+  inside their panel**; KPI tiles keep at least ~96 px.
+- If a panel would get under ~120 px the tab scrolls as usual and a small
+  notice says so — `dashboard --check` warns about this ahead of time
+  (`layout/fit-too-many`, judged at 1366×768), and about a `::FIT` whose
+  scope is unclear (`layout/fit-ambiguous`: before the first `::TAB` of a
+  tabbed dashboard, twice for one tab, or cast beside a panel's columns).
+- **URL override** (kiosk screens): `?fit=1` fits the shown tab even without
+  `::FIT`; `?fit=0` never fits.
+- Phones (narrower than 600 px) ignore `::FIT` and `?fit=1`: the usual single
+  scrolling column.
 
 ### Alternative views of one panel (`::VIEW`)
 

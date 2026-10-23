@@ -80,7 +80,7 @@ the axes and colour series.
 | Group | Roles / behaviour |
 |-------|-------------------|
 | Inputs | `::DROPDOWN`, `::MULTISELECT`, `::NUMBER`, `::DATE`, `::TEXT`, `::DATERANGE` → each is a DuckDB variable read with `getvariable('name')` |
-| Layout | 12-column grid (`::COLUMNS`/`::COL`/`::HEIGHT`), `::GROUP` boxes, tabs (`::TAB`/`::SUBTAB`), alternative views of one panel (`::VIEW`/`::ENDVIEW` — a Lines/Bars/Table switcher) |
+| Layout | 12-column grid (`::COLUMNS`/`::COL`/`::HEIGHT`), `::GROUP` boxes, tabs (`::TAB`/`::SUBTAB`), alternative views of one panel (`::VIEW`/`::ENDVIEW` — a Lines/Bars/Table switcher), fit-to-screen tabs (`'fit'::FIT`, no page scroll) |
 | Interactivity | hover tooltips, **click-to-cross-filter**, range zoom, brush/value filters, dark mode, share links — pure DOM, so it works on exported HTML too |
 | Formatting | ggplot2-style axis formatters (`::YFORMAT '€'`, `::XFORMAT '$'`, percent, compact) |
 
