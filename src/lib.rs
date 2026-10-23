@@ -2899,7 +2899,14 @@ fn cartesian(
         Kind::Bar | Kind::BarPercent if dodge => plot
             .geom_col_with(card_col(o))
             .position(position_dodge(dodge_width)),
-        Kind::Bar | Kind::BarPercent => plot.geom_col_with(card_col(o)),
+        // The plain (non-stacked, non-dodged) `::BARCHART` role: usually one
+        // bar per x (stacking is then a no-op), but a numeric x with a
+        // CATEGORY can put more than one group's row at the same x without
+        // `dodge` (`discrete_dodge` only dodges a *discrete* x). ggplot-rs
+        // 0.24's new `geom_col()` default (`position_stack()`, #169) would
+        // silently stack that case; `::BARCHART_STACKED` is the role for
+        // that, so keep this one's documented overlap-from-0 meaning.
+        Kind::Bar | Kind::BarPercent => plot.geom_col_with(card_col(o)).position(PositionIdentity),
         Kind::BarStacked => plot.geom_col_with(card_col(o)).position(PositionStack),
         Kind::BarStackedPercent => plot.geom_col_with(card_col(o)).position(PositionFill),
         // Lines/areas also get point markers — they carry the per-point `<title>`
@@ -2994,7 +3001,16 @@ fn cartesian(
                 }
             }
         }
-        Kind::Area => plot.geom_area().geom_point_with(small_point()),
+        // The plain (non-stacked) `::AREA` role: several CATEGORY series
+        // overlapping at shared x values (e.g. comparing a few series over
+        // the same date range) is the common case this role exists for, as
+        // opposed to `::AREA_STACKED`. ggplot-rs 0.24's new `geom_area()`
+        // default (`position_stack()`, same parity gap as #169) would
+        // silently stack those bands; keep the documented overlap look.
+        Kind::Area => plot
+            .geom_area()
+            .position(PositionIdentity)
+            .geom_point_with(small_point()),
         Kind::AreaStacked => plot
             .geom_area_with(GeomArea {
                 fill: brand,
