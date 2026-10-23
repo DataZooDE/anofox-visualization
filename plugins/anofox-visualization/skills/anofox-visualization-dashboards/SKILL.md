@@ -404,7 +404,7 @@ its first marker.
 
 ### Fit to screen (`::FIT`)
 
-For a wall display or a one-screen overview, put `SELECT 'fit'::FIT;` right after the `::TAB` (or `::SUBTAB` / `::VIEW`) that should fill the browser window: its rows of panels share the height under the app and tab bars in their `::HEIGHT` ratio, charts are redrawn at that size, tables / `::PAGED` scroll inside their panel, KPI tiles keep ~96 px. Only that section fits, only while it is shown; tabs without `::FIT` scroll as usual. With no tabs, a `::FIT` anywhere fits the whole dashboard. `?fit=1` fits the shown tab without `::FIT`, `?fit=0` never fits; phones (< 600 px) ignore it.
+For a wall display or a one-screen overview, put `SELECT 'fit'::FIT;` right after the `::TAB` (or `::SUBTAB` / `::VIEW`) that should fill the browser window: its rows of panels share the height under the app and tab bars in their `::HEIGHT` ratio, charts are redrawn at that size, tables / `::PAGED` scroll inside their panel, KPI tiles keep ~96 px. Only that section fits, only while it is shown; tabs without `::FIT` scroll as usual. In a `::SUBTAB` / `::VIEW`, only that pane's own panels fit (under its bar); the parent tab's panels above keep their height and the page may scroll to reach the fitted pane. With no tabs, a `::FIT` anywhere fits the whole dashboard. `?fit=1` fits the shown tab without `::FIT`, `?fit=0` never fits; phones (< 600 px) ignore it. The downloaded HTML fits itself too (scaling its drawn SVGs); a page without the app (`dashboard file.sql out.html`, `serve`'s static page) fits only a dashboard-wide `::FIT` (no tabs), in equal rows, with CSS.
 
 ```sql dashboard
 -- A one-screen overview tab (no page scroll) beside a detail tab that scrolls
@@ -428,7 +428,7 @@ SELECT region AS "Region" ::TABLE, sum(amount) AS "Revenue" ::MONEY, 'Revenue by
 FROM sales GROUP BY region ORDER BY "Revenue" DESC;
 ```
 
-Keep a fitted tab small: if a panel would get under ~120 px the tab scrolls instead (with a notice). `dashboard --check` warns ahead of time — `layout/fit-too-many` (more rows than a 1366×768 screen holds; aim for ≤ ~4 rows: a KPI strip and two rows of charts) and `layout/fit-ambiguous` (a `::FIT` before the first `::TAB` of a tabbed dashboard, twice for one tab, or cast beside a panel's columns instead of its own statement).
+Keep a fitted tab small: if a panel would get under ~120 px the tab scrolls instead (with a notice). `dashboard --check` warns ahead of time — `layout/fit-too-many` (more rows than a 1366×768 screen holds — for a sub-tab / view, only its own panels count; aim for ≤ ~4 rows: a KPI strip and two rows of charts) and `layout/fit-ambiguous` (a `::FIT` before the first `::TAB` of a tabbed dashboard, twice for one tab, or cast beside a panel's columns instead of its own statement).
 
 ## Design contract
 
