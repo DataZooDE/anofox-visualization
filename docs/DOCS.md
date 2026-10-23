@@ -152,6 +152,7 @@ terminal.
 | `::TRANSITION` | `::TWEEN` | modifier | on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart |
 | `::HOVER_FOCUS` | `::HOVERFOCUS` | modifier | hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts) |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
+| `::LEGEND` |  | modifier | a chart's legend / colourbar: 'none' hides it, or 'top'/'right'/'bottom'/'left' moves it; without it, unchanged |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
 | `::PERCENT` | `::PCT` | kpi | percent KPI / table column format; the value is in percent (12.5 → 12.5%; a fraction × 100) |
@@ -1115,6 +1116,17 @@ FROM sales GROUP BY ALL ORDER BY week, channel;
   `getvariable('selected')` to the cell's **row** (`::YAXIS`) value.
 - `::CALENDAR` uses the same ramp, card-coloured cell gaps and formatted
   tooltips.
+- **Legend** (`::LEGEND`): `'none'::LEGEND` hides the colourbar — useful on a
+  dense dashboard where the tooltip already gives the value —
+  and `'top'`/`'right'`/`'bottom'`/`'left'` move it. The same role hides or
+  moves a categorised chart's legend (`::CATEGORY` on a bar/line/area/
+  scatter, a pie/donut) and a map's. Without it nothing changes.
+
+  ```sql
+  SELECT d::XAXIS, feature::YAXIS, alert_share::HEATMAP, ''::COLORSCALE,
+         'none'::LEGEND, 'When does each input alert?'::TITLE
+  FROM per_method;
+  ```
 
 ### Maps
 

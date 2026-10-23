@@ -2644,6 +2644,22 @@ fn motion_diags(
                 ));
             }
         }
+        if *r == Role::Legend {
+            if !crate::LEGEND_POSITIONS.contains(&v.as_str()) {
+                out.push((
+                    "legend/bad-value",
+                    format!(
+                        "::LEGEND `{v}` is not 'none', 'top', 'right', 'bottom' or 'left' — \
+                         the legend is drawn where it always has"
+                    ),
+                ));
+            } else if !panel_has_legend(roles) {
+                out.push((
+                    "legend/no-legend",
+                    "::LEGEND has no legend or colourbar to hide or move on this panel".into(),
+                ));
+            }
+        }
     }
     out
 }
@@ -3480,6 +3496,47 @@ fn chart_kind(roles: &[(usize, Role)]) -> Option<Kind> {
         Role::Value(k) => Some(*k),
         _ => None,
     })
+}
+
+/// Does this panel ever draw a legend or colourbar `::LEGEND` could move or
+/// hide? Maps (best-effort: any geometry/region/lat-lon panel may show a
+/// category legend or a colourbar) and heatmaps/pies/donuts always do;
+/// cartesian charts and small multiples only with a `::CATEGORY`. Everything
+/// else — KPIs, tables, text, gauges, candlesticks, calendars, sparklines,
+/// histograms, box/violin without a category, waterfalls, bullets, funnels,
+/// diagrams, tracks — never shows one.
+fn panel_has_legend(roles: &[(usize, Role)]) -> bool {
+    let is_map = roles
+        .iter()
+        .any(|(_, r)| matches!(r, Role::Geometry | Role::Region | Role::Origin | Role::Dest))
+        || (roles.iter().any(|(_, r)| *r == Role::Lat)
+            && roles.iter().any(|(_, r)| *r == Role::Lon));
+    if is_map {
+        return true;
+    }
+    match chart_kind(roles) {
+        Some(Kind::Heatmap | Kind::Pie | Kind::Donut) => true,
+        Some(
+            Kind::Bar
+            | Kind::BarStacked
+            | Kind::BarPercent
+            | Kind::BarStackedPercent
+            | Kind::Line
+            | Kind::LinePercent
+            | Kind::Step
+            | Kind::Smooth
+            | Kind::Area
+            | Kind::AreaStacked
+            | Kind::Point
+            | Kind::Bubble
+            | Kind::Jitter
+            | Kind::Density
+            | Kind::Radar
+            | Kind::Boxplot
+            | Kind::Violin,
+        ) => roles.iter().any(|(_, r)| *r == Role::Category),
+        _ => false,
+    }
 }
 
 /// A "real" chart that ought to carry a `::TITLE` (excludes sparklines, gauges,
@@ -4750,6 +4807,46 @@ mod design_tests {
             rows(2, |i| json!({ "c0": i, "c1": "r", "c2": i, "c3": "" })),
         );
         assert!(!has(&d, "colorscale/no-tiles"), "{d:?}");
+    }
+
+    #[test]
+    fn legend_value_and_no_legend_panels_are_checked() {
+        // A categorised bar chart has a legend: 'none' is fine, a typo warns.
+        let data = rows(2, |i| json!({ "c0": i, "c1": i, "c2": "a", "c3": "none" }));
+        let ok = lint_one(
+            "SELECT x::XAXIS, y::BARCHART, s::CATEGORY, 'none'::LEGEND FROM t;",
+            data.clone(),
+        );
+        assert!(
+            !has(&ok, "legend/bad-value") && !has(&ok, "legend/no-legend"),
+            "{ok:?}"
+        );
+        let d = lint_one(
+            "SELECT x::XAXIS, y::BARCHART, s::CATEGORY, 'sideways'::LEGEND FROM t;",
+            rows(
+                2,
+                |i| json!({ "c0": i, "c1": i, "c2": "a", "c3": "sideways" }),
+            ),
+        );
+        assert!(has(&d, "legend/bad-value"), "{d:?}");
+        // A bar chart without a ::CATEGORY never draws a legend.
+        let d = lint_one(
+            "SELECT x::XAXIS, y::BARCHART, 'none'::LEGEND FROM t;",
+            rows(2, |i| json!({ "c0": i, "c1": i, "c2": "none" })),
+        );
+        assert!(has(&d, "legend/no-legend"), "{d:?}");
+        // A ::HEATMAP always has a colourbar.
+        let ok = lint_one(
+            "SELECT x::XAXIS, 'r'::YAXIS, v::HEATMAP, 'none'::LEGEND FROM t;",
+            rows(2, |i| json!({ "c0": i, "c1": "r", "c2": i, "c3": "none" })),
+        );
+        assert!(!has(&ok, "legend/no-legend"), "{ok:?}");
+        // A KPI never has one.
+        let d = lint_one(
+            "SELECT v::METRIC, 'none'::LEGEND FROM t;",
+            rows(1, |_| json!({ "c0": 1, "c1": "none" })),
+        );
+        assert!(has(&d, "legend/no-legend"), "{d:?}");
     }
 
     #[test]
