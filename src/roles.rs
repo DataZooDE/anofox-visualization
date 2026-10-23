@@ -257,6 +257,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts)"),
     e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
       "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
+    e("LEGEND", &[], R::Legend, "modifier", true,
+      "a chart's legend / colourbar: 'none' hides it, or 'top'/'right'/'bottom'/'left' moves it; without it, unchanged"),
     // ── KPIs & text ────────────────────────────────────────────────────────
     e("METRIC", &["KPI", "BIGNUMBER"], R::Metric(MetricFmt::Plain), "kpi", true,
       "big-number KPI (add ::LABEL for a caption)"),
@@ -851,6 +853,7 @@ mod tests {
             Role::Edges,
             Role::Direction,
             Role::Lane,
+            Role::Legend,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -978,7 +981,8 @@ mod tests {
                 | Role::Upstream
                 | Role::Edges
                 | Role::Direction
-                | Role::Lane => {}
+                | Role::Lane
+                | Role::Legend => {}
             }
         }
         v

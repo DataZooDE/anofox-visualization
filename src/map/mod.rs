@@ -43,8 +43,8 @@ mod write;
 use crate::format::{escape_xml as esc, ValueFmt};
 use crate::theme::{contrast, hex, mix};
 use crate::{
-    cell_num, find_role, role_num, role_str, value_fmt, value_str, Column, Kind, Ramp,
-    RenderOptions, Role,
+    cell_num, find_role, legend_position_of, role_num, role_str, value_fmt, value_str, Column,
+    Kind, Ramp, RenderOptions, Role,
 };
 use classes::{Classes, Method};
 use flows::Flows;
@@ -1101,11 +1101,37 @@ pub(crate) struct Drawn {
     pub warnings: Vec<String>,
 }
 
+/// `::LEGEND` on a map: `'none'` hides it outright (`lg` zeroed so
+/// [`layout`] reserves it no room); `'top'`/`'right'`/`'bottom'`/`'left'` is
+/// instead returned for [`layout`] to place it on that side.
+fn legend_override(
+    cols: &[Column],
+    lg: &mut LegendBox,
+) -> Option<ggplot_rs::theme::LegendPosition> {
+    match legend_position_of(cols) {
+        Some(ggplot_rs::theme::LegendPosition::None) => {
+            lg.w = 0.0;
+            lg.h = 0.0;
+            None
+        }
+        other => other,
+    }
+}
+
 /// Where the map and its legend go when not zoomed: the data's box (with
 /// its margin) fitted to the whole panel, the legend over the corner that
 /// covers the fewest vertices — or, when every corner would cover some,
-/// beside or above the map (whichever keeps it larger).
-fn layout(m: &Model, lg: &LegendBox, w: f64, h: f64) -> Option<(Frame, (f64, f64))> {
+/// beside or above the map (whichever keeps it larger). `forced` (`::LEGEND`
+/// `'top'`/`'right'`/`'bottom'`/`'left'`) skips that auto corner-pick and
+/// puts the legend on the given side instead (`'none'` is handled by the
+/// caller zeroing `lg` before this runs).
+fn layout(
+    m: &Model,
+    lg: &LegendBox,
+    w: f64,
+    h: f64,
+    forced: Option<ggplot_rs::theme::LegendPosition>,
+) -> Option<(Frame, (f64, f64))> {
     let margin = if m.flows.is_some() || m.hexbin.is_some() {
         0.08
     } else {
@@ -1117,6 +1143,27 @@ fn layout(m: &Model, lg: &LegendBox, w: f64, h: f64) -> Option<(Frame, (f64, f64
         return Some((full, (0.0, 0.0)));
     }
     let (lw, lh) = (lg.w, lg.h);
+    use ggplot_rs::theme::LegendPosition as L;
+    match forced {
+        Some(L::Top) => {
+            let top = Frame::fit(b, (2.0, lh + 8.0, w - 4.0, (h - lh - 10.0).max(1.0)));
+            return Some((top, (4.0, 4.0)));
+        }
+        Some(L::Bottom) => {
+            let bottom = Frame::fit(b, (2.0, 2.0, w - 4.0, (h - lh - 10.0).max(1.0)));
+            return Some((bottom, (4.0, h - 4.0 - lh)));
+        }
+        Some(L::Left) => {
+            let side = Frame::fit(b, (lw + 8.0, 2.0, (w - lw - 10.0).max(1.0), h - 4.0));
+            return Some((side, (4.0, 4.0)));
+        }
+        Some(L::Right) => {
+            let side = Frame::fit(b, (2.0, 2.0, (w - lw - 10.0).max(1.0), h - 4.0));
+            return Some((side, (w - 4.0 - lw, 4.0)));
+        }
+        // `None` (no role) or `L::None`/`L::Inside` (not a map side): auto-pick.
+        _ => {}
+    }
     let corners = [
         (4.0, 4.0),
         (w - 4.0 - lw, 4.0),
@@ -1175,8 +1222,9 @@ fn frame_of(
     w: f64,
     h: f64,
     foot: f64,
+    forced: Option<ggplot_rs::theme::LegendPosition>,
 ) -> Option<(Frame, (f64, f64))> {
-    let (auto, at) = layout(m, lg, w, h - foot)?;
+    let (auto, at) = layout(m, lg, w, h - foot, forced)?;
     if let Some(((x0, x1), (y0, y1))) = o.zoom {
         if [x0, x1, y0, y1].iter().all(|f| f.is_finite()) && x1 > x0 && y1 > y0 {
             return Some((Frame::fit((x0, y0, x1, y1), (0.0, 0.0, w, h)), at));
@@ -1195,16 +1243,18 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
         return Some([x0, x1, y0, y1]);
     }
     let (w, h) = (w as f64, h as f64);
-    let lg = legend_of(o, &m, w, h);
+    let mut lg = legend_of(o, &m, w, h);
+    let forced = legend_override(cols, &mut lg);
     let ft = foot_of(o, &m, w);
-    layout(&m, &lg, w, h - ft.h).map(|(f, _)| f.window(w, h))
+    layout(&m, &lg, w, h - ft.h, forced).map(|(f, _)| f.window(w, h))
 }
 
 /// Render a map panel's body (`None` when no row has geometry).
 pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<Drawn> {
     let m = Model::new(o, cols)?;
     let (w, h) = (width as f64, height as f64);
-    let lg = legend_of(o, &m, w, h);
+    let mut lg = legend_of(o, &m, w, h);
+    let forced = legend_override(cols, &mut lg);
     let nodata = lg.nodata;
     // `nodata` (above) only counts regular features/symbols without a
     // value — a flow row without one (`Fill::Measure` + no value) isn't a
@@ -1216,7 +1266,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
         matches!(&m.fill, Fill::Measure(s) if fl.flows.iter().any(|f| s.values[f.row].is_none()))
     });
     let ft = foot_of(o, &m, w);
-    let (frame, legend_at) = frame_of(&m, o, &lg, w, h, ft.h)?;
+    let (frame, legend_at) = frame_of(&m, o, &lg, w, h, ft.h, forced)?;
     let t = &o.theme;
     let id = id_of(cols, width, height);
     let card = t.colors.card;

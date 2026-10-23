@@ -548,6 +548,10 @@ pub enum Role {
     /// A `::DIAGRAM` node's swimlane (`::LANE`): nodes of one lane share a
     /// band across the layers.
     Lane,
+    /// Hide or place a chart's legend / colourbar (`::LEGEND`): `'none'`,
+    /// `'top'`, `'right'`, `'bottom'` or `'left'`. Without it, a chart's
+    /// legend sits where it always has (unchanged). Read from the first value.
+    Legend,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.
@@ -1784,6 +1788,10 @@ pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
 /// The `::HOVER_FOCUS` values the browser knows.
 pub const HOVER_FOCUS_MODES: &[&str] = &["series", "none"];
 
+/// The `::LEGEND` values — `'none'` plus every [`ggplot_rs::theme::LegendPosition`]
+/// variant that is a side (not `Inside`, which `::LEGEND` has no syntax for).
+pub const LEGEND_POSITIONS: &[&str] = &["none", "top", "right", "bottom", "left"];
+
 /// A panel's motion directives, as root attributes for the browser (static
 /// output ignores them): `data-animate` (`::ANIMATE`) and, for `'reveal'`,
 /// `data-xline` — where the reveal starts, in the x axis' unit (epoch
@@ -2193,6 +2201,22 @@ fn role_fmt(cols: &[Column], role: Role) -> Option<String> {
             _ => None,
         })
     })
+}
+
+/// `::LEGEND` ('none'/'top'/'right'/'bottom'/'left') as a
+/// [`ggplot_rs::theme::LegendPosition`] override — `None` without the role
+/// or with an unrecognised value (lint warns on that separately; the panel
+/// keeps its own default position, unchanged).
+pub(crate) fn legend_position_of(cols: &[Column]) -> Option<ggplot_rs::theme::LegendPosition> {
+    use ggplot_rs::theme::LegendPosition as L;
+    match role_str(cols, Role::Legend)?.to_ascii_lowercase().as_str() {
+        "none" => Some(L::None),
+        "top" => Some(L::Top),
+        "right" => Some(L::Right),
+        "bottom" => Some(L::Bottom),
+        "left" => Some(L::Left),
+        _ => None,
+    }
 }
 
 /// The first finite numeric value of a `role` column.
@@ -3523,7 +3547,8 @@ fn cartesian(
         }
     }
     plot = plot.house_theme(o);
-    plot = plot.legend_position(ggplot_rs::theme::LegendPosition::Top);
+    plot = plot
+        .legend_position(legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top));
     if let Some(t) = &title {
         plot = plot.title(t);
     }
@@ -3581,7 +3606,9 @@ fn render_density(
             .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
             .scale_color(dz_scale(o, Aesthetic::Color, cat))
             .house_theme(o)
-            .legend_position(ggplot_rs::theme::LegendPosition::Top);
+            .legend_position(
+                legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
+            );
     } else {
         plot = GGPlot::new(data)
             .aes(aes)
@@ -3808,6 +3835,9 @@ fn render_heatmap(
             ..Default::default()
         });
     let mut plot = fill.scale(plot, o, &fmt).theme(th);
+    if let Some(pos) = legend_position_of(cols) {
+        plot = plot.legend_position(pos);
+    }
     if let Some(levels) = &x_levels {
         let mut sx = ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect());
         if let Some(thin) = x_thin {
@@ -3926,6 +3956,9 @@ fn render_heatmap_categorical(
     let mut plot = plot
         .scale_fill(category_scale(o, Aesthetic::Fill, value, cols))
         .theme(th);
+    if let Some(pos) = legend_position_of(cols) {
+        plot = plot.legend_position(pos);
+    }
     if let Some(levels) = &x_levels {
         let mut sx = ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect());
         if let Some(thin) = x_thin {
@@ -4489,6 +4522,9 @@ fn render_calendar(
             false,
         );
     let mut plot = fill.scale(plot, o, &fmt).xlab("").ylab("").theme(th);
+    if let Some(pos) = legend_position_of(cols) {
+        plot = plot.legend_position(pos);
+    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -4629,7 +4665,7 @@ fn render_radar(
         .xlab("")
         .ylab("")
         .house_theme(o)
-        .legend_position(ggplot_rs::theme::LegendPosition::Top);
+        .legend_position(legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top));
     if let Some(cat) = category {
         plot = plot
             .scale_color(dz_scale(o, Aesthetic::Color, cat))
@@ -5426,7 +5462,7 @@ fn render_pie(
                 .expand(false),
         )
         .house_void(o)
-        .legend_position(ggplot_rs::theme::LegendPosition::Top);
+        .legend_position(legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top));
     if let Some(t) = title {
         plot = plot.title(t);
     }
