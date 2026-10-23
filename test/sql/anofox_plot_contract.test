@@ -473,6 +473,32 @@ SELECT anofox_plot_assignment(t) FROM (VALUES ('a', 1)) t(item, size);
 ----
 bin
 
+# Bin order follows numeric order, not row order; an integral DOUBLE bin
+# ("10.0") shows "10".
+query I
+SELECT anofox_plot_assignment(b) LIKE '%>0</text>%' AND anofox_plot_assignment(b) NOT LIKE '%>10.0</text>%'
+FROM (VALUES (10.0, 'j', 1), (2, 'b', 1), (1, 'a', 1), (0, 'z', 1)) b(bin, item, size);
+----
+true
+
+# A capacity that varies by bin draws as a marker per bin, not one
+# misleading shared reference line.
+query I
+SELECT anofox_plot_assignment(b) NOT LIKE '%data-geom="hline"%' AND anofox_plot_assignment(b) LIKE '%data-geom="point"%'
+FROM (VALUES (1, 'a', 3, 10), (2, 'b', 4, 20)) b(bin, item, size, capacity);
+----
+true
+
+# A NULL bin is dropped and reported on data-warnings; a NULL item still
+# stacks (anofox_plot_assignment alone does not carry data-warnings — only
+# the anofox_render/anofox_plot entry point does).
+query I
+SELECT anofox_render(json_object('plot', 'assignment', 'rows', to_json(list(b ORDER BY b))))
+       LIKE '%data-warnings%1 row with a NULL `bin` dropped%'
+FROM (VALUES (1, 'a', 3), (NULL, 'b', 4), (1, NULL, 2)) b(bin, item, size);
+----
+true
+
 # ── distribution (#181) ──────────────────────────────────────────────────────
 # One id: a plain bar per option.
 query II
@@ -495,6 +521,52 @@ statement error
 SELECT anofox_plot_distribution(t) FROM (VALUES ('q1', 'yes')) t(id, option);
 ----
 probability
+
+# A NULL id is dropped (it cannot sit on the id axis) and reported; a NULL
+# option still stacks.
+query I
+SELECT anofox_render(json_object('plot', 'distribution', 'rows', to_json(list(d ORDER BY d))))
+       LIKE '%data-warnings%1 row with a NULL `id` dropped%'
+FROM (VALUES ('q1', 'yes', 0.7), ('q1', NULL, 0.3), (NULL, 'yes', 0.5), ('q2', 'yes', 0.4), ('q2', 'no', 0.6))
+     d(id, option, probability);
+----
+true
+
+# Above 40 ids a data-warning says the axis may be unreadable; the chart
+# still draws.
+query I
+SELECT anofox_render(json_object('plot', 'distribution', 'rows', to_json(list(d ORDER BY d))))
+       LIKE '%data-warnings%41 ids plotted%'
+FROM (SELECT 'q' || i AS id, 'yes' AS option, 0.5 AS probability FROM range(41) r(i)) d;
+----
+true
+
+# anofox-decide's own spellings: question_id (its row key before the MAP
+# bridge) and model are read as id / model_id.
+query I
+SELECT anofox_plot_distribution(d) LIKE '%>q1</text>%' AND anofox_plot_distribution(d) LIKE '%>stub</text>%'
+       AND anofox_plot_distribution(d) LIKE '%>laya</text>%'
+FROM (VALUES
+  ('stub', 'q1', 'yes', 0.7), ('stub', 'q1', 'no', 0.3), ('stub', 'q2', 'yes', 0.4), ('stub', 'q2', 'no', 0.6),
+  ('laya', 'q1', 'yes', 0.6), ('laya', 'q1', 'no', 0.4), ('laya', 'q2', 'yes', 0.5), ('laya', 'q2', 'no', 0.5))
+     d(model, question_id, option, probability);
+----
+true
+
+# decide_table's distribution MAP, bridged with the documented recipe
+# (the unnested STRUCT needs its own alias, u(e), to reach key/value).
+statement ok
+CREATE TABLE decide_table AS SELECT * FROM (VALUES
+  ('stub', 'q1', MAP {'yes': 0.7, 'no': 0.3}),
+  ('stub', 'q2', MAP {'yes': 0.4, 'no': 0.6})
+) t(model, question_id, distribution);
+
+query I
+SELECT anofox_plot_distribution(d) LIKE '<svg%' FROM (
+  SELECT t.model, t.question_id AS id, u.e.key AS option, u.e.value AS probability
+  FROM decide_table t, unnest(map_entries(t.distribution)) AS u(e)) d;
+----
+true
 
 # ── contract version ─────────────────────────────────────────────────────────
 query I

@@ -163,6 +163,26 @@ CREATE TABLE flows AS SELECT * FROM (VALUES ('ingest', 'build', 9800), ('build',
 SELECT anofox_plot_diagram(n, edges := (SELECT list(e) FROM flows e)) FROM stages n;
 ```
 
+**An optimizer's bin/wave assignment** (`assignment` schema; anofox-optimize `pack_*` / `wave_*`): items stack per bin, the capacity as a quiet reference line — or, when capacity varies by bin/model, a marker at each bin instead of one misleading shared line:
+
+```sql
+SELECT anofox_plot_assignment(a) FROM (VALUES
+  (1, 'c01', 4, 10), (1, 'c02', 5, 10), (2, 'c03', 7, 10))
+     a(bin, item, size, capacity);
+```
+
+**A categorical distribution** (`distribution` schema; anofox-decide's `decide_choice_distribution` MAP and `decide_table.distribution`): `unnest(map_entries(…))` needs the unnested STRUCT named one level in (`AS u(e)`, then `u.e.key` / `u.e.value` — a bare `u.key` does not parse) to reach `option` / `probability`; `question_id` and `model` (decide's own spellings) are read as `id` / `model_id`, so the bridge can skip renaming those:
+
+```sql
+CREATE TABLE decide_table AS SELECT * FROM (VALUES
+  ('stub', 'q1', MAP {'yes': 0.7, 'no': 0.3}),
+  ('stub', 'q2', MAP {'yes': 0.4, 'no': 0.6}))
+     t(model, question_id, distribution);
+SELECT anofox_plot_distribution(d) FROM (
+  SELECT t.model, t.question_id AS id, u.e.key AS option, u.e.value AS probability
+  FROM decide_table t, unnest(map_entries(t.distribution)) AS u(e)) d;
+```
+
 **Other producers' column names are read as contract columns**, so raw statsmodels / R / broom / pingouin tables plot without renaming. Names compare with case, `.`, spaces and symbols ignored (`Std. Error` = `std.error` = `std_error`, broom's `.fitted` = `fitted`), plus these spellings (the first present wins; a column the contract name already has, or one an option names, is left alone; `anofox_plot_compare` reads its rows as given):
 
 | Contract column | Also read from |

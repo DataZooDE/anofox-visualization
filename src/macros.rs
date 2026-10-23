@@ -400,10 +400,10 @@ a(bin, item, size, capacity)",
         named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
         body: contract_body!("distribution", "'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "A categorical distribution from a `distribution` table (anofox-decide's decide_choice_distribution \
-MAP / decide_table's distribution column, reached with `SELECT id, m.key AS option, m.value AS probability FROM t, \
-unnest(map_entries(distribution)) m`): one row per option (id, option, probability, model_id optional). One id draws \
-a plain bar per option; several ids draw a 100% stacked bar per id (CATEGORY: option). Several model_id's are faceted \
-to compare models.",
+MAP / decide_table's distribution column, reached with `SELECT t.question_id AS id, u.e.key AS option, u.e.value AS \
+probability FROM t, unnest(map_entries(t.distribution)) AS u(e)`; question_id and model are also read as id and \
+model_id): one row per option (id, option, probability, model_id optional). One id draws a plain bar per option; \
+several ids draw a 100% stacked bar per id (CATEGORY: option). Several model_id's are faceted to compare models.",
         example: "SELECT anofox_plot_distribution(d) FROM (VALUES ('q1', 'yes', 0.7), ('q1', 'no', 0.3)) \
 d(id, option, probability)",
         tags: &[("anofox.consumes", "distribution"), CONTRACT_TAG],

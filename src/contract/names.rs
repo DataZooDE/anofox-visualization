@@ -122,7 +122,12 @@ pub(super) const ALIASES: &[(&str, &[&str])] = &[
     ("std_residual", &["std_resid", "standard_resid"]),
     ("leverage", &["hat", "hat_diag"]),
     ("cooks_d", &["cooksd", "cooks_distance", "cook_d"]),
-    ("id", &["unique_id"]),
+    // `question_id`: anofox-decide's distribution bridge (`decide_table`
+    // unnested through `unnest(map_entries(distribution))`).
+    ("id", &["unique_id", "question_id"]),
+    // `model`: anofox-decide's own column for which calibrated model
+    // answered (`decide_table`, `decide_choice_distribution`).
+    ("model_id", &["model"]),
 ];
 
 /// In a prediction table (one with `yhat`) an interval bounds the forecast.

@@ -174,7 +174,11 @@ fn render_plot(
     // Plots drawn directly with ggplot-rs (see `stats`).
     let direct = |f: &dyn Fn() -> stats::Out| crate::guard(|| f().map_err(fail));
     let labels = look::Labels::from(options);
-    let cols = match name {
+    // `extra_warnings`: text the column-building step wants on `data-warnings`
+    // (dropped rows, a chart shape adapted to the data) alongside whatever
+    // the plotting engine itself reports (empty for every plot but
+    // `assignment` / `distribution` today).
+    let (cols, extra_warnings) = match name {
         "terms" => return direct(&|| terms::terms(&t, options, w, h, o, place)),
         "prediction" => return direct(&|| stats::prediction(&t, options, w, h, o, place)),
         "curve" => match curve_type(&t).map_err(fail)?.as_str() {
@@ -186,7 +190,7 @@ fn render_plot(
             ty @ ("acf" | "pacf") => {
                 return direct(&|| curves::acf(&t, ty, options, w, h, o, place))
             }
-            _ => curve(&t),
+            _ => curve(&t).map(|c| (c, Vec::new())),
         },
         "summary" => return direct(&|| stats::summary(&t, options, w, h, o, place)),
         "tests" => return direct(&|| stats::tests(&t, options, w, h, o, place)),
@@ -207,7 +211,7 @@ fn render_plot(
         "distribution" => distribution::columns(&t),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
-            obs(&t, &kind, label_top(options))
+            obs(&t, &kind, label_top(options)).map(|c| (c, Vec::new()))
         }
         "diagnostics" => {
             return crate::guard(|| {
@@ -241,9 +245,19 @@ fn render_plot(
     match crate::panel_plot(&cols, w, h, o).map_err(fail)? {
         Some(plot) => {
             let plot = tweak(plot, o, &refs, &labels, &xl, &yl, false);
-            crate::guard(|| stats::finish(plot, w, h, place).map_err(fail))
+            crate::guard(|| {
+                stats::finish(plot, w, h, place)
+                    .map(|(svg, mut w0)| {
+                        w0.extend(extra_warnings);
+                        (svg, w0)
+                    })
+                    .map_err(fail)
+            })
         }
-        None => crate::render_placed(&cols, place, width, height, o),
+        None => crate::render_placed(&cols, place, width, height, o).map(|(svg, mut w0)| {
+            w0.extend(extra_warnings);
+            (svg, w0)
+        }),
     }
 }
 
@@ -625,7 +639,15 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["row", "col", "value"],
         &["column_a", "column_b"],
     ),
-    ("assignment", &["bin", "item", "size"], &["item"]),
+    (
+        "assignment",
+        &["bin", "item", "size"],
+        // `item` alone is too generic: `item_id` near-misses it (#255's
+        // length rule) in any ordinary item/product table, which has no
+        // bin/wave/size at all. `bin` (wave stands in, see STAND_INS) is
+        // the one column no other schema or everyday table carries.
+        &["bin"],
+    ),
     (
         "distribution",
         &["id", "option", "probability"],
@@ -1644,6 +1666,20 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("got a list"), "{e}");
+        // An ordinary item/product table (no bin/wave/size) does not get an
+        // "assignment" hint just because `item_id` near-misses `item`: the
+        // identifying column is `bin`, not `item` (review of #375).
+        let e = go(
+            "auto",
+            r#"[{"item_id":"sku-1","store":"north","sales":12}]"#,
+            "{}",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("match no plottable schema") && !e.contains("closest"),
+            "{e}"
+        );
     }
 
     /// Write `svg` under `$ANOFOX_DUMP/<name>.svg` for a visual check.
@@ -2003,6 +2039,62 @@ mod tests {
     }
 
     #[test]
+    fn assignment_bin_order_capacity_and_nulls() {
+        // Review of #375 (1): the x axis follows numeric order, not row
+        // order — bin 10 (given first, as a producer might hand it over
+        // unsorted) still draws after bin 0, 1, 2; an integral DOUBLE bin
+        // (10.0) shows "10", not "10.0".
+        const UNSORTED: &str = r#"[
+            {"bin":10.0,"item":"j","size":1},
+            {"bin":2,"item":"b","size":1},
+            {"bin":1,"item":"a","size":1},
+            {"bin":0,"item":"z","size":1}]"#;
+        let svg = go("assignment", UNSORTED, "{}").unwrap();
+        dump("assignment_bin_order", &svg);
+        let pos = |needle: &str| {
+            svg.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in {svg}"))
+        };
+        let (p0, p1, p2, p10) = (
+            pos(">0</text>"),
+            pos(">1</text>"),
+            pos(">2</text>"),
+            pos(">10</text>"),
+        );
+        assert!(
+            p0 < p1 && p1 < p2 && p2 < p10,
+            "{p0} {p1} {p2} {p10}: {svg}"
+        );
+        assert!(!svg.contains(">10.0</text>"), "{svg}");
+
+        // (2) A capacity that varies by bin draws as a marker per bin
+        // (ggplot-rs's own point geom), not one misleading shared hline.
+        const VARYING_CAP: &str = r#"[
+            {"bin":1,"item":"a","size":3,"capacity":10},
+            {"bin":2,"item":"b","size":4,"capacity":20}]"#;
+        let svg = go("assignment", VARYING_CAP, "{}").unwrap();
+        dump("assignment_varying_capacity", &svg);
+        assert!(!svg.contains("data-geom=\"hline\""), "{svg}");
+        assert!(svg.contains("data-geom=\"point\""), "{svg}");
+
+        // (4) A NULL bin is dropped and reported on data-warnings; the row
+        // with a NULL item still stacks. `go()` returns only the SVG body
+        // (contract::render), not the outer `data-warnings` attribute that
+        // the full anofox_render pipeline writes — render_spec_checked goes
+        // through that pipeline, like the `compare` warning test above.
+        const WITH_NULLS: &str = r#"[
+            {"bin":1,"item":"a","size":3,"capacity":10},
+            {"bin":null,"item":"b","size":4,"capacity":10},
+            {"bin":1,"item":null,"size":2,"capacity":10}]"#;
+        let svg =
+            crate::render_spec_checked(&format!(r#"{{"plot":"assignment","rows":{WITH_NULLS}}}"#))
+                .unwrap();
+        dump("assignment_with_nulls", &svg);
+        assert!(svg.contains("data-warnings"), "{svg}");
+        assert!(svg.contains("1 row with a NULL `bin` dropped"), "{svg}");
+    }
+
+    #[test]
     fn distribution_bars_and_stacked_percent() {
         // One id: a plain bar per option.
         const ONE: &str = r#"[
@@ -2040,6 +2132,80 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("option") && e.contains("probability"), "{e}");
+    }
+
+    #[test]
+    fn distribution_reads_decides_own_spellings() {
+        // anofox-decide's decide_table unnested with the documented bridge
+        // (SELECT id, u.e.key AS option, u.e.value AS probability FROM t,
+        // unnest(map_entries(t.distribution)) AS u(e)) already produces
+        // `id`/`option`/`probability` directly; `question_id` (decide's own
+        // row key before that bridge) and `model` (decide's column for
+        // which calibrated model answered) are read as `id` / `model_id`
+        // too, so a table that skips the bridge's own aliasing still plots.
+        const DECIDE: &str = r#"[
+            {"model":"stub","question_id":"q1","option":"yes","probability":0.7},
+            {"model":"stub","question_id":"q1","option":"no","probability":0.3},
+            {"model":"stub","question_id":"q2","option":"yes","probability":0.4},
+            {"model":"stub","question_id":"q2","option":"no","probability":0.6},
+            {"model":"laya","question_id":"q1","option":"yes","probability":0.6},
+            {"model":"laya","question_id":"q1","option":"no","probability":0.4},
+            {"model":"laya","question_id":"q2","option":"yes","probability":0.5},
+            {"model":"laya","question_id":"q2","option":"no","probability":0.5}]"#;
+        assert_eq!(detect(&rows(DECIDE)).unwrap(), "distribution");
+        let svg = go("auto", DECIDE, "{}").unwrap();
+        dump("distribution_decide_spellings", &svg);
+        assert!(
+            svg.contains(">stub</text>") && svg.contains(">laya</text>"),
+            "model facets by its alias: {svg}"
+        );
+        assert!(
+            svg.contains(">q1</text>") && svg.contains(">q2</text>"),
+            "question_id read as id: {svg}"
+        );
+    }
+
+    #[test]
+    fn distribution_nulls_and_many_ids_warning() {
+        // A NULL option is kept (an unlabelled stack segment); a NULL id in
+        // a many-ids table cannot sit on the id axis, so it is dropped and
+        // reported.
+        const WITH_NULLS: &str = r#"[
+            {"id":"q1","option":"yes","probability":0.7},
+            {"id":"q1","option":null,"probability":0.3},
+            {"id":null,"option":"yes","probability":0.5},
+            {"id":"q2","option":"yes","probability":0.4},
+            {"id":"q2","option":"no","probability":0.6}]"#;
+        // `go()` returns only the SVG body (contract::render), not the
+        // outer `data-warnings` attribute the full anofox_render pipeline
+        // writes — render_spec_checked goes through that pipeline, like the
+        // `compare` warning test above.
+        let svg = crate::render_spec_checked(&format!(
+            r#"{{"plot":"distribution","rows":{WITH_NULLS}}}"#
+        ))
+        .unwrap();
+        dump("distribution_with_nulls", &svg);
+        assert!(svg.contains("data-warnings"), "{svg}");
+        assert!(svg.contains("1 row with a NULL `id` dropped"), "{svg}");
+        assert!(
+            svg.contains(">q1</text>") && svg.contains(">q2</text>"),
+            "{svg}"
+        );
+
+        // Above 40 ids the axis is unreadable: a data-warning, not a hard
+        // error — the chart still draws.
+        let many: String = format!(
+            "[{}]",
+            (0..41)
+                .map(|i| format!(r#"{{"id":"q{i}","option":"yes","probability":0.5}}"#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let svg =
+            crate::render_spec_checked(&format!(r#"{{"plot":"distribution","rows":{many}}}"#))
+                .unwrap();
+        assert!(svg.contains("data-warnings"), "{svg}");
+        assert!(svg.contains("41 ids plotted"), "{svg}");
     }
 
     #[test]
