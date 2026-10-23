@@ -135,9 +135,13 @@ serve --dashboards dash/ --init init.sql [--db data.duckdb] [--bind 127.0.0.1] [
       [--allow-host dash.example.com] [--auth @auth.json] [--log stderr] [--audit audit.jsonl]   # static render (B)
 dashboard file.sql [out.html] [--theme T] [--dark]                    # one static HTML file, no server
 dashboard --svg file.sql [out.svg]                                    # the whole dashboard as one SVG
+dashboard --site dash/ out-dir --data data/ --options locked.json \
+      [--app web/]                                                    # publish a mode-A folder as a static DuckDB-Wasm site (#417), no server at all
 ```
 
 `--init` runs once, read-write, before serving; `--cache <seconds>` is the shared render cache and the freshness knob. Try: `serve --dashboards examples/serve-dashboards/dash --init examples/serve-dashboards/init.sql`, or `examples/served/` for a locked server with cache, refresh and a data folder.
+
+`dashboard --site` turns a mode-A folder into files any static host (GitHub Pages, S3, …) can serve: the dashboards run in the browser's own DuckDB-Wasm, looking and behaving like the locked server, but with no login and no row/column policy (`--options` takes `path_vars`/`nav_picker`/`app`/`home`/`theme` only) — the data is public to anyone with the URL. See docs/secure-serving.md, "C. Publish as a static site".
 
 ## Dashboard header comments
 
