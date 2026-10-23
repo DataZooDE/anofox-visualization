@@ -327,17 +327,39 @@ SELECT anofox_plot_schedule(s) LIKE '%<rect%<rect%',
 ----
 true	true	true
 
-# A due-date connector only for the late task (O2, end 25 past due 20); the
-# on-time task (O1) keeps due 12 in its tooltip alone, no connector of its
-# own — a dot for every task on a shared lane can't be matched back to one.
+# A due-date connector + end tick (two segment marks) only for the late task
+# (O2, end 25 past due 20); the on-time task (O1) keeps due 12 in its
+# tooltip alone, no connector of its own — a dot for every task on a shared
+# lane can't be matched back to one. Both marks are drawn in ink, not the
+# status red a connector over its own red bar would be invisible in.
 query III
 SELECT anofox_plot_schedule(s) LIKE '%data-geom="segment"%',
-       (len(string_split(anofox_plot_schedule(s), 'data-geom="segment"')) - 1) = 1,
+       (len(string_split(anofox_plot_schedule(s), 'data-geom="segment"')) - 1) = 2,
        anofox_plot_schedule(s) LIKE '%<title>O2: due 20</title>%' FROM (VALUES
   ('L1', 'O1', 0, 10, 'on time', 12), ('L1', 'O2', 10, 25, 'late', 20)
 ) s(resource, task, start, "end", status, due);
 ----
 true	true	true
+
+# Both due marks are ink (#0A0A0A), not the status red (#DC2626) a
+# connector over its own red bar would be invisible in (#378 review): the
+# red only ever appears as the rect's fill, never as a stroke.
+query II
+SELECT anofox_plot_schedule(s) LIKE '%stroke="#0A0A0A"%',
+       NOT anofox_plot_schedule(s) LIKE '%stroke="#DC2626"%' FROM (VALUES
+  ('L1', 'O1', 0, 10, 'late', 8)
+) s(resource, task, start, "end", status, due);
+----
+true	true
+
+# A widened bar (start = end) still reports its true, un-widened end in the
+# tooltip, not the widened draw width (#378 review).
+query I
+SELECT anofox_plot_schedule(s) LIKE '%<title>O2 · L1: 20 – 20</title>%' FROM (VALUES
+  ('L1', 'O1', 0, 10), ('L1', 'O2', 20, 20)
+) s(resource, task, start, "end");
+----
+true
 
 # Several model_id values facet into one panel each, to compare algorithms;
 # "late" is counted across every model, not per panel.
