@@ -8947,6 +8947,12 @@ async function runOnce(fresh = true, pv = preview) {
         const compact = String(sizeVal ?? "").replace(/^"|"$/g, "").trim().toLowerCase() === "compact";
         const box = document.createElement("section");
         box.className = "group" + (compact ? " group-compact" : "");
+        // ::HEIGHT right before a ::GROUP sets that row's ::FIT share (#418),
+        // like it does for a chart row — fitDash reads it off the box; a
+        // ::GROUP with none keeps its tiles' own natural height instead of
+        // sharing the window at all (see fitDash's `kind()` / `share()`).
+        if (nextHeight > 0) box.dataset.dpHeight = nextHeight;
+        nextHeight = 0;
         if (title) {
           const t = document.createElement("div");
           t.className = "group-title";
@@ -9639,7 +9645,11 @@ function fitDash(dash, env) {
       // lower floor than a normal KPI tile.
       const compact = p.classList.contains("metric-size-compact") || (!p.classList.contains("metric-size-normal") && !!p.closest(".group-compact"));
       const min = Math.max(compact ? MIN_KPI_COMPACT : MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
-      return { kind: "kpi", w: min, min };
+      // #418: a ::HEIGHT right before the ::GROUP box sets its row's ::FIT
+      // share, like a chart row's — else the row keeps its own natural
+      // (measured) height, out of the share entirely (see `share()` below).
+      const authored = +p.closest(".group")?.dataset.dpHeight || 0;
+      return { kind: "kpi", w: authored || min, min, natural: !authored };
     }
     // a table / ::PAGED: its ::HEIGHT, else a default chart's (never its row
     // count, so a cross-filter re-run keeps the sizes); a text / Markdown box,
@@ -9670,13 +9680,27 @@ function fitDash(dash, env) {
       r.w = Math.max(...r.items.map((i) => i.w));
       r.min = Math.max(...r.items.map((i) => i.min));
       r.kpiOnly = r.items.every((i) => i.kind === "kpi");
+      // #418: a KPI-only row with no ::HEIGHT on its ::GROUP keeps its own
+      // natural height — it never grows to fill the window; only chart /
+      // table rows (and a KPI row given its own ::HEIGHT) share the rest.
+      r.natural = r.kpiOnly && r.items.every((i) => i.natural);
     }
     // heights summing to `total` in the rows' ratio; a row whose share is
-    // under its minimum (KPI tiles) keeps the minimum
+    // under its minimum (KPI tiles) keeps the minimum; a `natural` row is
+    // fixed at its own height and taken out of both `total` and the ratio.
     const share = (total) => {
       const hs = new Map();
-      let free = rows.slice();
       let left = total;
+      const sharable = [];
+      for (const r of rows) {
+        if (r.natural) {
+          hs.set(r, r.min);
+          left -= r.min;
+        } else {
+          sharable.push(r);
+        }
+      }
+      let free = sharable;
       while (free.length) {
         const k = left / free.reduce((a, r) => a + r.w, 0);
         const pin = free.filter((r) => r.w * k < r.min);

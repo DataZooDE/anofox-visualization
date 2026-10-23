@@ -257,7 +257,10 @@ fn headless_compact_kpi_group_drops_spark_and_goal() {
         fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
             if sql.contains("'KPIs'") {
                 // the ::GROUP marker: its own title + 'compact'::KPI_SIZE
-                return Ok(vec![("c0".into(), s(&["KPIs"])), ("c1".into(), s(&["compact"]))]);
+                return Ok(vec![
+                    ("c0".into(), s(&["KPIs"])),
+                    ("c1".into(), s(&["compact"])),
+                ]);
             }
             if sql.contains("'Cost'") {
                 return Ok(vec![
@@ -282,11 +285,17 @@ fn headless_compact_kpi_group_drops_spark_and_goal() {
         SELECT 1::ENDGROUP;";
     let o = DashboardOptions::default();
     let svg = render_dashboard_svg(script, &mut Kpis, &o).unwrap();
-    assert!(svg.matches("class=\"kpi-value kpi-compact\"").count() == 2, "{svg}");
+    assert!(
+        svg.matches("class=\"kpi-value kpi-compact\"").count() == 2,
+        "{svg}"
+    );
     // the change is still there, inline — just no spark / goal
     assert!(svg.contains("▲ 10% (+$100)"), "{svg}");
     assert!(svg.contains("Cost") && svg.contains("$1,100"), "{svg}");
-    assert!(!svg.contains("kpi-spark") && !svg.contains("kpi-goal"), "{svg}");
+    assert!(
+        !svg.contains("kpi-spark") && !svg.contains("kpi-goal"),
+        "{svg}"
+    );
     // both tiles share one row, at the compact floor (36), not the normal one (96)
     let heights: Vec<f64> = svg
         .match_indices("rx=\"")
@@ -340,7 +349,11 @@ fn headless_kpi_size_tile_override_wins_over_its_group() {
     assert!(svg.contains("Own compact") && svg.contains("55"), "{svg}");
     assert!(svg.contains("Overridden") && svg.contains("20"), "{svg}");
     // exactly one compact tile (the lone 'A' tile): 'Overridden' stays normal
-    assert_eq!(svg.matches("class=\"kpi-value kpi-compact\"").count(), 1, "{svg}");
+    assert_eq!(
+        svg.matches("class=\"kpi-value kpi-compact\"").count(),
+        1,
+        "{svg}"
+    );
 }
 
 // A provider answering every query with the same canned columns.

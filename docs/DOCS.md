@@ -2055,13 +2055,19 @@ SELECT * ::TABLE FROM orders;
 
 - The height under the app bar and the tab bar is measured, and the rows of
   panels share it **in the ratio of their heights** (`::HEIGHT`, else the
-  default) — a `360::HEIGHT` row stays taller than a default one.
+  default) — a `360::HEIGHT` row stays taller than a default one. A
+  **KPI-only row** (a `::GROUP` of `::METRIC`s, or a row of bare KPI tiles)
+  is the exception: it keeps its own **natural height** instead — its
+  measured content, at least ~96 px (`'compact'::KPI_SIZE` tiles, ~36 px) —
+  and is left out of the share; only chart / table rows divide the rest.
+  `::HEIGHT` right before the `::GROUP` opts it back into sharing, exactly
+  like a chart row's (#418).
 - Charts are **drawn again at their new size** (text and lines stay their real
   size, nothing is stretched); a resize, a rotation, entering full screen and
   switching tabs re-fit (cross-filtering keeps the fitted sizes).
 - Tables, `::PAGED` tables and text boxes keep their content and **scroll
   inside their panel**; KPI tiles keep at least ~96 px (`'compact'::KPI_SIZE`
-  tiles, ~36 px).
+  tiles, ~36 px) — see the KPI-only row note above.
 - If a panel would get under ~120 px the tab scrolls as usual and a small
   notice says so — `dashboard --check` warns about this ahead of time
   (`layout/fit-too-many`, judged at 1366×768; for a sub-tab / view only its own panels under its own bar), and about a `::FIT` whose
