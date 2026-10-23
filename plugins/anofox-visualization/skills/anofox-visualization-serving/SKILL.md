@@ -10,7 +10,7 @@ description: >
   static server-side rendering with whitelisted -- @param values). Covers
   which mode to pick, the trust model (server-owned SQL, typed variables,
   read-only snapshot, Host allowlist), every option (max_rows, timeout_ms,
-  threads, max_queries, max_inflight_mb, max_response_mb, cache_mb,
+  threads, warm, max_queries, max_inflight_mb, max_response_mb, cache_mb,
   memory_limit, duckdb_threads, bind, hosts, search_path, app, home, attach, load,
   refresh_s, data, path_vars, theme), the result cache, single-flight and
   cancelled requests, snapshot refresh, a live data folder, /healthz,
@@ -81,6 +81,7 @@ Unknown keys and bad values fail the start, naming the valid ones.
 | `max_queries` | 4 | panel queries running at once; others wait up to `timeout_ms`, then `503` + `Retry-After` |
 | `max_inflight_mb` / `max_response_mb` | 256 / 32 | results held outside DuckDB at once (`503` over it) / one response (`413` over it) |
 | `cache_mb` | 64 | per-snapshot result cache; `0` = off (single-flight stays) |
+| `warm` | `threads` | idle connections kept with a dashboard's setup already run, reused by requests with the same setup inputs and viewer (#388); `0` = off. Each holds its setup's TEMP tables in memory |
 | `memory_limit`, `duckdb_threads` | 80 % RAM, cores | DuckDB settings of the snapshot instance, shared by all queries |
 | `bind` | `127.0.0.1` | `"0.0.0.0"` in a container / behind a load balancer on another host (warns without `auth`) |
 | `hosts` | loopback names | public names the proxy forwards in `Host` (else `421`); `"*"` disables the check |
@@ -107,7 +108,7 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 
 - **Server-owned SQL.** Dashboards are planned at start; each statement is checked with DuckDB's parser. `vars` become typed literals (`SET VARIABLE name = 'EU'`); objects, nested lists and oversize values are `400`. `::PAGED` requests are structural (page, sort, search, column filters); the server builds the SQL with bound parameters. No `/query` (`410`).
 - **Read-only snapshot.** The session's DuckDB databases are copied into a private `0700` temp directory and opened `READ_ONLY` in a separate instance with external access, extension loading and configuration locked. Foreign catalogs (Postgres, SQLite, MotherDuck) are not snapshotted: copy what the dashboards need into DuckDB tables first.
-- **Per request**: a fresh connection (setup statements re-run; only `TEMP` objects), row cap, timeout.
+- **Per request**: a fresh connection (setup statements re-run; only `TEMP` objects), row cap, timeout. A warm connection (`warm`) skips the setup when the viewer and the variables the setup reads are the same as for an earlier request.
 - **Cache and single-flight**: results are cached per snapshot, keyed by dashboard, panel, every variable and the page (and the viewer's claims with `auth`); identical concurrent requests run once. `now()` / `random()` panels are cached too — `cache_mb: 0` for those.
 - **Cancelled requests**: paging or scrolling a `::PAGED` table quickly cancels the superseded query (`409`, `X-Anofox-Supersede`), unless another viewer waits for it.
 - **Refresh** (`refresh_s` / `anofox_serve_refresh`): atomic swap, running requests finish on the old snapshot, a new empty cache; a failed rebuild keeps the old one. Needs the snapshot's disk and memory twice while it runs. No HTTP endpoint can trigger it.
