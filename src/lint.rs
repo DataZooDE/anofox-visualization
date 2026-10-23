@@ -70,7 +70,9 @@ pub struct Diagnostic {
     /// Header comments ([`header_diags`], warnings): `header/empty-group` |
     /// `header/long-group` | `header/too-many-tags` | `header/empty-owner` |
     /// `header/bad-certified` | `header/bad-order` | `header/long-description` |
-    /// `header/empty-nav` | `header/long-nav`. A served folder
+    /// `header/empty-nav` | `header/long-nav` | `header/bad-astables` (not
+    /// `on`/`off`, so the author's `-- @astables` is ignored — the bar stays
+    /// off unless a viewer turns it on). A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
@@ -1688,6 +1690,23 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                 }
             }
             tags_line = line;
+        } else if let Some(a) = header_value(line, "astables").filter(|a| *a != "on" && *a != "off")
+        {
+            warn(
+                "header/bad-astables",
+                if a.is_empty() {
+                    "`-- @astables` has no value — write `on` or `off` (without it, the \
+                     bar is off unless a viewer switches it on themselves)"
+                        .into()
+                } else {
+                    format!(
+                        "`-- @astables {a}` is not `on` or `off` — the \"▦ Charts as tables\" \
+                         bar stays off on this dashboard unless a viewer switches it on \
+                         themselves"
+                    )
+                },
+                line,
+            );
         }
     }
     if tags.len() > MAX_TAGS {
@@ -3838,6 +3857,11 @@ mod design_tests {
         assert_eq!(codes("-- @order\n"), ["header/bad-order"]);
         assert_eq!(codes("-- @order one\n"), ["header/bad-order"]);
         assert_eq!(codes("-- @order 1.5\n"), ["header/bad-order"]);
+        assert!(codes("-- @astables on\nSELECT 1;").is_empty());
+        assert!(codes("-- @astables off\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @astables\n"), ["header/bad-astables"]);
+        assert_eq!(codes("-- @astables yes\n"), ["header/bad-astables"]);
+        assert_eq!(codes("-- @astables On\n"), ["header/bad-astables"]);
         assert!(codes(&format!("-- @description {}\n", "x".repeat(160))).is_empty());
         let long = format!(
             "-- @description {}\n-- @description {}\n",
