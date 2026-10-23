@@ -263,6 +263,7 @@ fn cmd_render(args: &[String]) {
         head_extra: String::new(),
         controls_html: String::new(),
         panels_html: panels,
+        fit: page::static_fit(&sql::plan(&script)),
     });
     std::fs::write(&out, html).unwrap_or_else(|e| panic!("write {out}: {e}"));
     println!("wrote {out} ({n} panels) — open it in a browser");

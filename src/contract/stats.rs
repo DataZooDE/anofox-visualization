@@ -2812,6 +2812,212 @@ pub(super) fn lambda_cv(
     grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
 }
 
+/// `curve_type = 'nested_cv'`: outer-fold test error points (`series =
+/// 'fold'`, x = the outer fold number) plus the across-folds mean ± SE as a
+/// quiet horizontal band (`series = 'mean'`, x NULL), from
+/// `ridge_nested_cv_by` / `elasticnet_nested_cv_by`; one panel per model / id.
+pub(super) fn nested_cv(
+    t: &Table,
+    options: &Row,
+    w: u32,
+    h: u32,
+    o: &RenderOptions,
+    place: Place,
+) -> Out {
+    let labels = Labels::from(options);
+    t.need(&["y"])?;
+    let y = t.num("y")?;
+    let x = if t.has("x") {
+        t.num("x")?
+    } else {
+        vec![Value::Na; t.rows.len()]
+    };
+    let series = t.text("series");
+    let is_mean = |i: usize| matches!(&series[i], Value::Str(s) if s.eq_ignore_ascii_case("mean"));
+    let band = t.has("y_low") && t.has("y_high");
+    let (lo, hi) = if band {
+        (t.num("y_low")?, t.num("y_high")?)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let opt_num = |k: &str| -> Result<Option<Vec<Value>>, String> {
+        if t.has(k) {
+            t.num(k).map(Some)
+        } else {
+            Ok(None)
+        }
+    };
+    let fold = opt_num("fold")?;
+    let lambda = opt_num("lambda")?;
+    let inner_cv = opt_num("inner_cv_mean")?;
+    let metric = if t.has("metric") {
+        Some(t.text("metric"))
+    } else {
+        None
+    };
+
+    let key = combo(t, &["model_id", "id"]);
+    let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+    for i in 0..t.rows.len() {
+        let k = key.as_ref().and_then(|kv| text_of(&kv[i]));
+        match groups.iter_mut().find(|(g, _)| *g == k) {
+            Some((_, v)) => v.push(i),
+            None => groups.push((k, vec![i])),
+        }
+    }
+    if groups.is_empty() {
+        return crate::note_svg(None, "No data", w, h).finish(place);
+    }
+    let small = groups.len() > 1;
+    let brand = o.brand();
+    let mut plots = Vec::new();
+    for (g, idx) in &groups {
+        let folds: Vec<usize> = idx
+            .iter()
+            .copied()
+            .filter(|&i| !is_mean(i) && fin(&x[i]).is_some() && fin(&y[i]).is_some())
+            .collect();
+        if folds.is_empty() {
+            continue;
+        }
+        let mean_i = idx
+            .iter()
+            .copied()
+            .find(|&i| is_mean(i) && fin(&y[i]).is_some());
+
+        let metric_name = folds
+            .iter()
+            .chain(mean_i.iter())
+            .find_map(|&i| metric.as_ref().and_then(|m| text_of(&m[i])))
+            .map(|m| m.to_ascii_lowercase());
+        let y_label = match metric_name.as_deref() {
+            Some("mse") => "test MSE".to_string(),
+            Some("rmse") => "test RMSE".to_string(),
+            Some("mae") => "test MAE".to_string(),
+            Some(other) if !other.is_empty() => format!("test {}", other.to_ascii_uppercase()),
+            _ => "test error".to_string(),
+        };
+        let pick = |v: &[Value]| folds.iter().map(|&i| v[i].clone()).collect::<Vec<_>>();
+        let tips: Vec<Value> = folds
+            .iter()
+            .map(|&i| {
+                let fold_n = fold
+                    .as_ref()
+                    .and_then(|f| fin(&f[i]))
+                    .or_else(|| fin(&x[i]))
+                    .map(fmt_num)
+                    .unwrap_or_default();
+                let mut parts = vec![format!(
+                    "fold {fold_n}: {y_label} {}",
+                    fmt_num(fin(&y[i]).unwrap_or(0.0))
+                )];
+                if let Some(l) = lambda.as_ref().and_then(|v| fin(&v[i])) {
+                    parts.push(format!("λ = {}", fmt_num(l)));
+                }
+                if let Some(ic) = inner_cv.as_ref().and_then(|v| fin(&v[i])) {
+                    parts.push(format!("inner CV {}", fmt_num(ic)));
+                }
+                s(parts.join(" · "))
+            })
+            .collect();
+        let mut plot = GGPlot::new(vec![
+            ("x".to_string(), pick(&x)),
+            ("y".to_string(), pick(&y)),
+            ("tip".to_string(), tips),
+        ])
+        .aes(Aes::new().x("x").y("y").label("tip"));
+
+        let mut ticks: Vec<f64> = folds.iter().filter_map(|&i| fin(&x[i])).collect();
+        ticks.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ticks.dedup();
+        let (xmin, xmax) = (
+            ticks.first().copied().unwrap_or(0.0),
+            ticks.last().copied().unwrap_or(1.0),
+        );
+        let (mut top, mut bottom) = folds
+            .iter()
+            .filter_map(|&i| fin(&y[i]))
+            .fold((f64::NEG_INFINITY, f64::INFINITY), |(a, b), v| {
+                (a.max(v), b.min(v))
+            });
+
+        if let Some(mi) = mean_i {
+            let my = fin(&y[mi]).unwrap_or(0.0);
+            let (mlo, mhi) = if band {
+                (fin(&lo[mi]), fin(&hi[mi]))
+            } else {
+                (None, None)
+            };
+            top = top.max(mhi.unwrap_or(my));
+            bottom = bottom.min(mlo.unwrap_or(my));
+            if let (Some(a), Some(b)) = (mlo, mhi) {
+                plot = plot
+                    .geom_ribbon_with(GeomRibbon {
+                        fill: GREY,
+                        alpha: 0.15,
+                    })
+                    .layer_data(vec![
+                        ("x".into(), vec![Value::Float(xmin), Value::Float(xmax)]),
+                        ("lo".into(), vec![Value::Float(a); 2]),
+                        ("hi".into(), vec![Value::Float(b); 2]),
+                    ])
+                    .layer_aes(Aes::new().x("x").ymin("lo").ymax("hi"));
+            }
+            plot = plot.geom_hline_with(GeomHline {
+                yintercept: my,
+                color: GREY,
+                width: 1.2,
+                linetype: Linetype::Dashed,
+                alpha: 0.9,
+            });
+            let label = if mlo.is_some() && mhi.is_some() {
+                "mean ± SE"
+            } else {
+                "mean"
+            };
+            let label_y = top + (top - bottom).abs().max(1e-9) * 0.06;
+            plot = plot
+                .geom_text_with(GeomText {
+                    size: if small { 9.0 } else { 10.0 },
+                    color: INK,
+                    hjust: 1.0,
+                    vjust: 0.0,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".into(), vec![Value::Float(xmax)]),
+                    ("y".into(), vec![Value::Float(label_y)]),
+                    ("note".into(), vec![s(label.to_string())]),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("note"));
+        }
+
+        plot = plot.geom_point_with(GeomPoint {
+            size: 2.2,
+            color: brand,
+            alpha: 1.0,
+        });
+        plot = plot.scale_x_continuous(ScaleContinuous::new().with_breaks(ticks));
+        plot = plot
+            .xlab(&labels.x_or("outer fold"))
+            .ylab(&labels.y_or(&y_label));
+        if let Some(g) = g {
+            plot = plot.title(g);
+        } else if let Some(tt) = &labels.title {
+            plot = plot.title(tt);
+        }
+        plots.push(styled(plot, o, small));
+    }
+    if plots.is_empty() {
+        return crate::note_svg(None, "No data", w, h).finish(place);
+    }
+    if plots.len() == 1 {
+        return finish(plots.pop().expect("one plot"), w, h, place);
+    }
+    let n = plots.len();
+    grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
+}
+
 /// About `n` round tick positions covering [lo, hi].
 pub(super) fn nice_ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
     if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) || n == 0 {

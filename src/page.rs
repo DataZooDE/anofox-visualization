@@ -58,7 +58,40 @@ pub struct StaticPage<'a> {
     pub controls_html: String,
     /// The panels (`<figure class="panel">…` / `<h2 class="section">…`), HTML.
     pub panels_html: String,
+    /// Fit the panels to the window ([`static_fit`]: a top-level `::FIT`
+    /// in a dashboard without tabs).
+    pub fit: bool,
 }
+
+/// Does a static page fit its panels to the window (#400)? Only for a
+/// dashboard-wide `::FIT`: one outside any `::VIEW` in a dashboard with no
+/// `::TAB` / `::SUBTAB` — a static page flattens tabs (every tab's panels on
+/// one page) and shows a `::VIEW` group's first alternative inline, so a
+/// tab's, sub-tab's or view's `::FIT` has no section of its own to fit there.
+pub fn static_fit(plan: &[crate::sql::Panel]) -> bool {
+    let live = |p: &&crate::sql::Panel| !p.setup;
+    !plan.iter().filter(live).any(|p| p.tab_kind().is_some())
+        && plan
+            .iter()
+            .filter(live)
+            .any(|p| p.view.is_none() && p.roles.iter().any(|(_, r)| *r == crate::Role::Fit))
+}
+
+/// The static page's fit-to-screen, CSS only (no script measures anything):
+/// the page is the window tall, the header keeps its height and the panels'
+/// grid takes the rest in equal rows of at least 120 px — more rows than fit
+/// overflow it and the page scrolls, as the live app falls back. Each chart
+/// (its pre-rendered SVG, under its title) fills its panel's height, scaled uniformly by its
+/// viewBox (`preserveAspectRatio` meet: crisp, not distorted).
+const FIT_CSS: &str = "html{height:100%}\
+body.dp-static.dp-fit{height:100vh;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;margin:0}\
+body.dp-fit>.grid{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}\
+body.dp-fit>.grid>*{flex:none}\
+body.dp-fit>.grid>.dp-fit-grid{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));grid-auto-rows:minmax(120px,1fr);gap:inherit}\
+body.dp-fit .dp-fit-grid>.panel{min-height:0;overflow:hidden;display:flex;flex-direction:column}\
+body.dp-fit .dp-fit-grid>.panel>svg{flex:none}\
+body.dp-fit .dp-fit-grid>.panel>svg:last-child{flex:1 1 0;min-height:0;width:100%;height:100%}\
+body.dp-fit .dp-fit-grid>h2.section{grid-column:1/-1;align-self:end}";
 
 /// Render a static page.
 pub fn render(p: &StaticPage) -> String {
@@ -78,8 +111,8 @@ pub fn render(p: &StaticPage) -> String {
     format!(
         "<!doctype html><html lang=\"{lang}\" data-theme=\"{name}\" data-variant=\"{variant}\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
-<style>{css}</style></head>\
-<body class=\"dp-static\"><div class=\"grid\">{header}{sub}{controls}{panels}</div>\
+<style>{css}{fit_css}</style></head>\
+<body class=\"dp-static{fit_class}\"><div class=\"grid\">{header}{sub}{controls}{panels}</div>\
 <div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
@@ -94,7 +127,13 @@ pub fn render(p: &StaticPage) -> String {
             format!("<div class=\"dp-src\">{}</div>", p.subtitle_html)
         },
         controls = p.controls_html,
-        panels = p.panels_html,
+        fit_css = if p.fit { FIT_CSS } else { "" },
+        fit_class = if p.fit { " dp-fit" } else { "" },
+        panels = if p.fit {
+            format!("<div class=\"dp-fit-grid\">{}</div>", p.panels_html)
+        } else {
+            p.panels_html.clone()
+        },
     )
 }
 
@@ -111,6 +150,7 @@ pub fn list(t: &ResolvedTheme, title: &str, items: &[(String, String)]) -> Strin
         head_extra: String::new(),
         controls_html: String::new(),
         panels_html: format!("<ul class=\"dash-list\">{lis}</ul>"),
+        fit: false,
     })
 }
 
@@ -555,5 +595,56 @@ mod tests {
         // without @nav, the title is the label and gets no such tooltip
         assert!(html.contains(">Ops board<"));
         assert!(!html.contains("title=\"Ops board\""));
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+    use crate::sql::plan;
+
+    /// #400: a static page fits only for a dashboard-wide ::FIT (no tabs,
+    /// not inside a ::VIEW), with CSS alone.
+    #[test]
+    fn static_fit_only_for_a_dashboard_wide_fit() {
+        let chart = "SELECT 1 AS x ::XAXIS, 2 AS y ::BARCHART;";
+        assert!(static_fit(&plan(&format!("SELECT 'fit'::FIT; {chart}"))));
+        assert!(!static_fit(&plan(chart)));
+        assert!(!static_fit(&plan(&format!(
+            "SELECT 'A'::TAB; SELECT 'fit'::FIT; {chart}"
+        ))));
+        assert!(!static_fit(&plan(&format!(
+            "SELECT 'L' AS v ::VIEW; SELECT 'fit'::FIT; {chart} SELECT 'B' AS v ::VIEW; {chart}"
+        ))));
+    }
+
+    #[test]
+    fn a_fitted_static_page_sizes_rows_with_css_only() {
+        let t = theme::default_light();
+        let page = |fit| {
+            render(&StaticPage {
+                theme: &t,
+                fallback_title: "x",
+                subtitle_html: String::new(),
+                head_extra: String::new(),
+                controls_html: String::new(),
+                panels_html: "<figure class=\"panel\"><svg viewBox=\"0 0 460 300\"></svg></figure>"
+                    .into(),
+                fit,
+            })
+        };
+        let on = page(true);
+        assert!(on.contains("<body class=\"dp-static dp-fit\">"));
+        assert!(on.contains("<div class=\"dp-fit-grid\"><figure class=\"panel\">"));
+        assert!(on.contains("height:100vh") && on.contains("grid-auto-rows:minmax(120px,1fr)"));
+        assert!(
+            !FIT_CSS.contains("transform"),
+            "scaled by viewBox, not a CSS transform"
+        );
+        let off = page(false);
+        assert!(
+            off.contains("<body class=\"dp-static\">")
+                && !off.contains("<div class=\"dp-fit-grid\">")
+        );
     }
 }

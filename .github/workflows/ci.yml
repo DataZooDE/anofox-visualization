@@ -255,11 +255,29 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/toolbar-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/astables-e2e.mjs (#401): "Charts as tables" is opt-in — off
+      # by default with no in-page bar, the toolbar's ⋯ menu item reaches it
+      # either way (bar or no bar) and stays in sync with the bar's own
+      # button, and `-- @astables on` (not `off`/an unrecognized value)
+      # shows the bar. Reuses the :8947 server and Chromium above.
+      - name: Charts-as-tables opt-in e2e (#401)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/astables-e2e.mjs --url http://127.0.0.1:8947/
+
       # The downloaded HTML's tab/sub-tab switcher (#381, an owner-reported
       # regression): exports a dashboard with tabs and sub-tabs and clicks
       # through every one in the downloaded file, offline.
       - name: Sub-tabs export e2e (every ::TAB / ::SUBTAB page in the downloaded HTML)
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/subtabs-export-e2e.mjs --url http://127.0.0.1:8947/
+
+      # scripts/fit-e2e.mjs (#400): a 'fit'::FIT tab fills the window with no
+      # page scroll at 1920x1080 / 1366x768 / 3840x2160, its charts redrawn
+      # at their fitted pixel size (not stretched); a tab without ::FIT, an
+      # overloaded ::FIT tab (fallback + notice), ?fit=0 / ?fit=1, a resize
+      # and a cross-filter re-run — reuses the :8947 server and Chromium above.
+      - name: Fit-to-screen e2e (::FIT tabs)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/fit-e2e.mjs --url http://127.0.0.1:8947/
 
       - name: Stop the web/ server
         if: always()

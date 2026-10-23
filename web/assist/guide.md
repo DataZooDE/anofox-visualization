@@ -20,7 +20,7 @@
 | Chart interactions (before the chart) | `'region' \| 'region multi'::SELECT_AS` (own selection variable + brushed `region_from` / `region_to`) · `'region > country > city'::DRILL` (drill-down + breadcrumb) · a `'#Tab?v.x={value}'::LINK` column (drill-through, charts and tables) |
 | Inputs | `::DROPDOWN` · `::MULTISELECT` (a list) · `::BUTTONS` (segmented, ≤ ~5 options) · `::TOGGLE` (a BOOLEAN; value = default) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` · `::OPTION_LABEL` (an option's shown text; the value stays the variable's) |
 | Strips under a chart | right after a chart with a numeric / date x: `day::XAXIS, 'Promotions'::TRACK, name::LABEL` (ticks) · `… , detector::YAXIS, '#d64545'-style ::CATEGORY, 1::HEATMAP, 'Alarms'::TRACK` (lanes of tiles) · `day::XAXIS, price::STEP, 'Price'::TRACK` (sparkline) — same plot area and x window as the chart; a click on a strip mark shades its span on the chart |
-| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `en-IE` (English, €) `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` · `max(loaded_at)::ASOF, 'stale=24h'` (a "Data as of …" chip, amber when stale — give every locked / exported dashboard one; a plain `DATE` reads as a calendar day, with no time and no time-zone shift) |
 
 A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name (else the bare column name), for an input it is the variable name, in a table the header. Without a `::CATEGORY`, several columns of the *same* chart kind (`events::LINECHART, failures::LINECHART`; `events::BARCHART, failures::BARCHART`) get a real legend named by column; a *mixed* overlay (bars + a different-kind line/area) instead keeps the base in the brand colour with no legend, each overlay just a distinct palette colour.
@@ -333,6 +333,34 @@ runs — switching views re-runs just that one, never all three up front. The
 group's id for the URL (`?view.layout=Bars`) comes from the `layout` alias on
 its first marker.
 
+### Fit to screen (`::FIT`)
+
+For a wall display or a one-screen overview, put `SELECT 'fit'::FIT;` right after the `::TAB` (or `::SUBTAB` / `::VIEW`) that should fill the browser window: its rows of panels share the height under the app and tab bars in their `::HEIGHT` ratio, charts are redrawn at that size, tables / `::PAGED` scroll inside their panel, KPI tiles keep ~96 px. Only that section fits, only while it is shown; tabs without `::FIT` scroll as usual. In a `::SUBTAB` / `::VIEW`, only that pane's own panels fit (under its bar); the parent tab's panels above keep their height and the page may scroll to reach the fitted pane. With no tabs, a `::FIT` anywhere fits the whole dashboard. `?fit=1` fits the shown tab without `::FIT`, `?fit=0` never fits; phones (< 600 px) ignore it. The downloaded HTML fits itself too (scaling its drawn SVGs); a page without the app (`dashboard file.sql out.html`, `serve`'s static page) fits only a dashboard-wide `::FIT` (no tabs), in equal rows, with CSS.
+
+```sql dashboard
+-- A one-screen overview tab (no page scroll) beside a detail tab that scrolls
+CREATE TABLE sales AS
+SELECT DATE '2024-01-01' + INTERVAL (i) DAY AS day, (ARRAY['EU', 'US', 'APAC'])[1 + i % 3] AS region,
+       100 + (hash(i) % 50)::INTEGER AS amount
+FROM range(90) r(i);
+
+SELECT 'Overview'::TAB;
+SELECT 'fit'::FIT;                         -- this tab fills the window; rows keep their ::HEIGHT ratio
+SELECT 'Totals'::GROUP;
+SELECT sum(amount)::MONEY, 'Revenue'::LABEL FROM sales;
+SELECT count(*)::METRIC, 'Orders'::LABEL FROM sales;
+SELECT 1::ENDGROUP;
+SELECT 6::COL; SELECT 320::HEIGHT;
+SELECT region::XAXIS, sum(amount)::BARCHART, 'EU leads on revenue'::TITLE FROM sales GROUP BY 1 ORDER BY 2 DESC;
+SELECT 6::COL; SELECT 320::HEIGHT;
+SELECT day::XAXIS, sum(amount)::LINECHART, 'Daily revenue holds steady'::TITLE FROM sales GROUP BY 1 ORDER BY 1;
+SELECT 'Detail'::TAB;                      -- no ::FIT: scrolls as usual
+SELECT region AS "Region" ::TABLE, sum(amount) AS "Revenue" ::MONEY, 'Revenue by region'::TITLE
+FROM sales GROUP BY region ORDER BY "Revenue" DESC;
+```
+
+Keep a fitted tab small: if a panel would get under ~120 px the tab scrolls instead (with a notice). `dashboard --check` warns ahead of time — `layout/fit-too-many` (more rows than a 1366×768 screen holds — for a sub-tab / view, only its own panels count; aim for ≤ ~4 rows: a KPI strip and two rows of charts) and `layout/fit-ambiguous` (a `::FIT` before the first `::TAB` of a tabbed dashboard, twice for one tab, or cast beside a panel's columns instead of its own statement).
+
 ## Design contract
 
 Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`design/*`).
@@ -367,7 +395,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 - **Don't dump raw rows**: aggregate or top-N a big detail table **[lint: raw-table]**.
 - **Placement** (`docs/dashboard-design.md` §7): default to 2-up (`6::COL`), full width for time series and tables; equalise a 2-up row with `::HEIGHT`; title 2-up panels with a `::TITLE` column (a lone `::LABEL` heading forces a new row); a `::GROUP` is always full width (use it for KPI strips and filter boxes, not for side by side); keep the top to one slim row (a bare `::DROPDOWN` filter, no banner repeating the KPIs).
 - **Colour is discrete**: band a continuous value with `CASE` before `::COLOR`.
-- **Name a dashboard by the business question it answers** (`'Which regions are behind plan?'::DASHBOARD_TITLE`, `-- @title`), never by method or technology. When that question is too long for a nav bar / start-page card, give it a short `-- @nav <label>` too (`@title` stays the page's own heading). Place it with `-- @group <area>` (` / ` for one sub-level), find it with `-- @tags a, b` (≤10), describe it in one line with `-- @description`, and say who looks after it with `-- @owner <team>` and, once checked, `-- @certified YYYY-MM-DD` (a ✓ badge) header lines. Where the numbers come from (stored model runs, the ETL job) goes in `--` header comments and the README, not as a note or banner on the page; freshness goes in an `::ASOF` chip.
+- **Name a dashboard by the business question it answers** (`'Which regions are behind plan?'::DASHBOARD_TITLE`, `-- @title`), never by method or technology. When that question is too long for a nav bar / start-page card, give it a short `-- @nav <label>` too (`@title` stays the page's own heading). Place it with `-- @group <area>` (` / ` for one sub-level), find it with `-- @tags a, b` (≤10), describe it in one line with `-- @description`, and say who looks after it with `-- @owner <team>` and, once checked, `-- @certified YYYY-MM-DD` (a ✓ badge) header lines. Where the numbers come from (stored model runs, the ETL job) goes in `--` header comments and the README, not as a note or banner on the page; freshness goes in an `::ASOF` chip. For a dashboard a screen-reader or keyboard-only audience will rely on, add `-- @astables on` so the "▦ Charts as tables" bar is there without the viewer having to find it in the menu first — leave it off (the default) otherwise, since every viewer can still switch to tables from the toolbar's **⋯ → Charts as tables** menu item.
 - **Default look**: the built-in graphite theme (`light`); add a `::THEME` only for a real brand.
 
 Complete references: `examples/dashboards/sales-overview.sql` (self-contained, lints clean), `examples/sp500-dashboard/sp500.sql` (cross-filtered), `web/examples/statistics-showcase.sql` (contract plots in ten tabs).

@@ -51,7 +51,7 @@ FROM poisson_augment_by('d', grp, y_count, [x1, x2]) o WHERE grp = 'A';
 -- prediction: fit + 90 % band per group, the last rows held out as 'test'.
 SELECT 'prediction' AS name, anofox_plot_prediction(p, height := 520) AS svg
 FROM ols_prediction_by('d', grp, id, y, [x1, x2], level := 0.9,
-                       split := CASE WHEN id > 50 THEN 'test' END) p;
+                       split := CASE WHEN id > 50 THEN 'test' ELSE 'train' END) p;
 
 -- prediction: two models in one panel (one coloured line + band each).
 SELECT 'prediction_models' AS name, anofox_plot_prediction(p) AS svg
@@ -80,6 +80,8 @@ SELECT 'kaplan_meier' AS name, anofox_plot_curve(c) AS svg
 FROM kaplan_meier_by('d', grp, time, event) c;
 SELECT 'lambda_cv' AS name, anofox_plot_curve(c) AS svg
 FROM ridge_cv_by('d', grp, y, [x1, x2]) c WHERE grp = 'A';
+SELECT 'nested_cv' AS name, anofox_plot_curve(c) AS svg
+FROM ridge_nested_cv_by('d', grp, y, [x1, x2]) c WHERE grp = 'A';
 SELECT 'acf' AS name, anofox_plot_curve(c, height := 520) AS svg
 FROM acf_by('d', grp, y, id) c;
 

@@ -197,7 +197,8 @@ row per model and level.",
         body: contract_body!("curve", "'base_rate', base_rate, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Plot a `curve` table; the geom follows curve_type: roc/calibration (line + diagonal), pr/pdp/lift/lowess \
 (line), km (step), acf/pacf (lollipops + bounds from y_low/y_high), lambda_cv (point ± y_low..y_high on a log x), \
-qq (points + identity). One curve_type per call (GROUP BY curve_type); several model_id/series are coloured.",
+nested_cv (outer-fold points + a mean ± SE band), qq (points + identity). One curve_type per call (GROUP BY curve_type); \
+several model_id/series are coloured.",
         example: "SELECT anofox_plot_curve(r) FROM (VALUES ('roc', 0.0, 0.0), ('roc', 0.2, 0.7), ('roc', 1.0, 1.0)) \
 r(curve_type, x, y)",
         tags: &[("anofox.consumes", "curve"), CONTRACT_TAG],

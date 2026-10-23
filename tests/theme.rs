@@ -400,6 +400,7 @@ fn no_powered_by_credit_anywhere() {
                     head_extra: String::new(),
                     controls_html: String::new(),
                     panels_html: String::new(),
+                    fit: false,
                 });
             assert!(!html.contains("Powered by DataZoo"), "page {name}");
             let list = anofox_visualization::page::list(set.pick(variant), "D", &[]);
