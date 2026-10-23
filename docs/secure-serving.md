@@ -340,7 +340,10 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 - A fresh connection per request: one viewer's variables or temp objects never
   leak into another's. Setup statements (`CREATE TEMP …`) of the dashboard are
   re-run per request; only TEMP objects can be created (the data is read-only),
-  so materialise anything heavy before serving.
+  so materialise anything heavy before serving. A `CREATE TEMP TABLE … AS` in
+  setup is rebuilt on every connection that runs the setup (without warm
+  connections: every panel request, #387); prefer `CREATE TEMP VIEW`
+  (`dashboard --check <folder>` warns: `folder/setup-table`).
 - **Warm connections** (`warm`, #388). After a clean panel request, its
   connection, setup already run, waits idle for the next request with the
   same key. The key is the viewer's login (claims, and with them a policy's

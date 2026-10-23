@@ -1934,8 +1934,15 @@ more than 10 tags (`header/too-many-tags`), an empty `@owner`
 (`header/long-description`), reported as statement 0. `dashboard --check
 <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
-same title (`folder/duplicate-title`, ignoring case) and a file name the
-servers skip (`folder/bad-id`).
+same title (`folder/duplicate-title`, ignoring case), a file name the
+servers skip (`folder/bad-id`), and a setup statement that materialises a
+table (`CREATE [TEMP] TABLE … AS`, `folder/setup-table`). The locked server
+runs a panel's setup on every connection that serves it: with warm
+connections (`warm`, #388) once per kept connection and again whenever a
+variable the setup reads changes, without them for every panel request
+(#387: 17.6 s against 0.76 s per click with a view, on a 30-panel, 20M-row
+dashboard). Each kept connection also holds the table in memory; a
+`CREATE VIEW` costs only what each panel reads.
 
 ### Layout (from SQL)
 
