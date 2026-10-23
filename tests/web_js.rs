@@ -129,6 +129,13 @@ fn web_served_nav_groups() {
     run_node("served_nav_test.mjs");
 }
 
+/// #407 part 2: a served-nav link carries the current value of every
+/// server-declared `pathVars` variable (servedNavHref), and only those.
+#[test]
+fn web_served_nav_keeps_path_vars() {
+    run_node("nav_path_vars_test.mjs");
+}
+
 /// The builder assistant's core (#145): the loop with scripted model turns,
 /// the classifier, masking, the cache prefix, transport (a) against a local
 /// fake API and the tools in DuckDB-Wasm; and web/assist/guide.md is current.

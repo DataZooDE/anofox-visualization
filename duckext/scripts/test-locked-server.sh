@@ -24,6 +24,10 @@
 #     is not (#209).
 #   * the result cache keys on the variables a panel can depend on (#210).
 #   * a database with foreign keys (#283).
+#   * window.__served exposes `path_vars` (#407 part 2); `nav_picker` (#407
+#     part 3) refuses to start with `var` not in `path_vars` or together
+#     with an access policy, and its options drop a row whose value isn't a
+#     plain name — with NODE_PATH also in a browser (served-e2e.mjs §5).
 # usage: duckext/scripts/test-locked-server.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -655,3 +659,54 @@ for _ in 1 2 3; do [ "$(panel 2 '{"a":1}' w)" = 200 ] && [ "$(val)" = 10 ] || fa
 [ "$(warms)" = 0 ] || fail "warm 0 still reused a connection: $(cat "$T/out")"
 stop
 echo "OK: warm connections answer like fresh ones (setup inputs keyed, other variables reset; warm: 0 turns them off)"
+
+# #407 part 2: window.__served exposes `path_vars`; an unused/unrelated
+# viewer variable is accepted, not rejected (the client relies on this to
+# carry a path_vars value to a dashboard that may not read it). Part 3:
+# `nav_picker` refuses to start with `var` not in `path_vars` or together
+# with an access policy, and its options drop a row whose value isn't a
+# plain name (never sent to a page).
+mkdir -p "$T/navdash" "$T/navruns"
+cat > "$T/navdash/m1.sql" <<'SQL'
+SELECT coalesce(getvariable('model'), 'none')::VARCHAR AS m ::TEXT_SMALL;
+SQL
+PICKER_SQL="SELECT * FROM (VALUES ('car-price','Car price'), ('../etc','Bad -- dropped'), ('van','Van')) t(value, label)"
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/navdash"), $PORT,
+  json_object('data', $(q "$T/navruns"), 'path_vars', ['model'],
+    'nav_picker', json_object('var', 'model', 'label', 'Model', 'sql', $(q "$PICKER_SQL"))));" || fail "nav_picker server"
+page_html="$(curl -s "http://127.0.0.1:$PORT/d/m1")"
+echo "$page_html" | grep -oq '"pathVars":\["model"\]' || fail "#407: window.__served.pathVars missing: $page_html"
+echo "$page_html" | grep -oq '"navPicker":{"var":"model","label":"Model","options":\[{"value":"car-price","label":"Car price"},{"value":"van","label":"Van"}\]}' \
+  || fail "#407: window.__served.navPicker (the bad row must be dropped): $page_html"
+# An unknown/unused viewer variable on a panel request is accepted (ignored),
+# not rejected — the nav relies on this to carry a path_vars value to a
+# dashboard that doesn't happen to read it.
+[ "$(panel 0 '{"model":"car-price","totally_unrelated":"x"}' m1)" = 200 ] && grep -q '"c0":"car-price"' "$T/body" \
+  || fail "#407: an unrelated viewer variable was rejected: $(cat "$T/body")"
+stop
+echo "OK: #407 part 2: window.__served.pathVars; an unused viewer variable is accepted, not rejected"
+echo "OK: #407 part 3: nav_picker.options drops a row whose value isn't a plain path_vars name"
+
+# nav_picker.var must be one of path_vars.
+if QUIET=1 start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/navdash"), $PORT,
+  json_object('data', $(q "$T/navruns"), 'path_vars', ['model'],
+    'nav_picker', json_object('var', 'other', 'sql', 'SELECT 1, 2')));"; then
+  fail "nav_picker.var not in path_vars was accepted"
+fi
+grep -q "options.nav_picker.var 'other' must be one of options.path_vars" "$T/out" || fail "nav_picker.var check: $(cat "$T/out")"
+exec 3>&-
+
+# nav_picker refuses to start together with an access policy: its SQL runs
+# directly, outside the policy's row/column rewrite.
+cat > "$T/navpolicy.json" <<'JSON'
+{"tables": {"sales": {"rows": true}}}
+JSON
+if QUIET=1 start "$T/main.duckdb" "" "CREATE TABLE sales AS SELECT 1 AS x;
+  SELECT anofox_serve_dashboards($(q "$T/navdash"), $PORT,
+  json_object('data', $(q "$T/navruns"), 'path_vars', ['model'], 'policy', $(q "$T/navpolicy.json"),
+    'nav_picker', json_object('var', 'model', 'sql', 'SELECT 1, 2')));"; then
+  fail "nav_picker with an access policy was accepted"
+fi
+grep -q "options.nav_picker cannot be combined with options.policy" "$T/out" || fail "nav_picker + policy refusal: $(cat "$T/out")"
+exec 3>&-
+echo "OK: #407 part 3: nav_picker.var must be one of path_vars; refuses to start with an access policy"
