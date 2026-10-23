@@ -936,7 +936,7 @@ SELECT anofox_plot_diagnostics(o) FROM poisson_augment_by('d', grp, y_count, [x1
 -- prediction: 90 % band per group, rows after id 50 held out ('test')
 SELECT anofox_plot_prediction(p)
 FROM ols_prediction_by('d', grp, id, y, [x1, x2], level := 0.9,
-                       split := CASE WHEN id > 50 THEN 'test' END) p;
+                       split := CASE WHEN id > 50 THEN 'test' ELSE 'train' END) p;
 -- … two models in one panel; marginal effect of x1
 SELECT anofox_plot_prediction(p)
 FROM (SELECT * FROM ols_prediction_by('d', grp, id, y_count, [x1, x2])

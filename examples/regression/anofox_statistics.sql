@@ -51,7 +51,7 @@ FROM poisson_augment_by('d', grp, y_count, [x1, x2]) o WHERE grp = 'A';
 -- prediction: fit + 90 % band per group, the last rows held out as 'test'.
 SELECT 'prediction' AS name, anofox_plot_prediction(p, height := 520) AS svg
 FROM ols_prediction_by('d', grp, id, y, [x1, x2], level := 0.9,
-                       split := CASE WHEN id > 50 THEN 'test' END) p;
+                       split := CASE WHEN id > 50 THEN 'test' ELSE 'train' END) p;
 
 -- prediction: two models in one panel (one coloured line + band each).
 SELECT 'prediction_models' AS name, anofox_plot_prediction(p) AS svg
