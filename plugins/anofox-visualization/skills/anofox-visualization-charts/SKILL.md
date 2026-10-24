@@ -100,6 +100,8 @@ Charts wear the theme: its font, muted axis text, a hairline grid, a transparent
 
 **Heatmaps** (`[i, "XAXIS"], [j, "YAXIS"], [k, "HEATMAP"]`): text axes keep the row order of the spec (first `YAXIS` level = top row, so `ORDER BY` in the `list(…)`); the theme's sequential ramp, or its diverging ramp around 0 when the values span zero; `[k, "DATALABELS"]` prints the formatted value in each cell with automatic contrast.
 
+**Dense scatter** (`SCATTER`/`BUBBLE` + `HEXBIN`): thousands of points blur into a solid blob — `[k, "HEXBIN"]` (value `'auto'` or a bin count, e.g. `'40'`) bins them into a 2D count density instead, with its own fill legend; `IDENTITY`/`ABLINE`/`REFLINE` still draw on top (e.g. the `y = x` line on a predicted-vs-actual scatter). `CATEGORY` is ignored once `HEXBIN` is set (one density for the panel, not one per category — `dashboard --check` notes it).
+
 ## Worked examples
 
 ```sql

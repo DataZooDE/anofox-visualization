@@ -142,7 +142,7 @@ terminal.
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
-| `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons: 'auto' or a width across ('25 km'; planar: '2.5'); sums the measure, else counts rows |
+| `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis) |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -1423,6 +1423,36 @@ This needs the community extension, installed either natively (`INSTALL …
 FROM community`) or, in the browser, by fetching it from outside this host
 — which breaks on an offline or locked-down server (D9). `::HEXBIN` needs
 neither: it has no extension dependency and no outside fetch.
+
+#### Density on a planar scatter (`::HEXBIN` off the map)
+
+```sql
+SELECT x ::XAXIS, y ::SCATTER, 'auto'::HEXBIN, 1::IDENTITY
+FROM predictions;
+```
+
+`::HEXBIN` on a planar (non-map) `::SCATTER`/bubble chart bins the points
+into a 2D count density instead of drawing each one — the fix for a
+predicted-vs-actual scatter at thousands of rows, where individual points
+blur into a solid blob and the identity line (`::IDENTITY`) is the point of
+the chart. Drawn through ggplot-rs's own `geom_hex`/`StatBinHex` (the same
+stat the map's `::HEXBIN` uses), with a "count" fill legend; `::IDENTITY`,
+`::ABLINE` and `::REFLINE` are still drawn on top, unaffected.
+
+- **Bin count, not a width:** `'auto'` (default) sizes the lattice from the
+  panel's own pixel size; a bare number sets the bin count *across each
+  axis* (ggplot2's own `stat_bin_hex(bins = …)` convention) — unlike the
+  map's `::HEXBIN`, which takes a width. A lopsided x/y data range can
+  stretch the hexagons for a given bin count, same as ggplot2's.
+- **Count only:** always a count of points per hexagon — there is no
+  "sum the measure" case here (a planar scatter's y *is* the measure).
+- **`::CATEGORY` is ignored** (`chart/hexbin-category`, a Note under
+  `dashboard --check`) — one density for the whole panel, not one hexagon
+  grid per category value, the same rule the map's own `::HEXBIN` has.
+- **Tooltip:** each hexagon's hover reads "n = `<count>`" (`GeomHex`'s own
+  default).
+- A malformed value (not `'auto'` or a number) is a hard error, same as
+  any other role.
 
 #### Built-in boundaries (`::REGION`, `::BOUNDARIES`)
 

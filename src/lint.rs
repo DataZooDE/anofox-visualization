@@ -970,6 +970,16 @@ where
                 }),
         );
 
+        diags.extend(scatter_hexbin_diags(&p.roles, &rows).into_iter().map(
+            |(severity, code, message)| Diagnostic {
+                severity,
+                stmt,
+                code,
+                message,
+                sql: short.clone(),
+            },
+        ));
+
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
         if opts.design {
@@ -3162,6 +3172,59 @@ fn hexbin_diags(
             Severity::Note,
             "map/hexbin-category",
             "::CATEGORY is ignored on a ::HEXBIN map — hexagons are coloured by count or sum"
+                .to_string(),
+        ));
+    }
+    out
+}
+
+/// `::HEXBIN` on a planar `::SCATTER`/bubble chart (#426) — a chart-side
+/// sibling of [`hexbin_diags`] (the map case), which only runs for a map
+/// panel. Two checks: a bad size spec, and `::CATEGORY` being ignored (the
+/// density layer drops it, same rule the map's own `::HEXBIN` has — one
+/// hexbin for the whole panel, not one per category; see `src/lib.rs`'s
+/// `cartesian`).
+fn scatter_hexbin_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let Some(hi) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Hexbin)
+        .map(|(i, _)| *i)
+    else {
+        return out;
+    };
+    // A map panel's `::HEXBIN` is `hexbin_diags`'s job (via `map_diags`), not
+    // this one — conservatively: any role `map_diags` would treat as a map
+    // trigger routes there instead, even on the rare false positive (a
+    // numeric column mistakenly tagged `::GEOMETRY`), rather than risk
+    // duplicate diagnostics on the same column.
+    let is_map = roles.iter().any(|(_, r)| {
+        matches!(
+            r,
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+        )
+    });
+    if is_map || !matches!(chart_kind(roles), Some(Kind::Point) | Some(Kind::Bubble)) {
+        return out;
+    }
+    if let Some(v) = column_texts(rows, hi).into_iter().next() {
+        if crate::map::hexbin::HexSize::parse(&v).is_err() {
+            out.push((
+                Severity::Warning,
+                "chart/hexbin-bad-size",
+                format!("::HEXBIN '{v}' is not 'auto' or a number — the chart uses 'auto'"),
+            ));
+        }
+    }
+    if roles.iter().any(|(_, r)| *r == Role::Category) {
+        out.push((
+            Severity::Note,
+            "chart/hexbin-category",
+            "::CATEGORY is ignored on a ::HEXBIN scatter — hexagons are coloured by point count \
+             alone"
                 .to_string(),
         ));
     }
@@ -6060,6 +6123,64 @@ mod design_tests {
             .map(|d| (d.severity, d.code))
             .collect();
         assert_eq!(codes, vec![(Severity::Note, "map/hexbin-category")]);
+    }
+
+    #[test]
+    fn scatter_hexbin_category_is_noted() {
+        let data = vec![json!({ "c0": 1.0, "c1": 2.0, "c2": "auto", "c3": "A" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT x::XAXIS, y::SCATTER, h::HEXBIN, cat::CATEGORY FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let codes: Vec<_> = d
+            .into_iter()
+            .filter(|d| d.code == "chart/hexbin-category")
+            .map(|d| (d.severity, d.code))
+            .collect();
+        assert_eq!(codes, vec![(Severity::Note, "chart/hexbin-category")]);
+    }
+
+    #[test]
+    fn scatter_hexbin_bad_size_is_flagged() {
+        let data = vec![json!({ "c0": 1.0, "c1": 2.0, "c2": "huge" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT x::XAXIS, y::SCATTER, h::HEXBIN FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let codes: Vec<_> = d
+            .into_iter()
+            .filter(|d| d.code == "chart/hexbin-bad-size")
+            .map(|d| (d.severity, d.code))
+            .collect();
+        assert_eq!(codes, vec![(Severity::Warning, "chart/hexbin-bad-size")]);
+    }
+
+    #[test]
+    fn scatter_hexbin_on_a_map_defers_to_the_map_diags() {
+        // A map panel's own `::HEXBIN` is `hexbin_diags`'s job (via
+        // `map_diags`) — `scatter_hexbin_diags` must stay quiet so the two
+        // don't double-report the same column.
+        let data = vec![json!({ "c0": 50.0, "c1": 10.0, "c2": "auto", "c3": "A" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        assert!(
+            !d.iter().any(|d| d.code.starts_with("chart/hexbin")),
+            "{d:?}"
+        );
     }
 
     #[test]

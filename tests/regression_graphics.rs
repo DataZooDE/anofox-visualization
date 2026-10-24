@@ -66,6 +66,13 @@ fn polylines(svg: &str) -> Vec<String> {
         .map(|t| t[..t.find('>').unwrap()].to_string())
         .collect()
 }
+/// Every `<polygon>` mark (`::HEXBIN` cells on a planar scatter, #426).
+fn polygons(svg: &str) -> Vec<String> {
+    svg.split("<polygon ")
+        .skip(1)
+        .map(|t| t[..t.find('>').unwrap()].to_string())
+        .collect()
+}
 
 // ── A1: grouped bars are dodged, not drawn on top of each other ──────────
 #[test]
@@ -2605,4 +2612,98 @@ fn non_finite_x_levels_are_shown_not_merged_with_blank() {
     // Five distinct bars: "a", "∞", "−∞", "NaN" and the blank `Na` level —
     // none of the four non-"a" levels collapsed into one.
     assert_eq!(s.matches("data-geom=\"col\"").count(), 5, "{s}");
+}
+
+// ── #426: ::HEXBIN on a planar ::SCATTER ────────────────────────────────
+/// A quasi-uniform spread of `n` points over roughly [0, 97) × [0, 83) —
+/// enough points, spread widely enough, that a hexbin lattice reliably
+/// collapses them into fewer cells than points, and a finer lattice
+/// reliably yields more (non-aliasing) cells than a coarser one.
+fn hexbin_scatter_cols(n: usize, hexbin: &str) -> Vec<Column> {
+    let xs: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37) % 97.0).collect();
+    let ys: Vec<f64> = (0..n).map(|i| (i as f64 * 0.53) % 83.0).collect();
+    vec![
+        Column::new("x", Role::X, nums(&xs)),
+        Column::new("y", Role::Value(Kind::Point), nums(&ys)),
+        Column::new("h", Role::Hexbin, strs(&[hexbin])),
+    ]
+}
+
+#[test]
+fn hexbin_on_a_scatter_bins_points_into_hexagons_not_circles() {
+    let s = svg(hexbin_scatter_cols(400, "auto"));
+    assert!(
+        !s.contains("<circle"),
+        "::HEXBIN should bin the points, not draw each one: {s}"
+    );
+    let hexes = polygons(&s);
+    assert!(!hexes.is_empty(), "no hexagons drawn: {s}");
+    assert!(
+        hexes.len() < 400,
+        "{} hexagons for 400 points — not binned",
+        hexes.len()
+    );
+}
+
+#[test]
+fn hexbin_number_sets_the_bin_count_across_each_axis() {
+    let coarse = polygons(&svg(hexbin_scatter_cols(400, "6"))).len();
+    let fine = polygons(&svg(hexbin_scatter_cols(400, "30"))).len();
+    assert!(
+        fine > coarse,
+        "30 bins ({fine} cells) should give more cells than 6 bins ({coarse} cells)"
+    );
+}
+
+#[test]
+fn hexbin_scatter_keeps_identity_and_abline_on_top() {
+    let mut cols = hexbin_scatter_cols(400, "auto");
+    cols.push(Column::new("i", Role::Identity, nums(&[1.0])));
+    cols.push(Column::new("a", Role::AbLine, strs(&["0.5,2"])));
+    let s = svg(cols);
+    // `::HEXBIN`'s own fill legend draws its colourbar border/ticks as
+    // plain polylines too (in the grid colour, but not quite — filter on
+    // the abline/identity geom tag instead of `polylines`'s generic
+    // grid-colour exclusion).
+    let lines: Vec<&str> = s
+        .split("<polyline ")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap()])
+        .filter(|t| t.contains("data-geom=\"abline\""))
+        .collect();
+    assert_eq!(lines.len(), 2, "identity + abline: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("stroke-dasharray")),
+        "identity dashed: {lines:?}"
+    );
+    // Later layers draw later in the markup — on top: the last hexagon's
+    // markup must end before the first abline/identity line starts.
+    let last_hex = s.rfind("<polygon ").expect("hex cells");
+    let first_line = s.find("data-geom=\"abline\"").expect("abline/identity");
+    assert!(
+        last_hex < first_line,
+        "::IDENTITY/::ABLINE must draw on top of the hexagons"
+    );
+}
+
+#[test]
+fn hexbin_scatter_has_a_count_fill_legend() {
+    let s = svg(hexbin_scatter_cols(400, "auto"));
+    assert!(s.contains(">count<"), "no 'count' legend title: {s}");
+}
+
+#[test]
+fn hexbin_scatter_bad_size_is_an_error() {
+    let e = render(&hexbin_scatter_cols(20, "huge"), 480, 320).unwrap_err();
+    assert!(e.contains("::HEXBIN"), "{e}");
+}
+
+#[test]
+fn hexbin_scatter_category_is_dropped_not_faceted_or_errored() {
+    let mut cols = hexbin_scatter_cols(400, "auto");
+    let cat: Vec<&str> = ["a", "b"].iter().cycle().take(400).copied().collect();
+    cols.push(Column::new("cat", Role::Category, strs(&cat)));
+    // One density for the whole panel — no error, no per-category facets.
+    let s = svg(cols);
+    assert!(!polygons(&s).is_empty(), "{s}");
 }
