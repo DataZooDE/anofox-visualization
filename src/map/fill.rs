@@ -19,7 +19,6 @@ use ggplot_rs::scale::Scale;
 
 use crate::format::Locale;
 
-use super::legend::nice_ticks;
 use super::{Rgb, ValueScale};
 
 /// The `::MAP` fill scale: a continuous or classed measure, or a
@@ -113,8 +112,11 @@ impl Scale for MapFill {
     /// Classed: every class's label, high to low (a colourbar-like legend
     /// reads top to bottom as high to low — `crate::StepFill::scale`'s own
     /// `.rev()` for `::THRESHOLDS` matches this). Continuous: "nice" ticks
-    /// over the domain (`nice_ticks`, the same helper the hand-written
-    /// gradient legend used). Category: each level in its fixed order.
+    /// over the domain (`ggplot_rs::scale::util::extended_breaks`, the same
+    /// helper `legend.rs`'s own gradient-bar ticks use since #419 —
+    /// `extended_breaks` can pick a round tick a little outside `[lo, hi]`,
+    /// filtered back since this legend's `domain()` is fixed at `[lo, hi]`).
+    /// Category: each level in its fixed order.
     fn breaks(&self) -> Vec<(f64, String)> {
         match self {
             MapFill::Measure { scale, locale, .. } => match &scale.classes {
@@ -122,10 +124,14 @@ impl Scale for MapFill {
                     .rev()
                     .map(|i| (i as f64, c.label(i, &|v| scale.fmt.short(v, locale))))
                     .collect(),
-                None => nice_ticks(scale.lo, scale.hi, 5)
-                    .into_iter()
-                    .map(|v| (v, scale.fmt.short(v, locale)))
-                    .collect(),
+                None => {
+                    let eps = (scale.hi - scale.lo).abs() * 1e-9;
+                    ggplot_rs::scale::util::extended_breaks(scale.lo, scale.hi, 5)
+                        .into_iter()
+                        .filter(|v| *v >= scale.lo - eps && *v <= scale.hi + eps)
+                        .map(|v| (v, scale.fmt.short(v, locale)))
+                        .collect()
+                }
             },
             MapFill::Category { levels, .. } => levels
                 .iter()
