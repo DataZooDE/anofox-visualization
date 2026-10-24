@@ -247,7 +247,7 @@ mod tests {
         let o = RenderOptions::default();
         let mut s = scale(0.0, 100.0, None);
         s.fmt = ValueFmt::Currency("€".to_string());
-        let fill = MapFill::measure(s, o.locale.clone());
+        let fill = MapFill::measure(s, o.locale);
         let formatted = fill.format_value(&Value::Float(42.0)).unwrap();
         assert!(formatted.contains('€'), "{formatted}");
         assert_ne!(formatted, "42", "a plain number, not the house format");

@@ -49,7 +49,7 @@ pub(super) fn build(
     let mut lg = legend_of(o, m, w, h);
     let forced = legend_override(cols, &mut lg);
     // `eligible` already confirmed no footer, so its height is 0 here.
-    let (frame, _legend_at) = frame_of(m, o, &lg, w, h, 0.0, forced)?;
+    let (frame, legend_at) = frame_of(m, o, &lg, w, h, 0.0, forced)?;
     let [x0, x1, y0, y1] = frame.window(w, h);
 
     let t = &o.theme;
@@ -66,45 +66,81 @@ pub(super) fn build(
 
     // ---- the features layer: one row per `m.features`.
     let n = m.rows;
+    let step_x = crate::find_role(cols, crate::Role::X);
     let mut geometry = Vec::with_capacity(n);
     let mut fill_vals = Vec::with_capacity(n);
+    let mut measure_vals = Vec::with_capacity(n);
     let mut labels = Vec::with_capacity(n);
     let mut rows = Vec::with_capacity(n);
     let mut seriess = Vec::with_capacity(n);
+    let mut xs = Vec::with_capacity(n);
     for i in 0..n {
-        geometry.push(
-            row_wkt(&m.features[i])
-                .map(Value::Str)
-                .unwrap_or(Value::Na),
-        );
+        geometry.push(row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na));
         let label = m.label_of(i);
+        let label_is_empty = label.is_empty();
         let cat = m.text(m.category, i);
         let series = if cat.is_empty() { label.clone() } else { cat };
         rows.push(Value::Str(i.to_string()));
         seriess.push(na_if_empty(series));
         labels.push(na_if_empty(label));
-        fill_vals.push(match &m.fill {
-            Fill::Measure(s) => s.values[i].map(Value::Float).unwrap_or(Value::Na),
-            Fill::Category { of_row, levels } => of_row[i]
-                .map(|k| Value::Str(levels[k].0.clone()))
-                .unwrap_or(Value::Na),
-            Fill::Plain(_) => Value::Na,
-        });
+        // `::XAXIS`/`::STORY` keying (the old writer's `step_x`/`mod.rs`
+        // ~1449): an explicit `::XAXIS` value wins; else, a row with no
+        // label falls back to its own row index so a story can still
+        // step through unlabeled rows (a labeled row with no `::XAXIS`
+        // gets no `data-x` at all — `Value::Na` omits the attribute).
+        let x = step_x
+            .and_then(|c| c.values.get(i))
+            .and_then(crate::mark_key_text)
+            .map(Value::Str)
+            .or_else(|| label_is_empty.then(|| Value::Str(i.to_string())))
+            .unwrap_or(Value::Na);
+        xs.push(x);
+        // `fill` (the scale input) and `value`/`data-value` (the *raw
+        // measure* the browser's a11y table shows) are different things
+        // for a `Fill::Category` map — only a `Fill::Measure` row has a
+        // measure at all, so `data-value` stays absent otherwise (the old
+        // writer's own contract, `map/mod.rs`'s `value: Option<f64>`).
+        let (fill, measure) = match &m.fill {
+            Fill::Measure(s) => {
+                let v = s.values[i].map(Value::Float).unwrap_or(Value::Na);
+                (v.clone(), v)
+            }
+            Fill::Category { of_row, levels } => (
+                of_row[i]
+                    .map(|k| Value::Str(levels[k].0.clone()))
+                    .unwrap_or(Value::Na),
+                Value::Na,
+            ),
+            Fill::Plain(_) => (Value::Na, Value::Na),
+        };
+        fill_vals.push(fill);
+        measure_vals.push(measure);
     }
     let features_df: Vec<(String, Vec<Value>)> = vec![
         ("geometry".into(), geometry),
-        ("fill".into(), fill_vals.clone()),
+        ("fill".into(), fill_vals),
         ("label".into(), labels),
         ("row".into(), rows),
         ("series".into(), seriess),
-        ("value".into(), fill_vals),
+        ("value".into(), measure_vals),
+        ("xkey".into(), xs),
     ];
     let mut features_aes = Aes::new()
         .label("label")
+        // A `fill`/`color` aesthetic makes ggplot-rs's stat/group pipeline
+        // cluster same-category rows together for stacking-style stats;
+        // a map has no such concept — every row draws independently, in
+        // its own input order. Map `group` to the row index itself so
+        // each row is its own group and the draw order this geom sees
+        // matches `m.features`'s order exactly (`data-row` would still be
+        // correct either way, but the *drawn* order must match too, e.g.
+        // for `many_marks_warn`'s and the browser's row-order contract).
+        .group("row")
         .data_attr("row", "row")
         .data_attr("series", "series")
         .data_attr("value", "value")
-        .data_attr("label", "label");
+        .data_attr("label", "label")
+        .data_attr("x", "xkey");
     let has_fill_aes = !matches!(m.fill, Fill::Plain(_));
     if has_fill_aes {
         features_aes = features_aes.fill("fill");
@@ -120,6 +156,7 @@ pub(super) fn build(
         line_width: 0.6,
         ..Default::default()
     };
+
     let has_base = !m.base.is_empty();
 
     // ---- the basemap layer (drawn first — under the features), if any —
@@ -141,9 +178,9 @@ pub(super) fn build(
                 line_width: 0.5,
                 ..Default::default()
             })
+            .geom_sf_with(features_geom())
             .layer_data(features_df)
             .layer_aes(features_aes)
-            .geom_sf_with(features_geom())
     } else {
         GGPlot::new(features_df)
             .aes(features_aes)
@@ -152,11 +189,28 @@ pub(super) fn build(
 
     if has_fill_aes {
         plot = plot.scale_fill(match &m.fill {
-            Fill::Measure(s) => MapFill::measure((**s).clone(), o.locale.clone()),
+            Fill::Measure(s) => MapFill::measure((**s).clone(), o.locale),
             Fill::Category { levels, .. } => MapFill::category(levels.clone()),
             Fill::Plain(_) => unreachable!("has_fill_aes excludes Fill::Plain"),
         });
+        // TODO(#420 slice 1, NOT DONE — tried and reverted this session):
+        // `legend_at` (below) is `layout()`'s own 4-corner,
+        // vertex-density-aware pick, meant to convert to
+        // `legend_position_inside`'s (0,0)=bottom-left/(1,1)=top-right
+        // fraction (`guide/legend.rs:188-192`) via `fx = legend_at.0 / w;
+        // fy = 1.0 - legend_at.1 / h`. Wiring that in renders a continuous
+        // (`Fill::Measure`) legend's box outline in the right place but
+        // its tick marks/labels at wildly wrong, off-canvas y positions
+        // (e.g. y=-131, -419, -707 for a 320px-tall panel) — looks like a
+        // real ggplot-rs bug in `draw_continuous_legend_at`'s tick math
+        // under `LegendPosition::Inside`, not a sign error in the fx/fy
+        // formula above (the box itself lands correctly). Not verified
+        // whether a discrete (`Fill::Category`) legend has the same bug.
+        // Left at ggplot-rs's default legend placement (not yet
+        // corner-picked) rather than ship broken ticks — flag to
+        // team-lead / file upstream before retrying.
     }
+    let _ = legend_at;
 
     plot = plot
         .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))

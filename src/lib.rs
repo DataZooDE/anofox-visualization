@@ -1471,6 +1471,9 @@ pub(crate) enum Panel {
         height: u32,
         /// Extra root attributes (e.g. `data-track`) written on the `<svg>`.
         attrs: Vec<(&'static str, String)>,
+        /// Extra warnings (e.g. `::MAP`'s `MARK_WARN`), merged with
+        /// `render_svg_native_with_warnings`'s own at [`Panel::finish`].
+        warnings: Vec<String>,
     },
     Own {
         width: u32,
@@ -1495,6 +1498,7 @@ impl Panel {
                 width,
                 height,
                 attrs,
+                warnings,
             } if !o.locale.is_default() => {
                 let yearish = cols.iter().filter(|c| c.role == Role::X).any(|c| {
                     let mut any = false;
@@ -1517,6 +1521,7 @@ impl Panel {
                     width,
                     height,
                     attrs,
+                    warnings,
                 }
             }
             p => p,
@@ -1551,6 +1556,7 @@ impl Panel {
             width,
             height,
             attrs: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -1577,7 +1583,7 @@ impl Panel {
                 width,
                 height,
                 attrs,
-                ..
+                warnings: extra_warnings,
             } => {
                 // B2-3: every root attribute (`data-track`, the motion
                 // attrs, …) goes through ggplot-rs's own `svg_attr`/
@@ -1595,7 +1601,11 @@ impl Panel {
                         .render_svg_native_at(x, y, width, height)
                         .map(|s| (s, Vec::new())),
                 };
-                svg.map_err(|e| format!("render failed: {e:?}"))
+                svg.map(|(s, mut w)| {
+                    w.extend(extra_warnings);
+                    (s, w)
+                })
+                .map_err(|e| format!("render failed: {e:?}"))
             }
             Panel::Own {
                 width,
@@ -2136,10 +2146,20 @@ fn render_inner(
             },
             // #420 slice 1: an eligible map is a real GGPlot now — the
             // same Panel::Plot every other chart kind renders through.
-            Some(map::MapOutput::Plot { plot, attrs }) => {
+            Some(map::MapOutput::Plot {
+                plot,
+                attrs,
+                warnings,
+            }) => {
                 let mut p = Panel::plot(*plot, width, height);
-                if let Panel::Plot { attrs: a, .. } = &mut p {
+                if let Panel::Plot {
+                    attrs: a,
+                    warnings: w,
+                    ..
+                } = &mut p
+                {
                     *a = attrs;
+                    *w = warnings;
                 }
                 p
             }

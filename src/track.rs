@@ -101,7 +101,7 @@ impl Panel {
                 width,
                 height,
                 attrs,
-                ..
+                warnings,
             } => {
                 let mut plot = plot.theme_update(ThemeUpdate {
                     plot_margin: Some(fit.margin),
@@ -118,6 +118,7 @@ impl Panel {
                     width,
                     height,
                     attrs,
+                    warnings,
                 }
             }
             p => p,

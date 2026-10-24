@@ -1260,6 +1260,7 @@ pub(crate) enum MapOutput {
     Plot {
         plot: Box<ggplot_rs::prelude::GGPlot>,
         attrs: Vec<(&'static str, String)>,
+        warnings: Vec<String>,
     },
     Own(Drawn),
 }
@@ -1267,14 +1268,28 @@ pub(crate) enum MapOutput {
 /// Build a map panel: the new `geom_sf`-backed `GGPlot` for an
 /// [`plot::eligible`] map, the old hand-written SVG otherwise. `None` when
 /// no row has geometry (the only case either path bails out on).
-pub(crate) fn build(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<MapOutput> {
+pub(crate) fn build(
+    o: &RenderOptions,
+    cols: &[Column],
+    width: u32,
+    height: u32,
+) -> Option<MapOutput> {
     let m = Model::new(o, cols)?;
     let w = width as f64;
+
     if plot::eligible(o, &m, w) {
         if let Some((p, attrs)) = plot::build(o, cols, &m, width, height) {
+            let mut warnings = Vec::new();
+            if m.rows > MARK_WARN {
+                warnings.push(format!(
+                    "map: {} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light",
+                    m.rows
+                ));
+            }
             return Some(MapOutput::Plot {
                 plot: Box::new(p),
                 attrs,
+                warnings,
             });
         }
     }
