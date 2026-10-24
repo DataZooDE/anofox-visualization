@@ -1905,6 +1905,10 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 size: 11.0,
                 color: muted,
                 hjust: 0.0,
+                // #228: lane names (dp-lane-label) render bold, matching
+                // web/theme-base.css for the same reason as dp-node-label
+                // below.
+                fontface: FontFace::Bold,
                 ..Default::default()
             })
             .layer_data(names.take(h))
@@ -1985,9 +1989,27 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
         }
         if let Some(l) = &e.label {
             let (mx, my) = midpoint(&p.edges[k]);
-            lf.num("x", mx).num("y", mid_of_baseline(my - 4.0, 11.0));
-            lf.txt("label", l.clone());
-            lf.txt("from", a.id.clone()).txt("to", b.id.clone());
+            // #229: an embedded "\n" (e.g. "5.4K\norders") is a forced line
+            // break — one halo-backed text row per line, stacked around the
+            // midpoint, so it reads as one multi-line label rather than a
+            // chip per line.
+            let edge_lines: Vec<&str> = {
+                let v: Vec<&str> = l.lines().collect();
+                if v.is_empty() {
+                    vec![""]
+                } else {
+                    v
+                }
+            };
+            let n = edge_lines.len() as f64;
+            let lh = 11.0 * 1.2;
+            let top = my - 4.0 - (n - 1.0) * lh / 2.0;
+            for (i, line) in edge_lines.iter().enumerate() {
+                lf.num("x", mx)
+                    .num("y", mid_of_baseline(top + i as f64 * lh, 11.0));
+                lf.txt("label", (*line).to_string());
+                lf.txt("from", a.id.clone()).txt("to", b.id.clone());
+            }
         }
     }
     if !ef.is_empty() {
@@ -2027,20 +2049,20 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             .layer_svg_attr("class", "dp-edge");
     }
     if !lf.is_empty() {
-        // a card-coloured box keeps the label legible over the lines
+        // #229: text directly on the line with a card-coloured halo keeps
+        // it legible over the line, matching the old hand-written SVG's
+        // paint-order:stroke halo (replaces the boxed chip the GeomLabel
+        // port used before ggplot-rs grew a halo option).
         plot = plot
-            .geom_label_with(GeomLabel {
-                size: 11.0,
-                color: muted,
-                fill: card,
-                alpha: 1.0,
-                padding: 1.5,
-                radius: 3.0,
-                // measured with the theme's text metrics (a box as wide as
-                // the text), never actually wrapping an edge label
-                wrap_width: Some(1e4),
-                ..Default::default()
-            })
+            .geom_text_with(
+                GeomText {
+                    size: 11.0,
+                    color: muted,
+                    ..Default::default()
+                }
+                .bg_colour(card)
+                .bg_r(2.0),
+            )
             .layer_data(lf.take(h))
             .layer_aes(
                 Aes::new()
@@ -2233,6 +2255,11 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             .geom_text_with(GeomText {
                 size,
                 color: colour,
+                // #228: node names (dp-node-label) and values (dp-node-value)
+                // render bold — matches web/theme-base.css's font-weight on
+                // those classes, which the browser applies via CSS but a
+                // headless/static export needs baked into the SVG itself.
+                fontface: FontFace::Bold,
                 ..Default::default()
             })
             .layer_data(f.take(h))

@@ -184,9 +184,10 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel svg .dp-flow,.panel svg [data-linestyle="flow"]{animation:dp-flow 1.2s linear infinite}
 @keyframes dp-dots{to{stroke-dashoffset:-20}}
 .panel svg .dp-flow.dp-dots{animation:dp-dots 1s linear infinite}
-/* ::DIAGRAM text weights: ggplot-rs's geom_text has no font weight yet,
-   so the browser sets them by class (a headless --svg export draws them
-   regular) */
+/* ::DIAGRAM text weights: src/diagram.rs already bakes these bold via
+   ggplot-rs's geom_text fontface (#228), so a headless --svg export draws
+   them bold too; this class is the browser's own belt-and-suspenders path
+   (also covers any future non-ggplot-rs rendering of the same markup) */
 .panel svg .dp-node-label,.panel svg .dp-lane-label{font-weight:600}
 .panel svg .dp-node-value{font-weight:700}
 /* 'flow-volume' / 'flow-dots-volume': the busier the edge, the faster it
