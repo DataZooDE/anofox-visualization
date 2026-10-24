@@ -41,7 +41,7 @@ SELECT channel ::XAXIS, ROUND(SUM(units*price),0) ::BARCHART,
        '€' ::YFORMAT, 'Revenue by channel' ::TITLE
 FROM sales WHERE region = getvariable('region') GROUP BY channel ORDER BY 2 DESC;
 SELECT channel ::CATEGORY, SUM(units) ::DONUTCHART, 'Unit share by channel' ::TITLE
-FROM sales WHERE region = getvariable('region') GROUP BY channel;
+FROM sales WHERE region = getvariable('region') GROUP BY channel ORDER BY 2 DESC, channel;
 
 -- Detail table (one ::TABLE marker; other columns keep their aliases)
 SELECT 12 ::SPAN;
