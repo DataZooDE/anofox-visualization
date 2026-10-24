@@ -840,10 +840,13 @@ where
         diags.extend(tile_scale_diags(&p.roles, &rows, stmt, &short));
         // ::XBREAKS / ::YBREAKS: numeric entries, and only on a cartesian chart.
         diags.extend(breaks_diags(&p.roles, &rows, stmt, &short));
-        // ::FACET/::FACET_FREE on a chart kind that still ignores it (#423);
-        // ::CATEGORY on ::HISTOGRAM (a ggplot-rs gap, #423); ::HIST_BINS /
-        // ::HIST_NORM anywhere but a ::HISTOGRAM.
+        // ::FACET/::FACET_FREE on a chart kind that still ignores it (#423,
+        // #424); ::CATEGORY on ::HISTOGRAM (a ggplot-rs gap, #423);
+        // ::HIST_BINS/::HIST_NORM anywhere but a ::HISTOGRAM.
         diags.extend(histogram_qq_diags(&p.roles, stmt, &short));
+        // #424: ::IDENTITY / ::REFLINE are still dropped on a ::HEATMAP
+        // (cartesian()'s only drawn there, and a heatmap never reaches it).
+        diags.extend(heatmap_line_diags(&p.roles, stmt, &short));
         // A ::COLORS level map ('Critical:bad; …') must parse and needs a
         // ::CATEGORY to colour.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
@@ -1266,6 +1269,25 @@ where
                              use a sorted ::BARCHART instead.",
                             rows.len()
                         ),
+                        sql: short.clone(),
+                    });
+                }
+                // #441: a pie/donut's slice order IS its layout — a `GROUP BY`
+                // with no `ORDER BY` leaves DuckDB free to return the groups
+                // in any order (and, under parallel execution, a different
+                // one from run to run — seen in practice with two near-tied
+                // values). A quiet Note, not a Warning: plenty of queries
+                // already order further up a CTE, which this (deliberately
+                // simple) text scan can't see, so a false positive here must
+                // never fail a plain `dashboard --check`.
+                if matches!(k, Kind::Pie | Kind::Donut) && has_group_by_no_order_by(&p.sql) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Note,
+                        stmt,
+                        code: "design/pie-no-order",
+                        message: "GROUP BY with no ORDER BY — the slice order isn't guaranteed \
+                                  (and can vary run to run); add ORDER BY 2 DESC"
+                            .into(),
                         sql: short.clone(),
                     });
                 }
@@ -3838,6 +3860,37 @@ fn looks_like_date(s: &str) -> bool {
     b.len() >= 8 && b[0..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
 }
 
+/// #424: `::IDENTITY` / `::REFLINE` are read inside `cartesian()` only — a
+/// `::HEATMAP` dispatches to `render_heatmap`/`render_heatmap_categorical`
+/// before ever reaching it (`lib.rs`'s `match kind` in `render_with`), so
+/// both are silently dropped there today. Drawing a diagonal/reference line
+/// over a tile grid needs the grid's own x/y to be numeric-binned (not the
+/// usual discrete row/column labels) for the line to mean anything, which
+/// `render_heatmap` doesn't distinguish yet — so this warns instead of
+/// drawing a line that would be wrong on a discrete grid.
+fn heatmap_line_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if chart_kind(roles) != Some(Kind::Heatmap) {
+        return out;
+    }
+    for role in [Role::Identity, Role::RefLine] {
+        if roles.iter().any(|(_, r)| *r == role) {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "heatmap/line-dropped",
+                message: format!(
+                    "::{} is dropped on ::HEATMAP — reference/identity lines aren't drawn over \
+                     tiles yet",
+                    role.token()
+                ),
+                sql: short.to_string(),
+            });
+        }
+    }
+    out
+}
+
 /// Status colour scales on tiles (see the call site).
 fn tile_scale_diags(
     roles: &[(usize, Role)],
@@ -4026,8 +4079,8 @@ fn breaks_diags(
 
 /// Does `::FACET`/`::FACET_FREE` do anything on this panel's chart kind?
 /// Every cartesian kind (bars/lines/areas/scatter/box/violin/…), plus
-/// `::HISTOGRAM` and `::QQ` (#423), honour it; the rest still draw one
-/// overlapping panel and ignore it — `::HEATMAP` among them (#424).
+/// `::HISTOGRAM` and `::QQ` (#423) and `::HEATMAP` (#424), honour it; the
+/// rest still draw one overlapping panel and ignore it.
 fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
     match chart_kind(roles) {
         None => false,
@@ -4035,7 +4088,6 @@ fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
             Kind::Pie
             | Kind::Donut
             | Kind::Gauge
-            | Kind::Heatmap
             | Kind::Calendar
             | Kind::Candlestick
             | Kind::Radar
@@ -4182,6 +4234,15 @@ fn sql_error(
 /// function, or a quoted path with a data-file extension (`FROM 'x.parquet'`)?
 /// (`requires/on-setup`.) A `SET` is read token by token (#166): one whose
 /// subquery reads a file reads it, one that builds a path reads nothing.
+/// #441: a plain text scan (same style as [`reads_a_file`], no real parsing)
+/// for `GROUP BY` with no `ORDER BY` anywhere in the statement — deliberately
+/// simple, so it can only ever under-report (a query that orders inside a
+/// CTE, or on a later line this doesn't see, is missed, never flagged).
+fn has_group_by_no_order_by(sql: &str) -> bool {
+    let code = sql.to_ascii_lowercase();
+    code.contains("group by") && !code.contains("order by")
+}
+
 fn reads_a_file(sql: &str) -> bool {
     let code = sql.to_ascii_lowercase();
     if sql::lex::first_keyword(&code).as_deref() == Some("SET") {
@@ -5555,6 +5616,37 @@ mod design_tests {
             data,
         );
         assert!(!has(&d, "design/pie-slices"), "{d:?}");
+    }
+
+    #[test]
+    fn pie_group_by_without_order_by_hints_quietly() {
+        let data = rows(4, |i| json!({ "c0": format!("s{i}"), "c1": i as f64 }));
+        let d = lint_one(
+            "SELECT cat::CATEGORY, sum(n)::DONUTCHART, 'Share'::TITLE FROM t GROUP BY 1;",
+            data.clone(),
+        );
+        assert!(has(&d, "design/pie-no-order"), "{d:?}");
+        assert_eq!(
+            d.iter()
+                .find(|x| x.code == "design/pie-no-order")
+                .unwrap()
+                .severity,
+            Severity::Note,
+            "a hint, not a warning that fails a plain check"
+        );
+        // ordered — no hint.
+        let d = lint_one(
+            "SELECT cat::CATEGORY, sum(n)::DONUTCHART, 'Share'::TITLE FROM t GROUP BY 1 ORDER BY 2 DESC;",
+            data.clone(),
+        );
+        assert!(!has(&d, "design/pie-no-order"), "{d:?}");
+        // a bar chart's GROUP BY without ORDER BY is a different concern
+        // (design/unsorted-bars, data-driven) — this hint stays pie/donut-only.
+        let d = lint_one(
+            "SELECT cat::XAXIS, sum(n)::BARCHART, 'Share'::TITLE FROM t GROUP BY 1;",
+            data,
+        );
+        assert!(!has(&d, "design/pie-no-order"), "{d:?}");
     }
 
     #[test]

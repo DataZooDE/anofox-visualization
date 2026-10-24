@@ -882,13 +882,18 @@ fn render_panel_svg(
     // Its ::TRACKs sit right under it, sharing its plot area and x window.
     let tracks_h: u32 = crate::track::heights(tracks).iter().sum();
     let body_h = (h - title_h - pad - tracks_h as f64).max(30.0);
-    // The chart is nested below the title as a positioned fragment.
-    let draw = |cols: &[Column], w: u32, h: u32, o: &RenderOptions, y: f64| {
-        render_with_at(cols, 0.0, title_h + y, w, h, o)
-    };
-    let chart = crate::track::stack(&cols, tracks, w as u32, body_h as u32, ropts, &draw)
-        .map(|(svgs, _)| svgs.concat())
-        .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
+    // The chart (and its tracks) are nested below the title as one
+    // positioned fragment.
+    let chart = crate::track::stack(
+        &cols,
+        tracks,
+        w as u32,
+        body_h as u32,
+        ropts,
+        Place::At(0.0, title_h),
+    )
+    .map(|(svgs, _)| svgs.concat())
+    .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
     let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
     if let Some(tt) = &title {
         let mark = info
@@ -1160,12 +1165,13 @@ fn table_svg(
     };
 
     let top = if title.is_some() { 30.0 } else { 10.0 };
-    // A nested sparkline panel is clamped to at least `MIN_DIM` (32px, the
-    // whole crate's floor for a renderable panel — `clamp_dim`) however
-    // little height we ask for, so a table with a ::SPARKLINE column gets
-    // taller rows to fit it without spilling into the next one.
+    // #457: a nested sparkline panel can't be asked for less than
+    // `SPARKLINE_MIN_H` (50px, see its doc comment on ggplot-rs's own
+    // layout floor) without clipping the line's low points, so a table
+    // with a ::SPARKLINE column gets taller rows to fit it without
+    // spilling into the next one.
     let row_h = if cols.iter().enumerate().any(|(k, _)| is_spark(k)) {
-        38.0
+        crate::SPARKLINE_MIN_H + 6.0
     } else {
         22.0
     };
@@ -1271,10 +1277,12 @@ fn table_svg(
                 }
                 let row_top = top + 23.0 + r as f64 * row_h;
                 let sw = (widths[k] - 6.0).max(32.0);
-                // `MIN_DIM` (32px) itself, not `row_h - 6.0`: a shorter
-                // request is clamped up to it anyway (`clamp_dim`), which
-                // would otherwise spill past this row's own height.
-                let sh = 32.0;
+                // `SPARKLINE_MIN_H` itself, not `row_h - 6.0`: a shorter
+                // request still gets clamped up to it inside
+                // `render_sparkline` (#457), which would otherwise spill
+                // past this row's own height without this cell centring
+                // the taller panel on its own.
+                let sh = crate::SPARKLINE_MIN_H;
                 let sx = xs[k] + 2.0;
                 let sy = row_top + (row_h - sh) / 2.0;
                 let spark_col = Column::new(
@@ -1912,6 +1920,77 @@ mod doc_table_tests {
         assert!(
             svg.contains("data-geom=\"line\""),
             "the sparkline cell must draw through ggplot-rs, like --svg/serve: {svg}"
+        );
+    }
+
+    // #457: a table's ::SPARKLINE cell goes through `render_sparkline` the
+    // same way a KPI tile's does (see `kpi::tests::
+    // kpi_sparkline_minima_stay_inside_the_strip`) — a zigzag with real
+    // dips must stay fully inside its own cell's viewBox, not clipped at
+    // the bottom by a request shorter than ggplot-rs's `SPARKLINE_MIN_H`
+    // layout floor.
+    #[test]
+    fn a_table_sparkline_cells_minima_stay_inside_the_cell_box() {
+        let rows = vec![
+            ("feature".to_string(), vec![Value::Str("a".into())]),
+            (
+                "trend".to_string(),
+                vec![Value::Str("[1005,1010,1000,1012,1001,1013,1000]".into())],
+            ),
+        ];
+        let roles = vec![
+            (0usize, Role::Table),
+            (1usize, Role::Value(Kind::Sparkline)),
+        ];
+        let ropts = RenderOptions::default();
+        let svg = render_panel_doc_svg(
+            &rows,
+            &roles,
+            &[],
+            460.0,
+            300.0,
+            &ropts,
+            false,
+            &[],
+            None,
+            false,
+        );
+        let line_at = svg
+            .find("data-geom=\"line\"")
+            .expect("a drawn sparkline line");
+        let svg_open = svg[..line_at].rfind("<svg ").expect("its own nested <svg>");
+        let svg_close =
+            line_at + svg[line_at..].find("</svg>").expect("a closing </svg>") + "</svg>".len();
+        let frag = &svg[svg_open..svg_close];
+        let viewbox = frag
+            .split("viewBox=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("a viewBox");
+        let h: f64 = viewbox
+            .split_whitespace()
+            .nth(3)
+            .and_then(|n| n.parse().ok())
+            .expect("a viewBox height");
+        let mut ys: Vec<f64> = Vec::new();
+        for pts in frag.split("points=\"").skip(1) {
+            let pts = pts.split('"').next().unwrap_or("");
+            ys.extend(
+                pts.split(' ')
+                    .filter_map(|p| p.split(',').nth(1))
+                    .filter_map(|y| y.parse::<f64>().ok()),
+            );
+        }
+        assert!(!ys.is_empty(), "expected drawn points: {frag}");
+        let (mn, mx) = ys
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                (a.min(v), b.max(v))
+            });
+        assert!(
+            mn > -0.5 && mx < h + 0.5,
+            "sparkline cell content (y {mn}..{mx}) must stay inside its own \
+             {h}px-tall viewBox, not clipped: {frag}"
         );
     }
 }

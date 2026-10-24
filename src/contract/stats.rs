@@ -2554,8 +2554,14 @@ pub(super) fn km(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, pl
                 .layer_aes(Aes::new().x("x").xend("xend").y("y").yend("yend"));
         }
     }
-    // Number at risk under the curves at regular time ticks.
-    let ticks = nice_ticks(0.0, xmax, 6);
+    // Number at risk under the curves at regular time ticks — the same
+    // extended-Wilkinson algorithm the `component`/`added_variable` x-axis
+    // above uses (ggplot-rs's `extended_breaks`), not a local copy (#419).
+    // Unlike the old `nice_ticks`, this can return a break or two just past
+    // `xmax` for rounder numbers; the x scale picks those up as its own
+    // breaks below, so the panel's axis simply grows to show them — no
+    // filtering needed here (same as the `component` plot's use above).
+    let ticks = ggplot_rs::scale::util::extended_breaks(0.0, xmax, 6);
     let has_risk = risk.iter().any(|v| fin(v).is_some());
     let k = by.len();
     let row_h = 0.075;
@@ -3018,38 +3024,20 @@ pub(super) fn nested_cv(
     grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
 }
 
-/// About `n` round tick positions covering [lo, hi].
-pub(super) fn nice_ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
-    if hi.partial_cmp(&lo) != Some(std::cmp::Ordering::Greater) || n == 0 {
-        return Vec::new();
-    }
-    let raw = (hi - lo) / n as f64;
-    let mag = 10f64.powf(raw.log10().floor());
-    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
-        .iter()
-        .map(|m| m * mag)
-        .find(|st| *st >= raw)
-        .unwrap_or(10.0 * mag);
-    let mut v = Vec::new();
-    let mut t = (lo / step).ceil() * step;
-    while t <= hi + step * 1e-9 {
-        v.push(if t.abs() < step * 1e-9 { 0.0 } else { t });
-        t += step;
-    }
-    v
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// #419: the number-at-risk ticks now come straight from ggplot-rs's
+    /// `extended_breaks` (no local `nice_ticks` copy); a round span still
+    /// lands on the same round ticks, and a degenerate one is still empty.
     #[test]
     fn ticks_are_round() {
         assert_eq!(
-            nice_ticks(0.0, 60.0, 6),
+            ggplot_rs::scale::util::extended_breaks(0.0, 60.0, 6),
             vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
         );
-        assert!(nice_ticks(1.0, 1.0, 5).is_empty());
+        assert!(ggplot_rs::scale::util::extended_breaks(1.0, 1.0, 5).is_empty());
     }
 
     #[test]

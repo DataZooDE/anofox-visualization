@@ -10,7 +10,7 @@
 Charts & dashboards for DuckDB — the grammar of graphics, straight from SQL. You
 write ordinary DuckDB SQL and tag output columns with `::ROLE` casts; each
 annotated `SELECT` becomes a panel (chart / KPI / table / input), rendered to
-SVG by [ggplot-rs](https://github.com/sipemu/ggplot-rs) (0.22.x), a
+SVG by [ggplot-rs](https://github.com/sipemu/ggplot-rs), a
 grammar-of-graphics engine. No JS charting library, no bespoke config — the
 SQL *is* the dashboard.
 
@@ -59,19 +59,20 @@ the axes and colour series.
 |--------|-------|
 | Bars | `::BARCHART`, `_STACKED`, `_PERCENT`, `_STACKED_PERCENT`, `::FLIP` (horizontal) |
 | Lines & areas | `::LINECHART`, `_PERCENT`, `::STEP`, `::SMOOTH` (trend), `::AREACHART`, `_STACKED` |
-| Points | `::SCATTER`, `::BUBBLE` (sized), `::JITTER` |
+| Points | `::SCATTER`, `::BUBBLE` (sized), `::JITTER`, `::HEXBIN` (bins a planar scatter into a 2D count density) |
 | Part-to-whole | `::PIE`, `::DONUTCHART` |
-| Distribution | `::HISTOGRAM`, `::DENSITY`, `::BOXPLOT`, `::VIOLIN`, `::QQ` |
+| Distribution | `::HISTOGRAM`, `::DENSITY`, `::BOXPLOT`, `::VIOLIN`, `::QQ` — histogram and QQ take `::CATEGORY` / `::FACET`; `::HIST_BINS` (count or edges), `'share'::HIST_NORM` |
 | Matrix / geo | `::HEATMAP`, calendar heatmap, maps: `::MAP`/`::REGION` choropleth (WKT geometry or a region code against the built-in boundaries), `::LAT`/`::LON` points, graduated symbols, flow maps (`::ORIGIN`/`::DEST`), `::HEXBIN` density |
 | Finance | `::CANDLESTICK`, `::OHLC`, `::SPARKLINE` |
 | Gauge / radar | `::GAUGE` (+ `::RANGE`, `::COLORS` zones), `::RADAR` |
 | Annotations | `::REFLINE`/`::XLINE` reference lines, `::BAND_LOWER`/`::BAND_UPPER` bands |
+| Small multiples & axes | `::FACET` (one panel per value, shared axes), `::XSCALE`/`::YSCALE` (`'log10'`, `'sqrt'`, `'reverse'`, with round-number ticks), `::XBREAKS`/`::YBREAKS` (explicit ticks) |
 
 ### KPIs, text & tables
 
 | Group | Roles |
 |-------|-------|
-| KPI tiles | `::METRIC`, `::MONEY`, `::PERCENT`, `::COMPACT` (+ `::LABEL` caption, `::DELTA` arrow) |
+| KPI tiles | `::METRIC`, `::MONEY`, `::PERCENT`, `::COMPACT` (+ `::LABEL` caption, `::DELTA` arrow), `'compact'::KPI_SIZE` for a dense one-line strip |
 | Text | `::TEXT_SMALL`/`_MEDIUM`/`_LARGE`, `::MARKDOWN` |
 | Tables | `::TABLE`, `::PAGED` (SQL-paginated), `::COLORSCALE`, `::BADGE`, `::TREND`, `::SPARKLINE`, `::DOWNLOAD_CSV`/`_XLSX`/`_PDF` |
 
@@ -79,8 +80,8 @@ the axes and colour series.
 
 | Group | Roles / behaviour |
 |-------|-------------------|
-| Inputs | `::DROPDOWN`, `::MULTISELECT`, `::NUMBER`, `::DATE`, `::TEXT`, `::DATERANGE` → each is a DuckDB variable read with `getvariable('name')` |
-| Layout | 12-column grid (`::COLUMNS`/`::COL`/`::HEIGHT`), `::GROUP` boxes, tabs (`::TAB`/`::SUBTAB`), alternative views of one panel (`::VIEW`/`::ENDVIEW` — a Lines/Bars/Table switcher), fit-to-screen tabs (`'fit'::FIT`, no page scroll) |
+| Inputs | `::DROPDOWN` (searchable for long option lists; `::DROPDOWN_STYLE` forces it), `::MULTISELECT`, `::NUMBER`, `::DATE`, `::TEXT`, `::DATERANGE` → each is a DuckDB variable read with `getvariable('name')` |
+| Layout | 12-column grid (`::COLUMNS`/`::COL`/`::HEIGHT`), `::GROUP` boxes, tabs (`::TAB`/`::SUBTAB`), alternative views of one panel (`::VIEW`/`::ENDVIEW` — a Lines/Bars/Table switcher), fit-to-screen tabs (`'fit'::FIT`, no page scroll), `::TRACK` strips under a chart that share its x axis |
 | Interactivity | hover tooltips, **click-to-cross-filter**, range zoom, brush/value filters, dark mode, share links — pure DOM, so it works on exported HTML too |
 | Formatting | ggplot2-style axis formatters (`::YFORMAT '€'`, `::XFORMAT '$'`, percent, compact) |
 
@@ -100,6 +101,7 @@ and [docs/DOCS.md](docs/DOCS.md).
 ### Key capabilities
 - **Three surfaces, one renderer** — a core library (annotated result → SVG, wasm-compatible), a **DuckDB extension** (render + serve), and a browser builder on DuckDB-Wasm.
 - **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (the client sends only panel ids + variable values) over a locked, read-only snapshot. The folder groups itself from header comments (`-- @group`, `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`, `-- @order N` for nav/start-page ordering, `-- @nav` for a short nav/card label distinct from `-- @title`): a grouped nav (a searchable menu above 8 dashboards) and a `/` landing page of cards with descriptions, owners and a ✓ certified badge.
+- **Publish as a static site** *(full toolkit CLI)* — `dashboard --site <folder> <out-dir> [--data …]` turns a dashboard folder into plain files (HTML, the DuckDB-Wasm renderer, the `.sql`, the data) for GitHub Pages, S3 or any web server; nothing to run. `dashboard --svg` and static HTML export render a dashboard headless — see [Secure serving](docs/secure-serving.md#c-publish-as-a-static-site--dashboard---site-417).
 - **Any DuckDB source** — CSV / Parquet / JSON / Arrow, MotherDuck, Postgres / MySQL / SQLite via `ATTACH`, remote HTTP, and spatial layers (`ST_AsText` → WKT → `::MAP`). A locked server can also snapshot a live **Quack** source (DuckDB 2.0 host, opt-in) instead of a local database — see [Secure serving](docs/secure-serving.md#quack-source-prototype-352).
 - **Authoring aids** — a `dashboard --check` linter (structure + `design/*` quality checks), a `build-dashboard` agent skill that writes dashboards from a prompt, and a per-query timeout for authoring `serve` (`--query-timeout`, default 120s) that ends a hung query and starts a fresh session.
 - **AI assistant in the browser builder** *(off unless an installation enables it in `app-config.json`)* — a plain-language request becomes a dashboard, or follow-up edits to one, via *"new from question"* or the assistant panel; every proposal is previewed in a locked, network-free DuckDB-Wasm sandbox on a capped copy of your tables and only runs on the page's own database after you choose *Apply*. Calls Claude directly with your own API key — never a DataZooDE server ([docs](docs/DOCS.md)).
@@ -428,7 +430,7 @@ The skills live in [`plugins/anofox-visualization/`](plugins/anofox-visualizatio
 
 - **DuckDB**: v1.5.x for the CMake / community build (pinned to v1.5.6 in this repo; also builds and runs sqllogictests on v2.0.0 in a non-blocking CI job — see [DuckDB 2.0](#from-source)); C-API v1.2.0+ (DuckDB v1.2 or newer, including 2.0) for the `duckext` full-toolkit build
 - **Rust**: stable toolchain (for building from source)
-- **[ggplot-rs](https://github.com/sipemu/ggplot-rs)** (0.22.x): the grammar-of-graphics rendering engine — all chart rendering lives here, not in this repository
+- **[ggplot-rs](https://github.com/sipemu/ggplot-rs)** (version pinned in `Cargo.toml`): the grammar-of-graphics rendering engine — all chart rendering lives here, not in this repository
 - **plotters / image / ab_glyph**: SVG & raster backends (via Cargo)
 
 ## Telemetry

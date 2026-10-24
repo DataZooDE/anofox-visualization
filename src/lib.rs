@@ -39,7 +39,6 @@ pub mod math;
 pub mod page;
 pub mod period;
 pub mod roles;
-mod smooth;
 pub mod sql;
 pub mod table;
 pub mod theme;
@@ -682,13 +681,12 @@ pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
     // ggplot-rs#318 step 2: keep outer x labels on-canvas (ggplot-rs 0.22's
     // `AxisLabelFit`) and thin crowded ones (ggplot2's `check.overlap`).
     // `::TRACK`-aligned panels must keep their exact plot area so sibling
-    // tracks stay lined up, so they Shift labels inward instead of
-    // Reserve-ing extra margin for them (which would narrow the panel).
-    th.axis_text_x_fit = if o.align.is_some() {
-        AxisLabelFit::Shift
-    } else {
-        AxisLabelFit::Reserve
-    };
+    // tracks stay lined up: `PlotGrid::axis_collect`
+    // (`AxisCollect::Align`/`CollectX`, ggplot-rs#175, `track::stack`) forces
+    // every cell of an aligned column to `Shift` itself, overriding
+    // whatever this sets — so a plain chart (never grid-aligned) is the
+    // only case this default actually governs.
+    th.axis_text_x_fit = AxisLabelFit::Reserve;
     th.axis_text_x_check_overlap = true;
     th
 }
@@ -765,6 +763,20 @@ pub const DEFAULT_MAX_LINE_POINTS: usize = 5_000;
 pub const MIN_DIM: u32 = 32;
 /// See [`MIN_DIM`].
 pub const MAX_DIM: u32 = 8_192;
+/// #457: ggplot-rs's own layout engine floors a panel's *drawable* plot
+/// area at 50px tall (`plot_height.max(50.0)` in its `render/layout.rs`),
+/// but the nested `<svg … viewBox="0 0 w h">` it wraps that panel in is
+/// still sized to whatever `w`/`h` we asked for (`render_svg_native_at`
+/// reuses the same number for both the layout and the SVG canvas/viewBox).
+/// Ask for a panel shorter than this floor — as the KPI tile's and a
+/// table's `::SPARKLINE` cell both used to, via `MIN_DIM` (32px) — and the
+/// *drawn* content (sized against the 50px floor) overflows the *visible*
+/// viewBox (sized against our smaller request) and gets clipped: a
+/// series' low points fall outside the box and the line looks torn apart.
+/// Every embedder of a `GGPlot` panel into a slot shorter than this must
+/// request at least `SPARKLINE_MIN_H` and centre/pad the smaller visible
+/// slot around it, never ask ggplot-rs for less.
+pub(crate) const SPARKLINE_MIN_H: f64 = 50.0;
 
 /// Per-render options — passed explicitly (no hidden thread state).
 #[derive(Clone, Debug)]
@@ -784,9 +796,6 @@ pub struct RenderOptions {
     pub theme: std::sync::Arc<theme::ResolvedTheme>,
     /// Number/date locale of axis and legend labels (default en-US).
     pub locale: format::Locale,
-    /// Line the plot area and x window up with other panels (a chart and
-    /// its `::TRACK`s, see [`track::render_stack`]); `None` = the panel's own.
-    pub align: Option<track::Align>,
     /// Record the plotting engine's build warnings on the SVG root as
     /// `data-warnings` (see [`render_with_warnings`])? Default `true`. A
     /// host with no script that reads it — the script-free served page
@@ -807,7 +816,6 @@ impl Default for RenderOptions {
             max_line_points: DEFAULT_MAX_LINE_POINTS,
             theme: theme::default_light(),
             locale: format::Locale::EN_US,
-            align: None,
             record_warnings: true,
         }
     }
@@ -1758,52 +1766,90 @@ fn render_placed(
         }
         let cols = downsample::prepare(cols, o);
         let cols = boxstats::prepare(cols).map_err(RenderError::Render)?;
-        let draw = |fit: Option<track::Fit>| {
-            render_inner(&cols, w, h, o)
-                .map(|p| p.localized(o, &cols))
-                .map(|p| match fit {
-                    Some(f) => p.fitted(f),
-                    None => p,
-                })
-                .map(|p| p.with_motion_attrs(&cols))
-                .and_then(|p| p.finish(place))
-        };
-        // Aligned with other panels: draw, measure, draw again fitted.
-        let run = || match &o.align {
-            Some(a) => {
-                let first = track::Fit::first(o, a);
-                let (svg, _) = draw(Some(first.clone()))?;
-                draw(Some(first.correct(a, &svg, h as f64)))
+        let (svg, warnings) = render_inner(&cols, w, h, o)
+            .map(|p| p.localized(o, &cols))
+            .map(|p| p.with_motion_attrs(&cols))
+            .and_then(|p| p.finish(place))
+            .map_err(RenderError::Render)?;
+        Ok((finish_touches(svg, &cols, o), warnings))
+    })
+}
+
+/// The post-render touches every panel gets, whatever drew it: the
+/// plotting engine's own build warnings are threaded through separately
+/// ([`render_placed`]'s caller attaches `data-warnings`) — this is just the
+/// SVG text itself.
+///
+/// A horizontal legend too long for one line auto-wraps (ggplot-rs's own
+/// `layout_built`: it plans the wrap once and draws exactly that plan, then
+/// pushes an overflow warning into the caller's `warnings` when even that
+/// isn't enough room — see ggplot-rs#318 step 2). Every panel's hand-drawn
+/// SVG text (headings, notes, a map's own labels/legend, …) still writes the
+/// generic font family by hand, so `with_font` swaps it in here — the one
+/// place a GGPlot panel and the extension's own panels are both still just
+/// `svg: String` (a no-op on the GGPlot part, #326). A map paints with the
+/// variant's own tokens already: no neutral remap on top. `::XLINE` dates
+/// and every mark's `data-fvalue`/`data-fx` are ggplot-rs's own job (B2-4
+/// `svg_formatted_values`, on for every `GGPlot` panel since `Panel::plot`,
+/// plus the `Value::DateTime` reflines now carry through `xline_values`);
+/// the motion attrs (`data-animate`, …) went onto the panel before it was
+/// rendered, via `svg_attrs` (B2-3, `Panel::with_motion_attrs`).
+/// `with_formatted_values` below only still runs for a map's hand-drawn
+/// marks and a gradient-fill measure ggplot-rs can't give a custom
+/// formatter yet.
+fn finish_touches(svg: String, cols: &[Column], o: &RenderOptions) -> String {
+    let svg = o.theme.with_font(svg);
+    let svg = if map::is_map(cols) {
+        svg
+    } else {
+        o.theme.finish_svg(svg)
+    };
+    with_formatted_values(svg, cols, o)
+}
+
+/// Build (but don't render) a chart's plot for `::TRACK` stacking
+/// (`track::stack`, sipemu/ggplot-rs#175): the same pipeline
+/// [`render_placed`] runs up to [`Panel::finish`], minus it — the caller
+/// composes the returned `GGPlot` together with every track's own plot into
+/// one `PlotGrid` and renders them in a single pass, instead of each panel
+/// separately. `None` when the chart isn't backed by a plain `GGPlot` panel
+/// at all (a diagram, map, table, KPI, …), in which case a `::TRACK` under
+/// it stays today's "needs a numeric or date x axis" error note. Also
+/// returns the chart's columns post `downsample`/`boxstats` prep, for the
+/// caller's own [`finish_touches`] call once the grid is rendered.
+/// The chart's own root attributes (motion attrs, …) go on the `GGPlot`
+/// via `svg_attrs` right here — the same thing [`Panel::finish`] does for
+/// a lone render — and [`track::stack`] composes the result straight into
+/// a `PlotGrid`: a cell's own `svg_attr`s land on a `<g>` wrapping its
+/// content (sipemu/ggplot-rs#208).
+pub(crate) fn chart_plot_for_track(
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Result<Option<(GGPlot, Vec<Column>)>, RenderError> {
+    guard(|| {
+        if diagram::Diagram::from_columns(cols, &o.locale).is_some() {
+            return Ok(None);
+        }
+        let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+        let cols = downsample::prepare(cols, o);
+        let cols = boxstats::prepare(cols).map_err(RenderError::Render)?;
+        let panel = render_inner(&cols, w, h, o)
+            .map(|p| p.localized(o, &cols))
+            .map(|p| p.with_motion_attrs(&cols))
+            .map_err(RenderError::Render)?;
+        match panel {
+            Panel::Plot { plot, attrs, .. } => {
+                let plot = if attrs.is_empty() {
+                    *plot
+                } else {
+                    plot.svg_attrs(attrs.into_iter().map(|(k, v)| (k.to_string(), v)))
+                };
+                Ok(Some((plot, cols)))
             }
-            None => draw(None),
-        };
-        let (svg, warnings) = run().map_err(RenderError::Render)?;
-        // A horizontal legend too long for one line auto-wraps (ggplot-rs's
-        // own layout_built: it plans the wrap once and draws exactly that
-        // plan, then pushes an overflow warning into `warnings` above when
-        // even that isn't enough room — see ggplot-rs#318 step 2).
-        // Every panel's hand-drawn SVG text (headings, notes, a map's own
-        // labels/legend, …) still writes the generic font family by hand,
-        // so `with_font` swaps it in here — the one place a GGPlot panel
-        // and the extension's own panels are both still just `svg: String`
-        // (a no-op on the GGPlot part, #326). A map paints with the
-        // variant's own tokens already: no neutral remap on top.
-        let svg = o.theme.with_font(svg);
-        let svg = if map::is_map(&cols) {
-            svg
-        } else {
-            o.theme.finish_svg(svg)
-        };
-        // `::XLINE` dates and every mark's `data-fvalue`/`data-fx` are now
-        // ggplot-rs's own job (B2-4 `svg_formatted_values`, on for every
-        // `GGPlot` panel since `Panel::plot`, plus the `Value::DateTime`
-        // reflines now carry through `xline_values`); the motion attrs
-        // (`data-animate`, …) went onto the panel before `finish` too, via
-        // `svg_attrs` (B2-3, `Panel::with_motion_attrs`). `with_formatted_values`
-        // below only still runs for a map's hand-drawn marks and a
-        // gradient-fill measure ggplot-rs can't give a custom formatter yet.
-        let svg = with_formatted_values(svg, &cols, o);
-        Ok((svg, warnings))
+            Panel::Own { .. } => Ok(None),
+        }
     })
 }
 
@@ -2427,26 +2473,6 @@ fn subset(data: &[(String, Vec<Value>)], idx: &[usize]) -> Vec<(String, Vec<Valu
         .collect()
 }
 
-/// Row indices grouped by the (string) keys of the given columns, in
-/// first-seen order.
-fn group_rows(n: usize, keys: &[&[Value]]) -> Vec<Vec<usize>> {
-    let mut order: Vec<Vec<usize>> = Vec::new();
-    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for i in 0..n {
-        let k: String = keys
-            .iter()
-            .map(|c| value_str(&c[i]))
-            .collect::<Vec<_>>()
-            .join("\u{1}");
-        let g = *at.entry(k).or_insert_with(|| {
-            order.push(Vec::new());
-            order.len() - 1
-        });
-        order[g].push(i);
-    }
-    order
-}
-
 /// The cartesian chart kinds (bars, lines, areas, points, box/violin plots)
 /// with every encoding/annotation/modifier role.
 ///
@@ -2809,19 +2835,6 @@ fn cartesian(
             .map(|(_, v)| v.clone())
             .unwrap_or_default()
     };
-    // Per-series row groups (category × facet) for layers drawn per group.
-    let series_rows = {
-        let cat = col_of(&data, "cat");
-        let fac = col_of(&data, "facet");
-        let mut keys: Vec<&[Value]> = Vec::new();
-        if !cat.is_empty() {
-            keys.push(&cat);
-        }
-        if !fac.is_empty() {
-            keys.push(&fac);
-        }
-        group_rows(n_rows, &keys)
-    };
     // A missing measure is a gap: as NaN the plotting engine drops the row
     // for that layer (a `Value::Na` y would be drawn at the bottom edge) — e.g.
     // a forecast's history rows have no yhat but do have y.
@@ -3069,47 +3082,14 @@ fn cartesian(
                 None | Some("loess") => fit(plot, SmoothMethod::Loess { span: 0.75 }),
                 // A Gaussian GLM with identity link is ordinary least squares.
                 // ggplot-rs's GeomSmooth::glm (binomial/gamma/negative-binomial
-                // families) needs its `regression` feature — not used here, see
-                // `smooth`.
+                // families) needs its `regression` feature — not used here.
                 Some("lm") | Some("glm") | Some("linear") => fit(plot, SmoothMethod::Lm),
-                Some("gam") => {
-                    // P-spline per series (see `smooth::pspline`).
-                    let xs = col_of(&data, "x");
-                    let ys = col_of(&data, "y");
-                    for rows in &series_rows {
-                        let pts: Vec<(f64, f64)> = rows
-                            .iter()
-                            .filter_map(|&i| Some((xs[i].as_f64()?, ys[i].as_f64()?)))
-                            .collect();
-                        let Some(curve) = smooth::pspline(&pts, 80) else {
-                            continue;
-                        };
-                        let mut frame = vec![
-                            (
-                                "x".to_string(),
-                                curve.iter().map(|p| Value::Float(p.0)).collect(),
-                            ),
-                            (
-                                "y".to_string(),
-                                curve.iter().map(|p| Value::Float(p.1)).collect(),
-                            ),
-                        ];
-                        for key in ["cat", "facet"] {
-                            let c = col_of(&data, key);
-                            if let Some(v) = c.get(rows[0]) {
-                                frame.push((key.to_string(), vec![v.clone(); curve.len()]));
-                            }
-                        }
-                        plot = plot
-                            .geom_line_with(GeomLine {
-                                color: brand,
-                                width: 2.0,
-                                ..Default::default()
-                            })
-                            .layer_data(frame);
-                    }
-                    plot
-                }
+                // Penalized B-spline (P-spline, λ by GCV) — ggplot-rs's own
+                // wasm-safe builtin without the `regression` feature (#174);
+                // grouped by series/facet the same way as `lm`/`loess` (its
+                // `StatSmooth::compute_group` groups on the mapped
+                // color/fill aesthetic).
+                Some("gam") => fit(plot, SmoothMethod::Gam),
                 Some(other) => {
                     return Err(format!(
                         "::SMOOTH_METHOD '{other}' is not one of 'loess', 'lm', 'gam', 'glm'"
@@ -4220,6 +4200,11 @@ fn render_qq(
 /// the SQL row order (first level at the top, like a table). `::DATALABELS`
 /// writes each value into its cell (dark text on light cells, light text on
 /// dark ones); `::YFORMAT` formats the values (labels, legend, tooltip).
+/// `::FACET`/`::FACET_FREE` draws one tile grid per distinct value (#424,
+/// e.g. a confusion matrix, reference vs. current): the fill scale (and so
+/// the legend/colourbar) is still trained on every panel's rows together,
+/// so panels stay visually comparable, exactly as a non-faceted heatmap's
+/// colour scale already covers its whole `value` column.
 fn render_heatmap(
     o: &RenderOptions,
     value: &Column,
@@ -4237,6 +4222,9 @@ fn render_heatmap(
         .iter()
         .find(|c| c.role == Role::Y)
         .ok_or("heatmap needs a YAXIS column")?;
+    let facet = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
     // #332: a string measure (a status word such as 'blocked', coloured
     // with ::COLORS as a level map) gets a categorical fill scale and
     // legend — the words themselves, not a numeric ramp/::THRESHOLDS steps,
@@ -4268,12 +4256,15 @@ fn render_heatmap(
         })
         .collect();
     let (x_data, x_levels, x_thin) = heatmap_x_axis(&x.values, width);
-    let data = vec![
+    let mut data = vec![
         ("x".to_string(), x_data.clone()),
         ("y".to_string(), y.values.clone()),
         ("fill".to_string(), value.values.clone()),
         ("label".to_string(), tips),
     ];
+    if let Some(f) = facet {
+        data.push(("facet".to_string(), f.values.clone()));
+    }
     let mut th = chart_theme(o, 11.0);
     // Tiles fill the panel: no grid behind them; a slim, borderless colourbar.
     th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
@@ -4341,23 +4332,40 @@ fn render_heatmap(
         for (ink, rows) in by_ink {
             let pick =
                 |vals: &[Value]| -> Vec<Value> { rows.iter().map(|&i| vals[i].clone()).collect() };
+            let mut layer_data = vec![
+                ("x".to_string(), pick(&x_data)),
+                ("y".to_string(), pick(&y.values)),
+                (
+                    "cell".to_string(),
+                    rows.iter().map(|&i| Value::Str(short[i].clone())).collect(),
+                ),
+            ];
+            // So `::FACET` still splits each ink colour's labels into their
+            // own panel, not all of them into the first one.
+            if let Some(f) = facet {
+                layer_data.push(("facet".to_string(), pick(&f.values)));
+            }
             plot = plot
                 .geom_text_with(GeomText {
                     size,
                     color: ink,
                     ..Default::default()
                 })
-                .layer_data(vec![
-                    ("x".to_string(), pick(&x_data)),
-                    ("y".to_string(), pick(&y.values)),
-                    (
-                        "cell".to_string(),
-                        rows.iter().map(|&i| Value::Str(short[i].clone())).collect(),
-                    ),
-                ])
+                .layer_data(layer_data)
                 .layer_aes(Aes::new().x("x").y("y").label("cell"))
                 .show_legend(false);
         }
+    }
+    if let Some(f) = facet {
+        let ncol = role_num(cols, Role::FacetCols)
+            .filter(|n| *n >= 1.0)
+            .map(|n| n.min(64.0) as usize)
+            .or((f.role == Role::FacetFree).then_some(1));
+        plot = if f.role == Role::FacetFree {
+            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+        } else {
+            plot.facet_wrap("facet", ncol)
+        };
     }
     if let Some(t) = title {
         plot = plot.title(t);
@@ -4388,12 +4396,18 @@ fn render_heatmap_categorical(
 ) -> Result<Panel, String> {
     let x = find_role(cols, Role::X).ok_or("heatmap needs an XAXIS column")?;
     let y = find_role(cols, Role::Y).ok_or("heatmap needs a YAXIS column")?;
+    let facet = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
     let (x_data, x_levels, x_thin) = heatmap_x_axis(&x.values, width);
-    let data = vec![
+    let mut data = vec![
         ("x".to_string(), x_data),
         ("y".to_string(), y.values.clone()),
         ("fill".to_string(), value.values.clone()),
     ];
+    if let Some(f) = facet {
+        data.push(("facet".to_string(), f.values.clone()));
+    }
     let mut th = chart_theme(o, 11.0);
     th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
     th.legend_key.color = Some(o.theme.colors.card);
@@ -4423,6 +4437,17 @@ fn render_heatmap_categorical(
         plot = plot.scale_y_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
         );
+    }
+    if let Some(f) = facet {
+        let ncol = role_num(cols, Role::FacetCols)
+            .filter(|n| *n >= 1.0)
+            .map(|n| n.min(64.0) as usize)
+            .or((f.role == Role::FacetFree).then_some(1));
+        plot = if f.role == Role::FacetFree {
+            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+        } else {
+            plot.facet_wrap("facet", ncol)
+        };
     }
     if let Some(t) = title {
         plot = plot.title(t);
@@ -5153,7 +5178,7 @@ fn render_sparkline(
     let n = value.values.len();
     let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
     let data = vec![
-        ("x".to_string(), xs),
+        ("x".to_string(), xs.clone()),
         ("y".to_string(), value.values.clone()),
     ];
 
@@ -5169,14 +5194,35 @@ fn render_sparkline(
         ),
     ];
 
+    // #457: a sparkline shows *shape*, not a value-vs-zero comparison, so the
+    // y axis must scale to the series' own min/max (a small pad), never a
+    // zero baseline — matching the browser's `cellSpark` (web/app.js) and
+    // the KPI tile's own scaling before #419. `GeomArea::include_zero_
+    // baseline` forces 0 into the trained domain unconditionally (right for
+    // a real area chart, wrong here), so the fill-under-the-line is drawn
+    // with `geom_ribbon` instead (band from the series' own minimum up to
+    // the line) — a ribbon doesn't carry that zero-baseline behaviour, so
+    // the y scale trains on the data alone.
+    let (mn, mx) = value
+        .values
+        .iter()
+        .filter_map(Value::as_f64)
+        .filter(|f| f.is_finite())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+            (a.min(v), b.max(v))
+        });
+    let floor = vec![Value::Float(if mn.is_finite() { mn } else { 0.0 }); n];
+    let band = vec![
+        ("x".to_string(), xs),
+        ("ymin".to_string(), floor),
+        ("ymax".to_string(), value.values.clone()),
+    ];
+
     let plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y"))
-        .geom_area_with(GeomArea {
-            fill,
-            color: fill,
-            alpha: 0.55,
-            line_width: 0.0,
-        })
+        .geom_ribbon_with(GeomRibbon { fill, alpha: 0.55 })
+        .layer_data(band)
+        .layer_aes(Aes::new().x("x").ymin("ymin").ymax("ymax"))
         .geom_line_with(GeomLine {
             color: steel,
             width: 2.6,
@@ -5194,14 +5240,38 @@ fn render_sparkline(
             // `cartesian`'s matching comment.
             let vfmt = value_fmt(cols, Kind::Sparkline, &value.values);
             let locale = o.locale;
-            ggplot_rs::scale::continuous::ScaleContinuous::new()
+            let mut scale = ggplot_rs::scale::continuous::ScaleContinuous::new()
                 .with_expand(0.1, 0.0)
-                .with_value_formatter(move |n: f64| vfmt.full(n, &locale))
+                .with_value_formatter(move |n: f64| vfmt.full(n, &locale));
+            if mn.is_finite() && mx <= mn {
+                // A constant (or single-point) series has no range to show:
+                // centre a flat line in the panel with a visible `±pad`
+                // window instead of collapsing the domain to zero width.
+                let pad = if mn.abs() > 1e-9 {
+                    mn.abs() * 0.05
+                } else {
+                    1.0
+                };
+                scale = scale.with_limits(mn - pad, mn + pad);
+            }
+            scale
         })
         .house_void(o);
     // Render at a compact width so strokes stay crisp when the inline
     // sparkline is scaled down into a narrow panel column.
-    Ok(Panel::plot(plot, width.min(240), height))
+    let w = width.min(240);
+    // #457: never hand ggplot-rs a panel shorter than its own layout floor
+    // (`SPARKLINE_MIN_H` — see its doc comment). The nested `<svg viewBox>`
+    // this panel renders into is sized to whatever height we pass here, so
+    // asking for less than the floor draws the line against a taller
+    // virtual plot area than the visible box, clipping off whatever falls
+    // below it — every dip, once the min-to-max y scale above stopped
+    // flattening the line against a zero baseline. Every embedder (the KPI
+    // tile, a table's `::SPARKLINE` cell) requests at least this floor too
+    // and centres/pads its own smaller visible slot around it; this clamp
+    // is the backstop for any caller that doesn't.
+    let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+    Ok(Panel::plot(plot, w, h))
 }
 
 /// Blend a colour toward black by `t` (0 = unchanged, 1 = black).
