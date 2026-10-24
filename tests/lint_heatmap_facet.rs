@@ -80,3 +80,14 @@ fn identity_and_refline_are_still_quiet_on_a_chart_kind_that_supports_them() {
         assert!(!cs.contains(&"heatmap/line-dropped".to_string()), "{cs:?}");
     }
 }
+
+// #471: two ::REFLINE columns (an alert band's lower and upper edge) on the
+// same statement is a legitimate, fully-drawn shape now — `--check --strict`
+// stays quiet on the issue's own repro.
+#[test]
+fn two_reflines_with_a_shared_label_check_clean() {
+    let script = "SELECT i::XAXIS, (800 + 10 * i)::LINECHART, 930::REFLINE, 760::REFLINE, \
+                  'Alert band'::REFLINE_LABEL FROM range(10) t(i);";
+    let cs = codes(script);
+    assert!(cs.is_empty(), "expected a clean check: {cs:?}");
+}
