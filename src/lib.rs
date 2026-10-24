@@ -99,6 +99,10 @@ pub enum Kind {
     Heatmap,
     /// A minimal inline trend line, no axes (`::SPARKLINE`).
     Sparkline,
+    /// A minimal inline bar histogram, no axes (`::SPARKBAR`); a table cell's
+    /// `list(v ORDER BY i)`, or two overlaid series from
+    /// `list({'ref': r, 'cur': c} ORDER BY i)` sharing one y scale.
+    Sparkbar,
     /// A single value as a gauge/progress arc toward a `::RANGE` (`::GAUGE`).
     Gauge,
     /// A GitHub-style calendar heatmap — a date `::XAXIS` laid out as weeks ×
@@ -145,6 +149,7 @@ impl Kind {
                 | Kind::Candlestick
                 | Kind::Radar
                 | Kind::Sparkline
+                | Kind::Sparkbar
                 | Kind::Waterfall
                 | Kind::Bullet
                 | Kind::Funnel
@@ -2200,6 +2205,7 @@ fn render_inner(
         }
         Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(o, value, cols, width, height),
+        Kind::Sparkbar => return render_sparkbar(o, value, cols, width, height),
         Kind::Waterfall => {
             return variance::render_waterfall(o, value, cols, title.as_deref(), width, height)
         }
@@ -3282,6 +3288,7 @@ fn cartesian(
         | Kind::Candlestick
         | Kind::Radar
         | Kind::Sparkline
+        | Kind::Sparkbar
         | Kind::Waterfall
         | Kind::Bullet
         | Kind::Funnel => {
@@ -5170,6 +5177,100 @@ fn render_sparkline(
         .house_void(o);
     // Render at a compact width so strokes stay crisp when the inline
     // sparkline is scaled down into a narrow panel column.
+    Ok(Panel::plot(plot, width.min(240), height))
+}
+
+/// A minimal inline bar histogram (no axes) — one series of bars, or two
+/// overlaid (a muted reference behind the accent-coloured current), sharing
+/// one y scale so bar heights stay comparable (#425).
+///
+/// `cols` carries one or two `Role::Value(Kind::Sparkbar)` columns (built by
+/// the table-cell / KPI callers from `kpi::spark_values`/`spark_pairs`):
+/// one → a single series; two → `[ref, cur]`, drawn ref-then-cur so cur
+/// paints on top. `value` (`render_inner`'s own lookup) is always the
+/// *first* such column, so the one-series case can read it directly.
+fn render_sparkbar(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let series: Vec<&Column> = cols
+        .iter()
+        .filter(|c| c.role == Role::Value(Kind::Sparkbar))
+        .collect();
+    let (ref_vals, cur_vals): (&[Value], &[Value]) = if series.len() >= 2 {
+        (&series[0].values, &series[1].values)
+    } else {
+        (&[], &value.values)
+    };
+    let xs = |len: usize| -> Vec<Value> { (0..len).map(|i| Value::Float(i as f64)).collect() };
+
+    // Train the shared y scale on the combined ref+cur values so one bar
+    // series never dwarfs or is dwarfed by the other's own scale. `x` is
+    // built to the same (doubled) length as `combined` — every column of a
+    // base [`GGData`] frame must have the same row count.
+    let mut combined = cur_vals.to_vec();
+    combined.extend_from_slice(ref_vals);
+    let mut combined_x = xs(cur_vals.len());
+    combined_x.extend_from_slice(&xs(ref_vals.len()));
+    let base_data = vec![("x".to_string(), combined_x), ("y".to_string(), combined)];
+
+    let accent = o.brand();
+    let muted = wash(o, o.theme.colors.ink, 0.72); // low-contrast reference bars
+
+    let mut plot = GGPlot::new(base_data).aes(Aes::new().x("x").y("y"));
+    let two_series = !ref_vals.is_empty();
+
+    if two_series {
+        let ref_data = vec![
+            ("x".to_string(), xs(ref_vals.len())),
+            ("y".to_string(), ref_vals.to_vec()),
+            (
+                "label".to_string(),
+                vec![Value::Str("ref".into()); ref_vals.len()],
+            ),
+        ];
+        plot = plot
+            .geom_col_with(GeomCol {
+                fill: muted,
+                color: muted,
+                alpha: 0.45,
+                width: 0.75,
+            })
+            .layer_data(ref_data)
+            .layer_aes(Aes::new().x("x").y("y").label("label"))
+            .position(PositionIdentity);
+    }
+
+    let cur_data = vec![
+        ("x".to_string(), xs(cur_vals.len())),
+        ("y".to_string(), cur_vals.to_vec()),
+        (
+            "label".to_string(),
+            vec![Value::Str(if two_series { "cur" } else { "" }.into()); cur_vals.len()],
+        ),
+    ];
+    plot = plot
+        .geom_col_with(GeomCol {
+            fill: accent,
+            color: accent,
+            alpha: 1.0,
+            width: if two_series { 0.45 } else { 0.75 },
+        })
+        .layer_data(cur_data)
+        .layer_aes(Aes::new().x("x").y("y").label("label"))
+        .position(PositionIdentity)
+        .scale_y_continuous({
+            let vfmt = value_fmt(cols, Kind::Sparkbar, cur_vals);
+            let locale = o.locale;
+            ggplot_rs::scale::continuous::ScaleContinuous::new()
+                .with_expand(0.1, 0.0)
+                .with_value_formatter(move |n: f64| vfmt.full(n, &locale))
+        })
+        .house_void(o);
+    // Same compact-width clamp as render_sparkline, for the same reason.
     Ok(Panel::plot(plot, width.min(240), height))
 }
 

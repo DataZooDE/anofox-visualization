@@ -862,14 +862,16 @@ SELECT 'Tables — rich per-column formatting & scalable paging'::LABEL;
 -- Rich formatting: each column picks its own presentation role.
 SELECT 'Formatted'::TAB;
 SELECT 12::COL;
-SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, and an in-cell **::SPARKLINE**. One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero. The third groups its rows with **::SUBTOTAL** and marks each margin good / warn / bad with **::THRESHOLDS**.'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'A **rich data table** — each column carries its own formatting role: **::MONEY** currency, **::COLORSCALE** heat-shaded cells, **::BADGE** status pills, **::TREND** an up/down arrow, an in-cell **::SPARKLINE**, and an in-cell **::SPARKBAR** (here two overlaid series: a flat reference share, muted, against each month''s actual share of the SKU''s total — one y scale per cell, so the bars stay comparable). One SELECT, per-column presentation. The second table adds options for the next table: **::TOTALS** picks each total (click a total''s tag to change it), **::COLGROUP** groups the header, **::FLAG** marks cells with ⚠, **::HIGHLIGHT** ranks the top n, and **::COLORSCALE_HIGH_GOOD** / **::COLORSCALE_DIVERGING** shade where high is good / around zero. The third groups its rows with **::SUBTOTAL** and marks each margin good / warn / bad with **::THRESHOLDS**.'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 12::COL;
 SELECT sku::TABLE,
        forecast::MONEY,
        mape AS "MAPE %" ::COLORSCALE,
        status::BADGE,
        growth AS "growth %" ::TREND,
-       (SELECT list(sales ORDER BY m) FROM hist WHERE hist.sku = fc.sku) AS trend ::SPARKLINE
+       (SELECT list(sales ORDER BY m) FROM hist WHERE hist.sku = fc.sku) AS trend ::SPARKLINE,
+       (SELECT list({'ref': 0.2, 'cur': sales / sum(sales) OVER ()} ORDER BY m)
+          FROM hist WHERE hist.sku = fc.sku) AS "Sales share" ::SPARKBAR
 FROM fc ORDER BY forecast DESC;
 
 -- Totals per column (::TOTALS; click a total's tag to change it), a grouped
@@ -6196,7 +6198,7 @@ const role = (s, name) => s.roles.some((r) => r[1] === name);
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT"];
-let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "PLAIN"];
+let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
 let ZOOMABLE = [
@@ -12114,7 +12116,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       `download the ${server ? "loaded" : "matching"} rows as an Excel workbook, formatted like the table`,
       false,
       () => {
-        const vc = visCols().filter((c) => info[c].f !== "SPARKLINE");
+        const vc = visCols().filter((c) => !["SPARKLINE", "SPARKBAR"].includes(info[c].f));
         const data = server ? (view === "scroll" ? loadedRows() : rows) : sortedRows();
         const fmts = Object.fromEntries(vc.map((c) => [c, xlFmt(c)]));
         const present = (c) => data.map((r) => r[c]).filter((v) => v != null && unquote(v) !== "");
@@ -12232,15 +12234,15 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const statsTitle = (c) => {
     const i = info[c];
     const parts = [];
-    if (i.numeric && !i.label && i.mean != null && !["SPARKLINE", "BADGE"].includes(i.f)) {
+    if (i.numeric && !i.label && i.mean != null && !["SPARKLINE", "SPARKBAR", "BADGE"].includes(i.f)) {
       parts.push(`min ${cellText(i.min, c)}`, `max ${cellText(i.max, c)}`, `mean ${cellText(i.mean, c)}`);
-    } else if (i.f !== "SPARKLINE") parts.push(`${i.distinct.toLocaleString(loc)} distinct`);
+    } else if (!["SPARKLINE", "SPARKBAR"].includes(i.f)) parts.push(`${i.distinct.toLocaleString(loc)} distinct`);
     if (i.empty) parts.push(`${i.empty.toLocaleString(loc)} empty`);
     const scope = server ? " (all matching rows)" : "";
     const name = head(c) === c ? c : `${head(c)}  (${c})`;
     return `${name}\n${parts.join(" · ")}${scope}\nclick to sort`;
   };
-  const alignRight = (c) => info[c].numeric && !["BADGE", "SPARKLINE"].includes(info[c].f);
+  const alignRight = (c) => info[c].numeric && !["BADGE", "SPARKLINE", "SPARKBAR"].includes(info[c].f);
   // ── natural column widths, in ch of the table font: the header (as wrapped
   // onto two lines) and the formatted cells, measured once per render over all
   // rows (a sample of long tables; a ::PAGED table: the loaded page) so paging
@@ -12256,7 +12258,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     for (const c of cols) {
       const i = info[c];
       let w = 0;
-      if (i.f === "SPARKLINE") w = 15;
+      if (i.f === "SPARKLINE" || i.f === "SPARKBAR") w = 15;
       else
         for (const r of sample) {
           const v = r[c];
@@ -12286,7 +12288,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       let w = Math.max(natW[c], hw, 4);
       // a shown total: its aggregation tag and value
       const i = info[c];
-      if (showTotals && !totalsOff && i.numeric && !i.label && i.f !== "SPARKLINE" && c !== cols[0]) {
+      if (showTotals && !totalsOff && i.numeric && !i.label && !["SPARKLINE", "SPARKBAR"].includes(i.f) && c !== cols[0]) {
         const a = aggOf(c);
         const v = a === "none" ? null : aggValue(c, a);
         if (v != null) w = Math.max(w, chars(aggText(v, c, a)) * 1.05 + chars(a) * 0.8 + 2);
@@ -12401,7 +12403,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const pctTxt = (x) => new Intl.NumberFormat(loc, { style: "percent", maximumFractionDigits: x < 0.1 ? 1 : 0 }).format(x);
   function statCell(c, p) {
     const i = info[c];
-    if (!p || i.f === "SPARKLINE") return "";
+    if (!p || ["SPARKLINE", "SPARKBAR"].includes(i.f)) return "";
     const empty = (server ? server.total || 0 : filtered.length) - p.n; // (a number column: values that aren't numbers too)
     const foot = empty > 0 ? `<span class="st-empty">${empty.toLocaleString(loc)} empty</span>` : "";
     if (p.num) {
@@ -12478,7 +12480,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
       const i = info[c];
       // a categorical column with few values → a dropdown (a ::PAGED table loads
       // its values from SQL: every distinct value under the other filters)
-      const few = !i.numeric && i.f !== "SPARKLINE" && (colEq[c] != null || (i.distinct > 1 && i.distinct <= 30));
+      const few = !i.numeric && !["SPARKLINE", "SPARKBAR"].includes(i.f) && (colEq[c] != null || (i.distinct > 1 && i.distinct <= 30));
       if (few) {
         const sel = document.createElement("select");
         sel.className = "dp-colf";
@@ -12506,7 +12508,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
           filtersChanged();
         };
         th.appendChild(sel);
-      } else if (i.f !== "SPARKLINE") {
+      } else if (!["SPARKLINE", "SPARKBAR"].includes(i.f)) {
         const inp = document.createElement("input");
         inp.className = "dp-colf";
         inp.placeholder = i.numeric ? "> n  < n" : "contains…";
@@ -12575,6 +12577,11 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     if (f === "SPARKLINE") {
       td.className = "spark-cell";
       td.innerHTML = cellSpark(v, c);
+      return;
+    }
+    if (f === "SPARKBAR") {
+      td.className = "spark-cell";
+      td.innerHTML = cellSparkbar(v, c);
       return;
     }
     if (v == null || unquote(v) === "") {
@@ -12898,7 +12905,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         td.title = `${head(subCol)}: ${k || "(empty)"} — ${grp.length.toLocaleString(loc)} matching rows`;
         return;
       }
-      if (!i.numeric || i.label || ["SPARKLINE", "BADGE"].includes(i.f)) return;
+      if (!i.numeric || i.label || ["SPARKLINE", "SPARKBAR", "BADGE"].includes(i.f)) return;
       const a = aggOf(c);
       if (a === "none") return;
       const v = aggValue(c, a, grp);
@@ -12938,7 +12945,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         td.classList.add("tot-badges"); // wraps rather than widening the column
         return;
       }
-      if (!i.numeric || i.label || i.f === "SPARKLINE") return;
+      if (!i.numeric || i.label || ["SPARKLINE", "SPARKBAR"].includes(i.f)) return;
       const a = aggOf(c);
       if (a === "none" && authorNone(c)) return;
       const v = a === "none" ? null : aggValue(c, a);
@@ -13252,6 +13259,70 @@ function cellSpark(v) {
     `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>` +
     `<circle cx="${xs(nums.length - 1).toFixed(1)}" cy="${ys(last).toFixed(1)}" r="2.2" fill="var(--ax-spark-dot)"/></svg>`
   );
+}
+
+// ::SPARKBAR cell — a word-sized bar histogram (#425): one bar per list
+// element (`list(v ORDER BY i)`), or two overlaid per bucket — a muted
+// reference behind, the accent current bar on top — from
+// `list({'ref': r, 'cur': c} ORDER BY i)`. One y scale per cell (the
+// combined ref+cur range), so heights stay comparable. Each bar carries its
+// own <title> (a discrete bucket, unlike a trend line's one whole-cell tip).
+function cellSparkbar(v) {
+  let arr = Array.isArray(v) ? v : null;
+  if (!arr && typeof v === "string") {
+    try {
+      const p = JSON.parse(v);
+      if (Array.isArray(p)) arr = p;
+    } catch (_) {}
+  }
+  arr = arr || [];
+  const isPair = arr.length > 0 && typeof arr[0] === "object" && arr[0] !== null && !Array.isArray(arr[0]);
+  let refs = [];
+  let curs = [];
+  if (isPair) {
+    for (const o of arr) {
+      const r = Number(o && o.ref);
+      const c = Number(o && o.cur);
+      if (isFinite(r) && isFinite(c)) {
+        refs.push(r);
+        curs.push(c);
+      }
+    }
+  } else {
+    curs = (arr || []).map(Number).filter((x) => isFinite(x));
+  }
+  if (curs.length < 1) return `<span class="nil">—</span>`;
+  const w = 104;
+  const h = 26;
+  const pad = 2.5;
+  const all = refs.concat(curs);
+  const mn = Math.min(0, ...all);
+  const mx = Math.max(0, ...all) || 1;
+  const rng = mx - mn || 1;
+  const n = curs.length;
+  const slot = (w - 2 * pad) / n;
+  const bw = isPair ? slot * 0.62 : slot * 0.7;
+  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
+  const base = ys(0);
+  const f = (x) => fmtNum(x, "COMPACT");
+  const rect = (x, val, fill, opacity, title) => {
+    const y1 = ys(val);
+    const y0 = Math.min(y1, base);
+    const bh = Math.max(Math.abs(y1 - base), 0.6);
+    return (
+      `<rect x="${(x - bw / 2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" ` +
+      `height="${bh.toFixed(1)}" fill="${fill}" fill-opacity="${opacity}">` +
+      `<title>${escapeHtml(title)}</title></rect>`
+    );
+  };
+  let bars = "";
+  for (let i = 0; i < n; i++) {
+    const x = pad + slot * (i + 0.5);
+    const tip = isPair ? `ref ${f(refs[i])} · cur ${f(curs[i])}` : `${f(curs[i])}`;
+    if (isPair) bars += rect(x, refs[i], "var(--ax-muted)", 0.4, tip);
+    bars += rect(x, curs[i], "var(--ax-spark)", isPair ? 0.92 : 1, tip);
+  }
+  return `<svg class="spark spark-bar" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${bars}</svg>`;
 }
 
 // A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the
@@ -14071,9 +14142,9 @@ function addExportButtons() {
   document.querySelectorAll(".panel").forEach((fig) => {
     if (fig.querySelector(".dl")) return;
     const table = fig.querySelector(".dp-table");
-    // A ::SPARKLINE column draws a tiny <svg> per cell (#354 follow-up):
-    // that is table content, not a chart's own svg, so only an svg *outside*
-    // the table marks this panel as a chart.
+    // A ::SPARKLINE / ::SPARKBAR column draws a tiny <svg> per cell (#354
+    // follow-up; #425): that is table content, not a chart's own svg, so
+    // only an svg *outside* the table marks this panel as a chart.
     const svg = [...fig.querySelectorAll("svg")].find((s) => !table || !table.contains(s));
     // A table keeps this hover button whenever it has no export menu of its
     // own to use instead — no toolbar at all (pre-#354), or `export`
@@ -14909,7 +14980,7 @@ function astablesBarOn(sql) {
 }
 
 const CHART_KINDS = [
-  [/^BARCHART|^BAR_/, "Bar chart"],
+  [/^BARCHART|^BAR_|^SPARKBAR/, "Bar chart"],
   [/^LINECHART|^STEP|^SPARKLINE/, "Line chart"],
   [/^AREACHART/, "Area chart"],
   [/^SCATTER|^BUBBLE|^JITTER|^SMOOTH/, "Scatter plot"],

@@ -1109,13 +1109,14 @@ fn table_svg(
         };
 
     // natural widths (in characters): the header (wrapping onto ≤ 2 lines) and
-    // the formatted cells, shared out over the card. A ::SPARKLINE cell draws
-    // a small chart, not text (#427) — it gets a fixed pixel width instead of
-    // one measured from its (JSON) cell text, reserved up front so the other
-    // columns still split the rest by their own natural width.
+    // the formatted cells, shared out over the card. A ::SPARKLINE/::SPARKBAR
+    // cell draws a small chart, not text — it gets a fixed pixel width
+    // instead of one measured from its (JSON) cell text, reserved up front
+    // so the other columns still split the rest by their own natural width
+    // (same approach as #427's SPARKLINE fix).
     let sample = nrow.min(200);
     let chars = |s: &str| s.chars().count() as f64;
-    let is_spark = |k: usize| cols[k].fmt == Some("SPARKLINE");
+    let is_spark = |k: usize| matches!(cols[k].fmt, Some("SPARKLINE" | "SPARKBAR"));
     const SPARK_COL_W: f64 = 92.0;
     let nat: Vec<f64> = cols
         .iter()
@@ -1160,11 +1161,11 @@ fn table_svg(
     };
 
     let top = if title.is_some() { 30.0 } else { 10.0 };
-    // A nested sparkline panel is clamped to at least `MIN_DIM` (32px, the
-    // whole crate's floor for a renderable panel — `clamp_dim`) however
-    // little height we ask for, so a table with a ::SPARKLINE column gets
-    // taller rows to fit it without spilling into the next one.
-    let row_h = if cols.iter().enumerate().any(|(k, _)| is_spark(k)) {
+    // A nested sparkline/sparkbar panel is clamped to at least `MIN_DIM`
+    // (32px, the whole crate's floor for a renderable panel — `clamp_dim`)
+    // however little height we ask for, so a table with one of these
+    // columns gets taller rows to fit it without spilling into the next.
+    let row_h = if (0..cols.len()).any(is_spark) {
         38.0
     } else {
         22.0
@@ -1283,6 +1284,67 @@ fn table_svg(
                     nums.into_iter().map(Value::Float).collect(),
                 );
                 match render_with_at(&[spark_col], sx, sy, sw as u32, sh as u32, ropts) {
+                    Ok(frag) => s.push_str(&frag),
+                    Err(_) => s.push_str(&format!(
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"
+                    )),
+                }
+                continue;
+            }
+            // A `::SPARKBAR` cell (#425): a list of numbers (one series) or
+            // `{'ref','cur'}` objects (two overlaid series) drawn as a tiny
+            // bar histogram, through the same ggplot-rs path as a standalone
+            // `::SPARKBAR` panel (`render_sparkbar`, via `render_with_at`) —
+            // no hand-written SVG here. No data draws the usual dash.
+            if c.fmt == Some("SPARKBAR") {
+                let raw = match c.cells.get(r) {
+                    Some(Cell::Text(s)) => Some(s.clone()),
+                    _ => None,
+                };
+                let spark_cols: Vec<Column> = raw
+                    .as_deref()
+                    .map(|s| {
+                        let v = Value::Str(s.to_string());
+                        let pairs = crate::kpi::spark_pairs(&v);
+                        if !pairs.is_empty() {
+                            vec![
+                                Column::new(
+                                    "ref",
+                                    Role::Value(Kind::Sparkbar),
+                                    pairs.iter().map(|(r, _)| Value::Float(*r)).collect(),
+                                ),
+                                Column::new(
+                                    "cur",
+                                    Role::Value(Kind::Sparkbar),
+                                    pairs.iter().map(|(_, c)| Value::Float(*c)).collect(),
+                                ),
+                            ]
+                        } else {
+                            let nums = crate::kpi::spark_values(&v);
+                            vec![Column::new(
+                                "value",
+                                Role::Value(Kind::Sparkbar),
+                                nums.into_iter().map(Value::Float).collect(),
+                            )]
+                        }
+                    })
+                    .unwrap_or_default();
+                let n_vals = spark_cols.first().map_or(0, |c| c.values.len());
+                if n_vals == 0 {
+                    s.push_str(&format!(
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"
+                    ));
+                    continue;
+                }
+                let row_top = top + 23.0 + r as f64 * row_h;
+                let sw = (widths[k] - 6.0).max(32.0);
+                // `MIN_DIM` (32px) itself, not `row_h - 6.0`: a shorter
+                // request is clamped up to it anyway (`clamp_dim`), which
+                // would otherwise spill past this row's own height.
+                let sh = 32.0;
+                let sx = xs[k] + 2.0;
+                let sy = row_top + (row_h - sh) / 2.0;
+                match render_with_at(&spark_cols, sx, sy, sw as u32, sh as u32, ropts) {
                     Ok(frag) => s.push_str(&frag),
                     Err(_) => s.push_str(&format!(
                         "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"

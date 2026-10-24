@@ -982,3 +982,55 @@ fn table_sparkline_cell_is_drawn_not_dropped() {
         "the table's other columns must still render, unaffected: {svg}"
     );
 }
+
+// #425: a `::TABLE`'s `list(v ORDER BY i)::SPARKBAR` (one series) or
+// `list({'ref','cur'} ORDER BY i)::SPARKBAR` (two overlaid series) column
+// draws a tiny bar histogram per cell, through the same ggplot-rs path as a
+// standalone `::SPARKBAR` panel (`render_sparkbar`, via `render_with_at`).
+#[test]
+fn table_sparkbar_cell_draws_bars_one_and_two_series() {
+    struct SparkbarMock;
+    impl DataProvider for SparkbarMock {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("Dist") {
+                return Ok(vec![
+                    ("feature".into(), s(&["temp", "humidity"])),
+                    (
+                        "Dist".into(),
+                        s(&[
+                            "[0.1,0.2,0.3,0.4]",
+                            "[{\"ref\":0.1,\"cur\":0.3},{\"ref\":0.3,\"cur\":0.3},\
+                             {\"ref\":0.4,\"cur\":0.2},{\"ref\":0.2,\"cur\":0.2}]",
+                        ]),
+                    ),
+                    ("mx".into(), f(&[3.0, 4.0])),
+                ]);
+            }
+            Ok(vec![("c0".into(), f(&[1.0]))])
+        }
+    }
+    let script = "SELECT feature ::TABLE, dist AS \"Dist\" ::SPARKBAR, mx AS \"Mx\" FROM t;";
+    let mut db = SparkbarMock;
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        svg.contains(">Dist<"),
+        "the sparkbar column's own header must still show: {svg}"
+    );
+    assert!(
+        !svg.contains("[0.1,0.2,0.3,0.4]") && !svg.contains("\"ref\":0.1"),
+        "a cell's raw JSON must never print literally: {svg}"
+    );
+    assert_eq!(
+        svg.matches("data-geom=\"col\"").count(),
+        12,
+        "every value (4 one-series bars + 4 ref + 4 cur two-series bars) draws \
+         through ggplot-rs's bar geom, one rect per mark: {svg}"
+    );
+    assert!(
+        svg.contains(">Mx<") && svg.contains(">3<") && svg.contains(">4<"),
+        "the table's other columns must still render, unaffected: {svg}"
+    );
+}

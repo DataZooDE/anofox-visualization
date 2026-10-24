@@ -163,6 +163,9 @@ pub static REGISTRY: &[RoleSpec] = &[
       "OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure"),
     e("SPARKLINE", &["SPARK"], R::Value(Kind::Sparkline), "chart", true,
       "minimal trend line (no axes); a list() column in a table"),
+    e("SPARKBAR", &["SPARK_BAR"], R::Value(Kind::Sparkbar), "chart", true,
+      "minimal bar histogram (no axes); a table cell's list(v ORDER BY i), or two overlaid \
+       series sharing one y scale from list({'ref': r, 'cur': c} ORDER BY i)"),
     e("MAP", &["GEOMETRY", "GEO", "CHOROPLETH"], R::Geometry, "chart", true,
       "WKT-geometry map, coloured by a measure"),
     e("REGION", &["REGION_CODE", "ISO_CODE"], R::Region, "chart", true,
@@ -570,6 +573,7 @@ pub fn is_table_format(r: Role) -> bool {
             | Role::ColorScale(_)
             | Role::Badge
             | Role::Value(Kind::Sparkline)
+            | Role::Value(Kind::Sparkbar)
             | Role::Plain
             | Role::Link
     )
@@ -727,6 +731,7 @@ mod tests {
             K::QQ,
             K::Heatmap,
             K::Sparkline,
+            K::Sparkbar,
             K::Gauge,
             K::Calendar,
             K::Jitter,
