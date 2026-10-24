@@ -4394,7 +4394,18 @@ fn set_reads_a_file(code: &str) -> bool {
 /// front of `q`. A `session: true` query reads session variables
 /// (`getvariable()`), which needs `prelude` replayed in the fresh-session
 /// case; a `session: false` one (`glob()` file checks) never depended on
-/// session state either way, so `q` goes alone regardless.
+/// session state either way, so `q` goes alone regardless — but always
+/// `;`-terminated: a CI hang traced to `tests/fixtures/lint/requires-setup.sql`
+/// found that `sql::requires::glob_sql`'s query has no trailing `;` of its
+/// own, which this `else` branch used to send verbatim. That's harmless to a
+/// one-shot `run_query` (a fresh process per call, or `-c`), but
+/// `host::duckdb_cli::OneProcessSession::round` (the CLI's persistent
+/// session, #435) appends its own sentinel statements straight after `q` in
+/// the same write — without a `;`, the sentinel merges into `q`'s own
+/// (now two-statement, erroring) text and is never actually run, so its
+/// marker never comes back and the round hangs. (`OneProcessSession::round`
+/// now also carries its own timeout backstop for any such bug, but the
+/// query text itself must be correct regardless.)
 pub fn unmet_requirement<F>(
     run_query: &mut F,
     prelude: &str,
@@ -4407,7 +4418,7 @@ where
         let rows = run_query(&if session {
             format!("{prelude}{q};")
         } else {
-            q.to_string()
+            format!("{q};")
         })?;
         Ok(rows
             .into_iter()

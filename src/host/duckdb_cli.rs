@@ -13,8 +13,10 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 /// This build's DuckDB pin (`.duckdb-version`, the release pin -- untouched
 /// by #352's groundwork).
@@ -104,6 +106,20 @@ pub fn prepare(bin: &str, cmd: &mut Command) {
         cmd.arg("-no-agent");
     }
 }
+
+/// How long one [`OneProcessSession::round`] may run before its session is
+/// treated as hung and killed — matches `serve --query-timeout`'s own
+/// default (`src/bin/serve.rs`). A round that can't produce its own sentinel
+/// within this is killed instead of blocking its caller forever: that covers
+/// a genuinely wedged `duckdb` child, and also a caller bug that swallows
+/// the sentinel — e.g. a statement sent without its trailing `;` merges the
+/// following `SELECT '<nonce>' …` into itself, so the sentinel is never
+/// actually run and the marker never comes (found investigating a CI hang
+/// on `tests/fixtures/lint/requires-setup.sql`'s `glob(...)` requires-check,
+/// which `sql::requires::glob_sql` built with no trailing `;`). `SessionRunner`
+/// then sees a timeout exactly like a crash (`RoundOutcome::Ended`) and
+/// recovers by respawning and replaying.
+const ROUND_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The result of one [`OneProcessSession::round`].
 pub enum RoundOutcome {
@@ -217,6 +233,12 @@ impl OneProcessSession {
     /// everything an earlier round sent — unlike `run_query`'s one-shot
     /// calls, `sql` carries no prelude of its own.
     pub fn round(&mut self, sql: &str) -> RoundOutcome {
+        self.round_timeout(sql, ROUND_TIMEOUT)
+    }
+
+    /// [`Self::round`] with an explicit timeout (tests use a short one so
+    /// a deliberately wedged child doesn't make the suite itself hang).
+    fn round_timeout(&mut self, sql: &str, timeout: Duration) -> RoundOutcome {
         let nonce = super::serving::random_token();
         let missing = std::env::temp_dir().join(format!("anofox-sep-{nonce}"));
         let script = format!(
@@ -231,36 +253,104 @@ impl OneProcessSession {
         {
             return RoundOutcome::Ended(self.drain_err());
         }
-        let marker_line = format!("[{{\"__anofox_sep\":\"{nonce}\"}}]");
-        let mut text = String::new();
-        loop {
-            let mut line = String::new();
-            match self.out.read_line(&mut line) {
-                Ok(0) | Err(_) => return RoundOutcome::Ended(self.drain_err()),
-                Ok(_) => {
-                    if line.trim_end_matches(['\r', '\n']) == marker_line {
-                        break;
+
+        // A structural backstop (mirrors `serve.rs`'s `Live::round_with`,
+        // sec-review-342 L1/L3): if the sentinel never comes back — a
+        // genuinely wedged child, or a caller statement that swallowed it
+        // (see `ROUND_TIMEOUT`'s doc) — this round still has to end, not
+        // hang its caller forever. The watchdog blocks on
+        // `done_rx.recv_timeout` rather than unconditionally sleeping the
+        // full timeout, so the common (fast) case wakes it immediately —
+        // dropping `done_tx` below closes the channel, which `recv_timeout`
+        // sees as `Disconnected` right away, instead of leaving a thread
+        // parked for up to `timeout` with nothing to do. Joined before
+        // returning, so the child is never reaped elsewhere (`drop`, a
+        // retry) while a watchdog that might still call `kill` on its pid
+        // is alive — the same TOCTOU window a sleep-based watchdog would
+        // leave open.
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        #[cfg(unix)]
+        let watchdog = {
+            let (timed_out, pid) = (timed_out.clone(), self.child.id());
+            std::thread::Builder::new()
+                .spawn(move || {
+                    use std::sync::mpsc::RecvTimeoutError;
+                    if let Err(RecvTimeoutError::Timeout) = done_rx.recv_timeout(timeout) {
+                        timed_out.store(true, Ordering::SeqCst);
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                        }
                     }
-                    text.push_str(&line);
+                })
+                .ok()
+        };
+        // No watchdog on Windows (best-effort there, like `serve.rs`'s) —
+        // a hang has no backstop beyond the write-failure check above.
+        #[cfg(not(unix))]
+        let _ = (&timed_out, done_rx, timeout);
+
+        let outcome = 'round: {
+            let marker_line = format!("[{{\"__anofox_sep\":\"{nonce}\"}}]");
+            let mut text = String::new();
+            loop {
+                let mut line = String::new();
+                match self.out.read_line(&mut line) {
+                    Ok(0) | Err(_) => {
+                        break 'round RoundOutcome::Ended(if timed_out.load(Ordering::SeqCst) {
+                            format!(
+                                "the duckdb session timed out after {}s waiting for output \
+                                 (killed)",
+                                timeout.as_secs()
+                            )
+                        } else {
+                            self.drain_err()
+                        })
+                    }
+                    Ok(_) => {
+                        if line.trim_end_matches(['\r', '\n']) == marker_line {
+                            break;
+                        }
+                        text.push_str(&line);
+                    }
                 }
             }
-        }
-        let mut err = String::new();
-        loop {
-            match self.err.recv() {
-                Ok(l) if l.contains(&nonce) => break,
-                Ok(l) => {
-                    err.push_str(&l);
-                    err.push('\n');
+            let mut err = String::new();
+            loop {
+                match self.err.recv() {
+                    Ok(l) if l.contains(&nonce) => break,
+                    Ok(l) => {
+                        err.push_str(&l);
+                        err.push('\n');
+                    }
+                    Err(_) => {
+                        break 'round RoundOutcome::Ended(if timed_out.load(Ordering::SeqCst) {
+                            format!(
+                                "the duckdb session timed out after {}s waiting for output \
+                                 (killed)",
+                                timeout.as_secs()
+                            )
+                        } else {
+                            err
+                        })
+                    }
                 }
-                Err(_) => return RoundOutcome::Ended(err),
             }
+            if err.trim().is_empty() {
+                RoundOutcome::Ok(text)
+            } else {
+                RoundOutcome::Sql(err.trim_end().to_string())
+            }
+        };
+        // Wake a still-waiting watchdog at once, then join it (see the
+        // comment above): the child can't be reaped anywhere else while it
+        // might still be about to `kill` it.
+        drop(done_tx);
+        #[cfg(unix)]
+        if let Some(h) = watchdog {
+            let _ = h.join();
         }
-        if err.trim().is_empty() {
-            RoundOutcome::Ok(text)
-        } else {
-            RoundOutcome::Sql(err.trim_end().to_string())
-        }
+        outcome
     }
 
     /// stderr's remaining lines, once the CLI is gone (best-effort, short
@@ -605,5 +695,84 @@ mod tests {
         // this very statement's own rows come back too, from the new session.
         let rows = r.run("SELECT x FROM t;").unwrap();
         assert_eq!(rows[0]["x"], 7);
+    }
+
+    /// A CI hang traced to `tests/fixtures/lint/requires-setup.sql`: a round
+    /// whose `sql` has no trailing `;` lets DuckDB's own line-buffering
+    /// swallow the sentinel `SELECT` `round` appends after it — both merge
+    /// into one (now two-statement, erroring) incomplete chunk up to the
+    /// next semicolon, so the sentinel is never actually run and its marker
+    /// never comes back on stdout. The root cause (`sql::requires::glob_sql`'s
+    /// query, sent unterminated by `lint::unmet_requirement`) is fixed, but
+    /// `round` must still end — not hang its caller forever — regardless of
+    /// what any caller (present or future) sends; its timeout backstop is
+    /// what makes that true. A short timeout here keeps the test itself fast.
+    #[test]
+    fn a_statement_with_no_trailing_semicolon_times_out_instead_of_hanging() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        let start = std::time::Instant::now();
+        match s.round_timeout("SELECT 1 AS x", Duration::from_secs(2)) {
+            RoundOutcome::Ended(msg) => assert!(msg.contains("timed out"), "{msg}"),
+            other => panic!("expected a timeout, got {}", outcome_label(&other)),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "took {:?}, should have been killed at ~2s",
+            start.elapsed()
+        );
+    }
+
+    /// sec-review-342's original hypothesis for the CI hang above (wrong for
+    /// this particular bug — see the test above — but worth guarding
+    /// anyway): a round whose statements write a lot to stderr (every
+    /// anofox extension's `LOAD` banner, plus many failing statements) must
+    /// not deadlock stdin/stdout against a full pipe buffer. stderr is
+    /// drained on its own background thread into an unbounded channel
+    /// (`OneProcessSession::spawn`), so this should finish quickly; it did
+    /// even before the timeout backstop above existed, but the backstop
+    /// also means a regression here would now show up as `Ended`, not a
+    /// hang.
+    #[test]
+    fn a_flood_of_stderr_does_not_deadlock_the_session() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        // ~3000 small catalog errors: comfortably past a pipe's usual 64 KB
+        // buffer (each DuckDB "table does not exist" error is well over
+        // 100 B with its "Did you mean" / `LINE 1:` context).
+        let script: String = (0..3000)
+            .map(|i| format!("SELECT * FROM nope_{i}_does_not_exist;\n"))
+            .collect();
+        let start = std::time::Instant::now();
+        match s.round(&script) {
+            RoundOutcome::Sql(e) => {
+                assert!(
+                    e.len() > 200_000,
+                    "only {} bytes of stderr: {e:.200}",
+                    e.len()
+                );
+                assert!(e.contains("nope_"), "{e:.200}");
+            }
+            other => panic!("expected a SQL error, got {}", outcome_label(&other)),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "took {:?} — stdin/stdout looks wedged on the stderr flood",
+            start.elapsed()
+        );
+        // the session is still alive and usable right after.
+        match s.round("SELECT 1 AS v;") {
+            RoundOutcome::Ok(text) => {
+                let rows = crate::sql::parse_rows_json(&text).unwrap();
+                assert_eq!(rows[0]["v"], 1);
+            }
+            other => panic!("expected rows, got {}", outcome_label(&other)),
+        }
     }
 }
