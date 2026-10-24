@@ -10,10 +10,11 @@ use ggplot_rs::geom::sf::GeomSf;
 use ggplot_rs::prelude::*;
 use ggplot_rs::render::backend::FillPattern;
 use ggplot_rs::scale::binned::ScaleFillBinned;
+use ggplot_rs::scale::Scale;
 use ggplot_rs::theme::LegendPosition;
 
 use crate::theme::mix;
-use crate::{Column, HouseTheme, RenderOptions};
+use crate::{Column, RenderOptions};
 
 use super::fill::MapFill;
 use super::legend::legend_of;
@@ -270,16 +271,15 @@ pub(super) fn build(
                     .chain(c.edges.iter().copied())
                     .chain(std::iter::once(c.hi))
                     .collect();
-                // No legend title: `house_void`'s theme (`#459`) zeroes
-                // `legend_margin.top` for `LegendPosition::Top`'s one-row
-                // layout, so a non-empty title would draw at y=0 — cut off
-                // above the panel. `MapFill::category`'s legend (already
-                // shipped, #459) avoids this the same way, leaving its own
-                // `name` empty — same choice here, not a new workaround.
-                let scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
+                let mut scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
                     .na_color(hatch_bg)
                     .na_pattern(FillPattern::stripe(hatch_fg, hatch_bg))
                     .na_label("No data");
+                // The measure's own title, same as the old writer's
+                // stepped-bar legend and `MapFill::measure`'s continuous
+                // one — real `legend_margin` (below) gives it room to
+                // render without clipping.
+                scale.set_name(s.title.clone().unwrap_or_default().as_str());
                 plot = plot.scale_fill(scale);
             }
             // A continuous measure (no classes): stays on `MapFill`'s own
@@ -295,9 +295,19 @@ pub(super) fn build(
     }
     let _ = legend_at;
 
+    // `crate::void_theme` (pie/gauge/map/sparkline) zeroes `legend_margin`
+    // — fine for those (no legend, or one positioned off the panel
+    // entirely), wrong for a map's own legend: at `LegendPosition::Top`
+    // (below) or the default `Right`, zero margin puts the first swatch
+    // and any title flush against the panel's own top/left edge, clipped
+    // by the panel card. Restore `Margin`'s own library default (10px each
+    // side) on top of the void theme — a plain `Theme` field, not an SVG
+    // post-process.
+    let mut theme = crate::void_theme(o);
+    theme.legend_margin = ggplot_rs::theme::Margin::default();
     plot = plot
         .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
-        .house_void(o);
+        .theme(theme);
     // A discrete legend (`Fill::Category`, or a classed `Fill::Measure` —
     // `ScaleFillBinned::is_discrete()` is also `true`) goes at
     // `LegendPosition::Top` (plain ggplot-rs API, `is_horizontal` for
@@ -305,14 +315,14 @@ pub(super) fn build(
     // — the old writer put its legend above the map at full width;
     // ggplot-rs's own default (`Right`, a vertical column) narrows the map
     // a lot on a narrow (390px) panel, which `Top` avoids. Must come
-    // *after* `.house_void(o)`: that call sets the plot's whole `Theme`
-    // (incl. `legend_position`), so setting it earlier would just get
+    // *after* `.theme(..)`: that call sets the plot's whole `Theme` (incl.
+    // `legend_position`), so setting it earlier would just get
     // overwritten. A continuous (`Fill::Measure`, no classes) legend stays
-    // on ggplot-rs's default for now: `legend_at` above (`layout()`'s own
-    // 4-corner, vertex-density-aware pick, meant to convert to
-    // `legend_position_inside`'s fraction) renders a continuous legend's
-    // tick marks/labels at wildly wrong, off-canvas y positions under
-    // `LegendPosition::Inside` — a real ggplot-rs bug (filed:
+    // on ggplot-rs's default `Right` position for now: `legend_at` above
+    // (`layout()`'s own 4-corner, vertex-density-aware pick, meant to
+    // convert to `legend_position_inside`'s fraction) renders a continuous
+    // legend's tick marks/labels at wildly wrong, off-canvas y positions
+    // under `LegendPosition::Inside` — a real ggplot-rs bug (filed:
     // sipemu/ggplot-rs#225), not a sign error here — so nothing calls
     // `.legend_position_inside()` yet for either fill kind.
     if discrete_fill {

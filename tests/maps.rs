@@ -428,6 +428,23 @@ fn classed_measure_routes_through_geom_sf_with_counts_and_a_hatch() {
     assert!(s.contains(">1–2 (1)</text>"), "{s}");
     assert!(s.contains(">2–1000 (2)</text>"), "{s}");
     assert!(s.contains(">No data (1)</text>"), "{s}");
+    // the legend title (the measure's own name, same as the old writer's
+    // stepped-bar legend and `MapFill::measure`'s continuous one).
+    assert!(s.contains(">v</text>"), "{s}");
+    // Regression guard: `crate::void_theme` zeroes `legend_margin` (fine
+    // for pie/gauge/sparkline, which don't put a legend at the panel's own
+    // edge) — without restoring it, the legend's first swatch and title
+    // land flush at x=0/y=0, clipped by the panel. Neither a swatch
+    // (12x12 `<rect>`) nor the title `<text>` may sit exactly on either
+    // axis.
+    assert!(
+        !s.contains("<rect x=\"0.00\" y=\"0.00\" width=\"12.00\""),
+        "the legend's first swatch sits flush at (0,0): {s}"
+    );
+    assert!(
+        !s.contains("<text x=\"0.00\" y=\"0.00\""),
+        "the legend title sits flush at (0,0): {s}"
+    );
 }
 
 #[test]
@@ -998,6 +1015,13 @@ fn a_colors_level_map_pins_named_levels_and_keeps_the_rest_in_palette_order() {
     assert!(
         d < l && l < v,
         "legend order should be named levels first, in written order: {all}"
+    );
+    // Regression guard: `crate::void_theme` zeroes `legend_margin` — a
+    // category legend has no title (same as the old writer), but its
+    // first swatch must not sit flush at (0,0), clipped by the panel.
+    assert!(
+        !all.contains("<rect x=\"0.00\" y=\"0.00\" width=\"12.00\""),
+        "the legend's first swatch sits flush at (0,0): {all}"
     );
 }
 
