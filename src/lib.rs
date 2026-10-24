@@ -3834,18 +3834,19 @@ fn hist_bin_of(v: f64, edges: &[f64]) -> Option<usize> {
         .or(Some(edges.len() - 2))
 }
 
-/// A histogram of the measure column — one bar series per `::CATEGORY`
-/// group would need `GeomHistogram` to read a fill/color aesthetic per row,
-/// which it doesn't (unlike `GeomDensity`); `--check` warns `::CATEGORY` is
-/// dropped here (see `lint::histogram_diags`) until that's fixed upstream in
-/// ggplot-rs. `::FACET`/`::FACET_FREE` (one panel per value, #423),
-/// `::HIST_BINS` (a bin count or explicit edges) and `::HIST_NORM 'share'`
-/// (each panel normalised to its own share of 1, so reference/current
-/// periods of different sizes compare) all work: without any of them, this
-/// takes ggplot-rs's own `GeomHistogram`/`StatBin` unchanged (byte-identical
-/// output to before #423); with any of them, bins are computed here first —
-/// shared across every panel — and drawn as pre-aggregated bars
-/// (`StatIdentity`) so the panels/shares line up.
+/// A histogram of the measure column. `::CATEGORY` draws one bar series per
+/// group, overlaid with alpha (#446 — ggplot-rs 0.28's `GeomHistogram` now
+/// reads a per-row fill aesthetic, same as `GeomDensity`); `::FACET`/
+/// `::FACET_FREE` (one panel per value, #423), `::HIST_BINS` (a bin count or
+/// explicit edges) and `::HIST_NORM 'share'` (each group normalised to its
+/// own share of 1, so reference/current periods of different sizes compare)
+/// all work too, any combined. Without any of them, this takes ggplot-rs's
+/// own `GeomHistogram`/`StatBin` unchanged (byte-identical output to before
+/// #423); with any of them, bins are computed here first — pooled over every
+/// row, so every group/panel shares the same edges — and drawn as
+/// pre-aggregated bars (`StatIdentity`) so groups/panels/shares line up. No
+/// `::POSITION` role exists yet for an explicit dodge; overlay (the default)
+/// is the only layout `::CATEGORY` draws.
 fn render_histogram(
     o: &RenderOptions,
     value: &Column,
@@ -3857,10 +3858,11 @@ fn render_histogram(
     let facet = cols
         .iter()
         .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
+    let category = cols.iter().find(|c| c.role == Role::Category);
     let bins_spec = role_str(cols, Role::HistBins);
     let share = role_str(cols, Role::HistNorm).is_some_and(|s| s.eq_ignore_ascii_case("share"));
 
-    if facet.is_none() && bins_spec.is_none() && !share {
+    if facet.is_none() && category.is_none() && bins_spec.is_none() && !share {
         let data = vec![("x".to_string(), value.values.clone())];
         let mut plot = GGPlot::new(data)
             .aes(Aes::new().x("x"))
@@ -3879,11 +3881,18 @@ fn render_histogram(
 
     let edges = hist_edges(&value.values, bins_spec.as_deref());
     let n_bins = edges.len() - 1;
-    // Each panel's own total (valid, in-range) row count, for `::HIST_NORM`.
-    let panel_of =
+    // Each (category, facet) group's own total (valid, in-range) row count,
+    // for `::HIST_NORM`: a group's share is of its own count, not pooled
+    // across categories or panels.
+    let cat_of =
+        |i: usize| -> String { category.map_or_else(String::new, |c| value_str(&c.values[i])) };
+    let facet_of =
         |i: usize| -> String { facet.map_or_else(String::new, |f| value_str(&f.values[i])) };
-    let mut counts: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
-    let mut totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let group_of = |i: usize| -> (String, String) { (cat_of(i), facet_of(i)) };
+    let mut counts: std::collections::HashMap<(String, String), Vec<f64>> =
+        std::collections::HashMap::new();
+    let mut totals: std::collections::HashMap<(String, String), f64> =
+        std::collections::HashMap::new();
     for i in 0..value.values.len() {
         let Some(v) = value.values[i].as_f64().filter(|f| f.is_finite()) else {
             continue;
@@ -3891,25 +3900,30 @@ fn render_histogram(
         let Some(bin) = hist_bin_of(v, &edges) else {
             continue;
         };
-        let panel = panel_of(i);
-        counts
-            .entry(panel.clone())
-            .or_insert_with(|| vec![0.0; n_bins])[bin] += 1.0;
-        *totals.entry(panel).or_insert(0.0) += 1.0;
+        let g = group_of(i);
+        counts.entry(g.clone()).or_insert_with(|| vec![0.0; n_bins])[bin] += 1.0;
+        *totals.entry(g).or_insert(0.0) += 1.0;
     }
-    // Panels in first-seen order (facet panels keep the SQL's row order).
-    let mut panels: Vec<String> = Vec::new();
+    // Groups in first-seen order (facet panels, and the category legend,
+    // keep the SQL's row order).
+    let mut groups: Vec<(String, String)> = Vec::new();
     for i in 0..value.values.len() {
-        let p = panel_of(i);
-        if !panels.contains(&p) {
-            panels.push(p);
+        let g = group_of(i);
+        if !groups.contains(&g) {
+            groups.push(g);
         }
     }
-    let (mut xmin, mut xmax, mut xmid, mut y, mut fac) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for p in &panels {
-        let cs = counts.get(p).cloned().unwrap_or_else(|| vec![0.0; n_bins]);
-        let total = totals.get(p).copied().unwrap_or(0.0);
+    let (mut xmin, mut xmax, mut xmid, mut y, mut fac, mut cat) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    for g in &groups {
+        let cs = counts.get(g).cloned().unwrap_or_else(|| vec![0.0; n_bins]);
+        let total = totals.get(g).copied().unwrap_or(0.0);
         for b in 0..n_bins {
             let (lo, hi) = (edges[b], edges[b + 1]);
             xmin.push(Value::Float(lo));
@@ -3921,7 +3935,8 @@ fn render_histogram(
             } else {
                 raw
             }));
-            fac.push(Value::Str(p.clone()));
+            cat.push(Value::Str(g.0.clone()));
+            fac.push(Value::Str(g.1.clone()));
         }
     }
     let mut data: Vec<(String, Vec<Value>)> = vec![
@@ -3930,7 +3945,11 @@ fn render_histogram(
         ("xmax".to_string(), xmax),
         ("y".to_string(), y),
     ];
-    let aes = Aes::new().x("x").xmin("xmin").xmax("xmax").y("y");
+    let mut aes = Aes::new().x("x").xmin("xmin").xmax("xmax").y("y");
+    if category.is_some() {
+        data.push(("cat".to_string(), cat));
+        aes = aes.fill("cat");
+    }
     if facet.is_some() {
         data.push(("facet".to_string(), fac));
     }
@@ -3939,11 +3958,23 @@ fn render_histogram(
         .geom_histogram_with(GeomHistogram {
             fill: o.brand(),
             color: o.theme.colors.card,
+            // Overlaid groups need to show through each other; a single
+            // series keeps the solid default (unused when fill isn't
+            // data-mapped, since `GeomHistogram` only applies alpha, not a
+            // flat tint, per row).
+            alpha: if category.is_some() { 0.6 } else { 1.0 },
             ..Default::default()
         })
         .stat(StatIdentity)
         .house_theme(o)
         .primary_color(o.brand());
+    if let Some(cat_col) = category {
+        plot = plot
+            .scale_fill(dz_scale(o, Aesthetic::Fill, cat_col))
+            .legend_position(
+                legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
+            );
+    }
     if let Some(f) = facet {
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
