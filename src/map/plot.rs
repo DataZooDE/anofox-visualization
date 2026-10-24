@@ -1,15 +1,16 @@
-//! #420 slice 1+2: build a plain polygon/point choropleth (measure,
-//! category or classed fill; no flows, hex or symbols — [`eligible`]) as
-//! one real `GGPlot`, instead of our own hand-written SVG.
+//! #420 slice 1+2+3: build a plain polygon/point choropleth (measure,
+//! category or classed fill, graduated `::SIZE` symbols; no flows/hexbin —
+//! [`eligible`]) as one real `GGPlot`, instead of our own hand-written SVG.
 //!
-//! Everything else (flows, hexbin, symbols, or any map that still needs the
-//! old footer — a scale bar or pack attribution) stays on
+//! Everything else (flows, hexbin, or any map that still needs the old
+//! footer — a scale bar or pack attribution) stays on
 //! [`super::render_with_model`] until its own slice.
 
 use ggplot_rs::geom::sf::GeomSf;
 use ggplot_rs::prelude::*;
 use ggplot_rs::render::backend::FillPattern;
 use ggplot_rs::scale::binned::ScaleFillBinned;
+use ggplot_rs::scale::size::ScaleSizeContinuous;
 use ggplot_rs::scale::Scale;
 use ggplot_rs::theme::LegendPosition;
 
@@ -19,18 +20,24 @@ use crate::{Column, RenderOptions};
 use super::fill::MapFill;
 use super::legend::legend_of;
 use super::wkt::row_wkt;
-use super::{foot_of, frame_of, legend_override, Fill, Model};
+use super::{foot_of, frame_of, legend_override, symbols, Fill, Model, Shape};
+
+/// A `GGPlot::new`/`layer_data` DataFrame: `(column name, column values)`
+/// pairs.
+type Df = Vec<(String, Vec<Value>)>;
 
 /// Whether `m` (already built from `cols`) is simple enough for the new
-/// `geom_sf` path: no flows/hexbin (slice 4) or graduated symbols (slice
-/// 3), and no scale bar/attribution furniture (slice 5 — [`foot_of`]'s own
-/// height check, reused rather than duplicated, since "does this map need
-/// a footer" already depends on pack layers *and* the projection/span).
-/// `::CLASSES` (slice 2) is allowed — [`build`] routes a classed measure
-/// through `ggplot_rs::scale::binned::ScaleFillBinned` instead of
-/// [`MapFill`].
+/// `geom_sf` path: no flows/hexbin (slice 4), and no scale bar/attribution
+/// furniture (slice 5 — [`foot_of`]'s own height check, reused rather than
+/// duplicated, since "does this map need a footer" already depends on pack
+/// layers *and* the projection/span). `::CLASSES` (slice 2) and graduated
+/// `::SIZE` symbols (slice 3) are both allowed — [`build`] routes a classed
+/// measure through `ggplot_rs::scale::binned::ScaleFillBinned` instead of
+/// [`MapFill`], and a symbol map's anchor rows through `GeomSf`'s own
+/// `size` aesthetic (sipemu/ggplot-rs#194) instead of our hand-rolled
+/// circle drawing.
 pub(super) fn eligible(o: &RenderOptions, m: &Model, w: f64) -> bool {
-    m.flows.is_none() && m.hexbin.is_none() && m.symbols.is_none() && foot_of(o, m, w).h <= 0.0
+    m.flows.is_none() && m.hexbin.is_none() && foot_of(o, m, w).h <= 0.0
 }
 
 /// Build the `GGPlot` and its extra root attributes (`data-map`, …) for an
@@ -90,7 +97,21 @@ pub(super) fn build(
     let mut class_idxs: Vec<Value> = Vec::with_capacity(n);
     let mut titles: Vec<Value> = Vec::with_capacity(n);
     for i in 0..n {
-        geometry.push(row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na));
+        // A row with a graduated-symbol anchor (slice 3) takes over: its
+        // own area/point geometry is suppressed here (`Value::Na` — the
+        // same "no geometry, no mark" convention `GeomSf::draw` already
+        // uses) and it's drawn instead, as a sized circle at its anchor,
+        // by the separate symbols layer built after this loop. A row with
+        // no anchor (a line, or `m.symbols` absent) draws here unchanged.
+        let suppressed_by_symbols = m
+            .symbols
+            .as_ref()
+            .is_some_and(|sym| !sym.anchors[i].is_empty());
+        geometry.push(if suppressed_by_symbols {
+            Value::Na
+        } else {
+            row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na)
+        });
         let label = m.label_of(i);
         let label_is_empty = label.is_empty();
         let cat = m.text(m.category, i);
@@ -177,6 +198,123 @@ pub(super) fn build(
         class_idxs.push(class_idx);
         titles.push(title);
     }
+
+    // ---- graduated symbols (`::SIZE`, slice 3): a second `geom_sf` layer,
+    // one anchor point per qualifying row (the features layer above
+    // already suppressed its own area/point geometry for these). `GeomSf`'s
+    // own `size` aesthetic (sipemu/ggplot-rs#194) sizes each circle and
+    // sorts largest-first automatically (D5) — no hand-rolled anchor-circle
+    // drawing or sort needed. Built *before* `features_df` below moves
+    // `fill_vals`/`labels`/`rows`/`seriess`/`xs`/`class_idxs` — this layer
+    // reuses the same per-row fill/label/series/class values by cloning
+    // them out first.
+    let symbols_df_aes: Option<(Df, Aes)> = m.symbols.as_ref().and_then(|sym| {
+        let idx: Vec<usize> = (0..n).filter(|&i| sym.size[i].is_some()).collect();
+        if idx.is_empty() {
+            return None;
+        }
+        let mut sym_geometry = Vec::with_capacity(idx.len());
+        let mut sym_value = Vec::with_capacity(idx.len());
+        let mut sym_size = Vec::with_capacity(idx.len());
+        let mut sym_fsize = Vec::with_capacity(idx.len());
+        let mut sym_title = Vec::with_capacity(idx.len());
+        for &i in &idx {
+            let v = sym.size[i].unwrap();
+            let anchor_shapes: Vec<Shape> =
+                sym.anchors[i].iter().map(|p| Shape::Point(*p)).collect();
+            sym_geometry.push(row_wkt(&anchor_shapes).map(Value::Str).unwrap_or(Value::Na));
+            let fsize = sym.fmt.full(v, &o.locale);
+            // `data-value`: the fill measure when there is one, else the
+            // `::SIZE` value itself — the old writer's own fallback
+            // (`mod.rs`'s `let data_value = value.unwrap_or(c.v);`).
+            let fill_measure_value = match &m.fill {
+                Fill::Measure(s) => s.values[i],
+                _ => None,
+            };
+            sym_value.push(Value::Float(fill_measure_value.unwrap_or(v)));
+            sym_size.push(Value::Float(v));
+            sym_fsize.push(Value::Str(fsize.clone()));
+            // The tooltip: "label: value; Size: fsize" (a colour measure),
+            // "label: fsize" (a label, no measure) or just "fsize" — plus
+            // the classed suffix — the old writer's own composition
+            // (`mod.rs`'s symbol-circle loop): `GeomSf`'s automatic
+            // "label: value" tooltip doesn't know about a second (size)
+            // channel, so this mark's whole tooltip is computed here too,
+            // same as the classed one above.
+            let label = m.label_of(i);
+            let shown = match &m.fill {
+                Fill::Measure(s) => match s.values[i] {
+                    Some(v) => s.fmt.full(v, &o.locale),
+                    None => "no data".to_string(),
+                },
+                Fill::Category { .. } => m.text(m.category, i),
+                Fill::Plain(_) => String::new(),
+            };
+            let size_title = sym.title.clone().unwrap_or_else(|| "Size".to_string());
+            let mut title = if matches!(m.fill, Fill::Measure(_)) {
+                let head = match (label.is_empty(), shown.is_empty()) {
+                    (false, false) => format!("{label}: {shown}"),
+                    (false, true) => label.clone(),
+                    (true, _) => shown.clone(),
+                };
+                format!("{head}; {size_title}: {fsize}")
+            } else if !label.is_empty() {
+                format!("{label}: {fsize}")
+            } else {
+                fsize.clone()
+            };
+            if let (Some((_, c, _)), Value::Str(k)) = (classes, &class_idxs[i]) {
+                if let Ok(k) = k.parse::<usize>() {
+                    title.push_str(&format!(
+                        " (class {} of {}: {})",
+                        k,
+                        c.len(),
+                        c.label(k - 1, &|v| match &m.fill {
+                            Fill::Measure(s) => s.fmt.short(v, &o.locale),
+                            _ => String::new(),
+                        })
+                    ));
+                }
+            }
+            sym_title.push(na_if_empty(title));
+        }
+        let select = |src: &[Value]| idx.iter().map(|&i| src[i].clone()).collect::<Vec<_>>();
+        let df: Vec<(String, Vec<Value>)> = vec![
+            ("geometry".into(), sym_geometry),
+            ("fill".into(), select(&fill_vals)),
+            ("label".into(), select(&labels)),
+            ("row".into(), select(&rows)),
+            ("series".into(), select(&seriess)),
+            ("value".into(), sym_value),
+            ("xkey".into(), select(&xs)),
+            ("class".into(), select(&class_idxs)),
+            ("title".into(), sym_title),
+            ("size".into(), sym_size),
+            ("fsize".into(), sym_fsize),
+        ];
+        let mut aes = Aes::new()
+            .label("label")
+            .group("row")
+            .data_attr("row", "row")
+            .data_attr("series", "series")
+            .data_attr("value", "value")
+            .data_attr("label", "label")
+            .data_attr("x", "xkey")
+            .data_attr("size", "size")
+            .data_attr("fsize", "fsize")
+            .tooltip("title");
+        if classes.is_some() {
+            aes = aes.data_attr("class", "class");
+        }
+        if !matches!(m.fill, Fill::Plain(_)) {
+            aes = aes.fill("fill");
+        }
+        if sym.fixed.is_none() {
+            aes = aes.size("size");
+        }
+        Some((df, aes))
+    });
+
     let features_df: Vec<(String, Vec<Value>)> = vec![
         ("geometry".into(), geometry),
         ("fill".into(), fill_vals),
@@ -252,6 +390,40 @@ pub(super) fn build(
             .aes(features_aes)
             .geom_sf_with(features_geom())
     };
+
+    // ---- the symbols layer (on top of everything else), if any — a
+    // circle's border is the card colour (matching the old writer's
+    // `stroke="{card}"`), not the polygon border `feature_edge`.
+    if let Some((sym_df, sym_aes)) = symbols_df_aes {
+        let fixed = m.symbols.as_ref().and_then(|s| s.fixed);
+        let sym_geom = GeomSf {
+            fill: plain_fill,
+            color: card,
+            alpha: m.alpha,
+            point_size: fixed.unwrap_or(3.0),
+            ..Default::default()
+        };
+        plot = plot
+            .geom_sf_with(sym_geom)
+            .layer_data(sym_df)
+            .layer_aes(sym_aes);
+        // A constant `::SIZE` (every row the same value, `symbols::of`'s
+        // own `constant_size` convention) is a fixed radius, not a size
+        // aesthetic — no scale, no size legend, matching the old writer
+        // (`constant_size_sets_the_radius`).
+        if fixed.is_none() {
+            let rmax = symbols::rmax(w, h);
+            let mut size_scale = ScaleSizeContinuous::new().area(rmax);
+            size_scale.set_name(
+                m.symbols
+                    .as_ref()
+                    .and_then(|s| s.title.clone())
+                    .unwrap_or_default()
+                    .as_str(),
+            );
+            plot = plot.scale_size(size_scale);
+        }
+    }
 
     let mut discrete_fill = false;
     if has_fill_aes {
