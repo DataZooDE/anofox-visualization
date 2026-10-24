@@ -297,6 +297,20 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/compact-kpi-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/input-options-order-e2e.mjs (#428): an input's OPTIONS query
+      # that reads another input's variable sees that other input's CURRENT
+      # value, not a run-stale one — whether it is declared before or after
+      # that input in the script; and a pick that falls out of its own,
+      # narrower, options falls back to the first remaining one. The locked
+      # server side (unconditional, not just stale — a fresh connection per
+      # request never gets a second chance) is covered separately by
+      # scripts/input-options-order-served-e2e.mjs, which needs a native
+      # extension build and is not run in CI (like scripts/served-e2e.mjs).
+      # Reuses the :8947 server and Chromium above.
+      - name: Input OPTIONS query order e2e (#428)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |

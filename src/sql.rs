@@ -732,6 +732,17 @@ pub fn rewrite(stmt: &str) -> Rewritten {
     (out, roles, names)
 }
 
+/// Strip a leading `DISTINCT` keyword (as DuckDB itself ignores it when
+/// naming the column): `"DISTINCT channel"` → `"channel"`. Anything else is
+/// returned unchanged.
+fn strip_leading_distinct(expr: &str) -> &str {
+    let toks = lex::tokenize(expr);
+    match toks.iter().find(|t| !t.is_trivia()) {
+        Some(t) if t.is_word(expr, "DISTINCT") => expr[t.end..].trim_start(),
+        _ => expr,
+    }
+}
+
 /// Rewrite one SELECT list's items (`<expr>::ROLE` → `<expr> AS c{i}`, same
 /// rules as [`rewrite`]) and return the joined item text plus the roles and
 /// display names found, keyed by position within this list.
@@ -859,7 +870,26 @@ fn rewrite_list(list: &str) -> Rewritten {
                 }
                 // Inputs keep the original column name — it becomes the
                 // DuckDB variable name the browser binds the control to.
-                Role::Input(_) => expr.to_string(),
+                // #428: that name is also recorded in `names` (an explicit
+                // `AS alias`, else the bare column reference) so the browser
+                // can read it from the plan alone, before the statement's
+                // own OPTIONS query has ever run — letting it apply a known
+                // value (a previous pick, a URL seed) for one input before
+                // fetching another's options, regardless of their order in
+                // the script. Left out when the column has no simple name
+                // (a bare, unaliased expression); the browser falls back to
+                // its own, unchanged, run-it-and-read-the-column-name path.
+                Role::Input(_) => {
+                    let (core, alias) = trailing_alias(expr);
+                    // `SELECT DISTINCT channel ::DROPDOWN` (a common way to
+                    // list an input's options): DISTINCT is a select-list
+                    // modifier, not part of the column's own name.
+                    let bare = alias.is_none().then(|| strip_leading_distinct(core));
+                    if let Some(nm) = alias.or_else(|| lex::simple_ident(bare.unwrap_or(core))) {
+                        names.push((i, nm));
+                    }
+                    expr.to_string()
+                }
                 // A `::VIEW` marker's explicit `AS alias` names its group
                 // (#214) — kept in `names` (views::assign_views reads it
                 // back), the value's own text kept intact (not even
