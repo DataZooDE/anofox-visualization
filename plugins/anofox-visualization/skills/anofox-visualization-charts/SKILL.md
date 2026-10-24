@@ -17,13 +17,13 @@ description: >
   how to install or load anofox_visualization, or why a chart call fails.
   For model output tables (coefficients, residuals, ROC, forecasts) see the
   statistics-plots skill; for ::ROLE dashboards the dashboards skill.
-version: 2026.10.24
+version: 2026.10.25
 user-invocable: false
 ---
 
 # Anofox Visualization — Charts in SQL Cheat Sheet
 
-**Extension:** `anofox_visualization` (CalVer 2026.10.24) | **DuckDB:** v1.5.x (pinned v1.5.6) | **Engine:** [ggplot-rs](https://github.com/sipemu/ggplot-rs), every chart is an SVG string
+**Extension:** `anofox_visualization` (CalVer 2026.10.25) | **DuckDB:** v1.5.x (pinned v1.5.6) | **Engine:** [ggplot-rs](https://github.com/sipemu/ggplot-rs), every chart is an SVG string
 
 ## Install and builds
 
