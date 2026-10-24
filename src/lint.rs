@@ -1018,8 +1018,21 @@ where
             continue;
         }
 
-        // Layout directives don't render a chart — nothing to check.
+        // Layout directives don't render a chart — nothing to check, except
+        // a ::GROUP's own ::KPI_SIZE (#405: it never reaches the per-panel
+        // checks below, since this branch always `continue`s).
         if roles::is_directive_panel(&p.roles) {
+            if p.roles.iter().any(|(_, r)| *r == Role::KpiSize) {
+                diags.extend(kpi_size_checks(&p.roles, &rows).into_iter().map(
+                    |(severity, code, message)| Diagnostic {
+                        severity,
+                        stmt,
+                        code,
+                        message,
+                        sql: short.clone(),
+                    },
+                ));
+            }
             empty_msg |= p.roles.iter().any(|(_, r)| *r == Role::Empty);
             if p.roles
                 .iter()
@@ -1157,6 +1170,18 @@ where
                 },
             ));
         }
+
+        // `::KPI_SIZE` (#405): checked on every panel, not only a KPI's —
+        // it can also sit misplaced on a chart / table.
+        diags.extend(kpi_size_checks(&p.roles, &rows).into_iter().map(
+            |(severity, code, message)| Diagnostic {
+                severity,
+                stmt,
+                code,
+                message,
+                sql: short.clone(),
+            },
+        ));
 
         // Waterfall / bullet / funnel rows are named by their ::XAXIS (step,
         // category, stage); without it the panel only shows a note.
@@ -1331,6 +1356,9 @@ mod fit_ref {
     pub const PANEL_MIN: f64 = 120.0;
     /// A KPI tile's minimum height under fit (web/app.js FIT_MIN_KPI).
     pub const KPI_MIN: f64 = 96.0;
+    /// A `::KPI_SIZE` `'compact'` tile's minimum height under fit (#405;
+    /// web/app.js `MIN_KPI_COMPACT`, src/kpi.rs `PAD_COMPACT`/`LINE_H_COMPACT`).
+    pub const KPI_MIN_COMPACT: f64 = 36.0;
     /// The grid's row gap (theme-base.css `.grid` gap: 1.15rem).
     pub const ROW_GAP: f64 = 18.0;
     /// A ::SECTION / lone ::LABEL heading row.
@@ -1352,11 +1380,13 @@ type ViewAlt = Option<(usize, usize)>;
 /// One statement of a `::FIT` scope as the row estimate sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FitItem {
-    /// A panel: its grid span (of 12), whether it is a KPI tile, whether it
-    /// sits inside a `::GROUP` box.
+    /// A panel: its grid span (of 12), whether it is a KPI tile, whether its
+    /// `::KPI_SIZE` is 'compact' (#405), whether it sits inside a `::GROUP`
+    /// box.
     Panel {
         span: u32,
         kpi: bool,
+        compact: bool,
         grouped: bool,
     },
     Heading,
@@ -1375,13 +1405,52 @@ fn literal_number(sql: &str) -> Option<f64> {
     num.trim_matches('\'').trim().parse().ok()
 }
 
+/// A rewritten (`::ROLE` → `AS c{idx}`) statement's `c{idx}` output column,
+/// when the whole statement is a plain `SELECT <list>` with no `FROM` — a
+/// directive's literal value, readable without a `DataProvider` (`fit_diags`
+/// never queries). `None` on a data-driven statement too: the caller treats
+/// that as "assume compact", the common case (an explicit, data-driven
+/// `'normal'` override only mis-sizes this estimate, never the real render).
+fn literal_text_col(sql: &str, idx: usize) -> Option<String> {
+    let t = sql.trim().trim_end_matches(';').trim();
+    let body = t
+        .strip_prefix("SELECT ")
+        .or_else(|| t.strip_prefix("select "))?;
+    if body.to_ascii_uppercase().contains(" FROM ") {
+        return None;
+    }
+    let suffix = format!("AS c{idx}");
+    sql::split_top_commas(body).into_iter().find_map(|item| {
+        let rest = item.trim().strip_suffix(&suffix)?.trim();
+        rest.strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .map(|s| s.replace("''", "'"))
+    })
+}
+
+/// A statement's `::KPI_SIZE` ('compact' = `true`), read from its literal
+/// value when possible, else assumed 'compact' (see [`literal_text_col`]).
+/// `None` when it carries no `::KPI_SIZE` at all.
+fn kpi_size_compact(p: &sql::Panel) -> Option<bool> {
+    let idx = p.roles.iter().find(|(_, r)| *r == Role::KpiSize)?.0;
+    Some(
+        literal_text_col(&p.sql, idx)
+            .map(|v| v.trim().eq_ignore_ascii_case("compact"))
+            .unwrap_or(true),
+    )
+}
+
 /// The height (px) a `::FIT` scope's panels need at their minimum readable
 /// size: the 12-column grid packed in order (a `::GROUP` box or an
 /// automatic strip of ≥ 2 KPI tiles is one block whose tiles wrap as in its
 /// flex box), each row as tall as its tallest minimum, plus the row gaps.
 fn fit_needed_height(items: &[FitItem]) -> (f64, usize) {
     use fit_ref::*;
-    let min_h = |kpi: bool| if kpi { KPI_MIN } else { PANEL_MIN };
+    let min_h = |kpi: bool, compact: bool| match (kpi, compact) {
+        (true, true) => KPI_MIN_COMPACT,
+        (true, false) => KPI_MIN,
+        (false, _) => PANEL_MIN,
+    };
     let mut rows: Vec<f64> = Vec::new();
     let (mut used, mut cur) = (0u32, 0.0f64);
     // An open box (explicit ::GROUP, or an automatic KPI strip): its own rows.
@@ -1436,7 +1505,12 @@ fn fit_needed_height(items: &[FitItem]) -> (f64, usize) {
                     close_box(&mut rows, b);
                 }
             }
-            FitItem::Panel { span, kpi, grouped } => {
+            FitItem::Panel {
+                span,
+                kpi,
+                compact,
+                grouped,
+            } => {
                 let run = items[k..]
                     .iter()
                     .take_while(|x| {
@@ -1463,14 +1537,14 @@ fn fit_needed_height(items: &[FitItem]) -> (f64, usize) {
                         b.2 = 0.0;
                     }
                     b.1 += w;
-                    b.2 = b.2.max(min_h(kpi));
+                    b.2 = b.2.max(min_h(kpi, compact));
                 } else {
                     let span = span.clamp(1, 12);
                     if used + span > 12 {
                         flush(&mut rows, &mut used, &mut cur);
                     }
                     used += span;
-                    cur = cur.max(min_h(kpi));
+                    cur = cur.max(min_h(kpi, compact));
                 }
             }
         }
@@ -1505,6 +1579,8 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     // Each statement's section (top tab, sub-tab) and its place in the grid.
     let mut cols = 2.0f64; // web/app.js dpCols
     let (mut pending_span, mut depth) = (0u32, 0i32);
+    // The enclosing ::GROUP's ::KPI_SIZE (#405); a tile's own wins.
+    let mut group_compact = false;
     let (mut tab, mut sub): (Option<usize>, Option<usize>) = (None, None);
     let mut at: Vec<(Option<usize>, Option<usize>, Option<FitItem>)> = Vec::new();
     // each statement's ::VIEW alternative and its item even when that
@@ -1528,9 +1604,11 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                 pending_span = literal_number(&p.sql).unwrap_or(0.0).max(0.0) as u32;
             } else if has_role(p, Role::GroupStart) {
                 depth += 1;
+                group_compact = kpi_size_compact(p).unwrap_or(false);
                 item = Some(FitItem::GroupStart);
             } else if has_role(p, Role::GroupEnd) {
                 depth = (depth - 1).max(0);
+                group_compact = false;
                 item = Some(FitItem::GroupEnd);
             } else if has_role(p, Role::Section)
                 || (p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label))
@@ -1546,6 +1624,7 @@ fn fit_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                 item = Some(FitItem::Panel {
                     span,
                     kpi: is_kpi(&p.roles),
+                    compact: kpi_size_compact(p).unwrap_or(group_compact),
                     grouped: depth > 0,
                 });
             }
@@ -3515,6 +3594,38 @@ fn kpi_checks(
     out
 }
 
+/// `::KPI_SIZE` (#405): `kpi/bad-kpi-size` (a value that isn't 'compact' or
+/// 'normal' — treated as 'normal'), `kpi/kpi-size-misplaced` (not on a
+/// `::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT` KPI tile or a `::GROUP` box
+/// — e.g. a chart or table). Checked on every panel, not only a KPI's.
+fn kpi_size_checks(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let Some((idx, _)) = roles.iter().find(|(_, r)| *r == Role::KpiSize) else {
+        return out;
+    };
+    if let Some(Some(Value::String(v))) = rows.first().map(|r| r.get(&format!("c{idx}"))) {
+        if !matches!(v.trim().to_ascii_lowercase().as_str(), "compact" | "normal") {
+            out.push((
+                Severity::Warning,
+                "kpi/bad-kpi-size",
+                format!("::KPI_SIZE `{v}` is not 'compact' or 'normal' — treated as 'normal'"),
+            ));
+        }
+    }
+    let on_kpi_or_group = is_kpi(roles) || roles.iter().any(|(_, r)| *r == Role::GroupStart);
+    if !on_kpi_or_group {
+        out.push((
+            Severity::Warning,
+            "kpi/kpi-size-misplaced",
+            "::KPI_SIZE only applies to a ::METRIC/::MONEY/::PERCENT/::COMPACT KPI tile or a ::GROUP box".into(),
+        ));
+    }
+    out
+}
+
 /// The panel's chart kind, if it's a chart (`count()::BARCHART` → `Kind::Bar`).
 fn chart_kind(roles: &[(usize, Role)]) -> Option<Kind> {
     roles.iter().find_map(|(_, r)| match r {
@@ -4517,11 +4628,13 @@ mod design_tests {
         let chart = FitItem::Panel {
             span: 6,
             kpi: false,
+            compact: false,
             grouped: false,
         };
         let kpi = FitItem::Panel {
             span: 6,
             kpi: true,
+            compact: false,
             grouped: false,
         };
         // 4 charts two to a row: 2 × 120 + 1 gap
@@ -4534,6 +4647,37 @@ mod design_tests {
         assert_eq!(fit_needed_height(&[FitItem::Heading, chart]).1, 2);
         assert_eq!(literal_number("SELECT 4 AS c0 "), Some(4.0));
         assert_eq!(literal_number("SELECT 'x' AS c0"), None);
+        // #405: a strip of 4 ::KPI_SIZE 'compact' tiles needs only its own
+        // (36 px) floor, not the normal 96 px one
+        let kpi_c = FitItem::Panel {
+            span: 6,
+            kpi: true,
+            compact: true,
+            grouped: false,
+        };
+        let (hc, rowsc) = fit_needed_height(&[kpi_c, kpi_c, kpi_c, kpi_c, chart]);
+        assert_eq!(rowsc, 2);
+        assert_eq!(hc, 36.0 + 40.0 + 18.0 + 120.0);
+        assert!(hc < h);
+    }
+
+    #[test]
+    fn kpi_size_literal_reads_a_directive_statement() {
+        // a plain literal (the common case): the real value decides
+        assert_eq!(
+            literal_text_col("SELECT 'Status' AS c0, 'compact' AS c1", 1),
+            Some("compact".into())
+        );
+        assert_eq!(
+            literal_text_col("SELECT 'compact' AS c0", 0),
+            Some("compact".into())
+        );
+        // a data-driven column: unreadable without a DataProvider
+        assert_eq!(
+            literal_text_col("SELECT x AS c0, 'compact' AS c1 FROM t", 1),
+            None
+        );
+        assert_eq!(literal_text_col("SELECT count(*) AS c0 FROM t", 0), None);
     }
 
     /// #400: ::FIT placement that leaves its scope unclear.
@@ -5118,6 +5262,46 @@ mod design_tests {
             ],
         );
         assert!(!d.iter().any(|x| x.code.starts_with("kpi/")), "{d:?}");
+    }
+
+    /// #405: `::KPI_SIZE`'s own value and placement.
+    #[test]
+    fn kpi_size_checks_value_and_placement() {
+        // an unknown value warns but still lints clean otherwise
+        let d = lint_one(
+            "SELECT 5::METRIC, 'dense'::KPI_SIZE",
+            vec![json!({"c0": 5.0, "c1": "dense"})
+                .as_object()
+                .unwrap()
+                .clone()],
+        );
+        assert!(has(&d, "kpi/bad-kpi-size"), "{d:?}");
+        // 'compact' / 'normal' on a ::METRIC: no warning
+        for v in ["compact", "normal"] {
+            let d = lint_one(
+                "SELECT 5::METRIC, 'v'::KPI_SIZE",
+                vec![json!({"c0": 5.0, "c1": v}).as_object().unwrap().clone()],
+            );
+            assert!(!d.iter().any(|x| x.code.starts_with("kpi/")), "{v}: {d:?}");
+        }
+        // on a ::GROUP box: no warning either
+        let d = lint_one(
+            "SELECT 'Status'::GROUP, 'compact'::KPI_SIZE",
+            vec![json!({"c0": "Status", "c1": "compact"})
+                .as_object()
+                .unwrap()
+                .clone()],
+        );
+        assert!(!d.iter().any(|x| x.code.starts_with("kpi/")), "{d:?}");
+        // misplaced on a chart: a warning
+        let d = lint_one(
+            "SELECT x::XAXIS, y::BARCHART, 'compact'::KPI_SIZE FROM t",
+            rows(
+                3,
+                |i| json!({"c0": i as f64, "c1": i as f64, "c2": "compact"}),
+            ),
+        );
+        assert!(has(&d, "kpi/kpi-size-misplaced"), "{d:?}");
     }
 
     #[test]

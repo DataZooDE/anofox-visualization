@@ -288,6 +288,15 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/dropdown-search-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/compact-kpi-e2e.mjs (#405): 'compact'::KPI_SIZE on a ::GROUP
+      # packs its tiles onto one line each, well under the normal ~96px
+      # floor, a tile's own ::KPI_SIZE overriding the box's; ::THRESHOLDS
+      # still colours the value; ::FIT gives a compact tile its own, lower
+      # floor. Reuses the :8947 server and Chromium above.
+      - name: Compact KPI tiles e2e (::KPI_SIZE 'compact')
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/compact-kpi-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |

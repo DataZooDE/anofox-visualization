@@ -211,6 +211,9 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
         // surviving (default-alternative) ::VIEW marker is kept too, so
         // render_inner can apply its group's pending ::COL width (#214) —
         // it never draws a box itself (see render_inner's own check).
+        // ::GROUP / ::ENDGROUP are kept too (#405): a ::GROUP's own
+        // ::KPI_SIZE cascades onto its tiles (render_inner's compact_flags),
+        // though neither ever draws a box itself (same comment as above).
         let layout = has(&|r| {
             matches!(
                 r,
@@ -220,15 +223,43 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
                     | Role::Section
                     | Role::TableOpt(TableOpt::Totals)
                     | Role::View
+                    | Role::GroupStart
+                    | Role::GroupEnd
             )
         });
         if roles::is_directive_panel(&panel.roles) && !layout {
-            continue; // inputs, downloads, tabs, groups, reload, …
+            continue; // inputs, downloads, tabs, reload, …
         }
         let rows = provider.query(&panel.sql);
         steps.push(Step { panel, rows });
     }
     (steps, chrome)
+}
+
+/// Each step's effective `::KPI_SIZE` (#405): `true` once the tile itself,
+/// or the `::GROUP` box it's in, is `'compact'` — a tile's own value wins.
+/// `::GROUP` / `::ENDGROUP` advance the state; they are never tiles
+/// themselves. An unparsable or missing value defaults to 'normal'
+/// (`dashboard --lint` warns on the former separately).
+fn compact_flags(steps: &[Step]) -> Vec<bool> {
+    let mut group = false;
+    steps
+        .iter()
+        .map(|st| {
+            let roles = &st.panel.roles;
+            let Ok(rows) = &st.rows else { return group };
+            let cols = columns_from_result(rows, roles);
+            if roles.iter().any(|(_, r)| *r == Role::GroupStart) {
+                group = crate::kpi::kpi_size_of(&cols).unwrap_or(false);
+                false
+            } else if roles.iter().any(|(_, r)| *r == Role::GroupEnd) {
+                group = false;
+                false
+            } else {
+                crate::kpi::kpi_size_of(&cols).unwrap_or(group)
+            }
+        })
+        .collect()
 }
 
 fn render_inner(
@@ -237,6 +268,7 @@ fn render_inner(
     opts: &DashboardOptions,
 ) -> Result<String, String> {
     let (steps, chrome) = execute(script, provider);
+    let compact = compact_flags(&steps);
     let set = chrome.resolve(opts.theme.as_deref())?;
     let theme = set.pick(opts.variant).clone();
     let locale = theme
@@ -296,13 +328,15 @@ fn render_inner(
     // KPI tiles (not text cards), for the KPI strip.
     let tiles: Vec<Option<crate::kpi::Kpi>> = steps
         .iter()
-        .map(|st| {
+        .enumerate()
+        .map(|(si, st)| {
             let rows = st.rows.as_ref().ok()?;
             if st.panel.contract.is_some() {
                 return None;
             }
             let cols = columns_from_result(rows, &st.panel.roles);
-            crate::kpi::Kpi::from_columns(&cols, &ropts.locale).filter(|k| !k.text_card)
+            crate::kpi::Kpi::from_columns(&cols, &ropts.locale, compact[si])
+                .filter(|k| !k.text_card)
         })
         .collect();
     // A run of >= 2 consecutive KPI tiles (a ::GROUP of KPIs, or the
@@ -363,6 +397,12 @@ fn render_inner(
             }
         }
 
+        // ::GROUP / ::ENDGROUP (#405): kept only so compact_flags can read a
+        // box's ::KPI_SIZE; neither draws anything here (no box: the static
+        // renderer packs a run of tiles directly into a strip).
+        if has(&|r| matches!(r, Role::GroupStart | Role::GroupEnd)) {
+            continue;
+        }
         // Directives that don't render a box.
         if has(&|r| matches!(r, Role::Columns)) {
             if let Some(n) = num() {
@@ -475,7 +515,12 @@ fn render_inner(
                 }
                 let per_row = run.len().min(6);
                 let tw = (content_w + gap) / per_row as f64 - gap;
-                let th = run.iter().fold(96.0f64, |a, k| a.max(k.height()));
+                // Each tile's own floor (96 normal, 36 ::KPI_SIZE 'compact' —
+                // #405; mirrored in lint.rs fit_ref and web/app.js MIN_KPI /
+                // MIN_KPI_COMPACT), the tallest tile wins.
+                let th = run.iter().fold(0.0f64, |a, k| {
+                    a.max(k.height()).max(if k.compact { 36.0 } else { 96.0 })
+                });
                 strip = Some((run.len(), per_row, tw, th));
             }
         }
@@ -576,6 +621,7 @@ fn render_inner(
             strip.is_some(),
             &tracks,
             totals_spec.as_deref(),
+            compact[si],
         );
         placed.push((x, row_y, cw, ch, inner));
 
@@ -714,6 +760,7 @@ fn render_panel_svg(
     kpi_top: bool,
     tracks: &[(Vec<Column>, u32)],
     totals: Option<&str>,
+    compact: bool,
 ) -> String {
     let cols = columns_named(rows, roles, names);
     // Title bar (::TITLE) eats a strip off the top.
@@ -745,7 +792,7 @@ fn render_panel_svg(
 
     // A KPI / text card — the shared tile (crate::kpi), also used by the
     // static HTML.
-    if let Some(k) = crate::kpi::Kpi::from_columns(&cols, &ropts.locale) {
+    if let Some(k) = crate::kpi::Kpi::from_columns(&cols, &ropts.locale, compact) {
         return format!(
             "{}{}</svg>",
             svg_open(place, format!("{w:.0}"), format!("{h:.0}")),
@@ -841,7 +888,8 @@ fn is_chart(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], o: &RenderOp
                 Role::Table | Role::PagedTable | Role::Markdown | Role::Track
             )
         })
-        && crate::kpi::Kpi::from_columns(&columns_from_result(rows, roles), &o.locale).is_none()
+        // `compact` doesn't change whether this is a KPI, only how it draws.
+        && crate::kpi::Kpi::from_columns(&columns_from_result(rows, roles), &o.locale, false).is_none()
 }
 
 fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> String {

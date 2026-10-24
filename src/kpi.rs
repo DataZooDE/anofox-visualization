@@ -201,18 +201,45 @@ pub struct Kpi {
     pub text_card: bool,
     /// `::THRESHOLDS` status of the value — colours the number.
     pub status: Option<crate::thresholds::Status>,
+    /// `::KPI_SIZE` = `'compact'` (#405): one line (value + label, delta
+    /// inline), no sparkline / goal. Set on the tile itself, else inherited
+    /// from its `::GROUP` box (the caller resolves that; see
+    /// [`kpi_size_of`]).
+    pub compact: bool,
+}
+
+/// A statement's own `::KPI_SIZE` value — `Some(true)` for `'compact'`,
+/// `Some(false)` for `'normal'`, `None` with no (or an unparseable) value.
+/// `dashboard --lint` warns separately on an unknown value or a misplaced
+/// one (not on a `::METRIC`/`::GROUP`); callers that cascade a `::GROUP`'s
+/// setting onto its tiles fall back to the group's own flag.
+pub fn kpi_size_of(cols: &[Column]) -> Option<bool> {
+    let v = cols
+        .iter()
+        .find(|c| c.role == Role::KpiSize)
+        .and_then(|c| c.values.first())
+        .filter(|v| !matches!(v, Value::Na))
+        .map(value_str)?;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "compact" => Some(true),
+        "normal" => Some(false),
+        _ => None,
+    }
 }
 
 impl Kpi {
     /// The KPI / text card in a panel's columns (by role), or `None` when the
     /// panel is not one. A table's `::MONEY` columns are formats, not a KPI.
-    pub fn from_columns(cols: &[Column], l: &Locale) -> Option<Kpi> {
+    /// `group_compact`: the enclosing `::GROUP` box's `::KPI_SIZE`, used
+    /// unless this tile sets its own.
+    pub fn from_columns(cols: &[Column], l: &Locale, group_compact: bool) -> Option<Kpi> {
         if cols
             .iter()
             .any(|c| matches!(c.role, Role::Table | Role::PagedTable | Role::Diagram))
         {
             return None;
         }
+        let compact = kpi_size_of(cols).unwrap_or(group_compact);
         let first = |pred: &dyn Fn(Role) -> bool| {
             cols.iter()
                 .find(|c| pred(c.role))
@@ -241,6 +268,7 @@ impl Kpi {
                 goal: None,
                 text_card: true,
                 status: None,
+                compact,
             });
         };
         let cur = num(main.values.first());
@@ -275,12 +303,17 @@ impl Kpi {
             goal,
             text_card: false,
             status,
+            compact,
         })
     }
 
     /// The tile's natural height in px (its content plus padding) — the
-    /// headless layouts size a KPI row to the tallest tile.
+    /// headless layouts size a KPI row to the tallest tile. A `::KPI_SIZE`
+    /// `'compact'` tile is one line, no sparkline / goal (#405).
     pub fn height(&self) -> f64 {
+        if self.compact {
+            return PAD_COMPACT * 2.0 + LINE_H_COMPACT;
+        }
         PAD * 2.0
             + VALUE_H
             + if self.delta.is_some() { DELTA_H } else { 0.0 }
@@ -311,6 +344,9 @@ impl Kpi {
     }
 
     fn draw(&self, w: f64, h: f64, o: &RenderOptions, center: bool) -> String {
+        if self.compact {
+            return self.draw_compact(w, h, o);
+        }
         let t = &o.theme;
         let c = &t.colors;
         let (fd, fb) = (esc(&t.font.display), esc(&t.font.family));
@@ -440,6 +476,50 @@ impl Kpi {
         }
         s
     }
+
+    /// #405: a `::KPI_SIZE` `'compact'` tile — one line (`::LABEL`, the
+    /// value, the change), vertically centred; no sparkline / goal (there's
+    /// no room in a ~32–40 px row — see [`Kpi::height`]).
+    fn draw_compact(&self, w: f64, h: f64, o: &RenderOptions) -> String {
+        let _ = w; // the line wraps in the browser's CSS; the SVG just centres it
+        let t = &o.theme;
+        let c = &t.colors;
+        let fb = esc(&t.font.family);
+        let y = (h / 2.0 + 5.0).max(PAD_COMPACT + 11.0);
+        let value_fill = match t.chrome.kpi_value.as_str() {
+            _ if self.text_card => c.heading,
+            _ if self.status.is_some() => self.status.map_or(c.ink, |st| st.color(t)),
+            "accent" | "gradient" => c.accent,
+            _ => c.ink,
+        };
+        let cap = if self.caption.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<tspan font-size=\"11\" font-weight=\"700\" fill=\"{}\">{} </tspan>",
+                hex(c.muted),
+                esc(&self.caption)
+            )
+        };
+        let delta = self
+            .delta
+            .as_ref()
+            .map(|d| {
+                let col = if d.good { c.positive } else { c.negative };
+                format!(
+                    " <tspan font-size=\"12\" font-weight=\"700\" fill=\"{}\">{} {}</tspan>",
+                    hex(col),
+                    d.arrow,
+                    esc(&d.text)
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "<text class=\"kpi-value kpi-compact\" x=\"{PAD_COMPACT}\" y=\"{y:.1}\" font-family=\"{fb}\">{cap}<tspan font-size=\"18\" font-weight=\"800\" fill=\"{}\">{}</tspan>{delta}</text>",
+            hex(value_fill),
+            esc(&self.value)
+        )
+    }
 }
 
 /// Tile padding and the heights of its blocks (px).
@@ -449,6 +529,12 @@ const DELTA_H: f64 = 20.0;
 const CAP_H: f64 = 18.0;
 const SPARK_H: f64 = 42.0;
 const GOAL_H: f64 = 30.0;
+/// `::KPI_SIZE` `'compact'` tile padding and its one line's height (px) —
+/// also the per-tile floor `dashboard::compact_flags`'s strip layout and
+/// `lint.rs` `fit_ref::KPI_MIN_COMPACT` use; keep in sync with
+/// `web/app.js`'s `MIN_KPI_COMPACT`.
+const PAD_COMPACT: f64 = 7.0;
+const LINE_H_COMPACT: f64 = 22.0;
 
 #[cfg(test)]
 mod tests {
@@ -610,7 +696,7 @@ mod tests {
             col(Role::RefLine, Value::Float(1_200_000.0)),
             col(Role::Label, Value::Str("Revenue".into())),
         ];
-        let k = Kpi::from_columns(&cols, &en()).unwrap();
+        let k = Kpi::from_columns(&cols, &en(), false).unwrap();
         assert_eq!(k.value, "$984,000");
         assert_eq!(k.delta.as_ref().unwrap().text, "23% (+$184,000)");
         assert_eq!(k.label.as_deref(), Some("vs Aug 2026"));
@@ -620,13 +706,26 @@ mod tests {
         // a NULL comparison hides the delta and its label
         let mut c2 = cols.clone();
         c2[1] = col(Role::Delta, Value::Na);
-        let k2 = Kpi::from_columns(&c2, &en()).unwrap();
+        let k2 = Kpi::from_columns(&c2, &en(), false).unwrap();
         assert!(k2.delta.is_none() && k2.label.is_none());
         assert!(k2.height() < k.height());
         // a table is never a KPI
-        let mut t = cols;
+        let mut t = cols.clone();
         t.push(col(Role::Table, Value::Na));
-        assert!(Kpi::from_columns(&t, &en()).is_none());
+        assert!(Kpi::from_columns(&t, &en(), false).is_none());
+        // ::KPI_SIZE 'compact' on the tile itself — one line, no sparkline/goal
+        let mut c3 = cols.clone();
+        c3.push(col(Role::KpiSize, Value::Str("compact".into())));
+        let k3 = Kpi::from_columns(&c3, &en(), false).unwrap();
+        assert!(k3.compact);
+        assert!(k3.height() < k2.height());
+        // inherited from an enclosing ::GROUP box, unless this tile overrides it
+        let k4 = Kpi::from_columns(&cols, &en(), true).unwrap();
+        assert!(k4.compact);
+        let mut c5 = cols;
+        c5.push(col(Role::KpiSize, Value::Str("normal".into())));
+        let k5 = Kpi::from_columns(&c5, &en(), true).unwrap();
+        assert!(!k5.compact);
     }
 
     #[test]
@@ -648,6 +747,7 @@ mod tests {
             goal: goal(5.0, 4.0, MetricFmt::Plain, &en()),
             text_card: false,
             status: None,
+            compact: false,
         };
         let s = k.body(300.0, k.height(), &o);
         let c = &o.theme.colors;
@@ -660,5 +760,41 @@ mod tests {
         assert!(s.contains("<polyline") && s.contains("<circle"), "{s}");
         assert!(s.contains("125% of goal 4"), "{s}");
         assert!(s.contains(&format!("fill=\"{}\"", hex(c.positive))));
+    }
+
+    /// #405: a `'compact'::KPI_SIZE` tile is one short line — value, label
+    /// and delta inline, no sparkline / goal — at its own, lower minimum.
+    #[test]
+    fn compact_tile_is_one_line_without_spark_or_goal() {
+        let o = RenderOptions::default();
+        let k = Kpi {
+            value: "$984,000".into(),
+            caption: "Revenue".into(),
+            delta: delta(
+                900.0,
+                1000.0,
+                MetricFmt::Money,
+                DeltaFormat::Pct,
+                true,
+                &en(),
+            ),
+            label: Some("vs last month".into()),
+            spark: vec![1.0, 2.0, 1.5],
+            goal: goal(5.0, 4.0, MetricFmt::Plain, &en()),
+            text_card: false,
+            status: None,
+            compact: true,
+        };
+        assert_eq!(k.height(), 36.0);
+        let s = k.body(300.0, k.height(), &o);
+        assert!(s.contains("kpi-compact"), "{s}");
+        assert!(
+            s.contains("Revenue") && s.contains("$984,000") && s.contains("▼ 10%"),
+            "{s}"
+        );
+        // no sparkline / goal markup at all in the compact line
+        assert!(!s.contains("kpi-spark") && !s.contains("kpi-goal"), "{s}");
+        // the label line's own text ("vs last month") has no room either
+        assert!(!s.contains("vs last month"), "{s}");
     }
 }

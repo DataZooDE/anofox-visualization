@@ -390,6 +390,18 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .metric-goal.reached .metric-goal-bar>span{background:var(--ax-positive)}
 .metric-goal-text{color:var(--ax-muted);font-size:.72rem;font-weight:600;margin-top:.3rem}
 .group-body .metric{align-self:stretch;justify-content:flex-start}
+/* ::KPI_SIZE 'compact' (#405): one line — ::LABEL, the value, the change —
+   no sparkline / goal (no room); a tile's own class wins over its
+   ::GROUP's. A status row of 4-6 tiles fits in ~32-40px. */
+.metric.metric-size-compact,.group-compact .metric:not(.metric-size-normal){flex-direction:row;flex-wrap:wrap;align-items:baseline;justify-content:flex-start;column-gap:.4rem;row-gap:0;padding:.3rem .65rem}
+.metric.metric-size-compact .metric-value,.group-compact .metric:not(.metric-size-normal) .metric-value{font-size:1.15rem;line-height:1.2}
+.metric.metric-size-compact .metric-cap,.group-compact .metric:not(.metric-size-normal) .metric-cap{order:-1;margin-top:0;font-size:.64rem}
+.metric.metric-size-compact .metric-delta,.group-compact .metric:not(.metric-size-normal) .metric-delta{margin-top:0;font-size:.76rem}
+.metric.metric-size-compact .metric-delta-label,.group-compact .metric:not(.metric-size-normal) .metric-delta-label,
+.metric.metric-size-compact svg.metric-spark,.group-compact .metric:not(.metric-size-normal) svg.metric-spark,
+.metric.metric-size-compact .metric-goal,.group-compact .metric:not(.metric-size-normal) .metric-goal{display:none}
+.group-compact{padding:.65rem .9rem .65rem 1.05rem}
+.group-compact .group-body{gap:.5rem .9rem}
 .textcard{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:.4rem;min-height:150px}
 .text-value{font-weight:700;letter-spacing:-.02em;color:var(--ax-ink);line-height:1.25}
 .text-small .text-value{font-size:1rem}
