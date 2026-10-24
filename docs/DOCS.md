@@ -299,6 +299,20 @@ order the browser, the builder and a locked server all use — so the
 derived variable always sees the current pick, never the input's previous
 one (#416).
 
+An input's own **OPTIONS query** (or default) can likewise read another
+input's variable — a dropdown narrowed by a search box's text, say —
+**wherever the two sit relative to each other in the script**: every other
+input's known value (a previous pick, a `?v.name=` seed) is applied before
+any input's OPTIONS query runs, so it always filters by the viewer's
+current value, not a run-stale one — and never, unconditionally, on a
+locked server reading it for the very first time, since a fresh connection
+per request gets no second chance to catch up (#428). When an input's
+*current* pick then falls out of its own, narrower, list — the search box
+above excluding the picked value — it falls back to the **first remaining
+option** (a `::MULTISELECT`'s several picks instead keep whichever of them
+are still offered, dropping the rest); nothing errors or stays on a value
+no longer offered.
+
 ```sql
 SELECT DISTINCT region::DROPDOWN FROM sales;          -- above the tabs: every tab
 SELECT 'Detail'::TAB;

@@ -2,10 +2,49 @@
 //! splitting, FROM/clause detection, comment stripping and role detection.
 
 use anofox_visualization::sql::{self, lex};
-use anofox_visualization::{Kind, Role};
+use anofox_visualization::{InputKind, Kind, Role};
 
 fn roles_of(stmt: &str) -> Vec<(usize, Role)> {
     sql::rewrite(stmt).1
+}
+
+// #428: an input's variable name, statically — the browser applies a known
+// value (a previous pick, a URL seed) for one input before fetching
+// another's OPTIONS, which needs the name without running anything.
+#[test]
+fn input_variable_name_is_recorded_statically() {
+    // Explicit alias.
+    let (_, _, names) = sql::rewrite("SELECT name AS extension ::DROPDOWN FROM exts");
+    assert_eq!(names, vec![(0, "extension".to_string())]);
+    // Bare column reference — the name DuckDB itself would give the column.
+    let (_, _, names) = sql::rewrite("SELECT DISTINCT channel ::DROPDOWN FROM sessions");
+    assert_eq!(names, vec![(0, "channel".to_string())]);
+    // Every input kind, not just ::DROPDOWN.
+    for (sql_text, kind) in [
+        ("SELECT '' AS q ::TEXT", InputKind::Text),
+        ("SELECT 5 AS n ::NUMBER", InputKind::Number),
+        ("SELECT today() AS d ::DATE", InputKind::Date),
+        ("SELECT TRUE AS on_off ::TOGGLE", InputKind::Toggle),
+        (
+            "SELECT region AS r ::MULTISELECT FROM t",
+            InputKind::Multiselect,
+        ),
+        ("SELECT 'week' AS p ::PERIOD", InputKind::Period),
+        ("SELECT x AS b ::BUTTONS FROM t", InputKind::Buttons),
+    ] {
+        let (_, roles, names) = sql::rewrite(sql_text);
+        assert_eq!(roles, vec![(0, Role::Input(kind))], "{sql_text}");
+        assert_eq!(names, vec![(0, names[0].1.clone())], "{sql_text}");
+        assert!(!names[0].1.is_empty(), "{sql_text}");
+    }
+    // An unaliased, non-trivial expression: DuckDB would name the column
+    // after the expression text itself — not a simple identifier, so no
+    // name is recorded (the browser falls back to running the query).
+    let (_, _, names) = sql::rewrite("SELECT upper(name) ::DROPDOWN FROM exts");
+    assert_eq!(names, Vec::<(usize, String)>::new());
+    // A quoted alias, unquoted back to its plain text.
+    let (_, _, names) = sql::rewrite(r#"SELECT name AS "my var" ::DROPDOWN FROM exts"#);
+    assert_eq!(names, vec![(0, "my var".to_string())]);
 }
 
 #[test]
