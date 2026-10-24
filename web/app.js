@@ -8792,6 +8792,14 @@ async function runOnce(fresh = true, pv = preview) {
           };
           const fig = mkPanel();
           fig.classList.add("metric");
+          // ::KPI_SIZE (#405): this tile's own value wins over an enclosing
+          // ::GROUP's (CSS: .group-compact .metric, overridden by either class).
+          const sizeVal = String(cell("KPI_SIZE") ?? "")
+            .replace(/^"|"$/g, "")
+            .trim()
+            .toLowerCase();
+          if (sizeVal === "compact") fig.classList.add("metric-size-compact");
+          else if (sizeVal === "normal") fig.classList.add("metric-size-normal");
           let parts = {};
           try {
             parts = JSON.parse(
@@ -8979,9 +8987,28 @@ async function runOnce(fresh = true, pv = preview) {
           defaultSpan = Math.max(1, Math.round(12 / n));
         }
       } else if (d === "GROUP") {
-        const title = await firstValue(s);
+        // ::KPI_SIZE (#405) cascades onto every tile in the box, unless a
+        // tile sets its own — a second column beside the title, so it needs
+        // its own query (firstValue()'s literal shortcut only reads c0).
+        const kr = s.roles.find((r) => r[1] === "KPI_SIZE");
+        let title, sizeVal;
+        if (kr) {
+          const gr = s.roles.find((r) => r[1] === "GROUP");
+          const r0 = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i))[0] || {};
+          title = gr ? r0["c" + gr[0]] : null;
+          sizeVal = r0["c" + kr[0]];
+        } else {
+          title = await firstValue(s);
+        }
+        const compact = String(sizeVal ?? "").replace(/^"|"$/g, "").trim().toLowerCase() === "compact";
         const box = document.createElement("section");
-        box.className = "group";
+        box.className = "group" + (compact ? " group-compact" : "");
+        // ::HEIGHT right before a ::GROUP sets that row's ::FIT share (#418),
+        // like it does for a chart row — fitDash reads it off the box; a
+        // ::GROUP with none keeps its tiles' own natural height instead of
+        // sharing the window at all (see fitDash's `kind()` / `share()`).
+        if (nextHeight > 0) box.dataset.dpHeight = nextHeight;
+        nextHeight = 0;
         if (title) {
           const t = document.createElement("div");
           t.className = "group-title";
@@ -9622,6 +9649,7 @@ function fitScreen() {
 function fitDash(dash, env) {
   const MIN_PANEL = 120; // px (lint.rs fit_ref::PANEL_MIN)
   const MIN_KPI = 96; // px (lint.rs fit_ref::KPI_MIN): a value, its caption, the tile's padding
+  const MIN_KPI_COMPACT = 36; // px (lint.rs fit_ref::KPI_MIN_COMPACT, src/kpi.rs): a ::KPI_SIZE 'compact' tile (#405)
   const MIN_WIDTH = 600; // px: phones keep the scrolling column
   const body = document.body;
   const shown = (el) => {
@@ -9668,8 +9696,16 @@ function fitDash(dash, env) {
       // its own content (the tile may be stretched to its row's height)
       const kids = [...p.children].map((c) => c.getBoundingClientRect()).filter((b) => b.height);
       const content = kids.length ? Math.max(...kids.map((b) => b.bottom)) - Math.min(...kids.map((b) => b.top)) : 0;
-      const min = Math.max(MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
-      return { kind: "kpi", w: min, min };
+      // #405: a ::KPI_SIZE 'compact' tile (its own class, or inherited from
+      // an enclosing ::GROUP unless it overrides back to 'normal') has a
+      // lower floor than a normal KPI tile.
+      const compact = p.classList.contains("metric-size-compact") || (!p.classList.contains("metric-size-normal") && !!p.closest(".group-compact"));
+      const min = Math.max(compact ? MIN_KPI_COMPACT : MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
+      // #418: a ::HEIGHT right before the ::GROUP box sets its row's ::FIT
+      // share, like a chart row's — else the row keeps its own natural
+      // (measured) height, out of the share entirely (see `share()` below).
+      const authored = +p.closest(".group")?.dataset.dpHeight || 0;
+      return { kind: "kpi", w: authored || min, min, natural: !authored };
     }
     // a table / ::PAGED: its ::HEIGHT, else a default chart's (never its row
     // count, so a cross-filter re-run keeps the sizes); a text / Markdown box,
@@ -9700,13 +9736,27 @@ function fitDash(dash, env) {
       r.w = Math.max(...r.items.map((i) => i.w));
       r.min = Math.max(...r.items.map((i) => i.min));
       r.kpiOnly = r.items.every((i) => i.kind === "kpi");
+      // #418: a KPI-only row with no ::HEIGHT on its ::GROUP keeps its own
+      // natural height — it never grows to fill the window; only chart /
+      // table rows (and a KPI row given its own ::HEIGHT) share the rest.
+      r.natural = r.kpiOnly && r.items.every((i) => i.natural);
     }
     // heights summing to `total` in the rows' ratio; a row whose share is
-    // under its minimum (KPI tiles) keeps the minimum
+    // under its minimum (KPI tiles) keeps the minimum; a `natural` row is
+    // fixed at its own height and taken out of both `total` and the ratio.
     const share = (total) => {
       const hs = new Map();
-      let free = rows.slice();
       let left = total;
+      const sharable = [];
+      for (const r of rows) {
+        if (r.natural) {
+          hs.set(r, r.min);
+          left -= r.min;
+        } else {
+          sharable.push(r);
+        }
+      }
+      let free = sharable;
       while (free.length) {
         const k = left / free.reduce((a, r) => a + r.w, 0);
         const pin = free.filter((r) => r.w * k < r.min);
