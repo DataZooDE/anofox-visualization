@@ -4431,6 +4431,7 @@ fn distinct_labels_of(values: &[Value]) -> usize {
 /// spanning zero: the theme's diverging ramp with a neutral midpoint at 0,
 /// both arms scaled to the larger |end| (−2…+10 reads as a little red, a lot
 /// of blue). An explicit theme `sequential` pair is used as given.
+#[derive(Clone)]
 pub(crate) struct Ramp {
     min: f64,
     max: f64,

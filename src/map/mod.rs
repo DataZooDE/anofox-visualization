@@ -31,6 +31,7 @@
 
 pub(crate) mod boundaries;
 pub(crate) mod classes;
+mod fill;
 mod flows;
 pub(crate) mod hexbin;
 mod labels;
@@ -371,6 +372,7 @@ enum Fill {
 }
 
 /// The colour scale of a measure.
+#[derive(Clone)]
 struct ValueScale {
     /// The value of each row (`None` = no data).
     values: Vec<Option<f64>>,
