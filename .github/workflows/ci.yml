@@ -46,7 +46,7 @@ jobs:
     name: docs/link check (docs-only PR)
     needs: lane
     if: needs.lane.outputs.docs_only == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
     name: fmt + clippy + test
     needs: lane
     if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -166,7 +166,7 @@ jobs:
     name: DuckDB 2.0 smoke test (Rust C-API cdylib, non-blocking)
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     continue-on-error: true
     steps:
@@ -220,7 +220,7 @@ jobs:
     name: web build (wasm + dashboard CLI)
     needs: lane
     if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       # Full history + tags: tests/web/version_test.mjs checks the footer's build version (#216).
@@ -288,7 +288,7 @@ jobs:
     name: web tests shard ${{ matrix.shard }}/4
     needs: [lane, web-build]
     if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -365,7 +365,7 @@ jobs:
     name: web e2e (browser)
     needs: [lane, web-build]
     if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -567,7 +567,7 @@ jobs:
     name: Explore starter dashboards --check --strict
     needs: [lane, web-build]
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -605,7 +605,7 @@ jobs:
     name: anofox-statistics conformance
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -663,7 +663,7 @@ jobs:
     name: anofox-optimize conformance
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
@@ -721,7 +721,7 @@ jobs:
     name: anofox-decide conformance
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
@@ -781,7 +781,7 @@ jobs:
     name: anofox-tabular conformance
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
@@ -836,7 +836,7 @@ jobs:
     name: anofox-forecast conformance (${{ matrix.repo }})
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
     timeout-minutes: 40
@@ -903,7 +903,7 @@ jobs:
     name: Claude Code skills SQL
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -946,7 +946,7 @@ jobs:
     name: Quack source (DuckDB 2.0 host, non-blocking prototype, #352)
     needs: lane
     if: needs.lane.outputs.full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     continue-on-error: true
     steps:
@@ -1022,7 +1022,7 @@ jobs:
       - forecast-conformance
       - skills-sql
       - quack-source
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
       - name: Every needed job succeeded or was skipped
@@ -1063,7 +1063,7 @@ jobs:
       - forecast-conformance
       - skills-sql
       - quack-source
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:
       issues: write
