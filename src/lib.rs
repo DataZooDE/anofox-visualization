@@ -2884,6 +2884,7 @@ fn cartesian(
                 color: (148, 160, 178),
                 alpha: 0.14,
                 line_width: 0.0,
+                ..Default::default()
             })
             .layer_data(frame)
             // (x as well: the layer is drawn first, and its x column is
@@ -5159,6 +5160,7 @@ fn data_annotations(
                     color: shade,
                     alpha: 0.13,
                     line_width: 0.0,
+                    ..Default::default()
                 })
                 .layer_data(vec![
                     ("bx0".to_string(), x0),
