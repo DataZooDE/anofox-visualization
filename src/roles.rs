@@ -331,6 +331,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
+    e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
+      "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
@@ -786,6 +788,7 @@ mod tests {
             Role::Plain,
             Role::Hint,
             Role::OptionLabel,
+            Role::DropdownStyle,
             Role::Placeholder,
             Role::HeaderImage,
             Role::FooterLink,
@@ -916,6 +919,7 @@ mod tests {
                 | Role::Plain
                 | Role::Hint
                 | Role::OptionLabel
+                | Role::DropdownStyle
                 | Role::Text(_)
                 | Role::KpiSize
                 | Role::Placeholder

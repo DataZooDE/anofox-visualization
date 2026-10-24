@@ -279,6 +279,15 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/fit-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/dropdown-search-e2e.mjs (#411): above ~50 options (or forced
+      # by 'search'/'native'::DROPDOWN_STYLE) a ::DROPDOWN renders a
+      # searchable combobox — filtering by value/::OPTION_LABEL, Arrow keys +
+      # Enter, Esc / an outside click, a 2,000-option window, and the
+      # downloaded HTML snapshot's native <select> fallback.
+      - name: Searchable ::DROPDOWN e2e (#411)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/dropdown-search-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/setvar-order-e2e.mjs (#416): a dashboard's own `SET
       # VARIABLE` that reads an input via getvariable() sees the viewer's
       # CURRENT pick, whether it is declared before or after that input in

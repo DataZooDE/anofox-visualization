@@ -447,6 +447,31 @@ where
                             sql: short.clone(),
                         });
                     }
+                    if kind == InputKind::Dropdown {
+                        if let Some((idx, _)) =
+                            p.roles.iter().find(|(_, r)| *r == Role::DropdownStyle)
+                        {
+                            if let Some(v) = rows
+                                .first()
+                                .and_then(|r| r.values().nth(*idx))
+                                .and_then(|v| v.as_str())
+                            {
+                                let lv = v.to_ascii_lowercase();
+                                if !crate::DROPDOWN_STYLES.contains(&lv.as_str()) {
+                                    diags.push(Diagnostic {
+                                        severity: Severity::Warning,
+                                        stmt,
+                                        code: "dropdown-style/unknown",
+                                        message: format!(
+                                            "::DROPDOWN_STYLE `{lv}` is not 'search' or 'native' ({}) — the option count decides",
+                                            crate::DROPDOWN_STYLES.join(", ")
+                                        ),
+                                        sql: short.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
@@ -6205,6 +6230,31 @@ mod design_tests {
         .is_empty());
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());
+    }
+
+    #[test]
+    fn dropdown_style_unknown_value_warns() {
+        let data = vec![json!({ "c0": "a", "c1": "bogus" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let sql = "SELECT 'a' AS v ::DROPDOWN, 'bogus' AS style ::DROPDOWN_STYLE FROM t;";
+        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        assert!(
+            d.iter().any(|x| x.code == "dropdown-style/unknown"),
+            "{d:?}"
+        );
+
+        let data = vec![json!({ "c0": "a", "c1": "search" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let sql = "SELECT 'a' AS v ::DROPDOWN, 'search' AS style ::DROPDOWN_STYLE FROM t;";
+        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        assert!(
+            !d.iter().any(|x| x.code == "dropdown-style/unknown"),
+            "{d:?}"
+        );
     }
 
     #[test]

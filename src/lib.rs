@@ -298,6 +298,10 @@ pub enum Role {
     Hint,
     /// The shown text of a `::DROPDOWN`/`::BUTTONS`/`::MULTISELECT` option (`::OPTION_LABEL`); the variable keeps the value (#170).
     OptionLabel,
+    /// Forces a `::DROPDOWN`'s widget (`::DROPDOWN_STYLE`): `'search'` (a
+    /// searchable combobox) or `'native'` (a plain `<select>`), overriding
+    /// the option-count threshold the browser otherwise switches on (#411).
+    DropdownStyle,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
     Text(TextSize),
     /// A KPI tile's density (`::KPI_SIZE`): `'compact'` (single-line
@@ -1802,6 +1806,11 @@ fn xline_date_text(secs: i64) -> String {
 
 /// The `::LINESTYLE` values.
 pub const LINE_STYLES: &[&str] = &["solid", "dashed", "flow"];
+
+/// The `::DROPDOWN_STYLE` values: `'search'` forces the searchable combobox
+/// below the option-count threshold the browser otherwise switches on;
+/// `'native'` forces the plain `<select>` above it.
+pub const DROPDOWN_STYLES: &[&str] = &["search", "native"];
 
 /// The `::ANIMATE` modes the browser plays.
 pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
