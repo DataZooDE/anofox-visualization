@@ -338,6 +338,16 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/sparkbar-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/sparkline-e2e.mjs (#454): a table's ::SPARKLINE cell draws
+      # through the wasm render_cell export (ggplot-rs marks, not
+      # hand-written SVG, the same #425/#453 migration) for a zigzag and a
+      # flat series, its whole-series summary tip (first → last / min / max
+      # / count) still intact as the svg's own <title>, and its drawn
+      # content fits inside the cell's own box, not clipped or letterboxed.
+      - name: Table ::SPARKLINE cell e2e (#454)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/sparkline-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/mini-charts-e2e.mjs (#463): Explore data's card histogram
       # (xpMini, both its histogram and rows-over-time-line branches), its
       # A/B distribution overlay (xpOverlay) and the table's own
