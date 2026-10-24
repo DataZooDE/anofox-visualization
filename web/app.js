@@ -13240,6 +13240,28 @@ function badgeHtml(text) {
   return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
 }
 
+// Shared by cellSpark/cellSparkbar (#454/#425, #476 review): a cell-sized
+// chart's own width/height request to the wasm render_cell, matched to
+// this cell's fixed CSS box's aspect ratio. render_sparkline/
+// render_sparkbar floor their own panel height at ggplot-rs's 50px layout
+// minimum (`SPARKLINE_MIN_H`, src/lib.rs, #457) no matter how short a
+// height they're asked for; the first version of this migration asked for
+// the cell's own small height (so the returned svg's viewBox came back
+// taller than that request) and stretch-filled the mismatched box with
+// `preserveAspectRatio="none"` — which scales the two axes by different
+// factors, flattening a circular marker (the sparkline's endpoint dot)
+// into an ellipse and unevenly thickening a stroke depending on its angle.
+// Growing the requested WIDTH by the same ratio the height was floored by
+// keeps the returned viewBox at this cell's own w:h, so the browser's
+// *default* (uniform) downscale into the fixed CSS box is lossless: no
+// letterboxing (the aspect ratios already match going in) and no
+// non-uniform squash (a circle stays round, a stroke's width scales evenly
+// in both directions).
+const SPARK_FLOOR = 50; // ggplot-rs's own panel-area floor (SPARKLINE_MIN_H in src/lib.rs)
+function sparkRequestSize(w, h) {
+  return h >= SPARK_FLOOR ? [w, h] : [Math.round((w * SPARK_FLOOR) / h), SPARK_FLOOR];
+}
+
 // ::SPARKLINE cell — a word-sized trend from a numeric array (DuckDB list()):
 // a soft area under the line, the last point marked, and first → last / min /
 // max on hover. Drawn by the wasm renderer's render_cell (#454; owner rule
@@ -13271,18 +13293,18 @@ function cellSpark(v) {
   const tip = `${f(first)} → ${f(last)}${chg} · min ${f(mn)} · max ${f(mx)} · ${nums.length} points`;
   const rows = nums.map((n) => ({ c0: n }));
   const roles = [[0, "SPARKLINE"]];
+  const [rw, rh] = sparkRequestSize(w, h);
   let svg = "";
   try {
-    svg = render_cell(JSON.stringify(rows), JSON.stringify(roles), w, h, renderCtx());
+    svg = render_cell(JSON.stringify(rows), JSON.stringify(roles), rw, rh, renderCtx());
   } catch (_) {}
   if (!svg) return `<span class="nil">—</span>`;
   // `svg class` for the table CSS (width/height, compact-row height) that
-  // targets svg.spark — render_cell's own output carries none.
-  // `preserveAspectRatio="none"` stretch-fills that fixed CSS box instead of
-  // letterboxing a narrower, centred chart: `render_sparkline`'s own viewBox
-  // is at least ggplot-rs's 50px panel floor tall (#457), taller than this
-  // cell's 26px — same reasoning as `cellSparkbar`'s (#425/#453).
-  svg = svg.replace(/^<svg /, '<svg preserveAspectRatio="none" class="spark" ');
+  // targets svg.spark — render_cell's own output carries none. No
+  // `preserveAspectRatio` override: `sparkRequestSize` already matched the
+  // returned viewBox to this cell's own aspect ratio, so the default
+  // (uniform) downscale into the CSS box is exact — see its own comment.
+  svg = svg.replace(/^<svg /, '<svg class="spark" ');
   return svg.replace(/^(<svg[^>]*>)/, `$1<title>${escapeHtml(tip)}</title>`);
 }
 
@@ -13329,20 +13351,19 @@ function cellSparkbar(v) {
   // as series[0]/series[1]); c0 = cur alone otherwise.
   const rows = curs.map((c, i) => (isPair ? { c0: refs[i], c1: c } : { c0: c }));
   const roles = isPair ? [[0, "SPARKBAR"], [1, "SPARKBAR"]] : [[0, "SPARKBAR"]];
+  const [rw, rh] = sparkRequestSize(w, h);
   let svg = "";
   try {
-    svg = render_cell(JSON.stringify(rows), JSON.stringify(roles), w, h, renderCtx());
+    svg = render_cell(JSON.stringify(rows), JSON.stringify(roles), rw, rh, renderCtx());
   } catch (_) {}
   if (!svg) return `<span class="nil">—</span>`;
   // `svg class` for the table CSS (width/height, compact-row height) that
-  // targets svg.spark — render_cell's own output carries none. Its own
-  // viewBox is at least ggplot-rs's 50px panel floor tall (render_sparkbar
-  // clamps up to it internally, #425/#457), taller than this cell's own
-  // fixed CSS box — `preserveAspectRatio="none"` stretch-fills that box
-  // instead of letterboxing a narrower, centred chart inside it, the same
-  // house convention every other inline mini-chart here uses (xp-mini,
-  // metric-spark, …) for a CSS box that doesn't match its own viewBox.
-  return svg.replace(/^<svg /, '<svg preserveAspectRatio="none" class="spark spark-bar" ');
+  // targets svg.spark — render_cell's own output carries none. No
+  // `preserveAspectRatio` override: `sparkRequestSize` already matched the
+  // returned viewBox to this cell's own aspect ratio (#476 review), so the
+  // default (uniform) downscale into the CSS box is exact — see its own
+  // comment.
+  return svg.replace(/^<svg /, '<svg class="spark spark-bar" ');
 }
 
 // A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the

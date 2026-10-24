@@ -8,12 +8,15 @@
 //     count) survived the migration, as the returned svg's own <title> —
 //     render_sparkline only puts a <title> on its endpoint marker, so
 //     cellSpark (web/app.js) injects this one itself.
-//   - the cell's drawn content fits inside its own bounding box —
-//     render_sparkline's 50px panel floor (#457) paired with
-//     preserveAspectRatio="none" on the returned SVG, so a taller internal
-//     viewBox stretch-fills the cell's fixed CSS size instead of
-//     letterboxing a narrower, centred chart or clipping a dip off the
-//     bottom.
+//   - the cell's drawn content fits inside its own bounding box, and does
+//     so via a UNIFORM downscale, not a stretch: render_sparkline's 50px
+//     panel floor (#457) means the returned svg's own viewBox is taller
+//     than this cell's own fixed CSS box, so cellSpark requests a WIDER
+//     panel too, matched to the cell's own aspect ratio (`sparkRequestSize`,
+//     #476 review) — no `preserveAspectRatio="none"` override needed, and
+//     none wanted: that would scale the two axes unevenly, flattening the
+//     endpoint marker into an ellipse instead of a circle. Checked
+//     directly: the marker's own bounding box is square.
 //
 //   cargo build --lib --target wasm32-unknown-unknown --profile wasm --no-default-features --features wasm
 //   wasm-bindgen --target web --out-dir web/pkg --out-name anofox_visualization <target>/wasm32-unknown-unknown/wasm/anofox_visualization.wasm
@@ -67,6 +70,8 @@ const cells = await page.evaluate(() => {
     const cellBox = svg.closest("td").getBoundingClientRect();
     const svgBox = svg.getBoundingClientRect();
     const points = [...svg.querySelectorAll("circle, polyline, polygon")];
+    const end = svg.querySelector('[data-geom="point"]');
+    const endBox = end ? end.getBoundingClientRect() : null;
     return {
       title: svg.querySelector(":scope > title")?.textContent || "",
       hasLine: !!svg.querySelector('[data-geom="line"]'),
@@ -75,6 +80,7 @@ const cells = await page.evaluate(() => {
       everyMarkIsGgMark: points.every((m) => m.classList.contains("gg-mark")),
       linePointCount: (svg.querySelector('polyline[data-geom="line"]')?.getAttribute("points") || "").trim().split(/\s+/).filter(Boolean).length,
       preserveAspectRatio: svg.getAttribute("preserveAspectRatio"),
+      endBox: endBox && { w: endBox.width, h: endBox.height },
       cellBox: { top: cellBox.top, bottom: cellBox.bottom, left: cellBox.left, right: cellBox.right },
       svgBox: { top: svgBox.top, bottom: svgBox.bottom, left: svgBox.left, right: svgBox.right },
     };
@@ -94,7 +100,17 @@ if (zigzag) {
     zigzag.title === "1K → 1K (−0%) · min 1K · max 1K · 7 points",
     `zigzag cell's whole-series summary tip survived the migration, found ${JSON.stringify(zigzag.title)}`
   );
-  check(zigzag.preserveAspectRatio === "none", `zigzag cell's svg stretch-fills its box (preserveAspectRatio="none"), found ${JSON.stringify(zigzag.preserveAspectRatio)}`);
+  // #476 review: a stretch ("none") scales the two axes unevenly — the
+  // request is matched to the cell's own aspect ratio instead, so the
+  // default (uniform) downscale is exact; "none" would be the bug again.
+  check(
+    zigzag.preserveAspectRatio !== "none",
+    `zigzag cell's svg scales uniformly (no preserveAspectRatio="none"), found ${JSON.stringify(zigzag.preserveAspectRatio)}`
+  );
+  check(
+    zigzag.endBox && Math.abs(zigzag.endBox.w - zigzag.endBox.h) < 1,
+    `zigzag cell's endpoint marker is round, not flattened into an ellipse (its own bbox is ${JSON.stringify(zigzag.endBox)})`
+  );
 } else {
   check(false, "no zigzag ::SPARKLINE cell found");
 }
