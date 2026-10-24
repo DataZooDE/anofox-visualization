@@ -3410,7 +3410,7 @@ fn summed_rate_diag(
             range: None,
             many: rows.len() > 1,
         };
-        if matches!(fmt, Some("SPARKLINE" | "BADGE")) {
+        if matches!(fmt, Some("SPARKLINE" | "SPARKBAR" | "BADGE")) {
             continue;
         }
         if profile_column(&spec_c, &cells, &l).rate {
@@ -4097,6 +4097,7 @@ fn kind_uses_axis_breaks(roles: &[(usize, Role)]) -> bool {
             | Kind::Candlestick
             | Kind::Radar
             | Kind::Sparkline
+            | Kind::Sparkbar
             | Kind::Waterfall
             | Kind::Bullet
             | Kind::Funnel,
@@ -4177,6 +4178,7 @@ fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
             | Kind::Candlestick
             | Kind::Radar
             | Kind::Sparkline
+            | Kind::Sparkbar
             | Kind::Waterfall
             | Kind::Bullet
             | Kind::Funnel,

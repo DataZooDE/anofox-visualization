@@ -311,7 +311,7 @@ pub struct ColumnSpec<'a> {
     /// Raw column name.
     pub name: &'a str,
     /// The column's format role token (`MONEY`, `COMPACT`, `PERCENT`, `METRIC`,
-    /// `PLAIN`, `TREND`, `COLORSCALE…`, `BADGE`, `SPARKLINE`), if any.
+    /// `PLAIN`, `TREND`, `COLORSCALE…`, `BADGE`, `SPARKLINE`, `SPARKBAR`), if any.
     pub fmt: Option<&'a str>,
     /// The first (key) column of the table.
     pub first: bool,
@@ -761,7 +761,7 @@ pub fn short_number(n: f64, l: &Locale, neg: Negatives) -> String {
 /// percentage (#207; the browser shows its tag as "none").
 pub fn default_total(p: &ColumnProfile, fmt: Option<&str>) -> Option<&'static str> {
     let f = fmt.unwrap_or("");
-    if !p.numeric || p.label || p.rate || f == "SPARKLINE" || f == "BADGE" {
+    if !p.numeric || p.label || p.rate || f == "SPARKLINE" || f == "SPARKBAR" || f == "BADGE" {
         return None;
     }
     Some(if p.additive { "sum" } else { "mean" })

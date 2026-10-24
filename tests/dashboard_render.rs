@@ -986,6 +986,58 @@ fn table_sparkline_cell_is_drawn_not_dropped() {
     );
 }
 
+// #425: a `::TABLE`'s `list(v ORDER BY i)::SPARKBAR` (one series) or
+// `list({'ref','cur'} ORDER BY i)::SPARKBAR` (two overlaid series) column
+// draws a tiny bar histogram per cell, through the same ggplot-rs path as a
+// standalone `::SPARKBAR` panel (`render_sparkbar`, via `render_with_at`).
+#[test]
+fn table_sparkbar_cell_draws_bars_one_and_two_series() {
+    struct SparkbarMock;
+    impl DataProvider for SparkbarMock {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("Dist") {
+                return Ok(vec![
+                    ("feature".into(), s(&["temp", "humidity"])),
+                    (
+                        "Dist".into(),
+                        s(&[
+                            "[0.1,0.2,0.3,0.4]",
+                            "[{\"ref\":0.1,\"cur\":0.3},{\"ref\":0.3,\"cur\":0.3},\
+                             {\"ref\":0.4,\"cur\":0.2},{\"ref\":0.2,\"cur\":0.2}]",
+                        ]),
+                    ),
+                    ("mx".into(), f(&[3.0, 4.0])),
+                ]);
+            }
+            Ok(vec![("c0".into(), f(&[1.0]))])
+        }
+    }
+    let script = "SELECT feature ::TABLE, dist AS \"Dist\" ::SPARKBAR, mx AS \"Mx\" FROM t;";
+    let mut db = SparkbarMock;
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        svg.contains(">Dist<"),
+        "the sparkbar column's own header must still show: {svg}"
+    );
+    assert!(
+        !svg.contains("[0.1,0.2,0.3,0.4]") && !svg.contains("\"ref\":0.1"),
+        "a cell's raw JSON must never print literally: {svg}"
+    );
+    assert_eq!(
+        svg.matches("data-geom=\"col\"").count(),
+        12,
+        "every value (4 one-series bars + 4 ref + 4 cur two-series bars) draws \
+         through ggplot-rs's bar geom, one rect per mark: {svg}"
+    );
+    assert!(
+        svg.contains(">Mx<") && svg.contains(">3<") && svg.contains(">4<"),
+        "the table's other columns must still render, unaffected: {svg}"
+    );
+}
+
 // #457: `render_sparkline` must scale the y axis to the series' own
 // min/max, not a zero baseline. `GeomArea::include_zero_baseline` forces 0
 // into the trained domain unconditionally (fine for a real area chart,
@@ -1086,4 +1138,56 @@ fn standalone_sparkline_panel_minima_stay_inside_a_short_viewbox() {
         "sparkline content (y {mn}..{mx}) must stay inside its own \
          {h}px-tall viewBox, not clipped: {svg}"
     );
+}
+
+// #425/#457: a standalone `::SPARKBAR` panel goes through the same
+// `render_sparkbar` as a table cell — asked for a height under ggplot-rs's
+// own plot-area floor (`SPARKLINE_MIN_H`, 50px, shared with the sparkline
+// clamp since the floor is generic to any ggplot-rs panel), it must still
+// draw every bar's full height inside its viewBox, not clip a bar's own
+// baseline against a shorter one.
+#[test]
+fn standalone_sparkbar_panel_minima_stay_inside_a_short_viewbox() {
+    use anofox_visualization::{render, Column, Kind, Role};
+    let col = Column::new(
+        "value",
+        Role::Value(Kind::Sparkbar),
+        f(&[1.0, 9.0, 2.0, 8.0, 3.0, 7.0]),
+    );
+    // A height well under the engine's 50px plot-area floor — exactly the
+    // squeeze a table row put it under before this panel clamped itself.
+    let svg = render(&[col], 240, 20).expect("a rendered sparkbar panel");
+    let h: f64 = svg
+        .split("viewBox=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("a viewBox")
+        .split_whitespace()
+        .nth(3)
+        .and_then(|n| n.parse().ok())
+        .expect("a viewBox height");
+    let get_attr = |attrs: &str, name: &str| -> Option<f64> {
+        attrs
+            .split(&format!("{name}=\""))
+            .nth(1)?
+            .split('"')
+            .next()?
+            .parse()
+            .ok()
+    };
+    let mut bars: Vec<(f64, f64)> = Vec::new();
+    for rect in svg.split("<rect ").skip(1) {
+        let attrs = rect.split('>').next().unwrap_or("");
+        if let (Some(y), Some(ht)) = (get_attr(attrs, "y"), get_attr(attrs, "height")) {
+            bars.push((y, y + ht));
+        }
+    }
+    assert!(!bars.is_empty(), "expected drawn bars: {svg}");
+    for (y, bottom) in &bars {
+        assert!(
+            *y > -0.5 && *bottom < h + 0.5,
+            "sparkbar content (bar y {y}..{bottom}) must stay inside its own \
+             {h}px-tall viewBox, not clipped: {svg}"
+        );
+    }
 }
