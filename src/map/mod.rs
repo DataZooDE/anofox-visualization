@@ -1278,8 +1278,7 @@ pub(crate) fn build(
     let w = width as f64;
 
     if plot::eligible(o, &m, w) {
-        if let Some((p, attrs)) = plot::build(o, cols, &m, width, height) {
-            let mut warnings = Vec::new();
+        if let Some((p, attrs, mut warnings)) = plot::build(o, cols, &m, width, height) {
             if m.rows > MARK_WARN {
                 warnings.push(format!(
                     "map: {} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light",
@@ -1697,7 +1696,7 @@ fn render_with_model(
     let mut extra_self = 0usize; // L < 2px screen-coincident flows, counted at render time
     if let Some(fl) = &m.flows {
         let (frag, added_marks, self_ct, cap_warn) =
-            overlay::render(o, cols, m, &frame, fl, t, card, hatch_bg, w, h);
+            overlay::render(o, cols, m, &frame, fl, t, card, hatch_bg, hatch_fg, w, h);
         out.push_str(&frag);
         marks += added_marks;
         extra_self += self_ct;
@@ -1712,7 +1711,8 @@ fn render_with_model(
     // overlay is above: after the basemap and before `labels_svg` below.
     if let Some(hb) = &m.hexbin {
         if let Fill::Measure(scale) = &m.fill {
-            let (frag, added_marks) = overlay::render_hexbin(o, hb, scale, &frame, card, w, h);
+            let (frag, added_marks) =
+                overlay::render_hexbin(o, hb, scale, &frame, card, hatch_bg, hatch_fg, w, h);
             out.push_str(&frag);
             marks += added_marks;
             if hb.cells.len() > hexbin::HEX_WARN {

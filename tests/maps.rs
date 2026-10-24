@@ -1764,6 +1764,13 @@ fn hexbin_auto_size_is_nice_and_zoom_stable() {
 }
 
 #[test]
+// This fixture's 'none'::PROJECTION makes it #420-slice-4-eligible, and its
+// 2-cell quantile-2 split lands one class edge exactly on the data's own
+// max (150) — ScaleFillBinned::sorted_edges used to dedupe that against
+// classes.hi, silently collapsing 2 bins into 1 and falling back to its own
+// default colours, so both cells rendered the same fill despite different
+// data-class values. Fixed upstream by sipemu/ggplot-rs#240
+// (anofox-visualization#477), released in ggplot-rs 0.30.1.
 fn hexbin_classes_and_legend_note() {
     // two well-separated clusters, planar so the ::HEXBIN width is exact
     let xs = [0.0, 0.01, 0.02, 20.0, 20.01];
@@ -1786,9 +1793,22 @@ fn hexbin_classes_and_legend_note() {
     values.sort_by(f64::total_cmp);
     assert_eq!(values, vec![35.0, 150.0]); // 10+20+5, 100+50
     assert!(h.iter().all(|t| attr(t, "data-class").is_some()), "{s}");
-    // a stepped legend with counts, and the width note under it
-    assert!(s.contains("dp-legend"), "{s}");
-    assert!(s.contains("Hexagons 2 across"), "{s}");
+    // #240 itself: the two cells must land in distinct classes *and*
+    // distinct colours — before the fix, ScaleFillBinned::sorted_edges
+    // deduped the edge at 150 (the data's own max) against classes.hi,
+    // collapsing both bins into one and falling back to the same default
+    // fill despite different data-class values.
+    let classes: Vec<&str> = h.iter().map(|t| attr(t, "data-class").unwrap()).collect();
+    assert_ne!(classes[0], classes[1], "{s}");
+    let fills: Vec<&str> = h.iter().map(|t| attr(t, "fill").unwrap()).collect();
+    assert_ne!(fills[0], fills[1], "{s}");
+    // A real stepped legend (ggplot-rs's own ScaleFillBinned, not the old
+    // writer's hand-drawn `dp-legend` box — #420 slice 4 moved hexbin's
+    // colour onto the same real Fill scale a choropleth uses): one swatch
+    // + count per class. The old writer's extra "Hexagons 2 across" width
+    // note isn't carried over by this path (`data-hexbin` on the root
+    // still has the width, just not rendered as on-canvas text).
+    assert!(s.contains("(1)"), "a per-class count in the legend: {s}");
 }
 
 #[test]
