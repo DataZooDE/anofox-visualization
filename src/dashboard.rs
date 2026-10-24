@@ -24,8 +24,7 @@ use crate::format::Locale;
 use crate::sql::contract_call;
 use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant};
 use crate::{
-    error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions,
-    Role, TableOpt,
+    error_svg_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions, Role, TableOpt,
 };
 use ggplot_rs::prelude::Value;
 use std::sync::Arc;
@@ -846,13 +845,18 @@ fn render_panel_svg(
     // Its ::TRACKs sit right under it, sharing its plot area and x window.
     let tracks_h: u32 = crate::track::heights(tracks).iter().sum();
     let body_h = (h - title_h - pad - tracks_h as f64).max(30.0);
-    // The chart is nested below the title as a positioned fragment.
-    let draw = |cols: &[Column], w: u32, h: u32, o: &RenderOptions, y: f64| {
-        render_with_at(cols, 0.0, title_h + y, w, h, o)
-    };
-    let chart = crate::track::stack(&cols, tracks, w as u32, body_h as u32, ropts, &draw)
-        .map(|(svgs, _)| svgs.concat())
-        .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
+    // The chart (and its tracks) are nested below the title as one
+    // positioned fragment.
+    let chart = crate::track::stack(
+        &cols,
+        tracks,
+        w as u32,
+        body_h as u32,
+        ropts,
+        Place::At(0.0, title_h),
+    )
+    .map(|(svgs, _)| svgs.concat())
+    .unwrap_or_else(|e| error_svg_at(Place::At(0.0, title_h), &e.to_string(), w as u32));
     let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
     if let Some(tt) = &title {
         let mark = info

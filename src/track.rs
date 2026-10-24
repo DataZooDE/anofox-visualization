@@ -7,158 +7,23 @@
 //! (the value names it) with an `::XAXIS`, and optionally `::YAXIS` lanes, a
 //! `::CATEGORY` colour, a `::LABEL` tooltip and a measure (`::HEATMAP` tiles,
 //! or a line / bar / area / step / scatter). [`render_stack`] renders the
-//! chart and its tracks at one width with the same plot area and x window:
-//! each SVG is drawn, measured (its `data-plot` and `data-xdomain`) and drawn
-//! again with its margins and x window corrected, so no layout internals of
-//! the plotting engine are needed.
+//! chart and its tracks at one width, sharing one plot area and x window:
+//! the chart's own `GGPlot` and every track's are composed into one
+//! single-column `PlotGrid` and rendered together in a single pass
+//! (`AxisCollect::CollectX`, sipemu/ggplot-rs#175) — no render-measure-render
+//! loop, and no layout internals of the plotting engine are needed. `CollectX`
+//! also unions the column's x domains and draws ticks on the bottom-most
+//! cell only; every track's own [`track_theme`] already hides its x axis
+//! (it never was the bottom cell before #175 either), so the one visible
+//! change is that axis now sits under the *last* track rather than right
+//! under the chart.
 
 use crate::{
     chart_theme, dz_scale, find_role, guard, role_str, value_fmt, value_str, Column, Kind, Panel,
-    RenderError, RenderOptions, Role,
+    Place, RenderError, RenderOptions, Role,
 };
 use ggplot_rs::prelude::*;
-use ggplot_rs::theme::{ElementLine, ElementText, LegendPosition, Margin, ThemeUpdate};
-
-/// Where a panel's plot area and x window must be, to line up with others.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Align {
-    /// Left edge of the plot area (px from the panel's left).
-    pub left: f64,
-    /// Right edge of the plot area (px from the panel's left).
-    pub right: f64,
-    /// The x domain to show edge to edge (the chart's expanded domain);
-    /// `None` keeps the panel's own.
-    pub xdomain: Option<(f64, f64)>,
-    /// The chart's x step: a heatmap track's tile width.
-    pub step: Option<f64>,
-}
-
-/// The margins and x window that put a panel's plot area where an [`Align`]
-/// wants it.
-#[derive(Clone, Debug)]
-pub(crate) struct Fit {
-    margin: Margin,
-    xlim: Option<(f64, f64)>,
-    /// Panel height / width, for a plot area lower than the plotting engine's
-    /// 50 px minimum (a thin track).
-    aspect: Option<f64>,
-}
-
-impl Fit {
-    /// The first draw: house margins, the target domain as the x window.
-    pub(crate) fn first(o: &RenderOptions, a: &Align) -> Fit {
-        Fit {
-            margin: chart_theme(o, 11.0).plot_margin,
-            xlim: a.xdomain,
-            aspect: None,
-        }
-    }
-
-    /// The second draw, from what the first one drew (`svg`): the plot area
-    /// moves by the margin difference (layout is linear in the margins) and
-    /// the x window shrinks by the scale's expansion, so the drawn domain is
-    /// the target. A margin cannot go below 0: a panel whose axis labels need
-    /// more room keeps its larger left edge (see [`render_stack`]).
-    ///
-    /// The plotting engine keeps a plot area at least 50 px high; a thinner
-    /// track (`height` px in all) gets its height from an aspect ratio
-    /// instead, whose box (still 50 px, centred) moves up by the difference.
-    pub(crate) fn correct(&self, a: &Align, svg: &str, height: f64) -> Fit {
-        let mut margin = self.margin.clone();
-        let mut aspect = None;
-        if let Some([x, y, w, h]) = plot_rect(svg) {
-            margin.left = (margin.left + a.left - x).max(0.0);
-            margin.right = (margin.right + x + w - a.right).max(0.0);
-            let fits = (height - y - self.margin.bottom).max(8.0);
-            if y + h > height - self.margin.bottom + 0.5 && a.right > a.left {
-                aspect = Some(fits / (a.right - a.left));
-                margin.top -= (h - fits) / 2.0;
-            }
-        }
-        let xlim = match (a.xdomain, root_pair(svg, "data-xdomain")) {
-            (Some((t0, t1)), Some((d0, d1))) if t1 > t0 => {
-                let (el, eu) = ((t0 - d0) / (t1 - t0), (d1 - t1) / (t1 - t0));
-                let r = (t1 - t0) / (1.0 + el + eu);
-                (r.is_finite() && r > 0.0).then_some((t0 + r * el, t1 - r * eu))
-            }
-            _ => None,
-        };
-        Fit {
-            margin,
-            xlim: xlim.or(self.xlim),
-            aspect,
-        }
-    }
-}
-
-impl Panel {
-    /// Apply a [`Fit`] (plots only; the extension's own small SVGs keep their
-    /// layout).
-    pub(crate) fn fitted(self, fit: Fit) -> Panel {
-        match self {
-            Panel::Plot {
-                plot,
-                width,
-                height,
-                attrs,
-                ..
-            } => {
-                let mut plot = plot.theme_update(ThemeUpdate {
-                    plot_margin: Some(fit.margin),
-                    ..Default::default()
-                });
-                if let Some(xlim) = fit.xlim {
-                    plot = plot.coord_cartesian_zoom(Some(xlim), None);
-                }
-                if let Some(r) = fit.aspect {
-                    plot = plot.aspect_ratio(r);
-                }
-                Panel::Plot {
-                    plot: Box::new(plot),
-                    width,
-                    height,
-                    attrs,
-                }
-            }
-            p => p,
-        }
-    }
-}
-
-/// The root `<svg>` start tag of a rendered panel.
-fn root_tag(svg: &str) -> &str {
-    &svg[..svg.find('>').unwrap_or(svg.len())]
-}
-
-/// Two numbers from a root attribute (`data-xdomain="a b"`).
-fn root_pair(svg: &str, attr: &str) -> Option<(f64, f64)> {
-    let tag = root_tag(svg);
-    let at = tag.find(&format!(" {attr}=\""))? + attr.len() + 3;
-    let v: Vec<f64> = tag[at..]
-        .split('"')
-        .next()?
-        .split_whitespace()
-        .map(|t| t.parse().ok())
-        .collect::<Option<_>>()?;
-    match v.as_slice() {
-        [a, b, ..] if a.is_finite() && b.is_finite() => Some((*a, *b)),
-        _ => None,
-    }
-}
-
-/// A rendered panel's plot area `[x, y, width, height]` (its root
-/// `data-plot`).
-fn plot_rect(svg: &str) -> Option<[f64; 4]> {
-    let tag = root_tag(svg);
-    let at = tag.find(" data-plot=\"")? + 12;
-    let v: Vec<f64> = tag[at..]
-        .split('"')
-        .next()?
-        .split_whitespace()
-        .filter_map(|t| t.parse().ok())
-        .collect();
-    v.try_into().ok()
-}
+use ggplot_rs::theme::{ElementLine, ElementText, LegendPosition, ThemeUpdate};
 
 /// The typical step between distinct x positions (their median gap).
 pub(crate) fn x_step(values: &[Value]) -> Option<f64> {
@@ -206,22 +71,44 @@ pub fn natural_height(cols: &[Column]) -> u32 {
 const TRACK_X: &str =
     "a ::TRACK needs a numeric or date ::XAXIS (it shares the x axis of the chart above)";
 
-/// Render a track panel (see the module docs).
+/// Render a track panel on its own (`render_inner`'s dispatch: `cols`
+/// already `downsample`/`boxstats`-prepared by its caller,
+/// [`crate::render_placed`]) — no chart above it to align to, so the x axis
+/// stays hidden, as every track's always has (only [`stack`]'s own
+/// bottom-most track shows one).
 pub(crate) fn render(
     o: &RenderOptions,
     cols: &[Column],
     width: u32,
     height: u32,
 ) -> Result<Panel, String> {
+    let plot = plot_for(o, cols, width, height, None, false)?;
+    Ok(track_panel(plot, width, height))
+}
+
+/// The track dispatch core, shared by [`render`] (solo) and [`build`] (a
+/// [`stack`] `PlotGrid` cell): ticks/tiles ([`lanes`]) or a line / bar /
+/// area / step / scatter sparkline ([`measure`]). `step` is the chart's own
+/// x step (a heatmap/tick tile's width), `None` solo; `bottom` is whether
+/// this is the bottom-most cell of a [`stack`] (shows the x axis instead of
+/// hiding it), always `false` solo.
+fn plot_for(
+    o: &RenderOptions,
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    step: Option<f64>,
+    bottom: bool,
+) -> Result<GGPlot, String> {
     let x = find_role(cols, Role::X).ok_or(TRACK_X)?;
     if x.values.iter().any(|v| matches!(v, Value::Str(_))) {
         return Err(TRACK_X.into());
     }
     let name = role_str(cols, Role::Track).unwrap_or_default();
     match cols.iter().find(|c| matches!(c.role, Role::Value(_))) {
-        None => lanes(o, cols, x, None, &name, width, height),
+        None => lanes(o, cols, x, None, &name, step, bottom),
         Some(v) if v.role == Role::Value(Kind::Heatmap) => {
-            lanes(o, cols, x, Some(v), &name, width, height)
+            lanes(o, cols, x, Some(v), &name, step, bottom)
         }
         Some(v) => match v.role {
             Role::Value(
@@ -231,7 +118,7 @@ pub(crate) fn render(
                 | Kind::Bar
                 | Kind::Point
                 | Kind::Smooth),
-            ) => measure(o, kind, v, cols, &name, width, height),
+            ) => measure(o, kind, v, cols, &name, width, height, bottom),
             r => Err(format!(
                 "a ::TRACK draws ticks, ::HEATMAP tiles or a ::LINECHART / ::STEP / \
                  ::AREACHART / ::BARCHART / ::SCATTER, not ::{}",
@@ -241,12 +128,35 @@ pub(crate) fn render(
     }
 }
 
-/// The track look: no x axis (the chart above has it), no grid, no legend,
-/// the lane names (or the track's name) as the y labels.
-fn track_theme(name_shown: bool) -> ThemeUpdate {
+/// One track's plot for [`stack`]'s `PlotGrid` column: the same
+/// `downsample`/`boxstats` prep every panel gets from
+/// [`crate::render_placed`], then [`plot_for`]. Returns the columns
+/// post-prep too, for the caller's own [`crate::finish_touches`] call once
+/// the grid is rendered — [`stack`] itself adds the `data-track` root
+/// attribute to the split-out fragment (a `PlotGrid` cell drops a plot's
+/// own `svg_attr`, see [`crate::chart_plot_for_track`]'s doc comment).
+fn build(
+    o: &RenderOptions,
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    step: Option<f64>,
+    bottom: bool,
+) -> Result<(GGPlot, Vec<Column>), String> {
+    let cols = crate::downsample::prepare(cols, o);
+    let cols = crate::boxstats::prepare(cols)?;
+    let plot = plot_for(o, &cols, width, height, step, bottom)?.svg_attr("data-track", "true");
+    Ok((plot, cols))
+}
+
+/// The track look: no x axis unless `bottom` (the chart above has it,
+/// unless this track is itself the bottom of a [`stack`] — #175's
+/// `AxisCollect::CollectX` draws ticks on the bottom cell only), no grid,
+/// no legend, the lane names (or the track's name) as the y labels.
+fn track_theme(name_shown: bool, bottom: bool) -> ThemeUpdate {
     ThemeUpdate {
-        axis_text_x: Some(ElementText::blank()),
-        axis_title_x: Some(ElementText::blank()),
+        axis_text_x: (!bottom).then(ElementText::blank),
+        axis_title_x: (!bottom).then(ElementText::blank),
         axis_title_y: Some(ElementText::blank()),
         axis_text_y: (!name_shown).then(ElementText::blank),
         panel_grid_major: Some(ElementLine::blank()),
@@ -263,16 +173,16 @@ fn at(c: Option<&Column>, i: usize) -> &Value {
 
 /// Ticks (no measure) or tiles (`::HEATMAP`) in one lane per `::YAXIS` value
 /// (one lane, the track's name, without it). A tile is one x step wide (the
-/// chart's step when stacked); a tick a sliver of it.
+/// chart's step when stacked, via `step`); a tick a sliver of it.
 fn lanes(
     o: &RenderOptions,
     cols: &[Column],
     x: &Column,
     value: Option<&Column>,
     name: &str,
-    width: u32,
-    height: u32,
-) -> Result<Panel, String> {
+    step: Option<f64>,
+    bottom: bool,
+) -> Result<GGPlot, String> {
     let lane = find_role(cols, Role::Y);
     let cat = find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
     let tip = find_role(cols, Role::Label);
@@ -304,9 +214,8 @@ fn lanes(
         levels.push(name.to_string());
     }
 
-    let align = o.align.as_ref();
     let xs: Vec<f64> = x.values.iter().filter_map(num).collect();
-    let (lo, hi) = align.and_then(|a| a.xdomain).unwrap_or_else(|| {
+    let (lo, hi) = {
         let lo = xs.iter().copied().fold(f64::INFINITY, f64::min);
         let hi = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         if lo.is_finite() {
@@ -314,10 +223,9 @@ fn lanes(
         } else {
             (0.0, 1.0)
         }
-    });
-    let step = align
-        .and_then(|a| a.step)
-        .or_else(|| crate::track::x_step(&x.values))
+    };
+    let step = step
+        .or_else(|| x_step(&x.values))
         .filter(|s| *s > 0.0)
         .unwrap_or(((hi - lo) / 50.0).max(1.0));
     // A tick stays visible on a long axis: at least 1/600 of the span.
@@ -446,12 +354,13 @@ fn lanes(
     let shown = levels.iter().any(|l| !l.is_empty());
     let plot = plot
         .theme(chart_theme(o, 11.0))
-        .theme_update(track_theme(shown));
-    Ok(track_panel(plot, width, height))
+        .theme_update(track_theme(shown, bottom));
+    Ok(plot)
 }
 
 /// A line / bar / area / step / scatter track: the chart's own marks, its
 /// name as the one y label (values are in the tooltips).
+#[allow(clippy::too_many_arguments)]
 fn measure(
     o: &RenderOptions,
     kind: Kind,
@@ -460,7 +369,8 @@ fn measure(
     name: &str,
     width: u32,
     height: u32,
-) -> Result<Panel, String> {
+    bottom: bool,
+) -> Result<GGPlot, String> {
     let nums: Vec<f64> = value
         .values
         .iter()
@@ -489,14 +399,16 @@ fn measure(
                         .with_labels(vec![name.to_string()])
                         .with_value_formatter(move |n: f64| vfmt.full(n, &locale)),
                 )
-                .theme_update(track_theme(!name.is_empty()));
-            Ok(track_panel(plot, width, height))
+                .theme_update(track_theme(!name.is_empty(), bottom));
+            Ok(plot)
         }
-        p => Ok(p),
+        // Never happens in practice: every `Kind` `plot_for` dispatches
+        // here to is a plain cartesian panel in `render_cartesian`.
+        Panel::Own { .. } => Err("a ::TRACK measure chart must be a plain plot".to_string()),
     }
 }
 
-/// A track panel, marked for hosts (`data-track`).
+/// A track panel, marked for hosts (`data-track`), at a solo render's size.
 fn track_panel(plot: GGPlot, width: u32, height: u32) -> Panel {
     let mut panel = Panel::plot(plot, width, height);
     if let Panel::Plot { attrs, .. } = &mut panel {
@@ -516,10 +428,7 @@ pub fn render_stack(
     height: u32,
     o: &RenderOptions,
 ) -> Result<Vec<String>, RenderError> {
-    stack(chart, tracks, width, height, o, &|cols, w, h, o, _| {
-        crate::render_with(cols, w, h, o)
-    })
-    .map(|(svgs, _)| svgs)
+    stack(chart, tracks, width, height, o, Place::Doc).map(|(svgs, _)| svgs)
 }
 
 /// The track heights of a stack (0 → natural).
@@ -530,74 +439,194 @@ pub fn heights(tracks: &[(Vec<Column>, u32)]) -> Vec<u32> {
         .collect()
 }
 
-/// A drawing function: columns, width, height, options, y offset in the stack.
-pub(crate) type Draw<'a> =
-    &'a dyn Fn(&[Column], u32, u32, &RenderOptions, f64) -> Result<String, RenderError>;
-
-/// [`render_stack`] with a custom `draw` (the headless dashboard places the
-/// panels as fragments); also returns the track heights.
+/// [`render_stack`] at a given [`Place`] (the headless dashboard nests the
+/// whole stack as one fragment, via a custom `place`); also returns the
+/// track heights.
+///
+/// The chart's own `GGPlot` and every track's are built, then composed into
+/// one single-column [`PlotGrid`] with [`AxisCollect::CollectX`] and
+/// rendered together in **one** pass (sipemu/ggplot-rs#175) — the grid
+/// trains and unions the column's x domain, equalises every cell's
+/// left/right plot-area margins to the widest requirement (a long lane
+/// name's y-axis label, say), and gives a cell thinner than the plotting
+/// engine's own 50px panel floor (a `::TRACK` strip) a centred
+/// `aspect_ratio` so it comes out exactly as tall as its row — all in one
+/// internal layout pass per cell, not a render-measure-render loop. The
+/// merged SVG is then split back into one fragment per panel (`::TRACK`s
+/// and the wasm/web host still address each one separately) and finished
+/// exactly as a lone render would be.
+///
+/// A chart without a plain `GGPlot` panel (a diagram, map, table, KPI, …),
+/// or one whose x scale turns out discrete (categorical bars, say — #175's
+/// own `CollectX` can't train a shared domain on that, same as today), is
+/// left as the chart rendered plainly plus an error note per track.
 pub(crate) fn stack(
     chart: &[Column],
     tracks: &[(Vec<Column>, u32)],
     width: u32,
     height: u32,
     o: &RenderOptions,
-    draw: Draw,
+    place: Place,
 ) -> Result<(Vec<String>, Vec<u32>), RenderError> {
     guard(|| {
         let hs = heights(tracks);
-        let main = draw(chart, width, height, o, 0.0)?;
-        let (Some([px, _, pw, _]), Some(xdomain)) =
-            (plot_rect(&main), root_pair(&main, "data-xdomain"))
+        if tracks.is_empty() {
+            let svg = match place {
+                Place::Doc => crate::render_with(chart, width, height, o)?,
+                Place::At(x, y) => crate::render_with_at(chart, x, y, width, height, o)?,
+            };
+            return Ok((vec![svg], hs));
+        }
+        let Some((chart_plot, chart_cols)) = crate::chart_plot_for_track(chart, width, height, o)?
         else {
-            let note = "a ::TRACK needs a chart with a numeric or date x axis above it";
-            let notes = hs.iter().map(|_| crate::error_svg(note, width));
-            return Ok((std::iter::once(main).chain(notes).collect(), hs));
+            return fallback_notes(chart, &hs, width, height, o, place);
         };
         let step = find_role(chart, Role::X).and_then(|x| x_step(&x.values));
-        let right = px + pw;
-        let tracks_at = |left: f64| -> Result<Vec<String>, RenderError> {
-            let to = RenderOptions {
-                zoom: None,
-                align: Some(Align {
-                    left,
-                    right,
-                    xdomain: Some(xdomain),
-                    step,
-                }),
-                ..o.clone()
-            };
-            let mut y = height as f64;
-            let mut out = Vec::new();
-            for ((cols, _), h) in tracks.iter().zip(&hs) {
-                out.push(draw(cols, width, *h, &to, y)?);
-                y += *h as f64;
-            }
-            Ok(out)
+        let n = tracks.len();
+        let mut track_cols: Vec<Vec<Column>> = Vec::with_capacity(n);
+        let mut grid = PlotGrid::new().ncol(1).axis_collect(AxisCollect::CollectX);
+        grid = grid.add(chart_plot);
+        let mut weights = vec![height as f64];
+        for (i, ((cols, _), h)) in tracks.iter().zip(&hs).enumerate() {
+            let (plot, prepared) =
+                build(o, cols, width, *h, step, i + 1 == n).map_err(RenderError::Render)?;
+            grid = grid.add(plot);
+            track_cols.push(prepared);
+            weights.push(*h as f64);
+        }
+        let total = height.saturating_add(hs.iter().sum());
+        let (merged, warnings) = grid
+            .heights(&weights)
+            .render_svg_native_with_warnings(width, total)
+            .map_err(|e| RenderError::Render(format!("render failed: {e:?}")))?;
+        let frags = split_fragments(&merged, 1 + n)?;
+        // The chart's own x scale turned out discrete (e.g. a categorical
+        // `::BARCHART`): `CollectX` can't train a shared domain on that —
+        // same "needs a numeric or date x axis" case as a chart that isn't
+        // a plain `GGPlot` panel at all.
+        if !frags[0].contains(" data-xdomain=\"") {
+            return fallback_notes(chart, &hs, width, height, o, place);
+        }
+        let panel_warnings = |tag: usize| -> Vec<String> {
+            let prefix = format!("panel {tag}: ");
+            warnings
+                .iter()
+                .filter_map(|w| w.strip_prefix(prefix.as_str()).map(str::to_string))
+                .collect()
         };
-        let mut out = tracks_at(px)?;
-        // A track whose lane names need more room than the chart's y labels
-        // moves everyone's left edge to its own.
-        let left = out
-            .iter()
-            .filter_map(|s| plot_rect(s))
-            .map(|r| r[0])
-            .fold(px, f64::max);
-        let main = if left > px + 0.25 {
-            out = tracks_at(left)?;
-            let mo = RenderOptions {
-                align: Some(Align {
-                    left,
-                    right,
-                    xdomain: None,
-                    step: None,
-                }),
-                ..o.clone()
+        let mut out = Vec::with_capacity(1 + n);
+        for (i, frag) in frags.iter().enumerate() {
+            let cols: &[Column] = if i == 0 {
+                &chart_cols
+            } else {
+                &track_cols[i - 1]
             };
-            draw(chart, width, height, &mo, 0.0)?
-        } else {
-            main
-        };
-        Ok((std::iter::once(main).chain(out).collect(), hs))
+            // Each cell's own `svg_attr`s (the chart's motion attrs, every
+            // track's `data-track`) already landed on a `<g>` wrapping its
+            // content when the grid rendered (sipemu/ggplot-rs#208) — no
+            // string surgery needed here any more.
+            let svg = repackage(frag, place);
+            let svg = crate::finish_touches(svg, cols, o);
+            let svg = match place {
+                Place::Doc => {
+                    crate::with_warnings_attr(svg, &panel_warnings(i + 1), o.record_warnings)
+                }
+                Place::At(..) => svg,
+            };
+            out.push(svg);
+        }
+        Ok((out, hs))
     })
+}
+
+/// `stack`'s fallback when the chart can't be aligned with: the chart
+/// rendered plainly, plus the "needs a numeric or date x axis" note once
+/// per track (unconditionally at [`Place::Doc`], matching the chart's own
+/// `place` only for the chart itself — this mirrors the pre-#175
+/// behaviour, which never positioned these notes for a `Place::At` host
+/// either).
+fn fallback_notes(
+    chart: &[Column],
+    hs: &[u32],
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+    place: Place,
+) -> Result<(Vec<String>, Vec<u32>), RenderError> {
+    let note = "a ::TRACK needs a chart with a numeric or date x axis above it";
+    let main = match place {
+        Place::Doc => crate::render_with(chart, width, height, o)?,
+        Place::At(x, y) => crate::render_with_at(chart, x, y, width, height, o)?,
+    };
+    let notes = hs.iter().map(|_| crate::error_svg(note, width));
+    Ok((std::iter::once(main).chain(notes).collect(), hs.to_vec()))
+}
+
+/// Split a [`PlotGrid`]'s merged, single-column SVG (one `data-panel="1"`,
+/// `"2"`, … fragment per cell, in ggplot-rs's own nested `<svg x y ...>`
+/// form) back into `n` fragments, in panel order.
+fn split_fragments(merged: &str, n: usize) -> Result<Vec<String>, RenderError> {
+    let body_start = merged.find('>').map_or(0, |i| i + 1);
+    let body_end = merged.rfind("</svg>").unwrap_or(merged.len());
+    let mut rest = &merged[body_start..body_end];
+    let mut out = Vec::with_capacity(n);
+    while let Some(start) = rest.find("<svg ") {
+        let after = &rest[start..];
+        let Some(close) = after.find("</svg>") else {
+            break;
+        };
+        let end = close + "</svg>".len();
+        out.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    if out.len() != n {
+        return Err(RenderError::Render(format!(
+            "track stack: expected {n} panel(s) in the merged grid SVG, found {}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// One split-out panel fragment — still ggplot-rs's own nested `<svg x=".."
+/// y=".." ...>` form, its `(x, y)` relative to the grid's own top-left
+/// corner — repackaged as the caller wants it: a standalone document
+/// (`Place::Doc`), or shifted to sit at `(x, y)` in a parent SVG
+/// (`Place::At(x, y)`, a dashboard card nesting the whole stack as one
+/// fragment). The two forms are otherwise identical
+/// (ggplot-rs `render/svg_backend.rs`'s `finish`/`finish_fragment`); an
+/// unrecognised tag (should never happen — this is always ggplot-rs's own
+/// output) is returned unchanged rather than panicking.
+fn repackage(frag: &str, place: Place) -> String {
+    let Some(gt) = frag.find('>') else {
+        return frag.to_string();
+    };
+    let open = &frag[..gt];
+    let Some(rest) = open.strip_prefix("<svg x=\"") else {
+        return frag.to_string();
+    };
+    let Some(x_end) = rest.find('"') else {
+        return frag.to_string();
+    };
+    let fx: f64 = rest[..x_end].parse().unwrap_or(0.0);
+    let Some(y_rest) = rest[x_end + 1..].strip_prefix(" y=\"") else {
+        return frag.to_string();
+    };
+    let Some(y_end) = y_rest.find('"') else {
+        return frag.to_string();
+    };
+    let fy: f64 = y_rest[..y_end].parse().unwrap_or(0.0);
+    let tail = &y_rest[y_end + 1..];
+    match place {
+        Place::Doc => format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"{tail}{}",
+            &frag[gt..]
+        ),
+        Place::At(ax, ay) => format!(
+            "<svg x=\"{:.2}\" y=\"{:.2}\"{tail}{}",
+            ax + fx,
+            ay + fy,
+            &frag[gt..]
+        ),
+    }
 }
