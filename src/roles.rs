@@ -227,6 +227,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "panels per row of a ::FACET / ::FACET_FREE"),
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
       "trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm)"),
+    e("HIST_BINS", &[], R::HistBins, "modifier", true,
+      "a ::HISTOGRAM's bin count ('20') or explicit edges ('0,10,20,30'), shared by every ::CATEGORY / ::FACET group — distinct from ::BINS, which aliases ::CLASSES (a map's colour-class breaks)"),
+    e("HIST_NORM", &[], R::HistNorm, "modifier", true,
+      "a ::HISTOGRAM's per-group normalisation: 'share' draws each ::CATEGORY / ::FACET group's bars as a share of that group's own count (groups of unequal size stay comparable); default: raw counts"),
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
     e("SYNC_ZOOM", &["ZOOM_GROUP"], R::SyncZoom, "modifier", true,
       "maps with the same value (e.g. 'routes') zoom and pan together in the browser"),
@@ -857,6 +861,8 @@ mod tests {
             Role::Censor,
             Role::CooksContour,
             Role::SmoothMethod,
+            Role::HistBins,
+            Role::HistNorm,
             Role::Theme,
             Role::Locale,
             Role::DashboardTitle,
@@ -991,6 +997,8 @@ mod tests {
                 | Role::Censor
                 | Role::CooksContour
                 | Role::SmoothMethod
+                | Role::HistBins
+                | Role::HistNorm
                 | Role::Theme
                 | Role::Locale
                 | Role::DashboardTitle
