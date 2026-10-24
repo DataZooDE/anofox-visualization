@@ -21,7 +21,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # See ci.yml's `lane` job for why: opening a PR with a label already
+  # attached fires `opened` + `labeled` together (#491), so only re-run the
+  # lane decision on labeled/unlabeled when the label is `full-ci` itself.
   lane:
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJson('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'full-ci'
     uses: ./.github/workflows/lane.yml
 
   duckdb-stable-build:
