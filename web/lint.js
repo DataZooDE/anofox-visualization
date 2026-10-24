@@ -326,30 +326,102 @@ export function scratchSession(db, opts = {}) {
   };
 }
 
+// Arrow's logical type ids (apache-arrow's `Type` enum — already live on
+// every Field/DataType object a DuckDB-Wasm result hands us, so reading
+// `.typeId` isn't a new import; web/app.js's own CSP note on importing
+// apache-arrow itself, after boot, doesn't apply here).
+const T_DECIMAL = 7,
+  T_DATE = 8,
+  T_TIMESTAMP = 10,
+  T_LIST = 12,
+  T_STRUCT = 13,
+  T_FIXED_SIZE_LIST = 16,
+  T_MAP = 17;
+
+// #468: `row.toJSON()` only resolves a row's own *top-level* columns to
+// plain values — a List/Struct/Map's own elements stay live Arrow
+// Vector/StructRow/MapRow objects, each needing the same per-type fixup a
+// top-level column gets below (DECIMAL's unscaled mantissa, DATE/
+// TIMESTAMP's epoch number), or a value such as `[0.1, 0.25]::DECIMAL(4,2)[]`
+// reaches the renderer as `["10", "25"]` — the raw, unscaled mantissa.
+// Walks `value` alongside its own (possibly nested) Arrow `type`, converting
+// only the leaf kinds DuckDB-Wasm's default conversion gets wrong; every
+// other leaf (string, bool, plain int, already-correct nested value) passes
+// through untouched, same as it does today.
+function fromArrow(value, type) {
+  if (value == null) return null;
+  switch (type.typeId) {
+    case T_DECIMAL: {
+      const scale = Number(type.scale) || 0;
+      const n = Number(value);
+      return scale > 0 ? n / 10 ** scale : n;
+    }
+    case T_DATE:
+      return toIso(value, true);
+    case T_TIMESTAMP:
+      return toIso(value, false);
+    case T_LIST:
+    case T_FIXED_SIZE_LIST: {
+      const itemType = type.children[0].type;
+      return [...value].map((v) => fromArrow(v, itemType));
+    }
+    case T_STRUCT: {
+      const out = {};
+      for (const f of type.children) out[f.name] = fromArrow(value[f.name], f.type);
+      return out;
+    }
+    case T_MAP: {
+      // Physically List<Struct<key, value>> — `entries`' own two children.
+      const entry = type.children[0].type;
+      const keyType = entry.children[0].type;
+      const valType = entry.children[1].type;
+      const out = {};
+      for (const [k, v] of value) out[fromArrow(k, keyType)] = fromArrow(v, valType);
+      return out;
+    }
+    default:
+      return typeof value === "bigint" ? Number(value) : value;
+  }
+}
+
+// Whether `type`'s own structure (recursively) contains a DECIMAL, DATE or
+// TIMESTAMP leaf anywhere — the only leaf kinds `fromArrow` needs to walk
+// for. A column without one keeps going through DuckDB-Wasm's own (already
+// correct) default conversion, untouched.
+function needsFixup(type) {
+  switch (type.typeId) {
+    case T_DECIMAL:
+    case T_DATE:
+    case T_TIMESTAMP:
+      return true;
+    case T_LIST:
+    case T_FIXED_SIZE_LIST:
+      return needsFixup(type.children[0].type);
+    case T_STRUCT:
+      return type.children.some((f) => needsFixup(f.type));
+    case T_MAP:
+      return needsFixup(type.children[0].type.children[1].type);
+    default:
+      return false;
+  }
+}
+
 // A DuckDB-Wasm result as rows' JSON text ([{col: value, …}, …]) — what
 // web/app.js hands to render_panel. DuckDB-Wasm returns DATE / TIMESTAMP as
 // epoch numbers (back to ISO strings, so date variables and axes read as
 // YYYY-MM-DD) and DECIMAL as the unscaled mantissa (scaled back); BIGINTs
-// become numbers.
+// become numbers — a column's own top-level value and, #468, any DECIMAL /
+// DATE / TIMESTAMP nested inside a LIST / STRUCT / MAP (or FixedSizeList).
 export function rowsJson(res) {
-  const dateCols = new Map(); // name -> "date" | "time"
-  const decCols = new Map(); // name -> scale
+  const fixupCols = new Map(); // name -> field.type, for a column needing fromArrow's walk
   try {
     for (const f of res.schema.fields) {
-      const t = String(f.type);
-      if (/date/i.test(t)) dateCols.set(f.name, "date");
-      else if (/timestamp/i.test(t)) dateCols.set(f.name, "time");
-      else if (/decimal/i.test(t)) decCols.set(f.name, Number(f.type.scale) || 0);
+      if (needsFixup(f.type)) fixupCols.set(f.name, f.type);
     }
   } catch (_) {}
   const rows = res.toArray().map((row) => {
     const o = row.toJSON();
-    for (const [c, kind] of dateCols) {
-      if (o[c] != null) o[c] = toIso(o[c], kind === "date");
-    }
-    for (const [c, scale] of decCols) {
-      if (o[c] != null && scale > 0) o[c] = Number(o[c]) / 10 ** scale;
-    }
+    for (const [c, type] of fixupCols) o[c] = fromArrow(o[c], type);
     return o;
   });
   return JSON.stringify(rows, (_, v) => (typeof v === "bigint" ? Number(v) : v));
