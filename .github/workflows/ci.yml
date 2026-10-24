@@ -114,10 +114,14 @@ jobs:
       - name: test (core incl. serve) — doctests
         run: cargo test --doc --locked --features serve
 
+      # No separate doctest step here: anofox_viz_ffi/anofox-visualization-duckdb
+      # are staticlib/cdylib only (doctests aren't supported for those crate
+      # types), and vendor/tiny_http's lib sets `doctest = false` on purpose —
+      # its one doc example needs the dropped dev-dependency `rustc-serialize`
+      # (vendor/tiny_http/PATCHES.md). `cargo test --doc` ignores that flag and
+      # tries to compile it anyway, so don't pass `--doc` for this group.
       - name: test (ffi + duckext + vendored tiny_http)
         run: cargo nextest run --locked -p anofox_viz_ffi -p anofox-visualization-duckdb -p tiny_http
-      - name: test (ffi + duckext + vendored tiny_http) — doctests
-        run: cargo test --doc --locked -p anofox_viz_ffi -p anofox-visualization-duckdb -p tiny_http
 
       - name: C-API extension smoke test (render, NULL, errors)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
@@ -291,7 +295,13 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
+      # Full history + tags: tests/web/version_test.mjs computes its own
+      # `git describe` and compares it against the wasm build's embedded
+      # version (built with full history in web-build) — a shallow checkout
+      # here makes `git describe` fail and the comparison mismatch (#464).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
