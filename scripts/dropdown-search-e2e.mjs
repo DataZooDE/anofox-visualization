@@ -51,6 +51,9 @@ const ready = (page) =>
     null,
     { timeout: 120000 }
   );
+// place()'s own one-frame compositor-correction (web/app.js) needs a paint
+// to land before the popover's geometry is trustworthy to assert on.
+const nextFrame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 async function open(sql, opts = {}) {
   const page = await browser.newPage({
     viewport: opts.viewport || { width: 1280, height: 900 },
@@ -118,6 +121,30 @@ const FEW = `SELECT v AS ext ::DROPDOWN FROM (VALUES ('a'), ('b'), ('c')) t(v);`
   check(afterOpen.rows === 200, "(b) renders a window of the 400 options, got " + afterOpen.rows);
   check(afterOpen.firstSelected === "true", "(b) the current pick is aria-selected in the list");
   check(!!afterOpen.activedescendant, "(b) aria-activedescendant points at the highlighted option");
+
+  // The popover is `position: fixed`, placed from the input's own
+  // getBoundingClientRect() — not clipped by the `.controls` bar's own
+  // `overflow: hidden` (a real bug: the bar cuts off an `overflow:
+  // visible`/`absolute` popover at its own bottom edge), and tall enough to
+  // show a useful first page of a long list, not just one or two rows.
+  // (place()'s own one-frame compositor correction needs a paint first.)
+  await nextFrame(page);
+  const popBox = await page.evaluate(() => {
+    const pop = document.querySelector(".dp-dd-pop");
+    const list = document.querySelector(".dp-dd-list");
+    const r = pop.getBoundingClientRect();
+    const lr = list.getBoundingClientRect();
+    const visible = [...list.querySelectorAll('[role="option"]')].filter((o) => {
+      const or = o.getBoundingClientRect();
+      return or.top >= lr.top - 0.5 && or.bottom <= lr.bottom + 0.5;
+    }).length;
+    return { top: r.top, left: r.left, right: r.right, bottom: r.bottom, vw: innerWidth, vh: innerHeight, visible };
+  });
+  check(
+    popBox.top >= 0 && popBox.left >= 0 && popBox.right <= popBox.vw && popBox.bottom <= popBox.vh,
+    `(b) the open listbox's bounding box is fully inside the viewport, got ${JSON.stringify(popBox)}`
+  );
+  check(popBox.visible >= 8, `(b) at least 8 options show at once for a 400-option list, got ${popBox.visible}`);
 
   // Type a filter that matches one option by value.
   await combo.fill("ext_250");
@@ -190,11 +217,6 @@ const FEW = `SELECT v AS ext ::DROPDOWN FROM (VALUES ('a'), ('b'), ('c')) t(v);`
   }
 
   check(!errs.length, "(b) no page errors: " + errs.join(" | "));
-  if (shots) {
-    await combo2.click();
-    await combo2.fill("ext_1");
-    await page.screenshot({ path: `${shots}/dropdown-search-light-1280.png` });
-  }
   await page.close();
 }
 
@@ -270,20 +292,72 @@ const FEW = `SELECT v AS ext ::DROPDOWN FROM (VALUES ('a'), ('b'), ('c')) t(v);`
   await page.close();
 }
 
-// dark + phone screenshots -------------------------------------------------
+// (f) a ::FIT tab (no page scroll) still fits the popover in the viewport --
+{
+  const { page, errs } = await open(`SELECT 'Overview'::TAB;
+SELECT 'fit'::FIT;
+${MANY}`);
+  await page.locator(".dp-dd-input").click();
+  await nextFrame(page);
+  const info = await page.evaluate(() => {
+    const pop = document.querySelector(".dp-dd-pop");
+    const r = pop.getBoundingClientRect();
+    return {
+      top: r.top,
+      left: r.left,
+      right: r.right,
+      bottom: r.bottom,
+      vw: innerWidth,
+      vh: innerHeight,
+      pageScrolls: document.documentElement.scrollHeight > innerHeight + 2,
+    };
+  });
+  check(
+    info.top >= 0 && info.left >= 0 && info.right <= info.vw && info.bottom <= info.vh,
+    `(f) the listbox still fits the viewport in a ::FIT tab, got ${JSON.stringify(info)}`
+  );
+  check(!info.pageScrolls, "(f) the ::FIT tab itself still has no page scroll with the popover open");
+  check(!errs.length, "(f) no page errors: " + errs.join(" | "));
+  if (shots) await page.screenshot({ path: `${shots}/dropdown-search-fit-1280.png` });
+  await page.close();
+}
+
+// (g) phone width (390px): no horizontal overflow, and the popover is still
+// fully inside the (short) viewport, not just the wide desktop one. --------
+{
+  const { page, errs } = await open(MANY, { viewport: { width: 390, height: 844 } });
+  await page.locator(".dp-dd-input").click();
+  await nextFrame(page);
+  const info = await page.evaluate(() => {
+    const pop = document.querySelector(".dp-dd-pop");
+    const r = pop.getBoundingClientRect();
+    return {
+      top: r.top,
+      left: r.left,
+      right: r.right,
+      bottom: r.bottom,
+      vw: innerWidth,
+      vh: innerHeight,
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  });
+  check(info.overflow <= 1, "(g) no horizontal overflow at 390px with the combobox open, got " + info.overflow);
+  check(
+    info.top >= 0 && info.left >= 0 && info.right <= info.vw && info.bottom <= info.vh,
+    `(g) the listbox is fully inside the 390px viewport, got ${JSON.stringify(info)}`
+  );
+  check(!errs.length, "(g) no page errors: " + errs.join(" | "));
+  if (shots) await page.screenshot({ path: `${shots}/dropdown-search-phone-390.png` });
+  await page.close();
+}
+
+// dark + light screenshots --------------------------------------------------
 if (shots) {
   for (const theme of ["light", "dark"]) {
     const { page } = await open(MANY, { theme });
     await page.locator(".dp-dd-input").click();
+    await nextFrame(page);
     await page.screenshot({ path: `${shots}/dropdown-search-${theme}-1280.png` });
-    await page.close();
-  }
-  {
-    const { page } = await open(MANY, { viewport: { width: 390, height: 844 } });
-    await page.locator(".dp-dd-input").click();
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-    check(overflow <= 1, "(phone) no horizontal overflow at 390px with the combobox open, got " + overflow);
-    await page.screenshot({ path: `${shots}/dropdown-search-phone-390.png` });
     await page.close();
   }
 }

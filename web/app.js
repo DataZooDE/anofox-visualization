@@ -10365,6 +10365,60 @@ function makeSearchableDropdown(meta) {
       items[active].scrollIntoView({ block: "nearest" });
     } else inputEl.removeAttribute("aria-activedescendant");
   };
+  // `.dp-dd-pop` is `position: fixed` (CSS) so a `.controls` bar's
+  // `overflow: hidden` never clips it, but that means it no longer inherits
+  // a position from flowing after `inputEl` — place it from the input's
+  // own `getBoundingClientRect()`, flipped above when there isn't room
+  // below (a short viewport, a ::FIT tab, near the bottom of the page).
+  // Clamps `list`'s own height (not the popover's) to whatever room is
+  // left, so there is only ever the one scrollbar `.dp-ms-list` already
+  // has — not a second one on the popover.
+  const PAD = 8;
+  const place = () => {
+    const r = inputEl.getBoundingClientRect();
+    const w = Math.min(Math.max(r.width, 190), window.innerWidth - 2 * PAD);
+    pop.style.width = w + "px";
+    pop.style.left = Math.max(PAD, Math.min(r.left, window.innerWidth - w - PAD)) + "px";
+    list.style.maxHeight = ""; // the CSS default (230px) — measure the natural size first
+    // `clientHeight` (not `scrollHeight`, which ignores `max-height` by
+    // definition — it reports the full, unclamped content height) is the
+    // list's actual rendered height under the CSS 230px cap.
+    const naturalList = list.clientHeight;
+    const chromeH = pop.clientHeight - naturalList; // padding + the "+N more" line
+    const below = window.innerHeight - r.bottom - PAD;
+    const above = r.top - PAD;
+    const fitsBelow = naturalList + chromeH <= below;
+    if (fitsBelow || below >= above) {
+      pop.style.top = r.bottom + 4 + "px";
+      if (!fitsBelow) list.style.maxHeight = Math.max(80, below - chromeH) + "px";
+    } else {
+      const listH = Math.max(80, Math.min(naturalList, above - chromeH));
+      pop.style.top = Math.max(PAD, r.top - 4 - (listH + chromeH)) + "px";
+      list.style.maxHeight = listH + "px";
+    }
+    // A compositor quirk: under `prefers-reduced-motion: reduce` (which
+    // forces every CSS transition's duration near 0 — `.control input`'s own
+    // border-color/box-shadow transition included), the first frame a
+    // `position: fixed` popover is placed in can paint at a stale position
+    // even though `top`/`left` are already correct in the CSSOM (reproduced
+    // in Chromium; not specific to this popover). Re-applying them one frame
+    // later — reading current values, not ones captured now, so a later
+    // `place()` before this fires is never clobbered — fixes it.
+    requestAnimationFrame(() => {
+      if (pop.hidden) return;
+      const t = pop.style.top,
+        l = pop.style.left;
+      pop.style.top = "0px";
+      void pop.offsetTop; // force the reflow between the two writes
+      pop.style.top = t;
+      pop.style.left = "0px";
+      void pop.offsetLeft;
+      pop.style.left = l;
+    });
+  };
+  const reposition = () => {
+    if (!pop.hidden) place();
+  };
   const render = (q) => {
     const all = ddMatches(meta, q);
     shown = all.slice(0, DD_WINDOW);
@@ -10397,6 +10451,7 @@ function makeSearchableDropdown(meta) {
     more.hidden = all.length <= shown.length;
     if (!more.hidden) more.textContent = `+${all.length - shown.length} more — keep typing to narrow`;
     moveActive(shown.length ? 0 : -1);
+    if (!pop.hidden) place();
   };
   const close = (restore) => {
     if (pop.hidden) return;
@@ -10406,6 +10461,8 @@ function makeSearchableDropdown(meta) {
     inputEl.removeAttribute("aria-activedescendant");
     active = -1;
     if (restore) inputEl.value = currentLabel();
+    window.removeEventListener("scroll", reposition, true);
+    window.removeEventListener("resize", reposition);
   };
   const open = () => {
     if (!pop.hidden) return;
@@ -10413,6 +10470,10 @@ function makeSearchableDropdown(meta) {
     dd.setAttribute("data-open", "true");
     inputEl.setAttribute("aria-expanded", "true");
     render(inputEl.value === currentLabel() ? "" : inputEl.value);
+    // capture:true so a scroll inside any nested scrollable ancestor (not
+    // just the window) keeps the popover lined up with the input.
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
   };
   function commit(k) {
     const v = options[k];
