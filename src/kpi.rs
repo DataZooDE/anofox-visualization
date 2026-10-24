@@ -19,7 +19,7 @@
 
 use crate::format::{escape_xml as esc, format_number_l, Locale};
 use crate::theme::hex;
-use crate::{value_str, Column, Kind, MetricFmt, RenderOptions, Role};
+use crate::{render_with_at, value_str, Column, Kind, MetricFmt, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 
 /// How a KPI's change reads (`::DELTA_FORMAT`).
@@ -427,36 +427,26 @@ impl Kpi {
         if self.spark.len() >= 2 {
             let (top, sh) = (y + 8.0, SPARK_H - 12.0);
             y += SPARK_H;
-            let sw = inner.min(320.0);
-            let (mn, mx) = self
-                .spark
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-                    (a.min(v), b.max(v))
-                });
-            let rng = if mx > mn { mx - mn } else { 1.0 };
-            let n = self.spark.len() as f64;
-            let px = |i: usize| PAD + i as f64 * sw / (n - 1.0);
-            let py = |v: f64| top + sh - (v - mn) / rng * sh;
-            let pts: Vec<String> = self
-                .spark
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| format!("{:.1},{:.1}", px(i), py(v)))
-                .collect();
-            let brand = hex(o.brand());
-            let last = self.spark.len() - 1;
-            s.push_str(&format!(
-                "<g class=\"kpi-spark\"><polygon points=\"{:.1},{b:.1} {p} {:.1},{b:.1}\" fill=\"{brand}\" fill-opacity=\"0.12\"/>\
-                 <polyline points=\"{p}\" fill=\"none\" stroke=\"{brand}\" stroke-width=\"1.6\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>\
-                 <circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" fill=\"{brand}\"/></g>",
-                px(0),
-                px(last),
-                px(last),
-                py(self.spark[last]),
-                p = pts.join(" "),
-                b = top + sh,
-            ));
+            let sw = inner.min(320.0).max(crate::MIN_DIM as f64);
+            // Drawn through the same ggplot-rs path as a standalone
+            // `::SPARKLINE` panel / a table's `::SPARKLINE` cell
+            // (`render_sparkline`, via `render_with_at`) instead of a
+            // hand-rolled `<polygon>`/`<polyline>`/`<circle>` (#419) — one
+            // sparkline renderer in the whole crate. A nested panel is
+            // clamped to `MIN_DIM` (32px) in both dimensions however little
+            // is asked for, and this strip is only `sh` (30px) tall, so the
+            // panel is centred on it, the same technique #427 used to fit a
+            // table's sparkline cell into its row.
+            let sh_req = sh.max(crate::MIN_DIM as f64);
+            let sy = top + (sh - sh_req) / 2.0;
+            let spark_col = Column::new(
+                "value",
+                Role::Value(Kind::Sparkline),
+                self.spark.iter().map(|&v| Value::Float(v)).collect(),
+            );
+            if let Ok(frag) = render_with_at(&[spark_col], PAD, sy, sw as u32, sh_req as u32, o) {
+                s.push_str(&frag);
+            }
         }
         if let Some(g) = &self.goal {
             let top = y + 6.0;
@@ -757,7 +747,13 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("vs &lt;prev&gt;"), "{s}");
-        assert!(s.contains("<polyline") && s.contains("<circle"), "{s}");
+        // #419: the sparkline is now drawn through `render_sparkline` (via
+        // `render_with_at`), the same ggplot-rs line/point geoms a
+        // standalone `::SPARKLINE` panel or a table's `::SPARKLINE` cell
+        // use (#427's `table_sparkline_cell_is_drawn_not_dropped`) — no
+        // hand-rolled `<polyline>`/`<circle>` left to assert against.
+        assert!(s.contains("data-geom=\"line\""), "{s}");
+        assert!(s.contains("data-geom=\"point\""), "{s}");
         assert!(s.contains("125% of goal 4"), "{s}");
         assert!(s.contains(&format!("fill=\"{}\"", hex(c.positive))));
     }

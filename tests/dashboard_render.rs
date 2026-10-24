@@ -219,8 +219,11 @@ fn headless_kpi_tile_has_delta_sparkline_and_goal() {
         "{svg}"
     );
     assert!(svg.contains(">vs last month</tspan>"), "{svg}");
+    // #419: the sparkline is drawn through `render_sparkline` (ggplot-rs),
+    // the same line/point geoms a standalone `::SPARKLINE` panel or a
+    // table's `::SPARKLINE` cell use — no `kpi-spark` hand-rolled markup.
     assert!(
-        svg.contains("class=\"kpi-spark\"") && svg.contains("<polyline"),
+        svg.contains("data-geom=\"line\"") && svg.contains("data-geom=\"point\""),
         "{svg}"
     );
     assert!(
