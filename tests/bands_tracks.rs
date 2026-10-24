@@ -230,7 +230,11 @@ fn tracks_share_the_charts_plot_area_and_x_window() {
     let xdomain = root_attr(&svgs[0], "data-xdomain").unwrap();
     for (k, svg) in svgs.iter().enumerate().skip(1) {
         common::assert_safe_svg(svg, "track");
-        assert_eq!(root_attr(svg, "data-track").as_deref(), Some("true"));
+        // `data-track` lands on a `<g>` wrapping the track's content, not
+        // the panel's own root `<svg>` (sipemu/ggplot-rs#208's `PlotGrid`
+        // cell attributes) — same as the dashboard-card tests below check
+        // via a plain substring count.
+        assert!(svg.contains("data-track=\"true\""), "{svg}");
         let p = plot_rect(svg);
         assert!(
             (p[0] - main[0]).abs() < 0.05 && (p[2] - main[2]).abs() < 0.05,

@@ -552,6 +552,22 @@ fn record_warnings_off_covers_every_top_level_svg_not_just_the_first() {
             vec![Value::Float(1.0), Value::Float(2.0)],
         ),
     ];
+    // A proper `::TRACK` (unlike `warned()` above, which has no `Role::X`
+    // or `Role::Track` at all — fine as a standalone density chart, but
+    // `track::stack` now dispatches a `::TRACK` statement itself rather
+    // than falling through to a plain chart render): one non-finite point
+    // reliably gives one ggplot-rs build warning.
+    let track_warned = || {
+        vec![
+            Column::new("x", Role::X, vec![Value::Float(1.0), Value::Float(2.0)]),
+            Column::new(
+                "v",
+                Role::Value(Kind::Point),
+                vec![Value::Float(1.0), Value::Float(f64::NAN)],
+            ),
+            Column::new("t", Role::Track, vec![Value::Str("T".into()); 2]),
+        ]
+    };
     let off = RenderOptions {
         record_warnings: false,
         ..RenderOptions::default()
@@ -579,7 +595,7 @@ fn record_warnings_off_covers_every_top_level_svg_not_just_the_first() {
     // (sec-review-342 L2) because it only edited the *first* `<svg>`.
     let on_svg = render_with_title(
         &clean,
-        &[(warned(), 0)],
+        &[(track_warned(), 0)],
         460,
         300,
         &RenderOptions::default(),
@@ -594,19 +610,19 @@ fn record_warnings_off_covers_every_top_level_svg_not_just_the_first() {
         on_svg.contains("data-warnings"),
         "sanity: the track does warn: {on_svg}"
     );
-    let off_svg = render_with_title(&clean, &[(warned(), 0)], 460, 300, &off).unwrap();
+    let off_svg = render_with_title(&clean, &[(track_warned(), 0)], 460, 300, &off).unwrap();
     assert!(!off_svg.contains("data-warnings"), "{off_svg}");
 
     // Same check one level down, directly on `track::render_stack`.
     let on_svgs = track::render_stack(
         &clean,
-        &[(warned(), 0)],
+        &[(track_warned(), 0)],
         460,
         300,
         &RenderOptions::default(),
     )
     .unwrap();
     assert!(on_svgs.iter().any(|s| s.contains("data-warnings")));
-    let off_svgs = track::render_stack(&clean, &[(warned(), 0)], 460, 300, &off).unwrap();
+    let off_svgs = track::render_stack(&clean, &[(track_warned(), 0)], 460, 300, &off).unwrap();
     assert!(off_svgs.iter().all(|s| !s.contains("data-warnings")));
 }
