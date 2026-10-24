@@ -343,6 +343,48 @@ for (const vp of [
   check(!errs.length, `(h) no page errors: ${errs.join(" | ")}`);
 }
 
+// (i) #418: a ::GROUP KPI strip keeps its own natural height under ::FIT —
+// it is taken out of the row-share entirely (never stretched to fill the
+// window), while chart rows share the rest; a ::HEIGHT right before the
+// ::GROUP instead sets that row's share, like it does for a chart row.
+{
+  const vp = { width: 1920, height: 1080 };
+  const sql = (heightLine = "") => `SELECT 'fit'::FIT;\n${heightLine}SELECT ''::GROUP;\n` + `SELECT count(*) ::METRIC, 'Extensions'::LABEL FROM range(5) t(i);\n` + `SELECT sum(i) ::METRIC, 'Downloads'::LABEL FROM range(5) t(i);\n` + `SELECT 1::ENDGROUP;\n` + `SELECT 6::COL; SELECT 320::HEIGHT;\n${chart(30)}SELECT 6::COL; SELECT 320::HEIGHT;\n${chart(31)}${bars(32)}`;
+  // the tiles' authored (un-fitted) height — what "natural" means here
+  const nat = await open(vp, "?fit=0", "", sql());
+  const natH = await nat.page.evaluate(() => [...document.querySelectorAll(".metric")].map((p) => p.getBoundingClientRect().height));
+  await nat.page.close();
+  // no ::HEIGHT before the ::GROUP: fitted tiles stay at ~natH (at least the
+  // tile's own minimum — 96 px plain, 36 px ::KPI_SIZE 'compact' — #405/#400),
+  // not stretched to share the window with the chart rows.
+  const { page, errs } = await open(vp, "", "", sql());
+  const m = await measure(page);
+  check(m.state === "on" && !m.scroll, `(i) the ::FIT tab fits, no scroll (${m.state}, scroll ${m.scroll})`);
+  const fitH = await page.evaluate(() => [...document.querySelectorAll(".metric")].map((p) => p.getBoundingClientRect().height));
+  const wantH = natH.map((h) => Math.max(h, 96));
+  check(
+    natH.length === 2 && fitH.length === 2 && fitH.every((h, k) => Math.abs(h - wantH[k]) <= 4),
+    `(i) a ::GROUP KPI strip keeps its natural height under ::FIT, not stretched (natural ${natH.map(Math.round)}, wanted ${wantH.map(Math.round)}, fitted ${fitH.map(Math.round)})`
+  );
+  check(inView(m), "(i) every panel is inside the viewport");
+  check(m.charts.length >= 2, `(i) charts on the tab (${m.charts.length})`);
+  check(
+    m.charts.every((c) => Math.abs((c.attrH || c.vbH) - c.shownH) <= 2 && Math.abs(c.vbW - c.holderW) <= 2),
+    `(i) charts fill the rest, redrawn at their fitted size: ${JSON.stringify(m.charts.map((c) => [c.attrH, Math.round(c.shownH)]))}`
+  );
+  check(!errs.length, `(i) no page errors: ${errs.join(" | ")}`);
+  await page.close();
+  // a ::HEIGHT right before the ::GROUP sets its share instead — no longer
+  // ignored: a much taller authored weight grows the row well past natural.
+  const { page: hp, errs: hErrs } = await open(vp, "", "", sql("SELECT 420::HEIGHT;\n"));
+  const hm = await measure(hp);
+  const grown = hm.boxes.find((b) => b.kpi).h;
+  check(grown > wantH[0] + 40, `(i) ::HEIGHT right before a ::GROUP sets its ::FIT share, not ignored (natural ${Math.round(wantH[0])}px, 420::HEIGHT -> ${Math.round(grown)}px)`);
+  check(hm.state === "on" && !hm.scroll && inView(hm), `(i, ::HEIGHT) the tab fits, no scroll, every panel in the viewport (${hm.state}, scroll ${hm.scroll})`);
+  check(!hErrs.length, `(i, ::HEIGHT) no page errors: ${hErrs.join(" | ")}`);
+  await hp.close();
+}
+
 // screenshots of the fitted tab (light / dark)
 if (shots) {
   for (const theme of ["light", "dark"]) {

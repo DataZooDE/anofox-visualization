@@ -300,6 +300,12 @@ pub enum Role {
     OptionLabel,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
     Text(TextSize),
+    /// A KPI tile's density (`::KPI_SIZE`): `'compact'` (single-line
+    /// value + label, no sparkline/goal) or `'normal'` (default). On a
+    /// `::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT` panel it sets that tile;
+    /// on a `::GROUP` it sets every tile in the box (a tile's own
+    /// `::KPI_SIZE` wins over the box's).
+    KpiSize,
     /// Layout: reserve an empty grid cell (`::PLACEHOLDER`).
     Placeholder,
     /// A banner image at the top of the dashboard (`::HEADER_IMAGE`).
@@ -1287,7 +1293,7 @@ pub(crate) fn title_value(values: &[Value]) -> Option<String> {
 /// (its caption is `::LABEL`), as in a dashboard.
 fn panel_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
     let title = title_value(&cols.iter().find(|c| c.role == Role::Title)?.values)?;
-    kpi::Kpi::from_columns(cols, &o.locale)
+    kpi::Kpi::from_columns(cols, &o.locale, false)
         .is_none()
         .then_some(title)
 }
@@ -2079,7 +2085,7 @@ fn render_inner(
     }
     // A KPI / text card (value, change, sparkline, goal) — the same tile as
     // the headless dashboard; at most its natural height.
-    if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale) {
+    if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale, false) {
         let h = height.min(k.height().ceil() as u32).max(MIN_DIM);
         return Ok(Panel::own(width, h, k.body(width as f64, h as f64, o)));
     }

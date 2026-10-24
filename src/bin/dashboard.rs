@@ -17,6 +17,27 @@ use anofox_visualization::{
 use std::process::Command;
 use std::sync::Arc;
 
+/// A statement's own `::KPI_SIZE` cell, read from its already-queried JSON
+/// rows (#405) — `Some(true)` 'compact', `Some(false)` 'normal', `None` with
+/// no (or an unparseable) value or no `::KPI_SIZE` role at all.
+fn kpi_size_json(
+    roles: &[(usize, Role)],
+    rows: &Result<Vec<serde_json::Map<String, serde_json::Value>>, String>,
+) -> Option<bool> {
+    let idx = roles.iter().find(|(_, r)| *r == Role::KpiSize)?.0;
+    let v = rows
+        .as_ref()
+        .ok()?
+        .first()?
+        .get(&format!("c{idx}"))?
+        .as_str()?;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "compact" => Some(true),
+        "normal" => Some(false),
+        _ => None,
+    }
+}
+
 const USAGE: &str = "usage:\n  \
      dashboard <file.sql> [out.html] [--theme T] [--dark] [--data <dir>]\n  \
                                              render to interactive HTML (T: a built-in theme,\n  \
@@ -142,7 +163,8 @@ fn render_dashboard_html(
     // panels' rows (a ::THEME anywhere applies to every panel).
     let mut chrome = DashboardChrome::default();
     type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
-    let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
+    // The third element is each panel's own `::KPI_SIZE` ('compact') (#405).
+    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
     // `SET VARIABLE anofox_data = …` opens the session, before the script's
     // own statements — as `--data` does for `--check` and a locked server.
     let mut prelude = data.map(data_set_stmt).unwrap_or_default();
@@ -152,6 +174,8 @@ fn render_dashboard_html(
     // alternative (#214) — the other alternatives' non-setup statements
     // never even run.
     let mut view_pick = sql::views::StaticPick::default();
+    // The enclosing ::GROUP's own ::KPI_SIZE (#405) — a tile's own wins.
+    let mut group_compact = false;
     for p in sql::plan(script) {
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
@@ -203,6 +227,22 @@ fn render_dashboard_html(
             chrome.apply_row(r, cells);
             continue;
         }
+        // ::GROUP / ::ENDGROUP (#405): no box here (the static CLI output
+        // is one figure per panel, no grid), but a ::GROUP's own
+        // ::KPI_SIZE still cascades onto its tiles' own cards.
+        if p.roles.iter().any(|(_, r)| *r == Role::GroupStart) {
+            group_compact = if p.roles.iter().any(|(_, r)| *r == Role::KpiSize) {
+                let rows = exec(&format!("{prelude}{};", p.sql));
+                kpi_size_json(&p.roles, &rows).unwrap_or(false)
+            } else {
+                false
+            };
+            continue;
+        }
+        if p.roles.iter().any(|(_, r)| *r == Role::GroupEnd) {
+            group_compact = false;
+            continue;
+        }
         let section = p.roles.iter().any(|(_, r)| *r == Role::Section);
         // Layout directives are interactive — the browser builder / `serve`
         // handle them; the static CLI output skips them (role registry).
@@ -210,7 +250,8 @@ fn render_dashboard_html(
             continue;
         }
         let rows = exec(&format!("{prelude}{};", p.sql));
-        queried.push((p, rows));
+        let compact = kpi_size_json(&p.roles, &rows).unwrap_or(group_compact);
+        queried.push((p, rows, compact));
     }
 
     let set = chrome.resolve(theme_arg).unwrap_or_else(|e| {
@@ -232,7 +273,7 @@ fn render_dashboard_html(
     let mut panels = String::new();
     let mut n = 0;
     let mut queried = queried.into_iter().peekable();
-    while let Some((p, rows)) = queried.next() {
+    while let Some((p, rows, compact)) = queried.next() {
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
@@ -264,14 +305,24 @@ fn render_dashboard_html(
             panels.push_str(&format!("<h2 class=\"section\">{}</h2>", escape_xml(text)));
             continue;
         }
-        let cols = anofox_visualization::name_columns(
+        let mut cols = anofox_visualization::name_columns(
             sql::columns_from_rows(&rows, &p.roles),
             &p.roles,
             &p.names,
         );
+        // A ::GROUP's ::KPI_SIZE cascading onto this tile (#405): a synthetic
+        // column, since this isn't a tile's own cast — kpi::Kpi::from_columns
+        // reads the first ::KPI_SIZE column it finds, own one first.
+        if compact {
+            cols.push(anofox_visualization::Column::new(
+                "_kpi_size",
+                Role::KpiSize,
+                vec![anofox_visualization::Value::Str("compact".into())],
+            ));
+        }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
             if let Ok(r) = r {
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
