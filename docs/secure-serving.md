@@ -536,7 +536,17 @@ of the authoring servers carries a
   - `app` — the landing page's header: `{"name": "…", "tagline": "…",
     "logo": "https://… | data:image/…", "favicon": "…"}` (the app-bar
     settings of `anofox_serve`; `name_visible: false` shows the logo alone).
-    Without it the page is titled *Dashboards*.
+    Without it the page is titled *Dashboards*. `charts_as_tables: true`
+    (boolean only — #403) is a sibling key with no bearing on the header:
+    an installation default for a viewer's never-set initial "Charts as
+    tables" state (`web/app.js`'s `dpAsTables`). It never overrides a
+    viewer's own explicit choice (their remembered toggle, or a dashboard
+    link's `?tables=`) and never forces a dashboard's own in-page bar on
+    (that stays `-- @astables on` / the toolbar's **⋯** menu, #401).
+    `serve --dashboards` (mode B, script-free) has no toggle at all to
+    seed — there is no client script there — so `charts_as_tables` only
+    ever has an effect on `anofox_serve_dashboards`'s own dashboard pages
+    and the authoring builder (`anofox_serve`/`serve <db>`, `--app-charts-as-tables`).
   - `home` — a dashboard id: `/` redirects (`302`) to `/d/<home>` instead of
     showing the landing page, when the viewer may read that dashboard (else
     the landing page). The server refuses to start if no such dashboard

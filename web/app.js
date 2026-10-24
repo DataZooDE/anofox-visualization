@@ -1403,6 +1403,14 @@ let appBrandReady = null; // #204: the Promise boot() keeps from appBrandLoad(),
 // every boot, even on an installation that opted in on its own,
 // non-shared domain.
 let assistantRememberOptIn = false;
+// #403: the installation's own default for a viewer's initial "Charts as
+// tables" state (app-config.json's/window.__anofoxApp's top-level
+// `charts_as_tables: true`) — same own-property, later-wins read as
+// assistantRememberOptIn above (via ownAppBool()), set alongside it in
+// appBrandLoad(). It only ever seeds a viewer who never made their own
+// explicit choice (see dpAsTablesExplicit) — applyChartsAsTablesInstallDefault()
+// below is where that's enforced.
+let installChartsAsTables = false;
 // #244: the assistant's own state. `assistCfg` is assistConfig()'s result
 // (boot() sets it once, after appBrandReady resolves — assistFlags());
 // `appAssistBlock` is read only inside appBrandLoad() (G2); `assistUi` is
@@ -2570,6 +2578,7 @@ async function finishAssistBoot() {
   assistCfg = assistConfig(appAssistBlock, assistFlags());
   wireAssist();
   assistUiSync();
+  applyChartsAsTablesInstallDefault(); // #403: after appBrandReady — see its own comment
 }
 
 // ---- Check (#145): the lint of `dashboard --check`, in the browser ----
@@ -13442,6 +13451,25 @@ function appBrandApply(cfg) {
   document.body.classList.add("brand-ready");
 }
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+// sec-review-256 L-2 / #403: an own-property, later-wins boolean read off
+// an installation config object (app-config.json's `file` or the serving
+// process's `window.__anofoxApp`), down `path` — used for both
+// assistantRememberOptIn (`["assistant", "remember"]`) and the #403
+// charts_as_tables install default (`["charts_as_tables"]`). Every step
+// uses Object.hasOwn, never a plain `?.` chain: a polluted
+// Object.prototype.assistant = {remember: true} (or .charts_as_tables)
+// must never opt an installation in with nothing of its own saying so.
+// `undefined` means this source says nothing at this path at all —
+// callers combine two sources with `??` so the earlier one (the serving
+// process) wins only when it actually says something.
+function ownAppBool(src, path) {
+  let cur = src;
+  for (const key of path) {
+    if (!cur || typeof cur !== "object" || !Object.hasOwn(cur, key)) return undefined;
+    cur = cur[key];
+  }
+  return cur;
+}
 async function appBrandLoad() {
   let file = null;
   // A locked server has no app-config.json (and no app bar).
@@ -13475,18 +13503,13 @@ async function appBrandLoad() {
   // wins" order appBrandMerge uses — but only when it actually says
   // something: an installation that configures the opt-in only in
   // app-config.json must not be overridden by an absent `assistant` key
-  // from the server layer. `ownRemember` reads `.assistant` and
-  // `.assistant.remember` as *own* properties at each level
-  // (Object.hasOwn) — a plain `?.` chain would read a polluted
-  // Object.prototype.assistant = {remember: true} and opt every
-  // installation in with nothing of its own saying so.
-  const ownRemember = (src) => {
-    if (!src || typeof src !== "object" || !Object.hasOwn(src, "assistant")) return undefined;
-    const a = src.assistant;
-    if (!a || typeof a !== "object" || !Object.hasOwn(a, "remember")) return undefined;
-    return a.remember;
-  };
-  assistantRememberOptIn = (ownRemember(window.__anofoxApp) ?? ownRemember(file)) === true;
+  // from the server layer. See ownAppBool() above.
+  assistantRememberOptIn = (ownAppBool(window.__anofoxApp, ["assistant", "remember"]) ?? ownAppBool(file, ["assistant", "remember"])) === true;
+  // #403: the installation default for a viewer's never-set "Charts as
+  // tables" choice — same own-property, later-wins rule as
+  // assistantRememberOptIn, but `charts_as_tables` sits at the top level
+  // (it rides the app bar's own config objects, not a nested block).
+  installChartsAsTables = (ownAppBool(window.__anofoxApp, ["charts_as_tables"]) ?? ownAppBool(file, ["charts_as_tables"])) === true;
   return cfg; // #204: boot() keeps this as appBrandReady, for the CSP's imgOrigins
 }
 // #204: the https: origins (I-R2-3(a): the exact logo/favicon URL, narrower
@@ -14852,13 +14875,26 @@ function attachHover() {
 // (←/→ along a series, ↑/↓ across series, Home/End), Enter/Space clicks the
 // focused mark (select / drill / link), Esc returns to the chart. The focused
 // mark shows its tooltip. "Charts as tables" swaps every chart for its data.
-let dpAsTables = (() => {
+// #403: the viewer's own *explicit* choice, from the two places it can come
+// from — `?tables=` and the remembered toggle — "1"/"0" meaning explicitly
+// on/off, anything else (including absent) meaning never set. Pure (no
+// DOM) so it's testable on its own, and the one place that must tell
+// "never set" apart from "explicitly off": an installation default
+// (installChartsAsTables) only ever seeds the never-set case, never
+// overriding an explicit off.
+function tablesExplicitChoice(urlParam, stored) {
+  if (urlParam === "1" || urlParam === "0") return urlParam === "1";
+  if (stored === "1" || stored === "0") return stored === "1";
+  return null;
+}
+let dpAsTablesExplicit = (() => {
   try {
-    return new URLSearchParams(location.search).get("tables") === "1" || localStorage.getItem("dp-as-tables") === "1";
+    return tablesExplicitChoice(new URLSearchParams(location.search).get("tables"), localStorage.getItem("dp-as-tables"));
   } catch (_) {
-    return false;
+    return null;
   }
 })();
+let dpAsTables = dpAsTablesExplicit ?? false;
 let dpA11yFocus = null; // {stmt, series, x} — the mark ({stmt, chart}: the chart) to refocus after a re-run
 // #401: does this dashboard's own header turn the in-page "Charts as
 // tables" bar on for every viewer (`-- @astables on`)? Off by default — a
@@ -15201,12 +15237,33 @@ function applyAsTables() {
 }
 function toggleAsTables() {
   dpAsTables = !dpAsTables;
+  dpAsTablesExplicit = dpAsTables; // #403: the viewer's own choice, from here on — wins over any install default
   try {
     localStorage.setItem("dp-as-tables", dpAsTables ? "1" : "0");
   } catch (_) {}
   applyAsTables();
 }
-
+// #403: should the installation default flip dpAsTables on? Pure decision
+// (no DOM), for applyChartsAsTablesInstallDefault() below — true only when
+// the viewer never made their own explicit choice, the installation turned
+// the default on, and it isn't already on (nothing to re-render).
+function chartsAsTablesShouldApplyDefault(explicit, installDefault, current) {
+  return explicit === null && installDefault === true && current !== true;
+}
+// #403: applied once appBrandReady resolves (finishAssistBoot, after
+// boot()'s first run()) — never before: boot() calls run() without
+// awaiting appBrandReady (#244: "never delays the first render"), so the
+// first paint may already be done by the time this runs. applyAsTables()
+// alone is the re-render: the panel data is already there (fig._dp), so no
+// need to re-run the dashboard's SQL — this only swaps the already-
+// rendered chart for its table (or leaves it be, if run() hasn't drawn any
+// panels yet, in which case run()'s own applyAsTables() picks up the
+// already-true dpAsTables with no flash at all).
+function applyChartsAsTablesInstallDefault() {
+  if (!chartsAsTablesShouldApplyDefault(dpAsTablesExplicit, installChartsAsTables, dpAsTables)) return;
+  dpAsTables = true;
+  applyAsTables();
+}
 
 // One tooltip row: colour swatch + series + value (+ the full tooltip text
 // when it carries more, e.g. box-plot stats or OHLC). A single-series bar's
