@@ -765,6 +765,20 @@ pub const DEFAULT_MAX_LINE_POINTS: usize = 5_000;
 pub const MIN_DIM: u32 = 32;
 /// See [`MIN_DIM`].
 pub const MAX_DIM: u32 = 8_192;
+/// #457: ggplot-rs's own layout engine floors a panel's *drawable* plot
+/// area at 50px tall (`plot_height.max(50.0)` in its `render/layout.rs`),
+/// but the nested `<svg … viewBox="0 0 w h">` it wraps that panel in is
+/// still sized to whatever `w`/`h` we asked for (`render_svg_native_at`
+/// reuses the same number for both the layout and the SVG canvas/viewBox).
+/// Ask for a panel shorter than this floor — as the KPI tile's and a
+/// table's `::SPARKLINE` cell both used to, via `MIN_DIM` (32px) — and the
+/// *drawn* content (sized against the 50px floor) overflows the *visible*
+/// viewBox (sized against our smaller request) and gets clipped: a
+/// series' low points fall outside the box and the line looks torn apart.
+/// Every embedder of a `GGPlot` panel into a slot shorter than this must
+/// request at least `SPARKLINE_MIN_H` and centre/pad the smaller visible
+/// slot around it, never ask ggplot-rs for less.
+pub(crate) const SPARKLINE_MIN_H: f64 = 50.0;
 
 /// Per-render options — passed explicitly (no hidden thread state).
 #[derive(Clone, Debug)]
@@ -5197,7 +5211,7 @@ fn render_sparkline(
     let n = value.values.len();
     let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
     let data = vec![
-        ("x".to_string(), xs),
+        ("x".to_string(), xs.clone()),
         ("y".to_string(), value.values.clone()),
     ];
 
@@ -5213,14 +5227,35 @@ fn render_sparkline(
         ),
     ];
 
+    // #457: a sparkline shows *shape*, not a value-vs-zero comparison, so the
+    // y axis must scale to the series' own min/max (a small pad), never a
+    // zero baseline — matching the browser's `cellSpark` (web/app.js) and
+    // the KPI tile's own scaling before #419. `GeomArea::include_zero_
+    // baseline` forces 0 into the trained domain unconditionally (right for
+    // a real area chart, wrong here), so the fill-under-the-line is drawn
+    // with `geom_ribbon` instead (band from the series' own minimum up to
+    // the line) — a ribbon doesn't carry that zero-baseline behaviour, so
+    // the y scale trains on the data alone.
+    let (mn, mx) = value
+        .values
+        .iter()
+        .filter_map(Value::as_f64)
+        .filter(|f| f.is_finite())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
+            (a.min(v), b.max(v))
+        });
+    let floor = vec![Value::Float(if mn.is_finite() { mn } else { 0.0 }); n];
+    let band = vec![
+        ("x".to_string(), xs),
+        ("ymin".to_string(), floor),
+        ("ymax".to_string(), value.values.clone()),
+    ];
+
     let plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y"))
-        .geom_area_with(GeomArea {
-            fill,
-            color: fill,
-            alpha: 0.55,
-            line_width: 0.0,
-        })
+        .geom_ribbon_with(GeomRibbon { fill, alpha: 0.55 })
+        .layer_data(band)
+        .layer_aes(Aes::new().x("x").ymin("ymin").ymax("ymax"))
         .geom_line_with(GeomLine {
             color: steel,
             width: 2.6,
@@ -5238,14 +5273,38 @@ fn render_sparkline(
             // `cartesian`'s matching comment.
             let vfmt = value_fmt(cols, Kind::Sparkline, &value.values);
             let locale = o.locale;
-            ggplot_rs::scale::continuous::ScaleContinuous::new()
+            let mut scale = ggplot_rs::scale::continuous::ScaleContinuous::new()
                 .with_expand(0.1, 0.0)
-                .with_value_formatter(move |n: f64| vfmt.full(n, &locale))
+                .with_value_formatter(move |n: f64| vfmt.full(n, &locale));
+            if mn.is_finite() && mx <= mn {
+                // A constant (or single-point) series has no range to show:
+                // centre a flat line in the panel with a visible `±pad`
+                // window instead of collapsing the domain to zero width.
+                let pad = if mn.abs() > 1e-9 {
+                    mn.abs() * 0.05
+                } else {
+                    1.0
+                };
+                scale = scale.with_limits(mn - pad, mn + pad);
+            }
+            scale
         })
         .house_void(o);
     // Render at a compact width so strokes stay crisp when the inline
     // sparkline is scaled down into a narrow panel column.
-    Ok(Panel::plot(plot, width.min(240), height))
+    let w = width.min(240);
+    // #457: never hand ggplot-rs a panel shorter than its own layout floor
+    // (`SPARKLINE_MIN_H` — see its doc comment). The nested `<svg viewBox>`
+    // this panel renders into is sized to whatever height we pass here, so
+    // asking for less than the floor draws the line against a taller
+    // virtual plot area than the visible box, clipping off whatever falls
+    // below it — every dip, once the min-to-max y scale above stopped
+    // flattening the line against a zero baseline. Every embedder (the KPI
+    // tile, a table's `::SPARKLINE` cell) requests at least this floor too
+    // and centres/pads its own smaller visible slot around it; this clamp
+    // is the backstop for any caller that doesn't.
+    let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+    Ok(Panel::plot(plot, w, h))
 }
 
 /// Blend a colour toward black by `t` (0 = unchanged, 1 = black).
