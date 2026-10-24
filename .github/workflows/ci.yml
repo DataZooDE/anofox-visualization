@@ -530,6 +530,14 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/sparkline-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/view-col-width-e2e.mjs (#470): a chart inside a ::VIEW group
+      # that sits in an n::COL slot lays out (its svg viewBox) at the slot's
+      # own width, the same as a panel outside the view — not at full width,
+      # scaled down afterwards (half the height, half-size text).
+      - name: ::VIEW group ::COL width e2e (#470)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-col-width-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |
