@@ -105,12 +105,19 @@ impl Default for LintOptions {
     }
 }
 
-/// Lint `script`. `run_query` runs a whole SQL script in a **fresh** session and
-/// returns the last statement's rows (empty on a non-SELECT), or a DuckDB error.
+/// Lint `script`. `run_query` runs ONE statement — not the whole script —
+/// and returns its rows (empty on a non-SELECT), or a DuckDB error; it is
+/// expected to keep session state (TEMP views/tables, `SET VARIABLE`,
+/// `LOAD`, plain DDL) across calls, so earlier statements stay in scope for
+/// later ones exactly as a real connection would (#435: the caller backs
+/// this with a persistent `duckdb` CLI session — `host::duckdb_cli`'s
+/// `SessionRunner` — not a fresh process replaying everything run so far
+/// before every statement).
 ///
-/// The linter replays an accumulated `prelude` (setup + input `SET`s — none of
-/// which emit rows) before each statement, so session state (temp views, bound
-/// variables) is faithfully in scope without needing a long-lived connection.
+/// An ordinary SQL error from one call does not need special handling here:
+/// a real session (and `SessionRunner`) both isolate it to that one
+/// statement and keep going, so the next call still sees everything before
+/// it, in scope, same as if the failing statement were simply absent.
 pub fn check<F>(script: &str, run_query: F) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
@@ -125,7 +132,6 @@ where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
     let mut diags = header_diags(script);
-    let mut prelude = String::new();
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
                              // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
                              // so two different directives writing one variable are reported.
@@ -257,7 +263,7 @@ where
         let mut tab_unknown = Vec::new();
         let mut decided_here = false; // (not a sub-tab of a hidden tab)
         if let Some(path) = sections.step(&p, |reqs| {
-            let u = unmet_requirement(&mut run_query, &prelude, reqs);
+            let u = unmet_requirement(&mut run_query, reqs);
             tab_unknown = u.unknown;
             decided_here = u.missing.is_some();
             u.missing
@@ -307,7 +313,7 @@ where
                 unknown: tab_unknown,
             }
         } else {
-            unmet_requirement(&mut run_query, &prelude, &p.requires)
+            unmet_requirement(&mut run_query, &p.requires)
         };
         for v in &unmet.unknown {
             diags.push(Diagnostic {
@@ -374,28 +380,30 @@ where
                         .into(),
                     sql: short.clone(),
                 });
-            } else if let Err(e) = run_query(&format!("{prelude}{};", p.sql)) {
+            } else if let Err(e) = run_query(&format!("{};", p.sql)) {
                 // In a hidden tab, a setup statement that reads its missing
-                // input fails as expected.
+                // input fails as expected. The session isolates this to
+                // this one statement (#435) — later panels still see
+                // everything genuine setup before it left in scope.
                 let reqs = if sections.hiding() {
                     [p.requires.clone(), p.tab_requires.clone()].concat()
                 } else {
                     p.requires.clone()
                 };
                 diags.push(sql_error(stmt, &reqs, &e, &short));
-            } else {
-                // Genuine setup succeeded — keep it in scope for later panels.
-                prelude.push_str(&p.sql);
-                prelude.push_str(";\n");
             }
+            // Genuine setup that succeeded needs nothing further here: it
+            // already ran in the session `run_query` backs, so it is
+            // already in scope for later panels (#435) — there is no
+            // separate prelude text to grow and replay.
             continue;
         }
 
         // Input panel: run its option query and prime the variable(s) to a
-        // default (into the prelude), so downstream getvariable() panels aren't
-        // spuriously empty — mirrors the browser's input pre-pass.
+        // default, so downstream getvariable() panels aren't spuriously
+        // empty — mirrors the browser's input pre-pass.
         if let Some(kind) = input_kind(&p.roles) {
-            match run_query(&format!("{prelude}{};", p.sql)) {
+            match run_query(&format!("{};", p.sql)) {
                 Ok(rows) => {
                     let names: Vec<String> = rows
                         .first()
@@ -472,9 +480,14 @@ where
                             }
                         }
                     }
+                    // #435: each default is sent to the session right away
+                    // (it already carries everything before it) instead of
+                    // growing a prelude text to replay before every later
+                    // statement. A default failing to apply isn't checked
+                    // here, same as before — these are always well-formed
+                    // `SET VARIABLE` text this function built itself.
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
-                        prelude.push_str(&setv);
-                        prelude.push_str(";\n");
+                        let _ = run_query(&format!("{setv};"));
                     }
                 }
                 Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
@@ -482,8 +495,9 @@ where
             continue;
         }
 
-        // Panel: run it (with the prelude in scope), then check rows and render.
-        let rows = match run_query(&format!("{prelude}{};", p.sql)) {
+        // Panel: run it (with everything before it already in scope,
+        // #435), then check rows and render.
+        let rows = match run_query(&format!("{};", p.sql)) {
             Ok(rows) => rows,
             Err(e) => {
                 diags.push(sql_error(stmt, &p.requires, &e, &short));
@@ -725,7 +739,12 @@ where
                 claim(&mut diags, &names, stmt, kind, &short);
             }
             match sets {
-                Ok(sets) => prelude.push_str(&sets),
+                // #435: sent to the session right away (already complete,
+                // semicolon-terminated `SET VARIABLE` statements) instead
+                // of growing a prelude text to replay later.
+                Ok(sets) => {
+                    let _ = run_query(&sets);
+                }
                 Err(message) => diags.push(Diagnostic {
                     severity: Severity::Warning,
                     stmt,
@@ -4098,13 +4117,16 @@ fn set_reads_a_file(code: &str) -> bool {
 }
 
 /// Check `requires` the way the locked server does (see
-/// [`sql::requires::check`]), with the prelude's session state. Shared with
-/// the headless CLI renderers (`dashboard` static HTML, `dashboard --svg`),
-/// which replay the same growing `prelude` before every statement to keep
-/// one DuckDB session's semantics across separate `duckdb` CLI calls.
+/// [`sql::requires::check`]). `run_query` is expected to run `q` with
+/// everything earlier in the script already in scope — true of both the
+/// headless CLI renderers' and `--check`'s `run_query` since #435 (a
+/// persistent session, not a fresh process replaying a growing prelude
+/// text), so `q` alone is all either `session` case here ever needed: the
+/// `session: true` queries read session variables (`getvariable()`), which
+/// the session already has; the `session: false` ones (`glob()` file
+/// checks) never depended on it either way.
 pub fn unmet_requirement<F>(
     run_query: &mut F,
-    prelude: &str,
     requires: &[sql::requires::Requirement],
 ) -> sql::requires::Unmet
 where
@@ -4112,7 +4134,7 @@ where
 {
     sql::requires::check(requires, |q, session| {
         let rows = run_query(&if session {
-            format!("{prelude}{q};")
+            format!("{q};")
         } else {
             q.to_string()
         })?;
@@ -5191,12 +5213,20 @@ mod design_tests {
             },
         );
         assert!(!has(&d, "interaction/bad-value"), "{d:?}");
-        let last = seen.last().unwrap();
+        // #435: the priming `SET VARIABLE`s are sent in their own round
+        // (eagerly, to the session) rather than bundled into the text of
+        // whatever statement comes next — so look for them among every
+        // call made, not specifically the last one.
         assert!(
-            last.contains("SET VARIABLE week = []::VARCHAR[];"),
-            "{last}"
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE week = []::VARCHAR[];")),
+            "{seen:?}"
         );
-        assert!(last.contains("SET VARIABLE week_from = NULL;"), "{last}");
+        assert!(
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE week_from = NULL;")),
+            "{seen:?}"
+        );
         assert_eq!(
             select_as_prelude("region").unwrap(),
             "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
@@ -6283,10 +6313,12 @@ mod design_tests {
             seen.push(q.to_string());
             Ok(opts.clone())
         });
-        let last = seen.last().unwrap();
+        // #435: the default is sent in its own round (eagerly, to the
+        // session), not bundled into the next statement's own text.
         assert!(
-            last.contains("SET VARIABLE \"zone\" = 'EU';"),
-            "variable not primed: {last}"
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE \"zone\" = 'EU';")),
+            "variable not primed: {seen:?}"
         );
         // A weird column name is quoted, not injected.
         let weird = rows(1, |_| json!({ "a b\"; DROP TABLE t; --": "v" }));
