@@ -206,6 +206,17 @@ async function exploreRun({ width, dark }) {
   else ok(`${tag}: compare two tables (${sum.trim()})`);
   if (shots) await page.locator(".xp-cmp-panel").screenshot({ path: path.join(shots, `compare-${width}-${dark ? "dark" : "light"}.png`) });
   if (!(await page.$("table.xp-cmp caption")) || !(await page.$("table.xp-cmp svg.xp-ov[aria-label]"))) fail(`${tag}: compare table without a caption or overlay summaries`);
+  // #481: a `.xp-ov` overlay draws at its authored 120×30 (the design's
+  // `.xp-ov{width:120px;height:30px}`, web/index.html), not blown up to its
+  // table cell's width — `.panel svg{width:100%;height:auto}` (a `.panel`
+  // ancestor, `section.xp-chart.xp-cmp-panel`, used to win the specificity
+  // fight and stretch it to ~342-434px).
+  const ovSize = await page.$eval("table.xp-cmp svg.xp-ov", (s) => {
+    const r = s.getBoundingClientRect();
+    return { w: r.width, h: r.height };
+  });
+  if (Math.abs(ovSize.w - 120) > 1 || Math.abs(ovSize.h - 30) > 1) fail(`${tag}: .xp-ov overlay drawn at ${ovSize.w.toFixed(1)}x${ovSize.h.toFixed(1)}, not its authored 120x30`);
+  else ok(`${tag}: .xp-ov overlay drawn at its authored 120x30 (${ovSize.w.toFixed(1)}x${ovSize.h.toFixed(1)})`);
   await pick(page, "shop");
   await page.click("button:has-text('Compare…')");
   await page.check(".xp-cmp-mode input[value=range]");
