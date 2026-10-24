@@ -38,6 +38,13 @@ pub struct AppBrand {
     pub link: Option<String>,
     pub favicon: Option<String>,
     pub name_visible: Option<bool>,
+    /// #403: an installation default for a viewer's never-set initial
+    /// "Charts as tables" choice (web/app.js's `dpAsTables`) — `None`/`false`
+    /// changes nothing (off is the builder's own default); `true` seeds it
+    /// on for a viewer who has never explicitly chosen (`?tables=` or the
+    /// remembered toggle), without overriding that choice when they have.
+    /// It does not force the in-page `-- @astables on` bar on; see #401.
+    pub charts_as_tables: Option<bool>,
 }
 
 fn has_control(s: &str) -> bool {
@@ -190,9 +197,16 @@ impl AppBrand {
                     _ => return Err("name_visible must be true or false".into()),
                 })
             }
+            "charts_as_tables" => {
+                self.charts_as_tables = Some(match v {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("charts_as_tables must be true or false".into()),
+                })
+            }
             other => {
                 return Err(format!(
-                    "unknown key '{other}' ({}, name_visible)",
+                    "unknown key '{other}' ({}, name_visible, charts_as_tables)",
                     KEYS.join(", ")
                 ))
             }
@@ -223,6 +237,10 @@ impl AppBrand {
             let s = match (k.as_str(), val) {
                 ("name_visible", Value::Bool(on)) => on.to_string(),
                 ("name_visible", _) => return Err("name_visible must be true or false".into()),
+                ("charts_as_tables", Value::Bool(on)) => on.to_string(),
+                ("charts_as_tables", _) => {
+                    return Err("charts_as_tables must be true or false".into())
+                }
                 (_, Value::String(s)) => s.clone(),
                 _ => return Err(format!("{k} must be a string")),
             };
@@ -253,6 +271,9 @@ impl AppBrand {
         }
         if let Some(on) = self.name_visible {
             m.insert("name_visible".into(), Value::Bool(on));
+        }
+        if let Some(on) = self.charts_as_tables {
+            m.insert("charts_as_tables".into(), Value::Bool(on));
         }
         Value::Object(m)
     }
@@ -384,5 +405,35 @@ mod tests {
             r#"{"logo":"https://x/l.svg","logo_dark":"javascript:alert(1)"}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn charts_as_tables() {
+        // #403: boolean only, like name_visible — a string is rejected even
+        // when it spells "true" (CLI flags go through `set`'s "true"/"false"
+        // text match; the extension's JSON options take a real boolean).
+        let b = AppBrand::from_json(r#"{"charts_as_tables":true}"#).unwrap();
+        assert_eq!(b.charts_as_tables, Some(true));
+        assert!(
+            b.script().contains(r#""charts_as_tables":true"#),
+            "{}",
+            b.script()
+        );
+        let e = AppBrand::from_json(r#"{"charts_as_tables":"true"}"#).unwrap_err();
+        assert!(e.contains("must be true or false"), "{e}");
+        assert!(AppBrand::default().charts_as_tables.is_none());
+        assert!(!AppBrand::default().script().contains("charts_as_tables"));
+
+        let mut b = AppBrand::default();
+        b.set("charts_as_tables", "true", false).unwrap();
+        assert_eq!(b.charts_as_tables, Some(true));
+        b.set("charts_as_tables", "false", false).unwrap();
+        assert_eq!(b.charts_as_tables, Some(false));
+        assert!(b.set("charts_as_tables", "yes", false).is_err());
+        // it never needs a logo / never conflicts with the bar-emptiness
+        // check (unlike name_visible: false) — check() stays Ok.
+        b.name_visible = Some(false);
+        b.logo = Some("https://x/l.svg".into());
+        assert!(b.check().is_ok());
     }
 }
