@@ -5,6 +5,8 @@ import init, {
   plan,
   render_panel,
   render_cell,
+  render_mini_hist,
+  render_mini_overlay,
   render_stack,
   render_contract,
   map_bounds,
@@ -5193,7 +5195,7 @@ function xpCard(c, cards, e, chartSlot) {
   const dist = c.distinct != null ? `${c.distinct > 1000 ? "≈ " : ""}${xp.fmtStat(c.distinct)} distinct` : "";
   li.appendChild(xpEl("div", "xp-meta", [`${xp.fmtStat(c.nullPct, 2)}% empty`, dist].filter(Boolean).join(" · ")));
   const viz = xpMini(c);
-  if (viz) li.appendChild(viz);
+  if (viz) li.insertAdjacentHTML("beforeend", viz);
   // the most common values: a click filters the query to one
   if (c.top && c.top.length && c.kind !== "num") {
     const ul = xpEl("ul", "xp-top");
@@ -5245,7 +5247,19 @@ function xpCard(c, cards, e, chartSlot) {
 }
 
 // A card's mini chart: a 10-bin histogram of a measure, or rows over time.
-const SVGNS = "http://www.w3.org/2000/svg";
+// Drawn by the wasm renderer (#463; owner rule #318 — one renderer,
+// ggplot-rs, the #425/#453/#454 migration), not hand-drawn SVG — returns
+// an HTML string (the caller inserts it), null if there's nothing to
+// chart. `xp-mini`'s own CSS box is fluid-width (the card's own layout
+// width, `width:100%`, unknown at request time): the histogram branches
+// (bars tolerate a non-uniform squash — no circular marker to flatten)
+// request the design size `W`×`H` directly and stretch-fill with
+// `preserveAspectRatio="none"`, same reasoning as `st-hist`; the rows-
+// over-time line branch still runs `sparkRequestSize` against that same
+// design size as a best-effort aspect match (a circular endpoint marker,
+// render_sparkline's own, is sensitive to the squash, #476 review) — not
+// exact for a card narrower/wider than the design width, but strictly no
+// worse than skipping it, and exact whenever a card is close to it.
 function xpMini(c) {
   const W = 200,
     H = 40;
@@ -5262,34 +5276,24 @@ function xpMini(c) {
     label = `Rows per ${c.grain} from ${s[0].b} to ${s[s.length - 1].b}; most in ${top.b} (${top.n.toLocaleString("en-US")}).`;
     if (s.length < 3) bars = s.map((x) => x.n);
     else {
-      const max = Math.max(...s.map((x) => x.n), 1);
-      const pts = s.map((x, i) => `${((i / (s.length - 1)) * (W - 2) + 1).toFixed(1)},${(H - 2 - (x.n / max) * (H - 4)).toFixed(1)}`).join(" ");
-      const svg = document.createElementNS(SVGNS, "svg");
-      svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-      svg.setAttribute("preserveAspectRatio", "none");
-      svg.setAttribute("class", "xp-mini");
-      svg.setAttribute("role", "img");
-      svg.setAttribute("aria-label", label);
-      svg.innerHTML = `<polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`;
-      return svg;
+      const rows = s.map((x) => ({ c0: x.n }));
+      const roles = [[0, "SPARKLINE"]];
+      const [rw, rh] = sparkRequestSize(W, H);
+      let svg = "";
+      try {
+        svg = render_cell(JSON.stringify(rows), JSON.stringify(roles), rw, rh, xpCtx());
+      } catch (_) {}
+      if (!svg) return null;
+      return svg.replace(/^<svg /, `<svg class="xp-mini" role="img" aria-label="${escapeHtml(label)}" `);
     }
   }
   if (!bars) return null;
-  const max = Math.max(...bars, 1);
-  const bw = W / bars.length;
-  const svg = document.createElementNS(SVGNS, "svg");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("preserveAspectRatio", "none");
-  svg.setAttribute("class", "xp-mini");
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", label);
-  svg.innerHTML = bars
-    .map((n, i) => {
-      const h = n ? Math.max(1.5, (n / max) * (H - 2)) : 0;
-      return `<rect x="${(i * bw + 1).toFixed(1)}" y="${(H - h).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5" fill="currentColor"/>`;
-    })
-    .join("");
-  return svg;
+  let svg = "";
+  try {
+    svg = render_mini_hist(JSON.stringify(bars), "", 1.0, W, H, xpCtx());
+  } catch (_) {}
+  if (!svg) return null;
+  return svg.replace(/^<svg /, `<svg class="xp-mini" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(label)}" `);
 }
 
 // ---- charts: a live preview of an annotated statement ----
@@ -5727,7 +5731,7 @@ async function xpCompareRun(a, b, msg, out, pickAlive) {
     tr.appendChild(xpEl("td", "num", ab(r, (c) => (c.kind === "num" ? xp.fmtStat(c.median) : "–"))));
     const td = xpEl("td");
     const ov = cmp.overlay.get(r.name);
-    if (ov) td.appendChild(xpOverlay(r.name, ov));
+    if (ov) td.innerHTML = xpOverlay(r.name, ov);
     tr.appendChild(td);
     tb.appendChild(tr);
   }
@@ -5735,31 +5739,27 @@ async function xpCompareRun(a, b, msg, out, pickAlive) {
   wrap.appendChild(t);
   out.append(sum, wrap, mk);
 }
-// Two 10-bin histograms on one range: A as an outline, B filled.
+// Two 10-bin histograms on one range: A as an outline, B filled. Drawn by
+// the wasm renderer's render_mini_overlay (#463; owner rule #318 — one
+// renderer, ggplot-rs), not hand-drawn SVG. `xp-ov`'s own CSS box is a
+// fixed size, so the request is matched to its aspect ratio
+// (`sparkRequestSize`, #476 review) for a lossless uniform downscale.
 function xpOverlay(name, h) {
   const W = 120,
     H = 30;
-  const max = Math.max(...h.a, ...h.b, 1);
-  const bw = W / 10;
   const peak = (arr) => {
     const k = arr.indexOf(Math.max(...arr));
     const w = (h.hi - h.lo) / 10;
     return `${xp.fmtStat(h.lo + k * w)} to ${xp.fmtStat(h.lo + (k + 1) * w)}`;
   };
-  const svg = document.createElementNS(SVGNS, "svg");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.setAttribute("class", "xp-ov");
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `Distribution of ${name} from ${xp.fmtStat(h.lo)} to ${xp.fmtStat(h.hi)}: most of A from ${peak(h.a)}, most of B from ${peak(h.b)}.`);
-  const bars = (arr, cls) =>
-    arr
-      .map((n, i) => {
-        const y = n ? Math.max(1.5, (n / max) * (H - 2)) : 0;
-        return `<rect class="${cls}" x="${(i * bw + 1).toFixed(1)}" y="${(H - y).toFixed(1)}" width="${(bw - 2).toFixed(1)}" height="${y.toFixed(1)}"/>`;
-      })
-      .join("");
-  svg.innerHTML = bars(h.b, "ov-b") + bars(h.a, "ov-a");
-  return svg;
+  const label = `Distribution of ${name} from ${xp.fmtStat(h.lo)} to ${xp.fmtStat(h.hi)}: most of A from ${peak(h.a)}, most of B from ${peak(h.b)}.`;
+  const [rw, rh] = sparkRequestSize(W, H);
+  let svg = "";
+  try {
+    svg = render_mini_overlay(JSON.stringify(h.a), JSON.stringify(h.b), rw, rh, xpCtx());
+  } catch (_) {}
+  if (!svg) return "";
+  return svg.replace(/^<svg /, `<svg class="xp-ov" role="img" aria-label="${escapeHtml(label)}" `);
 }
 
 // ---- the paged rows: the ::PAGED renderer over any SELECT ----
@@ -12449,19 +12449,28 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     const empty = (server ? server.total || 0 : filtered.length) - p.n; // (a number column: values that aren't numbers too)
     const foot = empty > 0 ? `<span class="st-empty">${empty.toLocaleString(loc)} empty</span>` : "";
     if (p.num) {
-      const mx = Math.max(...p.hist, 1);
-      const w = 100 / BINS;
+      // Drawn by the wasm renderer's render_mini_hist (#463; owner rule
+      // #318 — one renderer, ggplot-rs — the #425/#453/#454 migration),
+      // not hand-drawn SVG. Each bar's own label is its bin's own range
+      // ("10 – 20"); render_mini_hist appends ": {count}" itself (the
+      // same `GeomCol` tip format render_sparkbar's own bars use).
       const step = p.hi > p.lo ? (p.hi - p.lo) / BINS : 0;
-      const bars = p.hist
-        .map((n, k) => {
-          const h = n ? Math.max(1.5, (22 * n) / mx) : 0;
-          const range = step ? `${cellText(p.lo + k * step, c)} – ${cellText(p.lo + (k + 1) * step, c)}` : cellText(p.lo, c);
-          return `<rect x="${(k * w + 0.6).toFixed(2)}" y="${(24 - h).toFixed(2)}" width="${(w - 1.2).toFixed(2)}" height="${h.toFixed(2)}"><title>${escapeHtml(range)}: ${n.toLocaleString(loc)}</title></rect>`;
-        })
-        .join("");
+      const labels = p.hist.map((_, k) => (step ? `${cellText(p.lo + k * step, c)} – ${cellText(p.lo + (k + 1) * step, c)}` : cellText(p.lo, c)));
+      let svg = "";
+      try {
+        svg = render_mini_hist(JSON.stringify(p.hist), JSON.stringify(labels), 0.55, 100, 24, renderCtx());
+      } catch (_) {}
+      if (!svg) return foot;
+      // `preserveAspectRatio="none"`: st-hist's own CSS box is fluid-width
+      // (`width:100%`, the table's own column width), unknown at request
+      // time, so the request can't be aspect-matched like a fixed-size
+      // cell (cellSpark/cellSparkbar, #476) — a non-uniform squash of a
+      // rectangular bar reads fine (unlike a circular marker, which this
+      // chart has none of).
+      svg = svg.replace(/^<svg /, `<svg class="st-hist" preserveAspectRatio="none" role="img" aria-label="distribution of ${escapeHtml(head(c))}" `);
       const ends =
         p.lo == null ? "" : `<span class="st-ends"><span>${escapeHtml(cellText(p.lo, c))}</span><span>${escapeHtml(cellText(p.hi, c))}</span></span>`;
-      return `<svg class="st-hist" viewBox="0 0 100 24" preserveAspectRatio="none" role="img" aria-label="distribution of ${escapeHtml(head(c))}">${bars}</svg>${ends}${foot}`;
+      return `${svg}${ends}${foot}`;
     }
     if (!p.top || !p.top.length) return foot;
     // every value once (ids, names): shares say nothing
@@ -13267,23 +13276,23 @@ function badgeHtml(text) {
   return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
 }
 
-// Shared by cellSpark/cellSparkbar (#454/#425, #476 review): a cell-sized
-// chart's own width/height request to the wasm render_cell, matched to
-// this cell's fixed CSS box's aspect ratio. render_sparkline/
-// render_sparkbar floor their own panel height at ggplot-rs's 50px layout
-// minimum (`SPARKLINE_MIN_H`, src/lib.rs, #457) no matter how short a
-// height they're asked for; the first version of this migration asked for
-// the cell's own small height (so the returned svg's viewBox came back
-// taller than that request) and stretch-filled the mismatched box with
-// `preserveAspectRatio="none"` — which scales the two axes by different
-// factors, flattening a circular marker (the sparkline's endpoint dot)
-// into an ellipse and unevenly thickening a stroke depending on its angle.
-// Growing the requested WIDTH by the same ratio the height was floored by
-// keeps the returned viewBox at this cell's own w:h, so the browser's
-// *default* (uniform) downscale into the fixed CSS box is lossless: no
-// letterboxing (the aspect ratios already match going in) and no
-// non-uniform squash (a circle stays round, a stroke's width scales evenly
-// in both directions).
+// Shared by cellSpark/cellSparkbar (#454/#425, #476 review) and #463's
+// xp-mini/xp-ov: a cell-sized chart's own width/height request to the
+// wasm render_cell, matched to this cell's fixed CSS box's aspect ratio.
+// render_sparkline/render_sparkbar floor their own panel height at
+// ggplot-rs's 50px layout minimum (`SPARKLINE_MIN_H`, src/lib.rs, #457) no
+// matter how short a height they're asked for; the first version of this
+// migration asked for the cell's own small height (so the returned svg's
+// viewBox came back taller than that request) and stretch-filled the
+// mismatched box with `preserveAspectRatio="none"` — which scales the two
+// axes by different factors, flattening a circular marker (the
+// sparkline's endpoint dot) into an ellipse and unevenly thickening a
+// stroke depending on its angle. Growing the requested WIDTH by the same
+// ratio the height was floored by keeps the returned viewBox at this
+// cell's own w:h, so the browser's *default* (uniform) downscale into the
+// fixed CSS box is lossless: no letterboxing (the aspect ratios already
+// match going in) and no non-uniform squash (a circle stays round, a
+// stroke's width scales evenly in both directions).
 const SPARK_FLOOR = 50; // ggplot-rs's own panel-area floor (SPARKLINE_MIN_H in src/lib.rs)
 function sparkRequestSize(w, h) {
   return h >= SPARK_FLOOR ? [w, h] : [Math.round((w * SPARK_FLOOR) / h), SPARK_FLOOR];

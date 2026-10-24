@@ -538,6 +538,17 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-col-width-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/mini-charts-e2e.mjs (#463): Explore data's card histogram
+      # (xpMini, both its histogram and rows-over-time-line branches), its
+      # A/B distribution overlay (xpOverlay) and the table's own
+      # column-profile histogram (st-hist) all draw through the wasm
+      # renderer (ggplot-rs marks, not hand-written SVG) — the same
+      # #425/#453/#454 migration, folded into the app's remaining
+      # hand-drawn mini charts.
+      - name: Explore/table mini-chart e2e (#463)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/mini-charts-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |

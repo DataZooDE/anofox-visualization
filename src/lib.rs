@@ -5420,6 +5420,195 @@ fn render_sparkbar(
     Ok(Panel::plot(plot, w, h))
 }
 
+/// Finish a [`Panel`] built outside the usual `cols`-driven pipeline
+/// (#463's mini-chart renderers, below): the same `localized`/
+/// `with_motion_attrs`/`finish`/[`finish_touches`] steps
+/// [`render_placed`] runs, with an empty `cols` — these charts have no
+/// `::ROLE` cast to carry a locale-affecting x axis or a motion-attr
+/// role, and no `::YFORMAT`-style custom formatter to thread through
+/// `finish_touches`'s `with_formatted_values`.
+fn finish_mini(panel: Panel, o: &RenderOptions, place: Place) -> Result<String, String> {
+    let (svg, _warnings) = panel
+        .localized(o, &[])
+        .with_motion_attrs(&[])
+        .finish(place)?;
+    Ok(finish_touches(svg, &[], o))
+}
+
+/// Shared by the #463 "mini chart" wasm exports (`render_mini_hist`,
+/// `render_mini_overlay`) — not reachable from SQL (no `::ROLE`): these
+/// draw app-chrome widgets built from data the browser already has
+/// client-side (a column's own histogram bin counts, computed by Explore
+/// data's profiler or the table's own column-stats row), not a dashboard
+/// query result, so there's no `Column`/`Role` to route through
+/// `render_inner`'s dispatch. One bar per value, `x` = its index.
+/// `labels[i]`, if given, becomes bar `i`'s own hover tip prefix
+/// (`"{label}: {value}"`, ggplot-rs's own `GeomCol` tip format) — e.g. a
+/// histogram's bin range; `None` leaves every bar with just its bare
+/// value (ggplot-rs's default). `alpha` is the fill's own opacity (`0.0`
+/// draws an outline only — the stroke is unaffected by `fill-opacity`,
+/// ggplot-rs's `RectStyle`/`svg_backend::rect_markup`), so the same
+/// building block covers a single always-filled histogram (xpMini,
+/// st-hist, #463) and (via [`render_mini_overlay`]) a filled B over an
+/// outline-only A.
+fn mini_hist_plot(
+    values: &[f64],
+    labels: Option<&[String]>,
+    fill: (u8, u8, u8),
+    stroke: (u8, u8, u8),
+    alpha: f64,
+    bar_width: f64,
+) -> GGPlot {
+    let n = values.len();
+    let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
+    let mut data = vec![
+        ("x".to_string(), xs),
+        (
+            "y".to_string(),
+            values.iter().map(|&v| Value::Float(v)).collect(),
+        ),
+    ];
+    let mut aes = Aes::new().x("x").y("y");
+    if let Some(labels) = labels {
+        data.push((
+            "label".to_string(),
+            labels.iter().cloned().map(Value::Str).collect(),
+        ));
+        aes = aes.label("label");
+    }
+    GGPlot::new(data).aes(aes).geom_col_with(GeomCol {
+        fill,
+        color: stroke,
+        alpha,
+        width: bar_width,
+    })
+}
+
+/// A pre-binned histogram (the caller already computed the bin counts) —
+/// Explore data's card histogram (`xpMini`) and the table's own
+/// column-profile row (`st-hist`), #463. `labels_json`, if not `""`, is a
+/// JSON array of per-bar hover-tip text, same length as `values` (a bin's
+/// own range, e.g. `"10 – 20"`); `fill_alpha` matches each caller's own
+/// previous hand-drawn look (`st-hist`: `0.55`, translucent;`xpMini`:
+/// `1.0`, opaque).
+pub fn render_mini_hist(
+    values_json: &str,
+    labels_json: &str,
+    fill_alpha: f64,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> Result<String, RenderError> {
+    guard(|| {
+        let o = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        let values: Vec<f64> = serde_json::from_str(values_json)
+            .map_err(|e| RenderError::BadSpec(format!("values JSON: {e}")))?;
+        let labels: Option<Vec<String>> = if labels_json.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::from_str(labels_json)
+                    .map_err(|e| RenderError::BadSpec(format!("labels JSON: {e}")))?,
+            )
+        };
+        let accent = o.brand();
+        let plot = mini_hist_plot(&values, labels.as_deref(), accent, accent, fill_alpha, 0.86)
+            .scale_y_continuous(
+                ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.05, 0.0),
+            )
+            .house_void(&o);
+        // Same compact-width clamp as render_sparkbar, for the same reason
+        // (crisp strokes once scaled down) — a higher cap than the fixed
+        // table-spark cells' 240: both callers (a fluid-width Explore card,
+        // the table's own fluid stats row) can legitimately ask for more.
+        let w = width.min(400);
+        let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+        let svg = finish_mini(Panel::plot(plot, w, h), &o, Place::At(0.0, 0.0))
+            .map_err(RenderError::Render)?;
+        Ok(svg)
+    })
+}
+
+/// Two pre-binned histograms on one shared y scale, A as an outline, B
+/// filled — Explore data's distribution-comparison overlay (`xpOverlay`),
+/// #463. No per-bar labels (the caller's own single whole-svg
+/// `aria-label` already names the comparison).
+pub fn render_mini_overlay(
+    a_json: &str,
+    b_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> Result<String, RenderError> {
+    guard(|| {
+        let o = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        let a: Vec<f64> = serde_json::from_str(a_json)
+            .map_err(|e| RenderError::BadSpec(format!("a JSON: {e}")))?;
+        let b: Vec<f64> = serde_json::from_str(b_json)
+            .map_err(|e| RenderError::BadSpec(format!("b JSON: {e}")))?;
+        let xs = |len: usize| -> Vec<Value> { (0..len).map(|i| Value::Float(i as f64)).collect() };
+        // Train the shared y scale on both series, same reasoning as
+        // render_sparkbar's own combined-training base layer (#425): A
+        // never dwarfs, or is dwarfed by, B's own scale.
+        let mut combined: Vec<Value> = b.iter().map(|&v| Value::Float(v)).collect();
+        combined.extend(a.iter().map(|&v| Value::Float(v)));
+        let mut combined_x = xs(b.len());
+        combined_x.extend(xs(a.len()));
+        let base_data = vec![("x".to_string(), combined_x), ("y".to_string(), combined)];
+
+        let accent = o.brand();
+        let ink = o.theme.colors.ink;
+
+        // B first (filled, underneath), A second (outline, on top) — the
+        // same paint order the hand-drawn version used (`bars(h.b) +
+        // bars(h.a)`), so A's outline stays crisp over B's fill where the
+        // two overlap.
+        let b_data = vec![
+            ("x".to_string(), xs(b.len())),
+            (
+                "y".to_string(),
+                b.iter().map(|&v| Value::Float(v)).collect(),
+            ),
+        ];
+        let a_data = vec![
+            ("x".to_string(), xs(a.len())),
+            (
+                "y".to_string(),
+                a.iter().map(|&v| Value::Float(v)).collect(),
+            ),
+        ];
+        let plot = GGPlot::new(base_data)
+            .aes(Aes::new().x("x").y("y"))
+            .geom_col_with(GeomCol {
+                fill: accent,
+                color: accent,
+                alpha: 0.55,
+                width: 0.86,
+            })
+            .layer_data(b_data)
+            .layer_aes(Aes::new().x("x").y("y"))
+            .position(PositionIdentity)
+            .geom_col_with(GeomCol {
+                fill: ink,
+                color: ink,
+                alpha: 0.0,
+                width: 0.86,
+            })
+            .layer_data(a_data)
+            .layer_aes(Aes::new().x("x").y("y"))
+            .position(PositionIdentity)
+            .scale_y_continuous(
+                ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.05, 0.0),
+            )
+            .house_void(&o);
+        let w = width.min(400);
+        let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+        let svg = finish_mini(Panel::plot(plot, w, h), &o, Place::At(0.0, 0.0))
+            .map_err(RenderError::Render)?;
+        Ok(svg)
+    })
+}
+
 /// Blend a colour toward black by `t` (0 = unchanged, 1 = black).
 pub(crate) fn darken((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 * (1.0 - t)).round() as u8;
