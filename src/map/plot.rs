@@ -1,21 +1,20 @@
-//! #420 slice 1: build a plain polygon/point choropleth (measure or
-//! category fill; no classes, flows, hex or symbols — [`eligible`]) as one
-//! real `GGPlot`, instead of our own hand-written SVG.
+//! #420 slice 1+2: build a plain polygon/point choropleth (measure,
+//! category or classed fill; no flows, hex or symbols — [`eligible`]) as
+//! one real `GGPlot`, instead of our own hand-written SVG.
 //!
-//! Everything else (classed, flows, hexbin, symbols, or any map that still
-//! needs the old footer — a scale bar or pack attribution) stays on
+//! Everything else (flows, hexbin, symbols, or any map that still needs the
+//! old footer — a scale bar or pack attribution) stays on
 //! [`super::render_with_model`] until its own slice.
-
-// #420 WIP: not wired into `map::build()` (the lib.rs dispatch point) yet —
-// nothing outside this module's own tests calls `build` or `eligible`.
-#![allow(dead_code)]
 
 use ggplot_rs::geom::sf::GeomSf;
 use ggplot_rs::prelude::*;
+use ggplot_rs::render::backend::FillPattern;
+use ggplot_rs::scale::binned::ScaleFillBinned;
+use ggplot_rs::scale::Scale;
 use ggplot_rs::theme::LegendPosition;
 
 use crate::theme::mix;
-use crate::{Column, HouseTheme, RenderOptions};
+use crate::{Column, RenderOptions};
 
 use super::fill::MapFill;
 use super::legend::legend_of;
@@ -23,17 +22,15 @@ use super::wkt::row_wkt;
 use super::{foot_of, frame_of, legend_override, Fill, Model};
 
 /// Whether `m` (already built from `cols`) is simple enough for the new
-/// `geom_sf` path: no classes (slice 2), flows/hexbin (slice 4) or
-/// graduated symbols (slice 3), and no scale bar/attribution furniture
-/// (slice 5 — [`foot_of`]'s own height check, reused rather than
-/// duplicated, since "does this map need a footer" already depends on
-/// pack layers *and* the projection/span).
+/// `geom_sf` path: no flows/hexbin (slice 4) or graduated symbols (slice
+/// 3), and no scale bar/attribution furniture (slice 5 — [`foot_of`]'s own
+/// height check, reused rather than duplicated, since "does this map need
+/// a footer" already depends on pack layers *and* the projection/span).
+/// `::CLASSES` (slice 2) is allowed — [`build`] routes a classed measure
+/// through `ggplot_rs::scale::binned::ScaleFillBinned` instead of
+/// [`MapFill`].
 pub(super) fn eligible(o: &RenderOptions, m: &Model, w: f64) -> bool {
-    m.flows.is_none()
-        && m.hexbin.is_none()
-        && m.symbols.is_none()
-        && !matches!(&m.fill, Fill::Measure(s) if s.classes.is_some())
-        && foot_of(o, m, w).h <= 0.0
+    m.flows.is_none() && m.hexbin.is_none() && m.symbols.is_none() && foot_of(o, m, w).h <= 0.0
 }
 
 /// Build the `GGPlot` and its extra root attributes (`data-map`, …) for an
@@ -59,10 +56,25 @@ pub(super) fn build(
     let land_edge = mix(t.colors.muted, card, 0.7);
     let plain_edge = mix(t.colors.muted, card, 0.35);
     let border = t.chart_grid();
+    // The no-data hatch (`ScaleFillBinned::na_pattern`, #206) — same colours
+    // as the old writer's `<pattern>` def (`mod.rs`'s `hatch_bg`/`hatch_fg`).
+    let hatch_bg = mix(t.colors.muted, card, 0.85);
+    let hatch_fg = mix(t.colors.muted, card, 0.35);
     let feature_edge = if matches!(m.fill, Fill::Plain(_)) {
         plain_edge
     } else {
         border
+    };
+
+    // A classed measure (`::CLASSES`): the per-row class index (1-based,
+    // `data-class`) and the `(label, formatted value) -> title` tooltip
+    // text the old writer composed (`mod.rs`'s own "label: value (class K
+    // of N: boundary)" — `GeomSf`'s own automatic `label: value` tooltip
+    // doesn't know about the class suffix, so this map's whole tooltip is
+    // computed here and fed through `Aes::tooltip`, not left automatic).
+    let classes = match &m.fill {
+        Fill::Measure(s) => s.classes.as_ref(),
+        _ => None,
     };
 
     // ---- the features layer: one row per `m.features`.
@@ -75,6 +87,8 @@ pub(super) fn build(
     let mut rows = Vec::with_capacity(n);
     let mut seriess = Vec::with_capacity(n);
     let mut xs = Vec::with_capacity(n);
+    let mut class_idxs: Vec<Value> = Vec::with_capacity(n);
+    let mut titles: Vec<Value> = Vec::with_capacity(n);
     for i in 0..n {
         geometry.push(row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na));
         let label = m.label_of(i);
@@ -116,6 +130,52 @@ pub(super) fn build(
         };
         fill_vals.push(fill);
         measure_vals.push(measure);
+        // `data-class` (1-based) + the classed tooltip suffix — only when
+        // this map has classes at all; `Classes::index` is the exact same
+        // half-open-bin convention `ScaleFillBinned::bin_index` uses below
+        // (both: an edge value belongs to the *upper* class, out-of-range
+        // clamps to an end class), so the row's class and its legend
+        // swatch always agree.
+        let (class_idx, title) = match classes {
+            Some((_, c, _)) => {
+                let label = m.label_of(i);
+                let shown = match &m.fill {
+                    Fill::Measure(s) => match s.values[i] {
+                        Some(v) => s.fmt.full(v, &o.locale),
+                        None => "no data".to_string(),
+                    },
+                    _ => String::new(),
+                };
+                let mut title = match (label.is_empty(), shown.is_empty()) {
+                    (false, false) => format!("{label}: {shown}"),
+                    (false, true) => label.clone(),
+                    (true, _) => shown,
+                };
+                let k = match &m.fill {
+                    Fill::Measure(s) => s.values[i].map(|v| c.index(v.clamp(s.lo, s.hi))),
+                    _ => None,
+                };
+                if let Some(k) = k {
+                    title.push_str(&format!(
+                        " (class {} of {}: {})",
+                        k + 1,
+                        c.len(),
+                        c.label(k, &|v| match &m.fill {
+                            Fill::Measure(s) => s.fmt.short(v, &o.locale),
+                            _ => String::new(),
+                        })
+                    ));
+                }
+                (
+                    k.map(|k| Value::Str((k + 1).to_string()))
+                        .unwrap_or(Value::Na),
+                    na_if_empty(title),
+                )
+            }
+            None => (Value::Na, Value::Na),
+        };
+        class_idxs.push(class_idx);
+        titles.push(title);
     }
     let features_df: Vec<(String, Vec<Value>)> = vec![
         ("geometry".into(), geometry),
@@ -125,6 +185,8 @@ pub(super) fn build(
         ("series".into(), seriess),
         ("value".into(), measure_vals),
         ("xkey".into(), xs),
+        ("class".into(), class_idxs),
+        ("title".into(), titles),
     ];
     let mut features_aes = Aes::new()
         .label("label")
@@ -142,6 +204,9 @@ pub(super) fn build(
         .data_attr("value", "value")
         .data_attr("label", "label")
         .data_attr("x", "xkey");
+    if classes.is_some() {
+        features_aes = features_aes.data_attr("class", "class").tooltip("title");
+    }
     let has_fill_aes = !matches!(m.fill, Fill::Plain(_));
     if has_fill_aes {
         features_aes = features_aes.fill("fill");
@@ -190,42 +255,101 @@ pub(super) fn build(
 
     let mut discrete_fill = false;
     if has_fill_aes {
-        discrete_fill = matches!(m.fill, Fill::Category { .. });
-        plot = plot.scale_fill(match &m.fill {
-            Fill::Measure(s) => MapFill::measure((**s).clone(), o.locale),
-            Fill::Category { levels, .. } => MapFill::category(levels.clone()),
+        match &m.fill {
+            // A classed measure: `ScaleFillBinned` (sipemu/ggplot-rs#180,
+            // built for exactly this) bins against `classes.rs`'s own
+            // edges/colours, tallies each bin's *trained* row count for the
+            // legend ("10–50 (12)", `class_label`'s own format — no hand
+            // rolled count text needed) and draws a `#206` pattern-filled
+            // "no data" key for any `Value::Na` row, matching the old
+            // writer's hatch. The break *maths* stays entirely ours
+            // (`classes.rs`); only the scale/legend object changes.
+            Fill::Measure(s) if s.classes.is_some() => {
+                discrete_fill = true;
+                let (_, c, colors) = s.classes.as_ref().unwrap();
+                let breaks: Vec<f64> = std::iter::once(c.lo)
+                    .chain(c.edges.iter().copied())
+                    .chain(std::iter::once(c.hi))
+                    .collect();
+                let mut scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
+                    .na_color(hatch_bg)
+                    .na_pattern(FillPattern::stripe(hatch_fg, hatch_bg))
+                    .na_label("No data");
+                // The measure's own title, same as the old writer's
+                // stepped-bar legend and `MapFill::measure`'s continuous
+                // one — real `legend_margin` (below) gives it room to
+                // render without clipping.
+                scale.set_name(s.title.clone().unwrap_or_default().as_str());
+                plot = plot.scale_fill(scale);
+            }
+            // A continuous measure (no classes): stays on `MapFill`'s own
+            // default legend placement — see the `legend_position` note
+            // below (sipemu/ggplot-rs#225).
+            Fill::Measure(s) => plot = plot.scale_fill(MapFill::measure((**s).clone(), o.locale)),
+            Fill::Category { levels, .. } => {
+                discrete_fill = true;
+                plot = plot.scale_fill(MapFill::category(levels.clone()));
+            }
             Fill::Plain(_) => unreachable!("has_fill_aes excludes Fill::Plain"),
-        });
+        }
     }
     let _ = legend_at;
 
+    // `crate::void_theme` (pie/gauge/map/sparkline) zeroes `legend_margin`
+    // — fine for those (no legend, or one positioned off the panel
+    // entirely), wrong for a map's own legend: at `LegendPosition::Top`
+    // (below) or the default `Right`, zero margin puts the first swatch
+    // and any title flush against the panel's own top/left edge, clipped
+    // by the panel card. Restore `Margin`'s own library default (10px each
+    // side) on top of the void theme — a plain `Theme` field, not an SVG
+    // post-process.
+    let mut theme = crate::void_theme(o);
+    theme.legend_margin = ggplot_rs::theme::Margin::default();
     plot = plot
         .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
-        .house_void(o);
-    // A discrete (`Fill::Category`) legend goes at `LegendPosition::Top`
-    // (plain ggplot-rs API, `is_horizontal` for `Top`/`Bottom` is just the
-    // one swatch row the old writer also drew) — the old writer put its
-    // legend above the map at full width; ggplot-rs's own default (`Right`,
-    // a vertical column) narrows the map a lot on a narrow (390px) panel,
-    // which `Top` avoids. Must come *after* `.house_void(o)`: that call sets
-    // the plot's whole `Theme` (incl. `legend_position`), so setting it
-    // earlier would just get overwritten. A continuous (`Fill::Measure`, no
-    // classes — `eligible()` already excludes classed measures) legend stays
-    // on ggplot-rs's default for now: `legend_at` above (`layout()`'s own
-    // 4-corner, vertex-density-aware pick, meant to convert to
-    // `legend_position_inside`'s fraction) renders a continuous legend's
-    // tick marks/labels at wildly wrong, off-canvas y positions under
-    // `LegendPosition::Inside` — a real ggplot-rs bug (filed:
+        .theme(theme);
+    // A discrete legend (`Fill::Category`, or a classed `Fill::Measure` —
+    // `ScaleFillBinned::is_discrete()` is also `true`) goes at
+    // `LegendPosition::Top` (plain ggplot-rs API, `is_horizontal` for
+    // `Top`/`Bottom` is just the one swatch row the old writer also drew)
+    // — the old writer put its legend above the map at full width;
+    // ggplot-rs's own default (`Right`, a vertical column) narrows the map
+    // a lot on a narrow (390px) panel, which `Top` avoids. Must come
+    // *after* `.theme(..)`: that call sets the plot's whole `Theme` (incl.
+    // `legend_position`), so setting it earlier would just get
+    // overwritten. A continuous (`Fill::Measure`, no classes) legend stays
+    // on ggplot-rs's default `Right` position for now: `legend_at` above
+    // (`layout()`'s own 4-corner, vertex-density-aware pick, meant to
+    // convert to `legend_position_inside`'s fraction) renders a continuous
+    // legend's tick marks/labels at wildly wrong, off-canvas y positions
+    // under `LegendPosition::Inside` — a real ggplot-rs bug (filed:
     // sipemu/ggplot-rs#225), not a sign error here — so nothing calls
     // `.legend_position_inside()` yet for either fill kind.
     if discrete_fill {
         plot = plot.legend_position(LegendPosition::Top);
     }
 
-    let attrs: Vec<(&'static str, String)> = vec![
+    let mut attrs: Vec<(&'static str, String)> = vec![
         ("data-map", String::new()),
         ("data-proj", m.projection.name().to_string()),
     ];
+    // `data-classes`: every class's short-formatted label, low to high, as
+    // JSON (`mapTableHtml`'s "k of n: label" a11y row — `app.js:15454`) —
+    // same shape as the old writer's own `data-classes` (`mod.rs`).
+    if let Some((_, c, _)) = classes {
+        let labels: Vec<String> = (0..c.len())
+            .map(|k| {
+                c.label(k, &|v| match &m.fill {
+                    Fill::Measure(s) => s.fmt.short(v, &o.locale),
+                    _ => String::new(),
+                })
+            })
+            .collect();
+        attrs.push((
+            "data-classes",
+            serde_json::to_string(&labels).unwrap_or_default(),
+        ));
+    }
     Some((plot, attrs))
 }
 
