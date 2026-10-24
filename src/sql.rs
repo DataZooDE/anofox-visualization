@@ -34,6 +34,7 @@ pub mod contract_call;
 pub mod deps;
 pub mod lex;
 pub mod requires;
+pub mod shared;
 pub mod views;
 
 pub use contract_call::ContractPanel;
@@ -64,6 +65,13 @@ pub struct Panel {
     pub requires: Vec<requires::Requirement>,
     /// What is malformed in those lines (`dashboard --check` reports it).
     pub requires_issues: Vec<(&'static str, String)>,
+    /// Variable names a `-- @shared <name>, …` comment above the statement
+    /// names as deliberately shared (#398): when this statement's own
+    /// `interaction/rowselect-shared-name` / `interaction/name-clash` claim
+    /// would otherwise warn for one of these names, the warning is skipped —
+    /// every other clash still is. A listed name this statement doesn't
+    /// itself set (a typo) is flagged on its own (`interaction/shared-unused`).
+    pub shared: Vec<String>,
     /// The `-- @requires` of the `::TAB` / `::SUBTAB` whose section the
     /// statement is in (a `::SUBTAB` statement: its `::TAB`'s), see
     /// [`section_requires`]. A tab whose own requirements are not met is
@@ -177,6 +185,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
         .filter_map(|raw| {
             let requires = requires::parse(&raw);
             let requires_issues = requires::issues(&raw);
+            let shared = shared::parse(&raw);
             let clean = strip_comments(&raw);
             let stmt = clean.trim();
             if stmt.is_empty() {
@@ -185,6 +194,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
             if let Some((mut panel, _)) = contract_call::plan_contract(stmt) {
                 panel.requires = requires;
                 panel.requires_issues = requires_issues;
+                panel.shared = shared;
                 return Some(panel);
             }
             let (sql, roles, names) = rewrite(stmt);
@@ -197,6 +207,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     contract: None,
                     requires,
                     requires_issues,
+                    shared,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
@@ -210,6 +221,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     contract: None,
                     requires,
                     requires_issues,
+                    shared,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,

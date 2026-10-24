@@ -180,7 +180,17 @@ where
                              // so two different directives writing one variable are reported.
     let mut owners: std::collections::HashMap<String, (usize, &'static str)> =
         std::collections::HashMap::new();
-    let mut claim = |diags: &mut Vec<Diagnostic>, names: &[String], stmt, kind, sql: &str| {
+    // #398: `-- @shared <name>, …` directly above a ::ROWSELECT / ::SELECT_AS
+    // / ::DRILL / input statement documents that *this* directive deliberately
+    // reuses `<name>` — so the two name-clash lints below skip it (every other
+    // clash still is flagged). A name named here this statement doesn't
+    // itself claim (a typo) gets its own warning instead of silencing nothing.
+    let mut claim = |diags: &mut Vec<Diagnostic>,
+                     names: &[String],
+                     stmt,
+                     kind,
+                     sql: &str,
+                     shared: &[String]| {
         for n in names {
             match owners.get(n) {
                 // ::DRILL / ::ROWSELECT: always flagged, even repeated by the
@@ -192,33 +202,63 @@ where
                     if other != stmt
                         && (k != kind || kind == "::DRILL" || kind == "::ROWSELECT") =>
                 {
+                    if shared.iter().any(|s| s == n) {
+                        continue;
+                    }
                     let (code, hint) = if kind == "::ROWSELECT" && k == "::ROWSELECT" {
                         (
                             "interaction/rowselect-shared-name",
-                            "clicking a row in either table sets the same getvariable() and \
-                             silently toggles the other's selection too — alias one table's \
-                             first column to a different name",
+                            format!(
+                                "clicking a row in either table sets the same getvariable() \
+                                     and silently toggles the other's selection too — alias one \
+                                     table's first column to a different name, or add \
+                                     `-- @shared {n}` above this ::ROWSELECT if the fan-in is \
+                                     deliberate"
+                            ),
                         )
                     } else {
                         (
                             "interaction/name-clash",
-                            "each overwrites the other; rename one",
+                            format!(
+                                "each overwrites the other; rename one, or add \
+                                     `-- @shared {n}` above this statement if the hand-off is \
+                                     deliberate"
+                            ),
                         )
                     };
                     diags.push(Diagnostic {
-                        severity: Severity::Warning,
-                        stmt,
-                        code,
-                        message: format!(
-                            "variable `{n}` is set by this {kind} and by statement {other} ({k}) — {hint}"
-                        ),
-                        sql: sql.to_string(),
-                    })
+                            severity: Severity::Warning,
+                            stmt,
+                            code,
+                            message: format!(
+                                "variable `{n}` is set by this {kind} and by statement {other} ({k}) — {hint}"
+                            ),
+                            sql: sql.to_string(),
+                        })
                 }
                 Some(_) => {}
                 None => {
                     owners.insert(n.clone(), (stmt, kind));
                 }
+            }
+        }
+        for want in shared {
+            if !names.iter().any(|n| n == want) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "interaction/shared-unused",
+                    message: format!(
+                        "`-- @shared {want}` names a variable this {kind} doesn't set — {} \
+                             fix the typo, or drop the line",
+                        if names.is_empty() {
+                            "it sets no variable here.".to_string()
+                        } else {
+                            format!("this {kind} sets {}.", names.join(", "))
+                        }
+                    ),
+                    sql: sql.to_string(),
+                });
             }
         }
     };
@@ -232,8 +272,10 @@ where
     // share one (e.g. the same alias, or no alias on the same source column)
     // silently share one selection — a click in either toggles both. Unlike
     // ::SELECT_AS / ::DRILL (an explicit, chosen name — reuse there is
-    // allowed), any repeat here is flagged.
-    let mut pending_rowselect: Option<usize> = None;
+    // allowed), any repeat here is flagged — unless the directive itself
+    // carries `-- @shared <name>` (#398: its statement index, and that
+    // comment's names).
+    let mut pending_rowselect: Option<(usize, Vec<String>)> = None;
     // What a ::TRACK here would sit under: `Some(true)` a chart with a numeric
     // / date x, `Some(false)` one with a discrete x, `None` no chart.
     let mut track_host: Option<bool> = None;
@@ -474,7 +516,7 @@ where
                             }
                         })
                         .unwrap_or_default();
-                    claim(&mut diags, &names, stmt, "input", &short);
+                    claim(&mut diags, &names, stmt, "input", &short, &p.shared);
                     if kind == InputKind::Period {
                         let spec = rows
                             .first()
@@ -794,7 +836,7 @@ where
                 } else {
                     "::SELECT_AS"
                 };
-                claim(&mut diags, &names, stmt, kind, &short);
+                claim(&mut diags, &names, stmt, kind, &short, &p.shared);
             }
             match sets {
                 // Already complete, semicolon-terminated `SET VARIABLE`
@@ -1146,7 +1188,7 @@ where
                     .map(str::to_string);
             }
             if p.roles.iter().any(|(_, r)| *r == Role::RowSelect) {
-                pending_rowselect = Some(stmt);
+                pending_rowselect = Some((stmt, p.shared.clone()));
             }
             continue;
         }
@@ -1194,10 +1236,17 @@ where
         // this table's first (non-::TITLE/::INFO) column — claim it so a
         // second ::ROWSELECT table with the same first-column name is
         // flagged (interaction/rowselect-shared-name), not silently shared.
-        if let Some(rs_stmt) = pending_rowselect.take() {
+        if let Some((rs_stmt, rs_shared)) = pending_rowselect.take() {
             if is_table_panel {
                 if let Some(name) = rowselect_key_column(&p.roles, &rows) {
-                    claim(&mut diags, &[name], rs_stmt, "::ROWSELECT", &short);
+                    claim(
+                        &mut diags,
+                        &[name],
+                        rs_stmt,
+                        "::ROWSELECT",
+                        &short,
+                        &rs_shared,
+                    );
                 }
             }
         }
@@ -5636,6 +5685,131 @@ mod design_tests {
             },
         );
         assert!(!has(&ok, "interaction/rowselect-shared-name"), "{ok:?}");
+    }
+
+    /// #398: a `-- @shared <name>` directly above a `::ROWSELECT` documents
+    /// that it deliberately reuses `<name>` with another one — the issue's
+    /// own repro (two tables fanning in to one `item` selection).
+    #[test]
+    fn shared_header_silences_the_rowselect_repro_from_398() {
+        let build = |hdr: &str| {
+            format!(
+                "SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"ID\" FROM items;\n\
+                 {hdr}SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id * 2 AS \"Doubled\" FROM items;"
+            )
+        };
+        let run = |s: &str| {
+            check(s, |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    Ok(rows(1, |_| json!({ "item": "a", "ID": 1, "Doubled": 2 })))
+                }
+            })
+        };
+
+        // Without the header: flagged, same as #330.
+        let bare = run(&build(""));
+        assert!(has(&bare, "interaction/rowselect-shared-name"), "{bare:?}");
+
+        // With `-- @shared item` above the second ::ROWSELECT: silenced, and
+        // `--check --strict` passes clean.
+        let ok = run(&build("-- @shared item\n"));
+        assert!(!has(&ok, "interaction/rowselect-shared-name"), "{ok:?}");
+        assert!(passes(&ok, true), "{ok:?}");
+    }
+
+    /// #398: three `::ROWSELECT` tables fanning in to one variable (the
+    /// supplier-risk `material` case from the issue) — every clash past the
+    /// first owner needs its own `-- @shared`, since each is reported
+    /// against the first table, never against each other.
+    #[test]
+    fn shared_header_silences_a_three_way_rowselect_fan_in() {
+        let build = |hdr_b: &str, hdr_c: &str| {
+            format!(
+                "SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"A\" FROM a;\n\
+                 {hdr_b}SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"B\" FROM b;\n\
+                 {hdr_c}SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"C\" FROM c;"
+            )
+        };
+        let run = |s: &str| {
+            check(s, |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    Ok(rows(1, |_| json!({ "item": "a", "x": 1 })))
+                }
+            })
+        };
+
+        let bare = run(&build("", ""));
+        assert_eq!(
+            bare.iter()
+                .filter(|d| d.code == "interaction/rowselect-shared-name")
+                .count(),
+            2,
+            "{bare:?}"
+        );
+
+        let ok = run(&build("-- @shared item\n", "-- @shared item\n"));
+        assert!(!has(&ok, "interaction/rowselect-shared-name"), "{ok:?}");
+        assert!(passes(&ok, true), "{ok:?}");
+    }
+
+    /// #398: a dropdown input and a `::ROWSELECT` table meant to hand a
+    /// selection to each other either way (the supplier-risk `product` case).
+    #[test]
+    fn shared_header_silences_a_dropdown_rowselect_handoff() {
+        let answer = |q: &str| {
+            if q.contains("DISTINCT") {
+                rows(1, |_| json!({ "product": "A" }))
+            } else if q.contains("'single'") {
+                vec![json!({ "c0": "single" }).as_object().unwrap().clone()]
+            } else {
+                rows(1, |_| json!({ "product": "A", "ID": 1 }))
+            }
+        };
+        let build = |hdr: &str| {
+            format!(
+                "SELECT DISTINCT product ::DROPDOWN FROM t;\n\
+                 {hdr}SELECT 'single'::ROWSELECT;\n\
+                 SELECT product ::TABLE, id AS \"ID\" FROM items;"
+            )
+        };
+
+        let bare = check(&build(""), |q| Ok(answer(q)));
+        assert!(has(&bare, "interaction/name-clash"), "{bare:?}");
+
+        let ok = check(&build("-- @shared product\n"), |q| Ok(answer(q)));
+        assert!(!has(&ok, "interaction/name-clash"), "{ok:?}");
+        assert!(passes(&ok, true), "{ok:?}");
+    }
+
+    /// #398: a `-- @shared` name this directive doesn't itself set (a typo)
+    /// is flagged on its own, instead of silently disabling nothing.
+    #[test]
+    fn shared_header_with_an_unknown_name_warns_itself() {
+        let d = check(
+            "-- @shared itme\n\
+             SELECT 'single'::ROWSELECT;\n\
+             SELECT item ::TABLE, id AS \"ID\" FROM a;",
+            |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    Ok(rows(1, |_| json!({ "item": "x1", "ID": 1 })))
+                }
+            },
+        );
+        assert!(has(&d, "interaction/shared-unused"), "{d:?}");
+        // The real name is unaffected — no clash to report here anyway since
+        // there's only one claimant, but the typo'd name itself is flagged.
+        assert!(!has(&d, "interaction/rowselect-shared-name"), "{d:?}");
     }
 
     #[test]
