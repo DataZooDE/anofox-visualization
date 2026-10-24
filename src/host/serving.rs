@@ -15,6 +15,7 @@
 //!   ([`sql_literal`]); the SQL itself is owned by the server.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// Header carrying the per-server token for non-browser clients.
 pub const TOKEN_HEADER: &str = "X-Anofox-Token";
@@ -1328,6 +1329,162 @@ fn contains_from_stdin(lower: &str) -> bool {
     false
 }
 
+/// Refuse a `data`/`--site --data` directory that is too broad to safely
+/// publish or serve read-only: the filesystem root, a top-level system
+/// directory (`/etc`, `/home`, `/tmp`, …), the temp directory, or `$HOME`
+/// itself / anything that contains it (so a typo like `--data ~` can't turn
+/// into "every file I own is now world-readable over HTTP"). Moved here
+/// (#417) from `duckext/src/serve.rs` (where it guarded
+/// `LockedOptions::parse`'s `options.data`) so `dashboard --site --data`
+/// shares the exact same rule — a published site copies the folder onto a
+/// public host, so accepting a too-broad one there is worse than serving it
+/// read-only locally.
+pub fn too_broad(dir: &Path) -> Option<String> {
+    let Some(parent) = dir.parent() else {
+        return Some("the filesystem root".into());
+    };
+    const SYSTEM: [&str; 16] = [
+        "bin", "boot", "dev", "etc", "home", "lib", "lib64", "opt", "proc", "root", "run", "sbin",
+        "sys", "tmp", "usr", "var",
+    ];
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if parent.parent().is_none() && SYSTEM.contains(&name) {
+        return Some("a system directory".into());
+    }
+    let home = ["HOME", "USERPROFILE"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from);
+    for (what, p) in home
+        .map(|p| ("the home directory", p))
+        .chain([("the temp directory", std::env::temp_dir())])
+    {
+        if p.canonicalize().is_ok_and(|p| p.starts_with(dir)) {
+            return Some(format!("it contains {what}"));
+        }
+    }
+    None
+}
+
+// ----------------------------------------------- data-folder read-only ---
+// Moved here from `duckext/src/serve.rs` (#417) so `dashboard --site`'s own
+// pre-publish check — and its build-time `nav_picker` — can share the exact
+// rule the locked server enforces at startup and on every request, instead
+// of a second copy drifting out of sync. The locked server still owns
+// `check_read_only`/`build_nav_picker` themselves (they need a live DuckDB
+// connection); only the DuckDB-connection-free parts live here.
+
+/// `Ok` if `sql` (a panel, or a setup statement if `setup`) may run with a
+/// data folder open: a panel must be one query; a setup statement may also
+/// be `SET VARIABLE <name> = <expr>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW
+/// <name> AS <query>`, whose expression / query must parse as one query —
+/// classified by DuckDB's own parser ([`crate::host::policy::statement_query`],
+/// [`crate::host::policy::check_query`]), the same way the access policy is.
+pub fn read_only_statement(
+    sql: &str,
+    setup: bool,
+    duck: &mut dyn crate::host::policy::Duck,
+) -> Result<(), String> {
+    let query = if setup {
+        crate::host::policy::statement_query(sql).map_err(|e| format!("with a data folder: {e}"))?
+    } else {
+        sql.to_string()
+    };
+    crate::host::policy::check_query(duck, &query)
+        .map_err(|e| format!("with a data folder, only queries (SELECT …) are allowed: {e}"))
+}
+
+/// Is `lit` (a typed literal from `sv::sql_literal`/[`sql_literal`]) an
+/// acceptable value for a `path_vars` variable: a string or integer that is
+/// one plain path segment — `[A-Za-z0-9_.-]`, not starting with `.` (so
+/// never `.`, `..` or a hidden file), no `/` — or NULL?
+pub fn valid_path_value(lit: &str) -> bool {
+    if lit == "NULL" || (!lit.is_empty() && lit.bytes().all(|b| b.is_ascii_digit())) {
+        return true;
+    }
+    lit.strip_prefix('\'')
+        .and_then(|l| l.strip_suffix('\''))
+        .is_some_and(valid_path_value_text)
+}
+
+/// The same rule as [`valid_path_value`], but on a raw value (as a
+/// `nav_picker.sql` row returns it, or a `dashboard --site` build-time
+/// query), not a SQL literal's `'…'` quoting.
+pub fn valid_path_value_text(v: &str) -> bool {
+    (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())) || valid_dashboard_id(v)
+}
+
+/// `nav_picker.sql`'s options are inlined into every served page (or baked
+/// into `dashboard --site`'s `site.json`): cap how many rows it may return
+/// and how long one label may be.
+pub const NAV_PICKER_MAX_OPTIONS: usize = 2_000;
+pub const NAV_PICKER_MAX_LABEL: usize = 200;
+
+/// `sql` (the author's `nav_picker.sql`, already checked read-only) wrapped
+/// so every column comes back as text: `COLUMNS(*)::VARCHAR` casts whatever
+/// type the author's query gives a column, so a `VARCHAR`-only row reader
+/// can read it regardless.
+///
+/// Security review of #410, L1: the closing `)` is on its own line, after a
+/// newline — never appended right after `sql`'s own text — so a `sql` that
+/// ends in a `-- comment` with no newline of its own (a line comment runs to
+/// end of line) can never swallow it and produce a confusing "missing )"
+/// parse error instead of the real refusal from [`read_only_statement`].
+pub fn wrap_nav_picker_sql(sql: &str) -> String {
+    format!(
+        "SELECT COLUMNS(*)::VARCHAR FROM (\n{}\n) AS __anofox_nav_picker",
+        sql.trim().trim_end_matches(';')
+    )
+}
+
+/// `rows` (already fetched, two `VARCHAR` columns) to the (value, label)
+/// pairs a page (or a published site) gets — dropping any row whose value
+/// isn't a plain `path_vars` name (the exact rule [`valid_path_value`]
+/// enforces on every request), and refusing the whole result if a row has
+/// the wrong column count or the result is too big to inline into every
+/// page. Shared by the locked server's `build_nav_picker` (a live DuckDB
+/// connection) and `dashboard --site` (the `duckdb` CLI): both fetch rows
+/// their own way and hand them here.
+pub fn nav_picker_rows_to_options(
+    rows: &[Vec<Option<String>>],
+) -> Result<Vec<(String, String)>, String> {
+    if rows.len() > NAV_PICKER_MAX_OPTIONS {
+        return Err(format!(
+            "options.nav_picker.sql returned more than {NAV_PICKER_MAX_OPTIONS} rows — its list \
+             is sent to every page, so keep it short"
+        ));
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        if row.len() != 2 {
+            return Err(format!(
+                "options.nav_picker.sql must return exactly two columns (value, label), got {}",
+                row.len()
+            ));
+        }
+        let Some(value) = row[0].as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+            eprintln!("[anofox-serve] options.nav_picker: row {i} has no value, dropped");
+            continue;
+        };
+        if !valid_path_value_text(value) {
+            eprintln!(
+                "[anofox-serve] options.nav_picker: row {i}'s value ({}) is not a plain name, dropped",
+                crate::host::access::diag(value)
+            );
+            continue;
+        }
+        let mut label = row[1].as_deref().unwrap_or(value).trim().to_string();
+        if label.is_empty() {
+            label = value.to_string();
+        }
+        if label.chars().count() > NAV_PICKER_MAX_LABEL {
+            label = label.chars().take(NAV_PICKER_MAX_LABEL).collect();
+        }
+        out.push((value.to_string(), label));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1919,5 +2076,25 @@ mod tests {
         assert!(!reads_stdin("SELECT * FROM read_csv('-')"));
         assert!(!reads_stdin("SELECT * FROM read_csv('/dev/std[i]n')"));
         assert!(!reads_stdin("SELECT /proc_stats FROM t")); // no /fd/0 at all
+    }
+
+    #[test]
+    fn broad_data_folders_are_refused() {
+        assert!(too_broad(Path::new("/")).is_some());
+        for d in ["/etc", "/usr", "/home", "/tmp", "/var"] {
+            assert!(too_broad(Path::new(d)).is_some(), "{d}");
+        }
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        assert!(too_broad(&tmp).is_some());
+        if let Some(home) =
+            std::env::var_os("HOME").and_then(|h| PathBuf::from(h).canonicalize().ok())
+        {
+            assert!(too_broad(&home).is_some());
+            assert!(too_broad(home.parent().unwrap()).is_some());
+            assert!(too_broad(&home.join("runs")).is_none());
+        }
+        assert!(too_broad(&tmp.join("anofox-runs")).is_none());
+        assert!(too_broad(Path::new("/srv/runs")).is_none());
+        assert!(too_broad(Path::new("/data")).is_none());
     }
 }

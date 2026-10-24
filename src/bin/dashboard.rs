@@ -8,12 +8,15 @@
 //! `anofox_visualization::sql`, shared with the wasm browser build.
 
 use anofox_visualization::format::{escape_xml, Locale};
+use anofox_visualization::host::app_brand::AppBrand;
+use anofox_visualization::host::serving as sv;
 use anofox_visualization::inputs;
 use anofox_visualization::lint::{self, Severity};
 use anofox_visualization::theme::{self, DashboardChrome, Variant};
 use anofox_visualization::{
     dashboard, error_pre, page, render_with_title, roles, sql, track, RenderOptions, Role,
 };
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -50,6 +53,13 @@ const USAGE: &str = "usage:\n  \
                                              titles and file names the servers skip\n  \
                [--db f --policy policy.json]  …and what an access policy refuses / hides\n  \
                [--data <dir>]                 getvariable('anofox_data') = dir, as a locked server\n  \
+     dashboard --site <folder> <out-dir>     publish a served folder as a static DuckDB-Wasm\n  \
+               [--data <dir|url>]             site (#417) — a GitHub Pages workflow runs this\n  \
+               [--options locked.json]        after a scheduled data refresh. --options takes\n  \
+               [--app <web dir|tarball>]      the same path_vars/nav_picker/app/home/theme keys\n  \
+                                             as anofox_serve_dashboards; --app is the unpacked or\n  \
+                                             packed `anofox-visualization-web-*` release asset\n  \
+                                             (default: next to this binary) — never downloaded.\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
      dashboard --themes                      list the built-in themes\n  \
@@ -69,6 +79,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
+        Some("--site") => cmd_site(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
         Some("--themes") => cmd_themes(),
@@ -698,6 +709,819 @@ fn policy_diags(script: &str, db: &str, path: &str) -> Vec<lint::Diagnostic> {
     out
 }
 
+// ------------------------------------------------------------- --site ---
+// #417: turn a served folder (the one `anofox_serve_dashboards(dir, …)`
+// would open) into a static site that runs in DuckDB-Wasm — no server, no
+// patches by the publisher. Reuses the locked server's own rules
+// (`host::serving::{read_only_statement, nav_picker_rows_to_options, …}`,
+// `DashboardMeta::nav_json`) through the `duckdb` CLI (this binary has no
+// embedded DuckDB), so a published site never accepts a folder, or shows a
+// `nav_picker` option, the locked server itself would refuse.
+
+/// A loaded dashboard, enough of `duckext::serve::Dash` for `--site`: no
+/// `requires`/`tabs`/`info` (those drive live serving, not the static
+/// export — the browser plans the script itself, as the builder does).
+struct SiteDash {
+    id: String,
+    meta: sv::DashboardMeta,
+    sql: String,
+    /// `(is a setup statement, its SQL)` — [`sql::plan`]'s own split.
+    stmts: Vec<(bool, String)>,
+}
+
+/// Load every `*.sql` of `dir`, sorted the same way the locked server does
+/// (`-- @order`, then id — [`sv::DashboardMeta::order_key`]), so `site.json`'s
+/// `dashboards` array is already in nav order.
+fn load_site_dashboards(dir: &Path) -> Result<Vec<SiteDash>, String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read dashboard folder '{}': {e}", dir.display()))?;
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("sql") {
+            continue;
+        }
+        let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            continue;
+        };
+        if !sv::valid_dashboard_id(&id) {
+            continue; // ids end up in URLs: only [A-Za-z0-9_.-], as the server requires
+        }
+        let sql =
+            std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
+        let meta = sv::parse_dashboard_meta(&id, &sql);
+        let stmts = sql::plan(&sql)
+            .into_iter()
+            .map(|p| (p.setup, p.sql.trim().to_string()))
+            .collect();
+        out.push(SiteDash {
+            id,
+            meta,
+            sql,
+            stmts,
+        });
+    }
+    if out.is_empty() {
+        return Err(format!("no .sql dashboards found in '{}'", dir.display()));
+    }
+    out.sort_by(|a, b| a.meta.order_key(&a.id).cmp(&b.meta.order_key(&b.id)));
+    Ok(out)
+}
+
+/// `options.nav_picker` for `--site` — the same shape as
+/// `LockedOptions.nav_picker` (`duckext/src/serve.rs`), parsed again here
+/// because the full `LockedOptions` also carries live-serving-only state
+/// (`auth`, `policy`, a `Conn`) this binary has no use for.
+#[derive(Debug)]
+struct SiteNavPicker {
+    var: String,
+    sql: String,
+    label: Option<String>,
+}
+
+/// `--options locked.json` for `--site`: the subset of `anofox_serve_dashboards`'s
+/// options that make sense for a site with no server behind it (no `auth`,
+/// no `policy` — the plan's own parity point: every query the browser runs
+/// is the author's, exactly as in the builder; see docs/secure-serving.md,
+/// "Publish as a static site").
+#[derive(Default, Debug)]
+struct SiteOptions {
+    path_vars: Vec<String>,
+    nav_picker: Option<SiteNavPicker>,
+    app: Option<serde_json::Value>,
+    home: Option<String>,
+    theme: Option<String>,
+}
+
+fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
+    let mut o = SiteOptions::default();
+    let Some(json) = json.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(o);
+    };
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("--options: bad JSON: {e}"))?;
+    let m = v.as_object().ok_or("--options must be a JSON object")?;
+    let valid_var =
+        |v: &str| sv::valid_ident(v) && !anofox_visualization::host::access::is_reserved_var(v);
+    for (k, val) in m {
+        match k.as_str() {
+            "path_vars" => {
+                let arr = val
+                    .as_array()
+                    .ok_or("options.path_vars must be a list of variable names")?;
+                for v in arr {
+                    let v = v
+                        .as_str()
+                        .filter(|v| valid_var(v))
+                        .ok_or("options.path_vars: invalid variable name")?;
+                    o.path_vars.push(v.to_string());
+                }
+            }
+            "nav_picker" => {
+                let m = val.as_object().ok_or(
+                    "options.nav_picker must be an object like {\"var\": \"model\", \"sql\": \"SELECT …\", \"label\": \"Model\"}",
+                )?;
+                if let Some(other) = m.keys().find(|k| !matches!(k.as_str(), "var" | "sql" | "label")) {
+                    return Err(format!("options.nav_picker: unknown key '{other}' (var, sql, label)"));
+                }
+                let var = m
+                    .get("var")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| valid_var(v))
+                    .ok_or("options.nav_picker.var must be a variable name")?;
+                let sql = m
+                    .get("sql")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or("options.nav_picker.sql must be a SELECT query")?;
+                let label = match m.get("label") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(s))
+                        if !s.trim().is_empty() && s.chars().count() <= 100 =>
+                    {
+                        Some(s.clone())
+                    }
+                    _ => return Err("options.nav_picker.label must be a short (<=100 character) string".into()),
+                };
+                o.nav_picker = Some(SiteNavPicker {
+                    var: var.to_string(),
+                    sql: sql.to_string(),
+                    label,
+                });
+            }
+            "app" => {
+                if !val.is_object() {
+                    return Err(
+                        "options.app must be an object like {\"name\": \"…\", \"tagline\": \"…\", \"logo\": \"https://…\"}"
+                            .into(),
+                    );
+                }
+                let a = AppBrand::from_json(&val.to_string()).map_err(|e| format!("options.app: {e}"))?;
+                a.check().map_err(|e| format!("options.app: {e}"))?;
+                o.app = Some(val.clone());
+            }
+            "home" => {
+                let h = val
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|h| sv::valid_dashboard_id(h))
+                    .ok_or("options.home must be a dashboard id (its file name without .sql)")?;
+                o.home = Some(h.to_string());
+            }
+            "theme" => {
+                let spec = match val {
+                    serde_json::Value::String(t) => t.clone(),
+                    serde_json::Value::Object(_) => val.to_string(),
+                    _ => return Err("options.theme must be a theme name or a JSON object".into()),
+                };
+                theme::resolve(&spec).map_err(|e| format!("options.theme: {e}"))?;
+                o.theme = Some(spec);
+            }
+            other => {
+                return Err(format!(
+                    "options: unknown key '{other}' for --site (path_vars, nav_picker, app, home, theme — \
+                     auth/policy make no sense for a site with no server behind it)"
+                ))
+            }
+        }
+    }
+    if let Some(np) = &o.nav_picker {
+        if !o.path_vars.iter().any(|p| p.eq_ignore_ascii_case(&np.var)) {
+            return Err(format!(
+                "options.nav_picker.var '{}' must be one of options.path_vars",
+                np.var
+            ));
+        }
+    }
+    Ok(o)
+}
+
+/// [`run_query`], but as positional `VARCHAR` rows ([`policy::Duck`]) instead
+/// of JSON objects — the same adaptation `policy_diags`'s own closure does
+/// above.
+fn duck_rows(db: Option<&str>, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+    Ok(run_query(db, sql)?
+        .into_iter()
+        .map(|r| {
+            r.into_values()
+                .map(|v| match v {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(s) => Some(s),
+                    other => Some(other.to_string()),
+                })
+                .collect()
+        })
+        .collect())
+}
+
+/// Every dashboard statement of `dashboards` must run with a data folder
+/// open, exactly as the locked server's `check_read_only` requires — a
+/// published site must never accept a folder the server would refuse.
+/// `json_serialize_sql` only parses (it needs no `anofox_data`), so no
+/// prelude is needed here.
+fn site_check_read_only(dashboards: &[SiteDash]) -> Result<(), String> {
+    let mut duck = |sql: &str| duck_rows(None, sql);
+    for d in dashboards {
+        for (i, (setup, sql)) in d.stmts.iter().enumerate() {
+            sv::read_only_statement(sql, *setup, &mut duck)
+                .map_err(|e| format!("dashboard '{}' statement {i}: {e}", d.id))?;
+        }
+    }
+    Ok(())
+}
+
+/// Run `np.sql` with `anofox_data` set to `data` (a local path or URL —
+/// whatever the generated site's pages will also set it to) and turn its
+/// rows into the picker's options, exactly as the locked server's
+/// `build_nav_picker` does against its live connection.
+fn site_build_nav_picker(
+    np: &SiteNavPicker,
+    data: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut duck = |sql: &str| duck_rows(None, sql);
+    sv::read_only_statement(&np.sql, false, &mut duck)
+        .map_err(|e| format!("options.nav_picker.sql: {e}"))?;
+    let prelude = match data {
+        Some(d) => format!("SET VARIABLE anofox_data = '{}';\n", d.replace('\'', "''")),
+        None => String::new(),
+    };
+    let wrapped = format!("{prelude}{}", sv::wrap_nav_picker_sql(&np.sql));
+    let rows = duck_rows(None, &wrapped).map_err(|e| format!("options.nav_picker.sql: {e}"))?;
+    sv::nav_picker_rows_to_options(&rows)
+}
+
+/// Copy `src` into `dst` (already created), recursively. Used for `--site`'s
+/// `out/data/` (a copy of a local `--data <dir>`) and for an unpacked `--app`
+/// web directory.
+/// Copy `src` into `dst` (already created), recursively, refusing a symlink
+/// anywhere inside `src`: `entry.file_type()` is the symlink's own type (it
+/// doesn't follow the link), never the target's, so a symlink would
+/// otherwise silently copy whatever it points at — `--site --data` publishes
+/// `out/data/` on a public host, so a symlink into `~/.ssh`, `/etc`, or
+/// another project would publish that too. The locked server has the same
+/// rule in spirit (`too_broad` refuses the obvious footguns on `options.data`
+/// itself; this is the per-file backstop a symlink *inside* an otherwise
+/// fine folder needs). Refusing (not skipping) matches `too_broad`: a
+/// folder this command can't safely publish whole is worse to publish
+/// partially and silently than to refuse outright.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            return Err(std::io::Error::other(format!(
+                "'{}' is a symlink — refusing to publish it (it may point outside this folder)",
+                entry.path().display()
+            )));
+        }
+        let to = dst.join(entry.file_name());
+        if ft.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Is `s` a `--data` URL (as opposed to a local directory)?
+fn is_data_url(s: &str) -> bool {
+    s.starts_with("https://") || s.starts_with("http://")
+}
+
+/// Removes an extracted `--app` tarball's temp directory when dropped. Only
+/// covers `cmd_site`'s normal-completion path: every error here still exits
+/// through `fail()` (`std::process::exit`), which — like every other
+/// `std::process::exit` in this file — skips destructors, so an early
+/// failure after extraction can still leave the temp directory behind. A
+/// hygiene gap, not a security one (it holds a copy of the public `--app`
+/// web build, nothing secret, and the OS reclaims `/tmp` eventually); a
+/// full fix would mean reworking `cmd_site`'s whole `fail()`-exits-
+/// immediately error style, out of scope here.
+struct AppExtractGuard(Option<PathBuf>);
+impl Drop for AppExtractGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+}
+
+/// `--app <dir|tarball>`: a directory already (no guard — nothing of ours to
+/// clean up), or a `.tar.gz`/`.tgz` release asset unpacked (via the `tar` on
+/// PATH — no tar/gzip crate: the core stays dependency-light) into a fresh
+/// temp directory, removed by the returned [`AppExtractGuard`] once the
+/// caller is done with it.
+fn resolve_app_dir(app: &Path) -> Result<(PathBuf, AppExtractGuard), String> {
+    let is_archive = matches!(
+        app.extension().and_then(|e| e.to_str()),
+        Some("gz") | Some("tgz")
+    );
+    if !is_archive {
+        if !app.is_dir() {
+            return Err(format!("--app '{}' is not a directory", app.display()));
+        }
+        return Ok((app.to_path_buf(), AppExtractGuard(None)));
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "anofox-site-app-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("mkdir {}: {e}", tmp.display()))?;
+    let guard = AppExtractGuard(Some(tmp.clone()));
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(app)
+        .arg("-C")
+        .arg(&tmp)
+        .status()
+        .map_err(|e| format!("run tar: {e}"))?;
+    if !status.success() {
+        return Err(format!("tar -xzf {}: failed", app.display()));
+    }
+    // The app files may sit right at the tarball's root, under a `web/`
+    // folder, or (the actual `anofox-visualization-web-<tag>.tar.gz` release
+    // asset, scripts/release/build-web.sh) under its own
+    // `anofox-visualization-web-<tag>/` folder, as every other release
+    // tarball is wrapped (so unpacking it never scatters files into the
+    // current directory) — so: already rooted at the app files (has its own
+    // index.html), else `web/`, else the only directory the archive has.
+    if tmp.join("index.html").is_file() {
+        return Ok((tmp, guard));
+    }
+    let web = tmp.join("web");
+    if web.is_dir() {
+        return Ok((web, guard));
+    }
+    let mut dirs = std::fs::read_dir(&tmp)
+        .map_err(|e| format!("read {}: {e}", tmp.display()))?
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false));
+    match (dirs.next(), dirs.next()) {
+        (Some(only), None) => Ok((only.path(), guard)),
+        _ => Err(format!(
+            "--app '{}': unpacked but no index.html found (not an anofox-visualization-web-<tag>.tar.gz?)",
+            app.display()
+        )),
+    }
+}
+
+/// `dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [--app <web dir|tarball>]`
+fn cmd_site(args: &[String]) {
+    let mut folder: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut data: Option<String> = None;
+    let mut options: Option<String> = None;
+    let mut app: Option<String> = None;
+    let mut positional = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--data" => data = it.next().cloned(),
+            "--options" => options = it.next().cloned(),
+            "--app" => app = it.next().cloned(),
+            _ if !a.starts_with("--") => positional.push(a.clone()),
+            _ => {
+                eprintln!("--site: unknown flag '{a}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    if positional.len() == 1 {
+        folder = positional.first().cloned();
+    } else if positional.len() >= 2 {
+        folder = positional.first().cloned();
+        out = positional.get(1).cloned();
+    }
+    let (Some(folder), Some(out)) = (folder, out) else {
+        eprintln!(
+            "usage: dashboard --site <folder> <out-dir> [--data <dir|url>] \
+             [--options locked.json] [--app <web dir|tarball>]"
+        );
+        std::process::exit(2);
+    };
+    let folder = Path::new(&folder);
+    let out = Path::new(&out);
+    let fail = |msg: String| -> ! {
+        eprintln!("--site: {msg}");
+        std::process::exit(1);
+    };
+
+    // 1. The folder, as the locked server would open it: the dashboards
+    //    load and parse, every statement is read-only ([`site_check_read_only`]),
+    //    and `--check`'s own lint (broken/empty panels, header issues) passes.
+    let dashboards = load_site_dashboards(folder).unwrap_or_else(|e| fail(e));
+    let options_json = options.as_deref().map(|p| {
+        std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("--options '{p}': {e}")))
+    });
+    let opts = parse_site_options(options_json.as_deref()).unwrap_or_else(|e| fail(e));
+
+    let data_value: Option<String> = match &data {
+        Some(d) if is_data_url(d) => Some(d.trim_end_matches('/').to_string()),
+        Some(d) => {
+            let abs =
+                std::fs::canonicalize(d).unwrap_or_else(|e| fail(format!("--data '{d}': {e}")));
+            if !abs.is_dir() {
+                fail(format!("--data '{d}' is not a directory"));
+            }
+            // S1 (PR #429 review): a published site copies this folder onto
+            // a public host — refusing a too-broad one here is the same
+            // rule `options.data` enforces on a locked server
+            // (`LockedOptions::parse`), shared via `sv::too_broad`.
+            if let Some(why) = sv::too_broad(&abs) {
+                fail(format!(
+                    "--data '{d}': refusing '{}': {why} — point it at the folder that holds the data only",
+                    abs.display()
+                ));
+            }
+            Some(abs.to_string_lossy().into_owned())
+        }
+        None => None,
+    };
+    if !opts.path_vars.is_empty() && data_value.is_none() {
+        fail("options.path_vars needs --data".into());
+    }
+
+    if let Err(e) = site_check_read_only(&dashboards) {
+        fail(format!(
+            "{e}\n(the locked server would refuse this folder too — fix the dashboard or drop --data)"
+        ));
+    }
+
+    let mut diags_failed = false;
+    {
+        let names: Vec<String> = dashboards.iter().map(|d| format!("{}.sql", d.id)).collect();
+        let scripts: Vec<(String, String)> = dashboards
+            .iter()
+            .map(|d| (format!("{}.sql", d.id), d.sql.clone()))
+            .collect();
+        let data_set = data_value
+            .as_ref()
+            .map(|d| format!("SET VARIABLE anofox_data = '{}';\n", d.replace('\'', "''")))
+            .unwrap_or_default();
+        let extra = lint::folder_diags(&scripts);
+        for (i, d) in dashboards.iter().enumerate() {
+            let mut diags = lint::check_opts(
+                &d.sql,
+                |sql| run_query(None, &format!("{data_set}{sql}")),
+                lint::LintOptions { design: false },
+            );
+            diags.extend(
+                extra
+                    .iter()
+                    .filter(|(f, _)| f == &names[i])
+                    .map(|(_, d)| d.clone()),
+            );
+            if !lint::passes(&diags, false) {
+                diags_failed = true;
+                for diag in &diags {
+                    if diag.severity == Severity::Error {
+                        eprintln!(
+                            "--site: {}.sql [stmt {}] {} — {}",
+                            d.id, diag.stmt, diag.code, diag.message
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if diags_failed {
+        fail("one or more dashboards fail --check — fix them first (dashboard --check <folder> for details)".into());
+    }
+
+    // 2. The nav_picker's options, computed now (never from a viewer, never
+    //    per-request — the exact rule `build_nav_picker` runs against a live
+    //    connection, here against the `duckdb` CLI).
+    let nav_picker_options = opts
+        .nav_picker
+        .as_ref()
+        .map(|np| site_build_nav_picker(np, data_value.as_deref()).unwrap_or_else(|e| fail(e)));
+
+    // 3. The app bundle (`--app`, else next to this binary). `_app_guard`
+    // removes a tarball's extracted temp directory once it drops at the end
+    // of this function (A3, PR #429 review) — see its own doc comment for
+    // what it doesn't cover.
+    let (app_src, _app_guard) = match app {
+        Some(a) => resolve_app_dir(Path::new(&a)).unwrap_or_else(|e| fail(e)),
+        None => {
+            let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("current_exe: {e}")));
+            let next_to = exe.parent().map(|p| p.join("web"));
+            match next_to.filter(|p| p.is_dir()) {
+                Some(p) => (p, AppExtractGuard(None)),
+                None => fail(
+                    "no --app given and no 'web' folder next to this binary — pass --app <web dir|tarball> \
+                     (the anofox-visualization-web-<tag>.tar.gz release asset, unpacked or not)"
+                        .into(),
+                ),
+            }
+        }
+    };
+    let index_html = std::fs::read_to_string(app_src.join("index.html"))
+        .unwrap_or_else(|e| fail(format!("--app: read index.html: {e}")));
+    // The exact markers `page()` (below) rewrites: refuse rather than quietly
+    // publish a page with no CSP meta, no published-mode body class, or
+    // (`import.meta.url`-relative app.js/theme-base.css aside) broken asset
+    // paths on an `--app` from a web build this generator doesn't recognize.
+    for marker in [
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"object-src 'none'; base-uri 'none'\">",
+        "<head>",
+        "<body class=\"mode-view\">",
+        "href=\"theme-base.css\"",
+        "src=\"./app.js\"",
+    ] {
+        if !index_html.contains(marker) {
+            fail(format!(
+                "--app: index.html doesn't look like an anofox-visualization web build (missing {marker:?}) — \
+                 pass a matching anofox-visualization-web-<tag> release asset"
+            ));
+        }
+    }
+
+    // 4. Write the output tree. The app's own bundled builder content
+    // (`data/`, `examples/`, `m5_monthly.parquet` — the in-browser "Examples"
+    // library's sample dashboards/data, never read in published mode) is
+    // skipped: a published site never needs it, and `data/` would otherwise
+    // collide with this command's own `out/data/` (the site's `--data`).
+    const APP_SKIP: [&str; 3] = ["data", "examples", "m5_monthly.parquet"];
+    std::fs::create_dir_all(out).unwrap_or_else(|e| fail(format!("mkdir {}: {e}", out.display())));
+    for entry in std::fs::read_dir(&app_src)
+        .unwrap_or_else(|e| fail(format!("read {}: {e}", app_src.display())))
+    {
+        let entry = entry.unwrap_or_else(|e| fail(format!("read {}: {e}", app_src.display())));
+        let name = entry.file_name();
+        if APP_SKIP
+            .iter()
+            .any(|s| std::ffi::OsStr::new(s) == name.as_os_str())
+        {
+            continue;
+        }
+        let to = out.join(&name);
+        let ft = entry
+            .file_type()
+            .unwrap_or_else(|e| fail(format!("stat {}: {e}", entry.path().display())));
+        // S1: the same symlink refusal as copy_dir_recursive's own, for a
+        // symlink sitting right at --app's top level (copy_dir_recursive
+        // only ever sees one *inside* a subdirectory).
+        if ft.is_symlink() {
+            fail(format!(
+                "'{}' is a symlink — refusing to publish it (it may point outside --app)",
+                entry.path().display()
+            ));
+        } else if ft.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)
+                .unwrap_or_else(|e| fail(format!("copy app files: {e}")));
+        } else {
+            std::fs::copy(entry.path(), &to)
+                .unwrap_or_else(|e| fail(format!("copy app files: {e}")));
+        }
+    }
+    let dash_dir = out.join("dashboards");
+    std::fs::create_dir_all(&dash_dir)
+        .unwrap_or_else(|e| fail(format!("mkdir {}: {e}", dash_dir.display())));
+    for d in &dashboards {
+        std::fs::write(dash_dir.join(format!("{}.sql", d.id)), &d.sql)
+            .unwrap_or_else(|e| fail(format!("write dashboards/{}.sql: {e}", d.id)));
+    }
+
+    let site_data = match (&data, &data_value) {
+        (Some(d), Some(v)) if is_data_url(d) => Some(v.clone()),
+        (Some(_), Some(_)) => {
+            let data_out = out.join("data");
+            let src = Path::new(data.as_deref().unwrap());
+            copy_dir_recursive(src, &data_out)
+                .unwrap_or_else(|e| fail(format!("copy --data: {e}")));
+            Some("data".to_string())
+        }
+        _ => None,
+    };
+
+    let nav: Vec<serde_json::Value> = dashboards.iter().map(|d| d.meta.nav_json(&d.id)).collect();
+    let mut site_json = serde_json::json!({
+        "dashboards": nav,
+    });
+    if !opts.path_vars.is_empty() {
+        site_json["pathVars"] = serde_json::json!(opts.path_vars);
+    }
+    if let (Some(np), Some(options)) = (&opts.nav_picker, &nav_picker_options) {
+        site_json["navPicker"] = serde_json::json!({
+            "var": np.var,
+            "label": np.label,
+            "options": options.iter().map(|(v, l)| serde_json::json!({"value": v, "label": l})).collect::<Vec<_>>(),
+        });
+    }
+    if let Some(app) = &opts.app {
+        site_json["app"] = app.clone();
+    }
+    if let Some(theme) = &opts.theme {
+        site_json["theme"] = serde_json::json!(theme);
+    }
+    if let Some(home) = &opts.home {
+        site_json["home"] = serde_json::json!(home);
+    }
+    if let Some(d) = &site_data {
+        site_json["data"] = serde_json::json!(d);
+    }
+    std::fs::write(
+        out.join("site.json"),
+        serde_json::to_string(&site_json).unwrap_or_else(|e| fail(format!("site.json: {e}"))),
+    )
+    .unwrap_or_else(|e| fail(format!("write site.json: {e}")));
+
+    // 5. index.html (the home page, below) + one launcher per dashboard
+    //    (`d/<id>/index.html`): a GitHub-Pages-friendly real file per
+    //    dashboard id, so a refresh, a shared link and back/forward all
+    //    land on a page that can bootstrap itself (there are no server
+    //    rewrites on static hosting).
+    let data_origin = data_value
+        .as_deref()
+        .filter(|d| is_data_url(d))
+        .and_then(|d| {
+            let rest = d
+                .strip_prefix("https://")
+                .or_else(|| d.strip_prefix("http://"))?;
+            let host = rest.split('/').next()?;
+            Some(format!("{}://{}", d.split("://").next()?, host))
+        });
+    let page = |dash_id: &str, rel: &str| -> String {
+        let csp = site_csp(data_origin.as_deref());
+        let html = index_html
+            .replacen(
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"object-src 'none'; base-uri 'none'\">",
+                &format!("<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"),
+                1,
+            )
+            .replacen(
+                "<head>",
+                // "site.json" always — `sitePrepare()` (web/app.js) resolves it
+                // against `import.meta.url` (app.js's own, fixed location: every
+                // page loads the same app.js, co-located with site.json), never
+                // against this page's own URL, so it must NOT carry `rel`'s
+                // document-relative "../../" (a launcher is two directories
+                // deeper than the page that serves app.js — only the asset
+                // hrefs below need that prefix).
+                &format!(
+                    "<head>\n<meta name=\"anofox-site\" content=\"site.json\">\n<meta name=\"anofox-dash\" content=\"{}\">",
+                    sv::html_escape_attr_roundtrip(dash_id)
+                ),
+                1,
+            )
+            .replacen(
+                "<body class=\"mode-view\">",
+                "<body class=\"mode-view embed published\">",
+                1,
+            );
+        if rel.is_empty() {
+            html
+        } else {
+            html.replace(
+                "href=\"theme-base.css\"",
+                &format!("href=\"{rel}theme-base.css\""),
+            )
+            .replace("src=\"./app.js\"", &format!("src=\"{rel}app.js\""))
+        }
+    };
+    for d in &dashboards {
+        let launcher_dir = out.join("d").join(&d.id);
+        std::fs::create_dir_all(&launcher_dir)
+            .unwrap_or_else(|e| fail(format!("mkdir {}: {e}", launcher_dir.display())));
+        std::fs::write(launcher_dir.join("index.html"), page(&d.id, "../../"))
+            .unwrap_or_else(|e| fail(format!("write d/{}/index.html: {e}", d.id)));
+    }
+    // A2 (PR #429 review): `/` matches the locked server exactly — straight
+    // to `options.home` (a launcher page here; the server's own 302) when
+    // it's set, else the same card-grid landing page every dashboard count
+    // gets there too (`page::landing`, reused verbatim: the same markup,
+    // the same CSS, so there is nothing of its own for this command to keep
+    // in sync).
+    let valid_home = opts
+        .home
+        .as_deref()
+        .filter(|h| dashboards.iter().any(|d| &d.id == h));
+    let index_body = match valid_home {
+        Some(h) => page(h, ""),
+        None => {
+            let theme_set =
+                theme::resolve(opts.theme.as_deref().unwrap_or("")).unwrap_or_else(|e| {
+                    fail(format!("options.theme: {e}")) // already validated in parse_site_options; defensive
+                });
+            let items = dashboards
+                .iter()
+                .map(|d| page::LandingItem {
+                    href: format!("d/{}/", d.id),
+                    meta: &d.meta,
+                    updated: sv::file_date(&folder.join(format!("{}.sql", d.id))),
+                })
+                .collect();
+            let app = opts.app.as_ref().map(|v| {
+                AppBrand::from_json(&v.to_string())
+                    .unwrap_or_else(|e| fail(format!("options.app: {e}")))
+            });
+            let html = page::landing(&page::Landing {
+                theme: &theme_set,
+                app: app.as_ref(),
+                items,
+            });
+            site_landing_csp(&html)
+        }
+    };
+    std::fs::write(out.join("index.html"), index_body)
+        .unwrap_or_else(|e| fail(format!("write index.html: {e}")));
+
+    eprintln!(
+        "wrote {} ({} dashboard{}) — serve it under any web root, the files are all relative",
+        out.display(),
+        dashboards.len(),
+        if dashboards.len() == 1 { "" } else { "s" }
+    );
+}
+
+/// `@duckdb/duckdb-wasm`'s own `+esm` build (jsdelivr) pulls in apache-arrow,
+/// which pulls in tslib and flatbuffers, each its own
+/// `cdn.jsdelivr.net/npm/<pkg>@<version>/+esm` script — found by actually
+/// running a published site (#417) and watching the CSP reports name one
+/// transitive dependency after another, then confirmed clean (no further
+/// ones) the same way. A locked server's own `page_csp` (`host::serving`)
+/// never needed any of these: a locked/served page never calls local
+/// `conn.query()` at all (it fetches `/api/panel` instead). Each is pinned
+/// exact, same as `sv::CDN_DUCKDB_WASM`/`sv::CDN_KATEX` — jsdelivr's `+esm`
+/// resolves a *specific* source package version's imports once and serves
+/// that resolution long-term (the same property that already makes pinning
+/// `CDN_DUCKDB_WASM`'s own exact version meaningful); re-pin these three
+/// (and re-run the end-to-end check in the PR this const was added by,
+/// watching for a *new* "violates ... script-src" console error) whenever
+/// `@duckdb/duckdb-wasm`'s pinned version in tests/web/package.json changes.
+const CDN_APACHE_ARROW: &str = "https://cdn.jsdelivr.net/npm/apache-arrow@17.0.0/";
+const CDN_TSLIB: &str = "https://cdn.jsdelivr.net/npm/tslib@2.6.3/";
+const CDN_FLATBUFFERS: &str = "https://cdn.jsdelivr.net/npm/flatbuffers@24.3.25/";
+
+/// The published site's `<meta http-equiv="Content-Security-Policy">`: the
+/// locked server's own header ([`sv::page_csp`]) minus `frame-ancestors` (a
+/// `<meta>` can't carry it — GitHub Pages sets no response headers at all),
+/// minus the per-response nonce (a static site's pages carry no inline
+/// `<script>`: `script-src 'self'` covers `app.js`, the one script every
+/// page loads), plus [`CDN_APACHE_ARROW`]/[`CDN_TSLIB`]/[`CDN_FLATBUFFERS`]
+/// (needed only because a published site, unlike a locked server, runs
+/// every query locally — see their own doc comment). `data_origin`: a
+/// remote `--data` URL's own origin, added to `connect-src` — the plan's
+/// own rule, "no request to hosts other than its own origin and the data
+/// URL".
+fn site_csp(data_origin: Option<&str>) -> String {
+    format!(
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval' {} {} {} {} {}; \
+         worker-src blob:; connect-src 'self' {} {} {} {} {} {} {}; img-src 'self' data: blob: https:; \
+         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com {}; \
+         font-src 'self' data: https://fonts.gstatic.com {}; manifest-src 'self'; media-src 'none'; \
+         object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'",
+        sv::CDN_DUCKDB_WASM,
+        sv::CDN_KATEX,
+        CDN_APACHE_ARROW,
+        CDN_TSLIB,
+        CDN_FLATBUFFERS,
+        sv::CDN_DUCKDB_WASM,
+        CDN_APACHE_ARROW,
+        CDN_TSLIB,
+        CDN_FLATBUFFERS,
+        sv::DUCKDB_EXT,
+        sv::USGS,
+        data_origin.unwrap_or(""),
+        sv::CDN_KATEX,
+        sv::CDN_KATEX,
+    )
+}
+
+/// `page::landing`'s own output (`html`) with a `<meta
+/// http-equiv="Content-Security-Policy">` injected (A2, PR #429 review) —
+/// much tighter than [`site_csp`]: this page runs no DuckDB-Wasm and makes
+/// no `fetch` at all (every dashboard link is a real navigation to its own
+/// launcher), so none of `site_csp`'s jsdelivr/`connect-src`/`wasm-unsafe-
+/// eval` entries apply. The one loosening: `script-src 'unsafe-inline'`,
+/// for `page::landing`'s own fixed `LANDING_SCRIPT` (9+ dashboards only —
+/// the search/filter box), which is first-party, author-independent
+/// content, never user data (every `::nav`/`::title`/description/tag/owner
+/// `page::landing` prints is HTML-escaped, not inlined into script). A hash
+/// source (`'sha256-…'`) would be tighter still and needs no
+/// `'unsafe-inline'` at all, but the core crate has no sha2/base64-general-
+/// purpose dependency to compute one with — the core crate stays
+/// dependency-light by design (see Cargo.toml's own comments).
+fn site_landing_csp(html: &str) -> String {
+    let csp = "default-src 'none'; script-src 'self' 'unsafe-inline'; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; \
+         manifest-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; \
+         base-uri 'self'; form-action 'self'";
+    html.replacen(
+        "<head>",
+        &format!("<head><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"),
+        1,
+    )
+}
+
 /// Print `SUMMARIZE` (types, min/max, approx-distinct, null %) for a source —
 /// schema grounding so an author never invents columns.
 fn cmd_describe(args: &[String]) {
@@ -801,5 +1625,215 @@ mod telemetry_default_tests {
         assert_eq!(default_value(Some("1")), None);
         assert_eq!(default_value(Some("0")), None); // opt back into telemetry
         assert_eq!(default_value(Some("false")), None);
+    }
+}
+
+#[cfg(test)]
+mod site_tests {
+    // Unit tests for the pure parts of `--site` (#417): option parsing and
+    // the CSP builder. The rest (`load_site_dashboards`, the read-only check,
+    // `site_build_nav_picker`, writing the output tree) needs the `duckdb`
+    // CLI and a real folder — covered by the manual end-to-end check this PR
+    // describes (a real site built, served under a sub-path, and compared
+    // side by side with the same folder on the locked server) rather than by
+    // a unit test here.
+    use super::*;
+
+    #[test]
+    fn empty_options_are_the_default() {
+        let o = parse_site_options(None).unwrap();
+        assert!(o.path_vars.is_empty());
+        assert!(o.nav_picker.is_none());
+        assert!(o.app.is_none());
+        assert!(o.home.is_none());
+        assert!(o.theme.is_none());
+        let o2 = parse_site_options(Some("  ")).unwrap();
+        assert!(o2.path_vars.is_empty());
+    }
+
+    #[test]
+    fn bad_json_is_refused() {
+        assert!(parse_site_options(Some("not json")).is_err());
+    }
+
+    #[test]
+    fn auth_and_policy_are_refused_for_a_site_with_no_server() {
+        let e = parse_site_options(Some(r#"{"auth": {}}"#)).unwrap_err();
+        assert!(e.contains("unknown key 'auth'"), "{e}");
+        let e = parse_site_options(Some(r#"{"policy": "none"}"#)).unwrap_err();
+        assert!(e.contains("unknown key 'policy'"), "{e}");
+    }
+
+    #[test]
+    fn path_vars_takes_plain_variable_names_only() {
+        let o = parse_site_options(Some(r#"{"path_vars": ["region", "model"]}"#)).unwrap();
+        assert_eq!(o.path_vars, vec!["region".to_string(), "model".to_string()]);
+        assert!(parse_site_options(Some(r#"{"path_vars": ["not a name"]}"#)).is_err());
+        // anofox_data / __claim_* are server-reserved — never a `path_vars` name.
+        assert!(parse_site_options(Some(r#"{"path_vars": ["anofox_data"]}"#)).is_err());
+        assert!(parse_site_options(Some(r#"{"path_vars": ["__claim_role"]}"#)).is_err());
+    }
+
+    #[test]
+    fn nav_picker_var_must_be_a_path_vars_entry() {
+        let json =
+            r#"{"path_vars": ["region"], "nav_picker": {"var": "model", "sql": "SELECT 1, 2"}}"#;
+        let e = parse_site_options(Some(json)).unwrap_err();
+        assert!(e.contains("must be one of options.path_vars"), "{e}");
+
+        let json = r#"{"path_vars": ["region"], "nav_picker": {"var": "region", "sql": "SELECT 1, 2", "label": "Region"}}"#;
+        let o = parse_site_options(Some(json)).unwrap();
+        let np = o.nav_picker.unwrap();
+        assert_eq!(np.var, "region");
+        assert_eq!(np.sql, "SELECT 1, 2");
+        assert_eq!(np.label.as_deref(), Some("Region"));
+    }
+
+    #[test]
+    fn home_must_be_a_plain_dashboard_id() {
+        assert!(parse_site_options(Some(r#"{"home": "overview"}"#)).is_ok());
+        assert!(parse_site_options(Some(r#"{"home": "../etc/passwd"}"#)).is_err());
+    }
+
+    #[test]
+    fn theme_is_validated_like_the_locked_server() {
+        assert!(parse_site_options(Some(r#"{"theme": "not-a-registered-theme"}"#)).is_err());
+        assert!(parse_site_options(Some(r#"{"theme": "light"}"#)).is_ok());
+        assert!(parse_site_options(Some(r#"{"theme": 5}"#)).is_err());
+    }
+
+    #[test]
+    fn app_must_be_a_valid_app_brand_object() {
+        assert!(parse_site_options(Some(r#"{"app": {"name": "Demo"}}"#)).is_ok());
+        assert!(parse_site_options(Some(r#"{"app": "Demo"}"#)).is_err());
+        assert!(parse_site_options(Some(r#"{"app": {"logo": "javascript:alert(1)"}}"#)).is_err());
+    }
+
+    #[test]
+    fn unknown_keys_are_refused() {
+        assert!(parse_site_options(Some(r#"{"max_rows": 10}"#)).is_err());
+    }
+
+    #[test]
+    fn site_csp_has_no_frame_ancestors_and_no_nonce() {
+        let csp = site_csp(None);
+        assert!(!csp.contains("frame-ancestors"), "{csp}");
+        assert!(!csp.contains("nonce-"), "{csp}");
+        let script_src = csp
+            .split(';')
+            .find(|p| p.trim().starts_with("script-src"))
+            .unwrap();
+        for exact in [
+            "cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@",
+            "cdn.jsdelivr.net/npm/katex@",
+            "cdn.jsdelivr.net/npm/apache-arrow@17.0.0/",
+            "cdn.jsdelivr.net/npm/tslib@2.6.3/",
+            "cdn.jsdelivr.net/npm/flatbuffers@24.3.25/",
+        ] {
+            assert!(script_src.contains(exact), "{script_src}");
+        }
+        // every jsdelivr source is pinned to an exact version — never a bare
+        // `cdn.jsdelivr.net/npm/` prefix that would allow any package (A1,
+        // PR #429 review)
+        assert!(
+            !script_src.contains("npm/;") && !script_src.contains("npm/ "),
+            "{script_src}"
+        );
+        assert!(csp.contains("object-src 'none'"), "{csp}");
+    }
+
+    #[test]
+    fn site_csp_adds_a_remote_data_origin_to_connect_src_only() {
+        let csp = site_csp(Some("https://data.example.com"));
+        assert!(
+            csp.contains("connect-src 'self' https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@"),
+            "{csp}"
+        );
+        assert!(csp.contains("https://data.example.com"), "{csp}");
+        // the data origin is a connect-src addition, not a script-src one
+        let script_src = csp
+            .split(';')
+            .find(|p| p.trim().starts_with("script-src"))
+            .unwrap();
+        assert!(!script_src.contains("data.example.com"), "{script_src}");
+    }
+
+    #[test]
+    fn data_url_is_detected_and_trimmed() {
+        assert!(is_data_url("https://example.com/data"));
+        assert!(is_data_url("http://example.com/data"));
+        assert!(!is_data_url("/local/path"));
+        assert!(!is_data_url("data"));
+    }
+
+    /// A fresh scratch directory under the system temp dir, removed on drop
+    /// — `copy_dir_recursive`'s own tests need real files (it does real
+    /// I/O), not a pure-function stand-in.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "anofox-site-test-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn copy_dir_recursive_refuses_a_symlink() {
+        // S1 (PR #429 review): a symlink inside --data must never be
+        // followed and copied into a public out/data/ — refused outright.
+        let src = TempDir::new("symlink-src");
+        let dst = TempDir::new("symlink-dst");
+        std::fs::write(src.0.join("plain.txt"), b"ok").unwrap();
+        let secret = TempDir::new("symlink-secret");
+        std::fs::write(secret.0.join("id_rsa"), b"not for publishing").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret.0, src.0.join("sneaky")).unwrap();
+        #[cfg(unix)]
+        {
+            let err = copy_dir_recursive(&src.0, &dst.0).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{err}");
+            // Nothing from the symlinked target ever lands in the output.
+            assert!(!dst.0.join("sneaky").join("id_rsa").exists());
+        }
+    }
+
+    #[test]
+    fn copy_dir_recursive_copies_a_plain_tree() {
+        let src = TempDir::new("plain-src");
+        let dst = TempDir::new("plain-dst");
+        std::fs::create_dir_all(src.0.join("sub")).unwrap();
+        std::fs::write(src.0.join("a.txt"), b"a").unwrap();
+        std::fs::write(src.0.join("sub/b.txt"), b"b").unwrap();
+        copy_dir_recursive(&src.0, &dst.0).unwrap();
+        assert_eq!(std::fs::read(dst.0.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(dst.0.join("sub/b.txt")).unwrap(), b"b");
+    }
+
+    #[test]
+    fn site_data_cannot_be_home_or_the_filesystem_root() {
+        // S1: --site --data shares `too_broad` with the locked server's
+        // own `options.data` (full behaviour re-tested in
+        // src/host/serving.rs; this just confirms --site actually wired it
+        // in, since a `--data` check that exists but is never called is as
+        // good as none).
+        assert!(sv::too_broad(std::path::Path::new("/")).is_some());
+        if let Some(home) =
+            std::env::var_os("HOME").and_then(|h| std::path::PathBuf::from(h).canonicalize().ok())
+        {
+            assert!(sv::too_broad(&home).is_some());
+        }
     }
 }

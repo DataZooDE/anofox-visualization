@@ -670,6 +670,139 @@ examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
 
 ---
 
+## C. Publish as a static site — `dashboard --site` (#417)
+
+Not a server at all — a build step. Turns a folder `anofox_serve_dashboards(dir,
+port[, options])` (mode A) would open into a folder of static files: HTML,
+CSS, JS, the DuckDB-Wasm renderer, the dashboards' own `.sql` text, and a
+copy (or a URL) of the data. Upload it to GitHub Pages, S3, or any plain web
+server — there is nothing to run, and no TLS/auth/process-isolation
+concerns from the rest of this document apply, because there is no process.
+
+```
+dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [--app <web dir|tarball>]
+```
+
+- `<folder>` is the same dashboard folder `anofox_serve_dashboards` opens.
+  `--site` refuses it for the same reasons the locked server would refuse to
+  start: `dashboard --check <folder>`'s own lint must pass, and (with
+  `--data`) every dashboard statement must be read-only, checked with
+  DuckDB's `json_serialize_sql` — the same rule `options.data` enforces on a
+  locked server.
+- `--options locked.json` takes the subset of `anofox_serve_dashboards`'s
+  options that make sense with no server behind the pages: `path_vars`,
+  `nav_picker`, `app`, `home`, `theme`. **Not** `auth` or `policy` — a
+  published site has no login and no row/column policy; every dashboard
+  query the browser can build from the author's own SQL is exactly what a
+  viewer can see, as in the browser-only builder. Say so if the data is
+  sensitive: a published site's data is public to anyone with the URL.
+- `--data <dir>` is copied into `out/data/`; `--data <url>` is read from
+  there directly (nothing is downloaded by this command). Either way, the
+  generated pages `SET VARIABLE anofox_data = '<url>'` before every
+  dashboard, exactly like a locked server's `getvariable('anofox_data')` —
+  dashboard SQL doesn't need to know it's no longer talking to a server.
+- `nav_picker`'s options are computed **now**, by running
+  `options.nav_picker.sql` against `--data` with the `duckdb` CLI (the same
+  read-only check, and the same "a value isn't a plain name → dropped" rule,
+  as the locked server's `build_nav_picker`) — never at request time (there
+  are no requests). Refresh the site (re-run `--site`) to pick up new
+  options.
+- `--app <web dir|tarball>` is the browser app: unpacked, or the
+  `anofox-visualization-web-<tag>.tar.gz` release asset as-is. Without
+  `--app`, this command looks for a `web/` folder next to its own binary and
+  never downloads anything itself — a CI workflow fetches the release asset
+  with `gh release download` (see the Action below) before running `--site`.
+- Every path the generated site writes is **relative**, so it works from a
+  bucket root or a GitHub project-pages sub-path (`https://you.github.io/<repo>/`)
+  without configuration.
+- Output: `index.html` (the `home` dashboard, or the first by `-- @order`),
+  one `d/<id>/index.html` launcher per dashboard (so a refresh, a shared
+  `/d/<id>?v.x=…` link, and the browser's back/forward all land on a real
+  file — GitHub Pages has no server-side rewrites), `dashboards/<id>.sql`,
+  `site.json` (nav, `path_vars`, the computed `nav_picker` options, `app`,
+  `theme`, `home`, and where the data is), and `data/` (unless `--data` was
+  a URL).
+
+**What runs where.** The published app is the same `web/` build as every
+other mode, with one addition: a page `--site` writes carries `<body
+class="mode-view embed published">` (so there is no editor flash — the class
+is in the markup from the first paint, not added by JS after the sidebar
+painted) and `<meta name="anofox-site" content="site.json">`. That meta tag
+is the *only* trigger for published mode — never a URL parameter, so a link
+can never point the app at a different `site.json` and relabel someone
+else's data as this site's own. On load, the app fetches `site.json` and the
+current dashboard's `.sql`, then renders and queries **locally**, in
+DuckDB-Wasm, exactly as the browser-only builder does — there is no
+`/api/panel` to ask. Clicking a nav link, a `nav_picker` option, or a
+`/d/<id>?v.x=…` `::LINK` switches dashboards in place (`history.pushState`):
+the DuckDB-Wasm session and any loaded data stay warm, so only the first
+dashboard pays Wasm start-up.
+
+**The path-value rule.** A `path_vars` value still has to be a plain name —
+`[A-Za-z0-9_.-]`, not starting with `.` — before the page will set it,
+exactly the rule a locked server's `check_path_values` enforces on every
+request. On a published site this is enforced client-side (there is no
+server to enforce it instead): it keeps `getvariable('anofox_data') || '/'
+|| getvariable('model')`-style dashboard SQL inside the site's own `data/`
+folder even though nothing is checking requests, because nothing ever builds
+that path from anything but a plain name.
+
+**The CSP.** GitHub Pages (and most static hosts) can't set response
+headers, so the server's CSP *header* becomes a `<meta
+http-equiv="Content-Security-Policy">` in the generated HTML instead — the
+same policy, minus `frame-ancestors` (a `<meta>` can't carry it) and the
+per-response script nonce (a published page has no inline `<script>`:
+`script-src 'self'` covers the one external `app.js` every page loads). It
+differs from the locked server's `page_csp` in one way: `connect-src` /
+`script-src` allow the whole `cdn.jsdelivr.net/npm/` path, not individually
+pinned package versions — a published page runs every query in the browser's
+own DuckDB-Wasm, and DuckDB-Wasm's own `+esm` bundle pulls in apache-arrow,
+which pulls in more packages of its own, each its own versioned
+`cdn.jsdelivr.net/npm/<pkg>@<version>/+esm` script; pinning each one by exact
+version is a chase a routine dependency bump always wins. A remote `--data
+<url>`'s own origin is added to `connect-src` too — the rule is "no request
+to any host but this site's own origin and the data URL", not "no request
+anywhere".
+
+**A GitHub Pages workflow** (data refresh → `--site` → deploy):
+
+```yaml
+name: Publish dashboards
+on:
+  schedule: [{ cron: "0 6 * * *" }]   # or push, workflow_dispatch, …
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh the data
+        run: ./scripts/refresh-data.sh data/   # whatever produces your parquet/csv
+      - name: Fetch the released CLI + web app
+        env: { GH_TOKEN: ${{ github.token }} }
+        run: |
+          gh release download --repo DataZooDE/anofox-visualization --pattern 'anofox-visualization-cli-*-x86_64-unknown-linux-gnu.tar.gz' -O cli.tar.gz
+          gh release download --repo DataZooDE/anofox-visualization --pattern 'anofox-visualization-web-*.tar.gz' -O web.tar.gz
+          mkdir cli web && tar -xzf cli.tar.gz -C cli --strip-components=1 && tar -xzf web.tar.gz -C web --strip-components=1
+      - name: Build the site
+        run: ./cli/dashboard --site dash site --data data --options locked.json --app web
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - uses: actions/deploy-pages@v4
+```
+
+What differs from the locked server: no login, no row/column policy (say so
+if the data is sensitive — it's public); `nav_picker`'s options are frozen
+at build time (refresh the site to update them); there is no `/health` or
+request log, because there is no process to ask.
+
+---
+
 - **DNS rebinding.** The `Host` must be a loopback name on the server's port,
   the `--bind` address, or a name given with `--allow-host NAME` (repeatable;
   `*` disables the check); anything else gets `421`. Behind a proxy that

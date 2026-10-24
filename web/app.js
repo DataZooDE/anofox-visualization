@@ -1229,6 +1229,12 @@ let conn = null;
 // SET VARIABLE statements are captured here (never sent), so every request is
 // self-contained (multi-user safe — no shared session state).
 let servedMode = false;
+// #417: a `dashboard --site` export — set only by the `<body class="…
+// published">` that command's own index.html/launchers carry, never by a URL
+// parameter (a link can't point the app at someone else's site.json). Unlike
+// servedMode above, queries still run locally (pageConn(), below): there is
+// no server to answer /api/panel. See sitePrepare()/siteGo() further down.
+const published = document.body.classList.contains("published");
 const servedVars = {};
 let servedIndex = null; // planned statement SQL -> its first plan index
 let servedPlan = null; // the served dashboard's planned statements
@@ -1288,6 +1294,26 @@ function sqlLiteralToJson(lit) {
   }
   const n = Number(t);
   return t !== "" && Number.isFinite(n) ? n : t;
+}
+
+// #417 S2: the same `path_vars` value rule a locked server's
+// `check_path_values` (duckext/src/serve.rs) enforces server-side on every
+// `vars` entry of a `/api/panel` request — one plain path segment:
+// `[A-Za-z0-9_.-]`, 1..=128 characters, not starting with `.` (so never `.`,
+// `..` or a hidden file; no `/`) — or a bare non-negative integer, or NULL.
+// `lit` is a typed SQL literal (`setv[2]` of the `SET VARIABLE` regex below,
+// or sqlLiteralToJson's own input shape), not a raw value: a string is still
+// `'…'`-quoted. A published site enforces this itself (runSqlInner, below)
+// because there is no server left to enforce it instead.
+function validPathValueLiteral(lit) {
+  const t = String(lit).trim();
+  if (/^null$/i.test(t)) return true;
+  if (t.length && /^[0-9]+$/.test(t)) return true;
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
+    const inner = t.slice(1, -1).replace(/''/g, "'");
+    return inner.length > 0 && inner.length <= 128 && !inner.startsWith(".") && /^[A-Za-z0-9_.-]+$/.test(inner);
+  }
+  return false;
 }
 
 // `at`: the statement's own plan index, when the caller knows it — the same
@@ -1874,6 +1900,21 @@ async function runSqlInner(sql, page, kind, setup, at, pv) {
     // the script derived itself.
     if (!setup) dpViewerVars.add(setv[1].toLowerCase());
   }
+  // #417 S2: a published site has no server to run check_path_values for it
+  // — enforce the same rule here, for every `path_vars` variable, wherever
+  // its value came from (a URL seed into a text/number/date input, the
+  // headless dpXf path setSelectionVars() applies, a ::LINK/followLink deep
+  // link, or the nav_picker — whose own options are already vetted at build
+  // time, so this never rejects a legitimate pick). Not `setup`: the rule is
+  // on VIEWER-supplied values only, same as the server's own `r.vars`, never
+  // on a dashboard's own setup SQL (the author is trusted either way).
+  if (published && setv && !setup) {
+    const pathVars = window.__served && Array.isArray(window.__served.pathVars) ? window.__served.pathVars : [];
+    if (pathVars.some((p) => p.toLowerCase() === setv[1].toLowerCase()) && !validPathValueLiteral(setv[2])) {
+      status(`variable '${setv[1]}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.' — dropped`);
+      return "[]";
+    }
+  }
   // #244 C-1 / sec-review-272-rereview H-1R / H-1R2: before prepareSql and
   // before any page handle — dispatch on the TOKEN this particular call
   // was made under: an explicitly passed `pv` (a lazy/prefetch job, bound
@@ -2173,9 +2214,13 @@ async function boot() {
   loadRoleSets();
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
-  // A locked served dashboard always uses its server (/api/panel, no SQL).
-  if (window.__served) backend = "live";
-  else
+  // A locked served dashboard always uses its server (/api/panel, no SQL) —
+  // but a published static site (#417) has no server at all: it needs
+  // DuckDB-Wasm loaded below like any offline dashboard, so `published`
+  // keeps `backend` off "live" (and skips the same-origin /query probe,
+  // which would just 404).
+  if (window.__served && !published) backend = "live";
+  else if (!published)
     try {
       const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
       if (r.ok) backend = "live";
@@ -2206,6 +2251,21 @@ async function boot() {
         await conn.query(pragma);
       } catch (_) {
         /* option not available on this build */
+      }
+    }
+    // #417: a published site's data folder/URL — `getvariable('anofox_data')`
+    // on the locked server (duckext/src/serve.rs's DATA_VAR), set here
+    // (once; siteGo() never needs to repeat it — the connection, and the
+    // variable, stay warm across a dashboard switch) because `conn` exists
+    // only from this point on. Before every dashboard's own statements:
+    // `run()` below is the first one.
+    const site = window.__anofoxSite;
+    if (published && site && site.data) {
+      const url = new URL(site.data.endsWith("/") ? site.data : site.data + "/", site.base).href.replace(/\/$/, "");
+      try {
+        await conn.query(`SET VARIABLE anofox_data = '${url.replace(/'/g, "''")}'`);
+      } catch (e) {
+        status("could not set anofox_data: " + e);
       }
     }
   }
@@ -2299,7 +2359,11 @@ async function boot() {
   // the server gates /query, so the client can render everything but only run the
   // server's registered queries.
   const served = window.__served || null;
-  if (served) servedMode = true;
+  // #417: a published site's `served` is shaped the same way (sitePrepare(),
+  // below) so renderServedNav/servedNavHref/renderNavPicker need no changes
+  // — but it must NOT flip servedMode: its queries run locally (there is no
+  // /api/panel to dispatch to), only the nav/view-only chrome is shared.
+  if (served) servedMode = !published;
   if (params.get("embed") === "1" || params.has("embed") || served) {
     document.body.classList.add("embed");
   }
@@ -7096,7 +7160,20 @@ function followLink(url) {
   const safe = safeUrl(u);
   if (!safe) return status("link blocked: only #tab, ?v.…, paths and http(s) URLs are followed");
   if (/^https?:/i.test(safe) && !safe.startsWith(location.origin + "/")) window.open(safe, "_blank", "noopener");
-  else location.href = safe;
+  else {
+    // #417: a published site switches a same-site `/d/<id>` ::LINK in place,
+    // same as a served-nav click (onServedNavClick) — a locked server's own
+    // `/d/<id>` still gets a real navigation below (it has a real route).
+    if (published) {
+      const id = siteDashId(safe);
+      if (id) {
+        const q = safe.includes("?") ? safe.slice(safe.indexOf("?")) : "";
+        siteGo(id, q, true);
+        return;
+      }
+    }
+    location.href = safe;
+  }
 }
 // Drill-through to a tab: show it at once — its panels as they are, under the
 // loading veil (no delay: they may still show the previous value) — and fade
@@ -7703,8 +7780,161 @@ function renderServedNav(served) {
   }
   const picker = hasPicker && renderNavPicker(served);
   if (picker) nav.appendChild(picker);
+  // #417: a published site has no server to answer a real /d/<id> request —
+  // every nav link switches in place instead (siteGo), so Wasm and the
+  // loaded data stay warm. A locked server's own nav still navigates for
+  // real (it has a real route there); this listener only ever fires on a
+  // `published` page (siteGo's own guard, belt-and-braces).
+  if (published) nav.addEventListener("click", onServedNavClick);
   const dash = document.querySelector(".dash");
   if (dash && dash.parentNode) dash.parentNode.insertBefore(nav, dash);
+}
+// ---- #417: published static site — in-place /d/<id> routing ----
+// `dashboard --site` writes `out/index.html` + `out/d/<id>/index.html`
+// (a tiny launcher per dashboard, so a refresh/shared link/back-forward all
+// land on a real file — GitHub Pages has no rewrites) and `out/site.json`
+// (the same fields `served_index` injects: see duckext/src/serve.rs). Both
+// pages load the *same* app.js; sitePrepare() (called once, before boot())
+// tells them apart by their own `<meta name="anofox-dash">`.
+function onServedNavClick(e) {
+  const a = e.target.closest?.("a[data-nav-id]");
+  if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const u = new URL(a.href, location.href);
+  e.preventDefault();
+  siteGo(a.dataset.navId, u.search, true);
+}
+// `path` (a served-nav href, or followLink's already-`safeUrl`'d target) to
+// the dashboard id it names, or null — only within this site's own base
+// path (`site.base`'s directory), so a path outside it (or on a locked
+// server, where this is never called at all) is left to navigate for real.
+function siteDashId(path) {
+  const site = window.__anofoxSite;
+  if (!site) return null;
+  let u;
+  try {
+    u = new URL(path, location.href);
+  } catch (_) {
+    return null;
+  }
+  // Same-origin, belt-and-braces: every caller (onServedNavClick's own
+  // hrefs, followLink's already-safeUrl()'d same-origin branch, a popstate's
+  // own location) only ever offers a same-origin path anyway, but this
+  // function shouldn't rely on that — a cross-origin URL that happens to
+  // share this site's pathname must still fall through to a real
+  // navigation, never an in-place switch.
+  if (u.origin !== location.origin) return null;
+  if (!u.pathname.startsWith(site.basePath)) return null;
+  const rest = u.pathname.slice(site.basePath.length);
+  if (rest === "" || rest === "index.html") return site.home;
+  const m = /^d\/([^/]+)\/?(?:index\.html)?$/.exec(rest);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+// Switch the page to dashboard `id` without a reload: fetch its `.sql`
+// (dashboards/<id>.sql, written by `dashboard --site`), reset the dashboard
+// state — a different dashboard starts clean, as the sidebar's loadDash()
+// does — seed dpUrlSeed/dpView/dpTab from `search` like any other deep
+// link, run it, and (unless `push` is false, a popstate) push the new URL.
+async function siteGo(id, search = "", push = true) {
+  const site = window.__anofoxSite;
+  const meta = site && site.dashboards.find((d) => d.id === id);
+  if (!meta) return false;
+  let sql;
+  try {
+    sql = await (await fetch(new URL(`dashboards/${encodeURIComponent(id)}.sql`, site.base))).text();
+  } catch (e) {
+    status("could not load dashboards/" + id + ".sql: " + e);
+    return false;
+  }
+  if (preview) await previewExit({ rerun: false });
+  clearApplyHold();
+  heldTexts.clear();
+  heldStatements.clear();
+  pinnedHeldText = null;
+  heldBasisSql = "";
+  dashStateReset();
+  window.__served = { ...window.__served, id, title: meta.title, sql };
+  servedIndex = null;
+  servedPlan = null;
+  $("sql").value = sql;
+  $("dash-name").value = navLabel(meta.nav, meta.title, meta.id) || meta.id;
+  syncHL();
+  Object.assign(dpUrlSeed, readUrlSeed(search));
+  Object.assign(dpView, readViewSeed(search));
+  const tab = new URLSearchParams(search).get("tab");
+  if (tab) dpTab = tab;
+  // A trailing slash, always: `out/d/<id>/index.html` is the real file a
+  // static host serves (`dashboard --site`) — `/d/<id>` with no slash
+  // depends on the host redirecting a bare directory path to its slashed
+  // form, which GitHub Pages and most static hosts do but can't be relied
+  // on (a site-e2e.mjs reload caught this: 404 without it). servedNavHref
+  // itself (shared with the locked server, whose real `/d/<id>` route has
+  // no such requirement) stays as it is; only the URL this push actually
+  // commits to history gets the slash.
+  if (push) history.pushState({ anofoxSite: id }, "", site.basePath + "d/" + encodeURIComponent(id) + "/" + search);
+  document.title = meta.title || document.title;
+  await run(true, { explicit: true });
+  refreshServedNavHrefs();
+  document.querySelectorAll(".served-nav a[data-nav-id]").forEach((a) => {
+    const on = a.dataset.navId === id;
+    a.classList.toggle("active", on);
+    if (on) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+  return true;
+}
+// Called once, before boot() — reads `site.json` (and this page's own
+// `<meta name="anofox-dash">`) and sets `window.__served` / `window.__anofoxApp`
+// / `window.__anofoxSite`, the same shapes a locked server injects inline
+// (`served_index`, `app_brand.rs`), so the rest of the app needs no further
+// `published` branches beyond the ones above. A no-op (and zero fetches) on
+// any page `dashboard --site` didn't write — the builder and a locked
+// server are both unaffected.
+async function sitePrepare() {
+  if (!published) return;
+  const siteTag = document.querySelector('meta[name="anofox-site"]');
+  const dashTag = document.querySelector('meta[name="anofox-dash"]');
+  if (!siteTag || !dashTag) return;
+  const base = new URL(siteTag.content || "site.json", import.meta.url);
+  let site;
+  try {
+    site = await (await fetch(base)).json();
+  } catch (e) {
+    status("could not load site.json: " + e);
+    return;
+  }
+  const id = dashTag.content;
+  let sql;
+  try {
+    sql = await (await fetch(new URL(`dashboards/${encodeURIComponent(id)}.sql`, base))).text();
+  } catch (e) {
+    status("could not load dashboards/" + id + ".sql: " + e);
+    return;
+  }
+  const dashboards = Array.isArray(site.dashboards) ? site.dashboards : [];
+  const meta = dashboards.find((d) => d.id === id) || { id, title: id };
+  window.__served = {
+    id,
+    title: meta.title,
+    sql,
+    nav: dashboards,
+    locked: true,
+    theme: site.theme,
+    pathVars: site.pathVars,
+    navPicker: site.navPicker,
+  };
+  if (site.app) window.__anofoxApp = site.app;
+  window.__anofoxSite = {
+    dashboards,
+    base,
+    basePath: new URL(".", base).pathname,
+    home: (site.home && dashboards.some((d) => d.id === site.home) && site.home) || dashboards[0]?.id || id,
+    data: site.data,
+  };
+  // `anofox_data` itself (#407's locked-server rule, kept: a path_vars value
+  // joined onto it never leaves the site — enforced in runSqlInner()
+  // [validPathValueLiteral], not here; see its own comment, and
+  // `check_path_values` in duckext/src/serve.rs) is set in boot(), once
+  // `conn` exists.
 }
 // The served nav as one button and a grouped, searchable list of links.
 function servedNavMenu(served, groups) {
@@ -15853,8 +16083,24 @@ document.addEventListener("keydown", (e) => {
   if (clearSelections()) run(false);
 });
 
+// #417: back/forward on a published site — a popstate from siteGo's own
+// pushState (or a plain history navigation between /d/<id> paths) switches
+// dashboards in place too, same as a nav click; `push: false` (it would
+// otherwise push right back onto the same history entry).
+if (published) {
+  window.addEventListener("popstate", () => {
+    const id = siteDashId(location.pathname + location.search) || window.__anofoxSite?.home;
+    if (id) siteGo(id, location.search, false);
+  });
+}
+
 // Before boot, so a remembered sidebar width applies without a jump.
 initSideResizer();
 initSideDrawer();
 initHeaderMenu();
-boot().catch((e) => status("boot failed: " + e));
+// #417: sitePrepare() (a no-op off a `dashboard --site` page) must finish —
+// window.__served/__anofoxSite set — before boot() ever reads them.
+sitePrepare()
+  .catch((e) => status("site boot failed: " + e))
+  .then(() => boot())
+  .catch((e) => status("boot failed: " + e));

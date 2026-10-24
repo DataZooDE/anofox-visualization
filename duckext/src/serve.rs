@@ -1732,35 +1732,9 @@ pub fn refresh(port: u16) -> Result<String, String> {
     Ok(locked.refresh(true)?.unwrap_or_default())
 }
 
-/// Why `dir` is too broad to open to every viewer as `options.data`: the
-/// filesystem root, a system directory, or a folder that contains the home
-/// directory or the temp directory (where the snapshots live).
-fn too_broad(dir: &Path) -> Option<String> {
-    let Some(parent) = dir.parent() else {
-        return Some("the filesystem root".into());
-    };
-    const SYSTEM: [&str; 16] = [
-        "bin", "boot", "dev", "etc", "home", "lib", "lib64", "opt", "proc", "root", "run", "sbin",
-        "sys", "tmp", "usr", "var",
-    ];
-    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if parent.parent().is_none() && SYSTEM.contains(&name) {
-        return Some("a system directory".into());
-    }
-    let home = ["HOME", "USERPROFILE"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .map(PathBuf::from);
-    for (what, p) in home
-        .map(|p| ("the home directory", p))
-        .chain([("the temp directory", std::env::temp_dir())])
-    {
-        if p.canonicalize().is_ok_and(|p| p.starts_with(dir)) {
-            return Some(format!("it contains {what}"));
-        }
-    }
-    None
-}
+// #417: `too_broad` moved to `anofox_visualization::host::serving` (`sv`) so
+// `dashboard --site --data` shares the exact same rule.
+use sv::too_broad;
 
 /// With a data folder open, every dashboard statement must be a query or one
 /// of the setup forms the server needs — classified by DuckDB's own parser,
@@ -1787,19 +1761,14 @@ fn check_read_only(c: &Conn, dashboards: &[Dash]) -> Result<(), String> {
     Ok(())
 }
 
-/// `Ok` if `sql` (a panel, or a setup statement if `setup`) may run with a data
-/// folder open: a panel must be one query; a setup statement may also be
-/// `SET VARIABLE <name> = <expr>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW
-/// <name> AS <query>`, whose expression / query must parse as one query.
-fn read_only_statement(sql: &str, setup: bool, duck: &mut dyn policy::Duck) -> Result<(), String> {
-    let query = if setup {
-        policy::statement_query(sql).map_err(|e| format!("with a data folder: {e}"))?
-    } else {
-        sql.to_string()
-    };
-    policy::check_query(duck, &query)
-        .map_err(|e| format!("with a data folder, only queries (SELECT …) are allowed: {e}"))
-}
+// #417: `read_only_statement`, `valid_path_value[_text]`, `wrap_nav_picker_sql`
+// and `nav_picker_rows_to_options` moved to `anofox_visualization::host::serving`
+// (`sv`) so `dashboard --site`'s own pre-publish check and build-time
+// `nav_picker` share the exact same rules instead of a second, drifting copy.
+use sv::{
+    nav_picker_rows_to_options, read_only_statement, valid_path_value, wrap_nav_picker_sql,
+    NAV_PICKER_MAX_OPTIONS,
+};
 
 /// A DuckDB error as a viewer sees it: the data folder's absolute path is
 /// replaced by `<data>` (the full text goes to the server log).
@@ -1813,25 +1782,6 @@ fn redact(e: String, data: Option<&Path>) -> String {
     }
 }
 
-/// Is `lit` (a typed literal from `sv::sql_literal`) an acceptable value for a
-/// `path_vars` variable: a string or integer that is one plain path segment —
-/// `[A-Za-z0-9_.-]`, not starting with `.` (so never `.`, `..` or a hidden
-/// file), no `/` — or NULL?
-fn valid_path_value(lit: &str) -> bool {
-    if lit == "NULL" || (!lit.is_empty() && lit.bytes().all(|b| b.is_ascii_digit())) {
-        return true;
-    }
-    lit.strip_prefix('\'')
-        .and_then(|l| l.strip_suffix('\''))
-        .is_some_and(sv::valid_dashboard_id)
-}
-
-/// The same rule as [`valid_path_value`], but on a raw value (as a
-/// `nav_picker.sql` row returns it), not a SQL literal's `'…'` quoting.
-fn valid_path_value_text(v: &str) -> bool {
-    (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())) || sv::valid_dashboard_id(v)
-}
-
 /// Does `scope` (an embed link's or API key's credential) fix variable
 /// `name` (`Scope::lock_vars`, case-insensitive — DuckDB names are)? Used by
 /// `served_index` (security review of #410, M1) to decide whether a
@@ -1842,29 +1792,6 @@ fn valid_path_value_text(v: &str) -> bool {
 /// tenant's model) this credential's viewer can never actually choose.
 fn var_locked(scope: Option<&Scope>, name: &str) -> bool {
     scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(name)))
-}
-
-/// `nav_picker.sql`'s options are inlined into every served page: cap how
-/// many rows it may return and how long one label may be.
-const NAV_PICKER_MAX_OPTIONS: usize = 2_000;
-const NAV_PICKER_MAX_LABEL: usize = 200;
-
-/// `sql` (the author's `nav_picker.sql`, already checked read-only) wrapped
-/// so every column comes back as text: `COLUMNS(*)::VARCHAR` casts whatever
-/// type the author's query gives a column, so `string_rows` (which reads
-/// VARCHAR vectors only) can read it regardless.
-///
-/// Security review of #410, L1: the closing `)` is on its own line, after a
-/// newline — never appended right after `sql`'s own text — so a `sql` that
-/// ends in a `-- comment` with no newline of its own (a line comment runs to
-/// end of line) can never swallow it and produce a confusing "missing )"
-/// parse error at server start instead of the real refusal from
-/// `read_only_statement`.
-fn wrap_nav_picker_sql(sql: &str) -> String {
-    format!(
-        "SELECT COLUMNS(*)::VARCHAR FROM (\n{}\n) AS __anofox_nav_picker",
-        sql.trim().trim_end_matches(';')
-    )
 }
 
 /// Run and validate `options.nav_picker.sql` against the snapshot just built
@@ -1896,52 +1823,6 @@ fn build_nav_picker(
         .and_then(|mut r| r.string_rows(NAV_PICKER_MAX_OPTIONS + 1))
         .map_err(|e| format!("options.nav_picker.sql: {e}"))?;
     nav_picker_rows_to_options(&rows)
-}
-
-/// The pure part of [`build_nav_picker`]: `rows` (already fetched, two
-/// `VARCHAR` columns) to the (value, label) pairs a page gets — dropping any
-/// row whose value isn't a plain `path_vars` name (the exact rule
-/// [`valid_path_value`] enforces on every request), and refusing the whole
-/// result if a row has the wrong column count or the result is too big to
-/// inline into every page.
-fn nav_picker_rows_to_options(
-    rows: &[Vec<Option<String>>],
-) -> Result<Vec<(String, String)>, String> {
-    if rows.len() > NAV_PICKER_MAX_OPTIONS {
-        return Err(format!(
-            "options.nav_picker.sql returned more than {NAV_PICKER_MAX_OPTIONS} rows — its list \
-             is sent to every page, so keep it short"
-        ));
-    }
-    let mut out = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
-        if row.len() != 2 {
-            return Err(format!(
-                "options.nav_picker.sql must return exactly two columns (value, label), got {}",
-                row.len()
-            ));
-        }
-        let Some(value) = row[0].as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
-            eprintln!("[anofox-serve] options.nav_picker: row {i} has no value, dropped");
-            continue;
-        };
-        if !valid_path_value_text(value) {
-            eprintln!(
-                "[anofox-serve] options.nav_picker: row {i}'s value ({}) is not a plain name, dropped",
-                access::diag(value)
-            );
-            continue;
-        }
-        let mut label = row[1].as_deref().unwrap_or(value).trim().to_string();
-        if label.is_empty() {
-            label = value.to_string();
-        }
-        if label.chars().count() > NAV_PICKER_MAX_LABEL {
-            label = label.chars().take(NAV_PICKER_MAX_LABEL).collect();
-        }
-        out.push((value.to_string(), label));
-    }
-    Ok(out)
 }
 
 /// Load `*.sql` dashboards from `dir`. Returns them plus the union of their
@@ -4313,9 +4194,9 @@ mod tests {
         );
         // A label longer than the cap is truncated in characters, not bytes
         // — a multi-byte character right at the boundary must not panic.
-        let wide_label = "é".repeat(NAV_PICKER_MAX_LABEL + 10);
+        let wide_label = "é".repeat(sv::NAV_PICKER_MAX_LABEL + 10);
         let out = nav_picker_rows_to_options(&[row(Some("v"), Some(&wide_label))]).unwrap();
-        assert_eq!(out[0].1.chars().count(), NAV_PICKER_MAX_LABEL);
+        assert_eq!(out[0].1.chars().count(), sv::NAV_PICKER_MAX_LABEL);
     }
 
     /// Security review of #410, M1: `var_locked` is what `served_index` asks
@@ -4613,25 +4494,8 @@ mod tests {
         assert_eq!(redact("/srv/runs".into(), None), "/srv/runs");
     }
 
-    #[test]
-    fn broad_data_folders_are_refused() {
-        assert!(too_broad(Path::new("/")).is_some());
-        for d in ["/etc", "/usr", "/home", "/tmp", "/var"] {
-            assert!(too_broad(Path::new(d)).is_some(), "{d}");
-        }
-        let tmp = std::env::temp_dir().canonicalize().unwrap();
-        assert!(too_broad(&tmp).is_some());
-        if let Some(home) =
-            std::env::var_os("HOME").and_then(|h| PathBuf::from(h).canonicalize().ok())
-        {
-            assert!(too_broad(&home).is_some());
-            assert!(too_broad(home.parent().unwrap()).is_some());
-            assert!(too_broad(&home.join("runs")).is_none());
-        }
-        assert!(too_broad(&tmp.join("anofox-runs")).is_none());
-        assert!(too_broad(Path::new("/srv/runs")).is_none());
-        assert!(too_broad(Path::new("/data")).is_none());
-    }
+    // too_broad's own test moved with it to
+    // anofox_visualization::host::serving (#417).
 
     #[test]
     fn auth_and_log_options() {

@@ -340,6 +340,20 @@ jobs:
           done
           exit $status
 
+      # scripts/site-e2e.mjs (#417 A4, PR #429 review): `dashboard --site`'s
+      # published static site, in a real browser, served under a GitHub-
+      # Pages-style /repo/ sub-path by a plain static server this script
+      # starts itself (no locked server, no builder) — nav + nav_picker
+      # render, an in-place nav switch survives a window marker (no full
+      # reload), a hard reload of /d/<id>/ and back/forward all work, the
+      # parquet data reads for real, a `../x` path_vars value is dropped
+      # (#417 S2), no editor flash, and no request leaves this site's own
+      # origin / the pinned CDN hosts. Reuses the dashboard CLI and DuckDB
+      # CLI built/installed above.
+      - name: Published static site e2e (dashboard --site)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-e2e.mjs --dashboard target/debug/dashboard
+
       - name: Explore starter dashboards pass --check --strict
         run: |
           # the hints' anofox_tabular checks run when the extension installs (#111)
