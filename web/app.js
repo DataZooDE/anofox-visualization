@@ -13242,7 +13242,14 @@ function badgeHtml(text) {
 
 // ::SPARKLINE cell — a word-sized trend from a numeric array (DuckDB list()):
 // a soft area under the line, the last point marked, and first → last / min /
-// max on hover.
+// max on hover. Drawn by the wasm renderer's render_cell (#454; owner rule
+// #318 — one renderer, ggplot-rs — the same `render_sparkline` (src/lib.rs)
+// the native --svg and static-HTML table cells already use), not hand-drawn
+// SVG, the same migration #425/#453 did for ::SPARKBAR cells (`cellSparkbar`
+// below). `render_sparkline` only puts a <title> on its own endpoint marker
+// (that point's own value) — the whole-series summary tip is still computed
+// here, same text as before #454, and injected as the returned svg's own
+// <title>.
 function cellSpark(v) {
   let arr = Array.isArray(v) ? v : null;
   if (!arr && typeof v === "string") {
@@ -13255,25 +13262,28 @@ function cellSpark(v) {
   if (nums.length < 2) return `<span class="nil">—</span>`;
   const w = 104;
   const h = 26;
-  const pad = 2.5;
   const mn = Math.min(...nums);
   const mx = Math.max(...nums);
-  const rng = mx - mn || 1;
-  const xs = (i) => pad + (i * (w - 2 * pad)) / (nums.length - 1);
-  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
-  const pts = nums.map((y, i) => `${xs(i).toFixed(1)},${ys(y).toFixed(1)}`).join(" ");
-  const area = `${xs(0).toFixed(1)},${h} ${pts} ${xs(nums.length - 1).toFixed(1)},${h}`;
   const first = nums[0];
   const last = nums[nums.length - 1];
   const f = (n) => fmtNum(n, "COMPACT");
   const chg = first ? ` (${last >= first ? "+" : "−"}${Math.abs(((last - first) / Math.abs(first)) * 100).toFixed(0)}%)` : "";
   const tip = `${f(first)} → ${f(last)}${chg} · min ${f(mn)} · max ${f(mx)} · ${nums.length} points`;
-  return (
-    `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><title>${escapeHtml(tip)}</title>` +
-    `<polygon points="${area}" fill="var(--ax-spark)" fill-opacity="0.1"/>` +
-    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"/>` +
-    `<circle cx="${xs(nums.length - 1).toFixed(1)}" cy="${ys(last).toFixed(1)}" r="2.2" fill="var(--ax-spark-dot)"/></svg>`
-  );
+  const rows = nums.map((n) => ({ c0: n }));
+  const roles = [[0, "SPARKLINE"]];
+  let svg = "";
+  try {
+    svg = render_cell(JSON.stringify(rows), JSON.stringify(roles), w, h, renderCtx());
+  } catch (_) {}
+  if (!svg) return `<span class="nil">—</span>`;
+  // `svg class` for the table CSS (width/height, compact-row height) that
+  // targets svg.spark — render_cell's own output carries none.
+  // `preserveAspectRatio="none"` stretch-fills that fixed CSS box instead of
+  // letterboxing a narrower, centred chart: `render_sparkline`'s own viewBox
+  // is at least ggplot-rs's 50px panel floor tall (#457), taller than this
+  // cell's 26px — same reasoning as `cellSparkbar`'s (#425/#453).
+  svg = svg.replace(/^<svg /, '<svg preserveAspectRatio="none" class="spark" ');
+  return svg.replace(/^(<svg[^>]*>)/, `$1<title>${escapeHtml(tip)}</title>`);
 }
 
 // ::SPARKBAR cell — a word-sized bar histogram (#425): one bar per list
