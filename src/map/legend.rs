@@ -85,28 +85,6 @@ pub(super) fn legend_title(name: &str, fmt: &crate::format::ValueFmt) -> Option<
     })
 }
 
-/// "Nice" ticks (1, 2, 2.5, 5 × 10ⁿ) inside `[lo, hi]`, at most `n`.
-pub(super) fn nice_ticks(lo: f64, hi: f64, n: usize) -> Vec<f64> {
-    let span = hi - lo;
-    if span <= 0.0 || !span.is_finite() {
-        return Vec::new();
-    }
-    let raw = span / n.max(1) as f64;
-    let mag = 10f64.powf(raw.log10().floor());
-    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
-        .iter()
-        .map(|m| m * mag)
-        .find(|st| span / st <= n as f64)
-        .unwrap_or(10.0 * mag);
-    let mut out = Vec::new();
-    let mut v = (lo / step).ceil() * step;
-    while v <= hi + step * 1e-9 {
-        out.push(if v.abs() < step * 1e-9 { 0.0 } else { v });
-        v += step;
-    }
-    out
-}
-
 /// The largest "nice" value (1, 2, 2.5, 5 × 10ⁿ) that is ≤ `x` (`x > 0`).
 pub(super) fn nice_floor(x: f64) -> f64 {
     if x <= 0.0 || !x.is_finite() {
@@ -321,10 +299,21 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
                         .collect();
                     let span = s.hi - s.lo;
                     let pos = |v: f64| if span > 0.0 { (v - s.lo) / span } else { 0.5 };
-                    let cand: Vec<(f64, String)> = nice_ticks(s.lo, s.hi, 5)
-                        .into_iter()
-                        .map(|v| (pos(v), short(v)))
-                        .collect();
+                    // ggplot-rs's `extended_breaks` (#419, replacing the local
+                    // `nice_ticks` copy) picks rounder numbers by also
+                    // considering ticks a little outside `[lo, hi]` — fine
+                    // for an axis, where the panel just grows to show them,
+                    // but here `pos` places a tick's label *inside* the fixed
+                    // gradient bar, so an out-of-range tick would float off
+                    // one end of it. Filtered back to `[lo, hi]`, same as the
+                    // bar's own extent.
+                    let eps = span.abs() * 1e-9;
+                    let cand: Vec<(f64, String)> =
+                        ggplot_rs::scale::util::extended_breaks(s.lo, s.hi, 5)
+                            .into_iter()
+                            .filter(|v| *v >= s.lo - eps && *v <= s.hi + eps)
+                            .map(|v| (pos(v), short(v)))
+                            .collect();
                     // a label's extent along the bar (the ends are anchored
                     // inside it)
                     let ext = |p: f64, l: &str| {
