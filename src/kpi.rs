@@ -176,6 +176,33 @@ pub fn spark_values(v: &Value) -> Vec<f64> {
     }
 }
 
+/// A `::SPARKBAR` cell's two-series form: a JSON list of
+/// `{"ref": r, "cur": c}` objects (as DuckDB prints
+/// `list({'ref': r, 'cur': c} ORDER BY i)`), non-finite / non-numeric pairs
+/// skipped. Sibling to [`spark_values`] (the one-series form).
+pub fn spark_pairs(v: &Value) -> Vec<(f64, f64)> {
+    let num = |x: Option<&serde_json::Value>| -> Option<f64> {
+        match x? {
+            serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+            x => x.as_f64(),
+        }
+        .filter(|f| f.is_finite())
+    };
+    match v {
+        Value::Str(s) => serde_json::from_str::<Vec<serde_json::Value>>(s.trim())
+            .map(|xs| {
+                xs.iter()
+                    .filter_map(|x| {
+                        let o = x.as_object()?;
+                        Some((num(o.get("ref"))?, num(o.get("cur"))?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// A cell as a number (DuckDB's JSON writes DECIMAL / HUGEINT as strings).
 fn num(v: Option<&Value>) -> Option<f64> {
     match v? {
@@ -673,6 +700,19 @@ mod tests {
         );
         assert!(spark_values(&Value::Str("12".into())).is_empty());
         assert!(spark_values(&Value::Float(3.0)).is_empty());
+    }
+
+    #[test]
+    fn sparkbar_pairs() {
+        assert_eq!(
+            spark_pairs(&Value::Str(
+                r#"[{"ref":0.1,"cur":0.3},{"ref":0.3,"cur":"0.3"},{"ref":null,"cur":0.2}]"#.into()
+            )),
+            vec![(0.1, 0.3), (0.3, 0.3)]
+        );
+        assert!(spark_pairs(&Value::Str("[1,2,3]".into())).is_empty());
+        assert!(spark_pairs(&Value::Str("12".into())).is_empty());
+        assert!(spark_pairs(&Value::Float(3.0)).is_empty());
     }
 
     #[test]

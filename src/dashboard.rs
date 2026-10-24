@@ -1114,13 +1114,14 @@ fn table_svg(
         };
 
     // natural widths (in characters): the header (wrapping onto ≤ 2 lines) and
-    // the formatted cells, shared out over the card. A ::SPARKLINE cell draws
-    // a small chart, not text (#427) — it gets a fixed pixel width instead of
-    // one measured from its (JSON) cell text, reserved up front so the other
-    // columns still split the rest by their own natural width.
+    // the formatted cells, shared out over the card. A ::SPARKLINE/::SPARKBAR
+    // cell draws a small chart, not text — it gets a fixed pixel width
+    // instead of one measured from its (JSON) cell text, reserved up front
+    // so the other columns still split the rest by their own natural width
+    // (same approach as #427's SPARKLINE fix).
     let sample = nrow.min(200);
     let chars = |s: &str| s.chars().count() as f64;
-    let is_spark = |k: usize| cols[k].fmt == Some("SPARKLINE");
+    let is_spark = |k: usize| matches!(cols[k].fmt, Some("SPARKLINE" | "SPARKBAR"));
     const SPARK_COL_W: f64 = 92.0;
     let nat: Vec<f64> = cols
         .iter()
@@ -1165,11 +1166,13 @@ fn table_svg(
     };
 
     let top = if title.is_some() { 30.0 } else { 10.0 };
-    // #457: a nested sparkline panel can't be asked for less than
+    // #457: a nested sparkline/sparkbar panel can't be asked for less than
     // `SPARKLINE_MIN_H` (50px, see its doc comment on ggplot-rs's own
-    // layout floor) without clipping the line's low points, so a table
-    // with a ::SPARKLINE column gets taller rows to fit it without
-    // spilling into the next one.
+    // layout floor) without clipping the line's low points (or, for
+    // ::SPARKBAR, overflowing its own row — render_sparkbar has no #457-
+    // style internal clamp of its own yet, #453 review), so a table with
+    // one of these columns gets taller rows to fit it without spilling
+    // into the next one.
     let row_h = if cols.iter().enumerate().any(|(k, _)| is_spark(k)) {
         crate::SPARKLINE_MIN_H + 6.0
     } else {
@@ -1291,6 +1294,70 @@ fn table_svg(
                     nums.into_iter().map(Value::Float).collect(),
                 );
                 match render_with_at(&[spark_col], sx, sy, sw as u32, sh as u32, ropts) {
+                    Ok(frag) => s.push_str(&frag),
+                    Err(_) => s.push_str(&format!(
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"
+                    )),
+                }
+                continue;
+            }
+            // A `::SPARKBAR` cell (#425): a list of numbers (one series) or
+            // `{'ref','cur'}` objects (two overlaid series) drawn as a tiny
+            // bar histogram, through the same ggplot-rs path as a standalone
+            // `::SPARKBAR` panel (`render_sparkbar`, via `render_with_at`) —
+            // no hand-written SVG here. No data draws the usual dash.
+            if c.fmt == Some("SPARKBAR") {
+                let raw = match c.cells.get(r) {
+                    Some(Cell::Text(s)) => Some(s.clone()),
+                    _ => None,
+                };
+                let spark_cols: Vec<Column> = raw
+                    .as_deref()
+                    .map(|s| {
+                        let v = Value::Str(s.to_string());
+                        let pairs = crate::kpi::spark_pairs(&v);
+                        if !pairs.is_empty() {
+                            vec![
+                                Column::new(
+                                    "ref",
+                                    Role::Value(Kind::Sparkbar),
+                                    pairs.iter().map(|(r, _)| Value::Float(*r)).collect(),
+                                ),
+                                Column::new(
+                                    "cur",
+                                    Role::Value(Kind::Sparkbar),
+                                    pairs.iter().map(|(_, c)| Value::Float(*c)).collect(),
+                                ),
+                            ]
+                        } else {
+                            let nums = crate::kpi::spark_values(&v);
+                            vec![Column::new(
+                                "value",
+                                Role::Value(Kind::Sparkbar),
+                                nums.into_iter().map(Value::Float).collect(),
+                            )]
+                        }
+                    })
+                    .unwrap_or_default();
+                let n_vals = spark_cols.first().map_or(0, |c| c.values.len());
+                if n_vals == 0 {
+                    s.push_str(&format!(
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"
+                    ));
+                    continue;
+                }
+                let row_top = top + 23.0 + r as f64 * row_h;
+                let sw = (widths[k] - 6.0).max(32.0);
+                // `SPARKLINE_MIN_H` itself, not `row_h - 6.0`: a shorter
+                // request still gets clamped up to it inside
+                // `render_sparkbar`, which would otherwise spill past this
+                // row's own height without this cell centring the taller
+                // panel on its own (same reasoning as the `::SPARKLINE`
+                // cell above, #457/#425).
+                let sh = crate::SPARKLINE_MIN_H;
+                let sx = xs[k] + 2.0;
+                let sy = row_top + (row_h - sh) / 2.0;
+                match render_with_at(&spark_cols, sx, sy, sw as u32, sh as u32, ropts) {
                     Ok(frag) => s.push_str(&frag),
                     Err(_) => s.push_str(&format!(
                         "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"
@@ -1992,5 +2059,72 @@ mod doc_table_tests {
             "sparkline cell content (y {mn}..{mx}) must stay inside its own \
              {h}px-tall viewBox, not clipped: {frag}"
         );
+    }
+
+    // #425/#457: a table's ::SPARKBAR cell goes through `render_sparkbar`
+    // the same way a ::SPARKLINE cell goes through `render_sparkline` — it
+    // must clamp to ggplot-rs's own 50px panel floor too, or a bar's own
+    // baseline (sized against that floor) falls outside a shorter requested
+    // viewBox and every bar's bottom gets clipped off instead of sitting on
+    // the baseline.
+    #[test]
+    fn a_table_sparkbar_cells_stay_inside_the_cell_box() {
+        let rows = vec![
+            ("feature".to_string(), vec![Value::Str("a".into())]),
+            ("dist".to_string(), vec![Value::Str("[1,9,2,8,3,7]".into())]),
+        ];
+        let roles = vec![(0usize, Role::Table), (1usize, Role::Value(Kind::Sparkbar))];
+        let ropts = RenderOptions::default();
+        let svg = render_panel_doc_svg(
+            &rows,
+            &roles,
+            &[],
+            460.0,
+            300.0,
+            &ropts,
+            false,
+            &[],
+            None,
+            false,
+        );
+        let geom_at = svg.find("data-geom=\"col\"").expect("a drawn sparkbar bar");
+        let svg_open = svg[..geom_at].rfind("<svg ").expect("its own nested <svg>");
+        let svg_close =
+            geom_at + svg[geom_at..].find("</svg>").expect("a closing </svg>") + "</svg>".len();
+        let frag = &svg[svg_open..svg_close];
+        let viewbox = frag
+            .split("viewBox=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("a viewBox");
+        let h: f64 = viewbox
+            .split_whitespace()
+            .nth(3)
+            .and_then(|n| n.parse().ok())
+            .expect("a viewBox height");
+        let get_attr = |attrs: &str, name: &str| -> Option<f64> {
+            attrs
+                .split(&format!("{name}=\""))
+                .nth(1)?
+                .split('"')
+                .next()?
+                .parse()
+                .ok()
+        };
+        let mut bars: Vec<(f64, f64)> = Vec::new();
+        for rect in frag.split("<rect ").skip(1) {
+            let attrs = rect.split('>').next().unwrap_or("");
+            if let (Some(y), Some(ht)) = (get_attr(attrs, "y"), get_attr(attrs, "height")) {
+                bars.push((y, y + ht));
+            }
+        }
+        assert!(!bars.is_empty(), "expected drawn bars: {frag}");
+        for (y, bottom) in &bars {
+            assert!(
+                *y > -0.5 && *bottom < h + 0.5,
+                "sparkbar cell content (bar y {y}..{bottom}) must stay inside \
+                 its own {h}px-tall viewBox, not clipped: {frag}"
+            );
+        }
     }
 }
