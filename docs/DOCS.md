@@ -103,6 +103,7 @@ terminal.
 | `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
+| `::SPARKBAR` | `::SPARK_BAR` | chart | minimal bar histogram (no axes); a table cell's list(v ORDER BY i), or two overlaid series sharing one y scale from list({'ref': r, 'cur': c} ORDER BY i) |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
 | `::REGION` | `::REGION_CODE`, `::ISO_CODE` | chart | a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name |
 | `::LAT` | `::LATITUDE` | chart | a map point's latitude (degrees, WGS84), with ::LON |

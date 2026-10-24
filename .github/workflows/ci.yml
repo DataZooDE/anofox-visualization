@@ -320,6 +320,24 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/map-geom-sf-e2e.mjs (#459, slice 1 of #420): an eligible
+      # ::MAP panel's data-*/<title> contract, hover tooltip, click-to-filter
+      # (cross-filters a dependent panel like every other chart) and
+      # scroll-to-zoom all still work once the panel is a real GGPlot
+      # rendered through geom_sf, not our own hand-written SVG.
+      - name: Map geom_sf interaction e2e (#459)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/map-geom-sf-e2e.mjs --url http://127.0.0.1:8947/
+
+      # scripts/sparkbar-e2e.mjs (#425, 50px-floor follow-up #457): a
+      # table's ::SPARKBAR cell draws through the wasm render_cell export
+      # (ggplot-rs marks, not hand-written SVG, #453 review) for both the
+      # single-series and ref/cur-pair forms, and its drawn content fits
+      # inside the cell's own box, not clipped or letterboxed.
+      - name: Table ::SPARKBAR cell e2e (#425)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/sparkbar-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |
