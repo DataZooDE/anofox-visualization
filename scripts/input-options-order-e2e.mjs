@@ -86,9 +86,39 @@ async function run(label, sql) {
 }
 const dequal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+// Security (PR #436 review): a NUMBER input's preset literal is the one
+// UNQUOTED branch (so getvariable('n') keeps reading as a real number, not
+// a string) — so a malicious `?v.n=` must never reach it as raw text, or
+// it becomes arbitrary SQL appended to the `SET VARIABLE` statement. `n`
+// is declared first so it's resolved from a URL seed by inputsToPreset's
+// new pre-pass, exactly the code path this PR adds. The marker statement a
+// successful injection would run (`CREATE TABLE pwned_428`) is checked for
+// directly — not just "no page error" — since DuckDB-Wasm's query() runs
+// every statement in a `;`-joined string it is given, sequentially.
+const injectionSql = `SELECT 1 AS n ::NUMBER;
+SELECT 'leaked: ' || (SELECT count(*) FROM information_schema.tables WHERE table_name = 'pwned_428') AS t ::TITLE;`;
+
+async function runInjection(label, payload) {
+  const page = await browser.newPage({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" });
+  const errs = [];
+  page.on("pageerror", (e) => errs.push(String(e)));
+  await page.goto(`${base}?embed=1&v.n=${encodeURIComponent(payload)}#sql=${b64(injectionSql)}`);
+  await page.waitForFunction(
+    () => !document.body.classList.contains("loading") && document.querySelector(".grid")?.textContent.includes("leaked:"),
+    null,
+    { timeout: 30000 }
+  );
+  const panel = await page.locator(".grid").first().textContent();
+  check(panel.includes("leaked: 0"), `${label}: the marker table was never created (${panel.trim()})`);
+  check(errs.length === 0, `${label}: no page errors${errs.length ? ": " + errs.join("; ") : ""}`);
+  await page.close();
+}
+
 try {
   await run("(a) dropdown before the search box (#428)", sql);
   await run("(b) search box before the dropdown", sqlReversed);
+  await runInjection("(c) NUMBER URL-seed injection (#436)", "1; CREATE TABLE pwned_428 AS SELECT 42");
+  await runInjection("(d) NUMBER URL-seed injection, comment form (#436)", "1); CREATE TABLE pwned_428(x INT); --");
 } finally {
   await browser.close();
 }

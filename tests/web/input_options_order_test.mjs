@@ -14,8 +14,8 @@
 // statically), never from running the statement.
 //
 // No jsdom: inputsToPreset, inputVarName, inputCandidateLiteral, inputKind,
-// role and toggleValue are pure, extracted from app.js like
-// setvar_order_test.mjs does.
+// role, toggleValue, validSeed and isIsoDate are pure, extracted from app.js
+// like setvar_order_test.mjs does.
 import { readFileSync } from "fs";
 import assert from "assert/strict";
 
@@ -30,8 +30,8 @@ const line = (name) => {
   assert.ok(m, `let/const ${name} not found in app.js`);
   return m[0];
 };
-const { inputsToPreset } = new Function(
-  `${line("INPUTS")}\n${line("role")}\n${line("inputKind")}\n${line("inputVarName")}\n${fn("toggleValue")}\n${fn("inputCandidateLiteral")}\n${fn("inputsToPreset")}\nreturn { inputsToPreset };`
+const { inputsToPreset, inputCandidateLiteral } = new Function(
+  `${line("INPUTS")}\n${line("role")}\n${line("inputKind")}\n${line("inputVarName")}\n${fn("toggleValue")}\n${fn("isIsoDate")}\n${fn("validSeed")}\n${fn("inputCandidateLiteral")}\n${fn("inputsToPreset")}\nreturn { inputsToPreset, inputCandidateLiteral };`
 )();
 
 // A plan statement: `setup`, `roles` (as the wasm plan() JSON gives them —
@@ -111,6 +111,56 @@ const setup = (sql = "") => ({ setup: true, sql, roles: [] });
 {
   const stmts = [input("TEXT", "q")];
   assert.deepEqual(inputsToPreset(stmts, {}, { q: [""] }), [{ varname: "q", sql: "SET VARIABLE q = ''" }]);
+}
+
+// 9. Security (PR #436 review): a NUMBER's URL seed is UNVALIDATED at this
+// point (seedInputFromUrl's own validSeed() call hasn't run yet) — the one
+// unquoted literal, so anything that isn't actually a number must never
+// reach `SET VARIABLE n = <here>` as text, or it's arbitrary SQL. Neither
+// payload produces a preset at all (validSeed rejects both, same as
+// seedInputFromUrl already does on master); a genuinely valid number does.
+{
+  const stmts = [input("NUMBER", "n")];
+  assert.deepEqual(inputsToPreset(stmts, {}, { n: ["1; SELECT 42"] }), []);
+  assert.deepEqual(inputsToPreset(stmts, {}, { n: ["1) OR (1=1"] }), []);
+  assert.deepEqual(inputsToPreset(stmts, {}, { n: ["12.5"] }), [{ varname: "n", sql: "SET VARIABLE n = 12.5" }]);
+}
+
+// 10. Security: inputCandidateLiteral itself (defense in depth) never emits
+// a NUMBER's `v` unquoted without checking it first — a `dpVars` pick can
+// reach it from somewhere other than validSeed, so the same injection
+// payload as case 9, arriving as an already-"picked" value instead of a
+// raw seed, still comes out as the inert NULL, never as the payload text.
+{
+  assert.equal(inputCandidateLiteral("NUMBER", "1; SELECT 42"), "NULL");
+  assert.equal(inputCandidateLiteral("NUMBER", "1) OR (1=1"), "NULL");
+  assert.equal(inputCandidateLiteral("NUMBER", "12.5"), "12.5");
+  assert.equal(inputCandidateLiteral("NUMBER", "-3"), "-3");
+}
+{
+  const stmts = [input("NUMBER", "n")];
+  // Same payload, but already a `vars` (dpVars) pick, not a URL seed —
+  // inputsToPreset doesn't re-validate that path (case 9 covers the seed
+  // path); inputCandidateLiteral's own check (case 10) is what catches it.
+  assert.deepEqual(inputsToPreset(stmts, { n: "1; SELECT 42" }, {}), [{ varname: "n", sql: "SET VARIABLE n = NULL" }]);
+}
+
+// 11. Security: a TEXT seed containing a quote is still escaped (the
+// seed-validation path, case 9, doesn't change the existing quoting).
+{
+  const stmts = [input("TEXT", "t")];
+  assert.deepEqual(inputsToPreset(stmts, {}, { t: ["a ' b"] }), [{ varname: "t", sql: "SET VARIABLE t = 'a '' b'" }]);
+}
+
+// 12. Security: a DROPDOWN/BUTTONS/MULTISELECT seed can't be checked
+// against its own options yet (not fetched at this point) — it is still
+// only ever quoted, escaped text, never anything that could be read back
+// as SQL, whatever it contains.
+{
+  const stmts = [input("DROPDOWN", "extension")];
+  assert.deepEqual(inputsToPreset(stmts, {}, { extension: ["a'); DROP TABLE t; --"] }), [
+    { varname: "extension", sql: "SET VARIABLE extension = 'a''); DROP TABLE t; --'" },
+  ]);
 }
 
 console.log("input_options_order_test: ok");

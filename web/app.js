@@ -6858,19 +6858,29 @@ function periodUrlParams(prefix, st, def) {
 function toggleValue(v) {
   return /^(true|t|1|yes|on)$/i.test(String(v ?? "").trim()) ? "true" : "false";
 }
-// #428: a candidate value — a previous pick or a raw URL seed, NOT yet
-// checked against this input's own (possibly not-yet-fetched) options — as
-// the literal a `SET VARIABLE` uses. Same quoting rules as the main
-// pre-pass below (NUMBER unquoted, MULTISELECT a VARCHAR[] literal); TOGGLE
-// goes through toggleValue so a seed's 'yes'/'1'/… normalizes the same way
-// a real run would store it.
+// #428: a candidate value — a previous pick or a (by now validated, see
+// inputsToPreset) URL seed — as the literal a `SET VARIABLE` uses. Same
+// quoting rules as the main pre-pass below (NUMBER unquoted, MULTISELECT a
+// VARCHAR[] literal); TOGGLE goes through toggleValue so a seed's
+// 'yes'/'1'/… normalizes the same way a real run would store it.
+// Security (PR #436 review): NUMBER is the one unquoted branch — its text
+// becomes part of the SQL itself, not a string literal — so, unlike every
+// other branch (which quotes+escapes and so cannot break out), it must
+// never trust `v`. inputsToPreset already validates a URL seed before
+// calling this, but `v` can also be a `dpVars` pick from elsewhere, so this
+// checks again itself (reusing validSeed's own NUMBER regex — one
+// definition of "a valid number" for both) and falls back to the inert
+// `NULL`, never emitting `v` itself unquoted without checking it first.
 function inputCandidateLiteral(kind, v) {
   if (kind === "MULTISELECT") {
     const arr = Array.isArray(v) ? v : [v];
     return "[" + arr.map((x) => `'${String(x).replace(/'/g, "''")}'`).join(",") + "]";
   }
   if (kind === "TOGGLE") return toggleValue(v) === "true" ? "TRUE" : "FALSE";
-  if (kind === "NUMBER") return String(v ?? "") || "0";
+  if (kind === "NUMBER") {
+    const s = String(v ?? "");
+    return validSeed("NUMBER", [s], null) !== undefined ? s : "NULL";
+  }
   return `'${String(v ?? "").replace(/'/g, "''")}'`;
 }
 // #428: the `SET VARIABLE` statements to run BEFORE any input's OPTIONS
@@ -6881,6 +6891,16 @@ function inputCandidateLiteral(kind, v) {
 // PERIOD and DATERANGE are left out: neither narrows from an OPTIONS list
 // the way DROPDOWN/BUTTONS/MULTISELECT do, so there is nothing here for
 // them to unblock.
+// Security (PR #436 review): a URL seed is viewer-controlled and, at this
+// point, UNVALIDATED — seedInputFromUrl's own validSeed() call hasn't run
+// yet (that happens later, at this input's own turn). NUMBER/TOGGLE/
+// DATE/TEXT go through that same validSeed() here (no `options`: none of
+// them need one) and are skipped — resolved as usual, from their own turn
+// — when it rejects the seed; this is what stops e.g. `?v.n=1; <sql>` from
+// ever reaching inputCandidateLiteral's unquoted NUMBER branch as a
+// "value". DROPDOWN/BUTTONS/MULTISELECT can't be checked against their own
+// options yet (not fetched), so they're preset as quoted, escaped text
+// only — never trusted as anything else — same as before.
 function inputsToPreset(stmts, vars, urlSeed) {
   const out = [];
   for (const s of stmts) {
@@ -6889,15 +6909,17 @@ function inputsToPreset(stmts, vars, urlSeed) {
     if (!kind || kind === "PERIOD" || kind === "DATERANGE") continue;
     const varname = inputVarName(s, kind);
     if (!varname) continue; // no static name: resolved from its own turn, as before
-    let lit;
+    const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
+    let v;
     if (vars[varname] !== undefined) {
-      lit = inputCandidateLiteral(kind, vars[varname]);
+      v = vars[varname];
     } else {
       const seed = urlSeed[varname]; // peeked, not consumed — seedInputFromUrl still needs it
       if (!seed || !seed.length) continue;
-      lit = inputCandidateLiteral(kind, kind === "MULTISELECT" ? seed : seed[0]);
+      v = listed ? (kind === "MULTISELECT" ? seed : seed[0]) : validSeed(kind, seed, null);
+      if (v === undefined) continue;
     }
-    out.push({ varname, sql: `SET VARIABLE ${varname} = ${lit}` });
+    out.push({ varname, sql: `SET VARIABLE ${varname} = ${inputCandidateLiteral(kind, v)}` });
   }
   return out;
 }
