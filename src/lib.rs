@@ -2494,6 +2494,15 @@ fn render_cartesian(
     cartesian(o, kind, &value, &sorted, title, width, height, Some(levels))
 }
 
+/// `'auto'::HEXBIN` bin count on a planar scatter (#426): roughly one
+/// hexagon every 16 px across the panel's narrower side, so a small panel
+/// isn't swamped with cells and a large one isn't left looking sparse —
+/// clamped to a range that stays readable either way.
+fn auto_hex_bins(width: u32, height: u32) -> usize {
+    let px = width.min(height).max(1) as f64;
+    (px / 16.0).round().clamp(14.0, 50.0) as usize
+}
+
 /// [`render_cartesian`]; `x_levels` (the discrete x levels in order) is set
 /// when grouped marks are dodged.
 #[allow(clippy::too_many_arguments)]
@@ -2522,6 +2531,24 @@ fn cartesian(
         Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
     );
     let point_kind = matches!(kind, Kind::Point | Kind::Bubble);
+    // `::HEXBIN` on a planar scatter (#426): a 2D count density, in place of
+    // the individual points — the predicted-vs-actual-at-5,000-rows case a
+    // sampled scatter loses. `'auto'` sizes the lattice from the panel's own
+    // pixel size; a number sets the bin count across *each* axis (ggplot2's
+    // own single-`bins` convention for `stat_bin_hex` — a lopsided x/y data
+    // range can stretch the hexagons, same as ggplot2's). Ignored off a
+    // point/bubble chart, like any other geom-specific role.
+    let hex_bins: Option<usize> = if point_kind {
+        role_str(cols, Role::Hexbin)
+            .map(|s| map::hexbin::HexSize::parse(&s))
+            .transpose()?
+            .map(|spec| match spec {
+                map::hexbin::HexSize::Auto => auto_hex_bins(width, height),
+                map::hexbin::HexSize::Width(n, _) => (n.round() as usize).clamp(2, 300),
+            })
+    } else {
+        None
+    };
     let interval = |lo: Role, hi: Role| -> Result<Option<(&Column, &Column)>, String> {
         match (find_role(cols, lo), find_role(cols, hi)) {
             (Some(a), Some(b)) => Ok(Some((a, b))),
@@ -3108,6 +3135,90 @@ fn cartesian(
                 ..Default::default()
             })
             .position(PositionStack),
+        // `::HEXBIN` (above): a count-density layer in place of the points —
+        // checked before the pointrange/fixed-size arms below, so it wins
+        // over either (a y-interval or ::SIZE alongside ::HEXBIN is not a
+        // meaningful combination; this one does). `::CATEGORY`/`::SIZE`
+        // would otherwise be inherited from the plot-level aes (`color_col`
+        // above), but this layer's own `layer_data` carries only `x`/`y`/
+        // `count`/`width`/`height`, so those mappings simply find no column
+        // to resolve and are dropped — one hexbin density for the whole
+        // panel, not one `::CATEGORY` value (the map's own `::HEXBIN` has
+        // the same "category ignored" rule, `map/hexbin.rs`'s
+        // `hexbin_diags`; `--check` flags it here too,
+        // `chart/hexbin-category`).
+        //
+        // Pre-binned with ggplot-rs's own `StatBinHex::compute_group`
+        // (issue #318: density-binning logic belongs in ggplot-rs) — the
+        // same call `map/hexbin.rs`'s `of` already makes — rather than
+        // leaving `GeomHex`'s *default* stat to bin lazily inside the
+        // pipeline: `GeomHex::draw` reads the post-stat `fill` column
+        // directly, bypassing the aes-mapping system entirely (there's no
+        // raw column to map a stat-computed aesthetic from), and
+        // ggplot-rs's own legend-width reservation only runs off that
+        // mapping system — so a lazily-binned `fill` draws a real,
+        // correctly-coloured legend that ggplot-rs never reserves panel
+        // margin for, and it runs off the canvas edge (confirmed with a
+        // minimal ggplot-rs-only repro outside this crate; PR #439 review).
+        // Binning here ourselves makes `count` a genuine *raw* column the
+        // layer's own `layer_data` carries, so `.fill("count")` is a real
+        // aes mapping `StatIdentity` (no further binning) leaves alone —
+        // the legend gets its margin like any other mapped fill (`GeomTile`
+        // /`GeomPoint`, confirmed the same way).
+        Kind::Point | Kind::Bubble if hex_bins.is_some() => {
+            use ggplot_rs::data::DataFrame;
+            use ggplot_rs::scale::{Scale, ScaleSet};
+            use ggplot_rs::stat::binhex::StatBinHex;
+            use ggplot_rs::stat::identity::StatIdentity;
+            use ggplot_rs::stat::Stat;
+            let bins = hex_bins.unwrap_or(30);
+            let mut raw = DataFrame::new();
+            raw.add_column("x".to_string(), col_of(&data, "x"));
+            raw.add_column("y".to_string(), col_of(&data, "y"));
+            let binned = StatBinHex::new()
+                .bins(bins)
+                .compute_group(&raw, &ScaleSet::new());
+            let col = |name: &str| {
+                binned
+                    .column(name)
+                    .map(<[Value]>::to_vec)
+                    .unwrap_or_default()
+            };
+            let hex_data: Vec<(String, Vec<Value>)> = vec![
+                ("x".to_string(), col("x")),
+                ("y".to_string(), col("y")),
+                ("count".to_string(), col("count")),
+                ("width".to_string(), col("width")),
+                ("height".to_string(), col("height")),
+            ];
+            // `min`/`max` left non-finite: `FmtGradient` then skips fixing the
+            // scale's domain (`with_limits`), so it self-trains off the real
+            // binned counts instead of a guess made before binning ran.
+            let ramp = Ramp::new(o, o.theme.seq_low(), f64::NAN, f64::NAN);
+            let mut fill_scale = FmtGradient::new(&ramp, format::ValueFmt::Plain, o.locale);
+            fill_scale.set_name("count");
+            plot.geom_hex_with(GeomHex {
+                color: o.theme.colors.card,
+                line_width: 0.3,
+                alpha: 0.95,
+            })
+            .stat(StatIdentity)
+            .layer_data(hex_data)
+            .layer_aes(Aes::new().x("x").y("y").fill("count"))
+            .scale_fill(fill_scale)
+            // TODO(ggplot-rs upstream, PR #439 review): a mapped Fill
+            // legend's panel-margin reservation only works when the hex
+            // layer is the plot's *only* layer — add any second layer
+            // (even one that inherits the same aes and maps nothing new,
+            // confirmed with a geom_abline/geom_point/reordered-layers
+            // repro outside this crate) and the legend box draws past the
+            // canvas edge uncropped instead of narrowing the panel. Since
+            // `::IDENTITY`/`::ABLINE` are exactly this chart's main combo,
+            // hide the guide until that's fixed upstream — the per-hexagon
+            // "n = <count>" tooltip (`GeomHex`'s own default) still carries
+            // the value on hover.
+            .show_legend(false)
+        }
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
         Kind::Point | Kind::Bubble => match fixed_size {
@@ -3192,7 +3303,9 @@ fn cartesian(
     };
     // Intervals: a point measure becomes a pointrange; any other measure gets
     // capped error bars; an x interval is a horizontal error bar through y.
-    if y_interval.is_some() {
+    // Neither makes sense once `::HEXBIN` has turned the points into a
+    // density (its own match arm above already wins over this one).
+    if y_interval.is_some() && hex_bins.is_none() {
         let span = Aes::new().x("x").ymin("ilo").ymax("ihi");
         plot = if point_kind {
             plot.geom_pointrange_with(GeomPointrange {
@@ -3215,7 +3328,7 @@ fn cartesian(
             plot = plot.position(position_dodge(dodge_width));
         }
     }
-    if x_interval.is_some() {
+    if x_interval.is_some() && hex_bins.is_none() {
         plot = plot
             .geom_errorbarh_with(GeomErrorbarh {
                 color: brand,
@@ -3475,7 +3588,11 @@ fn cartesian(
             });
         }
     }
-    if let Some(col) = color_col {
+    // `::HEXBIN` drops `::CATEGORY` (above): no colour column survives onto
+    // any layer, so skip registering a colour/fill scale for it at all —
+    // training an unused scale from no data would otherwise risk an empty
+    // legend entry.
+    if let Some(col) = color_col.filter(|_| hex_bins.is_none()) {
         // The theme palette, levels sorted so a series keeps its colour across
         // charts; `#rrggbb` levels are drawn in that colour.
         // A `::COLORS` level map pins named levels to status colours.
