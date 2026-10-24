@@ -1643,6 +1643,19 @@ const NOT_AVAILABLE_HTML: &str = "<figure class=\"panel dp-na\"><div class=\"nod
 /// server-declared `-- @load`s.
 type Rows = Vec<serde_json::Map<String, serde_json::Value>>;
 
+/// A statement's own `::KPI_SIZE` cell, read from its already-queried rows
+/// (#405) — `Some(true)` 'compact', `Some(false)` 'normal', `None` with no
+/// (or an unparseable) value or no `::KPI_SIZE` role at all.
+fn kpi_size_json(roles: &[(usize, Role)], rows: &Rows) -> Option<bool> {
+    let idx = roles.iter().find(|(_, r)| *r == Role::KpiSize)?.0;
+    let v = rows.first()?.get(&format!("c{idx}"))?.as_str()?;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "compact" => Some(true),
+        "normal" => Some(false),
+        _ => None,
+    }
+}
+
 /// Why the script-free page could not be drawn (#279). `Viewer` text is safe
 /// to show (no data, SQL or paths: a timeout, the row cap); `Server` text — a
 /// DuckDB error, which can quote file paths, SQL and values — goes to the
@@ -1753,11 +1766,14 @@ fn render_dashboard_page(
     // Phase 1: query every panel (read-only) and collect the chrome
     // directives, so a ::THEME anywhere styles the whole page.
     let mut chrome = DashboardChrome::default();
-    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
+    // The fourth element is each panel's own `::KPI_SIZE` ('compact') (#405).
+    let mut queried: Vec<(sql::Panel, Rows, bool, bool)> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
     // (#214); the others are never queried, and a `?view.*` request param
     // is not a thing — `resolve_params` above only reads declared `@param`s.
     let mut view_pick = sql::views::StaticPick::default();
+    // The enclosing ::GROUP's own ::KPI_SIZE (#405) — a tile's own wins.
+    let mut group_compact = false;
     // #274: a ::TAB / ::SUBTAB / ::VIEW alternative whose `-- @requires`
     // input is missing is left out with its panels (the tabs are flattened
     // here; the next shown alternative is the one drawn) — as the static
@@ -1812,6 +1828,27 @@ fn render_dashboard_page(
             continue;
         }
         let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
+        // ::GROUP / ::ENDGROUP (#405): no box here (one figure per panel),
+        // but a ::GROUP's own ::KPI_SIZE still cascades onto its tiles' own
+        // cards.
+        if panel.roles.iter().any(|(_, r)| *r == Role::GroupStart) {
+            group_compact = if panel.roles.iter().any(|(_, r)| *r == Role::KpiSize) {
+                let q = format!(
+                    "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
+                    panel.sql.trim().trim_end_matches(';'),
+                    st.max_rows
+                );
+                let rows: Rows = page_rows(st, &q)?;
+                kpi_size_json(&panel.roles, &rows).unwrap_or(false)
+            } else {
+                false
+            };
+            continue;
+        }
+        if panel.roles.iter().any(|(_, r)| *r == Role::GroupEnd) {
+            group_compact = false;
+            continue;
+        }
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()
             && !section
@@ -1828,7 +1865,7 @@ fn render_dashboard_page(
         // left out of its chart instead.
         if chrome_role.is_none() && !section && gated {
             if !track::is_track(&panel.roles) {
-                queried.push((panel, Rows::new(), true));
+                queried.push((panel, Rows::new(), true, false));
             }
             continue;
         }
@@ -1858,7 +1895,8 @@ fn render_dashboard_page(
             chrome.apply_row(r, cells);
             continue;
         }
-        queried.push((panel, rows, false));
+        let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
+        queried.push((panel, rows, false, compact));
     }
     let set = chrome.resolve(theme_default()).map_err(PageError::Server)?;
     let t = set.default_variant().clone();
@@ -1882,12 +1920,12 @@ fn render_dashboard_page(
     // Phase 2: render.
     let mut panels = String::new();
     let mut queried = queried.into_iter().peekable();
-    while let Some((panel, rows, na)) = queried.next() {
+    while let Some((panel, rows, na, compact)) = queried.next() {
         if na {
             panels.push_str(NOT_AVAILABLE_HTML);
             // its strips go with it
             while queried
-                .next_if(|(q, _, _)| track::is_track(&q.roles))
+                .next_if(|(q, _, _, _)| track::is_track(&q.roles))
                 .is_some()
             {}
             continue;
@@ -1916,14 +1954,24 @@ fn render_dashboard_page(
             panels.push_str(&format!("<h2 class=\"section\">{}</h2>", esc(text)));
             continue;
         }
-        let cols = anofox_visualization::name_columns(
+        let mut cols = anofox_visualization::name_columns(
             sql::columns_from_rows(&rows, &panel.roles),
             &panel.roles,
             &panel.names,
         );
+        // A ::GROUP's ::KPI_SIZE cascading onto this tile (#405): a synthetic
+        // column, since this isn't a tile's own cast — kpi::Kpi::from_columns
+        // reads the first ::KPI_SIZE column it finds, own one first.
+        if compact {
+            cols.push(anofox_visualization::Column::new(
+                "_kpi_size",
+                Role::KpiSize,
+                vec![anofox_visualization::Value::Str("compact".into())],
+            ));
+        }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| track::is_track(&q.roles)) {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
         // Its ::TITLE bar, as on a dashboard card (#232).
