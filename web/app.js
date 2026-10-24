@@ -8244,7 +8244,11 @@ async function runOnce(fresh = true, pv = preview) {
         if (kind === "DROPDOWN" || kind === "BUTTONS") {
           const { options, labels, hints } = inputOptions(s.roles, rows, varname);
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
-          dd[i] = { kind, varname, options, labels, hints, caption };
+          // ::DROPDOWN_STYLE (#411): 'search' / 'native' overrides the
+          // option-count threshold that otherwise picks the widget.
+          const dsr = kind === "DROPDOWN" && s.roles.find((r) => r[1] === "DROPDOWN_STYLE");
+          const dropdownStyle = dsr ? String(rows[0]["c" + dsr[0]] ?? "").trim().toLowerCase() : null;
+          dd[i] = { kind, varname, options, labels, hints, caption, dropdownStyle };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
         } else if (kind === "TOGGLE") {
           // A BOOLEAN variable; the query's value is the default.
@@ -10015,6 +10019,46 @@ function inputOptions(roles, rows, varname) {
 function optionLabel(meta, k) {
   return (meta.labels && meta.labels[k]) || meta.options[k];
 }
+// Fills a <select> with an input's options (shared by ::DROPDOWN's plain
+// <select> and the searchable combobox's hidden fallback <select>, #411).
+function fillSelectOptions(select, meta) {
+  meta.options.forEach((o, k) => {
+    const opt = document.createElement("option");
+    opt.value = o;
+    const hint = meta.hints && meta.hints[k];
+    opt.textContent = hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k);
+    if (o === dpVars[meta.varname]) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+// A search box appears once a list gets long, so many categories/options
+// stay usable — shared threshold for ::MULTISELECT's popover search and
+// ::DROPDOWN's searchable combobox (#411). `'search'`/`'native'::DROPDOWN_STYLE`
+// overrides it either way.
+const SEARCHABLE_OPTION_THRESHOLD = 50;
+function dropdownIsSearchable(meta) {
+  if (meta.dropdownStyle === "native") return false;
+  if (meta.dropdownStyle === "search") return true;
+  return meta.options.length > SEARCHABLE_OPTION_THRESHOLD;
+}
+// The indices of `meta.options` matching `q` — a case-insensitive substring
+// of the value or its ::OPTION_LABEL, like ::MULTISELECT's search (empty `q`:
+// every option, in order). A standalone, DOM-free function so the searchable
+// ::DROPDOWN's filter (#411) is unit-testable.
+function ddMatches(meta, q) {
+  const needle = String(q).trim().toLowerCase();
+  const out = [];
+  for (let k = 0; k < meta.options.length; k++) {
+    if (!needle || (optionLabel(meta, k) + "\u0000" + meta.options[k]).toLowerCase().includes(needle)) out.push(k);
+  }
+  return out;
+}
+// An Arrow-key move by `i` (a raw, unwrapped target), wrapped into
+// `[0, count)` — `-1` when there is nothing to highlight. Standalone for the
+// same reason as ddMatches.
+function ddWrapIndex(i, count) {
+  return count ? ((i % count) + count) % count : -1;
+}
 
 function makeControl(meta, bar) {
   if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
@@ -10063,16 +10107,10 @@ function makeControl(meta, bar) {
   }
   let input;
   if (meta.kind === "DROPDOWN") {
+    if (dropdownIsSearchable(meta)) return finalizeControl(makeSearchableDropdown(meta), bar);
     input = document.createElement("select");
     input.setAttribute("aria-label", meta.caption || meta.varname);
-    meta.options.forEach((o, k) => {
-      const opt = document.createElement("option");
-      opt.value = o;
-      const hint = meta.hints && meta.hints[k];
-      opt.textContent = hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k);
-      if (o === dpVars[meta.varname]) opt.selected = true;
-      input.appendChild(opt);
-    });
+    fillSelectOptions(input, meta);
     input.onchange = () => {
       dpVars[meta.varname] = input.value;
       run(false);
@@ -10126,7 +10164,7 @@ function makeControl(meta, bar) {
 
     const rows = [];
     // A search box appears once the list gets long, so many categories stay usable.
-    if (options.length > 50) {
+    if (options.length > SEARCHABLE_OPTION_THRESHOLD) {
       const sb = document.createElement("input");
       sb.type = "search";
       sb.placeholder = `Search ${options.length} options…`;
@@ -10199,6 +10237,194 @@ function makeControl(meta, bar) {
   }
   wrap.appendChild(input);
   return finalizeControl(wrap, bar);
+}
+
+// ::DROPDOWN above SEARCHABLE_OPTION_THRESHOLD (or forced by
+// `'search'::DROPDOWN_STYLE`, #411): an accessible combobox — a text field
+// that filters options by value and ::OPTION_LABEL (case-insensitive
+// substring, like ::MULTISELECT's search box), arrow keys + Enter to pick,
+// Esc or an outside click to close, the current pick shown when closed.
+// Reuses ::MULTISELECT's popover CSS (.dp-ms-pop/.dp-ms-list/.dp-ms-opt).
+// At most DD_WINDOW matches are rendered at a time so a 2,000-option list
+// still filters without jank. A hidden native <select> (.dp-dd-fallback)
+// carries the same options so a no-JS context (the downloaded HTML
+// snapshot) still shows a plain dropdown — downloadHtml() swaps it back in.
+const DD_WINDOW = 200;
+let ddUid = 0;
+function makeSearchableDropdown(meta) {
+  const options = meta.options;
+  const varname = meta.varname;
+  const cont = document.createElement("div");
+  cont.className = "control";
+  const cap = document.createElement("span");
+  cap.textContent = (meta.caption || varname || "") + ":";
+  cont.appendChild(cap);
+
+  const dd = document.createElement("div");
+  dd.className = "dp-ms dp-dd";
+  const uid = "dp-dd-" + ++ddUid;
+  const listId = uid + "-list";
+
+  const inputEl = document.createElement("input");
+  inputEl.type = "text";
+  inputEl.className = "dp-dd-input";
+  inputEl.setAttribute("role", "combobox");
+  inputEl.setAttribute("aria-haspopup", "listbox");
+  inputEl.setAttribute("aria-expanded", "false");
+  inputEl.setAttribute("aria-controls", listId);
+  inputEl.setAttribute("aria-autocomplete", "list");
+  inputEl.setAttribute("aria-label", meta.caption || varname);
+  inputEl.autocomplete = "off";
+  inputEl.spellcheck = false;
+  refocus("dd:" + varname, inputEl); // a pick re-runs (rebuilds the controls); keep the keyboard here
+
+  const pop = document.createElement("div");
+  pop.className = "dp-ms-pop dp-dd-pop";
+  pop.hidden = true;
+  const list = document.createElement("div");
+  list.className = "dp-ms-list dp-dd-list";
+  list.id = listId;
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", meta.caption || varname);
+  pop.appendChild(list);
+  const more = document.createElement("div");
+  more.className = "dp-dd-more";
+  more.hidden = true;
+  pop.appendChild(more);
+
+  const fallback = document.createElement("select");
+  fallback.className = "dp-dd-fallback";
+  fallback.hidden = true;
+  fallback.setAttribute("aria-hidden", "true");
+  fallback.setAttribute("aria-label", meta.caption || varname);
+  fallback.tabIndex = -1;
+  fillSelectOptions(fallback, meta);
+
+  let shown = []; // option indices behind the currently rendered rows
+  let active = -1; // keyboard-highlighted index into `shown`
+  const currentLabel = () => {
+    const k = options.indexOf(dpVars[varname]);
+    return k >= 0 ? optionLabel(meta, k) : "";
+  };
+  const moveActive = (i) => {
+    const items = [...list.querySelectorAll('[role="option"]')];
+    active = ddWrapIndex(i, items.length);
+    items.forEach((el, j) => el.classList.toggle("dp-dd-active", j === active));
+    if (active >= 0) {
+      inputEl.setAttribute("aria-activedescendant", items[active].id);
+      items[active].scrollIntoView({ block: "nearest" });
+    } else inputEl.removeAttribute("aria-activedescendant");
+  };
+  const render = (q) => {
+    const all = ddMatches(meta, q);
+    shown = all.slice(0, DD_WINDOW);
+    list.replaceChildren(
+      ...shown.map((k, i) => {
+        const row = document.createElement("div");
+        row.className = "dp-ms-opt dp-dd-opt";
+        row.id = uid + "-opt-" + i;
+        row.setAttribute("role", "option");
+        const picked = options[k] === dpVars[varname];
+        row.setAttribute("aria-selected", picked ? "true" : "false");
+        const hint = meta.hints && meta.hints[k];
+        const label = (picked ? "✓ " : "") + (hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k));
+        const tx = document.createElement("span");
+        tx.textContent = label;
+        row.appendChild(tx);
+        row.onmousedown = (ev) => {
+          ev.preventDefault(); // keep focus on the input (no blur-close) before the pick lands
+          commit(k);
+        };
+        return row;
+      })
+    );
+    if (!shown.length) {
+      const empty = document.createElement("div");
+      empty.className = "dp-dd-empty";
+      empty.textContent = "No matches";
+      list.appendChild(empty);
+    }
+    more.hidden = all.length <= shown.length;
+    if (!more.hidden) more.textContent = `+${all.length - shown.length} more — keep typing to narrow`;
+    moveActive(shown.length ? 0 : -1);
+  };
+  const close = (restore) => {
+    if (pop.hidden) return;
+    pop.hidden = true;
+    dd.removeAttribute("data-open");
+    inputEl.setAttribute("aria-expanded", "false");
+    inputEl.removeAttribute("aria-activedescendant");
+    active = -1;
+    if (restore) inputEl.value = currentLabel();
+  };
+  const open = () => {
+    if (!pop.hidden) return;
+    pop.hidden = false;
+    dd.setAttribute("data-open", "true");
+    inputEl.setAttribute("aria-expanded", "true");
+    render(inputEl.value === currentLabel() ? "" : inputEl.value);
+  };
+  function commit(k) {
+    const v = options[k];
+    inputEl.value = optionLabel(meta, k);
+    fallback.value = v;
+    close(false);
+    if (v === dpVars[varname]) return;
+    if (document.activeElement === inputEl) dpRefocus = "dd:" + varname;
+    dpVars[varname] = v;
+    run(false);
+  }
+
+  inputEl.value = currentLabel();
+  // Only a genuine click opens it on focus — a refocus() after a pick (the
+  // re-run rebuilds the controls) must not immediately reopen the popover it
+  // just closed.
+  inputEl.onfocus = () => inputEl.select();
+  inputEl.onclick = () => open();
+  inputEl.oninput = () => {
+    if (pop.hidden) open();
+    else render(inputEl.value);
+  };
+  inputEl.onkeydown = (e) => {
+    e.stopPropagation(); // don't let the page's own shortcuts see these keys
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (pop.hidden) return open();
+      moveActive(active + (e.key === "ArrowDown" ? 1 : -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (!pop.hidden && active >= 0) commit(shown[active]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close(true);
+    } else if (e.key === "Tab") close(true);
+  };
+  inputEl.onblur = () => {
+    // A pick already committed via onmousedown (which runs before blur);
+    // anything else (click outside, Tab away) just closes + restores the label.
+    requestAnimationFrame(() => {
+      if (!dd.contains(document.activeElement)) close(true);
+    });
+  };
+
+  dd.append(inputEl, pop, fallback);
+  cont.appendChild(dd);
+  installDdAutoClose();
+  return cont;
+}
+// One document-level listener blurs any open searchable ::DROPDOWN when you
+// click outside it (its own onblur then closes + restores the label) —
+// installed once, like installMsAutoClose, so later re-runs' widgets are
+// covered too.
+let ddAutoCloseInstalled = false;
+function installDdAutoClose() {
+  if (ddAutoCloseInstalled) return;
+  ddAutoCloseInstalled = true;
+  document.addEventListener("mousedown", (e) => {
+    document.querySelectorAll('.dp-dd[data-open="true"]').forEach((d) => {
+      if (!d.contains(e.target)) d.querySelector(".dp-dd-input").blur();
+    });
+  });
 }
 
 // The control to focus again after the re-run a keyboard change triggers
@@ -13482,6 +13708,18 @@ async function downloadHtml() {
   snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot, .dp-toolbox").forEach((el) => el.remove());
   // …nor the builder's header editing (#60).
   snap.querySelectorAll(".dp-hedit, .dp-head-blank").forEach((el) => el.remove());
+  // A searchable ::DROPDOWN (#411) is wired entirely by listeners cloneNode
+  // drops, so it would be unopenable in a snapshot: swap it for its hidden
+  // native <select> fallback, which needs no JS to browse (same as a plain
+  // ::DROPDOWN's <select> always has, offline).
+  snap.querySelectorAll(".dp-dd").forEach((dd) => {
+    const sel = dd.querySelector(".dp-dd-fallback");
+    if (!sel) return;
+    sel.hidden = false;
+    sel.removeAttribute("aria-hidden");
+    sel.removeAttribute("tabindex");
+    dd.replaceWith(sel);
+  });
   snap.querySelectorAll(".dp-title[data-title]").forEach((h) => {
     if (!h.dataset.title) return h.remove();
     h.textContent = h.dataset.title;

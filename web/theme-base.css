@@ -93,6 +93,15 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-ms-opt{display:flex;align-items:center;gap:.5rem;padding:.32rem .5rem;border-radius:7px;font-size:.82rem;font-weight:600;color:var(--ax-ink);cursor:pointer}
 .dp-ms-opt:hover{background:var(--ax-card)}
 .dp-ms-opt input{margin:0;min-width:0;accent-color:var(--ax-accent)}
+/* Searchable ::DROPDOWN combobox (#411) — the base look (border, padding,
+   focus ring) already comes from `.control input` above; this only adds the
+   chevron that marks it as a dropdown, a width, the open-state ring (to
+   match `.dp-ms[open]>summary`) and the keyboard-highlighted row. Reuses
+   .dp-ms/.dp-ms-pop/.dp-ms-list/.dp-ms-opt for the popover + option rows. */
+.dp-dd-input{width:220px;max-width:100%;padding-right:2rem;background-image:var(--ax-chevron);background-repeat:no-repeat;background-position:right .7rem center}
+.dp-dd[data-open="true"] .dp-dd-input{border-color:var(--ax-accent);box-shadow:var(--ax-focus-ring)}
+.dp-dd-opt.dp-dd-active{background:var(--ax-card);box-shadow:inset 2px 0 0 0 var(--ax-accent)}
+.dp-dd-empty,.dp-dd-more{padding:.3rem .5rem;font-size:.76rem;color:var(--ax-muted)}
 /* range slider + per-column table filters (were injected from JS) */
 .dp-colf{width:100%;box-sizing:border-box;font:400 12px system-ui;padding:3px 6px;border:1px solid var(--ax-colf-border);border-radius:5px;margin-top:2px;background:var(--ax-input-bg);color:var(--ax-ink)}
 .dp-range{position:relative;height:24px;margin-top:6px}

@@ -189,6 +189,7 @@ terminal.
 | `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
+| `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
