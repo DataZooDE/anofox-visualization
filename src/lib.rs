@@ -4189,6 +4189,11 @@ fn render_qq(
 /// the SQL row order (first level at the top, like a table). `::DATALABELS`
 /// writes each value into its cell (dark text on light cells, light text on
 /// dark ones); `::YFORMAT` formats the values (labels, legend, tooltip).
+/// `::FACET`/`::FACET_FREE` draws one tile grid per distinct value (#424,
+/// e.g. a confusion matrix, reference vs. current): the fill scale (and so
+/// the legend/colourbar) is still trained on every panel's rows together,
+/// so panels stay visually comparable, exactly as a non-faceted heatmap's
+/// colour scale already covers its whole `value` column.
 fn render_heatmap(
     o: &RenderOptions,
     value: &Column,
@@ -4206,6 +4211,9 @@ fn render_heatmap(
         .iter()
         .find(|c| c.role == Role::Y)
         .ok_or("heatmap needs a YAXIS column")?;
+    let facet = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
     // #332: a string measure (a status word such as 'blocked', coloured
     // with ::COLORS as a level map) gets a categorical fill scale and
     // legend — the words themselves, not a numeric ramp/::THRESHOLDS steps,
@@ -4237,12 +4245,15 @@ fn render_heatmap(
         })
         .collect();
     let (x_data, x_levels, x_thin) = heatmap_x_axis(&x.values, width);
-    let data = vec![
+    let mut data = vec![
         ("x".to_string(), x_data.clone()),
         ("y".to_string(), y.values.clone()),
         ("fill".to_string(), value.values.clone()),
         ("label".to_string(), tips),
     ];
+    if let Some(f) = facet {
+        data.push(("facet".to_string(), f.values.clone()));
+    }
     let mut th = chart_theme(o, 11.0);
     // Tiles fill the panel: no grid behind them; a slim, borderless colourbar.
     th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
@@ -4310,23 +4321,40 @@ fn render_heatmap(
         for (ink, rows) in by_ink {
             let pick =
                 |vals: &[Value]| -> Vec<Value> { rows.iter().map(|&i| vals[i].clone()).collect() };
+            let mut layer_data = vec![
+                ("x".to_string(), pick(&x_data)),
+                ("y".to_string(), pick(&y.values)),
+                (
+                    "cell".to_string(),
+                    rows.iter().map(|&i| Value::Str(short[i].clone())).collect(),
+                ),
+            ];
+            // So `::FACET` still splits each ink colour's labels into their
+            // own panel, not all of them into the first one.
+            if let Some(f) = facet {
+                layer_data.push(("facet".to_string(), pick(&f.values)));
+            }
             plot = plot
                 .geom_text_with(GeomText {
                     size,
                     color: ink,
                     ..Default::default()
                 })
-                .layer_data(vec![
-                    ("x".to_string(), pick(&x_data)),
-                    ("y".to_string(), pick(&y.values)),
-                    (
-                        "cell".to_string(),
-                        rows.iter().map(|&i| Value::Str(short[i].clone())).collect(),
-                    ),
-                ])
+                .layer_data(layer_data)
                 .layer_aes(Aes::new().x("x").y("y").label("cell"))
                 .show_legend(false);
         }
+    }
+    if let Some(f) = facet {
+        let ncol = role_num(cols, Role::FacetCols)
+            .filter(|n| *n >= 1.0)
+            .map(|n| n.min(64.0) as usize)
+            .or((f.role == Role::FacetFree).then_some(1));
+        plot = if f.role == Role::FacetFree {
+            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+        } else {
+            plot.facet_wrap("facet", ncol)
+        };
     }
     if let Some(t) = title {
         plot = plot.title(t);
@@ -4357,12 +4385,18 @@ fn render_heatmap_categorical(
 ) -> Result<Panel, String> {
     let x = find_role(cols, Role::X).ok_or("heatmap needs an XAXIS column")?;
     let y = find_role(cols, Role::Y).ok_or("heatmap needs a YAXIS column")?;
+    let facet = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
     let (x_data, x_levels, x_thin) = heatmap_x_axis(&x.values, width);
-    let data = vec![
+    let mut data = vec![
         ("x".to_string(), x_data),
         ("y".to_string(), y.values.clone()),
         ("fill".to_string(), value.values.clone()),
     ];
+    if let Some(f) = facet {
+        data.push(("facet".to_string(), f.values.clone()));
+    }
     let mut th = chart_theme(o, 11.0);
     th.panel_grid_major = ggplot_rs::theme::ElementLine::blank();
     th.legend_key.color = Some(o.theme.colors.card);
@@ -4392,6 +4426,17 @@ fn render_heatmap_categorical(
         plot = plot.scale_y_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
         );
+    }
+    if let Some(f) = facet {
+        let ncol = role_num(cols, Role::FacetCols)
+            .filter(|n| *n >= 1.0)
+            .map(|n| n.min(64.0) as usize)
+            .or((f.role == Role::FacetFree).then_some(1));
+        plot = if f.role == Role::FacetFree {
+            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+        } else {
+            plot.facet_wrap("facet", ncol)
+        };
     }
     if let Some(t) = title {
         plot = plot.title(t);

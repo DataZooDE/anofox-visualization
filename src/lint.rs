@@ -840,10 +840,13 @@ where
         diags.extend(tile_scale_diags(&p.roles, &rows, stmt, &short));
         // ::XBREAKS / ::YBREAKS: numeric entries, and only on a cartesian chart.
         diags.extend(breaks_diags(&p.roles, &rows, stmt, &short));
-        // ::FACET/::FACET_FREE on a chart kind that still ignores it (#423);
-        // ::CATEGORY on ::HISTOGRAM (a ggplot-rs gap, #423); ::HIST_BINS /
-        // ::HIST_NORM anywhere but a ::HISTOGRAM.
+        // ::FACET/::FACET_FREE on a chart kind that still ignores it (#423,
+        // #424); ::CATEGORY on ::HISTOGRAM (a ggplot-rs gap, #423);
+        // ::HIST_BINS/::HIST_NORM anywhere but a ::HISTOGRAM.
         diags.extend(histogram_qq_diags(&p.roles, stmt, &short));
+        // #424: ::IDENTITY / ::REFLINE are still dropped on a ::HEATMAP
+        // (cartesian()'s only drawn there, and a heatmap never reaches it).
+        diags.extend(heatmap_line_diags(&p.roles, stmt, &short));
         // A ::COLORS level map ('Critical:bad; …') must parse and needs a
         // ::CATEGORY to colour.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
@@ -3838,6 +3841,37 @@ fn looks_like_date(s: &str) -> bool {
     b.len() >= 8 && b[0..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
 }
 
+/// #424: `::IDENTITY` / `::REFLINE` are read inside `cartesian()` only — a
+/// `::HEATMAP` dispatches to `render_heatmap`/`render_heatmap_categorical`
+/// before ever reaching it (`lib.rs`'s `match kind` in `render_with`), so
+/// both are silently dropped there today. Drawing a diagonal/reference line
+/// over a tile grid needs the grid's own x/y to be numeric-binned (not the
+/// usual discrete row/column labels) for the line to mean anything, which
+/// `render_heatmap` doesn't distinguish yet — so this warns instead of
+/// drawing a line that would be wrong on a discrete grid.
+fn heatmap_line_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if chart_kind(roles) != Some(Kind::Heatmap) {
+        return out;
+    }
+    for role in [Role::Identity, Role::RefLine] {
+        if roles.iter().any(|(_, r)| *r == role) {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "heatmap/line-dropped",
+                message: format!(
+                    "::{} is dropped on ::HEATMAP — reference/identity lines aren't drawn over \
+                     tiles yet",
+                    role.token()
+                ),
+                sql: short.to_string(),
+            });
+        }
+    }
+    out
+}
+
 /// Status colour scales on tiles (see the call site).
 fn tile_scale_diags(
     roles: &[(usize, Role)],
@@ -4026,8 +4060,8 @@ fn breaks_diags(
 
 /// Does `::FACET`/`::FACET_FREE` do anything on this panel's chart kind?
 /// Every cartesian kind (bars/lines/areas/scatter/box/violin/…), plus
-/// `::HISTOGRAM` and `::QQ` (#423), honour it; the rest still draw one
-/// overlapping panel and ignore it — `::HEATMAP` among them (#424).
+/// `::HISTOGRAM` and `::QQ` (#423) and `::HEATMAP` (#424), honour it; the
+/// rest still draw one overlapping panel and ignore it.
 fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
     match chart_kind(roles) {
         None => false,
@@ -4035,7 +4069,6 @@ fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
             Kind::Pie
             | Kind::Donut
             | Kind::Gauge
-            | Kind::Heatmap
             | Kind::Calendar
             | Kind::Candlestick
             | Kind::Radar
