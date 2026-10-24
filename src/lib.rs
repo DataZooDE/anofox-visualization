@@ -2126,14 +2126,23 @@ fn render_inner(
             Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
         )
     }) {
-        return Ok(match map::render(o, cols, width, height) {
-            Some(m) => Panel::Own {
+        return Ok(match map::build(o, cols, width, height) {
+            Some(map::MapOutput::Own(m)) => Panel::Own {
                 width,
                 height,
                 body: m.body,
                 attrs: m.attrs,
                 warnings: m.warnings,
             },
+            // #420 slice 1: an eligible map is a real GGPlot now — the
+            // same Panel::Plot every other chart kind renders through.
+            Some(map::MapOutput::Plot { plot, attrs }) => {
+                let mut p = Panel::plot(*plot, width, height);
+                if let Panel::Plot { attrs: a, .. } = &mut p {
+                    *a = attrs;
+                }
+                p
+            }
             None => note_svg(None, "No data", width, height),
         });
     }

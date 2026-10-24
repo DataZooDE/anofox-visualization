@@ -171,6 +171,23 @@ impl Scale for MapFill {
         }
     }
 
+    /// The measure's locale-formatted value (our own `ValueFmt`, e.g. a
+    /// currency/percent string) — ggplot-rs writes this natively as
+    /// `data-fvalue` on every mark (B2-4 `svg_formatted_values`, on for
+    /// every `GGPlot` panel), so a map's hover tooltip reads the same
+    /// formatted value the old hand-written writer gave it, without this
+    /// module writing `data-fvalue` itself (reserved — ggplot-rs's own
+    /// job). `None` for a `::CATEGORY` fill, same as every other discrete
+    /// scale in this crate.
+    fn format_value(&self, value: &Value) -> Option<String> {
+        match self {
+            MapFill::Measure { scale, locale, .. } => {
+                value.as_f64().map(|f| scale.fmt.full(f, locale))
+            }
+            MapFill::Category { .. } => None,
+        }
+    }
+
     fn clone_box(&self) -> Box<dyn Scale> {
         Box::new(self.clone())
     }
@@ -223,6 +240,23 @@ mod tests {
         let direct = s.color_at(42.0);
         let fill = MapFill::measure(s, RenderOptions::default().locale);
         assert_eq!(fill.map_to_color(&Value::Float(42.0)), Some(direct));
+    }
+
+    #[test]
+    fn format_value_uses_the_measures_own_fmt_not_a_raw_number() {
+        let o = RenderOptions::default();
+        let mut s = scale(0.0, 100.0, None);
+        s.fmt = ValueFmt::Currency("€".to_string());
+        let fill = MapFill::measure(s, o.locale.clone());
+        let formatted = fill.format_value(&Value::Float(42.0)).unwrap();
+        assert!(formatted.contains('€'), "{formatted}");
+        assert_ne!(formatted, "42", "a plain number, not the house format");
+    }
+
+    #[test]
+    fn category_fill_has_no_formatted_value() {
+        let fill = MapFill::category(vec![("a".to_string(), (0, 0, 0))]);
+        assert_eq!(fill.format_value(&Value::Str("a".to_string())), None);
     }
 
     #[test]

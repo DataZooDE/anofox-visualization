@@ -37,6 +37,7 @@ pub(crate) mod hexbin;
 mod labels;
 mod legend;
 mod overlay;
+mod plot;
 pub(crate) mod project;
 mod symbols;
 mod wkt;
@@ -1252,17 +1253,38 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
     layout(&m, &lg, w, h - ft.h, forced).map(|(f, _)| f.window(w, h))
 }
 
-/// Render a map panel's body (`None` when no row has geometry).
-pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<Drawn> {
-    let m = Model::new(o, cols)?;
-    render_with_model(o, cols, &m, width, height)
+/// Either a real `GGPlot` (#420 slice 1's `geom_sf` path) or the old
+/// writer's already-rendered body — [`build`]'s result, for `render_inner`
+/// (`src/lib.rs`) to turn into a `Panel::Plot` or `Panel::Own` accordingly.
+pub(crate) enum MapOutput {
+    Plot {
+        plot: Box<ggplot_rs::prelude::GGPlot>,
+        attrs: Vec<(&'static str, String)>,
+    },
+    Own(Drawn),
 }
 
-/// [`render`]'s own body, taking an already-built [`Model`] — split out so
+/// Build a map panel: the new `geom_sf`-backed `GGPlot` for an
+/// [`plot::eligible`] map, the old hand-written SVG otherwise. `None` when
+/// no row has geometry (the only case either path bails out on).
+pub(crate) fn build(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<MapOutput> {
+    let m = Model::new(o, cols)?;
+    let w = width as f64;
+    if plot::eligible(o, &m, w) {
+        if let Some((p, attrs)) = plot::build(o, cols, &m, width, height) {
+            return Some(MapOutput::Plot {
+                plot: Box::new(p),
+                attrs,
+            });
+        }
+    }
+    render_with_model(o, cols, &m, width, height).map(MapOutput::Own)
+}
+
+/// The old hand-written SVG writer, taking an already-built [`Model`] —
 /// [`build`] (#420 slice 1: the `geom_sf`-backed path for eligible maps)
-/// can build the `Model` once and route to either this (the old writer,
-/// for everything not yet ported) or the new path, without computing it
-/// twice.
+/// builds the `Model` once and routes to either this (every map not yet
+/// ported) or the new path, without computing it twice.
 fn render_with_model(
     o: &RenderOptions,
     cols: &[Column],
