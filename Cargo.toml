@@ -112,10 +112,6 @@ roxmltree = "0.21"
 # What changed and why: vendor/tiny_http/PATCHES.md.
 [patch.crates-io]
 tiny_http = { path = "vendor/tiny_http" }
-# LOCAL, uncommitted (#422 / sipemu/ggplot-rs#207, #208): both merged to
-# ggplot-rs main, no release yet. Drop this once 0.28.2 is out and master
-# bumps to it.
-ggplot-rs = { path = "/home/simonm/projects/rust/ggplot-rs" }
 
 # The wasm build only (web/pkg, `wasm-pack build --profile wasm …`, #312).
 # Separate from [profile.release] (native DuckDB extension + the `serve`/
