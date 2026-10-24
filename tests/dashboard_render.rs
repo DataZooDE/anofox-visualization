@@ -985,3 +985,57 @@ fn table_sparkline_cell_is_drawn_not_dropped() {
         "the table's other columns must still render, unaffected: {svg}"
     );
 }
+
+// #457: `render_sparkline` must scale the y axis to the series' own
+// min/max, not a zero baseline. `GeomArea::include_zero_baseline` forces 0
+// into the trained domain unconditionally (fine for a real area chart,
+// wrong for a sparkline showing shape), which compressed a narrow-range
+// series like 1000-1013 into a near-flat line a few pixels tall — the KPI
+// tile, a table's `::SPARKLINE` cell and a standalone panel all went
+// through this one function (#419), so all three had the regression. The
+// fix draws the fill with `geom_ribbon` (no zero-baseline behaviour)
+// instead, matching the browser's `cellSpark` (web/app.js) and the KPI
+// tile's own min-max scaling before #419.
+#[test]
+fn sparkline_scales_to_its_own_range_not_zero() {
+    struct NarrowMock;
+    impl DataProvider for NarrowMock {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            Ok(vec![(
+                "c0".into(),
+                f(&[1000.0, 1001.0, 1002.0, 1003.0, 1013.0]),
+            )])
+        }
+    }
+    let script = "SELECT trend AS \"Trend\" ::SPARKLINE FROM t;";
+    let mut db = NarrowMock;
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    // Every y-coordinate of the drawn line, in panel pixels. A zero-anchored
+    // scale would compress this 1000-1013 series into a handful of pixels
+    // near one edge; a min-max scale spreads them across most of the panel.
+    let points = svg
+        .split("<polyline points=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or("");
+    let ys: Vec<f64> = points
+        .split(' ')
+        .filter_map(|p| p.split(',').nth(1))
+        .filter_map(|y| y.parse::<f64>().ok())
+        .collect();
+    assert!(ys.len() >= 2, "expected a drawn line: {svg}");
+    let (mn, mx) = ys
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+            (a.min(v), b.max(v))
+        });
+    assert!(
+        mx - mn > 5.0,
+        "a narrow-range series must still show its shape, not a near-flat \
+         line: y span {} in {svg}",
+        mx - mn
+    );
+}
