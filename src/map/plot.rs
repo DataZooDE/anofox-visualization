@@ -279,9 +279,9 @@ pub(super) fn build(
             sym_title.push(na_if_empty(title));
         }
         let select = |src: &[Value]| idx.iter().map(|&i| src[i].clone()).collect::<Vec<_>>();
-        let df: Vec<(String, Vec<Value>)> = vec![
+        let has_fill_aes = !matches!(m.fill, Fill::Plain(_));
+        let mut df: Vec<(String, Vec<Value>)> = vec![
             ("geometry".into(), sym_geometry),
-            ("fill".into(), select(&fill_vals)),
             ("label".into(), select(&labels)),
             ("row".into(), select(&rows)),
             ("series".into(), select(&seriess)),
@@ -292,6 +292,16 @@ pub(super) fn build(
             ("size".into(), sym_size),
             ("fsize".into(), sym_fsize),
         ];
+        // Only when actually fill-mapped: `GeomSf::draw` (sipemu/ggplot-rs
+        // #238) looks up its `data-fvalue` formatter by checking whether a
+        // column literally named "fill" exists at all — not whether `fill`
+        // is aes-mapped — so always including this column (even full of
+        // `Value::Na` for a `Fill::Plain` symbol map) would silently steal
+        // its fallback to `size`'s own formatter, the #238 fix's whole
+        // point for a size-only graduated-symbol map.
+        if has_fill_aes {
+            df.push(("fill".into(), select(&fill_vals)));
+        }
         let mut aes = Aes::new()
             .label("label")
             .group("row")
@@ -306,7 +316,7 @@ pub(super) fn build(
         if classes.is_some() {
             aes = aes.data_attr("class", "class");
         }
-        if !matches!(m.fill, Fill::Plain(_)) {
+        if has_fill_aes {
             aes = aes.fill("fill");
         }
         if sym.fixed.is_none() {

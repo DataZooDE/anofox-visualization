@@ -611,6 +611,14 @@ fn symbols_route_through_geom_sf_largest_first_with_area_and_line_rows() {
     assert!(attr(a, "data-fsize").is_some());
     assert_eq!(attr(a, "data-label"), Some("A"));
     assert!(s.contains("<title>A: 100</title>"), "{s}");
+    // No colour measure here: GeomSf's own data-fvalue formatter falls
+    // back to the size aesthetic's (sipemu/ggplot-rs#238) — but only
+    // because the symbols layer's DataFrame omits a "fill" column
+    // entirely when Fill::Plain (GeomSf looks that column up by its
+    // literal name, not by aes mapping, to decide which scale formats
+    // data-fvalue; always including an all-Na "fill" column would
+    // silently steal #238's own fallback to "size").
+    assert_eq!(attr(a, "data-fvalue"), Some("100"), "{a}");
 }
 
 #[test]
