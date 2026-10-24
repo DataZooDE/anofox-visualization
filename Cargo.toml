@@ -67,7 +67,7 @@ crate-type = ["cdylib", "rlib"]
 # here (no `Left`/`Right` legend, no simultaneous colourbar + discrete
 # guide on one plot).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.28.2", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.29.0", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
@@ -112,6 +112,10 @@ roxmltree = "0.21"
 # What changed and why: vendor/tiny_http/PATCHES.md.
 [patch.crates-io]
 tiny_http = { path = "vendor/tiny_http" }
+# LOCAL, uncommitted (#421 / sipemu/ggplot-rs#220, #221): both in
+# ggplot-rs 0.29.0, not yet on crates.io. Drop this once 0.29.0 is
+# published.
+ggplot-rs = { path = "/home/simonm/projects/rust/ggplot-rs" }
 
 # The wasm build only (web/pkg, `wasm-pack build --profile wasm …`, #312).
 # Separate from [profile.release] (native DuckDB extension + the `serve`/

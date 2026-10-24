@@ -52,6 +52,9 @@ pub fn assert_safe_svg(svg: &str, ctx: &str) {
                     | "data-from"
                     | "data-to"
                     | "data-fx"
+                    // a ::DIAGRAM node's / edge's name (`data-fx` is
+                    // ggplot-rs-reserved, #421)
+                    | "data-xtext"
                     | "data-summary"
                     | "data-badge"
                     | "data-of"
