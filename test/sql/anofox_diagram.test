@@ -29,24 +29,30 @@ SELECT anofox_render(json_object(
 true
 
 # Edges with attributes from a list of structs (::EDGES), top to bottom.
+# Order-agnostic: the edge is drawn by ggplot-rs (#421), whose class list carries
+# more tokens (gg-mark gg-path dp-flow flow-speed-N) and whose attribute order differs.
 query I
-SELECT anofox_render(json_object(
+SELECT svg LIKE '<svg%data-diagram="TB"%'
+   AND regexp_matches(svg, '<polyline[^>]*class="[^"]*\bdp-flow\b[^"]*"[^>]*data-edge="ingest&gt;build"|<polyline[^>]*data-edge="ingest&gt;build"[^>]*class="[^"]*\bdp-flow\b[^"]*"')
+FROM (SELECT anofox_render(json_object(
   'rows', (SELECT to_json(list({c0: stage, c1: e, c2: 'TB'} ORDER BY seq)) FROM stages,
            (SELECT list({'from': 'ingest', 'to': 'build', 'value': 9800, 'style': 'flow'}) AS e)),
   'roles', json('[[0,"NODE"],[1,"EDGES"],[2,"DIRECTION"]]'),
-  'width', 400, 'height', 400)) LIKE '<svg%data-diagram="TB"%class="dp-flow" data-edge="ingest&gt;build"%';
+  'width', 400, 'height', 400)) AS svg);
 ----
 true
 
 # Motion: a ::STORY caption per node becomes a step keyed by its id, a row's
 # ::LINESTYLE styles the edges into it ('flow-dots': travelling dots).
 query I
-SELECT anofox_render(json_object(
+SELECT svg LIKE '<svg%data-story="[{&quot;k&quot;:&quot;monitor&quot;,&quot;t&quot;:&quot;Twins drift&quot;}]"%'
+   AND regexp_matches(regexp_extract(svg, '<polyline[^>]*data-edge="ingest&gt;build"[^>]*>'), 'class="[^"]*\bdp-flow\b[^"]*\bdp-dots\b')
+FROM (SELECT anofox_render(json_object(
   'rows', (SELECT to_json(list({c0: stage, c1: inputs,
                                 c2: CASE stage WHEN 'monitor' THEN 'Twins drift' END,
                                 c3: CASE stage WHEN 'build' THEN 'flow-dots' END} ORDER BY seq)) FROM stages),
   'roles', json('[[0,"DIAGRAM"],[1,"UPSTREAM"],[2,"STORY"],[3,"LINESTYLE"]]'),
-  'width', 800, 'height', 300)) LIKE '<svg%data-story="[{&quot;k&quot;:&quot;monitor&quot;,&quot;t&quot;:&quot;Twins drift&quot;}]"%class="dp-flow dp-dots" data-edge="ingest&gt;build"%';
+  'width', 800, 'height', 300)) AS svg);
 ----
 true
 
@@ -82,11 +88,14 @@ FROM (VALUES ('a', 'Load', 10, 'Ops'), ('b', 'Clean', 8, 'Data')) n(id, title, m
 ----
 true
 
-# Swimlanes and the edge's health / speed reach the SVG.
+# Swimlanes and the edge's health / speed reach the SVG (speed as a flow-speed-N
+# class since #421: no inline style under the strict CSP).
 query I
-SELECT anofox_plot_diagram(n, edges := [{'source': 'a', 'target': 'b', 'value': 3, 'status': 'delayed', 'style': 'flow-volume'}])
-  LIKE '%data-lane="Ops"%animation-duration:0.6s%data-status="warn"%'
-FROM (VALUES ('a', 'Load', 10, 'Ops'), ('b', 'Clean', 8, 'Data')) n(id, title, mainstat, lane);
+SELECT svg LIKE '%data-lane="Ops"%'
+   AND regexp_matches(regexp_extract(svg, '<polyline[^>]*data-edge="a&gt;b"[^>]*>'), 'data-status="warn"')
+   AND regexp_matches(regexp_extract(svg, '<polyline[^>]*data-edge="a&gt;b"[^>]*>'), 'class="[^"]*\bflow-speed-[0-9]+\b')
+FROM (SELECT anofox_plot_diagram(n, edges := [{'source': 'a', 'target': 'b', 'value': 3, 'status': 'delayed', 'style': 'flow-volume'}]) AS svg
+      FROM (VALUES ('a', 'Load', 10, 'Ops'), ('b', 'Clean', 8, 'Data')) n(id, title, mainstat, lane));
 ----
 true
 
