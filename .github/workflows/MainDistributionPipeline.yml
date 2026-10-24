@@ -1,9 +1,19 @@
 name: Main Extension Distribution Pipeline
+
+# #464: the cross-platform extension builds here are full-lane only — they
+# don't gate a normal PR's fast lane. `pull_request` still triggers (so a
+# `full-ci` label or a push to the PR branch re-evaluates the lane), but the
+# build jobs are gated on lane.yml's `full` output: push to master, a tag,
+# workflow_dispatch, the nightly schedule, a release/* branch, or a PR
+# labelled `full-ci`.
 on:
   push:
     branches: [master]
     tags: ['**', '!wasm-ext-*']
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -11,8 +21,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lane:
+    uses: ./.github/workflows/lane.yml
+
   duckdb-stable-build:
     name: Build extension binaries
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
     with:
       duckdb_version: v1.5.6
@@ -38,6 +53,8 @@ jobs:
   # has dropped for 2.0.
   duckdb-2-0-build:
     name: Build extension binaries (DuckDB 2.0, non-blocking)
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
       duckdb_version: v2.0.0
