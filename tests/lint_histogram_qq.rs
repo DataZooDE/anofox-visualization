@@ -34,7 +34,10 @@ fn codes(script: &str) -> Vec<String> {
                 .or_insert_with(|| duckdb(q))
                 .clone()
         },
-        LintOptions { design: false },
+        LintOptions {
+            design: false,
+            ..Default::default()
+        },
     )
     .into_iter()
     .map(|d| d.code.to_string())

@@ -97,20 +97,53 @@ pub struct LintOptions {
     /// Also emit `design/*` advisory warnings (layout / chart-choice quality).
     /// On by default; the CLI's `--no-design` turns it off.
     pub design: bool,
+    /// Is `run_query` backed by one **persistent** session that keeps state
+    /// (TEMP views/tables, `SET VARIABLE`, `LOAD`, plain DDL) across calls,
+    /// so an earlier statement stays in scope for a later one exactly as a
+    /// real connection would?
+    ///
+    /// `true`: each statement is sent to `run_query` alone — setup and
+    /// input/interaction default `SET VARIABLE`s are executed once, right
+    /// away, since the session already has them in scope for whatever runs
+    /// next. This is the CLI's persistent `duckdb` session (#435:
+    /// `host::duckdb_cli::SessionRunner`, used by `dashboard --check`, the
+    /// static/`--svg`/`--site` renderers), which backs one process for a
+    /// whole script instead of a fresh process per statement.
+    ///
+    /// `false` (the default): every call to `run_query` is a **fresh**
+    /// session — nothing survives between calls — so this instead replays
+    /// an accumulated `prelude` (setup + input defaults + ::SELECT_AS /
+    /// ::DRILL `sets`, none of which emit rows) before each statement, so
+    /// session state is faithfully in scope without a long-lived
+    /// connection. This is the wasm `lint_step` export and web/lint.js's
+    /// `scratchRunner`, which drive DuckDB-Wasm with one fresh scratch
+    /// connection per query. The query text sent must match what
+    /// `origin/master` sends (the browser's `known` cache is keyed on the
+    /// literal query string, and `lint_test.mjs` byte-compares it against
+    /// `dashboard --check`'s own queries), so this path must not change
+    /// shape even as the stateful one does.
+    pub stateful_session: bool,
 }
 
 impl Default for LintOptions {
     fn default() -> Self {
-        LintOptions { design: true }
+        LintOptions {
+            design: true,
+            stateful_session: false,
+        }
     }
 }
 
-/// Lint `script`. `run_query` runs a whole SQL script in a **fresh** session and
-/// returns the last statement's rows (empty on a non-SELECT), or a DuckDB error.
+/// Lint `script`. See [`LintOptions::stateful_session`] for what `run_query`
+/// is expected to do across calls — a persistent session (true) or a fresh
+/// one each time, replaying a growing prelude (false, the default here).
 ///
-/// The linter replays an accumulated `prelude` (setup + input `SET`s — none of
-/// which emit rows) before each statement, so session state (temp views, bound
-/// variables) is faithfully in scope without needing a long-lived connection.
+/// An ordinary SQL error from one call does not need special handling: a
+/// real session (`SessionRunner` included) isolates it to that one
+/// statement and keeps going, so the next call still sees everything before
+/// it, in scope, same as if the failing statement were simply absent — in
+/// the `false` case, the prelude only ever grows after a statement
+/// *succeeds*, so a failed one is simply never added to it either.
 pub fn check<F>(script: &str, run_query: F) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
@@ -118,13 +151,29 @@ where
     check_opts(script, run_query, LintOptions::default())
 }
 
+/// The text to send for `sql` (not yet `;`-terminated): with
+/// [`LintOptions::stateful_session`], `sql` alone (the persistent session
+/// already has `prelude`'s statements in scope); otherwise `prelude` replayed
+/// in front of it (a fresh session each call needs it replayed every time).
+fn stmt_text(stateful_session: bool, prelude: &str, sql: &str) -> String {
+    if stateful_session {
+        format!("{sql};")
+    } else {
+        format!("{prelude}{sql};")
+    }
+}
+
 /// Like [`check`], but with [`LintOptions`] (e.g. to disable the `design/*`
-/// advisory pass).
+/// advisory pass, or set [`LintOptions::stateful_session`]).
 pub fn check_opts<F>(script: &str, mut run_query: F, opts: LintOptions) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
     let mut diags = header_diags(script);
+    // Replayed before each statement when `!opts.stateful_session` (a fresh
+    // session each call); left empty (and never grown) when
+    // `opts.stateful_session` — the persistent session already has every
+    // earlier statement in scope, so there is nothing to replay.
     let mut prelude = String::new();
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
                              // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
@@ -374,17 +423,26 @@ where
                         .into(),
                     sql: short.clone(),
                 });
-            } else if let Err(e) = run_query(&format!("{prelude}{};", p.sql)) {
+            } else if let Err(e) = run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
                 // In a hidden tab, a setup statement that reads its missing
-                // input fails as expected.
+                // input fails as expected. A stateful session isolates
+                // this to this one statement (#435) — later panels still
+                // see everything genuine setup before it left in scope;
+                // in a fresh-session run, the failed statement simply
+                // never joins `prelude` below, so it's left out of every
+                // later replay exactly the same way.
                 let reqs = if sections.hiding() {
                     [p.requires.clone(), p.tab_requires.clone()].concat()
                 } else {
                     p.requires.clone()
                 };
                 diags.push(sql_error(stmt, &reqs, &e, &short));
-            } else {
-                // Genuine setup succeeded — keep it in scope for later panels.
+            } else if !opts.stateful_session {
+                // Genuine setup succeeded: with a persistent session it's
+                // already in scope for later panels (#435) and there's
+                // nothing further to do; with a fresh session each call,
+                // keep it in `prelude` to replay before every later
+                // statement.
                 prelude.push_str(&p.sql);
                 prelude.push_str(";\n");
             }
@@ -392,10 +450,10 @@ where
         }
 
         // Input panel: run its option query and prime the variable(s) to a
-        // default (into the prelude), so downstream getvariable() panels aren't
-        // spuriously empty — mirrors the browser's input pre-pass.
+        // default, so downstream getvariable() panels aren't spuriously
+        // empty — mirrors the browser's input pre-pass.
         if let Some(kind) = input_kind(&p.roles) {
-            match run_query(&format!("{prelude}{};", p.sql)) {
+            match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
                 Ok(rows) => {
                     let names: Vec<String> = rows
                         .first()
@@ -472,9 +530,21 @@ where
                             }
                         }
                     }
+                    // A default failing to apply isn't checked here, same
+                    // as before — these are always well-formed
+                    // `SET VARIABLE` text this function built itself.
+                    // Stateful (#435): send each default to the session
+                    // right away, since it already carries everything
+                    // before it. Fresh-session (the default — a browser
+                    // `run_query`): fold it into `prelude` to replay
+                    // before every later statement instead.
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
-                        prelude.push_str(&setv);
-                        prelude.push_str(";\n");
+                        if opts.stateful_session {
+                            let _ = run_query(&format!("{setv};"));
+                        } else {
+                            prelude.push_str(&setv);
+                            prelude.push_str(";\n");
+                        }
                     }
                 }
                 Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
@@ -482,8 +552,10 @@ where
             continue;
         }
 
-        // Panel: run it (with the prelude in scope), then check rows and render.
-        let rows = match run_query(&format!("{prelude}{};", p.sql)) {
+        // Panel: run it (stateful: everything before it is already in
+        // scope, #435; fresh-session: with `prelude` replayed in front),
+        // then check rows and render.
+        let rows = match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
             Ok(rows) => rows,
             Err(e) => {
                 diags.push(sql_error(stmt, &p.requires, &e, &short));
@@ -725,7 +797,17 @@ where
                 claim(&mut diags, &names, stmt, kind, &short);
             }
             match sets {
-                Ok(sets) => prelude.push_str(&sets),
+                // Already complete, semicolon-terminated `SET VARIABLE`
+                // statements. Stateful (#435): send them to the session
+                // right away. Fresh-session (the default): fold them into
+                // `prelude` to replay before every later statement.
+                Ok(sets) => {
+                    if opts.stateful_session {
+                        let _ = run_query(&sets);
+                    } else {
+                        prelude.push_str(&sets);
+                    }
+                }
                 Err(message) => diags.push(Diagnostic {
                     severity: Severity::Warning,
                     stmt,
@@ -2520,6 +2602,9 @@ pub fn step_json(script: &str, known_json: &str, opts_json: &str) -> String {
         &answers,
         LintOptions {
             design: flag("design", true),
+            // Each query runs in a fresh DuckDB-Wasm scratch session
+            // (web/lint.js's `scratchRunner`) — not a persistent one.
+            stateful_session: false,
         },
     );
     serde_json::json!({
@@ -4299,10 +4384,17 @@ fn set_reads_a_file(code: &str) -> bool {
 }
 
 /// Check `requires` the way the locked server does (see
-/// [`sql::requires::check`]), with the prelude's session state. Shared with
-/// the headless CLI renderers (`dashboard` static HTML, `dashboard --svg`),
-/// which replay the same growing `prelude` before every statement to keep
-/// one DuckDB session's semantics across separate `duckdb` CLI calls.
+/// [`sql::requires::check`]), with `prelude`'s session state. Shared with
+/// the headless CLI renderers (`dashboard` static HTML, `dashboard --svg`)
+/// and `--check`, all of which back `run_query` with one persistent
+/// session (#435) and so always pass `prelude = ""` (there is nothing to
+/// replay — the session already has it), and with the wasm `lint_step`
+/// (via [`check_opts`]), which backs `run_query` with a fresh session each
+/// call and so passes the real accumulated prelude text to replay in
+/// front of `q`. A `session: true` query reads session variables
+/// (`getvariable()`), which needs `prelude` replayed in the fresh-session
+/// case; a `session: false` one (`glob()` file checks) never depended on
+/// session state either way, so `q` goes alone regardless.
 pub fn unmet_requirement<F>(
     run_query: &mut F,
     prelude: &str,
@@ -4517,7 +4609,10 @@ mod design_tests {
             check_opts(
                 &format!("-- @requires {req}\n{panel}"),
                 requires_session(vars, files, &globbed),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
         };
         let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
@@ -4565,7 +4660,10 @@ mod design_tests {
             check_opts(
                 &format!("-- @requires ${{rd}}/a\n{stmt}"),
                 requires_session(&vars, &["/srv/runs/r1/a"], &globbed),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
         };
         assert_eq!(
@@ -4619,7 +4717,10 @@ mod design_tests {
             check_opts(
                 script,
                 requires_session(&vars, &["/srv/runs/r1/here.parquet"], &globbed),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
         };
         let codes = |d: &[Diagnostic]| d.iter().map(|d| (d.stmt, d.code)).collect::<Vec<_>>();
@@ -4667,7 +4768,10 @@ mod design_tests {
                     Ok(vec![Map::new()])
                 }
             },
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         assert_eq!(
             codes(&d),
@@ -5392,12 +5496,20 @@ mod design_tests {
             },
         );
         assert!(!has(&d, "interaction/bad-value"), "{d:?}");
-        let last = seen.last().unwrap();
+        // #435: the priming `SET VARIABLE`s are sent in their own round
+        // (eagerly, to the session) rather than bundled into the text of
+        // whatever statement comes next — so look for them among every
+        // call made, not specifically the last one.
         assert!(
-            last.contains("SET VARIABLE week = []::VARCHAR[];"),
-            "{last}"
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE week = []::VARCHAR[];")),
+            "{seen:?}"
         );
-        assert!(last.contains("SET VARIABLE week_from = NULL;"), "{last}");
+        assert!(
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE week_from = NULL;")),
+            "{seen:?}"
+        );
         assert_eq!(
             select_as_prelude("region").unwrap(),
             "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
@@ -6025,7 +6137,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT g::CATEGORY, v::DENSITY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let w: Vec<_> = d.iter().filter(|x| x.code == "render-warning").collect();
         assert_eq!(w.len(), 1, "{d:?}");
@@ -6040,11 +6155,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/"))
-                .map(|d| (d.severity, d.code))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/"))
+            .map(|d| (d.severity, d.code))
+            .collect()
         };
         let poly = "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
         let row = |p: &str, c: &str| json!({ "c0": poly, "c1": 1.0, "c2": p, "c3": c });
@@ -6085,11 +6207,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/"))
-                .map(|d| (d.severity, d.code))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/"))
+            .map(|d| (d.severity, d.code))
+            .collect()
         };
         let sql = "SELECT c::REGION, v::BARCHART, 'robinson'::PROJECTION FROM t;";
         assert_eq!(
@@ -6118,7 +6247,10 @@ mod design_tests {
             check_opts(
                 "SELECT lat::LAT, lon::LON, n::SIZE FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/size-not-positive")
@@ -6148,11 +6280,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/flow"))
-                .map(|d| (d.severity, d.code))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/flow"))
+            .map(|d| (d.severity, d.code))
+            .collect()
         };
         let d = codes("SELECT o::ORIGIN FROM t;", vec![json!({ "c0": "DE-BY" })]);
         assert_eq!(d, vec![(Severity::Warning, "map/flow-needs-both")]);
@@ -6168,7 +6307,10 @@ mod design_tests {
             check_opts(
                 "SELECT o::ORIGIN, d::DEST FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/flow-missing-end")
@@ -6192,7 +6334,10 @@ mod design_tests {
             check_opts(
                 "SELECT o::ORIGIN, d::DEST FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/flow-self")
@@ -6216,7 +6361,10 @@ mod design_tests {
             check_opts(
                 "SELECT lat::LAT, lon::LON, h::HEXBIN FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/hexbin-bad-size")
@@ -6244,7 +6392,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT c::REGION, h::HEXBIN FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6265,7 +6416,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN, 'mercator'::PROJECTION FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6284,7 +6438,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6303,7 +6460,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT x::XAXIS, y::SCATTER, h::HEXBIN, cat::CATEGORY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6322,7 +6482,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT x::XAXIS, y::SCATTER, h::HEXBIN FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6344,7 +6507,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         assert!(
             !d.iter().any(|d| d.code.starts_with("chart/hexbin")),
@@ -6361,7 +6527,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         assert!(!d.iter().any(|d| d.code == "map/too-many-marks"), "{d:?}");
     }
@@ -6376,7 +6545,10 @@ mod design_tests {
             check_opts(
                 "SELECT o::ORIGIN, d::DEST FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/too-many-flows")
@@ -6400,11 +6572,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/"))
-                .map(|d| (d.severity, d.code, d.message))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/"))
+            .map(|d| (d.severity, d.code, d.message))
+            .collect()
         };
         let sql = "SELECT c::REGION, v::BARCHART FROM t;";
         let rows = |cs: &[&str]| cs.iter().map(|c| json!({ "c0": c, "c1": 1.0 })).collect();
@@ -6448,21 +6627,28 @@ mod design_tests {
     fn motion_directives_are_checked() {
         let codes = |sql: &str, row: Value| -> Vec<&'static str> {
             let data = vec![row.as_object().unwrap().clone()];
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .map(|d| d.code)
-                .filter(|c| {
-                    [
-                        "animate/",
-                        "linestyle/",
-                        "story/",
-                        "transition/",
-                        "hover-focus/",
-                    ]
-                    .iter()
-                    .any(|p| c.starts_with(p))
-                })
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| {
+                [
+                    "animate/",
+                    "linestyle/",
+                    "story/",
+                    "transition/",
+                    "hover-focus/",
+                ]
+                .iter()
+                .any(|p| c.starts_with(p))
+            })
+            .collect()
         };
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "wobble" });
         assert_eq!(
@@ -6529,7 +6715,14 @@ mod design_tests {
             .unwrap()
             .clone()];
         let sql = "SELECT 'a' AS v ::DROPDOWN, 'bogus' AS style ::DROPDOWN_STYLE FROM t;";
-        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        let d = check_opts(
+            sql,
+            |_q| Ok(data.clone()),
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
+        );
         assert!(
             d.iter().any(|x| x.code == "dropdown-style/unknown"),
             "{d:?}"
@@ -6540,7 +6733,14 @@ mod design_tests {
             .unwrap()
             .clone()];
         let sql = "SELECT 'a' AS v ::DROPDOWN, 'search' AS style ::DROPDOWN_STYLE FROM t;";
-        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        let d = check_opts(
+            sql,
+            |_q| Ok(data.clone()),
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
+        );
         assert!(
             !d.iter().any(|x| x.code == "dropdown-style/unknown"),
             "{d:?}"
@@ -6554,7 +6754,14 @@ mod design_tests {
             |i| json!({ "c0": format!("c{i}"), "c1": (3 - i) as f64 }),
         );
         let flat = "SELECT x::XAXIS, y::BARCHART FROM t;\n".repeat(9);
-        let d = check_opts(&flat, |_q| Ok(data.clone()), LintOptions { design: false });
+        let d = check_opts(
+            &flat,
+            |_q| Ok(data.clone()),
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
+        );
         assert!(!d.iter().any(|x| x.code.starts_with("design/")), "{d:?}");
     }
 
@@ -6573,10 +6780,12 @@ mod design_tests {
             seen.push(q.to_string());
             Ok(opts.clone())
         });
-        let last = seen.last().unwrap();
+        // #435: the default is sent in its own round (eagerly, to the
+        // session), not bundled into the next statement's own text.
         assert!(
-            last.contains("SET VARIABLE \"zone\" = 'EU';"),
-            "variable not primed: {last}"
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE \"zone\" = 'EU';")),
+            "variable not primed: {seen:?}"
         );
         // A weird column name is quoted, not injected.
         let weird = rows(1, |_| json!({ "a b\"; DROP TABLE t; --": "v" }));
