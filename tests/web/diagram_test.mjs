@@ -48,7 +48,7 @@ const stub = (tagName, attrs) => ({
 const svgOf = (svg) => {
   const els = [...svg.matchAll(/<(rect|polyline)( [^>]*)>/g)].map((m) => stub(m[1], attrsOf(m[2])));
   // what attachHover leaves: titled marks become .dp-hit with a data-tip
-  for (const e of els) if (e.attrs["data-node"] || e.attrs["data-edge"]) e.attrs["data-tip"] = e.attrs["data-node"] ? "tip" : e.attrs["data-fx"];
+  for (const e of els) if (e.attrs["data-node"] || e.attrs["data-edge"]) e.attrs["data-tip"] = e.attrs["data-node"] ? "tip" : e.attrs["data-xtext"];
   const root = attrsOf(svg.slice(0, svg.indexOf(">")));
   return {
     hasAttribute: (k) => k in root,

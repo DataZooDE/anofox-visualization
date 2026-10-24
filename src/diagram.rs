@@ -20,7 +20,7 @@
 //! the browser's hover, selection and accessibility layers already read.
 
 use crate::format::{escape_xml as esc, format_number_l, Locale};
-use crate::theme::hex;
+use crate::theme::{hex, Rgb};
 use crate::thresholds::{Rules, Status};
 use crate::{key_text, svg_open, with_root_attr, Column, MetricFmt, Place, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
@@ -1705,18 +1705,84 @@ fn steps_text(d: &Diagram, p: &Placed) -> String {
         .join(" ")
 }
 
-// ---- SVG ---------------------------------------------------------------------
+// ---- drawing (ggplot-rs) -----------------------------------------------------
+//
+// The layout above is ours (graph theory); the drawing is ggplot-rs's
+// (#318 step 5, #421): one `GGPlot` over the layout's own pixel space (x
+// right, y down, 1 data unit = 1 px, no margins), with a layer per mark
+// kind. The mark contract web/anim.js and web/app.js read stays as before:
+// `rect[data-node]` boxes and `polyline[data-edge]` edges with a `<title>`,
+// arrowheads (`polygon[data-from]`) and edge labels carrying
+// `data-from`/`data-to`, and a node's contents (accent, label, value,
+// badge, sparkline) inside one `<g data-of="<id>">`, inert
+// (`pointer-events="none"`, `aria-hidden="true"`) so hover, click and
+// screen readers reach the box below.
 
-fn f1(v: f64) -> String {
-    let s = format!("{v:.1}");
-    s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
+/// A column-major frame for one layer; every row pushes every column.
+#[derive(Default)]
+struct Frame(Vec<(String, Vec<Value>)>);
+
+impl Frame {
+    fn col(&mut self, name: &str) -> &mut Vec<Value> {
+        let i = match self.0.iter().position(|(n, _)| n == name) {
+            Some(i) => i,
+            None => {
+                self.0.push((name.to_string(), Vec::new()));
+                self.0.len() - 1
+            }
+        };
+        &mut self.0[i].1
+    }
+    fn num(&mut self, name: &str, v: f64) -> &mut Self {
+        self.col(name).push(Value::Float(v));
+        self
+    }
+    fn txt(&mut self, name: &str, v: impl Into<String>) -> &mut Self {
+        self.col(name).push(Value::Str(v.into()));
+        self
+    }
+    fn opt(&mut self, name: &str, v: Option<String>) -> &mut Self {
+        self.col(name).push(v.map_or(Value::Na, Value::Str));
+        self
+    }
+    fn is_empty(&self) -> bool {
+        self.0.first().is_none_or(|(_, v)| v.is_empty())
+    }
+    /// The frame's columns, its pixel y (down) flipped to ggplot-rs's data
+    /// y (up) on a canvas `h` tall: `y` → `h - y`, and a rect's `y0`/`y1`
+    /// swapped as they flip so `y0` stays the low edge.
+    fn take(&mut self, h: f64) -> Vec<(String, Vec<Value>)> {
+        let flip = |v: Vec<Value>| -> Vec<Value> {
+            v.into_iter()
+                .map(|x| match x {
+                    Value::Float(y) => Value::Float(h - y),
+                    other => other,
+                })
+                .collect()
+        };
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .map(|(n, v)| match n.as_str() {
+                "y" => (n, flip(v)),
+                "y0" => ("y1".to_string(), flip(v)),
+                "y1" => ("y0".to_string(), flip(v)),
+                _ => (n, v),
+            })
+            .collect()
+    }
 }
 
-fn pts_attr(pts: &[(f64, f64)]) -> String {
-    pts.iter()
-        .map(|(x, y)| format!("{},{}", f1(*x), f1(*y)))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Frames keyed by a colour a geom only takes as a fixed parameter (a
+/// rect's stroke), in first-seen order: one layer per colour.
+fn by_colour(v: &mut Vec<(Rgb, Frame)>, c: Rgb) -> &mut Frame {
+    let i = match v.iter().position(|(k, _)| *k == c) {
+        Some(i) => i,
+        None => {
+            v.push((c, Frame::default()));
+            v.len() - 1
+        }
+    };
+    &mut v[i].1
 }
 
 /// The point halfway along a polyline.
@@ -1737,6 +1803,498 @@ fn midpoint(pts: &[(f64, f64)]) -> (f64, f64) {
         left -= l;
     }
     pts.first().copied().unwrap_or((0.0, 0.0))
+}
+
+/// ggplot-rs centres text on its y (`dominant-baseline="middle"`); the
+/// layout places lines by their baseline. A cap-height-ish shift between
+/// the two.
+fn mid_of_baseline(baseline: f64, px: f64) -> f64 {
+    baseline - 0.36 * px
+}
+
+/// `'flow-volume'`/`'flow-dots-volume'`: an edge's animation speed bucket
+/// from what it carries, on the same area-true sqrt scale as its width.
+/// Five fixed, equal-width buckets of `sqrt(v / max)` (not quantiles: a
+/// diagram's few edges would make quantile buckets jump around between
+/// refreshes, and equal steps keep "twice as busy" looking faster
+/// everywhere). `flow-speed-1` is the busiest (fastest, 0.6 s a cycle) …
+/// `flow-speed-5` a trickle (2.4 s) — the durations live in
+/// web/theme-base.css, a class instead of an inline `style`, so a strict
+/// CSP holds.
+fn speed_class(v: f64, vmax: f64) -> &'static str {
+    let r = (v.max(0.0) / vmax).sqrt();
+    match r {
+        r if r >= 0.8 => "flow-speed-1",
+        r if r >= 0.6 => "flow-speed-2",
+        r if r >= 0.4 => "flow-speed-3",
+        r if r >= 0.2 => "flow-speed-4",
+        _ => "flow-speed-5",
+    }
+}
+
+/// The drawing as a nested `<svg>` of `pw` × `ph` (the layout's own size).
+fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String {
+    use ggplot_rs::geom::arrow::arrow;
+    use ggplot_rs::prelude::*;
+    use ggplot_rs::render::backend::{LineEnd, Linetype};
+    use ggplot_rs::scale::linewidth::ScaleLinewidthContinuous;
+
+    let t = &o.theme;
+    let (muted, card, ink) = (t.colors.muted, t.colors.card, t.colors.ink);
+    let (w, h) = (pw as f64, ph as f64);
+    let mut th = crate::void_theme(o);
+    th.legend_position = ggplot_rs::theme::LegendPosition::None;
+    let mut plot = GGPlot::new(vec![
+        ("x".to_string(), vec![Value::Float(0.0), Value::Float(w)]),
+        ("y".to_string(), vec![Value::Float(0.0), Value::Float(h)]),
+    ])
+    .theme(th)
+    // the canvas is the view (a zoom, so a mark reaching past it is clipped
+    // rather than dropped); `Frame::take` flips the layout's y-down pixels
+    .scale_x_continuous(ScaleContinuous::new().with_expand(0.0, 0.0))
+    .scale_y_continuous(ScaleContinuous::new().with_expand(0.0, 0.0))
+    .coord_cartesian_zoom(Some((0.0, w)), Some((0.0, h)))
+    .scale_color_identity()
+    .scale_fill_identity()
+    .scale_linewidth(
+        ScaleLinewidthContinuous::new()
+            .with_limits(0.0, 16.0)
+            .with_range(0.0, 16.0),
+    )
+    .scale_linetype_manual(vec![
+        ("solid", Linetype::Solid),
+        ("dashed", Linetype::Custom(vec![(6.0, 4.0)])),
+        // round caps on a zero-length dash: moving dots
+        ("dots", Linetype::Custom(vec![(0.0, 10.0)])),
+    ]);
+    let rect_aes = || Aes::new().xmin("x0").xmax("x1").ymin("y0").ymax("y1");
+    let inert = [("pointer-events", "none")];
+
+    // swimlanes (under everything): a tinted band per lane, its name on top
+    let (mut even, mut odd, mut names) = (Frame::default(), Frame::default(), Frame::default());
+    for &(l, x0, y0, x1, y1) in &p.bands {
+        let f = if l % 2 == 0 { &mut even } else { &mut odd };
+        f.num("x0", x0).num("x1", x1).num("y0", y0).num("y1", y1);
+        f.txt("lane", d.lanes[l].clone());
+        names
+            .num("x", x0 + 8.0)
+            .num("y", mid_of_baseline(y0 + 13.0, 11.0));
+        names.txt("label", d.lanes[l].clone());
+    }
+    for (mut f, alpha) in [(even, 0.35), (odd, 0.18)] {
+        if f.is_empty() {
+            continue;
+        }
+        plot = plot
+            .geom_rect_with(
+                GeomRect {
+                    fill: t.colors.line,
+                    alpha,
+                    line_width: 0.0,
+                    ..Default::default()
+                }
+                .with_radius(6.0),
+            )
+            .layer_data(f.take(h))
+            .layer_aes(rect_aes().data_attr("lane", "lane"))
+            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-lane")]);
+    }
+    if !names.is_empty() {
+        plot = plot
+            .geom_text_with(GeomText {
+                size: 11.0,
+                color: muted,
+                hjust: 0.0,
+                ..Default::default()
+            })
+            .layer_data(names.take(h))
+            .layer_aes(Aes::new().x("x").y("y").label("label"))
+            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-lane-label")]);
+    }
+
+    // edges (under the nodes): one path per edge, as wide as what it
+    // carries (area-true: sqrt), its style a linetype
+    let vmax = d.edges.iter().filter_map(|e| e.value).fold(0.0, f64::max);
+    let (mut ef, mut lf) = (Frame::default(), Frame::default());
+    for (k, e) in d.edges.iter().enumerate() {
+        let width = match e.value {
+            Some(v) if vmax > 0.0 => 1.4 + 5.6 * (v.max(0.0) / vmax).sqrt(),
+            _ => 1.6,
+        };
+        let width = match e.style {
+            EdgeStyle::Dots(_) => width.clamp(3.0, 6.0),
+            _ => width,
+        };
+        let width = (width * 10.0).round() / 10.0;
+        let mut pts = p.edges[k].clone();
+        if pts.len() < 2 {
+            continue;
+        }
+        // ggplot-rs puts the arrow's tip on the path's last point and
+        // strokes the head as wide as the line (its mitred tip reaching
+        // about one line width further): end the path one width short of
+        // the box so the tip lands on its edge.
+        let n = pts.len();
+        let ((fx, fy), (tx, ty)) = (pts[n - 2], pts[n - 1]);
+        let len = ((tx - fx).powi(2) + (ty - fy).powi(2)).sqrt().max(1e-6);
+        let pull = width.min(len / 2.0);
+        pts[n - 1] = (tx - (tx - fx) / len * pull, ty - (ty - fy) / len * pull);
+        // health first (warn / bad), else a flowing edge in the brand colour
+        let colour = match (e.status, e.style) {
+            (Some(st @ (Status::Bad | Status::Warn)), _) => st.color(t),
+            (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => t.color(0),
+            _ => muted,
+        };
+        let (lt, class) = match e.style {
+            EdgeStyle::Solid => ("solid", None),
+            EdgeStyle::Dashed => ("dashed", None),
+            EdgeStyle::Flow(_) => ("dashed", Some("dp-flow")),
+            EdgeStyle::Dots(_) => ("dots", Some("dp-flow dp-dots")),
+        };
+        let speed = match (e.style, e.value) {
+            (EdgeStyle::Flow(true) | EdgeStyle::Dots(true), Some(v)) if vmax > 0.0 => {
+                Some(speed_class(v, vmax))
+            }
+            _ => None,
+        };
+        let class = match (class, speed) {
+            (Some(c), Some(s)) => Some(format!("{c} {s}")),
+            (c, _) => c.map(str::to_string),
+        };
+        let (a, b) = (&d.nodes[e.from], &d.nodes[e.to]);
+        let name = format!("{} → {}", a.label, b.label);
+        let tip = match (&e.label, &e.fvalue) {
+            (Some(l), _) => format!("{name}: {l}"),
+            (None, Some(v)) => format!("{name}: {v}"),
+            _ => name.clone(),
+        };
+        for &(x, y) in &pts {
+            ef.num("x", x).num("y", y).txt("g", format!("e{k:04}"));
+            ef.txt("col", hex(colour)).num("lw", width).txt("lt", lt);
+            ef.opt("cls", class.clone()).txt("tip", tip.clone());
+            ef.txt("edge", format!("{}>{}", a.id, b.id));
+            ef.txt("from", a.id.clone()).txt("to", b.id.clone());
+            ef.txt("fx", name.clone());
+            ef.opt("value", e.value.map(|v| v.to_string()));
+            ef.opt(
+                "fvalue",
+                e.value.map(|_| e.fvalue.clone().unwrap_or_default()),
+            );
+            ef.opt("status", e.status.map(|s| s.as_str().to_string()));
+            ef.opt("back", p.back[k].then(|| "1".to_string()));
+        }
+        if let Some(l) = &e.label {
+            let (mx, my) = midpoint(&p.edges[k]);
+            lf.num("x", mx).num("y", mid_of_baseline(my - 4.0, 11.0));
+            lf.txt("label", l.clone());
+            lf.txt("from", a.id.clone()).txt("to", b.id.clone());
+        }
+    }
+    if !ef.is_empty() {
+        plot = plot
+            .geom_path_with(
+                GeomPath::default()
+                    .lineend(LineEnd::Round)
+                    // the old 7 px + width head, ~29° half-angle
+                    .arrow(
+                        arrow()
+                            .closed()
+                            .angle(29.0)
+                            .length(ARROW + 1.0)
+                            .length_per_linewidth(1.2),
+                    ),
+            )
+            .layer_data(ef.take(h))
+            .layer_aes(
+                Aes::new()
+                    .x("x")
+                    .y("y")
+                    .group("g")
+                    .color("col")
+                    .linewidth("lw")
+                    .linetype("lt")
+                    .class("cls")
+                    .tooltip("tip")
+                    .data_attr("edge", "edge")
+                    .data_attr("from", "from")
+                    .data_attr("to", "to")
+                    .data_attr("xtext", "fx")
+                    .data_attr("value", "value")
+                    .data_attr("vtext", "fvalue")
+                    .data_attr("status", "status")
+                    .data_attr("back", "back"),
+            )
+            .layer_svg_attr("class", "dp-edge");
+    }
+    if !lf.is_empty() {
+        // a card-coloured box keeps the label legible over the lines
+        plot = plot
+            .geom_label_with(GeomLabel {
+                size: 11.0,
+                color: muted,
+                fill: card,
+                alpha: 1.0,
+                padding: 1.5,
+                radius: 3.0,
+                // measured with the theme's text metrics (a box as wide as
+                // the text), never actually wrapping an edge label
+                wrap_width: Some(1e4),
+                ..Default::default()
+            })
+            .layer_data(lf.take(h))
+            .layer_aes(
+                Aes::new()
+                    .x("x")
+                    .y("y")
+                    .label("label")
+                    .data_attr("from", "from")
+                    .data_attr("to", "to"),
+            )
+            .layer_svg_attrs(inert)
+            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-edge-label")]);
+    }
+
+    // nodes: the box (the hit target, outside any `data-of` group), then
+    // what it shows, grouped per node
+    let mut boxes: Vec<(Rgb, Frame)> = Vec::new();
+    let mut badges: Vec<(Rgb, Frame)> = Vec::new();
+    let (mut accent, mut lines, mut values) =
+        (Frame::default(), Frame::default(), Frame::default());
+    let (mut dots, mut btext, mut spark, mut ends) = (
+        Frame::default(),
+        Frame::default(),
+        Frame::default(),
+        Frame::default(),
+    );
+    for v in reading(p) {
+        let nd = &d.nodes[v];
+        let pn = &p.nodes[v];
+        let id = nd.id.clone();
+        let (x, y) = (pn.cx - pn.w / 2.0, pn.cy - pn.h / 2.0);
+        let stroke = nd
+            .status
+            .filter(|s| *s == Status::Bad || *s == Status::Warn)
+            .map(|s| s.color(t))
+            .unwrap_or(t.chart.line);
+        let mut tip = nd.label.clone();
+        if let Some(fv) = &nd.fvalue {
+            tip.push_str(&format!(": {fv}"));
+        }
+        if let Some(b) = &nd.badge {
+            tip.push_str(&format!(" ({b})"));
+        }
+        let f = by_colour(&mut boxes, stroke);
+        f.num("x0", x)
+            .num("x1", x + pn.w)
+            .num("y0", y)
+            .num("y1", y + pn.h);
+        f.txt("node", id.clone())
+            .txt("xk", id.clone())
+            .txt("series", id.clone());
+        f.txt("fx", nd.label.clone());
+        f.txt("layer", pn.layer.to_string())
+            .txt("order", pn.order.to_string());
+        f.opt("value", nd.value.map(|v| v.to_string()));
+        f.opt(
+            "fvalue",
+            nd.value.map(|_| nd.fvalue.clone().unwrap_or_default()),
+        );
+        f.opt("status", nd.status.map(|s| s.as_str().to_string()));
+        f.opt("badge", nd.badge.clone()).txt("tip", tip);
+
+        let accent_c = nd
+            .status
+            .filter(|s| *s != Status::Neutral)
+            .map(|s| s.color(t))
+            .or_else(|| nd.category.map(|c| t.color(c)));
+        if let Some(a) = accent_c {
+            accent.num("x0", x + 1.5).num("x1", x + 4.5);
+            accent
+                .num("y0", y + 6.0)
+                .num("y1", y + 6.0 + (pn.h - 12.0).max(4.0));
+            accent.txt("fill", hex(a)).txt("of", id.clone());
+        }
+        let mut base = y + BOX_PAD_Y + 12.0;
+        for line in &pn.lines {
+            lines
+                .num("x", pn.cx)
+                .num("y", mid_of_baseline(base, LABEL_PX));
+            lines.txt("label", line.clone()).txt("of", id.clone());
+            base += LINE_H;
+        }
+        if let Some(fv) = &nd.fvalue {
+            values
+                .num("x", pn.cx)
+                .num("y", mid_of_baseline(base, VALUE_PX));
+            values.txt("label", fv.clone()).txt("of", id.clone());
+            base += LINE_H;
+        }
+        if let Some(b) = &nd.badge {
+            let bw = text_w(b, BADGE_PX, false) + 20.0;
+            let dot = nd.status.map(|s| s.color(t)).unwrap_or(muted);
+            let (bx, by) = (pn.cx - bw / 2.0, base - 9.0);
+            let f = by_colour(&mut badges, dot);
+            f.num("x0", bx)
+                .num("x1", bx + bw)
+                .num("y0", by)
+                .num("y1", by + 16.0);
+            f.txt("of", id.clone());
+            dots.num("x", bx + 9.0).num("y", by + 8.0);
+            dots.txt("col", hex(dot)).txt("of", id.clone());
+            btext.num("x", bx + 15.0).num("y", by + 8.0);
+            btext.txt("label", b.clone()).txt("of", id.clone());
+            base += 20.0;
+        }
+        // a mini trend along the bottom of the box
+        if nd.spark.len() >= 2 {
+            let (lo, hi) = nd
+                .spark
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                    (a.min(v), b.max(v))
+                });
+            let rng = if hi > lo { hi - lo } else { 1.0 };
+            let (sx0, sw) = (x + BOX_PAD_X, pn.w - 2.0 * BOX_PAD_X);
+            let (top, sh) = (base - 8.0, SPARK_H - 8.0);
+            let last = nd.spark.len() - 1;
+            let col = hex(nd
+                .status
+                .filter(|s| *s == Status::Bad || *s == Status::Warn)
+                .map(|s| s.color(t))
+                .unwrap_or_else(|| t.color(0)));
+            for (i, &sv) in nd.spark.iter().enumerate() {
+                let (px, py) = (
+                    sx0 + sw * i as f64 / last as f64,
+                    top + sh - (sv - lo) / rng * sh,
+                );
+                spark.num("x", px).num("y", py).txt("g", id.clone());
+                spark.txt("col", col.clone()).txt("of", id.clone());
+                if i == last {
+                    ends.num("x", px).num("y", py);
+                    ends.txt("col", col.clone()).txt("of", id.clone());
+                }
+            }
+        }
+    }
+    for (stroke, mut f) in boxes {
+        plot = plot
+            .geom_rect_with(
+                GeomRect {
+                    fill: card,
+                    color: stroke,
+                    alpha: 1.0,
+                    line_width: 1.2,
+                    ..Default::default()
+                }
+                .with_radius(8.0),
+            )
+            .layer_data(f.take(h))
+            .layer_aes(
+                rect_aes()
+                    .tooltip("tip")
+                    .data_attr("node", "node")
+                    .data_attr("x", "xk")
+                    .data_attr("series", "series")
+                    .data_attr("xtext", "fx")
+                    .data_attr("layer", "layer")
+                    .data_attr("order", "order")
+                    .data_attr("value", "value")
+                    .data_attr("vtext", "fvalue")
+                    .data_attr("status", "status")
+                    .data_attr("badge", "badge"),
+            )
+            .layer_svg_attr("class", "dp-node");
+    }
+    // everything below: dims / lights with its node (`data-of`), inert
+    let of = |a: Aes| a.group_wrap("of", "of");
+    if !accent.is_empty() {
+        plot = plot
+            .geom_rect_with(
+                GeomRect {
+                    alpha: 1.0,
+                    line_width: 0.0,
+                    ..Default::default()
+                }
+                .with_radius(1.5),
+            )
+            .layer_data(accent.take(h))
+            .layer_aes(of(rect_aes().fill("fill")))
+            .decorative()
+            .layer_svg_attrs(inert);
+    }
+    for (mut f, size, colour, class) in [
+        (lines, LABEL_PX, t.colors.heading, "dp-node-label"),
+        (values, VALUE_PX, ink, "dp-node-value"),
+    ] {
+        if f.is_empty() {
+            continue;
+        }
+        plot = plot
+            .geom_text_with(GeomText {
+                size,
+                color: colour,
+                ..Default::default()
+            })
+            .layer_data(f.take(h))
+            .layer_aes(of(Aes::new().x("x").y("y").label("label")))
+            .layer_svg_attrs(inert)
+            .layer_svg_attrs([("aria-hidden", "true"), ("class", class)]);
+    }
+    for (dot, mut f) in badges {
+        plot = plot
+            .geom_rect_with(
+                GeomRect {
+                    fill: card,
+                    color: dot,
+                    alpha: 0.0,
+                    line_width: 1.0,
+                    ..Default::default()
+                }
+                .with_radius(8.0),
+            )
+            .layer_data(f.take(h))
+            .layer_aes(of(rect_aes()))
+            .decorative()
+            .layer_svg_attrs(inert);
+    }
+    for (mut f, size) in [(dots, 3.0), (ends, 2.2)] {
+        if f.is_empty() {
+            continue;
+        }
+        plot = plot
+            .geom_point_with(GeomPoint {
+                size,
+                ..Default::default()
+            })
+            .layer_data(f.take(h))
+            .layer_aes(of(Aes::new().x("x").y("y").color("col")))
+            .decorative()
+            .layer_svg_attrs(inert);
+    }
+    if !btext.is_empty() {
+        plot = plot
+            .geom_text_with(GeomText {
+                size: BADGE_PX,
+                color: ink,
+                hjust: 0.0,
+                ..Default::default()
+            })
+            .layer_data(btext.take(h))
+            .layer_aes(of(Aes::new().x("x").y("y").label("label")))
+            .layer_svg_attrs(inert)
+            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-node-badge")]);
+    }
+    if !spark.is_empty() {
+        plot = plot
+            .geom_path_with(GeomPath::default().linewidth(1.4))
+            .layer_data(spark.take(h))
+            .layer_aes(of(Aes::new().x("x").y("y").group("g").color("col")))
+            .decorative()
+            .layer_svg_attrs(inert)
+            .layer_svg_attr("class", "dp-node-spark");
+    }
+    plot.render_svg_native_at(0.0, 0.0, pw, ph)
+        .unwrap_or_default()
 }
 
 /// Render the diagram as a whole `<svg>` (or a nested fragment at `place`)
@@ -1774,11 +2332,13 @@ pub(crate) fn render(
         )
     });
     let note_h = if note.is_some() { 18.0 } else { 0.0 };
+    // the drawing's own canvas: whole px, so a data unit stays a pixel
+    let (pw, ph) = (p.w.ceil().max(1.0), p.h.ceil().max(1.0));
     let (aw, ah) = ((w - 4.0).max(10.0), (h - 4.0 - note_h).max(10.0));
-    let s = (aw / p.w).min(ah / p.h).min(1.0);
+    let s = (aw / pw).min(ah / ph).min(1.0);
     let s = (s * 1000.0).floor() / 1000.0;
-    let tx = ((w - p.w * s) / 2.0).max(0.0);
-    let ty = ((h - note_h - p.h * s) / 2.0).max(0.0);
+    let tx = ((w - pw * s) / 2.0).max(0.0);
+    let ty = ((h - note_h - ph * s) / 2.0).max(0.0);
 
     let mut out = svg_open(place, width, height);
     out.push_str(&format!(
@@ -1786,288 +2346,16 @@ pub(crate) fn render(
         esc(&format!("Diagram: {summary}. Steps: {}", steps_text(d, &p)))
     ));
     out.push_str(&format!(
-        "<g class=\"dp-diagram\" transform=\"translate({},{}) scale({})\" font-family=\"{font}\">",
-        f1(tx),
-        f1(ty),
-        s
+        "<g class=\"dp-diagram\" transform=\"translate({:.1},{:.1}) scale({})\" font-family=\"{font}\">",
+        tx, ty, s
     ));
-
-    // swimlanes (under everything): a tinted band per lane, its name on top
-    if !p.bands.is_empty() {
-        out.push_str("<g class=\"dp-lanes\" aria-hidden=\"true\">");
-        for &(l, x0, y0, x1, y1) in &p.bands {
-            out.push_str(&format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"6\" fill=\"{}\" fill-opacity=\"{}\" data-lane=\"{}\"/><text x=\"{}\" y=\"{}\" font-size=\"11\" font-weight=\"700\" fill=\"{}\">{}</text>",
-                f1(x0),
-                f1(y0),
-                f1(x1 - x0),
-                f1(y1 - y0),
-                hex(t.colors.line),
-                if l % 2 == 0 { "0.35" } else { "0.18" },
-                esc(&d.lanes[l]),
-                f1(x0 + 8.0),
-                f1(y0 + 13.0),
-                hex(t.colors.muted),
-                esc(&d.lanes[l])
-            ));
-        }
-        out.push_str("</g>");
-    }
-    // edges (under the nodes)
-    let muted = hex(t.colors.muted);
-    let card = hex(t.colors.card);
-    out.push_str("<g class=\"dp-edges\">");
-    // with values, an edge is as wide as what it carries (area-true: sqrt)
-    let vmax = d.edges.iter().filter_map(|e| e.value).fold(0.0, f64::max);
-    for (k, e) in d.edges.iter().enumerate() {
-        let width = match e.value {
-            Some(v) if vmax > 0.0 => 1.4 + 5.6 * (v.max(0.0) / vmax).sqrt(),
-            _ => 1.6,
-        };
-        let width = match e.style {
-            EdgeStyle::Dots(_) => width.clamp(3.0, 6.0),
-            _ => width,
-        };
-        let arrow = ARROW + width;
-        let mut pts = p.edges[k].clone();
-        if pts.len() < 2 {
-            continue;
-        }
-        let (fx, fy) = pts[pts.len() - 2];
-        let (tx_, ty_) = pts[pts.len() - 1];
-        let len = ((tx_ - fx).powi(2) + (ty_ - fy).powi(2)).sqrt().max(1e-6);
-        let (ux, uy) = ((tx_ - fx) / len, (ty_ - fy) / len);
-        let base = (tx_ - ux * arrow, ty_ - uy * arrow);
-        let last = pts.len() - 1;
-        pts[last] = base;
-        // health first (warn / bad), else a flowing edge in the brand colour
-        let colour = match (e.status, e.style) {
-            (Some(st @ (Status::Bad | Status::Warn)), _) => hex(st.color(t)),
-            (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => hex(t.color(0)),
-            _ => muted.clone(),
-        };
-        let dash = match e.style {
-            EdgeStyle::Solid => "",
-            EdgeStyle::Dashed => " stroke-dasharray=\"6 4\"",
-            EdgeStyle::Flow(_) => " stroke-dasharray=\"6 4\" class=\"dp-flow\"",
-            EdgeStyle::Dots(_) => " stroke-dasharray=\"0 10\" class=\"dp-flow dp-dots\"",
-        };
-        // speed by volume: the busiest edge cycles in 0.6 s, a trickle in 2.4 s
-        let speed = match (e.style, e.value) {
-            (EdgeStyle::Flow(true) | EdgeStyle::Dots(true), Some(v)) if vmax > 0.0 => format!(
-                " style=\"animation-duration:{}s\"",
-                f1(2.4 - 1.8 * (v.max(0.0) / vmax).sqrt())
-            ),
-            _ => String::new(),
-        };
-        let width = f1(width);
-        let status = e
-            .status
-            .map(|s| format!(" data-status=\"{}\"", s.as_str()))
-            .unwrap_or_default();
-        let (a, b) = (&d.nodes[e.from], &d.nodes[e.to]);
-        let name = format!("{} → {}", a.label, b.label);
-        let tip = match (&e.label, &e.fvalue) {
-            (Some(l), _) => format!("{name}: {l}"),
-            (None, Some(v)) => format!("{name}: {v}"),
-            _ => name.clone(),
-        };
-        let value = e
-            .value
-            .map(|v| {
-                format!(
-                    " data-value=\"{v}\" data-fvalue=\"{}\"",
-                    esc(e.fvalue.as_deref().unwrap_or(""))
-                )
-            })
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "<polyline points=\"{}\" fill=\"none\" stroke=\"{colour}\" stroke-width=\"{width}\" stroke-linejoin=\"round\" stroke-linecap=\"round\"{dash}{speed} data-edge=\"{}&gt;{}\" data-from=\"{}\" data-to=\"{}\" data-fx=\"{}\"{value}{status}{}><title>{}</title></polyline>",
-            pts_attr(&pts),
-            esc(&a.id),
-            esc(&b.id),
-            esc(&a.id),
-            esc(&b.id),
-            esc(&name),
-            if p.back[k] { " data-back=\"1\"" } else { "" },
-            esc(&tip)
-        ));
-        let (px, py) = (-uy, ux);
-        let ends = format!(" data-from=\"{}\" data-to=\"{}\"", esc(&a.id), esc(&b.id));
-        out.push_str(&format!(
-            "<polygon points=\"{},{} {},{} {},{}\" fill=\"{colour}\"{ends} aria-hidden=\"true\"/>",
-            f1(tx_),
-            f1(ty_),
-            f1(base.0 + px * (arrow * 0.55)),
-            f1(base.1 + py * (arrow * 0.55)),
-            f1(base.0 - px * (arrow * 0.55)),
-            f1(base.1 - py * (arrow * 0.55))
-        ));
-        if let Some(l) = &e.label {
-            let (mx, my) = midpoint(&p.edges[k]);
-            out.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"11\" fill=\"{muted}\" stroke=\"{card}\" stroke-width=\"3\" paint-order=\"stroke\" pointer-events=\"none\"{ends} aria-hidden=\"true\">{}</text>",
-                f1(mx),
-                f1(my - 4.0),
-                esc(l)
-            ));
-        }
-    }
+    out.push_str(&draw(d, &p, pw as u32, ph as u32, o));
     out.push_str("</g>");
-
-    // nodes
-    out.push_str("<g class=\"dp-nodes\">");
-    let ink = hex(t.colors.ink);
-    for v in reading(&p) {
-        let nd = &d.nodes[v];
-        let pn = &p.nodes[v];
-        let (x, y) = (pn.cx - pn.w / 2.0, pn.cy - pn.h / 2.0);
-        let accent = nd
-            .status
-            .filter(|s| *s != Status::Neutral)
-            .map(|s| s.color(t))
-            .or_else(|| nd.category.map(|c| t.color(c)));
-        let stroke = nd
-            .status
-            .filter(|s| *s == Status::Bad || *s == Status::Warn)
-            .map(|s| hex(s.color(t)))
-            .unwrap_or_else(|| hex(t.chart.line));
-        let mut tip = nd.label.clone();
-        if let Some(fv) = &nd.fvalue {
-            tip.push_str(&format!(": {fv}"));
-        }
-        if let Some(b) = &nd.badge {
-            tip.push_str(&format!(" ({b})"));
-        }
-        let value = nd
-            .value
-            .map(|val| {
-                format!(
-                    " data-value=\"{val}\" data-fvalue=\"{}\"",
-                    esc(nd.fvalue.as_deref().unwrap_or(""))
-                )
-            })
-            .unwrap_or_default();
-        let status = nd
-            .status
-            .map(|s| format!(" data-status=\"{}\"", s.as_str()))
-            .unwrap_or_default()
-            + &nd
-                .badge
-                .as_deref()
-                .map(|b| format!(" data-badge=\"{}\"", esc(b)))
-                .unwrap_or_default();
-        out.push_str(&format!(
-            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"8\" fill=\"{card}\" stroke=\"{stroke}\" stroke-width=\"1.2\" data-node=\"{id}\" data-x=\"{id}\" data-series=\"{id}\" data-fx=\"{}\" data-layer=\"{}\" data-order=\"{}\"{value}{status}><title>{}</title></rect>",
-            f1(x),
-            f1(y),
-            f1(pn.w),
-            f1(pn.h),
-            esc(&nd.label),
-            pn.layer,
-            pn.order,
-            esc(&tip),
-            id = esc(&nd.id),
-        ));
-        // what the box shows: dims / lights with its node (`data-of`)
-        out.push_str(&format!(
-            "<g data-of=\"{}\" pointer-events=\"none\" aria-hidden=\"true\">",
-            esc(&nd.id)
-        ));
-        if let Some(a) = accent {
-            out.push_str(&format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"3\" height=\"{}\" rx=\"1.5\" fill=\"{}\"/>",
-                f1(x + 1.5),
-                f1(y + 6.0),
-                f1((pn.h - 12.0).max(4.0)),
-                hex(a)
-            ));
-        }
-        let mut ty_ = y + BOX_PAD_Y + 12.0;
-        for line in &pn.lines {
-            out.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"{LABEL_PX}\" font-weight=\"600\" fill=\"{}\">{}</text>",
-                f1(pn.cx),
-                f1(ty_),
-                hex(t.colors.heading),
-                esc(line)
-            ));
-            ty_ += LINE_H;
-        }
-        if let Some(fv) = &nd.fvalue {
-            out.push_str(&format!(
-                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"{VALUE_PX}\" font-weight=\"700\" fill=\"{ink}\">{}</text>",
-                f1(pn.cx),
-                f1(ty_),
-                esc(fv)
-            ));
-            ty_ += LINE_H;
-        }
-        if let Some(b) = &nd.badge {
-            let bw = text_w(b, BADGE_PX, false) + 20.0;
-            let dot = nd
-                .status
-                .map(|s| hex(s.color(t)))
-                .unwrap_or_else(|| muted.clone());
-            let (bx, by) = (pn.cx - bw / 2.0, ty_ - 9.0);
-            out.push_str(&format!(
-                "<g><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"16\" rx=\"8\" fill=\"none\" stroke=\"{dot}\" stroke-width=\"1\"/><circle cx=\"{}\" cy=\"{}\" r=\"3\" fill=\"{dot}\"/><text x=\"{}\" y=\"{}\" font-size=\"{BADGE_PX}\" fill=\"{ink}\">{}</text></g>",
-                f1(bx),
-                f1(by),
-                f1(bw),
-                f1(bx + 9.0),
-                f1(by + 8.0),
-                f1(bx + 15.0),
-                f1(by + 12.0),
-                esc(b)
-            ));
-            ty_ += 20.0;
-        }
-        // a mini trend along the bottom of the box
-        if nd.spark.len() >= 2 {
-            let (lo, hi) = nd
-                .spark
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-                    (a.min(v), b.max(v))
-                });
-            let rng = if hi > lo { hi - lo } else { 1.0 };
-            let (sx0, sw) = (x + BOX_PAD_X, pn.w - 2.0 * BOX_PAD_X);
-            let (top, sh) = (ty_ - 8.0, SPARK_H - 8.0);
-            let last = nd.spark.len() - 1;
-            let pt = |i: usize, v: f64| {
-                (
-                    sx0 + sw * i as f64 / last as f64,
-                    top + sh - (v - lo) / rng * sh,
-                )
-            };
-            let pts: Vec<(f64, f64)> = nd
-                .spark
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| pt(i, v))
-                .collect();
-            let col = nd
-                .status
-                .filter(|s| *s == Status::Bad || *s == Status::Warn)
-                .map(|s| s.color(t))
-                .unwrap_or_else(|| t.color(0));
-            out.push_str(&format!(
-                "<polyline class=\"dp-node-spark\" points=\"{}\" fill=\"none\" stroke=\"{c}\" stroke-width=\"1.4\" stroke-linejoin=\"round\"/><circle cx=\"{}\" cy=\"{}\" r=\"2.2\" fill=\"{c}\"/>",
-                pts_attr(&pts),
-                f1(pts[last].0),
-                f1(pts[last].1),
-                c = hex(col)
-            ));
-        }
-        out.push_str("</g>");
-    }
-    out.push_str("</g></g>");
     if let Some(nt) = note {
         out.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"11\" fill=\"{}\">{}</text>",
-            f1(w / 2.0),
-            f1(h - 5.0),
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"11\" fill=\"{}\">{}</text>",
+            w / 2.0,
+            h - 5.0,
             hex(t.chart.note),
             esc(&nt)
         ));
@@ -2375,7 +2663,7 @@ mod tests {
         roxmltree::Document::parse(&svg).expect("well-formed");
         assert!(svg.starts_with("<svg") && svg.contains(" data-diagram=\"LR\""));
         assert!(svg.contains(
-            "data-node=\"build\" data-x=\"build\" data-series=\"build\" data-fx=\"Build twin\""
+            "data-node=\"build\" data-x=\"build\" data-series=\"build\" data-xtext=\"Build twin\""
         ));
         assert!(svg.contains("<title>Monitor drift: 412 (alarm)</title>"));
         assert!(svg.contains("data-edge=\"calibrate&gt;build\""));
@@ -2496,11 +2784,40 @@ mod tests {
             r#"data-story="[{&quot;k&quot;:&quot;ingest&quot;,&quot;t&quot;:&quot;Records arrive&quot;},{&quot;k&quot;:&quot;monitor&quot;,&quot;t&quot;:&quot;Twins drift&quot;}]""#
         ));
         assert!(root.contains(r#"data-story-by="x""#) && root.contains(r#"data-animate="auto""#));
-        assert!(svg.contains(
-            r#"stroke-dasharray="0 10" class="dp-flow dp-dots" data-edge="ingest&gt;build""#
-        ));
-        assert!(svg.contains(r#"<g data-of="build" pointer-events="none" aria-hidden="true">"#));
-        assert!(svg.contains(r#"data-from="ingest" data-to="build" aria-hidden="true"/>"#));
+        // the moving-dots edge: round-capped zero-length dashes and its
+        // classes (beside ggplot-rs's own `gg-mark gg-line`)
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let find = |tag: &str, k: &str, v: &str| {
+            doc.descendants()
+                .find(|n| n.has_tag_name(tag) && n.attribute(k) == Some(v))
+                .unwrap_or_else(|| panic!("no <{tag} {k}={v:?}>"))
+        };
+        let dots = find("polyline", "data-edge", "ingest>build");
+        assert_eq!(dots.attribute("stroke-dasharray"), Some("0,10"));
+        assert_eq!(dots.attribute("stroke-linecap"), Some("round"));
+        let class = dots.attribute("class").unwrap();
+        assert!(
+            class.split(' ').any(|c| c == "dp-flow") && class.split(' ').any(|c| c == "dp-dots")
+        );
+        // a node's contents in one `data-of` group, every part inert
+        let g = find("g", "data-of", "build");
+        let parts: Vec<_> = g.children().filter(|n| n.is_element()).collect();
+        assert!(parts.iter().any(|n| n.text() == Some("Build twin")));
+        assert!(parts
+            .iter()
+            .all(|n| n.attribute("pointer-events") == Some("none")
+                && n.attribute("aria-hidden") == Some("true")));
+        // the arrowhead: tagged with its edge, hidden from screen readers
+        let head = doc
+            .descendants()
+            .find(|n| {
+                n.has_tag_name("polygon")
+                    && n.attribute("data-part") == Some("arrow")
+                    && n.attribute("data-from") == Some("ingest")
+                    && n.attribute("data-to") == Some("build")
+            })
+            .expect("arrowhead");
+        assert_eq!(head.attribute("aria-hidden"), Some("true"));
         // no story, no animate: no motion attributes
         let plain = render_with(&pipeline(), 900, 320, &RenderOptions::default()).unwrap();
         assert!(!plain.contains("data-story") && !plain.contains("data-animate"));
@@ -2535,16 +2852,16 @@ mod tests {
         let edge = |id: &str| {
             let i = svg.find(&format!("data-edge=\"{id}\"")).unwrap();
             let start = svg[..i].rfind("<polyline").unwrap();
-            svg[start..i].to_string()
+            svg[start..i].to_lowercase() // ggplot-rs writes #RRGGBB
         };
-        assert!(edge("ingest&gt;build").contains(r#"stroke-width="7""#));
-        assert!(edge("build&gt;step").contains(r#"stroke-width="4.2""#));
+        assert!(edge("ingest&gt;build").contains(r#"stroke-width="7.00""#));
+        assert!(edge("build&gt;step").contains(r#"stroke-width="4.20""#));
         assert!(edge("build&gt;step").contains(&format!("stroke=\"{}\"", hex(t.colors.warning))));
-        assert!(edge("step&gt;monitor").contains(r#"stroke-width="1.4""#));
+        assert!(edge("step&gt;monitor").contains(r#"stroke-width="1.40""#));
         assert!(edge("step&gt;monitor").contains(&format!("stroke=\"{}\"", hex(t.colors.negative))));
         assert!(svg.contains(r#"data-status="bad""#));
         // an edge without a value keeps the hairline
-        assert!(edge("monitor&gt;calibrate").contains(r#"stroke-width="1.6""#));
+        assert!(edge("monitor&gt;calibrate").contains(r#"stroke-width="1.60""#));
         let root = &svg[..svg.find('>').unwrap()];
         assert!(root.contains(r#"data-transition="tween""#) && root.contains(" data-fit=\""));
     }
@@ -2611,7 +2928,20 @@ mod tests {
         }
         let svg = render_with(&cols, 900, 500, &RenderOptions::default()).unwrap();
         roxmltree::Document::parse(&svg).expect("well-formed");
-        assert!(svg.contains(r#"data-lane="Stores""#) && svg.contains(r#"class="dp-node-spark""#));
+        assert!(svg.contains(r#"data-lane="Stores""#));
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let spark = doc
+            .descendants()
+            .find(|n| {
+                n.attribute("class")
+                    .is_some_and(|c| c.split(' ').any(|c| c == "dp-node-spark"))
+            })
+            .expect("a sparkline");
+        assert!(spark.has_tag_name("polyline"));
+        assert_eq!(
+            spark.parent().and_then(|g| g.attribute("data-of")),
+            Some("ingest")
+        );
 
         // ::XAXIS pins a stage: `step` forced to stage 4, an empty stage kept
         let mut cols = pipeline();
@@ -2661,8 +2991,19 @@ mod tests {
             ],
         ));
         let svg = render_with(&cols, 900, 320, &RenderOptions::default()).unwrap();
-        assert!(svg.contains(r#"style="animation-duration:0.6s" data-edge="ingest&gt;build""#));
-        assert!(svg.contains(r#"style="animation-duration:2.2s" data-edge="build&gt;step""#));
+        // a speed bucket class (web/theme-base.css), no inline style
+        let doc = roxmltree::Document::parse(&svg).unwrap();
+        let class = |id: &str| {
+            doc.descendants()
+                .find(|n| n.has_tag_name("polyline") && n.attribute("data-edge") == Some(id))
+                .and_then(|n| n.attribute("class"))
+                .unwrap()
+                .to_string()
+        };
+        assert!(class("ingest>build").ends_with(" dp-flow flow-speed-1"));
+        assert!(class("build>step").ends_with(" dp-flow dp-dots flow-speed-5"));
+        assert!(!svg.contains("animation-duration"));
+        assert_eq!(speed_class(0.5, 1.0), "flow-speed-2");
     }
 
     #[test]
