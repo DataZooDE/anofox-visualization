@@ -780,7 +780,10 @@ pub const MAX_DIM: u32 = 8_192;
 /// series' low points fall outside the box and the line looks torn apart.
 /// Every embedder of a `GGPlot` panel into a slot shorter than this must
 /// request at least `SPARKLINE_MIN_H` and centre/pad the smaller visible
-/// slot around it, never ask ggplot-rs for less.
+/// slot around it, never ask ggplot-rs for less. The floor itself is
+/// generic to any ggplot-rs panel (not just a line geom), so
+/// `render_sparkbar` (#425) clamps to it too — the name predates that
+/// second consumer.
 pub(crate) const SPARKLINE_MIN_H: f64 = 50.0;
 
 /// Per-render options — passed explicitly (no hidden thread state).
@@ -5341,7 +5344,16 @@ fn render_sparkbar(
         })
         .house_void(o);
     // Same compact-width clamp as render_sparkline, for the same reason.
-    Ok(Panel::plot(plot, width.min(240), height))
+    let w = width.min(240);
+    // Same `SPARKLINE_MIN_H` floor render_sparkline clamps to (#457): the
+    // 50px layout floor `render/layout.rs` enforces is generic to every
+    // ggplot-rs panel, `GeomCol` included, not just a line geom — ask for
+    // less and the bars' own baseline (the bottom of the virtual plot area,
+    // sized against the 50px floor) falls outside the smaller requested
+    // viewBox and gets clipped, same class of bug, every bar floating with
+    // its bottom cut off instead of sitting on the baseline (#425).
+    let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+    Ok(Panel::plot(plot, w, h))
 }
 
 /// Blend a colour toward black by `t` (0 = unchanged, 1 = black).

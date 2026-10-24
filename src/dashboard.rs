@@ -1348,10 +1348,13 @@ fn table_svg(
                 }
                 let row_top = top + 23.0 + r as f64 * row_h;
                 let sw = (widths[k] - 6.0).max(32.0);
-                // `MIN_DIM` (32px) itself, not `row_h - 6.0`: a shorter
-                // request is clamped up to it anyway (`clamp_dim`), which
-                // would otherwise spill past this row's own height.
-                let sh = 32.0;
+                // `SPARKLINE_MIN_H` itself, not `row_h - 6.0`: a shorter
+                // request still gets clamped up to it inside
+                // `render_sparkbar`, which would otherwise spill past this
+                // row's own height without this cell centring the taller
+                // panel on its own (same reasoning as the `::SPARKLINE`
+                // cell above, #457/#425).
+                let sh = crate::SPARKLINE_MIN_H;
                 let sx = xs[k] + 2.0;
                 let sy = row_top + (row_h - sh) / 2.0;
                 match render_with_at(&spark_cols, sx, sy, sw as u32, sh as u32, ropts) {
@@ -2056,5 +2059,72 @@ mod doc_table_tests {
             "sparkline cell content (y {mn}..{mx}) must stay inside its own \
              {h}px-tall viewBox, not clipped: {frag}"
         );
+    }
+
+    // #425/#457: a table's ::SPARKBAR cell goes through `render_sparkbar`
+    // the same way a ::SPARKLINE cell goes through `render_sparkline` — it
+    // must clamp to ggplot-rs's own 50px panel floor too, or a bar's own
+    // baseline (sized against that floor) falls outside a shorter requested
+    // viewBox and every bar's bottom gets clipped off instead of sitting on
+    // the baseline.
+    #[test]
+    fn a_table_sparkbar_cells_stay_inside_the_cell_box() {
+        let rows = vec![
+            ("feature".to_string(), vec![Value::Str("a".into())]),
+            ("dist".to_string(), vec![Value::Str("[1,9,2,8,3,7]".into())]),
+        ];
+        let roles = vec![(0usize, Role::Table), (1usize, Role::Value(Kind::Sparkbar))];
+        let ropts = RenderOptions::default();
+        let svg = render_panel_doc_svg(
+            &rows,
+            &roles,
+            &[],
+            460.0,
+            300.0,
+            &ropts,
+            false,
+            &[],
+            None,
+            false,
+        );
+        let geom_at = svg.find("data-geom=\"col\"").expect("a drawn sparkbar bar");
+        let svg_open = svg[..geom_at].rfind("<svg ").expect("its own nested <svg>");
+        let svg_close =
+            geom_at + svg[geom_at..].find("</svg>").expect("a closing </svg>") + "</svg>".len();
+        let frag = &svg[svg_open..svg_close];
+        let viewbox = frag
+            .split("viewBox=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("a viewBox");
+        let h: f64 = viewbox
+            .split_whitespace()
+            .nth(3)
+            .and_then(|n| n.parse().ok())
+            .expect("a viewBox height");
+        let get_attr = |attrs: &str, name: &str| -> Option<f64> {
+            attrs
+                .split(&format!("{name}=\""))
+                .nth(1)?
+                .split('"')
+                .next()?
+                .parse()
+                .ok()
+        };
+        let mut bars: Vec<(f64, f64)> = Vec::new();
+        for rect in frag.split("<rect ").skip(1) {
+            let attrs = rect.split('>').next().unwrap_or("");
+            if let (Some(y), Some(ht)) = (get_attr(attrs, "y"), get_attr(attrs, "height")) {
+                bars.push((y, y + ht));
+            }
+        }
+        assert!(!bars.is_empty(), "expected drawn bars: {frag}");
+        for (y, bottom) in &bars {
+            assert!(
+                *y > -0.5 && *bottom < h + 0.5,
+                "sparkbar cell content (bar y {y}..{bottom}) must stay inside \
+                 its own {h}px-tall viewBox, not clipped: {frag}"
+            );
+        }
     }
 }

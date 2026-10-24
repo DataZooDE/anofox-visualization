@@ -1139,3 +1139,55 @@ fn standalone_sparkline_panel_minima_stay_inside_a_short_viewbox() {
          {h}px-tall viewBox, not clipped: {svg}"
     );
 }
+
+// #425/#457: a standalone `::SPARKBAR` panel goes through the same
+// `render_sparkbar` as a table cell — asked for a height under ggplot-rs's
+// own plot-area floor (`SPARKLINE_MIN_H`, 50px, shared with the sparkline
+// clamp since the floor is generic to any ggplot-rs panel), it must still
+// draw every bar's full height inside its viewBox, not clip a bar's own
+// baseline against a shorter one.
+#[test]
+fn standalone_sparkbar_panel_minima_stay_inside_a_short_viewbox() {
+    use anofox_visualization::{render, Column, Kind, Role};
+    let col = Column::new(
+        "value",
+        Role::Value(Kind::Sparkbar),
+        f(&[1.0, 9.0, 2.0, 8.0, 3.0, 7.0]),
+    );
+    // A height well under the engine's 50px plot-area floor — exactly the
+    // squeeze a table row put it under before this panel clamped itself.
+    let svg = render(&[col], 240, 20).expect("a rendered sparkbar panel");
+    let h: f64 = svg
+        .split("viewBox=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("a viewBox")
+        .split_whitespace()
+        .nth(3)
+        .and_then(|n| n.parse().ok())
+        .expect("a viewBox height");
+    let get_attr = |attrs: &str, name: &str| -> Option<f64> {
+        attrs
+            .split(&format!("{name}=\""))
+            .nth(1)?
+            .split('"')
+            .next()?
+            .parse()
+            .ok()
+    };
+    let mut bars: Vec<(f64, f64)> = Vec::new();
+    for rect in svg.split("<rect ").skip(1) {
+        let attrs = rect.split('>').next().unwrap_or("");
+        if let (Some(y), Some(ht)) = (get_attr(attrs, "y"), get_attr(attrs, "height")) {
+            bars.push((y, y + ht));
+        }
+    }
+    assert!(!bars.is_empty(), "expected drawn bars: {svg}");
+    for (y, bottom) in &bars {
+        assert!(
+            *y > -0.5 && *bottom < h + 0.5,
+            "sparkbar content (bar y {y}..{bottom}) must stay inside its own \
+             {h}px-tall viewBox, not clipped: {svg}"
+        );
+    }
+}

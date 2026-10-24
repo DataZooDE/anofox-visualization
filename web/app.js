@@ -13310,8 +13310,14 @@ function cellSparkbar(v) {
   } catch (_) {}
   if (!svg) return `<span class="nil">—</span>`;
   // `svg class` for the table CSS (width/height, compact-row height) that
-  // targets svg.spark — render_cell's own output carries none.
-  return svg.replace(/^<svg /, '<svg class="spark spark-bar" ');
+  // targets svg.spark — render_cell's own output carries none. Its own
+  // viewBox is at least ggplot-rs's 50px panel floor tall (render_sparkbar
+  // clamps up to it internally, #425/#457), taller than this cell's own
+  // fixed CSS box — `preserveAspectRatio="none"` stretch-fills that box
+  // instead of letterboxing a narrower, centred chart inside it, the same
+  // house convention every other inline mini-chart here uses (xp-mini,
+  // metric-spark, …) for a CSS box that doesn't match its own viewBox.
+  return svg.replace(/^<svg /, '<svg preserveAspectRatio="none" class="spark spark-bar" ');
 }
 
 // A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the
