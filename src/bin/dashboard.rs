@@ -338,9 +338,35 @@ fn render_dashboard_html(
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
         }
-        // Its ::TITLE bar, as on a dashboard card (#232).
-        let svg = render_with_title(&cols, &tracks, 460, 300, &opts)
-            .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+        // A ::TABLE / ::PAGED panel (#427): its rewrite keeps each column's
+        // own name rather than aliasing it to `cN` (`sql::rewrite_list`'s
+        // `keep_intact`), so the `cols` built above (indexed by `cN`) can't
+        // see most of its columns — the same raw, name-keyed rows `--svg`
+        // and `serve` already read instead, through the shared table
+        // renderer (`dashboard::render_panel_doc_svg`).
+        let svg = if p
+            .roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+        {
+            let named_rows = sql::result_columns(&rows);
+            dashboard::render_panel_doc_svg(
+                &named_rows,
+                &p.roles,
+                &p.names,
+                460.0,
+                300.0,
+                &opts,
+                false,
+                &tracks,
+                None,
+                compact,
+            )
+        } else {
+            // Its ::TITLE bar, as on a dashboard card (#232).
+            render_with_title(&cols, &tracks, 460, 300, &opts)
+                .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
+        };
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
         n += 1;
     }
@@ -371,6 +397,28 @@ struct CliProvider {
     prelude: String,
 }
 
+impl CliProvider {
+    /// `sql`'s real DuckDB column types (`DESCRIBE`, replaying the same
+    /// prelude so temp views/variables the query depends on are in scope) —
+    /// `name → column_type` (`"VARCHAR"`, `"DECIMAL(10,2)"`, …). Empty on any
+    /// failure (a provider-level detail, not a panel error): `query` then
+    /// falls back to `result_columns_typed`'s old per-value numeric guess,
+    /// same as before #424 fixed it for the common case.
+    fn column_types(&self, sql: &str) -> std::collections::HashMap<String, String> {
+        let describe = format!("DESCRIBE {}", sql.trim().trim_end_matches(';'));
+        let Ok(rows) = run_query(None, &format!("{}{describe};", self.prelude)) else {
+            return std::collections::HashMap::new();
+        };
+        rows.into_iter()
+            .filter_map(|r| {
+                let name = r.get("column_name")?.as_str()?.to_string();
+                let ty = r.get("column_type")?.as_str()?.to_string();
+                Some((name, ty))
+            })
+            .collect()
+    }
+}
+
 impl dashboard::DataProvider for CliProvider {
     fn execute(&mut self, sql: &str) -> Result<(), String> {
         run_query(None, &format!("{}{sql};", self.prelude))?;
@@ -383,7 +431,11 @@ impl dashboard::DataProvider for CliProvider {
         sql: &str,
     ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
         let rows = run_query(None, &format!("{}{sql};", self.prelude))?;
-        Ok(sql::result_columns(&rows))
+        // #424: a VARCHAR column whose values happen to parse as numbers
+        // (binary-classifier labels `'0'`/`'1'`) must stay discrete — ask
+        // DuckDB's own types rather than guessing from the JSON text.
+        let types = self.column_types(sql);
+        Ok(sql::result_columns_typed(&rows, &types))
     }
 }
 
