@@ -34,7 +34,10 @@ fn codes(script: &str) -> Vec<String> {
                 .or_insert_with(|| duckdb(q))
                 .clone()
         },
-        LintOptions { design: false },
+        LintOptions {
+            design: false,
+            ..Default::default()
+        },
     )
     .into_iter()
     .map(|d| d.code.to_string())
@@ -42,7 +45,8 @@ fn codes(script: &str) -> Vec<String> {
 }
 
 #[test]
-fn histogram_category_is_dropped_with_a_warning() {
+fn histogram_category_no_longer_warns() {
+    // #446: ::CATEGORY on ::HISTOGRAM is supported now (ggplot-rs 0.28).
     let script = "SELECT v ::HISTOGRAM, g ::CATEGORY FROM \
                   (VALUES (1.0, 'a'), (2.0, 'b')) t(v, g);";
     let cs = codes(script);
@@ -50,7 +54,7 @@ fn histogram_category_is_dropped_with_a_warning() {
         return; // no duckdb CLI on PATH
     }
     assert!(
-        cs.contains(&"histogram/category-dropped".to_string()),
+        !cs.contains(&"histogram/category-dropped".to_string()),
         "{cs:?}"
     );
 }

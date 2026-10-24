@@ -8711,7 +8711,17 @@ async function runOnce(fresh = true, pv = preview) {
   let openView = null; // the plan index of the currently open ::VIEW group (#214), or null
   let viewBar = null; // its <div class="dp-viewbar">
   let viewSec = null; // its <section class="dp-views">
-  let viewHost = null; // {container, curGrid, defaultSpan} to restore when the group closes
+  let viewHost = null; // {container, curGrid, defaultSpan, viewScale} to restore when the group closes
+  // The open ::VIEW group's own share of the page (its ::COL / 12), 1
+  // outside a view — a chart inside the group scales its desktop render
+  // width by this (#470), so it lays out at the slot's actual width instead
+  // of assuming its own full-width nested grid is the whole page (which it
+  // used to: `defaultSpan` resets to 12 on entering a view so a panel's
+  // LOCAL ::COL semantics stay full-width-of-the-pane, correct for CSS, but
+  // that same 12 used to also drive the chart's internal layout width,
+  // ignoring the pane's own narrower slot).
+  let curGroupScale = 1;
+  let viewScale = 1;
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
   let nextRowSelect = ""; // ::ROWSELECT → the next table's row selection ('single' | 'multi')
@@ -8751,6 +8761,9 @@ async function runOnce(fresh = true, pv = preview) {
   const panelBody = async (i, s, ctx) => {
     let { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty } = ctx;
     const { defaultSpan, trackHost } = ctx;
+    // The open ::VIEW group's own share of the page (#470), 1 outside a
+    // view — see where it's set in the render loop, next to `defaultSpan`.
+    const viewScale = ctx.viewScale ?? 1;
     let lastChart = null;
     let panels = 0;
     try {
@@ -8780,7 +8793,7 @@ async function runOnce(fresh = true, pv = preview) {
           const ph = nextHeight || contractHeight(s.contract.macro);
           const holder = document.createElement("div");
           holder.className = "panel-svg";
-          const rw = Math.max(300, span * 100);
+          const rw = Math.max(300, span * 100 * viewScale);
           const data = contractCell(r, s.contract.rows, "[]");
           const args = contractCell(r, s.contract.args, "{}");
           holder.innerHTML = render_contract(s.contract.macro, data, args, rw, ph, renderCtx());
@@ -9222,13 +9235,13 @@ async function runOnce(fresh = true, pv = preview) {
             const isMap = isMapPanel(s.roles);
             // a map without ::HEIGHT takes the height its shape needs
             const mapAr = isMap && !boxH ? mapAspect(rowsJson, s.roles) : 0;
-            const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100)) : 300); // ::HEIGHT, else default
+            const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300); // ::HEIGHT, else default
             const holder = document.createElement("div");
             holder.className = "panel-svg";
             // Render width proportional to the panel's span, so displayed height
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
-            const rw = spark ? 460 : Math.max(300, span * 100);
+            const rw = spark ? 460 : Math.max(300, span * 100 * viewScale);
             renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
@@ -9290,6 +9303,7 @@ async function runOnce(fresh = true, pv = preview) {
       container = viewHost.container;
       curGrid = viewHost.curGrid;
       defaultSpan = viewHost.defaultSpan;
+      viewScale = viewHost.viewScale;
       openView = null;
       viewBar = null;
       viewSec = null;
@@ -9491,7 +9505,12 @@ async function runOnce(fresh = true, pv = preview) {
         if (openView !== s.view.group) {
           const sec = document.createElement("section");
           sec.className = "dp-views";
-          if (container === curGrid) sec.style.gridColumn = `span ${Math.min(12, nextSpan || 12)}`;
+          curGroupScale = 1;
+          if (container === curGrid) {
+            const outerSpan = Math.min(12, nextSpan || 12);
+            sec.style.gridColumn = `span ${outerSpan}`;
+            curGroupScale = outerSpan / 12;
+          }
           nextSpan = 0;
           const bar = document.createElement("div");
           bar.className = "dp-viewbar dp-seg";
@@ -9501,7 +9520,7 @@ async function runOnce(fresh = true, pv = preview) {
           bar.dataset.viewId = id;
           sec.appendChild(bar);
           container.appendChild(sec);
-          viewHost = { container, curGrid, defaultSpan };
+          viewHost = { container, curGrid, defaultSpan, viewScale };
           viewBar = bar;
           viewSec = sec;
           openView = s.view.group;
@@ -9509,7 +9528,15 @@ async function runOnce(fresh = true, pv = preview) {
         }
         // Full width of the view's own grid by default (like a fresh
         // tab/section resetting nextSpan), unless a ::COL is already pending.
+        // A chart drawn at that default width must still inherit the slot's
+        // actual width for layout, like a panel outside the view (#470):
+        // `viewScale` (the group's own ::COL / 12, captured above as
+        // `curGroupScale` — unconditionally reapplied here so a later
+        // alternative's statements, not just the group's first marker, see
+        // it too) scales a chart's desktop render width (span × 100 assumes
+        // a full top-level column) down to the slot's own share of the page.
         defaultSpan = 12;
+        viewScale = curGroupScale;
         const pane = document.createElement("div");
         pane.className = "grid dp-viewpane";
         pane.id = `dp-vp-${s.view.group}-${alt}`;
@@ -9609,7 +9636,7 @@ async function runOnce(fresh = true, pv = preview) {
         // D3: tag a job inside a ::VIEW alternative so lazyPump's idle
         // prefetch (unlike a hidden tab's) skips it — it runs once its view
         // is actually shown.
-        const job = { i, ph, run: lazy, tracks: [], view: curGrid.classList.contains("dp-viewpane"), ctx: { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost: null } };
+        const job = { i, ph, run: lazy, tracks: [], view: curGrid.classList.contains("dp-viewpane"), ctx: { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, viewScale, trackHost: null } };
         lazy.jobs.push(job);
         lastChart = { lazy: job };
         panels++;
@@ -9620,7 +9647,7 @@ async function runOnce(fresh = true, pv = preview) {
         nextIa = {};
         nextEmpty = "";
       } else {
-        const out = await panelBody(i, s, { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, trackHost });
+        const out = await panelBody(i, s, { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, viewScale, trackHost });
         if (out.lastChart) lastChart = out.lastChart;
         panels += out.panels;
         nextSpan = 0;

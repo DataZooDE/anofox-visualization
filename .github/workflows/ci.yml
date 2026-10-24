@@ -3,10 +3,29 @@ name: CI
 # Rust checks for the whole workspace (core, crates/anofox-viz-ffi, duckext).
 # The C++ extension's sqllogictests (test/sql) run in
 # MainDistributionPipeline.yml via extension-ci-tools (`make test`).
+#
+# #464: two lanes, decided once by lane.yml.
+#   - PR fast lane (target ~10 min): rust (fmt+clippy+nextest), the web
+#     tests/e2e (wasm built once, tests/web/*.mjs sharded 4-way), the wasm
+#     size check. A docs-only PR (every changed file *.md or under docs/)
+#     instead runs only a markdown/link check.
+#   - Full lane (release-grade): everything above, plus the DuckDB 2.0 smoke
+#     test, the Quack prototype, the strict Explore-starters check, the
+#     skills-SQL validator and every *-conformance job (they install
+#     extensions from live network sources). Runs on push to master, a v*
+#     tag, workflow_dispatch, the nightly schedule, a release/* branch, or a
+#     PR labelled `full-ci`.
+# `ci-gate` is the one stable "mergeable" check: it passes when every needed
+# job succeeded or was skipped (so a docs-only PR resolves cleanly instead of
+# leaving full-lane-only jobs pending forever).
 on:
   push:
     branches: [master]
+    tags: ["v*"]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -19,9 +38,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  lane:
+    uses: ./.github/workflows/lane.yml
+
+  # ---- docs-only PRs: a markdown/link check instead of the whole lane ----
+  docs-check:
+    name: docs/link check (docs-only PR)
+    needs: lane
+    if: needs.lane.outputs.docs_only == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: gaurav-nelson/github-action-markdown-link-check@1.0.17
+        with:
+          use-quiet-mode: "yes"
+          check-modified-files-only: "yes"
+          base-branch: ${{ github.event.pull_request.base.ref }}
+
   rust:
     name: fmt + clippy + test
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +71,10 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
 
       - name: Lockfile is up to date
         run: cargo metadata --locked --format-version 1 > /dev/null
@@ -62,11 +106,22 @@ jobs:
           "$d/duckdb" --version
           echo "$d" >> "$GITHUB_PATH"
 
+      # cargo-nextest doesn't run doctests (#464); `cargo test --doc` alongside
+      # it covers those (src/boxstats.rs, period.rs, thresholds.rs, theme.rs,
+      # lib.rs, and vendor/tiny_http's).
       - name: test (core incl. serve)
-        run: cargo test --locked --features serve
+        run: cargo nextest run --locked --features serve
+      - name: test (core incl. serve) — doctests
+        run: cargo test --doc --locked --features serve
 
+      # No separate doctest step here: anofox_viz_ffi/anofox-visualization-duckdb
+      # are staticlib/cdylib only (doctests aren't supported for those crate
+      # types), and vendor/tiny_http's lib sets `doctest = false` on purpose —
+      # its one doc example needs the dropped dev-dependency `rustc-serialize`
+      # (vendor/tiny_http/PATCHES.md). `cargo test --doc` ignores that flag and
+      # tries to compile it anyway, so don't pass `--doc` for this group.
       - name: test (ffi + duckext + vendored tiny_http)
-        run: cargo test --locked -p anofox_viz_ffi -p anofox-visualization-duckdb -p tiny_http
+        run: cargo nextest run --locked -p anofox_viz_ffi -p anofox-visualization-duckdb -p tiny_http
 
       - name: C-API extension smoke test (render, NULL, errors)
         run: SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
@@ -106,8 +161,12 @@ jobs:
     # test, so a future break shows up here without failing CI. The 2.0
     # release asset is named differently (`duckdb-cli-...tar.gz`, not
     # `duckdb_cli-...zip`) — the pinned jobs above keep the old name.
+    # #464: full lane only (a full test-suite re-run, not part of the PR
+    # fast lane's budget).
     name: DuckDB 2.0 smoke test (Rust C-API cdylib, non-blocking)
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     continue-on-error: true
     steps:
@@ -153,15 +212,16 @@ jobs:
       - name: Access policy key e2e, against DuckDB 2.0
         run: duckext/scripts/policy-key-e2e.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
-  web:
-    # The browser-side tests (tests/web/*.mjs): app.js against the wasm build —
-    # table formatting vectors, locale, contract plots, SVG attributes,
-    # sanitising, the .xlsx writer and the DuckDB-Wasm extension smoke test.
-    # A test that skips (a missing web/pkg, DuckDB-Wasm or wasm extension)
-    # fails the job, so the wasm parts always run here.
-    name: web tests (node + wasm)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  web-build:
+    # Builds the wasm package once (#464) so the sharded test jobs and the
+    # e2e job below don't each pay for it. Also the only place the assist
+    # function lists are checked and the dashboard CLI is built — both are
+    # shared downstream via the `web-build` artifact.
+    name: web build (wasm + dashboard CLI)
+    needs: lane
+    if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
     steps:
       # Full history + tags: tests/web/version_test.mjs checks the footer's build version (#216).
       - uses: actions/checkout@v4
@@ -204,6 +264,127 @@ jobs:
       - name: The assistant's function lists are current
         run: node scripts/gen-assist-functions.mjs --check
 
+      - name: Build the dashboard CLI
+        run: cargo build --locked --bin dashboard
+
+      - name: Upload web/pkg, web/localext and the dashboard CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: |
+            web/pkg
+            web/localext
+            target/debug/dashboard
+          retention-days: 1
+
+  web-mjs-shard:
+    # tests/web/*.mjs sharded 4-way (#464): app.js against the wasm build —
+    # table formatting vectors, locale, contract plots, SVG attributes,
+    # sanitising, the .xlsx writer and the DuckDB-Wasm extension smoke test.
+    # A test that skips (a missing web/pkg, DuckDB-Wasm or wasm extension)
+    # fails the shard, so the wasm parts always run here.
+    # (tests/web/lint_test.mjs compares the browser's Check with the CLI's,
+    # so this shard also needs the pinned DuckDB CLI and the dashboard CLI.)
+    name: web tests shard ${{ matrix.shard }}/4
+    needs: [lane, web-build]
+    if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      # Full history + tags: tests/web/version_test.mjs computes its own
+      # `git describe` and compares it against the wasm build's embedded
+      # version (built with full history in web-build) — a shallow checkout
+      # here makes `git describe` fail and the comparison mismatch (#464).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download web/pkg, web/localext and the dashboard CLI
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+
+      - name: Dashboard CLI is executable
+        run: chmod +x target/debug/dashboard
+
+      - name: Install DuckDB-Wasm (tests/web)
+        run: npm install --prefix tests/web --no-audit --no-fund
+
+      - name: Cache DuckDB CLI (pinned)
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/duckdb-1.5.6
+          key: duckdb-cli-1.5.6-linux-amd64
+
+      - name: Install DuckDB CLI (pinned)
+        run: |
+          d="$HOME/.local/duckdb-1.5.6"
+          if [ ! -x "$d/duckdb" ]; then
+            mkdir -p "$d"
+            curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+            unzip -q duckdb.zip -d "$d"
+            chmod +x "$d/duckdb"
+          fi
+          "$d/duckdb" --version
+          echo "$d" >> "$GITHUB_PATH"
+
+      # Deterministic, index-mod-4 split of the sorted file list — every file
+      # lands in exactly one shard, so the "no skips" grep check below still
+      # covers all of tests/web/*.mjs across the 4 shards.
+      - name: Run this shard's tests/web/*.mjs (no skips)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          status=0
+          i=0
+          for t in $(ls tests/web/*.mjs | sort); do
+            if [ $(( i % 4 )) -eq "$SHARD" ]; then
+              echo "== $t"
+              out=$(node "$t" 2>&1) || { echo "$out"; echo "::error file=$t::failed"; status=1; i=$((i+1)); continue; }
+              echo "$out"
+              if echo "$out" | grep -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
+            fi
+            i=$((i+1))
+          done
+          exit $status
+
+  web-e2e:
+    # The browser e2e scripts (scripts/*-e2e.mjs): kept in one job (#464) —
+    # they share the :8947 server and Chromium, and splitting them by area
+    # would mean path-filtering each one individually without actually
+    # shortening the lane (they're already the fast part next to the sharded
+    # tests/web/*.mjs and the full lane's Explore-starters check).
+    name: web e2e (browser)
+    needs: [lane, web-build]
+    if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download web/pkg, web/localext and the dashboard CLI
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+
+      - name: Dashboard CLI is executable
+        run: chmod +x target/debug/dashboard
+
+      - name: Install DuckDB-Wasm (tests/web)
+        run: npm install --prefix tests/web --no-audit --no-fund
+
       # scripts/telemetry-e2e.mjs (#334): no visitor's browser reports usage to
       # a third party. Playwright itself came from tests/web's npm install
       # above (tests/web/package.json devDependencies); only its Chromium
@@ -245,6 +426,7 @@ jobs:
       # cancel and the page database works again right after.
       - name: Scratch cancel e2e (a late query is really cancelled in the Worker)
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/scratch-cancel-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/toolbar-e2e.mjs (#354 follow-up): ::TOOLBAR's per-part gating
       # in a real browser (totals row vs its toggle button, excluded parts'
       # saved search/filter/hidden-column state, the Pages|Scroll segment,
@@ -348,6 +530,14 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/sparkline-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/view-col-width-e2e.mjs (#470): a chart inside a ::VIEW group
+      # that sits in an n::COL slot lays out (its svg viewBox) at the slot's
+      # own width, the same as a panel outside the view — not at full width,
+      # scaled down afterwards (half the height, half-size text).
+      - name: ::VIEW group ::COL width e2e (#470)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-col-width-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/mini-charts-e2e.mjs (#463): Explore data's card histogram
       # (xpMini, both its histogram and rows-over-time-line branches), its
       # A/B distribution overlay (xpOverlay) and the table's own
@@ -366,32 +556,23 @@ jobs:
             kill "$(cat "$RUNNER_TEMP/serve_nocache.pid")" 2>/dev/null || true
           fi
 
-      # Explore data's starter dashboards (#97): every sample table's starter
-      # passes `dashboard --check --strict` (profiled with web/explore.js and
-      # the wasm page_sql, linted against the native DuckDB CLI).
+      - name: Cache DuckDB CLI (pinned)
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/duckdb-1.5.6
+          key: duckdb-cli-1.5.6-linux-amd64
+
       - name: Install DuckDB CLI (pinned)
         run: |
           d="$HOME/.local/duckdb-1.5.6"
-          mkdir -p "$d"
-          curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
-          unzip -q duckdb.zip -d "$d"
-          chmod +x "$d/duckdb"
+          if [ ! -x "$d/duckdb" ]; then
+            mkdir -p "$d"
+            curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+            unzip -q duckdb.zip -d "$d"
+            chmod +x "$d/duckdb"
+          fi
+          "$d/duckdb" --version
           echo "$d" >> "$GITHUB_PATH"
-
-      # (tests/web/lint_test.mjs compares the browser's Check with the CLI's)
-      - name: Build the dashboard CLI
-        run: cargo build --locked --bin dashboard
-
-      - name: Run tests/web/*.mjs (no skips)
-        run: |
-          status=0
-          for t in tests/web/*.mjs; do
-            echo "== $t"
-            out=$(node "$t" 2>&1) || { echo "$out"; echo "::error file=$t::failed"; status=1; continue; }
-            echo "$out"
-            if echo "$out" | grep -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
-          done
-          exit $status
 
       # scripts/site-e2e.mjs (#417 A4, PR #429 review): `dashboard --site`'s
       # published static site, in a real browser, served under a GitHub-
@@ -407,6 +588,36 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-e2e.mjs --dashboard target/debug/dashboard
 
+  web-explore-starters:
+    # Explore data's starter dashboards (#97): every sample table's starter
+    # passes `dashboard --check --strict` (profiled with web/explore.js and
+    # the wasm page_sql, linted against the native DuckDB CLI). #464: this is
+    # the ~4.5 min strict check that only needs to run in the full lane.
+    name: Explore starter dashboards --check --strict
+    needs: [lane, web-build]
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download web/pkg, web/localext and the dashboard CLI
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+
+      - name: Dashboard CLI is executable
+        run: chmod +x target/debug/dashboard
+
+      - name: Install DuckDB CLI (pinned)
+        run: |
+          d="$HOME/.local/duckdb-1.5.6"
+          mkdir -p "$d"
+          curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+          unzip -q duckdb.zip -d "$d"
+          chmod +x "$d/duckdb"
+          echo "$d" >> "$GITHUB_PATH"
+
       - name: Explore starter dashboards pass --check --strict
         run: |
           # the hints' anofox_tabular checks run when the extension installs (#111)
@@ -418,8 +629,12 @@ jobs:
     # anofox.contract = '1') → anofox_plot(...) and its specific macro, on the
     # C-API build. DuckDB is pinned to v1.5.6 (get.erpl.io serves stale
     # anofox_statistics builds for older DuckDB releases).
+    # #464: full lane only — it installs anofox_statistics from a live
+    # network source (get.erpl.io), not just ~1 min of local work.
     name: anofox-statistics conformance
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -473,8 +688,11 @@ jobs:
     # anofox_plot_summary(...), its decision view through anofox_render. On
     # the C-API build, DuckDB pinned to v1.5.6; anofox_optimize from
     # get.erpl.io (the community repository has no v1.5.6 build of it yet).
+    # #464: full lane only (live network install, see statistics-conformance).
     name: anofox-optimize conformance
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
@@ -528,8 +746,11 @@ jobs:
     # from decide's built-in stub model (offline, deterministic). anofox_decide
     # from the community repository (signed), anofox_statistics from get.erpl.io
     # for its curve producers; DuckDB pinned to v1.5.6.
+    # #464: full lane only (live network install, see statistics-conformance).
     name: anofox-decide conformance
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
@@ -585,8 +806,11 @@ jobs:
     # the nearest contract schema or a generic chart → anofox_plot(...) and
     # the specific macro, on the C-API build. anofox_tabular comes signed from
     # the community repository (pinned by its description.yml), DuckDB v1.5.6.
+    # #464: full lane only (live network install, see statistics-conformance).
     name: anofox-tabular conformance
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
@@ -637,8 +861,11 @@ jobs:
     # not tag its functions) → anofox_plot(...) and its specific macro, on the
     # C-API build, against the community release and the main build from
     # get.erpl.io. DuckDB is pinned to v1.5.6.
+    # #464: full lane only (live network install, see statistics-conformance).
     name: anofox-forecast conformance (${{ matrix.repo }})
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       DATAZOO_DISABLE_TELEMETRY: "1"
     timeout-minutes: 40
@@ -700,8 +927,12 @@ jobs:
     # through `dashboard --check --strict`, ```sql skip blocks not at all.
     # Blocks that LOAD anofox_statistics / anofox_forecast get them from
     # get.erpl.io / the community repository (DuckDB v1.5.6).
+    # #464: full lane only (live network installs, a --release build, and
+    # not part of the fast-lane job list).
     name: Claude Code skills SQL
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -740,8 +971,11 @@ jobs:
     # loaded into the serving instance). Needs a DuckDB 2.0 host — unlike
     # every other job here, which targets the pinned 1.5.6 — so it is kept
     # non-blocking (continue-on-error) until that review lands.
+    # #464: full lane only (non-blocking + a live network DuckDB 2.0 host).
     name: Quack source (DuckDB 2.0 host, non-blocking prototype, #352)
-    runs-on: ubuntu-latest
+    needs: lane
+    if: needs.lane.outputs.full == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     continue-on-error: true
     steps:
@@ -793,3 +1027,87 @@ jobs:
 
       - name: Quack source end to end + security (test-quack-source.sh)
         run: duckext/scripts/test-quack-source.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+  ci-gate:
+    # The one stable "mergeable" check (#464): passes when every needed job
+    # succeeded or was skipped. A docs-only PR skips everything except
+    # `lane` and `docs-check`, so it still resolves with every reported
+    # check passed or skipped — nothing left pending forever.
+    name: ci-gate
+    if: ${{ !cancelled() }}  # not always(): a cancelled (superseded) run must not wait for a runner just to report
+    needs:
+      - lane
+      - docs-check
+      - rust
+      - duckdb-2-0-smoke
+      - web-build
+      - web-mjs-shard
+      - web-e2e
+      - web-explore-starters
+      - statistics-conformance
+      - optimize-conformance
+      - decide-conformance
+      - tabular-conformance
+      - forecast-conformance
+      - skills-sql
+      - quack-source
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Every needed job succeeded or was skipped
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+        run: |
+          echo "$NEEDS_JSON" | jq .
+          bad=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')
+          if [ -n "$bad" ]; then
+            echo "::error::not mergeable — failed or cancelled jobs:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "all needed jobs succeeded or were skipped"
+
+  master-red:
+    # Safety net (#464): a failed full-lane run on master or the nightly
+    # schedule opens (or comments on) an issue labelled `ci-master-red`,
+    # instead of a red run on master going unnoticed until the next person
+    # looks at Actions.
+    name: file ci-master-red on a failed full-lane master/nightly run
+    if: >-
+      failure() &&
+      needs.lane.outputs.full == 'true' &&
+      (github.ref == 'refs/heads/master' || github.event_name == 'schedule')
+    needs:
+      - lane
+      - rust
+      - duckdb-2-0-smoke
+      - web-build
+      - web-mjs-shard
+      - web-e2e
+      - web-explore-starters
+      - statistics-conformance
+      - optimize-conformance
+      - decide-conformance
+      - tabular-conformance
+      - forecast-conformance
+      - skills-sql
+      - quack-source
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or comment on the ci-master-red issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          existing=$(gh issue list --label ci-master-red --state open --json number --jq '.[0].number' || true)
+          body="CI failed on the full lane for ${SHA} (${{ github.event_name }}): ${RUN_URL}"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "CI red on master" --label ci-master-red --body "$body"
+          fi

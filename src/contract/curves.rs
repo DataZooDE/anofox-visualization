@@ -170,14 +170,25 @@ pub(super) fn roc(
                     .collect(),
             ),
     );
-    // The legend (with the AUCs) in the empty lower-right corner.
+    // The legend (with the AUCs) in the empty lower-right corner. `0.7`
+    // (was `0.48`, sipemu/ggplot-rs#242 / #225, ggplot-rs 0.30.1): an
+    // `Inside` legend's own justification now equals its position fraction
+    // — the legend's left edge no longer sits *at* `fx` (the old implicit
+    // top-left-corner anchor), it's `fx` of the way between fully
+    // left-justified (edge at the panel's left) and fully right-justified
+    // (edge at the panel's right), so reproducing the old left-edge
+    // position needs a larger `fx` for a legend this wide (about two
+    // names). Chosen by rendering `roc()`'s own contract plot before/after
+    // (ggplot-rs 0.30.1 bump, #479) and matching pixel position; re-check
+    // this constant if the legend's typical width changes a lot (very
+    // long model names, three or more curves).
     let plot = labels
         .apply(
             look::styled_aspect(unit_axes(plot), o, false, Some(1.0)),
             "false positive rate",
             "true positive rate",
         )
-        .legend_position_inside(0.48, (0.08 * names.len() as f64 + 0.06).min(0.6));
+        .legend_position_inside(0.7, (0.08 * names.len() as f64 + 0.06).min(0.6));
     finish(plot, w, h, place)
 }
 
