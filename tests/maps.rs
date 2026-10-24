@@ -1570,6 +1570,15 @@ fn hexbin_auto_size_is_nice_and_zoom_stable() {
 }
 
 #[test]
+// Blocked on sipemu/ggplot-rs#240 (anofox-visualization#477): this
+// fixture's 'none'::PROJECTION makes it #420-slice-4-eligible, and its
+// 2-cell quantile-2 split lands one class edge exactly on the data's own
+// max (150) — ScaleFillBinned::sorted_edges dedupes that against classes.hi,
+// silently collapsing 2 bins into 1 and falling back to its own default
+// colours, so both cells render the same fill despite different
+// data-class values. Re-enable once the ggplot-rs release with #240 is in
+// (alongside #475's own re-enable).
+#[ignore = "sipemu/ggplot-rs#240 (anofox-visualization#477): ScaleFillBinned collapses a degenerate class edge, merging two classes' colours"]
 fn hexbin_classes_and_legend_note() {
     // two well-separated clusters, planar so the ::HEXBIN width is exact
     let xs = [0.0, 0.01, 0.02, 20.0, 20.01];

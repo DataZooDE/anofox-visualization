@@ -24,22 +24,29 @@
 //! transform `Frame::at` used to do by hand, so feeding it pixel
 //! coordinates too would double-transform every position.
 
+use ggplot_rs::aes::Aesthetic;
+use ggplot_rs::data::Value;
 use ggplot_rs::prelude::*;
+use ggplot_rs::scale::Scale;
 
-use crate::theme::{hex, mix};
+use crate::theme::mix;
 use crate::{find_role, value_str, Column, RenderOptions, Role};
 
+use super::fill::Reaimed;
 use super::flows::{Flows, FLOW_CAP};
 use super::hexbin::{self, Hexbin};
 use super::{Fill, Frame, Model, Rgb, ValueScale};
 
-/// Draw the flow overlay and splice it into the map body. Returns the
-/// rendered SVG fragment (empty when every flow turned out screen-coincident
-/// or there were none to draw), the number of marks drawn (for the
-/// "aggregate in SQL" budget warning), the count of screen-coincident
-/// ("self") flows skipped (pixel distance < 2px, checked here since the
-/// drawn coordinates themselves stay in projected, not pixel, space), and
-/// the over-cap warning text (`fl.total > FLOW_CAP`), if any.
+/// Draw the flow overlay and splice it into the map body (the old writer,
+/// [`super::render_with_model`]): [`flow_layers`] on a throwaway seed plot,
+/// then rendered standalone and spliced in as a transparent fragment.
+/// Returns the rendered SVG fragment (empty when every flow turned out
+/// screen-coincident or there were none to draw), the number of marks drawn
+/// (for the "aggregate in SQL" budget warning), the count of
+/// screen-coincident ("self") flows skipped (pixel distance < 2px, checked
+/// here since the drawn coordinates themselves stay in projected, not
+/// pixel, space), and the over-cap warning text (`fl.total > FLOW_CAP`), if
+/// any.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     o: &RenderOptions,
@@ -50,9 +57,80 @@ pub(super) fn render(
     t: &crate::theme::ResolvedTheme,
     card: Rgb,
     hatch_bg: Rgb,
+    hatch_fg: Rgb,
     w: f64,
     h: f64,
 ) -> (String, usize, usize, Option<String>) {
+    let plain_fill = match &m.fill {
+        Fill::Plain(c) => *c,
+        _ => (97, 156, 255),
+    };
+    let color_scale = super::fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
+    let seed = GGPlot::new(Vec::<(String, Vec<Value>)>::new()).aes(Aes::new());
+    let (plot, n, extra_self, cap_warn) = flow_layers(
+        seed,
+        o,
+        cols,
+        m,
+        frame,
+        fl,
+        t,
+        card,
+        color_scale,
+        plain_fill,
+    );
+    // Every flow turned out screen-coincident (or there were none): no
+    // layer was ever added to the seed plot — render nothing, not an
+    // (empty-but-still-wrapped) SVG fragment.
+    if n == 0 {
+        return (String::new(), 0, extra_self, cap_warn);
+    }
+    let [x0, x1, y0, y1] = frame.window(w, h);
+    let frag = plot
+        .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
+        .theme_void()
+        .legend_position(LegendPosition::None)
+        .svg_root_data(false)
+        .render_svg_native_at(0.0, 0.0, w.max(1.0) as u32, h.max(1.0) as u32)
+        .unwrap_or_default();
+    (frag, n, extra_self, cap_warn)
+}
+
+/// The curve + endpoint layers (and their colour/linetype/linewidth
+/// scales), appended onto `plot` — [`render`] (the old writer) appends them
+/// to a throwaway seed and renders the result standalone;
+/// [`super::plot::build`] (#420 slice 4) appends them straight onto the
+/// map's own `GGPlot`, so one real `GGPlot`/legend covers flows alongside
+/// the fill/size scales, instead of a separately-rendered-and-spliced
+/// fragment. Positions are fed through already-projected, pre-pixel
+/// coordinates (see the module doc); `coord_sf`/theme/legend/rendering stay
+/// the caller's job — plot-wide, not per-layer. Returns the number of marks
+/// drawn, the screen-coincident ("self") count and the over-cap warning,
+/// same as [`render`].
+#[allow(clippy::too_many_arguments)]
+pub(super) fn flow_layers(
+    plot: GGPlot,
+    o: &RenderOptions,
+    cols: &[Column],
+    m: &Model,
+    frame: &Frame,
+    fl: &Flows,
+    t: &crate::theme::ResolvedTheme,
+    card: Rgb,
+    // The plot's own `Fill` scale (`fill::scale_for`, the same one
+    // `plot::build` registers for `Fill`, cloned), re-aimed at `Color`
+    // (`fill::Reaimed`) instead of a second, hand-resolved identity
+    // colour (#420 slice 4) — `None` for `Fill::Plain`, which colours
+    // every curve `plain_fill` directly (no aes at all, same as the
+    // features layer's own plain fill). One open gap, not worked around:
+    // when the same measure drives both a features layer's `Fill` and a
+    // flow layer's `Color`, ggplot-rs renders two separate (duplicate)
+    // legend entries — no cross-aesthetic guide merge (ggplot2's
+    // `labs(fill = x, colour = x)` equivalent) exists yet; filed as
+    // sipemu/ggplot-rs#239.
+    color_scale: Option<Box<dyn Scale>>,
+    plain_fill: Rgb,
+) -> (GGPlot, usize, usize, Option<String>) {
     let linestyle_col = find_role(cols, Role::LineStyle);
     let fmt_full = |s: &ValueScale, v: f64| s.fmt.full(v, &o.locale);
 
@@ -94,21 +172,32 @@ pub(super) fn render(
         } else {
             cat.clone()
         };
-        let (color, value, class, nd) = match &m.fill {
+        // The raw value fed to the shared `Color` scale (`color_scale`,
+        // `None` for `Fill::Plain`) — the same convention `plot::build`'s
+        // own "fill" column uses: a float for a measure (`Value::Na` for
+        // no data, which that scale's own `na_color` already resolves —
+        // #420 slice 4, no more hand-resolving `hatch_bg` here), a level's
+        // name for a category (matched by label text, same as `MapFill`).
+        let (color_in, value, class, nd) = match &m.fill {
             Fill::Measure(s) => match s.values[i] {
                 Some(v) => {
-                    let (c, k) = s.color(v);
-                    (c, Some(v), k, false)
+                    let k = s
+                        .classes
+                        .as_ref()
+                        .map(|(_, c, _)| c.index(v.clamp(s.lo, s.hi)));
+                    (Value::Float(v), Some(v), k, false)
                 }
-                None => (hatch_bg, None, None, true),
+                None => (Value::Na, None, None, true),
             },
             Fill::Category { of_row, levels } => (
-                of_row[i].map(|k| levels[k].1).unwrap_or(hatch_bg),
+                of_row[i]
+                    .map(|k| Value::Str(levels[k].0.clone()))
+                    .unwrap_or(Value::Na),
                 None,
                 None,
                 false,
             ),
-            Fill::Plain(c) => (*c, None, None, false),
+            Fill::Plain(_) => (Value::Na, None, None, false),
         };
         let linestyle = linestyle_col
             .and_then(|lc| lc.values.get(i))
@@ -150,7 +239,7 @@ pub(super) fn render(
         ys.push(Value::Float(fl_.o[1]));
         xends.push(Value::Float(fl_.d[0]));
         yends.push(Value::Float(fl_.d[1]));
-        colors.push(Value::Str(hex(if nd { hatch_bg } else { color })));
+        colors.push(color_in);
         // The raw, unscaled magnitude — the linewidth *scale* does the sqrt
         // scaling (when one applies, see `width_const` below), not this row.
         sizes.push(Value::Float(fl_.raw.unwrap_or(fl_.w)));
@@ -186,7 +275,7 @@ pub(super) fn render(
         )
     });
     if xs.is_empty() {
-        return (String::new(), 0, extra_self, cap_warn);
+        return (plot, 0, extra_self, cap_warn);
     }
     let n = xs.len();
 
@@ -211,12 +300,11 @@ pub(super) fn render(
         ("key".into(), keys),
     ];
 
-    let aes = Aes::new()
+    let mut aes = Aes::new()
         .x("x")
         .y("y")
         .xend("xend")
         .yend("yend")
-        .color("color")
         .tooltip("tooltip_col")
         .data_attr("row", "row")
         .data_attr("series", "series")
@@ -227,7 +315,6 @@ pub(super) fn render(
         .data_attr("size", "size")
         .data_attr("fsize", "fsize")
         .data_attr("linestyle", "linestyle")
-        .linetype("linestyle")
         .data_attr("nd", "nd")
         // `data-x` by default would be the row's `x` aesthetic (a numeric
         // longitude); this replaces it with the flow's "orig→dest" key, as
@@ -244,9 +331,28 @@ pub(super) fn render(
     let fixed_w = fl.flows.first().map(|f| f.w).unwrap_or(1.5);
     let alpha = if m.alpha < 1.0 { m.alpha } else { 0.85 };
 
-    let mut aes = aes;
     if !width_const {
         aes = aes.linewidth("size_col");
+    }
+    // The `linetype` aes/legend only when a `::LINESTYLE` column is
+    // actually present (#420 slice 4) — mapping it unconditionally was
+    // harmless under the old fragment-splice architecture
+    // (`legend_position(None)` hid it), but once folded onto the main
+    // plot it would show a "NA/flow/dashed" legend key even when every
+    // row is really solid (no meaningful variation to show).
+    let has_linestyle_aes = linestyle_col.is_some();
+    if has_linestyle_aes {
+        aes = aes.linetype("linestyle");
+    }
+    // `Fill::Plain`: every curve the same colour, no aes/scale at all —
+    // same as the features layer's own plain fill. Otherwise the plot's
+    // own `Fill` scale, cloned and wrapped for `Color` (#420 slice 4): a
+    // real, shared scale, not a second hand-resolved identity colour, so
+    // flows get a real (not hand-drawn) legend entry with the same
+    // colours/classes/no-data handling as the main fill.
+    let has_color_aes = color_scale.is_some();
+    if has_color_aes {
+        aes = aes.color("color");
     }
 
     let mut curve = GeomCurve::default()
@@ -264,19 +370,24 @@ pub(super) fn render(
     if width_const {
         curve = curve.linewidth(fixed_w);
     }
+    if !has_color_aes {
+        curve = curve.color(plain_fill);
+    }
 
-    let mut plot = GGPlot::new(df)
-        .aes(aes)
-        .geom_curve_with(curve)
-        .scale_colour_identity()
+    let mut plot = plot.geom_curve_with(curve).layer_data(df).layer_aes(aes);
+    if has_linestyle_aes {
         // "flow"/"dashed" ::LINESTYLE rows dash — ggplot-rs's own `Dashed`
         // pattern (6,3), not the old hand-written `stroke-dasharray="6 4"`
         // (an accepted, documented visual delta).
-        .scale_linetype_manual(vec![
+        plot = plot.scale_linetype_manual(vec![
             ("NA", Linetype::Solid),
             ("flow", Linetype::Dashed),
             ("dashed", Linetype::Dashed),
         ]);
+    }
+    if let Some(scale) = color_scale {
+        plot = plot.scale_color(Reaimed(Aesthetic::Color, scale));
+    }
     if !width_const {
         plot = plot.scale_linewidth(
             ScaleLinewidthContinuous::new()
@@ -307,16 +418,7 @@ pub(super) fn render(
         .layer_data(ends_df)
         .layer_aes(Aes::new().x("x").y("y").tooltip("tip"));
 
-    let [x0, x1, y0, y1] = frame.window(w, h);
-    let frag = plot
-        .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
-        .theme_void()
-        .legend_position(LegendPosition::None)
-        .svg_root_data(false)
-        .render_svg_native_at(0.0, 0.0, w.max(1.0) as u32, h.max(1.0) as u32)
-        .unwrap_or_default();
-
-    (frag, n, extra_self, cap_warn)
+    (plot, n, extra_self, cap_warn)
 }
 
 /// Draw the hexbin overlay and splice it into the map body. `hb` is already
@@ -326,17 +428,57 @@ pub(super) fn render(
 /// the consumer for now") and draws. Returns the rendered SVG fragment
 /// (empty when there are no occupied cells) and the number of hexagons
 /// drawn (for the "aggregate in SQL" mark-budget warning in `mod.rs`).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_hexbin(
     o: &RenderOptions,
     hb: &Hexbin,
     scale: &ValueScale,
     frame: &Frame,
     card: Rgb,
+    hatch_bg: Rgb,
+    hatch_fg: Rgb,
     w: f64,
     h: f64,
 ) -> (String, usize) {
-    if hb.cells.is_empty() {
+    let fill = Fill::Measure(Box::new(scale.clone()));
+    let color_scale = super::fill::scale_for(&fill, o.locale, hatch_bg, hatch_fg);
+    let seed = GGPlot::new(Vec::<(String, Vec<Value>)>::new()).aes(Aes::new());
+    let (plot, n) = hexbin_layer(seed, o, hb, scale, card, color_scale);
+    if n == 0 {
         return (String::new(), 0);
+    }
+    let [x0, x1, y0, y1] = frame.window(w, h);
+    let frag = plot
+        .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
+        .theme_void()
+        .legend_position(LegendPosition::None)
+        .svg_root_data(false)
+        .render_svg_native_at(0.0, 0.0, w.max(1.0) as u32, h.max(1.0) as u32)
+        .unwrap_or_default();
+    (frag, n)
+}
+
+/// The hexagon layer (and its `Fill` scale, the plot's own — see
+/// [`render]/`fill::scale_for`), appended onto `plot` — [`render_hexbin`]
+/// (the old writer) appends it to a throwaway seed and renders the result
+/// standalone; [`super::plot::build`] (#420 slice 4) appends it straight
+/// onto the map's own `GGPlot`, reusing the same `Fill` scale the features
+/// layer already registered (hexbin cells colour by the *same* measure a
+/// choropleth would, so one real scale/legend covers both — no more
+/// hand-resolving `scale.color(value)` into a pre-baked hex string).
+/// `coord_sf`/theme/legend/rendering stay the caller's job. Returns the
+/// number of hexagons drawn (for the "aggregate in SQL" mark-budget
+/// warning).
+pub(super) fn hexbin_layer(
+    plot: GGPlot,
+    o: &RenderOptions,
+    hb: &Hexbin,
+    scale: &ValueScale,
+    card: Rgb,
+    color_scale: Option<Box<dyn Scale>>,
+) -> (GGPlot, usize) {
+    if hb.cells.is_empty() {
+        return (plot, 0);
     }
     let lattice = hexbin::lattice_of(hb);
     let n = hb.cells.len();
@@ -364,7 +506,14 @@ pub(super) fn render_hexbin(
         } else {
             cell.n as f64
         };
-        let (color, class) = scale.color(value);
+        // The class index alone (for `data-class`) — the colour itself
+        // comes from the plot's own `Fill` scale now (#420 slice 4), via
+        // the raw `value` fed as the `fill` aes below, not a hand-resolved
+        // `scale.color(value)` hex string.
+        let class = scale
+            .classes
+            .as_ref()
+            .map(|(_, c, _)| c.index(value.clamp(scale.lo, scale.hi)));
         let fvalue = scale.fmt.full(value, &o.locale);
         let label = hexbin::label_of(cell, hb.planar);
         let n_points = format!("point{}", if cell.n == 1 { "" } else { "s" });
@@ -378,7 +527,7 @@ pub(super) fn render_hexbin(
         ys.push(Value::Float(cy));
         widths.push(Value::Float(hb.width));
         heights.push(Value::Float(hb.width));
-        fills.push(Value::Str(hex(color)));
+        fills.push(Value::Float(value));
         rows.push(Value::Integer(i as i64));
         // `data-x` by default would be the row's `x` aesthetic (a numeric
         // projected coordinate); this replaces it with the cell's "q,r"
@@ -405,7 +554,7 @@ pub(super) fn render_hexbin(
         ("y".into(), ys),
         ("width".into(), widths),
         ("height".into(), heights),
-        ("fill_color".into(), fills),
+        ("fill".into(), fills),
         ("row".into(), rows),
         ("key".into(), keys),
         ("value".into(), values),
@@ -419,7 +568,7 @@ pub(super) fn render_hexbin(
     let aes = Aes::new()
         .x("x")
         .y("y")
-        .fill("fill_color")
+        .fill("fill")
         .tooltip("tooltip_col")
         .data_attr("row", "row")
         .data_attr("value", "value")
@@ -436,22 +585,18 @@ pub(super) fn render_hexbin(
         .data_attr("vtext", "fvalue")
         .data_attr("x", "key");
 
-    let [x0, x1, y0, y1] = frame.window(w, h);
-    let frag = GGPlot::new(df)
-        .aes(aes)
+    let mut plot = plot
         .geom_hex_with(GeomHex {
             color: card,
             line_width: 0.4,
             alpha: 1.0,
         })
-        .stat(StatIdentity)
-        .scale_fill_identity()
-        .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
-        .theme_void()
-        .legend_position(LegendPosition::None)
-        .svg_root_data(false)
-        .render_svg_native_at(0.0, 0.0, w.max(1.0) as u32, h.max(1.0) as u32)
-        .unwrap_or_default();
+        .layer_data(df)
+        .layer_aes(aes)
+        .stat(StatIdentity);
+    if let Some(scale) = color_scale {
+        plot = plot.scale_fill(Reaimed(Aesthetic::Fill, scale));
+    }
 
-    (frag, n)
+    (plot, n)
 }
