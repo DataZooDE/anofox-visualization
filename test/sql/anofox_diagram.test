@@ -29,12 +29,16 @@ SELECT anofox_render(json_object(
 true
 
 # Edges with attributes from a list of structs (::EDGES), top to bottom.
+# Order-agnostic: the edge is drawn by ggplot-rs (#421), whose class list carries
+# more tokens (gg-mark gg-path dp-flow flow-speed-N) and whose attribute order differs.
 query I
-SELECT anofox_render(json_object(
+SELECT svg LIKE '<svg%data-diagram="TB"%'
+   AND regexp_matches(svg, '<polyline[^>]*class="[^"]*\bdp-flow\b[^"]*"[^>]*data-edge="ingest&gt;build"|<polyline[^>]*data-edge="ingest&gt;build"[^>]*class="[^"]*\bdp-flow\b[^"]*"')
+FROM (SELECT anofox_render(json_object(
   'rows', (SELECT to_json(list({c0: stage, c1: e, c2: 'TB'} ORDER BY seq)) FROM stages,
            (SELECT list({'from': 'ingest', 'to': 'build', 'value': 9800, 'style': 'flow'}) AS e)),
   'roles', json('[[0,"NODE"],[1,"EDGES"],[2,"DIRECTION"]]'),
-  'width', 400, 'height', 400)) LIKE '<svg%data-diagram="TB"%class="dp-flow" data-edge="ingest&gt;build"%';
+  'width', 400, 'height', 400)) AS svg);
 ----
 true
 
