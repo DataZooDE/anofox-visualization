@@ -17,7 +17,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}
+  # See ci.yml's concurrency group for why: a spurious labeled/unlabeled run
+  # (one whose `lane` job skips below, #491) gets its own, never-colliding
+  # group (a run_id suffix) instead of the shared one, so it can't cancel
+  # the real run it shares a ref with — cancel-in-progress applies before
+  # any job's `if` is evaluated.
+  group: "${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ (github.event_name == 'pull_request' && contains(fromJson('[\"labeled\",\"unlabeled\"]'), github.event.action) && github.event.label.name != 'full-ci') && github.run_id || '' }}"
   cancel-in-progress: true
 
 jobs:
