@@ -152,6 +152,43 @@ pub fn render_cell_checked(
     })
 }
 
+/// Render a pre-binned histogram (the caller already computed the bin
+/// counts, e.g. Explore data's column profiler) — Explore data's card
+/// histogram and the table's own column-stats row, #463 (owner rule #318
+/// — ggplot-rs, not hand-drawn SVG). `values_json` = `[n0, n1, …]`;
+/// `labels_json` = `""` for none, else a same-length JSON array of each
+/// bar's own hover-tip text prefix (e.g. a bin's range). `fill_alpha` is
+/// the bars' own fill opacity (`0.0` draws an outline only). Errors come
+/// back as a small error SVG.
+#[wasm_bindgen]
+pub fn render_mini_hist(
+    values_json: &str,
+    labels_json: &str,
+    fill_alpha: f64,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> String {
+    crate::render_mini_hist(values_json, labels_json, fill_alpha, width, height, primary)
+        .unwrap_or_else(|e| error_svg(&e.to_string(), width))
+}
+
+/// Two pre-binned histograms on one shared y scale, `a` as an outline,
+/// `b` filled — Explore data's distribution-comparison overlay, #463.
+/// `a_json`/`b_json` = `[n0, n1, …]`. Errors come back as a small error
+/// SVG.
+#[wasm_bindgen]
+pub fn render_mini_overlay(
+    a_json: &str,
+    b_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> String {
+    crate::render_mini_overlay(a_json, b_json, width, height, primary)
+        .unwrap_or_else(|e| error_svg(&e.to_string(), width))
+}
+
 /// Render a chart and the `::TRACK`s under it, lined up on one x axis
 /// ([`crate::track::render_stack`]). `stack_json` =
 /// `{"chart": {"rows", "roles"}, "tracks": [{"rows", "roles", "height"}, …]}`
