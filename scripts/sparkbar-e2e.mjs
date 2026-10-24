@@ -5,12 +5,16 @@
 // real browser:
 //   - the cell's SVG is ggplot-rs output: gg-mark rects (data-geom="col"),
 //     the expected bar count for a single series and a ref/cur pair.
-//   - the cell's drawn content fits inside its own bounding box — the
-//     render_sparkbar panel floor clamp (50px, same as render_sparkline's
-//     #457 fix) paired with preserveAspectRatio="none" on the returned SVG
-//     (cellSparkbar, web/app.js), so a taller internal viewBox stretch-fills
-//     the cell's fixed CSS size instead of letterboxing a narrower, centred
-//     chart or clipping a bar's own baseline off the bottom.
+//   - the cell's drawn content fits inside its own bounding box, and does
+//     so via a UNIFORM downscale, not a stretch: the render_sparkbar panel
+//     floor clamp (50px, same as render_sparkline's #457 fix) means the
+//     returned svg's own viewBox is taller than this cell's own fixed CSS
+//     box, so cellSparkbar requests a WIDER panel too, matched to the
+//     cell's own aspect ratio (`sparkRequestSize`, web/app.js, #476
+//     review) — no `preserveAspectRatio="none"` override: that would scale
+//     the two axes unevenly (fine for a rect, but the same request size
+//     this function shares with cellSpark's circular endpoint marker needs
+//     a uniform scale, so neither cell overrides it).
 //
 //   cargo build --lib --target wasm32-unknown-unknown --profile wasm --no-default-features --features wasm
 //   wasm-bindgen --target web --out-dir web/pkg --out-name anofox_visualization <target>/wasm32-unknown-unknown/wasm/anofox_visualization.wasm
@@ -93,7 +97,10 @@ const refCur = cells[1];
 if (single) {
   check(single.rectCount === 4, `single-series cell draws 4 bars (one per bucket), found ${single.rectCount}`);
   check(single.everyRectIsGgMark, "single-series cell's bars are ggplot-rs marks (gg-mark gg-bar, data-geom=\"col\"), not hand-drawn SVG");
-  check(single.preserveAspectRatio === "none", `single-series cell's svg stretch-fills its box (preserveAspectRatio="none"), found ${JSON.stringify(single.preserveAspectRatio)}`);
+  check(
+    single.preserveAspectRatio !== "none",
+    `single-series cell's svg scales uniformly (no preserveAspectRatio="none"), found ${JSON.stringify(single.preserveAspectRatio)}`
+  );
 } else {
   check(false, "no single-series ::SPARKBAR cell found");
 }
@@ -101,7 +108,10 @@ if (single) {
 if (refCur) {
   check(refCur.rectCount === 8, `ref/cur cell draws 8 bars (4 ref + 4 cur), found ${refCur.rectCount}`);
   check(refCur.everyRectIsGgMark, "ref/cur cell's bars are ggplot-rs marks (gg-mark gg-bar, data-geom=\"col\"), not hand-drawn SVG");
-  check(refCur.preserveAspectRatio === "none", `ref/cur cell's svg stretch-fills its box (preserveAspectRatio="none"), found ${JSON.stringify(refCur.preserveAspectRatio)}`);
+  check(
+    refCur.preserveAspectRatio !== "none",
+    `ref/cur cell's svg scales uniformly (no preserveAspectRatio="none"), found ${JSON.stringify(refCur.preserveAspectRatio)}`
+  );
 } else {
   check(false, "no ref/cur ::SPARKBAR cell found");
 }
