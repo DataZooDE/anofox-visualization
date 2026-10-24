@@ -338,9 +338,35 @@ fn render_dashboard_html(
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
         }
-        // Its ::TITLE bar, as on a dashboard card (#232).
-        let svg = render_with_title(&cols, &tracks, 460, 300, &opts)
-            .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+        // A ::TABLE / ::PAGED panel (#427): its rewrite keeps each column's
+        // own name rather than aliasing it to `cN` (`sql::rewrite_list`'s
+        // `keep_intact`), so the `cols` built above (indexed by `cN`) can't
+        // see most of its columns — the same raw, name-keyed rows `--svg`
+        // and `serve` already read instead, through the shared table
+        // renderer (`dashboard::render_panel_doc_svg`).
+        let svg = if p
+            .roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+        {
+            let named_rows = sql::result_columns(&rows);
+            dashboard::render_panel_doc_svg(
+                &named_rows,
+                &p.roles,
+                &p.names,
+                460.0,
+                300.0,
+                &opts,
+                false,
+                &tracks,
+                None,
+                compact,
+            )
+        } else {
+            // Its ::TITLE bar, as on a dashboard card (#232).
+            render_with_title(&cols, &tracks, 460, 300, &opts)
+                .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
+        };
         panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
         n += 1;
     }

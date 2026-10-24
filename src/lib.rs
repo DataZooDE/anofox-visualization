@@ -3164,16 +3164,15 @@ fn cartesian(
         // pipeline: `GeomHex::draw` reads the post-stat `fill` column
         // directly, bypassing the aes-mapping system entirely (there's no
         // raw column to map a stat-computed aesthetic from), and
-        // ggplot-rs's own legend-width reservation only runs off that
-        // mapping system — so a lazily-binned `fill` draws a real,
-        // correctly-coloured legend that ggplot-rs never reserves panel
-        // margin for, and it runs off the canvas edge (confirmed with a
-        // minimal ggplot-rs-only repro outside this crate; PR #439 review).
-        // Binning here ourselves makes `count` a genuine *raw* column the
-        // layer's own `layer_data` carries, so `.fill("count")` is a real
-        // aes mapping `StatIdentity` (no further binning) leaves alone —
-        // the legend gets its margin like any other mapped fill (`GeomTile`
-        // /`GeomPoint`, confirmed the same way).
+        // ggplot-rs's legend-width reservation runs off that mapping
+        // system. Binning here ourselves makes `count` a genuine *raw*
+        // column the layer's own `layer_data` carries, so `.fill("count")`
+        // is a real aes mapping `StatIdentity` (no further binning) leaves
+        // alone — the legend gets its margin like any other mapped fill
+        // (`GeomTile`/`GeomPoint`). ggplot-rs < 0.28 only reserved that
+        // margin for a plot-level mapping, not a layer-only one, and lost
+        // it again once a second layer (`::IDENTITY`/`::ABLINE`) was
+        // present — fixed upstream in sipemu/ggplot-rs#201 (0.28.0, #449).
         Kind::Point | Kind::Bubble if hex_bins.is_some() => {
             use ggplot_rs::data::DataFrame;
             use ggplot_rs::scale::{Scale, ScaleSet};
@@ -3215,18 +3214,6 @@ fn cartesian(
             .layer_data(hex_data)
             .layer_aes(Aes::new().x("x").y("y").fill("count"))
             .scale_fill(fill_scale)
-            // TODO(ggplot-rs upstream, PR #439 review): a mapped Fill
-            // legend's panel-margin reservation only works when the hex
-            // layer is the plot's *only* layer — add any second layer
-            // (even one that inherits the same aes and maps nothing new,
-            // confirmed with a geom_abline/geom_point/reordered-layers
-            // repro outside this crate) and the legend box draws past the
-            // canvas edge uncropped instead of narrowing the panel. Since
-            // `::IDENTITY`/`::ABLINE` are exactly this chart's main combo,
-            // hide the guide until that's fixed upstream — the per-hexagon
-            // "n = <count>" tooltip (`GeomHex`'s own default) still carries
-            // the value on hover.
-            .show_legend(false)
         }
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
@@ -3754,8 +3741,17 @@ fn cartesian(
         }
     }
     plot = plot.house_theme(o);
-    plot = plot
-        .legend_position(legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top));
+    // `::HEXBIN`'s "count" fill is a continuous colourbar, not a discrete
+    // category row — it keeps ggplot-rs's own default legend position (a
+    // right-hand colourbar), same as `render_heatmap`'s `legend_position_of`
+    // handling, instead of the "Top" every other cartesian chart defaults
+    // to: a tall vertical gradient bar squeezed into a short top strip
+    // overlaps the panel instead of sitting beside it. An explicit
+    // `::LEGEND` still wins either way.
+    plot = match (hex_bins, legend_position_of(cols)) {
+        (Some(_), None) => plot,
+        (_, pos) => plot.legend_position(pos.unwrap_or(ggplot_rs::theme::LegendPosition::Top)),
+    };
     if let Some(t) = &title {
         plot = plot.title(t);
     }

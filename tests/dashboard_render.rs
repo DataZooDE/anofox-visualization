@@ -935,3 +935,50 @@ fn markdown_placeholders_are_filled_not_printed_literally() {
         "the filled values must appear: {svg}"
     );
 }
+
+// #427: a `::TABLE`'s `list(v ORDER BY i)::SPARKLINE` column was dropped
+// entirely by the headless table renderer (`table_svg`'s own `vis` filter
+// excluded every `SPARKLINE`-formatted column) — the other columns rendered,
+// but the trend cell was just missing. Each row's list is now drawn through
+// the same ggplot-rs sparkline panel (`render_sparkline`, via
+// `render_with_at`) as a standalone `::SPARKLINE`, nested in the cell.
+#[test]
+fn table_sparkline_cell_is_drawn_not_dropped() {
+    struct SparkMock;
+    impl DataProvider for SparkMock {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("Trend") {
+                return Ok(vec![
+                    ("feature".into(), s(&["0", "1"])),
+                    ("Trend".into(), s(&["[0,1,2,3,1]", "[4,3,2,1,3]"])),
+                    ("mx".into(), f(&[3.0, 4.0])),
+                ]);
+            }
+            Ok(vec![("c0".into(), f(&[1.0]))])
+        }
+    }
+    let script = "SELECT feature ::TABLE, trend AS \"Trend\" ::SPARKLINE, mx AS \"Mx\" FROM t;";
+    let mut db = SparkMock;
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        svg.contains(">Trend<"),
+        "the sparkline column's own header must still show: {svg}"
+    );
+    assert!(
+        !svg.contains("[0,1,2,3,1]") && !svg.contains("[4,3,2,1,3]"),
+        "a cell's raw JSON list must never print literally: {svg}"
+    );
+    assert_eq!(
+        svg.matches("gg-line\" data-geom=\"line\"").count(),
+        2,
+        "one drawn sparkline per row, through the same ggplot-rs line geom \
+         `render_sparkline` uses: {svg}"
+    );
+    assert!(
+        svg.contains(">Mx<") && svg.contains(">3<") && svg.contains(">4<"),
+        "the table's other columns must still render, unaffected: {svg}"
+    );
+}
