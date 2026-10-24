@@ -3123,19 +3123,57 @@ fn cartesian(
         // over either (a y-interval or ::SIZE alongside ::HEXBIN is not a
         // meaningful combination; this one does). `::CATEGORY`/`::SIZE`
         // would otherwise be inherited from the plot-level aes (`color_col`
-        // above), but this layer's own `layer_data` carries only `x`/`y`, so
-        // those mappings simply find no column to resolve and are dropped —
-        // one hexbin density for the whole panel, not one `::CATEGORY` value
-        // (the map's own `::HEXBIN` has the same "category ignored" rule,
-        // `map/hexbin.rs`'s `hexbin_diags`; `--check` flags it here too,
-        // `chart/hexbin-category`). Binned with ggplot-rs's own
-        // `StatBinHex`/`GeomHex` (issue #318: density-binning logic belongs
-        // in ggplot-rs) — `GeomHex` already gives each hexagon a "n = <count>"
-        // tooltip (`consumes_tooltips`), so there's nothing to wire up here.
+        // above), but this layer's own `layer_data` carries only `x`/`y`/
+        // `count`/`width`/`height`, so those mappings simply find no column
+        // to resolve and are dropped — one hexbin density for the whole
+        // panel, not one `::CATEGORY` value (the map's own `::HEXBIN` has
+        // the same "category ignored" rule, `map/hexbin.rs`'s
+        // `hexbin_diags`; `--check` flags it here too,
+        // `chart/hexbin-category`).
+        //
+        // Pre-binned with ggplot-rs's own `StatBinHex::compute_group`
+        // (issue #318: density-binning logic belongs in ggplot-rs) — the
+        // same call `map/hexbin.rs`'s `of` already makes — rather than
+        // leaving `GeomHex`'s *default* stat to bin lazily inside the
+        // pipeline: `GeomHex::draw` reads the post-stat `fill` column
+        // directly, bypassing the aes-mapping system entirely (there's no
+        // raw column to map a stat-computed aesthetic from), and
+        // ggplot-rs's own legend-width reservation only runs off that
+        // mapping system — so a lazily-binned `fill` draws a real,
+        // correctly-coloured legend that ggplot-rs never reserves panel
+        // margin for, and it runs off the canvas edge (confirmed with a
+        // minimal ggplot-rs-only repro outside this crate; PR #439 review).
+        // Binning here ourselves makes `count` a genuine *raw* column the
+        // layer's own `layer_data` carries, so `.fill("count")` is a real
+        // aes mapping `StatIdentity` (no further binning) leaves alone —
+        // the legend gets its margin like any other mapped fill (`GeomTile`
+        // /`GeomPoint`, confirmed the same way).
         Kind::Point | Kind::Bubble if hex_bins.is_some() => {
-            use ggplot_rs::scale::Scale;
+            use ggplot_rs::data::DataFrame;
+            use ggplot_rs::scale::{Scale, ScaleSet};
             use ggplot_rs::stat::binhex::StatBinHex;
+            use ggplot_rs::stat::identity::StatIdentity;
+            use ggplot_rs::stat::Stat;
             let bins = hex_bins.unwrap_or(30);
+            let mut raw = DataFrame::new();
+            raw.add_column("x".to_string(), col_of(&data, "x"));
+            raw.add_column("y".to_string(), col_of(&data, "y"));
+            let binned = StatBinHex::new()
+                .bins(bins)
+                .compute_group(&raw, &ScaleSet::new());
+            let col = |name: &str| {
+                binned
+                    .column(name)
+                    .map(<[Value]>::to_vec)
+                    .unwrap_or_default()
+            };
+            let hex_data: Vec<(String, Vec<Value>)> = vec![
+                ("x".to_string(), col("x")),
+                ("y".to_string(), col("y")),
+                ("count".to_string(), col("count")),
+                ("width".to_string(), col("width")),
+                ("height".to_string(), col("height")),
+            ];
             // `min`/`max` left non-finite: `FmtGradient` then skips fixing the
             // scale's domain (`with_limits`), so it self-trains off the real
             // binned counts instead of a guess made before binning ran.
@@ -3147,13 +3185,22 @@ fn cartesian(
                 line_width: 0.3,
                 alpha: 0.95,
             })
-            .stat(StatBinHex::new().bins(bins))
-            .layer_data(vec![
-                ("x".to_string(), col_of(&data, "x")),
-                ("y".to_string(), col_of(&data, "y")),
-            ])
-            .layer_aes(Aes::new().x("x").y("y"))
+            .stat(StatIdentity)
+            .layer_data(hex_data)
+            .layer_aes(Aes::new().x("x").y("y").fill("count"))
             .scale_fill(fill_scale)
+            // TODO(ggplot-rs upstream, PR #439 review): a mapped Fill
+            // legend's panel-margin reservation only works when the hex
+            // layer is the plot's *only* layer — add any second layer
+            // (even one that inherits the same aes and maps nothing new,
+            // confirmed with a geom_abline/geom_point/reordered-layers
+            // repro outside this crate) and the legend box draws past the
+            // canvas edge uncropped instead of narrowing the panel. Since
+            // `::IDENTITY`/`::ABLINE` are exactly this chart's main combo,
+            // hide the guide until that's fixed upstream — the per-hexagon
+            // "n = <count>" tooltip (`GeomHex`'s own default) still carries
+            // the value on hover.
+            .show_legend(false)
         }
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,

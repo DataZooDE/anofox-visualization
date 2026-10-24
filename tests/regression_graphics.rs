@@ -2687,9 +2687,20 @@ fn hexbin_scatter_keeps_identity_and_abline_on_top() {
 }
 
 #[test]
-fn hexbin_scatter_has_a_count_fill_legend() {
+fn hexbin_scatter_hexagons_carry_their_count() {
+    // The native ggplot-rs fill legend is off for now (PR #439 review): a
+    // mapped Fill legend's panel-margin reservation only works when the hex
+    // layer is the plot's *only* layer, and this chart always has a second
+    // layer once `::IDENTITY`/`::ABLINE` are added — with one, the legend
+    // box draws past the canvas edge uncropped instead of narrowing the
+    // panel (confirmed with a minimal ggplot-rs-only repro outside this
+    // crate; tracked upstream). Each hexagon still carries its count as a
+    // `data-value`/`data-fvalue` attribute and an "n = …" tooltip
+    // (`GeomHex`'s own default), so the value is still there on hover.
     let s = svg(hexbin_scatter_cols(400, "auto"));
-    assert!(s.contains(">count<"), "no 'count' legend title: {s}");
+    assert!(!s.contains(">count<"), "legend unexpectedly drawn: {s}");
+    assert!(s.contains("data-value=\""), "no per-hexagon count: {s}");
+    assert!(s.contains("<title>n = "), "no count tooltip: {s}");
 }
 
 #[test]

@@ -1436,8 +1436,8 @@ into a 2D count density instead of drawing each one — the fix for a
 predicted-vs-actual scatter at thousands of rows, where individual points
 blur into a solid blob and the identity line (`::IDENTITY`) is the point of
 the chart. Drawn through ggplot-rs's own `geom_hex`/`StatBinHex` (the same
-stat the map's `::HEXBIN` uses), with a "count" fill legend; `::IDENTITY`,
-`::ABLINE` and `::REFLINE` are still drawn on top, unaffected.
+stat the map's `::HEXBIN` uses); `::IDENTITY`, `::ABLINE` and `::REFLINE`
+are still drawn on top, unaffected.
 
 - **Bin count, not a width:** `'auto'` (default) sizes the lattice from the
   panel's own pixel size; a bare number sets the bin count *across each
@@ -1451,6 +1451,12 @@ stat the map's `::HEXBIN` uses), with a "count" fill legend; `::IDENTITY`,
   grid per category value, the same rule the map's own `::HEXBIN` has.
 - **Tooltip:** each hexagon's hover reads "n = `<count>`" (`GeomHex`'s own
   default).
+- **No fill legend yet:** ggplot-rs's own panel-margin reservation for a
+  mapped `Fill` legend only works when the hex layer is a plot's *only*
+  layer — `::IDENTITY`/`::ABLINE` add a second one, and the legend box then
+  draws past the canvas edge instead of narrowing the panel. The legend is
+  off for now, tracked as a ggplot-rs upstream fix; the per-hexagon count
+  is still there on hover.
 - A malformed value (not `'auto'` or a number) is a hard error, same as
   any other role.
 
