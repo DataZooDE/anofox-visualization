@@ -13267,6 +13267,10 @@ function cellSpark(v) {
 // `list({'ref': r, 'cur': c} ORDER BY i)`. One y scale per cell (the
 // combined ref+cur range), so heights stay comparable. Each bar carries its
 // own <title> (a discrete bucket, unlike a trend line's one whole-cell tip).
+// Drawn by the wasm renderer's render_cell (GeomCol, #453 review — not
+// hand-drawn SVG here, the owner rule #318 every other chart already
+// follows) — the same `render_sparkbar` (src/lib.rs) the native --svg and
+// static-HTML table cells already use.
 function cellSparkbar(v) {
   let arr = Array.isArray(v) ? v : null;
   if (!arr && typeof v === "string") {
@@ -13294,35 +13298,20 @@ function cellSparkbar(v) {
   if (curs.length < 1) return `<span class="nil">—</span>`;
   const w = 104;
   const h = 26;
-  const pad = 2.5;
-  const all = refs.concat(curs);
-  const mn = Math.min(0, ...all);
-  const mx = Math.max(0, ...all) || 1;
-  const rng = mx - mn || 1;
-  const n = curs.length;
-  const slot = (w - 2 * pad) / n;
-  const bw = isPair ? slot * 0.62 : slot * 0.7;
-  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
-  const base = ys(0);
-  const f = (x) => fmtNum(x, "COMPACT");
-  const rect = (x, val, fill, opacity, title) => {
-    const y1 = ys(val);
-    const y0 = Math.min(y1, base);
-    const bh = Math.max(Math.abs(y1 - base), 0.6);
-    return (
-      `<rect x="${(x - bw / 2).toFixed(1)}" y="${y0.toFixed(1)}" width="${bw.toFixed(1)}" ` +
-      `height="${bh.toFixed(1)}" fill="${fill}" fill-opacity="${opacity}">` +
-      `<title>${escapeHtml(title)}</title></rect>`
-    );
-  };
-  let bars = "";
-  for (let i = 0; i < n; i++) {
-    const x = pad + slot * (i + 0.5);
-    const tip = isPair ? `ref ${f(refs[i])} · cur ${f(curs[i])}` : `${f(curs[i])}`;
-    if (isPair) bars += rect(x, refs[i], "var(--ax-muted)", 0.4, tip);
-    bars += rect(x, curs[i], "var(--ax-spark)", isPair ? 0.92 : 1, tip);
-  }
-  return `<svg class="spark spark-bar" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${bars}</svg>`;
+  // One row per bucket; a pair's ref/cur share the row, each its own
+  // ::SPARKBAR column — c0 = ref, c1 = cur when there's a pair (that
+  // column order, [ref, cur], is what render_sparkbar in src/lib.rs reads
+  // as series[0]/series[1]); c0 = cur alone otherwise.
+  const rows = curs.map((c, i) => (isPair ? { c0: refs[i], c1: c } : { c0: c }));
+  const roles = isPair ? [[0, "SPARKBAR"], [1, "SPARKBAR"]] : [[0, "SPARKBAR"]];
+  let svg = "";
+  try {
+    svg = render_cell(JSON.stringify(rows), JSON.stringify(roles), w, h, renderCtx());
+  } catch (_) {}
+  if (!svg) return `<span class="nil">—</span>`;
+  // `svg class` for the table CSS (width/height, compact-row height) that
+  // targets svg.spark — render_cell's own output carries none.
+  return svg.replace(/^<svg /, '<svg class="spark spark-bar" ');
 }
 
 // A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the
