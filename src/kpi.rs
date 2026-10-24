@@ -19,7 +19,7 @@
 
 use crate::format::{escape_xml as esc, format_number_l, Locale};
 use crate::theme::hex;
-use crate::{value_str, Column, Kind, MetricFmt, RenderOptions, Role};
+use crate::{render_with_at, value_str, Column, Kind, MetricFmt, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
 
 /// How a KPI's change reads (`::DELTA_FORMAT`).
@@ -454,36 +454,27 @@ impl Kpi {
         if self.spark.len() >= 2 {
             let (top, sh) = (y + 8.0, SPARK_H - 12.0);
             y += SPARK_H;
-            let sw = inner.min(320.0);
-            let (mn, mx) = self
-                .spark
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-                    (a.min(v), b.max(v))
-                });
-            let rng = if mx > mn { mx - mn } else { 1.0 };
-            let n = self.spark.len() as f64;
-            let px = |i: usize| PAD + i as f64 * sw / (n - 1.0);
-            let py = |v: f64| top + sh - (v - mn) / rng * sh;
-            let pts: Vec<String> = self
-                .spark
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| format!("{:.1},{:.1}", px(i), py(v)))
-                .collect();
-            let brand = hex(o.brand());
-            let last = self.spark.len() - 1;
-            s.push_str(&format!(
-                "<g class=\"kpi-spark\"><polygon points=\"{:.1},{b:.1} {p} {:.1},{b:.1}\" fill=\"{brand}\" fill-opacity=\"0.12\"/>\
-                 <polyline points=\"{p}\" fill=\"none\" stroke=\"{brand}\" stroke-width=\"1.6\" stroke-linejoin=\"round\" stroke-linecap=\"round\"/>\
-                 <circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.6\" fill=\"{brand}\"/></g>",
-                px(0),
-                px(last),
-                px(last),
-                py(self.spark[last]),
-                p = pts.join(" "),
-                b = top + sh,
-            ));
+            let sw = inner.min(320.0).max(crate::MIN_DIM as f64);
+            // Drawn through the same ggplot-rs path as a standalone
+            // `::SPARKLINE` panel / a table's `::SPARKLINE` cell
+            // (`render_sparkline`, via `render_with_at`) instead of a
+            // hand-rolled `<polygon>`/`<polyline>`/`<circle>` (#419) — one
+            // sparkline renderer in the whole crate. #457: a nested panel
+            // can't be asked for less than `SPARKLINE_MIN_H` (50px, see its
+            // doc comment) without clipping the line's low points, and this
+            // strip is only `sh` (30px) tall, so the taller panel is
+            // centred on it, the same technique #427 used to fit a table's
+            // sparkline cell into its row.
+            let sh_req = sh.max(crate::SPARKLINE_MIN_H);
+            let sy = top + (sh - sh_req) / 2.0;
+            let spark_col = Column::new(
+                "value",
+                Role::Value(Kind::Sparkline),
+                self.spark.iter().map(|&v| Value::Float(v)).collect(),
+            );
+            if let Ok(frag) = render_with_at(&[spark_col], PAD, sy, sw as u32, sh_req as u32, o) {
+                s.push_str(&frag);
+            }
         }
         if let Some(g) = &self.goal {
             let top = y + 6.0;
@@ -768,6 +759,72 @@ mod tests {
         assert!(!k5.compact);
     }
 
+    // #457 follow-up: once the sparkline scaled to its own min/max instead of
+    // a zero baseline, a KPI tile's thin (~30px) strip exposed a mismatch
+    // between the plotting engine's own minimum plot-area height
+    // (`SPARKLINE_MIN_H`, 50px — see its doc comment) and the strip's small
+    // declared viewBox — every dip below the strip's own height got clipped
+    // off, turning one continuous line into separate humps.
+    // `render_sparkline` now never draws into a viewBox shorter than that
+    // floor, and this tile (like a table's `::SPARKLINE` cell) requests at
+    // least the floor and centres its smaller visible strip on the taller
+    // panel, so the viewBox always matches what was actually laid out.
+    #[test]
+    fn kpi_sparkline_minima_stay_inside_the_strip() {
+        let o = RenderOptions::default();
+        let k = Kpi {
+            value: "$1,013".into(),
+            caption: "Revenue".into(),
+            delta: None,
+            label: None,
+            // a real zigzag with low dips, not a monotonic line — a clipped
+            // bottom would otherwise go unnoticed
+            spark: vec![1005.0, 1010.0, 1000.0, 1012.0, 1001.0, 1013.0, 1000.0],
+            goal: None,
+            text_card: false,
+            status: None,
+            compact: false,
+        };
+        let s = k.body(300.0, k.height(), &o);
+        let line_at = s
+            .find("data-geom=\"line\"")
+            .expect("a drawn sparkline line");
+        let svg_open = s[..line_at].rfind("<svg ").expect("its own nested <svg>");
+        let svg_close =
+            line_at + s[line_at..].find("</svg>").expect("a closing </svg>") + "</svg>".len();
+        let frag = &s[svg_open..svg_close];
+        let viewbox = frag
+            .split("viewBox=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("a viewBox");
+        let h: f64 = viewbox
+            .split_whitespace()
+            .nth(3)
+            .and_then(|n| n.parse().ok())
+            .expect("a viewBox height");
+        let mut ys: Vec<f64> = Vec::new();
+        for pts in frag.split("points=\"").skip(1) {
+            let pts = pts.split('"').next().unwrap_or("");
+            ys.extend(
+                pts.split(' ')
+                    .filter_map(|p| p.split(',').nth(1))
+                    .filter_map(|y| y.parse::<f64>().ok()),
+            );
+        }
+        assert!(!ys.is_empty(), "expected drawn points: {frag}");
+        let (mn, mx) = ys
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+                (a.min(v), b.max(v))
+            });
+        assert!(
+            mn > -0.5 && mx < h + 0.5,
+            "sparkline content (y {mn}..{mx}) must stay inside its own \
+             {h}px-tall viewBox, not clipped: {frag}"
+        );
+    }
+
     #[test]
     fn tile_svg_has_every_part_in_theme_colours() {
         let o = RenderOptions::default();
@@ -797,7 +854,13 @@ mod tests {
             "{s}"
         );
         assert!(s.contains("vs &lt;prev&gt;"), "{s}");
-        assert!(s.contains("<polyline") && s.contains("<circle"), "{s}");
+        // #419: the sparkline is now drawn through `render_sparkline` (via
+        // `render_with_at`), the same ggplot-rs line/point geoms a
+        // standalone `::SPARKLINE` panel or a table's `::SPARKLINE` cell
+        // use (#427's `table_sparkline_cell_is_drawn_not_dropped`) — no
+        // hand-rolled `<polyline>`/`<circle>` left to assert against.
+        assert!(s.contains("data-geom=\"line\""), "{s}");
+        assert!(s.contains("data-geom=\"point\""), "{s}");
         assert!(s.contains("125% of goal 4"), "{s}");
         assert!(s.contains(&format!("fill=\"{}\"", hex(c.positive))));
     }
