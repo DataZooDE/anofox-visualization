@@ -14733,7 +14733,9 @@ function markInfo(attr, tip) {
   const plain = [raw, value].some(
     (v) => tip === v || tip === series || tip === `${series}: ${v}` || tip === `${tSeries}: ${v}`
   );
-  const fx = attr("data-fx") || "";
+  // `data-xtext`: a ::DIAGRAM node's / edge's name (`data-fx` is
+  // ggplot-rs-reserved, see `diagram.rs`)
+  const fx = attr("data-fx") || attr("data-xtext") || "";
   const x = attr("data-x") || "";
   return { series, value, x: fx || x, fx: !!fx, own: series === x, detail: plain ? "" : tip };
 }
@@ -15275,7 +15277,7 @@ function markKey(fig, el) {
 function diagramNodeLabel(svg, el) {
   const id = el.getAttribute("data-node");
   if (id == null || !svg.hasAttribute("data-diagram")) return "";
-  const name = (n) => svg.querySelector(`rect[data-node="${CSS.escape(n)}"]`)?.getAttribute("data-fx") || n;
+  const name = (n) => svg.querySelector(`rect[data-node="${CSS.escape(n)}"]`)?.getAttribute("data-xtext") || n;
   const edges = [...svg.querySelectorAll("polyline[data-edge]")];
   const from = edges.filter((e) => e.getAttribute("data-to") === id).map((e) => name(e.getAttribute("data-from")));
   const to = edges.filter((e) => e.getAttribute("data-from") === id).map((e) => name(e.getAttribute("data-to")));
@@ -15326,7 +15328,7 @@ function chartKey(e, svg, fig) {
     if (edge) {
       to._dpVia = edge;
       if (e.key !== (svg.getAttribute("data-diagram") === "TB" ? "ArrowUp" : "ArrowLeft")) to._dpCameFrom = cur;
-      to.setAttribute("aria-label", `${edge.getAttribute("data-tip") || edge.getAttribute("data-fx")}. ${diagramNodeLabel(svg, to)}`);
+      to.setAttribute("aria-label", `${edge.getAttribute("data-tip") || edge.getAttribute("data-xtext")}. ${diagramNodeLabel(svg, to)}`);
     }
     to.focus();
     return;
@@ -15586,21 +15588,23 @@ function diagramTextHtml(svg, caption) {
   const esc = (v) => escapeHtml(v == null ? "" : String(v));
   const nodes = [...svg.querySelectorAll("rect[data-node]")].sort((a, b) => +a.dataset.order - +b.dataset.order);
   const edges = [...svg.querySelectorAll("polyline[data-edge]")];
-  const name = new Map(nodes.map((n) => [n.dataset.node, n.dataset.fx || n.dataset.node]));
+  // `data-xtext` / `data-vtext`: the name and formatted value (`data-fx` /
+  // `data-fvalue` are ggplot-rs-reserved)
+  const name = new Map(nodes.map((n) => [n.dataset.node, n.dataset.xtext || n.dataset.node]));
   const items = nodes.map((n) => {
     const st = n.dataset.status && n.dataset.status !== "neutral" ? n.dataset.status : "";
-    const extra = [n.dataset.fvalue, n.dataset.badge || st].filter(Boolean);
+    const extra = [n.dataset.vtext, n.dataset.badge || st].filter(Boolean);
     const next = edges.filter((e) => e.dataset.from === n.dataset.node).map((e) => name.get(e.dataset.to) || e.dataset.to);
     return `<li>${esc(name.get(n.dataset.node))}${extra.length ? ` (${esc(extra.join(", "))})` : ""}${next.length ? ` → ${esc(next.join(", "))}` : ""}</li>`;
   });
   const label = caption ? ` aria-label="${esc(caption)}"` : "";
   const rows = edges.length
-    ? edges.map((e) => `<tr><td>${esc(name.get(e.dataset.from))}</td><td>${esc(name.get(e.dataset.to))}</td><td>${esc(e.dataset.fvalue || "")}</td></tr>`)
+    ? edges.map((e) => `<tr><td>${esc(name.get(e.dataset.from))}</td><td>${esc(name.get(e.dataset.to))}</td><td>${esc(e.dataset.vtext || "")}</td></tr>`)
     : [];
   const table = edges.length
     ? `<table class="dp-dv"${caption ? ` aria-label="${esc(caption)}: connections"` : ""}><thead><tr><th scope="col">From</th><th scope="col">To</th><th scope="col">Value</th></tr></thead><tbody>${rows.join("")}</tbody></table>`
     : `<table class="dp-dv"${label}><thead><tr><th scope="col">Step</th><th scope="col">Value</th></tr></thead><tbody>${nodes
-        .map((n) => `<tr><td>${esc(name.get(n.dataset.node))}</td><td>${esc(n.dataset.fvalue || "")}</td></tr>`)
+        .map((n) => `<tr><td>${esc(name.get(n.dataset.node))}</td><td>${esc(n.dataset.vtext || "")}</td></tr>`)
         .join("")}</tbody></table>`;
   return `<ol class="dp-diagram-steps"${label}>${items.join("")}</ol>${table}`;
 }
