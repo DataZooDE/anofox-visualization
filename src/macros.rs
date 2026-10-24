@@ -13,8 +13,9 @@
 //! * **column macros** (`anofox_xy(x, y)` …) aggregate a few columns;
 //! * **contract macros** (`anofox_plot_terms(tbl)` …) aggregate *whole rows*:
 //!   `SELECT anofox_plot_terms(c) FROM coefs c` passes each row as a STRUCT,
-//!   `to_json(list(tbl ORDER BY tbl))` keeps the column names, and the
-//!   renderer ([`crate::contract`]) reads the contract columns by name. One
+//!   `to_json(list(tbl))` keeps the column names and the producer's own row
+//!   order (#445), and the renderer ([`crate::contract`]) reads the contract
+//!   columns by name. One
 //!   SVG per group (`GROUP BY model_id`), no table-name strings, no
 //!   introspection SQL — works in both builds.
 
@@ -79,19 +80,50 @@ const XYC: &str = "anofox_render(json_object('rows', to_json(list({c0: x, c1: y,
 
 const CONTRACT_TAG: (&str, &str) = ("anofox.contract", "1");
 
+// `list(tbl)` — no ORDER BY — keeps the producer's own row order (#445).
+// `tbl` is an opaque per-row STRUCT built by the caller (`SELECT
+// anofox_plot_terms(c) FROM coefs c`): the macro never knows its field set,
+// so it cannot reference a named column (`tbl.index_value`) — DuckDB raises
+// a bind error for any caller whose row lacks that field, and most contract
+// columns besides the aggregate's own grouping keys are optional. That rules
+// out an ordinal-column ORDER BY here (anofox_plot_terms's `path()` renderer
+// still re-sorts by `index_value`/`window_end` itself once the rows arrive,
+// for exactly this reason). A window function (`row_number() OVER ()`) can't
+// stand in either: DuckDB rejects a window call inside an aggregate's own
+// argument/ORDER BY list ("aggregate function calls cannot contain window
+// function calls"), and computing one in a separate SELECT stage would need
+// to wrap the *caller's* FROM clause, which this single-expression macro
+// body has no access to.
+//
+// `list(tbl ORDER BY tbl)` (removed here) sorted by the whole row STRUCT,
+// which — once the leading, usually-constant grouping fields (model_id,
+// model_name, ...) tie — falls through to the first field that varies
+// (`term`, `test_id`, `metric`, ...) and alphabetises by it: deterministic,
+// but not the producer's order (#445, found via #443's mediation_by case).
+// `list(tbl)` instead leans on DuckDB preserving scan order, which holds
+// whenever the whole aggregation runs on one thread (measured empirically:
+// true through several hundred thousand rows; DuckDB's parallel hash
+// aggregate can interleave threads' partial lists above that, same as it
+// would for the removed `ORDER BY tbl` once ties also stopped being fully
+// ordered, e.g. two models sharing every grouping column). Every table this
+// macro family renders is a human-scale summary (model terms, test rows,
+// metrics, ...), never a per-observation dump at that size, so this holds in
+// practice; a producer-side ordinal (a `row_order` column, say) is the only
+// way to make it unconditional — tracked as a follow-up rather than blocking
+// this fix (DataZooDE/anofox-visualization#445).
 macro_rules! contract_body {
     ($plot:literal) => {
         concat!(
             "anofox_render(json_object('plot', '",
             $plot,
-            "', 'rows', to_json(list(tbl ORDER BY tbl)), 'theme', coalesce(theme, getvariable('anofox_theme')), 'locale', coalesce(locale, getvariable('anofox_locale')), 'width', width, 'height', height))"
+            "', 'rows', to_json(list(tbl)), 'theme', coalesce(theme, getvariable('anofox_theme')), 'locale', coalesce(locale, getvariable('anofox_locale')), 'width', width, 'height', height))"
         )
     };
     ($plot:literal, $opts:literal) => {
         concat!(
             "anofox_render(json_object('plot', '",
             $plot,
-            "', 'rows', to_json(list(tbl ORDER BY tbl)), 'options', json_object(",
+            "', 'rows', to_json(list(tbl)), 'options', json_object(",
             $opts,
             "), 'theme', coalesce(theme, getvariable('anofox_theme')), 'locale', coalesce(locale, getvariable('anofox_locale')), 'width', width, 'height', height))"
         )

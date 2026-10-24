@@ -1,20 +1,23 @@
-//! `anofox_plot_terms` on a `mediation_by` output (#409): the producer's
-//! own `acme, ade, total, prop_mediated` order must survive
-//! `anofox_plot_terms`'s aggregation (`list(tbl ORDER BY tbl)`, which
-//! otherwise alphabetises by `term`), and `prop_mediated` — a ratio, not an
+//! `anofox_plot_terms` on a `mediation_by` output (#409, #445): the
+//! producer's own `acme, ade, total, prop_mediated` order must survive
+//! `anofox_plot_terms`'s aggregation (`list(tbl)`, `src/macros.rs` — #445
+//! dropped the `ORDER BY tbl` that used to alphabetise by `term`, the
+//! struct's first varying field), and `prop_mediated` — a ratio, not an
 //! outcome-unit effect — gets its own small panel.
 
 use anofox_visualization::sql::contract_call::render_call;
 
-/// `mediation_by`'s rows, as `anofox_plot_terms`'s own aggregation macro
-/// would hand them to the renderer: alphabetised by the whole row struct
-/// (`term` being the first field that varies) — `acme, ade, prop_mediated,
-/// total` — not the producer's own `acme, ade, total, prop_mediated`.
+/// `mediation_by`'s rows, in the producer's own order (`acme, ade, total,
+/// prop_mediated`) — what `anofox_plot_terms`'s aggregation macro now hands
+/// the renderer unchanged (#445; it used to alphabetise by `term` instead,
+/// `acme, ade, prop_mediated, total`, which `terms.rs` had its own
+/// mediation-specific reorder to undo — #443, removed once this held
+/// without it).
 const MEDIATION_ROWS: &str = r#"[
     {"term": "acme", "estimate": 1.2, "conf_low": -0.4, "conf_high": 2.8, "conf_level": 0.95, "model_id": "mediation"},
     {"term": "ade", "estimate": -0.6, "conf_low": -2.6, "conf_high": 1.4, "conf_level": 0.95, "model_id": "mediation"},
-    {"term": "prop_mediated", "estimate": 0.22, "conf_low": -0.05, "conf_high": 0.49, "conf_level": 0.95, "model_id": "mediation"},
-    {"term": "total", "estimate": 0.6, "conf_low": -1.4, "conf_high": 2.6, "conf_level": 0.95, "model_id": "mediation"}
+    {"term": "total", "estimate": 0.6, "conf_low": -1.4, "conf_high": 2.6, "conf_level": 0.95, "model_id": "mediation"},
+    {"term": "prop_mediated", "estimate": 0.22, "conf_low": -0.05, "conf_high": 0.49, "conf_level": 0.95, "model_id": "mediation"}
 ]"#;
 
 fn render(rows: &str) -> String {
