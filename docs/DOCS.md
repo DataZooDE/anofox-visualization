@@ -2031,6 +2031,7 @@ with the browser through wasm):
 | `-- @astables on` \| `off` | Shows the "▦ Charts as tables" bar on this dashboard for every viewer — off (no bar) by default, or with `off`. A viewer can still turn the feature itself on or off from the toolbar's **⋯ → Charts as tables** menu item whether or not the bar is shown; their choice is remembered across dashboards. |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
+| `-- @shared <name>, …` | Directly above one `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement: documents that *this* directive deliberately reuses `<name>` with another one, so `dashboard --check --strict` skips `interaction/rowselect-shared-name` / `interaction/name-clash` for it — every other clash still is flagged. See *Selecting table rows* below. |
 
 `dashboard --check` warns about an empty `@nav` (`header/empty-nav`), one
 longer than 24 characters (`header/long-nav`), an empty `@group`
@@ -2432,6 +2433,25 @@ in different `::TAB`s) silently share one selection — a click in either
 toggles both, which looks like nothing happened. `dashboard --check` flags
 this (`interaction/rowselect-shared-name`); alias one table's first column
 to a different name if the sharing isn't intended.
+
+Sometimes it *is* intended — several registers deliberately fanning in to one
+detail panel, or a dropdown input and a `::ROWSELECT` table meant to hand a
+selection to each other either way. Put `-- @shared <name>` directly above
+the `::ROWSELECT` (or input) that would otherwise be flagged, naming the
+variable it shares:
+
+```sql
+-- @shared item
+SELECT 'single'::ROWSELECT;
+SELECT name AS item ::TABLE, id * 2 AS "Doubled" FROM items;
+```
+
+`--check --strict` then skips `interaction/rowselect-shared-name` /
+`interaction/name-clash` for just that variable on that one directive — every
+other clash on the dashboard still is flagged. A `-- @shared` name this
+directive doesn't itself end up setting (a typo, or the wrong column) is
+flagged on its own (`interaction/shared-unused`), so a mistyped name never
+silently disables nothing.
 
 #### Named chart selections (`::SELECT_AS`)
 

@@ -3467,64 +3467,67 @@ fn cartesian(
     // (`::REFLINE`/`::YLINE` — an average line, min/max bands, thresholds…)
     // and vertical (`::XLINE`, a continuous x). Data-mapped hlines/vlines:
     // they train their axis, appear in every facet panel and survive
-    // coord_flip.
+    // coord_flip. A statement can carry more than one `::REFLINE` (or
+    // `::XLINE`) column — e.g. an alert band's lower and upper edge — and
+    // every one of them draws its own line(s) (#471; previously only the
+    // first `::REFLINE` column was read via `find_role`, so the second was
+    // silently dropped).
     let flipped = cols.iter().any(|c| c.role == Role::Flip);
     for (role, col, vertical) in [
         (Role::RefLine, "yintercept", false),
         (Role::VLine, "xintercept", true),
     ] {
-        let Some(c) = find_role(cols, role) else {
-            continue;
-        };
-        let vals: Vec<Value> = if vertical {
-            xline_values(&c.values)
-        } else {
-            distinct_nums(&c.values)
-                .into_iter()
-                .map(Value::Float)
-                .collect()
-        };
-        if vals.is_empty() {
-            continue;
+        for c in cols.iter().filter(|c| c.role == role) {
+            let vals: Vec<Value> = if vertical {
+                xline_values(&c.values)
+            } else {
+                distinct_nums(&c.values)
+                    .into_iter()
+                    .map(Value::Float)
+                    .collect()
+            };
+            if vals.is_empty() {
+                continue;
+            }
+            let frame = vec![(col.to_string(), vals)];
+            // A quiet dashed rule in the chart text colour (not ggplot's black).
+            let ink = o.theme.chart_text();
+            plot = if vertical {
+                plot.geom_vline_aes_with(
+                    GeomVline {
+                        xintercept: 0.0,
+                        color: ink,
+                        width: 0.8,
+                        linetype: Linetype::Dashed,
+                        alpha: 1.0,
+                    },
+                    Aes::new().xintercept(col),
+                )
+                .layer_data(frame)
+                // An `::XLINE`'s tooltip is just its value (`2026-10-12`), not
+                // `x = 2026-10-12`: `geom_vline` now reads a `.tooltip()`
+                // template (ggplot-rs 0.22.2, sipemu/ggplot-rs#165), replacing
+                // its default `"x = …"` label, instead of the old
+                // `without_xline_prefix` SVG string-surgery. `{xintercept}` is
+                // formatted through the x scale (B2-4), so a `Value::DateTime`
+                // refline still shows its date text, not a raw epoch number.
+                // A `::REFLINE`/`::YLINE`'s default `"y = …"` label is left
+                // untouched, as before #326.
+                .tooltip("{xintercept}")
+            } else {
+                plot.geom_hline_aes_with(
+                    GeomHline {
+                        yintercept: 0.0,
+                        color: ink,
+                        width: 0.8,
+                        linetype: Linetype::Dashed,
+                        alpha: 1.0,
+                    },
+                    Aes::new().yintercept(col),
+                )
+                .layer_data(frame)
+            };
         }
-        let frame = vec![(col.to_string(), vals)];
-        // A quiet dashed rule in the chart text colour (not ggplot's black).
-        let ink = o.theme.chart_text();
-        plot = if vertical {
-            plot.geom_vline_aes_with(
-                GeomVline {
-                    xintercept: 0.0,
-                    color: ink,
-                    width: 0.8,
-                    linetype: Linetype::Dashed,
-                    alpha: 1.0,
-                },
-                Aes::new().xintercept(col),
-            )
-            .layer_data(frame)
-            // An `::XLINE`'s tooltip is just its value (`2026-10-12`), not
-            // `x = 2026-10-12`: `geom_vline` now reads a `.tooltip()`
-            // template (ggplot-rs 0.22.2, sipemu/ggplot-rs#165), replacing
-            // its default `"x = …"` label, instead of the old
-            // `without_xline_prefix` SVG string-surgery. `{xintercept}` is
-            // formatted through the x scale (B2-4), so a `Value::DateTime`
-            // refline still shows its date text, not a raw epoch number.
-            // A `::REFLINE`/`::YLINE`'s default `"y = …"` label is left
-            // untouched, as before #326.
-            .tooltip("{xintercept}")
-        } else {
-            plot.geom_hline_aes_with(
-                GeomHline {
-                    yintercept: 0.0,
-                    color: ink,
-                    width: 0.8,
-                    linetype: Linetype::Dashed,
-                    alpha: 1.0,
-                },
-                Aes::new().yintercept(col),
-            )
-            .layer_data(frame)
-        };
     }
     plot = data_annotations(plot, o, kind, cols, &data, x_discrete);
     // Threshold lines (`::THRESHOLDS`): one at each bound where the status
@@ -3853,18 +3856,19 @@ fn hist_bin_of(v: f64, edges: &[f64]) -> Option<usize> {
         .or(Some(edges.len() - 2))
 }
 
-/// A histogram of the measure column — one bar series per `::CATEGORY`
-/// group would need `GeomHistogram` to read a fill/color aesthetic per row,
-/// which it doesn't (unlike `GeomDensity`); `--check` warns `::CATEGORY` is
-/// dropped here (see `lint::histogram_diags`) until that's fixed upstream in
-/// ggplot-rs. `::FACET`/`::FACET_FREE` (one panel per value, #423),
-/// `::HIST_BINS` (a bin count or explicit edges) and `::HIST_NORM 'share'`
-/// (each panel normalised to its own share of 1, so reference/current
-/// periods of different sizes compare) all work: without any of them, this
-/// takes ggplot-rs's own `GeomHistogram`/`StatBin` unchanged (byte-identical
-/// output to before #423); with any of them, bins are computed here first —
-/// shared across every panel — and drawn as pre-aggregated bars
-/// (`StatIdentity`) so the panels/shares line up.
+/// A histogram of the measure column. `::CATEGORY` draws one bar series per
+/// group, overlaid with alpha (#446 — ggplot-rs 0.28's `GeomHistogram` now
+/// reads a per-row fill aesthetic, same as `GeomDensity`); `::FACET`/
+/// `::FACET_FREE` (one panel per value, #423), `::HIST_BINS` (a bin count or
+/// explicit edges) and `::HIST_NORM 'share'` (each group normalised to its
+/// own share of 1, so reference/current periods of different sizes compare)
+/// all work too, any combined. Without any of them, this takes ggplot-rs's
+/// own `GeomHistogram`/`StatBin` unchanged (byte-identical output to before
+/// #423); with any of them, bins are computed here first — pooled over every
+/// row, so every group/panel shares the same edges — and drawn as
+/// pre-aggregated bars (`StatIdentity`) so groups/panels/shares line up. No
+/// `::POSITION` role exists yet for an explicit dodge; overlay (the default)
+/// is the only layout `::CATEGORY` draws.
 fn render_histogram(
     o: &RenderOptions,
     value: &Column,
@@ -3876,10 +3880,11 @@ fn render_histogram(
     let facet = cols
         .iter()
         .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
+    let category = cols.iter().find(|c| c.role == Role::Category);
     let bins_spec = role_str(cols, Role::HistBins);
     let share = role_str(cols, Role::HistNorm).is_some_and(|s| s.eq_ignore_ascii_case("share"));
 
-    if facet.is_none() && bins_spec.is_none() && !share {
+    if facet.is_none() && category.is_none() && bins_spec.is_none() && !share {
         let data = vec![("x".to_string(), value.values.clone())];
         let mut plot = GGPlot::new(data)
             .aes(Aes::new().x("x"))
@@ -3898,11 +3903,18 @@ fn render_histogram(
 
     let edges = hist_edges(&value.values, bins_spec.as_deref());
     let n_bins = edges.len() - 1;
-    // Each panel's own total (valid, in-range) row count, for `::HIST_NORM`.
-    let panel_of =
+    // Each (category, facet) group's own total (valid, in-range) row count,
+    // for `::HIST_NORM`: a group's share is of its own count, not pooled
+    // across categories or panels.
+    let cat_of =
+        |i: usize| -> String { category.map_or_else(String::new, |c| value_str(&c.values[i])) };
+    let facet_of =
         |i: usize| -> String { facet.map_or_else(String::new, |f| value_str(&f.values[i])) };
-    let mut counts: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
-    let mut totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let group_of = |i: usize| -> (String, String) { (cat_of(i), facet_of(i)) };
+    let mut counts: std::collections::HashMap<(String, String), Vec<f64>> =
+        std::collections::HashMap::new();
+    let mut totals: std::collections::HashMap<(String, String), f64> =
+        std::collections::HashMap::new();
     for i in 0..value.values.len() {
         let Some(v) = value.values[i].as_f64().filter(|f| f.is_finite()) else {
             continue;
@@ -3910,25 +3922,30 @@ fn render_histogram(
         let Some(bin) = hist_bin_of(v, &edges) else {
             continue;
         };
-        let panel = panel_of(i);
-        counts
-            .entry(panel.clone())
-            .or_insert_with(|| vec![0.0; n_bins])[bin] += 1.0;
-        *totals.entry(panel).or_insert(0.0) += 1.0;
+        let g = group_of(i);
+        counts.entry(g.clone()).or_insert_with(|| vec![0.0; n_bins])[bin] += 1.0;
+        *totals.entry(g).or_insert(0.0) += 1.0;
     }
-    // Panels in first-seen order (facet panels keep the SQL's row order).
-    let mut panels: Vec<String> = Vec::new();
+    // Groups in first-seen order (facet panels, and the category legend,
+    // keep the SQL's row order).
+    let mut groups: Vec<(String, String)> = Vec::new();
     for i in 0..value.values.len() {
-        let p = panel_of(i);
-        if !panels.contains(&p) {
-            panels.push(p);
+        let g = group_of(i);
+        if !groups.contains(&g) {
+            groups.push(g);
         }
     }
-    let (mut xmin, mut xmax, mut xmid, mut y, mut fac) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for p in &panels {
-        let cs = counts.get(p).cloned().unwrap_or_else(|| vec![0.0; n_bins]);
-        let total = totals.get(p).copied().unwrap_or(0.0);
+    let (mut xmin, mut xmax, mut xmid, mut y, mut fac, mut cat) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    for g in &groups {
+        let cs = counts.get(g).cloned().unwrap_or_else(|| vec![0.0; n_bins]);
+        let total = totals.get(g).copied().unwrap_or(0.0);
         for b in 0..n_bins {
             let (lo, hi) = (edges[b], edges[b + 1]);
             xmin.push(Value::Float(lo));
@@ -3940,7 +3957,8 @@ fn render_histogram(
             } else {
                 raw
             }));
-            fac.push(Value::Str(p.clone()));
+            cat.push(Value::Str(g.0.clone()));
+            fac.push(Value::Str(g.1.clone()));
         }
     }
     let mut data: Vec<(String, Vec<Value>)> = vec![
@@ -3949,7 +3967,11 @@ fn render_histogram(
         ("xmax".to_string(), xmax),
         ("y".to_string(), y),
     ];
-    let aes = Aes::new().x("x").xmin("xmin").xmax("xmax").y("y");
+    let mut aes = Aes::new().x("x").xmin("xmin").xmax("xmax").y("y");
+    if category.is_some() {
+        data.push(("cat".to_string(), cat));
+        aes = aes.fill("cat");
+    }
     if facet.is_some() {
         data.push(("facet".to_string(), fac));
     }
@@ -3958,11 +3980,23 @@ fn render_histogram(
         .geom_histogram_with(GeomHistogram {
             fill: o.brand(),
             color: o.theme.colors.card,
+            // Overlaid groups need to show through each other; a single
+            // series keeps the solid default (unused when fill isn't
+            // data-mapped, since `GeomHistogram` only applies alpha, not a
+            // flat tint, per row).
+            alpha: if category.is_some() { 0.6 } else { 1.0 },
             ..Default::default()
         })
         .stat(StatIdentity)
         .house_theme(o)
         .primary_color(o.brand());
+    if let Some(cat_col) = category {
+        plot = plot
+            .scale_fill(dz_scale(o, Aesthetic::Fill, cat_col))
+            .legend_position(
+                legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
+            );
+    }
     if let Some(f) = facet {
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
@@ -5386,6 +5420,195 @@ fn render_sparkbar(
     Ok(Panel::plot(plot, w, h))
 }
 
+/// Finish a [`Panel`] built outside the usual `cols`-driven pipeline
+/// (#463's mini-chart renderers, below): the same `localized`/
+/// `with_motion_attrs`/`finish`/[`finish_touches`] steps
+/// [`render_placed`] runs, with an empty `cols` — these charts have no
+/// `::ROLE` cast to carry a locale-affecting x axis or a motion-attr
+/// role, and no `::YFORMAT`-style custom formatter to thread through
+/// `finish_touches`'s `with_formatted_values`.
+fn finish_mini(panel: Panel, o: &RenderOptions, place: Place) -> Result<String, String> {
+    let (svg, _warnings) = panel
+        .localized(o, &[])
+        .with_motion_attrs(&[])
+        .finish(place)?;
+    Ok(finish_touches(svg, &[], o))
+}
+
+/// Shared by the #463 "mini chart" wasm exports (`render_mini_hist`,
+/// `render_mini_overlay`) — not reachable from SQL (no `::ROLE`): these
+/// draw app-chrome widgets built from data the browser already has
+/// client-side (a column's own histogram bin counts, computed by Explore
+/// data's profiler or the table's own column-stats row), not a dashboard
+/// query result, so there's no `Column`/`Role` to route through
+/// `render_inner`'s dispatch. One bar per value, `x` = its index.
+/// `labels[i]`, if given, becomes bar `i`'s own hover tip prefix
+/// (`"{label}: {value}"`, ggplot-rs's own `GeomCol` tip format) — e.g. a
+/// histogram's bin range; `None` leaves every bar with just its bare
+/// value (ggplot-rs's default). `alpha` is the fill's own opacity (`0.0`
+/// draws an outline only — the stroke is unaffected by `fill-opacity`,
+/// ggplot-rs's `RectStyle`/`svg_backend::rect_markup`), so the same
+/// building block covers a single always-filled histogram (xpMini,
+/// st-hist, #463) and (via [`render_mini_overlay`]) a filled B over an
+/// outline-only A.
+fn mini_hist_plot(
+    values: &[f64],
+    labels: Option<&[String]>,
+    fill: (u8, u8, u8),
+    stroke: (u8, u8, u8),
+    alpha: f64,
+    bar_width: f64,
+) -> GGPlot {
+    let n = values.len();
+    let xs: Vec<Value> = (0..n).map(|i| Value::Float(i as f64)).collect();
+    let mut data = vec![
+        ("x".to_string(), xs),
+        (
+            "y".to_string(),
+            values.iter().map(|&v| Value::Float(v)).collect(),
+        ),
+    ];
+    let mut aes = Aes::new().x("x").y("y");
+    if let Some(labels) = labels {
+        data.push((
+            "label".to_string(),
+            labels.iter().cloned().map(Value::Str).collect(),
+        ));
+        aes = aes.label("label");
+    }
+    GGPlot::new(data).aes(aes).geom_col_with(GeomCol {
+        fill,
+        color: stroke,
+        alpha,
+        width: bar_width,
+    })
+}
+
+/// A pre-binned histogram (the caller already computed the bin counts) —
+/// Explore data's card histogram (`xpMini`) and the table's own
+/// column-profile row (`st-hist`), #463. `labels_json`, if not `""`, is a
+/// JSON array of per-bar hover-tip text, same length as `values` (a bin's
+/// own range, e.g. `"10 – 20"`); `fill_alpha` matches each caller's own
+/// previous hand-drawn look (`st-hist`: `0.55`, translucent;`xpMini`:
+/// `1.0`, opaque).
+pub fn render_mini_hist(
+    values_json: &str,
+    labels_json: &str,
+    fill_alpha: f64,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> Result<String, RenderError> {
+    guard(|| {
+        let o = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        let values: Vec<f64> = serde_json::from_str(values_json)
+            .map_err(|e| RenderError::BadSpec(format!("values JSON: {e}")))?;
+        let labels: Option<Vec<String>> = if labels_json.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::from_str(labels_json)
+                    .map_err(|e| RenderError::BadSpec(format!("labels JSON: {e}")))?,
+            )
+        };
+        let accent = o.brand();
+        let plot = mini_hist_plot(&values, labels.as_deref(), accent, accent, fill_alpha, 0.86)
+            .scale_y_continuous(
+                ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.05, 0.0),
+            )
+            .house_void(&o);
+        // Same compact-width clamp as render_sparkbar, for the same reason
+        // (crisp strokes once scaled down) — a higher cap than the fixed
+        // table-spark cells' 240: both callers (a fluid-width Explore card,
+        // the table's own fluid stats row) can legitimately ask for more.
+        let w = width.min(400);
+        let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+        let svg = finish_mini(Panel::plot(plot, w, h), &o, Place::At(0.0, 0.0))
+            .map_err(RenderError::Render)?;
+        Ok(svg)
+    })
+}
+
+/// Two pre-binned histograms on one shared y scale, A as an outline, B
+/// filled — Explore data's distribution-comparison overlay (`xpOverlay`),
+/// #463. No per-bar labels (the caller's own single whole-svg
+/// `aria-label` already names the comparison).
+pub fn render_mini_overlay(
+    a_json: &str,
+    b_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> Result<String, RenderError> {
+    guard(|| {
+        let o = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        let a: Vec<f64> = serde_json::from_str(a_json)
+            .map_err(|e| RenderError::BadSpec(format!("a JSON: {e}")))?;
+        let b: Vec<f64> = serde_json::from_str(b_json)
+            .map_err(|e| RenderError::BadSpec(format!("b JSON: {e}")))?;
+        let xs = |len: usize| -> Vec<Value> { (0..len).map(|i| Value::Float(i as f64)).collect() };
+        // Train the shared y scale on both series, same reasoning as
+        // render_sparkbar's own combined-training base layer (#425): A
+        // never dwarfs, or is dwarfed by, B's own scale.
+        let mut combined: Vec<Value> = b.iter().map(|&v| Value::Float(v)).collect();
+        combined.extend(a.iter().map(|&v| Value::Float(v)));
+        let mut combined_x = xs(b.len());
+        combined_x.extend(xs(a.len()));
+        let base_data = vec![("x".to_string(), combined_x), ("y".to_string(), combined)];
+
+        let accent = o.brand();
+        let ink = o.theme.colors.ink;
+
+        // B first (filled, underneath), A second (outline, on top) — the
+        // same paint order the hand-drawn version used (`bars(h.b) +
+        // bars(h.a)`), so A's outline stays crisp over B's fill where the
+        // two overlap.
+        let b_data = vec![
+            ("x".to_string(), xs(b.len())),
+            (
+                "y".to_string(),
+                b.iter().map(|&v| Value::Float(v)).collect(),
+            ),
+        ];
+        let a_data = vec![
+            ("x".to_string(), xs(a.len())),
+            (
+                "y".to_string(),
+                a.iter().map(|&v| Value::Float(v)).collect(),
+            ),
+        ];
+        let plot = GGPlot::new(base_data)
+            .aes(Aes::new().x("x").y("y"))
+            .geom_col_with(GeomCol {
+                fill: accent,
+                color: accent,
+                alpha: 0.55,
+                width: 0.86,
+            })
+            .layer_data(b_data)
+            .layer_aes(Aes::new().x("x").y("y"))
+            .position(PositionIdentity)
+            .geom_col_with(GeomCol {
+                fill: ink,
+                color: ink,
+                alpha: 0.0,
+                width: 0.86,
+            })
+            .layer_data(a_data)
+            .layer_aes(Aes::new().x("x").y("y"))
+            .position(PositionIdentity)
+            .scale_y_continuous(
+                ggplot_rs::scale::continuous::ScaleContinuous::new().with_expand(0.05, 0.0),
+            )
+            .house_void(&o);
+        let w = width.min(400);
+        let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+        let svg = finish_mini(Panel::plot(plot, w, h), &o, Place::At(0.0, 0.0))
+            .map_err(RenderError::Render)?;
+        Ok(svg)
+    })
+}
+
 /// Blend a colour toward black by `t` (0 = unchanged, 1 = black).
 pub(crate) fn darken((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
     let f = |c: u8| (c as f64 * (1.0 - t)).round() as u8;
@@ -5519,11 +5742,18 @@ fn data_annotations(
         plot = top_labels(plot, xs, ls);
     }
 
-    // Reference-line labels above the line's right end.
-    if let (Some(line), Some(lab)) = (
-        find_role(cols, Role::RefLine),
-        find_role(cols, Role::RefLineLabel),
-    ) {
+    // Reference-line labels above the line's right end. A statement can
+    // carry more than one `::REFLINE` column (#471); a single
+    // `::REFLINE_LABEL` column labels every one of them, and several label
+    // columns pair with the `::REFLINE` columns by position (same rule as
+    // `::BAND_LOWER`/`::BAND_UPPER`, see `band_pairs`) — the trailing,
+    // unpaired lines (more lines than labels) draw without a label.
+    let ref_lines: Vec<&Column> = cols.iter().filter(|c| c.role == Role::RefLine).collect();
+    let ref_labels: Vec<&Column> = cols
+        .iter()
+        .filter(|c| c.role == Role::RefLineLabel)
+        .collect();
+    if !ref_lines.is_empty() && !ref_labels.is_empty() {
         let xcol = data.iter().find(|(k, _)| k == "x").map(|(_, v)| v);
         let right = xcol.and_then(|xs| {
             if x_discrete {
@@ -5537,14 +5767,22 @@ fn data_annotations(
         });
         let mut seen = std::collections::HashSet::new();
         let (mut ys, mut ls) = (vec![], vec![]);
-        for (i, v) in line.values.iter().enumerate() {
-            let Some(y) = v.as_f64().filter(|f| f.is_finite()) else {
-                continue;
+        for (li, line) in ref_lines.iter().enumerate() {
+            let lab = if ref_labels.len() == 1 {
+                Some(ref_labels[0])
+            } else {
+                ref_labels.get(li).copied()
             };
-            if let Some(l) = text_at(Some(lab), i) {
-                if ys.len() < MAX_NOTES && seen.insert((y.to_bits(), l.clone())) {
-                    ys.push(y);
-                    ls.push(l);
+            let Some(lab) = lab else { continue };
+            for (i, v) in line.values.iter().enumerate() {
+                let Some(y) = v.as_f64().filter(|f| f.is_finite()) else {
+                    continue;
+                };
+                if let Some(l) = text_at(Some(lab), i) {
+                    if ys.len() < MAX_NOTES && seen.insert((y.to_bits(), l.clone())) {
+                        ys.push(y);
+                        ls.push(l);
+                    }
                 }
             }
         }

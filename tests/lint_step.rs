@@ -66,7 +66,15 @@ fn lint_step_matches_the_native_lint() {
                         .or_insert_with(|| duckdb(q))
                         .clone()
                 },
-                LintOptions { design },
+                LintOptions {
+                    design,
+                    // `duckdb(q)` above is a fresh in-memory session per
+                    // call — the same shape `lint_step`'s `scratchRunner`
+                    // drives in the browser — so both sides must replay
+                    // the same prelude text for the query strings (and so
+                    // the `cache`) to line up.
+                    stateful_session: false,
+                },
             );
             let want: Vec<serde_json::Value> = native.iter().map(|d| d.to_json()).collect();
 

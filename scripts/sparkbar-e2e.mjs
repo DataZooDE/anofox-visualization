@@ -5,12 +5,16 @@
 // real browser:
 //   - the cell's SVG is ggplot-rs output: gg-mark rects (data-geom="col"),
 //     the expected bar count for a single series and a ref/cur pair.
-//   - the cell's drawn content fits inside its own bounding box — the
-//     render_sparkbar panel floor clamp (50px, same as render_sparkline's
-//     #457 fix) paired with preserveAspectRatio="none" on the returned SVG
-//     (cellSparkbar, web/app.js), so a taller internal viewBox stretch-fills
-//     the cell's fixed CSS size instead of letterboxing a narrower, centred
-//     chart or clipping a bar's own baseline off the bottom.
+//   - the cell's drawn content fits inside its own bounding box, and does
+//     so via a UNIFORM downscale, not a stretch: the render_sparkbar panel
+//     floor clamp (50px, same as render_sparkline's #457 fix) means the
+//     returned svg's own viewBox is taller than this cell's own fixed CSS
+//     box, so cellSparkbar requests a WIDER panel too, matched to the
+//     cell's own aspect ratio (`sparkRequestSize`, web/app.js, #476
+//     review) — no `preserveAspectRatio="none"` override: that would scale
+//     the two axes unevenly (fine for a rect, but the same request size
+//     this function shares with cellSpark's circular endpoint marker needs
+//     a uniform scale, so neither cell overrides it).
 //
 //   cargo build --lib --target wasm32-unknown-unknown --profile wasm --no-default-features --features wasm
 //   wasm-bindgen --target web --out-dir web/pkg --out-name anofox_visualization <target>/wasm32-unknown-unknown/wasm/anofox_visualization.wasm
@@ -34,20 +38,17 @@ const check = (ok, m) => (ok ? console.log("ok   " + m) : (bad++, console.error(
 // One single-series bucket list, one ref/cur comparison list — the two
 // ::SPARKBAR cell shapes `cellSparkbar` (web/app.js) and `render_sparkbar`
 // (src/lib.rs) both handle.
-// Numeric literals cast to DOUBLE: DuckDB infers a bare decimal literal
-// (0.1, …) as DECIMAL, and rowsJson's unscale-back-to-DOUBLE step (web/
-// lint.js) only looks at a row's own top-level columns, not a DECIMAL
-// nested inside a LIST/STRUCT — so an uncast literal here would reach
-// cellSparkbar as the raw unscaled mantissa, unrelated to the bug this
-// e2e covers.
+// Bare decimal literals (0.1, …, DuckDB's own DECIMAL inference) — #468
+// fixed rowsJson's unscale step to walk a DECIMAL nested inside a LIST/
+// STRUCT/MAP, so this no longer needs a ::DOUBLE cast to route around it.
 const SQL = `SELECT f AS feature ::TABLE,
        list(share ORDER BY bucket) AS "Single" ::SPARKBAR,
        list({'ref': r, 'cur': c} ORDER BY bucket) AS "RefCur" ::SPARKBAR
 FROM (VALUES
-    ('temp', 1, 0.1::DOUBLE, 0.1::DOUBLE, 0.3::DOUBLE),
-    ('temp', 2, 0.2::DOUBLE, 0.3::DOUBLE, 0.3::DOUBLE),
-    ('temp', 3, 0.3::DOUBLE, 0.4::DOUBLE, 0.2::DOUBLE),
-    ('temp', 4, 0.4::DOUBLE, 0.2::DOUBLE, 0.2::DOUBLE)
+    ('temp', 1, 0.1, 0.1, 0.3),
+    ('temp', 2, 0.2, 0.3, 0.3),
+    ('temp', 3, 0.3, 0.4, 0.2),
+    ('temp', 4, 0.4, 0.2, 0.2)
 ) t(f, bucket, share, r, c)
 GROUP BY f;
 `;
@@ -93,7 +94,10 @@ const refCur = cells[1];
 if (single) {
   check(single.rectCount === 4, `single-series cell draws 4 bars (one per bucket), found ${single.rectCount}`);
   check(single.everyRectIsGgMark, "single-series cell's bars are ggplot-rs marks (gg-mark gg-bar, data-geom=\"col\"), not hand-drawn SVG");
-  check(single.preserveAspectRatio === "none", `single-series cell's svg stretch-fills its box (preserveAspectRatio="none"), found ${JSON.stringify(single.preserveAspectRatio)}`);
+  check(
+    single.preserveAspectRatio !== "none",
+    `single-series cell's svg scales uniformly (no preserveAspectRatio="none"), found ${JSON.stringify(single.preserveAspectRatio)}`
+  );
 } else {
   check(false, "no single-series ::SPARKBAR cell found");
 }
@@ -101,7 +105,10 @@ if (single) {
 if (refCur) {
   check(refCur.rectCount === 8, `ref/cur cell draws 8 bars (4 ref + 4 cur), found ${refCur.rectCount}`);
   check(refCur.everyRectIsGgMark, "ref/cur cell's bars are ggplot-rs marks (gg-mark gg-bar, data-geom=\"col\"), not hand-drawn SVG");
-  check(refCur.preserveAspectRatio === "none", `ref/cur cell's svg stretch-fills its box (preserveAspectRatio="none"), found ${JSON.stringify(refCur.preserveAspectRatio)}`);
+  check(
+    refCur.preserveAspectRatio !== "none",
+    `ref/cur cell's svg scales uniformly (no preserveAspectRatio="none"), found ${JSON.stringify(refCur.preserveAspectRatio)}`
+  );
 } else {
   check(false, "no ref/cur ::SPARKBAR cell found");
 }

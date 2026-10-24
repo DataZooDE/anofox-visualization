@@ -11,8 +11,12 @@
 //! that flag and exits with "Unknown Option Error" on it, so we can only pass
 //! it after confirming the CLI is new enough.
 
-use std::process::Command;
-use std::sync::OnceLock;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 /// This build's DuckDB pin (`.duckdb-version`, the release pin -- untouched
 /// by #352's groundwork).
@@ -100,6 +104,365 @@ fn cli_info(bin: &str) -> &'static CliInfo {
 pub fn prepare(bin: &str, cmd: &mut Command) {
     if cli_info(bin).supports_no_agent {
         cmd.arg("-no-agent");
+    }
+}
+
+/// How long one [`OneProcessSession::round`] may run before its session is
+/// treated as hung and killed — matches `serve --query-timeout`'s own
+/// default (`src/bin/serve.rs`). A round that can't produce its own sentinel
+/// within this is killed instead of blocking its caller forever: that covers
+/// a genuinely wedged `duckdb` child, and also a caller bug that swallows
+/// the sentinel — e.g. a statement sent without its trailing `;` merges the
+/// following `SELECT '<nonce>' …` into itself, so the sentinel is never
+/// actually run and the marker never comes (found investigating a CI hang
+/// on `tests/fixtures/lint/requires-setup.sql`'s `glob(...)` requires-check,
+/// which `sql::requires::glob_sql` built with no trailing `;`). `SessionRunner`
+/// then sees a timeout exactly like a crash (`RoundOutcome::Ended`) and
+/// recovers by respawning and replaying.
+const ROUND_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The result of one [`OneProcessSession::round`].
+pub enum RoundOutcome {
+    /// The statement's own raw stdout text (DuckDB JSON; empty for a
+    /// statement with no rows, such as plain DDL).
+    Ok(String),
+    /// The statement errored; the session is still alive and ready for the
+    /// next round.
+    Sql(String),
+    /// The child process ended (crashed, was killed, or its stdin pipe
+    /// broke) — not an ordinary SQL error. `String` is whatever of its
+    /// stderr could still be collected.
+    Ended(String),
+}
+
+/// A persistent `duckdb` CLI child, fed one statement at a time over stdin,
+/// so a script's session state (`SET VARIABLE`, `LOAD`, TEMP views and
+/// tables, `ATTACH`, plain DDL) carries forward exactly as a real connection
+/// would (#435) — what the static renderers and `dashboard --check` use
+/// instead of replaying every earlier setup statement before each later one
+/// in a fresh process, which cost O(panels × setup).
+///
+/// Piping statements over stdin (rather than `-c "a; b; c;"`) matters: `-c`
+/// aborts the whole script at the first error (confirmed empirically), but
+/// feeding the same statements one at a time to a session reading from
+/// stdin does not — the CLI prints the error and keeps reading the next
+/// line, exactly the per-statement isolation every caller here already
+/// relies on (a failing panel's error must not stop later panels from
+/// rendering). Only the process itself ending unexpectedly — a crash, not a
+/// SQL error — needs a caller-side fallback; see [`SessionRunner`].
+///
+/// Finding the end of one round's own stdout (which can itself span several
+/// lines — a multi-row result prints one row per line) and of its own
+/// stderr (which can ALSO span several lines — a Catalog Error's "Did you
+/// mean" and `LINE 1: …` context) both use a fresh per-round random marker,
+/// the same two-marker technique `serve.rs`'s `AuthoringSession` uses for
+/// its own long-lived session, simplified for a single, already-trusted
+/// script read once from disk by the operator running the CLI (no
+/// watchdog, no staged-file `.read` defence against adversarial dot
+/// commands — this is never network-facing, the same trust level
+/// `run_query`'s `-c` argument already gave the script's text):
+/// - a trailing `SELECT '<nonce>' AS __anofox_sep;`, whose one-line JSON
+///   (`[{"__anofox_sep":"<nonce>"}]`, confirmed empirically to always be
+///   exactly one line for a one-row, one-column result) marks the end of
+///   this round's own stdout.
+/// - a trailing `.read '<a path named after nonce, guaranteed missing>'`,
+///   whose single-line `Error: cannot open "…"` (confirmed empirically to
+///   be exactly one line, unlike a SQL error) marks the end of this
+///   round's own stderr, drained on a background thread into a channel so
+///   a child that only writes to stderr can't block the stdin writer or
+///   the stdout reader.
+pub struct OneProcessSession {
+    child: Child,
+    stdin: ChildStdin,
+    out: BufReader<ChildStdout>,
+    err: Receiver<String>,
+}
+
+impl OneProcessSession {
+    /// Starts the session: `duckdb <db> -readonly -json` against a prebuilt
+    /// database (as `--db` does for `--check`), or a fresh `duckdb :memory:
+    /// -json` (as every static render already used).
+    pub fn spawn(db: Option<&str>) -> Result<Self, String> {
+        let mut cmd = Command::new("duckdb");
+        match db {
+            Some(f) => {
+                cmd.arg("-readonly").arg(f);
+            }
+            None => {
+                cmd.arg(":memory:");
+            }
+        }
+        cmd.arg("-json");
+        prepare("duckdb", &mut cmd);
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("run duckdb: {e}"))?;
+        let stdin = child.stdin.take().expect("piped stdin");
+        let out = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let err_pipe = child.stderr.take().expect("piped stderr");
+        let (tx, err) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(err_pipe).lines() {
+                let Ok(l) = line else { break };
+                if tx.send(l).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut s = OneProcessSession {
+            child,
+            stdin,
+            out,
+            err,
+        };
+        // Reset what a `~/.duckdbrc` could otherwise break every round with
+        // (the same defence `AuthoringSession::spawn` applies in serve.rs):
+        // `.bail on` would stop the session at the first error instead of
+        // continuing, and a leftover `.output`/`.mode` would garble the
+        // JSON this relies on.
+        match s.round(".bail off\n.mode json\n") {
+            RoundOutcome::Ended(tail) => Err(format!("duckdb did not start: {tail}")),
+            RoundOutcome::Ok(_) | RoundOutcome::Sql(_) => Ok(s),
+        }
+    }
+
+    /// Runs `sql` (one or more statements) in this session, after
+    /// everything an earlier round sent — unlike `run_query`'s one-shot
+    /// calls, `sql` carries no prelude of its own.
+    pub fn round(&mut self, sql: &str) -> RoundOutcome {
+        self.round_timeout(sql, ROUND_TIMEOUT)
+    }
+
+    /// [`Self::round`] with an explicit timeout (tests use a short one so
+    /// a deliberately wedged child doesn't make the suite itself hang).
+    fn round_timeout(&mut self, sql: &str, timeout: Duration) -> RoundOutcome {
+        let nonce = super::serving::random_token();
+        let missing = std::env::temp_dir().join(format!("anofox-sep-{nonce}"));
+        let script = format!(
+            "{sql}\nSELECT '{nonce}' AS __anofox_sep;\n.read '{}'\n",
+            missing.display()
+        );
+        if self
+            .stdin
+            .write_all(script.as_bytes())
+            .and_then(|_| self.stdin.flush())
+            .is_err()
+        {
+            return RoundOutcome::Ended(self.drain_err());
+        }
+
+        // A structural backstop (mirrors `serve.rs`'s `Live::round_with`,
+        // sec-review-342 L1/L3): if the sentinel never comes back — a
+        // genuinely wedged child, or a caller statement that swallowed it
+        // (see `ROUND_TIMEOUT`'s doc) — this round still has to end, not
+        // hang its caller forever. The watchdog blocks on
+        // `done_rx.recv_timeout` rather than unconditionally sleeping the
+        // full timeout, so the common (fast) case wakes it immediately —
+        // dropping `done_tx` below closes the channel, which `recv_timeout`
+        // sees as `Disconnected` right away, instead of leaving a thread
+        // parked for up to `timeout` with nothing to do. Joined before
+        // returning, so the child is never reaped elsewhere (`drop`, a
+        // retry) while a watchdog that might still call `kill` on its pid
+        // is alive — the same TOCTOU window a sleep-based watchdog would
+        // leave open.
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        #[cfg(unix)]
+        let watchdog = {
+            let (timed_out, pid) = (timed_out.clone(), self.child.id());
+            std::thread::Builder::new()
+                .spawn(move || {
+                    use std::sync::mpsc::RecvTimeoutError;
+                    if let Err(RecvTimeoutError::Timeout) = done_rx.recv_timeout(timeout) {
+                        timed_out.store(true, Ordering::SeqCst);
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                        }
+                    }
+                })
+                .ok()
+        };
+        // No watchdog on Windows (best-effort there, like `serve.rs`'s) —
+        // a hang has no backstop beyond the write-failure check above.
+        #[cfg(not(unix))]
+        let _ = (&timed_out, done_rx, timeout);
+
+        let outcome = 'round: {
+            let marker_line = format!("[{{\"__anofox_sep\":\"{nonce}\"}}]");
+            let mut text = String::new();
+            loop {
+                let mut line = String::new();
+                match self.out.read_line(&mut line) {
+                    Ok(0) | Err(_) => {
+                        break 'round RoundOutcome::Ended(if timed_out.load(Ordering::SeqCst) {
+                            format!(
+                                "the duckdb session timed out after {}s waiting for output \
+                                 (killed)",
+                                timeout.as_secs()
+                            )
+                        } else {
+                            self.drain_err()
+                        })
+                    }
+                    Ok(_) => {
+                        if line.trim_end_matches(['\r', '\n']) == marker_line {
+                            break;
+                        }
+                        text.push_str(&line);
+                    }
+                }
+            }
+            let mut err = String::new();
+            loop {
+                match self.err.recv() {
+                    Ok(l) if l.contains(&nonce) => break,
+                    Ok(l) => {
+                        err.push_str(&l);
+                        err.push('\n');
+                    }
+                    Err(_) => {
+                        break 'round RoundOutcome::Ended(if timed_out.load(Ordering::SeqCst) {
+                            format!(
+                                "the duckdb session timed out after {}s waiting for output \
+                                 (killed)",
+                                timeout.as_secs()
+                            )
+                        } else {
+                            err
+                        })
+                    }
+                }
+            }
+            if err.trim().is_empty() {
+                RoundOutcome::Ok(text)
+            } else {
+                RoundOutcome::Sql(err.trim_end().to_string())
+            }
+        };
+        // Wake a still-waiting watchdog at once, then join it (see the
+        // comment above): the child can't be reaped anywhere else while it
+        // might still be about to `kill` it.
+        drop(done_tx);
+        #[cfg(unix)]
+        if let Some(h) = watchdog {
+            let _ = h.join();
+        }
+        outcome
+    }
+
+    /// stderr's remaining lines, once the CLI is gone (best-effort, short
+    /// timeout: nothing more is coming once the pipe is closed, but a line
+    /// already in flight gets a brief chance to land).
+    fn drain_err(&mut self) -> String {
+        let mut s = String::new();
+        while let Ok(l) = self.err.recv_timeout(std::time::Duration::from_millis(200)) {
+            s.push_str(&l);
+            s.push('\n');
+        }
+        s
+    }
+}
+
+impl Drop for OneProcessSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// [`OneProcessSession`], returning parsed rows and handling the rare case
+/// of the child process ending unexpectedly (a crash — not an ordinary SQL
+/// error, which the session already isolates per statement on its own):
+/// one respawn, replaying everything this runner has ever been asked to
+/// run (`sent`) into the fresh session before retrying the statement that
+/// triggered the respawn. This is a best-effort recovery, not a guarantee —
+/// if the crash was e.g. an out-of-memory kill, replaying the same setup
+/// can reproduce it — but it is strictly better than the alternative of
+/// giving up on every later statement over one transient failure, and it
+/// can't loop forever (exactly one respawn attempt per call to [`Self::run`]).
+pub struct SessionRunner {
+    db: Option<String>,
+    session: OneProcessSession,
+    /// Everything ever handed to [`Self::run`] (successful or not — a
+    /// statement that errored the first time errors the same way on
+    /// replay, harmlessly), for the respawn-and-replay recovery above. Not
+    /// used at all on the common, no-crash path.
+    sent: String,
+}
+
+impl SessionRunner {
+    pub fn spawn(db: Option<&str>) -> Result<Self, String> {
+        Ok(SessionRunner {
+            db: db.map(str::to_string),
+            session: OneProcessSession::spawn(db)?,
+            sent: String::new(),
+        })
+    }
+
+    /// Runs `sql` in the session and returns its rows (parsed DuckDB JSON),
+    /// or the DuckDB error text.
+    pub fn run(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+        match self.session.round(sql) {
+            RoundOutcome::Ok(text) => {
+                self.sent.push_str(sql);
+                self.sent.push('\n');
+                crate::sql::parse_rows_json(&text)
+            }
+            RoundOutcome::Sql(e) => {
+                self.sent.push_str(sql);
+                self.sent.push('\n');
+                Err(e)
+            }
+            RoundOutcome::Ended(tail) => self.recover_and_retry(sql, tail),
+        }
+    }
+
+    fn recover_and_retry(
+        &mut self,
+        sql: &str,
+        tail: String,
+    ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+        eprintln!(
+            "warning: the duckdb session ended unexpectedly{} — restarting it and replaying \
+             what it had already run before continuing",
+            if tail.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", tail.trim())
+            }
+        );
+        let mut fresh = OneProcessSession::spawn(self.db.as_deref()).map_err(|e| {
+            format!("the duckdb session ended ({tail}) and a new one could not be started: {e}")
+        })?;
+        if !self.sent.is_empty() {
+            // Best-effort: this is restoring session state the first pass
+            // already reported on, not new work to diagnose, so its own
+            // outcome (even another Ended) is not surfaced here — only
+            // the retry below is.
+            let _ = fresh.round(&self.sent);
+        }
+        self.session = fresh;
+        match self.session.round(sql) {
+            RoundOutcome::Ok(text) => {
+                self.sent.push_str(sql);
+                self.sent.push('\n');
+                crate::sql::parse_rows_json(&text)
+            }
+            RoundOutcome::Sql(e) => {
+                self.sent.push_str(sql);
+                self.sent.push('\n');
+                Err(e)
+            }
+            RoundOutcome::Ended(tail2) => Err(format!(
+                "the duckdb session ended and could not be recovered: {tail2}"
+            )),
+        }
     }
 }
 
@@ -197,5 +560,219 @@ mod tests {
         assert_eq!(major_old, Some(1));
         assert!(!major_old.is_some_and(|m| m >= 2));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn no_duckdb_on_path() -> bool {
+        Command::new("duckdb").arg("-version").output().is_err()
+    }
+
+    /// #435: the whole point — a `CREATE TEMP TABLE` in one round is still
+    /// there (not re-run, not forgotten) in a later round, exactly as a
+    /// real connection would keep it, without any prelude text.
+    #[test]
+    fn session_keeps_state_across_rounds() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        assert!(matches!(
+            s.round("CREATE TEMP TABLE t AS SELECT 1 AS x;"),
+            RoundOutcome::Ok(_)
+        ));
+        assert!(matches!(
+            s.round("SET VARIABLE y = 41;"),
+            RoundOutcome::Ok(_)
+        ));
+        match s.round("SELECT x, getvariable('y') + 1 AS y FROM t;") {
+            RoundOutcome::Ok(text) => {
+                let rows = crate::sql::parse_rows_json(&text).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["x"], 1);
+                assert_eq!(rows[0]["y"], 42);
+            }
+            other => panic!("expected rows, got {}", outcome_label(&other)),
+        }
+    }
+
+    /// #435: an ordinary SQL error on one round doesn't end the session —
+    /// the very next round still succeeds, with everything before it still
+    /// in scope. This is the property that makes a fallback unnecessary for
+    /// per-statement errors (only a crashed process needs one).
+    #[test]
+    fn a_statement_error_does_not_end_the_session() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        assert!(matches!(
+            s.round("SET VARIABLE x = 1;"),
+            RoundOutcome::Ok(_)
+        ));
+        match s.round("SELECT * FROM table_that_does_not_exist;") {
+            RoundOutcome::Sql(e) => assert!(e.contains("table_that_does_not_exist"), "{e}"),
+            other => panic!("expected a SQL error, got {}", outcome_label(&other)),
+        }
+        match s.round("SELECT getvariable('x') AS v;") {
+            RoundOutcome::Ok(text) => {
+                let rows = crate::sql::parse_rows_json(&text).unwrap();
+                assert_eq!(rows[0]["v"], 1, "x is still set after the earlier error");
+            }
+            other => panic!("expected rows, got {}", outcome_label(&other)),
+        }
+    }
+
+    /// A statement whose JSON result spans several lines (one row per
+    /// line) is still read in full, and its boundary is found correctly —
+    /// not cut short, not merged with the next round's own output.
+    #[test]
+    fn a_multi_row_result_does_not_confuse_the_round_boundary() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        match s.round("SELECT * FROM range(50) t(x);") {
+            RoundOutcome::Ok(text) => {
+                let rows = crate::sql::parse_rows_json(&text).unwrap();
+                assert_eq!(rows.len(), 50);
+            }
+            other => panic!("expected rows, got {}", outcome_label(&other)),
+        }
+        // the next round is still this round's own result, not leftovers.
+        match s.round("SELECT 'next' AS v;") {
+            RoundOutcome::Ok(text) => {
+                let rows = crate::sql::parse_rows_json(&text).unwrap();
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["v"], "next");
+            }
+            other => panic!("expected rows, got {}", outcome_label(&other)),
+        }
+    }
+
+    fn outcome_label(o: &RoundOutcome) -> &'static str {
+        match o {
+            RoundOutcome::Ok(_) => "Ok",
+            RoundOutcome::Sql(_) => "Sql",
+            RoundOutcome::Ended(_) => "Ended",
+        }
+    }
+
+    /// #435: `SessionRunner::run` returns parsed rows (not raw text), and a
+    /// statement error is just an `Err` — the recovery path is never
+    /// exercised in ordinary use.
+    #[test]
+    fn session_runner_parses_rows_and_isolates_errors() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut r = SessionRunner::spawn(None).unwrap();
+        r.run("CREATE TEMP TABLE t AS SELECT 1 AS x;").unwrap();
+        let e = r.run("SELECT * FROM nope;").unwrap_err();
+        assert!(e.contains("nope"), "{e}");
+        let rows = r.run("SELECT x FROM t;").unwrap();
+        assert_eq!(rows[0]["x"], 1, "t is still there after the error above");
+    }
+
+    /// #435: if the live process is killed outright, `SessionRunner`
+    /// recovers by restarting and replaying what it had already run, then
+    /// retries the statement that triggered the respawn — so the render
+    /// keeps going instead of losing the whole rest of the script to one
+    /// crash.
+    #[test]
+    fn session_runner_recovers_from_a_killed_process() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut r = SessionRunner::spawn(None).unwrap();
+        r.run("CREATE TEMP TABLE t AS SELECT 7 AS x;").unwrap();
+        r.session.child.kill().unwrap();
+        // the in-flight round's write/read fails against the now-dead
+        // process, triggering recovery — the table is back (replayed) and
+        // this very statement's own rows come back too, from the new session.
+        let rows = r.run("SELECT x FROM t;").unwrap();
+        assert_eq!(rows[0]["x"], 7);
+    }
+
+    /// A CI hang traced to `tests/fixtures/lint/requires-setup.sql`: a round
+    /// whose `sql` has no trailing `;` lets DuckDB's own line-buffering
+    /// swallow the sentinel `SELECT` `round` appends after it — both merge
+    /// into one (now two-statement, erroring) incomplete chunk up to the
+    /// next semicolon, so the sentinel is never actually run and its marker
+    /// never comes back on stdout. The root cause (`sql::requires::glob_sql`'s
+    /// query, sent unterminated by `lint::unmet_requirement`) is fixed, but
+    /// `round` must still end — not hang its caller forever — regardless of
+    /// what any caller (present or future) sends; its timeout backstop is
+    /// what makes that true. A short timeout here keeps the test itself fast.
+    #[test]
+    fn a_statement_with_no_trailing_semicolon_times_out_instead_of_hanging() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        let start = std::time::Instant::now();
+        match s.round_timeout("SELECT 1 AS x", Duration::from_secs(2)) {
+            RoundOutcome::Ended(msg) => assert!(msg.contains("timed out"), "{msg}"),
+            other => panic!("expected a timeout, got {}", outcome_label(&other)),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "took {:?}, should have been killed at ~2s",
+            start.elapsed()
+        );
+    }
+
+    /// sec-review-342's original hypothesis for the CI hang above (wrong for
+    /// this particular bug — see the test above — but worth guarding
+    /// anyway): a round whose statements write a lot to stderr (every
+    /// anofox extension's `LOAD` banner, plus many failing statements) must
+    /// not deadlock stdin/stdout against a full pipe buffer. stderr is
+    /// drained on its own background thread into an unbounded channel
+    /// (`OneProcessSession::spawn`), so this should finish quickly; it did
+    /// even before the timeout backstop above existed, but the backstop
+    /// also means a regression here would now show up as `Ended`, not a
+    /// hang.
+    #[test]
+    fn a_flood_of_stderr_does_not_deadlock_the_session() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        // ~3000 small catalog errors: comfortably past a pipe's usual 64 KB
+        // buffer (each DuckDB "table does not exist" error is well over
+        // 100 B with its "Did you mean" / `LINE 1:` context).
+        let script: String = (0..3000)
+            .map(|i| format!("SELECT * FROM nope_{i}_does_not_exist;\n"))
+            .collect();
+        let start = std::time::Instant::now();
+        match s.round(&script) {
+            RoundOutcome::Sql(e) => {
+                assert!(
+                    e.len() > 200_000,
+                    "only {} bytes of stderr: {e:.200}",
+                    e.len()
+                );
+                assert!(e.contains("nope_"), "{e:.200}");
+            }
+            other => panic!("expected a SQL error, got {}", outcome_label(&other)),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "took {:?} — stdin/stdout looks wedged on the stderr flood",
+            start.elapsed()
+        );
+        // the session is still alive and usable right after.
+        match s.round("SELECT 1 AS v;") {
+            RoundOutcome::Ok(text) => {
+                let rows = crate::sql::parse_rows_json(&text).unwrap();
+                assert_eq!(rows[0]["v"], 1);
+            }
+            other => panic!("expected rows, got {}", outcome_label(&other)),
+        }
     }
 }

@@ -1191,3 +1191,120 @@ fn standalone_sparkbar_panel_minima_stay_inside_a_short_viewbox() {
         );
     }
 }
+
+// #463: Explore data's card histogram (xpMini) and the table's own
+// column-profile row (st-hist) both draw a pre-binned histogram through
+// `render_mini_hist` — not reachable from SQL (no ::ROLE), so plain
+// values-in, SVG-out, same shape as [`render_mini_overlay`] below. Same
+// 50px panel-floor clamp as render_sparkbar's own (#425/#457): asked for
+// a height under it, every bar's baseline must still stay inside the
+// returned viewBox, not clipped.
+#[test]
+fn mini_hist_floors_to_the_panel_minimum_and_clips_nothing() {
+    use anofox_visualization::render_mini_hist;
+    let svg =
+        render_mini_hist("[1,9,2,8,3,7]", "", 1.0, 240, 20, "").expect("a rendered mini histogram");
+    let h: f64 = svg
+        .split("viewBox=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("a viewBox")
+        .split_whitespace()
+        .nth(3)
+        .and_then(|n| n.parse().ok())
+        .expect("a viewBox height");
+    assert!(
+        h >= 50.0,
+        "the panel floor (50px) must apply: viewBox height {h}"
+    );
+    let get_attr = |attrs: &str, name: &str| -> Option<f64> {
+        attrs
+            .split(&format!("{name}=\""))
+            .nth(1)?
+            .split('"')
+            .next()?
+            .parse()
+            .ok()
+    };
+    let mut bars: Vec<(f64, f64)> = Vec::new();
+    for rect in svg.split("<rect ").skip(1) {
+        let attrs = rect.split('>').next().unwrap_or("");
+        if let (Some(y), Some(ht)) = (get_attr(attrs, "y"), get_attr(attrs, "height")) {
+            bars.push((y, y + ht));
+        }
+    }
+    assert_eq!(bars.len(), 6, "one bar per value: {svg}");
+    for (y, bottom) in &bars {
+        assert!(
+            *y > -0.5 && *bottom < h + 0.5,
+            "mini histogram content (bar y {y}..{bottom}) must stay inside \
+             its own {h}px-tall viewBox, not clipped: {svg}"
+        );
+    }
+}
+
+// #463: `labels_json`, when given, becomes each bar's own hover-tip prefix
+// (`st-hist`'s bin ranges) — ggplot-rs's own `GeomCol` tip format,
+// `"{label}: {value}"`.
+#[test]
+fn mini_hist_labels_become_each_bars_own_tip_prefix() {
+    use anofox_visualization::render_mini_hist;
+    let svg = render_mini_hist("[5,9]", r#"["0 - 10","10 - 20"]"#, 0.55, 100, 24, "")
+        .expect("a rendered mini histogram with labels");
+    assert!(
+        svg.contains("<title>0 - 10: 5</title>"),
+        "the first bar's own label + value: {svg}"
+    );
+    assert!(
+        svg.contains("<title>10 - 20: 9</title>"),
+        "the second bar's own label + value: {svg}"
+    );
+    assert!(
+        svg.contains("fill-opacity=\"0.550\""),
+        "the requested fill alpha (0.55, st-hist's own translucent look): {svg}"
+    );
+}
+
+// #463: `fill_alpha: 0.0` draws an outline only (xpOverlay's A series) —
+// the fill is fully transparent but the stroke (unaffected by
+// `fill-opacity`, ggplot-rs's own `RectStyle`) stays visible, so the bar
+// still reads as a shape, not nothing.
+#[test]
+fn mini_hist_zero_alpha_draws_an_outline_not_a_filled_bar() {
+    use anofox_visualization::render_mini_hist;
+    let svg =
+        render_mini_hist("[4,6,2]", "", 0.0, 100, 30, "").expect("a rendered outline histogram");
+    assert!(
+        svg.contains("fill-opacity=\"0.000\""),
+        "alpha 0.0 must reach the mark as a fully transparent fill: {svg}"
+    );
+    assert!(
+        svg.contains("stroke-width=\"0.50\""),
+        "the outline's own stroke must still be drawn: {svg}"
+    );
+}
+
+// #463: Explore data's distribution-comparison overlay (xpOverlay) — A as
+// an outline, B filled, on one shared y scale (never one series dwarfing
+// the other). B paints first (underneath), A second (on top), the same
+// order the hand-drawn version used, so A's outline stays crisp over B's
+// fill where the two overlap.
+#[test]
+fn mini_overlay_draws_b_filled_under_a_outline() {
+    use anofox_visualization::render_mini_overlay;
+    let svg =
+        render_mini_overlay("[1,9,2,8]", "[8,2,9,1]", 240, 30, "").expect("a rendered overlay");
+    let rect_count = svg.matches("<rect ").count();
+    assert_eq!(rect_count, 8, "4 bars for A + 4 for B: {svg}");
+    let b_at = svg
+        .find("fill-opacity=\"0.550\"")
+        .expect("B's own filled bars");
+    let a_at = svg
+        .find("fill-opacity=\"0.000\"")
+        .expect("A's own outline bars");
+    assert!(
+        b_at < a_at,
+        "B (filled) must paint before A (outline), so A's outline stays \
+         crisp on top where the two overlap: {svg}"
+    );
+}
