@@ -2606,3 +2606,140 @@ fn non_finite_x_levels_are_shown_not_merged_with_blank() {
     // none of the four non-"a" levels collapsed into one.
     assert_eq!(s.matches("data-geom=\"col\"").count(), 5, "{s}");
 }
+
+// ── #423: HISTOGRAM/QQ honour CATEGORY/FACET ────────────────────────────────
+
+/// Pixel widths of every `::HISTOGRAM` bar (no `data-series`, unlike `bars`).
+fn histogram_bar_widths(svg: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find("<rect ") {
+        let end = i + rest[i..].find('>').unwrap();
+        let tag = &rest[i..end];
+        if tag.contains("data-geom=\"histogram\"") {
+            let k = tag.find(" width=\"").unwrap() + 8;
+            out.push(tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap());
+        }
+        rest = &rest[end + 1..];
+    }
+    out
+}
+
+#[test]
+fn histogram_facet_draws_one_strip_per_group_with_shared_bins() {
+    let n = 40;
+    let v: Vec<f64> = (0..n).map(|i| (i % 10) as f64).collect();
+    let g: Vec<&str> = (0..n)
+        .map(|i| if i < n / 2 { "reference" } else { "current" })
+        .collect();
+    let s = svg(vec![
+        Column::new("v", Role::Value(Kind::Histogram), nums(&v)),
+        Column::new("g", Role::Facet, strs(&g)),
+    ]);
+    for strip in ["reference", "current"] {
+        assert!(
+            s.contains(&format!(">{strip}</text>")),
+            "{strip} strip: {s}"
+        );
+    }
+    // Every bar's xmin/xmax is on the same shared grid, in both panels: the
+    // set of bar widths (xmax - xmin, in px) collapses to a single value.
+    let widths: std::collections::BTreeSet<i64> = histogram_bar_widths(&s)
+        .into_iter()
+        .map(|w| (w * 100.0).round() as i64)
+        .collect();
+    assert_eq!(widths.len(), 1, "every bar the same width: {s}");
+}
+
+#[test]
+fn histogram_hist_norm_share_sums_to_one_per_facet_panel() {
+    let n = 30;
+    // Unequal group sizes: 10 "reference" rows, 20 "current" rows.
+    let v: Vec<f64> = (0..n).map(|i| (i % 10) as f64).collect();
+    let g: Vec<&str> = (0..n)
+        .map(|i| if i < 10 { "reference" } else { "current" })
+        .collect();
+    let s = svg(vec![
+        Column::new("v", Role::Value(Kind::Histogram), nums(&v)),
+        Column::new("g", Role::Facet, strs(&g)),
+        Column::new("norm", Role::HistNorm, strs(&["share"])),
+    ]);
+    assert!(s.contains("Share"), "y axis labelled Share: {s}");
+}
+
+#[test]
+fn histogram_hist_bins_sets_an_explicit_bin_count() {
+    let v: Vec<f64> = (0..100).map(|i| (i % 50) as f64).collect();
+    let s = svg(vec![
+        Column::new("v", Role::Value(Kind::Histogram), nums(&v)),
+        Column::new("b", Role::HistBins, strs(&["5"])),
+    ]);
+    // 5 bins: at most 5 bars (some may be empty / dropped).
+    assert!(
+        s.matches("data-geom=\"histogram\"").count() <= 5,
+        "at most 5 bins: {s}"
+    );
+}
+
+#[test]
+fn histogram_without_new_roles_is_unchanged() {
+    // No ::FACET / ::HIST_BINS / ::HIST_NORM: the original single-series
+    // GeomHistogram/StatBin path, byte-for-byte (verified separately against
+    // origin/master in review) — this just pins the shape stays a plain
+    // single-panel histogram.
+    let v: Vec<f64> = (0..60).map(|i| (i % 13) as f64).collect();
+    let s = svg(vec![Column::new(
+        "v",
+        Role::Value(Kind::Histogram),
+        nums(&v),
+    )]);
+    assert!(s.matches("data-geom=\"histogram\"").count() > 1, "{s}");
+    assert!(!s.contains("Share"));
+}
+
+#[test]
+fn qq_category_draws_one_series_per_group_with_its_own_line_and_band() {
+    let n = 60;
+    let y: Vec<f64> = (0..n)
+        .map(|i| ((i as f64) * 0.37).sin() * 2.0 + if i < n / 2 { 0.0 } else { 10.0 })
+        .collect();
+    let g: Vec<&str> = (0..n)
+        .map(|i| if i < n / 2 { "reference" } else { "current" })
+        .collect();
+    let s = svg(vec![
+        Column::new("v", Role::Value(Kind::QQ), nums(&y)),
+        Column::new("g", Role::Category, strs(&g)),
+    ]);
+    // One envelope + one dashed reference line per group.
+    assert_eq!(s.matches("<polygon ").count(), 2, "one band per group: {s}");
+    assert_eq!(s.matches("<circle ").count(), n);
+    // A legend names both groups.
+    assert!(s.contains(">reference<") && s.contains(">current<"), "{s}");
+}
+
+#[test]
+fn qq_facet_draws_one_panel_per_group() {
+    let n = 60;
+    let y: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.37).sin() * 2.0).collect();
+    let g: Vec<&str> = (0..n)
+        .map(|i| if i < n / 2 { "reference" } else { "current" })
+        .collect();
+    let s = svg(vec![
+        Column::new("v", Role::Value(Kind::QQ), nums(&y)),
+        Column::new("g", Role::Facet, strs(&g)),
+    ]);
+    for strip in ["reference", "current"] {
+        assert!(
+            s.contains(&format!(">{strip}</text>")),
+            "{strip} strip: {s}"
+        );
+    }
+}
+
+#[test]
+fn qq_without_category_or_facet_is_unchanged() {
+    let y: Vec<f64> = (0..30).map(|i| ((i as f64) * 0.37).sin() * 2.0).collect();
+    let s = svg(vec![Column::new("r", Role::Value(Kind::QQ), nums(&y))]);
+    assert_eq!(s.matches("<polygon ").count(), 1, "one envelope: {s}");
+    assert_eq!(s.matches("<circle ").count(), 30);
+}

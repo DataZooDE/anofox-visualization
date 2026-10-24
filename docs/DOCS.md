@@ -136,6 +136,8 @@ terminal.
 | `::YBREAKS` | `::Y_BREAKS` | modifier | explicit y-axis tick positions, like ::XBREAKS |
 | `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
+| `::HIST_BINS` |  | modifier | a ::HISTOGRAM's bin count ('20') or explicit edges ('0,10,20,30'), shared by every ::CATEGORY / ::FACET group — distinct from ::BINS, which aliases ::CLASSES (a map's colour-class breaks) |
+| `::HIST_NORM` |  | modifier | a ::HISTOGRAM's per-group normalisation: 'share' draws each ::CATEGORY / ::FACET group's bars as a share of that group's own count (groups of unequal size stay comparable); default: raw counts |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |

@@ -503,6 +503,20 @@ pub enum Role {
     /// Trend-line method for `::SMOOTH` (`::SMOOTH_METHOD`): `'loess'`
     /// (default), `'lm'`, `'gam'`; `'glm'` draws the Gaussian GLM (= lm).
     SmoothMethod,
+    /// A `::HISTOGRAM`'s bin count or explicit edges (`::HIST_BINS`): a bare
+    /// number (`'20'::HIST_BINS`) or comma-separated edges
+    /// (`'0,10,20,30'::HIST_BINS`) — computed over every row (every
+    /// `::CATEGORY` / `::FACET` group shares the same bins, #423). A
+    /// deliberately distinct token from `::BINS` (an alias of
+    /// [`Role::Classes`], a map's colour-class breaks) rather than
+    /// repurposing it, since one token can't parse to two different roles.
+    HistBins,
+    /// A `::HISTOGRAM`'s per-group count normalisation (`::HIST_NORM`):
+    /// `'share'` draws each `::CATEGORY` / `::FACET` group's bars as a share
+    /// of that group's own row count, so groups of unequal size (e.g. a
+    /// reference vs. a current period) are still comparable (#423). Without
+    /// it, bars are raw counts.
+    HistNorm,
     /// Dashboard theme (`::THEME`): a built-in name, a stack `'acme+dark'` or
     /// a JSON definition (see [`theme`]).
     Theme,
@@ -2172,9 +2186,11 @@ fn render_inner(
         Kind::Pie => return render_pie(o, value, cols, title.as_deref(), 0.0, width, height),
         Kind::Donut => return render_pie(o, value, cols, title.as_deref(), 0.55, width, height),
         Kind::Gauge => return render_gauge(o, value, cols, title.as_deref(), width, height),
-        Kind::Histogram => return render_histogram(o, value, title.as_deref(), width, height),
+        Kind::Histogram => {
+            return render_histogram(o, value, cols, title.as_deref(), width, height)
+        }
         Kind::Density => return render_density(o, value, cols, title.as_deref(), width, height),
-        Kind::QQ => return render_qq(o, value, title.as_deref(), width, height),
+        Kind::QQ => return render_qq(o, value, cols, title.as_deref(), width, height),
         Kind::Heatmap => {
             return render_heatmap(o, value, cols, title.as_deref(), width, height, None)
         }
@@ -3620,24 +3636,214 @@ fn cartesian(
     Ok(panel)
 }
 
-/// A histogram of the measure column (ggplot bins + counts).
+/// ggplot2's own histogram bin alignment: a bin is centered on 0
+/// (`boundary = width/2`), so a plain (no `::FACET`/`::HIST_BINS`/
+/// `::HIST_NORM`) `::HISTOGRAM` keeps the exact pixels it always has —
+/// `render_histogram`'s own fast path leaves `GeomHistogram`'s bundled
+/// `StatBin` to compute this. [`hist_edges`] replicates it (ggplot-rs's own
+/// copy, `StatBin::aligned_bins`, is private) only when #423's new roles need
+/// bins computed *before* the plot is built: shared across every
+/// `::CATEGORY`/`::FACET` group, or as the denominator for `::HIST_NORM`.
+fn hist_aligned_edges(min: f64, max: f64, bins: usize) -> Vec<f64> {
+    let width = if bins <= 1 {
+        max - min
+    } else {
+        (max - min) / (bins - 1) as f64
+    };
+    let width = if width > 0.0 { width } else { 1.0 };
+    let boundary = width / 2.0;
+    let shift = ((min - boundary) / width).floor();
+    let origin = boundary + shift * width;
+    let n = (((max - origin) / width).ceil() as usize).max(1);
+    (0..=n).map(|i| origin + i as f64 * width).collect()
+}
+
+/// `::HIST_BINS`-aware bin edges, pooled over every row (every `::CATEGORY`
+/// / `::FACET` group shares them, #423): a bare number is a bin count (like
+/// ggplot2's default 30), comma-separated numbers with more than one value
+/// are explicit edges (irregular widths allowed — `GeomHistogram`/`StatBin`
+/// can't do this, so these are drawn as pre-aggregated bars, see
+/// [`render_histogram`]).
+fn hist_edges(values: &[Value], bins_spec: Option<&str>) -> Vec<f64> {
+    let nums: Vec<f64> = values
+        .iter()
+        .filter_map(|v| v.as_f64())
+        .filter(|f| f.is_finite())
+        .collect();
+    let (min, max) = nums
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+            (a.min(v), b.max(v))
+        });
+    let (min, max) = if !min.is_finite() || !max.is_finite() {
+        (0.0, 1.0)
+    } else if (max - min).abs() < f64::EPSILON {
+        (min - 0.5, max + 0.5)
+    } else {
+        (min, max)
+    };
+    if let Some(spec) = bins_spec {
+        let parts: Vec<f64> = spec
+            .split(',')
+            .filter_map(|t| t.trim().parse::<f64>().ok())
+            .filter(|f| f.is_finite())
+            .collect();
+        if parts.len() > 1 {
+            let mut edges = parts;
+            edges.sort_by(f64::total_cmp);
+            edges.dedup();
+            if edges.len() > 1 {
+                return edges;
+            }
+        } else if let [n] = parts[..] {
+            return hist_aligned_edges(min, max, (n.round().max(1.0)) as usize);
+        }
+    }
+    hist_aligned_edges(min, max, 30)
+}
+
+/// The bin `edges[i..i+1]` (0-based) a finite value falls in — right-closed
+/// `(lo, hi]`, like ggplot2/`StatBin`; the lowest bin's left edge is closed
+/// too, so the pooled minimum lands in bin 0 rather than nowhere. `edges` is
+/// sorted ascending with at least 2 entries, possibly unequal widths
+/// (explicit `::HIST_BINS` edges). `None` outside `[edges[0], edges[last]]`.
+fn hist_bin_of(v: f64, edges: &[f64]) -> Option<usize> {
+    if !v.is_finite() || v < edges[0] || v > *edges.last()? {
+        return None;
+    }
+    if v == edges[0] {
+        return Some(0);
+    }
+    edges
+        .windows(2)
+        .position(|w| v > w[0] && v <= w[1])
+        .or(Some(edges.len() - 2))
+}
+
+/// A histogram of the measure column — one bar series per `::CATEGORY`
+/// group would need `GeomHistogram` to read a fill/color aesthetic per row,
+/// which it doesn't (unlike `GeomDensity`); `--check` warns `::CATEGORY` is
+/// dropped here (see `lint::histogram_diags`) until that's fixed upstream in
+/// ggplot-rs. `::FACET`/`::FACET_FREE` (one panel per value, #423),
+/// `::HIST_BINS` (a bin count or explicit edges) and `::HIST_NORM 'share'`
+/// (each panel normalised to its own share of 1, so reference/current
+/// periods of different sizes compare) all work: without any of them, this
+/// takes ggplot-rs's own `GeomHistogram`/`StatBin` unchanged (byte-identical
+/// output to before #423); with any of them, bins are computed here first —
+/// shared across every panel — and drawn as pre-aggregated bars
+/// (`StatIdentity`) so the panels/shares line up.
 fn render_histogram(
     o: &RenderOptions,
     value: &Column,
+    cols: &[Column],
     title: Option<&str>,
     width: u32,
     height: u32,
 ) -> Result<Panel, String> {
-    let data = vec![("x".to_string(), value.values.clone())];
+    let facet = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
+    let bins_spec = role_str(cols, Role::HistBins);
+    let share = role_str(cols, Role::HistNorm).is_some_and(|s| s.eq_ignore_ascii_case("share"));
+
+    if facet.is_none() && bins_spec.is_none() && !share {
+        let data = vec![("x".to_string(), value.values.clone())];
+        let mut plot = GGPlot::new(data)
+            .aes(Aes::new().x("x"))
+            .geom_histogram_with(GeomHistogram {
+                fill: o.brand(),
+                color: o.theme.colors.card,
+                ..Default::default()
+            })
+            .house_theme(o)
+            .primary_color(o.brand());
+        if let Some(t) = title {
+            plot = plot.title(t);
+        }
+        return Ok(Panel::plot(plot, width, height));
+    }
+
+    let edges = hist_edges(&value.values, bins_spec.as_deref());
+    let n_bins = edges.len() - 1;
+    // Each panel's own total (valid, in-range) row count, for `::HIST_NORM`.
+    let panel_of =
+        |i: usize| -> String { facet.map_or_else(String::new, |f| value_str(&f.values[i])) };
+    let mut counts: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
+    let mut totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for i in 0..value.values.len() {
+        let Some(v) = value.values[i].as_f64().filter(|f| f.is_finite()) else {
+            continue;
+        };
+        let Some(bin) = hist_bin_of(v, &edges) else {
+            continue;
+        };
+        let panel = panel_of(i);
+        counts
+            .entry(panel.clone())
+            .or_insert_with(|| vec![0.0; n_bins])[bin] += 1.0;
+        *totals.entry(panel).or_insert(0.0) += 1.0;
+    }
+    // Panels in first-seen order (facet panels keep the SQL's row order).
+    let mut panels: Vec<String> = Vec::new();
+    for i in 0..value.values.len() {
+        let p = panel_of(i);
+        if !panels.contains(&p) {
+            panels.push(p);
+        }
+    }
+    let (mut xmin, mut xmax, mut xmid, mut y, mut fac) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for p in &panels {
+        let cs = counts.get(p).cloned().unwrap_or_else(|| vec![0.0; n_bins]);
+        let total = totals.get(p).copied().unwrap_or(0.0);
+        for b in 0..n_bins {
+            let (lo, hi) = (edges[b], edges[b + 1]);
+            xmin.push(Value::Float(lo));
+            xmax.push(Value::Float(hi));
+            xmid.push(Value::Float((lo + hi) / 2.0));
+            let raw = cs[b];
+            y.push(Value::Float(if share && total > 0.0 {
+                raw / total
+            } else {
+                raw
+            }));
+            fac.push(Value::Str(p.clone()));
+        }
+    }
+    let mut data: Vec<(String, Vec<Value>)> = vec![
+        ("x".to_string(), xmid),
+        ("xmin".to_string(), xmin),
+        ("xmax".to_string(), xmax),
+        ("y".to_string(), y),
+    ];
+    let aes = Aes::new().x("x").xmin("xmin").xmax("xmax").y("y");
+    if facet.is_some() {
+        data.push(("facet".to_string(), fac));
+    }
     let mut plot = GGPlot::new(data)
-        .aes(Aes::new().x("x"))
+        .aes(aes)
         .geom_histogram_with(GeomHistogram {
             fill: o.brand(),
             color: o.theme.colors.card,
             ..Default::default()
         })
+        .stat(StatIdentity)
         .house_theme(o)
         .primary_color(o.brand());
+    if let Some(f) = facet {
+        let ncol = role_num(cols, Role::FacetCols)
+            .filter(|n| *n >= 1.0)
+            .map(|n| n.min(64.0) as usize)
+            .or((f.role == Role::FacetFree).then_some(1));
+        plot = if f.role == Role::FacetFree {
+            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+        } else {
+            plot.facet_wrap("facet", ncol)
+        };
+    }
+    if share {
+        plot = plot.ylab("Share");
+    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -3792,18 +3998,36 @@ fn axis_formatter_locale(
 
 /// A normal quantile-quantile plot of the measure column (`geom_qq` + a
 /// reference line) — points on the line ⇒ roughly normal; systematic bowing ⇒
-/// skew/heavy tails. Handy for checking a model's residuals.
+/// skew/heavy tails. Handy for checking a model's residuals. An optional
+/// `::CATEGORY` draws one point series (plus its own reference line and 95%
+/// band) per group — `geom_qq`/`geom_qq_line`/`geom_qq_band` each already
+/// group by the `color`/`fill` aesthetic and re-run their stat per group, so
+/// this is the same `fill("cat").color("cat")` idiom as `::DENSITY` (#423).
+/// `::FACET`/`::FACET_FREE` draws one panel per group instead.
 fn render_qq(
     o: &RenderOptions,
     value: &Column,
+    cols: &[Column],
     title: Option<&str>,
     width: u32,
     height: u32,
 ) -> Result<Panel, String> {
-    let data = vec![("y".to_string(), value.values.clone())];
+    let category = cols.iter().find(|c| c.role == Role::Category);
+    let facet = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Facet | Role::FacetFree));
+    let mut data: Vec<(String, Vec<Value>)> = vec![("y".to_string(), value.values.clone())];
+    let mut aes = Aes::new().y("y");
+    if let Some(cat) = category {
+        data.push(("cat".to_string(), cat.values.clone()));
+        aes = aes.fill("cat").color("cat");
+    }
+    if let Some(f) = facet {
+        data.push(("facet".to_string(), f.values.clone()));
+    }
     // Points on a 95 % pointwise envelope around the quartile line (qqplotr).
     let mut plot = GGPlot::new(data)
-        .aes(Aes::new().y("y"))
+        .aes(aes)
         .geom_qq_band_with(
             GeomQQBand {
                 fill: o.brand(),
@@ -3817,6 +4041,25 @@ fn render_qq(
         .ylab("Sample")
         .house_theme(o)
         .primary_color(o.brand());
+    if let Some(cat) = category {
+        plot = plot
+            .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
+            .scale_color(dz_scale(o, Aesthetic::Color, cat))
+            .legend_position(
+                legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
+            );
+    }
+    if let Some(f) = facet {
+        let ncol = role_num(cols, Role::FacetCols)
+            .filter(|n| *n >= 1.0)
+            .map(|n| n.min(64.0) as usize)
+            .or((f.role == Role::FacetFree).then_some(1));
+        plot = if f.role == Role::FacetFree {
+            plot.facet_wrap_free("facet", ncol, FacetScales::Free)
+        } else {
+            plot.facet_wrap("facet", ncol)
+        };
+    }
     if let Some(t) = title {
         plot = plot.title(t);
     }
