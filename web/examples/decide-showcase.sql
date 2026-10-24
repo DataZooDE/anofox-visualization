@@ -88,7 +88,7 @@ g AS (SELECT t / 100.0 AS th FROM range(5, 100, 5) r(t)),
 c AS (SELECT g.th, 100 * (dc_miss() * count(*) FILTER (WHERE s.p_refund < g.th AND s.refund)
                         + dc_false() * count(*) FILTER (WHERE s.p_refund >= g.th AND NOT s.refund)) / count(*) AS cost
       FROM g, s GROUP BY g.th),
-o AS (SELECT arg_min(th, cost) AS best, min(cost) AS best_cost FROM c)
+o AS (SELECT arg_min(th, (cost, th)) AS best, min(cost) AS best_cost FROM c)
 SELECT c.th ::XAXIS, round(c.cost, 1) ::LINECHART, 'tween'::TRANSITION,
        CASE WHEN c.th < 0.5 THEN o.best ELSE dc_t() END ::XLINE,
        ('Agent minutes lost per 100 tickets by threshold — cheapest at ' || o.best || ' (' || round(o.best_cost)::INTEGER

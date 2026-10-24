@@ -53,7 +53,11 @@ SELECT *, datediff('day', ordered_at, promised_at) AS promised_lt, datediff('day
 FROM (SELECT h.po_id, any_value(s.name) AS supplier, any_value(h.sku_id) AS sku_id, any_value(h.ordered_at) AS ordered_at,
              any_value(h.promised_at) AS promised_at, any_value(h.ordered_qty) AS ordered_qty,
              max(r.received_at) AS closed_at, count(*) AS receipts,
-             sum(datediff('day', h.ordered_at, r.received_at) * r.received_qty) / sum(r.received_qty) AS lead_time
+             -- round: a quantity-weighted mean of two sums that a parallel
+             -- hash aggregate can combine in a different order each run,
+             -- leaving the last bit or two of the float non-deterministic
+             -- (#488) — rounded well below any meaningful precision here.
+             round(sum(datediff('day', h.ordered_at, r.received_at) * r.received_qty) / sum(r.received_qty), 6) AS lead_time
       FROM lt_po h JOIN lt_receipt r USING (po_id, line_id) JOIN lt_suppliers s USING (supplier_id)
       WHERE h.status = 'received'
       GROUP BY h.po_id);
@@ -254,7 +258,8 @@ SELECT a.supplier AS "Supplier" ::TABLE,
        round(100 * a.on_time) AS "On time %", round(100 * b.on_time) AS "On time % before",
        round(a.late_by, 1) AS "Days late, when late",
        a.lines AS "Lines",
-       (SELECT list(m ORDER BY mo) FROM (SELECT date_trunc('month', closed_at) AS mo, avg(lead_time) AS m
+       -- round: same parallel-sum non-determinism as lead_time itself (#488).
+       (SELECT list(m ORDER BY mo) FROM (SELECT date_trunc('month', closed_at) AS mo, round(avg(lead_time), 6) AS m
                                         FROM lt_lines l WHERE l.supplier = a.supplier GROUP BY 1)) AS "Mean lead time by month" ::SPARKLINE,
        '?v.supplier={value}' AS "Highlight" ::LINK,
        ('Every supplier, ' || lt_qname(lt_q0()) || ' (before: ' || lt_qname(lt_q1()) || ')')::TITLE,
@@ -307,7 +312,7 @@ FROM plan p WHERE p.wk >= (SELECT min(wk) FROM fan) AND p.assumed IS NOT NULL
 ORDER BY 2, 1;
 SELECT closed_at ::XAXIS, 'Late lines' ::TRACK,
        po_id || ' (' || sku_id || '): ' || days_late || ' days late' ::LABEL
-FROM lt_lines WHERE supplier = lt_sup() AND days_late > 0 AND closed_at >= DATE '2025-03-03' ORDER BY closed_at;
+FROM lt_lines WHERE supplier = lt_sup() AND days_late > 0 AND closed_at >= DATE '2025-03-03' ORDER BY closed_at, po_id;
 SELECT w.wk ::XAXIS, d.kind ::CATEGORY, 1 ::HEATMAP, d.what || ' (' || strftime(d.start_date, '%-d %b') || ' – ' || strftime(d.end_date, '%-d %b %Y') || ')' ::LABEL,
        'Disruptions' ::TRACK
 FROM (SELECT unnest(generate_series(DATE '2025-03-03', lt_today(), INTERVAL 7 DAY))::DATE AS wk) w
@@ -409,7 +414,7 @@ SELECT 300::HEIGHT;
 SELECT ordered_at ::XAXIS, CASE WHEN days_late > 0 THEN 'late' ELSE 'on time' END ::CATEGORY, lead_time ::SCATTER,
        promised_lt ::REFLINE, 'promised' ::REFLINE_LABEL,
        (lt_sup() || ': lead time of each order line by order day (days)')::TITLE
-FROM lt_lines WHERE supplier = lt_sup() ORDER BY ordered_at;
+FROM lt_lines WHERE supplier = lt_sup() ORDER BY ordered_at, po_id;
 
 SELECT 12::COL;
 SELECT h.po_id AS "Order" ::TABLE, h.sku_id AS "Item", strftime(h.ordered_at, '%-d %b %Y') AS "Ordered", h.ordered_qty AS "Qty",

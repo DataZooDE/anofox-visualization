@@ -199,14 +199,14 @@ SELECT 480::HEIGHT;
 SELECT wkt ::MAP, series ::CATEGORY, label ::LABEL, base ::BASEMAP, 'routes'::SYNC_ZOOM, 'Depot:neutral; Late stop:bad'::COLORS,
        ('Today''s plan: ' || round(t_km)::INTEGER || ' km, ' || CASE WHEN t_late = 0 THEN 'all 40 stops on time' ELSE t_late || ' of 40 stops late' END)::TITLE
 FROM dr_map(dr_today()), dr_cmp()
-ORDER BY layer, van;
+ORDER BY layer, van, label, base;
 
 SELECT 6::COL;
 SELECT 480::HEIGHT;
 SELECT wkt ::MAP, series ::CATEGORY, label ::LABEL, base ::BASEMAP, 'routes'::SYNC_ZOOM, 'Depot:neutral; Late stop:bad'::COLORS,
        (dr_title(dr_plan()) || ': ' || round(p_km)::INTEGER || ' km, ' || CASE WHEN p_late = 0 THEN 'all 40 stops on time' ELSE p_late || ' of 40 stops late' END)::TITLE
 FROM dr_map(dr_plan()), dr_cmp()
-ORDER BY layer, van;
+ORDER BY layer, van, label, base;
 
 -- Van by van, today's plan vs. the new plan; the clicked van (or, for a
 -- click on a ring, every van with a late stop today) alone. A click
@@ -336,7 +336,7 @@ FROM (
     SELECT 5, 0, 'POLYGON((-0.8 -0.8, 0.8 -0.8, 0.8 0.8, -0.8 0.8, -0.8 -0.8))', 'Depot',
            'Depot' || chr(10) || 'the van leaves at 06:00 and ends here', NULL, NULL
 )
-ORDER BY layer, x NULLS FIRST;
+ORDER BY layer, x NULLS FIRST, base;
 
 SELECT 12::COL;
 SELECT 260::HEIGHT;
