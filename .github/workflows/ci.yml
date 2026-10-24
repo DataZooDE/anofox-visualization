@@ -1005,7 +1005,7 @@ jobs:
     # `lane` and `docs-check`, so it still resolves with every reported
     # check passed or skipped — nothing left pending forever.
     name: ci-gate
-    if: always()
+    if: ${{ !cancelled() }}  # not always(): a cancelled (superseded) run must not wait for a runner just to report
     needs:
       - lane
       - docs-check
