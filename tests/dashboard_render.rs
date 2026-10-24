@@ -1039,3 +1039,51 @@ fn sparkline_scales_to_its_own_range_not_zero() {
         mx - mn
     );
 }
+
+// #457: a standalone `::SPARKLINE` panel goes through the same
+// `render_sparkline` as the KPI tile and a table cell (see
+// `sparkline_scales_to_its_own_range_not_zero`'s comment) — asked for a
+// height under ggplot-rs's own plot-area floor (`SPARKLINE_MIN_H`, 50px),
+// it must still draw the whole line inside its viewBox, not clip the dips
+// against a shorter one.
+#[test]
+fn standalone_sparkline_panel_minima_stay_inside_a_short_viewbox() {
+    use anofox_visualization::{render, Column, Kind, Role};
+    let col = Column::new(
+        "value",
+        Role::Value(Kind::Sparkline),
+        f(&[1005.0, 1010.0, 1000.0, 1012.0, 1001.0, 1013.0, 1000.0]),
+    );
+    // A height well under the engine's 50px plot-area floor — exactly the
+    // squeeze a KPI tile's ~30px strip or a table row put it under.
+    let svg = render(&[col], 240, 20).expect("a rendered sparkline panel");
+    let h: f64 = svg
+        .split("viewBox=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("a viewBox")
+        .split_whitespace()
+        .nth(3)
+        .and_then(|n| n.parse().ok())
+        .expect("a viewBox height");
+    let mut ys: Vec<f64> = Vec::new();
+    for pts in svg.split("points=\"").skip(1) {
+        let pts = pts.split('"').next().unwrap_or("");
+        ys.extend(
+            pts.split(' ')
+                .filter_map(|p| p.split(',').nth(1))
+                .filter_map(|y| y.parse::<f64>().ok()),
+        );
+    }
+    assert!(!ys.is_empty(), "expected a drawn line: {svg}");
+    let (mn, mx) = ys
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
+            (a.min(v), b.max(v))
+        });
+    assert!(
+        mn > -0.5 && mx < h + 0.5,
+        "sparkline content (y {mn}..{mx}) must stay inside its own \
+         {h}px-tall viewBox, not clipped: {svg}"
+    );
+}

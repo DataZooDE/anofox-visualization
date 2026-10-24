@@ -765,6 +765,20 @@ pub const DEFAULT_MAX_LINE_POINTS: usize = 5_000;
 pub const MIN_DIM: u32 = 32;
 /// See [`MIN_DIM`].
 pub const MAX_DIM: u32 = 8_192;
+/// #457: ggplot-rs's own layout engine floors a panel's *drawable* plot
+/// area at 50px tall (`plot_height.max(50.0)` in its `render/layout.rs`),
+/// but the nested `<svg … viewBox="0 0 w h">` it wraps that panel in is
+/// still sized to whatever `w`/`h` we asked for (`render_svg_native_at`
+/// reuses the same number for both the layout and the SVG canvas/viewBox).
+/// Ask for a panel shorter than this floor — as the KPI tile's and a
+/// table's `::SPARKLINE` cell both used to, via `MIN_DIM` (32px) — and the
+/// *drawn* content (sized against the 50px floor) overflows the *visible*
+/// viewBox (sized against our smaller request) and gets clipped: a
+/// series' low points fall outside the box and the line looks torn apart.
+/// Every embedder of a `GGPlot` panel into a slot shorter than this must
+/// request at least `SPARKLINE_MIN_H` and centre/pad the smaller visible
+/// slot around it, never ask ggplot-rs for less.
+pub(crate) const SPARKLINE_MIN_H: f64 = 50.0;
 
 /// Per-render options — passed explicitly (no hidden thread state).
 #[derive(Clone, Debug)]
@@ -5248,7 +5262,19 @@ fn render_sparkline(
         .house_void(o);
     // Render at a compact width so strokes stay crisp when the inline
     // sparkline is scaled down into a narrow panel column.
-    Ok(Panel::plot(plot, width.min(240), height))
+    let w = width.min(240);
+    // #457: never hand ggplot-rs a panel shorter than its own layout floor
+    // (`SPARKLINE_MIN_H` — see its doc comment). The nested `<svg viewBox>`
+    // this panel renders into is sized to whatever height we pass here, so
+    // asking for less than the floor draws the line against a taller
+    // virtual plot area than the visible box, clipping off whatever falls
+    // below it — every dip, once the min-to-max y scale above stopped
+    // flattening the line against a zero baseline. Every embedder (the KPI
+    // tile, a table's `::SPARKLINE` cell) requests at least this floor too
+    // and centres/pads its own smaller visible slot around it; this clamp
+    // is the backstop for any caller that doesn't.
+    let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+    Ok(Panel::plot(plot, w, h))
 }
 
 /// Blend a colour toward black by `t` (0 = unchanged, 1 = black).
