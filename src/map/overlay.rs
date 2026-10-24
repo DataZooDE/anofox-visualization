@@ -150,7 +150,10 @@ pub(super) fn flow_layers(
     let mut nds = Vec::new();
     let mut keys = Vec::new();
 
-    let mut end_pts: std::collections::HashMap<&str, [f64; 2]> = std::collections::HashMap::new();
+    // `BTreeMap`, not `HashMap`: iteration order below (dots drawn "one per
+    // distinct end point") must be deterministic across runs (#488), not
+    // just dedup-by-key.
+    let mut end_pts: std::collections::BTreeMap<&str, [f64; 2]> = std::collections::BTreeMap::new();
     let mut extra_self = 0usize;
 
     for fl_ in &fl.flows {
