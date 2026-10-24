@@ -205,16 +205,15 @@ fn features_follow_row_order_and_carry_the_contract() {
     assert!(f[1].starts_with("<polyline ") && attr(f[1], "fill") == Some("none"));
     assert!(f[1].contains(" data-row=\"1\" data-series=\"Van 1\" data-label=\"Van 1: 12 km\""));
     assert!(f[2].contains(" data-series=\"late &quot;stop&quot;\""));
-    // KNOWN GAP (flagged to team-lead, not filed upstream yet): ggplot-rs's
-    // SVG attribute escaper doesn't entity-escape `\n` (only `&`/`<`/`>`/
-    // `"`), so a literal newline lands in the `data-label` attribute value.
-    // Per XML/HTML attribute-value whitespace normalization, a browser's
-    // `getAttribute` collapses that to a space, not a newline — the old
-    // writer used `&#10;` specifically so the newline survives attribute
-    // parsing. `<title>` text *content* (asserted below) isn't affected;
-    // only this attribute form is. Asserting current (not-yet-fixed)
-    // behavior here so the suite stays green pending that decision.
-    assert!(f[3].contains(" data-label=\"Bakery &amp; Co\nstop #1\""));
+    // Fixed by sipemu/ggplot-rs#234 (#226, ggplot-rs 0.30.1): attribute
+    // values now entity-escape `\t`/`\n`/`\r` (`escape_attr`, used for
+    // every attribute including `data-label`), so a newline survives XML/
+    // HTML attribute-value whitespace normalization instead of collapsing
+    // to a space on `getAttribute` — the old hand-written writer's own
+    // `&#10;` behaviour, now matched. `<title>` text *content* (asserted
+    // below) keeps a literal newline either way; only this attribute form
+    // changed.
+    assert!(f[3].contains(" data-label=\"Bakery &amp; Co&#10;stop #1\""));
     // titles: "label: series", or the series alone without a label
     // ggplot-rs's own `class="gg-mark …" data-geom="sf"` land between our
     // last data-* attribute and the tag's `>` (every geom_sf mark gets
@@ -445,6 +444,93 @@ fn classed_measure_routes_through_geom_sf_with_counts_and_a_hatch() {
         !s.contains("<text x=\"0.00\" y=\"0.00\""),
         "the legend title sits flush at (0,0): {s}"
     );
+}
+
+/// Regression for #477 (fixed by `ScaleFillBinned`'s own duplicate-edge fix,
+/// sipemu/ggplot-rs#240): a classed measure whose computed break lands
+/// exactly on the data's own max (or min) gives `plot::build` a `breaks`
+/// vector with a duplicate at that end — `[c.lo, ...c.edges, c.hi]` repeats
+/// `c.hi` whenever the top interior edge coincides with it. Before #240,
+/// `ScaleFillBinned::new`'s `sorted_edges()` deduped that pair before
+/// binning, silently losing one class and falling back to a single
+/// default colour for both — the row-level `data-class` (computed by our
+/// own `Classes::index`, never touched by the scale) stayed correct, so
+/// the two classes' fills looked identical despite different `data-class`
+/// values. Two rows, `quantile 2`, a tie at the max (`35`/`150`): exactly
+/// DataZooDE/anofox-visualization#477's own repro.
+#[test]
+fn classed_map_duplicate_edge_at_max_keeps_distinct_colours_477() {
+    let wkt: Vec<Value> = vec![
+        Value::Str("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))".to_string()),
+        Value::Str("POLYGON((1 0, 2 0, 2 1, 1 1, 1 0))".to_string()),
+    ];
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[35.0, 150.0])),
+        Column::new("l", Role::Label, strs(&["A", "B"])),
+        Column::new("p", Role::Projection, konst("none", 2)),
+        Column::new("c", Role::Classes, konst("quantile 2", 2)),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 2, "{s}");
+    assert_eq!(attr(f[0], "data-class"), Some("1"), "{s}");
+    assert_eq!(attr(f[1], "data-class"), Some("2"), "{s}");
+    assert_ne!(
+        attr(f[0], "fill"),
+        attr(f[1], "fill"),
+        "class 1 (35) and class 2 (150, the degenerate top edge) must not \
+         collapse to the same colour: {s}"
+    );
+}
+
+/// Same bug, a 4-row tie at the max with `quantile 3` (three classes):
+/// `10`/`50`/`100`/`100` gives `breaks = [10, 50, 100, 100]` — the
+/// duplicate `100` again. Before #240 this merged classes 2 and 3 (both
+/// rows `>= 50`) into one fallback colour; class 1 stayed distinct only
+/// because it wasn't adjacent to the duplicate.
+#[test]
+fn classed_map_duplicate_edge_at_max_four_rows_keeps_distinct_colours_477() {
+    let wkt: Vec<Value> = (0..4)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt),
+        Column::new(
+            "v",
+            Role::Value(Kind::Bar),
+            nums(&[10.0, 50.0, 100.0, 100.0]),
+        ),
+        Column::new("l", Role::Label, strs(&["A", "B", "C", "D"])),
+        Column::new("p", Role::Projection, konst("none", 4)),
+        Column::new("c", Role::Classes, konst("quantile 3", 4)),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 4, "{s}");
+    assert_eq!(attr(f[0], "data-class"), Some("1"), "{s}");
+    assert_eq!(attr(f[1], "data-class"), Some("2"), "{s}");
+    assert_eq!(attr(f[2], "data-class"), Some("3"), "{s}");
+    assert_eq!(attr(f[3], "data-class"), Some("3"), "{s}");
+    assert_ne!(
+        attr(f[0], "fill"),
+        attr(f[1], "fill"),
+        "class 1 (10) and class 2 (50) must differ: {s}"
+    );
+    assert_ne!(
+        attr(f[1], "fill"),
+        attr(f[2], "fill"),
+        "class 2 (50) and class 3 (100, the degenerate top edge) must not \
+         collapse to the same colour: {s}"
+    );
+    // The two class-3 rows (both the tied max, 100) legitimately share a
+    // colour — same class, not the bug.
+    assert_eq!(attr(f[2], "fill"), attr(f[3], "fill"), "{s}");
 }
 
 #[test]
