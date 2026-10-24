@@ -1,0 +1,79 @@
+name: CI lane
+
+# Decides, once, which lane a run belongs to; ci.yml and
+# MainDistributionPipeline.yml both call this first and gate their jobs on
+# its outputs (#464).
+#
+#   full=true   the heavy/slow/network-hitting jobs run too (release checks).
+#               push to master, a tag, workflow_dispatch, the nightly
+#               schedule, a release/* branch, or a PR labelled `full-ci`.
+#   docs_only=true   every changed file is *.md or under docs/ (any
+#               extension) — a PR gets only a docs/link check plus the
+#               always-on gate job. Only ever computed for pull_request
+#               events; irrelevant (false) otherwise since full already
+#               covers push/schedule/dispatch/tag runs.
+#
+# full takes priority over docs_only: a full-ci-labelled docs PR still gets
+# the full lane.
+on:
+  workflow_call:
+    outputs:
+      full:
+        description: "true when this run should take the full lane (release-grade checks)"
+        value: ${{ jobs.lane.outputs.full }}
+      docs_only:
+        description: "true when every changed file is docs/markdown (pull_request only)"
+        value: ${{ jobs.lane.outputs.docs_only }}
+
+jobs:
+  lane:
+    name: decide lane
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+      docs_only: ${{ steps.decide.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide lane
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          full=false
+          reason=""
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch) full=true; reason="$EVENT_NAME" ;;
+          esac
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/master" ]; then full=true; reason="push:master"; fi
+          if [[ "$REF" == refs/tags/* ]]; then full=true; reason="tag"; fi
+          if [[ "$REF" == refs/heads/release/* ]]; then full=true; reason="push:release-branch"; fi
+          if [[ "$HEAD_REF" == release/* ]]; then full=true; reason="pr:release-branch"; fi
+          if echo "${PR_LABELS_JSON:-[]}" | jq -e 'any(.[]?; .name == "full-ci")' >/dev/null 2>&1; then
+            full=true; reason="full-ci label"
+          fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
+          echo "full lane: $full (${reason:-no trigger matched})"
+
+          docs_only=false
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- || true)
+            if [ -n "$changed" ]; then
+              echo "changed files:"; echo "$changed"
+              # *.md anywhere, or anything under docs/ (any extension, e.g. docs/img/*.png).
+              non_docs=$(echo "$changed" | grep -vE '\.md$|^docs/' || true)
+              if [ -z "$non_docs" ]; then docs_only=true; fi
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs only: $docs_only"
