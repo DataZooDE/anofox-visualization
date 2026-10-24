@@ -39,6 +39,7 @@ mod legend;
 mod overlay;
 pub(crate) mod project;
 mod symbols;
+mod wkt;
 mod write;
 
 use crate::format::{escape_xml as esc, ValueFmt};
@@ -1254,8 +1255,23 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
 /// Render a map panel's body (`None` when no row has geometry).
 pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<Drawn> {
     let m = Model::new(o, cols)?;
+    render_with_model(o, cols, &m, width, height)
+}
+
+/// [`render`]'s own body, taking an already-built [`Model`] — split out so
+/// [`build`] (#420 slice 1: the `geom_sf`-backed path for eligible maps)
+/// can build the `Model` once and route to either this (the old writer,
+/// for everything not yet ported) or the new path, without computing it
+/// twice.
+fn render_with_model(
+    o: &RenderOptions,
+    cols: &[Column],
+    m: &Model,
+    width: u32,
+    height: u32,
+) -> Option<Drawn> {
     let (w, h) = (width as f64, height as f64);
-    let mut lg = legend_of(o, &m, w, h);
+    let mut lg = legend_of(o, m, w, h);
     let forced = legend_override(cols, &mut lg);
     let nodata = lg.nodata;
     // `nodata` (above) only counts regular features/symbols without a
@@ -1267,8 +1283,8 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     let flow_nodata = m.flows.as_ref().is_some_and(|fl| {
         matches!(&m.fill, Fill::Measure(s) if fl.flows.iter().any(|f| s.values[f.row].is_none()))
     });
-    let ft = foot_of(o, &m, w);
-    let (frame, legend_at) = frame_of(&m, o, &lg, w, h, ft.h, forced)?;
+    let ft = foot_of(o, m, w);
+    let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced)?;
     let t = &o.theme;
     let id = id_of(cols, width, height);
     let card = t.colors.card;
@@ -1644,7 +1660,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     let mut extra_self = 0usize; // L < 2px screen-coincident flows, counted at render time
     if let Some(fl) = &m.flows {
         let (frag, added_marks, self_ct, cap_warn) =
-            overlay::render(o, cols, &m, &frame, fl, t, card, hatch_bg, w, h);
+            overlay::render(o, cols, m, &frame, fl, t, card, hatch_bg, w, h);
         out.push_str(&frag);
         marks += added_marks;
         extra_self += self_ct;
@@ -1687,7 +1703,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     out.push_str(&labels_svg(
         o,
         cols,
-        &m,
+        m,
         &frame,
         &[legend_box, (0.0, h - ft.h, w, h)],
         (w, h),
@@ -1698,10 +1714,10 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     out.push_str(&legend_svg(o, &lg, &id, legend_at, &font));
 
     // ---- the scale bar and the attribution the pack layers require
-    out.push_str(&foot_svg(o, &m, &ft, &frame, (w, h), &font));
+    out.push_str(&foot_svg(o, m, &ft, &frame, (w, h), &font));
 
     // ---- summary and root attributes
-    let summary = summary(o, &m, extra_self);
+    let summary = summary(o, m, extra_self);
     out.insert_str(0, &format!("<desc>{}</desc>", esc(&summary)));
     let mut attrs = vec![
         ("data-map", String::new()),
