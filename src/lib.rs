@@ -3467,64 +3467,67 @@ fn cartesian(
     // (`::REFLINE`/`::YLINE` — an average line, min/max bands, thresholds…)
     // and vertical (`::XLINE`, a continuous x). Data-mapped hlines/vlines:
     // they train their axis, appear in every facet panel and survive
-    // coord_flip.
+    // coord_flip. A statement can carry more than one `::REFLINE` (or
+    // `::XLINE`) column — e.g. an alert band's lower and upper edge — and
+    // every one of them draws its own line(s) (#471; previously only the
+    // first `::REFLINE` column was read via `find_role`, so the second was
+    // silently dropped).
     let flipped = cols.iter().any(|c| c.role == Role::Flip);
     for (role, col, vertical) in [
         (Role::RefLine, "yintercept", false),
         (Role::VLine, "xintercept", true),
     ] {
-        let Some(c) = find_role(cols, role) else {
-            continue;
-        };
-        let vals: Vec<Value> = if vertical {
-            xline_values(&c.values)
-        } else {
-            distinct_nums(&c.values)
-                .into_iter()
-                .map(Value::Float)
-                .collect()
-        };
-        if vals.is_empty() {
-            continue;
+        for c in cols.iter().filter(|c| c.role == role) {
+            let vals: Vec<Value> = if vertical {
+                xline_values(&c.values)
+            } else {
+                distinct_nums(&c.values)
+                    .into_iter()
+                    .map(Value::Float)
+                    .collect()
+            };
+            if vals.is_empty() {
+                continue;
+            }
+            let frame = vec![(col.to_string(), vals)];
+            // A quiet dashed rule in the chart text colour (not ggplot's black).
+            let ink = o.theme.chart_text();
+            plot = if vertical {
+                plot.geom_vline_aes_with(
+                    GeomVline {
+                        xintercept: 0.0,
+                        color: ink,
+                        width: 0.8,
+                        linetype: Linetype::Dashed,
+                        alpha: 1.0,
+                    },
+                    Aes::new().xintercept(col),
+                )
+                .layer_data(frame)
+                // An `::XLINE`'s tooltip is just its value (`2026-10-12`), not
+                // `x = 2026-10-12`: `geom_vline` now reads a `.tooltip()`
+                // template (ggplot-rs 0.22.2, sipemu/ggplot-rs#165), replacing
+                // its default `"x = …"` label, instead of the old
+                // `without_xline_prefix` SVG string-surgery. `{xintercept}` is
+                // formatted through the x scale (B2-4), so a `Value::DateTime`
+                // refline still shows its date text, not a raw epoch number.
+                // A `::REFLINE`/`::YLINE`'s default `"y = …"` label is left
+                // untouched, as before #326.
+                .tooltip("{xintercept}")
+            } else {
+                plot.geom_hline_aes_with(
+                    GeomHline {
+                        yintercept: 0.0,
+                        color: ink,
+                        width: 0.8,
+                        linetype: Linetype::Dashed,
+                        alpha: 1.0,
+                    },
+                    Aes::new().yintercept(col),
+                )
+                .layer_data(frame)
+            };
         }
-        let frame = vec![(col.to_string(), vals)];
-        // A quiet dashed rule in the chart text colour (not ggplot's black).
-        let ink = o.theme.chart_text();
-        plot = if vertical {
-            plot.geom_vline_aes_with(
-                GeomVline {
-                    xintercept: 0.0,
-                    color: ink,
-                    width: 0.8,
-                    linetype: Linetype::Dashed,
-                    alpha: 1.0,
-                },
-                Aes::new().xintercept(col),
-            )
-            .layer_data(frame)
-            // An `::XLINE`'s tooltip is just its value (`2026-10-12`), not
-            // `x = 2026-10-12`: `geom_vline` now reads a `.tooltip()`
-            // template (ggplot-rs 0.22.2, sipemu/ggplot-rs#165), replacing
-            // its default `"x = …"` label, instead of the old
-            // `without_xline_prefix` SVG string-surgery. `{xintercept}` is
-            // formatted through the x scale (B2-4), so a `Value::DateTime`
-            // refline still shows its date text, not a raw epoch number.
-            // A `::REFLINE`/`::YLINE`'s default `"y = …"` label is left
-            // untouched, as before #326.
-            .tooltip("{xintercept}")
-        } else {
-            plot.geom_hline_aes_with(
-                GeomHline {
-                    yintercept: 0.0,
-                    color: ink,
-                    width: 0.8,
-                    linetype: Linetype::Dashed,
-                    alpha: 1.0,
-                },
-                Aes::new().yintercept(col),
-            )
-            .layer_data(frame)
-        };
     }
     plot = data_annotations(plot, o, kind, cols, &data, x_discrete);
     // Threshold lines (`::THRESHOLDS`): one at each bound where the status
@@ -5519,11 +5522,18 @@ fn data_annotations(
         plot = top_labels(plot, xs, ls);
     }
 
-    // Reference-line labels above the line's right end.
-    if let (Some(line), Some(lab)) = (
-        find_role(cols, Role::RefLine),
-        find_role(cols, Role::RefLineLabel),
-    ) {
+    // Reference-line labels above the line's right end. A statement can
+    // carry more than one `::REFLINE` column (#471); a single
+    // `::REFLINE_LABEL` column labels every one of them, and several label
+    // columns pair with the `::REFLINE` columns by position (same rule as
+    // `::BAND_LOWER`/`::BAND_UPPER`, see `band_pairs`) — the trailing,
+    // unpaired lines (more lines than labels) draw without a label.
+    let ref_lines: Vec<&Column> = cols.iter().filter(|c| c.role == Role::RefLine).collect();
+    let ref_labels: Vec<&Column> = cols
+        .iter()
+        .filter(|c| c.role == Role::RefLineLabel)
+        .collect();
+    if !ref_lines.is_empty() && !ref_labels.is_empty() {
         let xcol = data.iter().find(|(k, _)| k == "x").map(|(_, v)| v);
         let right = xcol.and_then(|xs| {
             if x_discrete {
@@ -5537,14 +5547,22 @@ fn data_annotations(
         });
         let mut seen = std::collections::HashSet::new();
         let (mut ys, mut ls) = (vec![], vec![]);
-        for (i, v) in line.values.iter().enumerate() {
-            let Some(y) = v.as_f64().filter(|f| f.is_finite()) else {
-                continue;
+        for (li, line) in ref_lines.iter().enumerate() {
+            let lab = if ref_labels.len() == 1 {
+                Some(ref_labels[0])
+            } else {
+                ref_labels.get(li).copied()
             };
-            if let Some(l) = text_at(Some(lab), i) {
-                if ys.len() < MAX_NOTES && seen.insert((y.to_bits(), l.clone())) {
-                    ys.push(y);
-                    ls.push(l);
+            let Some(lab) = lab else { continue };
+            for (i, v) in line.values.iter().enumerate() {
+                let Some(y) = v.as_f64().filter(|f| f.is_finite()) else {
+                    continue;
+                };
+                if let Some(l) = text_at(Some(lab), i) {
+                    if ys.len() < MAX_NOTES && seen.insert((y.to_bits(), l.clone())) {
+                        ys.push(y);
+                        ls.push(l);
+                    }
                 }
             }
         }
