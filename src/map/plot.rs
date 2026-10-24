@@ -12,6 +12,7 @@
 
 use ggplot_rs::geom::sf::GeomSf;
 use ggplot_rs::prelude::*;
+use ggplot_rs::theme::LegendPosition;
 
 use crate::theme::mix;
 use crate::{Column, HouseTheme, RenderOptions};
@@ -187,34 +188,39 @@ pub(super) fn build(
             .geom_sf_with(features_geom())
     };
 
+    let mut discrete_fill = false;
     if has_fill_aes {
+        discrete_fill = matches!(m.fill, Fill::Category { .. });
         plot = plot.scale_fill(match &m.fill {
             Fill::Measure(s) => MapFill::measure((**s).clone(), o.locale),
             Fill::Category { levels, .. } => MapFill::category(levels.clone()),
             Fill::Plain(_) => unreachable!("has_fill_aes excludes Fill::Plain"),
         });
-        // TODO(#420 slice 1, NOT DONE — tried and reverted this session):
-        // `legend_at` (below) is `layout()`'s own 4-corner,
-        // vertex-density-aware pick, meant to convert to
-        // `legend_position_inside`'s (0,0)=bottom-left/(1,1)=top-right
-        // fraction (`guide/legend.rs:188-192`) via `fx = legend_at.0 / w;
-        // fy = 1.0 - legend_at.1 / h`. Wiring that in renders a continuous
-        // (`Fill::Measure`) legend's box outline in the right place but
-        // its tick marks/labels at wildly wrong, off-canvas y positions
-        // (e.g. y=-131, -419, -707 for a 320px-tall panel) — looks like a
-        // real ggplot-rs bug in `draw_continuous_legend_at`'s tick math
-        // under `LegendPosition::Inside`, not a sign error in the fx/fy
-        // formula above (the box itself lands correctly). Not verified
-        // whether a discrete (`Fill::Category`) legend has the same bug.
-        // Left at ggplot-rs's default legend placement (not yet
-        // corner-picked) rather than ship broken ticks — flag to
-        // team-lead / file upstream before retrying.
     }
     let _ = legend_at;
 
     plot = plot
         .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
         .house_void(o);
+    // A discrete (`Fill::Category`) legend goes at `LegendPosition::Top`
+    // (plain ggplot-rs API, `is_horizontal` for `Top`/`Bottom` is just the
+    // one swatch row the old writer also drew) — the old writer put its
+    // legend above the map at full width; ggplot-rs's own default (`Right`,
+    // a vertical column) narrows the map a lot on a narrow (390px) panel,
+    // which `Top` avoids. Must come *after* `.house_void(o)`: that call sets
+    // the plot's whole `Theme` (incl. `legend_position`), so setting it
+    // earlier would just get overwritten. A continuous (`Fill::Measure`, no
+    // classes — `eligible()` already excludes classed measures) legend stays
+    // on ggplot-rs's default for now: `legend_at` above (`layout()`'s own
+    // 4-corner, vertex-density-aware pick, meant to convert to
+    // `legend_position_inside`'s fraction) renders a continuous legend's
+    // tick marks/labels at wildly wrong, off-canvas y positions under
+    // `LegendPosition::Inside` — a real ggplot-rs bug (filed:
+    // sipemu/ggplot-rs#225), not a sign error here — so nothing calls
+    // `.legend_position_inside()` yet for either fill kind.
+    if discrete_fill {
+        plot = plot.legend_position(LegendPosition::Top);
+    }
 
     let attrs: Vec<(&'static str, String)> = vec![
         ("data-map", String::new()),
