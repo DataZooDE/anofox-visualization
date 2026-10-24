@@ -38,20 +38,17 @@ const check = (ok, m) => (ok ? console.log("ok   " + m) : (bad++, console.error(
 // One single-series bucket list, one ref/cur comparison list — the two
 // ::SPARKBAR cell shapes `cellSparkbar` (web/app.js) and `render_sparkbar`
 // (src/lib.rs) both handle.
-// Numeric literals cast to DOUBLE: DuckDB infers a bare decimal literal
-// (0.1, …) as DECIMAL, and rowsJson's unscale-back-to-DOUBLE step (web/
-// lint.js) only looks at a row's own top-level columns, not a DECIMAL
-// nested inside a LIST/STRUCT — so an uncast literal here would reach
-// cellSparkbar as the raw unscaled mantissa, unrelated to the bug this
-// e2e covers.
+// Bare decimal literals (0.1, …, DuckDB's own DECIMAL inference) — #468
+// fixed rowsJson's unscale step to walk a DECIMAL nested inside a LIST/
+// STRUCT/MAP, so this no longer needs a ::DOUBLE cast to route around it.
 const SQL = `SELECT f AS feature ::TABLE,
        list(share ORDER BY bucket) AS "Single" ::SPARKBAR,
        list({'ref': r, 'cur': c} ORDER BY bucket) AS "RefCur" ::SPARKBAR
 FROM (VALUES
-    ('temp', 1, 0.1::DOUBLE, 0.1::DOUBLE, 0.3::DOUBLE),
-    ('temp', 2, 0.2::DOUBLE, 0.3::DOUBLE, 0.3::DOUBLE),
-    ('temp', 3, 0.3::DOUBLE, 0.4::DOUBLE, 0.2::DOUBLE),
-    ('temp', 4, 0.4::DOUBLE, 0.2::DOUBLE, 0.2::DOUBLE)
+    ('temp', 1, 0.1, 0.1, 0.3),
+    ('temp', 2, 0.2, 0.3, 0.3),
+    ('temp', 3, 0.3, 0.4, 0.2),
+    ('temp', 4, 0.4, 0.2, 0.2)
 ) t(f, bucket, share, r, c)
 GROUP BY f;
 `;
