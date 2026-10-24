@@ -1,7 +1,7 @@
 {
   "name": "anofox-visualization",
   "description": "Charts and dashboards from SQL with the anofox_visualization DuckDB extension — SQL to SVG (anofox_render and the column chart macros), interactive ::ROLE dashboards (KPIs, periods, tables, inputs, cross-filter and drill-down, annotations and forecast fans, process diagrams, motion, Explore data, dashboard --check lint and design rules), the anofox_plot_* contract macros for anofox-statistics, anofox-forecast and Python / R results (the anofox_viz package), locked read-only serving and deployment, and login with row / column access policies.",
-  "version": "2026.10.24",
+  "version": "2026.10.25",
   "author": {
     "name": "DataZoo GmbH",
     "url": "https://github.com/DataZooDE"

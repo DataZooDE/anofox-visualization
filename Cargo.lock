@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-visualization"
-version = "2026.10.24"
+version = "2026.10.25"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-visualization-duckdb"
-version = "2026.10.24"
+version = "2026.10.25"
 dependencies = [
  "anofox-visualization",
  "bindgen",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "anofox_viz_ffi"
-version = "2026.10.24"
+version = "2026.10.25"
 dependencies = [
  "anofox-visualization",
 ]
