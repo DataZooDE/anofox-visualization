@@ -294,6 +294,7 @@ pub(super) fn lane_rects(
             color: o.brand(),
             alpha: 0.85,
             line_width: 0.0,
+            ..Default::default()
         })
         .scale_fill(
             ScaleColorDiscrete::new(Aesthetic::Fill)

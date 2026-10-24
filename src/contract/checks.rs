@@ -331,6 +331,7 @@ fn band(
                     color: o.theme.colors.positive,
                     alpha: 0.15,
                     line_width: 0.0,
+                    ..Default::default()
                 })
                 .layer_data(vec![
                     ("xmin".into(), xmin),
