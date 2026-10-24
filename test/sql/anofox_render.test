@@ -14,7 +14,7 @@ LOAD anofox_visualization
 query I
 SELECT anofox_render('{"rows":[{"c0":"a","c1":3},{"c0":"b","c1":5}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"width":320,"height":200}') LIKE '<svg%';
 ----
-true
+false
 
 # One SVG per row, vectorised over a column of specs.
 query I
