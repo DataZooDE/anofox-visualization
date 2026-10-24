@@ -31,13 +31,16 @@
 
 pub(crate) mod boundaries;
 pub(crate) mod classes;
+mod fill;
 mod flows;
 pub(crate) mod hexbin;
 mod labels;
 mod legend;
 mod overlay;
+mod plot;
 pub(crate) mod project;
 mod symbols;
+mod wkt;
 mod write;
 
 use crate::format::{escape_xml as esc, ValueFmt};
@@ -371,6 +374,7 @@ enum Fill {
 }
 
 /// The colour scale of a measure.
+#[derive(Clone)]
 struct ValueScale {
     /// The value of each row (`None` = no data).
     values: Vec<Option<f64>>,
@@ -1249,11 +1253,62 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
     layout(&m, &lg, w, h - ft.h, forced).map(|(f, _)| f.window(w, h))
 }
 
-/// Render a map panel's body (`None` when no row has geometry).
-pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32) -> Option<Drawn> {
+/// Either a real `GGPlot` (#420 slice 1's `geom_sf` path) or the old
+/// writer's already-rendered body — [`build`]'s result, for `render_inner`
+/// (`src/lib.rs`) to turn into a `Panel::Plot` or `Panel::Own` accordingly.
+pub(crate) enum MapOutput {
+    Plot {
+        plot: Box<ggplot_rs::prelude::GGPlot>,
+        attrs: Vec<(&'static str, String)>,
+        warnings: Vec<String>,
+    },
+    Own(Drawn),
+}
+
+/// Build a map panel: the new `geom_sf`-backed `GGPlot` for an
+/// [`plot::eligible`] map, the old hand-written SVG otherwise. `None` when
+/// no row has geometry (the only case either path bails out on).
+pub(crate) fn build(
+    o: &RenderOptions,
+    cols: &[Column],
+    width: u32,
+    height: u32,
+) -> Option<MapOutput> {
     let m = Model::new(o, cols)?;
+    let w = width as f64;
+
+    if plot::eligible(o, &m, w) {
+        if let Some((p, attrs)) = plot::build(o, cols, &m, width, height) {
+            let mut warnings = Vec::new();
+            if m.rows > MARK_WARN {
+                warnings.push(format!(
+                    "map: {} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light",
+                    m.rows
+                ));
+            }
+            return Some(MapOutput::Plot {
+                plot: Box::new(p),
+                attrs,
+                warnings,
+            });
+        }
+    }
+    render_with_model(o, cols, &m, width, height).map(MapOutput::Own)
+}
+
+/// The old hand-written SVG writer, taking an already-built [`Model`] —
+/// [`build`] (#420 slice 1: the `geom_sf`-backed path for eligible maps)
+/// builds the `Model` once and routes to either this (every map not yet
+/// ported) or the new path, without computing it twice.
+fn render_with_model(
+    o: &RenderOptions,
+    cols: &[Column],
+    m: &Model,
+    width: u32,
+    height: u32,
+) -> Option<Drawn> {
     let (w, h) = (width as f64, height as f64);
-    let mut lg = legend_of(o, &m, w, h);
+    let mut lg = legend_of(o, m, w, h);
     let forced = legend_override(cols, &mut lg);
     let nodata = lg.nodata;
     // `nodata` (above) only counts regular features/symbols without a
@@ -1265,8 +1320,8 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     let flow_nodata = m.flows.as_ref().is_some_and(|fl| {
         matches!(&m.fill, Fill::Measure(s) if fl.flows.iter().any(|f| s.values[f.row].is_none()))
     });
-    let ft = foot_of(o, &m, w);
-    let (frame, legend_at) = frame_of(&m, o, &lg, w, h, ft.h, forced)?;
+    let ft = foot_of(o, m, w);
+    let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced)?;
     let t = &o.theme;
     let id = id_of(cols, width, height);
     let card = t.colors.card;
@@ -1642,7 +1697,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     let mut extra_self = 0usize; // L < 2px screen-coincident flows, counted at render time
     if let Some(fl) = &m.flows {
         let (frag, added_marks, self_ct, cap_warn) =
-            overlay::render(o, cols, &m, &frame, fl, t, card, hatch_bg, w, h);
+            overlay::render(o, cols, m, &frame, fl, t, card, hatch_bg, w, h);
         out.push_str(&frag);
         marks += added_marks;
         extra_self += self_ct;
@@ -1685,7 +1740,7 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     out.push_str(&labels_svg(
         o,
         cols,
-        &m,
+        m,
         &frame,
         &[legend_box, (0.0, h - ft.h, w, h)],
         (w, h),
@@ -1696,10 +1751,10 @@ pub(crate) fn render(o: &RenderOptions, cols: &[Column], width: u32, height: u32
     out.push_str(&legend_svg(o, &lg, &id, legend_at, &font));
 
     // ---- the scale bar and the attribution the pack layers require
-    out.push_str(&foot_svg(o, &m, &ft, &frame, (w, h), &font));
+    out.push_str(&foot_svg(o, m, &ft, &frame, (w, h), &font));
 
     // ---- summary and root attributes
-    let summary = summary(o, &m, extra_self);
+    let summary = summary(o, m, extra_self);
     out.insert_str(0, &format!("<desc>{}</desc>", esc(&summary)));
     let mut attrs = vec![
         ("data-map", String::new()),
