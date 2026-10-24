@@ -244,6 +244,118 @@ fn headless_kpi_tile_has_delta_sparkline_and_goal() {
     assert!(heights[0] % 1000.0 < 320.0, "{heights:?}");
 }
 
+/// #405: a `::GROUP`'s `'compact'::KPI_SIZE` cascades onto its tiles — one
+/// line each (no `::SPARKLINE` / `::GOAL`, even when the data is there), at
+/// the lower ~36px floor, not the normal tile's ~96px one.
+#[test]
+fn headless_compact_kpi_group_drops_spark_and_goal() {
+    struct Kpis;
+    impl DataProvider for Kpis {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("'KPIs'") {
+                // the ::GROUP marker: its own title + 'compact'::KPI_SIZE
+                return Ok(vec![
+                    ("c0".into(), s(&["KPIs"])),
+                    ("c1".into(), s(&["compact"])),
+                ]);
+            }
+            if sql.contains("'Cost'") {
+                return Ok(vec![
+                    ("c0".into(), f(&[1100.0])),
+                    ("c1".into(), f(&[1000.0])),
+                    ("c2".into(), s(&["both"])),
+                    ("c3".into(), s(&["vs last month"])),
+                    ("c4".into(), s(&["[3, 5, 4, 6]"])),
+                    ("c5".into(), f(&[1600.0])),
+                    ("c6".into(), s(&["Cost"])),
+                ]);
+            }
+            // 'Other' tile and the ::ENDGROUP marker
+            Ok(vec![("c0".into(), f(&[7.0])), ("c1".into(), s(&["Other"]))])
+        }
+    }
+    let script = "\
+        SELECT 'KPIs'::GROUP, 'compact'::KPI_SIZE;\n\
+        SELECT sum(c)::MONEY, sum(p)::DELTA_LOWER_GOOD, 'both'::DELTA_FORMAT, 'vs last month'::DELTA_LABEL, \
+               list(c ORDER BY d)::SPARKLINE, 1600::GOAL, 'Cost'::LABEL FROM t;\n\
+        SELECT 7::METRIC, 'Other'::LABEL;\n\
+        SELECT 1::ENDGROUP;";
+    let o = DashboardOptions::default();
+    let svg = render_dashboard_svg(script, &mut Kpis, &o).unwrap();
+    assert!(
+        svg.matches("class=\"kpi-value kpi-compact\"").count() == 2,
+        "{svg}"
+    );
+    // the change is still there, inline — just no spark / goal
+    assert!(svg.contains("▲ 10% (+$100)"), "{svg}");
+    assert!(svg.contains("Cost") && svg.contains("$1,100"), "{svg}");
+    assert!(
+        !svg.contains("kpi-spark") && !svg.contains("kpi-goal"),
+        "{svg}"
+    );
+    // both tiles share one row, at the compact floor (36), not the normal one (96)
+    let heights: Vec<f64> = svg
+        .match_indices("rx=\"")
+        .filter_map(|(i, _)| {
+            let tag = &svg[svg[..i].rfind("<rect").unwrap()..i];
+            let h = tag.split("height=\"").nth(1)?.split('"').next()?;
+            h.parse::<f64>().ok()
+        })
+        .filter(|h| *h > 20.0)
+        .collect();
+    assert_eq!(heights, vec![36.0, 36.0], "{heights:?}");
+}
+
+/// #405: a tile's own `::KPI_SIZE` wins over its `::GROUP`'s — 'compact' on
+/// a tile in a normal box, and 'normal' on a tile in a compact box.
+#[test]
+fn headless_kpi_size_tile_override_wins_over_its_group() {
+    struct Kpis;
+    impl DataProvider for Kpis {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("'Own compact'") {
+                return Ok(vec![
+                    ("c0".into(), f(&[55.0])),
+                    ("c1".into(), s(&["Own compact"])),
+                    ("c2".into(), s(&["compact"])),
+                ]);
+            }
+            if sql.contains("'Overridden'") {
+                return Ok(vec![
+                    ("c0".into(), f(&[20.0])),
+                    ("c1".into(), s(&["Overridden"])),
+                    ("c2".into(), s(&["normal"])),
+                ]);
+            }
+            // the two ::GROUP markers (one plain, one 'compact') and ::ENDGROUP
+            Ok(vec![("c0".into(), f(&[1.0]))])
+        }
+    }
+    let script = "\
+        SELECT 'A'::GROUP;\n\
+        SELECT 55::METRIC, 'Own compact'::LABEL, 'compact'::KPI_SIZE FROM t;\n\
+        SELECT 1::ENDGROUP;\n\
+        SELECT 'B'::GROUP, 'compact'::KPI_SIZE;\n\
+        SELECT 20::METRIC, 'Overridden'::LABEL, 'normal'::KPI_SIZE FROM t;\n\
+        SELECT 1::ENDGROUP;";
+    let o = DashboardOptions::default();
+    let svg = render_dashboard_svg(script, &mut Kpis, &o).unwrap();
+    assert!(svg.contains("Own compact") && svg.contains("55"), "{svg}");
+    assert!(svg.contains("Overridden") && svg.contains("20"), "{svg}");
+    // exactly one compact tile (the lone 'A' tile): 'Overridden' stays normal
+    assert_eq!(
+        svg.matches("class=\"kpi-value kpi-compact\"").count(),
+        1,
+        "{svg}"
+    );
+}
+
 // A provider answering every query with the same canned columns.
 struct Fixed(Vec<(String, Vec<Value>)>);
 impl DataProvider for Fixed {

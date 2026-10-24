@@ -279,6 +279,33 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/fit-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/dropdown-search-e2e.mjs (#411): above ~50 options (or forced
+      # by 'search'/'native'::DROPDOWN_STYLE) a ::DROPDOWN renders a
+      # searchable combobox — filtering by value/::OPTION_LABEL, Arrow keys +
+      # Enter, Esc / an outside click, a 2,000-option window, and the
+      # downloaded HTML snapshot's native <select> fallback.
+      - name: Searchable ::DROPDOWN e2e (#411)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/dropdown-search-e2e.mjs --url http://127.0.0.1:8947/
+
+      # scripts/setvar-order-e2e.mjs (#416): a dashboard's own `SET
+      # VARIABLE` that reads an input via getvariable() sees the viewer's
+      # CURRENT pick, whether it is declared before or after that input in
+      # the script — a Share link's first load and a later pick, in a real
+      # browser. Reuses the :8947 server and Chromium above.
+      - name: SET VARIABLE order e2e (#416)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/setvar-order-e2e.mjs --url http://127.0.0.1:8947/
+
+      # scripts/compact-kpi-e2e.mjs (#405): 'compact'::KPI_SIZE on a ::GROUP
+      # packs its tiles onto one line each, well under the normal ~96px
+      # floor, a tile's own ::KPI_SIZE overriding the box's; ::THRESHOLDS
+      # still colours the value; ::FIT gives a compact tile its own, lower
+      # floor. Reuses the :8947 server and Chromium above.
+      - name: Compact KPI tiles e2e (::KPI_SIZE 'compact')
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/compact-kpi-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |

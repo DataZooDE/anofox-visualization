@@ -1892,7 +1892,14 @@ async function runSql(sql, page, kind, setup, at, pv) {
 }
 async function runSqlInner(sql, page, kind, setup, at, pv) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
-  if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
+  if (setv) {
+    dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
+    // #416: every caller except runSetup (the dashboard's OWN setup
+    // statements) passes no `setup` flag — this is the viewer's value
+    // (an input, a URL seed, a cross-filter/range/drill var), not something
+    // the script derived itself.
+    if (!setup) dpViewerVars.add(setv[1].toLowerCase());
+  }
   // #417 S2: a published site has no server to run check_path_values for it
   // — enforce the same rule here, for every `path_vars` variable, wherever
   // its value came from (a URL seed into a text/number/date input, the
@@ -6622,6 +6629,11 @@ function mkLogoEdit(head, cur) {
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpVarNow = {}; // variable -> SQL literal set during this run (markPending)
 let dpVarLast = {}; // … and at the end of the last completed run
+// #416: lower-cased names SET this run by the VIEWER, not by the dashboard's
+// own script — an input's pick, a URL seed, a cross-filter/range/drill var.
+// Reset at the top of every run (runOnce); a derived `SET VARIABLE` that
+// reads one of these may need the corrective re-run pass below.
+let dpViewerVars = new Set();
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
 let dpZoomGroups = {}; // ::SYNC_ZOOM: group name → {view: {cx, cy, w} | null, members: Set<map holder>}
@@ -7537,6 +7549,35 @@ function patchSlots(roots, newRoots, swaps) {
 // The first run, with nothing on screen yet, draws skeleton cards instead (a
 // tabbed dashboard's panels live in .tabwrap, outside the grid).
 const varsOf = (sql) => [...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]);
+
+// #416: the dashboard's own `SET VARIABLE` setup statements that need a
+// corrective re-run once every viewer value (an input's pick, a URL seed, a
+// cross-filter/selection/range/drill var — `viewerVars`, lower-cased names)
+// has its final value for this run. The render loop's pre-pass runs every
+// statement once, in script order, so a derived `SET VARIABLE` declared
+// BEFORE the input (or other viewer var) it reads via getvariable() still
+// saw that variable's PREVIOUS value, from its own turn — unlike the locked
+// server, which sets every viewer value first and only then replays the
+// dashboard's own SET VARIABLEs (servedVars; duckext/src/serve.rs's
+// request_sets_named + run_panel). Returned in script order, and a
+// statement's own name counts as a viewer var for the rest of this list
+// too, so a chain of derived variables (sel2 reading sel) resolves in one
+// forward pass — the same single stmts[..panel] replay the server does. A
+// statement that reads none of them (including a running total that only
+// reads its own prior value) is left out, so nothing is ever applied twice.
+const SETVAR_RE = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=/i;
+function setVarsToReplay(stmts, viewerVars) {
+  const known = new Set(viewerVars);
+  const out = [];
+  for (const s of stmts) {
+    if (!s.setup) continue;
+    const m = SETVAR_RE.exec(sqlCode(s.sql));
+    if (!m || !varsOf(s.sql).some((v) => known.has(v.toLowerCase()))) continue;
+    out.push(s);
+    known.add(m[1].toLowerCase());
+  }
+  return out;
+}
 function markPending(grid, stmts, fresh) {
   const changed = new Set(
     [...new Set([...Object.keys(dpVarNow), ...Object.keys(dpVarLast)])].filter((k) => dpVarNow[k] !== dpVarLast[k])
@@ -8386,6 +8427,7 @@ async function runOnce(fresh = true, pv = preview) {
   // (::THEME, ::LOCALE, ::DASHBOARD_TITLE, …) are collected here so the theme
   // applies to every panel wherever the directive sits in the script.
   const dd = {};
+  dpViewerVars = new Set(); // #416: repopulated below as this run sets each one
   // Default theme: the server's (`serve --theme`, anofox_serve_dashboards
   // options.theme), else the built-in light look; a ::THEME overrides it.
   dpTheme.spec = defaultThemeSpec();
@@ -8474,7 +8516,11 @@ async function runOnce(fresh = true, pv = preview) {
         if (kind === "DROPDOWN" || kind === "BUTTONS") {
           const { options, labels, hints } = inputOptions(s.roles, rows, varname);
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
-          dd[i] = { kind, varname, options, labels, hints, caption };
+          // ::DROPDOWN_STYLE (#411): 'search' / 'native' overrides the
+          // option-count threshold that otherwise picks the widget.
+          const dsr = kind === "DROPDOWN" && s.roles.find((r) => r[1] === "DROPDOWN_STYLE");
+          const dropdownStyle = dsr ? String(rows[0]["c" + dsr[0]] ?? "").trim().toLowerCase() : null;
+          dd[i] = { kind, varname, options, labels, hints, caption, dropdownStyle };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
         } else if (kind === "TOGGLE") {
           // A BOOLEAN variable; the query's value is the default.
@@ -8504,6 +8550,20 @@ async function runOnce(fresh = true, pv = preview) {
 
   // URL seeds no input claimed are selections (`v.selected`, named ones).
   if (applySelectionSeeds()) await setSelectionVars();
+
+  // #416: viewer values are now final for this run (dpViewerVars) — re-run
+  // the dashboard's own SET VARIABLEs that read one, in script order, so a
+  // derived variable declared before the input it reads still sees the
+  // viewer's CURRENT pick (setVarsToReplay, above; the same order the
+  // locked server uses).
+  for (const s of setVarsToReplay(stmts, dpViewerVars)) {
+    try {
+      await runSetup(s.sql, pv);
+      dpViewerVars.add(SETVAR_RE.exec(sqlCode(s.sql))[1].toLowerCase());
+    } catch (e) {
+      if (!isOptionalMissing(s, e)) console.error(e);
+    }
+  }
   markPending(grid, stmts, fresh); // now the changed variables are known
 
   // The theme (and its light/dark variant) for this run: CSS tokens on the
@@ -8966,6 +9026,14 @@ async function runOnce(fresh = true, pv = preview) {
           };
           const fig = mkPanel();
           fig.classList.add("metric");
+          // ::KPI_SIZE (#405): this tile's own value wins over an enclosing
+          // ::GROUP's (CSS: .group-compact .metric, overridden by either class).
+          const sizeVal = String(cell("KPI_SIZE") ?? "")
+            .replace(/^"|"$/g, "")
+            .trim()
+            .toLowerCase();
+          if (sizeVal === "compact") fig.classList.add("metric-size-compact");
+          else if (sizeVal === "normal") fig.classList.add("metric-size-normal");
           let parts = {};
           try {
             parts = JSON.parse(
@@ -9153,9 +9221,28 @@ async function runOnce(fresh = true, pv = preview) {
           defaultSpan = Math.max(1, Math.round(12 / n));
         }
       } else if (d === "GROUP") {
-        const title = await firstValue(s);
+        // ::KPI_SIZE (#405) cascades onto every tile in the box, unless a
+        // tile sets its own — a second column beside the title, so it needs
+        // its own query (firstValue()'s literal shortcut only reads c0).
+        const kr = s.roles.find((r) => r[1] === "KPI_SIZE");
+        let title, sizeVal;
+        if (kr) {
+          const gr = s.roles.find((r) => r[1] === "GROUP");
+          const r0 = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i))[0] || {};
+          title = gr ? r0["c" + gr[0]] : null;
+          sizeVal = r0["c" + kr[0]];
+        } else {
+          title = await firstValue(s);
+        }
+        const compact = String(sizeVal ?? "").replace(/^"|"$/g, "").trim().toLowerCase() === "compact";
         const box = document.createElement("section");
-        box.className = "group";
+        box.className = "group" + (compact ? " group-compact" : "");
+        // ::HEIGHT right before a ::GROUP sets that row's ::FIT share (#418),
+        // like it does for a chart row — fitDash reads it off the box; a
+        // ::GROUP with none keeps its tiles' own natural height instead of
+        // sharing the window at all (see fitDash's `kind()` / `share()`).
+        if (nextHeight > 0) box.dataset.dpHeight = nextHeight;
+        nextHeight = 0;
         if (title) {
           const t = document.createElement("div");
           t.className = "group-title";
@@ -9796,6 +9883,7 @@ function fitScreen() {
 function fitDash(dash, env) {
   const MIN_PANEL = 120; // px (lint.rs fit_ref::PANEL_MIN)
   const MIN_KPI = 96; // px (lint.rs fit_ref::KPI_MIN): a value, its caption, the tile's padding
+  const MIN_KPI_COMPACT = 36; // px (lint.rs fit_ref::KPI_MIN_COMPACT, src/kpi.rs): a ::KPI_SIZE 'compact' tile (#405)
   const MIN_WIDTH = 600; // px: phones keep the scrolling column
   const body = document.body;
   const shown = (el) => {
@@ -9842,8 +9930,16 @@ function fitDash(dash, env) {
       // its own content (the tile may be stretched to its row's height)
       const kids = [...p.children].map((c) => c.getBoundingClientRect()).filter((b) => b.height);
       const content = kids.length ? Math.max(...kids.map((b) => b.bottom)) - Math.min(...kids.map((b) => b.top)) : 0;
-      const min = Math.max(MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
-      return { kind: "kpi", w: min, min };
+      // #405: a ::KPI_SIZE 'compact' tile (its own class, or inherited from
+      // an enclosing ::GROUP unless it overrides back to 'normal') has a
+      // lower floor than a normal KPI tile.
+      const compact = p.classList.contains("metric-size-compact") || (!p.classList.contains("metric-size-normal") && !!p.closest(".group-compact"));
+      const min = Math.max(compact ? MIN_KPI_COMPACT : MIN_KPI, Math.ceil(content + px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"])));
+      // #418: a ::HEIGHT right before the ::GROUP box sets its row's ::FIT
+      // share, like a chart row's — else the row keeps its own natural
+      // (measured) height, out of the share entirely (see `share()` below).
+      const authored = +p.closest(".group")?.dataset.dpHeight || 0;
+      return { kind: "kpi", w: authored || min, min, natural: !authored };
     }
     // a table / ::PAGED: its ::HEIGHT, else a default chart's (never its row
     // count, so a cross-filter re-run keeps the sizes); a text / Markdown box,
@@ -9874,13 +9970,27 @@ function fitDash(dash, env) {
       r.w = Math.max(...r.items.map((i) => i.w));
       r.min = Math.max(...r.items.map((i) => i.min));
       r.kpiOnly = r.items.every((i) => i.kind === "kpi");
+      // #418: a KPI-only row with no ::HEIGHT on its ::GROUP keeps its own
+      // natural height — it never grows to fill the window; only chart /
+      // table rows (and a KPI row given its own ::HEIGHT) share the rest.
+      r.natural = r.kpiOnly && r.items.every((i) => i.natural);
     }
     // heights summing to `total` in the rows' ratio; a row whose share is
-    // under its minimum (KPI tiles) keeps the minimum
+    // under its minimum (KPI tiles) keeps the minimum; a `natural` row is
+    // fixed at its own height and taken out of both `total` and the ratio.
     const share = (total) => {
       const hs = new Map();
-      let free = rows.slice();
       let left = total;
+      const sharable = [];
+      for (const r of rows) {
+        if (r.natural) {
+          hs.set(r, r.min);
+          left -= r.min;
+        } else {
+          sharable.push(r);
+        }
+      }
+      let free = sharable;
       while (free.length) {
         const k = left / free.reduce((a, r) => a + r.w, 0);
         const pin = free.filter((r) => r.w * k < r.min);
@@ -10245,6 +10355,46 @@ function inputOptions(roles, rows, varname) {
 function optionLabel(meta, k) {
   return (meta.labels && meta.labels[k]) || meta.options[k];
 }
+// Fills a <select> with an input's options (shared by ::DROPDOWN's plain
+// <select> and the searchable combobox's hidden fallback <select>, #411).
+function fillSelectOptions(select, meta) {
+  meta.options.forEach((o, k) => {
+    const opt = document.createElement("option");
+    opt.value = o;
+    const hint = meta.hints && meta.hints[k];
+    opt.textContent = hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k);
+    if (o === dpVars[meta.varname]) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+// A search box appears once a list gets long, so many categories/options
+// stay usable — shared threshold for ::MULTISELECT's popover search and
+// ::DROPDOWN's searchable combobox (#411). `'search'`/`'native'::DROPDOWN_STYLE`
+// overrides it either way.
+const SEARCHABLE_OPTION_THRESHOLD = 50;
+function dropdownIsSearchable(meta) {
+  if (meta.dropdownStyle === "native") return false;
+  if (meta.dropdownStyle === "search") return true;
+  return meta.options.length > SEARCHABLE_OPTION_THRESHOLD;
+}
+// The indices of `meta.options` matching `q` — a case-insensitive substring
+// of the value or its ::OPTION_LABEL, like ::MULTISELECT's search (empty `q`:
+// every option, in order). A standalone, DOM-free function so the searchable
+// ::DROPDOWN's filter (#411) is unit-testable.
+function ddMatches(meta, q) {
+  const needle = String(q).trim().toLowerCase();
+  const out = [];
+  for (let k = 0; k < meta.options.length; k++) {
+    if (!needle || (optionLabel(meta, k) + "\u0000" + meta.options[k]).toLowerCase().includes(needle)) out.push(k);
+  }
+  return out;
+}
+// An Arrow-key move by `i` (a raw, unwrapped target), wrapped into
+// `[0, count)` — `-1` when there is nothing to highlight. Standalone for the
+// same reason as ddMatches.
+function ddWrapIndex(i, count) {
+  return count ? ((i % count) + count) % count : -1;
+}
 
 function makeControl(meta, bar) {
   if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
@@ -10293,16 +10443,10 @@ function makeControl(meta, bar) {
   }
   let input;
   if (meta.kind === "DROPDOWN") {
+    if (dropdownIsSearchable(meta)) return finalizeControl(makeSearchableDropdown(meta), bar);
     input = document.createElement("select");
     input.setAttribute("aria-label", meta.caption || meta.varname);
-    meta.options.forEach((o, k) => {
-      const opt = document.createElement("option");
-      opt.value = o;
-      const hint = meta.hints && meta.hints[k];
-      opt.textContent = hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k);
-      if (o === dpVars[meta.varname]) opt.selected = true;
-      input.appendChild(opt);
-    });
+    fillSelectOptions(input, meta);
     input.onchange = () => {
       dpVars[meta.varname] = input.value;
       run(false);
@@ -10356,7 +10500,7 @@ function makeControl(meta, bar) {
 
     const rows = [];
     // A search box appears once the list gets long, so many categories stay usable.
-    if (options.length > 50) {
+    if (options.length > SEARCHABLE_OPTION_THRESHOLD) {
       const sb = document.createElement("input");
       sb.type = "search";
       sb.placeholder = `Search ${options.length} options…`;
@@ -10429,6 +10573,255 @@ function makeControl(meta, bar) {
   }
   wrap.appendChild(input);
   return finalizeControl(wrap, bar);
+}
+
+// ::DROPDOWN above SEARCHABLE_OPTION_THRESHOLD (or forced by
+// `'search'::DROPDOWN_STYLE`, #411): an accessible combobox — a text field
+// that filters options by value and ::OPTION_LABEL (case-insensitive
+// substring, like ::MULTISELECT's search box), arrow keys + Enter to pick,
+// Esc or an outside click to close, the current pick shown when closed.
+// Reuses ::MULTISELECT's popover CSS (.dp-ms-pop/.dp-ms-list/.dp-ms-opt).
+// At most DD_WINDOW matches are rendered at a time so a 2,000-option list
+// still filters without jank. A hidden native <select> (.dp-dd-fallback)
+// carries the same options so a no-JS context (the downloaded HTML
+// snapshot) still shows a plain dropdown — downloadHtml() swaps it back in.
+const DD_WINDOW = 200;
+let ddUid = 0;
+function makeSearchableDropdown(meta) {
+  const options = meta.options;
+  const varname = meta.varname;
+  const cont = document.createElement("div");
+  cont.className = "control";
+  const cap = document.createElement("span");
+  cap.textContent = (meta.caption || varname || "") + ":";
+  cont.appendChild(cap);
+
+  const dd = document.createElement("div");
+  dd.className = "dp-ms dp-dd";
+  const uid = "dp-dd-" + ++ddUid;
+  const listId = uid + "-list";
+
+  const inputEl = document.createElement("input");
+  inputEl.type = "text";
+  inputEl.className = "dp-dd-input";
+  inputEl.setAttribute("role", "combobox");
+  inputEl.setAttribute("aria-haspopup", "listbox");
+  inputEl.setAttribute("aria-expanded", "false");
+  inputEl.setAttribute("aria-controls", listId);
+  inputEl.setAttribute("aria-autocomplete", "list");
+  inputEl.setAttribute("aria-label", meta.caption || varname);
+  inputEl.autocomplete = "off";
+  inputEl.spellcheck = false;
+  refocus("dd:" + varname, inputEl); // a pick re-runs (rebuilds the controls); keep the keyboard here
+
+  const pop = document.createElement("div");
+  pop.className = "dp-ms-pop dp-dd-pop";
+  pop.hidden = true;
+  const list = document.createElement("div");
+  list.className = "dp-ms-list dp-dd-list";
+  list.id = listId;
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", meta.caption || varname);
+  pop.appendChild(list);
+  const more = document.createElement("div");
+  more.className = "dp-dd-more";
+  more.hidden = true;
+  pop.appendChild(more);
+
+  const fallback = document.createElement("select");
+  fallback.className = "dp-dd-fallback";
+  fallback.hidden = true;
+  fallback.setAttribute("aria-hidden", "true");
+  fallback.setAttribute("aria-label", meta.caption || varname);
+  fallback.tabIndex = -1;
+  fillSelectOptions(fallback, meta);
+
+  let shown = []; // option indices behind the currently rendered rows
+  let active = -1; // keyboard-highlighted index into `shown`
+  const currentLabel = () => {
+    const k = options.indexOf(dpVars[varname]);
+    return k >= 0 ? optionLabel(meta, k) : "";
+  };
+  const moveActive = (i) => {
+    const items = [...list.querySelectorAll('[role="option"]')];
+    active = ddWrapIndex(i, items.length);
+    items.forEach((el, j) => el.classList.toggle("dp-dd-active", j === active));
+    if (active >= 0) {
+      inputEl.setAttribute("aria-activedescendant", items[active].id);
+      items[active].scrollIntoView({ block: "nearest" });
+    } else inputEl.removeAttribute("aria-activedescendant");
+  };
+  // `.dp-dd-pop` is `position: fixed` (CSS) so a `.controls` bar's
+  // `overflow: hidden` never clips it, but that means it no longer inherits
+  // a position from flowing after `inputEl` — place it from the input's
+  // own `getBoundingClientRect()`, flipped above when there isn't room
+  // below (a short viewport, a ::FIT tab, near the bottom of the page).
+  // Clamps `list`'s own height (not the popover's) to whatever room is
+  // left, so there is only ever the one scrollbar `.dp-ms-list` already
+  // has — not a second one on the popover.
+  const PAD = 8;
+  const place = () => {
+    const r = inputEl.getBoundingClientRect();
+    const w = Math.min(Math.max(r.width, 190), window.innerWidth - 2 * PAD);
+    pop.style.width = w + "px";
+    pop.style.left = Math.max(PAD, Math.min(r.left, window.innerWidth - w - PAD)) + "px";
+    list.style.maxHeight = ""; // the CSS default (230px) — measure the natural size first
+    // `clientHeight` (not `scrollHeight`, which ignores `max-height` by
+    // definition — it reports the full, unclamped content height) is the
+    // list's actual rendered height under the CSS 230px cap.
+    const naturalList = list.clientHeight;
+    const chromeH = pop.clientHeight - naturalList; // padding + the "+N more" line
+    const below = window.innerHeight - r.bottom - PAD;
+    const above = r.top - PAD;
+    const fitsBelow = naturalList + chromeH <= below;
+    if (fitsBelow || below >= above) {
+      pop.style.top = r.bottom + 4 + "px";
+      if (!fitsBelow) list.style.maxHeight = Math.max(80, below - chromeH) + "px";
+    } else {
+      const listH = Math.max(80, Math.min(naturalList, above - chromeH));
+      pop.style.top = Math.max(PAD, r.top - 4 - (listH + chromeH)) + "px";
+      list.style.maxHeight = listH + "px";
+    }
+    // A compositor quirk: under `prefers-reduced-motion: reduce` (which
+    // forces every CSS transition's duration near 0 — `.control input`'s own
+    // border-color/box-shadow transition included), the first frame a
+    // `position: fixed` popover is placed in can paint at a stale position
+    // even though `top`/`left` are already correct in the CSSOM (reproduced
+    // in Chromium; not specific to this popover). Re-applying them one frame
+    // later — reading current values, not ones captured now, so a later
+    // `place()` before this fires is never clobbered — fixes it.
+    requestAnimationFrame(() => {
+      if (pop.hidden) return;
+      const t = pop.style.top,
+        l = pop.style.left;
+      pop.style.top = "0px";
+      void pop.offsetTop; // force the reflow between the two writes
+      pop.style.top = t;
+      pop.style.left = "0px";
+      void pop.offsetLeft;
+      pop.style.left = l;
+    });
+  };
+  const reposition = () => {
+    if (!pop.hidden) place();
+  };
+  const render = (q) => {
+    const all = ddMatches(meta, q);
+    shown = all.slice(0, DD_WINDOW);
+    list.replaceChildren(
+      ...shown.map((k, i) => {
+        const row = document.createElement("div");
+        row.className = "dp-ms-opt dp-dd-opt";
+        row.id = uid + "-opt-" + i;
+        row.setAttribute("role", "option");
+        const picked = options[k] === dpVars[varname];
+        row.setAttribute("aria-selected", picked ? "true" : "false");
+        const hint = meta.hints && meta.hints[k];
+        const label = (picked ? "✓ " : "") + (hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k));
+        const tx = document.createElement("span");
+        tx.textContent = label;
+        row.appendChild(tx);
+        row.onmousedown = (ev) => {
+          ev.preventDefault(); // keep focus on the input (no blur-close) before the pick lands
+          commit(k);
+        };
+        return row;
+      })
+    );
+    if (!shown.length) {
+      const empty = document.createElement("div");
+      empty.className = "dp-dd-empty";
+      empty.textContent = "No matches";
+      list.appendChild(empty);
+    }
+    more.hidden = all.length <= shown.length;
+    if (!more.hidden) more.textContent = `+${all.length - shown.length} more — keep typing to narrow`;
+    moveActive(shown.length ? 0 : -1);
+    if (!pop.hidden) place();
+  };
+  const close = (restore) => {
+    if (pop.hidden) return;
+    pop.hidden = true;
+    dd.removeAttribute("data-open");
+    inputEl.setAttribute("aria-expanded", "false");
+    inputEl.removeAttribute("aria-activedescendant");
+    active = -1;
+    if (restore) inputEl.value = currentLabel();
+    window.removeEventListener("scroll", reposition, true);
+    window.removeEventListener("resize", reposition);
+  };
+  const open = () => {
+    if (!pop.hidden) return;
+    pop.hidden = false;
+    dd.setAttribute("data-open", "true");
+    inputEl.setAttribute("aria-expanded", "true");
+    render(inputEl.value === currentLabel() ? "" : inputEl.value);
+    // capture:true so a scroll inside any nested scrollable ancestor (not
+    // just the window) keeps the popover lined up with the input.
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+  };
+  function commit(k) {
+    const v = options[k];
+    inputEl.value = optionLabel(meta, k);
+    fallback.value = v;
+    close(false);
+    if (v === dpVars[varname]) return;
+    if (document.activeElement === inputEl) dpRefocus = "dd:" + varname;
+    dpVars[varname] = v;
+    run(false);
+  }
+
+  inputEl.value = currentLabel();
+  // Only a genuine click opens it on focus — a refocus() after a pick (the
+  // re-run rebuilds the controls) must not immediately reopen the popover it
+  // just closed.
+  inputEl.onfocus = () => inputEl.select();
+  inputEl.onclick = () => open();
+  inputEl.oninput = () => {
+    if (pop.hidden) open();
+    else render(inputEl.value);
+  };
+  inputEl.onkeydown = (e) => {
+    e.stopPropagation(); // don't let the page's own shortcuts see these keys
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (pop.hidden) return open();
+      moveActive(active + (e.key === "ArrowDown" ? 1 : -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (!pop.hidden && active >= 0) commit(shown[active]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close(true);
+    } else if (e.key === "Tab") close(true);
+  };
+  inputEl.onblur = () => {
+    // A pick already committed via onmousedown (which runs before blur);
+    // anything else (click outside, Tab away) just closes + restores the label.
+    requestAnimationFrame(() => {
+      if (!dd.contains(document.activeElement)) close(true);
+    });
+  };
+
+  dd.append(inputEl, pop, fallback);
+  cont.appendChild(dd);
+  installDdAutoClose();
+  return cont;
+}
+// One document-level listener blurs any open searchable ::DROPDOWN when you
+// click outside it (its own onblur then closes + restores the label) —
+// installed once, like installMsAutoClose, so later re-runs' widgets are
+// covered too.
+let ddAutoCloseInstalled = false;
+function installDdAutoClose() {
+  if (ddAutoCloseInstalled) return;
+  ddAutoCloseInstalled = true;
+  document.addEventListener("mousedown", (e) => {
+    document.querySelectorAll('.dp-dd[data-open="true"]').forEach((d) => {
+      if (!d.contains(e.target)) d.querySelector(".dp-dd-input").blur();
+    });
+  });
 }
 
 // The control to focus again after the re-run a keyboard change triggers
@@ -13712,6 +14105,18 @@ async function downloadHtml() {
   snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot, .dp-toolbox").forEach((el) => el.remove());
   // …nor the builder's header editing (#60).
   snap.querySelectorAll(".dp-hedit, .dp-head-blank").forEach((el) => el.remove());
+  // A searchable ::DROPDOWN (#411) is wired entirely by listeners cloneNode
+  // drops, so it would be unopenable in a snapshot: swap it for its hidden
+  // native <select> fallback, which needs no JS to browse (same as a plain
+  // ::DROPDOWN's <select> always has, offline).
+  snap.querySelectorAll(".dp-dd").forEach((dd) => {
+    const sel = dd.querySelector(".dp-dd-fallback");
+    if (!sel) return;
+    sel.hidden = false;
+    sel.removeAttribute("aria-hidden");
+    sel.removeAttribute("tabindex");
+    dd.replaceWith(sel);
+  });
   snap.querySelectorAll(".dp-title[data-title]").forEach((h) => {
     if (!h.dataset.title) return h.remove();
     h.textContent = h.dataset.title;

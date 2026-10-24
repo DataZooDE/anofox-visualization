@@ -132,6 +132,8 @@ terminal.
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
+| `::XBREAKS` | `::X_BREAKS` | modifier | explicit x-axis tick positions, in data units — '100,1000,10000'; overrides the automatic ticks (and, under ::XSCALE, their log/sqrt round-number placement) |
+| `::YBREAKS` | `::Y_BREAKS` | modifier | explicit y-axis tick positions, like ::XBREAKS |
 | `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
@@ -161,6 +163,7 @@ terminal.
 | `::DELTA_LOWER_GOOD` | `::COMPARE_LOWER_GOOD`, `::DELTA_INVERSE` | kpi | comparison value where lower is better (churn, cost): a rise is drawn red |
 | `::DELTA_FORMAT` | `::DELTAFORMAT` | kpi | how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both' |
 | `::DELTA_LABEL` | `::DELTALABEL`, `::COMPARE_LABEL` | kpi | what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label') |
+| `::KPI_SIZE` | `::KPI_DENSITY` | kpi | KPI tile density: 'compact' (single line, value + label, no ::SPARKLINE/::GOAL) or 'normal' (default); on ::METRIC it sets that tile, on ::GROUP every tile in the box |
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
@@ -189,6 +192,7 @@ terminal.
 | `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
+| `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
@@ -285,6 +289,15 @@ only while the tab is. Put an input in the tab whose panels it changes, and
 keep only those that act on every tab (or on a KPI row above the tabs) at the
 top. Its variable is global either way — any panel can read it, it lands in
 the URL as `?v.name=` — and a `#Tab?v.name=…` link still sets it.
+
+A `SET VARIABLE` of your own can derive from an input's variable —
+`SET VARIABLE sel = coalesce(nullif(getvariable('channel'), ''), 'all')` —
+**wherever it sits in the script**, before or after the input. Every viewer
+value (an input's pick, a `?v.name=` seed, a cross-filter/selection) is
+applied before any of the dashboard's own `SET VARIABLE`s run, the same
+order the browser, the builder and a locked server all use — so the
+derived variable always sees the current pick, never the input's previous
+one (#416).
 
 ```sql
 SELECT DISTINCT region::DROPDOWN FROM sales;          -- above the tabs: every tab
@@ -392,6 +405,30 @@ more in a row) share one row, sized to the tallest tile. `dashboard --check`
 reports `kpi/bad-delta-format` (an unknown format; the change is shown as a %),
 `kpi/no-delta` (a format or label without a `::DELTA`) and
 `kpi/sparkline-not-list`.
+
+**A denser strip: `::KPI_SIZE`.** The tile above (~96 px) is sized for a
+reader studying one number; a status row of 4-6 KPIs someone just glances at
+— e.g. next to a `::BUTTONS` picker — doesn't need that much. `'compact'::KPI_SIZE`
+on a `::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT` statement packs it onto one
+line (`::LABEL`, the value, the change, in that order) at ~36 px; `::THRESHOLDS`
+colouring, `::DELTA`/`::DELTA_FORMAT` and number formats still apply, but
+`::SPARKLINE` and `::GOAL` are dropped — there's no room for them on one line.
+Put it on the `::GROUP` instead to set every tile in the box at once; a tile's
+own `::KPI_SIZE` (either value) then wins over the box's:
+
+```sql
+SELECT 'Status'::GROUP, 'compact'::KPI_SIZE;
+SELECT 42::METRIC, 'Latest value'::LABEL;
+SELECT 7::METRIC, 'Alerts'::LABEL, '<1:good; <4:warn; bad'::THRESHOLDS;
+SELECT 3::METRIC, 'Drifting inputs'::LABEL, '<1:good; <3:warn; bad'::THRESHOLDS;
+SELECT 91::PERCENT, 'Coverage'::LABEL;
+SELECT 1::ENDGROUP;
+```
+
+`dashboard --check` reports `kpi/bad-kpi-size` (a value that isn't 'compact'
+or 'normal' — treated as 'normal') and `kpi/kpi-size-misplaced` (not on a KPI
+tile or a `::GROUP`). `::FIT` (#400) sizes a compact tile's row at its own,
+lower minimum, not the normal tile's ~96 px floor.
 
 #### Button groups, toggles and the metric / dimension switcher
 
@@ -2030,12 +2067,19 @@ SELECT * ::TABLE FROM orders;
 
 - The height under the app bar and the tab bar is measured, and the rows of
   panels share it **in the ratio of their heights** (`::HEIGHT`, else the
-  default) — a `360::HEIGHT` row stays taller than a default one.
+  default) — a `360::HEIGHT` row stays taller than a default one. A
+  **KPI-only row** (a `::GROUP` of `::METRIC`s, or a row of bare KPI tiles)
+  is the exception: it keeps its own **natural height** instead — its
+  measured content, at least ~96 px (`'compact'::KPI_SIZE` tiles, ~36 px) —
+  and is left out of the share; only chart / table rows divide the rest.
+  `::HEIGHT` right before the `::GROUP` opts it back into sharing, exactly
+  like a chart row's (#418).
 - Charts are **drawn again at their new size** (text and lines stay their real
   size, nothing is stretched); a resize, a rotation, entering full screen and
   switching tabs re-fit (cross-filtering keeps the fitted sizes).
 - Tables, `::PAGED` tables and text boxes keep their content and **scroll
-  inside their panel**; KPI tiles keep at least ~96 px.
+  inside their panel**; KPI tiles keep at least ~96 px (`'compact'::KPI_SIZE`
+  tiles, ~36 px) — see the KPI-only row note above.
 - If a panel would get under ~120 px the tab scrolls as usual and a small
   notice says so — `dashboard --check` warns about this ahead of time
   (`layout/fit-too-many`, judged at 1366×768; for a sub-tab / view only its own panels under its own bar), and about a `::FIT` whose
@@ -2193,8 +2237,9 @@ Every panel carries its own state — there is no full-page spinner:
   `dashboard --check` and a locked server with a data folder check the paths
   before the statement runs (DuckDB's `glob()`, after expanding the variables
   with the values the statement would see): a requirement none of whose
-  alternatives exists skips the statement. `--check --data <dir>` sets
-  `anofox_data` as the locked server does. On the locked server a `${name}`
+  alternatives exists skips the statement. `--check --data <dir>`, `dashboard
+  --data <dir>` and `dashboard --svg --data <dir>` all set `anofox_data` as
+  the locked server does (#414). On the locked server a `${name}`
   must be a server-side value (`anofox_data`, a `path_vars` variable, a
   credential's locked variable, the login's claims, or what the dashboard's own
   statements set), and the expanded path must stay inside the data folder —
@@ -2790,6 +2835,28 @@ bundled DuckDB compile).
 ```sh
 cargo run --bin dashboard -- dashboards/sessions.sql   # → dashboard.html
 xdg-open dashboard.html
+```
+
+The render (and `dashboard --svg file.sql out.svg`, the whole dashboard as
+one SVG) runs the script's statements in **one DuckDB session, in script
+order** — a `CREATE OR REPLACE TEMP VIEW`, `SET VARIABLE` or other setup
+statement stays in scope for every later statement, the same session
+semantics as `dashboard --check` and a locked server's cold path (#414).
+There is no long-lived `duckdb` CLI connection to carry that across the
+separate `duckdb` calls the render makes, so it is simulated: a growing
+prelude of every setup statement run so far (plus the bound default of any
+input above it, as the browser's own first-load pre-pass picks) is replayed
+in full before each later statement. `--data <dir>` sets
+`getvariable('anofox_data')` to that directory (resolved to an absolute
+path) before the script's own statements run, exactly as `dashboard --check
+--data` and a locked server's `options.data` do — so a dashboard written
+for a locked server (setup views, `-- @requires ${anofox_data}/…`,
+`getvariable('anofox_data')` panels) renders to static HTML or SVG without
+one running:
+
+```sh
+dashboard dashboards/sessions.sql out.html --data /srv/runs/latest
+dashboard --svg dashboards/sessions.sql out.svg --data /srv/runs/latest
 ```
 
 The same binary lints and inspects — useful when authoring (by hand or with an

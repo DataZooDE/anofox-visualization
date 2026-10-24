@@ -298,8 +298,18 @@ pub enum Role {
     Hint,
     /// The shown text of a `::DROPDOWN`/`::BUTTONS`/`::MULTISELECT` option (`::OPTION_LABEL`); the variable keeps the value (#170).
     OptionLabel,
+    /// Forces a `::DROPDOWN`'s widget (`::DROPDOWN_STYLE`): `'search'` (a
+    /// searchable combobox) or `'native'` (a plain `<select>`), overriding
+    /// the option-count threshold the browser otherwise switches on (#411).
+    DropdownStyle,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
     Text(TextSize),
+    /// A KPI tile's density (`::KPI_SIZE`): `'compact'` (single-line
+    /// value + label, no sparkline/goal) or `'normal'` (default). On a
+    /// `::METRIC`/`::MONEY`/`::PERCENT`/`::COMPACT` panel it sets that tile;
+    /// on a `::GROUP` it sets every tile in the box (a tile's own
+    /// `::KPI_SIZE` wins over the box's).
+    KpiSize,
     /// Layout: reserve an empty grid cell (`::PLACEHOLDER`).
     Placeholder,
     /// A banner image at the top of the dashboard (`::HEADER_IMAGE`).
@@ -466,6 +476,13 @@ pub enum Role {
     XScale,
     /// y-axis scale transform (`::YSCALE`), like [`Role::XScale`].
     YScale,
+    /// Explicit x-axis tick positions (`::XBREAKS '100,1000,10000'`), in the
+    /// axis's own pre-transform data units — overrides the automatic ticks
+    /// (and, under `::XSCALE`, their automatic log/sqrt round-number
+    /// placement). Read from the first value.
+    XBreaks,
+    /// Explicit y-axis tick positions (`::YBREAKS`), like [`Role::XBreaks`].
+    YBreaks,
     /// A straight reference line `y = slope·x + intercept` per distinct
     /// `'slope,intercept'` value (`::ABLINE`).
     AbLine,
@@ -1287,7 +1304,7 @@ pub(crate) fn title_value(values: &[Value]) -> Option<String> {
 /// (its caption is `::LABEL`), as in a dashboard.
 fn panel_title(cols: &[Column], o: &RenderOptions) -> Option<String> {
     let title = title_value(&cols.iter().find(|c| c.role == Role::Title)?.values)?;
-    kpi::Kpi::from_columns(cols, &o.locale)
+    kpi::Kpi::from_columns(cols, &o.locale, false)
         .is_none()
         .then_some(title)
 }
@@ -1790,6 +1807,11 @@ fn xline_date_text(secs: i64) -> String {
 /// The `::LINESTYLE` values.
 pub const LINE_STYLES: &[&str] = &["solid", "dashed", "flow"];
 
+/// The `::DROPDOWN_STYLE` values: `'search'` forces the searchable combobox
+/// below the option-count threshold the browser otherwise switches on;
+/// `'native'` forces the plain `<select>` above it.
+pub const DROPDOWN_STYLES: &[&str] = &["search", "native"];
+
 /// The `::ANIMATE` modes the browser plays.
 pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
 
@@ -2079,7 +2101,7 @@ fn render_inner(
     }
     // A KPI / text card (value, change, sparkline, goal) — the same tile as
     // the headless dashboard; at most its natural height.
-    if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale) {
+    if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale, false) {
         let h = height.min(k.height().ceil() as u32).max(MIN_DIM);
         return Ok(Panel::own(width, h, k.body(width as f64, h as f64, o)));
     }
@@ -2234,6 +2256,21 @@ fn role_num(cols: &[Column], role: Role) -> Option<f64> {
             .iter()
             .find_map(|v| v.as_f64().filter(|f| f.is_finite()))
     })
+}
+
+/// `::XBREAKS`/`::YBREAKS`: a comma-separated list of explicit tick
+/// positions (`'100,1000,10000'`), in the axis's own pre-transform data
+/// units. Non-numeric tokens are dropped — the linter warns separately
+/// (`lint::breaks_diags`) — so an all-invalid spec yields `None`, same as
+/// not setting the role at all.
+fn role_breaks(cols: &[Column], role: Role) -> Option<Vec<f64>> {
+    let raw = role_str(cols, role)?;
+    let vals: Vec<f64> = raw
+        .split(',')
+        .filter_map(|t| t.trim().parse::<f64>().ok())
+        .filter(|f| f.is_finite())
+        .collect();
+    (!vals.is_empty()).then_some(vals)
 }
 
 /// Whether grouped marks on a discrete x sit side by side: bars, and point
@@ -3474,6 +3511,14 @@ fn cartesian(
     let y_tr = role_str(cols, Role::YScale)
         .map(|s| axis_transform(&s, Role::YScale))
         .transpose()?;
+    // `::YBREAKS` is given in the axis's own (pre-transform) data units —
+    // e.g. `'100,1000,10000'` under `'log10'::YSCALE` — so it's
+    // forward-transformed the same way the scale itself transforms data,
+    // matching `ScaleContinuous::with_breaks`'s transformed-space contract.
+    let y_breaks = role_breaks(cols, Role::YBreaks).map(|bs| match &y_tr {
+        Some(t) => bs.iter().map(|&v| t.apply(v)).collect::<Vec<_>>(),
+        None => bs,
+    });
     // B2-4: the measure's own `data-fvalue` (`::YFORMAT`/a percent kind,
     // same locale) — wired unconditionally so ggplot-rs's native
     // `svg_formatted_values` (on since `Panel::plot`) writes exactly what
@@ -3489,6 +3534,9 @@ fn cartesian(
         if let Some(t) = y_tr {
             s = s.with_transform(t);
         }
+        if let Some(bs) = y_breaks {
+            s = s.with_breaks(bs);
+        }
         s = s.with_value_formatter(move |n: f64| vfmt.full(n, &locale));
         plot = plot.scale_y_continuous(s);
     }
@@ -3503,17 +3551,25 @@ fn cartesian(
         let x_tr = role_str(cols, Role::XScale)
             .map(|s| axis_transform(&s, Role::XScale))
             .transpose()?;
+        // See `y_breaks` above — same forward-transform contract.
+        let x_breaks = role_breaks(cols, Role::XBreaks).map(|bs| match &x_tr {
+            Some(t) => bs.iter().map(|&v| t.apply(v)).collect::<Vec<_>>(),
+            None => bs,
+        });
         // B2-4: `data-fx` for a custom `::XFORMAT` — the only case the old
         // pass ever set it for a numeric x (a date x already formats its
         // own `data-x`/`data-fx` natively through `ScaleDateTime`).
         let x_vfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
-        if x_fmt.is_some() || x_tr.is_some() || x_vfmt.is_some() {
+        if x_fmt.is_some() || x_tr.is_some() || x_vfmt.is_some() || x_breaks.is_some() {
             let mut s = ScaleContinuous::new();
             if let Some(f) = x_fmt {
                 s = s.with_label_formatter(f);
             }
             if let Some(t) = x_tr {
                 s = s.with_transform(t);
+            }
+            if let Some(bs) = x_breaks {
+                s = s.with_breaks(bs);
             }
             if let Some(vfmt) = x_vfmt {
                 let locale = o.locale;

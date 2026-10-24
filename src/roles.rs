@@ -219,6 +219,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "x-axis transform: 'log10', 'sqrt' or 'reverse'"),
     e("YSCALE", &["YTRANS"], R::YScale, "modifier", true,
       "y-axis transform: 'log10', 'sqrt' or 'reverse'"),
+    e("XBREAKS", &["X_BREAKS"], R::XBreaks, "modifier", true,
+      "explicit x-axis tick positions, in data units — '100,1000,10000'; overrides the automatic ticks (and, under ::XSCALE, their log/sqrt round-number placement)"),
+    e("YBREAKS", &["Y_BREAKS"], R::YBreaks, "modifier", true,
+      "explicit y-axis tick positions, like ::XBREAKS"),
     e("FACET_NCOL", &["NCOL"], R::FacetCols, "modifier", true,
       "panels per row of a ::FACET / ::FACET_FREE"),
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
@@ -276,6 +280,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "how a KPI's change reads: 'pct' (default), 'abs' (in the KPI's format: +$1,200, +2.3 pp) or 'both'"),
     e("DELTA_LABEL", &["DELTALABEL", "COMPARE_LABEL"], R::DeltaLabel, "kpi", true,
       "what the change compares against, shown after it: 'vs last month', getvariable('p_prev_label')"),
+    e("KPI_SIZE", &["KPI_DENSITY"], R::KpiSize, "kpi", true,
+      "KPI tile density: 'compact' (single line, value + label, no ::SPARKLINE/::GOAL) or 'normal' (default); on ::METRIC it sets that tile, on ::GROUP every tile in the box"),
     e("TEXT_SMALL", &[], R::Text(TextSize::Small), "kpi", true, "small text card"),
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
@@ -325,6 +331,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
+    e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
+      "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
@@ -744,6 +752,7 @@ mod tests {
         v.extend([T::Small, T::Medium, T::Large].map(Role::Text));
         v.extend([D::Csv, D::Xlsx, D::Pdf].map(Role::Download));
         v.extend([
+            Role::KpiSize,
             Role::X,
             Role::Y,
             Role::Category,
@@ -779,6 +788,7 @@ mod tests {
             Role::Plain,
             Role::Hint,
             Role::OptionLabel,
+            Role::DropdownStyle,
             Role::Placeholder,
             Role::HeaderImage,
             Role::FooterLink,
@@ -838,6 +848,8 @@ mod tests {
             Role::FacetCols,
             Role::XScale,
             Role::YScale,
+            Role::XBreaks,
+            Role::YBreaks,
             Role::AbLine,
             Role::Identity,
             Role::LabelTop,
@@ -907,7 +919,9 @@ mod tests {
                 | Role::Plain
                 | Role::Hint
                 | Role::OptionLabel
+                | Role::DropdownStyle
                 | Role::Text(_)
+                | Role::KpiSize
                 | Role::Placeholder
                 | Role::HeaderImage
                 | Role::FooterLink
@@ -968,6 +982,8 @@ mod tests {
                 | Role::FacetCols
                 | Role::XScale
                 | Role::YScale
+                | Role::XBreaks
+                | Role::YBreaks
                 | Role::AbLine
                 | Role::Identity
                 | Role::LabelTop

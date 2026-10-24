@@ -20,11 +20,33 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+/// A statement's own `::KPI_SIZE` cell, read from its already-queried JSON
+/// rows (#405) — `Some(true)` 'compact', `Some(false)` 'normal', `None` with
+/// no (or an unparseable) value or no `::KPI_SIZE` role at all.
+fn kpi_size_json(
+    roles: &[(usize, Role)],
+    rows: &Result<Vec<serde_json::Map<String, serde_json::Value>>, String>,
+) -> Option<bool> {
+    let idx = roles.iter().find(|(_, r)| *r == Role::KpiSize)?.0;
+    let v = rows
+        .as_ref()
+        .ok()?
+        .first()?
+        .get(&format!("c{idx}"))?
+        .as_str()?;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "compact" => Some(true),
+        "normal" => Some(false),
+        _ => None,
+    }
+}
+
 const USAGE: &str = "usage:\n  \
-     dashboard <file.sql> [out.html] [--theme T] [--dark]\n  \
+     dashboard <file.sql> [out.html] [--theme T] [--dark] [--data <dir>]\n  \
                                              render to interactive HTML (T: a built-in theme,\n  \
-                                             'acme+dark', or a theme .json file)\n  \
-     dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N]\n  \
+                                             'acme+dark', or a theme .json file); --data sets\n  \
+                                             getvariable('anofox_data'), as a locked server\n  \
+     dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N] [--data <dir>]\n  \
                                              render the whole dashboard headless to one SVG\n  \
      dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
      dashboard --check <folder> [--json]     …every .sql of a served folder, plus duplicate\n  \
@@ -43,7 +65,10 @@ const USAGE: &str = "usage:\n  \
      dashboard --themes                      list the built-in themes\n  \
      dashboard --theme-css <T> [--dark]      print a theme's CSS design tokens\n  \
      dashboard --version                     print the version\n\n\
-     Queries run through the `duckdb` CLI on PATH.";
+     Queries run through the `duckdb` CLI on PATH. The render and --svg keep one\n  \
+     DuckDB session's semantics across statements (SET VARIABLE, TEMP views/tables,\n  \
+     and other setup all stay in scope for every later statement) by replaying the\n  \
+     script's own prelude before each `duckdb` call, exactly as --check does.";
 
 fn main() {
     // Owner decision (#333): the anofox extensions this binary's `duckdb`
@@ -78,18 +103,21 @@ fn main() {
 
 /// Render an annotated `.sql` file to an interactive HTML dashboard.
 ///
-/// `dashboard <file.sql> [out.html] [--theme NAME|file.json] [--dark]`: the
-/// script's own `::THEME` wins over `--theme`; `--dark` picks the dark
-/// variant of a theme that follows the viewer.
+/// `dashboard <file.sql> [out.html] [--theme NAME|file.json] [--dark] [--data <dir>]`:
+/// the script's own `::THEME` wins over `--theme`; `--dark` picks the dark
+/// variant of a theme that follows the viewer; `--data` sets `anofox_data`
+/// (a locked server's `options.data`).
 fn cmd_render(args: &[String]) {
     let mut pos: Vec<String> = Vec::new();
     let mut theme_arg: Option<String> = None;
     let mut variant = Variant::Light;
+    let mut data: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--theme" => theme_arg = it.next().map(|v| theme_spec_arg(v)),
             "--dark" => variant = Variant::Dark,
+            "--data" => data = it.next().cloned(),
             _ => pos.push(a.clone()),
         }
     }
@@ -103,61 +131,89 @@ fn cmd_render(args: &[String]) {
         .unwrap_or_else(|| "dashboard.html".to_string());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
 
-    let db = std::env::temp_dir().join(format!("anofox_{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&db);
-    let db = db.to_string_lossy().to_string();
+    let (html, n) = render_dashboard_html(
+        &script,
+        &path,
+        data.as_deref(),
+        theme_arg.as_deref(),
+        variant,
+    );
+    std::fs::write(&out, html).unwrap_or_else(|e| panic!("write {out}: {e}"));
+    println!("wrote {out} ({n} panels) — open it in a browser");
+}
 
+/// Render one annotated dashboard script to a self-contained HTML page, in
+/// one DuckDB session: every statement runs with everything before it
+/// (setup DDL, `SET VARIABLE`, `LOAD`, TEMP views/tables, input defaults)
+/// still in scope, in script order — the same session semantics as the
+/// locked server's cold path and `dashboard --check` (#414). There is no
+/// long-lived `duckdb` connection to hold that state between the separate
+/// `duckdb` CLI calls this binary makes, so it is simulated the way
+/// [`lint::check_opts`] does: a growing `prelude` of everything run so far
+/// is replayed, in full, before every later statement.
+///
+/// `data`: `anofox_data`, as `--data <dir>` / a locked server's
+/// `options.data` set it — applied before any statement of the script runs,
+/// so `-- @requires ${anofox_data}/…` and `getvariable('anofox_data')`
+/// panels see it from the first statement.
+///
+/// `path_label` is cosmetic (the page's "rendered from <code>…</code>"
+/// subtitle) — pass the dashboard's file name for a single-file render, or
+/// its id for a folder/site render (#417), which can call this once per
+/// dashboard.
+///
+/// Returns the HTML and the number of rendered panels.
+fn render_dashboard_html(
+    script: &str,
+    path_label: &str,
+    data: Option<&str>,
+    theme_arg: Option<&str>,
+    variant: Variant,
+) -> (String, usize) {
     // Phase 1: run the script in order; collect chrome directives and the
     // panels' rows (a ::THEME anywhere applies to every panel).
     let mut chrome = DashboardChrome::default();
     type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
-    let mut queried: Vec<(sql::Panel, Rows)> = Vec::new();
-    // Every `duckdb` call is a fresh session: session state (a script's own
-    // SET VARIABLE and LOAD, the inputs' defaults) is replayed before each
-    // statement.
-    let mut vars = String::new();
+    // The third element is each panel's own `::KPI_SIZE` ('compact') (#405).
+    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
+    // `SET VARIABLE anofox_data = …` opens the session, before the script's
+    // own statements — as `--data` does for `--check` and a locked server.
+    let mut prelude = data.map(data_set_stmt).unwrap_or_default();
+    let mut exec = |sql: &str| run_query(None, sql);
     let mut sections = sql::requires::Sections::default();
     // A static HTML render shows only a ::VIEW group's first shown
     // alternative (#214) — the other alternatives' non-setup statements
     // never even run.
     let mut view_pick = sql::views::StaticPick::default();
-    for p in sql::plan(&script) {
+    // The enclosing ::GROUP's own ::KPI_SIZE (#405) — a tile's own wins.
+    let mut group_compact = false;
+    for p in sql::plan(script) {
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
         // flattened here).
         let hidden = sections.step(&p, |reqs| {
-            sql::requires::check(reqs, |q, session| {
-                let pre = if session { vars.as_str() } else { "" };
-                let json = run(&db, &format!("{pre}{q};"), true);
-                Ok(sql::parse_rows_json(json.trim())?
-                    .into_iter()
-                    .next()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(k, v)| (k, v.as_str().map(str::to_string)))
-                    .collect())
-            })
-            .missing
+            lint::unmet_requirement(&mut exec, &prelude, reqs).missing
         });
         if hidden.is_some() || view_pick.drop_panel(&p) {
             continue;
         }
         if p.setup {
-            if is_session_state(&p.sql) {
-                vars.push_str(&format!("{};\n", p.sql.trim().trim_end_matches(';')));
-            } else {
-                run(&db, &format!("{vars}{}", p.sql), false); // DDL/insert — run for effect
+            // Genuine setup (DDL / SET / TEMP views and tables / …): run it
+            // with everything before it in scope, then keep it in scope too
+            // — exactly `lint::check_opts`'s prelude.
+            match exec(&format!("{prelude}{};", p.sql)) {
+                Ok(_) => prelude.push_str(&format!("{};\n", p.sql.trim().trim_end_matches(';'))),
+                Err(e) => eprintln!("duckdb error on: {}\n{e}", p.sql),
             }
             continue;
         }
         // An input renders nothing in the static output, but binds its default
         // (as the browser does on first load) for the getvariable() panels.
         if let Some(kind) = inputs::input_kind(&p.roles) {
-            let json = run(&db, &format!("{vars}{}", p.sql), true);
-            if let Ok(rows) = sql::parse_rows_json(json.trim()) {
+            if let Ok(rows) = exec(&format!("{prelude}{};", p.sql)) {
                 for set in inputs::input_defaults(kind, inputs::input_index(&p.roles), &rows) {
-                    vars.push_str(&set);
-                    vars.push_str(";\n");
+                    prelude.push_str(&set);
+                    prelude.push_str(";\n");
                 }
             }
             continue;
@@ -168,18 +224,34 @@ fn cmd_render(args: &[String]) {
             .map(|(_, r)| *r)
             .find(|r| roles::is_chrome_directive(*r))
         {
-            let json = run(&db, &format!("{vars}{}", p.sql), true);
+            let rows = exec(&format!("{prelude}{};", p.sql)).unwrap_or_default();
             let cell = |v: &serde_json::Value| match v {
                 serde_json::Value::String(s) => Some(s.clone()),
                 serde_json::Value::Null => None,
                 v => Some(v.to_string()),
             };
             // The first row's cells (an ::ASOF also reads its 'stale=…' cell).
-            let cells = sql::parse_rows_json(&json)
-                .ok()
-                .and_then(|rows| rows.first().map(|r| r.values().map(cell).collect()))
+            let cells = rows
+                .first()
+                .map(|r| r.values().map(cell).collect())
                 .unwrap_or_default();
             chrome.apply_row(r, cells);
+            continue;
+        }
+        // ::GROUP / ::ENDGROUP (#405): no box here (the static CLI output
+        // is one figure per panel, no grid), but a ::GROUP's own
+        // ::KPI_SIZE still cascades onto its tiles' own cards.
+        if p.roles.iter().any(|(_, r)| *r == Role::GroupStart) {
+            group_compact = if p.roles.iter().any(|(_, r)| *r == Role::KpiSize) {
+                let rows = exec(&format!("{prelude}{};", p.sql));
+                kpi_size_json(&p.roles, &rows).unwrap_or(false)
+            } else {
+                false
+            };
+            continue;
+        }
+        if p.roles.iter().any(|(_, r)| *r == Role::GroupEnd) {
+            group_compact = false;
             continue;
         }
         let section = p.roles.iter().any(|(_, r)| *r == Role::Section);
@@ -188,13 +260,12 @@ fn cmd_render(args: &[String]) {
         if roles::is_directive_panel(&p.roles) && !section {
             continue;
         }
-        let json = run(&db, &format!("{vars}{}", p.sql), true);
-        let rows = sql::parse_rows_json(&json);
-        queried.push((p, rows));
+        let rows = exec(&format!("{prelude}{};", p.sql));
+        let compact = kpi_size_json(&p.roles, &rows).unwrap_or(group_compact);
+        queried.push((p, rows, compact));
     }
-    let _ = std::fs::remove_file(&db);
 
-    let set = chrome.resolve(theme_arg.as_deref()).unwrap_or_else(|e| {
+    let set = chrome.resolve(theme_arg).unwrap_or_else(|e| {
         eprintln!("theme: {e}");
         std::process::exit(2);
     });
@@ -213,7 +284,7 @@ fn cmd_render(args: &[String]) {
     let mut panels = String::new();
     let mut n = 0;
     let mut queried = queried.into_iter().peekable();
-    while let Some((p, rows)) = queried.next() {
+    while let Some((p, rows, compact)) = queried.next() {
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
@@ -245,14 +316,24 @@ fn cmd_render(args: &[String]) {
             panels.push_str(&format!("<h2 class=\"section\">{}</h2>", escape_xml(text)));
             continue;
         }
-        let cols = anofox_visualization::name_columns(
+        let mut cols = anofox_visualization::name_columns(
             sql::columns_from_rows(&rows, &p.roles),
             &p.roles,
             &p.names,
         );
+        // A ::GROUP's ::KPI_SIZE cascading onto this tile (#405): a synthetic
+        // column, since this isn't a tile's own cast — kpi::Kpi::from_columns
+        // reads the first ::KPI_SIZE column it finds, own one first.
+        if compact {
+            cols.push(anofox_visualization::Column::new(
+                "_kpi_size",
+                Role::KpiSize,
+                vec![anofox_visualization::Value::Str("compact".into())],
+            ));
+        }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r)) = queried.next_if(|(q, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
             if let Ok(r) = r {
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
@@ -269,67 +350,56 @@ fn cmd_render(args: &[String]) {
         fallback_title: "anofox-visualization dashboard",
         subtitle_html: format!(
             "rendered from <code>{}</code> · {n} panels",
-            escape_xml(&path)
+            escape_xml(path_label)
         ),
         head_extra: String::new(),
         controls_html: String::new(),
         panels_html: panels,
-        fit: page::static_fit(&sql::plan(&script)),
+        fit: page::static_fit(&sql::plan(script)),
     });
-    std::fs::write(&out, html).unwrap_or_else(|e| panic!("write {out}: {e}"));
-    println!("wrote {out} ({n} panels) — open it in a browser");
+    (html, n)
 }
 
-/// The DuckDB CLI as a headless data provider (one temp database file, so
-/// setup statements persist between calls).
+/// The DuckDB CLI as a headless [`dashboard::DataProvider`]: each call is a
+/// fresh `duckdb :memory:` process, so a long-lived connection's session
+/// state (`SET VARIABLE`, `LOAD`, TEMP views/tables, any other setup) is
+/// simulated by replaying a growing `prelude` of everything run so far
+/// before every statement — the same trick [`render_dashboard_html`] and
+/// `--check` use (#414), so a `::TEMP VIEW`/`SET VARIABLE` a panel depends
+/// on is still in scope however many statements separate them.
 struct CliProvider {
-    db: String,
-    /// `SET VARIABLE`s and `LOAD`s replayed before every statement (each
-    /// `duckdb` call is a fresh session; tables persist in the db file,
-    /// variables and loaded extensions don't).
-    vars: String,
-}
-
-/// Session state a fresh `duckdb` call loses: a `SET VARIABLE` or a `LOAD`.
-fn is_session_state(sql: &str) -> bool {
-    inputs::is_set_variable(sql)
-        || sql
-            .split_whitespace()
-            .next()
-            .is_some_and(|w| w.eq_ignore_ascii_case("LOAD"))
+    prelude: String,
 }
 
 impl dashboard::DataProvider for CliProvider {
     fn execute(&mut self, sql: &str) -> Result<(), String> {
-        if is_session_state(sql) {
-            self.vars
-                .push_str(&format!("{};\n", sql.trim().trim_end_matches(';')));
-        } else {
-            run(&self.db, &format!("{}{sql}", self.vars), false);
-        }
+        run_query(None, &format!("{}{sql};", self.prelude))?;
+        self.prelude
+            .push_str(&format!("{};\n", sql.trim().trim_end_matches(';')));
         Ok(())
     }
     fn query(
         &mut self,
         sql: &str,
     ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
-        let json = run(&self.db, &format!("{}{sql}", self.vars), true);
-        let rows = sql::parse_rows_json(json.trim())?;
+        let rows = run_query(None, &format!("{}{sql};", self.prelude))?;
         Ok(sql::result_columns(&rows))
     }
 }
 
-/// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N]`:
+/// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N] [--data <dir>]`:
 /// the whole dashboard (KPIs, tables, charts, header) as one SVG.
 fn cmd_svg(args: &[String]) {
     let mut pos: Vec<String> = Vec::new();
     let mut o = dashboard::DashboardOptions::default();
+    let mut data: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--theme" => o.theme = it.next().map(|v| theme_spec_arg(v)),
             "--dark" => o.variant = Variant::Dark,
             "--width" => o.width = it.next().and_then(|v| v.parse().ok()).unwrap_or(o.width),
+            "--data" => data = it.next().cloned(),
             _ => pos.push(a.clone()),
         }
     }
@@ -342,14 +412,11 @@ fn cmd_svg(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.svg".into());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    let db = std::env::temp_dir().join(format!("anofox_svg_{}.db", std::process::id()));
-    let _ = std::fs::remove_file(&db);
+    // `anofox_data` opens the session, before the script's own statements.
     let mut p = CliProvider {
-        db: db.to_string_lossy().to_string(),
-        vars: String::new(),
+        prelude: data.as_deref().map(data_set_stmt).unwrap_or_default(),
     };
     let svg = dashboard::render_dashboard_svg(&script, &mut p, &o);
-    let _ = std::fs::remove_file(&db);
     match svg {
         Ok(svg) => {
             std::fs::write(&out, svg).unwrap_or_else(|e| panic!("write {out}: {e}"));
@@ -461,19 +528,7 @@ fn cmd_check(args: &[String]) {
     };
     // `SET VARIABLE anofox_data = '<dir>'` opens every session (as on a
     // locked server, before the dashboard's own statements).
-    let data_set = match &data {
-        Some(d) => {
-            let abs = std::fs::canonicalize(d).unwrap_or_else(|e| {
-                eprintln!("--data {d}: {e}");
-                std::process::exit(2);
-            });
-            format!(
-                "SET VARIABLE anofox_data = '{}';\n",
-                abs.to_string_lossy().replace('\'', "''")
-            )
-        }
-        None => String::new(),
-    };
+    let data_set = data.as_deref().map(data_set_stmt).unwrap_or_default();
     let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
         // Each call runs a full script (prelude + one statement) in a fresh session
         // (in-memory, or read-only against --db) — the linter replays session state.
@@ -1498,10 +1553,15 @@ fn cmd_describe(args: &[String]) {
     }
 }
 
-/// Run a full script in a fresh in-memory duckdb session; return the last
-/// statement's rows (empty for a non-SELECT) or the DuckDB error text. The
-/// prelude the linter prepends contains only non-SELECT statements, so the only
-/// JSON on stdout is the final statement's.
+/// Run a full script (a replayed prelude + one statement) in a fresh duckdb
+/// session — `:memory:`, or read-only against `db` (the linter's `--db`);
+/// return the last statement's rows (empty for a non-SELECT) or the DuckDB
+/// error text. The prelude only ever holds non-SELECT statements, so the
+/// only JSON on stdout is the final statement's. Shared by `--check`
+/// ([`lint::check_opts`]'s `run_query` closure) and the headless renderers
+/// ([`render_dashboard_html`], [`CliProvider`]), which replay their own
+/// growing prelude the same way to keep one DuckDB session's semantics
+/// across separate `duckdb` CLI calls (#414).
 fn run_query(
     db: Option<&str>,
     sql: &str,
@@ -1529,23 +1589,19 @@ fn run_query(
     sql::parse_rows_json(s).map_err(|e| format!("parse duckdb json: {e}"))
 }
 
-fn run(db: &str, sql: &str, json: bool) -> String {
-    let mut cmd = Command::new("duckdb");
-    cmd.arg(db);
-    if json {
-        cmd.arg("-json");
-    }
-    cmd.arg("-c").arg(sql);
-    anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
-    let out = cmd.output().unwrap_or_else(|e| panic!("run duckdb: {e}"));
-    if !out.status.success() {
-        eprintln!(
-            "duckdb error on: {sql}\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        return String::new();
-    }
-    String::from_utf8_lossy(&out.stdout).to_string()
+/// `SET VARIABLE anofox_data = '<dir>'`, resolved to an absolute path — as a
+/// locked server's `options.data` sets it, before any dashboard statement
+/// runs. Shared by `--check --data`, `dashboard --data` and `dashboard --svg
+/// --data` (#414): each prepends this to its own replayed prelude.
+fn data_set_stmt(dir: &str) -> String {
+    let abs = std::fs::canonicalize(dir).unwrap_or_else(|e| {
+        eprintln!("--data {dir}: {e}");
+        std::process::exit(2);
+    });
+    format!(
+        "SET VARIABLE anofox_data = '{}';\n",
+        abs.to_string_lossy().replace('\'', "''")
+    )
 }
 
 #[cfg(test)]
