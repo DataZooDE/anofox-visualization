@@ -187,7 +187,7 @@ CREATE TABLE expenses AS SELECT * FROM (VALUES ('rent', 1200), ('travel', 400), 
 SELECT 6::COL;
 SELECT sum(done)::GAUGE, '0,100'::RANGE, '#e03131,#efc94c,#0ca678'::COLORS, 'Completion at 72%'::TITLE FROM tasks;
 SELECT 6::COL;
-SELECT category::CATEGORY, sum(spend)::DONUTCHART, 'Rent is two thirds of spend'::TITLE FROM expenses GROUP BY ALL;
+SELECT category::CATEGORY, sum(spend)::DONUTCHART, 'Rent is two thirds of spend'::TITLE FROM expenses GROUP BY ALL ORDER BY 2 DESC;
 ```
 
 ```sql dashboard

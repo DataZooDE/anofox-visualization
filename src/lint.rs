@@ -1354,6 +1354,25 @@ where
                         sql: short.clone(),
                     });
                 }
+                // #441: a pie/donut's slice order IS its layout — a `GROUP BY`
+                // with no `ORDER BY` leaves DuckDB free to return the groups
+                // in any order (and, under parallel execution, a different
+                // one from run to run — seen in practice with two near-tied
+                // values). A quiet Note, not a Warning: plenty of queries
+                // already order further up a CTE, which this (deliberately
+                // simple) text scan can't see, so a false positive here must
+                // never fail a plain `dashboard --check`.
+                if matches!(k, Kind::Pie | Kind::Donut) && has_group_by_no_order_by(&p.sql) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Note,
+                        stmt,
+                        code: "design/pie-no-order",
+                        message: "GROUP BY with no ORDER BY — the slice order isn't guaranteed \
+                                  (and can vary run to run); add ORDER BY 2 DESC"
+                            .into(),
+                        sql: short.clone(),
+                    });
+                }
                 let has_cat = p.roles.iter().any(|(_, r)| matches!(r, Role::Category));
                 if matches!(k, Kind::Bar) && !has_cat && rows.len() >= 3 {
                     if let (Some(xi), Some(mi)) =
@@ -4309,6 +4328,15 @@ fn sql_error(
 /// function, or a quoted path with a data-file extension (`FROM 'x.parquet'`)?
 /// (`requires/on-setup`.) A `SET` is read token by token (#166): one whose
 /// subquery reads a file reads it, one that builds a path reads nothing.
+/// #441: a plain text scan (same style as [`reads_a_file`], no real parsing)
+/// for `GROUP BY` with no `ORDER BY` anywhere in the statement — deliberately
+/// simple, so it can only ever under-report (a query that orders inside a
+/// CTE, or on a later line this doesn't see, is missed, never flagged).
+fn has_group_by_no_order_by(sql: &str) -> bool {
+    let code = sql.to_ascii_lowercase();
+    code.contains("group by") && !code.contains("order by")
+}
+
 fn reads_a_file(sql: &str) -> bool {
     let code = sql.to_ascii_lowercase();
     if sql::lex::first_keyword(&code).as_deref() == Some("SET") {
@@ -5709,6 +5737,37 @@ mod design_tests {
             data,
         );
         assert!(!has(&d, "design/pie-slices"), "{d:?}");
+    }
+
+    #[test]
+    fn pie_group_by_without_order_by_hints_quietly() {
+        let data = rows(4, |i| json!({ "c0": format!("s{i}"), "c1": i as f64 }));
+        let d = lint_one(
+            "SELECT cat::CATEGORY, sum(n)::DONUTCHART, 'Share'::TITLE FROM t GROUP BY 1;",
+            data.clone(),
+        );
+        assert!(has(&d, "design/pie-no-order"), "{d:?}");
+        assert_eq!(
+            d.iter()
+                .find(|x| x.code == "design/pie-no-order")
+                .unwrap()
+                .severity,
+            Severity::Note,
+            "a hint, not a warning that fails a plain check"
+        );
+        // ordered — no hint.
+        let d = lint_one(
+            "SELECT cat::CATEGORY, sum(n)::DONUTCHART, 'Share'::TITLE FROM t GROUP BY 1 ORDER BY 2 DESC;",
+            data.clone(),
+        );
+        assert!(!has(&d, "design/pie-no-order"), "{d:?}");
+        // a bar chart's GROUP BY without ORDER BY is a different concern
+        // (design/unsorted-bars, data-driven) — this hint stays pie/donut-only.
+        let d = lint_one(
+            "SELECT cat::XAXIS, sum(n)::BARCHART, 'Share'::TITLE FROM t GROUP BY 1;",
+            data,
+        );
+        assert!(!has(&d, "design/pie-no-order"), "{d:?}");
     }
 
     #[test]
