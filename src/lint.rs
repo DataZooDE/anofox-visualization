@@ -859,6 +859,10 @@ where
         diags.extend(tile_scale_diags(&p.roles, &rows, stmt, &short));
         // ::XBREAKS / ::YBREAKS: numeric entries, and only on a cartesian chart.
         diags.extend(breaks_diags(&p.roles, &rows, stmt, &short));
+        // ::FACET/::FACET_FREE on a chart kind that still ignores it (#423);
+        // ::CATEGORY on ::HISTOGRAM (a ggplot-rs gap, #423); ::HIST_BINS /
+        // ::HIST_NORM anywhere but a ::HISTOGRAM.
+        diags.extend(histogram_qq_diags(&p.roles, stmt, &short));
         // A ::COLORS level map ('Critical:bad; …') must parse and needs a
         // ::CATEGORY to colour.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
@@ -3970,6 +3974,79 @@ fn breaks_diags(
                      ignores it",
                     role.token()
                 ),
+            );
+        }
+    }
+    out
+}
+
+/// Does `::FACET`/`::FACET_FREE` do anything on this panel's chart kind?
+/// Every cartesian kind (bars/lines/areas/scatter/box/violin/…), plus
+/// `::HISTOGRAM` and `::QQ` (#423), honour it; the rest still draw one
+/// overlapping panel and ignore it — `::HEATMAP` among them (#424).
+fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
+    match chart_kind(roles) {
+        None => false,
+        Some(
+            Kind::Pie
+            | Kind::Donut
+            | Kind::Gauge
+            | Kind::Heatmap
+            | Kind::Calendar
+            | Kind::Candlestick
+            | Kind::Radar
+            | Kind::Sparkline
+            | Kind::Waterfall
+            | Kind::Bullet
+            | Kind::Funnel,
+        ) => false,
+        Some(_) => true,
+    }
+}
+
+/// #423: `::FACET`/`::FACET_FREE` dropped on a chart kind that doesn't
+/// honour it yet (see [`kind_uses_facet`]); `::CATEGORY` on `::HISTOGRAM`
+/// (`GeomHistogram` doesn't read a per-row fill/color aesthetic, unlike
+/// `GeomDensity` — a ggplot-rs gap, not yet worked around here); and
+/// `::HIST_BINS`/`::HIST_NORM` anywhere but a `::HISTOGRAM`.
+fn histogram_qq_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut warn = |code, message: String| {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt,
+            code,
+            message,
+            sql: short.to_string(),
+        })
+    };
+    for role in [Role::Facet, Role::FacetFree] {
+        if roles.iter().any(|(_, r)| *r == role) && !kind_uses_facet(roles) {
+            warn(
+                "facet/unsupported-kind",
+                format!(
+                    "::{} draws one panel per value — this panel's chart kind draws them all \
+                     on top of each other instead",
+                    role.token()
+                ),
+            );
+        }
+    }
+    let kind = chart_kind(roles);
+    if kind == Some(Kind::Histogram) && roles.iter().any(|(_, r)| *r == Role::Category) {
+        warn(
+            "histogram/category-dropped",
+            "::CATEGORY is dropped on ::HISTOGRAM — ggplot-rs's GeomHistogram doesn't yet take \
+             a per-row fill/colour like GeomDensity does; use ::FACET for a reference/current \
+             comparison instead"
+                .to_string(),
+        );
+    }
+    for role in [Role::HistBins, Role::HistNorm] {
+        if roles.iter().any(|(_, r)| *r == role) && kind != Some(Kind::Histogram) {
+            warn(
+                "histogram/wrong-kind",
+                format!("::{} only does anything on a ::HISTOGRAM", role.token()),
             );
         }
     }

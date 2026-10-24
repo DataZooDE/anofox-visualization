@@ -3412,10 +3412,25 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
         }
     }
     let cfg = json_for_script(&cfg);
+    // #403: a served dashboard page has no app bar of its own (it's always
+    // embed chrome — header/sidebar/toolbar hidden) and never fetches
+    // app-config.json (window.__served is set, so web/app.js's
+    // appBrandLoad() skips that fetch), but `options.app`'s own-property
+    // settings (right now, only charts_as_tables matters without a bar —
+    // the brand fields have nothing to draw) still must reach the page as
+    // window.__anofoxApp, the one place web/app.js reads them from here.
+    // `AppBrand::script()` is "" when nothing is set, so this is a no-op
+    // for a server with no `options.app` at all.
+    let app_script = st
+        .opts
+        .app
+        .as_ref()
+        .map(AppBrand::script)
+        .unwrap_or_default();
     html.replacen("<head>", "<head><base href=\"/\">", 1)
         .replacen(
             "</head>",
-            &format!("<script>window.__served={cfg};</script></head>"),
+            &format!("<script>window.__served={cfg};</script>{app_script}</head>"),
             1,
         )
         .into_bytes()

@@ -136,6 +136,8 @@ terminal.
 | `::YBREAKS` | `::Y_BREAKS` | modifier | explicit y-axis tick positions, like ::XBREAKS |
 | `::FACET_NCOL` | `::NCOL` | modifier | panels per row of a ::FACET / ::FACET_FREE |
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
+| `::HIST_BINS` |  | modifier | a ::HISTOGRAM's bin count ('20') or explicit edges ('0,10,20,30'), shared by every ::CATEGORY / ::FACET group — distinct from ::BINS, which aliases ::CLASSES (a map's colour-class breaks) |
+| `::HIST_NORM` |  | modifier | a ::HISTOGRAM's per-group normalisation: 'share' draws each ::CATEGORY / ::FACET group's bars as a share of that group's own count (groups of unequal size stay comparable); default: raw counts |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
@@ -298,6 +300,20 @@ applied before any of the dashboard's own `SET VARIABLE`s run, the same
 order the browser, the builder and a locked server all use — so the
 derived variable always sees the current pick, never the input's previous
 one (#416).
+
+An input's own **OPTIONS query** (or default) can likewise read another
+input's variable — a dropdown narrowed by a search box's text, say —
+**wherever the two sit relative to each other in the script**: every other
+input's known value (a previous pick, a `?v.name=` seed) is applied before
+any input's OPTIONS query runs, so it always filters by the viewer's
+current value, not a run-stale one — and never, unconditionally, on a
+locked server reading it for the very first time, since a fresh connection
+per request gets no second chance to catch up (#428). When an input's
+*current* pick then falls out of its own, narrower, list — the search box
+above excluding the picked value — it falls back to the **first remaining
+option** (a `::MULTISELECT`'s several picks instead keep whichever of them
+are still offered, dropping the rest); nothing errors or stays on a value
+no longer offered.
 
 ```sql
 SELECT DISTINCT region::DROPDOWN FROM sales;          -- above the tabs: every tab
@@ -1919,11 +1935,16 @@ Charts are usable without a mouse and without sight of the screen:
   mark is labelled with its tooltip text.
 - **Charts as tables.** Swaps every chart for its data table. Reached from the
   toolbar's **⋯ → ▦ Charts as tables** menu item (also in embed and served
-  views; `?tables=1` turns it on, the choice is remembered across
-  dashboards). The *▦ Charts as tables* bar at the top of the dashboard
-  itself is off by default and shown only when the author opts a dashboard
-  in with `-- @astables on` (see *Dashboard header comments*) — a viewer who
-  never saw a bar can still reach the feature from the menu.
+  views; `?tables=1`/`?tables=0` turns it on/off explicitly, the choice is
+  remembered across dashboards). The *▦ Charts as tables* bar at the top of
+  the dashboard itself is off by default and shown only when the author opts
+  a dashboard in with `-- @astables on` (see *Dashboard header comments*) —
+  a viewer who never saw a bar can still reach the feature from the menu. An
+  installation can default the viewer's choice on (`charts_as_tables: true`
+  in `app-config.json` or the serving process's options, `--app-charts-as-tables`
+  for `serve`/`anofox_serve`; #403) without forcing the bar itself on — an
+  explicit `?tables=`/remembered choice always wins over the default,
+  whichever way it was set.
 - **Reduced motion.** With the system's *reduce motion* setting there are no
   entrance animations, line draw-ins, shimmers or transitions.
 - Tables keep `aria-sort` and keyboard row navigation; the `colorblind` and
