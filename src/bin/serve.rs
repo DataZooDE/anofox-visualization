@@ -71,6 +71,10 @@ struct Opts {
     log: Option<RequestLog>,
     /// `--app-name/-tagline/-logo/-link/-favicon/-hide-name`: the builder's
     /// app bar; with `--dashboards`, the landing page's header.
+    /// `--app-charts-as-tables` (#403) is a sibling with no header effect —
+    /// `--dashboards` (mode B) has no client script to seed, only
+    /// `anofox_serve_dashboards`'s own dashboard pages and the authoring
+    /// builder do.
     app: AppBrand,
     /// `--home <id>` (with `--dashboards`): `/` redirects to that dashboard.
     home: Option<String>,
@@ -95,7 +99,7 @@ static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]   (the builder's app bar)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -218,6 +222,11 @@ fn parse_args() -> Opts {
                     .unwrap_or_else(|e| usage(&app_flag_error(&e)));
             }
             "--app-hide-name" => o.app.name_visible = Some(false),
+            // #403: an installation default that seeds a viewer's never-set
+            // initial "Charts as tables" choice (web/app.js's dpAsTables) —
+            // never overrides an explicit ?tables=/remembered choice, and
+            // never forces the in-page -- @astables on bar on (#401).
+            "--app-charts-as-tables" => o.app.charts_as_tables = Some(true),
             "--home" => {
                 let h = args
                     .next()

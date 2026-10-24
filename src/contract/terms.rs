@@ -48,6 +48,29 @@ fn first_seen<'a>(it: impl Iterator<Item = &'a str>) -> Vec<String> {
     out
 }
 
+/// `mediation_by`'s fixed term vocabulary, in its own intended order (#409).
+/// The producer (`anofox_statistics`'s `mediation_by`) already orders its
+/// rows `acme, ade, total, prop_mediated` — but `anofox_plot_terms`'s own
+/// aggregation macro sorts the whole row struct for determinism under
+/// parallel execution (`list(tbl ORDER BY tbl)`, `src/macros.rs`), which —
+/// starting from `term`, the struct's first varying field — alphabetises
+/// them instead (`acme, ade, prop_mediated, total`). Put the known terms
+/// back in the producer's order; anything unexpected (a future
+/// `anofox_statistics` addition) keeps its first-seen place after them,
+/// rather than silently disappearing.
+const MEDIATION_TERM_ORDER: [&str; 4] = ["acme", "ade", "total", "prop_mediated"];
+
+fn mediation_term_order(terms: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = MEDIATION_TERM_ORDER
+        .iter()
+        .map(|s| s.to_string())
+        .filter(|s| terms.contains(s))
+        .collect();
+    let extra: Vec<String> = terms.into_iter().filter(|t| !out.contains(t)).collect();
+    out.extend(extra);
+    out
+}
+
 fn conf_label(t: &Table) -> String {
     t.num("conf_level")
         .ok()
@@ -77,6 +100,14 @@ pub(super) fn terms(
 
 fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Place) -> Out {
     let labels = Labels::from(options);
+    // `mediation_by` (#409): a fixed-vocabulary model whose `prop_mediated`
+    // is a ratio, not an effect in outcome units — put its terms back in
+    // the producer's own order and give it its own small panel, away from
+    // `acme`/`ade`/`total`'s shared estimate axis.
+    let is_mediation = t
+        .text("model_id")
+        .first()
+        .is_some_and(|v| matches!(v, Value::Str(s) if s == "mediation"));
     let model_key = t.model_key().filter(|k| t.distinct(k) > 1);
     let ids = t.has("id") && t.distinct("id") > 1;
     // Several models and several groups: a panel per group.
@@ -95,7 +126,7 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
     };
     let sv = series_key.map(|k| t.text(k));
     let pv = panel_key.map(|k| t.text(k));
-    let rows: Vec<Coef> = (0..t.rows.len())
+    let mut rows: Vec<Coef> = (0..t.rows.len())
         .filter_map(|i| {
             Some(Coef {
                 term: text_of(&term[i])?,
@@ -108,9 +139,29 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
             })
         })
         .collect();
-    let terms = first_seen(rows.iter().map(|r| r.term.as_str()));
+    // `mediation_by`'s own panel split (above): `panel_key` stays `None`
+    // for a single-model table like this one (no `id`-based facet to
+    // collide with — several groups colour-dodge within a panel instead,
+    // `series_key`), so it's safe to overload it purely for the
+    // effect/ratio split.
+    if is_mediation {
+        for r in &mut rows {
+            r.panel = Some(
+                if r.term == "prop_mediated" {
+                    "share mediated"
+                } else {
+                    "effect"
+                }
+                .to_string(),
+            );
+        }
+    }
+    let mut terms = first_seen(rows.iter().map(|r| r.term.as_str()));
+    if is_mediation {
+        terms = mediation_term_order(terms);
+    }
     let series: Vec<String> = first_seen(rows.iter().filter_map(|r| r.series.as_deref()));
-    let panels: Vec<Option<String>> = if panel_key.is_some() {
+    let panels: Vec<Option<String>> = if panel_key.is_some() || is_mediation {
         first_seen(rows.iter().filter_map(|r| r.panel.as_deref()))
             .into_iter()
             .map(Some)
@@ -145,8 +196,28 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
     let mut plots = Vec::new();
     for p in &panels {
         let prs: Vec<&Coef> = rows.iter().filter(|r| r.panel == *p).collect();
-        let mut plot = forest_panel(&prs, &terms, &series, o, small, missing_ci, null);
-        plot = labels.apply(plot, &xlab, "");
+        // The mediation split (above) puts different term subsets in each
+        // panel (acme/ade/total vs. prop_mediated alone) — unlike the usual
+        // one-panel-per-group case, where every panel shares the same term
+        // set and so the same `terms` y-axis slots. Narrow it to just the
+        // terms this panel actually draws, so `prop_mediated`'s panel isn't
+        // left with three empty slots reserved for the others.
+        let panel_terms: Vec<String> = if is_mediation {
+            terms
+                .iter()
+                .filter(|term| prs.iter().any(|r| &r.term == *term))
+                .cloned()
+                .collect()
+        } else {
+            terms.clone()
+        };
+        let mut plot = forest_panel(&prs, &panel_terms, &series, o, small, missing_ci, null);
+        let panel_xlab: &str = if is_mediation && p.as_deref() == Some("share mediated") {
+            "proportion mediated"
+        } else {
+            xlab.as_str()
+        };
+        plot = labels.apply(plot, panel_xlab, "");
         if let Some(p) = p {
             plot = plot.title(p);
         }
