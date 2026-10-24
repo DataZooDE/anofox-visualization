@@ -738,6 +738,57 @@ fn facet_wrap_and_free() {
     assert_eq!(rules, 3, "one per panel");
 }
 
+// #471: two ::REFLINE columns on one statement both draw — previously only
+// the first was read (`find_role` stops at the first match), so an alert
+// band's lower edge was silently dropped. A single ::REFLINE_LABEL column
+// labels every ::REFLINE column.
+#[test]
+fn two_refline_columns_both_draw_with_a_shared_label() {
+    let n = 10;
+    let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let y: Vec<f64> = (0..n).map(|i| 800.0 + 10.0 * i as f64).collect();
+    let s = svg(vec![
+        Column::new("x", Role::X, nums(&x)),
+        Column::new("y", Role::Value(Kind::Line), nums(&y)),
+        Column::new("r1", Role::RefLine, nums(&vec![930.0; n])),
+        Column::new("r2", Role::RefLine, nums(&vec![760.0; n])),
+        Column::new("l", Role::RefLineLabel, strs(&vec!["Alert band"; n])),
+    ]);
+    for v in ["930", "760"] {
+        let rules = polylines(&s)
+            .into_iter()
+            .filter(|p| p.contains(&format!("data-value=\"{v}\"")))
+            .count();
+        assert_eq!(rules, 1, "::REFLINE {v} missing: {s}");
+    }
+    // The single ::REFLINE_LABEL column labels both lines, not just the
+    // first.
+    assert_eq!(
+        s.matches("Alert band").count(),
+        2,
+        "both lines should get the shared label: {s}"
+    );
+}
+
+// #471: with two ::REFLINE_LABEL columns, each pairs with its ::REFLINE
+// column by position (same rule as ::BAND_LOWER/::BAND_UPPER).
+#[test]
+fn two_refline_columns_pair_with_two_labels_by_position() {
+    let n = 10;
+    let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+    let y: Vec<f64> = (0..n).map(|i| 800.0 + 10.0 * i as f64).collect();
+    let s = svg(vec![
+        Column::new("x", Role::X, nums(&x)),
+        Column::new("y", Role::Value(Kind::Line), nums(&y)),
+        Column::new("r1", Role::RefLine, nums(&vec![930.0; n])),
+        Column::new("r2", Role::RefLine, nums(&vec![760.0; n])),
+        Column::new("l1", Role::RefLineLabel, strs(&vec!["Upper"; n])),
+        Column::new("l2", Role::RefLineLabel, strs(&vec!["Lower"; n])),
+    ]);
+    assert!(s.contains("Upper"), "{s}");
+    assert!(s.contains("Lower"), "{s}");
+}
+
 // ── B4: axis transforms ──────────────────────────────────────────────────
 #[test]
 fn axis_scales() {
