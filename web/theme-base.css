@@ -174,7 +174,8 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel.dp-in{animation:dp-panel-in .5s cubic-bezier(.22,.61,.36,1) both}
 /* ::LINESTYLE 'flow': the dashes move along the line (ggplot-rs's own 6,3
    dash — one period = 9 — an accepted visual delta from the old 6 4).
-   `.dp-flow` is a ::DIAGRAM edge's own hand-written class (src/diagram.rs);
+   `.dp-flow` is a ::DIAGRAM edge's own class (src/diagram.rs, through
+   ggplot-rs's `Aes::class`);
    every other flowing line (map flow arcs, #308; plain line/step/smooth
    charts, #318 C2) is a ggplot-rs linetype-aesthetic mark that carries no
    class of its own (0.21 already writes `class="gg-mark …"`) — just
@@ -183,6 +184,20 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel svg .dp-flow,.panel svg [data-linestyle="flow"]{animation:dp-flow 1.2s linear infinite}
 @keyframes dp-dots{to{stroke-dashoffset:-20}}
 .panel svg .dp-flow.dp-dots{animation:dp-dots 1s linear infinite}
+/* ::DIAGRAM text weights: src/diagram.rs already bakes these bold via
+   ggplot-rs's geom_text fontface (#228), so a headless --svg export draws
+   them bold too; this class is the browser's own belt-and-suspenders path
+   (also covers any future non-ggplot-rs rendering of the same markup) */
+.panel svg .dp-node-label,.panel svg .dp-lane-label{font-weight:600}
+.panel svg .dp-node-value{font-weight:700}
+/* 'flow-volume' / 'flow-dots-volume': the busier the edge, the faster it
+   flows — five fixed buckets of sqrt(value / max) (src/diagram.rs
+   `speed_class`), a class rather than an inline style so a strict CSP holds */
+.panel svg .dp-flow.flow-speed-1{animation-duration:.6s}
+.panel svg .dp-flow.flow-speed-2{animation-duration:1.05s}
+.panel svg .dp-flow.flow-speed-3{animation-duration:1.5s}
+.panel svg .dp-flow.flow-speed-4{animation-duration:1.95s}
+.panel svg .dp-flow.flow-speed-5{animation-duration:2.4s}
 @media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg [data-linestyle="flow"],.panel svg .dp-flow.dp-dots{animation:none}}
 /* ::STORY: step controls under the chart, the caption + connector over it */
 .dp-story{display:flex;align-items:center;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
