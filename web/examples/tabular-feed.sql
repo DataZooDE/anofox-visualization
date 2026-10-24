@@ -133,7 +133,7 @@ SELECT 300::HEIGHT;
 WITH f AS (SELECT category, severity, count(*) AS n FROM fm_eval WHERE verdict <> 'pass' AND fm_days(delivery_date) GROUP BY ALL)
 SELECT category ::XAXIS, severity ::CATEGORY, n ::BARCHART_STACKED,
        'Failures by check kind — the price checks fire most'::TITLE
-FROM f ORDER BY sum(n) OVER (PARTITION BY category) DESC, severity;
+FROM f ORDER BY sum(n) OVER (PARTITION BY category) DESC, category, severity;
 
 SELECT 12::COL;
 SELECT 'Blocking > 0'::FLAG;

@@ -1,9 +1,11 @@
-//! #488: five `web/examples/*.sql` dashboards rendered different SVG bytes
+//! #488: six `web/examples/*.sql` dashboards rendered different SVG bytes
 //! from run to run with the same binary — `arg_min`/`ORDER BY ... DESC` ties
 //! resolved arbitrarily (parallel scan order), a flow map's end-point dots
-//! drawn in `HashMap` iteration order, and a quantity-weighted mean built
-//! from `sum(...)/sum(...)` picking up a different last bit or two each time
-//! a parallel hash aggregate combined its partial sums in a different order.
+//! drawn in `HashMap` iteration order, a quantity-weighted mean built from
+//! `sum(...)/sum(...)` picking up a different last bit or two each time a
+//! parallel hash aggregate combined its partial sums in a different order,
+//! and (tabular-feed, found by a separate pass over #488) a window-function
+//! total tied across categories with no tie-break beyond a non-unique column.
 //!
 //! This renders each listed example twice, with `SET threads=8;` forced (so
 //! the duckdb CLI subprocess parallelizes even on a small CI runner — the
@@ -44,6 +46,7 @@ const EXAMPLES: &[&str] = &[
     "delivery-coverage",
     "optimize-delivery",
     "supplier-lead-times",
+    "tabular-feed",
 ];
 
 /// Renders `web/examples/<name>.sql` to SVG, with `SET threads=8;` forced at
