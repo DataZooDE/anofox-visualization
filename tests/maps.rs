@@ -448,6 +448,106 @@ fn classed_measure_routes_through_geom_sf_with_counts_and_a_hatch() {
 }
 
 #[test]
+fn symbols_route_through_geom_sf_largest_first_with_area_and_line_rows() {
+    // #420 slice 3: `::SIZE` is now eligible for the new `GGPlot`/`geom_sf`
+    // path — a planar (`'none'::PROJECTION`) fixture keeps this eligible,
+    // same as slice 2's own classed test.
+    let s = svg(vec![
+        Column::new(
+            "g",
+            Role::Geometry,
+            strs(&[
+                "POINT(0 0)",
+                "POINT(1 1)",
+                "POLYGON((2 0, 3 0, 3 1, 2 1, 2 0))",
+                "LINESTRING(0 2, 1 3)",
+            ]),
+        ),
+        Column::new("l", Role::Label, strs(&["A", "B", "C", "D"])),
+        Column::new(
+            "n",
+            Role::Size,
+            vec![
+                Value::Float(100.0),
+                Value::Float(25.0),
+                Value::Float(400.0),
+                Value::Na,
+            ],
+        ),
+        Column::new("p", Role::Projection, konst("none", 4)),
+    ]);
+    assert!(s.contains("data-geom=\"sf\""), "{s}");
+
+    let f = features(&s);
+    // Three circles: A, B (points) and C (a polygon, whose own area fill
+    // is suppressed — taken over by its anchor, GeomSf's own `size`
+    // aesthetic, sipemu/ggplot-rs#194). D (no `::SIZE` value) draws as a
+    // plain line, unaffected.
+    let circles: Vec<&&str> = f.iter().filter(|t| t.starts_with("<circle")).collect();
+    assert_eq!(circles.len(), 3, "{f:?}");
+    assert!(
+        f.iter()
+            .any(|t| t.starts_with("<polyline") && attr(t, "data-row") == Some("3")),
+        "{f:?}"
+    );
+    assert!(
+        !f.iter()
+            .any(|t| t.starts_with("<path") && attr(t, "data-row") == Some("2")),
+        "the polygon's own area fill must be suppressed, taken over by its anchor: {f:?}"
+    );
+
+    // largest first (D5): C (400) before A (100) before B (25) — GeomSf's
+    // own draw order, not a hand-rolled sort.
+    let circle_rows: Vec<&str> = circles
+        .iter()
+        .map(|t| attr(t, "data-row").unwrap())
+        .collect();
+    assert_eq!(circle_rows, ["2", "0", "1"]);
+    // area (not radius) is proportional to the value.
+    let r: Vec<f64> = circles
+        .iter()
+        .map(|t| attr(t, "r").unwrap().parse::<f64>().unwrap())
+        .collect();
+    assert!(
+        (r[0] / r[1] - (400.0_f64 / 100.0).sqrt()).abs() < 0.05,
+        "{r:?}"
+    );
+
+    // data-size (raw) / data-fsize (formatted) on every symbol, and the
+    // tooltip (no fill measure here: "label: fsize", the old writer's own
+    // composition `GeomSf`'s automatic "label: value" doesn't know about a
+    // second, size, channel).
+    let a = circles
+        .iter()
+        .find(|t| attr(t, "data-row") == Some("0"))
+        .unwrap();
+    assert_eq!(attr(a, "data-size"), Some("100"));
+    assert!(attr(a, "data-fsize").is_some());
+    assert_eq!(attr(a, "data-label"), Some("A"));
+    assert!(s.contains("<title>A: 100</title>"), "{s}");
+}
+
+#[test]
+fn symbols_constant_size_is_a_fixed_radius_with_no_legend() {
+    // `symbols::of`'s own `constant_size` convention (every row the same
+    // `::SIZE` value): a fixed point radius, not a size aesthetic — no
+    // `scale_size`, no size legend (same as the old writer,
+    // `constant_size_sets_the_radius`).
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, strs(&["POINT(0 0)", "POINT(1 1)"])),
+        Column::new("n", Role::Size, nums(&[4.0, 4.0])),
+        Column::new("p", Role::Projection, konst("none", 2)),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 2);
+    for t in &f {
+        assert_eq!(attr(t, "r"), Some("4.00"), "{t}");
+    }
+    // no size legend: exactly the two data circles, no extra swatch circles.
+    assert_eq!(s.matches("<circle").count(), 2, "{s}");
+}
+
+#[test]
 fn diverging_around_zero_or_the_midpoint() {
     let t = theme::default_light();
     let [lo, mid, hi] = t.diverging_ramp();
