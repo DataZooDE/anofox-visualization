@@ -1,15 +1,14 @@
-//! #420 slice 1+2+3: build a plain polygon/point choropleth (measure,
-//! category or classed fill, graduated `::SIZE` symbols; no flows/hexbin —
-//! [`eligible`]) as one real `GGPlot`, instead of our own hand-written SVG.
+//! #420 slice 1+2+3+4: build a plain polygon/point choropleth (measure,
+//! category or classed fill; graduated `::SIZE` symbols; flows/hexbin as
+//! extra layers — [`eligible`]) as one real `GGPlot`, instead of our own
+//! hand-written SVG.
 //!
-//! Everything else (flows, hexbin, or any map that still needs the old
+//! Everything else (region labels, or any map that still needs the old
 //! footer — a scale bar or pack attribution) stays on
 //! [`super::render_with_model`] until its own slice.
 
 use ggplot_rs::geom::sf::GeomSf;
 use ggplot_rs::prelude::*;
-use ggplot_rs::render::backend::FillPattern;
-use ggplot_rs::scale::binned::ScaleFillBinned;
 use ggplot_rs::scale::size::ScaleSizeContinuous;
 use ggplot_rs::scale::Scale;
 use ggplot_rs::theme::LegendPosition;
@@ -17,8 +16,9 @@ use ggplot_rs::theme::LegendPosition;
 use crate::theme::mix;
 use crate::{Column, RenderOptions};
 
-use super::fill::MapFill;
+use super::fill;
 use super::legend::legend_of;
+use super::overlay;
 use super::wkt::row_wkt;
 use super::{foot_of, frame_of, legend_override, symbols, Fill, Model, Shape};
 
@@ -26,18 +26,26 @@ use super::{foot_of, frame_of, legend_override, symbols, Fill, Model, Shape};
 /// pairs.
 type Df = Vec<(String, Vec<Value>)>;
 
+/// [`build`]'s result: the plot, its extra root attributes (`data-map`,
+/// …) and any extra warnings (a flow's over-cap/hexbin's over-budget
+/// note — `MARK_WARN`'s own check in `mod.rs` only covers `m.rows`).
+type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
+
 /// Whether `m` (already built from `cols`) is simple enough for the new
-/// `geom_sf` path: no flows/hexbin (slice 4), and no scale bar/attribution
-/// furniture (slice 5 — [`foot_of`]'s own height check, reused rather than
-/// duplicated, since "does this map need a footer" already depends on pack
-/// layers *and* the projection/span). `::CLASSES` (slice 2) and graduated
-/// `::SIZE` symbols (slice 3) are both allowed — [`build`] routes a classed
-/// measure through `ggplot_rs::scale::binned::ScaleFillBinned` instead of
-/// [`MapFill`], and a symbol map's anchor rows through `GeomSf`'s own
-/// `size` aesthetic (sipemu/ggplot-rs#194) instead of our hand-rolled
-/// circle drawing.
+/// `geom_sf` path: no scale bar/attribution furniture (slice 5 —
+/// [`foot_of`]'s own height check, reused rather than duplicated, since
+/// "does this map need a footer" already depends on pack layers *and* the
+/// projection/span). `::CLASSES` (slice 2) is allowed — [`build`] routes a
+/// classed measure through `ggplot_rs::scale::binned::ScaleFillBinned`
+/// instead of [`MapFill`]. Graduated `::SIZE` symbols (slice 3) are allowed
+/// too — a symbol map's anchor rows route through `GeomSf`'s own `size`
+/// aesthetic (sipemu/ggplot-rs#194) instead of our hand-rolled circle
+/// drawing. Flows/hexbin (slice 4) are allowed as well — [`build`] folds
+/// them in as extra layers on the same plot, through
+/// [`overlay::flow_layers`]/[`overlay::hexbin_layer`], instead of a
+/// separately-rendered-and-spliced fragment.
 pub(super) fn eligible(o: &RenderOptions, m: &Model, w: f64) -> bool {
-    m.flows.is_none() && m.hexbin.is_none() && foot_of(o, m, w).h <= 0.0
+    foot_of(o, m, w).h <= 0.0
 }
 
 /// Build the `GGPlot` and its extra root attributes (`data-map`, …) for an
@@ -49,7 +57,8 @@ pub(super) fn build(
     m: &Model,
     width: u32,
     height: u32,
-) -> Option<(GGPlot, Vec<(&'static str, String)>)> {
+) -> Option<Built> {
+    let mut warnings: Vec<String> = Vec::new();
     let (w, h) = (width as f64, height as f64);
     let mut lg = legend_of(o, m, w, h);
     let forced = legend_override(cols, &mut lg);
@@ -96,18 +105,26 @@ pub(super) fn build(
     let mut xs = Vec::with_capacity(n);
     let mut class_idxs: Vec<Value> = Vec::with_capacity(n);
     let mut titles: Vec<Value> = Vec::with_capacity(n);
+    // `::HEXBIN` (M2c) takes over the point pass entirely — the per-row
+    // features layer draws nothing (`m.fill`'s `ValueScale.values` is
+    // indexed by *cell*, not row, when hexbin is active — same convention,
+    // same comment, as the old writer's own skip, `mod.rs`'s per-feature
+    // loop). Suppress every row's geometry/fill/class/title below rather
+    // than index `m.fill` by row at all.
+    let hexbin_takes_over = m.hexbin.is_some();
     for i in 0..n {
         // A row with a graduated-symbol anchor (slice 3) takes over: its
         // own area/point geometry is suppressed here (`Value::Na` — the
         // same "no geometry, no mark" convention `GeomSf::draw` already
         // uses) and it's drawn instead, as a sized circle at its anchor,
         // by the separate symbols layer built after this loop. A row with
-        // no anchor (a line, or `m.symbols` absent) draws here unchanged.
+        // no anchor (a line, or `m.symbols` absent) draws here unchanged —
+        // unless `::HEXBIN` (slice 4) takes over the whole pass instead.
         let suppressed_by_symbols = m
             .symbols
             .as_ref()
             .is_some_and(|sym| !sym.anchors[i].is_empty());
-        geometry.push(if suppressed_by_symbols {
+        geometry.push(if hexbin_takes_over || suppressed_by_symbols {
             Value::Na
         } else {
             row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na)
@@ -136,18 +153,22 @@ pub(super) fn build(
         // for a `Fill::Category` map — only a `Fill::Measure` row has a
         // measure at all, so `data-value` stays absent otherwise (the old
         // writer's own contract, `map/mod.rs`'s `value: Option<f64>`).
-        let (fill, measure) = match &m.fill {
-            Fill::Measure(s) => {
-                let v = s.values[i].map(Value::Float).unwrap_or(Value::Na);
-                (v.clone(), v)
+        let (fill, measure) = if hexbin_takes_over {
+            (Value::Na, Value::Na)
+        } else {
+            match &m.fill {
+                Fill::Measure(s) => {
+                    let v = s.values[i].map(Value::Float).unwrap_or(Value::Na);
+                    (v.clone(), v)
+                }
+                Fill::Category { of_row, levels } => (
+                    of_row[i]
+                        .map(|k| Value::Str(levels[k].0.clone()))
+                        .unwrap_or(Value::Na),
+                    Value::Na,
+                ),
+                Fill::Plain(_) => (Value::Na, Value::Na),
             }
-            Fill::Category { of_row, levels } => (
-                of_row[i]
-                    .map(|k| Value::Str(levels[k].0.clone()))
-                    .unwrap_or(Value::Na),
-                Value::Na,
-            ),
-            Fill::Plain(_) => (Value::Na, Value::Na),
         };
         fill_vals.push(fill);
         measure_vals.push(measure);
@@ -157,7 +178,7 @@ pub(super) fn build(
         // (both: an edge value belongs to the *upper* class, out-of-range
         // clamps to an end class), so the row's class and its legend
         // swatch always agree.
-        let (class_idx, title) = match classes {
+        let (class_idx, title) = match classes.filter(|_| !hexbin_takes_over) {
             Some((_, c, _)) => {
                 let label = m.label_of(i);
                 let shown = match &m.fill {
@@ -435,47 +456,77 @@ pub(super) fn build(
         }
     }
 
-    let mut discrete_fill = false;
-    if has_fill_aes {
-        match &m.fill {
-            // A classed measure: `ScaleFillBinned` (sipemu/ggplot-rs#180,
-            // built for exactly this) bins against `classes.rs`'s own
-            // edges/colours, tallies each bin's *trained* row count for the
-            // legend ("10–50 (12)", `class_label`'s own format — no hand
-            // rolled count text needed) and draws a `#206` pattern-filled
-            // "no data" key for any `Value::Na` row, matching the old
-            // writer's hatch. The break *maths* stays entirely ours
-            // (`classes.rs`); only the scale/legend object changes.
-            Fill::Measure(s) if s.classes.is_some() => {
-                discrete_fill = true;
-                let (_, c, colors) = s.classes.as_ref().unwrap();
-                let breaks: Vec<f64> = std::iter::once(c.lo)
-                    .chain(c.edges.iter().copied())
-                    .chain(std::iter::once(c.hi))
-                    .collect();
-                let mut scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
-                    .na_color(hatch_bg)
-                    .na_pattern(FillPattern::stripe(hatch_fg, hatch_bg))
-                    .na_label("No data");
+    // `fill::scale_for` builds whichever `Scale` the fill needs (classed:
+    // `ScaleFillBinned`, sipemu/ggplot-rs#180; continuous/category:
+    // `MapFill`) — `None` for `Fill::Plain`. Shared with `overlay`'s flow
+    // `Color` aesthetic (#420 slice 4): a clone of the *same* scale, not a
+    // second hand-resolved identity colour, so a flow map's colour legend
+    // is real too, not just its features'.
+    let discrete_fill = matches!(m.fill, Fill::Category { .. })
+        || matches!(&m.fill, Fill::Measure(s) if s.classes.is_some());
+    let mut fill_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
+    if let Fill::Measure(s) = &m.fill {
+        if s.classes.is_some() {
+            if let Some(scale) = &mut fill_scale {
                 // The measure's own title, same as the old writer's
                 // stepped-bar legend and `MapFill::measure`'s continuous
                 // one — real `legend_margin` (below) gives it room to
                 // render without clipping.
                 scale.set_name(s.title.clone().unwrap_or_default().as_str());
-                plot = plot.scale_fill(scale);
             }
-            // A continuous measure (no classes): stays on `MapFill`'s own
-            // default legend placement — see the `legend_position` note
-            // below (sipemu/ggplot-rs#225).
-            Fill::Measure(s) => plot = plot.scale_fill(MapFill::measure((**s).clone(), o.locale)),
-            Fill::Category { levels, .. } => {
-                discrete_fill = true;
-                plot = plot.scale_fill(MapFill::category(levels.clone()));
-            }
-            Fill::Plain(_) => unreachable!("has_fill_aes excludes Fill::Plain"),
+        }
+    }
+    // Clone for the flow layer below *before* `.scale_fill` consumes the
+    // original — flows need their own copy to re-aim at `Color`.
+    let flow_color_scale = m
+        .flows
+        .as_ref()
+        .and_then(|_| fill_scale.as_ref().map(|s| s.clone_box()));
+    if has_fill_aes {
+        if let Some(scale) = fill_scale {
+            plot = plot.scale_fill(fill::Reaimed(Aesthetic::Fill, scale));
         }
     }
     let _ = legend_at;
+
+    // ---- flows (::ORIGIN/::DEST, M2b) and hexbin (::HEXBIN, M2c), slice
+    // 4: extra layers on this same plot (overlay.rs's `flow_layers`/
+    // `hexbin_layer`), not a separately-rendered-and-spliced fragment.
+    if let Some(fl) = &m.flows {
+        let plain_fill_for_flows = match &m.fill {
+            Fill::Plain(c) => *c,
+            _ => plain_fill,
+        };
+        let (new_plot, _n, _extra_self, cap_warn) = overlay::flow_layers(
+            plot,
+            o,
+            cols,
+            m,
+            &frame,
+            fl,
+            t,
+            card,
+            flow_color_scale,
+            plain_fill_for_flows,
+        );
+        plot = new_plot;
+        if let Some(w) = cap_warn {
+            warnings.push(w);
+        }
+    }
+    if let Some(hb) = &m.hexbin {
+        if let Fill::Measure(scale) = &m.fill {
+            let hex_color_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
+            let (new_plot, _n) = overlay::hexbin_layer(plot, o, hb, scale, card, hex_color_scale);
+            plot = new_plot;
+            if hb.cells.len() > super::hexbin::HEX_WARN {
+                warnings.push(format!(
+                    "map: {} hexagons — use a larger ::HEXBIN",
+                    hb.cells.len()
+                ));
+            }
+        }
+    }
 
     // `crate::void_theme` (pie/gauge/map/sparkline) zeroes `legend_margin`
     // — fine for those (no legend, or one positioned off the panel
@@ -532,7 +583,12 @@ pub(super) fn build(
             serde_json::to_string(&labels).unwrap_or_default(),
         ));
     }
-    Some((plot, attrs))
+    // `data-hexbin`: the hex width (D7 — the zoom UI needs it anchored to
+    // the unzoomed data box), same as the old writer's own `data-hexbin`.
+    if let Some(hb) = &m.hexbin {
+        attrs.push(("data-hexbin", super::hexbin::fmt_num(hb.width)));
+    }
+    Some((plot, attrs, warnings))
 }
 
 /// `Value::Na` for an empty string (our own "no label/series" convention),

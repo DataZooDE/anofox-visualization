@@ -15,11 +15,101 @@
 
 use ggplot_rs::aes::Aesthetic;
 use ggplot_rs::data::Value;
+use ggplot_rs::render::backend::FillPattern;
+use ggplot_rs::scale::binned::ScaleFillBinned;
 use ggplot_rs::scale::Scale;
 
 use crate::format::Locale;
 
-use super::{Rgb, ValueScale};
+use super::{Fill, Rgb, ValueScale};
+
+/// The `Scale` for `fill` (a classed measure: `ScaleFillBinned`, a
+/// continuous one or a category: `MapFill`), or `None` for `Fill::Plain`
+/// (no aes at all). Shared by `plot::build`'s own `Fill` aesthetic and
+/// `overlay`'s flow `Color` aesthetic (#420 slice 4: flows reuse the exact
+/// same scale, wrapped, rather than hand-resolving an identity colour a
+/// second time) — one scale, one source of truth for what a map's colours
+/// mean.
+pub(super) fn scale_for(
+    fill: &Fill,
+    locale: Locale,
+    hatch_bg: Rgb,
+    hatch_fg: Rgb,
+) -> Option<Box<dyn Scale>> {
+    match fill {
+        Fill::Measure(s) if s.classes.is_some() => {
+            let (_, c, colors) = s.classes.as_ref().unwrap();
+            let breaks: Vec<f64> = std::iter::once(c.lo)
+                .chain(c.edges.iter().copied())
+                .chain(std::iter::once(c.hi))
+                .collect();
+            let scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
+                .na_color(hatch_bg)
+                .na_pattern(FillPattern::stripe(hatch_fg, hatch_bg))
+                .na_label("No data");
+            Some(Box::new(scale))
+        }
+        Fill::Measure(s) => Some(Box::new(MapFill::measure((**s).clone(), locale))),
+        Fill::Category { levels, .. } => Some(Box::new(MapFill::category(levels.clone()))),
+        Fill::Plain(_) => None,
+    }
+}
+
+/// A boxed `Scale`, re-aimed at a different aesthetic — `Box<dyn Scale>`
+/// doesn't implement `Scale` itself (every `GGPlot::scale_*` builder takes
+/// `impl Scale + 'static` and boxes it internally), so passing an
+/// already-boxed scale through a *different* `scale_*` builder (flows'
+/// `Color`, the same scale as the plot's own `Fill`, #420 slice 4) needs
+/// this thin pass-through.
+pub(super) struct Reaimed(pub Aesthetic, pub Box<dyn Scale>);
+
+impl Clone for Reaimed {
+    fn clone(&self) -> Self {
+        Reaimed(self.0.clone(), self.1.clone_box())
+    }
+}
+
+impl Scale for Reaimed {
+    fn aesthetic(&self) -> Aesthetic {
+        self.0.clone()
+    }
+    fn train(&mut self, values: &[Value]) {
+        self.1.train(values)
+    }
+    fn map(&self, value: &Value) -> f64 {
+        self.1.map(value)
+    }
+    fn breaks(&self) -> Vec<(f64, String)> {
+        self.1.breaks()
+    }
+    fn name(&self) -> &str {
+        self.1.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.1.set_name(name)
+    }
+    fn is_discrete(&self) -> bool {
+        self.1.is_discrete()
+    }
+    fn map_to_color(&self, value: &Value) -> Option<(u8, u8, u8)> {
+        self.1.map_to_color(value)
+    }
+    fn na_fill_pattern(&self) -> Option<FillPattern> {
+        self.1.na_fill_pattern()
+    }
+    fn is_na_break(&self, label: &str) -> bool {
+        self.1.is_na_break(label)
+    }
+    fn domain(&self) -> Option<(f64, f64)> {
+        self.1.domain()
+    }
+    fn format_value(&self, value: &Value) -> Option<String> {
+        self.1.format_value(value)
+    }
+    fn clone_box(&self) -> Box<dyn Scale> {
+        Box::new(self.clone())
+    }
+}
 
 /// The `::MAP` fill scale: a continuous or classed measure, or a
 /// `::CATEGORY`'s fixed level colours. Built once per render from the
