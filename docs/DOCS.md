@@ -2234,8 +2234,9 @@ Every panel carries its own state — there is no full-page spinner:
   `dashboard --check` and a locked server with a data folder check the paths
   before the statement runs (DuckDB's `glob()`, after expanding the variables
   with the values the statement would see): a requirement none of whose
-  alternatives exists skips the statement. `--check --data <dir>` sets
-  `anofox_data` as the locked server does. On the locked server a `${name}`
+  alternatives exists skips the statement. `--check --data <dir>`, `dashboard
+  --data <dir>` and `dashboard --svg --data <dir>` all set `anofox_data` as
+  the locked server does (#414). On the locked server a `${name}`
   must be a server-side value (`anofox_data`, a `path_vars` variable, a
   credential's locked variable, the login's claims, or what the dashboard's own
   statements set), and the expanded path must stay inside the data folder —
@@ -2831,6 +2832,28 @@ bundled DuckDB compile).
 ```sh
 cargo run --bin dashboard -- dashboards/sessions.sql   # → dashboard.html
 xdg-open dashboard.html
+```
+
+The render (and `dashboard --svg file.sql out.svg`, the whole dashboard as
+one SVG) runs the script's statements in **one DuckDB session, in script
+order** — a `CREATE OR REPLACE TEMP VIEW`, `SET VARIABLE` or other setup
+statement stays in scope for every later statement, the same session
+semantics as `dashboard --check` and a locked server's cold path (#414).
+There is no long-lived `duckdb` CLI connection to carry that across the
+separate `duckdb` calls the render makes, so it is simulated: a growing
+prelude of every setup statement run so far (plus the bound default of any
+input above it, as the browser's own first-load pre-pass picks) is replayed
+in full before each later statement. `--data <dir>` sets
+`getvariable('anofox_data')` to that directory (resolved to an absolute
+path) before the script's own statements run, exactly as `dashboard --check
+--data` and a locked server's `options.data` do — so a dashboard written
+for a locked server (setup views, `-- @requires ${anofox_data}/…`,
+`getvariable('anofox_data')` panels) renders to static HTML or SVG without
+one running:
+
+```sh
+dashboard dashboards/sessions.sql out.html --data /srv/runs/latest
+dashboard --svg dashboards/sessions.sql out.svg --data /srv/runs/latest
 ```
 
 The same binary lints and inspects — useful when authoring (by hand or with an

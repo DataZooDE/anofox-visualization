@@ -3984,8 +3984,11 @@ fn set_reads_a_file(code: &str) -> bool {
 }
 
 /// Check `requires` the way the locked server does (see
-/// [`sql::requires::check`]), with the prelude's session state.
-fn unmet_requirement<F>(
+/// [`sql::requires::check`]), with the prelude's session state. Shared with
+/// the headless CLI renderers (`dashboard` static HTML, `dashboard --svg`),
+/// which replay the same growing `prelude` before every statement to keep
+/// one DuckDB session's semantics across separate `duckdb` CLI calls.
+pub fn unmet_requirement<F>(
     run_query: &mut F,
     prelude: &str,
     requires: &[sql::requires::Requirement],
