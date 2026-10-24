@@ -9,20 +9,25 @@
 //! or a line / bar / area / step / scatter). [`render_stack`] renders the
 //! chart and its tracks at one width, sharing one plot area and x window:
 //! the chart's own `GGPlot` and every track's are composed into one
-//! single-column `PlotGrid` and rendered together in a single pass
-//! (`AxisCollect::CollectX`, sipemu/ggplot-rs#175) — no render-measure-render
-//! loop, and no layout internals of the plotting engine are needed. `CollectX`
-//! also unions the column's x domains and draws ticks on the bottom-most
-//! cell only; every track's own [`track_theme`] already hides its x axis
-//! (it never was the bottom cell before #175 either), so the one visible
-//! change is that axis now sits under the *last* track rather than right
-//! under the chart.
+//! single-column `PlotGrid` with `AxisCollect::Align` (sipemu/ggplot-rs#175)
+//! and rendered together in a single pass — no render-measure-render loop,
+//! and no layout internals of the plotting engine are needed. `Align` only
+//! equalises every cell's plot-area margins; it leaves axis text alone and
+//! doesn't touch the x domain (unlike `CollectX`, which forces every
+//! non-bottom cell's x axis blank — wrong here, since the chart, not the
+//! bottom track, is meant to keep its axis, as today). The shared x domain
+//! is instead computed directly from the chart's and every track's own data
+//! (the union, expanded 5% each side the same way ggplot-rs's own
+//! continuous/date scales default to) and given to every cell as explicit
+//! `scale_x_*` limits with `expand(0, 0)`, so no cell re-expands on top of
+//! it.
 
 use crate::{
     chart_theme, dz_scale, find_role, guard, role_str, value_fmt, value_str, Column, Kind, Panel,
     Place, RenderError, RenderOptions, Role,
 };
 use ggplot_rs::prelude::*;
+use ggplot_rs::scale::Scale;
 use ggplot_rs::theme::{ElementLine, ElementText, LegendPosition, ThemeUpdate};
 
 /// The typical step between distinct x positions (their median gap).
@@ -73,32 +78,27 @@ const TRACK_X: &str =
 
 /// Render a track panel on its own (`render_inner`'s dispatch: `cols`
 /// already `downsample`/`boxstats`-prepared by its caller,
-/// [`crate::render_placed`]) — no chart above it to align to, so the x axis
-/// stays hidden, as every track's always has (only [`stack`]'s own
-/// bottom-most track shows one).
+/// [`crate::render_placed`]) — no chart above it to align to.
 pub(crate) fn render(
     o: &RenderOptions,
     cols: &[Column],
     width: u32,
     height: u32,
 ) -> Result<Panel, String> {
-    let plot = plot_for(o, cols, width, height, None, false)?;
+    let plot = plot_for(o, cols, width, height, None)?;
     Ok(track_panel(plot, width, height))
 }
 
 /// The track dispatch core, shared by [`render`] (solo) and [`build`] (a
 /// [`stack`] `PlotGrid` cell): ticks/tiles ([`lanes`]) or a line / bar /
 /// area / step / scatter sparkline ([`measure`]). `step` is the chart's own
-/// x step (a heatmap/tick tile's width), `None` solo; `bottom` is whether
-/// this is the bottom-most cell of a [`stack`] (shows the x axis instead of
-/// hiding it), always `false` solo.
+/// x step (a heatmap/tick tile's width), `None` solo.
 fn plot_for(
     o: &RenderOptions,
     cols: &[Column],
     width: u32,
     height: u32,
     step: Option<f64>,
-    bottom: bool,
 ) -> Result<GGPlot, String> {
     let x = find_role(cols, Role::X).ok_or(TRACK_X)?;
     if x.values.iter().any(|v| matches!(v, Value::Str(_))) {
@@ -106,10 +106,8 @@ fn plot_for(
     }
     let name = role_str(cols, Role::Track).unwrap_or_default();
     match cols.iter().find(|c| matches!(c.role, Role::Value(_))) {
-        None => lanes(o, cols, x, None, &name, step, bottom),
-        Some(v) if v.role == Role::Value(Kind::Heatmap) => {
-            lanes(o, cols, x, Some(v), &name, step, bottom)
-        }
+        None => lanes(o, cols, x, None, &name, step),
+        Some(v) if v.role == Role::Value(Kind::Heatmap) => lanes(o, cols, x, Some(v), &name, step),
         Some(v) => match v.role {
             Role::Value(
                 kind @ (Kind::Line
@@ -118,7 +116,7 @@ fn plot_for(
                 | Kind::Bar
                 | Kind::Point
                 | Kind::Smooth),
-            ) => measure(o, kind, v, cols, &name, width, height, bottom),
+            ) => measure(o, kind, v, cols, &name, width, height),
             r => Err(format!(
                 "a ::TRACK draws ticks, ::HEATMAP tiles or a ::LINECHART / ::STEP / \
                  ::AREACHART / ::BARCHART / ::SCATTER, not ::{}",
@@ -141,22 +139,19 @@ fn build(
     width: u32,
     height: u32,
     step: Option<f64>,
-    bottom: bool,
 ) -> Result<(GGPlot, Vec<Column>), String> {
     let cols = crate::downsample::prepare(cols, o);
     let cols = crate::boxstats::prepare(cols)?;
-    let plot = plot_for(o, &cols, width, height, step, bottom)?.svg_attr("data-track", "true");
+    let plot = plot_for(o, &cols, width, height, step)?.svg_attr("data-track", "true");
     Ok((plot, cols))
 }
 
-/// The track look: no x axis unless `bottom` (the chart above has it,
-/// unless this track is itself the bottom of a [`stack`] — #175's
-/// `AxisCollect::CollectX` draws ticks on the bottom cell only), no grid,
-/// no legend, the lane names (or the track's name) as the y labels.
-fn track_theme(name_shown: bool, bottom: bool) -> ThemeUpdate {
+/// The track look: no x axis (the chart above has it), no grid, no legend,
+/// the lane names (or the track's name) as the y labels.
+fn track_theme(name_shown: bool) -> ThemeUpdate {
     ThemeUpdate {
-        axis_text_x: (!bottom).then(ElementText::blank),
-        axis_title_x: (!bottom).then(ElementText::blank),
+        axis_text_x: Some(ElementText::blank()),
+        axis_title_x: Some(ElementText::blank()),
         axis_title_y: Some(ElementText::blank()),
         axis_text_y: (!name_shown).then(ElementText::blank),
         panel_grid_major: Some(ElementLine::blank()),
@@ -181,7 +176,6 @@ fn lanes(
     value: Option<&Column>,
     name: &str,
     step: Option<f64>,
-    bottom: bool,
 ) -> Result<GGPlot, String> {
     let lane = find_role(cols, Role::Y);
     let cat = find_role(cols, Role::Category).filter(|c| c.values.iter().any(|v| *v != Value::Na));
@@ -354,13 +348,12 @@ fn lanes(
     let shown = levels.iter().any(|l| !l.is_empty());
     let plot = plot
         .theme(chart_theme(o, 11.0))
-        .theme_update(track_theme(shown, bottom));
+        .theme_update(track_theme(shown));
     Ok(plot)
 }
 
 /// A line / bar / area / step / scatter track: the chart's own marks, its
 /// name as the one y label (values are in the tooltips).
-#[allow(clippy::too_many_arguments)]
 fn measure(
     o: &RenderOptions,
     kind: Kind,
@@ -369,7 +362,6 @@ fn measure(
     name: &str,
     width: u32,
     height: u32,
-    bottom: bool,
 ) -> Result<GGPlot, String> {
     let nums: Vec<f64> = value
         .values
@@ -399,7 +391,7 @@ fn measure(
                         .with_labels(vec![name.to_string()])
                         .with_value_formatter(move |n: f64| vfmt.full(n, &locale)),
                 )
-                .theme_update(track_theme(!name.is_empty(), bottom));
+                .theme_update(track_theme(!name.is_empty()));
             Ok(plot)
         }
         // Never happens in practice: every `Kind` `plot_for` dispatches
@@ -439,27 +431,86 @@ pub fn heights(tracks: &[(Vec<Column>, u32)]) -> Vec<u32> {
         .collect()
 }
 
+/// The union of every finite, non-string x value across `chart` and every
+/// track's own columns — pure data, no rendering — expanded 5% each side
+/// the way ggplot-rs's own continuous/date scales default to (checked
+/// against `ggplot-rs/src/scale/{continuous,datetime}.rs`: `expand: (0.05,
+/// 0.0, …)`, and none of this crate's track-compatible chart kinds
+/// override it). `None` when the chart's own x isn't numeric/date — the
+/// same precondition each track's own x already needs ([`TRACK_X`]).
+fn shared_x_domain(chart: &[Column], tracks: &[(Vec<Column>, u32)]) -> Option<(bool, f64, f64)> {
+    let chart_x = find_role(chart, Role::X)?;
+    if chart_x.values.iter().any(|v| matches!(v, Value::Str(_))) {
+        return None;
+    }
+    let date = chart_x
+        .values
+        .iter()
+        .any(|v| matches!(v, Value::DateTime(_)));
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mut widen = |values: &[Value]| {
+        for v in values {
+            if let Some(f) = v.as_f64().filter(|f| f.is_finite()) {
+                lo = lo.min(f);
+                hi = hi.max(f);
+            }
+        }
+    };
+    widen(&chart_x.values);
+    for (cols, _) in tracks {
+        if let Some(x) = find_role(cols, Role::X) {
+            widen(&x.values);
+        }
+    }
+    if !(lo.is_finite() && hi.is_finite()) {
+        return None;
+    }
+    let range = (hi - lo).max(0.0);
+    Some((date, lo - range * 0.05, hi + range * 0.05))
+}
+
+/// Pin `plot`'s x scale to `(lo, hi)` (already expanded) with no further
+/// expansion of its own — the last `scale_x_*` call wins (ggplot-rs), so
+/// this overrides whatever the chart/track's own builder set.
+fn with_shared_x(plot: GGPlot, date: bool, lo: f64, hi: f64) -> GGPlot {
+    if date {
+        let mut s = ggplot_rs::scale::datetime::ScaleDateTime::new();
+        Scale::set_limits(&mut s, lo, hi);
+        Scale::set_expand(&mut s, 0.0, 0.0);
+        plot.scale_x_datetime(s)
+    } else {
+        plot.scale_x_continuous(
+            ggplot_rs::scale::continuous::ScaleContinuous::new()
+                .with_limits(lo, hi)
+                .with_expand(0.0, 0.0),
+        )
+    }
+}
+
 /// [`render_stack`] at a given [`Place`] (the headless dashboard nests the
 /// whole stack as one fragment, via a custom `place`); also returns the
 /// track heights.
 ///
 /// The chart's own `GGPlot` and every track's are built, then composed into
-/// one single-column [`PlotGrid`] with [`AxisCollect::CollectX`] and
-/// rendered together in **one** pass (sipemu/ggplot-rs#175) — the grid
-/// trains and unions the column's x domain, equalises every cell's
-/// left/right plot-area margins to the widest requirement (a long lane
-/// name's y-axis label, say), and gives a cell thinner than the plotting
-/// engine's own 50px panel floor (a `::TRACK` strip) a centred
-/// `aspect_ratio` so it comes out exactly as tall as its row — all in one
-/// internal layout pass per cell, not a render-measure-render loop. The
+/// one single-column [`PlotGrid`] with [`AxisCollect::Align`] and rendered
+/// together in **one** pass (sipemu/ggplot-rs#175) — the grid equalises
+/// every cell's left/right plot-area margins to the widest requirement (a
+/// long lane name's y-axis label, say) and gives a cell thinner than the
+/// plotting engine's own 50px panel floor (a `::TRACK` strip) a centred
+/// `aspect_ratio` so it comes out exactly as tall as its row — one internal
+/// layout pass per cell, not a render-measure-render loop. `Align` leaves
+/// axis text and the x domain alone (unlike `CollectX`, which would force
+/// every non-bottom cell's x axis blank — wrong here: the chart keeps its
+/// own axis, every track hides its own, as today); the shared x domain
+/// instead comes from [`shared_x_domain`]/[`with_shared_x`] above. The
 /// merged SVG is then split back into one fragment per panel (`::TRACK`s
 /// and the wasm/web host still address each one separately) and finished
 /// exactly as a lone render would be.
 ///
 /// A chart without a plain `GGPlot` panel (a diagram, map, table, KPI, …),
-/// or one whose x scale turns out discrete (categorical bars, say — #175's
-/// own `CollectX` can't train a shared domain on that, same as today), is
-/// left as the chart rendered plainly plus an error note per track.
+/// or one whose x isn't numeric/date (categorical bars, say), is left as
+/// the chart rendered plainly plus an error note per track.
 pub(crate) fn stack(
     chart: &[Column],
     tracks: &[(Vec<Column>, u32)],
@@ -477,19 +528,23 @@ pub(crate) fn stack(
             };
             return Ok((vec![svg], hs));
         }
+        let Some((date, lo, hi)) = shared_x_domain(chart, tracks) else {
+            return fallback_notes(chart, &hs, width, height, o, place);
+        };
         let Some((chart_plot, chart_cols)) = crate::chart_plot_for_track(chart, width, height, o)?
         else {
             return fallback_notes(chart, &hs, width, height, o, place);
         };
+        let chart_plot = with_shared_x(chart_plot, date, lo, hi);
         let step = find_role(chart, Role::X).and_then(|x| x_step(&x.values));
         let n = tracks.len();
         let mut track_cols: Vec<Vec<Column>> = Vec::with_capacity(n);
-        let mut grid = PlotGrid::new().ncol(1).axis_collect(AxisCollect::CollectX);
+        let mut grid = PlotGrid::new().ncol(1).axis_collect(AxisCollect::Align);
         grid = grid.add(chart_plot);
         let mut weights = vec![height as f64];
-        for (i, ((cols, _), h)) in tracks.iter().zip(&hs).enumerate() {
-            let (plot, prepared) =
-                build(o, cols, width, *h, step, i + 1 == n).map_err(RenderError::Render)?;
+        for ((cols, _), h) in tracks.iter().zip(&hs) {
+            let (plot, prepared) = build(o, cols, width, *h, step).map_err(RenderError::Render)?;
+            let plot = with_shared_x(plot, date, lo, hi);
             grid = grid.add(plot);
             track_cols.push(prepared);
             weights.push(*h as f64);
@@ -500,13 +555,6 @@ pub(crate) fn stack(
             .render_svg_native_with_warnings(width, total)
             .map_err(|e| RenderError::Render(format!("render failed: {e:?}")))?;
         let frags = split_fragments(&merged, 1 + n)?;
-        // The chart's own x scale turned out discrete (e.g. a categorical
-        // `::BARCHART`): `CollectX` can't train a shared domain on that —
-        // same "needs a numeric or date x axis" case as a chart that isn't
-        // a plain `GGPlot` panel at all.
-        if !frags[0].contains(" data-xdomain=\"") {
-            return fallback_notes(chart, &hs, width, height, o, place);
-        }
         let panel_warnings = |tag: usize| -> Vec<String> {
             let prefix = format!("panel {tag}: ");
             warnings
