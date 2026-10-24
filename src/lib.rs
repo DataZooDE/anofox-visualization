@@ -472,6 +472,13 @@ pub enum Role {
     XScale,
     /// y-axis scale transform (`::YSCALE`), like [`Role::XScale`].
     YScale,
+    /// Explicit x-axis tick positions (`::XBREAKS '100,1000,10000'`), in the
+    /// axis's own pre-transform data units — overrides the automatic ticks
+    /// (and, under `::XSCALE`, their automatic log/sqrt round-number
+    /// placement). Read from the first value.
+    XBreaks,
+    /// Explicit y-axis tick positions (`::YBREAKS`), like [`Role::XBreaks`].
+    YBreaks,
     /// A straight reference line `y = slope·x + intercept` per distinct
     /// `'slope,intercept'` value (`::ABLINE`).
     AbLine,
@@ -2242,6 +2249,21 @@ fn role_num(cols: &[Column], role: Role) -> Option<f64> {
     })
 }
 
+/// `::XBREAKS`/`::YBREAKS`: a comma-separated list of explicit tick
+/// positions (`'100,1000,10000'`), in the axis's own pre-transform data
+/// units. Non-numeric tokens are dropped — the linter warns separately
+/// (`lint::breaks_diags`) — so an all-invalid spec yields `None`, same as
+/// not setting the role at all.
+fn role_breaks(cols: &[Column], role: Role) -> Option<Vec<f64>> {
+    let raw = role_str(cols, role)?;
+    let vals: Vec<f64> = raw
+        .split(',')
+        .filter_map(|t| t.trim().parse::<f64>().ok())
+        .filter(|f| f.is_finite())
+        .collect();
+    (!vals.is_empty()).then_some(vals)
+}
+
 /// Whether grouped marks on a discrete x sit side by side: bars, and point
 /// ranges (a point measure with ::YMIN/::YMAX), dodged by ::CATEGORY.
 fn discrete_dodge(kind: Kind, cols: &[Column]) -> bool {
@@ -3480,6 +3502,14 @@ fn cartesian(
     let y_tr = role_str(cols, Role::YScale)
         .map(|s| axis_transform(&s, Role::YScale))
         .transpose()?;
+    // `::YBREAKS` is given in the axis's own (pre-transform) data units —
+    // e.g. `'100,1000,10000'` under `'log10'::YSCALE` — so it's
+    // forward-transformed the same way the scale itself transforms data,
+    // matching `ScaleContinuous::with_breaks`'s transformed-space contract.
+    let y_breaks = role_breaks(cols, Role::YBreaks).map(|bs| match &y_tr {
+        Some(t) => bs.iter().map(|&v| t.apply(v)).collect::<Vec<_>>(),
+        None => bs,
+    });
     // B2-4: the measure's own `data-fvalue` (`::YFORMAT`/a percent kind,
     // same locale) — wired unconditionally so ggplot-rs's native
     // `svg_formatted_values` (on since `Panel::plot`) writes exactly what
@@ -3495,6 +3525,9 @@ fn cartesian(
         if let Some(t) = y_tr {
             s = s.with_transform(t);
         }
+        if let Some(bs) = y_breaks {
+            s = s.with_breaks(bs);
+        }
         s = s.with_value_formatter(move |n: f64| vfmt.full(n, &locale));
         plot = plot.scale_y_continuous(s);
     }
@@ -3509,17 +3542,25 @@ fn cartesian(
         let x_tr = role_str(cols, Role::XScale)
             .map(|s| axis_transform(&s, Role::XScale))
             .transpose()?;
+        // See `y_breaks` above — same forward-transform contract.
+        let x_breaks = role_breaks(cols, Role::XBreaks).map(|bs| match &x_tr {
+            Some(t) => bs.iter().map(|&v| t.apply(v)).collect::<Vec<_>>(),
+            None => bs,
+        });
         // B2-4: `data-fx` for a custom `::XFORMAT` — the only case the old
         // pass ever set it for a numeric x (a date x already formats its
         // own `data-x`/`data-fx` natively through `ScaleDateTime`).
         let x_vfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
-        if x_fmt.is_some() || x_tr.is_some() || x_vfmt.is_some() {
+        if x_fmt.is_some() || x_tr.is_some() || x_vfmt.is_some() || x_breaks.is_some() {
             let mut s = ScaleContinuous::new();
             if let Some(f) = x_fmt {
                 s = s.with_label_formatter(f);
             }
             if let Some(t) = x_tr {
                 s = s.with_transform(t);
+            }
+            if let Some(bs) = x_breaks {
+                s = s.with_breaks(bs);
             }
             if let Some(vfmt) = x_vfmt {
                 let locale = o.locale;

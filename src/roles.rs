@@ -219,6 +219,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "x-axis transform: 'log10', 'sqrt' or 'reverse'"),
     e("YSCALE", &["YTRANS"], R::YScale, "modifier", true,
       "y-axis transform: 'log10', 'sqrt' or 'reverse'"),
+    e("XBREAKS", &["X_BREAKS"], R::XBreaks, "modifier", true,
+      "explicit x-axis tick positions, in data units — '100,1000,10000'; overrides the automatic ticks (and, under ::XSCALE, their log/sqrt round-number placement)"),
+    e("YBREAKS", &["Y_BREAKS"], R::YBreaks, "modifier", true,
+      "explicit y-axis tick positions, like ::XBREAKS"),
     e("FACET_NCOL", &["NCOL"], R::FacetCols, "modifier", true,
       "panels per row of a ::FACET / ::FACET_FREE"),
     e("SMOOTH_METHOD", &["METHOD"], R::SmoothMethod, "modifier", true,
@@ -841,6 +845,8 @@ mod tests {
             Role::FacetCols,
             Role::XScale,
             Role::YScale,
+            Role::XBreaks,
+            Role::YBreaks,
             Role::AbLine,
             Role::Identity,
             Role::LabelTop,
@@ -972,6 +978,8 @@ mod tests {
                 | Role::FacetCols
                 | Role::XScale
                 | Role::YScale
+                | Role::XBreaks
+                | Role::YBreaks
                 | Role::AbLine
                 | Role::Identity
                 | Role::LabelTop
