@@ -94,6 +94,11 @@ assert.equal(
   chartLink(heatLink, el({ "data-x": "2026-01-01", "data-series": "alpha" }), "2026-01-01", "alpha"),
   "?v.picked=alpha"
 );
+// #437 review: `vars` is a null-prototype object — {constructor} (or any
+// other Object.prototype name) must fill empty, not resolve to an inherited
+// property, now that its keys come straight from data column names.
+const protoLink = { ...heatLink, idx: 4, rows: JSON.stringify([{ c0: "2026-01-01", c1: "alpha", c2: "0", c4: "?v.x={constructor}" }]) };
+assert.equal(chartLink(protoLink, el({ "data-x": "2026-01-01", "data-series": "alpha" }), "2026-01-01", "alpha"), "?v.x=");
 
 // The legend toggle finds the legend above the panel rect, however many
 // rows it wrapped onto (#175).

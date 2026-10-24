@@ -7396,8 +7396,10 @@ function chartLink(link, el, key, series) {
     {};
   // `{<column>}` — any named column of the row, not just {value}/{x}/{series}
   // (#437: a bare {f} used to resolve to nothing, since only those three
-  // were ever filled in).
-  const vars = {};
+  // were ever filled in). A null-prototype object: the keys are data column
+  // names now, so e.g. {constructor} must not resolve to an inherited
+  // Object.prototype property.
+  const vars = Object.create(null);
   for (const r of link.roles) if (r[2] && row["c" + r[0]] !== undefined) vars[r[2]] = str(row["c" + r[0]]);
   Object.assign(vars, { value: key, x: xr ? str(row["c" + xr[0]]) : x, series });
   for (const ia of Object.values(dpIa)) {
@@ -7407,7 +7409,11 @@ function chartLink(link, el, key, series) {
 }
 // A table's ::LINK cell: a link built from the row ({value} = its first column).
 function linkCell(tpl, row, key) {
-  const vars = { value: key };
+  // A null-prototype object: the keys are a table row's own column names, so
+  // e.g. {constructor} must not resolve to an inherited Object.prototype
+  // property (#437 review).
+  const vars = Object.create(null);
+  vars.value = key;
   for (const [k, v] of Object.entries(row)) vars[k] = v == null ? "" : String(v).replace(/^"|"$/g, "");
   const url = fillLink(tpl, vars);
   const a = document.createElement("a");
