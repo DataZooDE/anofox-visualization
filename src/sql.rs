@@ -255,9 +255,29 @@ pub fn columns_from_rows(
 }
 
 /// JSON rows (as the DuckDB CLI's `-json` prints them) → columns in SELECT
-/// order, for a headless [`crate::dashboard::DataProvider`].
+/// order, for a headless [`crate::dashboard::DataProvider`]. No DuckDB type
+/// info (a `::XAXIS`/`::YAXIS` string column that merely *looks* numeric,
+/// `'0'`/`'1'`, would wrongly promote to a continuous axis, #424) — prefer
+/// [`result_columns_typed`] when `DESCRIBE`'s column types are available
+/// (`CliProvider` in `src/bin/dashboard.rs` always has them).
 pub fn result_columns(
     rows: &[serde_json::Map<String, serde_json::Value>],
+) -> Vec<(String, Vec<Value>)> {
+    result_columns_typed(rows, &std::collections::HashMap::new())
+}
+
+/// [`result_columns`], keyed on each column's real DuckDB type (`column_name`
+/// → `column_type`, as `DESCRIBE <query>` reports them) rather than guessing
+/// numeric-ness from the JSON text: #424, a VARCHAR `::XAXIS`/`::YAXIS` whose
+/// values happen to parse as numbers (`'0'`/`'1'`, a binary classifier's
+/// labels) must stay discrete, the same way a column of `'cat'`/`'dog'`
+/// already does. A type DuckDB serialises as a JSON string despite being
+/// numeric (`BIGINT`/`HUGEINT`/`DECIMAL`) still parses to `Value::Float`; a
+/// column missing from `types` (e.g. a `DataProvider` with no `DESCRIBE`
+/// step) falls back to the old per-value heuristic, unchanged.
+pub fn result_columns_typed(
+    rows: &[serde_json::Map<String, serde_json::Value>],
+    types: &std::collections::HashMap<String, String>,
 ) -> Vec<(String, Vec<Value>)> {
     let Some(first) = rows.first() else {
         return Vec::new();
@@ -265,23 +285,110 @@ pub fn result_columns(
     first
         .keys()
         .map(|k| {
-            let vals = rows.iter().map(|r| jval(r.get(k), false)).collect();
-            (k.clone(), vals)
-        })
-        .map(|(k, vals): (String, Vec<Value>)| {
-            // A column whose strings are all numbers is numeric.
-            let numeric = vals.iter().all(|v| match v {
-                Value::Str(s) => s.trim().parse::<f64>().is_ok(),
-                _ => true,
-            });
+            let vals: Vec<Value> = rows.iter().map(|r| jval(r.get(k), false)).collect();
+            let numeric = match types.get(k).map(|t| is_discrete_sql_type(t)) {
+                Some(discrete) => !discrete,
+                // No type info for this column: the old heuristic — every
+                // string value parses as a number.
+                None => vals.iter().all(|v| match v {
+                    Value::Str(s) => s.trim().parse::<f64>().is_ok(),
+                    _ => true,
+                }),
+            };
             let vals = if numeric {
-                rows.iter().map(|r| jval(r.get(&k), true)).collect()
+                rows.iter().map(|r| jval(r.get(k), true)).collect()
             } else {
                 vals
             };
-            (k, vals)
+            (k.clone(), vals)
         })
         .collect()
+}
+
+/// Is a DuckDB `column_type` (as `DESCRIBE` reports it, e.g. `"VARCHAR"`,
+/// `"DECIMAL(10,2)"`, `"ENUM('a', 'b')"`) a string/text type — so its values
+/// stay discrete even when every one of them happens to parse as a number?
+fn is_discrete_sql_type(t: &str) -> bool {
+    let head = t
+        .split(['(', '['])
+        .next()
+        .unwrap_or(t)
+        .trim()
+        .to_ascii_uppercase();
+    matches!(
+        head.as_str(),
+        "VARCHAR" | "CHAR" | "BPCHAR" | "TEXT" | "STRING" | "ENUM" | "UUID" | "BLOB" | "BIT"
+    )
+}
+
+#[cfg(test)]
+mod result_columns_typed_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn rows(vals: &[&str]) -> Vec<serde_json::Map<String, serde_json::Value>> {
+        vals.iter()
+            .map(|v| {
+                let mut m = serde_json::Map::new();
+                m.insert("c0".to_string(), serde_json::Value::String(v.to_string()));
+                m
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_varchar_column_stays_discrete_even_when_every_value_looks_numeric() {
+        // #424: '0'/'1' class labels — the old per-value heuristic (every
+        // string parses as a number) would wrongly promote this to a
+        // continuous axis; DESCRIBE's real VARCHAR type must win.
+        let r = rows(&["0", "1", "0", "1"]);
+        let mut types = HashMap::new();
+        types.insert("c0".to_string(), "VARCHAR".to_string());
+        let cols = result_columns_typed(&r, &types);
+        assert_eq!(
+            cols[0].1,
+            vec![
+                Value::Str("0".into()),
+                Value::Str("1".into()),
+                Value::Str("0".into()),
+                Value::Str("1".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_numeric_type_serialised_as_a_json_string_still_promotes() {
+        // DECIMAL/BIGINT/HUGEINT come back from DuckDB's -json as strings.
+        let r = rows(&["1.50", "2.75"]);
+        let mut types = HashMap::new();
+        types.insert("c0".to_string(), "DECIMAL(10,2)".to_string());
+        let cols = result_columns_typed(&r, &types);
+        assert_eq!(cols[0].1, vec![Value::Float(1.5), Value::Float(2.75)]);
+    }
+
+    #[test]
+    fn without_type_info_the_old_heuristic_still_applies() {
+        let r = rows(&["0", "1"]);
+        let cols = result_columns_typed(&r, &HashMap::new());
+        assert_eq!(cols[0].1, vec![Value::Float(0.0), Value::Float(1.0)]);
+        // A genuinely non-numeric string stays discrete either way.
+        let r2 = rows(&["cat", "dog"]);
+        let cols2 = result_columns_typed(&r2, &HashMap::new());
+        assert_eq!(
+            cols2[0].1,
+            vec![Value::Str("cat".into()), Value::Str("dog".into())]
+        );
+    }
+
+    #[test]
+    fn is_discrete_sql_type_covers_common_duckdb_spellings() {
+        for t in ["VARCHAR", "varchar", "CHAR(10)", "ENUM('a', 'b')", "TEXT"] {
+            assert!(is_discrete_sql_type(t), "{t}");
+        }
+        for t in ["INTEGER", "DOUBLE", "DECIMAL(10,2)", "BIGINT", "DATE"] {
+            assert!(!is_discrete_sql_type(t), "{t}");
+        }
+    }
 }
 
 fn jval(v: Option<&serde_json::Value>, numeric: bool) -> Value {

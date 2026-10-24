@@ -840,6 +840,9 @@ where
         diags.extend(tile_scale_diags(&p.roles, &rows, stmt, &short));
         // ::XBREAKS / ::YBREAKS: numeric entries, and only on a cartesian chart.
         diags.extend(breaks_diags(&p.roles, &rows, stmt, &short));
+        // #424: ::IDENTITY / ::REFLINE are still dropped on a ::HEATMAP
+        // (cartesian()'s only drawn there, and a heatmap never reaches it).
+        diags.extend(heatmap_line_diags(&p.roles, stmt, &short));
         // A ::COLORS level map ('Critical:bad; …') must parse and needs a
         // ::CATEGORY to colour.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
@@ -3769,6 +3772,37 @@ fn col_is_temporal(rows: &[Map<String, Value>], col: usize) -> bool {
 fn looks_like_date(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 8 && b[0..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
+}
+
+/// #424: `::IDENTITY` / `::REFLINE` are read inside `cartesian()` only — a
+/// `::HEATMAP` dispatches to `render_heatmap`/`render_heatmap_categorical`
+/// before ever reaching it (`lib.rs`'s `match kind` in `render_with`), so
+/// both are silently dropped there today. Drawing a diagonal/reference line
+/// over a tile grid needs the grid's own x/y to be numeric-binned (not the
+/// usual discrete row/column labels) for the line to mean anything, which
+/// `render_heatmap` doesn't distinguish yet — so this warns instead of
+/// drawing a line that would be wrong on a discrete grid.
+fn heatmap_line_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if chart_kind(roles) != Some(Kind::Heatmap) {
+        return out;
+    }
+    for role in [Role::Identity, Role::RefLine] {
+        if roles.iter().any(|(_, r)| *r == role) {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "heatmap/line-dropped",
+                message: format!(
+                    "::{} is dropped on ::HEATMAP — reference/identity lines aren't drawn over \
+                     tiles yet",
+                    role.token()
+                ),
+                sql: short.to_string(),
+            });
+        }
+    }
+    out
 }
 
 /// Status colour scales on tiles (see the call site).

@@ -2606,3 +2606,83 @@ fn non_finite_x_levels_are_shown_not_merged_with_blank() {
     // none of the four non-"a" levels collapsed into one.
     assert_eq!(s.matches("data-geom=\"col\"").count(), 5, "{s}");
 }
+
+// ── #424: HEATMAP honours FACET; IDENTITY/REFLINE warn instead of silently
+// dropping ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn heatmap_facet_draws_one_grid_per_group() {
+    let cols = vec![
+        Column::new(
+            "x",
+            Role::X,
+            strs(&["0", "0", "1", "1", "0", "0", "1", "1"]),
+        ),
+        Column::new(
+            "y",
+            Role::Y,
+            strs(&["0", "1", "0", "1", "0", "1", "0", "1"]),
+        ),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            nums(&[50.0, 5.0, 7.0, 40.0, 45.0, 12.0, 15.0, 30.0]),
+        ),
+        Column::new(
+            "p",
+            Role::Facet,
+            strs(&["ref", "ref", "ref", "ref", "cur", "cur", "cur", "cur"]),
+        ),
+        Column::new("l", Role::DataLabels, strs(&[""])),
+    ];
+    let s = svg(cols);
+    for strip in ["ref", "cur"] {
+        assert!(
+            s.contains(&format!(">{strip}</text>")),
+            "{strip} strip: {s}"
+        );
+    }
+    // 8 tiles total, one per row — no two sharing the exact same (x, y) pixel
+    // rect (the pre-#424 bug: both panels' tiles drawn on top of each
+    // other).
+    let mut rects: Vec<(String, String)> = Vec::new();
+    let mut rest = s.as_str();
+    while let Some(i) = rest.find("<rect ") {
+        let end = i + rest[i..].find('>').unwrap();
+        let tag = &rest[i..end];
+        if tag.contains("data-geom=\"tile\"") {
+            let attr = |a: &str| -> String {
+                let k = tag.find(&format!(" {a}=\"")).unwrap() + a.len() + 3;
+                tag[k..k + tag[k..].find('"').unwrap()].to_string()
+            };
+            rects.push((attr("x"), attr("y")));
+        }
+        rest = &rest[end + 1..];
+    }
+    assert_eq!(rects.len(), 8, "{s}");
+    let unique: std::collections::BTreeSet<_> = rects.iter().cloned().collect();
+    assert_eq!(unique.len(), 8, "no two tiles share a position: {rects:?}");
+    // 8 data labels too, each legible (one per cell, same split).
+    assert_eq!(s.matches("data-geom=\"text\"").count(), 8, "{s}");
+}
+
+#[test]
+fn heatmap_identity_and_refline_are_dropped_same_as_before_424() {
+    // #424 chose to warn (lint::heatmap_line_diags) rather than draw a line
+    // over a discrete tile grid — the render output itself is unchanged
+    // (::IDENTITY/::REFLINE still don't appear in the SVG).
+    let cols = vec![
+        Column::new("x", Role::X, strs(&["a", "b"])),
+        Column::new("y", Role::Y, strs(&["p", "q"])),
+        Column::new("v", Role::Value(Kind::Heatmap), nums(&[1.0, 2.0])),
+        Column::new("i", Role::Identity, nums(&[1.0])),
+        Column::new("r", Role::RefLine, nums(&[1.5])),
+    ];
+    let s = svg(cols);
+    assert!(!s.contains("data-geom=\"identity\""), "{s}");
+    assert_eq!(
+        s.matches("data-geom=\"tile\"").count(),
+        2,
+        "just the 2 tiles: {s}"
+    );
+}

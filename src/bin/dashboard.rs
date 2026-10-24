@@ -371,6 +371,28 @@ struct CliProvider {
     prelude: String,
 }
 
+impl CliProvider {
+    /// `sql`'s real DuckDB column types (`DESCRIBE`, replaying the same
+    /// prelude so temp views/variables the query depends on are in scope) —
+    /// `name → column_type` (`"VARCHAR"`, `"DECIMAL(10,2)"`, …). Empty on any
+    /// failure (a provider-level detail, not a panel error): `query` then
+    /// falls back to `result_columns_typed`'s old per-value numeric guess,
+    /// same as before #424 fixed it for the common case.
+    fn column_types(&self, sql: &str) -> std::collections::HashMap<String, String> {
+        let describe = format!("DESCRIBE {}", sql.trim().trim_end_matches(';'));
+        let Ok(rows) = run_query(None, &format!("{}{describe};", self.prelude)) else {
+            return std::collections::HashMap::new();
+        };
+        rows.into_iter()
+            .filter_map(|r| {
+                let name = r.get("column_name")?.as_str()?.to_string();
+                let ty = r.get("column_type")?.as_str()?.to_string();
+                Some((name, ty))
+            })
+            .collect()
+    }
+}
+
 impl dashboard::DataProvider for CliProvider {
     fn execute(&mut self, sql: &str) -> Result<(), String> {
         run_query(None, &format!("{}{sql};", self.prelude))?;
@@ -383,7 +405,11 @@ impl dashboard::DataProvider for CliProvider {
         sql: &str,
     ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
         let rows = run_query(None, &format!("{}{sql};", self.prelude))?;
-        Ok(sql::result_columns(&rows))
+        // #424: a VARCHAR column whose values happen to parse as numbers
+        // (binary-classifier labels `'0'`/`'1'`) must stay discrete — ask
+        // DuckDB's own types rather than guessing from the JSON text.
+        let types = self.column_types(sql);
+        Ok(sql::result_columns_typed(&rows, &types))
     }
 }
 
