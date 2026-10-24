@@ -1866,7 +1866,14 @@ async function runSql(sql, page, kind, setup, at, pv) {
 }
 async function runSqlInner(sql, page, kind, setup, at, pv) {
   const setv = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=\s*([\s\S]+?);?\s*$/i.exec(sql);
-  if (setv) dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
+  if (setv) {
+    dpVarNow[setv[1]] = setv[2]; // what changed since the last run (markPending)
+    // #416: every caller except runSetup (the dashboard's OWN setup
+    // statements) passes no `setup` flag — this is the viewer's value
+    // (an input, a URL seed, a cross-filter/range/drill var), not something
+    // the script derived itself.
+    if (!setup) dpViewerVars.add(setv[1].toLowerCase());
+  }
   // #244 C-1 / sec-review-272-rereview H-1R / H-1R2: before prepareSql and
   // before any page handle — dispatch on the TOKEN this particular call
   // was made under: an explicitly passed `pv` (a lazy/prefetch job, bound
@@ -6558,6 +6565,11 @@ function mkLogoEdit(head, cur) {
 let dpVars = {}; // DuckDB variable name -> selected value (persists across runs)
 let dpVarNow = {}; // variable -> SQL literal set during this run (markPending)
 let dpVarLast = {}; // … and at the end of the last completed run
+// #416: lower-cased names SET this run by the VIEWER, not by the dashboard's
+// own script — an input's pick, a URL seed, a cross-filter/range/drill var.
+// Reset at the top of every run (runOnce); a derived `SET VARIABLE` that
+// reads one of these may need the corrective re-run pass below.
+let dpViewerVars = new Set();
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
 let dpZoomGroups = {}; // ::SYNC_ZOOM: group name → {view: {cx, cy, w} | null, members: Set<map holder>}
@@ -7460,6 +7472,35 @@ function patchSlots(roots, newRoots, swaps) {
 // The first run, with nothing on screen yet, draws skeleton cards instead (a
 // tabbed dashboard's panels live in .tabwrap, outside the grid).
 const varsOf = (sql) => [...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]);
+
+// #416: the dashboard's own `SET VARIABLE` setup statements that need a
+// corrective re-run once every viewer value (an input's pick, a URL seed, a
+// cross-filter/selection/range/drill var — `viewerVars`, lower-cased names)
+// has its final value for this run. The render loop's pre-pass runs every
+// statement once, in script order, so a derived `SET VARIABLE` declared
+// BEFORE the input (or other viewer var) it reads via getvariable() still
+// saw that variable's PREVIOUS value, from its own turn — unlike the locked
+// server, which sets every viewer value first and only then replays the
+// dashboard's own SET VARIABLEs (servedVars; duckext/src/serve.rs's
+// request_sets_named + run_panel). Returned in script order, and a
+// statement's own name counts as a viewer var for the rest of this list
+// too, so a chain of derived variables (sel2 reading sel) resolves in one
+// forward pass — the same single stmts[..panel] replay the server does. A
+// statement that reads none of them (including a running total that only
+// reads its own prior value) is left out, so nothing is ever applied twice.
+const SETVAR_RE = /^\s*SET\s+VARIABLE\s+([A-Za-z_]\w*)\s*=/i;
+function setVarsToReplay(stmts, viewerVars) {
+  const known = new Set(viewerVars);
+  const out = [];
+  for (const s of stmts) {
+    if (!s.setup) continue;
+    const m = SETVAR_RE.exec(sqlCode(s.sql));
+    if (!m || !varsOf(s.sql).some((v) => known.has(v.toLowerCase()))) continue;
+    out.push(s);
+    known.add(m[1].toLowerCase());
+  }
+  return out;
+}
 function markPending(grid, stmts, fresh) {
   const changed = new Set(
     [...new Set([...Object.keys(dpVarNow), ...Object.keys(dpVarLast)])].filter((k) => dpVarNow[k] !== dpVarLast[k])
@@ -8156,6 +8197,7 @@ async function runOnce(fresh = true, pv = preview) {
   // (::THEME, ::LOCALE, ::DASHBOARD_TITLE, …) are collected here so the theme
   // applies to every panel wherever the directive sits in the script.
   const dd = {};
+  dpViewerVars = new Set(); // #416: repopulated below as this run sets each one
   // Default theme: the server's (`serve --theme`, anofox_serve_dashboards
   // options.theme), else the built-in light look; a ::THEME overrides it.
   dpTheme.spec = defaultThemeSpec();
@@ -8274,6 +8316,20 @@ async function runOnce(fresh = true, pv = preview) {
 
   // URL seeds no input claimed are selections (`v.selected`, named ones).
   if (applySelectionSeeds()) await setSelectionVars();
+
+  // #416: viewer values are now final for this run (dpViewerVars) — re-run
+  // the dashboard's own SET VARIABLEs that read one, in script order, so a
+  // derived variable declared before the input it reads still sees the
+  // viewer's CURRENT pick (setVarsToReplay, above; the same order the
+  // locked server uses).
+  for (const s of setVarsToReplay(stmts, dpViewerVars)) {
+    try {
+      await runSetup(s.sql, pv);
+      dpViewerVars.add(SETVAR_RE.exec(sqlCode(s.sql))[1].toLowerCase());
+    } catch (e) {
+      if (!isOptionalMissing(s, e)) console.error(e);
+    }
+  }
   markPending(grid, stmts, fresh); // now the changed variables are known
 
   // The theme (and its light/dark variant) for this run: CSS tokens on the
