@@ -202,7 +202,11 @@ fn render_dashboard_html(
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
         // flattened here).
-        let hidden = sections.step(&p, |reqs| lint::unmet_requirement(&mut exec, reqs).missing);
+        // `exec` is backed by a persistent session (#435), so there is no
+        // prelude text to replay — it already has everything in scope.
+        let hidden = sections.step(&p, |reqs| {
+            lint::unmet_requirement(&mut exec, "", reqs).missing
+        });
         if hidden.is_some() || view_pick.drop_panel(&p) {
             continue;
         }
@@ -613,8 +617,14 @@ fn cmd_check(args: &[String]) {
         if !data_set.is_empty() {
             let _ = session.run(&data_set);
         }
-        let mut diags =
-            lint::check_opts(script, |sql| session.run(sql), lint::LintOptions { design });
+        let mut diags = lint::check_opts(
+            script,
+            |sql| session.run(sql),
+            lint::LintOptions {
+                design,
+                stateful_session: true,
+            },
+        );
         if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
             diags.extend(policy_diags(script, db, p));
         }
@@ -1255,7 +1265,10 @@ fn cmd_site(args: &[String]) {
             let mut diags = lint::check_opts(
                 &d.sql,
                 |sql| session.run(sql),
-                lint::LintOptions { design: false },
+                lint::LintOptions {
+                    design: false,
+                    stateful_session: true,
+                },
             );
             diags.extend(
                 extra
