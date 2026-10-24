@@ -74,6 +74,27 @@ const link = {
 assert.equal(chartLink(link, el({ "data-row": "1", "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 3");
 assert.equal(chartLink(link, el({ "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 1");
 assert.equal(chartLink(link, el({ "data-row": "9", "data-series": "late stop" }), "late stop", "late stop"), "#Stop list?v.van=Van 1");
+// #437: a ::HEATMAP's {<column>} placeholder resolves to that column's own
+// value (by its role's name), not just {value}/{x}/{series} — and a
+// ::YAXIS lane (no ::CATEGORY) still picks the clicked row, not the first
+// one at that x.
+const heatLink = {
+  idx: 3,
+  roles: [[0, "XAXIS"], [1, "YAXIS", "f"], [2, "HEATMAP", "v"], [3, "LINK"]],
+  rows: JSON.stringify([
+    { c0: "2026-01-01", c1: "alpha", c2: "0", c3: "?v.picked={f}" },
+    { c0: "2026-01-01", c1: "beta", c2: "1", c3: "?v.picked={f}" },
+  ]),
+};
+assert.equal(
+  chartLink(heatLink, el({ "data-x": "2026-01-01", "data-series": "beta" }), "2026-01-01", "beta"),
+  "?v.picked=beta"
+);
+assert.equal(
+  chartLink(heatLink, el({ "data-x": "2026-01-01", "data-series": "alpha" }), "2026-01-01", "alpha"),
+  "?v.picked=alpha"
+);
+
 // The legend toggle finds the legend above the panel rect, however many
 // rows it wrapped onto (#175).
 const { legendBand } = new Function(`${grab("legendBand")}\nreturn { legendBand };`)();
