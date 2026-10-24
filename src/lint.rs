@@ -97,20 +97,53 @@ pub struct LintOptions {
     /// Also emit `design/*` advisory warnings (layout / chart-choice quality).
     /// On by default; the CLI's `--no-design` turns it off.
     pub design: bool,
+    /// Is `run_query` backed by one **persistent** session that keeps state
+    /// (TEMP views/tables, `SET VARIABLE`, `LOAD`, plain DDL) across calls,
+    /// so an earlier statement stays in scope for a later one exactly as a
+    /// real connection would?
+    ///
+    /// `true`: each statement is sent to `run_query` alone — setup and
+    /// input/interaction default `SET VARIABLE`s are executed once, right
+    /// away, since the session already has them in scope for whatever runs
+    /// next. This is the CLI's persistent `duckdb` session (#435:
+    /// `host::duckdb_cli::SessionRunner`, used by `dashboard --check`, the
+    /// static/`--svg`/`--site` renderers), which backs one process for a
+    /// whole script instead of a fresh process per statement.
+    ///
+    /// `false` (the default): every call to `run_query` is a **fresh**
+    /// session — nothing survives between calls — so this instead replays
+    /// an accumulated `prelude` (setup + input defaults + ::SELECT_AS /
+    /// ::DRILL `sets`, none of which emit rows) before each statement, so
+    /// session state is faithfully in scope without a long-lived
+    /// connection. This is the wasm `lint_step` export and web/lint.js's
+    /// `scratchRunner`, which drive DuckDB-Wasm with one fresh scratch
+    /// connection per query. The query text sent must match what
+    /// `origin/master` sends (the browser's `known` cache is keyed on the
+    /// literal query string, and `lint_test.mjs` byte-compares it against
+    /// `dashboard --check`'s own queries), so this path must not change
+    /// shape even as the stateful one does.
+    pub stateful_session: bool,
 }
 
 impl Default for LintOptions {
     fn default() -> Self {
-        LintOptions { design: true }
+        LintOptions {
+            design: true,
+            stateful_session: false,
+        }
     }
 }
 
-/// Lint `script`. `run_query` runs a whole SQL script in a **fresh** session and
-/// returns the last statement's rows (empty on a non-SELECT), or a DuckDB error.
+/// Lint `script`. See [`LintOptions::stateful_session`] for what `run_query`
+/// is expected to do across calls — a persistent session (true) or a fresh
+/// one each time, replaying a growing prelude (false, the default here).
 ///
-/// The linter replays an accumulated `prelude` (setup + input `SET`s — none of
-/// which emit rows) before each statement, so session state (temp views, bound
-/// variables) is faithfully in scope without needing a long-lived connection.
+/// An ordinary SQL error from one call does not need special handling: a
+/// real session (`SessionRunner` included) isolates it to that one
+/// statement and keeps going, so the next call still sees everything before
+/// it, in scope, same as if the failing statement were simply absent — in
+/// the `false` case, the prelude only ever grows after a statement
+/// *succeeds*, so a failed one is simply never added to it either.
 pub fn check<F>(script: &str, run_query: F) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
@@ -118,20 +151,46 @@ where
     check_opts(script, run_query, LintOptions::default())
 }
 
+/// The text to send for `sql` (not yet `;`-terminated): with
+/// [`LintOptions::stateful_session`], `sql` alone (the persistent session
+/// already has `prelude`'s statements in scope); otherwise `prelude` replayed
+/// in front of it (a fresh session each call needs it replayed every time).
+fn stmt_text(stateful_session: bool, prelude: &str, sql: &str) -> String {
+    if stateful_session {
+        format!("{sql};")
+    } else {
+        format!("{prelude}{sql};")
+    }
+}
+
 /// Like [`check`], but with [`LintOptions`] (e.g. to disable the `design/*`
-/// advisory pass).
+/// advisory pass, or set [`LintOptions::stateful_session`]).
 pub fn check_opts<F>(script: &str, mut run_query: F, opts: LintOptions) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
     let mut diags = header_diags(script);
+    // Replayed before each statement when `!opts.stateful_session` (a fresh
+    // session each call); left empty (and never grown) when
+    // `opts.stateful_session` — the persistent session already has every
+    // earlier statement in scope, so there is nothing to replay.
     let mut prelude = String::new();
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
                              // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
                              // so two different directives writing one variable are reported.
     let mut owners: std::collections::HashMap<String, (usize, &'static str)> =
         std::collections::HashMap::new();
-    let mut claim = |diags: &mut Vec<Diagnostic>, names: &[String], stmt, kind, sql: &str| {
+    // #398: `-- @shared <name>, …` directly above a ::ROWSELECT / ::SELECT_AS
+    // / ::DRILL / input statement documents that *this* directive deliberately
+    // reuses `<name>` — so the two name-clash lints below skip it (every other
+    // clash still is flagged). A name named here this statement doesn't
+    // itself claim (a typo) gets its own warning instead of silencing nothing.
+    let mut claim = |diags: &mut Vec<Diagnostic>,
+                     names: &[String],
+                     stmt,
+                     kind,
+                     sql: &str,
+                     shared: &[String]| {
         for n in names {
             match owners.get(n) {
                 // ::DRILL / ::ROWSELECT: always flagged, even repeated by the
@@ -143,33 +202,63 @@ where
                     if other != stmt
                         && (k != kind || kind == "::DRILL" || kind == "::ROWSELECT") =>
                 {
+                    if shared.iter().any(|s| s == n) {
+                        continue;
+                    }
                     let (code, hint) = if kind == "::ROWSELECT" && k == "::ROWSELECT" {
                         (
                             "interaction/rowselect-shared-name",
-                            "clicking a row in either table sets the same getvariable() and \
-                             silently toggles the other's selection too — alias one table's \
-                             first column to a different name",
+                            format!(
+                                "clicking a row in either table sets the same getvariable() \
+                                     and silently toggles the other's selection too — alias one \
+                                     table's first column to a different name, or add \
+                                     `-- @shared {n}` above this ::ROWSELECT if the fan-in is \
+                                     deliberate"
+                            ),
                         )
                     } else {
                         (
                             "interaction/name-clash",
-                            "each overwrites the other; rename one",
+                            format!(
+                                "each overwrites the other; rename one, or add \
+                                     `-- @shared {n}` above this statement if the hand-off is \
+                                     deliberate"
+                            ),
                         )
                     };
                     diags.push(Diagnostic {
-                        severity: Severity::Warning,
-                        stmt,
-                        code,
-                        message: format!(
-                            "variable `{n}` is set by this {kind} and by statement {other} ({k}) — {hint}"
-                        ),
-                        sql: sql.to_string(),
-                    })
+                            severity: Severity::Warning,
+                            stmt,
+                            code,
+                            message: format!(
+                                "variable `{n}` is set by this {kind} and by statement {other} ({k}) — {hint}"
+                            ),
+                            sql: sql.to_string(),
+                        })
                 }
                 Some(_) => {}
                 None => {
                     owners.insert(n.clone(), (stmt, kind));
                 }
+            }
+        }
+        for want in shared {
+            if !names.iter().any(|n| n == want) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "interaction/shared-unused",
+                    message: format!(
+                        "`-- @shared {want}` names a variable this {kind} doesn't set — {} \
+                             fix the typo, or drop the line",
+                        if names.is_empty() {
+                            "it sets no variable here.".to_string()
+                        } else {
+                            format!("this {kind} sets {}.", names.join(", "))
+                        }
+                    ),
+                    sql: sql.to_string(),
+                });
             }
         }
     };
@@ -183,8 +272,10 @@ where
     // share one (e.g. the same alias, or no alias on the same source column)
     // silently share one selection — a click in either toggles both. Unlike
     // ::SELECT_AS / ::DRILL (an explicit, chosen name — reuse there is
-    // allowed), any repeat here is flagged.
-    let mut pending_rowselect: Option<usize> = None;
+    // allowed), any repeat here is flagged — unless the directive itself
+    // carries `-- @shared <name>` (#398: its statement index, and that
+    // comment's names).
+    let mut pending_rowselect: Option<(usize, Vec<String>)> = None;
     // What a ::TRACK here would sit under: `Some(true)` a chart with a numeric
     // / date x, `Some(false)` one with a discrete x, `None` no chart.
     let mut track_host: Option<bool> = None;
@@ -374,17 +465,26 @@ where
                         .into(),
                     sql: short.clone(),
                 });
-            } else if let Err(e) = run_query(&format!("{prelude}{};", p.sql)) {
+            } else if let Err(e) = run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
                 // In a hidden tab, a setup statement that reads its missing
-                // input fails as expected.
+                // input fails as expected. A stateful session isolates
+                // this to this one statement (#435) — later panels still
+                // see everything genuine setup before it left in scope;
+                // in a fresh-session run, the failed statement simply
+                // never joins `prelude` below, so it's left out of every
+                // later replay exactly the same way.
                 let reqs = if sections.hiding() {
                     [p.requires.clone(), p.tab_requires.clone()].concat()
                 } else {
                     p.requires.clone()
                 };
                 diags.push(sql_error(stmt, &reqs, &e, &short));
-            } else {
-                // Genuine setup succeeded — keep it in scope for later panels.
+            } else if !opts.stateful_session {
+                // Genuine setup succeeded: with a persistent session it's
+                // already in scope for later panels (#435) and there's
+                // nothing further to do; with a fresh session each call,
+                // keep it in `prelude` to replay before every later
+                // statement.
                 prelude.push_str(&p.sql);
                 prelude.push_str(";\n");
             }
@@ -392,10 +492,10 @@ where
         }
 
         // Input panel: run its option query and prime the variable(s) to a
-        // default (into the prelude), so downstream getvariable() panels aren't
-        // spuriously empty — mirrors the browser's input pre-pass.
+        // default, so downstream getvariable() panels aren't spuriously
+        // empty — mirrors the browser's input pre-pass.
         if let Some(kind) = input_kind(&p.roles) {
-            match run_query(&format!("{prelude}{};", p.sql)) {
+            match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
                 Ok(rows) => {
                     let names: Vec<String> = rows
                         .first()
@@ -416,7 +516,7 @@ where
                             }
                         })
                         .unwrap_or_default();
-                    claim(&mut diags, &names, stmt, "input", &short);
+                    claim(&mut diags, &names, stmt, "input", &short, &p.shared);
                     if kind == InputKind::Period {
                         let spec = rows
                             .first()
@@ -472,9 +572,21 @@ where
                             }
                         }
                     }
+                    // A default failing to apply isn't checked here, same
+                    // as before — these are always well-formed
+                    // `SET VARIABLE` text this function built itself.
+                    // Stateful (#435): send each default to the session
+                    // right away, since it already carries everything
+                    // before it. Fresh-session (the default — a browser
+                    // `run_query`): fold it into `prelude` to replay
+                    // before every later statement instead.
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
-                        prelude.push_str(&setv);
-                        prelude.push_str(";\n");
+                        if opts.stateful_session {
+                            let _ = run_query(&format!("{setv};"));
+                        } else {
+                            prelude.push_str(&setv);
+                            prelude.push_str(";\n");
+                        }
                     }
                 }
                 Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
@@ -482,8 +594,10 @@ where
             continue;
         }
 
-        // Panel: run it (with the prelude in scope), then check rows and render.
-        let rows = match run_query(&format!("{prelude}{};", p.sql)) {
+        // Panel: run it (stateful: everything before it is already in
+        // scope, #435; fresh-session: with `prelude` replayed in front),
+        // then check rows and render.
+        let rows = match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
             Ok(rows) => rows,
             Err(e) => {
                 diags.push(sql_error(stmt, &p.requires, &e, &short));
@@ -722,10 +836,20 @@ where
                 } else {
                     "::SELECT_AS"
                 };
-                claim(&mut diags, &names, stmt, kind, &short);
+                claim(&mut diags, &names, stmt, kind, &short, &p.shared);
             }
             match sets {
-                Ok(sets) => prelude.push_str(&sets),
+                // Already complete, semicolon-terminated `SET VARIABLE`
+                // statements. Stateful (#435): send them to the session
+                // right away. Fresh-session (the default): fold them into
+                // `prelude` to replay before every later statement.
+                Ok(sets) => {
+                    if opts.stateful_session {
+                        let _ = run_query(&sets);
+                    } else {
+                        prelude.push_str(&sets);
+                    }
+                }
                 Err(message) => diags.push(Diagnostic {
                     severity: Severity::Warning,
                     stmt,
@@ -1064,7 +1188,7 @@ where
                     .map(str::to_string);
             }
             if p.roles.iter().any(|(_, r)| *r == Role::RowSelect) {
-                pending_rowselect = Some(stmt);
+                pending_rowselect = Some((stmt, p.shared.clone()));
             }
             continue;
         }
@@ -1112,10 +1236,17 @@ where
         // this table's first (non-::TITLE/::INFO) column — claim it so a
         // second ::ROWSELECT table with the same first-column name is
         // flagged (interaction/rowselect-shared-name), not silently shared.
-        if let Some(rs_stmt) = pending_rowselect.take() {
+        if let Some((rs_stmt, rs_shared)) = pending_rowselect.take() {
             if is_table_panel {
                 if let Some(name) = rowselect_key_column(&p.roles, &rows) {
-                    claim(&mut diags, &[name], rs_stmt, "::ROWSELECT", &short);
+                    claim(
+                        &mut diags,
+                        &[name],
+                        rs_stmt,
+                        "::ROWSELECT",
+                        &short,
+                        &rs_shared,
+                    );
                 }
             }
         }
@@ -2520,6 +2651,9 @@ pub fn step_json(script: &str, known_json: &str, opts_json: &str) -> String {
         &answers,
         LintOptions {
             design: flag("design", true),
+            // Each query runs in a fresh DuckDB-Wasm scratch session
+            // (web/lint.js's `scratchRunner`) — not a persistent one.
+            stateful_session: false,
         },
     );
     serde_json::json!({
@@ -4102,11 +4236,11 @@ fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
     }
 }
 
-/// #423: `::FACET`/`::FACET_FREE` dropped on a chart kind that doesn't
-/// honour it yet (see [`kind_uses_facet`]); `::CATEGORY` on `::HISTOGRAM`
-/// (`GeomHistogram` doesn't read a per-row fill/color aesthetic, unlike
-/// `GeomDensity` — a ggplot-rs gap, not yet worked around here); and
-/// `::HIST_BINS`/`::HIST_NORM` anywhere but a `::HISTOGRAM`.
+/// #423/#446: `::FACET`/`::FACET_FREE` dropped on a chart kind that doesn't
+/// honour it yet (see [`kind_uses_facet`]); `::HIST_BINS`/`::HIST_NORM`
+/// anywhere but a `::HISTOGRAM`. `::CATEGORY` on `::HISTOGRAM` is no longer
+/// warned about — ggplot-rs 0.28's `GeomHistogram` reads a per-row fill
+/// aesthetic (#446), same as `GeomDensity` already did.
 fn histogram_qq_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let mut warn = |code, message: String| {
@@ -4131,15 +4265,6 @@ fn histogram_qq_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<
         }
     }
     let kind = chart_kind(roles);
-    if kind == Some(Kind::Histogram) && roles.iter().any(|(_, r)| *r == Role::Category) {
-        warn(
-            "histogram/category-dropped",
-            "::CATEGORY is dropped on ::HISTOGRAM — ggplot-rs's GeomHistogram doesn't yet take \
-             a per-row fill/colour like GeomDensity does; use ::FACET for a reference/current \
-             comparison instead"
-                .to_string(),
-        );
-    }
     for role in [Role::HistBins, Role::HistNorm] {
         if roles.iter().any(|(_, r)| *r == role) && kind != Some(Kind::Histogram) {
             warn(
@@ -4301,10 +4426,28 @@ fn set_reads_a_file(code: &str) -> bool {
 }
 
 /// Check `requires` the way the locked server does (see
-/// [`sql::requires::check`]), with the prelude's session state. Shared with
-/// the headless CLI renderers (`dashboard` static HTML, `dashboard --svg`),
-/// which replay the same growing `prelude` before every statement to keep
-/// one DuckDB session's semantics across separate `duckdb` CLI calls.
+/// [`sql::requires::check`]), with `prelude`'s session state. Shared with
+/// the headless CLI renderers (`dashboard` static HTML, `dashboard --svg`)
+/// and `--check`, all of which back `run_query` with one persistent
+/// session (#435) and so always pass `prelude = ""` (there is nothing to
+/// replay — the session already has it), and with the wasm `lint_step`
+/// (via [`check_opts`]), which backs `run_query` with a fresh session each
+/// call and so passes the real accumulated prelude text to replay in
+/// front of `q`. A `session: true` query reads session variables
+/// (`getvariable()`), which needs `prelude` replayed in the fresh-session
+/// case; a `session: false` one (`glob()` file checks) never depended on
+/// session state either way, so `q` goes alone regardless — but always
+/// `;`-terminated: a CI hang traced to `tests/fixtures/lint/requires-setup.sql`
+/// found that `sql::requires::glob_sql`'s query has no trailing `;` of its
+/// own, which this `else` branch used to send verbatim. That's harmless to a
+/// one-shot `run_query` (a fresh process per call, or `-c`), but
+/// `host::duckdb_cli::OneProcessSession::round` (the CLI's persistent
+/// session, #435) appends its own sentinel statements straight after `q` in
+/// the same write — without a `;`, the sentinel merges into `q`'s own
+/// (now two-statement, erroring) text and is never actually run, so its
+/// marker never comes back and the round hangs. (`OneProcessSession::round`
+/// now also carries its own timeout backstop for any such bug, but the
+/// query text itself must be correct regardless.)
 pub fn unmet_requirement<F>(
     run_query: &mut F,
     prelude: &str,
@@ -4317,7 +4460,7 @@ where
         let rows = run_query(&if session {
             format!("{prelude}{q};")
         } else {
-            q.to_string()
+            format!("{q};")
         })?;
         Ok(rows
             .into_iter()
@@ -4519,7 +4662,10 @@ mod design_tests {
             check_opts(
                 &format!("-- @requires {req}\n{panel}"),
                 requires_session(vars, files, &globbed),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
         };
         let codes = |d: &[Diagnostic]| d.iter().map(|d| d.code).collect::<Vec<_>>();
@@ -4567,7 +4713,10 @@ mod design_tests {
             check_opts(
                 &format!("-- @requires ${{rd}}/a\n{stmt}"),
                 requires_session(&vars, &["/srv/runs/r1/a"], &globbed),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
         };
         assert_eq!(
@@ -4621,7 +4770,10 @@ mod design_tests {
             check_opts(
                 script,
                 requires_session(&vars, &["/srv/runs/r1/here.parquet"], &globbed),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
         };
         let codes = |d: &[Diagnostic]| d.iter().map(|d| (d.stmt, d.code)).collect::<Vec<_>>();
@@ -4669,7 +4821,10 @@ mod design_tests {
                     Ok(vec![Map::new()])
                 }
             },
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         assert_eq!(
             codes(&d),
@@ -5394,12 +5549,20 @@ mod design_tests {
             },
         );
         assert!(!has(&d, "interaction/bad-value"), "{d:?}");
-        let last = seen.last().unwrap();
+        // #435: the priming `SET VARIABLE`s are sent in their own round
+        // (eagerly, to the session) rather than bundled into the text of
+        // whatever statement comes next — so look for them among every
+        // call made, not specifically the last one.
         assert!(
-            last.contains("SET VARIABLE week = []::VARCHAR[];"),
-            "{last}"
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE week = []::VARCHAR[];")),
+            "{seen:?}"
         );
-        assert!(last.contains("SET VARIABLE week_from = NULL;"), "{last}");
+        assert!(
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE week_from = NULL;")),
+            "{seen:?}"
+        );
         assert_eq!(
             select_as_prelude("region").unwrap(),
             "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
@@ -5513,6 +5676,131 @@ mod design_tests {
             },
         );
         assert!(!has(&ok, "interaction/rowselect-shared-name"), "{ok:?}");
+    }
+
+    /// #398: a `-- @shared <name>` directly above a `::ROWSELECT` documents
+    /// that it deliberately reuses `<name>` with another one — the issue's
+    /// own repro (two tables fanning in to one `item` selection).
+    #[test]
+    fn shared_header_silences_the_rowselect_repro_from_398() {
+        let build = |hdr: &str| {
+            format!(
+                "SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"ID\" FROM items;\n\
+                 {hdr}SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id * 2 AS \"Doubled\" FROM items;"
+            )
+        };
+        let run = |s: &str| {
+            check(s, |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    Ok(rows(1, |_| json!({ "item": "a", "ID": 1, "Doubled": 2 })))
+                }
+            })
+        };
+
+        // Without the header: flagged, same as #330.
+        let bare = run(&build(""));
+        assert!(has(&bare, "interaction/rowselect-shared-name"), "{bare:?}");
+
+        // With `-- @shared item` above the second ::ROWSELECT: silenced, and
+        // `--check --strict` passes clean.
+        let ok = run(&build("-- @shared item\n"));
+        assert!(!has(&ok, "interaction/rowselect-shared-name"), "{ok:?}");
+        assert!(passes(&ok, true), "{ok:?}");
+    }
+
+    /// #398: three `::ROWSELECT` tables fanning in to one variable (the
+    /// supplier-risk `material` case from the issue) — every clash past the
+    /// first owner needs its own `-- @shared`, since each is reported
+    /// against the first table, never against each other.
+    #[test]
+    fn shared_header_silences_a_three_way_rowselect_fan_in() {
+        let build = |hdr_b: &str, hdr_c: &str| {
+            format!(
+                "SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"A\" FROM a;\n\
+                 {hdr_b}SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"B\" FROM b;\n\
+                 {hdr_c}SELECT 'single'::ROWSELECT;\n\
+                 SELECT item ::TABLE, id AS \"C\" FROM c;"
+            )
+        };
+        let run = |s: &str| {
+            check(s, |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    Ok(rows(1, |_| json!({ "item": "a", "x": 1 })))
+                }
+            })
+        };
+
+        let bare = run(&build("", ""));
+        assert_eq!(
+            bare.iter()
+                .filter(|d| d.code == "interaction/rowselect-shared-name")
+                .count(),
+            2,
+            "{bare:?}"
+        );
+
+        let ok = run(&build("-- @shared item\n", "-- @shared item\n"));
+        assert!(!has(&ok, "interaction/rowselect-shared-name"), "{ok:?}");
+        assert!(passes(&ok, true), "{ok:?}");
+    }
+
+    /// #398: a dropdown input and a `::ROWSELECT` table meant to hand a
+    /// selection to each other either way (the supplier-risk `product` case).
+    #[test]
+    fn shared_header_silences_a_dropdown_rowselect_handoff() {
+        let answer = |q: &str| {
+            if q.contains("DISTINCT") {
+                rows(1, |_| json!({ "product": "A" }))
+            } else if q.contains("'single'") {
+                vec![json!({ "c0": "single" }).as_object().unwrap().clone()]
+            } else {
+                rows(1, |_| json!({ "product": "A", "ID": 1 }))
+            }
+        };
+        let build = |hdr: &str| {
+            format!(
+                "SELECT DISTINCT product ::DROPDOWN FROM t;\n\
+                 {hdr}SELECT 'single'::ROWSELECT;\n\
+                 SELECT product ::TABLE, id AS \"ID\" FROM items;"
+            )
+        };
+
+        let bare = check(&build(""), |q| Ok(answer(q)));
+        assert!(has(&bare, "interaction/name-clash"), "{bare:?}");
+
+        let ok = check(&build("-- @shared product\n"), |q| Ok(answer(q)));
+        assert!(!has(&ok, "interaction/name-clash"), "{ok:?}");
+        assert!(passes(&ok, true), "{ok:?}");
+    }
+
+    /// #398: a `-- @shared` name this directive doesn't itself set (a typo)
+    /// is flagged on its own, instead of silently disabling nothing.
+    #[test]
+    fn shared_header_with_an_unknown_name_warns_itself() {
+        let d = check(
+            "-- @shared itme\n\
+             SELECT 'single'::ROWSELECT;\n\
+             SELECT item ::TABLE, id AS \"ID\" FROM a;",
+            |q| {
+                if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    Ok(rows(1, |_| json!({ "item": "x1", "ID": 1 })))
+                }
+            },
+        );
+        assert!(has(&d, "interaction/shared-unused"), "{d:?}");
+        // The real name is unaffected — no clash to report here anyway since
+        // there's only one claimant, but the typo'd name itself is flagged.
+        assert!(!has(&d, "interaction/rowselect-shared-name"), "{d:?}");
     }
 
     #[test]
@@ -6027,7 +6315,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT g::CATEGORY, v::DENSITY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let w: Vec<_> = d.iter().filter(|x| x.code == "render-warning").collect();
         assert_eq!(w.len(), 1, "{d:?}");
@@ -6042,11 +6333,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/"))
-                .map(|d| (d.severity, d.code))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/"))
+            .map(|d| (d.severity, d.code))
+            .collect()
         };
         let poly = "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
         let row = |p: &str, c: &str| json!({ "c0": poly, "c1": 1.0, "c2": p, "c3": c });
@@ -6087,11 +6385,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/"))
-                .map(|d| (d.severity, d.code))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/"))
+            .map(|d| (d.severity, d.code))
+            .collect()
         };
         let sql = "SELECT c::REGION, v::BARCHART, 'robinson'::PROJECTION FROM t;";
         assert_eq!(
@@ -6120,7 +6425,10 @@ mod design_tests {
             check_opts(
                 "SELECT lat::LAT, lon::LON, n::SIZE FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/size-not-positive")
@@ -6150,11 +6458,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/flow"))
-                .map(|d| (d.severity, d.code))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/flow"))
+            .map(|d| (d.severity, d.code))
+            .collect()
         };
         let d = codes("SELECT o::ORIGIN FROM t;", vec![json!({ "c0": "DE-BY" })]);
         assert_eq!(d, vec![(Severity::Warning, "map/flow-needs-both")]);
@@ -6170,7 +6485,10 @@ mod design_tests {
             check_opts(
                 "SELECT o::ORIGIN, d::DEST FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/flow-missing-end")
@@ -6194,7 +6512,10 @@ mod design_tests {
             check_opts(
                 "SELECT o::ORIGIN, d::DEST FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/flow-self")
@@ -6218,7 +6539,10 @@ mod design_tests {
             check_opts(
                 "SELECT lat::LAT, lon::LON, h::HEXBIN FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/hexbin-bad-size")
@@ -6246,7 +6570,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT c::REGION, h::HEXBIN FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6267,7 +6594,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN, 'mercator'::PROJECTION FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6286,7 +6616,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6305,7 +6638,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT x::XAXIS, y::SCATTER, h::HEXBIN, cat::CATEGORY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6324,7 +6660,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT x::XAXIS, y::SCATTER, h::HEXBIN FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         let codes: Vec<_> = d
             .into_iter()
@@ -6346,7 +6685,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         assert!(
             !d.iter().any(|d| d.code.starts_with("chart/hexbin")),
@@ -6363,7 +6705,10 @@ mod design_tests {
         let d = check_opts(
             "SELECT lat::LAT, lon::LON, h::HEXBIN FROM t;",
             |_q| Ok(data.clone()),
-            LintOptions { design: false },
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
         );
         assert!(!d.iter().any(|d| d.code == "map/too-many-marks"), "{d:?}");
     }
@@ -6378,7 +6723,10 @@ mod design_tests {
             check_opts(
                 "SELECT o::ORIGIN, d::DEST FROM t;",
                 |_q| Ok(data.clone()),
-                LintOptions { design: false },
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
             )
             .into_iter()
             .filter(|d| d.code == "map/too-many-flows")
@@ -6402,11 +6750,18 @@ mod design_tests {
                 .iter()
                 .map(|r| r.as_object().unwrap().clone())
                 .collect();
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .filter(|d| d.code.starts_with("map/"))
-                .map(|d| (d.severity, d.code, d.message))
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/"))
+            .map(|d| (d.severity, d.code, d.message))
+            .collect()
         };
         let sql = "SELECT c::REGION, v::BARCHART FROM t;";
         let rows = |cs: &[&str]| cs.iter().map(|c| json!({ "c0": c, "c1": 1.0 })).collect();
@@ -6450,21 +6805,28 @@ mod design_tests {
     fn motion_directives_are_checked() {
         let codes = |sql: &str, row: Value| -> Vec<&'static str> {
             let data = vec![row.as_object().unwrap().clone()];
-            check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false })
-                .into_iter()
-                .map(|d| d.code)
-                .filter(|c| {
-                    [
-                        "animate/",
-                        "linestyle/",
-                        "story/",
-                        "transition/",
-                        "hover-focus/",
-                    ]
-                    .iter()
-                    .any(|p| c.starts_with(p))
-                })
-                .collect()
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| {
+                [
+                    "animate/",
+                    "linestyle/",
+                    "story/",
+                    "transition/",
+                    "hover-focus/",
+                ]
+                .iter()
+                .any(|p| c.starts_with(p))
+            })
+            .collect()
         };
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "wobble" });
         assert_eq!(
@@ -6531,7 +6893,14 @@ mod design_tests {
             .unwrap()
             .clone()];
         let sql = "SELECT 'a' AS v ::DROPDOWN, 'bogus' AS style ::DROPDOWN_STYLE FROM t;";
-        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        let d = check_opts(
+            sql,
+            |_q| Ok(data.clone()),
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
+        );
         assert!(
             d.iter().any(|x| x.code == "dropdown-style/unknown"),
             "{d:?}"
@@ -6542,7 +6911,14 @@ mod design_tests {
             .unwrap()
             .clone()];
         let sql = "SELECT 'a' AS v ::DROPDOWN, 'search' AS style ::DROPDOWN_STYLE FROM t;";
-        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        let d = check_opts(
+            sql,
+            |_q| Ok(data.clone()),
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
+        );
         assert!(
             !d.iter().any(|x| x.code == "dropdown-style/unknown"),
             "{d:?}"
@@ -6556,7 +6932,14 @@ mod design_tests {
             |i| json!({ "c0": format!("c{i}"), "c1": (3 - i) as f64 }),
         );
         let flat = "SELECT x::XAXIS, y::BARCHART FROM t;\n".repeat(9);
-        let d = check_opts(&flat, |_q| Ok(data.clone()), LintOptions { design: false });
+        let d = check_opts(
+            &flat,
+            |_q| Ok(data.clone()),
+            LintOptions {
+                design: false,
+                ..Default::default()
+            },
+        );
         assert!(!d.iter().any(|x| x.code.starts_with("design/")), "{d:?}");
     }
 
@@ -6575,10 +6958,12 @@ mod design_tests {
             seen.push(q.to_string());
             Ok(opts.clone())
         });
-        let last = seen.last().unwrap();
+        // #435: the default is sent in its own round (eagerly, to the
+        // session), not bundled into the next statement's own text.
         assert!(
-            last.contains("SET VARIABLE \"zone\" = 'EU';"),
-            "variable not primed: {last}"
+            seen.iter()
+                .any(|q| q.contains("SET VARIABLE \"zone\" = 'EU';")),
+            "variable not primed: {seen:?}"
         );
         // A weird column name is quoted, not injected.
         let weird = rows(1, |_| json!({ "a b\"; DROP TABLE t; --": "v" }));

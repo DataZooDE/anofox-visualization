@@ -65,10 +65,10 @@ const USAGE: &str = "usage:\n  \
      dashboard --themes                      list the built-in themes\n  \
      dashboard --theme-css <T> [--dark]      print a theme's CSS design tokens\n  \
      dashboard --version                     print the version\n\n\
-     Queries run through the `duckdb` CLI on PATH. The render and --svg keep one\n  \
-     DuckDB session's semantics across statements (SET VARIABLE, TEMP views/tables,\n  \
-     and other setup all stay in scope for every later statement) by replaying the\n  \
-     script's own prelude before each `duckdb` call, exactly as --check does.";
+     Queries run through the `duckdb` CLI on PATH. The render, --svg and --check\n  \
+     each run a whole script in one `duckdb` process (#435), so DuckDB session\n  \
+     semantics across statements (SET VARIABLE, TEMP views/tables, and other\n  \
+     setup all stay in scope for every later statement) comes for free.";
 
 fn main() {
     // Owner decision (#333): the anofox extensions this binary's `duckdb`
@@ -146,11 +146,15 @@ fn cmd_render(args: &[String]) {
 /// one DuckDB session: every statement runs with everything before it
 /// (setup DDL, `SET VARIABLE`, `LOAD`, TEMP views/tables, input defaults)
 /// still in scope, in script order — the same session semantics as the
-/// locked server's cold path and `dashboard --check` (#414). There is no
-/// long-lived `duckdb` connection to hold that state between the separate
-/// `duckdb` CLI calls this binary makes, so it is simulated the way
-/// [`lint::check_opts`] does: a growing `prelude` of everything run so far
-/// is replayed, in full, before every later statement.
+/// locked server's cold path and `dashboard --check`. #435: a single
+/// persistent `duckdb` CLI child (`SessionRunner`) backs this, fed one
+/// statement at a time — not a fresh process per statement replaying a
+/// growing prelude of everything run so far (#414's original fix for this
+/// session semantics, which worked but cost O(panels × setup): a setup
+/// statement that reads a large file was re-run for every later panel).
+/// An ordinary SQL error on one statement does not disturb the session —
+/// later panels still see everything genuine setup before it left in
+/// scope, and still render.
 ///
 /// `data`: `anofox_data`, as `--data <dir>` / a locked server's
 /// `options.data` set it — applied before any statement of the script runs,
@@ -176,10 +180,17 @@ fn render_dashboard_html(
     type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
     // The third element is each panel's own `::KPI_SIZE` ('compact') (#405).
     let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
+    let mut session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+    let mut exec = |sql: &str| session.run(sql);
     // `SET VARIABLE anofox_data = …` opens the session, before the script's
     // own statements — as `--data` does for `--check` and a locked server.
-    let mut prelude = data.map(data_set_stmt).unwrap_or_default();
-    let mut exec = |sql: &str| run_query(None, sql);
+    if let Some(dir) = data {
+        let _ = exec(&data_set_stmt(dir));
+    }
     let mut sections = sql::requires::Sections::default();
     // A static HTML render shows only a ::VIEW group's first shown
     // alternative (#214) — the other alternatives' non-setup statements
@@ -191,29 +202,32 @@ fn render_dashboard_html(
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
         // flattened here).
+        // `exec` is backed by a persistent session (#435), so there is no
+        // prelude text to replay — it already has everything in scope.
         let hidden = sections.step(&p, |reqs| {
-            lint::unmet_requirement(&mut exec, &prelude, reqs).missing
+            lint::unmet_requirement(&mut exec, "", reqs).missing
         });
         if hidden.is_some() || view_pick.drop_panel(&p) {
             continue;
         }
         if p.setup {
-            // Genuine setup (DDL / SET / TEMP views and tables / …): run it
-            // with everything before it in scope, then keep it in scope too
-            // — exactly `lint::check_opts`'s prelude.
-            match exec(&format!("{prelude}{};", p.sql)) {
-                Ok(_) => prelude.push_str(&format!("{};\n", p.sql.trim().trim_end_matches(';'))),
-                Err(e) => eprintln!("duckdb error on: {}\n{e}", p.sql),
+            // Genuine setup (DDL / SET / TEMP views and tables / …): it
+            // already ran in the session `exec` backs, so it's already in
+            // scope for every later statement — there's no prelude text to
+            // grow and replay (#435).
+            if let Err(e) = exec(&format!("{};", p.sql)) {
+                eprintln!("duckdb error on: {}\n{e}", p.sql);
             }
             continue;
         }
         // An input renders nothing in the static output, but binds its default
         // (as the browser does on first load) for the getvariable() panels.
         if let Some(kind) = inputs::input_kind(&p.roles) {
-            if let Ok(rows) = exec(&format!("{prelude}{};", p.sql)) {
+            if let Ok(rows) = exec(&format!("{};", p.sql)) {
+                // #435: sent to the session right away instead of a
+                // prelude text to replay before later statements.
                 for set in inputs::input_defaults(kind, inputs::input_index(&p.roles), &rows) {
-                    prelude.push_str(&set);
-                    prelude.push_str(";\n");
+                    let _ = exec(&format!("{set};"));
                 }
             }
             continue;
@@ -224,7 +238,7 @@ fn render_dashboard_html(
             .map(|(_, r)| *r)
             .find(|r| roles::is_chrome_directive(*r))
         {
-            let rows = exec(&format!("{prelude}{};", p.sql)).unwrap_or_default();
+            let rows = exec(&format!("{};", p.sql)).unwrap_or_default();
             let cell = |v: &serde_json::Value| match v {
                 serde_json::Value::String(s) => Some(s.clone()),
                 serde_json::Value::Null => None,
@@ -243,7 +257,7 @@ fn render_dashboard_html(
         // ::KPI_SIZE still cascades onto its tiles' own cards.
         if p.roles.iter().any(|(_, r)| *r == Role::GroupStart) {
             group_compact = if p.roles.iter().any(|(_, r)| *r == Role::KpiSize) {
-                let rows = exec(&format!("{prelude}{};", p.sql));
+                let rows = exec(&format!("{};", p.sql));
                 kpi_size_json(&p.roles, &rows).unwrap_or(false)
             } else {
                 false
@@ -260,7 +274,7 @@ fn render_dashboard_html(
         if roles::is_directive_panel(&p.roles) && !section {
             continue;
         }
-        let rows = exec(&format!("{prelude}{};", p.sql));
+        let rows = exec(&format!("{};", p.sql));
         let compact = kpi_size_json(&p.roles, &rows).unwrap_or(group_compact);
         queried.push((p, rows, compact));
     }
@@ -386,27 +400,26 @@ fn render_dashboard_html(
     (html, n)
 }
 
-/// The DuckDB CLI as a headless [`dashboard::DataProvider`]: each call is a
-/// fresh `duckdb :memory:` process, so a long-lived connection's session
-/// state (`SET VARIABLE`, `LOAD`, TEMP views/tables, any other setup) is
-/// simulated by replaying a growing `prelude` of everything run so far
-/// before every statement — the same trick [`render_dashboard_html`] and
-/// `--check` use (#414), so a `::TEMP VIEW`/`SET VARIABLE` a panel depends
-/// on is still in scope however many statements separate them.
+/// The DuckDB CLI as a headless [`dashboard::DataProvider`]: #435, one
+/// persistent `duckdb :memory:` child (`SessionRunner`), fed one statement
+/// at a time — a real connection's session state (`SET VARIABLE`, `LOAD`,
+/// TEMP views/tables, any other setup) just carries forward on its own, so
+/// a `::TEMP VIEW`/`SET VARIABLE` a panel depends on is still in scope
+/// however many statements separate them, without replaying anything.
 struct CliProvider {
-    prelude: String,
+    session: anofox_visualization::host::duckdb_cli::SessionRunner,
 }
 
 impl CliProvider {
-    /// `sql`'s real DuckDB column types (`DESCRIBE`, replaying the same
-    /// prelude so temp views/variables the query depends on are in scope) —
-    /// `name → column_type` (`"VARCHAR"`, `"DECIMAL(10,2)"`, …). Empty on any
-    /// failure (a provider-level detail, not a panel error): `query` then
-    /// falls back to `result_columns_typed`'s old per-value numeric guess,
-    /// same as before #424 fixed it for the common case.
-    fn column_types(&self, sql: &str) -> std::collections::HashMap<String, String> {
-        let describe = format!("DESCRIBE {}", sql.trim().trim_end_matches(';'));
-        let Ok(rows) = run_query(None, &format!("{}{describe};", self.prelude)) else {
+    /// `sql`'s real DuckDB column types (`DESCRIBE`, as a round in the same
+    /// session — #435, no prelude replay needed) — `name → column_type`
+    /// (`"VARCHAR"`, `"DECIMAL(10,2)"`, …). Empty on any failure (a
+    /// provider-level detail, not a panel error): `query` then falls back
+    /// to `result_columns_typed`'s old per-value numeric guess, same as
+    /// before #424 fixed it for the common case.
+    fn column_types(&mut self, sql: &str) -> std::collections::HashMap<String, String> {
+        let describe = format!("DESCRIBE {};", sql.trim().trim_end_matches(';'));
+        let Ok(rows) = self.session.run(&describe) else {
             return std::collections::HashMap::new();
         };
         rows.into_iter()
@@ -421,20 +434,19 @@ impl CliProvider {
 
 impl dashboard::DataProvider for CliProvider {
     fn execute(&mut self, sql: &str) -> Result<(), String> {
-        run_query(None, &format!("{}{sql};", self.prelude))?;
-        self.prelude
-            .push_str(&format!("{};\n", sql.trim().trim_end_matches(';')));
+        self.session.run(&format!("{sql};"))?;
         Ok(())
     }
     fn query(
         &mut self,
         sql: &str,
     ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
-        let rows = run_query(None, &format!("{}{sql};", self.prelude))?;
         // #424: a VARCHAR column whose values happen to parse as numbers
         // (binary-classifier labels `'0'`/`'1'`) must stay discrete — ask
         // DuckDB's own types rather than guessing from the JSON text.
+        // #435: both rounds run in the same session, no prelude replay.
         let types = self.column_types(sql);
+        let rows = self.session.run(&format!("{sql};"))?;
         Ok(sql::result_columns_typed(&rows, &types))
     }
 }
@@ -464,10 +476,19 @@ fn cmd_svg(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.svg".into());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)
+        .unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        });
+    let mut p = CliProvider { session };
     // `anofox_data` opens the session, before the script's own statements.
-    let mut p = CliProvider {
-        prelude: data.as_deref().map(data_set_stmt).unwrap_or_default(),
-    };
+    if let Some(dir) = data.as_deref() {
+        if let Err(e) = p.session.run(&data_set_stmt(dir)) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
     let svg = dashboard::render_dashboard_svg(&script, &mut p, &o);
     match svg {
         Ok(svg) => {
@@ -582,12 +603,27 @@ fn cmd_check(args: &[String]) {
     // locked server, before the dashboard's own statements).
     let data_set = data.as_deref().map(data_set_stmt).unwrap_or_default();
     let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
-        // Each call runs a full script (prelude + one statement) in a fresh session
-        // (in-memory, or read-only against --db) — the linter replays session state.
+        // #435: one persistent session per file (in-memory, or read-only
+        // against --db) backs the whole check — not a fresh process per
+        // statement replaying everything run so far. A folder's dashboards
+        // each get their own fresh session (one per `lint_one` call), same
+        // isolation the old per-statement replay gave them implicitly.
+        let mut session =
+            anofox_visualization::host::duckdb_cli::SessionRunner::spawn(db.as_deref())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+        if !data_set.is_empty() {
+            let _ = session.run(&data_set);
+        }
         let mut diags = lint::check_opts(
             script,
-            |sql| run_query(db.as_deref(), &format!("{data_set}{sql}")),
-            lint::LintOptions { design },
+            |sql| session.run(sql),
+            lint::LintOptions {
+                design,
+                stateful_session: true,
+            },
         );
         if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
             diags.extend(policy_diags(script, db, p));
@@ -1219,10 +1255,20 @@ fn cmd_site(args: &[String]) {
             .unwrap_or_default();
         let extra = lint::folder_diags(&scripts);
         for (i, d) in dashboards.iter().enumerate() {
+            // #435: one persistent session per dashboard, not a fresh
+            // process per statement replaying everything run so far.
+            let mut session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)
+                .unwrap_or_else(|e| fail(e));
+            if !data_set.is_empty() {
+                let _ = session.run(&data_set);
+            }
             let mut diags = lint::check_opts(
                 &d.sql,
-                |sql| run_query(None, &format!("{data_set}{sql}")),
-                lint::LintOptions { design: false },
+                |sql| session.run(sql),
+                lint::LintOptions {
+                    design: false,
+                    stateful_session: true,
+                },
             );
             diags.extend(
                 extra
@@ -1605,15 +1651,14 @@ fn cmd_describe(args: &[String]) {
     }
 }
 
-/// Run a full script (a replayed prelude + one statement) in a fresh duckdb
-/// session — `:memory:`, or read-only against `db` (the linter's `--db`);
-/// return the last statement's rows (empty for a non-SELECT) or the DuckDB
-/// error text. The prelude only ever holds non-SELECT statements, so the
-/// only JSON on stdout is the final statement's. Shared by `--check`
-/// ([`lint::check_opts`]'s `run_query` closure) and the headless renderers
-/// ([`render_dashboard_html`], [`CliProvider`]), which replay their own
-/// growing prelude the same way to keep one DuckDB session's semantics
-/// across separate `duckdb` CLI calls (#414).
+/// Run `sql` (one or more statements) in a single fresh duckdb process —
+/// `:memory:`, or read-only against `db`; return the last statement's rows
+/// (empty for a non-SELECT) or the DuckDB error text. #435: this one-shot,
+/// no-session-kept call is no longer how the renderers or `--check` run a
+/// dashboard's own statements (see `host::duckdb_cli::SessionRunner`,
+/// which backs one persistent process for a whole script instead) — it is
+/// now used only for the occasional one-off query that needs no session at
+/// all (`policy_diags`'s `duck`, `duck_rows`).
 fn run_query(
     db: Option<&str>,
     sql: &str,
@@ -1644,7 +1689,8 @@ fn run_query(
 /// `SET VARIABLE anofox_data = '<dir>'`, resolved to an absolute path — as a
 /// locked server's `options.data` sets it, before any dashboard statement
 /// runs. Shared by `--check --data`, `dashboard --data` and `dashboard --svg
-/// --data` (#414): each prepends this to its own replayed prelude.
+/// --data`: each runs this as the session's first statement (#435; before
+/// #435, each prepended it to its own replayed prelude instead).
 fn data_set_stmt(dir: &str) -> String {
     let abs = std::fs::canonicalize(dir).unwrap_or_else(|e| {
         eprintln!("--data {dir}: {e}");
