@@ -859,10 +859,13 @@ where
         diags.extend(tile_scale_diags(&p.roles, &rows, stmt, &short));
         // ::XBREAKS / ::YBREAKS: numeric entries, and only on a cartesian chart.
         diags.extend(breaks_diags(&p.roles, &rows, stmt, &short));
-        // ::FACET/::FACET_FREE on a chart kind that still ignores it (#423);
-        // ::CATEGORY on ::HISTOGRAM (a ggplot-rs gap, #423); ::HIST_BINS /
-        // ::HIST_NORM anywhere but a ::HISTOGRAM.
+        // ::FACET/::FACET_FREE on a chart kind that still ignores it (#423,
+        // #424); ::CATEGORY on ::HISTOGRAM (a ggplot-rs gap, #423);
+        // ::HIST_BINS/::HIST_NORM anywhere but a ::HISTOGRAM.
         diags.extend(histogram_qq_diags(&p.roles, stmt, &short));
+        // #424: ::IDENTITY / ::REFLINE are still dropped on a ::HEATMAP
+        // (cartesian()'s only drawn there, and a heatmap never reaches it).
+        diags.extend(heatmap_line_diags(&p.roles, stmt, &short));
         // A ::COLORS level map ('Critical:bad; …') must parse and needs a
         // ::CATEGORY to colour.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
@@ -992,6 +995,16 @@ where
                     sql: short.clone(),
                 }),
         );
+
+        diags.extend(scatter_hexbin_diags(&p.roles, &rows).into_iter().map(
+            |(severity, code, message)| Diagnostic {
+                severity,
+                stmt,
+                code,
+                message,
+                sql: short.clone(),
+            },
+        ));
 
         // ---- design: cross-panel layout counters. Run for every planned panel,
         // including the layout directives handled just below. ----
@@ -3191,6 +3204,59 @@ fn hexbin_diags(
     out
 }
 
+/// `::HEXBIN` on a planar `::SCATTER`/bubble chart (#426) — a chart-side
+/// sibling of [`hexbin_diags`] (the map case), which only runs for a map
+/// panel. Two checks: a bad size spec, and `::CATEGORY` being ignored (the
+/// density layer drops it, same rule the map's own `::HEXBIN` has — one
+/// hexbin for the whole panel, not one per category; see `src/lib.rs`'s
+/// `cartesian`).
+fn scatter_hexbin_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let Some(hi) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Hexbin)
+        .map(|(i, _)| *i)
+    else {
+        return out;
+    };
+    // A map panel's `::HEXBIN` is `hexbin_diags`'s job (via `map_diags`), not
+    // this one — conservatively: any role `map_diags` would treat as a map
+    // trigger routes there instead, even on the rare false positive (a
+    // numeric column mistakenly tagged `::GEOMETRY`), rather than risk
+    // duplicate diagnostics on the same column.
+    let is_map = roles.iter().any(|(_, r)| {
+        matches!(
+            r,
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+        )
+    });
+    if is_map || !matches!(chart_kind(roles), Some(Kind::Point) | Some(Kind::Bubble)) {
+        return out;
+    }
+    if let Some(v) = column_texts(rows, hi).into_iter().next() {
+        if crate::map::hexbin::HexSize::parse(&v).is_err() {
+            out.push((
+                Severity::Warning,
+                "chart/hexbin-bad-size",
+                format!("::HEXBIN '{v}' is not 'auto' or a number — the chart uses 'auto'"),
+            ));
+        }
+    }
+    if roles.iter().any(|(_, r)| *r == Role::Category) {
+        out.push((
+            Severity::Note,
+            "chart/hexbin-category",
+            "::CATEGORY is ignored on a ::HEXBIN scatter — hexagons are coloured by point count \
+             alone"
+                .to_string(),
+        ));
+    }
+    out
+}
+
 /// A column's cells as text (numbers too; `None` for NULL).
 fn cells(rows: &[Map<String, Value>], idx: usize) -> Vec<Option<String>> {
     rows.iter()
@@ -3794,6 +3860,37 @@ fn looks_like_date(s: &str) -> bool {
     b.len() >= 8 && b[0..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
 }
 
+/// #424: `::IDENTITY` / `::REFLINE` are read inside `cartesian()` only — a
+/// `::HEATMAP` dispatches to `render_heatmap`/`render_heatmap_categorical`
+/// before ever reaching it (`lib.rs`'s `match kind` in `render_with`), so
+/// both are silently dropped there today. Drawing a diagonal/reference line
+/// over a tile grid needs the grid's own x/y to be numeric-binned (not the
+/// usual discrete row/column labels) for the line to mean anything, which
+/// `render_heatmap` doesn't distinguish yet — so this warns instead of
+/// drawing a line that would be wrong on a discrete grid.
+fn heatmap_line_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if chart_kind(roles) != Some(Kind::Heatmap) {
+        return out;
+    }
+    for role in [Role::Identity, Role::RefLine] {
+        if roles.iter().any(|(_, r)| *r == role) {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "heatmap/line-dropped",
+                message: format!(
+                    "::{} is dropped on ::HEATMAP — reference/identity lines aren't drawn over \
+                     tiles yet",
+                    role.token()
+                ),
+                sql: short.to_string(),
+            });
+        }
+    }
+    out
+}
+
 /// Status colour scales on tiles (see the call site).
 fn tile_scale_diags(
     roles: &[(usize, Role)],
@@ -3982,8 +4079,8 @@ fn breaks_diags(
 
 /// Does `::FACET`/`::FACET_FREE` do anything on this panel's chart kind?
 /// Every cartesian kind (bars/lines/areas/scatter/box/violin/…), plus
-/// `::HISTOGRAM` and `::QQ` (#423), honour it; the rest still draw one
-/// overlapping panel and ignore it — `::HEATMAP` among them (#424).
+/// `::HISTOGRAM` and `::QQ` (#423) and `::HEATMAP` (#424), honour it; the
+/// rest still draw one overlapping panel and ignore it.
 fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
     match chart_kind(roles) {
         None => false,
@@ -3991,7 +4088,6 @@ fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
             Kind::Pie
             | Kind::Donut
             | Kind::Gauge
-            | Kind::Heatmap
             | Kind::Calendar
             | Kind::Candlestick
             | Kind::Radar
@@ -6167,6 +6263,64 @@ mod design_tests {
             .map(|d| (d.severity, d.code))
             .collect();
         assert_eq!(codes, vec![(Severity::Note, "map/hexbin-category")]);
+    }
+
+    #[test]
+    fn scatter_hexbin_category_is_noted() {
+        let data = vec![json!({ "c0": 1.0, "c1": 2.0, "c2": "auto", "c3": "A" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT x::XAXIS, y::SCATTER, h::HEXBIN, cat::CATEGORY FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let codes: Vec<_> = d
+            .into_iter()
+            .filter(|d| d.code == "chart/hexbin-category")
+            .map(|d| (d.severity, d.code))
+            .collect();
+        assert_eq!(codes, vec![(Severity::Note, "chart/hexbin-category")]);
+    }
+
+    #[test]
+    fn scatter_hexbin_bad_size_is_flagged() {
+        let data = vec![json!({ "c0": 1.0, "c1": 2.0, "c2": "huge" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT x::XAXIS, y::SCATTER, h::HEXBIN FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        let codes: Vec<_> = d
+            .into_iter()
+            .filter(|d| d.code == "chart/hexbin-bad-size")
+            .map(|d| (d.severity, d.code))
+            .collect();
+        assert_eq!(codes, vec![(Severity::Warning, "chart/hexbin-bad-size")]);
+    }
+
+    #[test]
+    fn scatter_hexbin_on_a_map_defers_to_the_map_diags() {
+        // A map panel's own `::HEXBIN` is `hexbin_diags`'s job (via
+        // `map_diags`) — `scatter_hexbin_diags` must stay quiet so the two
+        // don't double-report the same column.
+        let data = vec![json!({ "c0": 50.0, "c1": 10.0, "c2": "auto", "c3": "A" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let d = check_opts(
+            "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions { design: false },
+        );
+        assert!(
+            !d.iter().any(|d| d.code.starts_with("chart/hexbin")),
+            "{d:?}"
+        );
     }
 
     #[test]

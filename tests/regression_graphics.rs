@@ -66,6 +66,13 @@ fn polylines(svg: &str) -> Vec<String> {
         .map(|t| t[..t.find('>').unwrap()].to_string())
         .collect()
 }
+/// Every `<polygon>` mark (`::HEXBIN` cells on a planar scatter, #426).
+fn polygons(svg: &str) -> Vec<String> {
+    svg.split("<polygon ")
+        .skip(1)
+        .map(|t| t[..t.find('>').unwrap()].to_string())
+        .collect()
+}
 
 // ── A1: grouped bars are dodged, not drawn on top of each other ──────────
 #[test]
@@ -2742,4 +2749,186 @@ fn qq_without_category_or_facet_is_unchanged() {
     let s = svg(vec![Column::new("r", Role::Value(Kind::QQ), nums(&y))]);
     assert_eq!(s.matches("<polygon ").count(), 1, "one envelope: {s}");
     assert_eq!(s.matches("<circle ").count(), 30);
+}
+
+// ── #424: HEATMAP honours FACET; IDENTITY/REFLINE warn instead of silently
+// dropping ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn heatmap_facet_draws_one_grid_per_group() {
+    let cols = vec![
+        Column::new(
+            "x",
+            Role::X,
+            strs(&["0", "0", "1", "1", "0", "0", "1", "1"]),
+        ),
+        Column::new(
+            "y",
+            Role::Y,
+            strs(&["0", "1", "0", "1", "0", "1", "0", "1"]),
+        ),
+        Column::new(
+            "v",
+            Role::Value(Kind::Heatmap),
+            nums(&[50.0, 5.0, 7.0, 40.0, 45.0, 12.0, 15.0, 30.0]),
+        ),
+        Column::new(
+            "p",
+            Role::Facet,
+            strs(&["ref", "ref", "ref", "ref", "cur", "cur", "cur", "cur"]),
+        ),
+        Column::new("l", Role::DataLabels, strs(&[""])),
+    ];
+    let s = svg(cols);
+    for strip in ["ref", "cur"] {
+        assert!(
+            s.contains(&format!(">{strip}</text>")),
+            "{strip} strip: {s}"
+        );
+    }
+    // 8 tiles total, one per row — no two sharing the exact same (x, y) pixel
+    // rect (the pre-#424 bug: both panels' tiles drawn on top of each
+    // other).
+    let mut rects: Vec<(String, String)> = Vec::new();
+    let mut rest = s.as_str();
+    while let Some(i) = rest.find("<rect ") {
+        let end = i + rest[i..].find('>').unwrap();
+        let tag = &rest[i..end];
+        if tag.contains("data-geom=\"tile\"") {
+            let attr = |a: &str| -> String {
+                let k = tag.find(&format!(" {a}=\"")).unwrap() + a.len() + 3;
+                tag[k..k + tag[k..].find('"').unwrap()].to_string()
+            };
+            rects.push((attr("x"), attr("y")));
+        }
+        rest = &rest[end + 1..];
+    }
+    assert_eq!(rects.len(), 8, "{s}");
+    let unique: std::collections::BTreeSet<_> = rects.iter().cloned().collect();
+    assert_eq!(unique.len(), 8, "no two tiles share a position: {rects:?}");
+    // 8 data labels too, each legible (one per cell, same split).
+    assert_eq!(s.matches("data-geom=\"text\"").count(), 8, "{s}");
+}
+
+#[test]
+fn heatmap_identity_and_refline_are_dropped_same_as_before_424() {
+    // #424 chose to warn (lint::heatmap_line_diags) rather than draw a line
+    // over a discrete tile grid — the render output itself is unchanged
+    // (::IDENTITY/::REFLINE still don't appear in the SVG).
+    let cols = vec![
+        Column::new("x", Role::X, strs(&["a", "b"])),
+        Column::new("y", Role::Y, strs(&["p", "q"])),
+        Column::new("v", Role::Value(Kind::Heatmap), nums(&[1.0, 2.0])),
+        Column::new("i", Role::Identity, nums(&[1.0])),
+        Column::new("r", Role::RefLine, nums(&[1.5])),
+    ];
+    let s = svg(cols);
+    assert!(!s.contains("data-geom=\"identity\""), "{s}");
+    assert_eq!(
+        s.matches("data-geom=\"tile\"").count(),
+        2,
+        "just the 2 tiles: {s}"
+    );
+}
+
+// ── #426: ::HEXBIN on a planar ::SCATTER ────────────────────────────────
+/// A quasi-uniform spread of `n` points over roughly [0, 97) × [0, 83) —
+/// enough points, spread widely enough, that a hexbin lattice reliably
+/// collapses them into fewer cells than points, and a finer lattice
+/// reliably yields more (non-aliasing) cells than a coarser one.
+fn hexbin_scatter_cols(n: usize, hexbin: &str) -> Vec<Column> {
+    let xs: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37) % 97.0).collect();
+    let ys: Vec<f64> = (0..n).map(|i| (i as f64 * 0.53) % 83.0).collect();
+    vec![
+        Column::new("x", Role::X, nums(&xs)),
+        Column::new("y", Role::Value(Kind::Point), nums(&ys)),
+        Column::new("h", Role::Hexbin, strs(&[hexbin])),
+    ]
+}
+
+#[test]
+fn hexbin_on_a_scatter_bins_points_into_hexagons_not_circles() {
+    let s = svg(hexbin_scatter_cols(400, "auto"));
+    assert!(
+        !s.contains("<circle"),
+        "::HEXBIN should bin the points, not draw each one: {s}"
+    );
+    let hexes = polygons(&s);
+    assert!(!hexes.is_empty(), "no hexagons drawn: {s}");
+    assert!(
+        hexes.len() < 400,
+        "{} hexagons for 400 points — not binned",
+        hexes.len()
+    );
+}
+
+#[test]
+fn hexbin_number_sets_the_bin_count_across_each_axis() {
+    let coarse = polygons(&svg(hexbin_scatter_cols(400, "6"))).len();
+    let fine = polygons(&svg(hexbin_scatter_cols(400, "30"))).len();
+    assert!(
+        fine > coarse,
+        "30 bins ({fine} cells) should give more cells than 6 bins ({coarse} cells)"
+    );
+}
+
+#[test]
+fn hexbin_scatter_keeps_identity_and_abline_on_top() {
+    let mut cols = hexbin_scatter_cols(400, "auto");
+    cols.push(Column::new("i", Role::Identity, nums(&[1.0])));
+    cols.push(Column::new("a", Role::AbLine, strs(&["0.5,2"])));
+    let s = svg(cols);
+    // `::HEXBIN`'s own fill legend draws its colourbar border/ticks as
+    // plain polylines too (in the grid colour, but not quite — filter on
+    // the abline/identity geom tag instead of `polylines`'s generic
+    // grid-colour exclusion).
+    let lines: Vec<&str> = s
+        .split("<polyline ")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap()])
+        .filter(|t| t.contains("data-geom=\"abline\""))
+        .collect();
+    assert_eq!(lines.len(), 2, "identity + abline: {lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("stroke-dasharray")),
+        "identity dashed: {lines:?}"
+    );
+    // Later layers draw later in the markup — on top: the last hexagon's
+    // markup must end before the first abline/identity line starts.
+    let last_hex = s.rfind("<polygon ").expect("hex cells");
+    let first_line = s.find("data-geom=\"abline\"").expect("abline/identity");
+    assert!(
+        last_hex < first_line,
+        "::IDENTITY/::ABLINE must draw on top of the hexagons"
+    );
+}
+
+#[test]
+fn hexbin_scatter_has_a_count_fill_legend_and_hexagons_carry_their_count() {
+    // #449: the native ggplot-rs fill legend is back on (ggplot-rs 0.28,
+    // sipemu/ggplot-rs#201 — a layer-only Fill mapping now reserves its own
+    // panel margin, including with a second layer like `::IDENTITY`/
+    // `::ABLINE`). Each hexagon still also carries its count as a
+    // `data-value`/`data-fvalue` attribute and an "n = …" tooltip
+    // (`GeomHex`'s own default), so the value is there on hover too.
+    let s = svg(hexbin_scatter_cols(400, "auto"));
+    assert!(s.contains(">count<"), "no 'count' legend title: {s}");
+    assert!(s.contains("data-value=\""), "no per-hexagon count: {s}");
+    assert!(s.contains("<title>n = "), "no count tooltip: {s}");
+}
+
+#[test]
+fn hexbin_scatter_bad_size_is_an_error() {
+    let e = render(&hexbin_scatter_cols(20, "huge"), 480, 320).unwrap_err();
+    assert!(e.contains("::HEXBIN"), "{e}");
+}
+
+#[test]
+fn hexbin_scatter_category_is_dropped_not_faceted_or_errored() {
+    let mut cols = hexbin_scatter_cols(400, "auto");
+    let cat: Vec<&str> = ["a", "b"].iter().cycle().take(400).copied().collect();
+    cols.push(Column::new("cat", Role::Category, strs(&cat)));
+    // One density for the whole panel — no error, no per-category facets.
+    let s = svg(cols);
+    assert!(!polygons(&s).is_empty(), "{s}");
 }

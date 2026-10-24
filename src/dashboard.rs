@@ -24,8 +24,8 @@ use crate::format::Locale;
 use crate::sql::contract_call;
 use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant};
 use crate::{
-    error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Place, RenderOptions,
-    Role, TableOpt,
+    error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Kind, Place,
+    RenderOptions, Role, TableOpt,
 };
 use ggplot_rs::prelude::Value;
 use std::sync::Arc;
@@ -743,6 +743,42 @@ fn json_rows(result: &[(String, Vec<Value>)]) -> Vec<serde_json::Map<String, ser
         .collect()
 }
 
+/// [`render_panel_svg`] for a single standalone panel (`Place::Doc`) — the
+/// static-HTML CLI's own renderer for a `::TABLE`/`::PAGED` panel (#427):
+/// that rewrite keeps every column's own name (not `cN`, as a chart/KPI's
+/// does), so the CLI's usual `columns_from_rows` + `render_with_title` path
+/// can't find them by position and used to render an empty table. This
+/// takes the same raw, name-keyed rows `--svg` and `serve` already read
+/// (`sql::result_columns`), so a table (and its `::SPARKLINE` cells) reads
+/// the same everywhere.
+#[allow(clippy::too_many_arguments)]
+pub fn render_panel_doc_svg(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+    w: f64,
+    h: f64,
+    ropts: &RenderOptions,
+    kpi_top: bool,
+    tracks: &[(Vec<Column>, u32)],
+    totals: Option<&str>,
+    compact: bool,
+) -> String {
+    render_panel_svg(
+        rows,
+        roles,
+        names,
+        Place::Doc,
+        w,
+        h,
+        ropts,
+        kpi_top,
+        tracks,
+        totals,
+        compact,
+    )
+}
+
 /// One panel body → an inner `<svg>` sized (w, h). Charts go through the normal
 /// renderer (with the `::TRACK`s under a chart); KPIs / text / tables get a
 /// lightweight SVG.
@@ -984,7 +1020,6 @@ fn table_svg(
         .iter()
         .enumerate()
         .filter(|(i, _)| !skip.contains(i))
-        .filter(|(i, _)| fmt_of.get(i) != Some(&"SPARKLINE"))
         .collect();
     let cols: Vec<Col> = vis
         .iter()
@@ -1074,13 +1109,21 @@ fn table_svg(
         };
 
     // natural widths (in characters): the header (wrapping onto ≤ 2 lines) and
-    // the formatted cells, shared out over the card
+    // the formatted cells, shared out over the card. A ::SPARKLINE cell draws
+    // a small chart, not text (#427) — it gets a fixed pixel width instead of
+    // one measured from its (JSON) cell text, reserved up front so the other
+    // columns still split the rest by their own natural width.
     let sample = nrow.min(200);
     let chars = |s: &str| s.chars().count() as f64;
+    let is_spark = |k: usize| cols[k].fmt == Some("SPARKLINE");
+    const SPARK_COL_W: f64 = 92.0;
     let nat: Vec<f64> = cols
         .iter()
         .enumerate()
         .map(|(k, c)| {
+            if is_spark(k) {
+                return 0.0;
+            }
             let head = chars(&c.p.head).min(14.0);
             let cells = (0..sample).map(|r| chars(&text(c, r))).fold(0.0, f64::max);
             let tot = totals[k].as_deref().map_or(0.0, chars);
@@ -1088,8 +1131,17 @@ fn table_svg(
         })
         .collect();
     let total_ch: f64 = nat.iter().sum::<f64>().max(1.0);
-    let inner = w - 24.0;
-    let widths: Vec<f64> = nat.iter().map(|n| inner * n / total_ch).collect();
+    let spark_w: f64 = (0..cols.len()).filter(|&k| is_spark(k)).count() as f64 * SPARK_COL_W;
+    let inner = (w - 24.0 - spark_w).max(0.0);
+    let widths: Vec<f64> = (0..cols.len())
+        .map(|k| {
+            if is_spark(k) {
+                SPARK_COL_W
+            } else {
+                inner * nat[k] / total_ch
+            }
+        })
+        .collect();
     let xs: Vec<f64> = widths
         .iter()
         .scan(12.0, |x, wd| {
@@ -1108,7 +1160,15 @@ fn table_svg(
     };
 
     let top = if title.is_some() { 30.0 } else { 10.0 };
-    let row_h = 22.0;
+    // A nested sparkline panel is clamped to at least `MIN_DIM` (32px, the
+    // whole crate's floor for a renderable panel — `clamp_dim`) however
+    // little height we ask for, so a table with a ::SPARKLINE column gets
+    // taller rows to fit it without spilling into the next one.
+    let row_h = if cols.iter().enumerate().any(|(k, _)| is_spark(k)) {
+        38.0
+    } else {
+        22.0
+    };
     let foot_h = if show_totals { row_h + 6.0 } else { 0.0 };
     let max_rows = (((h - top - 30.0 - foot_h) / row_h).floor().max(0.0) as usize).min(nrow);
     let max_rows = if max_rows < nrow {
@@ -1189,6 +1249,43 @@ fn table_svg(
                     )),
                     None => s.push_str(&format!(
                         "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">{label}</text>"
+                    )),
+                }
+                continue;
+            }
+            // A `::SPARKLINE` cell (#427): a list of numbers drawn as a tiny
+            // trend, through the same ggplot-rs path as a standalone
+            // `::SPARKLINE` panel ([`crate::render_sparkline`], via
+            // [`render_with_at`]) — no hand-written SVG here. Fewer than 2
+            // numbers (the browser's own cut-off) draws the usual dash.
+            if c.fmt == Some("SPARKLINE") {
+                let nums = c.cells.get(r).map_or_else(Vec::new, |cell| match cell {
+                    Cell::Text(s) => crate::kpi::spark_values(&Value::Str(s.clone())),
+                    _ => Vec::new(),
+                });
+                if nums.len() < 2 {
+                    s.push_str(&format!(
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"
+                    ));
+                    continue;
+                }
+                let row_top = top + 23.0 + r as f64 * row_h;
+                let sw = (widths[k] - 6.0).max(32.0);
+                // `MIN_DIM` (32px) itself, not `row_h - 6.0`: a shorter
+                // request is clamped up to it anyway (`clamp_dim`), which
+                // would otherwise spill past this row's own height.
+                let sh = 32.0;
+                let sx = xs[k] + 2.0;
+                let sy = row_top + (row_h - sh) / 2.0;
+                let spark_col = Column::new(
+                    "value",
+                    Role::Value(Kind::Sparkline),
+                    nums.into_iter().map(Value::Float).collect(),
+                );
+                match render_with_at(&[spark_col], sx, sy, sw as u32, sh as u32, ropts) {
+                    Ok(frag) => s.push_str(&frag),
+                    Err(_) => s.push_str(&format!(
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">\u{2014}</text>"
                     )),
                 }
                 continue;
@@ -1743,6 +1840,78 @@ mod link_tests {
         assert_eq!(
             markdown_fill("{{extra:eur}}", &rows, &l),
             crate::format::format_number_l(18.2, crate::MetricFmt::Money, &l)
+        );
+    }
+}
+
+#[cfg(test)]
+mod doc_table_tests {
+    use super::*;
+
+    // #427: the plain static-HTML CLI (`dashboard file.sql out.html`) built
+    // a `::TABLE`/`::PAGED` panel's columns the same way a chart/KPI's does
+    // (role-filtered, looked up by `cN`) — but that statement's rewrite
+    // keeps every column's own name instead of aliasing it to `cN`
+    // (`sql::rewrite_list`'s `keep_intact`), so the lookup found nothing and
+    // the whole table (not just a `::SPARKLINE` cell) rendered blank.
+    // `render_panel_doc_svg` takes the same raw, name-keyed rows `--svg` and
+    // `serve` already use.
+    #[test]
+    fn a_table_with_no_role_cast_columns_still_renders() {
+        let rows = vec![
+            ("feature".to_string(), vec![Value::Str("a".into())]),
+            ("mx".to_string(), vec![Value::Float(4.0)]),
+        ];
+        let roles = vec![(0usize, Role::Table)];
+        let ropts = RenderOptions::default();
+        let svg = render_panel_doc_svg(
+            &rows,
+            &roles,
+            &[],
+            460.0,
+            300.0,
+            &ropts,
+            false,
+            &[],
+            None,
+            false,
+        );
+        assert!(
+            svg.contains(">Feature<") && svg.contains(">Mx<") && svg.contains(">4<"),
+            "every column must render, not just the ::TABLE's own: {svg}"
+        );
+    }
+
+    #[test]
+    fn a_table_sparkline_cell_renders_in_the_static_html_doc_path() {
+        let rows = vec![
+            ("feature".to_string(), vec![Value::Str("a".into())]),
+            ("trend".to_string(), vec![Value::Str("[1,2,3]".into())]),
+        ];
+        let roles = vec![
+            (0usize, Role::Table),
+            (1usize, Role::Value(Kind::Sparkline)),
+        ];
+        let ropts = RenderOptions::default();
+        let svg = render_panel_doc_svg(
+            &rows,
+            &roles,
+            &[],
+            460.0,
+            300.0,
+            &ropts,
+            false,
+            &[],
+            None,
+            false,
+        );
+        assert!(
+            !svg.contains("[1,2,3]"),
+            "a cell's raw JSON list must never print literally: {svg}"
+        );
+        assert!(
+            svg.contains("data-geom=\"line\""),
+            "the sparkline cell must draw through ggplot-rs, like --svg/serve: {svg}"
         );
     }
 }

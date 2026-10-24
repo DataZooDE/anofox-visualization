@@ -423,6 +423,7 @@ fn lanes(
                 width: 1.0,
                 height: 0.72,
                 line_width: if value.is_some() { 1.0 } else { 0.0 },
+                ..Default::default()
             })
             // "lane: text" (the ::LABEL, category or value), not the
             // default tile tooltip's "x, lane: text" — the x is the chart's

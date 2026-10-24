@@ -19,7 +19,7 @@ anofox-visualization = { path = "..", features = ["auth"] }
 # Same version as the core crate (must resolve to one ggplot-rs).
 # 0.24.0: geom_col/geom_area default to position_stack(), legend-width
 # fixes — see the core Cargo.toml comment for the full list.
-ggplot-rs = { version = "0.26.0", default-features = false }
+ggplot-rs = { version = "0.28.2", default-features = false }
 # anofox_serve(): embed the browser UI + serve it on the live session.
 tiny_http = "0.12"
 include_dir = "0.7"
