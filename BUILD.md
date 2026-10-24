@@ -85,7 +85,42 @@ catalog entries and has neither issue.
 
 Because the macros live in that database, they are not found after `USE <other database>`: DuckDB looks unqualified functions up on the search path, and `USE` replaces it (`Catalog Error: Scalar Function with name anofox_plot_summary does not exist! Did you mean "memory.anofox_plot_summary"?`). Call them qualified with the database that was the default at `LOAD` (`memory.anofox_plot_summary(s)` in the CLI's in-memory session), or keep that database on the search path after `USE f`: `SET search_path = 'f.main,memory.main'`. `CREATE TEMP MACRO` is no way out: the extension creates the macros on its own connection, and temporary objects are visible only on the connection that created them. The C++ build (`INSTALL anofox_visualization FROM community`) registers them in the system catalog and has neither issue (#179).
 
+## CI lanes (#464)
+
+`.github/workflows/lane.yml` (a reusable workflow both `ci.yml` and
+`MainDistributionPipeline.yml` call first) decides, once per run, which lane
+applies:
+
+- **Fast lane** (target ~10 min) — every other PR: `fmt`+`clippy`+`cargo
+  nextest`, the web tests (`web/pkg` built once and shared via artifact,
+  `tests/web/*.mjs` sharded into 4 jobs, the browser e2e scripts, the wasm
+  size check). A **docs-only** PR (every changed file `*.md` or under
+  `docs/`) instead runs only a markdown/link check.
+- **Full lane** — everything in the fast lane, plus the DuckDB 2.0 smoke
+  test, the Quack prototype, the strict `Explore starter dashboards --check
+  --strict` check, the Claude Code skills-SQL validator, every
+  `*-conformance` job (they install extensions from live network sources:
+  get.erpl.io / the community repository), and the cross-platform extension
+  builds (`MainDistributionPipeline.yml`). It runs on a push to `master`, a
+  `v*` tag, `workflow_dispatch`, the nightly schedule, a `release/*` branch,
+  or a PR labelled **`full-ci`**.
+
+Add the `full-ci` label to a PR when it touches: a dependency bump
+(`Cargo.lock`, `package.json`/-`lock`, `wasm-extensions.lock`), serving or
+security code (`duckext/src/host/`, anything under `src/host/`, the access
+policy), `csrc/` or `CMakeLists.txt`, or when it is itself a release PR.
+
+`ci-gate` (in `ci.yml`) is the one check to point branch protection / a
+merge script at: it passes once every needed job has succeeded or was
+skipped, so a docs-only PR resolves cleanly instead of leaving full-lane-only
+checks pending forever. A full-lane run that fails on `master` or the
+nightly schedule files (or comments on) a `ci-master-red` issue.
+
 ## Release assets (full toolkit)
+
+Before tagging a release, confirm the release commit's `master` run of
+`ci.yml` (full lane — a push to `master` always takes it) finished green;
+a release should never go out over a red `master`.
 
 Publishing a GitHub release pushes its `v<version>` tag, which runs
 `.github/workflows/extension.yml` ("Release full toolkit"). One job per
