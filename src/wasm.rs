@@ -10,8 +10,8 @@
 //! the first is that the core never panics on user input (fuzz-tested).
 
 use crate::{
-    columns_from_entries, error_svg, guard, parse_role_entries, render_with, roles, sql,
-    RenderError, RenderOptions, Role,
+    columns_from_entries, error_svg, guard, parse_role_entries, render_with, render_with_at, roles,
+    sql, RenderError, RenderOptions, Role,
 };
 use wasm_bindgen::prelude::*;
 
@@ -110,6 +110,45 @@ pub fn render_panel_checked(
         let mut opts = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
         opts.zoom = parse_zoom(zoom_json);
         render_with(&cols, width, height, &opts)
+    })
+}
+
+/// Render one table/KPI cell's inline chart — a `::SPARKLINE`/`::SPARKBAR`
+/// series, cell-sized (no card chrome, no axes, no padding) — through the
+/// same [`render_with_at`] fragment path the native `--svg`/static-HTML
+/// table and KPI cells use (#419/#427), instead of the browser hand-drawing
+/// its own SVG (#453/#454; owner rule #318: one renderer, ggplot-rs).
+/// `rows_json`/`roles_json` as [`render_panel`] — one row per series point,
+/// a `SPARKLINE`/`SPARKBAR` role per column (two columns, ref then cur, for
+/// a comparison pair). Errors come back as a small error SVG.
+#[wasm_bindgen]
+pub fn render_cell(
+    rows_json: &str,
+    roles_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> String {
+    render_cell_checked(rows_json, roles_json, width, height, primary)
+        .unwrap_or_else(|e| error_svg(&e.to_string(), width))
+}
+
+/// The `Result` form of [`render_cell`] (native callers / tests).
+pub fn render_cell_checked(
+    rows_json: &str,
+    roles_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> Result<String, RenderError> {
+    guard(|| {
+        let rows = sql::parse_rows_json(rows_json).map_err(RenderError::BadSpec)?;
+        let roles_v: serde_json::Value = serde_json::from_str(roles_json)
+            .map_err(|e| RenderError::BadSpec(format!("roles JSON: {e}")))?;
+        let entries = parse_role_entries(&roles_v).map_err(RenderError::BadSpec)?;
+        let cols = columns_from_entries(&rows, &entries);
+        let opts = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        render_with_at(&cols, 0.0, 0.0, width, height, &opts)
     })
 }
 

@@ -98,6 +98,10 @@ pub enum Kind {
     Heatmap,
     /// A minimal inline trend line, no axes (`::SPARKLINE`).
     Sparkline,
+    /// A minimal inline bar histogram, no axes (`::SPARKBAR`); a table cell's
+    /// `list(v ORDER BY i)`, or two overlaid series from
+    /// `list({'ref': r, 'cur': c} ORDER BY i)` sharing one y scale.
+    Sparkbar,
     /// A single value as a gauge/progress arc toward a `::RANGE` (`::GAUGE`).
     Gauge,
     /// A GitHub-style calendar heatmap — a date `::XAXIS` laid out as weeks ×
@@ -144,6 +148,7 @@ impl Kind {
                 | Kind::Candlestick
                 | Kind::Radar
                 | Kind::Sparkline
+                | Kind::Sparkbar
                 | Kind::Waterfall
                 | Kind::Bullet
                 | Kind::Funnel
@@ -775,7 +780,10 @@ pub const MAX_DIM: u32 = 8_192;
 /// series' low points fall outside the box and the line looks torn apart.
 /// Every embedder of a `GGPlot` panel into a slot shorter than this must
 /// request at least `SPARKLINE_MIN_H` and centre/pad the smaller visible
-/// slot around it, never ask ggplot-rs for less.
+/// slot around it, never ask ggplot-rs for less. The floor itself is
+/// generic to any ggplot-rs panel (not just a line geom), so
+/// `render_sparkbar` (#425) clamps to it too — the name predates that
+/// second consumer.
 pub(crate) const SPARKLINE_MIN_H: f64 = 50.0;
 
 /// Per-render options — passed explicitly (no hidden thread state).
@@ -1479,6 +1487,9 @@ pub(crate) enum Panel {
         height: u32,
         /// Extra root attributes (e.g. `data-track`) written on the `<svg>`.
         attrs: Vec<(&'static str, String)>,
+        /// Extra warnings (e.g. `::MAP`'s `MARK_WARN`), merged with
+        /// `render_svg_native_with_warnings`'s own at [`Panel::finish`].
+        warnings: Vec<String>,
     },
     Own {
         width: u32,
@@ -1503,6 +1514,7 @@ impl Panel {
                 width,
                 height,
                 attrs,
+                warnings,
             } if !o.locale.is_default() => {
                 let yearish = cols.iter().filter(|c| c.role == Role::X).any(|c| {
                     let mut any = false;
@@ -1525,6 +1537,7 @@ impl Panel {
                     width,
                     height,
                     attrs,
+                    warnings,
                 }
             }
             p => p,
@@ -1559,6 +1572,7 @@ impl Panel {
             width,
             height,
             attrs: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -1585,7 +1599,7 @@ impl Panel {
                 width,
                 height,
                 attrs,
-                ..
+                warnings: extra_warnings,
             } => {
                 // B2-3: every root attribute (`data-track`, the motion
                 // attrs, …) goes through ggplot-rs's own `svg_attr`/
@@ -1603,7 +1617,11 @@ impl Panel {
                         .render_svg_native_at(x, y, width, height)
                         .map(|s| (s, Vec::new())),
                 };
-                svg.map_err(|e| format!("render failed: {e:?}"))
+                svg.map(|(s, mut w)| {
+                    w.extend(extra_warnings);
+                    (s, w)
+                })
+                .map_err(|e| format!("render failed: {e:?}"))
             }
             Panel::Own {
                 width,
@@ -2172,14 +2190,33 @@ fn render_inner(
             Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
         )
     }) {
-        return Ok(match map::render(o, cols, width, height) {
-            Some(m) => Panel::Own {
+        return Ok(match map::build(o, cols, width, height) {
+            Some(map::MapOutput::Own(m)) => Panel::Own {
                 width,
                 height,
                 body: m.body,
                 attrs: m.attrs,
                 warnings: m.warnings,
             },
+            // #420 slice 1: an eligible map is a real GGPlot now — the
+            // same Panel::Plot every other chart kind renders through.
+            Some(map::MapOutput::Plot {
+                plot,
+                attrs,
+                warnings,
+            }) => {
+                let mut p = Panel::plot(*plot, width, height);
+                if let Panel::Plot {
+                    attrs: a,
+                    warnings: w,
+                    ..
+                } = &mut p
+                {
+                    *a = attrs;
+                    *w = warnings;
+                }
+                p
+            }
             None => note_svg(None, "No data", width, height),
         });
     }
@@ -2246,6 +2283,7 @@ fn render_inner(
         }
         Kind::Radar => return render_radar(o, value, cols, title.as_deref(), width, height),
         Kind::Sparkline => return render_sparkline(o, value, cols, width, height),
+        Kind::Sparkbar => return render_sparkbar(o, value, cols, width, height),
         Kind::Waterfall => {
             return variance::render_waterfall(o, value, cols, title.as_deref(), width, height)
         }
@@ -3262,6 +3300,7 @@ fn cartesian(
         | Kind::Candlestick
         | Kind::Radar
         | Kind::Sparkline
+        | Kind::Sparkbar
         | Kind::Waterfall
         | Kind::Bullet
         | Kind::Funnel => {
@@ -4569,6 +4608,7 @@ fn distinct_labels_of(values: &[Value]) -> usize {
 /// spanning zero: the theme's diverging ramp with a neutral midpoint at 0,
 /// both arms scaled to the larger |end| (−2…+10 reads as a little red, a lot
 /// of blue). An explicit theme `sequential` pair is used as given.
+#[derive(Clone)]
 pub(crate) struct Ramp {
     min: f64,
     max: f64,
@@ -5239,6 +5279,109 @@ fn render_sparkline(
     // tile, a table's `::SPARKLINE` cell) requests at least this floor too
     // and centres/pads its own smaller visible slot around it; this clamp
     // is the backstop for any caller that doesn't.
+    let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
+    Ok(Panel::plot(plot, w, h))
+}
+
+/// A minimal inline bar histogram (no axes) — one series of bars, or two
+/// overlaid (a muted reference behind the accent-coloured current), sharing
+/// one y scale so bar heights stay comparable (#425).
+///
+/// `cols` carries one or two `Role::Value(Kind::Sparkbar)` columns (built by
+/// the table-cell / KPI callers from `kpi::spark_values`/`spark_pairs`):
+/// one → a single series; two → `[ref, cur]`, drawn ref-then-cur so cur
+/// paints on top. `value` (`render_inner`'s own lookup) is always the
+/// *first* such column, so the one-series case can read it directly.
+fn render_sparkbar(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let series: Vec<&Column> = cols
+        .iter()
+        .filter(|c| c.role == Role::Value(Kind::Sparkbar))
+        .collect();
+    let (ref_vals, cur_vals): (&[Value], &[Value]) = if series.len() >= 2 {
+        (&series[0].values, &series[1].values)
+    } else {
+        (&[], &value.values)
+    };
+    let xs = |len: usize| -> Vec<Value> { (0..len).map(|i| Value::Float(i as f64)).collect() };
+
+    // Train the shared y scale on the combined ref+cur values so one bar
+    // series never dwarfs or is dwarfed by the other's own scale. `x` is
+    // built to the same (doubled) length as `combined` — every column of a
+    // base [`GGData`] frame must have the same row count.
+    let mut combined = cur_vals.to_vec();
+    combined.extend_from_slice(ref_vals);
+    let mut combined_x = xs(cur_vals.len());
+    combined_x.extend_from_slice(&xs(ref_vals.len()));
+    let base_data = vec![("x".to_string(), combined_x), ("y".to_string(), combined)];
+
+    let accent = o.brand();
+    let muted = wash(o, o.theme.colors.ink, 0.72); // low-contrast reference bars
+
+    let mut plot = GGPlot::new(base_data).aes(Aes::new().x("x").y("y"));
+    let two_series = !ref_vals.is_empty();
+
+    if two_series {
+        let ref_data = vec![
+            ("x".to_string(), xs(ref_vals.len())),
+            ("y".to_string(), ref_vals.to_vec()),
+            (
+                "label".to_string(),
+                vec![Value::Str("ref".into()); ref_vals.len()],
+            ),
+        ];
+        plot = plot
+            .geom_col_with(GeomCol {
+                fill: muted,
+                color: muted,
+                alpha: 0.45,
+                width: 0.75,
+            })
+            .layer_data(ref_data)
+            .layer_aes(Aes::new().x("x").y("y").label("label"))
+            .position(PositionIdentity);
+    }
+
+    let cur_data = vec![
+        ("x".to_string(), xs(cur_vals.len())),
+        ("y".to_string(), cur_vals.to_vec()),
+        (
+            "label".to_string(),
+            vec![Value::Str(if two_series { "cur" } else { "" }.into()); cur_vals.len()],
+        ),
+    ];
+    plot = plot
+        .geom_col_with(GeomCol {
+            fill: accent,
+            color: accent,
+            alpha: 1.0,
+            width: if two_series { 0.45 } else { 0.75 },
+        })
+        .layer_data(cur_data)
+        .layer_aes(Aes::new().x("x").y("y").label("label"))
+        .position(PositionIdentity)
+        .scale_y_continuous({
+            let vfmt = value_fmt(cols, Kind::Sparkbar, cur_vals);
+            let locale = o.locale;
+            ggplot_rs::scale::continuous::ScaleContinuous::new()
+                .with_expand(0.1, 0.0)
+                .with_value_formatter(move |n: f64| vfmt.full(n, &locale))
+        })
+        .house_void(o);
+    // Same compact-width clamp as render_sparkline, for the same reason.
+    let w = width.min(240);
+    // Same `SPARKLINE_MIN_H` floor render_sparkline clamps to (#457): the
+    // 50px layout floor `render/layout.rs` enforces is generic to every
+    // ggplot-rs panel, `GeomCol` included, not just a line geom — ask for
+    // less and the bars' own baseline (the bottom of the virtual plot area,
+    // sized against the 50px floor) falls outside the smaller requested
+    // viewBox and gets clipped, same class of bug, every bar floating with
+    // its bottom cut off instead of sitting on the baseline (#425).
     let h = height.max(SPARKLINE_MIN_H.ceil() as u32);
     Ok(Panel::plot(plot, w, h))
 }
