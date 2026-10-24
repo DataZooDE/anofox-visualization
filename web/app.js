@@ -4,6 +4,7 @@
 import init, {
   plan,
   render_panel,
+  render_cell,
   render_stack,
   render_contract,
   map_bounds,
