@@ -279,6 +279,15 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/fit-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/dropdown-search-e2e.mjs (#411): above ~50 options (or forced
+      # by 'search'/'native'::DROPDOWN_STYLE) a ::DROPDOWN renders a
+      # searchable combobox — filtering by value/::OPTION_LABEL, Arrow keys +
+      # Enter, Esc / an outside click, a 2,000-option window, and the
+      # downloaded HTML snapshot's native <select> fallback.
+      - name: Searchable ::DROPDOWN e2e (#411)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/dropdown-search-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/setvar-order-e2e.mjs (#416): a dashboard's own `SET
       # VARIABLE` that reads an input via getvariable() sees the viewer's
       # CURRENT pick, whether it is declared before or after that input in
@@ -344,6 +353,20 @@ jobs:
             if echo "$out" | grep -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
           done
           exit $status
+
+      # scripts/site-e2e.mjs (#417 A4, PR #429 review): `dashboard --site`'s
+      # published static site, in a real browser, served under a GitHub-
+      # Pages-style /repo/ sub-path by a plain static server this script
+      # starts itself (no locked server, no builder) — nav + nav_picker
+      # render, an in-place nav switch survives a window marker (no full
+      # reload), a hard reload of /d/<id>/ and back/forward all work, the
+      # parquet data reads for real, a `../x` path_vars value is dropped
+      # (#417 S2), no editor flash, and no request leaves this site's own
+      # origin / the pinned CDN hosts. Reuses the dashboard CLI and DuckDB
+      # CLI built/installed above.
+      - name: Published static site e2e (dashboard --site)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-e2e.mjs --dashboard target/debug/dashboard
 
       - name: Explore starter dashboards pass --check --strict
         run: |

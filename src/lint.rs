@@ -447,6 +447,31 @@ where
                             sql: short.clone(),
                         });
                     }
+                    if kind == InputKind::Dropdown {
+                        if let Some((idx, _)) =
+                            p.roles.iter().find(|(_, r)| *r == Role::DropdownStyle)
+                        {
+                            if let Some(v) = rows
+                                .first()
+                                .and_then(|r| r.values().nth(*idx))
+                                .and_then(|v| v.as_str())
+                            {
+                                let lv = v.to_ascii_lowercase();
+                                if !crate::DROPDOWN_STYLES.contains(&lv.as_str()) {
+                                    diags.push(Diagnostic {
+                                        severity: Severity::Warning,
+                                        stmt,
+                                        code: "dropdown-style/unknown",
+                                        message: format!(
+                                            "::DROPDOWN_STYLE `{lv}` is not 'search' or 'native' ({}) — the option count decides",
+                                            crate::DROPDOWN_STYLES.join(", ")
+                                        ),
+                                        sql: short.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     for setv in input_defaults(kind, input_index(&p.roles), &rows) {
                         prelude.push_str(&setv);
                         prelude.push_str(";\n");
@@ -813,6 +838,8 @@ where
         // is one too many, and rules whose cuts miss the values paint every
         // tile alike (percent vs fraction).
         diags.extend(tile_scale_diags(&p.roles, &rows, stmt, &short));
+        // ::XBREAKS / ::YBREAKS: numeric entries, and only on a cartesian chart.
+        diags.extend(breaks_diags(&p.roles, &rows, stmt, &short));
         // A ::COLORS level map ('Critical:bad; …') must parse and needs a
         // ::CATEGORY to colour.
         if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::GaugeColors) {
@@ -3843,6 +3870,93 @@ fn tile_scale_diags(
     out
 }
 
+/// Does `::XBREAKS`/`::YBREAKS` have any effect on this panel? Only the
+/// cartesian x/y chart kinds route through `render_cartesian`'s continuous
+/// scale wiring (`lib.rs`'s `match kind` dispatch before that call) —
+/// pies/donuts, gauges, histograms, density, QQ, heatmaps, calendars,
+/// candlesticks, radar, sparklines, waterfalls, bullets, funnels, and
+/// non-chart panels (KPIs, tables, maps, markdown — no `Role::Value` at all)
+/// ignore it.
+fn kind_uses_axis_breaks(roles: &[(usize, Role)]) -> bool {
+    match chart_kind(roles) {
+        None => false,
+        Some(
+            Kind::Pie
+            | Kind::Donut
+            | Kind::Gauge
+            | Kind::Histogram
+            | Kind::Density
+            | Kind::QQ
+            | Kind::Heatmap
+            | Kind::Calendar
+            | Kind::Candlestick
+            | Kind::Radar
+            | Kind::Sparkline
+            | Kind::Waterfall
+            | Kind::Bullet
+            | Kind::Funnel,
+        ) => false,
+        Some(_) => true,
+    }
+}
+
+/// `::XBREAKS`/`::YBREAKS` ('100,1000,10000'): every entry must parse as a
+/// number (anofox_visualization::role_breaks silently drops bad ones, which
+/// would otherwise fail without explanation), and the role only does
+/// anything on a cartesian chart (see [`kind_uses_axis_breaks`]).
+fn breaks_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+    stmt: usize,
+    short: &str,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut warn = |code, message: String| {
+        out.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt,
+            code,
+            message,
+            sql: short.to_string(),
+        })
+    };
+    for role in [Role::XBreaks, Role::YBreaks] {
+        let Some((idx, _)) = roles.iter().find(|(_, r)| *r == role) else {
+            continue;
+        };
+        let Some(spec) = column_texts(rows, *idx).into_iter().next() else {
+            continue;
+        };
+        let bad: Vec<&str> = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && t.parse::<f64>().is_err())
+            .collect();
+        if !bad.is_empty() {
+            warn(
+                "breaks/non-numeric",
+                format!(
+                    "::{} '{spec}' has non-numeric entries ({}) — expected a comma-separated \
+                     list of numbers, e.g. '100,1000,10000'",
+                    role.token(),
+                    bad.join(", "),
+                ),
+            );
+        }
+        if !kind_uses_axis_breaks(roles) {
+            warn(
+                "breaks/non-cartesian",
+                format!(
+                    "::{} only places ticks on a cartesian x/y chart — this panel's kind \
+                     ignores it",
+                    role.token()
+                ),
+            );
+        }
+    }
+    out
+}
+
 /// A number for a lint message (no float noise).
 fn fmt_num(v: f64) -> String {
     let r = (v * 1e4).round() / 1e4;
@@ -3984,8 +4098,11 @@ fn set_reads_a_file(code: &str) -> bool {
 }
 
 /// Check `requires` the way the locked server does (see
-/// [`sql::requires::check`]), with the prelude's session state.
-fn unmet_requirement<F>(
+/// [`sql::requires::check`]), with the prelude's session state. Shared with
+/// the headless CLI renderers (`dashboard` static HTML, `dashboard --svg`),
+/// which replay the same growing `prelude` before every statement to keep
+/// one DuckDB session's semantics across separate `duckdb` CLI calls.
+pub fn unmet_requirement<F>(
     run_query: &mut F,
     prelude: &str,
     requires: &[sql::requires::Requirement],
@@ -5310,6 +5427,44 @@ mod design_tests {
     }
 
     #[test]
+    fn ybreaks_non_numeric_entry_warns() {
+        let bad = rows(
+            3,
+            |i| json!({ "c0": i as f64, "c1": i as f64 * 2.0, "c2": "100,oops,1000" }),
+        );
+        let d = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, '100,oops,1000'::YBREAKS FROM t;",
+            bad,
+        );
+        assert!(has(&d, "breaks/non-numeric"), "{d:?}");
+        // A clean numeric list, same cartesian chart, is fine.
+        let ok = rows(
+            3,
+            |i| json!({ "c0": i as f64, "c1": i as f64 * 2.0, "c2": "100,1000,10000" }),
+        );
+        let d = lint_one(
+            "SELECT x::XAXIS, y::LINECHART, '100,1000,10000'::YBREAKS FROM t;",
+            ok,
+        );
+        assert!(!has(&d, "breaks/non-numeric"), "{d:?}");
+        assert!(!has(&d, "breaks/non-cartesian"), "{d:?}");
+    }
+
+    #[test]
+    fn breaks_on_a_non_cartesian_panel_warns() {
+        // A pie has no x/y axis to place ticks on.
+        let data = rows(
+            4,
+            |i| json!({ "c0": format!("s{i}"), "c1": i as f64, "c2": "100,200" }),
+        );
+        let d = lint_one(
+            "SELECT cat::CATEGORY, sum(n)::PIE, '100,200'::YBREAKS FROM t GROUP BY 1;",
+            data,
+        );
+        assert!(has(&d, "breaks/non-cartesian"), "{d:?}");
+    }
+
+    #[test]
     fn unsorted_bars_warn_but_sorted_are_clean() {
         let unsorted = rows(3, |i| {
             let v = [3.0, 1.0, 2.0][i];
@@ -6075,6 +6230,31 @@ mod design_tests {
         .is_empty());
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());
+    }
+
+    #[test]
+    fn dropdown_style_unknown_value_warns() {
+        let data = vec![json!({ "c0": "a", "c1": "bogus" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let sql = "SELECT 'a' AS v ::DROPDOWN, 'bogus' AS style ::DROPDOWN_STYLE FROM t;";
+        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        assert!(
+            d.iter().any(|x| x.code == "dropdown-style/unknown"),
+            "{d:?}"
+        );
+
+        let data = vec![json!({ "c0": "a", "c1": "search" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let sql = "SELECT 'a' AS v ::DROPDOWN, 'search' AS style ::DROPDOWN_STYLE FROM t;";
+        let d = check_opts(sql, |_q| Ok(data.clone()), LintOptions { design: false });
+        assert!(
+            !d.iter().any(|x| x.code == "dropdown-style/unknown"),
+            "{d:?}"
+        );
     }
 
     #[test]

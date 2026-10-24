@@ -22,7 +22,9 @@ const h = inputOptions([[0, "BUTTONS"], [1, "HINT"]], [{ z: "EU", c1: 3 }, { z: 
 assert.deepEqual(h, { options: ["EU", "US"], labels: null, hints: ["3", ""] });
 assert.equal(optionLabel(h, 1), "US");
 const mk = grab("makeControl");
-assert.ok(/opt\.value = o;/.test(mk) && /optionLabel\(meta, k\)/.test(mk), "dropdown: value o, shown label");
+const fso = grab("fillSelectOptions");
+assert.ok(/opt\.value = o;/.test(fso) && /optionLabel\(meta, k\)/.test(fso), "dropdown: value o, shown label");
+assert.ok(/fillSelectOptions\(input, meta\)/.test(mk), "dropdown <select> fills via fillSelectOptions");
 assert.ok(/r\.l \+/.test(mk), "multiselect search reads the label");
 const bt = grab("mkButtons");
 assert.ok(/b\.textContent = optionLabel\(meta, k\)/.test(bt) && /dpVars\[meta\.varname\] = o;/.test(bt));

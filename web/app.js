@@ -1229,6 +1229,12 @@ let conn = null;
 // SET VARIABLE statements are captured here (never sent), so every request is
 // self-contained (multi-user safe — no shared session state).
 let servedMode = false;
+// #417: a `dashboard --site` export — set only by the `<body class="…
+// published">` that command's own index.html/launchers carry, never by a URL
+// parameter (a link can't point the app at someone else's site.json). Unlike
+// servedMode above, queries still run locally (pageConn(), below): there is
+// no server to answer /api/panel. See sitePrepare()/siteGo() further down.
+const published = document.body.classList.contains("published");
 const servedVars = {};
 let servedIndex = null; // planned statement SQL -> its first plan index
 let servedPlan = null; // the served dashboard's planned statements
@@ -1288,6 +1294,26 @@ function sqlLiteralToJson(lit) {
   }
   const n = Number(t);
   return t !== "" && Number.isFinite(n) ? n : t;
+}
+
+// #417 S2: the same `path_vars` value rule a locked server's
+// `check_path_values` (duckext/src/serve.rs) enforces server-side on every
+// `vars` entry of a `/api/panel` request — one plain path segment:
+// `[A-Za-z0-9_.-]`, 1..=128 characters, not starting with `.` (so never `.`,
+// `..` or a hidden file; no `/`) — or a bare non-negative integer, or NULL.
+// `lit` is a typed SQL literal (`setv[2]` of the `SET VARIABLE` regex below,
+// or sqlLiteralToJson's own input shape), not a raw value: a string is still
+// `'…'`-quoted. A published site enforces this itself (runSqlInner, below)
+// because there is no server left to enforce it instead.
+function validPathValueLiteral(lit) {
+  const t = String(lit).trim();
+  if (/^null$/i.test(t)) return true;
+  if (t.length && /^[0-9]+$/.test(t)) return true;
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
+    const inner = t.slice(1, -1).replace(/''/g, "'");
+    return inner.length > 0 && inner.length <= 128 && !inner.startsWith(".") && /^[A-Za-z0-9_.-]+$/.test(inner);
+  }
+  return false;
 }
 
 // `at`: the statement's own plan index, when the caller knows it — the same
@@ -1874,6 +1900,21 @@ async function runSqlInner(sql, page, kind, setup, at, pv) {
     // the script derived itself.
     if (!setup) dpViewerVars.add(setv[1].toLowerCase());
   }
+  // #417 S2: a published site has no server to run check_path_values for it
+  // — enforce the same rule here, for every `path_vars` variable, wherever
+  // its value came from (a URL seed into a text/number/date input, the
+  // headless dpXf path setSelectionVars() applies, a ::LINK/followLink deep
+  // link, or the nav_picker — whose own options are already vetted at build
+  // time, so this never rejects a legitimate pick). Not `setup`: the rule is
+  // on VIEWER-supplied values only, same as the server's own `r.vars`, never
+  // on a dashboard's own setup SQL (the author is trusted either way).
+  if (published && setv && !setup) {
+    const pathVars = window.__served && Array.isArray(window.__served.pathVars) ? window.__served.pathVars : [];
+    if (pathVars.some((p) => p.toLowerCase() === setv[1].toLowerCase()) && !validPathValueLiteral(setv[2])) {
+      status(`variable '${setv[1]}' must name a file or folder: [A-Za-z0-9_.-], not starting with '.' — dropped`);
+      return "[]";
+    }
+  }
   // #244 C-1 / sec-review-272-rereview H-1R / H-1R2: before prepareSql and
   // before any page handle — dispatch on the TOKEN this particular call
   // was made under: an explicitly passed `pv` (a lazy/prefetch job, bound
@@ -2173,9 +2214,13 @@ async function boot() {
   loadRoleSets();
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
-  // A locked served dashboard always uses its server (/api/panel, no SQL).
-  if (window.__served) backend = "live";
-  else
+  // A locked served dashboard always uses its server (/api/panel, no SQL) —
+  // but a published static site (#417) has no server at all: it needs
+  // DuckDB-Wasm loaded below like any offline dashboard, so `published`
+  // keeps `backend` off "live" (and skips the same-origin /query probe,
+  // which would just 404).
+  if (window.__served && !published) backend = "live";
+  else if (!published)
     try {
       const r = await fetch("/query", { method: "POST", body: "SELECT 1 AS ok" });
       if (r.ok) backend = "live";
@@ -2206,6 +2251,21 @@ async function boot() {
         await conn.query(pragma);
       } catch (_) {
         /* option not available on this build */
+      }
+    }
+    // #417: a published site's data folder/URL — `getvariable('anofox_data')`
+    // on the locked server (duckext/src/serve.rs's DATA_VAR), set here
+    // (once; siteGo() never needs to repeat it — the connection, and the
+    // variable, stay warm across a dashboard switch) because `conn` exists
+    // only from this point on. Before every dashboard's own statements:
+    // `run()` below is the first one.
+    const site = window.__anofoxSite;
+    if (published && site && site.data) {
+      const url = new URL(site.data.endsWith("/") ? site.data : site.data + "/", site.base).href.replace(/\/$/, "");
+      try {
+        await conn.query(`SET VARIABLE anofox_data = '${url.replace(/'/g, "''")}'`);
+      } catch (e) {
+        status("could not set anofox_data: " + e);
       }
     }
   }
@@ -2299,7 +2359,11 @@ async function boot() {
   // the server gates /query, so the client can render everything but only run the
   // server's registered queries.
   const served = window.__served || null;
-  if (served) servedMode = true;
+  // #417: a published site's `served` is shaped the same way (sitePrepare(),
+  // below) so renderServedNav/servedNavHref/renderNavPicker need no changes
+  // — but it must NOT flip servedMode: its queries run locally (there is no
+  // /api/panel to dispatch to), only the nav/view-only chrome is shared.
+  if (served) servedMode = !published;
   if (params.get("embed") === "1" || params.has("embed") || served) {
     document.body.classList.add("embed");
   }
@@ -7145,7 +7209,20 @@ function followLink(url) {
   const safe = safeUrl(u);
   if (!safe) return status("link blocked: only #tab, ?v.…, paths and http(s) URLs are followed");
   if (/^https?:/i.test(safe) && !safe.startsWith(location.origin + "/")) window.open(safe, "_blank", "noopener");
-  else location.href = safe;
+  else {
+    // #417: a published site switches a same-site `/d/<id>` ::LINK in place,
+    // same as a served-nav click (onServedNavClick) — a locked server's own
+    // `/d/<id>` still gets a real navigation below (it has a real route).
+    if (published) {
+      const id = siteDashId(safe);
+      if (id) {
+        const q = safe.includes("?") ? safe.slice(safe.indexOf("?")) : "";
+        siteGo(id, q, true);
+        return;
+      }
+    }
+    location.href = safe;
+  }
 }
 // Drill-through to a tab: show it at once — its panels as they are, under the
 // loading veil (no delay: they may still show the previous value) — and fade
@@ -7752,8 +7829,161 @@ function renderServedNav(served) {
   }
   const picker = hasPicker && renderNavPicker(served);
   if (picker) nav.appendChild(picker);
+  // #417: a published site has no server to answer a real /d/<id> request —
+  // every nav link switches in place instead (siteGo), so Wasm and the
+  // loaded data stay warm. A locked server's own nav still navigates for
+  // real (it has a real route there); this listener only ever fires on a
+  // `published` page (siteGo's own guard, belt-and-braces).
+  if (published) nav.addEventListener("click", onServedNavClick);
   const dash = document.querySelector(".dash");
   if (dash && dash.parentNode) dash.parentNode.insertBefore(nav, dash);
+}
+// ---- #417: published static site — in-place /d/<id> routing ----
+// `dashboard --site` writes `out/index.html` + `out/d/<id>/index.html`
+// (a tiny launcher per dashboard, so a refresh/shared link/back-forward all
+// land on a real file — GitHub Pages has no rewrites) and `out/site.json`
+// (the same fields `served_index` injects: see duckext/src/serve.rs). Both
+// pages load the *same* app.js; sitePrepare() (called once, before boot())
+// tells them apart by their own `<meta name="anofox-dash">`.
+function onServedNavClick(e) {
+  const a = e.target.closest?.("a[data-nav-id]");
+  if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const u = new URL(a.href, location.href);
+  e.preventDefault();
+  siteGo(a.dataset.navId, u.search, true);
+}
+// `path` (a served-nav href, or followLink's already-`safeUrl`'d target) to
+// the dashboard id it names, or null — only within this site's own base
+// path (`site.base`'s directory), so a path outside it (or on a locked
+// server, where this is never called at all) is left to navigate for real.
+function siteDashId(path) {
+  const site = window.__anofoxSite;
+  if (!site) return null;
+  let u;
+  try {
+    u = new URL(path, location.href);
+  } catch (_) {
+    return null;
+  }
+  // Same-origin, belt-and-braces: every caller (onServedNavClick's own
+  // hrefs, followLink's already-safeUrl()'d same-origin branch, a popstate's
+  // own location) only ever offers a same-origin path anyway, but this
+  // function shouldn't rely on that — a cross-origin URL that happens to
+  // share this site's pathname must still fall through to a real
+  // navigation, never an in-place switch.
+  if (u.origin !== location.origin) return null;
+  if (!u.pathname.startsWith(site.basePath)) return null;
+  const rest = u.pathname.slice(site.basePath.length);
+  if (rest === "" || rest === "index.html") return site.home;
+  const m = /^d\/([^/]+)\/?(?:index\.html)?$/.exec(rest);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+// Switch the page to dashboard `id` without a reload: fetch its `.sql`
+// (dashboards/<id>.sql, written by `dashboard --site`), reset the dashboard
+// state — a different dashboard starts clean, as the sidebar's loadDash()
+// does — seed dpUrlSeed/dpView/dpTab from `search` like any other deep
+// link, run it, and (unless `push` is false, a popstate) push the new URL.
+async function siteGo(id, search = "", push = true) {
+  const site = window.__anofoxSite;
+  const meta = site && site.dashboards.find((d) => d.id === id);
+  if (!meta) return false;
+  let sql;
+  try {
+    sql = await (await fetch(new URL(`dashboards/${encodeURIComponent(id)}.sql`, site.base))).text();
+  } catch (e) {
+    status("could not load dashboards/" + id + ".sql: " + e);
+    return false;
+  }
+  if (preview) await previewExit({ rerun: false });
+  clearApplyHold();
+  heldTexts.clear();
+  heldStatements.clear();
+  pinnedHeldText = null;
+  heldBasisSql = "";
+  dashStateReset();
+  window.__served = { ...window.__served, id, title: meta.title, sql };
+  servedIndex = null;
+  servedPlan = null;
+  $("sql").value = sql;
+  $("dash-name").value = navLabel(meta.nav, meta.title, meta.id) || meta.id;
+  syncHL();
+  Object.assign(dpUrlSeed, readUrlSeed(search));
+  Object.assign(dpView, readViewSeed(search));
+  const tab = new URLSearchParams(search).get("tab");
+  if (tab) dpTab = tab;
+  // A trailing slash, always: `out/d/<id>/index.html` is the real file a
+  // static host serves (`dashboard --site`) — `/d/<id>` with no slash
+  // depends on the host redirecting a bare directory path to its slashed
+  // form, which GitHub Pages and most static hosts do but can't be relied
+  // on (a site-e2e.mjs reload caught this: 404 without it). servedNavHref
+  // itself (shared with the locked server, whose real `/d/<id>` route has
+  // no such requirement) stays as it is; only the URL this push actually
+  // commits to history gets the slash.
+  if (push) history.pushState({ anofoxSite: id }, "", site.basePath + "d/" + encodeURIComponent(id) + "/" + search);
+  document.title = meta.title || document.title;
+  await run(true, { explicit: true });
+  refreshServedNavHrefs();
+  document.querySelectorAll(".served-nav a[data-nav-id]").forEach((a) => {
+    const on = a.dataset.navId === id;
+    a.classList.toggle("active", on);
+    if (on) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+  return true;
+}
+// Called once, before boot() — reads `site.json` (and this page's own
+// `<meta name="anofox-dash">`) and sets `window.__served` / `window.__anofoxApp`
+// / `window.__anofoxSite`, the same shapes a locked server injects inline
+// (`served_index`, `app_brand.rs`), so the rest of the app needs no further
+// `published` branches beyond the ones above. A no-op (and zero fetches) on
+// any page `dashboard --site` didn't write — the builder and a locked
+// server are both unaffected.
+async function sitePrepare() {
+  if (!published) return;
+  const siteTag = document.querySelector('meta[name="anofox-site"]');
+  const dashTag = document.querySelector('meta[name="anofox-dash"]');
+  if (!siteTag || !dashTag) return;
+  const base = new URL(siteTag.content || "site.json", import.meta.url);
+  let site;
+  try {
+    site = await (await fetch(base)).json();
+  } catch (e) {
+    status("could not load site.json: " + e);
+    return;
+  }
+  const id = dashTag.content;
+  let sql;
+  try {
+    sql = await (await fetch(new URL(`dashboards/${encodeURIComponent(id)}.sql`, base))).text();
+  } catch (e) {
+    status("could not load dashboards/" + id + ".sql: " + e);
+    return;
+  }
+  const dashboards = Array.isArray(site.dashboards) ? site.dashboards : [];
+  const meta = dashboards.find((d) => d.id === id) || { id, title: id };
+  window.__served = {
+    id,
+    title: meta.title,
+    sql,
+    nav: dashboards,
+    locked: true,
+    theme: site.theme,
+    pathVars: site.pathVars,
+    navPicker: site.navPicker,
+  };
+  if (site.app) window.__anofoxApp = site.app;
+  window.__anofoxSite = {
+    dashboards,
+    base,
+    basePath: new URL(".", base).pathname,
+    home: (site.home && dashboards.some((d) => d.id === site.home) && site.home) || dashboards[0]?.id || id,
+    data: site.data,
+  };
+  // `anofox_data` itself (#407's locked-server rule, kept: a path_vars value
+  // joined onto it never leaves the site — enforced in runSqlInner()
+  // [validPathValueLiteral], not here; see its own comment, and
+  // `check_path_values` in duckext/src/serve.rs) is set in boot(), once
+  // `conn` exists.
 }
 // The served nav as one button and a grouped, searchable list of links.
 function servedNavMenu(served, groups) {
@@ -8361,7 +8591,11 @@ async function runOnce(fresh = true, pv = preview) {
         if (kind === "DROPDOWN" || kind === "BUTTONS") {
           const { options, labels, hints } = inputOptions(s.roles, rows, varname);
           if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
-          dd[i] = { kind, varname, options, labels, hints, caption };
+          // ::DROPDOWN_STYLE (#411): 'search' / 'native' overrides the
+          // option-count threshold that otherwise picks the widget.
+          const dsr = kind === "DROPDOWN" && s.roles.find((r) => r[1] === "DROPDOWN_STYLE");
+          const dropdownStyle = dsr ? String(rows[0]["c" + dsr[0]] ?? "").trim().toLowerCase() : null;
+          dd[i] = { kind, varname, options, labels, hints, caption, dropdownStyle };
           lit = `'${String(dpVars[varname]).replace(/'/g, "''")}'`;
         } else if (kind === "TOGGLE") {
           // A BOOLEAN variable; the query's value is the default.
@@ -10196,6 +10430,46 @@ function inputOptions(roles, rows, varname) {
 function optionLabel(meta, k) {
   return (meta.labels && meta.labels[k]) || meta.options[k];
 }
+// Fills a <select> with an input's options (shared by ::DROPDOWN's plain
+// <select> and the searchable combobox's hidden fallback <select>, #411).
+function fillSelectOptions(select, meta) {
+  meta.options.forEach((o, k) => {
+    const opt = document.createElement("option");
+    opt.value = o;
+    const hint = meta.hints && meta.hints[k];
+    opt.textContent = hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k);
+    if (o === dpVars[meta.varname]) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+// A search box appears once a list gets long, so many categories/options
+// stay usable — shared threshold for ::MULTISELECT's popover search and
+// ::DROPDOWN's searchable combobox (#411). `'search'`/`'native'::DROPDOWN_STYLE`
+// overrides it either way.
+const SEARCHABLE_OPTION_THRESHOLD = 50;
+function dropdownIsSearchable(meta) {
+  if (meta.dropdownStyle === "native") return false;
+  if (meta.dropdownStyle === "search") return true;
+  return meta.options.length > SEARCHABLE_OPTION_THRESHOLD;
+}
+// The indices of `meta.options` matching `q` — a case-insensitive substring
+// of the value or its ::OPTION_LABEL, like ::MULTISELECT's search (empty `q`:
+// every option, in order). A standalone, DOM-free function so the searchable
+// ::DROPDOWN's filter (#411) is unit-testable.
+function ddMatches(meta, q) {
+  const needle = String(q).trim().toLowerCase();
+  const out = [];
+  for (let k = 0; k < meta.options.length; k++) {
+    if (!needle || (optionLabel(meta, k) + "\u0000" + meta.options[k]).toLowerCase().includes(needle)) out.push(k);
+  }
+  return out;
+}
+// An Arrow-key move by `i` (a raw, unwrapped target), wrapped into
+// `[0, count)` — `-1` when there is nothing to highlight. Standalone for the
+// same reason as ddMatches.
+function ddWrapIndex(i, count) {
+  return count ? ((i % count) + count) % count : -1;
+}
 
 function makeControl(meta, bar) {
   if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
@@ -10244,16 +10518,10 @@ function makeControl(meta, bar) {
   }
   let input;
   if (meta.kind === "DROPDOWN") {
+    if (dropdownIsSearchable(meta)) return finalizeControl(makeSearchableDropdown(meta), bar);
     input = document.createElement("select");
     input.setAttribute("aria-label", meta.caption || meta.varname);
-    meta.options.forEach((o, k) => {
-      const opt = document.createElement("option");
-      opt.value = o;
-      const hint = meta.hints && meta.hints[k];
-      opt.textContent = hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k);
-      if (o === dpVars[meta.varname]) opt.selected = true;
-      input.appendChild(opt);
-    });
+    fillSelectOptions(input, meta);
     input.onchange = () => {
       dpVars[meta.varname] = input.value;
       run(false);
@@ -10307,7 +10575,7 @@ function makeControl(meta, bar) {
 
     const rows = [];
     // A search box appears once the list gets long, so many categories stay usable.
-    if (options.length > 50) {
+    if (options.length > SEARCHABLE_OPTION_THRESHOLD) {
       const sb = document.createElement("input");
       sb.type = "search";
       sb.placeholder = `Search ${options.length} options…`;
@@ -10380,6 +10648,255 @@ function makeControl(meta, bar) {
   }
   wrap.appendChild(input);
   return finalizeControl(wrap, bar);
+}
+
+// ::DROPDOWN above SEARCHABLE_OPTION_THRESHOLD (or forced by
+// `'search'::DROPDOWN_STYLE`, #411): an accessible combobox — a text field
+// that filters options by value and ::OPTION_LABEL (case-insensitive
+// substring, like ::MULTISELECT's search box), arrow keys + Enter to pick,
+// Esc or an outside click to close, the current pick shown when closed.
+// Reuses ::MULTISELECT's popover CSS (.dp-ms-pop/.dp-ms-list/.dp-ms-opt).
+// At most DD_WINDOW matches are rendered at a time so a 2,000-option list
+// still filters without jank. A hidden native <select> (.dp-dd-fallback)
+// carries the same options so a no-JS context (the downloaded HTML
+// snapshot) still shows a plain dropdown — downloadHtml() swaps it back in.
+const DD_WINDOW = 200;
+let ddUid = 0;
+function makeSearchableDropdown(meta) {
+  const options = meta.options;
+  const varname = meta.varname;
+  const cont = document.createElement("div");
+  cont.className = "control";
+  const cap = document.createElement("span");
+  cap.textContent = (meta.caption || varname || "") + ":";
+  cont.appendChild(cap);
+
+  const dd = document.createElement("div");
+  dd.className = "dp-ms dp-dd";
+  const uid = "dp-dd-" + ++ddUid;
+  const listId = uid + "-list";
+
+  const inputEl = document.createElement("input");
+  inputEl.type = "text";
+  inputEl.className = "dp-dd-input";
+  inputEl.setAttribute("role", "combobox");
+  inputEl.setAttribute("aria-haspopup", "listbox");
+  inputEl.setAttribute("aria-expanded", "false");
+  inputEl.setAttribute("aria-controls", listId);
+  inputEl.setAttribute("aria-autocomplete", "list");
+  inputEl.setAttribute("aria-label", meta.caption || varname);
+  inputEl.autocomplete = "off";
+  inputEl.spellcheck = false;
+  refocus("dd:" + varname, inputEl); // a pick re-runs (rebuilds the controls); keep the keyboard here
+
+  const pop = document.createElement("div");
+  pop.className = "dp-ms-pop dp-dd-pop";
+  pop.hidden = true;
+  const list = document.createElement("div");
+  list.className = "dp-ms-list dp-dd-list";
+  list.id = listId;
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", meta.caption || varname);
+  pop.appendChild(list);
+  const more = document.createElement("div");
+  more.className = "dp-dd-more";
+  more.hidden = true;
+  pop.appendChild(more);
+
+  const fallback = document.createElement("select");
+  fallback.className = "dp-dd-fallback";
+  fallback.hidden = true;
+  fallback.setAttribute("aria-hidden", "true");
+  fallback.setAttribute("aria-label", meta.caption || varname);
+  fallback.tabIndex = -1;
+  fillSelectOptions(fallback, meta);
+
+  let shown = []; // option indices behind the currently rendered rows
+  let active = -1; // keyboard-highlighted index into `shown`
+  const currentLabel = () => {
+    const k = options.indexOf(dpVars[varname]);
+    return k >= 0 ? optionLabel(meta, k) : "";
+  };
+  const moveActive = (i) => {
+    const items = [...list.querySelectorAll('[role="option"]')];
+    active = ddWrapIndex(i, items.length);
+    items.forEach((el, j) => el.classList.toggle("dp-dd-active", j === active));
+    if (active >= 0) {
+      inputEl.setAttribute("aria-activedescendant", items[active].id);
+      items[active].scrollIntoView({ block: "nearest" });
+    } else inputEl.removeAttribute("aria-activedescendant");
+  };
+  // `.dp-dd-pop` is `position: fixed` (CSS) so a `.controls` bar's
+  // `overflow: hidden` never clips it, but that means it no longer inherits
+  // a position from flowing after `inputEl` — place it from the input's
+  // own `getBoundingClientRect()`, flipped above when there isn't room
+  // below (a short viewport, a ::FIT tab, near the bottom of the page).
+  // Clamps `list`'s own height (not the popover's) to whatever room is
+  // left, so there is only ever the one scrollbar `.dp-ms-list` already
+  // has — not a second one on the popover.
+  const PAD = 8;
+  const place = () => {
+    const r = inputEl.getBoundingClientRect();
+    const w = Math.min(Math.max(r.width, 190), window.innerWidth - 2 * PAD);
+    pop.style.width = w + "px";
+    pop.style.left = Math.max(PAD, Math.min(r.left, window.innerWidth - w - PAD)) + "px";
+    list.style.maxHeight = ""; // the CSS default (230px) — measure the natural size first
+    // `clientHeight` (not `scrollHeight`, which ignores `max-height` by
+    // definition — it reports the full, unclamped content height) is the
+    // list's actual rendered height under the CSS 230px cap.
+    const naturalList = list.clientHeight;
+    const chromeH = pop.clientHeight - naturalList; // padding + the "+N more" line
+    const below = window.innerHeight - r.bottom - PAD;
+    const above = r.top - PAD;
+    const fitsBelow = naturalList + chromeH <= below;
+    if (fitsBelow || below >= above) {
+      pop.style.top = r.bottom + 4 + "px";
+      if (!fitsBelow) list.style.maxHeight = Math.max(80, below - chromeH) + "px";
+    } else {
+      const listH = Math.max(80, Math.min(naturalList, above - chromeH));
+      pop.style.top = Math.max(PAD, r.top - 4 - (listH + chromeH)) + "px";
+      list.style.maxHeight = listH + "px";
+    }
+    // A compositor quirk: under `prefers-reduced-motion: reduce` (which
+    // forces every CSS transition's duration near 0 — `.control input`'s own
+    // border-color/box-shadow transition included), the first frame a
+    // `position: fixed` popover is placed in can paint at a stale position
+    // even though `top`/`left` are already correct in the CSSOM (reproduced
+    // in Chromium; not specific to this popover). Re-applying them one frame
+    // later — reading current values, not ones captured now, so a later
+    // `place()` before this fires is never clobbered — fixes it.
+    requestAnimationFrame(() => {
+      if (pop.hidden) return;
+      const t = pop.style.top,
+        l = pop.style.left;
+      pop.style.top = "0px";
+      void pop.offsetTop; // force the reflow between the two writes
+      pop.style.top = t;
+      pop.style.left = "0px";
+      void pop.offsetLeft;
+      pop.style.left = l;
+    });
+  };
+  const reposition = () => {
+    if (!pop.hidden) place();
+  };
+  const render = (q) => {
+    const all = ddMatches(meta, q);
+    shown = all.slice(0, DD_WINDOW);
+    list.replaceChildren(
+      ...shown.map((k, i) => {
+        const row = document.createElement("div");
+        row.className = "dp-ms-opt dp-dd-opt";
+        row.id = uid + "-opt-" + i;
+        row.setAttribute("role", "option");
+        const picked = options[k] === dpVars[varname];
+        row.setAttribute("aria-selected", picked ? "true" : "false");
+        const hint = meta.hints && meta.hints[k];
+        const label = (picked ? "✓ " : "") + (hint ? `${optionLabel(meta, k)} — ${hint}` : optionLabel(meta, k));
+        const tx = document.createElement("span");
+        tx.textContent = label;
+        row.appendChild(tx);
+        row.onmousedown = (ev) => {
+          ev.preventDefault(); // keep focus on the input (no blur-close) before the pick lands
+          commit(k);
+        };
+        return row;
+      })
+    );
+    if (!shown.length) {
+      const empty = document.createElement("div");
+      empty.className = "dp-dd-empty";
+      empty.textContent = "No matches";
+      list.appendChild(empty);
+    }
+    more.hidden = all.length <= shown.length;
+    if (!more.hidden) more.textContent = `+${all.length - shown.length} more — keep typing to narrow`;
+    moveActive(shown.length ? 0 : -1);
+    if (!pop.hidden) place();
+  };
+  const close = (restore) => {
+    if (pop.hidden) return;
+    pop.hidden = true;
+    dd.removeAttribute("data-open");
+    inputEl.setAttribute("aria-expanded", "false");
+    inputEl.removeAttribute("aria-activedescendant");
+    active = -1;
+    if (restore) inputEl.value = currentLabel();
+    window.removeEventListener("scroll", reposition, true);
+    window.removeEventListener("resize", reposition);
+  };
+  const open = () => {
+    if (!pop.hidden) return;
+    pop.hidden = false;
+    dd.setAttribute("data-open", "true");
+    inputEl.setAttribute("aria-expanded", "true");
+    render(inputEl.value === currentLabel() ? "" : inputEl.value);
+    // capture:true so a scroll inside any nested scrollable ancestor (not
+    // just the window) keeps the popover lined up with the input.
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+  };
+  function commit(k) {
+    const v = options[k];
+    inputEl.value = optionLabel(meta, k);
+    fallback.value = v;
+    close(false);
+    if (v === dpVars[varname]) return;
+    if (document.activeElement === inputEl) dpRefocus = "dd:" + varname;
+    dpVars[varname] = v;
+    run(false);
+  }
+
+  inputEl.value = currentLabel();
+  // Only a genuine click opens it on focus — a refocus() after a pick (the
+  // re-run rebuilds the controls) must not immediately reopen the popover it
+  // just closed.
+  inputEl.onfocus = () => inputEl.select();
+  inputEl.onclick = () => open();
+  inputEl.oninput = () => {
+    if (pop.hidden) open();
+    else render(inputEl.value);
+  };
+  inputEl.onkeydown = (e) => {
+    e.stopPropagation(); // don't let the page's own shortcuts see these keys
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (pop.hidden) return open();
+      moveActive(active + (e.key === "ArrowDown" ? 1 : -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (!pop.hidden && active >= 0) commit(shown[active]);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close(true);
+    } else if (e.key === "Tab") close(true);
+  };
+  inputEl.onblur = () => {
+    // A pick already committed via onmousedown (which runs before blur);
+    // anything else (click outside, Tab away) just closes + restores the label.
+    requestAnimationFrame(() => {
+      if (!dd.contains(document.activeElement)) close(true);
+    });
+  };
+
+  dd.append(inputEl, pop, fallback);
+  cont.appendChild(dd);
+  installDdAutoClose();
+  return cont;
+}
+// One document-level listener blurs any open searchable ::DROPDOWN when you
+// click outside it (its own onblur then closes + restores the label) —
+// installed once, like installMsAutoClose, so later re-runs' widgets are
+// covered too.
+let ddAutoCloseInstalled = false;
+function installDdAutoClose() {
+  if (ddAutoCloseInstalled) return;
+  ddAutoCloseInstalled = true;
+  document.addEventListener("mousedown", (e) => {
+    document.querySelectorAll('.dp-dd[data-open="true"]').forEach((d) => {
+      if (!d.contains(e.target)) d.querySelector(".dp-dd-input").blur();
+    });
+  });
 }
 
 // The control to focus again after the re-run a keyboard change triggers
@@ -13663,6 +14180,18 @@ async function downloadHtml() {
   snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot, .dp-toolbox").forEach((el) => el.remove());
   // …nor the builder's header editing (#60).
   snap.querySelectorAll(".dp-hedit, .dp-head-blank").forEach((el) => el.remove());
+  // A searchable ::DROPDOWN (#411) is wired entirely by listeners cloneNode
+  // drops, so it would be unopenable in a snapshot: swap it for its hidden
+  // native <select> fallback, which needs no JS to browse (same as a plain
+  // ::DROPDOWN's <select> always has, offline).
+  snap.querySelectorAll(".dp-dd").forEach((dd) => {
+    const sel = dd.querySelector(".dp-dd-fallback");
+    if (!sel) return;
+    sel.hidden = false;
+    sel.removeAttribute("aria-hidden");
+    sel.removeAttribute("tabindex");
+    dd.replaceWith(sel);
+  });
   snap.querySelectorAll(".dp-title[data-title]").forEach((h) => {
     if (!h.dataset.title) return h.remove();
     h.textContent = h.dataset.title;
@@ -15629,8 +16158,24 @@ document.addEventListener("keydown", (e) => {
   if (clearSelections()) run(false);
 });
 
+// #417: back/forward on a published site — a popstate from siteGo's own
+// pushState (or a plain history navigation between /d/<id> paths) switches
+// dashboards in place too, same as a nav click; `push: false` (it would
+// otherwise push right back onto the same history entry).
+if (published) {
+  window.addEventListener("popstate", () => {
+    const id = siteDashId(location.pathname + location.search) || window.__anofoxSite?.home;
+    if (id) siteGo(id, location.search, false);
+  });
+}
+
 // Before boot, so a remembered sidebar width applies without a jump.
 initSideResizer();
 initSideDrawer();
 initHeaderMenu();
-boot().catch((e) => status("boot failed: " + e));
+// #417: sitePrepare() (a no-op off a `dashboard --site` page) must finish —
+// window.__served/__anofoxSite set — before boot() ever reads them.
+sitePrepare()
+  .catch((e) => status("site boot failed: " + e))
+  .then(() => boot())
+  .catch((e) => status("boot failed: " + e));
