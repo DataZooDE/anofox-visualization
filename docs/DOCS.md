@@ -1919,11 +1919,16 @@ Charts are usable without a mouse and without sight of the screen:
   mark is labelled with its tooltip text.
 - **Charts as tables.** Swaps every chart for its data table. Reached from the
   toolbar's **⋯ → ▦ Charts as tables** menu item (also in embed and served
-  views; `?tables=1` turns it on, the choice is remembered across
-  dashboards). The *▦ Charts as tables* bar at the top of the dashboard
-  itself is off by default and shown only when the author opts a dashboard
-  in with `-- @astables on` (see *Dashboard header comments*) — a viewer who
-  never saw a bar can still reach the feature from the menu.
+  views; `?tables=1`/`?tables=0` turns it on/off explicitly, the choice is
+  remembered across dashboards). The *▦ Charts as tables* bar at the top of
+  the dashboard itself is off by default and shown only when the author opts
+  a dashboard in with `-- @astables on` (see *Dashboard header comments*) —
+  a viewer who never saw a bar can still reach the feature from the menu. An
+  installation can default the viewer's choice on (`charts_as_tables: true`
+  in `app-config.json` or the serving process's options, `--app-charts-as-tables`
+  for `serve`/`anofox_serve`; #403) without forcing the bar itself on — an
+  explicit `?tables=`/remembered choice always wins over the default,
+  whichever way it was set.
 - **Reduced motion.** With the system's *reduce motion* setting there are no
   entrance animations, line draw-ins, shimmers or transitions.
 - Tables keep `aria-sort` and keyboard row navigation; the `colorblind` and
