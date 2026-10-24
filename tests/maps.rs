@@ -348,6 +348,89 @@ fn custom_edges_and_range_open_the_end_classes() {
 }
 
 #[test]
+fn classed_measure_routes_through_geom_sf_with_counts_and_a_hatch() {
+    // #420 slice 2: `::CLASSES` is now eligible for the new `GGPlot`/
+    // `geom_sf` path (`plot::eligible` no longer excludes it) — but only
+    // when nothing else keeps the map on the old writer; `'none'::PROJECTION`
+    // (planar, no scale bar) keeps this fixture eligible, the same way
+    // `planar_coordinates_keep_their_shape` does for slice 1.
+    let wkt: Vec<Value> = (0..4)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt),
+        Column::new(
+            "v",
+            Role::Value(Kind::Bar),
+            vec![
+                Value::Float(1.0),
+                Value::Float(2.0),
+                Value::Na,
+                Value::Float(1000.0),
+            ],
+        ),
+        Column::new("l", Role::Label, strs(&["A", "B", "C", "D"])),
+        Column::new("p", Role::Projection, konst("none", 4)),
+        Column::new("c", Role::Classes, konst("quantile 2", 4)),
+    ]);
+    // the new path's own markup (`geom_sf`'s `data-geom="sf"`/`gg-band`
+    // class), not the old writer's hand-written `<pattern id="…-nd">` /
+    // `class="dp-legend"` box.
+    assert!(s.contains("data-geom=\"sf\""), "{s}");
+    assert!(!s.contains("class=\"dp-legend\""), "{s}");
+
+    let f = features(&s);
+    assert_eq!(attr(f[0], "data-class"), Some("1"));
+    assert_eq!(attr(f[1], "data-class"), Some("2"));
+    assert_eq!(
+        attr(f[2], "data-class"),
+        None,
+        "the no-data row has no class"
+    );
+    assert_eq!(attr(f[3], "data-class"), Some("2"));
+    // the no-data row: a pattern-filled hatch (#206), not a flat colour,
+    // and no `data-value`/`data-class`.
+    assert!(attr(f[2], "fill").unwrap().starts_with("url(#"), "{}", f[2]);
+    assert!(attr(f[2], "data-value").is_none());
+    assert!(s.contains("<pattern "));
+
+    // the tooltip composes the same "label: value (class K of N: boundary)"
+    // text the old writer wrote.
+    assert!(
+        s.contains("<title>A: 1 (class 1 of 2: 1 – 2)</title>"),
+        "{s}"
+    );
+    assert!(
+        s.contains("<title>D: 1,000 (class 2 of 2: 2 – 1,000)</title>"),
+        "{s}"
+    );
+    assert!(s.contains("<title>C: no data</title>"), "{s}");
+
+    // `data-classes` (the short-formatted class labels, for `mapTableHtml`'s
+    // a11y row) — same shape as the old writer's.
+    let classes = attr(root(&s), "data-classes").unwrap().to_string();
+    assert!(
+        classes.contains("1 – 2") && classes.contains("2 – 1,000"),
+        "{classes}"
+    );
+
+    // the legend: ggplot-rs's own `ScaleFillBinned::class_label` bakes each
+    // class's *trained* row count straight into its label ("lo–hi (n)"),
+    // and a "No data (n)" key for the hatched row — no hand-rolled count
+    // text, this is `scale_fill_binned`'s native format (sipemu/ggplot-rs#180).
+    assert!(s.contains(">1–2 (1)</text>"), "{s}");
+    assert!(s.contains(">2–1000 (2)</text>"), "{s}");
+    assert!(s.contains(">No data (1)</text>"), "{s}");
+}
+
+#[test]
 fn diverging_around_zero_or_the_midpoint() {
     let t = theme::default_light();
     let [lo, mid, hi] = t.diverging_ramp();
