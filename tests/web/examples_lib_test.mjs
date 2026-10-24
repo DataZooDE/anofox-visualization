@@ -249,11 +249,11 @@ assert.equal(JSON.parse(wasm.dashboard_meta("-- @certified 2026-02-30\nSELECT 1;
     svg,
     /<(?:path|polyline) [^>]*fill="none"[^>]*data-row="0" data-series="Van 1" data-label="Van 1: 4 km, back 07:10, 1 stop late"/
   );
-  // KNOWN GAP (sipemu/ggplot-rs#226): ggplot-rs's SVG attribute escaper
-  // doesn't entity-escape `\n` (only `&`/`<`/`>`/`"`), so a literal newline
-  // lands in the `data-label` attribute value instead of the old writer's
-  // `&#10;` — same gap documented in tests/maps.rs.
-  assert.match(svg, /<circle [^>]*data-row="1" data-series="Van 1" data-label="Backstube 3 — bakery\nVan 1, stop #1"/);
+  // Fixed by sipemu/ggplot-rs#234 (#226, ggplot-rs 0.30.1): attribute
+  // values now entity-escape `\t`/`\n`/`\r`, so `data-label` gets the old
+  // writer's own `&#10;` instead of a literal newline — same fix
+  // documented in tests/maps.rs.
+  assert.match(svg, /<circle [^>]*data-row="1" data-series="Van 1" data-label="Backstube 3 — bakery&#10;Van 1, stop #1"/);
   assert.match(svg, /<path [^>]*data-row="2" data-series="Late stop"/);
 }
 

@@ -291,14 +291,14 @@ fn map_marks_carry_row_series_value_and_label() {
             && m[0].contains(" fill=\"none\"")
             && m[0].contains(" data-row=\"0\" data-series=\"Van 1\" data-label=\"Van 1: 12 km\"")
     );
-    // KNOWN GAP (sipemu/ggplot-rs#226, flagged in tests/maps.rs's own copy
-    // of this check): ggplot-rs's SVG attribute escaper doesn't entity-
-    // escape `\n` (only `&`/`<`/`>`/`"`), so a literal newline lands in the
-    // `data-label` attribute value instead of the old writer's `&#10;`.
+    // Fixed by sipemu/ggplot-rs#234 (#226, ggplot-rs 0.30.1, flagged in
+    // tests/maps.rs's own copy of this check): attribute values now
+    // entity-escape `\t`/`\n`/`\r`, so the `data-label` attribute gets the
+    // old writer's own `&#10;` instead of a literal newline.
     assert!(
         m[1].starts_with("<circle ")
             && m[1].contains(
-                " data-row=\"1\" data-series=\"Van 1\" data-label=\"Bakery &amp; Co\nstop #1\""
+                " data-row=\"1\" data-series=\"Van 1\" data-label=\"Bakery &amp; Co&#10;stop #1\""
             )
     );
     // no label text: the title is the plain series, as before
