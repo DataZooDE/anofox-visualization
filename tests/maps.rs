@@ -898,30 +898,23 @@ fn a_colors_level_map_pins_named_levels_and_keeps_the_rest_in_palette_order() {
         assert_eq!(fill_of(&all, s), fill_of(&plain, s));
         assert_eq!(fill_of(&some, s), fill_of(&plain, s));
     }
-    // the legend: the named levels first, in the written order.
-    // KNOWN GAP (flagged to team-lead): ggplot-rs's own legend draws
-    // primitives directly, with no wrapping `<g class="…">` of its own —
-    // unlike the old hand-composed `dp-legend` box, there's no selector
-    // to scope to here, so this checks order directly in the full SVG
-    // (safe: these exact label strings only ever appear in legend text).
-    // KNOWN GAP (flagged to team-lead, not yet resolved): the *colors*
-    // are still correct (checked above — Depot/Late stop keep their
-    // pinned hex, the vans keep their palette slots) but ggplot-rs's own
-    // discrete legend doesn't draw swatches in `MapFill::category`'s
-    // `levels` order (named levels first) — it currently shows them in
-    // data/row order instead (Van 1, Van 2, Late stop, Depot). Asserting
-    // the actual order here rather than silently dropping the check;
-    // worth another look at `MapFill`'s `Scale::breaks()` (`fill.rs`) or
-    // an upstream question about how the discrete legend sources its
-    // order from a custom `Scale`.
+    // the legend: the named levels first, in the written order. ggplot-rs's
+    // own legend draws primitives directly, with no wrapping `<g class="…">`
+    // of its own — unlike the old hand-composed `dp-legend` box, there's no
+    // selector to scope to here, so this checks order directly in the full
+    // SVG. A plain `>LABEL<` search isn't enough: every mark's own `<title>`
+    // also wraps its series label in that shape and is drawn (in data/row
+    // order) before the legend, so it would shadow the legend's own
+    // position — match `>LABEL</text>` instead, which only the legend's
+    // `<text>` key (not a mark's `<title>`) ever closes with.
     let (d, l, v) = (
-        all.find(">Depot<").unwrap(),
-        all.find(">Late stop<").unwrap(),
-        all.find(">Van 1<").unwrap(),
+        all.find(">Depot</text>").unwrap(),
+        all.find(">Late stop</text>").unwrap(),
+        all.find(">Van 1</text>").unwrap(),
     );
     assert!(
-        v < l && l < d,
-        "legend order (data order, not pinned-first — see comment above)"
+        d < l && l < v,
+        "legend order should be named levels first, in written order: {all}"
     );
 }
 
