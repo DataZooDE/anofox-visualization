@@ -279,6 +279,15 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/fit-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/setvar-order-e2e.mjs (#416): a dashboard's own `SET
+      # VARIABLE` that reads an input via getvariable() sees the viewer's
+      # CURRENT pick, whether it is declared before or after that input in
+      # the script — a Share link's first load and a later pick, in a real
+      # browser. Reuses the :8947 server and Chromium above.
+      - name: SET VARIABLE order e2e (#416)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/setvar-order-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/compact-kpi-e2e.mjs (#405): 'compact'::KPI_SIZE on a ::GROUP
       # packs its tiles onto one line each, well under the normal ~96px
       # floor, a tile's own ::KPI_SIZE overriding the box's; ::THRESHOLDS
