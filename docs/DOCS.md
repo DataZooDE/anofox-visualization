@@ -288,6 +288,15 @@ keep only those that act on every tab (or on a KPI row above the tabs) at the
 top. Its variable is global either way — any panel can read it, it lands in
 the URL as `?v.name=` — and a `#Tab?v.name=…` link still sets it.
 
+A `SET VARIABLE` of your own can derive from an input's variable —
+`SET VARIABLE sel = coalesce(nullif(getvariable('channel'), ''), 'all')` —
+**wherever it sits in the script**, before or after the input. Every viewer
+value (an input's pick, a `?v.name=` seed, a cross-filter/selection) is
+applied before any of the dashboard's own `SET VARIABLE`s run, the same
+order the browser, the builder and a locked server all use — so the
+derived variable always sees the current pick, never the input's previous
+one (#416).
+
 ```sql
 SELECT DISTINCT region::DROPDOWN FROM sales;          -- above the tabs: every tab
 SELECT 'Detail'::TAB;
