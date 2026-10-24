@@ -4236,11 +4236,11 @@ fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
     }
 }
 
-/// #423: `::FACET`/`::FACET_FREE` dropped on a chart kind that doesn't
-/// honour it yet (see [`kind_uses_facet`]); `::CATEGORY` on `::HISTOGRAM`
-/// (`GeomHistogram` doesn't read a per-row fill/color aesthetic, unlike
-/// `GeomDensity` — a ggplot-rs gap, not yet worked around here); and
-/// `::HIST_BINS`/`::HIST_NORM` anywhere but a `::HISTOGRAM`.
+/// #423/#446: `::FACET`/`::FACET_FREE` dropped on a chart kind that doesn't
+/// honour it yet (see [`kind_uses_facet`]); `::HIST_BINS`/`::HIST_NORM`
+/// anywhere but a `::HISTOGRAM`. `::CATEGORY` on `::HISTOGRAM` is no longer
+/// warned about — ggplot-rs 0.28's `GeomHistogram` reads a per-row fill
+/// aesthetic (#446), same as `GeomDensity` already did.
 fn histogram_qq_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let mut warn = |code, message: String| {
@@ -4265,15 +4265,6 @@ fn histogram_qq_diags(roles: &[(usize, Role)], stmt: usize, short: &str) -> Vec<
         }
     }
     let kind = chart_kind(roles);
-    if kind == Some(Kind::Histogram) && roles.iter().any(|(_, r)| *r == Role::Category) {
-        warn(
-            "histogram/category-dropped",
-            "::CATEGORY is dropped on ::HISTOGRAM — ggplot-rs's GeomHistogram doesn't yet take \
-             a per-row fill/colour like GeomDensity does; use ::FACET for a reference/current \
-             comparison instead"
-                .to_string(),
-        );
-    }
     for role in [Role::HistBins, Role::HistNorm] {
         if roles.iter().any(|(_, r)| *r == role) && kind != Some(Kind::Histogram) {
             warn(
