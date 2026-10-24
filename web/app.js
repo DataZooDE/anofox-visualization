@@ -6221,6 +6221,12 @@ function loadRoleSets() {
 }
 const inputKind = (s) => INPUTS.find((k) => role(s, k));
 const isInput = (s) => !!inputKind(s);
+// #428: an input's variable name, straight from the plan (src/sql.rs's
+// Panel::names, carried through as a role's 3rd array entry) — no query
+// needed. null for a column with no simple name (a bare, unaliased
+// expression): the caller falls back to its own, unchanged, run-it-and-
+// read-the-column-name path.
+const inputVarName = (s, kind) => (s.roles.find((r) => r[1] === kind) || [])[2] || null;
 // A ::DIAGRAM's KPI format is its nodes' value line, not a KPI tile.
 const metricRole = (s) => !role(s, "DIAGRAM") && s.roles.find((r) => METRICS.includes(r[1]));
 const isHeading = (s) => s.roles.length === 1 && s.roles[0][1] === "LABEL";
@@ -6851,6 +6857,71 @@ function periodUrlParams(prefix, st, def) {
 // or text such as 'on'); unknown text is "false".
 function toggleValue(v) {
   return /^(true|t|1|yes|on)$/i.test(String(v ?? "").trim()) ? "true" : "false";
+}
+// #428: a candidate value — a previous pick or a (by now validated, see
+// inputsToPreset) URL seed — as the literal a `SET VARIABLE` uses. Same
+// quoting rules as the main pre-pass below (NUMBER unquoted, MULTISELECT a
+// VARCHAR[] literal); TOGGLE goes through toggleValue so a seed's
+// 'yes'/'1'/… normalizes the same way a real run would store it.
+// Security (PR #436 review): NUMBER is the one unquoted branch — its text
+// becomes part of the SQL itself, not a string literal — so, unlike every
+// other branch (which quotes+escapes and so cannot break out), it must
+// never trust `v`. inputsToPreset already validates a URL seed before
+// calling this, but `v` can also be a `dpVars` pick from elsewhere, so this
+// checks again itself (reusing validSeed's own NUMBER regex — one
+// definition of "a valid number" for both) and falls back to the inert
+// `NULL`, never emitting `v` itself unquoted without checking it first.
+function inputCandidateLiteral(kind, v) {
+  if (kind === "MULTISELECT") {
+    const arr = Array.isArray(v) ? v : [v];
+    return "[" + arr.map((x) => `'${String(x).replace(/'/g, "''")}'`).join(",") + "]";
+  }
+  if (kind === "TOGGLE") return toggleValue(v) === "true" ? "TRUE" : "FALSE";
+  if (kind === "NUMBER") {
+    const s = String(v ?? "");
+    return validSeed("NUMBER", [s], null) !== undefined ? s : "NULL";
+  }
+  return `'${String(v ?? "").replace(/'/g, "''")}'`;
+}
+// #428: the `SET VARIABLE` statements to run BEFORE any input's OPTIONS
+// query, so one input's options (or default) can depend on another
+// regardless of their order in the script — the resolve half of the fix;
+// the caller runs each one through runSql (runOnce, below). Pure: reads
+// `vars`/`urlSeed`, decides, returns — never mutates or queries anything.
+// PERIOD and DATERANGE are left out: neither narrows from an OPTIONS list
+// the way DROPDOWN/BUTTONS/MULTISELECT do, so there is nothing here for
+// them to unblock.
+// Security (PR #436 review): a URL seed is viewer-controlled and, at this
+// point, UNVALIDATED — seedInputFromUrl's own validSeed() call hasn't run
+// yet (that happens later, at this input's own turn). NUMBER/TOGGLE/
+// DATE/TEXT go through that same validSeed() here (no `options`: none of
+// them need one) and are skipped — resolved as usual, from their own turn
+// — when it rejects the seed; this is what stops e.g. `?v.n=1; <sql>` from
+// ever reaching inputCandidateLiteral's unquoted NUMBER branch as a
+// "value". DROPDOWN/BUTTONS/MULTISELECT can't be checked against their own
+// options yet (not fetched), so they're preset as quoted, escaped text
+// only — never trusted as anything else — same as before.
+function inputsToPreset(stmts, vars, urlSeed) {
+  const out = [];
+  for (const s of stmts) {
+    if (s.setup) continue;
+    const kind = inputKind(s);
+    if (!kind || kind === "PERIOD" || kind === "DATERANGE") continue;
+    const varname = inputVarName(s, kind);
+    if (!varname) continue; // no static name: resolved from its own turn, as before
+    const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
+    let v;
+    if (vars[varname] !== undefined) {
+      v = vars[varname];
+    } else {
+      const seed = urlSeed[varname]; // peeked, not consumed — seedInputFromUrl still needs it
+      if (!seed || !seed.length) continue;
+      v = listed ? (kind === "MULTISELECT" ? seed : seed[0]) : validSeed(kind, seed, null);
+      if (v === undefined) continue;
+    }
+    out.push({ varname, sql: `SET VARIABLE ${varname} = ${inputCandidateLiteral(kind, v)}` });
+  }
+  return out;
 }
 // Record an input's default and apply its URL seed (first run only, while the
 // variable is still unset). `names` = [var] or a ::DATERANGE's [from, to].
@@ -8428,6 +8499,32 @@ async function runOnce(fresh = true, pv = preview) {
   // applies to every panel wherever the directive sits in the script.
   const dd = {};
   dpViewerVars = new Set(); // #416: repopulated below as this run sets each one
+
+  // #428: resolve every input's KNOWN value — a previous pick (dpVars) or a
+  // URL seed (dpUrlSeed) — and apply it before ANY input's OPTIONS query
+  // runs below, so one input's options (or default) can depend on another
+  // regardless of their order in the script: without this, an input whose
+  // OPTIONS query reads getvariable('q') only ever sees q's value from a
+  // PREVIOUS run, because the loop below reaches this statement and q's own
+  // SET VARIABLE in script order — exactly #416's problem, but for an
+  // input's own OPTIONS query instead of the dashboard's SET VARIABLE (the
+  // locked server has it worse: a fresh connection per request means it
+  // never sees it at all unless the client already knows to send it).
+  // inputsToPreset decides (pure: an input whose column has no simple name
+  // is left out here, resolved as usual from its own turn below). This
+  // pass's value is provisional: seedInputFromUrl + the options-validation
+  // below (an input whose pick fell out of its own, now-known, narrower
+  // list falls back to the first remaining option; see docs/DOCS.md) still
+  // run exactly as before, once this input reaches its own turn, and
+  // correct it if needed.
+  for (const { sql } of inputsToPreset(stmts, dpVars, dpUrlSeed)) {
+    try {
+      await runSql(sql);
+    } catch (_) {
+      /* best effort — this input's own turn below still runs normally */
+    }
+  }
+
   // Default theme: the server's (`serve --theme`, anofox_serve_dashboards
   // options.theme), else the built-in light look; a ::THEME overrides it.
   dpTheme.spec = defaultThemeSpec();
