@@ -7379,7 +7379,10 @@ function chartLink(link, el, key, series) {
   } catch (_) {}
   const col = (name) => link.roles.find((r) => r[1] === name);
   const xr = col("DIAGRAM") || col("XAXIS"); // a ::DIAGRAM node's x is its id (its ::XAXIS a pin)
-  const cr = col("CATEGORY");
+  // A ::HEATMAP tile's lane is its ::YAXIS when there's no ::CATEGORY (e.g.
+  // a ::TRACK lane, or a plain heatmap with no category column) — needed to
+  // match the clicked row, not just its x.
+  const cr = col("CATEGORY") || col("YAXIS");
   const x = el.getAttribute("data-x") || "";
   const ds = el.getAttribute("data-series");
   const str = (v) => (v == null ? "" : String(v).replace(/^"|"$/g, ""));
@@ -7391,7 +7394,14 @@ function chartLink(link, el, key, series) {
     rows.find((r) => (xr && str(r["c" + xr[0]]) === key) || (cr && str(r["c" + cr[0]]) === key)) ||
     rows[0] ||
     {};
-  const vars = { value: key, x: xr ? str(row["c" + xr[0]]) : x, series };
+  // `{<column>}` — any named column of the row, not just {value}/{x}/{series}
+  // (#437: a bare {f} used to resolve to nothing, since only those three
+  // were ever filled in). A null-prototype object: the keys are data column
+  // names now, so e.g. {constructor} must not resolve to an inherited
+  // Object.prototype property.
+  const vars = Object.create(null);
+  for (const r of link.roles) if (r[2] && row["c" + r[0]] !== undefined) vars[r[2]] = str(row["c" + r[0]]);
+  Object.assign(vars, { value: key, x: xr ? str(row["c" + xr[0]]) : x, series });
   for (const ia of Object.values(dpIa)) {
     if (ia.drill) (dpDrill[ia.drill.prefix] || []).forEach((v, j) => (vars[ia.drill.levels[j]] = v));
   }
@@ -7399,7 +7409,11 @@ function chartLink(link, el, key, series) {
 }
 // A table's ::LINK cell: a link built from the row ({value} = its first column).
 function linkCell(tpl, row, key) {
-  const vars = { value: key };
+  // A null-prototype object: the keys are a table row's own column names, so
+  // e.g. {constructor} must not resolve to an inherited Object.prototype
+  // property (#437 review).
+  const vars = Object.create(null);
+  vars.value = key;
   for (const [k, v] of Object.entries(row)) vars[k] = v == null ? "" : String(v).replace(/^"|"$/g, "");
   const url = fillLink(tpl, vars);
   const a = document.createElement("a");
@@ -14841,18 +14855,30 @@ function attachHover() {
     el.addEventListener("click", (e) => {
       e.stopPropagation();
       if (rule) return;
-      if (el.closest(".panel-tracks")) return toggleTrackShade(el);
-      const ia = el.closest(".panel")?._ia;
+      const trackSvg = el.closest(".panel-tracks") && el.closest("svg");
+      const track = trackSvg && trackSvg._track;
+      // A ::TRACK lane's own ::LINK (declared on the track's own statement,
+      // not the chart above it) — same priority as a chart mark's, so a
+      // track with no ::LINK of its own still falls through to the
+      // cross-highlight shade below, as before #437.
+      const trackLr = track && track.roles.find((r) => r[1] === "LINK");
+      // A track's own `ia` is its own link only — never the chart's `_ia`
+      // (a track with no ::LINK of its own must not pick up the chart's,
+      // just because they share a `.panel`).
+      const ia = trackSvg
+        ? trackLr && { link: { idx: trackLr[0], rows: track.rows, roles: track.roles } }
+        : el.closest(".panel")?._ia;
       // The mark's own value — its x (a drill level is the x), else its series.
       const dx = el.getAttribute("data-x");
       const key = dx ? String(dx) : series;
-      if (ia && ia.drill && drillInto(ia.drill, key)) return;
+      if (!trackSvg && ia && ia.drill && drillInto(ia.drill, key)) return;
       if (ia && ia.link) {
         const k = markKey(el.closest(".panel"), el);
         const svg = el.closest("svg");
         dpLinkFrom = { ...k, n: Math.max(0, svg ? sameKeyMarks(svg, k).indexOf(el) : 0) };
         return followLink(chartLink(ia.link, el, key, series));
       }
+      if (trackSvg) return toggleTrackShade(el);
       if (ia && ia.select) return clickNamedSelection(ia.select, series, e.shiftKey || e.ctrlKey || e.metaKey);
       // Cross-filter: toggle `selected` to this value and re-query. Queries that
       // opt in (getvariable('selected')) filter; the rest just highlight it.
