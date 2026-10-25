@@ -700,10 +700,14 @@ impl LockedOptions {
                 "max_body_bytes" => o.max_body = num()?.min(64 << 20) as usize,
                 "threads" => o.threads = num()?.min(64) as usize,
                 "frame_ancestors" => {
-                    let list = val.as_array().ok_or("options.frame_ancestors must be an array of origins")?;
+                    let list = val
+                        .as_array()
+                        .ok_or("options.frame_ancestors must be an array of origins")?;
                     let mut out = Vec::new();
                     for o in list {
-                        let o = o.as_str().ok_or("options.frame_ancestors must be an array of origins")?;
+                        let o = o
+                            .as_str()
+                            .ok_or("options.frame_ancestors must be an array of origins")?;
                         if !sv::valid_frame_ancestor(o) {
                             return Err(format!("options.frame_ancestors: '{o}' is not an origin (https://host[:port], 'self' or 'none')"));
                         }
@@ -712,18 +716,27 @@ impl LockedOptions {
                     o.frame_ancestors = Some(out);
                 }
                 "warm" => {
-                    let n = val.as_u64().ok_or("options.warm must be a non-negative integer")?;
+                    let n = val
+                        .as_u64()
+                        .ok_or("options.warm must be a non-negative integer")?;
                     o.warm = Some(n.min(256) as usize);
                 }
                 "cache_mb" => {
-                    let mb = val.as_u64().ok_or("options.cache_mb must be a non-negative integer")?;
+                    let mb = val
+                        .as_u64()
+                        .ok_or("options.cache_mb must be a non-negative integer")?;
                     o.cache_bytes = (mb.min(1 << 16) as usize) << 20;
                 }
                 "attach" => o.attach = val.as_bool().ok_or("options.attach must be a boolean")?,
                 "load" => {
-                    let arr = val.as_array().ok_or("options.load must be a list of extension names")?;
+                    let arr = val
+                        .as_array()
+                        .ok_or("options.load must be a list of extension names")?;
                     for e in arr {
-                        let e = e.as_str().filter(|e| sv::valid_ident(e)).ok_or("options.load: invalid extension name")?;
+                        let e = e
+                            .as_str()
+                            .filter(|e| sv::valid_ident(e))
+                            .ok_or("options.load: invalid extension name")?;
                         o.load.push(e.to_string());
                     }
                 }
@@ -731,28 +744,41 @@ impl LockedOptions {
                     let spec = match val {
                         serde_json::Value::String(t) => t.clone(),
                         serde_json::Value::Object(_) => val.to_string(),
-                        _ => return Err("options.theme must be a theme name or a JSON object".into()),
+                        _ => {
+                            return Err("options.theme must be a theme name or a JSON object".into())
+                        }
                     };
-                    anofox_visualization::theme::resolve(&spec).map_err(|e| format!("options.theme: {e}"))?;
+                    anofox_visualization::theme::resolve(&spec)
+                        .map_err(|e| format!("options.theme: {e}"))?;
                     o.theme = Some(spec);
                 }
                 "hosts" => {
-                    let arr = val.as_array().ok_or("options.hosts must be a list of host names")?;
+                    let arr = val
+                        .as_array()
+                        .ok_or("options.hosts must be a list of host names")?;
                     for h in arr {
                         let h = h
                             .as_str()
                             .map(str::trim)
-                            .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || "-.:[]*".contains(c)))
+                            .filter(|h| {
+                                !h.is_empty()
+                                    && h.chars()
+                                        .all(|c| c.is_ascii_alphanumeric() || "-.:[]*".contains(c))
+                            })
                             .ok_or("options.hosts: invalid host name")?;
                         o.hosts.push(h.to_string());
                     }
                 }
                 "refresh_s" => o.refresh = Some(Duration::from_secs(num()?)),
                 "data" => {
-                    let d = val.as_str().filter(|d| !d.trim().is_empty()).ok_or("options.data must be a directory path")?;
+                    let d = val
+                        .as_str()
+                        .filter(|d| !d.trim().is_empty())
+                        .ok_or("options.data must be a directory path")?;
                     // Canonical: DuckDB compares paths as text, and `..` or a
                     // symlink in the configured path would make that brittle.
-                    let p = std::fs::canonicalize(d).map_err(|e| format!("options.data: '{d}': {e}"))?;
+                    let p = std::fs::canonicalize(d)
+                        .map_err(|e| format!("options.data: '{d}': {e}"))?;
                     if !p.is_dir() {
                         return Err(format!("options.data: '{d}' is not a directory"));
                     }
@@ -762,9 +788,14 @@ impl LockedOptions {
                     o.data = Some(p);
                 }
                 "path_vars" => {
-                    let arr = val.as_array().ok_or("options.path_vars must be a list of variable names")?;
+                    let arr = val
+                        .as_array()
+                        .ok_or("options.path_vars must be a list of variable names")?;
                     for v in arr {
-                        let v = v.as_str().filter(|v| sv::valid_ident(v)).ok_or("options.path_vars: invalid variable name")?;
+                        let v = v
+                            .as_str()
+                            .filter(|v| sv::valid_ident(v))
+                            .ok_or("options.path_vars: invalid variable name")?;
                         o.path_vars.push(v.to_string());
                     }
                 }
@@ -772,8 +803,13 @@ impl LockedOptions {
                     let m = val.as_object().ok_or(
                         "options.nav_picker must be an object like {\"var\": \"model\", \"sql\": \"SELECT …\", \"label\": \"Model\"}",
                     )?;
-                    if let Some(other) = m.keys().find(|k| !matches!(k.as_str(), "var" | "sql" | "label")) {
-                        return Err(format!("options.nav_picker: unknown key '{other}' (var, sql, label)"));
+                    if let Some(other) = m
+                        .keys()
+                        .find(|k| !matches!(k.as_str(), "var" | "sql" | "label"))
+                    {
+                        return Err(format!(
+                            "options.nav_picker: unknown key '{other}' (var, sql, label)"
+                        ));
                     }
                     let var = m
                         .get("var")
@@ -786,13 +822,19 @@ impl LockedOptions {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .ok_or("options.nav_picker.sql must be a SELECT query")?;
-                    let label = match m.get("label") {
-                        None | Some(serde_json::Value::Null) => None,
-                        Some(serde_json::Value::String(s)) if !s.trim().is_empty() && s.chars().count() <= 100 => {
-                            Some(s.clone())
-                        }
-                        _ => return Err("options.nav_picker.label must be a short (<=100 character) string".into()),
-                    };
+                    let label =
+                        match m.get("label") {
+                            None | Some(serde_json::Value::Null) => None,
+                            Some(serde_json::Value::String(s))
+                                if !s.trim().is_empty() && s.chars().count() <= 100 =>
+                            {
+                                Some(s.clone())
+                            }
+                            _ => return Err(
+                                "options.nav_picker.label must be a short (<=100 character) string"
+                                    .into(),
+                            ),
+                        };
                     o.nav_picker = Some(NavPicker {
                         var: var.to_string(),
                         sql: sql.to_string(),
@@ -800,9 +842,24 @@ impl LockedOptions {
                     });
                 }
                 "auth" => auth_cfg = Some(val),
-                "audit" => audit = Some(val.as_str().ok_or("options.audit must be \"stderr\" or a file path")?),
-                "log" => log = Some(val.as_str().ok_or("options.log must be \"stderr\" or a file path")?),
-                "log_vars" => log_vars = Some(val.as_str().ok_or("options.log_vars must be none, names or values")?),
+                "audit" => {
+                    audit = Some(
+                        val.as_str()
+                            .ok_or("options.audit must be \"stderr\" or a file path")?,
+                    )
+                }
+                "log" => {
+                    log = Some(
+                        val.as_str()
+                            .ok_or("options.log must be \"stderr\" or a file path")?,
+                    )
+                }
+                "log_vars" => {
+                    log_vars = Some(
+                        val.as_str()
+                            .ok_or("options.log_vars must be none, names or values")?,
+                    )
+                }
                 "bind" => {
                     o.bind = val
                         .as_str()
@@ -819,7 +876,10 @@ impl LockedOptions {
                 }
                 "duckdb_threads" => o.duckdb_threads = Some(num()?.min(1024) as usize),
                 "policy" => {
-                    let path = val.as_str().filter(|p| !p.trim().is_empty()).ok_or("options.policy must be the path of a policy file, or \"none\"")?;
+                    let path = val
+                        .as_str()
+                        .filter(|p| !p.trim().is_empty())
+                        .ok_or("options.policy must be the path of a policy file, or \"none\"")?;
                     if path == "none" {
                         o.policy_none = true;
                     } else {
@@ -827,8 +887,12 @@ impl LockedOptions {
                     }
                 }
                 "policy_key_env" => {
-                    let name = val.as_str().ok_or("options.policy_key_env must be the name of an environment variable")?;
-                    let key = std::env::var(name).map_err(|_| format!("options.policy_key_env: environment variable '{name}' is not set"))?;
+                    let name = val.as_str().ok_or(
+                        "options.policy_key_env must be the name of an environment variable",
+                    )?;
+                    let key = std::env::var(name).map_err(|_| {
+                        format!("options.policy_key_env: environment variable '{name}' is not set")
+                    })?;
                     if key.len() < 32 {
                         return Err("options.policy_key_env: the key must be at least 32 characters (e.g. `openssl rand -hex 32`)".into());
                     }
@@ -839,24 +903,37 @@ impl LockedOptions {
                 "max_queries" => o.max_queries = num()?.min(1024) as usize,
                 "search_path" => {
                     let p = val.as_str().map(str::trim).ok_or("options.search_path must be a string like \"warehouse\" or \"warehouse.sales\"")?;
-                    o.search_path = parse_search_path(p).map_err(|e| format!("options.search_path: {e}"))?;
+                    o.search_path =
+                        parse_search_path(p).map_err(|e| format!("options.search_path: {e}"))?;
                 }
                 "app" => {
                     if !val.is_object() {
                         return Err("options.app must be an object like {\"name\": \"…\", \"tagline\": \"…\", \"logo\": \"https://…\"}".into());
                     }
-                    let a = AppBrand::from_json(&val.to_string()).map_err(|e| format!("options.app: {e}"))?;
+                    let a = AppBrand::from_json(&val.to_string())
+                        .map_err(|e| format!("options.app: {e}"))?;
                     a.check().map_err(|e| format!("options.app: {e}"))?;
                     o.app = Some(a);
                 }
                 "home" => {
-                    let h = val.as_str().map(str::trim).filter(|h| sv::valid_dashboard_id(h)).ok_or("options.home must be a dashboard id (its file name without .sql)")?;
+                    let h = val
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|h| sv::valid_dashboard_id(h))
+                        .ok_or(
+                            "options.home must be a dashboard id (its file name without .sql)",
+                        )?;
                     o.home = Some(h.to_string());
                 }
                 "source" => {
                     o.source = Some(Arc::new(crate::source::parse(val)?));
                 }
-                other => return Err(format!("options: unknown key '{other}' (max_rows, timeout_ms, max_body_bytes, threads, warm, frame_ancestors, cache_mb, attach, load, theme, hosts, refresh_s, data, path_vars, nav_picker, auth, audit, log, log_vars, bind, memory_limit, duckdb_threads, policy, policy_key_env, max_inflight_mb, max_response_mb, max_queries, search_path, app, home, source)")),
+                // The key list is generated, not copied by hand, so it can't
+                // drift from `--site`'s own `SERVER_OPTION_KEYS` (#501).
+                other => {
+                    let keys = anofox_visualization::host::serve_options::all_keys_joined();
+                    return Err(format!("options: unknown key '{other}' ({keys})"));
+                }
             }
         }
         // A response larger than the in-flight budget could never be sent.
