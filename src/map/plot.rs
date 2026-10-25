@@ -144,6 +144,14 @@ pub(super) fn build(
     // loop). Suppress every row's geometry/fill/class/title below rather
     // than index `m.fill` by row at all.
     let hexbin_takes_over = m.hexbin.is_some();
+    // Whether any row actually keeps its own geometry here (`Value::Str`,
+    // not suppressed to `Value::Na` by hexbin or a symbol anchor below) —
+    // if every row is suppressed (hexbin always suppresses all of them;
+    // an all-symbol-anchored map, slice 3, can too — #420 slice 5's own
+    // lint-parity fix, see the features-layer gate below), the layer
+    // would never draw a mark, only report `StatSf`'s own "removed N
+    // rows" warning for every row.
+    let mut any_feature_geometry = false;
     for i in 0..n {
         // A row with a graduated-symbol anchor (slice 3) takes over: its
         // own area/point geometry is suppressed here (`Value::Na` — the
@@ -159,7 +167,13 @@ pub(super) fn build(
         geometry.push(if hexbin_takes_over || suppressed_by_symbols {
             Value::Na
         } else {
-            row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na)
+            match row_wkt(&m.features[i]) {
+                Some(wkt) => {
+                    any_feature_geometry = true;
+                    Value::Str(wkt)
+                }
+                None => Value::Na,
+            }
         });
         let label = m.label_of(i);
         let label_is_empty = label.is_empty();
@@ -448,21 +462,45 @@ pub(super) fn build(
     let has_base = !base_wkt.is_empty();
 
     // ---- the basemap layer (drawn first — under the features), if any —
-    // then the features layer, on top.
+    // then the features layer, on top. Skipped when `!any_feature_
+    // geometry`: every row's own geometry was suppressed to `Value::Na`
+    // above (hexbin always suppresses all of them; an all-symbol-
+    // anchored map, every row's own anchor already drawn by the separate
+    // symbols layer below, can too) — adding a `geom_sf` layer for an
+    // all-`Na` `features_df` anyway would never draw a mark, only report
+    // `StatSf`'s own "removed N rows containing missing values" warning
+    // for every single row. Found via a native/browser lint parity
+    // failure (`tests/web/lint_test.mjs`) on two different `de-states`-
+    // backed statements (a hexbin one, then a graduated-symbols one with
+    // every row anchored — the same bug, same fix) that resolved their
+    // pack natively (2 BKG attribution lines, `eligible` keeps it on the
+    // old writer) but not in the browser's lint pass (no pack registered
+    // there yet, 0 lines, `eligible` routes it here instead) — exposing
+    // this pre-existing slice-3/4 gap for the first time; not specific to
+    // that resolution mismatch, so fixed for both suppression kinds
+    // uniformly, not just hexbin. `features_df` still backs the plot's
+    // own base data when there's no real basemap either (a non-empty
+    // `GGData`, not the `0`-row kind `annotation_scale`/`annotation_
+    // attribution` need to avoid, see their own comment below) — just
+    // with no `geom_sf` layer of its own.
     let mut plot = if has_base {
         let base_df: Vec<(String, Vec<Value>)> = vec![("geometry".into(), base_wkt)];
-        GGPlot::new(base_df)
-            .aes(Aes::new())
-            .geom_sf_with(GeomSf {
-                fill: land,
-                color: land_edge,
-                alpha: 1.0,
-                line_width: 0.5,
-                ..Default::default()
-            })
-            .geom_sf_with(features_geom())
-            .layer_data(features_df)
-            .layer_aes(features_aes)
+        let mut p = GGPlot::new(base_df).aes(Aes::new()).geom_sf_with(GeomSf {
+            fill: land,
+            color: land_edge,
+            alpha: 1.0,
+            line_width: 0.5,
+            ..Default::default()
+        });
+        if any_feature_geometry {
+            p = p
+                .geom_sf_with(features_geom())
+                .layer_data(features_df)
+                .layer_aes(features_aes);
+        }
+        p
+    } else if !any_feature_geometry {
+        GGPlot::new(features_df).aes(features_aes)
     } else {
         GGPlot::new(features_df)
             .aes(features_aes)
