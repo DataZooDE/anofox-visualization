@@ -211,9 +211,15 @@ import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnos
   assert.equal(res.diagnostics.length, 1);
   assert.deepEqual(res.spans, [[0, 9]]);
 
-  // Defaults (opts omitted): strict false, design true.
+  // Defaults (opts omitted): strict false, design true, no timeout_ms key
+  // (JSON.stringify drops an `undefined` property — the server's own
+  // default applies, same as not sending the field at all).
   await liveCheck("SELECT 2;", { fetchImpl: fakeFetch });
   assert.deepEqual(JSON.parse(calls[1][1].body), { script: "SELECT 2;", strict: false, design: true });
+
+  // timeoutMs, when given, is forwarded as timeout_ms (#199 follow-up).
+  await liveCheck("SELECT 3;", { timeoutMs: 1000, fetchImpl: fakeFetch });
+  assert.deepEqual(JSON.parse(calls[2][1].body), { script: "SELECT 3;", strict: false, design: true, timeout_ms: 1000 });
 
   // A non-ok response rejects with the server's own text.
   await assert.rejects(() => liveCheck("bad", { fetchImpl: fakeFetch }), /the check failed: boom/);

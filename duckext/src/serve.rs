@@ -488,6 +488,10 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
         };
         match run_check(st, &body) {
             Ok(json) => respond(req, 200, "application/json", json.into_bytes()),
+            // #199 follow-up: "a check is already running" is the one error
+            // that isn't the request's fault — 503, like the locked
+            // server's own busy answer, not 400.
+            Err(e) if e.starts_with(CHECK_BUSY) => text(req, 503, &e),
             Err(e) => text(req, 400, &e),
         }
         return;
@@ -565,6 +569,21 @@ const CHECK_MAX_ROWS: usize = 1_000_000;
 /// racing a future authoring feature — never collide.
 static CHECK_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// `/check`'s own timeout (#199 follow-up): a hung or very slow checked
+/// query must not hold [`DbCtx::check`] forever — every later check (there
+/// is only the one check connection) would queue behind it. An author's own
+/// choice per request (`"timeout_ms"` in the body — the same trust level as
+/// `script` itself, which already runs on this server), clamped to
+/// `MAX_CHECK_TIMEOUT_MS`; `DEFAULT_CHECK_TIMEOUT_MS` without one, matching
+/// the locked server's own default `timeout_ms`.
+const DEFAULT_CHECK_TIMEOUT_MS: u64 = 30_000;
+const MAX_CHECK_TIMEOUT_MS: u64 = 120_000;
+
+/// Prefix of [`scratch_check`]'s error when [`DbCtx::check`] is already
+/// locked by another check — matched by the `/check` dispatcher above to
+/// answer 503 instead of 400.
+const CHECK_BUSY: &str = "a check is already running on this server";
+
 fn strip_trailing_semicolons(s: &str) -> &str {
     s.trim()
         .trim_end_matches(|c: char| c == ';' || c.is_whitespace())
@@ -572,11 +591,13 @@ fn strip_trailing_semicolons(s: &str) -> &str {
 
 /// Authoring `/check` (#199): `dashboard --check`'s diagnostics for the
 /// builder's Check button on a live backend, which has no DuckDB-Wasm
-/// scratch session to lint in. Body = `{"script", "strict", "design"}`
-/// (`strict`/`design` optional, default `false`/`true` — `--strict` /
-/// the inverse of `--no-design`). The lint's own queries run on a fresh,
-/// isolated connection ([`scratch_check`]) — never on the live `conn`,
-/// which stays free the whole time. Returns the same shape
+/// scratch session to lint in. Body = `{"script", "strict", "design",
+/// "timeout_ms"}` (`strict`/`design` optional, default `false`/`true` —
+/// `--strict` / the inverse of `--no-design`; `timeout_ms` optional, default
+/// [`DEFAULT_CHECK_TIMEOUT_MS`], clamped to [`MAX_CHECK_TIMEOUT_MS`]). The
+/// lint's own queries run on a fresh, isolated connection
+/// ([`scratch_check`]) — never on the live `conn`, which stays free the
+/// whole time. Returns the same shape
 /// [`anofox_visualization::lint::step_json`] does once `done`:
 /// `{"diagnostics": […], "ok", "summary", "spans": [[start, end], …]}`
 /// (`spans` in UTF-16 code units, for the editor to jump to a statement).
@@ -589,6 +610,11 @@ fn run_check(st: &Authoring, body: &str) -> Result<String, String> {
         .ok_or_else(|| "\"script\" (a string) is required".to_string())?;
     let design = req.get("design").and_then(Value::as_bool).unwrap_or(true);
     let strict = req.get("strict").and_then(Value::as_bool).unwrap_or(false);
+    let timeout_ms = req
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_CHECK_TIMEOUT_MS)
+        .clamp(1, MAX_CHECK_TIMEOUT_MS);
     let diags = scratch_check(
         st,
         script,
@@ -596,6 +622,7 @@ fn run_check(st: &Authoring, body: &str) -> Result<String, String> {
             design,
             stateful_session: true,
         },
+        Duration::from_millis(timeout_ms),
     )?;
     let utf16 = |i: usize| script[..i].encode_utf16().count();
     Ok(serde_json::json!({
@@ -612,24 +639,46 @@ fn run_check(st: &Authoring, body: &str) -> Result<String, String> {
 
 /// Runs `lint::check_opts` on [`DbCtx::check`] — a second connection to the
 /// same database as the live session's `conn`, never `conn` itself, so a
-/// check can never change what the next `/query` sees, and a long check
-/// never blocks one. Isolated the way web/lint.js's `scratchRunner` isolates
-/// DuckDB-Wasm: an ATTACHed `:memory:` scratch database, switched into with
-/// `USE` and put ahead of the live database on `search_path`, so anything
-/// the script creates (a plain or TEMP `CREATE TABLE`/`VIEW`/`MACRO`, `SET
-/// VARIABLE`) lands there, not on the live database's own `main` — while the
-/// live database's tables stay readable (an input's or `::SELECT_AS`'s
-/// default query needs real rows). The scratch database is DETACHed before
-/// returning, success or error alike (`ATTACH` is catalog-wide, not per
-/// connection, so leaving it attached would leak into every later connection
-/// on this database — including the live one's own `duckdb_databases()`);
-/// `check` itself is kept open and reused by the next call, like `conn`.
+/// check can never change what the next `/query` sees. Isolated the way
+/// web/lint.js's `scratchRunner` isolates DuckDB-Wasm: an ATTACHed
+/// `:memory:` scratch database, switched into with `USE` and put ahead of
+/// the live database on `search_path`, so anything the script creates (a
+/// plain or TEMP `CREATE TABLE`/`VIEW`/`MACRO`, `SET VARIABLE`) lands there,
+/// not on the live database's own `main` — while the live database's tables
+/// stay readable (an input's or `::SELECT_AS`'s default query needs real
+/// rows). The scratch database is DETACHed before returning, success or
+/// error alike (`ATTACH` is catalog-wide, not per connection, so leaving it
+/// attached would leak into every later connection on this database —
+/// including the live one's own `duckdb_databases()`); `check` itself is
+/// kept open and reused by the next call, like `conn`.
+///
+/// `timeout` bounds the whole check (every query `check_opts` runs, not
+/// just one): past it, a watchdog thread interrupts `check` the way the
+/// locked server's own `timeout_ms` interrupts a panel connection
+/// ([`Conn::with_deadline_fired`]) — there is only this one check
+/// connection, so a hung query must not hold it forever and queue up every
+/// later check behind it. `check_opts` absorbs an interrupted query's own
+/// DuckDB error into an ordinary `sql-error` diagnostic and keeps going (the
+/// same as any other failed statement), so on a fired timeout this also
+/// appends one more, unambiguous `check/timeout` diagnostic — the result is
+/// never silently "ok" just because `check_opts` itself never saw a hard
+/// error. [`DbCtx::check`] is locked with `try_lock`, not a blocking wait: a
+/// second check already running (there is at most one HTTP worker today,
+/// but this holds regardless) gets a clear, immediate "busy" error
+/// ([`CHECK_BUSY`]) instead of queuing — the mutex is never held across a
+/// response, so this can't itself cause the busy answer it's guarding
+/// against.
 fn scratch_check(
     st: &Authoring,
     script: &str,
     opts: anofox_visualization::lint::LintOptions,
+    timeout: Duration,
 ) -> Result<Vec<anofox_visualization::lint::Diagnostic>, String> {
-    let scratch = st.ctx.check.lock().unwrap_or_else(|p| p.into_inner());
+    let scratch = st
+        .ctx
+        .check
+        .try_lock()
+        .map_err(|_| format!("{CHECK_BUSY}; try again"))?;
     let home_raw = scratch
         .query("SELECT current_database() AS d")
         .and_then(|mut r| r.string_rows(1))
@@ -648,11 +697,36 @@ fn scratch_check(
         "SET search_path = '{name}.main,{}.main'",
         home.replace('\'', "''")
     ))?;
-    let diags =
-        anofox_visualization::lint::check_opts(script, |sql| check_run_query(&scratch, sql), opts);
+    let (diags, fired) = scratch.with_deadline_fired(timeout, |c| {
+        Ok(anofox_visualization::lint::check_opts(
+            script,
+            |sql| check_run_query(c, sql),
+            opts,
+        ))
+    });
+    // `with_deadline_fired` only ever sees `Ok` here (`check_opts` can't
+    // itself return an error — see above), so this is always `Some`; the
+    // fallback is defensive only.
+    let mut diags = diags.unwrap_or_default();
+    if fired {
+        diags.push(anofox_visualization::lint::Diagnostic {
+            severity: anofox_visualization::lint::Severity::Error,
+            stmt: 0,
+            code: "check/timeout",
+            message: format!(
+                "the check did not finish within {}ms and was interrupted; its diagnostics may be incomplete",
+                timeout.as_millis()
+            ),
+            sql: String::new(),
+        });
+    }
     // Best-effort cleanup either way; `scratch` closes (and disconnects) on
     // drop regardless, same defence-in-depth web/lint.js's own
-    // `detachAndClose` relies on.
+    // `detachAndClose` relies on. Run even after a fired interrupt: DETACH
+    // is cheap (catalog metadata only, no query execution) and this is the
+    // one connection every later check reuses, so leaving `name` attached —
+    // or `search_path`/the current database pointed at it — would corrupt
+    // every check after this one, not just this one's own cleanliness.
     let _ = scratch.exec(&format!("USE {home}"));
     let _ = scratch.exec(&format!("DETACH DATABASE IF EXISTS {name}"));
     Ok(diags)

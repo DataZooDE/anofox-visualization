@@ -12,6 +12,9 @@
 #     afterwards — no `anofox_check_N` pile-up in `duckdb_databases()`.
 #   * A script the real lint would flag comes back with a non-empty
 #     `diagnostics` array through `/check` too (not just "ok": true always).
+#   * A hung/slow checked query is interrupted by its own `timeout_ms`
+#     instead of holding the one check connection forever; the next,
+#     ordinary check still succeeds right after (the connection recovers).
 # usage: duckext/scripts/test-check-live.sh <extension> [port]
 #        (DUCKDB=… picks the CLI; default: duckdb on PATH)
 set -euo pipefail
@@ -99,6 +102,25 @@ OUT="$(check '{"script": "SELECT 1 AS x::NOT_A_ROLE;"}')"
 NDIAGS="$(json_get "$OUT" 'len(v["diagnostics"])')"
 [ "$NDIAGS" != "0" ] || fail "a script the real lint flags should come back with diagnostics: $OUT"
 echo "OK: /check reports real diagnostics, not just \"ok\": true"
+
+# A query that would run forever, with a short timeout_ms: /check must not
+# hang (there is only the one check connection — a hung query would hold it
+# for every later check, forever, without this).
+OUT="$(check '{"script": "SELECT count(*) FROM range(100000000000) a, range(100000000000) b;", "timeout_ms": 1000}')"
+[ "$(json_get "$OUT" 'v["ok"]')" = "false" ] || fail "a timed-out check should not read ok: true: $OUT"
+CODE="$(json_get "$OUT" '[d["code"] for d in v["diagnostics"]]' 2>/dev/null)"
+case "$CODE" in *check/timeout*) ;; *) fail "a timed-out check should carry a check/timeout diagnostic: $OUT" ;; esac
+echo "OK: /check interrupts a query past its timeout_ms"
+
+# The check connection recovers: an ordinary check right after still works
+# (not left wedged by the interrupt above).
+OUT="$(check '{"script": "SELECT 1 AS ok;"}')"
+[ "$(json_get "$OUT" 'v["ok"]')" = "true" ] || fail "the check connection did not recover after a timeout: $OUT"
+echo "OK: /check recovers for the next call after a timeout"
+
+DBS="$(query "SELECT database_name FROM duckdb_databases() WHERE database_name LIKE 'anofox_check_%'")"
+[ "$DBS" = "[]" ] || fail "the timed-out check's scratch database was left attached: $DBS"
+echo "OK: a timed-out check still detaches its scratch database"
 
 echo "SELECT anofox_serve_stop($PORT);" >&3
 exec 3>&-
