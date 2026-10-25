@@ -1308,3 +1308,95 @@ fn mini_overlay_draws_b_filled_under_a_outline() {
          crisp on top where the two overlap: {svg}"
     );
 }
+
+// #517 S1: a headless render of a dashboard that reads `viewer_state` gets
+// an empty seed of that temp (same rule as `lint::check_opts`) so it
+// renders instead of erroring on a table no real server has populated.
+struct RecordingMock {
+    executed: Vec<String>,
+}
+impl DataProvider for RecordingMock {
+    fn execute(&mut self, sql: &str) -> Result<(), String> {
+        self.executed.push(sql.to_string());
+        Ok(())
+    }
+    fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        Ok(vec![("c0".into(), s(&["hi"]))])
+    }
+}
+
+#[test]
+fn render_seeds_an_empty_viewer_state_when_the_script_reads_it() {
+    let script = "SELECT value::TEXT_SMALL FROM viewer_state;";
+    let mut db = RecordingMock {
+        executed: Vec::new(),
+    };
+    let svg = render_dashboard_svg(script, &mut db, &DashboardOptions::default())
+        .expect("renders instead of erroring on a missing viewer_state");
+    assert!(svg.starts_with("<svg"));
+    assert!(
+        db.executed
+            .iter()
+            .any(|s| s.contains("CREATE TEMP TABLE viewer_state")),
+        "expected the viewer_state temp to be created: {:?}",
+        db.executed
+    );
+    assert!(
+        db.executed
+            .iter()
+            .any(|s| s.contains("CREATE TEMP VIEW viewer_state_latest")),
+        "expected the viewer_state_latest view to be created: {:?}",
+        db.executed
+    );
+}
+
+struct ShadowingMock {
+    executed: Vec<String>,
+}
+impl DataProvider for ShadowingMock {
+    fn execute(&mut self, sql: &str) -> Result<(), String> {
+        self.executed.push(sql.to_string());
+        Ok(())
+    }
+    fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        if sql.contains("duckdb_tables()") {
+            // A real, non-temp `viewer_state` already exists.
+            return Ok(vec![("n".into(), f(&[1.0]))]);
+        }
+        Ok(vec![("c0".into(), s(&["hi"]))])
+    }
+}
+
+// #517, review of #530 #5: a dashboard whose connection already has a
+// *real* `viewer_state` (an attached database's table, say) must not get
+// an empty temp seeded on top of it — that would shadow the real one for
+// the rest of the session.
+#[test]
+fn render_does_not_shadow_a_pre_existing_real_viewer_state() {
+    let script = "SELECT value::TEXT_SMALL FROM viewer_state;";
+    let mut db = ShadowingMock {
+        executed: Vec::new(),
+    };
+    render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        !db.executed
+            .iter()
+            .any(|s| s.contains("CREATE TEMP TABLE viewer_state")),
+        "must not seed an empty viewer_state over a real one: {:?}",
+        db.executed
+    );
+}
+
+#[test]
+fn render_does_not_seed_viewer_state_when_not_needed() {
+    let script = "SELECT week::XAXIS, sum(n)::BARCHART FROM t GROUP BY ALL;";
+    let mut db = RecordingMock {
+        executed: Vec::new(),
+    };
+    render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap();
+    assert!(
+        db.executed.is_empty(),
+        "an unrelated dashboard shouldn't get the viewer_state temp: {:?}",
+        db.executed
+    );
+}

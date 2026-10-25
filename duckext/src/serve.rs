@@ -729,6 +729,16 @@ fn scratch_check(
     // every check after this one, not just this one's own cleanliness.
     let _ = scratch.exec(&format!("USE {home}"));
     let _ = scratch.exec(&format!("DETACH DATABASE IF EXISTS {name}"));
+    // #517, review of #530 #5: `check_opts`'s `viewer_state`/
+    // `viewer_state_latest` temps (if a `::SUBMIT` script needed them)
+    // live in `temp.main`, not in the scratch database `DETACH` just
+    // dropped — so they would otherwise outlive this one check and shadow
+    // whatever any *later* check's own `viewer_state` reference resolves
+    // to on this same, reused connection. Explicitly schema-qualified so
+    // this can never touch a real (non-temp) `viewer_state`/
+    // `viewer_state_latest` some other check's dashboard legitimately has.
+    let _ = scratch.exec("DROP VIEW IF EXISTS temp.main.viewer_state_latest");
+    let _ = scratch.exec("DROP TABLE IF EXISTS temp.main.viewer_state");
     Ok(diags)
 }
 

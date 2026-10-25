@@ -168,6 +168,25 @@ fn show_if_holds(
 /// the dashboard chrome directives — so a `::THEME` anywhere applies to every
 /// panel.
 fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, DashboardChrome) {
+    // #517 S1: a dashboard reading `viewer_state` (read-back, S3) or
+    // carrying `::SUBMIT` gets the server's own temps, empty — see
+    // `lint::check_opts`'s matching injection and
+    // `sql::script_needs_viewer_state`'s doc comment. Skipped when a real
+    // (non-temp) `viewer_state`/`viewer_state_latest` already exists on
+    // this connection, which seeding ours would otherwise shadow (review
+    // of #530 #5).
+    if sql::script_needs_viewer_state(script) {
+        let shadows_a_real_table = provider
+            .query(sql::viewer_state_exists_probe_sql())
+            .ok()
+            .and_then(|cols| cols.first().and_then(|(_, vals)| vals.first()?.as_f64()))
+            .is_some_and(|n| n > 0.0);
+        if !shadows_a_real_table {
+            for stmt in sql::viewer_state_setup_statements() {
+                let _ = provider.execute(stmt);
+            }
+        }
+    }
     let mut chrome = DashboardChrome::default();
     let mut steps = Vec::new();
     let mut sections = sql::requires::Sections::default();

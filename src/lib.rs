@@ -306,6 +306,22 @@ pub enum Role {
     /// searchable combobox) or `'native'` (a plain `<select>`), overriding
     /// the option-count threshold the browser otherwise switches on (#411).
     DropdownStyle,
+    /// A button that records this viewer's answers (`::SUBMIT`, #517): the
+    /// value is the button's label. **Requires a server with
+    /// `options.state`; not active until that server-side support lands
+    /// (#517 slice S2) — until then a dashboard with `::SUBMIT` lints clean
+    /// but the button has nowhere to post to.** The statement carrying it is
+    /// run as the viewer: exactly one row makes the button available, zero
+    /// rows hides it, more than one row is an error (see
+    /// [`roles::REGISTRY`]'s `submit/rows` lint).
+    Submit,
+    /// The variables a `::SUBMIT` button records (`::SUBMIT_VARS`): a
+    /// comma-separated list of names, each declared by one of this
+    /// dashboard's own input statements (#517).
+    SubmitVars,
+    /// Optional confirmation text shown after a successful `::SUBMIT`
+    /// (`::SUBMIT_DONE`, #517).
+    SubmitDone,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
     Text(TextSize),
     /// A KPI tile's density (`::KPI_SIZE`): `'compact'` (single-line
