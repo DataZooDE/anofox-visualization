@@ -11,7 +11,9 @@ const grab = (name) => {
   return m[0];
 };
 const { escapeHtml, safeUrl, renderMarkdown } = new Function(
-  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
+  `const IMAGE_DATA_TYPES = ["png", "jpeg", "jpg", "gif", "webp", "svg+xml"];\n` +
+    `const MAX_IMAGE_SRC_CHARS = 2000000;\n` +
+    `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("assetUrl")}\n${grab("imageSrc")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
 )();
 
 // escapeHtml is attribute-safe.
@@ -45,6 +47,8 @@ const cases = [
   "```\n</code><script>alert(1)</script>\n```",
   `# "quoted" 'title' <b>`,
   `> [a](data:text/html,<script>x</script>)`,
+  `![a](javascript:alert(1))`,
+  `![a](data:text/html,<script>x</script>)`,
 ];
 for (const md of cases) {
   const html = renderMarkdown(md);
@@ -58,4 +62,40 @@ for (const md of cases) {
 }
 // A good link still renders.
 assert.match(renderMarkdown("[docs](https://example.com/a?b=1&c=2)"), /<a href="https:\/\/example\.com\/a\?b=1&amp;c=2"/);
+
+// ---- markdown images (#514) ----
+// A rejected src renders the alt text, not a broken <img>.
+assert.doesNotMatch(renderMarkdown("![a](javascript:alert(1))"), /<img/i);
+assert.ok(renderMarkdown("![a](javascript:alert(1))").startsWith("<p>a"));
+
+// `![x [a](b)](c)`: the image rule runs before the link rule, so the `[a](b)`
+// inside what looks like alt text never becomes a live <a> — the plan's
+// named attribute/HTML-injection case. Exactly one <img>, no <a> anywhere,
+// and (critically) no "<a" landing inside an attribute value.
+{
+  const html = renderMarkdown("![x [a](https://b)](https://c/i.png)");
+  assert.equal((html.match(/<img/g) || []).length, 1, html);
+  assert.ok(!/<a\b/i.test(html), `a link leaked: ${html}`);
+  for (const m of html.matchAll(/="([^"]*)"/g)) assert.ok(!m[1].includes("<"), `tag inside an attribute: ${html}`);
+}
+
+// Alt text is escaped (never raw markup in the attribute).
+assert.match(renderMarkdown("![<b>](https://c/i.png)"), /alt="&lt;b&gt;"/);
+
+// A good data: image renders with that src.
+assert.match(
+  renderMarkdown("![a](data:image/svg+xml;base64,AAA)"),
+  /<img class="md-img" src="data:image\/svg\+xml;base64,AAA" alt="a" loading="lazy" decoding="async">/
+);
+
+// No alt text: alt="".
+assert.match(renderMarkdown("![](https://c/x.png)"), /alt=""/);
+
+// Text and a formula survive around an image.
+{
+  const html = renderMarkdown("before ![a](https://c/i.png) $x^2$ after");
+  assert.ok(html.startsWith("<p>before <img"), html);
+  assert.ok(html.includes('class="md-math"'), html);
+  assert.ok(html.endsWith(" after</p>"), html);
+}
 console.log("web sanitize tests: ok");

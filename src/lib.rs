@@ -30,6 +30,7 @@ mod downsample;
 pub mod format;
 pub mod freshness;
 pub mod host;
+pub mod image;
 pub mod inputs;
 pub mod kpi;
 pub mod lint;
@@ -241,6 +242,9 @@ pub enum Role {
     Label,
     /// A per-box title bar (`::TITLE`/`::HEADING`) drawn above a single panel.
     Title,
+    /// An image's text alternative (`::ALT`); `''` means decorative
+    /// (`alt=""`, no lint warning).
+    Alt,
     /// The measured value, carrying the chart kind (`count()::BARCHART`).
     Value(Kind),
     /// A control input (`::DROPDOWN`/`::NUMBER`/`::DATE`/`::TEXT`) — the output
@@ -436,6 +440,12 @@ pub enum Role {
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
+    /// A static picture panel (`::IMAGE`/`::PICTURE`/`::IMG`): `assets/x.svg`,
+    /// a `data:image/…` URI or an `https:` URL. See `src/image.rs::src_ok`.
+    Image,
+    /// The `::IMAGE` shown instead, while the dashboard is in dark mode
+    /// (`::IMAGE_DARK`/`::IMG_DARK`).
+    ImageDark,
     /// A panel's definition (`::INFO`): an ⓘ on its title bar shows the text.
     Info,
     /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,

@@ -51,6 +51,7 @@ terminal.
 | `::CATEGORY` | `::SERIES`, `::COLOR`, `::COLOUR` | encoding | grouping / colour series (discrete) |
 | `::LABEL` |  | encoding | section heading when alone; chart title / per-mark or per-feature label otherwise |
 | `::TITLE` | `::HEADING` | encoding | a title bar above one panel |
+| `::ALT` | `::ALT_TEXT` | encoding | an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL |
 | `::INFO` | `::DESCRIPTION`, `::DEFINITION` | encoding | a definition behind an ⓘ on the panel's title bar (hover, focus or click) |
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
@@ -171,8 +172,10 @@ terminal.
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
-| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas |
+| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
+| `::IMAGE` | `::PICTURE`, `::IMG` | kpi | a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption |
+| `::IMAGE_DARK` | `::IMG_DARK` | kpi | the ::IMAGE shown while the dashboard is dark |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
@@ -1796,6 +1799,99 @@ SELECT '**Margins of the last two weeks are provisional** — late returns still
 `::MARKDOWN` text (`callout/no-text`). Like `::MARKDOWN`, callouts are drawn by the
 browser (builder, `serve`, locked servers). The *A sales cockpit in your brand*
 sample has both.
+
+### Images (`::IMAGE`, `![alt](src)`)
+
+A dashboard panel can show a static picture — a diagram, a logo, a screenshot
+— drawn through `::IMAGE`, or a small inline figure in a `::MARKDOWN` text via
+Markdown's `![alt](src)` syntax. Both accept the same sources and are never
+sanitised as markup: every source is drawn through an `<img>` (browser) or an
+SVG `<image href=…>` (static output), so a browser runs no script and loads
+no external resource from inside an SVG used this way. **Never** inline SVG
+markup into the DOM, an `<object>` or an `<iframe>`.
+
+```sql
+SELECT 'assets/concept-drift.svg' ::IMAGE,
+       'assets/concept-drift-dark.svg' ::IMAGE_DARK,        -- optional; shown while the dashboard is dark
+       'Concept drift: inputs look the same, the input→outcome relationship moved' ::ALT,
+       'Concept drift' ::TITLE,
+       'Why input checks miss it' ::LABEL,                   -- optional caption under the image
+       'Drift in P(y|x) with P(x) unchanged' ::INFO;         -- optional ⓘ on the title bar
+SELECT 'Below: ![decision flow from signals to actions](data:image/svg+xml;base64,PHN2Zy…)'::MARKDOWN;
+```
+
+**Accepted sources** (`src/image.rs::src_ok`; the browser's `imageSrc()` gives
+the same verdict for every case):
+
+| Source | Accepted | Notes |
+|---|---|---|
+| `data:image/(png\|jpeg\|jpg\|gif\|webp\|svg+xml)` | yes | followed by `;` or `,` |
+| `https://…` | yes | never `http:` — mixed content on a served https page |
+| a relative path | yes, if it stays inside the folder | no scheme, no leading `/` or `//`, no `\`, no `..`/`.` segment, no segment starting with `.`; a warning unless it starts with `assets/` (where `--site`/the locked server serve files — a later PR) |
+| anything else | no | the alt text shows in a muted box, never a broken-image icon |
+
+Quotes, `<`, `>`, `(`, `)`, backticks and control characters are never
+allowed, the same rule as `::LOGO`/`::FAVICON` (`theme::safe_url`). A source
+over 2 000 000 characters is rejected (`image/too-large`); `--check` warns
+above 512 000.
+
+**Alt text.** `::ALT` is the image's text alternative; `''::ALT` means
+decorative (`alt=""`, no lint warning). Without an `::ALT`, the alt text
+falls back to `::TITLE`, then `::LABEL`, then `""` — `--check` warns
+(`image/no-alt`). In Markdown, `![](src)` gets the same warning
+(`markdown/image-no-alt`). Alt and caption text are only ever set with
+`textContent`/`setAttribute` (`::IMAGE`) or HTML-escaped (Markdown) — never
+built as a string of markup.
+
+**Sizing.** The image fills its panel's width, height following its own
+aspect; `::HEIGHT n` gives it a fixed `n` px box instead, with
+`object-fit: contain` (centred, not stretched). Under `::FIT` an image panel
+takes a share of the row height like a chart. Several `::IMAGE` rows stack in
+one card, each with its own alt (and `::LABEL` caption); `--check` warns
+above 6 (`image/many`).
+
+**Dark variant.** `::IMAGE_DARK` is the same idea as the app bar's
+`logo_dark`: the browser draws both `<img>`s and shows one, keyed on the
+dashboard's own dark toggle (`body.dark`), not the OS setting. Static output
+(`--svg`, the CLI, `serve --dashboards`) uses the dark variant with `--dark`.
+An SVG that switches itself with `prefers-color-scheme` follows the **OS**
+setting inside an `<img>`, not the dashboard's own toggle.
+
+**Static output.** `::IMAGE` becomes an SVG `<image href=… preserveAspectRatio="xMidYMid meet">`
+sized from the image's own pixel size (`src/image.rs::intrinsic_size` reads
+PNG/GIF/JPEG/WebP headers and an SVG's `viewBox`/`width`+`height`; a 9:16
+aspect otherwise) inside the panel frame, with the title bar and caption like
+any other panel — this is panel composition (`src/dashboard.rs`), not a new
+SVG writer for charts (plotting stays through ggplot-rs). `data:` sources are
+embedded as-is; `https:` is kept as a link (it may not show offline, and the
+assistant's preview CSP blocks it — `image/https-offline`); a relative path
+currently draws the alt-text placeholder (serving `assets/` files for static
+output is a later PR). Markdown images in static output render as their alt
+text in brackets (`[decision flow …]`) rather than as pixels. The browser's
+⤓ HTML export fetches and inlines any non-`data:` image so the download works
+fully offline (falling back to the alt text if that fetch fails, e.g. CORS
+on an `https:` source).
+
+**Limits.** `{{col}}`/`{{col:fmt}}` is **not** filled inside a Markdown image
+`src` (`markdownWithValues` strips tokens inside tags) — compute the path in
+an `::IMAGE` instead (`markdown/placeholder-in-image`, a warning). The
+authoring server (`serve [db]`, `anofox_serve`) does not yet serve a
+dashboard folder's `assets/`, so a relative `::IMAGE` there also shows the
+placeholder.
+
+**Lint codes:** `image/bad-src`, `image/outside-folder` (errors);
+`image/not-in-assets`, `image/svg-no-size`, `image/too-large`, `image/empty`,
+`image/no-alt`, `image/many`, `image/https-offline` (warnings);
+`markdown/image-bad-src` (error); `markdown/image-not-in-assets`,
+`markdown/image-svg-no-size`, `markdown/image-too-large`,
+`markdown/image-no-alt`, `markdown/placeholder-in-image` (warnings).
+
+**Images from data are a trust boundary worth knowing about.** A `::MARKDOWN`
+box built from a text column can point an `<img>` at any `https:` host —
+automatically, no click — which reveals the viewer's IP to it (the CSP's
+`img-src` already allows `https:` for `::LOGO`). This is the same trust
+`::LINK` already carries, just without a click; avoid rendering untrusted
+text as `::MARKDOWN`. See `docs/secure-serving.md`.
 
 ### Formatted tooltips
 

@@ -9132,6 +9132,62 @@ async function runOnce(fresh = true, pv = preview) {
         } else if (role(s, "DOWNLOAD_CSV") || role(s, "DOWNLOAD_XLSX") || role(s, "DOWNLOAD_PDF")) {
           const rows = JSON.parse(rowsJson);
           container.appendChild(mkDownload(s, rows));
+        } else if (role(s, "IMAGE")) {
+          // A static picture panel (#514): one <img> per row (::IMAGE_DARK
+          // shown instead while body.dark — CSS, not a reload), stacked in
+          // one card. Never inline SVG markup into the DOM, <object> or
+          // <iframe>: every source goes through imageSrc() and an <img>, so
+          // a browser runs no script and loads no external resource from
+          // inside an SVG used as an image this way.
+          const fig = mkPanel();
+          fig.classList.add("dp-image");
+          const rows = JSON.parse(rowsJson);
+          const idx = (tok) => {
+            const r = s.roles.find((x) => x[1] === tok);
+            return r ? r[0] : -1;
+          };
+          const iImg = idx("IMAGE"), iDark = idx("IMAGE_DARK"), iAlt = idx("ALT"), iTitle = idx("TITLE"), iLabel = idx("LABEL");
+          const text = (row, i) => (i < 0 || row == null || row["c" + i] == null ? null : String(row["c" + i]).replace(/^"|"$/g, ""));
+          if (rows[0] && text(rows[0], iTitle) != null) fig.appendChild(mkTitle(text(rows[0], iTitle)));
+          const missing = (alt) => {
+            const span = document.createElement("span");
+            span.className = "dp-img-missing";
+            span.textContent = alt || "image";
+            return span;
+          };
+          const mkImg = (url, alt, dark) => {
+            const img = document.createElement("img");
+            img.className = dark ? "dp-img dp-img-dark" : "dp-img";
+            img.alt = alt;
+            img.loading = "lazy";
+            img.decoding = "async";
+            img.draggable = false;
+            img.src = url;
+            img.onerror = () => img.isConnected && img.replaceWith(missing(alt));
+            return img;
+          };
+          for (const row of rows.length ? rows : [null]) {
+            const alt = iAlt >= 0 ? (text(row, iAlt) ?? "") : (text(row, iTitle) ?? text(row, iLabel) ?? "");
+            const src = imageSrc(text(row, iImg));
+            const darkSrc = iDark >= 0 ? imageSrc(text(row, iDark)) : "";
+            const wrap = document.createElement("div");
+            wrap.className = "dp-img-row" + (darkSrc ? " has-dark" : "");
+            wrap.appendChild(src ? mkImg(src, alt, false) : missing(alt));
+            if (darkSrc) wrap.appendChild(mkImg(darkSrc, alt, true));
+            fig.appendChild(wrap);
+            const caption = text(row, iLabel);
+            if (caption) {
+              // Not <figcaption>: mkTitle() already uses that tag for the
+              // panel's own title bar, and a <figure> takes at most one.
+              const cap = document.createElement("div");
+              cap.className = "dp-image-caption";
+              cap.textContent = caption;
+              fig.appendChild(cap);
+            }
+          }
+          if (boxH) fig.classList.add("dp-image-fixed");
+          container.appendChild(fig);
+          panels++;
         } else if (role(s, "MARKDOWN")) {
           const fig = mkPanel();
           fig.classList.add("md-box");
@@ -10121,6 +10177,20 @@ function fitDash(dash, env) {
       }
       const ph = (p._dp && p._dp.ph) || +p.dataset.dpPh || 300;
       return { kind: "chart", w: ph + chrome, min: 0, chrome, holder };
+    }
+    // #514: an ::IMAGE panel takes a share of the row height like a chart
+    // (the CSS then fits the picture into it with object-fit: contain)
+    // rather than the "box" kind's own-height floor.
+    if (p.matches(".dp-image")) {
+      const row = p.querySelector(".dp-img-row") || p;
+      let chrome = px(p, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]);
+      for (const c of p.children) {
+        const cs = getComputedStyle(c);
+        if (cs.position === "absolute" || cs.position === "fixed" || !c.getClientRects().length || c === row) continue;
+        chrome += c.getBoundingClientRect().height + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+      }
+      const ph = +p.dataset.dpPh || 300;
+      return { kind: "chart", w: ph + chrome, min: 0, chrome, holder: row };
     }
     if (p.matches(".metric, .dp-skel-kpi")) {
       // its own content (the tile may be stretched to its row's height)
@@ -13740,6 +13810,41 @@ function chromeUrlOk(u) {
   const i = low.indexOf(":");
   return i < 0 || low.slice(0, i).includes("/") || low.startsWith("https:") || low.startsWith("http:");
 }
+// ── ::IMAGE / ::IMAGE_DARK / markdown `![alt](src)` source rules (#514) ──
+// The browser counterpart of `src/image.rs::src_ok`; both must give the
+// same verdict for every case in tests/fixtures/image_src_vectors.json
+// (tests/web/image_src_test.mjs is the parity guard).
+const IMAGE_DATA_TYPES = ["png", "jpeg", "jpg", "gif", "webp", "svg+xml"];
+const MAX_IMAGE_SRC_CHARS = 2000000;
+// `raw` → a usable URL, or "" when rejected. Accepted: `data:image/(png|
+// jpeg|jpg|gif|webp|svg+xml)` followed by `;`/`,`; `https:` (never `http:` —
+// mixed content on a served https page); a relative path that stays inside
+// the dashboard's own folder (no scheme, no leading `/` or `//`, no `\`, no
+// `..`/`.` segment, no segment starting with `.`) — resolved through
+// assetUrl(). Never quotes, `<`, `>`, `(`, `)`, backticks or control
+// characters (same set as safeUrl/chromeUrlOk); at most 2 000 000 chars.
+function imageSrc(raw) {
+  const u = String(raw ?? "");
+  if (!u || u.length > MAX_IMAGE_SRC_CHARS || /["'<>()\\`\u0000-\u001f\u007f-\u009f]/.test(u)) return "";
+  const low = u.toLowerCase();
+  if (low.startsWith("data:")) {
+    return IMAGE_DATA_TYPES.some((t) => low.startsWith(`data:image/${t};`) || low.startsWith(`data:image/${t},`)) ? u : "";
+  }
+  if (low.startsWith("//") || u.startsWith("/")) return "";
+  const i = low.indexOf(":");
+  if (i >= 0 && !low.slice(0, i).includes("/")) return low.startsWith("https:") ? u : "";
+  for (const seg of u.split("/")) {
+    if (!seg || seg === "." || seg === ".." || seg.startsWith(".")) return "";
+  }
+  return assetUrl(u);
+}
+// A relative image path (already validated by imageSrc) → the URL to fetch
+// it from. PR A (this): unchanged — resolves against the page's own URL, as
+// documented for the no-server browser builder. PR B adds the served
+// (`/d/<id>/assets/…`) and published-site cases (plan-514 decision 5).
+function assetUrl(p) {
+  return p;
+}
 // The SQL text with its `'…'::<roleName>` statement set to `value`: the first
 // statement casting to the role is replaced (a string inside quotes doesn't
 // count), else one is added at the end of the "-- ── Look" section (or after
@@ -13899,20 +14004,44 @@ function renderMarkdown(src) {
   // swaps in KaTeX; a token inside a tag (a link URL) is dropped.
   const inline = (s) => {
     const math = [];
+    const imgs = [];
     const md = mathSpans(s)
       .map((g) => (g.tex == null ? g.text : (math.push(g), `\uE002${math.length - 1}\uE003`)))
       .join("");
-    const html = inlineMd(md);
-    if (!math.length) return html;
-    const tok = /\uE002(\d+)\uE003/g;
+    const html = inlineMd(md, imgs);
+    if (!math.length && !imgs.length) return html;
+    const mtok = /\uE002(\d+)\uE003/g;
+    const itok = /\uE004(\d+)\uE005/g;
     const span = (g) =>
       `<span class="md-math${g.display ? " md-math-display" : ""}" data-tex="${esc(g.tex)}"><code class="md-tex">${esc(g.tex)}</code></span>`;
     return html.replace(/<[^>]*>|[^<]+/g, (part) =>
-      part[0] === "<" ? part.replace(tok, "") : part.replace(tok, (_, k) => span(math[+k]))
+      part[0] === "<"
+        ? part.replace(mtok, "").replace(itok, "")
+        : part.replace(mtok, (_, k) => span(math[+k])).replace(itok, (_, k) => imgs[+k])
     );
   };
-  const inlineMd = (s) =>
+  // `imgs` collects this call's generated <img> tags, tokenized with a
+  // private-use marker (like the math tokens above) so they survive the
+  // later inline rules untouched, then get swapped back in `inline()`'s
+  // outside-of-tags pass. This MUST run before the `[text](url)` link rule
+  // below: `![x [a](b)](c)` is tokenized here as one `<img>` (alt "x [a",
+  // src "b") with the `](c)` tail left as inert literal text \u2014 if the link
+  // rule ran first on the untokenized text, `[a](b)` inside what was meant
+  // as alt text would become a live `<a href>`, landing inside the next
+  // attribute this function builds (an attribute/HTML-injection path).
+  const inlineMd = (s, imgs) =>
     esc(s)
+      .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, src) => {
+        // `src` is already HTML-escaped by esc(s) above; undo that to check
+        // it with imageSrc(), the same as the link rule does for `u` below.
+        const unesc = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
+        const rawSrc = src.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => unesc[e]);
+        const url = imageSrc(rawSrc);
+        if (!url) return alt; // a rejected src renders the alt text (decision 7)
+        // `alt` is already escaped (it's a substring of esc(s)); `url` isn't.
+        imgs.push(`<img class="md-img" src="${esc(url)}" alt="${alt}" loading="lazy" decoding="async">`);
+        return `\uE004${imgs.length - 1}\uE005`;
+      })
       .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/__([^_]+)__/g, "<strong>$1</strong>")
@@ -14450,6 +14579,37 @@ async function downloadHtml() {
   const math = snap.querySelector(".katex") ? await katexCssInline() : "";
   // no KaTeX stylesheet to embed: the formulas' MathML alone (drawn natively)
   if (!math) snap.querySelectorAll(".katex-html").forEach((el) => el.remove());
+  // ::IMAGE / markdown images (#514): the export must work offline, so any
+  // non-data: src (same-origin relative, or https:) is fetched and inlined
+  // as a data: URI; a failure (e.g. CORS refuses an https: source) falls
+  // back to the alt text, same as a live load error.
+  const toInline = [...snap.querySelectorAll("img.dp-img, img.md-img")].filter(
+    (img) => !/^data:/i.test(img.getAttribute("src") || "")
+  );
+  await Promise.all(
+    toInline.map(async (img) => {
+      const src = img.getAttribute("src");
+      const alt = img.getAttribute("alt") || "";
+      try {
+        const r = await fetch(src);
+        if (!r.ok) throw new Error(String(r.status));
+        const blob = await r.blob();
+        if (blob.size > 2 * 1024 * 1024) throw new Error("too large for the export");
+        const dataUrl = await new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => resolve(fr.result);
+          fr.onerror = () => reject(fr.error || new Error("read failed"));
+          fr.readAsDataURL(blob);
+        });
+        img.setAttribute("src", dataUrl);
+      } catch (_) {
+        const span = document.createElement("span");
+        span.className = "dp-img-missing";
+        span.textContent = alt || "image";
+        img.replaceWith(span);
+      }
+    })
+  );
   const content = snap.innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};

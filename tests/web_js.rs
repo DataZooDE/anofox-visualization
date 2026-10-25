@@ -24,6 +24,13 @@ fn web_html_sinks_are_inert() {
     run_node("sanitize_test.mjs");
 }
 
+/// #514: imageSrc() must classify every src exactly like Rust's
+/// src/image.rs::src_ok (tests/fixtures/image_src_vectors.json).
+#[test]
+fn web_image_src_matches_the_rust_classifier() {
+    run_node("image_src_test.mjs");
+}
+
 #[test]
 fn web_reads_svg_metadata() {
     run_node("svg_attrs_test.mjs");

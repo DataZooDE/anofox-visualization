@@ -572,6 +572,17 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/setvar-order-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/image-e2e.mjs (#514): ::IMAGE / ::IMAGE_DARK / markdown
+      # ![alt](src) images — a data: SVG panel's alt/caption, the dashboard's
+      # own dark toggle (not the OS setting) swapping ::IMAGE_DARK in, an
+      # inline markdown image, a rejected src drawing the alt-text
+      # placeholder with no network request, ::HEIGHT staying fixed and
+      # contained, no overflow at 390px, and the offline ⤓ HTML export.
+      # Reuses the :8947 server and Chromium above.
+      - name: Image panel e2e (::IMAGE, #514)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/image-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/compact-kpi-e2e.mjs (#405): 'compact'::KPI_SIZE on a ::GROUP
       # packs its tiles onto one line each, well under the normal ~96px
       # floor, a tile's own ::KPI_SIZE overriding the box's; ::THRESHOLDS
