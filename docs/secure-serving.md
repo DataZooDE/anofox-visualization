@@ -49,6 +49,24 @@ so the protection is about making sure *only you* can send it:
   `403` — including pages on *other* localhost ports (cookies are shared across
   ports, origins are not). A `text/plain` form/fetch POST from a web page
   therefore never reaches the SQL endpoint.
+- **Check, server-side (`/check`, #199).** The builder's Check button
+  (`dashboard --check`'s own diagnostics) needs a scratch session to run its
+  queries in without touching the live data — DuckDB-Wasm has one
+  (`web/lint.js`'s `scratchRunner`), but a live backend has none, so this
+  endpoint runs the whole lint on the server instead: `POST /check` with
+  `{"script", "strict", "design"}` (the body `dashboard --check --strict
+  --no-design` would take), behind the same token/cookie, `Host` and
+  `Origin` checks as `/query`. Its queries never run on the live session's
+  own connection: a second connection, opened once at start-up next to the
+  live one, is ATTACHed its own `:memory:` scratch database per call
+  (switched into with `USE`, ahead of the live database on `search_path`,
+  DETACHed after) — a `CREATE TABLE`/`VIEW`/`MACRO` or `SET VARIABLE` the
+  checked script runs lands there, never on the live database, while the
+  live database's own tables stay readable (an input's or `::SELECT_AS`'s
+  default needs real rows). Returns `{"diagnostics", "ok", "summary",
+  "spans"}`, the same shape the browser's own check settles to. Not
+  available on the locked server (`anofox_serve_dashboards`): that one never
+  accepts SQL from the client at all, checked or not.
 - **No CLI meta commands in the text you send** (`serve` bin). It runs SQL
   through the `duckdb` CLI. A body (or `--init` script) with a line that
   starts with `.` is refused, so `.shell`, `.read`, `.output`, … from the
