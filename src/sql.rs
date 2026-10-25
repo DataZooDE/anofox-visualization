@@ -849,6 +849,20 @@ pub fn viewer_state_setup_statements() -> [&'static str; 2] {
     ]
 }
 
+/// A query a caller runs **before** [`viewer_state_setup_statements`]:
+/// `n > 0` (the first column of its one row) means a real (non-temp)
+/// `viewer_state`/`viewer_state_latest` already exists on this connection
+/// — seeding our own empty temps on top would shadow it (confirmed in
+/// DuckDB: a later `CREATE TABLE viewer_state AS …` makes a `SELECT
+/// count(*) FROM viewer_state` return the *temp*'s row count, 0, not the
+/// real table's — review of #530 #5). The caller must skip seeding when
+/// this is `> 0`, so the dashboard's own `viewer_state` wins instead.
+pub fn viewer_state_exists_probe_sql() -> &'static str {
+    "SELECT count(*) AS n FROM (SELECT table_name AS name FROM duckdb_tables() \
+     WHERE NOT temporary UNION ALL SELECT view_name AS name FROM duckdb_views() \
+     WHERE NOT temporary) WHERE name IN ('viewer_state', 'viewer_state_latest')"
+}
+
 /// Does `script` reference `viewer_state` (any case) or carry a `::SUBMIT`
 /// panel? Both mean a real server would (eventually, #517 S3) seed the temp
 /// [`viewer_state_setup_sql`] creates — lint and headless renderers create

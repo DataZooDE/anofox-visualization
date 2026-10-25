@@ -103,6 +103,23 @@ NDIAGS="$(json_get "$OUT" 'len(v["diagnostics"])')"
 [ "$NDIAGS" != "0" ] || fail "a script the real lint flags should come back with diagnostics: $OUT"
 echo "OK: /check reports real diagnostics, not just \"ok\": true"
 
+# #517, review of #530 #5: a ::SUBMIT/viewer_state dashboard's empty temp
+# (seeded by lint, since no real server has populated it) must not outlive
+# its own check on the one, reused check connection — otherwise it shadows
+# whatever a *later*, unrelated check's own viewer_state resolves to.
+OUT="$(check '{"script": "SELECT value::TEXT_SMALL FROM viewer_state;"}')"
+[ "$(json_get "$OUT" 'v["ok"]')" = "true" ] || fail "a viewer_state read should check ok against the seeded empty temp: $OUT"
+echo "OK: a ::SUBMIT/viewer_state dashboard checks clean against its seeded empty temp"
+
+query "CREATE TABLE viewer_state AS SELECT 'real' AS value" >/dev/null
+OUT="$(check '{"script": "SELECT value::TEXT_SMALL FROM viewer_state;"}')"
+CODES="$(json_get "$OUT" '[d["code"] for d in v["diagnostics"]]' 2>/dev/null)"
+case "$CODES" in
+  *empty-panel*) fail "a later check's real viewer_state was shadowed by the earlier check's leftover empty temp: $OUT" ;;
+esac
+echo "OK: the check connection does not leak a viewer_state temp into the next check"
+query "DROP TABLE viewer_state" >/dev/null
+
 # A query that would run forever, with a short timeout_ms: /check must not
 # hang (there is only the one check connection — a hung query would hold it
 # for every later check, forever, without this).

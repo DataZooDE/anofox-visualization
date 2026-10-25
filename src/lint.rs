@@ -179,14 +179,22 @@ where
     // carrying `::SUBMIT` gets the server's own temps, empty — created
     // here so neither this lint nor a headless render (`dashboard.rs`'s
     // `render_dashboard_svg`) fails on a table no real server has
-    // populated yet.
+    // populated yet. Skipped when a real (non-temp) `viewer_state`/
+    // `viewer_state_latest` already exists on this connection — seeding
+    // ours on top would shadow it (review of #530 #5).
     if sql::script_needs_viewer_state(script) {
-        for stmt in sql::viewer_state_setup_statements() {
-            if opts.stateful_session {
-                let _ = run_query(&format!("{stmt};"));
-            } else {
-                prelude.push_str(stmt);
-                prelude.push_str(";\n");
+        let shadows_a_real_table = run_query(&format!("{};", sql::viewer_state_exists_probe_sql()))
+            .ok()
+            .and_then(|rows| rows.first().and_then(|r| r.values().next()?.as_u64()))
+            .is_some_and(|n| n > 0);
+        if !shadows_a_real_table {
+            for stmt in sql::viewer_state_setup_statements() {
+                if opts.stateful_session {
+                    let _ = run_query(&format!("{stmt};"));
+                } else {
+                    prelude.push_str(stmt);
+                    prelude.push_str(";\n");
+                }
             }
         }
     }
@@ -2961,9 +2969,11 @@ fn has_role_cast(sql: &str) -> bool {
 /// Does a setup statement `CREATE` a table/view named `viewer_state` or
 /// `viewer_state_latest` (`state/shadowed`, #517 §5)? A simple forward scan
 /// for `TABLE`/`VIEW` (skipping `TEMP`/`OR REPLACE`/`IF NOT EXISTS` before
-/// it, and those words too) then the next identifier — doesn't resolve a
-/// schema-qualified name (`main.viewer_state`), which is a rarer case this
-/// advisory can miss without being wrong when it does fire.
+/// it, and those words too) then the following (possibly dotted,
+/// `main.viewer_state`/`"x".viewer_state`) identifier, of which only the
+/// last segment is the table/view's own name — a schema or catalog
+/// qualifier never changes what the bare name resolves to for a later
+/// unqualified `FROM viewer_state` (review of #530, nits).
 fn creates_reserved_state_name(sql: &str) -> Option<&'static str> {
     use sql::lex::{tokenize, TokKind};
     let toks: Vec<_> = tokenize(sql)
@@ -2983,9 +2993,20 @@ fn creates_reserved_state_name(sql: &str) -> Option<&'static str> {
     {
         j += 1;
     }
-    let name_tok = toks.get(j)?;
+    // The dotted name's last segment: `a.b.c` tokenizes as `a . b . c`, so
+    // keep consuming `. <ident>` pairs and remember the last identifier.
+    let mut name_tok = toks.get(j)?;
     if !matches!(name_tok.kind, TokKind::Word | TokKind::QuotedIdent) {
         return None;
+    }
+    j += 1;
+    while toks.get(j).is_some_and(|t| t.is_punct(sql, '.')) {
+        let Some(next) = toks.get(j + 1) else { break };
+        if !matches!(next.kind, TokKind::Word | TokKind::QuotedIdent) {
+            break;
+        }
+        name_tok = next;
+        j += 2;
     }
     let name = name_tok.text(sql).trim_matches('"');
     ["viewer_state", "viewer_state_latest"]
@@ -7818,8 +7839,43 @@ mod submit_tests {
     }
 
     #[test]
+    fn a_pre_existing_real_viewer_state_is_not_shadowed() {
+        // The probe (`sql::viewer_state_exists_probe_sql`) reports a real
+        // (non-temp) `viewer_state` already on the connection — e.g. an
+        // attached database's table — so lint must not create its own
+        // empty temp on top of it (review of #530 #5: that would shadow
+        // the real one for the rest of the session).
+        let script = "SELECT value::TEXT_SMALL FROM viewer_state;\n";
+        let mut saw_create = false;
+        let d = check(script, |q| {
+            if q.contains("duckdb_tables()") {
+                return Ok(vec![row(json!({"n": 1}))]);
+            }
+            if q.contains("CREATE TEMP TABLE viewer_state") {
+                saw_create = true;
+            }
+            Ok(vec![row(json!({"c0": "hi"}))])
+        });
+        assert!(
+            !saw_create,
+            "must not seed an empty viewer_state over a real one: {d:?}"
+        );
+    }
+
+    #[test]
     fn shadowing_viewer_state_is_an_error() {
         let d = check("CREATE TEMP TABLE viewer_state AS SELECT 1;\n", |_| {
+            Ok(vec![])
+        });
+        assert!(has(&d, "state/shadowed"), "{d:?}");
+    }
+
+    #[test]
+    fn shadowing_a_dotted_viewer_state_is_also_an_error() {
+        // `CREATE TABLE main.viewer_state …` — a schema/catalog qualifier
+        // doesn't change what a later bare `FROM viewer_state` resolves to
+        // (review of #530, nits).
+        let d = check("CREATE TABLE main.viewer_state AS SELECT 1;\n", |_| {
             Ok(vec![])
         });
         assert!(has(&d, "state/shadowed"), "{d:?}");

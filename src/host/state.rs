@@ -325,21 +325,31 @@ pub struct StartContext<'a> {
 
 /// Plan §1's placement rules for `options.state.path`. Fails closed: any
 /// I/O error resolving a directory (doesn't exist, no permission, …) is
-/// itself a refusal, not a "skip the check".
+/// itself a refusal, not a "skip the check" — including a `dashboard_dir`
+/// that doesn't canonicalise, which used to be skipped (failing open,
+/// against this function's own contract; review of #530).
 ///
 /// Checked against the path's **parent** directory, which must already
 /// exist (the store file itself is created by [`Store::open`] if missing).
+/// This is the config-time advisory check (a good error message before a
+/// server even tries to create the store); [`Store::open`] enforces the
+/// filesystem-level safety (symlinks, ownership, the TOCTOU window) itself,
+/// independently, since by the time it runs this check may be stale (S2:
+/// there is a time gap between `validate_start` and `Store::open`).
 pub fn check_path_rules(
     path: &Path,
     data_dir: Option<&Path>,
     dashboard_dir: &Path,
 ) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("options.state.path must be an absolute path".into());
+    }
     if path.file_name().is_none() {
         return Err("options.state.path must name a file".into());
     }
     let parent_raw = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
+        _ => Path::new("/"),
     };
     let parent = std::fs::canonicalize(parent_raw)
         .map_err(|e| format!("options.state.path: '{}': {e}", parent_raw.display()))?;
@@ -356,8 +366,14 @@ pub fn check_path_rules(
             parent.display()
         ));
     }
+    // `options.data` is assumed already canonical (it was canonicalised by
+    // `LockedOptions::parse` itself) but re-canonicalised here defensively
+    // rather than trusted — a caller (or a future one) passing a raw path
+    // by mistake would otherwise silently miss this check.
     if let Some(data) = data_dir {
-        if parent.starts_with(data) || data.starts_with(&parent) {
+        let data = std::fs::canonicalize(data)
+            .map_err(|e| format!("options.data: '{}': {e}", data.display()))?;
+        if parent.starts_with(&data) || data.starts_with(&parent) {
             return Err(
                 "options.state.path must not be inside options.data (it would become \
                  readable through allowed_directories), and options.data must not be inside \
@@ -366,35 +382,84 @@ pub fn check_path_rules(
             );
         }
     }
-    if let Ok(dash) = std::fs::canonicalize(dashboard_dir) {
-        if parent.starts_with(&dash) {
-            return Err("options.state.path must not be inside the dashboard folder".into());
+    // Was `if let Ok(dash) = … { … }` — a `dashboard_dir` that doesn't
+    // canonicalise used to be silently skipped, failing *open* against
+    // this function's documented "fails closed".
+    let dash = std::fs::canonicalize(dashboard_dir).map_err(|e| {
+        format!(
+            "options.state: dashboard folder '{}': {e}",
+            dashboard_dir.display()
+        )
+    })?;
+    if parent.starts_with(&dash) {
+        return Err("options.state.path must not be inside the dashboard folder".into());
+    }
+    // The snapshot's own scratch files live under the system temp dir, and
+    // `/tmp`, `/var/tmp`, `/dev/shm` are shared, world-writable-by-design
+    // scratch space regardless of `$TMPDIR` — refuse all of them by name,
+    // not only whatever `std::env::temp_dir()` resolves to right now (a
+    // `$TMPDIR` pointing elsewhere would otherwise leave the literal `/tmp`
+    // unchecked; review of #530 #4).
+    let mut forbidden_roots: Vec<PathBuf> = Vec::new();
+    for p in ["/tmp", "/var/tmp", "/dev/shm"] {
+        if let Ok(c) = std::fs::canonicalize(p) {
+            forbidden_roots.push(c);
         }
     }
-    // The snapshot's own scratch files live under the system temp dir — a
-    // store there could be swept by anything that cleans it up, and the
-    // path rule means to keep the store off every path the server already
-    // treats specially.
-    if let Ok(tmp) = std::fs::canonicalize(std::env::temp_dir()) {
-        if parent.starts_with(&tmp) {
-            return Err(
-                "options.state.path must not be inside the system temp directory (the \
-                 snapshot's own scratch files live there)"
-                    .into(),
-            );
-        }
+    if let Ok(c) = std::fs::canonicalize(std::env::temp_dir()) {
+        forbidden_roots.push(c);
+    }
+    if let Some(root) = forbidden_roots.iter().find(|r| parent.starts_with(r)) {
+        return Err(format!(
+            "options.state.path must not be inside '{}' (a shared scratch/temp directory, \
+             regardless of $TMPDIR)",
+            root.display()
+        ));
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(&parent)
             .map_err(|e| format!("options.state.path: '{}': {e}", parent.display()))?;
-        if meta.permissions().mode() & 0o022 != 0 {
+        if meta.mode() & 0o022 != 0 {
             return Err(format!(
                 "options.state.path: '{}' is group- or world-writable — point it at a \
                  directory only the server can write",
                 parent.display()
             ));
+        }
+        // Review of #530 #4: the parent's *owner* wasn't checked at all — a
+        // 0755 directory created by another local user would otherwise
+        // pass. Accepted owners: this process (euid) or root.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid && meta.uid() != 0 {
+            return Err(format!(
+                "options.state.path: '{}' is not owned by this server (or root) — a \
+                 directory another local account controls could replace its contents",
+                parent.display()
+            ));
+        }
+        // Every ancestor up to the root: a loosely-permissioned one (no
+        // sticky bit) could be renamed/replaced by another local account,
+        // swapping out the directory this check just approved before
+        // `Store::open` gets to it.
+        let mut cur: &Path = &parent;
+        loop {
+            let ameta =
+                std::fs::symlink_metadata(cur).map_err(|e| format!("'{}': {e}", cur.display()))?;
+            let mode = ameta.mode();
+            let loosely_writable = mode & 0o022 != 0 && mode & 0o1000 == 0;
+            if loosely_writable {
+                return Err(format!(
+                    "options.state.path: '{}' is group- or world-writable without the sticky \
+                     bit — a local attacker could replace it (or something under it)",
+                    cur.display()
+                ));
+            }
+            match cur.parent() {
+                Some(p) if p != cur && !p.as_os_str().is_empty() => cur = p,
+                _ => break,
+            }
         }
     }
     Ok(())
@@ -409,7 +474,10 @@ pub const CURRENT_VERSION: u32 = 1;
 /// "dashboard":"tutorial","submit":"quiz_1","id":"<32 hex>","vars":{…}}`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Record {
-    pub v: u32,
+    /// Kept as `u64` (not `u32`, the wire type `v` is specified as) so a
+    /// huge or negative-looking `v` in a hand-edited line can't silently
+    /// truncate into looking like `CURRENT_VERSION` (review of #530: nits).
+    pub v: u64,
     pub seq: u64,
     pub ts: String,
     pub user: String,
@@ -455,8 +523,25 @@ impl Record {
         self.to_json().to_string()
     }
 
+    /// The exact field set a line may carry — anything else fails closed
+    /// (review of #530: `from_json` used to silently drop unknown fields).
+    const KNOWN_FIELDS: &'static [&'static str] = &[
+        "v",
+        "seq",
+        "ts",
+        "user",
+        "auth",
+        "dashboard",
+        "submit",
+        "id",
+        "vars",
+    ];
+
     fn from_json(v: &serde_json::Value) -> Result<Record, String> {
         let o = v.as_object().ok_or("not a JSON object")?;
+        if let Some(unknown) = o.keys().find(|k| !Self::KNOWN_FIELDS.contains(&k.as_str())) {
+            return Err(format!("unknown field '{unknown}'"));
+        }
         let get_str = |k: &str| -> Result<String, String> {
             o.get(k)
                 .and_then(|v| v.as_str())
@@ -477,7 +562,7 @@ impl Record {
             .cloned()
             .ok_or("missing or non-object 'vars'")?;
         Ok(Record {
-            v: v_ver as u32,
+            v: v_ver,
             seq,
             ts: get_str("ts")?,
             user: get_str("user")?,
@@ -533,102 +618,251 @@ impl std::fmt::Debug for Store {
 /// Bytes accounted per line beyond its own length (the `\n`).
 const LINE_OVERHEAD: u64 = 1;
 
+/// `clean`'s content is at least a prefix of our own header's literal
+/// start, or vice versa — the only basis on which an entirely-unterminated
+/// buffer (no `\n` anywhere) is trusted as *our* torn write rather than
+/// some unrelated file (review of #530, the BLOCKER).
+const HEADER_MAGIC: &str = "{\"anofox_state\"";
+
+fn looks_like_our_header_prefix(buf: &str) -> bool {
+    if buf.len() <= HEADER_MAGIC.len() {
+        HEADER_MAGIC.starts_with(buf)
+    } else {
+        buf.starts_with(HEADER_MAGIC)
+    }
+}
+
 impl Store {
     /// Open (creating if absent) and validate the whole file, holding an
     /// exclusive `flock` for as long as the returned `Store` lives.
     /// `max_mb` is the cap from `options.state.max_mb` (plan §4.4).
+    ///
+    /// Opens the **parent directory** first (`O_DIRECTORY|O_NOFOLLOW`) and
+    /// `openat`s the file under that held descriptor, so there is no
+    /// window between resolving `path` and creating the file in which it
+    /// could be swapped for a symlink (review of #530 #3: "Check/open
+    /// TOCTOU"). This repeats the ownership/permission checks
+    /// [`check_path_rules`] already did at config time — independently,
+    /// since by the time this runs that check may be stale (S2 adds a gap
+    /// between `validate_start` and `open`).
+    #[cfg(unix)]
     pub fn open(path: &Path, max_mb: u64) -> Result<Store, String> {
+        use std::ffi::CString;
+        use std::io::{Read, Write};
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
         let max_bytes = max_mb.saturating_mul(1 << 20);
-        #[cfg(unix)]
-        {
-            use std::io::{Read, Seek, SeekFrom, Write};
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            use std::os::unix::io::AsRawFd;
-
-            let mut o = std::fs::OpenOptions::new();
-            o.create(true)
-                .read(true)
-                .append(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW);
-            let mut file = o
-                .open(path)
-                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-            let meta = file
-                .metadata()
-                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-            if !meta.is_file() {
-                return Err(format!(
-                    "options.state.path: '{}' is not a regular file",
-                    path.display()
-                ));
-            }
-            if meta.permissions().mode() & 0o077 != 0 {
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                    .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-            }
-            // Single writer (plan §1 D6): a second server on this path must
-            // fail to start, not silently interleave writes.
-            let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if locked != 0 {
-                return Err(format!(
-                    "state file '{}' is in use by another server",
-                    path.display()
-                ));
-            }
-
-            file.seek(SeekFrom::Start(0))
-                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-            let mut buf = String::new();
-            file.read_to_string(&mut buf).map_err(|e| {
-                format!(
-                    "options.state.path: '{}' is not valid UTF-8 or can't be read: {e}",
-                    path.display()
-                )
-            })?;
-
-            let (clean, torn_bytes) = recover_torn_tail(&buf);
-            if torn_bytes > 0 {
-                let new_len = (buf.len() - torn_bytes) as u64;
-                file.set_len(new_len)
-                    .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-                eprintln!(
-                    "[anofox-state] {}: truncated a torn last line ({torn_bytes} bytes) — a \
-                     crash or `kill -9` mid-write, recovered at start",
-                    path.display()
-                );
-            }
-
-            let mut state = validate_and_index(clean, max_bytes, file)
-                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-            if clean.is_empty() {
-                let header = format!(
-                    "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{}\"}}\n",
-                    crate::host::access::rfc3339(std::time::SystemTime::now())
-                );
-                state
-                    .file
-                    .write_all(header.as_bytes())
-                    .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-                state
-                    .file
-                    .sync_data()
-                    .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-                state.size_bytes = header.len() as u64;
-            }
-            Ok(Store {
-                inner: Mutex::new(state),
-                max_bytes,
-                failed: AtomicBool::new(false),
-                #[cfg(test)]
-                force_fail: AtomicBool::new(false),
-            })
+        if !path.is_absolute() {
+            return Err("options.state.path must be an absolute path".into());
         }
-        #[cfg(not(unix))]
-        {
-            let _ = (path, max_bytes);
-            Err("the state store needs a Unix host (flock)".into())
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| !n.is_empty())
+            .ok_or_else(|| format!("options.state.path: '{}' must name a file", path.display()))?;
+        let parent_raw = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("/"),
+        };
+
+        struct Fd(i32);
+        impl Drop for Fd {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::close(self.0);
+                }
+            }
         }
+
+        let dir_cstr = CString::new(parent_raw.as_os_str().as_bytes())
+            .map_err(|_| "options.state.path: the directory path has a NUL byte".to_string())?;
+        let dirfd = unsafe {
+            libc::open(
+                dir_cstr.as_ptr(),
+                libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if dirfd < 0 {
+            return Err(format!(
+                "options.state.path: '{}': {}",
+                parent_raw.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let dirfd = Fd(dirfd);
+
+        let mut dstat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(dirfd.0, &mut dstat) } != 0 {
+            return Err(format!(
+                "options.state.path: '{}': {}",
+                parent_raw.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let euid = unsafe { libc::geteuid() };
+        if dstat.st_uid != euid && dstat.st_uid != 0 {
+            return Err(format!(
+                "options.state.path: '{}' is not owned by this server (or root)",
+                parent_raw.display()
+            ));
+        }
+        if dstat.st_mode as u32 & 0o022 != 0 {
+            return Err(format!(
+                "options.state.path: '{}' is group- or world-writable",
+                parent_raw.display()
+            ));
+        }
+
+        let name_cstr = CString::new(file_name)
+            .map_err(|_| "options.state.path: the file name has a NUL byte".to_string())?;
+        let fd = unsafe {
+            libc::openat(
+                dirfd.0,
+                name_cstr.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(format!(
+                "options.state.path: '{}': {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+
+        let fmeta = file
+            .metadata()
+            .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+        if !fmeta.is_file() {
+            return Err(format!(
+                "options.state.path: '{}' is not a regular file",
+                path.display()
+            ));
+        }
+        if fmeta.nlink() > 1 {
+            return Err(format!(
+                "options.state.path: '{}' has more than one hard link — refusing a file \
+                 that might be shared with something else",
+                path.display()
+            ));
+        }
+        if fmeta.uid() != euid && fmeta.uid() != 0 {
+            return Err(format!(
+                "options.state.path: '{}' is not owned by this server (or root)",
+                path.display()
+            ));
+        }
+
+        // Single writer (plan §1 D6): a second server on this path must
+        // fail to start, not silently interleave writes. `flock` is
+        // unreliable over NFS/CIFS (review of #530: worth a line in the
+        // operator-facing docs once they exist, S5) — `options.state.path`
+        // should be local storage.
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if locked != 0 {
+            return Err(format!(
+                "state file '{}' is in use by another server",
+                path.display()
+            ));
+        }
+
+        // Size cap checked against metadata before reading the whole file
+        // into memory (review of #530 #6).
+        if fmeta.len() > max_bytes {
+            return Err(format!(
+                "options.state.path: '{}' is {} bytes, over max_mb ({max_mb} MiB) — the \
+                 operator must inspect / grow max_mb",
+                path.display(),
+                fmeta.len()
+            ));
+        }
+
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).map_err(|e| {
+            format!(
+                "options.state.path: '{}' is not valid UTF-8 or can't be read: {e}",
+                path.display()
+            )
+        })?;
+
+        // BLOCKER fix (review of #530 #1): validate *before* mutating
+        // anything. The old order truncated a torn tail and chmodded the
+        // file ahead of checking its header — pointing `options.state.path`
+        // at any existing file without a trailing newline (a secret, a
+        // config file) silently destroyed it. Nothing below this point
+        // touches the file until `index` is known good.
+        let (clean, torn_bytes) = recover_torn_tail(&buf);
+        if clean.is_empty() && !buf.is_empty() && !looks_like_our_header_prefix(&buf) {
+            return Err(format!(
+                "options.state.path: '{}' doesn't look like a state store (no complete, \
+                 recognisable header line) — refusing to touch a file that might not be ours",
+                path.display()
+            ));
+        }
+        let index = validate_lines(clean, max_bytes)
+            .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+
+        // Only now, having confirmed `clean` is a valid (possibly empty)
+        // store prefix, mutate the file: drop a torn tail, then tighten
+        // loose permissions (never the other way around, and never when
+        // validation above failed).
+        if torn_bytes > 0 {
+            file.set_len(clean.len() as u64)
+                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+            eprintln!(
+                "[anofox-state] {}: truncated a torn last line ({torn_bytes} bytes) — a \
+                 crash or `kill -9` mid-write, recovered at start",
+                path.display()
+            );
+        }
+        if fmeta.mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+            eprintln!(
+                "[anofox-state] {}: tightened loose file permissions to 0600",
+                path.display()
+            );
+        }
+
+        let mut state = StoreState {
+            file,
+            records: index.records,
+            by_user: index.by_user,
+            next_seq: index.next_seq,
+            size_bytes: index.size_bytes,
+        };
+        if clean.is_empty() {
+            let header = format!(
+                "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{}\"}}\n",
+                crate::host::access::rfc3339(std::time::SystemTime::now())
+            );
+            state
+                .file
+                .write_all(header.as_bytes())
+                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+            state
+                .file
+                .sync_data()
+                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+            state.size_bytes = header.len() as u64;
+        }
+        Ok(Store {
+            inner: Mutex::new(state),
+            max_bytes,
+            failed: AtomicBool::new(false),
+            #[cfg(test)]
+            force_fail: AtomicBool::new(false),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn open(path: &Path, max_mb: u64) -> Result<Store, String> {
+        let _ = (path, max_mb);
+        Err("the state store needs a Unix host (flock)".into())
     }
 
     /// Append one submission, assigning its `seq`/`ts`. `fdatasync`s before
@@ -636,13 +870,17 @@ impl Store {
     #[cfg(unix)]
     pub fn append(&self, new: NewRecord) -> Result<Record, String> {
         use std::io::Write;
+        let mut st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        // Checked under the lock, not before it (review of #530 #2): a
+        // concurrent append failing and one passing this check used to be
+        // able to race, so the second write could land right after a torn
+        // fragment the first one left behind and get acknowledged anyway.
         if self.failed.load(Ordering::SeqCst) {
             return Err("state store: unavailable (a previous write failed)".into());
         }
-        let mut st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let seq = st.next_seq;
         let rec = Record {
-            v: CURRENT_VERSION,
+            v: CURRENT_VERSION as u64,
             seq,
             ts: crate::host::access::rfc3339(std::time::SystemTime::now()),
             user: new.user,
@@ -652,8 +890,12 @@ impl Store {
             id: new.id,
             vars: new.vars,
         };
-        let line = rec.to_line();
-        let added = line.len() as u64 + LINE_OVERHEAD;
+        // One `write_all` of the whole line including its newline (plan
+        // §1), not two separate writes — narrows the window in which a
+        // crash could tear the line (review of #530 #7).
+        let mut line = rec.to_line();
+        line.push('\n');
+        let added = line.len() as u64;
         if st.size_bytes + added > self.max_bytes {
             return Err("state store is full".into());
         }
@@ -663,7 +905,6 @@ impl Store {
                 return Err(std::io::Error::other("forced test failure"));
             }
             st.file.write_all(line.as_bytes())?;
-            st.file.write_all(b"\n")?;
             st.file.sync_data()?;
             Ok(())
         })();
@@ -672,7 +913,9 @@ impl Store {
             return Err(format!("state store write failed: {e}"));
         }
         st.size_bytes += added;
-        st.next_seq = seq + 1;
+        st.next_seq = seq
+            .checked_add(1)
+            .ok_or("state store: seq exhausted (u64::MAX reached)")?;
         let idx = st.records.len();
         st.by_user.entry(rec.user.clone()).or_default().push(idx);
         st.records.push(rec.clone());
@@ -751,75 +994,115 @@ fn recover_torn_tail(buf: &str) -> (&str, usize) {
     }
 }
 
-#[cfg(unix)]
-fn validate_and_index(
-    clean: &str,
-    max_bytes: u64,
-    file: std::fs::File,
-) -> Result<StoreState, String> {
-    let mut lines = clean.lines();
+/// The in-memory index built from validating a store's content — no file
+/// handle, so [`validate_lines`] is pure and can be run (and its result
+/// inspected) *before* [`Store::open`] mutates anything (review of #530,
+/// the BLOCKER: torn-tail truncation and the permission fix used to run
+/// ahead of validation, so a misconfigured path to an unrelated existing
+/// file could be destroyed before its content was ever checked).
+struct Index {
+    records: Vec<Record>,
+    by_user: HashMap<String, Vec<usize>>,
+    next_seq: u64,
+    size_bytes: u64,
+}
+
+/// Validate `clean` (the store's content up to its last complete line,
+/// [`recover_torn_tail`]) and build its index. `clean` is always `""` or
+/// ends in `\n`. Byte-exact line iteration (`split('\n')`, not `lines()`,
+/// which silently strips a trailing `\r` without counting it — review of
+/// #530, nits: that under-accounted a CRLF file's size and tolerated
+/// line-ending corruption no writer here ever produces); a bare `\r`
+/// inside a line is refused outright rather than silently dropped.
+fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
+    let body = clean.strip_suffix('\n').unwrap_or(clean);
+    let mut lines = if body.is_empty() {
+        Vec::new().into_iter()
+    } else {
+        body.split('\n').collect::<Vec<_>>().into_iter()
+    };
     let mut size_bytes = 0u64;
     let mut records = Vec::new();
     let mut by_user: HashMap<String, Vec<usize>> = HashMap::new();
     let mut next_seq = 1u64;
 
-    if let Some(header_line) = lines.next() {
-        size_bytes += header_line.len() as u64 + LINE_OVERHEAD;
-        let header: serde_json::Value = serde_json::from_str(header_line)
-            .map_err(|e| format!("state file: bad header line: {e}"))?;
-        let ver = header
-            .get("anofox_state")
-            .and_then(|v| v.as_u64())
-            .ok_or("state file: header line is missing 'anofox_state'")?;
-        if ver != CURRENT_VERSION as u64 {
-            return Err(format!(
-                "state file: unsupported version {ver} (this build writes {CURRENT_VERSION})"
-            ));
-        }
-        if header.get("created").and_then(|v| v.as_str()).is_none() {
-            return Err("state file: header line is missing 'created'".into());
-        }
-
-        for (i, line) in lines.enumerate() {
-            size_bytes += line.len() as u64 + LINE_OVERHEAD;
-            if size_bytes > max_bytes {
-                return Err(format!(
-                    "state file exceeds max_mb (line {}) — the operator must inspect / \
-                     grow max_mb",
-                    i + 2
-                ));
-            }
-            let v: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| format!("state file: malformed line {}: {e}", i + 2))?;
-            let rec = Record::from_json(&v)
-                .map_err(|e| format!("state file: malformed line {}: {e}", i + 2))?;
-            if rec.v != CURRENT_VERSION {
-                return Err(format!(
-                    "state file: line {} has unsupported version {}",
-                    i + 2,
-                    rec.v
-                ));
-            }
-            if rec.seq < next_seq {
-                return Err(format!(
-                    "state file: line {} has seq {} which is not strictly increasing \
-                     (expected > {})",
-                    i + 2,
-                    rec.seq,
-                    next_seq - 1
-                ));
-            }
-            next_seq = rec.seq + 1;
-            by_user
-                .entry(rec.user.clone())
-                .or_default()
-                .push(records.len());
-            records.push(rec);
-        }
+    let Some(header_line) = lines.next() else {
+        return Ok(Index {
+            records,
+            by_user,
+            next_seq,
+            size_bytes,
+        });
+    };
+    if header_line.contains('\r') {
+        return Err("state file: header line contains a carriage return (CRLF?)".into());
+    }
+    size_bytes += header_line.len() as u64 + LINE_OVERHEAD;
+    let header: serde_json::Value = serde_json::from_str(header_line)
+        .map_err(|e| format!("state file: bad header line: {e}"))?;
+    let ver = header
+        .get("anofox_state")
+        .and_then(|v| v.as_u64())
+        .ok_or("state file: header line is missing 'anofox_state'")?;
+    if ver != CURRENT_VERSION as u64 {
+        return Err(format!(
+            "state file: unsupported version {ver} (this build writes {CURRENT_VERSION})"
+        ));
+    }
+    if header.get("created").and_then(|v| v.as_str()).is_none() {
+        return Err("state file: header line is missing 'created'".into());
     }
 
-    Ok(StoreState {
-        file,
+    for (i, line) in lines.enumerate() {
+        size_bytes += line.len() as u64 + LINE_OVERHEAD;
+        if size_bytes > max_bytes {
+            return Err(format!(
+                "state file exceeds max_mb (line {}) — the operator must inspect / \
+                 grow max_mb",
+                i + 2
+            ));
+        }
+        if line.contains('\r') {
+            return Err(format!(
+                "state file: line {} contains a carriage return (CRLF?)",
+                i + 2
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| format!("state file: malformed line {}: {e}", i + 2))?;
+        let rec = Record::from_json(&v)
+            .map_err(|e| format!("state file: malformed line {}: {e}", i + 2))?;
+        if rec.v != CURRENT_VERSION as u64 {
+            return Err(format!(
+                "state file: line {} has unsupported version {}",
+                i + 2,
+                rec.v
+            ));
+        }
+        if rec.seq < next_seq {
+            return Err(format!(
+                "state file: line {} has seq {} which is not strictly increasing \
+                 (expected > {})",
+                i + 2,
+                rec.seq,
+                next_seq - 1
+            ));
+        }
+        // A `seq` at `u64::MAX` would otherwise wrap `next_seq` back to 0,
+        // which the "not strictly increasing" check above would then wave
+        // through for every later line (review of #530, nits).
+        next_seq = rec
+            .seq
+            .checked_add(1)
+            .ok_or_else(|| format!("state file: line {} has an out-of-range seq", i + 2))?;
+        by_user
+            .entry(rec.user.clone())
+            .or_default()
+            .push(records.len());
+        records.push(rec);
+    }
+
+    Ok(Index {
         records,
         by_user,
         next_seq,
@@ -858,6 +1141,13 @@ impl TokenBucket {
         } else {
             false
         }
+    }
+
+    /// What [`try_take`](Self::try_take) would see right now, without
+    /// mutating anything — used only to pick an eviction candidate.
+    fn current_tokens(&self, now: std::time::Instant) -> f64 {
+        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        (self.tokens + dt * self.refill_per_sec).min(self.capacity)
     }
 
     /// Seconds until one token is available (`Retry-After`, plan §4.4).
@@ -906,8 +1196,22 @@ impl RateLimiter {
         let mut st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if !st.buckets.contains_key(user) {
             if st.buckets.len() >= self.capacity_users {
-                if let Some(oldest) = st.order.pop_front() {
-                    st.buckets.remove(&oldest);
+                // Prefer a bucket that has refilled all the way back to
+                // capacity — it carries no information (no pending
+                // penalty), so evicting it is lossless, unlike the plain-
+                // oldest one, which could be a long-lived *active* user
+                // whose drained bucket gets reset for free (review of
+                // #530, nits). Falls back to oldest-inserted when every
+                // bucket is still partially drained.
+                let evict = st
+                    .buckets
+                    .iter()
+                    .find(|(_, b)| b.current_tokens(now) >= b.capacity)
+                    .map(|(u, _)| u.clone())
+                    .or_else(|| st.order.front().cloned());
+                if let Some(u) = evict {
+                    st.buckets.remove(&u);
+                    st.order.retain(|x| x != &u);
                 }
             }
             let refill_per_sec = self.per_minute as f64 / 60.0;
@@ -1354,6 +1658,30 @@ mod tests {
         }
     }
 
+    /// Reopen a path a previous `Store` on this path already dropped. Test
+    /// artefact, not a store bug (review of #530): `flock` belongs to the
+    /// *open file description*; a sibling test that forks a child (the
+    /// `duckdb_cli`/`auth::session` tests do) keeps that description open
+    /// across the `fork` until the child's `execve` closes its
+    /// `O_CLOEXEC` fds, so a reopen racing that window sees a transient,
+    /// spurious "in use" from a process that isn't even a server. Retries
+    /// only on that one message, bounded, so a *genuine* second writer
+    /// would still fail this after the bound. The very first "is it really
+    /// held" assertion right after opening a store (no retry there) stays
+    /// strict — it is correct by construction, no fork involved.
+    #[cfg(unix)]
+    fn reopen(path: &Path, max_mb: u64) -> Result<Store, String> {
+        for _ in 0..100 {
+            match Store::open(path, max_mb) {
+                Err(e) if e.contains("in use by another server") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        Store::open(path, max_mb)
+    }
+
     #[cfg(unix)]
     #[test]
     fn append_and_reload_round_trips() {
@@ -1368,7 +1696,7 @@ mod tests {
             assert_eq!(s.global_seq(), 2);
         }
         // Reopen: the lock was released when `s` dropped.
-        let s2 = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        let s2 = reopen(&p, DEFAULT_MAX_MB).unwrap();
         assert_eq!(s2.len(), 2);
         assert_eq!(s2.global_seq(), 2);
         let alice_rows = s2.rows_for_user("alice");
@@ -1392,7 +1720,7 @@ mod tests {
         // Header + exactly one data line: the injected newline did not
         // split the record into two lines.
         assert_eq!(text.lines().count(), 2, "{text:?}");
-        let s2 = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        let s2 = reopen(&p, DEFAULT_MAX_MB).unwrap();
         let rows = s2.rows_for_user("alice");
         assert_eq!(rows[0].vars.get("note").unwrap().as_str().unwrap(), nasty);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
@@ -1414,7 +1742,7 @@ mod tests {
             f.write_all(br#"{"v":1,"seq":2,"ts":"2026-01-01T00:00:00.000Z","user":"bob","auth":"oidc","dashboard":"t","submit":"q","id":"x","vars":{"#).unwrap();
         }
         let before = std::fs::metadata(&p).unwrap().len();
-        let s2 = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        let s2 = reopen(&p, DEFAULT_MAX_MB).unwrap();
         let after = std::fs::metadata(&p).unwrap().len();
         assert!(after < before, "torn tail should have been truncated");
         assert_eq!(s2.len(), 1, "only the complete record survives");
@@ -1438,7 +1766,7 @@ mod tests {
             let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
             writeln!(f, "not even json").unwrap();
         }
-        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        let e = reopen(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(e.contains("malformed line"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
@@ -1457,7 +1785,7 @@ mod tests {
             // Same seq as the first record (1), not strictly increasing.
             writeln!(f, r#"{{"v":1,"seq":1,"ts":"2026-01-01T00:00:00.000Z","user":"bob","auth":"oidc","dashboard":"t","submit":"q","id":"x","vars":{{}}}}"#).unwrap();
         }
-        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        let e = reopen(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(e.contains("not strictly increasing"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
@@ -1475,7 +1803,7 @@ mod tests {
             let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
             writeln!(f, r#"{{"v":99,"seq":2,"ts":"2026-01-01T00:00:00.000Z","user":"bob","auth":"oidc","dashboard":"t","submit":"q","id":"x","vars":{{}}}}"#).unwrap();
         }
-        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        let e = reopen(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(e.contains("unsupported version"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
@@ -1488,6 +1816,210 @@ mod tests {
         std::fs::write(&p, b"{\"anofox_state\":2,\"created\":\"x\"}\n").unwrap();
         let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(e.contains("unsupported version"), "{e}");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn header_missing_created_refuses_to_open() {
+        let p = store_path("no-created");
+        mkdir(p.parent().unwrap());
+        std::fs::write(&p, b"{\"anofox_state\":1}\n").unwrap();
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("created"), "{e}");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gaps_in_seq_are_accepted() {
+        // Only *strictly increasing* is required, not contiguous — a gap
+        // (1, 5) is not itself evidence of corruption (review of #530:
+        // "documents the intent").
+        let p = store_path("seq-gap");
+        mkdir(p.parent().unwrap());
+        std::fs::write(
+            &p,
+            "{\"anofox_state\":1,\"created\":\"x\"}\n\
+             {\"v\":1,\"seq\":1,\"ts\":\"t\",\"user\":\"a\",\"auth\":\"oidc\",\"dashboard\":\"d\",\"submit\":\"s\",\"id\":\"i\",\"vars\":{}}\n\
+             {\"v\":1,\"seq\":5,\"ts\":\"t\",\"user\":\"b\",\"auth\":\"oidc\",\"dashboard\":\"d\",\"submit\":\"s\",\"id\":\"i\",\"vars\":{}}\n",
+        )
+        .unwrap();
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        assert_eq!(s.len(), 2);
+        assert_eq!(s.global_seq(), 5);
+        // The next append continues from the file's own last seq (6), not
+        // from the record count (2) — no reuse of the gapped numbers.
+        let r = s.append(new_rec("c", json!({}))).unwrap();
+        assert_eq!(r.seq, 6);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_field_in_a_record_refuses_to_open() {
+        let p = store_path("unknown-field");
+        mkdir(p.parent().unwrap());
+        std::fs::write(
+            &p,
+            "{\"anofox_state\":1,\"created\":\"x\"}\n\
+             {\"v\":1,\"seq\":1,\"ts\":\"t\",\"user\":\"a\",\"auth\":\"oidc\",\"dashboard\":\"d\",\"submit\":\"s\",\"id\":\"i\",\"vars\":{},\"extra\":1}\n",
+        )
+        .unwrap();
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("unknown field"), "{e}");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_crlf_line_refuses_to_open() {
+        let p = store_path("crlf");
+        mkdir(p.parent().unwrap());
+        std::fs::write(
+            &p,
+            "{\"anofox_state\":1,\"created\":\"x\"}\n\
+             {\"v\":1,\"seq\":1,\"ts\":\"t\",\"user\":\"a\",\"auth\":\"oidc\",\"dashboard\":\"d\",\"submit\":\"s\",\"id\":\"i\",\"vars\":{}}\r\n",
+        )
+        .unwrap();
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("carriage return"), "{e}");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    // ── BLOCKER regression (review of #530 #1): never mutate a path that
+    // doesn't validate as our own store ──────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn a_foreign_file_without_a_trailing_newline_is_left_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("foreign-no-nl");
+        mkdir(&root);
+        let p = root.join("secret.token");
+        let content = b"sk-not-a-store-just-a-secret-written-with-echo-dash-n".to_vec();
+        std::fs::write(&p, &content).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let mode_before = std::fs::metadata(&p).unwrap().permissions().mode();
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("doesn't look like a state store"), "{e}");
+        let after = std::fs::read(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "a non-store file must be byte-identical after a refused open"
+        );
+        let mode_after = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(
+            mode_before, mode_after,
+            "its permissions must be untouched too"
+        );
+        assert_eq!(content, after);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_store_file_with_a_trailing_newline_is_left_untouched() {
+        // Also covers the BLOCKER: the old code validated *after*
+        // truncating/chmod-ing, so even a cleanly newline-terminated
+        // foreign file (nothing to "truncate") still had its permissions
+        // tightened before its content was ever checked.
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("foreign-with-nl");
+        mkdir(&root);
+        let p = root.join("other.jsonl");
+        let content = b"{\"not\":\"ours\"}\n{\"also\":\"not ours\"}\n".to_vec();
+        std::fs::write(&p, &content).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mode_before = std::fs::metadata(&p).unwrap().permissions().mode();
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(
+            e.contains("bad header line") || e.contains("missing 'anofox_state'"),
+            "{e}"
+        );
+        let after = std::fs::read(&p).unwrap();
+        assert_eq!(
+            content, after,
+            "a non-store file must be byte-identical after a refused open"
+        );
+        let mode_after = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(
+            mode_before, mode_after,
+            "its permissions (0644, loose) must be untouched too"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── filesystem-attack negative tests (review of #530: missing tests) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_final_path_component_is_refused() {
+        let root = tmp("symlink-final");
+        mkdir(&root);
+        let real = root.join("elsewhere.jsonl");
+        std::fs::write(&real, b"not a store\n").unwrap();
+        let link = root.join("state.jsonl");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let e = Store::open(&link, DEFAULT_MAX_MB).unwrap_err();
+        // O_NOFOLLOW on the openat makes this ELOOP (or similar), not our
+        // own "doesn't look like a store" message.
+        assert!(!e.is_empty());
+        assert_eq!(std::fs::read(&real).unwrap(), b"not a store\n");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_parent_directory_is_refused() {
+        let root = tmp("symlink-parent");
+        mkdir(&root);
+        let real_dir = root.join("real");
+        mkdir(&real_dir);
+        let link_dir = root.join("link");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+        let p = link_dir.join("state.jsonl");
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(!e.is_empty());
+        assert!(!real_dir.join("state.jsonl").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_parent_without_sticky_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("world-writable");
+        mkdir(&root);
+        let dir = root.join("store");
+        mkdir(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let p = dir.join("state.jsonl");
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("writable"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_at_the_path_is_refused() {
+        let p = store_path("is-a-dir");
+        std::fs::create_dir(&p).unwrap();
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(!e.is_empty());
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_path_is_refused() {
+        let p = store_path("is-a-fifo");
+        let cpath = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        let r = unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) };
+        assert_eq!(r, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("not a regular file"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
@@ -1506,7 +2038,7 @@ mod tests {
         // passing an explicit tiny byte budget via max_mb=0 is refused by
         // StateOptions::parse, so exercise the store directly with a byte
         // cap too small for the file that already exists).
-        let e = Store::open(&p, 0).unwrap_err();
+        let e = reopen(&p, 0).unwrap_err();
         assert!(e.contains("max_mb") || e.contains("exceeds"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
@@ -1520,7 +2052,7 @@ mod tests {
         assert!(e.contains("in use by another server"), "{e}");
         drop(s1);
         // Lock released on drop: a third open now succeeds.
-        assert!(Store::open(&p, DEFAULT_MAX_MB).is_ok());
+        assert!(reopen(&p, DEFAULT_MAX_MB).is_ok());
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
@@ -1545,31 +2077,31 @@ mod tests {
     #[test]
     fn store_full_refuses_further_appends() {
         let p = store_path("full");
-        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
-        // max_bytes derives from max_mb (MiB); open a second handle's worth
-        // of accounting isn't needed — call append in a loop against a
-        // store opened with a tiny budget instead.
-        drop(s);
-        std::fs::remove_file(&p).ok();
-        let s = Store::open(&p, 0).unwrap_or_else(|_| {
-            // max_mb=0 means max_bytes=0: even the header write at open
-            // time would be "too large", so Store::open itself may refuse.
-            // Fall back to a 1 MiB budget and fill it instead.
-            Store::open(&p, 1).unwrap()
-        });
-        let big = "x".repeat(2_000_000);
-        let mut filled = false;
-        for i in 0..1000 {
-            if s.append(new_rec(&format!("u{i}"), json!({"note": big})))
-                .is_err()
-            {
-                filled = true;
+        // A small (1 MiB) budget, filled with ~2 KiB records — several
+        // succeed, then one is refused once the cap is hit.
+        let s = Store::open(&p, 1).unwrap();
+        let note = "x".repeat(2_000);
+        let mut last_err = None;
+        for i in 0..2000 {
+            if let Err(e) = s.append(new_rec(&format!("u{i}"), json!({"note": note}))) {
+                last_err = Some(e);
                 break;
             }
         }
-        assert!(
-            filled,
-            "expected the store to refuse once max_mb was reached"
+        let e = last_err.expect("expected the store to refuse once max_mb was reached");
+        assert!(e.contains("full"), "{e}");
+        // A capacity refusal is not an I/O error: no write was attempted,
+        // so the store isn't marked failed and the file didn't grow
+        // (review of #530: missing negative test).
+        assert!(!s.is_failed(), "a full store is not a failed store");
+        let size_before = std::fs::metadata(&p).unwrap().len();
+        assert!(s
+            .append(new_rec("one-more", json!({"note": note})))
+            .is_err());
+        let size_after = std::fs::metadata(&p).unwrap().len();
+        assert_eq!(
+            size_before, size_after,
+            "a refused append must not touch the file"
         );
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
@@ -1621,5 +2153,48 @@ mod tests {
         rl.check("alice", t0).ok();
         let err = rl.check("alice", t0).unwrap_err();
         assert!(err >= 1);
+    }
+
+    #[test]
+    fn eviction_prefers_a_fully_refilled_bucket_over_the_oldest() {
+        // 1/sec refill, burst 3, capacity 2 users. alice and bob both
+        // drain their burst at t0 (oldest = alice); by t1 (1s later) bob
+        // has fully refilled (he's touched no further since) while alice
+        // is drained again by a second use — so the new entrant should
+        // evict *bob* (fully refilled, carries no information), not
+        // alice (the plain-oldest, but mid-penalty), unlike a plain FIFO
+        // (review of #530, nits).
+        let rl = RateLimiter::new(60, 3, 2);
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            rl.check("alice", t0).unwrap();
+        }
+        for _ in 0..3 {
+            rl.check("bob", t0).unwrap();
+        }
+        let t1 = t0 + std::time::Duration::from_secs(60); // both fully refill
+        rl.check("alice", t1).unwrap(); // alice: refills to 3, then -> 2 tokens
+        rl.check("carol", t1).ok(); // forces an eviction (capacity 2)
+        assert_eq!(rl.tracked_users(), 2);
+        // bob (fully refilled, no pending state) was evicted, not alice —
+        // alice keeps exactly the 2 tokens she had, not a fresh burst of 3
+        // (which a wrong eviction, or recreating her bucket, would give).
+        assert!(rl.check("alice", t1).is_ok()); // 2 -> 1
+        assert!(rl.check("alice", t1).is_ok()); // 1 -> 0
+        assert!(
+            rl.check("alice", t1).is_err(),
+            "alice must have exactly 2 tokens left, not a fresh burst — she was not evicted"
+        );
+    }
+
+    #[test]
+    fn tracked_users_never_exceeds_the_cap_under_churn() {
+        let rl = RateLimiter::new(60, 1, 10);
+        let t0 = std::time::Instant::now();
+        for i in 0..1000 {
+            rl.check(&format!("user{i}"), t0).ok();
+            assert!(rl.tracked_users() <= 10, "cap exceeded at user{i}");
+        }
+        assert_eq!(rl.tracked_users(), 10);
     }
 }
