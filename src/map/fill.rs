@@ -49,7 +49,9 @@ pub(super) fn scale_for(
                 .na_label("No data");
             Some(Box::new(scale))
         }
-        Fill::Measure(s) => Some(Box::new(MapFill::measure((**s).clone(), locale))),
+        Fill::Measure(s) => Some(Box::new(
+            MapFill::measure((**s).clone(), locale).na(hatch_bg, hatch_fg),
+        )),
         Fill::Category { levels, .. } => Some(Box::new(MapFill::category(levels.clone()))),
         Fill::Plain(_) => None,
     }
@@ -131,6 +133,15 @@ pub(super) enum MapFill {
         scale: Box<ValueScale>,
         locale: Locale,
         name: String,
+        /// `(hatch background, hatch foreground)` for a row without a
+        /// value — `None` (the bare `measure` constructor's default)
+        /// draws no-data as a flat, wrong-looking colour instead (found
+        /// porting #420 slice 5's own map fixtures: a continuous measure
+        /// never reached `geom_sf` with a no-data row before — the old
+        /// `::CLASSES` path already had its own hatch via
+        /// `ScaleFillBinned::na_pattern`/`na_color`, scale_for's other
+        /// branch above). Set via [`Self::na`].
+        na: Option<(Rgb, Rgb)>,
     },
     Category {
         levels: Vec<(String, Rgb)>,
@@ -146,7 +157,20 @@ impl MapFill {
             scale: Box::new(scale),
             locale,
             name,
+            na: None,
         }
+    }
+
+    /// The no-data hatch for a continuous measure (`bg`/`fg` — the same
+    /// `hatch_bg`/`hatch_fg` the classed branch of [`scale_for`] already
+    /// passes `ScaleFillBinned::na_color`/`na_pattern`), so a row without
+    /// a value draws hatched rather than falling through to `geom_sf`'s
+    /// own generic "mapping failed" colour.
+    pub(super) fn na(mut self, bg: Rgb, fg: Rgb) -> MapFill {
+        if let MapFill::Measure { na, .. } = &mut self {
+            *na = Some((bg, fg));
+        }
+        self
     }
 
     pub(super) fn category(levels: Vec<(String, Rgb)>) -> MapFill {
@@ -201,12 +225,27 @@ impl Scale for MapFill {
 
     /// Classed: every class's label, high to low (a colourbar-like legend
     /// reads top to bottom as high to low — `crate::StepFill::scale`'s own
-    /// `.rev()` for `::THRESHOLDS` matches this). Continuous: "nice" ticks
-    /// over the domain (`ggplot_rs::scale::util::extended_breaks`, the same
-    /// helper `legend.rs`'s own gradient-bar ticks use since #419 —
+    /// `.rev()` for `::THRESHOLDS` matches this; the discrete legend draw
+    /// path treats this `f64` as a plain swatch key, not a position, same
+    /// as `MapFill::Category` below). Continuous: "nice" ticks over the
+    /// domain (`ggplot_rs::scale::util::extended_breaks`, the same helper
+    /// `legend.rs`'s own gradient-bar ticks use since #419 —
     /// `extended_breaks` can pick a round tick a little outside `[lo, hi]`,
-    /// filtered back since this legend's `domain()` is fixed at `[lo, hi]`).
-    /// Category: each level in its fixed order.
+    /// filtered back since this legend's `domain()` is fixed at `[lo, hi]`),
+    /// normalised to `[0, 1]` over that domain — unlike the classed/
+    /// category cases above, `ggplot_rs::guide::legend::draw_continuous_
+    /// legend_at` (the only caller a continuous, non-discrete scale's
+    /// `breaks()` has) reads this `f64` as a fraction up the gradient bar
+    /// (`tick_y = bar_top + bar_height * (1.0 - pos)`), the same contract
+    /// `ggplot_rs::scale::continuous::Continuous::breaks` follows via its
+    /// own `self.map(&Value::Float(v))` — found running this slice's own
+    /// map fixtures through the geom_sf path for the first time (a
+    /// continuous `::MAP` legend was never reachable from that path
+    /// before #420 slice 5 widened `plot::eligible`): the raw domain value
+    /// was returned unnormalised, so a legend bar fit to few-hundred-px
+    /// `bar_height` multiplied by e.g. `(1.0 - 100.0)` landed thousands of
+    /// pixels off-canvas. Category: each level in its fixed order (again a
+    /// swatch key, not a position).
     fn breaks(&self) -> Vec<(f64, String)> {
         match self {
             MapFill::Measure { scale, locale, .. } => match &scale.classes {
@@ -216,10 +255,18 @@ impl Scale for MapFill {
                     .collect(),
                 None => {
                     let eps = (scale.hi - scale.lo).abs() * 1e-9;
+                    let span = (scale.hi - scale.lo).abs();
                     ggplot_rs::scale::util::extended_breaks(scale.lo, scale.hi, 5)
                         .into_iter()
                         .filter(|v| *v >= scale.lo - eps && *v <= scale.hi + eps)
-                        .map(|v| (v, scale.fmt.short(v, locale)))
+                        .map(|v| {
+                            let pos = if span > 0.0 {
+                                ((v - scale.lo) / span).clamp(0.0, 1.0)
+                            } else {
+                                0.5
+                            };
+                            (pos, scale.fmt.short(v, locale))
+                        })
                         .collect()
                 }
             },
@@ -233,16 +280,30 @@ impl Scale for MapFill {
 
     fn map_to_color(&self, value: &Value) -> Option<(u8, u8, u8)> {
         match self {
-            MapFill::Measure { scale, locale, .. } => match (&scale.classes, value) {
+            MapFill::Measure {
+                scale, locale, na, ..
+            } => match (&scale.classes, value) {
                 (Some((_, _, colors)), Value::Str(s)) => {
                     Self::class_by_label(scale, locale, s).map(|i| colors[i])
                 }
+                (None, v) if v.as_f64().is_none() => na.map(|(bg, _)| bg),
                 (_, v) => v.as_f64().map(|f| scale.color(f).0),
             },
             MapFill::Category { levels, .. } => match value {
                 Value::Str(s) => levels.iter().find(|(l, _)| l == s).map(|(_, c)| *c),
                 _ => None,
             },
+        }
+    }
+
+    fn na_fill_pattern(&self) -> Option<FillPattern> {
+        match self {
+            MapFill::Measure {
+                scale,
+                na: Some((bg, fg)),
+                ..
+            } if scale.classes.is_none() => Some(FillPattern::stripe(*fg, *bg)),
+            _ => None,
         }
     }
 
@@ -320,14 +381,27 @@ mod tests {
 
     #[test]
     fn continuous_breaks_are_nice_ticks_in_domain() {
-        let fill = MapFill::measure(scale(0.0, 100.0, None), RenderOptions::default().locale);
+        // lo=0/hi=100 alone can't distinguish a normalised [0,1] position
+        // from the raw domain value (a 0..100 break is also a valid 0..1
+        // one) — a non-zero `lo` forces the two apart, the same gap that
+        // let the un-normalised `breaks()` (fixed in #420 slice 5: see its
+        // own doc comment) slip past this test before.
+        let fill = MapFill::measure(scale(20.0, 120.0, None), RenderOptions::default().locale);
         let breaks = fill.breaks();
         assert!(!breaks.is_empty());
-        for (v, _) in &breaks {
-            assert!((0.0..=100.0).contains(v), "{v} outside [0,100]");
+        for (pos, label) in &breaks {
+            assert!((0.0..=1.0).contains(pos), "{pos} outside [0,1]: {label}");
         }
+        // the end breaks' positions and labels agree with the domain they
+        // were normalised from (ggplot_rs's `draw_continuous_legend_at`
+        // reads `pos` as a fraction up the gradient bar, `label` as the
+        // nice tick text — both must name the same point).
+        let (lo_pos, lo_label) = breaks.first().unwrap();
+        assert!(*lo_pos < 0.5, "{lo_pos} ({lo_label})");
+        let (hi_pos, hi_label) = breaks.last().unwrap();
+        assert!(*hi_pos > 0.5, "{hi_pos} ({hi_label})");
         assert!(!fill.is_discrete());
-        assert_eq!(fill.domain(), Some((0.0, 100.0)));
+        assert_eq!(fill.domain(), Some((20.0, 120.0)));
     }
 
     #[test]

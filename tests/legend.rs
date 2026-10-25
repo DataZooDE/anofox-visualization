@@ -139,21 +139,33 @@ fn choropleth(legend: Option<&str>) -> String {
     render(&cols, 480, 320).unwrap()
 }
 
-/// The map legend `<g>`'s own `translate(x,y)`, `None` without one.
-fn legend_translate(svg: &str) -> Option<&str> {
-    let i = svg.find("class=\"dp-legend\"")?;
-    let rest = &svg[i..];
-    let start = rest.find("translate(")? + "translate(".len();
-    let end = start + rest[start..].find(')')?;
-    Some(&rest[start..end])
+/// The panel rect ggplot-rs itself reports, "x0 y0 x1 y1" in `data-plot`
+/// (same convention `bottom_moves_a_categorised_bar_charts_legend` above
+/// already uses) — works on both the map writer's own `Panel::Own` SVG
+/// (no `data-plot` at all, so `None`) and a `geom_sf`-backed `Panel::Plot`
+/// (#420 slice 5 widened which maps are eligible for that path, this
+/// fixture's small lon/lat extent included — its own legend no longer
+/// draws inside a `class="dp-legend"` group with its own `translate(x,y)`,
+/// ggplot-rs's own primitives are positioned directly instead).
+fn plot_rect(svg: &str) -> Option<[f64; 4]> {
+    let i = svg.find("data-plot=\"")? + "data-plot=\"".len();
+    let s = &svg[i..];
+    let s = &s[..s.find('"')?];
+    let mut it = s.split_whitespace().map(|n| n.parse().unwrap());
+    Some([it.next()?, it.next()?, it.next()?, it.next()?])
 }
 
 #[test]
 fn none_removes_a_maps_legend() {
     let with = choropleth(None);
     let without = choropleth(Some("none"));
-    assert!(legend_translate(&with).is_some(), "{with}");
-    assert!(legend_translate(&without).is_none(), "{without}");
+    // no legend swatch slices (the continuous bar's own thin `<rect>`s)
+    // and the panel widens to use the room they left.
+    assert!(with.matches("<rect ").count() > 10, "{with}");
+    assert_eq!(without.matches("<rect ").count(), 0, "{without}");
+    let [_, _, with_x1, _] = plot_rect(&with).unwrap();
+    let [_, _, without_x1, _] = plot_rect(&without).unwrap();
+    assert!(without_x1 > with_x1, "{with}\n{without}");
 }
 
 #[test]
@@ -161,31 +173,22 @@ fn bottom_and_right_move_a_maps_legend() {
     let default = choropleth(None);
     let bottom = choropleth(Some("bottom"));
     let right = choropleth(Some("right"));
-    let (dx, dy) = split(legend_translate(&default).unwrap());
-    let (bx, by) = split(legend_translate(&bottom).unwrap());
-    let (rx, ry) = split(legend_translate(&right).unwrap());
-    // default and 'left' both sit at the top-left corner.
-    assert_eq!((dx, dy), (4.0, 4.0), "{default}");
-    // 'bottom' keeps the same x, moves down.
-    assert_eq!(bx, dx, "{bottom}");
-    assert!(by > dy, "{bottom}");
-    // 'right' keeps the same y, moves right.
-    assert_eq!(ry, dy, "{right}");
-    assert!(rx > dx, "{right}");
-}
-
-fn split(xy: &str) -> (f64, f64) {
-    let (x, y) = xy.split_once(',').unwrap();
-    (x.parse().unwrap(), y.parse().unwrap())
+    let [_, _, d_x1, d_y1] = plot_rect(&default).unwrap();
+    let [_, _, b_x1, b_y1] = plot_rect(&bottom).unwrap();
+    let [_, _, r_x1, r_y1] = plot_rect(&right).unwrap();
+    // a continuous fill's default legend position is already ggplot-rs's
+    // own `Right` (slice 5's own `plot::build` comment on why — #225), so
+    // `'right'` changes nothing; `'bottom'` moves the legend under the
+    // panel instead, widening it and shortening it.
+    assert_eq!((r_x1, r_y1), (d_x1, d_y1), "{default}\n{right}");
+    assert!(b_x1 > d_x1, "{default}\n{bottom}");
+    assert!(b_y1 < d_y1, "{default}\n{bottom}");
 }
 
 #[test]
 fn an_unknown_value_leaves_a_maps_legend_where_it_was() {
-    // Not byte-identical: the extra (otherwise no-op) ::LEGEND column shifts
-    // `map::id_of`'s hash, which only ever names a `<linearGradient>` def —
-    // the legend's own position is what matters here.
     assert_eq!(
-        legend_translate(&choropleth(None)),
-        legend_translate(&choropleth(Some("sideways")))
+        plot_rect(&choropleth(None)),
+        plot_rect(&choropleth(Some("sideways")))
     );
 }
