@@ -34,6 +34,7 @@ pub mod condition;
 pub mod contract_call;
 pub mod deps;
 pub mod lex;
+pub mod name;
 pub mod requires;
 pub mod shared;
 pub mod show_if;
@@ -75,6 +76,11 @@ pub struct Panel {
     /// every other clash still is. A listed name this statement doesn't
     /// itself set (a typo) is flagged on its own (`interaction/shared-unused`).
     pub shared: Vec<String>,
+    /// The first `-- @name <name>` line directly above the statement (#518):
+    /// a stable, author-given name for what it draws, carried through to
+    /// wasm `plan()` and tagged on the element as `data-dp-name` in the
+    /// browser. See [`name`].
+    pub name: Option<String>,
     /// The `-- @requires` of the `::TAB` / `::SUBTAB` whose section the
     /// statement is in (a `::SUBTAB` statement: its `::TAB`'s), see
     /// [`section_requires`]. A tab whose own requirements are not met is
@@ -195,6 +201,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
             let requires = requires::parse(&raw);
             let requires_issues = requires::issues(&raw);
             let shared = shared::parse(&raw);
+            let name = name::parse(&raw);
             let clean = strip_comments(&raw);
             let stmt = clean.trim();
             if stmt.is_empty() {
@@ -204,6 +211,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                 panel.requires = requires;
                 panel.requires_issues = requires_issues;
                 panel.shared = shared;
+                panel.name = name;
                 return Some(panel);
             }
             let (sql, roles, names) = rewrite(stmt);
@@ -217,6 +225,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     shared,
+                    name,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
@@ -232,6 +241,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     shared,
+                    name,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
@@ -1160,6 +1170,24 @@ mod requires_tests {
         );
         assert!(p[2].requires.is_empty());
         assert!(!p[1].sql.contains("@requires"));
+    }
+
+    #[test]
+    fn name_attaches_to_its_statement_across_a_blank_line() {
+        // `split_statements` splits on `;` alone, so everything between two
+        // `;`s — comments, blank lines and all — is one statement's raw
+        // text; a `-- @name` line reaches `Panel::name` the same way whether
+        // or not a blank line sits between it and the SQL (#518).
+        let p = plan(
+            "-- @name kpi\n\nSELECT 1 ::METRIC;\n\
+             -- @name chart\nSELECT a ::XAXIS, b ::BARCHART FROM t;\n\
+             SELECT 2 ::METRIC",
+        );
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0].name, Some("kpi".to_string()));
+        assert_eq!(p[1].name, Some("chart".to_string()));
+        assert_eq!(p[2].name, None);
+        assert!(!p[0].sql.contains("@name"));
     }
 
     #[test]

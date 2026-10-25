@@ -48,6 +48,7 @@ fn plan_json(script: &str) -> String {
             serde_json::json!({
                 "setup": p.setup,
                 "sql": p.sql,
+                "name": p.name,
                 "roles": p.roles.iter().map(|(i, r)| {
                     let name = p.names.iter().find(|(j, _)| j == i).map(|(_, n)| n.as_str()).unwrap_or("");
                     serde_json::json!([i, r.token(), name])
