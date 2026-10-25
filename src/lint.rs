@@ -193,10 +193,43 @@ where
     // `opts.stateful_session` — the persistent session already has every
     // earlier statement in scope, so there is nothing to replay.
     let mut prelude = String::new();
+    // #517 S1: a dashboard reading `viewer_state` (read-back, S3) or
+    // carrying `::SUBMIT` gets the server's own temps, empty — created
+    // here so neither this lint nor a headless render (`dashboard.rs`'s
+    // `render_dashboard_svg`) fails on a table no real server has
+    // populated yet. Skipped when a real (non-temp) `viewer_state`/
+    // `viewer_state_latest` already exists on this connection — seeding
+    // ours on top would shadow it (review of #530 #5).
+    if sql::script_needs_viewer_state(script) {
+        let shadows_a_real_table = run_query(&format!("{};", sql::viewer_state_exists_probe_sql()))
+            .ok()
+            .and_then(|rows| rows.first().and_then(|r| r.values().next()?.as_u64()))
+            .is_some_and(|n| n > 0);
+        if !shadows_a_real_table {
+            for stmt in sql::viewer_state_setup_statements() {
+                if opts.stateful_session {
+                    let _ = run_query(&format!("{stmt};"));
+                } else {
+                    prelude.push_str(stmt);
+                    prelude.push_str(";\n");
+                }
+            }
+        }
+    }
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
                              // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
                              // so two different directives writing one variable are reported.
     let mut owners: std::collections::HashMap<String, (usize, &'static str)> =
+        std::collections::HashMap::new();
+    // #517: every input-declared variable name (lower case) -> the
+    // statement(s) that declare it, its kind, and that statement's (plan-
+    // rewritten) SQL — read by the `::SUBMIT` branch below to validate
+    // `SUBMIT_VARS` (`submit/unknown-variable`, `submit/unsupported-input`,
+    // `submit/duplicate-input`, `submit/options-from-variable`). A name can
+    // have more than one entry when two input statements declare it
+    // (ambiguous for SUBMIT_VARS, even though `owners`/`claim` above don't
+    // themselves flag two inputs sharing a name).
+    let mut declared_inputs: std::collections::HashMap<String, Vec<(usize, InputKind, String)>> =
         std::collections::HashMap::new();
     // #398: `-- @shared <name>, …` directly above a ::ROWSELECT / ::SELECT_AS
     // / ::DRILL / input statement documents that *this* directive deliberately
@@ -481,6 +514,23 @@ where
         // don't run it (the casts would just raise a confusing type error).
         // Genuine setup (DDL / SET / …) is run so later panels see its effects.
         if p.setup {
+            // #517 §5: `viewer_state`/`viewer_state_latest` are server-
+            // provided temps (read-back, S3) — a dashboard defining its own
+            // table/view of that name would be silently shadowed by the
+            // server's once that lands (or would collide at start, S2/S3).
+            if let Some(reserved) = creates_reserved_state_name(&p.sql) {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "state/shadowed",
+                    message: format!(
+                        "`{reserved}` is reserved for the server's own per-viewer state (#517) \
+                         — this dashboard's own table/view of that name would be shadowed by \
+                         it once a server with options.state serves this dashboard"
+                    ),
+                    sql: short.clone(),
+                });
+            }
             if looks_like_query(&p.sql) && has_role_cast(&p.sql) {
                 diags.push(Diagnostic {
                     severity: Severity::Error,
@@ -546,6 +596,12 @@ where
                         })
                         .unwrap_or_default();
                     claim(&mut diags, &names, stmt, "input", &short, &p.shared);
+                    for n in &names {
+                        declared_inputs
+                            .entry(n.to_ascii_lowercase())
+                            .or_default()
+                            .push((stmt, kind, p.sql.clone()));
+                    }
                     if kind == InputKind::Period {
                         let spec = rows
                             .first()
@@ -621,6 +677,204 @@ where
                 Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
             }
             continue;
+        }
+
+        // `::SUBMIT` panel (#517 S1): run it as the viewer and check it's
+        // self-consistent — a real server isn't wired to any of this yet
+        // (no endpoint, no `options.state`), so this only checks that the
+        // dashboard's own authoring agrees with itself (plan §3).
+        if p.roles.iter().any(|(_, r)| matches!(r, Role::Submit)) {
+            match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
+                Ok(rows) if rows.len() > 1 => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "submit/rows",
+                    message: format!(
+                        "this ::SUBMIT returns {} rows with the current defaults — exactly \
+                         one makes the button available, zero hides it, more than one is an \
+                         error",
+                        rows.len()
+                    ),
+                    sql: short.clone(),
+                }),
+                Ok(rows) if rows.is_empty() => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "submit/rows",
+                    message: "this ::SUBMIT returns no rows with the current defaults — \
+                              hidden by default (the author's own SQL gate)"
+                        .into(),
+                    sql: short.clone(),
+                }),
+                Ok(rows) => {
+                    let row = &rows[0];
+                    let vars_text = p
+                        .roles
+                        .iter()
+                        .find(|(_, r)| *r == Role::SubmitVars)
+                        .and_then(|(i, _)| row.values().nth(*i))
+                        .and_then(|v| v.as_str());
+                    match vars_text {
+                        None => diags.push(Diagnostic {
+                            severity: Severity::Error,
+                            stmt,
+                            code: "submit/no-vars",
+                            message: "this ::SUBMIT has no ::SUBMIT_VARS (or its value isn't a \
+                                      string) — nothing would be recorded"
+                                .into(),
+                            sql: short.clone(),
+                        }),
+                        Some(text) => {
+                            let names: Vec<String> = text
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .collect();
+                            if names.is_empty() {
+                                diags.push(Diagnostic {
+                                    severity: Severity::Error,
+                                    stmt,
+                                    code: "submit/no-vars",
+                                    message: "::SUBMIT_VARS is empty — nothing would be recorded"
+                                        .into(),
+                                    sql: short.clone(),
+                                });
+                            } else if names.len() > 32 {
+                                diags.push(Diagnostic {
+                                    severity: Severity::Error,
+                                    stmt,
+                                    code: "submit/too-many-vars",
+                                    message: format!(
+                                        "::SUBMIT_VARS names {} variables — at most 32 may be \
+                                         recorded",
+                                        names.len()
+                                    ),
+                                    sql: short.clone(),
+                                });
+                            }
+                            for n in &names {
+                                match declared_inputs.get(&n.to_ascii_lowercase()) {
+                                    None => diags.push(Diagnostic {
+                                        severity: Severity::Error,
+                                        stmt,
+                                        code: "submit/unknown-variable",
+                                        message: format!(
+                                            "::SUBMIT_VARS names `{n}`, which no input \
+                                             statement of this dashboard declares"
+                                        ),
+                                        sql: short.clone(),
+                                    }),
+                                    Some(entries) => {
+                                        let stmts: std::collections::HashSet<usize> =
+                                            entries.iter().map(|(s, _, _)| *s).collect();
+                                        if stmts.len() > 1 {
+                                            diags.push(Diagnostic {
+                                                severity: Severity::Error,
+                                                stmt,
+                                                code: "submit/duplicate-input",
+                                                message: format!(
+                                                    "`{n}` is declared by more than one input \
+                                                     statement (statements {}) — the server \
+                                                     wouldn't know which option list to \
+                                                     validate it against",
+                                                    stmts
+                                                        .iter()
+                                                        .map(usize::to_string)
+                                                        .collect::<Vec<_>>()
+                                                        .join(", ")
+                                                ),
+                                                sql: short.clone(),
+                                            });
+                                        } else if entries.iter().any(|(_, k, _)| {
+                                            matches!(k, InputKind::DateRange | InputKind::Period)
+                                        }) {
+                                            diags.push(Diagnostic {
+                                                severity: Severity::Error,
+                                                stmt,
+                                                code: "submit/unsupported-input",
+                                                message: format!(
+                                                    "`{n}` comes from a ::DATERANGE/::PERIOD \
+                                                     input — ::SUBMIT can't record those yet \
+                                                     (several variables each)"
+                                                ),
+                                                sql: short.clone(),
+                                            });
+                                        } else if let Some((_, _, input_sql)) = entries.first() {
+                                            let deps = sql::deps::reads(
+                                                input_sql,
+                                                &std::collections::HashMap::new(),
+                                            );
+                                            let depends_on_a_variable = !matches!(
+                                                &deps,
+                                                sql::deps::Deps::Vars(v) if v.is_empty()
+                                            );
+                                            if depends_on_a_variable {
+                                                diags.push(Diagnostic {
+                                                    severity: Severity::Warning,
+                                                    stmt,
+                                                    code: "submit/options-from-variable",
+                                                    message: format!(
+                                                        "`{n}`'s own option query reads a \
+                                                         viewer-settable variable — the viewer \
+                                                         then controls its option list, so \
+                                                         \"validated against the options\" \
+                                                         means less (fine when that cascade is \
+                                                         intended)"
+                                                    ),
+                                                    sql: short.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
+            }
+            // `submit/dynamic-vars`: syntactic, on the raw statement text —
+            // checked whether or not the query above succeeded.
+            if let Some(raw) = raws.get(i) {
+                if let Some(expr) = sql::role_source_expr(raw, Role::SubmitVars) {
+                    if !sql::is_string_literal(&expr) {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "submit/dynamic-vars",
+                            message: "::SUBMIT_VARS is not a string literal — it can't be \
+                                      checked statically; only what it evaluates to just now \
+                                      was checked"
+                                .into(),
+                            sql: short.clone(),
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        // #517 §8: a learner's own TEXT answer, read back through
+        // `viewer_state`, can carry a phishing link or HTML/markdown a
+        // trainer's page would then render — advisory only (the app already
+        // escapes these; see docs/secure-serving.md).
+        if p.sql.to_ascii_lowercase().contains("viewer_state")
+            && p.roles
+                .iter()
+                .any(|(_, r)| matches!(r, Role::Markdown | Role::Link | Role::Download(_)))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "state/markup-from-viewer",
+                message: "this ::MARKDOWN/::LINK/::DOWNLOAD_* column reads viewer_state.value \
+                          — a learner's own TEXT answer can carry a link or markup that would \
+                          then render on whoever reads this panel (e.g. a trainer); the app \
+                          escapes it, but double check the content is meant to be shown that way"
+                    .into(),
+                sql: short.clone(),
+            });
         }
 
         // Panel: run it (stateful: everything before it is already in
@@ -3173,6 +3427,54 @@ fn has_role_cast(sql: &str) -> bool {
     cast_tokens(sql)
         .iter()
         .any(|t| crate::parse_role(t).is_some() && !roles::is_sql_type_token(t))
+}
+
+/// Does a setup statement `CREATE` a table/view named `viewer_state` or
+/// `viewer_state_latest` (`state/shadowed`, #517 §5)? A simple forward scan
+/// for `TABLE`/`VIEW` (skipping `TEMP`/`OR REPLACE`/`IF NOT EXISTS` before
+/// it, and those words too) then the following (possibly dotted,
+/// `main.viewer_state`/`"x".viewer_state`) identifier, of which only the
+/// last segment is the table/view's own name — a schema or catalog
+/// qualifier never changes what the bare name resolves to for a later
+/// unqualified `FROM viewer_state` (review of #530, nits).
+fn creates_reserved_state_name(sql: &str) -> Option<&'static str> {
+    use sql::lex::{tokenize, TokKind};
+    let toks: Vec<_> = tokenize(sql)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    if !toks.first().is_some_and(|t| t.is_word(sql, "CREATE")) {
+        return None;
+    }
+    let table_or_view = toks
+        .iter()
+        .position(|t| t.is_word(sql, "TABLE") || t.is_word(sql, "VIEW"))?;
+    let mut j = table_or_view + 1;
+    while toks
+        .get(j)
+        .is_some_and(|t| t.is_word(sql, "IF") || t.is_word(sql, "NOT") || t.is_word(sql, "EXISTS"))
+    {
+        j += 1;
+    }
+    // The dotted name's last segment: `a.b.c` tokenizes as `a . b . c`, so
+    // keep consuming `. <ident>` pairs and remember the last identifier.
+    let mut name_tok = toks.get(j)?;
+    if !matches!(name_tok.kind, TokKind::Word | TokKind::QuotedIdent) {
+        return None;
+    }
+    j += 1;
+    while toks.get(j).is_some_and(|t| t.is_punct(sql, '.')) {
+        let Some(next) = toks.get(j + 1) else { break };
+        if !matches!(next.kind, TokKind::Word | TokKind::QuotedIdent) {
+            break;
+        }
+        name_tok = next;
+        j += 2;
+    }
+    let name = name_tok.text(sql).trim_matches('"');
+    ["viewer_state", "viewer_state_latest"]
+        .into_iter()
+        .find(|reserved| name.eq_ignore_ascii_case(reserved))
 }
 
 /// DuckDB scalar types that are *not* role tokens — so a `::TYPE` cast to one of
@@ -7758,6 +8060,285 @@ mod design_tests {
             codes("-- @name 1bad\nSELECT 6::SPAN;\nSELECT 1::METRIC;"),
             [(1, "name/bad"), (1, "name/not-drawn")]
         );
+    }
+}
+
+/// `::SUBMIT`/`::SUBMIT_VARS`/`::SUBMIT_DONE` (#517 S1): roles + lint only —
+/// no endpoint, no `options.state`, no read-back yet. The fake session
+/// matches queries by a literal substring that survives the `::ROLE` → `AS
+/// c{i}` rewrite (the role casts, not the literals, are stripped).
+#[cfg(test)]
+mod submit_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(obj: serde_json::Value) -> Map<String, Value> {
+        obj.as_object().unwrap().clone()
+    }
+
+    fn has(diags: &[Diagnostic], code: &str) -> bool {
+        diags.iter().any(|d| d.code == code)
+    }
+
+    fn of<'a>(diags: &'a [Diagnostic], code: &str) -> Vec<&'a Diagnostic> {
+        diags.iter().filter(|d| d.code == code).collect()
+    }
+
+    const INPUT: &str = "SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);\n";
+
+    /// A one-input, one-submit script; `submit_vars` is the `::SUBMIT_VARS`
+    /// column's literal expression text (inserted as-is, so a test can pass
+    /// something other than a plain string literal).
+    fn script(submit_vars: &str) -> String {
+        format!(
+            "{INPUT}SELECT 'Check my answers' AS quiz_1::SUBMIT, {submit_vars} AS r::SUBMIT_VARS;\n"
+        )
+    }
+
+    /// Lints [`script`]`(submit_vars)`. `vars_value` is what the `::SUBMIT`
+    /// row's `SUBMIT_VARS` cell evaluates to at runtime — the test supplies
+    /// it directly (it already knows, having built `submit_vars`) rather
+    /// than this fake session re-deriving it from the rewritten query text.
+    fn lint_vars(submit_vars: &str, vars_value: serde_json::Value) -> Vec<Diagnostic> {
+        check(&script(submit_vars), |q| {
+            if q.contains("VALUES ('A')") {
+                // Input roles keep their original column name (`q1`), not a
+                // positional `c{i}` alias — see `sql::rewrite`'s
+                // `Role::Input(_)` branch.
+                Ok(vec![
+                    row(json!({"q1": "A"})),
+                    row(json!({"q1": "B"})),
+                    row(json!({"q1": "C"})),
+                ])
+            } else if q.contains("Check my answers") {
+                Ok(vec![row(
+                    json!({"c0": "Check my answers", "c1": vars_value}),
+                )])
+            } else {
+                // The injected `viewer_state` temp (setup) and anything else.
+                Ok(vec![])
+            }
+        })
+    }
+
+    /// [`lint_vars`] for the common case: `submit_vars` is a plain string
+    /// literal and also the value it evaluates to.
+    fn lint(submit_vars_literal: &str) -> Vec<Diagnostic> {
+        let value = submit_vars_literal
+            .trim()
+            .trim_start_matches('\'')
+            .trim_end_matches('\'')
+            .replace("''", "'");
+        lint_vars(submit_vars_literal, json!(value))
+    }
+
+    #[test]
+    fn valid_submit_is_clean() {
+        let d = lint("'q1'");
+        for code in [
+            "submit/unknown-variable",
+            "submit/unsupported-input",
+            "submit/duplicate-input",
+            "submit/no-vars",
+            "submit/too-many-vars",
+            "submit/rows",
+            "submit/dynamic-vars",
+        ] {
+            assert!(!has(&d, code), "unexpected {code} in {d:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_variable_is_an_error() {
+        let d = lint("'q1, nope'");
+        let found = of(&d, "submit/unknown-variable");
+        assert_eq!(found.len(), 1, "{d:?}");
+        assert_eq!(found[0].severity, Severity::Error);
+        assert!(found[0].message.contains("nope"), "{d:?}");
+    }
+
+    #[test]
+    fn no_vars_is_an_error_when_empty() {
+        let d = lint("''");
+        assert!(has(&d, "submit/no-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn no_vars_is_an_error_when_not_a_string() {
+        let script = format!("{INPUT}SELECT 'Check' AS quiz_1::SUBMIT, 1 AS r::SUBMIT_VARS;\n");
+        let d = check(&script, |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": 1}))])
+            }
+        });
+        assert!(has(&d, "submit/no-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn too_many_vars_is_an_error() {
+        let names: Vec<String> = (0..40).map(|i| format!("q1_{i}")).collect();
+        let d = lint(&format!("'{}'", names.join(", ")));
+        assert!(has(&d, "submit/too-many-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn unsupported_daterange_input_is_an_error() {
+        let script = "SELECT d0 ::DATERANGE, d1 FROM (VALUES (DATE '2026-01-01', DATE '2026-01-31')) t(d0, d1);\n\
+                       SELECT 'Check' AS quiz_1::SUBMIT, 'd0' AS r::SUBMIT_VARS;\n";
+        let d = check(script, |q| {
+            if q.contains("2026-01-01") && !q.contains("Check") {
+                Ok(vec![row(json!({"d0": "2026-01-01", "d1": "2026-01-31"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": "d0"}))])
+            }
+        });
+        assert!(has(&d, "submit/unsupported-input"), "{d:?}");
+    }
+
+    #[test]
+    fn duplicate_input_is_an_error() {
+        let script = format!(
+            "{INPUT}SELECT q1 ::DROPDOWN FROM (VALUES ('X'), ('Y')) t2(q1);\n\
+             SELECT 'Check' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS;\n"
+        );
+        let d = check(&script, |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else if q.contains("VALUES ('X')") {
+                Ok(vec![row(json!({"q1": "X"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": "q1"}))])
+            }
+        });
+        assert!(has(&d, "submit/duplicate-input"), "{d:?}");
+    }
+
+    #[test]
+    fn dynamic_vars_is_a_warning() {
+        // A computed expression instead of a literal — can't be checked
+        // statically, even though it happens to evaluate to 'q1' right now.
+        let d = lint_vars("(SELECT 'q1')", json!("q1"));
+        assert!(has(&d, "submit/dynamic-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn zero_rows_is_a_warning_hidden_by_default() {
+        let d = check(&script("'q1'"), |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else {
+                // Both the ::SUBMIT statement and the injected viewer_state
+                // setup return no rows here — ::SUBMIT's 0 rows is the
+                // thing under test (hidden by default).
+                Ok(vec![])
+            }
+        });
+        let found = of(&d, "submit/rows");
+        assert_eq!(found.len(), 1, "{d:?}");
+        assert_eq!(found[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn more_than_one_row_is_an_error() {
+        let d = check(&script("'q1'"), |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else if q.contains("Check my answers") {
+                Ok(vec![
+                    row(json!({"c0": "Check my answers", "c1": "q1"})),
+                    row(json!({"c0": "Check my answers", "c1": "q1"})),
+                ])
+            } else {
+                Ok(vec![])
+            }
+        });
+        let found = of(&d, "submit/rows");
+        assert_eq!(found.len(), 1, "{d:?}");
+        assert_eq!(found[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn options_from_variable_is_a_warning() {
+        let script = "SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B')) t(q1) \
+                       WHERE q1 = getvariable('region') OR 1 = 1;\n\
+                       SELECT 'Check' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS;\n";
+        let d = check(script, |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": "q1"}))])
+            }
+        });
+        assert!(has(&d, "submit/options-from-variable"), "{d:?}");
+    }
+
+    #[test]
+    fn viewer_state_temp_is_seeded_so_reading_it_does_not_fail() {
+        // No ::SUBMIT at all — only a read-back reference — still gets the
+        // empty temp (headless/lint parity, plan §3 "Headless renderers and
+        // lint create an empty viewer_state").
+        let script = "SELECT value::TEXT_SMALL FROM viewer_state;\n";
+        let mut saw_create = false;
+        let d = check(script, |q| {
+            if q.contains("CREATE TEMP TABLE viewer_state") {
+                saw_create = true;
+            }
+            Ok(vec![row(json!({"c0": "hi"}))])
+        });
+        assert!(saw_create, "viewer_state temp was never created");
+        assert!(!has(&d, "sql-error"), "{d:?}");
+    }
+
+    #[test]
+    fn a_pre_existing_real_viewer_state_is_not_shadowed() {
+        // The probe (`sql::viewer_state_exists_probe_sql`) reports a real
+        // (non-temp) `viewer_state` already on the connection — e.g. an
+        // attached database's table — so lint must not create its own
+        // empty temp on top of it (review of #530 #5: that would shadow
+        // the real one for the rest of the session).
+        let script = "SELECT value::TEXT_SMALL FROM viewer_state;\n";
+        let mut saw_create = false;
+        let d = check(script, |q| {
+            if q.contains("duckdb_tables()") {
+                return Ok(vec![row(json!({"n": 1}))]);
+            }
+            if q.contains("CREATE TEMP TABLE viewer_state") {
+                saw_create = true;
+            }
+            Ok(vec![row(json!({"c0": "hi"}))])
+        });
+        assert!(
+            !saw_create,
+            "must not seed an empty viewer_state over a real one: {d:?}"
+        );
+    }
+
+    #[test]
+    fn shadowing_viewer_state_is_an_error() {
+        let d = check("CREATE TEMP TABLE viewer_state AS SELECT 1;\n", |_| {
+            Ok(vec![])
+        });
+        assert!(has(&d, "state/shadowed"), "{d:?}");
+    }
+
+    #[test]
+    fn shadowing_a_dotted_viewer_state_is_also_an_error() {
+        // `CREATE TABLE main.viewer_state …` — a schema/catalog qualifier
+        // doesn't change what a later bare `FROM viewer_state` resolves to
+        // (review of #530, nits).
+        let d = check("CREATE TABLE main.viewer_state AS SELECT 1;\n", |_| {
+            Ok(vec![])
+        });
+        assert!(has(&d, "state/shadowed"), "{d:?}");
+    }
+
+    #[test]
+    fn markup_from_viewer_state_is_a_warning() {
+        let script = "SELECT value::MARKDOWN FROM viewer_state;\n";
+        let d = check(script, |_| Ok(vec![row(json!({"c0": "hello"}))]));
+        assert!(has(&d, "state/markup-from-viewer"), "{d:?}");
     }
 }
 

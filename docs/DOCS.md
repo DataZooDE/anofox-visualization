@@ -197,6 +197,9 @@ terminal.
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
 | `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
+| `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer — requires a server with options.state; not active until that lands (#517 slice S2) |
+| `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
+| `::SUBMIT_DONE` |  | input | optional confirmation text shown after a successful ::SUBMIT |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
