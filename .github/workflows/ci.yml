@@ -154,6 +154,9 @@ jobs:
       - name: Locked server end to end (read-only session, search_path, limits)
         run: duckext/scripts/test-locked-server.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      - name: Check button on a live (authoring) backend (#199)
+        run: duckext/scripts/test-check-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # #357: the access policy's hash-mask key never reaches a panel, an
       # error, the dashboard page, /healthz, stderr or the request log, and
       # SQL that could reveal it is refused at start.
@@ -281,6 +284,9 @@ jobs:
 
       - name: Locked server end to end, against DuckDB 2.0
         run: duckext/scripts/test-locked-server.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Check button on a live (authoring) backend, against DuckDB 2.0 (#199)
+        run: duckext/scripts/test-check-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
       - name: Access policy key e2e, against DuckDB 2.0
         run: duckext/scripts/policy-key-e2e.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"

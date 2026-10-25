@@ -454,6 +454,33 @@ export function sortDiagnostics(diags) {
     .map(([d]) => d);
 }
 
+// Check on a live backend (#199): `dashboard --check`'s diagnostics, run on
+// the server's own data, for a backend with no DuckDB-Wasm to scratch-lint
+// in (an authoring `anofox_serve(port)` / `serve <db>`). Unlike `lintScript`
+// above, this is one round trip: the server runs the whole lint itself,
+// synchronously, on a connection it keeps open and isolated for the purpose
+// (ATTACH ':memory:' + USE, the same idea as `scratchRunner` — see
+// duckext/src/serve.rs's `scratch_check`), so it never needs resuming and
+// never touches what the page's own queries ("/query") see; a hung or slow
+// query past `timeoutMs` (server default: 30s) is interrupted there rather
+// than held forever. Same auth as "/query" (the session's token cookie) —
+// `fetchImpl` defaults to the global `fetch` (a test can pass a stub).
+// Resolves to `{diagnostics, ok, summary, spans}`, or rejects with the
+// server's error text (its own 503 — a check is already running — included).
+export async function liveCheck(script, opts = {}) {
+  const { strict = false, design = true, timeoutMs, fetchImpl = fetch } = ownOpts(opts);
+  const r = await fetchImpl("/check", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // `timeout_ms` omitted (`undefined`) when the caller doesn't pass one:
+    // the server's own default (30s) applies, same as not sending it at all.
+    body: JSON.stringify({ script, strict, design, timeout_ms: timeoutMs }),
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(text);
+  return JSON.parse(text);
+}
+
 // "2 errors, 1 warning" — the counts for the status line ("" for none).
 export function countsText(diags) {
   const n = (s) => diags.filter((d) => d.severity === s).length;

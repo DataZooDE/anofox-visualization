@@ -18,7 +18,7 @@ import { createRequire } from "module";
 import os from "os";
 import path from "path";
 import assert from "assert/strict";
-import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from "../../web/lint.js";
+import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnostics } from "../../web/lint.js";
 
 // ---- 1. the loop ----
 {
@@ -180,6 +180,49 @@ import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics } from
     assert.equal(connectCalls, 2, "c wedged: a fresh connection was opened for the retry");
     assert.ok(fresh[0]?.calls.some(([k, sql]) => k === "query" && /^DETACH/.test(sql)), "c wedged: DETACH ran on the fresh connection instead (no leak)");
   }
+}
+
+// ---- 1c. liveCheck (#199): the live-backend Check button's one round trip
+// to "/check" — no wasm, no DuckDB needed, just that it posts the right
+// body and surfaces the server's answer (or its error text) faithfully.
+{
+  const calls = [];
+  const fakeFetch = async (url, init) => {
+    calls.push([url, init]);
+    const body = JSON.parse(init.body);
+    if (body.script === "bad") return { ok: false, text: async () => "the check failed: boom" };
+    return {
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          diagnostics: [{ severity: "error", stmt: 1, code: "x", message: "m", sql: body.script }],
+          ok: false,
+          summary: "1 error(s), 0 warning(s)",
+          spans: [[0, body.script.length]],
+        }),
+    };
+  };
+  const res = await liveCheck("SELECT 1;", { strict: true, design: false, fetchImpl: fakeFetch });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "/check");
+  assert.equal(calls[0][1].method, "POST");
+  assert.deepEqual(JSON.parse(calls[0][1].body), { script: "SELECT 1;", strict: true, design: false });
+  assert.equal(res.ok, false);
+  assert.equal(res.diagnostics.length, 1);
+  assert.deepEqual(res.spans, [[0, 9]]);
+
+  // Defaults (opts omitted): strict false, design true, no timeout_ms key
+  // (JSON.stringify drops an `undefined` property — the server's own
+  // default applies, same as not sending the field at all).
+  await liveCheck("SELECT 2;", { fetchImpl: fakeFetch });
+  assert.deepEqual(JSON.parse(calls[1][1].body), { script: "SELECT 2;", strict: false, design: true });
+
+  // timeoutMs, when given, is forwarded as timeout_ms (#199 follow-up).
+  await liveCheck("SELECT 3;", { timeoutMs: 1000, fetchImpl: fakeFetch });
+  assert.deepEqual(JSON.parse(calls[2][1].body), { script: "SELECT 3;", strict: false, design: true, timeout_ms: 1000 });
+
+  // A non-ok response rejects with the server's own text.
+  await assert.rejects(() => liveCheck("bad", { fetchImpl: fakeFetch }), /the check failed: boom/);
 }
 
 // ---- 2. DuckDB-Wasm against the CLI ----
