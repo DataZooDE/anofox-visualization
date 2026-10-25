@@ -29,7 +29,7 @@ import init, {
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
-import { countsText, lintScript, rowsJson, scratchRunner, sortDiagnostics, splitStatements } from "./lint.js";
+import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnostics, splitStatements } from "./lint.js";
 // #204: the tab-wide CSP (whenever an assistant key is stored) and the
 // groundwork for the assistant's own locked DuckDB-Wasm instance
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
@@ -1634,9 +1634,10 @@ function clearApplyHold() {
   applyHold = false;
   if ($("refresh")) $("refresh").disabled = false;
   // M-2 (sec-review-272-rereview): only re-enable Check the way wireLint()
-  // itself would have — a live/served backend hides #lint-run and never
-  // enables it at all.
-  if ($("lint-run") && backend !== "live" && !servedMode) {
+  // itself would have — a served backend hides #lint-run and never enables
+  // it at all. #199: a live (authoring) backend now has its own Check
+  // (liveCheck(), server-side), so it is no longer excluded here either.
+  if ($("lint-run") && !servedMode) {
     $("lint-run").disabled = false;
     $("lint-run").title = "";
   }
@@ -1649,8 +1650,9 @@ function clearApplyHold() {
 function armHold() {
   applyHold = true;
   if ($("refresh")) $("refresh").disabled = true;
-  // M-2 (sec-review-272-rereview): Check runs on the page database
-  // (scratchRunner(pageDb(), …)) — it must be just as held as Run.
+  // M-2 (sec-review-272-rereview): Check runs SQL from the editor too — on
+  // the page database (scratchRunner(pageDb(), …)) or, #199, the live
+  // backend's own data (liveCheck()) — it must be just as held as Run.
   if ($("lint-run")) {
     $("lint-run").disabled = true;
     $("lint-run").title = "Run or discard the applied SQL first";
@@ -2586,16 +2588,20 @@ async function finishAssistBoot() {
   applyChartsAsTablesInstallDefault(); // #403: after appBrandReady — see its own comment
 }
 
-// ---- Check (#145): the lint of `dashboard --check`, in the browser ----
+// ---- Check (#145, #199): the lint of `dashboard --check`, in the browser
+// or on a live backend ----
 // web/lint.js drives the wasm lint_step; each query runs in a scratch session
 // of DuckDB-Wasm (its own in-memory database), so checking never changes the
-// page's tables. A live backend has no scratch session yet (an authoring
-// server keeps one connection): there the Check is hidden.
+// page's tables. An authoring live backend (anofox_serve/serve <db>) has no
+// DuckDB-Wasm to scratch-lint in, so it runs the whole lint server-side
+// instead (liveCheck(), one round trip to "/check") — isolated there the
+// same way (see web/lint.js's own comment). A *served* (locked) backend
+// still has no Check at all: it never accepts SQL from the client.
 const lintState = { tok: 0, script: null, spans: [] };
 function wireLint() {
   const box = $("lint");
   if (!box) return;
-  if (backend === "live" || servedMode) {
+  if (servedMode) {
     box.hidden = true;
     return;
   }
@@ -2621,15 +2627,19 @@ async function runLint() {
   btn.setAttribute("aria-busy", "true");
   say("Checking…");
   try {
-    const run = scratchRunner(pageDb(), { prepare: prepareSql });
-    const res = await lintScript(script, {
-      step: lint_step,
-      run,
-      strict: $("lint-strict").checked,
-      design: $("lint-design").checked,
-      onStep: (n, q) => tok === lintState.tok && say(`Checking… ${q} quer${q === 1 ? "y" : "ies"}`),
-      cancelled: () => tok !== lintState.tok,
-    });
+    const checkOpts = { strict: $("lint-strict").checked, design: $("lint-design").checked };
+    // #199: a live backend has no DuckDB-Wasm scratch session to lint in —
+    // the server runs the whole check itself, in one round trip.
+    const res =
+      backend === "live"
+        ? await liveCheck(script, checkOpts)
+        : await lintScript(script, {
+            step: lint_step,
+            run: scratchRunner(pageDb(), { prepare: prepareSql }),
+            ...checkOpts,
+            onStep: (n, q) => tok === lintState.tok && say(`Checking… ${q} quer${q === 1 ? "y" : "ies"}`),
+            cancelled: () => tok !== lintState.tok,
+          });
     if (!res || tok !== lintState.tok) return;
     lintState.script = script;
     lintState.spans = res.spans || [];

@@ -601,12 +601,24 @@ unsafe fn init(
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::sync::Arc;
+        // #199: a second connection for `/check`'s isolated scratch session
+        // (`serve::DbCtx::check`), opened here — right next to `conn`, on
+        // this same thread — rather than from a server worker thread later:
+        // that crashed when tried (this C-API's `duckdb_connect` is
+        // apparently not safe to call from an arbitrary later thread, only
+        // cross-thread *use* of an already-open connection is).
+        let mut check_raw: duckdb_connection = ptr::null_mut();
+        if capi!(duckdb_connect)(*dbp, &mut check_raw) != duckdb_state::DuckDBSuccess {
+            return Err("could not open the check connection".into());
+        }
+        let check_conn = db::Conn::owned(check_raw);
         // The serving functions keep this connection (the init-time handle is
         // the only way back into this database from a server thread). It is
         // attached per function as extra_info, so each database serves its own
         // data; its lifetime is the database's.
         let ctx = Arc::new(serve::DbCtx {
             conn: std::sync::Mutex::new(conn),
+            check: std::sync::Mutex::new(check_conn),
         });
         let make = || Box::into_raw(Box::new(ctx.clone())) as *mut c_void;
         let destroy: duckdb_delete_callback_t = Some(serve_fns::drop_ctx);

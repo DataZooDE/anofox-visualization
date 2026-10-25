@@ -2172,6 +2172,48 @@ mod tests {
         assert!(e.contains("bin") && e.contains("wave"), "{e}");
     }
 
+    /// #499: `pack_by`/`wave_by`'s `group_col` keeps its own name next to
+    /// `model_id` (anofox-optimize#14) — this is the issue's own repro, two
+    /// sites each packed into bins numbered from 1, so without a facet
+    /// bin 1 of `site_a` and bin 1 of `site_b` would stack into one bar
+    /// (9 + 9 = 18, over the capacity of 10). Faceted, each site keeps its
+    /// own bins and no bar crosses its capacity line.
+    #[test]
+    fn assignment_group_column_facets_by_site_not_just_model() {
+        const BINS: &str = r#"[
+            {"site":"site_a","bin":1,"item":"a01","size":4,"capacity":10},
+            {"site":"site_a","bin":1,"item":"a02","size":5,"capacity":10},
+            {"site":"site_a","bin":2,"item":"a03","size":6,"capacity":10},
+            {"site":"site_a","bin":2,"item":"a04","size":3,"capacity":10},
+            {"site":"site_a","bin":3,"item":"a05","size":2,"capacity":10},
+            {"site":"site_b","bin":1,"item":"b01","size":5,"capacity":10},
+            {"site":"site_b","bin":1,"item":"b02","size":4,"capacity":10},
+            {"site":"site_b","bin":2,"item":"b03","size":7,"capacity":10},
+            {"site":"site_b","bin":3,"item":"b04","size":8,"capacity":10},
+            {"site":"site_b","bin":4,"item":"b05","size":3,"capacity":10}]"#;
+        assert_eq!(detect(&rows(BINS)).unwrap(), "assignment");
+        let svg = go("assignment", BINS, "{}").unwrap();
+        dump("assignment_group_facets", &svg);
+        assert!(
+            svg.contains(">site_a</text>") && svg.contains(">site_b</text>"),
+            "{svg}"
+        );
+        assert!(!svg.contains("data-warnings"), "{svg}");
+
+        // The same table with several `model_id`s too: group and model
+        // combine into one `"group · model"` facet title (ggplot-rs facets
+        // on a single column here).
+        const BINS_AND_MODELS: &str = r#"[
+            {"site":"site_a","model_id":"as_given","bin":1,"item":"a01","size":4,"capacity":10},
+            {"site":"site_a","model_id":"best_of","bin":1,"item":"a01","size":4,"capacity":10},
+            {"site":"site_b","model_id":"as_given","bin":1,"item":"b01","size":5,"capacity":10},
+            {"site":"site_b","model_id":"best_of","bin":1,"item":"b01","size":5,"capacity":10}]"#;
+        let svg = go("assignment", BINS_AND_MODELS, "{}").unwrap();
+        dump("assignment_group_and_model_facets", &svg);
+        assert!(svg.contains(">site_a · as_given</text>"), "{svg}");
+        assert!(svg.contains(">site_b · best_of</text>"), "{svg}");
+    }
+
     #[test]
     fn assignment_bin_order_capacity_and_nulls() {
         // Review of #375 (1): the x axis follows numeric order, not row

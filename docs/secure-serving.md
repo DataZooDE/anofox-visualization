@@ -49,6 +49,32 @@ so the protection is about making sure *only you* can send it:
   `403` — including pages on *other* localhost ports (cookies are shared across
   ports, origins are not). A `text/plain` form/fetch POST from a web page
   therefore never reaches the SQL endpoint.
+- **Check, server-side (`/check`, #199).** The builder's Check button
+  (`dashboard --check`'s own diagnostics) needs a scratch session to run its
+  queries in without touching the live data — DuckDB-Wasm has one
+  (`web/lint.js`'s `scratchRunner`), but a live backend has none, so this
+  endpoint runs the whole lint on the server instead: `POST /check` with
+  `{"script", "strict", "design", "timeout_ms"}` (the body `dashboard
+  --check --strict --no-design` would take, plus `timeout_ms` — default
+  30,000, at most 120,000), behind the same token/cookie, `Host` and
+  `Origin` checks as `/query`. Its queries never run on the live session's
+  own connection: a second connection, opened once at start-up next to the
+  live one, is ATTACHed its own `:memory:` scratch database per call
+  (switched into with `USE`, ahead of the live database on `search_path`,
+  DETACHed after) — a `CREATE TABLE`/`VIEW`/`MACRO` or `SET VARIABLE` the
+  checked script runs lands there, never on the live database, while the
+  live database's own tables stay readable (an input's or `::SELECT_AS`'s
+  default needs real rows). A hung or slow checked query past `timeout_ms`
+  is interrupted (`duckdb_interrupt`, like the locked server's own
+  `timeout_ms`) rather than holding that one connection forever — the
+  interrupted query's own error becomes an ordinary diagnostic, plus one
+  more `check/timeout` diagnostic, and the connection is cleaned up and
+  reused normally by the next check. There is only the one check
+  connection, so a second `/check` while one is still running answers `503`
+  immediately instead of queuing. Returns `{"diagnostics", "ok", "summary",
+  "spans"}`, the same shape the browser's own check settles to. Not
+  available on the locked server (`anofox_serve_dashboards`): that one never
+  accepts SQL from the client at all, checked or not.
 - **No CLI meta commands in the text you send** (`serve` bin). It runs SQL
   through the `duckdb` CLI. A body (or `--init` script) with a line that
   starts with `.` is refused, so `.shell`, `.read`, `.output`, … from the
