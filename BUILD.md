@@ -92,10 +92,12 @@ Because the macros live in that database, they are not found after `USE <other d
 applies:
 
 - **Fast lane** (target ~10 min) — every other PR: `fmt`+`clippy`+`cargo
-  nextest`, the web tests (`web/pkg` built once and shared via artifact,
-  `tests/web/*.mjs` sharded into 4 jobs, the browser e2e scripts, the wasm
-  size check). A **docs-only** PR (every changed file `*.md` or under
-  `docs/`) instead runs only a markdown/link check.
+  nextest`, the C++ ABI extension's sqllogictests (`sqllogictest` job:
+  `make test` → `test/sql/*.test`, linux_amd64 only, ccache + rust-cache so
+  repeat runs stay fast — #491), the web tests (`web/pkg` built once and
+  shared via artifact, `tests/web/*.mjs` sharded into 4 jobs, the browser
+  e2e scripts, the wasm size check). A **docs-only** PR (every changed file
+  `*.md` or under `docs/`) instead runs only a markdown/link check.
 - **Full lane** — everything in the fast lane, plus the DuckDB 2.0 smoke
   test, the Quack prototype, the strict `Explore starter dashboards --check
   --strict` check, the Claude Code skills-SQL validator, every
@@ -109,6 +111,10 @@ Add the `full-ci` label to a PR when it touches: a dependency bump
 (`Cargo.lock`, `package.json`/-`lock`, `wasm-extensions.lock`), serving or
 security code (`duckext/src/host/`, anything under `src/host/`, the access
 policy), `csrc/` or `CMakeLists.txt`, or when it is itself a release PR.
+Opening a PR with a label already attached fires `opened` and `labeled`
+together; `ci.yml`'s and `MainDistributionPipeline.yml`'s `lane` job only
+reacts to a bare `labeled`/`unlabeled` event when the label itself is
+`full-ci`, so that still starts exactly one run per workflow (#491).
 
 `ci-gate` (in `ci.yml`) is the one check to point branch protection / a
 merge script at: it passes once every needed job has succeeded or was
