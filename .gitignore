@@ -20,3 +20,7 @@ web/data/boundaries/nuts*.csv
 
 # #244: the assistant eval seed's live results (real API calls, cost money) — never committed
 /tests/assist-eval/results/
+
+# #493: the web-build CI job's captured `git describe`, shipped to the web-mjs-shard
+# jobs via the web-build artifact so version_test.mjs doesn't re-derive it.
+/.build-describe.txt
