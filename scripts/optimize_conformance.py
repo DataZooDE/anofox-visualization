@@ -76,6 +76,9 @@ CREATE TABLE assets AS
 SELECT i AS asset, [0.12, 0.09, 0.07, 0.05][i + 1] AS ret, [0.20, 0.15, 0.10, 0.06][i + 1] AS vol
 FROM range(0, 4) t(i);
 
+-- anofox_optimize's index base: 0 before v2026.10.26 (bins and orders 0-based, UBIGINT), 1 from then on
+-- (every index a 1-based BIGINT, the SQL convention, anofox-optimize#7). The harness accepts both.
+CREATE MACRO ob() AS (SELECT list_min(anofox_optimize_pack_next_fit([1.0], 2.0).assignment)::BIGINT);
 CREATE MACRO setup_seq() AS (
     SELECT list(round(sqrt((a.lon - b.lon) ^ 2 + (a.lat - b.lat) ^ 2) * 100, 3) ORDER BY a.node, b.node)
     FROM stops a, stops b);
@@ -121,12 +124,12 @@ FAMILIES = {
 HELPERS = {"anofox_optimize_matrix_from_triples", "anofox_optimize_version"}
 
 # Consistency of a solution `s` (one row, column `s`): an error() names the
-# first broken invariant. These also pin the index bases (pack 0-based,
-# wave 1-based, order 0-based) the examples rely on.
+# first broken invariant. These also pin the index bases: waves are 1-based; bins and orders start at ob()
+# (0 before anofox_optimize v2026.10.26, 1 from then on).
 INVARIANTS = {
     "pack": [
-        ("bins_used = max(assignment) + 1 (0-based bins)",
-         "s.bins_used = list_max(s.assignment) + 1 AND list_min(s.assignment) = 0"),
+        ("bins numbered ob() .. bins_used - 1 + ob()",
+         "s.bins_used = list_max(s.assignment) + 1 - ob() AND list_min(s.assignment) = ob()"),
         ("every bin within capacity",
          "(SELECT max(t) FROM (SELECT sum(i.size) t FROM items i GROUP BY s.assignment[i.item])) <= 10"),
     ],
@@ -144,14 +147,14 @@ INVARIANTS = {
     ],
     "sequence": [
         ("order is a permutation of 0..6",
-         "list_sort(s.\"order\") = range(0, 7)::UBIGINT[]"),
+         "list_sort(s.\"order\")::BIGINT[] = range(ob(), 7 + ob())"),
         ("total_setup = Σ consecutive setups (open path)",
-         "abs(s.total_setup - (SELECT sum(setup_seq()[(s.\"order\"[k] * 7 + s.\"order\"[k + 1] + 1)::BIGINT]) "
+         "abs(s.total_setup - (SELECT sum(setup_seq()[((s.\"order\"[k]::BIGINT - ob()) * 7 + s.\"order\"[k + 1]::BIGINT - ob() + 1)]) "
          "FROM range(1, 7) r(k))) < 1e-6"),
     ],
     "schedule": [
-        ("order is a permutation of the 6 jobs (0-based)",
-         "list_sort(s.\"order\") = range(0, 6)::UBIGINT[]"),
+        ("order is a permutation of the 6 jobs (from ob())",
+         "list_sort(s.\"order\")::BIGINT[] = range(ob(), 6 + ob())"),
         ("makespan = Σ setups + processing along the order",
          "abs(s.makespan - (SELECT max(e) FROM gantt)) < 1e-6"),
         ("total_weighted_tardiness recomputed from the Gantt",
@@ -173,8 +176,8 @@ INVARIANTS["assortment_recapture"] = INVARIANTS["assortment"]
 # The schedule as rows: start/end of each job along the returned order.
 GANTT = """
 CREATE TABLE gantt AS
-WITH o AS (SELECT k AS pos, s."order"[k]::BIGINT AS job,
-                  CASE WHEN k = 1 THEN 0 ELSE s."order"[k - 1]::BIGINT + 1 END AS prev
+WITH o AS (SELECT k AS pos, s."order"[k]::BIGINT - ob() AS job,
+                  CASE WHEN k = 1 THEN 0 ELSE s."order"[k - 1]::BIGINT - ob() + 1 END AS prev
            FROM sol, range(1, 7) r(k)),
 c AS (SELECT o.pos, o.job, j.p, j.due, j.w,
              setup_sched()[o.prev * 7 + o.job + 2] AS setup FROM o JOIN jobs j USING (job))
@@ -204,7 +207,7 @@ def role_svg(cols: list[tuple[str, str]], src: str, order: str, w: int = 640, h:
 def view_sql(fam: str) -> str:
     """The family's decision view of the solution in table `sol`."""
     if fam == "pack":
-        return role_svg([("'container ' || (s.assignment[item] + 1)", "XAXIS"), ("size", "BARCHART_STACKED"),
+        return role_svg([("'container ' || (s.assignment[item] + 1 - ob())", "XAXIS"), ("size", "BARCHART_STACKED"),
                          ("'carton ' || lpad(item::VARCHAR, 2, '0')", "CATEGORY"), ("10", "REFLINE")],
                         "SELECT * FROM sol, items", "s.assignment[item], item")
     if fam == "wave":
@@ -226,7 +229,7 @@ def view_sql(fam: str) -> str:
     if fam == "sequence":
         # the route through the returned order, and the stops
         src = ("SELECT 0 AS k, 'LINESTRING(' || string_agg(lon || ' ' || lat, ', ' ORDER BY pos) || ')' AS wkt, "
-               "'route' AS series FROM (SELECT k AS pos, s.\"order\"[k] AS node FROM sol, range(1, 8) r(k)) "
+               "'route' AS series FROM (SELECT k AS pos, s.\"order\"[k]::BIGINT - ob() AS node FROM sol, range(1, 8) r(k)) "
                "JOIN stops USING (node) "
                "UNION ALL SELECT 1 + node, 'POINT(' || lon || ' ' || lat || ')', 'stop' FROM stops")
         return role_svg([("wkt", "MAP"), ("series", "CATEGORY")], src, "k")
@@ -252,7 +255,9 @@ def summary_rows(fam: str, algo: str) -> str:
 def check_sql(name: str, fam: str) -> str:
     """Assert the return type and the invariants; renders an 'ok' SVG."""
     want = FAMILIES[fam][1]
-    conds = [(f"returns {want}", f"typeof(s) = '{want}'")] + INVARIANTS[fam]
+    # The index lists are UBIGINT before anofox_optimize v2026.10.26 and BIGINT from then on.
+    conds = [(f"returns {want}", f"replace(typeof(s), 'UBIGINT', 'BIGINT') = replace('{want}', 'UBIGINT', 'BIGINT')")] \
+        + INVARIANTS[fam]
     case = " ".join(f"WHEN NOT ({c}) THEN error('{name}: " + m.replace("'", "''") + "')"
                     for m, c in conds)
     pre = GANTT if fam == "schedule" else ""
