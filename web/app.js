@@ -6203,6 +6203,12 @@ function openTableAsDashboard(e, cards) {
 const MD_KEY = "dp_md";
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
+// #518: tag the first element a statement draws with its `-- @name`, a
+// stable anchor for e2e selectors and (PR B) a guided tour's target. Never
+// overwrites an already-tagged element (a re-run reaching the same node).
+function tagName(el, s) {
+  if (el && s && s.name && !el.dataset.dpName) el.dataset.dpName = s.name;
+}
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
@@ -8304,7 +8310,11 @@ async function lazyRunJob(job, inline = false) {
   await lazyFlushSetup(L, job.i, job.ph);
   const frag = document.createDocumentFragment();
   const base = { ...job.ctx, container: frag, curGrid: job.ctx.container === job.ctx.curGrid ? frag : null };
-  const tag = (i) => frag.querySelectorAll(".panel:not([data-stmt])").forEach((p) => (p.dataset.stmt = i));
+  const tag = (i) => {
+    const els = frag.querySelectorAll(".panel:not([data-stmt])");
+    els.forEach((p) => (p.dataset.stmt = i));
+    tagName(els[0], L.stmts[i]); // #518: the first panel of a multi-panel statement
+  };
   const out = await L.panelBody(job.i, L.stmts[job.i], base);
   tag(job.i);
   for (const t of job.tracks) {
@@ -9097,6 +9107,7 @@ async function runOnce(fresh = true, pv = preview) {
           h.className = "section";
           const r0 = rows[0];
           h.textContent = r0 ? String((sr ? r0["c" + sr[0]] : Object.values(r0)[0]) ?? "") : "";
+          tagName(h, s);
           container.appendChild(h);
         } else if (role(s, "RELOAD")) {
           // Auto-refresh every N seconds, driven from SQL.
@@ -9420,6 +9431,7 @@ async function runOnce(fresh = true, pv = preview) {
         const compact = String(sizeVal ?? "").replace(/^"|"$/g, "").trim().toLowerCase() === "compact";
         const box = document.createElement("section");
         box.className = "group" + (compact ? " group-compact" : "");
+        tagName(box, s);
         // ::HEIGHT right before a ::GROUP sets that row's ::FIT share (#418),
         // like it does for a chart row — fitDash reads it off the box; a
         // ::GROUP with none keeps its tiles' own natural height instead of
@@ -9473,6 +9485,7 @@ async function runOnce(fresh = true, pv = preview) {
         const btn = document.createElement("button");
         btn.className = "tab-btn";
         btn.textContent = name;
+        tagName(btn, s);
         btn.onclick = (e) => {
           e.stopPropagation();
           dpTab = name; // remember, so a cross-filter re-run keeps this tab
@@ -9512,6 +9525,7 @@ async function runOnce(fresh = true, pv = preview) {
         const sbtn = document.createElement("button");
         sbtn.className = "tab-btn subtab-btn";
         sbtn.textContent = name;
+        tagName(sbtn, s);
         const topName = curTopName || "";
         // Capture THIS sub-tab's bar/wrap — `subBar`/`subWrap` are shared loop
         // variables that get reassigned for later top tabs, so the closure must
@@ -9551,6 +9565,7 @@ async function runOnce(fresh = true, pv = preview) {
         if (openView !== s.view.group) {
           const sec = document.createElement("section");
           sec.className = "dp-views";
+          tagName(sec, s); // #518: the group's marker statement names its switcher
           curGroupScale = 1;
           if (container === curGrid) {
             const outerSpan = Math.min(12, nextSpan || 12);
@@ -9654,7 +9669,11 @@ async function runOnce(fresh = true, pv = preview) {
         nextIa = {};
         nextEmpty = "";
       } else if (isInput(s)) {
-        if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
+        if (dd[i]) {
+          const ctl = makeControl(dd[i], container === curGrid);
+          tagName(ctl, s);
+          container.appendChild(ctl);
+        }
       } else if (trackHost && trackHost.lazy) {
         // a ::TRACK under a chart that renders later: it renders with it
         trackHost.lazy.tracks.push({ i, height: nextHeight || 0 });
@@ -9722,8 +9741,11 @@ async function runOnce(fresh = true, pv = preview) {
       nextEmpty = "";
     } finally {
       // Tag this statement's panels (markPending finds them on the next run).
-      for (const root of [newGrid, tabWrap])
-        root?.querySelectorAll(".panel:not([data-stmt])").forEach((p) => (p.dataset.stmt = i));
+      for (const root of [newGrid, tabWrap]) {
+        const els = root?.querySelectorAll(".panel:not([data-stmt])");
+        els?.forEach((p) => (p.dataset.stmt = i));
+        tagName(els?.[0], s); // #518: the first panel of a multi-panel statement
+      }
     }
   }
   // If the remembered tab no longer exists, fall back to the first.
