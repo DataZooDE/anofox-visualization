@@ -1102,10 +1102,14 @@ fn region_codes_draw_from_the_pack_with_its_names_and_credits() {
     assert!(f[0].contains(" data-series=\"Bavaria\"") && f[0].contains(" data-label=\"Bavaria\""));
     assert!(s.contains("<title>Bavaria: 820</title>"));
     // the BKG's source note with its links and the note of modification
-    assert!(s.contains("<a href=\"https://www.bkg.bund.de\" target=\"_blank\"><tspan text-decoration=\"underline\">BKG</tspan></a>"));
+    // (`rel="noopener"` is `GeomAttribution`'s own addition, ggplot-rs
+    // 0.31.0 — the old hand-written writer didn't set it)
+    assert!(s.contains("<a href=\"https://www.bkg.bund.de\" target=\"_blank\" rel=\"noopener\"><tspan text-decoration=\"underline\">BKG</tspan></a>"));
     assert!(s.contains("<a href=\"https://www.govdata.de/dl-de/by-2-0\""));
     assert!(s.contains(">https://sgx.geodatenzentrum.de/web_public/gdz/datenquellen/datenquellen_vg_nuts.pdf</tspan>"));
-    assert!(s.contains("(2026)") && s.contains("geometry\u{a0}modified\u{a0}(simplified)"));
+    // `GeomAttribution`'s own run text uses plain spaces, not the old
+    // writer's non-breaking ones
+    assert!(s.contains("(2026)") && s.contains("geometry modified (simplified)"));
     assert!(!s.contains("Natural Earth"));
     // a scale bar (a state-sized map)
     assert!(s.contains("km</text>"), "scale bar");
@@ -1122,7 +1126,7 @@ fn region_codes_draw_from_the_pack_with_its_names_and_credits() {
         ],
         &o,
     );
-    assert!(s.contains("data-label=\"Bayern\"") && s.contains("Geometrie\u{a0}verändert"));
+    assert!(s.contains("data-label=\"Bayern\"") && s.contains("Geometrie verändert"));
     // ::LABEL from the data wins
     let s = svg(vec![
         codes(&["DE-BY"]),
@@ -1178,15 +1182,14 @@ fn lat_lon_points_over_a_named_backdrop() {
     ]);
     let f = features(&s);
     assert!(f.iter().all(|t| t.starts_with("<circle ")) && f.len() == 2);
-    // the backdrop is the 16 states, and its credit is shown
-    let base = &s[s.find("class=\"dp-basemap\"").unwrap()..];
-    let base = &base[..base.find("</g>").unwrap()];
-    assert_eq!(base.matches("<path ").count(), 16);
+    // the backdrop is the 16 states, and its credit is shown — a 2-line
+    // BKG attribution is now also eligible for the geom_sf path (slice 6:
+    // `GeomAttribution::line`), so the backdrop is a plain, unwrapped
+    // `geom_sf` layer (no `class="dp-basemap"` group) same as the world
+    // case below: count every `<path>` in the whole SVG.
+    assert_eq!(s.matches("<path ").count(), 16, "{s}");
     assert!(s.contains("dl-de/by-2-0"));
-    // a world backdrop leaves Antarctica out — a single `world` line (<=1
-    // attribution line) makes this eligible for the geom_sf path (slice
-    // 5's attribution): the backdrop is now a plain, unwrapped `geom_sf`
-    // layer (no `class="dp-basemap"` group), drawn before the two point
+    // a world backdrop leaves Antarctica out — drawn before the two point
     // features, so this just counts every `<path>` in the whole SVG.
     let s = svg(vec![
         Column::new("lat", Role::Lat, nums(&[0.0, 10.0])),
@@ -1211,15 +1214,21 @@ fn labels_go_where_they_fit_with_a_halo() {
             extra,
         ]
     };
+    // Region labels are drawn via `geom_sf_text` (`data-geom="sf_text"`,
+    // not the old writer's `class="dp-map-labels"` group); each label's
+    // own halo (shadowtext-style, ggplot-rs 0.31.0) repeats its text 8
+    // more times in the background colour before the real one, so dedupe
+    // by text content to get the distinct labels shown.
     let labels = |s: &str| -> Vec<String> {
-        let Some(i) = s.find("class=\"dp-map-labels\"") else {
-            return Vec::new();
-        };
-        let g = &s[i..s[i..].find("</g>").unwrap() + i];
-        g.split("<text ")
-            .skip(1)
-            .map(|t| t[t.find('>').unwrap() + 1..t.find("</text>").unwrap()].to_string())
-            .collect()
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for t in s.split("data-geom=\"sf_text\">").skip(1) {
+            let text = t[..t.find("</text>").unwrap()].to_string();
+            if seen.insert(text.clone()) {
+                out.push(text);
+            }
+        }
+        out
     };
     // the 3 most important (largest value first): Thuringia is 16
     let s = draw(
@@ -1228,7 +1237,13 @@ fn labels_go_where_they_fit_with_a_halo() {
     );
     let l = labels(&s);
     assert!(l.len() <= 3 && !l.is_empty(), "{l:?}");
-    assert!(s.contains("paint-order=\"stroke\""), "a halo");
+    // the halo: 8 background-coloured copies + 1 real one per label
+    let sf_text_count = s.matches("data-geom=\"sf_text\"").count();
+    assert_eq!(
+        sf_text_count,
+        l.len() * 9,
+        "a halo: {sf_text_count} texts for {l:?}"
+    );
     // ::DATALABELS: all that fit, none overlapping
     let s = draw(
         cols(Column::new("d", Role::DataLabels, strs(&[""; 16]))),
@@ -1359,10 +1374,12 @@ fn symbols_on_regions_sit_at_the_pole_over_the_layer() {
     let vals: Vec<f64> = (1..=16).map(f64::from).collect();
     let s = svg(vec![codes(all), Column::new("n", Role::Size, nums(&vals))]);
     // D4: the whole de-states layer is the (unfitted) backdrop, not the
-    // rows' own regions — with every state as a row, it's also the extent
-    let base = &s[s.find("class=\"dp-basemap\"").unwrap()..];
-    let base = &base[..base.find("</g>").unwrap()];
-    assert_eq!(base.matches("<path ").count(), 16, "{base}");
+    // rows' own regions — with every state as a row, it's also the extent.
+    // The 2-line BKG attribution this pack needs no longer keeps the map
+    // off the geom_sf path (slice 6), so the backdrop is a plain,
+    // unwrapped `geom_sf` layer (no `class="dp-basemap"` group) — count
+    // every `<path>` in the whole SVG; the symbols themselves are circles.
+    assert_eq!(s.matches("<path ").count(), 16, "{s}");
     let f = features(&s);
     assert_eq!(f.len(), 16);
     assert!(f.iter().all(|t| t.starts_with("<circle")));
