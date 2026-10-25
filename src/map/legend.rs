@@ -238,6 +238,18 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
     let mut bar = 0.0;
     let (legend, mut cw, mut ch) = match &m.fill {
         Fill::Plain(_) => (Legend::None, 0.0, 0.0),
+        // `::BIVARIATE` (M2d): draws through `plot::build`'s own
+        // `GeomBivariateLegend` furniture, not `legend_svg` below (this old
+        // writer is unreachable for maps — `plot::eligible` is
+        // unconditionally `true`, #505) — but a non-zero `(cw, ch)` still
+        // matters here: `plot::build` treats `lg.w <= 0.0 && lg.h <= 0.0` as
+        // "no legend content at all" and forces `LegendPosition::None`,
+        // which would also suppress the `GeomBivariateLegend` furniture
+        // layer itself (gated on "no override forced the legend off").
+        // A rough fixed estimate of the 3×3 grid's own footprint (cell
+        // size 14px, matching `GeomBivariateLegend`'s default) is enough —
+        // nothing here actually draws from it.
+        Fill::Bivariate(_) => (Legend::None, 3.0 * 14.0 + 20.0, 3.0 * 14.0 + 20.0),
         Fill::Category { levels, .. } => {
             let rows = category_rows(levels, max_w);
             let cw = rows

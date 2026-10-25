@@ -54,6 +54,72 @@ pub(super) fn scale_for(
         )),
         Fill::Category { levels, .. } => Some(Box::new(MapFill::category(levels.clone()))),
         Fill::Plain(_) => None,
+        // `ScaleFillBivariate::map_to_color` reads the fill value as a
+        // 1-indexed `"{i}-{j}"` composite class string (biscale's own
+        // convention) — `plot::build` writes exactly that string as the
+        // `fill` column for a bivariate map (M2d).
+        Fill::Bivariate(b) => {
+            let scale = ggplot_rs::scale::bivariate::ScaleFillBivariate::new(
+                Aesthetic::Fill,
+                3,
+                3,
+                b.base,
+                b.color_a,
+                b.color_b,
+                b.title_a.clone().unwrap_or_default(),
+                b.title_b.clone().unwrap_or_default(),
+            );
+            Some(Box::new(BivariateScale {
+                colors: b.colors,
+                scale,
+            }))
+        }
+    }
+}
+
+/// Wraps `ggplot_rs::scale::bivariate::ScaleFillBivariate` so `map_to_color`
+/// returns `Bivar`'s own already-mixed 9 cells (the same colours
+/// `bivariate.rs`'s old-writer path draws, so the two render paths never
+/// disagree) instead of recomputing them from base/color_x/color_y — the
+/// inner `scale` only supplies `breaks()`/`is_discrete()`/`name()` (the
+/// generic discrete-legend plumbing), unused here since `plot::build` hides
+/// the ordinary Fill legend (`LegendPosition::None`) in favour of
+/// `GeomBivariateLegend`.
+#[derive(Clone)]
+pub(super) struct BivariateScale {
+    colors: [[Rgb; 3]; 3],
+    scale: ggplot_rs::scale::bivariate::ScaleFillBivariate,
+}
+
+impl Scale for BivariateScale {
+    fn aesthetic(&self) -> Aesthetic {
+        Aesthetic::Fill
+    }
+    fn train(&mut self, _values: &[Value]) {}
+    fn is_discrete(&self) -> bool {
+        true
+    }
+    fn map(&self, value: &Value) -> f64 {
+        self.scale.map(value)
+    }
+    fn breaks(&self) -> Vec<(f64, String)> {
+        self.scale.breaks()
+    }
+    fn map_to_color(&self, value: &Value) -> Option<(u8, u8, u8)> {
+        let Value::Str(s) = value else { return None };
+        let (xs, ys) = s.split_once('-')?;
+        let i = xs.trim().parse::<usize>().ok()?.saturating_sub(1).min(2);
+        let j = ys.trim().parse::<usize>().ok()?.saturating_sub(1).min(2);
+        Some(self.colors[i][j])
+    }
+    fn name(&self) -> &str {
+        self.scale.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.scale.set_name(name);
+    }
+    fn clone_box(&self) -> Box<dyn Scale> {
+        Box::new(self.clone())
     }
 }
 

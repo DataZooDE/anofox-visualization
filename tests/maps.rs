@@ -477,6 +477,207 @@ fn classed_measure_routes_through_geom_sf_with_counts_and_a_hatch() {
     );
 }
 
+/// 9 cells of a 3×3 grid (`a` and `b` each 0/1/2) give 9 distinct fills, and
+/// `data-bivar="{i},{j}"` matches the row's own tertile (M2d).
+#[test]
+fn bivariate_tertiles_and_nine_colours() {
+    let wkt: Vec<Value> = (0..9)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let a: Vec<f64> = (0..9).map(|i| (i % 3) as f64).collect();
+    let b: Vec<f64> = (0..9).map(|i| (i / 3) as f64).collect();
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt),
+        Column::new("a", Role::Value(Kind::Bar), nums(&a)),
+        Column::new("b", Role::Bivariate, nums(&b)),
+        Column::new("p", Role::Projection, konst("none", 9)),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 9, "{s}");
+    let mut fills = std::collections::HashSet::new();
+    for (i, tag) in f.iter().enumerate() {
+        let ai = a[i] as usize;
+        let bi = b[i] as usize;
+        assert_eq!(
+            attr(tag, "data-bivar"),
+            Some(format!("{ai},{bi}").as_str()),
+            "{tag}"
+        );
+        assert!(attr(tag, "data-class").is_none(), "no data-class: {tag}");
+        fills.insert(attr(tag, "fill").unwrap().to_string());
+    }
+    assert_eq!(fills.len(), 9, "{fills:?}");
+}
+
+/// The 3×3 palette (D10: `ggplot_rs::scale::bivariate::bivariate_cell_color`
+/// over the theme's own `color(0)`/`color(1)`, lifted to the card colour in
+/// dark) keeps its 9 cells perceptually distinguishable in every theme.
+#[test]
+fn bivariate_palette_is_distinguishable_in_every_theme() {
+    fn lab((r, g, b): (u8, u8, u8)) -> (f64, f64, f64) {
+        let f = |c: u8| {
+            let c = c as f64 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (rl, gl, bl) = (f(r), f(g), f(b));
+        let x = rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375;
+        let y = rl * 0.2126729 + gl * 0.7151522 + bl * 0.0721750;
+        let z = rl * 0.0193339 + gl * 0.1191920 + bl * 0.9503041;
+        let t = |v: f64| {
+            if v > 0.008856 {
+                v.cbrt()
+            } else {
+                7.787 * v + 16.0 / 116.0
+            }
+        };
+        let (fx, fy, fz) = (t(x / 0.95047), t(y), t(z / 1.08883));
+        (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+    }
+    fn delta_e(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+        let (l1, a1, b1) = lab(a);
+        let (l2, a2, b2) = lab(b);
+        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+    }
+    let wkt: Vec<Value> = (0..9)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let a: Vec<f64> = (0..9).map(|i| (i % 3) as f64).collect();
+    let b: Vec<f64> = (0..9).map(|i| (i / 3) as f64).collect();
+    for (theme_name, dark) in [
+        ("default", false),
+        ("default", true),
+        ("colorblind", false),
+        ("high-contrast", false),
+    ] {
+        let o = opts(theme_name, dark);
+        let s = draw(
+            vec![
+                Column::new("g", Role::Geometry, wkt.clone()),
+                Column::new("a", Role::Value(Kind::Bar), nums(&a)),
+                Column::new("b", Role::Bivariate, nums(&b)),
+                Column::new("p", Role::Projection, konst("none", 9)),
+            ],
+            &o,
+        );
+        let f = features(&s);
+        let mut colors: Vec<(u8, u8, u8)> = Vec::new();
+        for tag in &f {
+            let hex = attr(tag, "fill").unwrap().trim_start_matches('#');
+            let n = u32::from_str_radix(hex, 16).unwrap();
+            colors.push((
+                ((n >> 16) & 0xff) as u8,
+                ((n >> 8) & 0xff) as u8,
+                (n & 0xff) as u8,
+            ));
+        }
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                let de = delta_e(colors[i], colors[j]);
+                assert!(
+                    de > 5.0,
+                    "{theme_name} dark={dark}: cells {i} and {j} too close (ΔE={de:.2}): {colors:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The 3×3 legend grid draws through `geom_sf`'s own `GeomBivariateLegend`
+/// (ggplot-rs's furniture geom, `data-geom="bivariate_legend"`) — 9 swatch
+/// `<rect>`s plus the two measures' plain names as captions. No per-cell
+/// counts (sipemu/ggplot-rs#259 is open for that upstream; the a11y table's
+/// "value 2"/class columns carry the same information meanwhile). `::REGION`
+/// (real German state codes) pulls in the BKG attribution footer — since
+/// #505, that no longer keeps a map off the `geom_sf` path, so this fixture
+/// exercises the exact shape the real `delivery-coverage.sql` example draws.
+#[test]
+fn bivariate_legend_counts_and_captions() {
+    let states = [
+        "DE-BW", "DE-BY", "DE-BE", "DE-BB", "DE-HB", "DE-HH", "DE-HE", "DE-MV", "DE-NI", "DE-NW",
+    ];
+    let mut a: Vec<Value> = (0..9).map(|i| Value::Float((i % 3) as f64)).collect();
+    let mut b: Vec<Value> = (0..9).map(|i| Value::Float((i / 3) as f64)).collect();
+    a.push(Value::Float(2.0));
+    b.push(Value::Na);
+    let mut rv = Column::new("Revenue", Role::Value(Kind::Bar), a);
+    rv.name = "Revenue".into();
+    let mut sh = Column::new("Share", Role::Bivariate, b);
+    sh.name = "Share".into();
+    let s = svg(vec![codes(&states), rv, sh]);
+    assert!(s.contains("data-geom=\"bivariate_legend\""), "{s}");
+    assert_eq!(
+        s.matches("data-geom=\"bivariate_legend\"").count(),
+        9 + 2,
+        "9 swatches + 2 captions: {s}"
+    );
+    assert!(s.contains(">Revenue<"), "{s}");
+    assert!(s.contains(">Share<"), "{s}");
+    assert!(
+        s.contains("data-bivar-titles=\"[&quot;Revenue&quot;,&quot;Share&quot;]\""),
+        "{s}"
+    );
+    // BKG attribution still draws (#505's own geom_sf furniture), confirming
+    // this bivariate map is on the same path as the real example.
+    assert!(s.contains("data-geom=\"attribution\""), "{s}");
+}
+
+/// A row missing either measure is no data: hatched (areas), no
+/// `data-bivar`, and counted in the legend's no-data entry.
+#[test]
+fn bivariate_rows_missing_either_value_are_hatched() {
+    let wkt: Vec<Value> = (0..3)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt),
+        Column::new(
+            "a",
+            Role::Value(Kind::Bar),
+            vec![Value::Float(1.0), Value::Na, Value::Float(3.0)],
+        ),
+        Column::new(
+            "b",
+            Role::Bivariate,
+            vec![Value::Na, Value::Float(2.0), Value::Float(3.0)],
+        ),
+        Column::new("p", Role::Projection, konst("none", 3)),
+    ]);
+    let f = features(&s);
+    assert_eq!(f.len(), 3, "{s}");
+    for tag in &f[..2] {
+        assert!(
+            attr(tag, "data-bivar").is_none(),
+            "no data-bivar on a hatched row: {tag}"
+        );
+    }
+    assert!(attr(f[2], "data-bivar").is_some(), "{}", f[2]);
+}
+
 /// Regression for #477 (fixed by `ScaleFillBinned`'s own duplicate-edge fix,
 /// sipemu/ggplot-rs#240): a classed measure whose computed break lands
 /// exactly on the data's own max (or min) gives `plot::build` a `breaks`

@@ -370,6 +370,11 @@ pub enum Role {
     Origin,
     /// A flow map's end (`::DEST`), see `Origin`.
     Dest,
+    /// A map's second measure (`::BIVARIATE`): with a first measure
+    /// (`Role::Value`), regions/points are coloured by tertiles of both — a
+    /// 3×3 palette and legend (M2d, plan-maps.md §15 D10). Ignored (lint)
+    /// with `::ORIGIN`/`::DEST`, `::HEXBIN` or `::SIZE`.
+    Bivariate,
     /// The pack layer a map's `::REGION` codes are looked up in
     /// (`::BOUNDARIES`): `'world'`, `'world-50m'`, `'de-states'`,
     /// `'de-districts'`. Read from the first value.

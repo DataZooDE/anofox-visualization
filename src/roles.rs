@@ -174,6 +174,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("LON", &["LONGITUDE", "LNG"], R::Lon, "chart", true, "a map point's longitude (degrees, WGS84), with ::LAT"),
     e("ORIGIN", &["FROM_PLACE"], R::Origin, "chart", true, "a flow map's start: a region code ('DE-BY'), a WKT POINT or {'lon': …, 'lat': …, 'name': …} — with ::DEST, width by ::SIZE"),
     e("DEST", &["DESTINATION", "TO_PLACE"], R::Dest, "chart", true, "a flow map's end (see ::ORIGIN)"),
+    e("BIVARIATE", &["BIVAR"], R::Bivariate, "encoding", true,
+      "a map's second measure: regions coloured by tertiles of both (a 3×3 palette and legend) — with the measure column"),
     e("BASEMAP", &["MAPBASE", "BACKDROP"], R::Basemap, "chart", true,
       "a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts'"),
     e("DIAGRAM", &["NODE"], R::Diagram, "chart", true,
@@ -819,6 +821,7 @@ mod tests {
             Role::Lon,
             Role::Origin,
             Role::Dest,
+            Role::Bivariate,
             Role::Boundaries,
             Role::Tab,
             Role::SubTab,
@@ -955,6 +958,7 @@ mod tests {
                 | Role::Lon
                 | Role::Origin
                 | Role::Dest
+                | Role::Bivariate
                 | Role::Boundaries
                 | Role::Tab
                 | Role::SubTab
