@@ -372,6 +372,13 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
     e("SUBTAB", &["SUB_TAB"], R::SubTab, "layout", false, "a nested tab inside a ::TAB"),
+    e("GUIDE_STEP", &["TUTORIAL_STEP", "WIZARD_STEP"], R::GuideStep, "layout", false,
+      "a step of a guided sequence (onboarding, tutorials): Back / Next, 'Step 2 of 5', \
+       ?v.<name>=n; the alias names the step variable (default 'step')"),
+    e("GATE", &["STEP_GATE", "NEXT_IF"], R::Gate, "layout", false,
+      "on a ::GUIDE_STEP: Next stays disabled until this BOOLEAN is TRUE"),
+    e("GATE_MESSAGE", &["GATE_HINT"], R::GateMessage, "layout", false,
+      "on a ::GUIDE_STEP: why Next is disabled"),
     e("VIEW", &["ALT_VIEW"], R::View, "layout", false,
       "one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`)"),
     e("ENDVIEW", &["END_VIEW"], R::ViewEnd, "layout", false,
@@ -541,7 +548,7 @@ pub fn roles_json() -> String {
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
-                | Role::Fit
+                | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -665,6 +672,9 @@ mod tests {
             "ENDVIEW",
             "FIT",
             "SHOW_IF",
+            "GUIDE_STEP",
+            "GATE",
+            "GATE_MESSAGE",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
@@ -902,6 +912,9 @@ mod tests {
             Role::Direction,
             Role::Lane,
             Role::Legend,
+            Role::GuideStep,
+            Role::Gate,
+            Role::GateMessage,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -1039,7 +1052,10 @@ mod tests {
                 | Role::Edges
                 | Role::Direction
                 | Role::Lane
-                | Role::Legend => {}
+                | Role::Legend
+                | Role::GuideStep
+                | Role::Gate
+                | Role::GateMessage => {}
             }
         }
         v

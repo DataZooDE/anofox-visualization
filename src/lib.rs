@@ -605,6 +605,19 @@ pub enum Role {
     /// `'top'`, `'right'`, `'bottom'` or `'left'`. Without it, a chart's
     /// legend sits where it always has (unchanged). Read from the first value.
     Legend,
+    /// Layout: `::GUIDE_STEP` (aliases `::TUTORIAL_STEP`, `::WIZARD_STEP`) —
+    /// one step of a guided sequence (onboarding, tutorials): Back / Next,
+    /// "Step 2 of 5", `?v.<name>=n`; an alias on the group's first marker
+    /// names the step variable (default `step`), #516.
+    GuideStep,
+    /// On a `::GUIDE_STEP` (`::GATE`, aliases `::STEP_GATE`/`::NEXT_IF`):
+    /// Next stays disabled until this BOOLEAN is `TRUE` — the same
+    /// fail-closed evaluator as `::SHOW_IF` (`crate::sql::condition`), #516.
+    Gate,
+    /// On a `::GUIDE_STEP` (`::GATE_MESSAGE`, alias `::GATE_HINT`): why Next
+    /// is disabled while `::GATE` is not `TRUE` — "Finish this step to
+    /// continue" without one.
+    GateMessage,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.

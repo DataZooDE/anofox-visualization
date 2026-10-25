@@ -215,6 +215,9 @@ terminal.
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
+| `::GUIDE_STEP` | `::TUTORIAL_STEP`, `::WIZARD_STEP` | layout | a step of a guided sequence (onboarding, tutorials): Back / Next, 'Step 2 of 5', ?v.<name>=n; the alias names the step variable (default 'step') |
+| `::GATE` | `::STEP_GATE`, `::NEXT_IF` | layout | on a ::GUIDE_STEP: Next stays disabled until this BOOLEAN is TRUE |
+| `::GATE_MESSAGE` | `::GATE_HINT` | layout | on a ::GUIDE_STEP: why Next is disabled |
 | `::VIEW` | `::ALT_VIEW` | layout | one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`) |
 | `::ENDVIEW` | `::END_VIEW` | layout | close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it) |
 | `::FIT` | `::FIT_SCREEN` | layout | this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide) |
@@ -2110,6 +2113,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
 | `SELECT 1::ENDVIEW;` | close a `::VIEW` group (optional when a `::TAB`/`::SUBTAB`/`::SECTION` or the end of the script follows) |
+| `SELECT 'Name' AS id ::GUIDE_STEP, cond ::GATE, 'msg' ::GATE_MESSAGE;` | open the next step of a guided sequence (Back/Next, "Step n of N") — see *Guided steps* below |
 | `SELECT 'fit'::FIT;` | the `::TAB` / `::SUBTAB` / `::VIEW` it is in fits the window, no page scroll — see *Fit to screen* below |
 | `SELECT cond::SHOW_IF;` | the **next** panel (or `::GROUP` box) shows only while `cond` is `TRUE` — see *Show a panel only when …* below |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
@@ -2329,6 +2333,98 @@ inside a view was not closed inside it), `view/stray-end` (warning: an
 `optional/missing` also covers a `-- @requires`-hidden alternative ("this
 ::VIEW is hidden"), and `design/too-many-panels` counts only the shown
 alternative of each group.
+
+### Guided steps (`::GUIDE_STEP`)
+
+`::GUIDE_STEP` (aliases `::TUTORIAL_STEP`, `::WIZARD_STEP`) turns a run of
+statements into a guided sequence — Back/Next, a progress strip ("Step 2 of
+5"), and an optional gate that holds Next until a condition is met. It's for
+onboarding and tutorials, not wizards that submit at the end (there is no
+submit here — see `-- @requires`/`::SHOW_IF` for that).
+
+```sql
+SELECT 'The three doors' AS lesson ::GUIDE_STEP;
+SELECT '…intro text…' ::MARKDOWN;
+
+SELECT 'Drift sandbox' ::GUIDE_STEP,
+       getvariable('q2') = 'measured error' ::GATE,
+       'Answer question 2 correctly to go on' ::GATE_MESSAGE;
+SELECT v AS q2 ::DROPDOWN, l ::OPTION_LABEL FROM
+  (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l)
+  ORDER BY o;
+
+SELECT 'Wrap-up' ::GUIDE_STEP;
+SELECT '…closing text…' ::MARKDOWN;
+```
+
+- **Grammar.** A `::GUIDE_STEP` statement opens a step; everything after it
+  — panels, inputs, a `::GROUP` box, a `::VIEW` group, `::SHOW_IF` — belongs
+  to it, up to the next marker or the group's close. Unlike `::VIEW`, the
+  markers of one group are *not* consecutive — each one opens the next step
+  of the sequence.
+- **Grouping.** A **step group** is the run of markers inside one top-level
+  section: the whole dashboard with no `::TAB`s, otherwise the current
+  `::TAB`. A group closes at the next `::TAB`, a `::SUBTAB`
+  (`step/mixed-with-subtab`: a sequence never nests inside a sub-tab) or end
+  of script. A marker reached while inside a `::SUBTAB` never opens a
+  sequence at all (`step/inside-subtab`, an error) — it draws as a plain
+  `::SECTION` heading instead. A `::GUIDE_STEP` marker closes an open
+  `::VIEW` group and an open `::GROUP` box, the same way a `::TAB` does.
+- **The step variable.** Each group keeps its current step (1-based) in a
+  variable, readable with `getvariable()` like any other: the alias of the
+  group's first marker when it's a valid identifier (`lesson` above), else
+  `step` for the first unnamed group on the dashboard and `step_2`, `step_3`,
+  … for the ones after it. It travels in the URL as `?v.<name>=n` (only when
+  not on step 1) through the same mechanism as an input, and on a locked
+  server it must be listed in `-- @vars` if the dashboard declares one
+  (`step/var-not-allowed`). Reusing the name for an input or a `SET
+  VARIABLE` elsewhere is `step/var-clash` (error).
+- **The gate.** `::GATE` is a BOOLEAN column on the marker: Next stays
+  disabled until it evaluates to `TRUE` — the same fail-closed rule as
+  `::SHOW_IF` (`FALSE`, `NULL`, no row, a non-boolean value or a query error
+  all count as closed). `::GATE_MESSAGE` is the text shown beside the
+  disabled Next; without one it reads "Finish this step to continue". A
+  gate is re-evaluated on every run (the marker is a plan statement like any
+  other, so a change to a variable it reads re-triggers it). The browser's
+  input pre-pass binds every input's default before any query runs,
+  gate included — so a gate reading a variable its own step's input sets
+  (the common "answer this step's quiz to continue" shape) sees a real
+  BOOLEAN from the first load. `dashboard --check` / `--svg` have no such
+  pre-pass (one sequential pass, script order): a gate ahead of its own
+  input's declaration reads it as unset there and warns
+  (`step/gate-not-boolean` / `step/gate-no-row`) — expected, not a bug; the
+  interactive dashboard is unaffected. The step list
+  lets a viewer jump to any step up to the furthest one whose gate holds; a
+  URL or seed past that clamps back to it. `::GATE`/`::GATE_MESSAGE` beside
+  a statement without `::GUIDE_STEP` does nothing (`step/gate-without-step`,
+  error); a gate on the last step does nothing either (`step/gate-on-last`,
+  warning, since there's no further step to hold back).
+- **Accessibility.** Keyboard Back/Next/step-list buttons; focus moves to
+  the new step's heading on every change; the progress strip is
+  `aria-live="polite"` ("Step 2 of 5 · Drift sandbox"); a disabled Next is
+  `aria-disabled="true"` (not `disabled`, so it stays focusable) and
+  explains the gate through `aria-describedby`.
+- **Static output and the script-free served page** (`--svg`, the CLI
+  `dashboard file.sql out.html`, a dashboard served with no `.sql` on the
+  page, and ⤓ HTML export) **flatten the sequence**: every step is drawn in
+  order, preceded by a `::SECTION`-style "Step n of N · Label" heading
+  (`N` counts only the steps shown — one hidden by `-- @requires` is left
+  out), gates are ignored (there is no Next to disable), and the step
+  variable is bound in order while walking the script, so a panel reading
+  `getvariable('step')` shows that step's own value.
+
+**`::GUIDE_STEP`/`::GATE` are not access control.** Like `::SHOW_IF`, a
+gated or hidden step only changes what the page shows — `/api/panel` still
+answers every step's statement, gated or not (see `docs/secure-serving.md`).
+
+`dashboard --check` also reports `step/lone` (warning: a sequence with a
+single step), `step/empty` (warning: a step with no rendering statement),
+`step/duplicate-label` (warning), `step/computed-label` (note: not a plain
+string literal), `step/fit-inside` (warning: `::FIT` inside a step does
+nothing) and, for the gate, `step/gate-not-boolean` / `step/gate-no-row`
+(warnings, the condition's result under the defaults used while checking)
+and `step/gate-constant` / `step/gate-unknown-variable` (warnings, the same
+checks as `::SHOW_IF`'s).
 
 ### Loading, empty, error and "not available" panels
 

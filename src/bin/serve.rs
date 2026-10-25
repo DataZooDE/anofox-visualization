@@ -1797,6 +1797,10 @@ fn render_dashboard_page(
     // `show_if` is checked below.
     let mut show_if_cache: std::collections::HashMap<usize, bool> =
         std::collections::HashMap::new();
+    // `::GUIDE_STEP` (#516): each group's running count of shown markers —
+    // see `dashboard::execute`'s identical `step_n` for why "of N" can't be
+    // filled in here (phase 2 does it, once every step is collected).
+    let mut step_n: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
     for (i, panel) in sql::plan(&dash.script).into_iter().enumerate() {
         let hidden = sections.step(&panel, |reqs| {
             requires_unmet(st, &prefix, reqs, &mut req_cache)
@@ -1881,6 +1885,19 @@ fn render_dashboard_page(
             continue;
         }
         let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
+        let step_marker = panel.step.as_ref().is_some_and(|s| s.marker);
+        // `::GUIDE_STEP` (#516, decision 8): bind this step's 1-based
+        // number (among the ones shown so far) before its own (and every
+        // later) panel's query — this page has no persistent session, so
+        // the binding is a `SET VARIABLE` appended to the shared `prefix`
+        // every panel's query is built from, the same way an input's
+        // default already is above.
+        if step_marker {
+            let s = panel.step.as_ref().unwrap();
+            let n = step_n.entry(s.group).or_insert(0);
+            *n += 1;
+            prefix.push_str(&format!("SET VARIABLE {} = {n}; ", s.var));
+        }
         // ::GROUP / ::ENDGROUP (#405): no box here (one figure per panel),
         // but a ::GROUP's own ::KPI_SIZE still cascades onto its tiles' own
         // cards.
@@ -1905,6 +1922,7 @@ fn render_dashboard_page(
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()
             && !section
+            && !step_marker
             && anofox_visualization::roles::is_directive_panel(&panel.roles)
         {
             continue;
@@ -1972,6 +1990,12 @@ fn render_dashboard_page(
 
     // Phase 2: render.
     let mut panels = String::new();
+    // `::GUIDE_STEP` (#516): `queried` only ever holds what phase 1 kept
+    // shown, so its total marker count per group ("of N") is known now.
+    let mut static_steps = {
+        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, ..)| p).collect();
+        sql::steps::StaticSteps::new(&shown)
+    };
     let mut queried = queried.into_iter().peekable();
     while let Some((panel, rows, na, compact)) = queried.next() {
         if na {
@@ -1998,13 +2022,41 @@ fn render_dashboard_page(
             continue;
         }
         let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
-        if section || (panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label)) {
-            let text = rows
-                .first()
-                .and_then(|r| r.values().next())
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            panels.push_str(&format!("<h2 class=\"section\">{}</h2>", esc(text)));
+        let step_n_of = panel.step.as_ref().filter(|s| s.marker).and_then(|_| {
+            static_steps.step(&panel).into_iter().find_map(|e| match e {
+                sql::steps::StaticEvent::Heading { n, of, .. } => Some((n, of)),
+                _ => None,
+            })
+        });
+        if section
+            || (panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label))
+            || step_n_of.is_some()
+        {
+            let text = match step_n_of {
+                Some((n, of)) => {
+                    let idx = panel
+                        .roles
+                        .iter()
+                        .find(|(_, r)| *r == Role::GuideStep)
+                        .map(|(i, _)| *i);
+                    let label = idx
+                        .and_then(|i| rows.first().and_then(|r| r.get(&format!("c{i}"))))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if label.is_empty() {
+                        format!("Step {n} of {of}")
+                    } else {
+                        format!("Step {n} of {of} · {label}")
+                    }
+                }
+                None => rows
+                    .first()
+                    .and_then(|r| r.values().next())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            panels.push_str(&format!("<h2 class=\"section\">{}</h2>", esc(&text)));
             continue;
         }
         let mut cols = anofox_visualization::name_columns(

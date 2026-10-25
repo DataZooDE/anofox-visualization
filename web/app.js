@@ -1036,6 +1036,7 @@ const FILE_SAMPLES = [
   "examples/tabular-showcase.sql",
   "examples/diagram-pipeline.sql",
   "examples/onboarding-quiz.sql",
+  "examples/onboarding-tutorial.sql",
   "examples/theming-branded.sql",
   "examples/theming-de-locale.sql",
 ];
@@ -6223,7 +6224,7 @@ function tagName(el, s) {
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -6814,6 +6815,36 @@ function readUrlSeed(search = location.search) {
     }
   } catch (_) {}
   return seed;
+}
+// #516: a `::GUIDE_STEP` group's seeded step number from the URL
+// (`?v.<name>=n`, peeked from `dpUrlSeed[name]`, one value): garbage, `0`
+// and negatives become `undefined` (the caller falls back to `1`) — no
+// upper clamp here, `clampStep` does that once the group's step count and
+// gates are known.
+function readStepSeed(seedArr) {
+  const raw = seedArr && seedArr[0];
+  if (raw === undefined) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : undefined;
+}
+// #516: clamp a requested 1-based step to `[1, count]`, then back further
+// to the furthest step reachable under `gates` (one entry per step, `true`
+// = open/no gate; `gates[i]` is step `i+1`'s own gate, which must hold to
+// go past it) — the first step whose gate is closed is as far as a viewer
+// can reach, even if they ask (by URL, by seed, or a stale list click) for
+// one beyond it.
+function clampStep(requested, gates, count) {
+  let furthest = Math.max(count, 1);
+  for (let i = 0; i < gates.length; i++) {
+    if (!gates[i]) {
+      furthest = i + 1;
+      break;
+    }
+  }
+  let n = Number.isFinite(requested) ? Math.trunc(requested) : 1;
+  if (n < 1) n = 1;
+  if (n > furthest) n = furthest;
+  return n;
 }
 function isIsoDate(v) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -8577,7 +8608,10 @@ async function runOnce(fresh = true, pv = preview) {
   // A ::VIEW marker starts a deferred-setup section too (#214): its
   // alternatives' panels go through the same lazy-job mechanism as a tab's,
   // so setup inside one is just as safe to defer until its first panel shows.
-  for (let i = 0, t = -1; i < stmts.length; i++) tabAt.push(["TAB", "VIEW"].includes(directive(stmts[i])) ? (t = i) : t);
+  // A ::GUIDE_STEP marker starts a deferred-setup section too (#516): a
+  // step's own setup is just as safe to defer until its first panel shows,
+  // the same reasoning as a ::TAB's / ::VIEW's.
+  for (let i = 0, t = -1; i < stmts.length; i++) tabAt.push(["TAB", "VIEW", "GUIDE_STEP"].includes(directive(stmts[i])) ? (t = i) : t);
 
   await prepInteractions(stmts);
   await setSelectionVars();
@@ -8729,6 +8763,21 @@ async function runOnce(fresh = true, pv = preview) {
           lit = kind === "NUMBER" ? v || "0" : `'${v.replace(/'/g, "''")}'`; // number unquoted
         }
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
+      } else if (s.step && s.step.marker && s.step.index === 0) {
+        // `::GUIDE_STEP` (#516): the group's first marker seeds its step
+        // variable — a seeded/remembered value (`dpVars`), else a URL seed
+        // (`?v.<name>=n`), else `1` — and binds it before any panel of the
+        // dashboard runs, same as an input's default. The gate-based upper
+        // clamp happens after the render pass, once every step (and its
+        // gate) is known; a run never clamps before it has seen them all.
+        const gvar = s.step.var;
+        dpVarDefault[gvar] = JSON.stringify(1);
+        if (dpVars[gvar] === undefined) {
+          const seeded = readStepSeed(dpUrlSeed[gvar]);
+          delete dpUrlSeed[gvar];
+          dpVars[gvar] = seeded ?? 1;
+        }
+        await runSql(`SET VARIABLE ${gvar} = ${Math.max(1, Math.trunc(Number(dpVars[gvar]) || 1))}`);
       }
     } catch (e) {
       if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${requiresText(reqsOf(s))}`);
@@ -8777,6 +8826,18 @@ async function runOnce(fresh = true, pv = preview) {
   let viewBar = null; // its <div class="dp-viewbar">
   let viewSec = null; // its <section class="dp-views">
   let viewHost = null; // {container, curGrid, defaultSpan, viewScale} to restore when the group closes
+  // `::GUIDE_STEP` (#516): the currently open step group's plan index, or
+  // null, and {container, curGrid, defaultSpan, viewScale} to restore when
+  // it closes — the same shape as `openView`/`viewHost`. Unlike a ::VIEW
+  // group, a step group's markers are not consecutive, so this stays open
+  // across every statement of every step until the group itself closes
+  // (the next ::TAB/::SUBTAB, or end of script).
+  let openStep = null;
+  let stepHost = null;
+  // Finalised after the render loop, once every step (and its gate) of
+  // every group is known: group plan-index -> {var, sec, panes, labels,
+  // gates, gateMessages}.
+  const stepGroups = {};
   // The open ::VIEW group's own share of the page (its ::COL / 12), 1
   // outside a view — a chart inside the group scales its desktop render
   // width by this (#470), so it lays out at the slot's actual width instead
@@ -9405,12 +9466,26 @@ async function runOnce(fresh = true, pv = preview) {
       viewSec = null;
       viewHost = null;
     }
-    // A ::TAB / ::SUBTAB / ::VIEW whose `-- @requires` input is missing is
-    // hidden — no button, no pane — with every statement up to the next
-    // ::TAB (a sub-tab: the next ::SUBTAB or ::TAB; a view: the next ::VIEW,
-    // or any closer, which the check above already handled). (Chrome
+    // `::GUIDE_STEP` (#516): close an open step group the moment this
+    // statement is no longer one of its members — the same reaction as
+    // ::VIEW above, for the same reason (`steps.rs` already decided the
+    // grouping; every closer carries `step: null`).
+    if (openStep !== null && (!s.step || s.step.group !== openStep)) {
+      container = stepHost.container;
+      curGrid = stepHost.curGrid;
+      defaultSpan = stepHost.defaultSpan;
+      viewScale = stepHost.viewScale;
+      openStep = null;
+      stepHost = null;
+    }
+    // A ::TAB / ::SUBTAB / ::VIEW / ::GUIDE_STEP whose `-- @requires` input
+    // is missing is hidden — no button, no pane — with every statement up
+    // to the next ::TAB (a sub-tab or a step: the next ::SUBTAB or ::TAB; a
+    // step is also ended by the next marker; a view: the next ::VIEW, or
+    // any closer, which the check above already handled). (Chrome
     // directives were applied in the pre-pass.)
-    if (hiding && (d === "TAB" || (d === "SUBTAB" && hiding === "SUBTAB"))) hiding = null;
+    if (hiding && (d === "TAB" || (d === "SUBTAB" && (hiding === "SUBTAB" || hiding === "STEP")))) hiding = null;
+    if (hiding === "STEP" && d === "GUIDE_STEP") hiding = null;
     if (hiding === "VIEW" && (!s.view || s.view.marker)) hiding = null;
     if (hiding) continue;
     // `::SHOW_IF` (#515): a condition is evaluated eagerly, every run,
@@ -9432,6 +9507,12 @@ async function runOnce(fresh = true, pv = preview) {
     if (d === "VIEW" && !(await tabShown(s, pv))) {
       console.info(`view hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = "VIEW";
+      lastChart = null;
+      continue;
+    }
+    if (d === "GUIDE_STEP" && !(await tabShown(s, pv))) {
+      console.info(`step hidden (optional input missing): ${requiresText(s.requires)}`);
+      hiding = "STEP";
       lastChart = null;
       continue;
     }
@@ -9708,6 +9789,62 @@ async function runOnce(fresh = true, pv = preview) {
       } else if (d === "ENDVIEW") {
         // No-op: the close check at the top of the loop already restored
         // container/curGrid the moment this (view-less) statement was seen.
+      } else if (d === "GUIDE_STEP") {
+        // `::GUIDE_STEP` (#516): a guided sequence — Back/Next, "Step n of
+        // N", an optional ::GATE. Unlike ::VIEW, markers are not
+        // consecutive: this one opens the NEXT step, running to the next
+        // marker or the group's close. The bar/progress/footer can only be
+        // finished once every step (and its gate) of the group is known —
+        // built from `stepGroups` after this loop (decision 6).
+        const group = s.step.group;
+        const gvar = s.step.var;
+        const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i, pv));
+        const row0 = rows[0] || {};
+        const labelRole = s.roles.find((r) => r[1] === "GUIDE_STEP");
+        let label = s.step.label; // the plan's literal label, else read below
+        if (label == null) label = labelRole ? String(row0["c" + labelRole[0]] ?? "") : "";
+        const gateRole = s.roles.find((r) => r[1] === "GATE");
+        const gate = gateRole ? condHolds(row0["c" + gateRole[0]]) : true;
+        const msgRole = s.roles.find((r) => r[1] === "GATE_MESSAGE");
+        const gateMessage = msgRole ? String(row0["c" + msgRole[0]] ?? "") : "Finish this step to continue";
+        if (openStep !== group) {
+          const sec = document.createElement("section");
+          sec.className = "dp-steps";
+          sec.setAttribute("aria-label", label || "Steps");
+          tagName(sec, s); // #518: the group's own marker names the whole sequence
+          if (container === curGrid) {
+            const outerSpan = Math.min(12, nextSpan || 12);
+            sec.style.gridColumn = `span ${outerSpan}`;
+          }
+          nextSpan = 0;
+          const head = document.createElement("nav");
+          head.className = "dp-step-head";
+          head.setAttribute("aria-label", "Steps");
+          sec.appendChild(head);
+          container.appendChild(sec);
+          stepHost = { container, curGrid, defaultSpan, viewScale };
+          openStep = group;
+          stepGroups[group] = { var: gvar, sec, head, panes: [], labels: [], gates: [], gateMessages: [] };
+        }
+        const g = stepGroups[group];
+        defaultSpan = 12;
+        viewScale = 1;
+        const pane = document.createElement("div");
+        pane.className = "grid dp-steppane";
+        pane.style.display = "none";
+        const h2 = document.createElement("h2");
+        h2.className = "dp-step-title";
+        h2.tabIndex = -1;
+        h2.textContent = label || `Step ${g.panes.length + 1}`;
+        h2.dataset.dpLabel = label || ""; // read by downloadHtml()'s flattened "Step n of N · Label"
+        pane.appendChild(h2);
+        g.sec.appendChild(pane);
+        g.panes.push(pane);
+        g.labels.push(label);
+        g.gates.push(gate);
+        g.gateMessages.push(gateMessage);
+        curGrid = pane;
+        container = pane;
       } else if (d === "PLACEHOLDER") {
         const span = Math.min(12, nextSpan || defaultSpan);
         const ph = document.createElement("div");
@@ -9834,6 +9971,124 @@ async function runOnce(fresh = true, pv = preview) {
       }
       if (firstPane) firstPane.style.display = "";
     });
+  }
+  // `::GUIDE_STEP` (#516): finish every group's bar/progress/footer now
+  // that its full step/gate list is known (decision 6, option b — simpler
+  // than tracking the group's close inline, and the swap happens after
+  // this loop anyway). Re-evaluated every run, so a gate re-closes or
+  // opens as soon as the variable it reads changes.
+  for (const [group, g] of Object.entries(stepGroups)) {
+    const count = g.panes.length;
+    const requested = Number(dpVars[g.var]);
+    const current = clampStep(requested, g.gates, count);
+    if (current !== requested) {
+      // The viewer asked (by seed, URL or a stale click) for a step past a
+      // closed gate: bind the clamped value and re-run once so every panel
+      // — including this group's own marker rows above — sees the truth
+      // (the precedent: dpSeedRerun, used the same way for a seeded
+      // selection whose shape a table only fixes once rendered).
+      dpVars[g.var] = current;
+      dpSeedRerun = true;
+    }
+    let furthest = count;
+    for (let k = 0; k < g.gates.length; k++) {
+      if (!g.gates[k]) {
+        furthest = k + 1;
+        break;
+      }
+    }
+    g.panes.forEach((pane, k) => (pane.style.display = k === current - 1 ? "" : "none"));
+    const msgId = `dp-step-msg-${group}`;
+    const head = g.head;
+    head.replaceChildren();
+    const progWrap = document.createElement("div");
+    progWrap.className = "dp-step-progress-wrap";
+    const text = document.createElement("span");
+    text.className = "dp-step-progress-text";
+    text.setAttribute("aria-live", "polite");
+    const label = g.labels[current - 1];
+    text.textContent = `Step ${current} of ${count}` + (label ? ` · ${label}` : "");
+    const bar = document.createElement("div");
+    bar.className = "dp-step-progress";
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-valuemin", "1");
+    bar.setAttribute("aria-valuemax", String(count));
+    bar.setAttribute("aria-valuenow", String(current));
+    bar.setAttribute("aria-valuetext", `Step ${current} of ${count}`);
+    const fill = document.createElement("div");
+    fill.className = "dp-step-progress-bar";
+    fill.style.width = `${(current / count) * 100}%`;
+    bar.appendChild(fill);
+    progWrap.append(text, bar);
+    const list = document.createElement("ol");
+    list.className = "dp-step-list";
+    const goTo = (n, focusMsg) => {
+      if (n === current) return;
+      if (focusMsg) dpRefocus = "step:" + g.var;
+      dpVars[g.var] = n;
+      run(false);
+    };
+    g.panes.forEach((_, k) => {
+      const n = k + 1;
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = String(n);
+      b.title = g.labels[k] || `Step ${n}`;
+      const reachable = n <= furthest;
+      if (n === current) b.setAttribute("aria-current", "step");
+      // `aria-disabled`, not `disabled` (decision 6): an unreachable step
+      // stays focusable so a screen reader announces it (and keyboard
+      // users still land on every pill in order), it just does nothing.
+      if (!reachable) b.setAttribute("aria-disabled", "true");
+      b.onclick = () => reachable && goTo(n, document.activeElement === b);
+      li.appendChild(b);
+      list.appendChild(li);
+    });
+    head.append(progWrap, list);
+    const foot = document.createElement("div");
+    foot.className = "dp-step-foot";
+    if (current > 1) {
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "dp-step-back";
+      back.textContent = "Back";
+      back.onclick = () => goTo(current - 1, document.activeElement === back);
+      foot.appendChild(back);
+    }
+    const gateClosed = !g.gates[current - 1];
+    const msg = document.createElement("div");
+    msg.id = msgId;
+    msg.className = "dp-step-message";
+    msg.setAttribute("role", "status");
+    msg.textContent = gateClosed ? g.gateMessages[current - 1] : "";
+    msg.hidden = !gateClosed;
+    foot.appendChild(msg);
+    if (current < count) {
+      const next = document.createElement("button");
+      next.type = "button";
+      next.className = "dp-step-next";
+      next.textContent = "Next";
+      if (gateClosed) {
+        next.setAttribute("aria-disabled", "true");
+        next.setAttribute("aria-describedby", msgId);
+      } else {
+        next.onclick = () => goTo(current + 1, document.activeElement === next);
+      }
+      foot.appendChild(next);
+    }
+    g.sec.appendChild(foot);
+    // Focus the new step's heading and bring the whole sequence into view
+    // — but only on an actual step change (this run's `dpRefocus` key
+    // matches), never on an ordinary re-render (a cross-filter elsewhere,
+    // an input default on load).
+    if (dpRefocus === "step:" + g.var) {
+      g.sec.scrollIntoView({
+        behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    }
+    refocus("step:" + g.var, g.panes[current - 1].querySelector(".dp-step-title"));
   }
   // The shown panes' panels: rendered off-screen here, like the rest — or,
   // on a first load (nothing but skeletons on screen), after the swap, each
@@ -14541,6 +14796,23 @@ async function downloadHtml() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
+  // `::GUIDE_STEP` (#516): a snapshot has no run loop to navigate with — it
+  // shows every step in sequence instead (decision 8, like a `::SUBTAB`'s
+  // panes do already, above the live DOM clone this runs on). The nav
+  // bar/footer go; each pane gets the same "Step n of N · Label" heading
+  // the static (`--svg`/CLI) output draws.
+  snap.querySelectorAll(".dp-steps").forEach((sec) => {
+    sec.querySelectorAll(".dp-step-head, .dp-step-foot").forEach((el) => el.remove());
+    const panes = [...sec.querySelectorAll(".dp-steppane")];
+    panes.forEach((p, k) => {
+      p.style.display = "";
+      const h2 = p.querySelector(".dp-step-title");
+      if (!h2) return;
+      const label = h2.dataset.dpLabel || "";
+      h2.textContent = `Step ${k + 1} of ${panes.length}` + (label ? ` · ${label}` : "");
+      delete h2.dataset.dpLabel;
+    });
+  });
   // ::FIT (#400): the snapshot fits itself on load (SNAPSHOT_JS) — each panel
   // goes back to its authored size and keeps its authored chart height
   // (data-dp-ph, the row weight).
