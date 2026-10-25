@@ -1334,11 +1334,15 @@ struct Dash {
     /// the page decides them — so a hidden tab's panels never run.
     tabs: Vec<Vec<usize>>,
     /// #517 S2, plan §4.2 step 8: every input-declared variable name
-    /// (lower case) → the statement(s) that declare it and its kind. More
-    /// than one entry for a name means two input statements declare it —
-    /// ambiguous for `SUBMIT_VARS` (`/api/submit` refuses it, `400`), same
-    /// as the static `submit/duplicate-input` lint.
-    inputs: HashMap<String, Vec<(usize, InputKind)>>,
+    /// (lower case) → the statement(s) that declare it, its kind, and its
+    /// own output column index (`inputs::input_index`) — review of #538
+    /// B2: option membership must be checked against *that* column, not a
+    /// row's first one (an `::OPTION_LABEL` or `::HINT` column before it
+    /// would otherwise be read instead). More than one entry for a name
+    /// means two input statements declare it — ambiguous for
+    /// `SUBMIT_VARS` (`/api/submit` refuses it, `400`), same as the
+    /// static `submit/duplicate-input` lint.
+    inputs: HashMap<String, Vec<(usize, InputKind, usize)>>,
     /// #517 S2: every `::SUBMIT` statement's own output columns, by plan
     /// index — `/api/submit`'s `panel` must name one of these.
     submits: HashMap<usize, SubmitSpec>,
@@ -1792,6 +1796,10 @@ struct SubmitRuntime {
     global: Mutex<GlobalBucket>,
     viewer_locks: Mutex<ViewerLocks>,
     recent: Mutex<RecentIds>,
+    /// Set once `store.append` has ever refused with "full" (review of
+    /// #538 should-fix 8: `/healthz`'s `state.full`). Append-only, so
+    /// once full it never un-fulls itself in this process's lifetime.
+    full: AtomicBool,
 }
 
 /// Plan §4.4's bound for the rate limiter's, the mutex map's and the
@@ -1838,13 +1846,22 @@ impl GlobalBucket {
 struct ViewerLocks {
     map: HashMap<String, Arc<Mutex<()>>>,
     order: VecDeque<String>,
+    capacity: usize,
 }
 
 impl ViewerLocks {
     fn new() -> Self {
+        Self::with_capacity(SUBMIT_BOUNDED_USERS)
+    }
+
+    /// Like [`Self::new`], but with an explicit `capacity` — the real
+    /// code always uses [`SUBMIT_BOUNDED_USERS`]; a test uses a small one
+    /// to exercise eviction without 100k inserts.
+    fn with_capacity(capacity: usize) -> Self {
         ViewerLocks {
             map: HashMap::new(),
             order: VecDeque::new(),
+            capacity,
         }
     }
 
@@ -1852,9 +1869,32 @@ impl ViewerLocks {
         if let Some(m) = self.map.get(user) {
             return m.clone();
         }
-        if self.map.len() >= SUBMIT_BOUNDED_USERS {
-            if let Some(oldest) = self.order.pop_front() {
+        if self.map.len() >= self.capacity {
+            // Review of #538, nit: skip an entry some other thread is
+            // currently holding (`strong_count > 1`: the map's own clone,
+            // plus at least one in a request's `_guard` scope) — evicting
+            // it would hand `user` a brand-new, un-contended mutex while
+            // the real holder still thinks it has exclusive access,
+            // reopening the "only once" race for that one moment. Falls
+            // through (the map grows past the bound by one) only in the
+            // pathological case where every entry is held at once.
+            let mut requeued = Vec::new();
+            while let Some(oldest) = self.order.pop_front() {
+                let held = self
+                    .map
+                    .get(&oldest)
+                    .is_some_and(|m| Arc::strong_count(m) > 1);
+                if held {
+                    requeued.push(oldest);
+                    continue;
+                }
                 self.map.remove(&oldest);
+                break;
+            }
+            // Entries skipped over go back to the front, oldest first, so
+            // the next eviction tries them again in the same order.
+            for u in requeued.into_iter().rev() {
+                self.order.push_front(u);
             }
         }
         let m = Arc::new(Mutex::new(()));
@@ -1871,9 +1911,15 @@ struct RecentReply {
     at: Instant,
 }
 
+// (user, dashboard, id): review of #538, nit — keying on `(user, id)`
+// alone means the same client nonce sent for a *different* dashboard
+// replays the first dashboard's reply. Clients mint one nonce per click,
+// so this was harmless in practice, but the stricter key costs nothing.
+type RecentKey = (String, String, String);
+
 struct RecentIds {
-    map: HashMap<(String, String), RecentReply>,
-    order: VecDeque<(String, String, Instant)>,
+    map: HashMap<RecentKey, RecentReply>,
+    order: VecDeque<(RecentKey, Instant)>,
 }
 
 impl RecentIds {
@@ -1885,10 +1931,10 @@ impl RecentIds {
     }
 
     fn evict_old(&mut self, now: Instant) {
-        while let Some((_, _, at)) = self.order.front() {
+        while let Some((_, at)) = self.order.front() {
             if now.duration_since(*at) > RECENT_ID_TTL {
-                if let Some((u, i, _)) = self.order.pop_front() {
-                    self.map.remove(&(u, i));
+                if let Some((k, _)) = self.order.pop_front() {
+                    self.map.remove(&k);
                 }
             } else {
                 break;
@@ -1896,24 +1942,23 @@ impl RecentIds {
         }
     }
 
-    fn get(&mut self, user: &str, id: &str, now: Instant) -> Option<String> {
+    fn get(&mut self, user: &str, dashboard: &str, id: &str, now: Instant) -> Option<String> {
         self.evict_old(now);
         self.map
-            .get(&(user.to_string(), id.to_string()))
+            .get(&(user.to_string(), dashboard.to_string(), id.to_string()))
             .map(|r| r.body.clone())
     }
 
-    fn insert(&mut self, user: &str, id: &str, body: String, now: Instant) {
+    fn insert(&mut self, user: &str, dashboard: &str, id: &str, body: String, now: Instant) {
         self.evict_old(now);
         if self.map.len() >= SUBMIT_BOUNDED_USERS {
-            if let Some((u, i, _)) = self.order.pop_front() {
-                self.map.remove(&(u, i));
+            if let Some((k, _)) = self.order.pop_front() {
+                self.map.remove(&k);
             }
         }
-        let key = (user.to_string(), id.to_string());
-        self.map.insert(key, RecentReply { body, at: now });
-        self.order
-            .push_back((user.to_string(), id.to_string(), now));
+        let key = (user.to_string(), dashboard.to_string(), id.to_string());
+        self.map.insert(key.clone(), RecentReply { body, at: now });
+        self.order.push_back((key, now));
     }
 }
 
@@ -2141,6 +2186,7 @@ pub fn start_locked(
                 global: Mutex::new(GlobalBucket::new()),
                 viewer_locks: Mutex::new(ViewerLocks::new()),
                 recent: Mutex::new(RecentIds::new()),
+                full: AtomicBool::new(false),
             }))
         }
     };
@@ -2416,7 +2462,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
         // statically either) are left out on purpose: a `SUBMIT_VARS`
         // naming one then falls through to the ordinary "unknown
         // variable" refusal, fail-closed either way.
-        let mut inputs: HashMap<String, Vec<(usize, InputKind)>> = HashMap::new();
+        let mut inputs: HashMap<String, Vec<(usize, InputKind, usize)>> = HashMap::new();
         let mut submits: HashMap<usize, SubmitSpec> = HashMap::new();
         for (i, p) in planned.iter().enumerate() {
             use anofox_visualization::inputs::{input_index, input_kind};
@@ -2427,7 +2473,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
                         inputs
                             .entry(name.to_ascii_lowercase())
                             .or_default()
-                            .push((i, kind));
+                            .push((i, kind, idx));
                     }
                 }
             }
@@ -3123,6 +3169,24 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 "refresh_failed": st.current.last_failed(),
                 "limits": limits_json(st),
             });
+            // #517 S2, review of #538 should-fix 8: operators need to see
+            // the store is reachable and how full it is without reading
+            // stderr. `ok` false means every submit is currently refused
+            // (503); `full` true means every submit is refused too (507),
+            // and stays true even after `max_mb` is raised and the server
+            // restarted picks the file back up non-full (append-only: it
+            // can only grow, never shrink, in this process's lifetime).
+            if let Some(submit) = &st.submit {
+                if let Some(map) = body.as_object_mut() {
+                    map.insert(
+                        "state".into(),
+                        serde_json::json!({
+                            "ok": !submit.store.is_failed(),
+                            "full": submit.full.load(Ordering::Relaxed),
+                        }),
+                    );
+                }
+            }
             // #352: only with a Quack source configured — numbers/booleans
             // only, never the source's URI, its token env/file name or any
             // error text (those stay in the server's own stderr).
@@ -3703,17 +3767,11 @@ fn handle_submit(
     info.dashboard = Some(sub.dashboard.clone());
     info.panel = Some(sub.panel);
 
-    // Step 4: this dashboard must be submit-enabled, and in the
-    // credential's scope.
-    if !submit.opts.dashboards.iter().any(|d| d == &sub.dashboard) {
-        info.deny = Some("not_enabled");
-        audit("deny", Some("not_enabled"), Some(&sub.dashboard), None);
-        return reply(
-            req,
-            403,
-            "forbidden: this dashboard does not accept submissions",
-        );
-    }
+    // Step 4: the dashboard must exist, be in the credential's scope, and
+    // be submit-enabled. Scope before enablement (review of #538, nit): a
+    // scoped credential outside its scope must see the same "forbidden"
+    // either way, not learn whether a dashboard outside its scope happens
+    // to be submit-enabled or not.
     let Some(dash) = st.dashboards.iter().find(|d| d.id == sub.dashboard) else {
         return reply(req, 404, "no such dashboard");
     };
@@ -3724,13 +3782,21 @@ fn handle_submit(
             return reply(req, 403, "forbidden: not in this credential's scope");
         }
     }
+    if !submit.opts.dashboards.iter().any(|d| d == &sub.dashboard) {
+        info.deny = Some("not_enabled");
+        audit("deny", Some("not_enabled"), Some(&sub.dashboard), None);
+        return reply(
+            req,
+            403,
+            "forbidden: this dashboard does not accept submissions",
+        );
+    }
     let Some(spec) = dash.submits.get(&sub.panel) else {
         return reply(req, 400, "'panel' does not name a ::SUBMIT statement");
     };
 
-    // Step 5: the store itself, then rate limits and caps. Refusals here
-    // (and above) don't consume a rate-limit token; validation failures
-    // (below) do — so a viewer can't use validation as a free oracle loop.
+    // Step 5 (store only — rate limits move below the viewer mutex, review
+    // of #538 should-fix 7).
     if submit.store.is_failed() {
         audit("error", Some("store_error"), Some(&dash.id), None);
         return reply(
@@ -3740,29 +3806,14 @@ fn handle_submit(
         );
     }
     let now = Instant::now();
-    if !submit
-        .global
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take(GLOBAL_SUBMITS_PER_SEC, now)
-    {
-        audit("deny", Some("rate_limited"), Some(&dash.id), None);
-        return rate_limited(req, 1);
-    }
-    if let Err(retry_after) = submit.rate.check(&claims.user, now) {
-        audit("deny", Some("rate_limited"), Some(&dash.id), None);
-        return rate_limited(req, retry_after);
-    }
-    if submit.store.user_count(&claims.user) >= submit.opts.max_per_viewer {
-        audit("deny", Some("viewer_limit"), Some(&dash.id), None);
-        return reply(req, 409, "submission limit reached");
-    }
 
     // The request's raw `vars` JSON (not yet typed literals): reused as-is
     // for every synthetic `/api/panel`-shaped call below, so
     // `locked_panel` does the `-- @vars` retain / scope lock / path-var /
     // dedup work exactly once, the same way a real panel request would
-    // (plan §4.2 step 6) — never duplicated here.
+    // (plan §4.2 step 6) — never duplicated here. `effective_value`
+    // (step 9) re-derives the *retained/locked* value per recorded
+    // variable from this same raw JSON, rather than trusting it directly.
     let raw_vars: Value = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|v| v.get("vars").cloned())
@@ -3779,6 +3830,11 @@ fn handle_submit(
     // Step 7: per-viewer mutex, held from here to the append — an author's
     // "only once" SQL gate (zero rows on a second attempt) can't be raced
     // by two tabs between the gate check (step 8) and the write (step 11).
+    // Taken *before* the rate limit and `max_per_viewer` checks (review of
+    // #538 should-fix 7): a retried idempotent request must never see a
+    // 429 just because its first attempt already spent a token, and
+    // `max_per_viewer` must see the same, mutex-protected row count the
+    // append itself will use.
     let lock = submit
         .viewer_locks
         .lock()
@@ -3786,17 +3842,44 @@ fn handle_submit(
         .get(&claims.user);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
 
-    // Step 10, checked here (inside the mutex) so a retry can never race a
-    // fresh submission into a double append.
-    if let Some(prior) =
-        submit
-            .recent
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&claims.user, &sub.id, now)
-    {
+    // Step 10, checked here (inside the mutex, ahead of every rate/cap
+    // check) so a retry can never race a fresh submission into a double
+    // append, and never pays a rate-limit token or sees a cap refusal for
+    // a submission the server already accepted.
+    if let Some(prior) = submit.recent.lock().unwrap_or_else(|p| p.into_inner()).get(
+        &claims.user,
+        &dash.id,
+        &sub.id,
+        now,
+    ) {
         respond(req, 201, "application/json", prior.into_bytes());
         return 201;
+    }
+
+    // Step 5 continued: rate limits and caps, now that we know this is a
+    // genuinely new submission. Refusals here (and above) don't consume a
+    // rate-limit token; validation failures (below) do — so a viewer
+    // can't use validation as a free oracle loop. The per-user bucket
+    // runs *before* the global one (review of #538 B3): checking the
+    // global bucket first let one flooding user spend the whole 20/s
+    // budget on requests their own limiter would have refused anyway,
+    // 429-ing every other viewer in the meantime.
+    if let Err(retry_after) = submit.rate.check(&claims.user, now) {
+        audit("deny", Some("rate_limited"), Some(&dash.id), None);
+        return rate_limited(req, retry_after);
+    }
+    if !submit
+        .global
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take(GLOBAL_SUBMITS_PER_SEC, now)
+    {
+        audit("deny", Some("rate_limited"), Some(&dash.id), None);
+        return rate_limited(req, 1);
+    }
+    if submit.store.user_count(&claims.user) >= submit.opts.max_per_viewer {
+        audit("deny", Some("viewer_limit"), Some(&dash.id), None);
+        return reply(req, 409, "submission limit reached");
     }
 
     // Step 8: the ::SUBMIT statement itself, through the normal panel path
@@ -3877,7 +3960,7 @@ fn handle_submit(
 
     // Each name declared by exactly one input statement of this dashboard
     // (`Dash.inputs`, built once at load — see `load_dashboards`).
-    let mut resolved: Vec<(String, usize, InputKind)> = Vec::with_capacity(names.len());
+    let mut resolved: Vec<(String, usize, InputKind, usize)> = Vec::with_capacity(names.len());
     for n in &names {
         let lower = n.to_ascii_lowercase();
         if !sv::valid_ident(&lower) || access::is_reserved_var(&lower) {
@@ -3920,25 +4003,41 @@ fn handle_submit(
                     &format!("'{n}' is declared by more than one input statement"),
                 );
             }
-            Some(entries) => resolved.push((lower, entries[0].0, entries[0].1)),
+            Some(entries) => resolved.push((lower, entries[0].0, entries[0].1, entries[0].2)),
         }
     }
 
     // Step 9: validate each recorded value against what the viewer could
     // actually have set through `/api/panel` — never a new SQL surface.
+    // `effective_value` (review of #538 B1) re-applies the dashboard's
+    // `-- @vars` allow-list and the credential's locked variables to the
+    // raw request value — the value the server would actually `SET`, not
+    // necessarily what the viewer sent.
     let mut vars_out = Map::new();
-    for (name, stmt_idx, kind) in &resolved {
-        let sent = raw_vars.as_object().and_then(|o| {
-            o.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                .map(|(_, v)| v)
-        });
+    for (name, stmt_idx, kind, col_idx) in &resolved {
+        let sent = match effective_value(name, dash, scope, &raw_vars) {
+            Ok(v) => v,
+            Err(()) => {
+                audit(
+                    "deny",
+                    Some("invalid_value"),
+                    Some(&dash.id),
+                    Some(&spec.name),
+                );
+                return reply(
+                    req,
+                    400,
+                    &format!("'{name}' is not a settable variable on this dashboard"),
+                );
+            }
+        };
         match validate_recorded_value(
             st,
-            dash,
+            name,
             *stmt_idx,
             *kind,
-            sent,
+            *col_idx,
+            sent.as_ref(),
             &panel_body,
             claims,
             scope,
@@ -3971,6 +4070,7 @@ fn handle_submit(
     let rec = match submit.store.append(new_rec) {
         Ok(r) => r,
         Err(e) if e.contains("full") => {
+            submit.full.store(true, Ordering::Relaxed);
             audit(
                 "error",
                 Some("store_full"),
@@ -4003,7 +4103,7 @@ fn handle_submit(
         .recent
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .insert(&claims.user, &sub.id, body_json.clone(), now);
+        .insert(&claims.user, &dash.id, &sub.id, body_json.clone(), now);
     audit(
         "ok",
         None,
@@ -4013,6 +4113,66 @@ fn handle_submit(
     info.bytes = Some(body_json.len());
     respond(req, 201, "application/json", body_json.into_bytes());
     201
+}
+
+/// A recorded variable's *effective* value — after the same `-- @vars`
+/// allow-list and credential-lock rules `locked_panel` applies before it
+/// ever runs SQL (review of #538, blocker 1; plan §4.2 step 9: "the value
+/// the server would `SET`, i.e. after `lock_vars`"). `Ok(None)`: the
+/// viewer didn't send this variable (and it isn't locked either) — the
+/// caller treats that as "answer this question first", the same as
+/// before. `Err(())`: this dashboard's `-- @vars` doesn't list `name` at
+/// all, so it would never reach a `SET VARIABLE` through *any* path — the
+/// caller must refuse recording it outright, never fall back to silently
+/// trusting the raw request value.
+fn effective_value(
+    name: &str,
+    dash: &Dash,
+    scope: Option<&Scope>,
+    raw_vars: &Value,
+) -> Result<Option<Value>, ()> {
+    if let Some(allowed) = &dash.meta.vars {
+        if !allowed.iter().any(|a| a.eq_ignore_ascii_case(name)) {
+            return Err(());
+        }
+    }
+    // A credential-locked variable always wins over whatever the viewer
+    // sent (`Scope::lock_vars`'s own rule) — recorded as the locked value,
+    // never the viewer's. `Scope::vars` stores it as a typed SQL literal
+    // (the same shape `sql_literal` builds for every viewer variable);
+    // `literal_to_json` is its exact inverse for the scalar forms a
+    // locked variable can actually take.
+    if let Some(s) = scope {
+        if let Some((_, lit)) = s.vars.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            return literal_to_json(lit).map(Some).ok_or(());
+        }
+    }
+    Ok(raw_vars.as_object().and_then(|o| {
+        o.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    }))
+}
+
+/// The exact inverse of [`sv::sql_literal`]'s scalar forms (`NULL`,
+/// `TRUE`/`FALSE`, a quoted string with `''`-doubled quotes, a plain
+/// number) — `None` for anything else (a list literal, which a locked
+/// variable's own config never actually produces in practice; fails
+/// closed rather than guess).
+fn literal_to_json(lit: &str) -> Option<Value> {
+    match lit {
+        "NULL" => Some(Value::Null),
+        "TRUE" => Some(Value::Bool(true)),
+        "FALSE" => Some(Value::Bool(false)),
+        _ if lit.len() >= 2 && lit.starts_with('\'') && lit.ends_with('\'') => {
+            Some(Value::String(lit[1..lit.len() - 1].replace("''", "'")))
+        }
+        _ => lit
+            .parse::<i64>()
+            .map(Value::from)
+            .or_else(|_| lit.parse::<f64>().map(Value::from))
+            .ok(),
+    }
 }
 
 /// Does `a` (an option's own cell) equal `b` (what the viewer sent)? JSON
@@ -4025,75 +4185,93 @@ fn values_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Plan §4.2 step 9: validate one recorded value, `kind`-specific. `sent`
-/// is the viewer's value for this variable from the request's raw `vars`
-/// (`None` if they didn't send it at all). `DROPDOWN`/`BUTTONS`/
-/// `MULTISELECT` re-run that input's own statement for this viewer — same
-/// request vars, so normally a cache hit, since the page just rendered it
-/// — and check membership; the error names the variable, never a value
-/// from data.
+/// Is `c` a control character, or one of the bidi-override / zero-width
+/// characters that could make submitted text read differently on a
+/// trainer's page than what the viewer actually typed (review of #538,
+/// nit — `is_control` alone only catches the Cc category)?
+fn has_invisible_or_control(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Plan §4.2 step 9: validate one recorded value, `kind`-specific. `name`
+/// is used in every error (review of #538 should-fix 5 — it used to name
+/// the dashboard instead). `sent` is the *effective* value for this
+/// variable ([`effective_value`]; `None` if the viewer didn't set it and
+/// it isn't credential-locked either).
+///
+/// Every kind's own input statement is run first, through the normal
+/// panel path, and must return at least one row (review of #538 should-
+/// fix 4: previously only `DROPDOWN`/`BUTTONS`/`MULTISELECT` did this, so
+/// a value could be recorded for an input hidden behind a tab's `--
+/// @requires`, itself gated off, or returning no rows). `DROPDOWN`/
+/// `BUTTONS`/`MULTISELECT` then check membership against that row's
+/// *input* column (`col_idx` — review of #538 B2: not a row's first
+/// column, which could be an `::OPTION_LABEL`/`::HINT` ahead of it).
 #[allow(clippy::too_many_arguments)]
 fn validate_recorded_value(
     st: &Locked,
-    dash: &Dash,
+    name: &str,
     stmt_idx: usize,
     kind: InputKind,
+    col_idx: usize,
     sent: Option<&Value>,
     panel_body: &dyn Fn(usize) -> String,
     claims: &Claims,
     scope: Option<&Scope>,
     text_max_chars: usize,
 ) -> Result<Value, String> {
-    let run_input = || -> Result<Vec<Value>, String> {
-        let mut scratch = LogInfo::default();
-        let mut charge = st.inflight.charge();
-        let (json, _, _) = locked_panel(
-            st,
-            &panel_body(stmt_idx),
-            None,
-            Some(claims),
-            scope,
-            &mut scratch,
-            &mut charge,
-        )
-        .map_err(|_| "this question is not currently available".to_string())?;
-        let rows: Vec<Map<String, Value>> =
-            serde_json::from_str(&json).map_err(|_| "internal error".to_string())?;
-        if rows.is_empty() {
-            return Err("this question is not currently available".into());
-        }
-        Ok(rows
-            .into_iter()
-            .filter_map(|r| r.values().next().cloned())
-            .collect())
+    let mut scratch = LogInfo::default();
+    let mut charge = st.inflight.charge();
+    let rows_json = locked_panel(
+        st,
+        &panel_body(stmt_idx),
+        None,
+        Some(claims),
+        scope,
+        &mut scratch,
+        &mut charge,
+    )
+    .map_err(|_| format!("'{name}' is not currently available"))?
+    .0;
+    let rows: Vec<Map<String, Value>> =
+        serde_json::from_str(&rows_json).map_err(|_| format!("internal error reading '{name}'"))?;
+    if rows.is_empty() {
+        return Err(format!("'{name}' is not currently available"));
+    }
+    let options = || -> Vec<Value> {
+        rows.iter()
+            .filter_map(|r| r.values().nth(col_idx).cloned())
+            .collect()
     };
     match kind {
         InputKind::Dropdown | InputKind::Buttons => {
             let Some(sent) = sent else {
-                return Err(format!("answer {} first", dash.id));
+                return Err(format!("answer '{name}' first"));
             };
-            let options = run_input()?;
+            let options = options();
             if options.iter().any(|o| values_eq(o, sent)) {
                 Ok(sent.clone())
             } else {
-                Err("the answer is not one of the options".into())
+                Err(format!("'{name}' is not one of the options"))
             }
         }
         InputKind::Multiselect => {
             let Some(sent) = sent.and_then(Value::as_array) else {
-                return Err("answer this question first (a list expected)".into());
+                return Err(format!("answer '{name}' first (a list expected)"));
             };
-            let options = run_input()?;
+            let options = options();
             if sent.len() > options.len() {
-                return Err("too many selected options".into());
+                return Err(format!("'{name}' has too many selected options"));
             }
             let mut seen = Vec::new();
             for v in sent {
                 if seen.iter().any(|s| values_eq(s, v)) {
-                    return Err("duplicate option in the selection".into());
+                    return Err(format!("'{name}' has a duplicate option in the selection"));
                 }
                 if !options.iter().any(|o| values_eq(o, v)) {
-                    return Err("the selection is not among the options".into());
+                    return Err(format!("'{name}': the selection is not among the options"));
                 }
                 seen.push(v.clone());
             }
@@ -4101,42 +4279,52 @@ fn validate_recorded_value(
         }
         InputKind::Toggle => match sent {
             Some(Value::Bool(b)) => Ok(Value::Bool(*b)),
-            None => Err("answer this question first".into()),
-            _ => Err("must be a boolean".into()),
+            None => Err(format!("answer '{name}' first")),
+            _ => Err(format!("'{name}' must be a boolean")),
         },
-        InputKind::Number => match sent.and_then(Value::as_f64) {
-            Some(n) if n.is_finite() && n.abs() <= 1e15 => Ok(serde_json::Number::from_f64(n)
-                .map(Value::Number)
-                .unwrap_or(Value::Null)),
-            None if sent.is_none() => Err("answer this question first".into()),
-            _ => Err("must be a finite number".into()),
+        InputKind::Number => match sent {
+            // Kept exactly as sent (review of #538 should-fix 6):
+            // rebuilding the number via `Number::from_f64` turned an
+            // integer like `5` into `5.0`, and could round one above
+            // 2^53.
+            Some(Value::Number(n))
+                if n.as_f64().is_some_and(|f| f.is_finite() && f.abs() <= 1e15) =>
+            {
+                Ok(Value::Number(n.clone()))
+            }
+            None => Err(format!("answer '{name}' first")),
+            _ => Err(format!("'{name}' must be a finite number")),
         },
         InputKind::Date => match sent.and_then(Value::as_str) {
             Some(s) if sv::valid_iso_date(s) => Ok(Value::String(s.to_string())),
-            None => Err("answer this question first".into()),
-            _ => Err("must be a YYYY-MM-DD date".into()),
+            None => Err(format!("answer '{name}' first")),
+            _ => Err(format!("'{name}' must be a YYYY-MM-DD date")),
         },
         InputKind::Text => match sent {
             Some(Value::String(s)) => {
                 if s.chars().count() > text_max_chars {
-                    Err(format!("must be at most {text_max_chars} characters"))
-                } else if s.chars().any(|c| c.is_control()) {
-                    Err("must not contain control characters".into())
+                    Err(format!(
+                        "'{name}' must be at most {text_max_chars} characters"
+                    ))
+                } else if s.chars().any(has_invisible_or_control) {
+                    Err(format!(
+                        "'{name}' must not contain control or invisible characters"
+                    ))
                 } else if s.trim().is_empty() {
-                    Err("must not be blank".into())
+                    Err(format!("'{name}' must not be blank"))
                 } else {
                     Ok(Value::String(s.clone()))
                 }
             }
             None => Ok(Value::Null),
-            _ => Err("must be a string".into()),
+            _ => Err(format!("'{name}' must be a string")),
         },
         // `Dash.inputs` never registers these (#517 S2: see
         // `load_dashboards`), so `SUBMIT_VARS` naming one already failed
         // the "declared by an input" check above — unreachable in
         // practice, kept fail-closed rather than `unreachable!()`.
         InputKind::DateRange | InputKind::Period => {
-            Err("this variable's input does not support recording".into())
+            Err(format!("'{name}' does not support recording"))
         }
     }
 }
@@ -4593,6 +4781,16 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
             cfg["depsTag"] = serde_json::json!(tag);
         }
     }
+    // #517 S2, plan §6 / review of #538 should-fix 8: whether *this*
+    // dashboard may submit on this server — S4's button reads it to
+    // render disabled-with-reason instead of posting to an endpoint that
+    // would just refuse it.
+    cfg["state"] = serde_json::json!({
+        "enabled": st
+            .submit
+            .as_ref()
+            .is_some_and(|s| s.opts.dashboards.iter().any(|d| d == &dash.id)),
+    });
     let cfg = json_for_script(&cfg);
     // #403: a served dashboard page has no app bar of its own (it's always
     // embed chrome — header/sidebar/toolbar hidden) and never fetches
@@ -6283,18 +6481,48 @@ mod tests {
     }
 
     #[test]
+    fn viewer_locks_skips_evicting_a_mutex_someone_else_is_holding() {
+        // Review of #538, nit: a bounded eviction must never take the
+        // mutex out from under a request that's currently holding it —
+        // that would hand the same user a *second*, uncontended mutex,
+        // reopening the "only once" race for one moment.
+        let mut locks = ViewerLocks::with_capacity(2);
+        let alice = locks.get("alice"); // oldest
+        let _alice_held = alice.clone(); // strong_count 3: map + `alice` + this
+        drop(locks.get("bob")); // map: {alice, bob}, at capacity
+
+        // A third user must evict bob (not alice, who is held) even
+        // though alice is the older entry.
+        let carol = locks.get("carol");
+        assert!(!Arc::ptr_eq(&alice, &carol));
+        drop(carol); // not held by anything else from here on
+
+        // alice is still the same mutex as before — not evicted.
+        assert!(Arc::ptr_eq(&alice, &locks.get("alice")));
+
+        // bob is gone: asking for "bob" again (now evicting carol, the
+        // actual oldest non-held entry) gets a fresh mutex.
+        let bob2 = locks.get("bob");
+        assert_eq!(Arc::strong_count(&bob2), 2); // map + this handle only
+    }
+
+    #[test]
     fn recent_ids_round_trip_and_expire() {
         let mut r = RecentIds::new();
         let t0 = Instant::now();
-        assert!(r.get("alice", "id1", t0).is_none());
-        r.insert("alice", "id1", "{\"seq\":1}".to_string(), t0);
-        assert_eq!(r.get("alice", "id1", t0), Some("{\"seq\":1}".to_string()));
-        // A different user or id is independent.
-        assert!(r.get("bob", "id1", t0).is_none());
-        assert!(r.get("alice", "id2", t0).is_none());
+        assert!(r.get("alice", "d", "id1", t0).is_none());
+        r.insert("alice", "d", "id1", "{\"seq\":1}".to_string(), t0);
+        assert_eq!(
+            r.get("alice", "d", "id1", t0),
+            Some("{\"seq\":1}".to_string())
+        );
+        // A different user, dashboard or id is independent.
+        assert!(r.get("bob", "d", "id1", t0).is_none());
+        assert!(r.get("alice", "d2", "id1", t0).is_none());
+        assert!(r.get("alice", "d", "id2", t0).is_none());
         // Past the TTL, it's gone.
         let later = t0 + RECENT_ID_TTL + Duration::from_secs(1);
-        assert!(r.get("alice", "id1", later).is_none());
+        assert!(r.get("alice", "d", "id1", later).is_none());
     }
 
     #[test]
@@ -6307,5 +6535,63 @@ mod tests {
             &serde_json::json!(null),
             &serde_json::json!(null)
         ));
+    }
+
+    // ── #538 review fixes ─────────────────────────────────────────────────
+
+    #[test]
+    fn literal_to_json_inverts_sql_literal_scalars() {
+        assert_eq!(literal_to_json("NULL"), Some(Value::Null));
+        assert_eq!(literal_to_json("TRUE"), Some(Value::Bool(true)));
+        assert_eq!(literal_to_json("FALSE"), Some(Value::Bool(false)));
+        assert_eq!(literal_to_json("42"), Some(serde_json::json!(42)));
+        assert_eq!(literal_to_json("'EU'"), Some(serde_json::json!("EU")));
+        // `''`-doubled quotes inside a string literal (`sql_string_literal`'s
+        // own escaping) round-trip back to a single quote.
+        assert_eq!(
+            literal_to_json("'O''Brien'"),
+            Some(serde_json::json!("O'Brien"))
+        );
+        // A list literal (never produced for a *locked* scalar variable in
+        // practice) is refused, not guessed at.
+        assert_eq!(literal_to_json("[1, 2]"), None);
+    }
+
+    #[test]
+    fn effective_value_refuses_a_name_outside_vars_allowlist() {
+        let mut d = dash("d", "");
+        d.meta.vars = Some(vec!["q1".to_string()]);
+        let raw = serde_json::json!({"note": "not settable"});
+        assert_eq!(effective_value("q1", &d, None, &raw), Ok(None));
+        assert_eq!(effective_value("note", &d, None, &raw), Err(()));
+    }
+
+    #[test]
+    fn effective_value_prefers_the_locked_value_over_the_viewers_own() {
+        // Review of #538, blocker 1: a credential that locks `region` must
+        // have its own value recorded, never whatever the viewer sent.
+        let d = dash("d", "");
+        let scope = Scope {
+            dashboards: None,
+            vars: vec![("region".to_string(), "'EU'".to_string())],
+        };
+        let raw = serde_json::json!({"region": "US"});
+        assert_eq!(
+            effective_value("region", &d, Some(&scope), &raw),
+            Ok(Some(serde_json::json!("EU")))
+        );
+        // An unlocked name still reads the viewer's own value.
+        let raw2 = serde_json::json!({"q1": "B"});
+        assert_eq!(
+            effective_value("q1", &d, Some(&scope), &raw2),
+            Ok(Some(serde_json::json!("B")))
+        );
+    }
+
+    #[test]
+    fn effective_value_is_none_when_the_viewer_sent_nothing() {
+        let d = dash("d", "");
+        let raw = serde_json::json!({});
+        assert_eq!(effective_value("q1", &d, None, &raw), Ok(None));
     }
 }

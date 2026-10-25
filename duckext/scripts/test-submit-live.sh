@@ -1,11 +1,29 @@
 #!/usr/bin/env bash
 # End-to-end checks of POST /api/submit (#517 slice S2, plan §4): the one
-# write path on the locked server.
+# write path on the locked server. Extended per review-530's round 2 of
+# #538 (should-fixes) to also cover, against a real running server:
+#   * api_key and an embed link without its own user are both 403
+#     (shared credentials never submit as themselves).
+#   * `Sec-Fetch-Site: cross-site` is 403 (same-origin is already covered
+#     by the missing-header case below; this is the explicit cross-site
+#     value).
+#   * a dashboard that exists but isn't in `options.state.dashboards` is
+#     403, a `panel` that doesn't name a `::SUBMIT` statement is 400, and
+#     a `user` field in the body is 400 (the server assigns the user).
+#   * B1 (review of #538, blocker 1): a credential-locked variable (an
+#     embed link's own `vars`) is recorded as its locked value, never the
+#     viewer's own.
+#   * B2 (blocker 2): a `::DROPDOWN` preceded by its own `::OPTION_LABEL`
+#     column is validated against its own column (the code), not the
+#     label text that happens to come first.
+#   * B3 (blocker 3) + the per-user rate limit: one user's flood doesn't
+#     429 a different user's very next submission, and a 429 carries
+#     Retry-After.
+#
+# Original coverage (plan §4, still exercised below):
 #   * The CSRF gate: missing Origin, wrong Origin, missing the custom
 #     header, and a non-JSON Content-Type are all 403.
-#   * No credential is 401; a shared/proxy-forwarded identity without its
-#     own personal sign-in would be refused (api_key/embed — not set up
-#     here, see the plan's threat model for those).
+#   * No credential is 401.
 #   * A valid submission: 201 with {seq, ts, gen}; the recorded value must
 #     be one of the ::BUTTONS input's own options (plan §4.2 step 9).
 #   * An answer outside the options is a 400, and nothing is appended.
@@ -37,19 +55,81 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 SEC="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+EMBED_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
 mkdir -p "$W/dash"
+# `d`: state-enabled. Panel 0/1 is the original BUTTONS+SUBMIT pair (q1).
+# Panel 2/3 adds a ::DROPDOWN whose own ::OPTION_LABEL column comes FIRST
+# (q2) — the exact shape review-530's blocker 2 (col_idx, not the row's
+# first column) needs to tell apart from the label text.
 cat > "$W/dash/d.sql" <<'EOF'
 SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
 SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
+SELECT label AS lbl ::OPTION_LABEL, code AS q2 ::DROPDOWN FROM (VALUES ('Alpha', 'A'), ('Beta', 'B')) t(label, code);
+SELECT 'Check q2' AS quiz_2::SUBMIT, 'q2' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
 EOF
-AUTH='"auth": {"mode": "proxy", "shared_secret_env": "SEC", "trusted_proxies": ["127.0.0.1"]}'
+# `d2`: exists, but deliberately left out of options.state.dashboards.
+mkdir -p "$W/dash2"
+cat > "$W/dash/d2.sql" <<'EOF'
+SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
+SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
+EOF
+
+# A server-issued API key (`afx_<id>_<secret>`, file holds only its hash) —
+# used only to prove the endpoint refuses it (shared/server-to-server
+# credentials never submit as themselves).
+APIKEY="$(python3 - "$W/keys.json" <<'PY'
+import hashlib, json, secrets, sys
+path = sys.argv[1]
+kid = "0123456789ab"
+secret = secrets.token_hex(32)
+key = f"afx_{kid}_{secret}"
+h = hashlib.sha256(key.encode()).hexdigest()
+json.dump({"keys": [{"id": kid, "sha256": h, "user": "keyuser", "dashboards": ["d"]}]}, open(path, "w"))
+print(key)
+PY
+)"
+
+# Mint an embed link by hand (HS256 JWT, signed with $EMBED_SECRET): prints
+# the link token for a JSON payload fragment (minus `exp`, added here).
+mint_embed() {
+  python3 - "$EMBED_SECRET" "$1" <<'PY'
+import base64, hashlib, hmac, json, sys, time
+
+def b64url(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+secret = sys.argv[1].encode()
+payload = json.loads(sys.argv[2])
+payload.setdefault("exp", int(time.time()) + 60)
+h = b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+p = b64url(json.dumps(payload, separators=(",", ":")).encode())
+sig = hmac.new(secret, f"{h}.{p}".encode(), hashlib.sha256).digest()
+print(f"{h}.{p}.{b64url(sig)}")
+PY
+}
+
+# Exchange an embed link for a page session (GET /d/d?embed=<link>) and
+# print the session token the page would carry in window.__served.session
+# (and resend as X-Anofox-Session) — never in the URL after this point.
+embed_session() {
+  curl -s "localhost:$PORT/d/d?embed=$1" | python3 -c '
+import re, sys
+m = re.search(r"\"session\":\"([^\"]+)\"", sys.stdin.read())
+print(m.group(1) if m else "")
+'
+}
+
+AUTH="\"auth\": [{\"mode\": \"proxy\", \"shared_secret_env\": \"SEC\", \"trusted_proxies\": [\"127.0.0.1\"]}, {\"mode\": \"embed\", \"secret_env\": \"EMBED_SECRET\"}, {\"mode\": \"api_keys\", \"file\": \"$W/keys.json\"}]"
 STATE="\"state\": {\"path\": \"$W/state.jsonl\", \"dashboards\": [\"d\"]}"
-OPTS="{$AUTH, \"policy\": \"none\", $STATE, \"log\": \"$W/requests.jsonl\", \"audit\": \"$W/audit.jsonl\"}"
+# The whole OPTS JSON is embedded in a SQL single-quoted string below, so a
+# literal `'self'` (frame_ancestors' own CSP-keyword syntax) needs its
+# quotes SQL-doubled to survive that string.
+OPTS="{$AUTH, \"policy\": \"none\", $STATE, \"frame_ancestors\": [\"''self''\"], \"log\": \"$W/requests.jsonl\", \"audit\": \"$W/audit.jsonl\"}"
 
 mkfifo "$W/in"
 sleep 120 > "$W/in" & PIDS+=($!)
 echo "LOAD '$EXT'; SELECT anofox_serve_dashboards('$W/dash', $PORT, '$OPTS');" > "$W/serve.sql"
-SEC=$SEC "$DUCKDB" -unsigned -init "$W/serve.sql" < "$W/in" > "$W/stderr.log" 2>&1 & PIDS+=($!)
+SEC=$SEC EMBED_SECRET=$EMBED_SECRET "$DUCKDB" -unsigned -init "$W/serve.sql" < "$W/in" > "$W/stderr.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 100); do curl -s -m 1 "localhost:$PORT/health" > /dev/null 2>&1 && break; sleep 0.2; done
 if ! grep -q '"status":"ok"' <(curl -s "localhost:$PORT/health"); then
   cat "$W/stderr.log" >&2
@@ -58,12 +138,14 @@ fi
 
 ORIGIN="http://localhost:$PORT"
 AUTH_H=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: alice")
-# submit <body>: POSTs with ${AUTH_H[@]} plus whatever is in the global
-# array HDRS (each caller sets HDRS first) — an array, never a
-# space-joined string, so a header value with its own space survives.
+CREDS=("${AUTH_H[@]}")
+# submit <body>: POSTs with ${CREDS[@]} (the credential under test; default
+# alice via the proxy) plus whatever is in the global array HDRS (each
+# caller sets HDRS first) — arrays, never space-joined strings, so a header
+# value with its own space survives.
 submit() {
   curl -s -o "$W/out" -w '%{http_code}' -X POST "localhost:$PORT/api/submit" \
-    "${AUTH_H[@]}" "${HDRS[@]}" -d "$1"
+    "${CREDS[@]}" "${HDRS[@]}" -d "$1"
 }
 
 BODY_OK='{"dashboard":"d","panel":1,"id":"deadbeef01","vars":{"q1":"B"}}'
@@ -88,12 +170,44 @@ CODE=$(submit "$BODY_OK")
 [ "$CODE" = "403" ] || fail "non-JSON Content-Type should be 403, got $CODE: $(cat "$W/out")"
 echo "OK: non-JSON Content-Type is 403"
 
+HDRS=(-H "Origin: $ORIGIN" -H "X-Anofox-Submit: 1" -H "Content-Type: application/json" -H "Sec-Fetch-Site: cross-site")
+CODE=$(submit "$BODY_OK")
+[ "$CODE" = "403" ] || fail "Sec-Fetch-Site: cross-site should be 403, got $CODE: $(cat "$W/out")"
+echo "OK: Sec-Fetch-Site: cross-site is 403"
+
 HDRS=(-H "Origin: $ORIGIN" -H "X-Anofox-Submit: 1" -H "Content-Type: application/json" -H "Sec-Fetch-Site: same-origin")
 CODE=$(curl -s -o "$W/out" -w '%{http_code}' -X POST "localhost:$PORT/api/submit" "${HDRS[@]}" -d "$BODY_OK")
 [ "$CODE" = "401" ] || fail "no credential should be 401, got $CODE: $(cat "$W/out")"
 echo "OK: no credential is 401"
 
-HDRS=(-H "Origin: $ORIGIN" -H "X-Anofox-Submit: 1" -H "Content-Type: application/json" -H "Sec-Fetch-Site: same-origin")
+# A shared/server-to-server credential never submits as itself (step 3).
+CREDS=(-H "Authorization: Bearer $APIKEY")
+CODE=$(submit '{"dashboard":"d","panel":1,"id":"a1a1a1a1","vars":{"q1":"A"}}')
+[ "$CODE" = "403" ] || fail "an api_key should be 403, got $CODE: $(cat "$W/out")"
+echo "OK: an api_key identity is 403 (submissions need a personal sign-in)"
+CREDS=("${AUTH_H[@]}")
+
+LINK_NOUSER="$(mint_embed '{"dashboard":"d"}')"
+SESSION_NOUSER="$(embed_session "$LINK_NOUSER")"
+[ -n "$SESSION_NOUSER" ] || fail "could not mint an embed session (no user)"
+CREDS=(-H "X-Anofox-Session: $SESSION_NOUSER")
+CODE=$(submit '{"dashboard":"d","panel":1,"id":"b2b2b2b2","vars":{"q1":"A"}}')
+[ "$CODE" = "403" ] || fail "an embed link without its own user should be 403, got $CODE: $(cat "$W/out")"
+echo "OK: an embed link without its own user (embed:<dashboard>) is 403"
+CREDS=("${AUTH_H[@]}")
+
+CODE=$(submit '{"dashboard":"d2","panel":1,"id":"c3c3c3c3","vars":{"q1":"A"}}')
+[ "$CODE" = "403" ] || fail "a dashboard outside options.state.dashboards should be 403, got $CODE: $(cat "$W/out")"
+echo "OK: a dashboard that isn't submit-enabled is 403"
+
+CODE=$(submit '{"dashboard":"d","panel":0,"id":"d4d4d4d4","vars":{"q1":"A"}}')
+[ "$CODE" = "400" ] || fail "a panel that isn't a ::SUBMIT statement should be 400, got $CODE: $(cat "$W/out")"
+echo "OK: a non-::SUBMIT panel index is 400"
+
+CODE=$(submit '{"dashboard":"d","panel":1,"id":"e5e5e5e5","vars":{"q1":"A"},"user":"mallory"}')
+[ "$CODE" = "400" ] || fail "a user field in the body should be 400, got $CODE: $(cat "$W/out")"
+echo "OK: a user field in the body is 400 (the server assigns the user)"
+
 CODE=$(submit '{"dashboard":"d","panel":1,"id":"baadf00d","vars":{"q1":"Z"}}')
 [ "$CODE" = "400" ] || fail "an answer outside the options should be 400, got $CODE: $(cat "$W/out")"
 [ ! -s "$W/state.jsonl" ] || ! grep -q '"q1":"Z"' "$W/state.jsonl" || fail "an invalid answer was appended"
@@ -126,5 +240,66 @@ if [ -s "$W/audit.jsonl" ]; then
   ! grep -q '"q1"' "$W/audit.jsonl" || fail "the audit log must never carry a value"
   echo "OK: the audit log has a submit event and no values"
 fi
+
+# --- B2 (review of #538, blocker 2): a ::DROPDOWN's own ::OPTION_LABEL
+# column comes first in the row, so the real options must be read from the
+# DROPDOWN's own column index (1), never the row's first column (the label
+# text, column 0). A fresh user (alice's own per-user bucket is already
+# partly spent by the checks above): the point here is the column, not the
+# rate limit.
+CREDS=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: carol")
+CODE=$(submit '{"dashboard":"d","panel":3,"id":"f6f6f6f6","vars":{"q2":"A"}}')
+[ "$CODE" = "201" ] || fail "B2: a valid DROPDOWN code should be 201, got $CODE: $(cat "$W/out")"
+grep -q '"q2":"A"' "$W/state.jsonl" || fail "B2: expected q2=A (the code) to be recorded"
+echo "OK: B2 — a ::DROPDOWN preceded by its own ::OPTION_LABEL validates against its own column"
+
+CODE=$(submit '{"dashboard":"d","panel":3,"id":"a7a7a7a7","vars":{"q2":"Alpha"}}')
+[ "$CODE" = "400" ] || fail "B2: the label text itself should be refused, got $CODE: $(cat "$W/out")"
+! grep -q '"q2":"Alpha"' "$W/state.jsonl" || fail "B2: the label text must never be recorded as the value"
+echo "OK: B2 — the ::OPTION_LABEL text itself is rejected (it is not one of the real options)"
+CREDS=("${AUTH_H[@]}")
+
+# --- B1 (blocker 1): a credential-locked variable (an embed link's own
+# `vars`) always wins over whatever the viewer sent — recorded as the
+# locked value, never the viewer's own.
+LINK_EVE="$(mint_embed '{"dashboard":"d","user":"eve","vars":{"q1":"A"}}')"
+SESSION_EVE="$(embed_session "$LINK_EVE")"
+[ -n "$SESSION_EVE" ] || fail "could not mint an embed session (eve, locked q1=A)"
+CREDS=(-H "X-Anofox-Session: $SESSION_EVE")
+CODE=$(submit '{"dashboard":"d","panel":1,"id":"b8b8b8b8","vars":{"q1":"B"}}')
+[ "$CODE" = "201" ] || fail "B1: a locked-var submission should still be 201, got $CODE: $(cat "$W/out")"
+EVE_LINE=$(grep '"user":"eve"' "$W/state.jsonl") || fail "B1: expected a recorded row for eve"
+echo "$EVE_LINE" | grep -q '"q1":"A"' || fail "B1: expected the locked value q1=A to be recorded, got: $EVE_LINE"
+if echo "$EVE_LINE" | grep -q '"q1":"B"'; then fail "B1: the viewer's own value q1=B must never override the locked value"; fi
+echo "OK: B1 — a credential-locked variable records the locked value, not the viewer's own"
+CREDS=("${AUTH_H[@]}")
+
+# --- B3 (blocker 3) + the per-user rate limit: a flood from one user must
+# not spend a different user's budget, and once a user's own bucket is
+# spent, further submissions are 429 with Retry-After.
+HDRS=(-H "Origin: $ORIGIN" -H "X-Anofox-Submit: 1" -H "Content-Type: application/json" -H "Sec-Fetch-Site: same-origin")
+CREDS=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: flooder")
+CODES=()
+for id in deadbee1 deadbee2 deadbee3 deadbee4 deadbee5 deadbee6 deadbee7; do
+  CODES+=("$(submit "{\"dashboard\":\"d\",\"panel\":1,\"id\":\"$id\",\"vars\":{\"q1\":\"B\"}}")")
+done
+[ "${CODES[0]}" = "201" ] || fail "flooder's 1st submission should be 201, got ${CODES[0]}"
+[ "${CODES[1]}" = "201" ] || fail "flooder's 2nd submission should be 201, got ${CODES[1]}"
+[ "${CODES[2]}" = "201" ] || fail "flooder's 3rd submission should be 201, got ${CODES[2]}"
+LATER_429=0
+for c in "${CODES[@]:3}"; do [ "$c" = "429" ] && LATER_429=1; done
+[ "$LATER_429" = "1" ] || fail "expected at least one 429 among 7 rapid submissions, got: ${CODES[*]}"
+echo "OK: 7 rapid submissions from one user run into 429 past its burst (${CODES[*]})"
+
+HEADERS=$(curl -s -D - -o /dev/null -X POST "localhost:$PORT/api/submit" "${CREDS[@]}" "${HDRS[@]}" -d '{"dashboard":"d","panel":1,"id":"deadbee8","vars":{"q1":"B"}}')
+echo "$HEADERS" | grep -qi '^HTTP/[0-9.]* 429' || fail "expected a 429 once the burst is spent: $HEADERS"
+echo "$HEADERS" | grep -qi '^Retry-After:' || fail "a 429 must carry Retry-After: $HEADERS"
+echo "OK: a 429 carries Retry-After"
+
+CREDS=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: bob")
+CODE=$(submit '{"dashboard":"d","panel":1,"id":"cafed00d","vars":{"q1":"C"}}')
+[ "$CODE" = "201" ] || fail "B3: bob's submission right after flooder's flood should be 201, got $CODE: $(cat "$W/out")"
+echo "OK: B3 — one user's flood does not rate-limit a different user's next submission"
+CREDS=("${AUTH_H[@]}")
 
 echo "PASS: submit-live"
