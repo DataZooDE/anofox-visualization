@@ -17,7 +17,11 @@
 //
 // No jsdom: both functions are pure (string in, string out, no DOM),
 // extracted from app.js like served_nav_test.mjs does, and run with
-// stand-in state closed over them.
+// stand-in state closed over them. Since #500, servedNavHref also calls
+// siteHref() (defined in the same Function body below), which references
+// the free identifiers `published`/`window` — set on `globalThis` (not
+// Function params, since siteHref itself isn't one of the factory's
+// closed-over pieces).
 import { readFileSync } from "fs";
 import assert from "assert/strict";
 
@@ -34,8 +38,15 @@ const makeHref = new Function(
   "dpVarDefault",
   "dpVars",
   "dpXf",
-  `${fn("pathVarValue")}\n${fn("servedNavHref")}\nreturn { pathVarValue, servedNavHref };`
+  `${fn("siteHref")}\n${fn("pathVarValue")}\n${fn("servedNavHref")}\nreturn { pathVarValue, servedNavHref };`
 );
+
+// All of this file's existing cases are a locked server's own served nav
+// (never `--site`): `published` false, so siteHref() is a no-op and every
+// href below stays exactly as it always has (`/d/<id>…`, no rewrite). The
+// #500 sub-path-rewrite cases are their own section at the end, with
+// `published`/`window` set for just that section.
+globalThis.published = false;
 
 // -- pathVarValue: dpXf for a headless variable (no declared input) --
 {
@@ -98,5 +109,29 @@ assert.equal(
   href({ model: "a b&c=d#e" }, "my dash", { pathVars: ["model"] }),
   "/d/my%20dash?v.model=a%20b%26c%3Dd%23e"
 );
+
+// #500: on a published site (siteHref's own guard), the same href is
+// rewritten under the site's own basePath — a real in-site path, not the
+// domain root — so middle-click / "open in new tab" / hover preview on a
+// served-nav link don't leave a sub-path-hosted site (GitHub Pages).
+{
+  const prevPublished = globalThis.published;
+  const prevWindow = globalThis.window;
+  const prevLocation = globalThis.location;
+  globalThis.published = true;
+  globalThis.window = { __anofoxSite: { basePath: "/repo/" } };
+  globalThis.location = { href: "http://example.test/repo/", origin: "http://example.test" };
+  try {
+    assert.equal(href({}, "monitor", {}), "/repo/d/monitor/");
+    assert.equal(
+      href({ model: "car-price" }, "monitor_features", { pathVars: ["model"] }),
+      "/repo/d/monitor_features/?v.model=car-price"
+    );
+  } finally {
+    globalThis.published = prevPublished;
+    globalThis.window = prevWindow;
+    globalThis.location = prevLocation;
+  }
+}
 
 console.log("nav_path_vars_test: ok");

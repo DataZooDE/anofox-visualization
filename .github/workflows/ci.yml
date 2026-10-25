@@ -1,11 +1,13 @@
 name: CI
 
 # Rust checks for the whole workspace (core, crates/anofox-viz-ffi, duckext).
-# The C++ extension's sqllogictests (test/sql) run in
-# MainDistributionPipeline.yml via extension-ci-tools (`make test`).
+# The C++ extension's sqllogictests (test/sql) run here too (`sqllogictest`
+# job, `make test`, linux_amd64 only); the full cross-platform matrix build
+# is MainDistributionPipeline.yml via extension-ci-tools.
 #
 # #464: two lanes, decided once by lane.yml.
-#   - PR fast lane (target ~10 min): rust (fmt+clippy+nextest), the web
+#   - PR fast lane (target ~10 min): rust (fmt+clippy+nextest), the C++ ABI
+#     extension's sqllogictests (test/sql/*.test, linux_amd64, #491), the web
 #     tests/e2e (wasm built once, tests/web/*.mjs sharded 4-way), the wasm
 #     size check. A docs-only PR (every changed file *.md or under docs/)
 #     instead runs only a markdown/link check.
@@ -29,7 +31,15 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A spurious labeled/unlabeled run (one whose `lane` job skips below, #491)
+  # must not cancel the real run it shares a ref with: GitHub applies
+  # cancel-in-progress at the whole-run level, before any job's `if` is
+  # evaluated, so without this the spurious run still kills the real one
+  # mid-flight and leaves its jobs looking like failures. Giving it a
+  # per-run_id (so unique, never-colliding) group suffix instead opts it out
+  # of the shared group entirely; every other trigger keeps the plain,
+  # stable group (empty suffix) and the normal cancel-newer-wins behaviour.
+  group: "${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJson('[\"labeled\",\"unlabeled\"]'), github.event.action) && github.event.label.name != 'full-ci') && github.run_id || '' }}"
   cancel-in-progress: true
 
 env:
@@ -38,7 +48,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Opening a PR *with* a label already attached (e.g. `gh pr create --label
+  # full-ci`) fires `opened` and `labeled` together — two runs in the same
+  # concurrency group, so the first gets cancelled and its never-started jobs
+  # sit on the PR as "fail" checks (#491, as hit by #490/#492). `labeled`/
+  # `unlabeled` only needs to re-run the lane when the label itself is
+  # `full-ci` (the one label lane.yml looks at); every other trigger
+  # (opened/synchronize/reopened, push, schedule, workflow_dispatch) is
+  # unaffected. Skipping `lane` here skips every job below it too (they all
+  # `needs: lane` and check its outputs), and ci-gate treats "skipped" as
+  # passing, so a redundant labeled/unlabeled run resolves cleanly instead of
+  # leaving checks pending.
   lane:
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJson('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'full-ci'
     uses: ./.github/workflows/lane.yml
 
   # ---- docs-only PRs: a markdown/link check instead of the whole lane ----
@@ -151,6 +176,54 @@ jobs:
         run: |
           pip install "duckdb==1.5.6" -e ".[test]" pingouin lifelines statsforecast nbclient ipykernel
           pytest -q -rs
+
+  sqllogictest:
+    # #491: test/sql/*.test (the sqllogictests for the C++ ABI build, `make
+    # test`) used to only run inside MainDistributionPipeline's full
+    # cross-platform matrix, which #465 moved to the full lane — so a fast
+    # lane PR that changed rendering output could merge without ever running
+    # them (#487 did, briefly breaking test/sql/anofox_diagram.test on
+    # master; fixed by #490). This builds just the linux_amd64 slice (no
+    # vcpkg deps — see MainDistributionPipeline.yml's comment) with `make
+    # test` directly, instead of going through extension-ci-tools' reusable
+    # distribution workflow, and runs parallel to the other fast-lane jobs.
+    # ccache (compiled objects) + Swatinem/rust-cache (the corrosion-built
+    # anofox_viz_ffi staticlib) keep repeat runs well under the fast lane's
+    # ~10 min budget; a cold cache (first run, or duckdb/corrosion bumped) is
+    # the slow case.
+    name: sqllogictest (linux_amd64, make test)
+    needs: lane
+    if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sqllogictest
+
+      - name: Install ninja
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: sqllogictest-linux-amd64
+          max-size: 2G
+
+      - name: Build the C++ ABI extension (release)
+        env:
+          GEN: ninja
+        run: make release
+
+      - name: make test (test/sql/*.test against the release build)
+        env:
+          GEN: ninja
+        run: make test
 
   duckdb-2-0-smoke:
     # #352: non-blocking. DuckDB 2.0 LTS shipped 2026-10-21; our release pin
@@ -1039,6 +1112,7 @@ jobs:
       - lane
       - docs-check
       - rust
+      - sqllogictest
       - duckdb-2-0-smoke
       - web-build
       - web-mjs-shard
@@ -1080,6 +1154,7 @@ jobs:
     needs:
       - lane
       - rust
+      - sqllogictest
       - duckdb-2-0-smoke
       - web-build
       - web-mjs-shard
