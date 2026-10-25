@@ -212,6 +212,7 @@ terminal.
 | `::TOOLBAR` |  | layout | next table's toolbar: 'none' hides it entirely (row count and chips too; a multi-select's "N selected" chip stays), or an allow-list of the parts to keep — 'search,filters,totals,stats,columns,density,export' ('totals' only hides its toggle button, not the row; 'density' covers Pages\|Scroll too; each kept part still needs its own row/column threshold); an excluded 'export' still gets a small hover CSV button |
 | `::SELECT_AS` | `::SELECTAS`, `::SELECTION` | layout | next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to |
 | `::EMPTY` | `::EMPTY_MESSAGE`, `::NODATA` | layout | next panel's message when its result is empty: 'No orders in range — widen the dates' |
+| `::SHOW_IF` | `::SHOWIF`, `::VISIBLE_IF` | layout | show the next panel (or ::GROUP box) only while this BOOLEAN is TRUE — re-checked on every input change: getvariable('q1') <> '' |
 | `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
@@ -2113,6 +2114,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
 | `SELECT 1::ENDVIEW;` | close a `::VIEW` group (optional when a `::TAB`/`::SUBTAB`/`::SECTION` or the end of the script follows) |
 | `SELECT 'fit'::FIT;` | the `::TAB` / `::SUBTAB` / `::VIEW` it is in fits the window, no page scroll — see *Fit to screen* below |
+| `SELECT cond::SHOW_IF;` | the **next** panel (or `::GROUP` box) shows only while `cond` is `TRUE` — see *Show a panel only when …* below |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
 | `SELECT day::XAXIS, 'Name'::TRACK …;` right after a chart | a thin strip **under** that chart, in its panel, on the same x axis (see [strips](#fans-shaded-regions-and-strips-under-a-chart)) |
 
@@ -2200,6 +2202,66 @@ SELECT * ::TABLE FROM orders;
   more rows than fit, the page scrolls. These pages show every tab on one
   page, so a tab's, sub-tab's or view's `::FIT` is ignored there. `dashboard
   --svg` draws one fixed-size image: `::FIT` has no effect.
+
+### Show a panel only when … (`::SHOW_IF`)
+
+`SELECT cond::SHOW_IF;` is a layout directive, like `::SPAN`/`::EMPTY`: a
+statement on its own, applying to whatever comes right after it. Its target
+shows only while `cond` evaluates to the BOOLEAN `TRUE` — `FALSE`, `NULL`, no
+row, a non-boolean value or a query error all hide it (fail closed). It is
+re-checked on every run: a full run, an input change or a cross-filter.
+
+A common pattern is a quiz-style dropdown with an empty first option (a
+`::DROPDOWN` defaults to its **first** option, so `getvariable('q1') IS NOT
+NULL` is always true — check against `''`/`<> ''` instead):
+
+```sql
+SELECT v AS q1 ::DROPDOWN, l ::OPTION_LABEL, 'Which check sees concept drift?' ::LABEL
+FROM (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l)
+ORDER BY o;
+
+SELECT getvariable('q1') <> '' ::SHOW_IF;               -- only after an answer
+SELECT CASE getvariable('q1') WHEN 'measured error' THEN '**Right.**'
+            ELSE 'Not quite — try again.' END ::MARKDOWN;
+```
+
+The target is the first statement after the `::SHOW_IF` that is not setup,
+not another stacked `::SHOW_IF` (stacked conditions AND together), and not a
+next-panel modifier (`::SPAN`/`::COL`, `::HEIGHT`, `::EMPTY`, `::ROWSELECT`, a
+table option, a lone `::THRESHOLDS`, `::SELECT_AS`, `::DRILL`) — those travel
+with the target, so a `::COL` right before a hidden panel never leaks onto
+the next one. A **`::GROUP` target** hides the whole box, including its
+`::ENDGROUP`:
+
+```sql
+SELECT getvariable('view') = 'detail' ::SHOW_IF;        -- a whole box
+SELECT 'Detail'::GROUP;
+SELECT …;
+SELECT 1::ENDGROUP;
+```
+
+A hidden panel gives up its grid slot (no card; the row reflows) rather than
+leaving a blank one. A hidden input draws no control, but its variable keeps
+its value — a learner's answer survives the control being hidden.
+
+Not every statement can be a target: `::TAB`, `::SUBTAB`, `::VIEW`,
+`::ENDVIEW`, `::ENDGROUP`, `::FIT`, `::COLUMNS` and chrome directives always
+show (`dashboard --check` reports `show_if/bad-target`); use `-- @requires`
+to hide those instead. Nothing after a `::SHOW_IF` at all is
+`show_if/no-target`. `--check` also flags a condition beside other roles
+(`show_if/not-alone`, ignored — the panel shows), a non-boolean or no-row
+result under the defaults used while checking (`show_if/not-boolean` /
+`show_if/no-row`), a `getvariable()` naming no variable this dashboard sets
+(`show_if/unknown-variable`) and a condition that reads no variable at all
+(`show_if/constant`).
+
+**`::SHOW_IF` is not access control.** Unlike a hidden `-- @requires` tab
+(which the server also refuses, answering "Not available" to a direct
+request), `::SHOW_IF` only hides a panel on the page — in served mode the
+hidden statement's own query can still be requested through `/api/panel`
+(see `docs/secure-serving.md`). Static output (`--svg`, the CLI's HTML, the
+script-free page of `serve --dashboards`) evaluates every condition with the
+defaults in scope at render time, same as the browser's first load.
 
 ### Alternative views of one panel (`::VIEW`)
 

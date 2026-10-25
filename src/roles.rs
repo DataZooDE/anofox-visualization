@@ -370,6 +370,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to"),
     e("EMPTY", &["EMPTY_MESSAGE", "NODATA"], R::Empty, "layout", false,
       "next panel's message when its result is empty: 'No orders in range — widen the dates'"),
+    e("SHOW_IF", &["SHOWIF", "VISIBLE_IF"], R::ShowIf, "layout", false,
+      "show the next panel (or ::GROUP box) only while this BOOLEAN is TRUE — re-checked on every input change: getvariable('q1') <> ''"),
     e("DRILL", &["DRILLDOWN", "DRILL_DOWN"], R::Drill, "layout", false,
       "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
@@ -544,7 +546,7 @@ pub fn roles_json() -> String {
             r,
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
-                | Role::SelectAs | Role::Drill | Role::Empty | Role::View | Role::ViewEnd
+                | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
                 | Role::Fit
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
@@ -668,6 +670,7 @@ mod tests {
             "VIEW",
             "ENDVIEW",
             "FIT",
+            "SHOW_IF",
         ] {
             assert!(dirs.contains(&t), "{t}");
         }
@@ -894,6 +897,7 @@ mod tests {
             Role::Drill,
             Role::Link,
             Role::Empty,
+            Role::ShowIf,
             Role::Animate,
             Role::LineStyle,
             Role::Story,
@@ -1034,6 +1038,7 @@ mod tests {
                 | Role::Drill
                 | Role::Link
                 | Role::Empty
+                | Role::ShowIf
                 | Role::Animate
                 | Role::LineStyle
                 | Role::Story

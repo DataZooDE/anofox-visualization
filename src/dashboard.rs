@@ -142,6 +142,28 @@ fn first_text(rows: &[(String, Vec<Value>)]) -> Option<String> {
     rows.first().and_then(|(_, v)| v.first()).map(value_str)
 }
 
+/// Run a `::SHOW_IF` condition statement at plan index `idx` (#515): the
+/// first row's cell of its `Role::ShowIf` column, through
+/// [`sql::condition::holds`]. `false` for a query error, no row, no such
+/// column or a non-`TRUE` value (fail closed) — the same rule everywhere.
+fn show_if_holds(
+    provider: &mut dyn DataProvider,
+    cond_src: &[(String, Vec<(usize, Role)>)],
+    idx: usize,
+) -> bool {
+    let Some((sql, roles)) = cond_src.get(idx) else {
+        return false;
+    };
+    let Some((i, _)) = roles.iter().find(|(_, r)| *r == Role::ShowIf) else {
+        return false;
+    };
+    provider
+        .query(sql)
+        .ok()
+        .and_then(|rows| column_at(&rows, *i).and_then(|(_, vals)| vals.first().cloned()))
+        .is_some_and(|v| sql::condition::holds(Some(&v)))
+}
+
 /// Run the script in order (setup for effect, panels queried) and collect
 /// the dashboard chrome directives — so a `::THEME` anywhere applies to every
 /// panel.
@@ -172,7 +194,31 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
     // shown alternative (#214) — the other alternatives' non-setup
     // statements never even reach a query.
     let mut view_pick = sql::views::StaticPick::default();
-    for panel in sql::plan(script) {
+    let plan = sql::plan(script);
+    // `::SHOW_IF` (#515): each condition statement's own SQL + roles, kept
+    // alongside the plan so a later statement's `show_if` indices can run
+    // (and cache) that condition on demand — a condition is itself a
+    // directive (`renders() == false`) and never reaches a query any other
+    // way below.
+    let cond_src: Vec<(String, Vec<(usize, Role)>)> = plan
+        .iter()
+        .map(|p| (p.sql.clone(), p.roles.clone()))
+        .collect();
+    let mut cond_cache: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
+    for panel in plan {
+        // Skip any non-setup statement whose `::SHOW_IF` conditions don't
+        // all hold, before the `-- @requires` / `::VIEW` checks below (a
+        // hidden statement never even reaches those).
+        if !panel.setup
+            && !panel.show_if.is_empty()
+            && !panel.show_if.iter().all(|&c| {
+                *cond_cache
+                    .entry(c)
+                    .or_insert_with(|| show_if_holds(provider, &cond_src, c))
+            })
+        {
+            continue;
+        }
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
         // flattened here).

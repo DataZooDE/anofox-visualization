@@ -568,6 +568,11 @@ pub enum Role {
     /// Layout: `::EMPTY` — the *next* panel's message when its query returns
     /// no rows (default: "No data for this selection").
     Empty,
+    /// Layout: `::SHOW_IF` — show the next panel (or `::GROUP` box) only
+    /// while this BOOLEAN is `TRUE`, re-checked on every run. A statement on
+    /// its own, like `::SPAN`/`::EMPTY`; not access control (`/api/panel`
+    /// still answers a hidden statement). See [`crate::sql::condition`].
+    ShowIf,
     /// Interaction: `::DRILL` makes the *next* chart a drill-down over a level
     /// path (`'region > country > city'`, `'geo: …'` names the variables) —
     /// `<prefix>_level` / `_depth` / `_path` plus one variable per level, and a

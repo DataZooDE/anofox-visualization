@@ -337,3 +337,66 @@ fn contract_panel_data_warnings_are_stripped() {
     assert!(!body.contains("hunter2_warn_sentinel_315"), "{body}");
     drop(server);
 }
+
+/// #515: a `::SHOW_IF` condition's own query failing is one of its fail-
+/// closed cases (FALSE / NULL / no row / non-boolean / an error all hide the
+/// target) — unlike an ordinary panel's query failure, it must never abort
+/// the whole script-free page. The raw DuckDB error can echo a value from
+/// the failing expression (here, a literal that fails a cast — the same
+/// shape a viewer-tainted `getvariable()` comparison would take), so it must
+/// not reach the viewer OR the server log: only a generic line does.
+#[test]
+fn show_if_condition_error_hides_the_panel_not_the_page() {
+    if !have_duckdb("show_if_condition_error_hides_the_panel_not_the_page") {
+        return;
+    }
+    let s = Scratch::new("showif");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("sentinel.sql"),
+        "SELECT CAST('hunter2_showif_sentinel_515' AS INTEGER) ::SHOW_IF;\n\
+         SELECT count(*) AS n ::METRIC, 'Hidden metric'::LABEL FROM t;\n\
+         SELECT count(*) AS n ::METRIC, 'Still shown metric'::LABEL FROM t;\n",
+    )
+    .unwrap();
+    let init = s.0.join("init.sql");
+    std::fs::write(&init, "CREATE TABLE IF NOT EXISTS t AS SELECT 1 AS x;\n").unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .arg("--db")
+            .arg(s.0.join("t.duckdb"))
+            .arg("--init")
+            .arg(&init)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let resp = http_get(port, "/d/sentinel");
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = http_body(&resp);
+    assert!(!body.contains("hunter2_showif_sentinel_515"), "{body}");
+    assert!(!body.contains("Hidden metric"), "{body}");
+    assert!(body.contains("Still shown metric"), "{body}");
+
+    let out = server.finish();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[anofox-serve] dashboard 'sentinel' ::SHOW_IF condition"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("hunter2_showif_sentinel_515"),
+        "the raw DuckDB error (which can echo a viewer-tainted value) must not reach the \
+         log either: {stderr}"
+    );
+}
