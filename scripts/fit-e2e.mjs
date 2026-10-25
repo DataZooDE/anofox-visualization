@@ -47,8 +47,10 @@ const bars = (n) =>
   `SELECT 'Region ${n}' AS t ::TITLE, r AS region ::XAXIS, v ::BARCHART FROM (VALUES ('North', ${3 + n}), ('South', 5), ('East', 2), ('West', 4)) t(r, v);\n`;
 const SQL = `CREATE TABLE fit_orders AS SELECT i AS id, ['North', 'South', 'East', 'West'][1 + i % 4] AS region, 20 + (i * 37) % 90 AS amount FROM range(40) t(i);
 SELECT 'All' AS fit_region ::DROPDOWN UNION ALL SELECT DISTINCT region FROM fit_orders;
+-- @name overview_tab
 SELECT 'Overview'::TAB;
 SELECT 'fit'::FIT;
+-- @name revenue_kpi
 SELECT sum(amount) ::MONEY, 'Revenue'::LABEL FROM fit_orders WHERE getvariable('fit_region') IN ('All', region);
 SELECT count(*) ::METRIC, 'Orders'::LABEL FROM fit_orders WHERE getvariable('fit_region') IN ('All', region);
 SELECT round(avg(amount), 1) ::METRIC, 'Avg order'::LABEL FROM fit_orders WHERE getvariable('fit_region') IN ('All', region);
@@ -168,6 +170,17 @@ for (const vp of [
   const m = await measure(page);
   checkFitted(m, tag + " (a)");
   if (vp.height <= 1080) check(m.tableOver === true, `${tag} (a) …and its rows do overflow it (scrolled, not clipped or squeezed)`);
+  if (vp.width === 1920 && vp.height === 1080) {
+    // #518: `-- @name` tags the tab button and the KPI tile with a stable
+    // `data-dp-name`, a selector e2e tests (and later a guided tour) can
+    // rely on instead of the position-dependent `data-stmt`.
+    const names = await page.evaluate(() => ({
+      tab: document.querySelector('.tabbar .tab-btn[data-dp-name="overview_tab"]')?.textContent,
+      kpi: document.querySelector('.metric[data-dp-name="revenue_kpi"] .metric-cap')?.textContent,
+    }));
+    check(names.tab === "Overview", `${tag} -- @name tags the tab button (data-dp-name="overview_tab", got ${JSON.stringify(names.tab)})`);
+    check(names.kpi === "Revenue", `${tag} -- @name tags the KPI tile (data-dp-name="revenue_kpi", got ${JSON.stringify(names.kpi)})`);
+  }
   // (b)
   await tab(page, "Details");
   const d = await measure(page);

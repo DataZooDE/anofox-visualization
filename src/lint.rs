@@ -85,6 +85,12 @@ pub struct Diagnostic {
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
+    /// `-- @name` panel names ([`name_diags`], #518): `name/bad` |
+    /// `name/reserved` | `name/duplicate` (errors: not a plain identifier,
+    /// `page` — reserved for a guided tour's intro/outro, or reused on
+    /// another statement) | `name/not-drawn` (warning: the statement is
+    /// setup, or a layout directive with no element of its own, so the name
+    /// never reaches the page).
     pub code: &'static str,
     pub message: String,
     /// The offending statement, trimmed to one line.
@@ -1773,6 +1779,97 @@ where
     let plan = sql::plan(script);
     diags.extend(view_diags(&plan));
     diags.extend(fit_diags(&plan));
+    diags.extend(name_diags(&plan));
+    diags
+}
+
+/// Does this statement draw an element `-- @name` can anchor (#518 decision
+/// 3): a panel (including a contract plot call), an input, a `::GROUP` box,
+/// a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/
+/// `::SECTION` heading — not setup, and not an invisible directive (`::SPAN`,
+/// `::RELOAD`, chrome, a lone `::THRESHOLDS`, …).
+fn is_name_target(p: &sql::Panel) -> bool {
+    if p.setup {
+        return false;
+    }
+    if p.contract.is_some() {
+        return true;
+    }
+    if roles::is_table_thresholds(&p.roles) {
+        return false;
+    }
+    p.roles.iter().any(|(_, r)| {
+        r.renders()
+            || matches!(
+                r,
+                Role::Input(_)
+                    | Role::GroupStart
+                    | Role::Tab
+                    | Role::SubTab
+                    | Role::View
+                    | Role::Section
+            )
+    })
+}
+
+/// `-- @name` panel names (#518 PR A): see [`Diagnostic::code`] for the full
+/// `name/*` list. Run once over the whole plan so a reused name is caught
+/// wherever its other statement sits.
+fn name_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        let Some(name) = p.name.as_deref() else {
+            continue;
+        };
+        if name == "page" {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "name/reserved",
+                message: "-- @name `page` is reserved for a guided tour's intro/outro \
+                          callout — pick another name"
+                    .into(),
+                sql: short(i),
+            });
+        } else if !sql::name::valid(name) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "name/bad",
+                message: format!(
+                    "-- @name `{name}` is not a plain identifier — use \
+                     `^[A-Za-z_][A-Za-z0-9_-]{{0,63}}$`"
+                ),
+                sql: short(i),
+            });
+        } else if let Some(&(_, other)) = seen.iter().find(|(n, _)| *n == name) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "name/duplicate",
+                message: format!(
+                    "-- @name `{name}` is also statement {other}'s — names must be unique \
+                     on one dashboard"
+                ),
+                sql: short(i),
+            });
+        } else {
+            seen.push((name, i + 1));
+        }
+        if !is_name_target(p) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "name/not-drawn",
+                message: "-- @name on a statement that draws nothing (setup, or a layout \
+                          directive with no element of its own) — it never reaches the page"
+                    .into(),
+                sql: short(i),
+            });
+        }
+    }
     diags
 }
 
@@ -7607,6 +7704,56 @@ mod design_tests {
             |_q| Ok(data.clone()),
         );
         assert!(!has(&d, "silent-setup"), "{d:?}");
+    }
+
+    #[test]
+    fn name_diags_flags_bad_reserved_duplicate_and_not_drawn() {
+        let codes = |script: &str| -> Vec<(usize, &'static str)> {
+            name_diags(&sql::plan(script))
+                .iter()
+                .map(|d| (d.stmt, d.code))
+                .collect()
+        };
+        // A well-formed, unique name on a drawn statement: clean.
+        assert!(codes("-- @name kpi\nSELECT 1::METRIC;").is_empty());
+        // A name on a `::GROUP`, a `::TAB`, an input and a heading: all draw
+        // something, so none of them is `name/not-drawn`.
+        assert!(codes("-- @name box\nSELECT 'Filters'::GROUP;").is_empty());
+        assert!(codes("-- @name t1\nSELECT 'Overview'::TAB;").is_empty());
+        assert!(
+            codes("-- @name region_filter\nSELECT DISTINCT region::DROPDOWN FROM t;").is_empty()
+        );
+        assert!(codes("-- @name heading\nSELECT 'Section'::LABEL;").is_empty());
+        // Not a plain identifier.
+        assert_eq!(codes("-- @name 1bad\nSELECT 1::METRIC;"), [(1, "name/bad")]);
+        assert_eq!(
+            codes("-- @name has space\nSELECT 1::METRIC;"),
+            [(1, "name/bad")]
+        );
+        // `page` is reserved for the guided tour's intro/outro.
+        assert_eq!(
+            codes("-- @name page\nSELECT 1::METRIC;"),
+            [(1, "name/reserved")]
+        );
+        // The same name on two statements.
+        assert_eq!(
+            codes("-- @name kpi\nSELECT 1::METRIC;\n-- @name kpi\nSELECT 2::METRIC;"),
+            [(2, "name/duplicate")]
+        );
+        // Setup, and an invisible layout directive, draw nothing.
+        assert_eq!(
+            codes("-- @name setup\nSET VARIABLE x = 1;"),
+            [(1, "name/not-drawn")]
+        );
+        assert_eq!(
+            codes("-- @name span\nSELECT 6::SPAN;\nSELECT 1::METRIC;"),
+            [(1, "name/not-drawn")]
+        );
+        // A bad name on an undrawn statement: both fire.
+        assert_eq!(
+            codes("-- @name 1bad\nSELECT 6::SPAN;\nSELECT 1::METRIC;"),
+            [(1, "name/bad"), (1, "name/not-drawn")]
+        );
     }
 }
 

@@ -2075,6 +2075,7 @@ with the browser through wasm):
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 | `-- @shared <name>, …` | Directly above one `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement: documents that *this* directive deliberately reuses `<name>` with another one, so `dashboard --check --strict` skips `interaction/rowselect-shared-name` / `interaction/name-clash` for it — every other clash still is flagged. See *Selecting table rows* below. |
+| `-- @name <name>` | Directly above any statement that draws something — a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/`::SECTION` heading: tags its element `data-dp-name="<name>"`, a stable anchor for e2e selectors and (later) deep links / guided tours (#518). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`; names must be unique on one dashboard (`name/duplicate`); `page` is reserved (`name/reserved`); a bad name is `name/bad`; one on a statement that draws nothing warns (`name/not-drawn`). See *Interactivity* below. |
 
 `dashboard --check` warns about an empty `@nav` (`header/empty-nav`), one
 longer than 24 characters (`header/long-nav`), an empty `@group`
@@ -2495,6 +2496,29 @@ other clash on the dashboard still is flagged. A `-- @shared` name this
 directive doesn't itself end up setting (a typo, or the wrong column) is
 flagged on its own (`interaction/shared-unused`), so a mistyped name never
 silently disables nothing.
+
+#### Stable element names (`-- @name`)
+
+`-- @name <name>` directly above a statement tags the first element it draws
+with `data-dp-name="<name>"` — a panel, an input, a `::GROUP` box, a
+`::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/`::SECTION`
+heading:
+
+```sql
+-- @name severity_kpi
+SELECT max(severity) ::METRIC, 'Worst severity' ::LABEL FROM problems;
+```
+
+Names make stable test selectors (`[data-dp-name="severity_kpi"]` instead of
+a positional `[data-stmt="3"]`, which shifts whenever a statement is added or
+removed above it) and, later, deep links and guided-tour targets (#518). A
+re-run (cross-filter, an input change, `::RELOAD`) re-tags the element
+whether it was patched in place or rebuilt. `dashboard --check` flags a name
+that isn't a plain identifier (`name/bad`), the reserved `page` (used by a
+guided tour's intro/outro, #518 PR B — `name/reserved`), one reused on
+another statement (`name/duplicate`), and one on a statement that draws
+nothing — setup, or a layout directive with no element of its own
+(`name/not-drawn`).
 
 #### Named chart selections (`::SELECT_AS`)
 
