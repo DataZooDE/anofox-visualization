@@ -1120,6 +1120,17 @@ fn rewrite_list(list: &str) -> Rewritten {
                     }
                     format!("{core} AS c{i}")
                 }
+                // #517 S2: the submit id for the audit log ("<submit id>
+                // seq=<n>", plan §4.6) is the author's own column name —
+                // kept the same way ::VIEW's group name is, instead of
+                // being erased into `c{i}` like a plain role.
+                Role::Submit => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 // Any other role: an explicit `AS alias` is replaced by c{i}.
                 _ => format!("{} AS c{i}", trailing_alias(expr).0),
             };

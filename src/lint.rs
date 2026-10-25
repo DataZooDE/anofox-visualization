@@ -2952,6 +2952,57 @@ pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
     out
 }
 
+/// `submit/not-enabled` / `state/not-enabled` (#517 S2, plan §3: "With
+/// `--options locked.json`"), deferred from S1 since they need a real
+/// server's `options.state` to check a dashboard's id against —
+/// `dashboard --check --options locked.json` reads that file itself
+/// (`cmd_check`) and calls this per dashboard. `enabled_for_submit` is
+/// `options.state.dashboards`; `enabled_for_state` the union of
+/// `dashboards`/`read`/`trainers.dashboards`
+/// ([`crate::host::state::StateOptions::named_dashboards`]) — both empty
+/// when `--options` named no `options.state` at all, which still flags
+/// every `::SUBMIT`/`viewer_state` dashboard as not enabled (there is no
+/// `state` for it to be enabled under).
+pub fn state_enablement_diags(
+    script: &str,
+    dashboard_id: &str,
+    enabled_for_submit: &[String],
+    enabled_for_state: &[String],
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let has_submit = sql::plan(script)
+        .iter()
+        .any(|p| p.roles.iter().any(|(_, r)| matches!(r, Role::Submit)));
+    if has_submit && !enabled_for_submit.iter().any(|d| d == dashboard_id) {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            stmt: 0,
+            code: "submit/not-enabled",
+            message: format!(
+                "this dashboard carries ::SUBMIT, but '{dashboard_id}' is not in \
+                 options.state.dashboards — its button would have nowhere to post to"
+            ),
+            sql: String::new(),
+        });
+    }
+    if sql::script_needs_viewer_state(script)
+        && !enabled_for_state.iter().any(|d| d == dashboard_id)
+    {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            stmt: 0,
+            code: "state/not-enabled",
+            message: format!(
+                "this dashboard reads viewer_state, but '{dashboard_id}' is in none of \
+                 options.state's dashboards/read/trainers.dashboards — it would always read \
+                 its own (empty) seeded temp, never a real viewer's rows"
+            ),
+            sql: String::new(),
+        });
+    }
+    diags
+}
+
 /// `CREATE [OR REPLACE] [TEMP | TEMPORARY] TABLE [IF NOT EXISTS] … AS …`:
 /// a statement that materialises a query's result (leading comments allowed).
 fn materialises_table(sql: &str) -> bool {
@@ -8090,6 +8141,52 @@ mod submit_tests {
         let script = "SELECT value::MARKDOWN FROM viewer_state;\n";
         let d = check(script, |_| Ok(vec![row(json!({"c0": "hello"}))]));
         assert!(has(&d, "state/markup-from-viewer"), "{d:?}");
+    }
+
+    // ── state_enablement_diags (#517 S2): submit/not-enabled, state/not-
+    // enabled, deferred from S1 since they need --options locked.json ──
+
+    #[test]
+    fn submit_not_enabled_when_dashboard_is_missing_from_state_dashboards() {
+        let script = "SELECT 'Check' AS quiz_1::SUBMIT, 'q1'::SUBMIT_VARS;\n";
+        let d = state_enablement_diags(script, "tutorial", &[], &[]);
+        assert!(has(&d, "submit/not-enabled"), "{d:?}");
+    }
+
+    #[test]
+    fn submit_enabled_when_dashboard_is_in_state_dashboards() {
+        let script = "SELECT 'Check' AS quiz_1::SUBMIT, 'q1'::SUBMIT_VARS;\n";
+        let d = state_enablement_diags(
+            script,
+            "tutorial",
+            &["tutorial".to_string()],
+            &["tutorial".to_string()],
+        );
+        assert!(!has(&d, "submit/not-enabled"), "{d:?}");
+    }
+
+    #[test]
+    fn state_not_enabled_when_dashboard_reads_viewer_state_but_is_in_no_list() {
+        let script = "SELECT value::TEXT_SMALL FROM viewer_state;\n";
+        let d = state_enablement_diags(script, "progress", &[], &[]);
+        assert!(has(&d, "state/not-enabled"), "{d:?}");
+    }
+
+    #[test]
+    fn state_enabled_via_read_only_list_does_not_need_submit_dashboards() {
+        // `read`-listed (my-progress overview): may read, not submit — so
+        // it must not need to be in `dashboards` too.
+        let script = "SELECT value::TEXT_SMALL FROM viewer_state;\n";
+        let d = state_enablement_diags(script, "my-progress", &[], &["my-progress".to_string()]);
+        assert!(!has(&d, "state/not-enabled"), "{d:?}");
+        assert!(!has(&d, "submit/not-enabled"), "{d:?}");
+    }
+
+    #[test]
+    fn a_dashboard_with_neither_submit_nor_viewer_state_is_clean() {
+        let script = "SELECT week::XAXIS, sum(n)::BARCHART FROM t GROUP BY ALL;\n";
+        let d = state_enablement_diags(script, "weekly", &[], &[]);
+        assert!(d.is_empty(), "{d:?}");
     }
 }
 

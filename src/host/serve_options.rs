@@ -62,6 +62,9 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("app", SiteOptionKind::Site),
     ("home", SiteOptionKind::Site),
     ("source", SiteOptionKind::ServerOnly),
+    // #517 S2: per-viewer append-only state needs a real server behind it
+    // (the write endpoint, the store) — a static site has neither.
+    ("state", SiteOptionKind::Refused),
 ];
 
 /// `None` for a key that isn't one of `anofox_serve_dashboards`'s options at

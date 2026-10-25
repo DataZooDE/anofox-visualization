@@ -351,6 +351,20 @@ pub fn check_path_rules(
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("/"),
     };
+    // `Store::open` opens the parent with `O_NOFOLLOW` and refuses a
+    // symlink outright (review of #530 residual nit 1) — `canonicalize`
+    // below would otherwise silently follow one and validate whatever it
+    // resolves to, passing this check only for `open` to then refuse for
+    // a reason this function never told the operator about.
+    let parent_symlink_meta = std::fs::symlink_metadata(parent_raw)
+        .map_err(|e| format!("options.state.path: '{}': {e}", parent_raw.display()))?;
+    if parent_symlink_meta.file_type().is_symlink() {
+        return Err(format!(
+            "options.state.path: '{}' is a symlink — point options.state.path at the real \
+             directory, not a link to it",
+            parent_raw.display()
+        ));
+    }
     let parent = std::fs::canonicalize(parent_raw)
         .map_err(|e| format!("options.state.path: '{}': {e}", parent_raw.display()))?;
     if !parent.is_dir() {
@@ -1483,6 +1497,28 @@ mod tests {
         mkdir(&dash);
         let e = check_path_rules(&dash.join("state.jsonl"), None, &dash).unwrap_err();
         assert!(e.contains("dashboard folder"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_path_rules_refuses_a_symlinked_parent_like_store_open_does() {
+        // Residual nit from the #530 review: `check_path_rules` used to
+        // `canonicalize` straight through a symlinked parent and validate
+        // whatever it resolved to, passing a config `Store::open` (which
+        // opens the parent with `O_NOFOLLOW`) would then refuse — fixed
+        // so both agree, with the clearer message coming from the
+        // earlier, config-time check.
+        let root = tmp("symlink-parent-check");
+        mkdir(&root);
+        let dash = root.join("dashboards");
+        mkdir(&dash);
+        let real_dir = root.join("real");
+        mkdir(&real_dir);
+        let link_dir = root.join("link");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+        let e = check_path_rules(&link_dir.join("state.jsonl"), None, &dash).unwrap_err();
+        assert!(e.contains("symlink"), "{e}");
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -561,6 +561,35 @@ pub fn dedup_last_spelling(vars: Vec<(String, String)>) -> Vec<(String, String)>
     vars
 }
 
+/// The `vars` object of a panel or submit request body: each name a valid,
+/// non-reserved identifier, at most [`MAX_VARS`] of them, each value a typed
+/// SQL literal ([`sql_literal`]) — the same parser and limits for both, so
+/// `/api/submit` accepts exactly what `/api/panel` would have (plan §4.2
+/// step 6: "parse vars exactly like a panel request"). Deduplicated by
+/// [`dedup_last_spelling`].
+pub fn parse_vars_object(v: Option<&serde_json::Value>) -> Result<Vec<(String, String)>, String> {
+    let mut vars = Vec::new();
+    if let Some(vs) = v {
+        let vs = vs.as_object().ok_or("'vars' must be an object")?;
+        if vs.len() > MAX_VARS {
+            return Err(format!("more than {MAX_VARS} variables"));
+        }
+        for (k, val) in vs {
+            if !valid_ident(k) {
+                return Err(format!("invalid variable name '{k}'"));
+            }
+            if crate::host::access::is_reserved_var(k) {
+                return Err(format!(
+                    "variable '{k}' is reserved: __claim_* (the viewer's login) and anofox_data are set by the server"
+                ));
+            }
+            let lit = sql_literal(val).map_err(|e| format!("variable '{k}': {e}"))?;
+            vars.push((k.clone(), lit));
+        }
+    }
+    Ok(dedup_last_spelling(vars))
+}
+
 /// Parse + validate a locked-mode panel request body.
 pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
     let v: serde_json::Value =
@@ -581,26 +610,7 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
         .get("panel")
         .and_then(|p| p.as_u64())
         .ok_or("'panel' must be a non-negative integer")? as usize;
-    let mut vars = Vec::new();
-    if let Some(vs) = o.get("vars") {
-        let vs = vs.as_object().ok_or("'vars' must be an object")?;
-        if vs.len() > MAX_VARS {
-            return Err(format!("more than {MAX_VARS} variables"));
-        }
-        for (k, val) in vs {
-            if !valid_ident(k) {
-                return Err(format!("invalid variable name '{k}'"));
-            }
-            if crate::host::access::is_reserved_var(k) {
-                return Err(format!(
-                    "variable '{k}' is reserved: __claim_* (the viewer's login) and anofox_data are set by the server"
-                ));
-            }
-            let lit = sql_literal(val).map_err(|e| format!("variable '{k}': {e}"))?;
-            vars.push((k.clone(), lit));
-        }
-    }
-    let vars = dedup_last_spelling(vars);
+    let vars = parse_vars_object(o.get("vars"))?;
     let page = match o.get("page") {
         None | Some(serde_json::Value::Null) => None,
         Some(p) => Some(parse_page(p)?),
@@ -611,6 +621,70 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
         vars,
         page,
     })
+}
+
+/// `POST /api/submit`'s body (#517 S2, plan §4.1): `{"dashboard", "panel",
+/// "id", "vars"}` — no `user`/`ts`/`seq` (those are the server's).
+#[derive(Debug, Clone)]
+pub struct SubmitRequest {
+    pub dashboard: String,
+    pub panel: usize,
+    /// Client nonce for idempotency, a retry after a network error must not
+    /// append twice. 1 to 64 hex digits (plan: "<32 hex, per click>" —
+    /// bounded a little looser than exactly 32 so a slightly different
+    /// client-side generator isn't refused for no security reason).
+    pub id: String,
+    /// `(name, typed SQL literal)`, like [`PanelRequest::vars`].
+    pub vars: Vec<(String, String)>,
+}
+
+/// A client nonce: 1 to 64 ASCII hex digits.
+pub fn valid_submit_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub fn parse_submit_request(body: &str) -> Result<SubmitRequest, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("bad request JSON: {e}"))?;
+    let o = v.as_object().ok_or("request must be a JSON object")?;
+    for k in o.keys() {
+        if !matches!(k.as_str(), "dashboard" | "panel" | "id" | "vars") {
+            return Err(format!("unknown request field '{k}'"));
+        }
+    }
+    let dashboard = o
+        .get("dashboard")
+        .and_then(|d| d.as_str())
+        .filter(|d| valid_dashboard_id(d))
+        .ok_or("'dashboard' must be a dashboard id")?
+        .to_string();
+    let panel = o
+        .get("panel")
+        .and_then(|p| p.as_u64())
+        .ok_or("'panel' must be a non-negative integer")? as usize;
+    let id = o
+        .get("id")
+        .and_then(|p| p.as_str())
+        .filter(|id| valid_submit_id(id))
+        .ok_or("'id' must be 1 to 64 hex digits")?
+        .to_string();
+    let vars = parse_vars_object(o.get("vars"))?;
+    Ok(SubmitRequest {
+        dashboard,
+        panel,
+        id,
+        vars,
+    })
+}
+
+/// The stricter CSRF gate for a write (`/api/submit`, plan §4.3): unlike
+/// [`origin_matches_host`] (used for the read-only panel/page routes, where
+/// a *missing* `Origin` is let through), a write requires `Origin` to be
+/// present *and* match `Host` — a browser's own `fetch` POST always sends
+/// one, so the real page is unaffected; a curl-style script with no Origin
+/// at all is not a use case this endpoint serves.
+pub fn origin_required_and_matches_host(origin: Option<&str>, host: Option<&str>) -> bool {
+    origin.is_some() && origin_matches_host(origin, host)
 }
 
 /// Parse + validate the `page` object of a panel request (also used by the
@@ -2096,5 +2170,72 @@ mod tests {
         assert!(too_broad(&tmp.join("anofox-runs")).is_none());
         assert!(too_broad(Path::new("/srv/runs")).is_none());
         assert!(too_broad(Path::new("/data")).is_none());
+    }
+
+    // ── #517 S2: /api/submit's own request parsing + CSRF gate ───────────
+
+    #[test]
+    fn origin_required_and_matches_host_needs_a_real_origin() {
+        assert!(origin_required_and_matches_host(
+            Some("https://d.example.com"),
+            Some("d.example.com")
+        ));
+        // Unlike `origin_matches_host`, a *missing* Origin is refused here.
+        assert!(!origin_required_and_matches_host(
+            None,
+            Some("d.example.com")
+        ));
+        assert!(!origin_required_and_matches_host(
+            Some("https://evil.example.com"),
+            Some("d.example.com")
+        ));
+    }
+
+    #[test]
+    fn submit_id_is_bounded_hex() {
+        assert!(valid_submit_id("deadbeef"));
+        assert!(valid_submit_id(&"a".repeat(64)));
+        assert!(!valid_submit_id(""));
+        assert!(!valid_submit_id(&"a".repeat(65)));
+        assert!(!valid_submit_id("not-hex!"));
+        assert!(!valid_submit_id("DEAD BEEF"));
+    }
+
+    #[test]
+    fn parse_submit_request_accepts_the_plan_example() {
+        let r = parse_submit_request(
+            r#"{"dashboard": "tutorial", "panel": 7, "id": "deadbeef", "vars": {"q1": "B", "note": "hi", "region": "EU"}}"#,
+        )
+        .unwrap();
+        assert_eq!(r.dashboard, "tutorial");
+        assert_eq!(r.panel, 7);
+        assert_eq!(r.id, "deadbeef");
+        assert_eq!(r.vars.len(), 3);
+    }
+
+    #[test]
+    fn parse_submit_request_refuses_a_user_or_seq_field() {
+        // Plan §4.1: "There is no `user`, `ts` or `seq` field" — those are
+        // the server's; a client naming one is an unknown field, not
+        // silently ignored.
+        for extra in ["user", "ts", "seq"] {
+            let body = format!(r#"{{"dashboard": "t", "panel": 0, "id": "ab", "{extra}": "x"}}"#);
+            assert!(
+                parse_submit_request(&body).is_err(),
+                "unexpected field '{extra}' should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_submit_request_refuses_a_reserved_or_invalid_var() {
+        assert!(parse_submit_request(
+            r#"{"dashboard": "t", "panel": 0, "id": "ab", "vars": {"__claim_user": "x"}}"#
+        )
+        .is_err());
+        assert!(parse_submit_request(
+            r#"{"dashboard": "t", "panel": 0, "id": "ab", "vars": {"anofox_data": "x"}}"#
+        )
+        .is_err());
     }
 }
