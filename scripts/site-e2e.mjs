@@ -12,6 +12,15 @@
 //   - a `../x` path_vars value is dropped (#417 S2), not applied;
 //   - there is no editor flash (the sidebar is never visible, even in the
 //     DOM's own computed layout, not just by class name);
+//   - #500: a table ::LINK and a chart-mark ::LINK, each written as
+//     `/d/<id>?v.x={…}` (same as a locked server's own route), switch
+//     dashboards in place under /repo/, never navigating to the domain
+//     root, and pass the clicked value on; the served-nav and ::LINK hrefs
+//     themselves resolve under /repo/ too (middle-click / new tab);
+//     (the locked-server counterpart — those same hrefs staying plain
+//     `/d/<id>` when `published` is false — is unit-tested directly at
+//     the function level, not re-proven here; see tests/web/
+//     site_href_test.mjs and nav_path_vars_test.mjs);
 //   - no request leaves this site's own origin / the pinned CDN hosts
 //     (the telemetry-e2e.mjs pattern, #334) — the exact list site_csp()
 //     (src/bin/dashboard.rs) allows;
@@ -97,7 +106,15 @@ writeFileSync(
   `-- @title Sales overview\n-- @nav Overview\n-- @order 1\n` +
     `CREATE OR REPLACE TEMP VIEW sales AS SELECT * FROM read_parquet(getvariable('anofox_data') || '/sales.parquet')\n` +
     `  WHERE region = coalesce(getvariable('region'), region);\n` +
-    `SELECT product::XAXIS, sum(units)::BARCHART, 'Units by product'::TITLE FROM sales GROUP BY 1 ORDER BY 1;\n`
+    `SELECT product::XAXIS, sum(units)::BARCHART, 'Units by product'::TITLE FROM sales GROUP BY 1 ORDER BY 1;\n` +
+    // #500: a chart-mark ::LINK and a table ::LINK, each written as
+    // '/d/<id>?v.x={…}' against the domain root, same as a locked server's
+    // own route — drill through to by-product, pre-filtered by the
+    // clicked region.
+    `SELECT region::XAXIS, sum(units)::BARCHART, 'Units by region'::TITLE,\n` +
+    `       '/d/by-product?v.region={x}'::LINK FROM sales GROUP BY 1 ORDER BY 1;\n` +
+    `SELECT region::TABLE, sum(units) AS units,\n` +
+    `       '/d/by-product?v.region={region}' AS detail ::LINK FROM sales GROUP BY 1 ORDER BY 1;\n`
 );
 writeFileSync(
   path.join(dashDir, "by-product.sql"),
@@ -239,7 +256,59 @@ try {
   // rows still show, not just one — the same proof a server's 400 gives.
   check(/north/.test(text3) && /south/.test(text3) && /east/.test(text3), "a ../ path_vars value is dropped — the dashboard falls back to its default (unfiltered), not an error or a traversal");
 
-  // ── 6. no request leaves this site's own origin / the pinned CDN hosts ──
+  // ── 6. #500: a table ::LINK and a chart-mark ::LINK ('/d/<id>?v.x={…}')
+  // switch in place under /repo/, never navigating to the domain root; the
+  // hrefs themselves (served-nav, table ::LINK cell) resolve under /repo/
+  // too, for middle-click / "open in new tab" / hover preview ──
+  const p4 = await openPage(BASE);
+  await p4.waitForSelector(".dash .panel", { timeout: 60000 });
+  const navHref = await p4.$eval('.served-nav a[data-nav-id="by-product"]', (a) => a.getAttribute("href"));
+  check(navHref.startsWith("/repo/d/by-product/"), `served-nav href resolves under /repo/: ${navHref}`);
+  const tableLinkHref = await p4.$eval(".dash .dp-link", (a) => a.getAttribute("href"));
+  check(tableLinkHref.startsWith("/repo/d/by-product/"), `table ::LINK href resolves under /repo/: ${tableLinkHref}`);
+
+  await p4.evaluate(() => (window.__e2eMarker = "still-here"));
+  await p4.click(".dash .dp-link"); // the first row: region = 'east' (units GROUP BY region ORDER BY region)
+  await p4.waitForSelector(".dash .panel", { timeout: 60000 });
+  await sleep(500);
+  check((await p4.evaluate(() => window.__e2eMarker)) === "still-here", "table ::LINK click: no full reload (a window marker survives)");
+  check(p4.url().startsWith(BASE + "d/by-product/"), `table ::LINK click: stays under /repo/ (${p4.url()})`);
+  const afterTableLink = await p4.evaluate(() => document.querySelector(".dash")?.textContent || "");
+  check(
+    /60/.test(afterTableLink) && /40/.test(afterTableLink) && !/120/.test(afterTableLink) && !/95/.test(afterTableLink),
+    "table ::LINK click: the target got the clicked row's value (region='east' filter applied)"
+  );
+
+  const p5 = await openPage(BASE);
+  await p5.waitForSelector(".panel-svg > svg .dp-hit", { timeout: 60000 });
+  await p5.evaluate(() => (window.__e2eMarker = "still-here"));
+  const bar = await p5.evaluate(() => {
+    const m = [...document.querySelectorAll(".panel-svg > svg .dp-hit")].find((e) => e.getAttribute("data-x") === "south");
+    const b = m.getBoundingClientRect();
+    return { x: b.left + b.width / 2, y: b.top + Math.min(b.height / 2, 20) };
+  });
+  await p5.mouse.click(bar.x, bar.y);
+  await p5.waitForSelector(".dash .panel", { timeout: 60000 });
+  await sleep(500);
+  check((await p5.evaluate(() => window.__e2eMarker)) === "still-here", "chart ::LINK click: no full reload (a window marker survives)");
+  check(p5.url().startsWith(BASE + "d/by-product/"), `chart ::LINK click: stays under /repo/ (${p5.url()})`);
+  const afterChartLink = await p5.evaluate(() => document.querySelector(".dash")?.textContent || "");
+  check(
+    /95/.test(afterChartLink) && /150/.test(afterChartLink) && !/60/.test(afterChartLink) && !/120/.test(afterChartLink),
+    "chart ::LINK click: the target got the clicked mark's value (region='south' filter applied)"
+  );
+
+  // (#500's locked-server guarantee — siteHref()/servedNavHref() are a
+  // no-op when `published` is false, so a locked server's own /d/<id>
+  // route is untouched — is unit-tested directly at the function level:
+  // tests/web/site_href_test.mjs's "not published" case and
+  // tests/web/nav_path_vars_test.mjs's existing published=false suite.
+  // A real locked server here would need the native extension loaded via
+  // anofox_serve_dashboards (scripts/served-e2e.mjs's setup), which this
+  // script doesn't build; duplicating that heavier harness just to re-prove
+  // a one-line early return isn't worth the extra CI time.)
+
+  // ── 7. no request leaves this site's own origin / the pinned CDN hosts ──
   const allowedHosts = new Set([
     `127.0.0.1:${PORT}`,
     "cdn.jsdelivr.net",

@@ -6,12 +6,14 @@
 // sub-path, compared side by side with the same folder on the locked
 // server) rather than by a unit test here.
 //
-// No jsdom: siteDashId references the free identifiers `window` and
-// `location` (not parameters — unlike pathVarValue/servedNavHref in
+// No jsdom: siteDashId (and, since #500, the siteHref() it now calls
+// first) reference the free identifiers `window`, `location` and
+// `published` (not parameters — unlike pathVarValue/servedNavHref in
 // nav_path_vars_test.mjs, which close over module-level state through
 // explicit factory parameters instead). Extracted with `new Function`, its
-// body runs against the *global* scope, so a minimal `window`/`location`
-// stand-in set directly on `globalThis` is enough; `URL` is a Node builtin.
+// body runs against the *global* scope, so a minimal `window`/`location`/
+// `published` stand-in set directly on `globalThis` is enough; `URL` is a
+// Node builtin.
 import { readFileSync } from "fs";
 import assert from "assert/strict";
 
@@ -21,18 +23,23 @@ const fn = (name) => {
   assert.ok(m, `function ${name} not found in app.js`);
   return m[0];
 };
-const siteDashId = new Function(`${fn("siteDashId")}\nreturn siteDashId;`)();
+// siteDashId calls siteHref() (#500) — both must be defined in the same
+// Function body.
+const siteDashId = new Function(`${fn("siteHref")}\n${fn("siteDashId")}\nreturn siteDashId;`)();
 
-function withSite(site, run) {
+function withSite(site, run, { published = true } = {}) {
   const prevWindow = globalThis.window;
   const prevLocation = globalThis.location;
+  const prevPublished = globalThis.published;
   globalThis.window = { __anofoxSite: site };
   globalThis.location = { href: "http://example.test/repo/", origin: "http://example.test" };
+  globalThis.published = published;
   try {
     run();
   } finally {
     globalThis.window = prevWindow;
     globalThis.location = prevLocation;
+    globalThis.published = prevPublished;
   }
 }
 
@@ -78,5 +85,33 @@ withSite(site, () => {
   assert.equal(siteDashId("/repo/theme-base.css"), null);
   assert.equal(siteDashId("/repo/d/"), null);
 });
+
+// #500: a root-relative `/d/<id>` — exactly what a ::LINK or served-nav
+// href is written as, same as on a locked server — is read through
+// siteHref() first, so it resolves to this site's own dashboard even
+// though it isn't (yet) under `/repo/`.
+withSite(site, () => {
+  assert.equal(siteDashId("/d/by-product"), "by-product");
+  assert.equal(siteDashId("/d/by-product/"), "by-product");
+  assert.equal(siteDashId("/d/by-product?v.region=east"), "by-product");
+
+  // Still scoped to this site: a cross-origin `/d/<id>` isn't rewritten
+  // into it (siteHref's own origin check), so it falls through to null
+  // same as before #500.
+  assert.equal(siteDashId("https://evil.example/d/overview"), null);
+});
+
+// Not `published` (a locked server's own page): siteHref() is a no-op, so
+// a root-relative `/d/<id>` is left alone — outside this site's basePath,
+// same as "no site at all". siteDashId isn't actually reachable here in
+// the real app (every caller guards on `published` first), but it must
+// still degrade safely, not rewrite, if it were.
+withSite(
+  site,
+  () => {
+    assert.equal(siteDashId("/d/by-product"), null);
+  },
+  { published: false }
+);
 
 console.log("site_route_test: ok");

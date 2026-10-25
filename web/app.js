@@ -7424,7 +7424,10 @@ function linkCell(tpl, row, key) {
   const tab = url.startsWith("#") ? decodeURIComponent(url.slice(1).split("?")[0]) : "";
   const external = /^https?:/i.test(url) && !url.startsWith(location.origin + "/");
   a.textContent = tab ? `${tab} →` : external ? "Open ↗" : "Open →";
-  a.href = url.startsWith("#") || url.startsWith("?") ? "#" : safeUrl(url) || "#";
+  // #500: siteHref() rewrites a same-site `/d/<id>` under the published
+  // site's basePath, so opening the link in a new tab (middle-click, "open
+  // in new tab") doesn't leave the site; a no-op on a locked server.
+  a.href = url.startsWith("#") || url.startsWith("?") ? "#" : siteHref(safeUrl(url)) || "#";
   a.title = url;
   if (external) {
     a.target = "_blank";
@@ -7761,7 +7764,11 @@ function servedNavHref(id, served) {
     if (v === undefined || v === null || v === "") continue;
     parts.push("v." + encodeURIComponent(name) + "=" + encodeURIComponent(String(v)));
   }
-  return parts.length ? path + "?" + parts.join("&") : path;
+  // #500: on a published site this is a real href (middle-click, "open in
+  // new tab", hover preview), not just onServedNavClick's in-place switch —
+  // siteHref() rewrites it under the site's own basePath, a no-op on a
+  // locked server (not `published`) or off `/d/<id>`.
+  return siteHref(parts.length ? path + "?" + parts.join("&") : path);
 }
 // Every served-nav link's href is rebuilt (not just its click handler) so a
 // middle-click / "open in new tab" and a plain hover preview both carry the
@@ -7900,6 +7907,35 @@ function onServedNavClick(e) {
   e.preventDefault();
   siteGo(a.dataset.navId, u.search, true);
 }
+// #500: a dashboard's own `/d/<id>[/][?q]` ::LINK or nav href is written
+// against the domain root — correct on a locked server (a real route
+// there), but a published static site may be served under a sub-path
+// (GitHub project pages, `/repo/`), where that same root-relative path
+// leaves the site entirely (404). On a `published` page, read it instead as
+// "dashboard `<id>` of *this* site, wherever it's served" and rewrite it to
+// the site's own `basePath + "d/" + <id> + "/"`, carrying the query along.
+// Same-origin only; a cross-origin URL, a malformed one, or anything that
+// isn't exactly `/d/<id>[/][?q]` (no extra path segments, no `#fragment`)
+// passes through unchanged — so this never turns an unrelated path into a
+// site path, and never introduces an open redirect (a leading `//host` or
+// `/\host` can't match the anchored `^/d/` pathname check below). `<id>` is
+// left exactly as encoded in the input (siteDashId below decodes it for
+// comparison; this function only ever relocates it, never decodes or
+// re-encodes it, so it can't double-encode).
+function siteHref(path) {
+  if (!published) return path; // checked first, so a locked server never touches window.__anofoxSite
+  const site = window.__anofoxSite;
+  if (!site) return path;
+  let u;
+  try {
+    u = new URL(String(path ?? ""), location.href);
+  } catch (_) {
+    return path;
+  }
+  if (u.origin !== location.origin) return path;
+  const m = /^\/d\/([^/?#]+)\/?$/.exec(u.pathname);
+  return m ? site.basePath + "d/" + m[1] + "/" + u.search : path;
+}
 // `path` (a served-nav href, or followLink's already-`safeUrl`'d target) to
 // the dashboard id it names, or null — only within this site's own base
 // path (`site.base`'s directory), so a path outside it (or on a locked
@@ -7909,7 +7945,7 @@ function siteDashId(path) {
   if (!site) return null;
   let u;
   try {
-    u = new URL(path, location.href);
+    u = new URL(siteHref(path), location.href);
   } catch (_) {
     return null;
   }
