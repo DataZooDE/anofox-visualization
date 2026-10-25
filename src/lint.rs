@@ -3099,6 +3099,68 @@ fn map_diags(
             ));
         }
     }
+    // M2d: ::BIVARIATE.
+    if let Some(bi) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Bivariate)
+        .map(|(i, _)| *i)
+    {
+        let has_measure = roles.iter().any(|(_, r)| matches!(r, Role::Value(_)));
+        if !has_measure {
+            out.push((
+                Severity::Warning,
+                "map/bivariate-needs-measure",
+                "::BIVARIATE needs a first measure (e.g. sales::BARCHART) — drawn as a plain map"
+                    .to_string(),
+            ));
+        }
+        if has(Role::Classes) {
+            out.push((
+                Severity::Note,
+                "map/bivariate-classes",
+                "::CLASSES is ignored on a bivariate map — both measures are split into tertiles"
+                    .to_string(),
+            ));
+        }
+        if has(Role::Origin) || has(Role::Dest) || has(Role::Hexbin) || has(Role::Size) {
+            out.push((
+                Severity::Warning,
+                "map/bivariate-ignored",
+                "::BIVARIATE has no effect with ::ORIGIN/::DEST, ::HEXBIN or ::SIZE".to_string(),
+            ));
+        }
+        let distinct_count = |idx: usize| -> usize {
+            cells(rows, idx)
+                .iter()
+                .filter_map(|v| v.as_deref()?.parse::<f64>().ok())
+                .map(|f| (f * 1e6).round() as i64)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        };
+        if has_measure && !has(Role::Hexbin) && !has(Role::Size) {
+            if distinct_count(bi) > 0 && distinct_count(bi) < 3 {
+                out.push((
+                    Severity::Note,
+                    "map/bivariate-few-levels",
+                    "::BIVARIATE has fewer than 3 distinct values — fewer classes".to_string(),
+                ));
+            }
+            if let Some(mi) = roles
+                .iter()
+                .find(|(_, r)| matches!(r, Role::Value(_)))
+                .map(|(i, _)| *i)
+            {
+                if distinct_count(mi) > 0 && distinct_count(mi) < 3 {
+                    out.push((
+                        Severity::Note,
+                        "map/bivariate-few-levels",
+                        "the measure column has fewer than 3 distinct values — fewer classes"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
     out
 }
 
@@ -6499,6 +6561,92 @@ mod design_tests {
                 row(52.0, 10.0, Value::Null),
             ]),
             vec![(Severity::Warning, "map/size-not-positive")]
+        );
+    }
+
+    /// M2d: the four `::BIVARIATE` lint codes.
+    #[test]
+    fn bivariate_lints() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/bivariate"))
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let row = |region: &str, a: Value, b: Value| json!({ "c0": region, "c1": a, "c2": b });
+
+        // no first measure: drawn as a plain map, warned.
+        assert_eq!(
+            codes(
+                "SELECT region::REGION, a::MAP, b::BIVARIATE FROM t;",
+                vec![row("DE-BY", json!("x"), json!(1.0))]
+            ),
+            vec![(Severity::Warning, "map/bivariate-needs-measure")]
+        );
+
+        // a well-formed bivariate map over enough distinct values: no lint.
+        let rows9: Vec<Value> = (0..9)
+            .map(|i| row("DE-BY", json!((i % 3) as f64), json!((i / 3) as f64)))
+            .collect();
+        assert!(codes(
+            "SELECT region::REGION, a::BARCHART, b::BIVARIATE FROM t;",
+            rows9.clone()
+        )
+        .is_empty());
+
+        // ::CLASSES is ignored.
+        let mut with_classes = rows9.clone();
+        for r in &mut with_classes {
+            r.as_object_mut()
+                .unwrap()
+                .insert("c3".to_string(), json!("quantile 3"));
+        }
+        assert_eq!(
+            codes(
+                "SELECT region::REGION, a::BARCHART, b::BIVARIATE, c::CLASSES FROM t;",
+                with_classes
+            ),
+            vec![(Severity::Note, "map/bivariate-classes")]
+        );
+
+        // ::SIZE makes ::BIVARIATE a no-op.
+        let mut with_size = rows9.clone();
+        for r in &mut with_size {
+            r.as_object_mut()
+                .unwrap()
+                .insert("c3".to_string(), json!(2.0));
+        }
+        assert_eq!(
+            codes(
+                "SELECT region::REGION, a::BARCHART, b::BIVARIATE, n::SIZE FROM t;",
+                with_size
+            ),
+            vec![(Severity::Warning, "map/bivariate-ignored")]
+        );
+
+        // fewer than 3 distinct values in ::BIVARIATE.
+        assert_eq!(
+            codes(
+                "SELECT region::REGION, a::BARCHART, b::BIVARIATE FROM t;",
+                vec![
+                    row("DE-BY", json!(1.0), json!(1.0)),
+                    row("DE-BW", json!(2.0), json!(1.0)),
+                    row("DE-SN", json!(3.0), json!(1.0)),
+                ]
+            ),
+            vec![(Severity::Note, "map/bivariate-few-levels")]
         );
     }
 

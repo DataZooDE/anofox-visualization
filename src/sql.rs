@@ -973,14 +973,18 @@ fn rewrite_list(list: &str) -> Rewritten {
                 | Role::Censor
                 | Role::CooksContour
                 | Role::Trend
-                | Role::Reload => {
+                | Role::Reload
+                | Role::Bivariate => {
                     // A charted measure remembers a human name (explicit
                     // trailing `AS alias`, else a bare column name) so a combo
                     // legend can read e.g. "observed"/"trend". The output alias
                     // stays `c{i}` so the render side keeps its by-position
                     // column lookup — the name travels as separate metadata.
+                    // `::BIVARIATE` (M2d) needs its own name too — the
+                    // bivariate legend's "{B} →" caption and tooltip read it
+                    // the same way `value_scale` reads a measure's.
                     let (core, alias) = trailing_alias(expr);
-                    if matches!(role, Role::Value(_)) {
+                    if matches!(role, Role::Value(_) | Role::Bivariate) {
                         if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
                             names.push((i, nm));
                         }

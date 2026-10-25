@@ -15675,6 +15675,7 @@ function mapTableHtml(svg, limit, caption) {
     const k = +el.getAttribute("data-class");
     const name = (label || series || `row ${+r + 1}`).split("\n")[0];
     const size = el.getAttribute("data-size");
+    const bivar = el.getAttribute("data-bivar");
     rows.push({
       name,
       series: series && series !== label && series !== name ? series : "",
@@ -15685,7 +15686,27 @@ function mapTableHtml(svg, limit, caption) {
       size: el.getAttribute("data-fsize") || "",
       orig: el.getAttribute("data-orig") || "",
       dest: el.getAttribute("data-dest") || "",
+      bivar,
+      value2: el.getAttribute("data-fvalue2") || "",
     });
+  }
+  // M2d: bivariate choropleths (::BIVARIATE) — a "value 2" column from
+  // data-fvalue2, and the class column reads "{lvl_i} {A} · {lvl_j} {B}"
+  // from data-bivar ("i,j") and the root's data-bivar-titles.
+  const isBivariate = rows.some((r) => r.bivar);
+  if (isBivariate) {
+    let bivarTitles = ["A", "B"];
+    try {
+      const t = JSON.parse(svg.getAttribute("data-bivar-titles") || "[]");
+      if (t[0]) bivarTitles[0] = t[0];
+      if (t[1]) bivarTitles[1] = t[1];
+    } catch (_) {}
+    const LEVEL = ["low", "mid", "high"];
+    for (const r of rows) {
+      if (!r.bivar) continue;
+      const [i, j] = r.bivar.split(",").map(Number);
+      r.cls = `${LEVEL[i] ?? i} ${bivarTitles[0]} · ${LEVEL[j] ?? j} ${bivarTitles[1]}`;
+    }
   }
   // M2b: flow maps (::ORIGIN/::DEST) — from/to columns, sorted by size.
   const isFlow = rows.some((r) => r.orig);
@@ -15717,6 +15738,7 @@ function mapTableHtml(svg, limit, caption) {
     ["name", "name"],
     ["series", "series"],
     ["value", "value"],
+    ["value2", "value 2"],
     ["size", "size"],
     ["cls", "class"],
   ].filter(([k]) => k === "name" || rows.some((r) => r[k]));

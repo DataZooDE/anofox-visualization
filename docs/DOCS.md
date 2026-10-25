@@ -110,6 +110,7 @@ terminal.
 | `::LON` | `::LONGITUDE`, `::LNG` | chart | a map point's longitude (degrees, WGS84), with ::LAT |
 | `::ORIGIN` | `::FROM_PLACE` | chart | a flow map's start: a region code ('DE-BY'), a WKT POINT or {'lon': …, 'lat': …, 'name': …} — with ::DEST, width by ::SIZE |
 | `::DEST` | `::DESTINATION`, `::TO_PLACE` | chart | a flow map's end (see ::ORIGIN) |
+| `::BIVARIATE` | `::BIVAR` | encoding | a map's second measure: regions coloured by tertiles of both (a 3×3 palette and legend) — with the measure column |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts' |
 | `::DIAGRAM` | `::NODE` | chart | node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES) |
 | `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
@@ -1440,6 +1441,45 @@ This needs the community extension, installed either natively (`INSTALL …
 FROM community`) or, in the browser, by fetching it from outside this host
 — which breaks on an offline or locked-down server (D9). `::HEXBIN` needs
 neither: it has no extension dependency and no outside fetch.
+
+#### Bivariate choropleths (`::BIVARIATE`)
+
+```sql
+SELECT ags ::REGION, dc_km ::BARCHART, per_10k ::BIVARIATE,
+       district ::LABEL, 'Far and thinly covered districts share one corner'::TITLE
+FROM dc_cover;
+```
+
+`::BIVARIATE` adds a second measure to a region/point map: with the chart's
+own measure (e.g. `dc_km::BARCHART`), regions or points are coloured by
+**tertiles of both** — a 3×3 palette and legend, the classic
+bivariate-choropleth look. It needs a first measure to pair with
+(`dashboard --check` warns `map/bivariate-needs-measure` and draws a plain
+map otherwise), and has no effect alongside `::ORIGIN`/`::DEST`, `::HEXBIN`
+or `::SIZE` (`map/bivariate-ignored`) — a statement is one layer.
+
+- **Classes:** each measure is split into tertiles (`quantile 3`)
+  independently; `::CLASSES` is ignored (`map/bivariate-classes`) — both
+  measures are always thirds. Fewer than 3 distinct values in either
+  measure gives fewer classes (`map/bivariate-few-levels`): 2 distinct
+  values makes a low/high split, 1 makes everything the middle cell.
+  A row missing either measure is no data (the hatch pattern).
+- **Palette:** derived from the theme, not a fixed Stevens palette — each
+  cell multiply-tints the theme's first two palette colours over white
+  (dark theme: over the card colour), so the 9 cells always suit the active
+  theme and stay distinguishable (a ΔE test checks this in light, dark,
+  colourblind and high-contrast).
+- **Legend:** a 3×3 grid, the first measure increasing to the right, the
+  second increasing upward, with each cell's row count and a "{measure} →"
+  caption under/beside the grid, plus a no-data key for rows missing either
+  value.
+- **Tooltip:** `"{label}: {measure A} {value} (low/mid/high), {measure B}
+  {value} (low/mid/high)"`.
+- **Attributes:** each feature carries `data-value`/`data-fvalue` (the
+  first measure, same as any other measured map), `data-value2`/
+  `data-fvalue2` (the second measure) and `data-bivar="{i},{j}"`
+  (0-indexed tertile levels); no `data-class`. The root carries
+  `data-bivar-titles` (both measures' names, as a JSON array).
 
 #### Density on a planar scatter (`::HEXBIN` off the map)
 

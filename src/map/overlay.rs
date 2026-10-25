@@ -201,6 +201,9 @@ pub(super) fn flow_layers(
                 false,
             ),
             Fill::Plain(_) => (Value::Na, None, None, false),
+            // Never built alongside flows (`Model::new` only builds
+            // `Fill::Bivariate` on the area/point path) — kept exhaustive.
+            Fill::Bivariate(_) => (Value::Na, None, None, false),
         };
         let linestyle = linestyle_col
             .and_then(|lc| lc.values.get(i))
