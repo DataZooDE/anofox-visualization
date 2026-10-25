@@ -699,13 +699,22 @@ dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [
   `--data`) every dashboard statement must be read-only, checked with
   DuckDB's `json_serialize_sql` — the same rule `options.data` enforces on a
   locked server.
-- `--options locked.json` takes the subset of `anofox_serve_dashboards`'s
-  options that make sense with no server behind the pages: `path_vars`,
-  `nav_picker`, `app`, `home`, `theme`. **Not** `auth` or `policy` — a
-  published site has no login and no row/column policy; every dashboard
-  query the browser can build from the author's own SQL is exactly what a
-  viewer can see, as in the browser-only builder. Say so if the data is
-  sensitive: a published site's data is public to anyone with the URL.
+- `--options locked.json` accepts the locked server's own options file
+  unedited (#501) — the same file that opens the folder with
+  `anofox_serve_dashboards`. It uses the keys that make sense with no server
+  behind the pages: `path_vars`, `nav_picker`, `app`, `home`, `theme`.
+  Server-only limits (`max_rows`, `timeout_ms`, `threads`, `max_queries`,
+  `cache_mb`, `memory_limit`, `data`, `hosts`, …) have no effect without a
+  server and are ignored, named once on stderr (e.g. `--options: ignored for
+  --site: max_rows, threads`) so a typo among them doesn't vanish silently.
+  An unknown key (not one of `anofox_serve_dashboards`'s options at all) is
+  refused, same as the locked server refuses it. **Not** `auth` or `policy`,
+  though — still refused, deliberately: a published site has no login and no
+  row/column policy, so a site built from a file that has either would
+  publish exactly what that policy was meant to hide. Every dashboard query
+  the browser can build from the author's own SQL is what a viewer can see,
+  as in the browser-only builder — say so if the data is sensitive, since a
+  published site's data is public to anyone with the URL.
 - `--data <dir>` is copied into `out/data/`; `--data <url>` is read from
   there directly (nothing is downloaded by this command). Either way, the
   generated pages `SET VARIABLE anofox_data = '<url>'` before every

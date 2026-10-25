@@ -16,6 +16,9 @@
 //!   anofox extension an embedding can load (#333): `dashboard`/`serve`
 //!   `main()` and the extension's own load callback each call
 //!   [`telemetry::ensure_default_once`] first thing.
+//! * [`serve_options`] — the locked server's `options` key list
+//!   (`duckext/src/serve.rs`'s `LockedOptions::parse`), shared with
+//!   `dashboard --site`'s own options parser so the two can't drift (#501).
 
 pub mod access;
 pub mod app_brand;
@@ -23,6 +26,7 @@ pub mod app_brand;
 pub mod auth;
 pub mod duckdb_cli;
 pub mod policy;
+pub mod serve_options;
 pub mod serving;
 pub mod telemetry;
 
