@@ -1989,27 +1989,17 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
         }
         if let Some(l) = &e.label {
             let (mx, my) = midpoint(&p.edges[k]);
-            // #229: an embedded "\n" (e.g. "5.4K\norders") is a forced line
-            // break — one halo-backed text row per line, stacked around the
-            // midpoint, so it reads as one multi-line label rather than a
-            // chip per line.
-            let edge_lines: Vec<&str> = {
-                let v: Vec<&str> = l.lines().collect();
-                if v.is_empty() {
-                    vec![""]
-                } else {
-                    v
-                }
-            };
-            let n = edge_lines.len() as f64;
-            let lh = 11.0 * 1.2;
-            let top = my - 4.0 - (n - 1.0) * lh / 2.0;
-            for (i, line) in edge_lines.iter().enumerate() {
-                lf.num("x", mx)
-                    .num("y", mid_of_baseline(top + i as f64 * lh, 11.0));
-                lf.txt("label", (*line).to_string());
-                lf.txt("from", a.id.clone()).txt("to", b.id.clone());
-            }
+            // #519: ggplot-rs 0.31.0's geom_text honours an embedded "\n"
+            // natively (sipemu/ggplot-rs#249) — one halo-backed text row for
+            // the whole label, centred around the midpoint, instead of
+            // #229's hand-stacked row per line. Its block centring (size
+            // 11, line_height 1.2) lands each line exactly where the old
+            // per-line loop put it: both put line i's drawn y at
+            // `my - 7.96 + i * 13.2 - (n - 1) * 6.6`, so this is a
+            // byte-identical render, for any number of lines.
+            lf.num("x", mx).num("y", mid_of_baseline(my - 4.0, 11.0));
+            lf.txt("label", l.clone());
+            lf.txt("from", a.id.clone()).txt("to", b.id.clone());
         }
     }
     if !ef.is_empty() {
@@ -2523,6 +2513,47 @@ mod tests {
         assert_eq!(e.label.as_deref(), Some("9.8K records"));
         let codes: Vec<&str> = d.problems.iter().map(|p| p.code).collect();
         assert_eq!(codes, ["diagram/bad-edges", "diagram/unknown-node"]);
+    }
+
+    /// #519: an embedded "\n" in an edge label (e.g. "5.4K\norders") is one
+    /// `geom_text` row, drawn as two haloed `<text>` lines `size * 1.2` px
+    /// apart (ggplot-rs 0.31.0's native multi-line layout, sipemu/
+    /// ggplot-rs#249) — not the #229 hand-stacked row per line.
+    #[test]
+    fn multiline_edge_label_uses_native_line_breaks() {
+        let mut cols = pipeline();
+        cols.push(Column::new(
+            "c4",
+            Role::Edges,
+            vec![
+                s(r#"[{"from":"ingest","to":"build","value":5400,"label":"5.4K\norders","style":"flow"}]"#),
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+                Value::Na,
+            ],
+        ));
+        let svg = render_with(&cols, 900, 320, &RenderOptions::default()).unwrap();
+        let doc = roxmltree::Document::parse(&svg).expect("well-formed");
+        let lines: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.attribute("class") == Some("gg-mark gg-text dp-edge-label"))
+            .collect();
+        assert_eq!(lines.len(), 2, "one <text> per line, not a chip per line");
+        assert_eq!(lines[0].text(), Some("5.4K"));
+        assert_eq!(lines[1].text(), Some("orders"));
+        // same x (centred on the midpoint), halo on every line, line height
+        // exactly `size * 1.2` = 13.2px apart.
+        let y0: f64 = lines[0].attribute("y").unwrap().parse().unwrap();
+        let y1: f64 = lines[1].attribute("y").unwrap().parse().unwrap();
+        assert_eq!(lines[0].attribute("x"), lines[1].attribute("x"));
+        assert!((y1 - y0 - 13.2).abs() < 1e-6);
+        for l in &lines {
+            assert_eq!(l.attribute("stroke-width"), Some("4.00"), "halo");
+            assert_eq!(l.attribute("aria-hidden"), Some("true"));
+        }
     }
 
     #[test]
