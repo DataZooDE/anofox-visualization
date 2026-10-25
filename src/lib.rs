@@ -2354,6 +2354,28 @@ pub(crate) fn legend_position_of(cols: &[Column]) -> Option<ggplot_rs::theme::Le
     }
 }
 
+/// Below this panel width, an un-overridden continuous (gradient) fill
+/// legend moves to the bottom instead of ggplot-rs's own default `Right`
+/// (heatmap/calendar/hexbin, #510). `Right` is a tall vertical colourbar
+/// that eats a fixed slice of panel *width* — proportionally large on a
+/// narrow panel, where a horizontal bar at `Bottom` only costs *height*
+/// instead (ggplot-rs 0.31.1 draws a continuous colourbar at `Top`/`Bottom`
+/// horizontally, slicing low→high left to right like an x-axis, rather
+/// than clipping the old vertical bar into that short band — sipemu/
+/// ggplot-rs#211). 480px: `web/theme-base.css`'s own `minmax(440px,1fr)`
+/// static-grid tile width, rounded up — a panel at or under that is
+/// narrow by the same convention the dashboard grid already uses; above
+/// it, a vertical bar beside the panel has always looked fine. An explicit
+/// `::LEGEND` still wins (checked by each caller via [`legend_position_of`]
+/// before this is ever consulted).
+const NARROW_PANEL_PX: f64 = 480.0;
+
+/// [`NARROW_PANEL_PX`]'s own position pick — `Some(Bottom)` under the
+/// threshold, `None` above it (meaning: keep ggplot-rs's own default).
+fn narrow_continuous_legend(width: u32) -> Option<ggplot_rs::theme::LegendPosition> {
+    (width as f64 <= NARROW_PANEL_PX).then_some(ggplot_rs::theme::LegendPosition::Bottom)
+}
+
 /// The first finite numeric value of a `role` column.
 fn role_num(cols: &[Column], role: Role) -> Option<f64> {
     find_role(cols, role).and_then(|c| {
@@ -3764,10 +3786,17 @@ fn cartesian(
     // right-hand colourbar), same as `render_heatmap`'s `legend_position_of`
     // handling, instead of the "Top" every other cartesian chart defaults
     // to: a tall vertical gradient bar squeezed into a short top strip
-    // overlaps the panel instead of sitting beside it. An explicit
+    // overlaps the panel instead of sitting beside it. Below
+    // `NARROW_PANEL_PX` though, `Bottom` (not ggplot-rs's own `Right`
+    // default) — same width-saving swap `render_heatmap`/`render_calendar`
+    // make, now safe since ggplot-rs 0.31.1 draws a continuous bar at
+    // `Bottom` horizontally instead of clipping (#510, #211). An explicit
     // `::LEGEND` still wins either way.
     plot = match (hex_bins, legend_position_of(cols)) {
-        (Some(_), None) => plot,
+        (Some(_), None) => match narrow_continuous_legend(width) {
+            Some(pos) => plot.legend_position(pos),
+            None => plot,
+        },
         (_, pos) => plot.legend_position(pos.unwrap_or(ggplot_rs::theme::LegendPosition::Top)),
     };
     if let Some(t) = &title {
@@ -4327,6 +4356,15 @@ fn render_heatmap(
     let mut plot = fill.scale(plot, o, &fmt).theme(th);
     if let Some(pos) = legend_position_of(cols) {
         plot = plot.legend_position(pos);
+    } else if matches!(fill, TileFill::Ramp(_)) {
+        // A continuous (gradient) fill, no `::LEGEND` override: on a
+        // narrow panel, `Bottom` instead of ggplot-rs's own `Right`
+        // default (#510) — see `narrow_continuous_legend`. A
+        // `TileFill::Steps` legend is a short discrete list regardless of
+        // width, so it keeps ggplot-rs's default unconditionally.
+        if let Some(pos) = narrow_continuous_legend(width) {
+            plot = plot.legend_position(pos);
+        }
     }
     if let Some(levels) = &x_levels {
         let mut sx = ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect());
@@ -5049,6 +5087,12 @@ fn render_calendar(
     let mut plot = fill.scale(plot, o, &fmt).xlab("").ylab("").theme(th);
     if let Some(pos) = legend_position_of(cols) {
         plot = plot.legend_position(pos);
+    } else if matches!(fill, TileFill::Ramp(_)) {
+        // Same narrow-panel swap as `render_heatmap` — see
+        // `narrow_continuous_legend` (#510).
+        if let Some(pos) = narrow_continuous_legend(width) {
+            plot = plot.legend_position(pos);
+        }
     }
     if let Some(t) = title {
         plot = plot.title(t);

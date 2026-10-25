@@ -66,8 +66,24 @@ crate-type = ["cdylib", "rlib"]
 # a bottom/top legend sharing width with a colourbar — neither reachable
 # here (no `Left`/`Right` legend, no simultaneous colourbar + discrete
 # guide on one plot).
+# 0.31.1: `GGPlot::svg_title`/`svg_desc` — an accessible name/description
+# written onto the root `<svg>` (`<title>`/`<desc>`, `role="img"` +
+# `aria-labelledby`/`-describedby`), used by `map/plot.rs` to restore the
+# `<desc>{summary}</desc>` the old hand-written map writer had before #498
+# (sipemu/ggplot-rs#255, #510); a continuous colourbar at
+# `LegendPosition::Top`/`Bottom` now draws horizontally instead of being
+# clipped (sipemu/ggplot-rs#211) — used by `render_heatmap`/
+# `render_calendar`/`cartesian`'s hexbin branch to put a narrow panel's
+# gradient legend at `Bottom` instead of ggplot-rs's own `Right` default
+# (`narrow_continuous_legend`, #510). 0.31.2: `GeomAttribution::fit`/
+# `.fit_overflow(..)` — shrink then truncate/wrap an attribution line that
+# would overflow the panel (sipemu/ggplot-rs#258), replacing `map/plot.rs`'s
+# own fixed 90px legend-width reservation; `GGPlot::bivariate_legend_counts`
+# — a `::BIVARIATE` map's legend swatches with each cell's row count
+# (sipemu/ggplot-rs#259, #506's bivariate choropleths). No API breaks in
+# either release (cargo-semver-checks against the prior version).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.0", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.31.2", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
