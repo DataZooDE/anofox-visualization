@@ -1,20 +1,27 @@
-//! #420 slice 1+2+3+4: build a plain polygon/point choropleth (measure,
+//! #420 slice 1+2+3+4+5: build a plain polygon/point choropleth (measure,
 //! category or classed fill; graduated `::SIZE` symbols; flows/hexbin as
-//! extra layers — [`eligible`]) as one real `GGPlot`, instead of our own
+//! extra layers; region labels, a scale bar and a single-line pack
+//! attribution — [`eligible`]) as one real `GGPlot`, instead of our own
 //! hand-written SVG.
 //!
-//! Everything else (region labels, or any map that still needs the old
-//! footer — a scale bar or pack attribution) stays on
-//! [`super::render_with_model`] until its own slice.
-
+//! What's still unported: a BKG/VG2500-style *multi-line* stacked
+//! attribution (needs `GeomAttribution::row`, sipemu/ggplot-rs#250 —
+//! [`eligible`] keeps any map needing 2+ attribution lines on the old
+//! writer until that ships) and labels anchored to a symbol/flow-end
+//! point rather than a region polygon (`geom_sf_text`'s own job stops at
+//! polygons — ggplot2's convention too; see its module doc — a point/line
+//! anchor needs `geom_text`'s own offset/overlap support, not audited
+//! this slice).
+use ggplot_rs::geom::annotation_scale::{GeomAnnotationScale, GeomAttribution, MapCorner};
 use ggplot_rs::geom::sf::GeomSf;
+use ggplot_rs::geom::sf_text::{GeomSfText, SfLabelAnchor};
 use ggplot_rs::prelude::*;
 use ggplot_rs::scale::size::ScaleSizeContinuous;
 use ggplot_rs::scale::Scale;
 use ggplot_rs::theme::LegendPosition;
 
 use crate::theme::mix;
-use crate::{Column, RenderOptions};
+use crate::{cell_num, find_role, role_num, Column, RenderOptions, Role};
 
 use super::fill;
 use super::legend::legend_of;
@@ -32,10 +39,7 @@ type Df = Vec<(String, Vec<Value>)>;
 type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 
 /// Whether `m` (already built from `cols`) is simple enough for the new
-/// `geom_sf` path: no scale bar/attribution furniture (slice 5 —
-/// [`foot_of`]'s own height check, reused rather than duplicated, since
-/// "does this map need a footer" already depends on pack layers *and* the
-/// projection/span). `::CLASSES` (slice 2) is allowed — [`build`] routes a
+/// `geom_sf` path. `::CLASSES` (slice 2) is allowed — [`build`] routes a
 /// classed measure through `ggplot_rs::scale::binned::ScaleFillBinned`
 /// instead of [`MapFill`]. Graduated `::SIZE` symbols (slice 3) are allowed
 /// too — a symbol map's anchor rows route through `GeomSf`'s own `size`
@@ -43,9 +47,17 @@ type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 /// drawing. Flows/hexbin (slice 4) are allowed as well — [`build`] folds
 /// them in as extra layers on the same plot, through
 /// [`overlay::flow_layers`]/[`overlay::hexbin_layer`], instead of a
-/// separately-rendered-and-spliced fragment.
+/// separately-rendered-and-spliced fragment. A footer (slice 5) is allowed
+/// too, as long as it's at most a scale bar (`annotation_scale` — any
+/// count) plus *one* attribution line (`annotation_attribution`) —
+/// [`foot_of`]'s own line list, reused rather than duplicated, since "does
+/// this map need a footer, and how many lines" already depends on pack
+/// layers *and* the projection/span. 2+ lines (a `de-*`/BKG pack's own
+/// "© BKG … Datenquellen:" + sources note) need `GeomAttribution::row`
+/// (sipemu/ggplot-rs#250, not yet released) to stack without overlapping —
+/// still the old writer's job until then.
 pub(super) fn eligible(o: &RenderOptions, m: &Model, w: f64) -> bool {
-    foot_of(o, m, w).h <= 0.0
+    foot_of(o, m, w).lines.len() <= 1
 }
 
 /// Build the `GGPlot` and its extra root attributes (`data-map`, …) for an
@@ -62,8 +74,28 @@ pub(super) fn build(
     let (w, h) = (width as f64, height as f64);
     let mut lg = legend_of(o, m, w, h);
     let forced = legend_override(cols, &mut lg);
-    // `eligible` already confirmed no footer, so its height is 0 here.
-    let (frame, legend_at) = frame_of(m, o, &lg, w, h, 0.0, forced)?;
+    // `legend_override` zeroes `lg` for `::LEGEND 'none'` and returns
+    // `None` — the same `None` it returns for "no override, pick a
+    // default" (`lg` is also what `frame_of`'s own layout math reads).
+    // `forced_position` below is the ggplot-rs-facing signal: `Some(...)`
+    // wins over the discrete-fill default, with its own `None` variant
+    // standing for "hide the legend" specifically, distinct from "no
+    // override" (`Option::None` on this line).
+    let forced_position = if lg.w <= 0.0 && lg.h <= 0.0 {
+        Some(ggplot_rs::theme::LegendPosition::None)
+    } else {
+        forced.clone()
+    };
+    // `eligible` only allows a footer this path can draw itself (a scale
+    // bar and/or one attribution line, via `annotation_scale`/
+    // `annotation_attribution` below) — reuse the old writer's own height
+    // calc so layout reserves exactly the same room it always did (the
+    // `frame.window` trick frame_of callers rely on: fitting into a
+    // shorter area then reporting the *unshrunk* `w`×`h` window stretches
+    // the trained coord_sf domain so the unused band lands at the bottom,
+    // without this geom_sf path needing its own pixel-perfect margin).
+    let ft = foot_of(o, m, w);
+    let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced.clone())?;
     let [x0, x1, y0, y1] = frame.window(w, h);
 
     let t = &o.theme;
@@ -112,6 +144,14 @@ pub(super) fn build(
     // loop). Suppress every row's geometry/fill/class/title below rather
     // than index `m.fill` by row at all.
     let hexbin_takes_over = m.hexbin.is_some();
+    // Whether any row actually keeps its own geometry here (`Value::Str`,
+    // not suppressed to `Value::Na` by hexbin or a symbol anchor below) —
+    // if every row is suppressed (hexbin always suppresses all of them;
+    // an all-symbol-anchored map, slice 3, can too — #420 slice 5's own
+    // lint-parity fix, see the features-layer gate below), the layer
+    // would never draw a mark, only report `StatSf`'s own "removed N
+    // rows" warning for every row.
+    let mut any_feature_geometry = false;
     for i in 0..n {
         // A row with a graduated-symbol anchor (slice 3) takes over: its
         // own area/point geometry is suppressed here (`Value::Na` — the
@@ -127,7 +167,13 @@ pub(super) fn build(
         geometry.push(if hexbin_takes_over || suppressed_by_symbols {
             Value::Na
         } else {
-            row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na)
+            match row_wkt(&m.features[i]) {
+                Some(wkt) => {
+                    any_feature_geometry = true;
+                    Value::Str(wkt)
+                }
+                None => Value::Na,
+            }
         });
         let label = m.label_of(i);
         let label_is_empty = label.is_empty();
@@ -392,30 +438,69 @@ pub(super) fn build(
         ..Default::default()
     };
 
-    let has_base = !m.base.is_empty();
+    // `m.base` has one slot per row whether or not there's a real
+    // backdrop (most slots are `[]`, no shapes at all) — `row_wkt`
+    // returns `None` for an empty slot, so the *filtered* WKT list, not
+    // `m.base`'s own (row-count-driven, near-always-non-empty) length, is
+    // what actually tells us whether anything will be drawn here. Found
+    // this slice: with no real backdrop, the old `!m.base.is_empty()`
+    // check still picked this branch, building a `GGPlot` whose *plot-
+    // level* data was a `"geometry"` column with zero actual rows — which
+    // silently drew no `annotation_scale`/`annotation_attribution`
+    // furniture at all later in this function (their own layers have no
+    // override of their own, so they inherit a 0-row base) despite
+    // reaching their own `add_geom` calls (confirmed directly, not
+    // assumed). A map with a real backdrop was never affected (its base
+    // WKT list is non-empty, so this was invisible until slice 5 added
+    // furniture layers that have no row loop of their own to mask it).
+    let base_wkt: Vec<Value> = m
+        .base
+        .iter()
+        .filter_map(|f| row_wkt(f))
+        .map(Value::Str)
+        .collect();
+    let has_base = !base_wkt.is_empty();
 
     // ---- the basemap layer (drawn first — under the features), if any —
-    // then the features layer, on top.
+    // then the features layer, on top. Skipped when `!any_feature_
+    // geometry`: every row's own geometry was suppressed to `Value::Na`
+    // above (hexbin always suppresses all of them; an all-symbol-
+    // anchored map, every row's own anchor already drawn by the separate
+    // symbols layer below, can too) — adding a `geom_sf` layer for an
+    // all-`Na` `features_df` anyway would never draw a mark, only report
+    // `StatSf`'s own "removed N rows containing missing values" warning
+    // for every single row. Found via a native/browser lint parity
+    // failure (`tests/web/lint_test.mjs`) on two different `de-states`-
+    // backed statements (a hexbin one, then a graduated-symbols one with
+    // every row anchored — the same bug, same fix) that resolved their
+    // pack natively (2 BKG attribution lines, `eligible` keeps it on the
+    // old writer) but not in the browser's lint pass (no pack registered
+    // there yet, 0 lines, `eligible` routes it here instead) — exposing
+    // this pre-existing slice-3/4 gap for the first time; not specific to
+    // that resolution mismatch, so fixed for both suppression kinds
+    // uniformly, not just hexbin. `features_df` still backs the plot's
+    // own base data when there's no real basemap either (a non-empty
+    // `GGData`, not the `0`-row kind `annotation_scale`/`annotation_
+    // attribution` need to avoid, see their own comment below) — just
+    // with no `geom_sf` layer of its own.
     let mut plot = if has_base {
-        let base_wkt: Vec<Value> = m
-            .base
-            .iter()
-            .filter_map(|f| row_wkt(f))
-            .map(Value::Str)
-            .collect();
         let base_df: Vec<(String, Vec<Value>)> = vec![("geometry".into(), base_wkt)];
-        GGPlot::new(base_df)
-            .aes(Aes::new())
-            .geom_sf_with(GeomSf {
-                fill: land,
-                color: land_edge,
-                alpha: 1.0,
-                line_width: 0.5,
-                ..Default::default()
-            })
-            .geom_sf_with(features_geom())
-            .layer_data(features_df)
-            .layer_aes(features_aes)
+        let mut p = GGPlot::new(base_df).aes(Aes::new()).geom_sf_with(GeomSf {
+            fill: land,
+            color: land_edge,
+            alpha: 1.0,
+            line_width: 0.5,
+            ..Default::default()
+        });
+        if any_feature_geometry {
+            p = p
+                .geom_sf_with(features_geom())
+                .layer_data(features_df)
+                .layer_aes(features_aes);
+        }
+        p
+    } else if !any_feature_geometry {
+        GGPlot::new(features_df).aes(features_aes)
     } else {
         GGPlot::new(features_df)
             .aes(features_aes)
@@ -492,12 +577,13 @@ pub(super) fn build(
     // ---- flows (::ORIGIN/::DEST, M2b) and hexbin (::HEXBIN, M2c), slice
     // 4: extra layers on this same plot (overlay.rs's `flow_layers`/
     // `hexbin_layer`), not a separately-rendered-and-spliced fragment.
+    let mut extra_self = 0usize; // self/unplaced flows, for the summary below
     if let Some(fl) = &m.flows {
         let plain_fill_for_flows = match &m.fill {
             Fill::Plain(c) => *c,
             _ => plain_fill,
         };
-        let (new_plot, _n, _extra_self, cap_warn) = overlay::flow_layers(
+        let (new_plot, _n, extra, cap_warn) = overlay::flow_layers(
             plot,
             o,
             cols,
@@ -510,6 +596,7 @@ pub(super) fn build(
             plain_fill_for_flows,
         );
         plot = new_plot;
+        extra_self = extra;
         if let Some(w) = cap_warn {
             warnings.push(w);
         }
@@ -526,6 +613,158 @@ pub(super) fn build(
                 ));
             }
         }
+        // The "Hexagons N across" note (M2c), restored via `.caption()`
+        // (team-lead, 2026-10-24/25) rather than hand-drawn text — it went
+        // missing when slice 4 moved the legend onto a real
+        // `ScaleFillBinned` guide (`legend.rs`'s old `hexbin_note_extra`
+        // stacked it under the swatches instead; a caption draws at the
+        // bottom of the whole figure, not tucked under the legend — a
+        // visible layout change, worth a before/after look, not a bug).
+        let german = o.locale.tag.starts_with("de");
+        let width_text = super::hexbin::fmt_width(hb.width, hb.planar);
+        let note = if german {
+            format!("Sechsecke {width_text} breit")
+        } else {
+            format!("Hexagons {width_text} across")
+        };
+        plot = plot.caption(&note);
+    }
+
+    // ---- region labels (`::LABEL_TOP`/`::DATALABELS`, slice 5): each
+    // region's name at its pole of inaccessibility (`geom_sf_text`'s own
+    // `SfLabelAnchor::Polylabel`, ggplot-rs's public port of our retired
+    // `labels::polylabel`), haloed, dropping a lower-priority label that
+    // collides, falls outside the panel or doesn't fit (`check_overlap`).
+    // `geom_sf_text` only labels polygons (ggplot2's own convention, see
+    // its module doc) — a symbol/flow-anchor label isn't this slice's
+    // job (module doc above). `::LABEL_TOP n` additionally caps *which*
+    // n regions are even offered to the geom (it has no count cap of its
+    // own): same priority order the old `labels_svg` used — `::RANK`,
+    // else |value|, else the region's own screen area (computed from
+    // `frame` here, the same transform `labels_svg` used) — highest first.
+    let top_n = role_num(cols, Role::LabelTop).map(|n| n.max(0.0) as usize);
+    let want_datalabels = find_role(cols, Role::DataLabels).is_some();
+    if (top_n.is_some() || want_datalabels) && !hexbin_takes_over {
+        let rank_col = find_role(cols, Role::Rank);
+        let mut order: Vec<(usize, f64)> = Vec::new();
+        for i in 0..n {
+            if m.features[i].is_empty() {
+                continue;
+            }
+            let text = m
+                .label_of(i)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let areas: Vec<&Shape> = m.features[i]
+                .iter()
+                .filter(|s| matches!(s, Shape::Area(_)))
+                .collect();
+            if areas.is_empty() {
+                // geom_sf_text's own job stops at polygons — no point in
+                // offering it a line/point row, it'll just skip it.
+                continue;
+            }
+            let value = match &m.fill {
+                Fill::Measure(s) => s.values[i],
+                _ => None,
+            };
+            let rank_v = rank_col.and_then(|c| c.values.get(i)).and_then(cell_num);
+            let area = areas
+                .iter()
+                .filter_map(|s| match s {
+                    Shape::Area(rings) => rings.first().map(|r| {
+                        let scr: Vec<(f64, f64)> = r.iter().map(|p| frame.at(*p)).collect();
+                        super::labels::area(&scr)
+                    }),
+                    _ => None,
+                })
+                .fold(0.0, f64::max);
+            let priority = rank_v.or(value.map(f64::abs)).unwrap_or(area);
+            order.push((i, priority));
+        }
+        order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let keep: std::collections::HashSet<usize> = match top_n {
+            Some(k) => order.iter().take(k).map(|(i, _)| *i).collect(),
+            None => order.iter().map(|(i, _)| *i).collect(),
+        };
+        if !keep.is_empty() {
+            let label_geo: Vec<Value> = (0..n)
+                .map(|i| {
+                    if keep.contains(&i) {
+                        row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na)
+                    } else {
+                        Value::Na
+                    }
+                })
+                .collect();
+            let label_text: Vec<Value> = (0..n)
+                .map(|i| {
+                    if keep.contains(&i) {
+                        na_if_empty(
+                            m.label_of(i)
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_string(),
+                        )
+                    } else {
+                        Value::Na
+                    }
+                })
+                .collect();
+            let label_df: Df = vec![("geometry".into(), label_geo), ("label".into(), label_text)];
+            let label_aes = Aes::new().label("label");
+            plot = plot
+                .geom_sf_text_with(GeomSfText {
+                    size: super::FONT,
+                    anchor: SfLabelAnchor::Polylabel,
+                    check_overlap: true,
+                    halo: Some((card, 1.4)),
+                    ..Default::default()
+                })
+                .layer_data(label_df)
+                .layer_aes(label_aes);
+        }
+    }
+
+    // ---- the scale bar and the pack attribution (slice 5): drawn
+    // straight into whatever panel rect the rest of this layout already
+    // computed — neither reserves its own room (unlike `.caption()`
+    // above), which is exactly why `ft.h` was fed into `frame_of` earlier
+    // instead: that's what actually carves out the blank band these two
+    // then draw into. No `.layer_data()`/`.layer_aes()` override on
+    // either — they inherit whatever data/aes `plot`'s base carries, but
+    // their own `draw()` never reads it (no `required_aes()`, no row
+    // loop — just `backend.plot_area()` and the trained X scale), so the
+    // inherited values are inert. Giving them an *empty* (0-row) override
+    // instead was tried and tracked down to a real ggplot-rs rendering
+    // gap: a layer whose data has 0 rows draws nothing at all, even when
+    // its own `draw()` ignores `data` entirely — worse than inheriting,
+    // not better, so it's not done here.
+    if ft.scale {
+        plot = plot.annotation_scale_with(
+            GeomAnnotationScale::default()
+                .corner(MapCorner::BottomLeft)
+                .max_width_px(90.0),
+        );
+    }
+    // `eligible` only let a map through with at most one line, so this
+    // runs at most once — a `de-*`/BKG pack's 2-line note stays on the old
+    // writer until `GeomAttribution::row` ships (module doc above).
+    if let Some(line) = ft.lines.first() {
+        let runs: Vec<(&str, Option<&str>)> = line.iter().map(|(s, u)| (s.as_str(), *u)).collect();
+        plot = plot.annotation_attribution_with(
+            GeomAttribution::new(String::new())
+                .corner(MapCorner::BottomRight)
+                .runs(runs),
+        );
     }
 
     // `crate::void_theme` (pie/gauge/map/sparkline) zeroes `legend_margin`
@@ -558,13 +797,37 @@ pub(super) fn build(
     // under `LegendPosition::Inside` — a real ggplot-rs bug (filed:
     // sipemu/ggplot-rs#225), not a sign error here — so nothing calls
     // `.legend_position_inside()` yet for either fill kind.
-    if discrete_fill {
+    //
+    // `::LEGEND none`/`'top'`/`'bottom'`/`'left'`/`'right'`
+    // (`forced_position`, derived above from the same `lg`/`forced` that
+    // feed `frame_of`'s own layout math) wins over the discrete-fill
+    // default when given — found missing entirely while widening
+    // `eligible` this slice: neither was ever actually applied to this
+    // `GGPlot`'s own `LegendPosition` before, so `::LEGEND` silently did
+    // nothing for any already-eligible map (every kind slices 1-4
+    // shipped) — untested until this slice's broader eligibility finally
+    // routed a `::LEGEND`-bearing map fixture through here for the first
+    // time.
+    if let Some(pos) = forced_position {
+        plot = plot.legend_position(pos);
+    } else if discrete_fill {
         plot = plot.legend_position(LegendPosition::Top);
     }
 
+    // The screen-reader summary (`super::summary`, shared by every map
+    // kind: choropleth, classed, symbols, flows, hexbin) as a root
+    // attribute, same text content as the old writer's own `data-summary`
+    // — found missing here entirely while widening `eligible` this slice
+    // (every map kind this path already drew, slices 1-4, was missing it
+    // too; `GGPlot` has no `<desc>` API yet for the old writer's own
+    // *child-element* `<desc>{summary}</desc>` though, so that part of
+    // the a11y contract stays a real, reported gap across the whole
+    // geom_sf path, not something this attribute alone fixes).
+    let summary_text = super::summary(o, m, extra_self);
     let mut attrs: Vec<(&'static str, String)> = vec![
         ("data-map", String::new()),
         ("data-proj", m.projection.name().to_string()),
+        ("data-summary", summary_text),
     ];
     // `data-classes`: every class's short-formatted label, low to high, as
     // JSON (`mapTableHtml`'s "k of n: label" a11y row — `app.js:15454`) —
