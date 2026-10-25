@@ -1820,8 +1820,25 @@ fn render_dashboard_page(
                 "{prefix}SELECT * FROM (\n{}\n) LIMIT 1",
                 panel.sql.trim().trim_end_matches(';'),
             );
-            let rows: Rows = page_rows(st, &q)?;
-            let v = rows.first().and_then(|row| row.values().next().cloned());
+            // A query error is one of `::SHOW_IF`'s own fail-closed cases
+            // (decision 2: FALSE / NULL / no row / non-boolean / an error all
+            // hide the target) — never `?` here, unlike an ordinary panel's
+            // query failure, which is a real error that should abort the
+            // page. The raw DuckDB error can echo a viewer-supplied value
+            // (e.g. a failed cast on a `getvariable()`), so only a generic
+            // line reaches the log — never the error text itself.
+            let v = match page_rows(st, &q) {
+                Ok(rows) => rows.first().and_then(|row| row.values().next().cloned()),
+                Err(_) => {
+                    eprintln!(
+                        "[anofox-serve] dashboard '{}' ::SHOW_IF condition (stmt {}) failed — \
+                         treated as false",
+                        dash.id,
+                        i + 1
+                    );
+                    None
+                }
+            };
             show_if_cache.insert(
                 i,
                 anofox_visualization::sql::condition::holds_json(v.as_ref()),

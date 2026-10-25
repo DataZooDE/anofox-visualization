@@ -29,6 +29,9 @@ impl DataProvider for Mock {
         if sql.contains("FALSE AS c0") {
             return Ok(vec![("c0".into(), vec![Value::Bool(false)])]);
         }
+        if sql.contains("ERRORS AS c0") {
+            return Err("Conversion Error: boom".into());
+        }
         // a ::MARKDOWN / ::LABEL heading: one string literal, named by it
         // (checked before the generic numeric fallback below, since a short
         // quoted literal would otherwise also match that shape).
@@ -68,6 +71,23 @@ fn a_false_condition_before_a_group_drops_every_tile_in_the_box() {
     let svg = render_dashboard_svg(script, &mut Mock, &DashboardOptions::default()).unwrap();
     assert!(!svg.contains("InsideBox"), "{svg}");
     assert!(svg.contains("AfterBox"), "{svg}");
+}
+
+/// A query error is one of `::SHOW_IF`'s own fail-closed cases (decision 2:
+/// FALSE / NULL / no row / non-boolean / an error all hide the target) —
+/// the whole render must still succeed, same as `false`, not bubble up as a
+/// render-wide `Err` (see also `tests/serve_page_errors.rs`'s equivalent
+/// check for the served script-free page).
+#[test]
+fn a_condition_query_error_hides_the_target_and_does_not_fail_the_render() {
+    let script = "\
+        SELECT ERRORS::SHOW_IF;\n\
+        SELECT 'HiddenText'::MARKDOWN;\n\
+        SELECT 'AfterText'::MARKDOWN;";
+    let svg = render_dashboard_svg(script, &mut Mock, &DashboardOptions::default())
+        .expect("a failing condition must not fail the whole render");
+    assert!(!svg.contains("HiddenText"), "{svg}");
+    assert!(svg.contains("AfterText"), "{svg}");
 }
 
 #[test]
