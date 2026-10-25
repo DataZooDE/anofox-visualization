@@ -2402,10 +2402,15 @@ SELECT '…closing text…' ::MARKDOWN;
   further along can re-close a gate that already opened — the viewer is
   clamped back to that step, same as a stale URL/seed would be.
 - **Accessibility.** Keyboard Back/Next/step-list buttons; focus moves to
-  the new step's heading on every change; the progress strip is
-  `aria-live="polite"` ("Step 2 of 5 · Drift sandbox"); a disabled Next is
-  `aria-disabled="true"` (not `disabled`, so it stays focusable) and
-  explains the gate through `aria-describedby`.
+  the new step's heading on every change. The visible progress strip
+  ("Step 2 of 5 · Drift sandbox") is not itself a live region (it is
+  rebuilt every run, and a screen reader usually only announces a text
+  change on a node already in the page, not a brand-new one); a small
+  visually-hidden, persistent announcer — one per sequence, updated in
+  place, only when its text actually changes, and only while its section
+  is shown — carries the same text, plus the gate message while Next is
+  closed. A disabled Next is `aria-disabled="true"` (not `disabled`, so it
+  stays focusable) and explains the gate through `aria-describedby`.
 - **Static output and the script-free served page** (`--svg`, the CLI
   `dashboard file.sql out.html`, a dashboard served with no `.sql` on the
   page, and ⤓ HTML export) **flatten the sequence**: every step is drawn in

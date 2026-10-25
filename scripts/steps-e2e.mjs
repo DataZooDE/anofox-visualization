@@ -184,6 +184,65 @@ if (axe && existsSync(axe)) {
   await page.close();
 }
 
+// (j) review-537 re-review: the persistent announcer's text is only
+// touched on an actual change — an unrelated re-run (the ::BUTTONS
+// chart/table switch on step 3, which never touches the step variable or
+// any gate) must not re-mutate it, or NVDA/JAWS would re-announce
+// "Step n of N" on every cross-filter.
+{
+  const { page, errs } = await open({ width: 1440, height: 1000 }, "?v.lesson=3&v.q2=measured+error");
+  await page.waitForSelector(".dp-step-progress-text");
+  const mutations = await page.evaluate(() => {
+    window.__muts = 0;
+    const announcer = [...document.body.children].find((el) => el.getAttribute("aria-live") === "polite" && el.getAttribute("role") === "status");
+    if (!announcer) return null;
+    new MutationObserver(() => window.__muts++).observe(announcer, { characterData: true, childList: true, subtree: true });
+    return true;
+  });
+  check(mutations === true, "(j) the persistent announcer exists on step 3");
+  await page.click(".dp-seg button:text-is('Table')");
+  await page.waitForFunction(() => document.querySelector(".dash .dp-table"), null, { timeout: 15000 });
+  const count = await page.evaluate(() => window.__muts);
+  check(count === 0, `(j) an unrelated re-run (chart -> table) does not re-touch the announcer (${count} mutation(s))`);
+  check(!errs.length, `(j) no page errors: ${errs.join(" | ")}`);
+  await page.close();
+}
+
+// (k) a guide-step sequence inside a currently-hidden ::TAB never gets a
+// live announcer at all (it would announce a step change nobody can see) —
+// but it does once that tab is the one active during a render pass (a
+// plain tab click never re-runs/re-finalises, so this opens straight on
+// it via `?tab=`, the same deep link a reload after clicking it would
+// carry — see `setTabParam`).
+{
+  const sql =
+    "SELECT 'Shown'::TAB;\nSELECT 'visible'::MARKDOWN;\n" +
+    "SELECT 'Hidden'::TAB;\nSELECT 'S1' AS hidden_lesson ::GUIDE_STEP;\nSELECT 'x'::MARKDOWN;\nSELECT 'S2'::GUIDE_STEP;\nSELECT 'y'::MARKDOWN;\n";
+  const hasAnnouncer = (page) =>
+    page.evaluate(() => [...document.body.children].some((el) => el.getAttribute("aria-live") === "polite" && el.getAttribute("role") === "status"));
+  {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+    const errs = [];
+    page.on("pageerror", (e) => errs.push(String(e)));
+    await page.goto(`${base}#sql=${b64(sql)}`);
+    await settled(page);
+    check(!(await hasAnnouncer(page)), "(k) a guide-step sequence inside a hidden ::TAB creates no live announcer");
+    check(!errs.length, `(k) no page errors (hidden tab): ${errs.join(" | ")}`);
+    await page.close();
+  }
+  {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+    const errs = [];
+    page.on("pageerror", (e) => errs.push(String(e)));
+    await page.goto(`${base}?tab=Hidden#sql=${b64(sql)}`);
+    await settled(page);
+    await page.waitForSelector(".dp-step-progress-text");
+    check(await hasAnnouncer(page), "(k) the same sequence gets an announcer once its tab is the active one");
+    check(!errs.length, `(k) no page errors (shown tab): ${errs.join(" | ")}`);
+    await page.close();
+  }
+}
+
 // Screenshots: step 1, step 2 (gate closed, with message), step 2 (open),
 // light and dark, at 1440px and 390px (step 2 only), per the plan.
 if (shots) {

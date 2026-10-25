@@ -6695,8 +6695,15 @@ let dpStepAnnouncers = {};
 // step and, when closed, the gate message, so both are reliably announced
 // even though the *visible* progress text / message nodes are rebuilt
 // every run (kept simple — see `patchSlots`'s slot-only reuse — rather
-// than risking the same bug this replaced, #537).
-function announceStep(gvar, text) {
+// than risking the same bug this replaced, #537). `shown`: false for a
+// group inside a currently-hidden ::TAB/::SUBTAB pane (review-537
+// re-review) — skipped entirely, the same as a hidden pane's content never
+// reaching a screen reader by other means. Only a genuine text change
+// writes `textContent`: replacing it with the same string still fires a
+// live-region announcement in some screen readers, re-announcing "Step n
+// of N" on every unrelated cross-filter/input re-run.
+function announceStep(gvar, text, shown) {
+  if (!shown) return;
   let el = dpStepAnnouncers[gvar];
   if (!el || !el.isConnected) {
     el = document.createElement("div");
@@ -6706,7 +6713,7 @@ function announceStep(gvar, text) {
     document.body.appendChild(el);
     dpStepAnnouncers[gvar] = el;
   }
-  el.textContent = text;
+  if (el.textContent !== text) el.textContent = text;
 }
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
@@ -10127,7 +10134,8 @@ async function runOnce(fresh = true, pv = preview) {
       g.var,
       `Step ${current} of ${count}` +
         (label ? ` · ${label}` : "") +
-        (gateClosed ? `. ${g.gateMessages[current - 1] || "Finish this step to continue"}` : "")
+        (gateClosed ? `. ${g.gateMessages[current - 1] || "Finish this step to continue"}` : ""),
+      paneShown(g.sec)
     );
     // Focus the new step's heading and bring the whole sequence into view
     // — but only on an actual step change (this run's `dpRefocus` key
