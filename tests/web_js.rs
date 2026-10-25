@@ -166,3 +166,11 @@ fn web_view_switcher_url_state() {
 fn web_export_wires_each_tab_group_independently() {
     run_node("subtabs_export_test.mjs");
 }
+
+/// `-- @name` (#518 PR A): wasm `plan()` carries `Panel::name` through to
+/// the browser, and `tagName` only sets `data-dp-name` once (a re-tag never
+/// overwrites it).
+#[test]
+fn web_panel_names() {
+    run_node("names_test.mjs");
+}

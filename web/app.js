@@ -6203,6 +6203,12 @@ function openTableAsDashboard(e, cards) {
 const MD_KEY = "dp_md";
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
+// #518: tag the first element a statement draws with its `-- @name`, a
+// stable anchor for e2e selectors and (PR B) a guided tour's target. Never
+// overwrites an already-tagged element (a re-run reaching the same node).
+function tagName(el, s) {
+  if (el && s && s.name && !el.dataset.dpName) el.dataset.dpName = s.name;
+}
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
@@ -8304,7 +8310,11 @@ async function lazyRunJob(job, inline = false) {
   await lazyFlushSetup(L, job.i, job.ph);
   const frag = document.createDocumentFragment();
   const base = { ...job.ctx, container: frag, curGrid: job.ctx.container === job.ctx.curGrid ? frag : null };
-  const tag = (i) => frag.querySelectorAll(".panel:not([data-stmt])").forEach((p) => (p.dataset.stmt = i));
+  const tag = (i) => {
+    const els = frag.querySelectorAll(".panel:not([data-stmt])");
+    els.forEach((p) => (p.dataset.stmt = i));
+    tagName(els[0], L.stmts[i]); // #518: the first panel of a multi-panel statement
+  };
   const out = await L.panelBody(job.i, L.stmts[job.i], base);
   tag(job.i);
   for (const t of job.tracks) {
@@ -9097,6 +9107,7 @@ async function runOnce(fresh = true, pv = preview) {
           h.className = "section";
           const r0 = rows[0];
           h.textContent = r0 ? String((sr ? r0["c" + sr[0]] : Object.values(r0)[0]) ?? "") : "";
+          tagName(h, s);
           container.appendChild(h);
         } else if (role(s, "RELOAD")) {
           // Auto-refresh every N seconds, driven from SQL.
@@ -9476,6 +9487,7 @@ async function runOnce(fresh = true, pv = preview) {
         const compact = String(sizeVal ?? "").replace(/^"|"$/g, "").trim().toLowerCase() === "compact";
         const box = document.createElement("section");
         box.className = "group" + (compact ? " group-compact" : "");
+        tagName(box, s);
         // ::HEIGHT right before a ::GROUP sets that row's ::FIT share (#418),
         // like it does for a chart row — fitDash reads it off the box; a
         // ::GROUP with none keeps its tiles' own natural height instead of
@@ -9529,6 +9541,7 @@ async function runOnce(fresh = true, pv = preview) {
         const btn = document.createElement("button");
         btn.className = "tab-btn";
         btn.textContent = name;
+        tagName(btn, s);
         btn.onclick = (e) => {
           e.stopPropagation();
           dpTab = name; // remember, so a cross-filter re-run keeps this tab
@@ -9568,6 +9581,7 @@ async function runOnce(fresh = true, pv = preview) {
         const sbtn = document.createElement("button");
         sbtn.className = "tab-btn subtab-btn";
         sbtn.textContent = name;
+        tagName(sbtn, s);
         const topName = curTopName || "";
         // Capture THIS sub-tab's bar/wrap — `subBar`/`subWrap` are shared loop
         // variables that get reassigned for later top tabs, so the closure must
@@ -9607,6 +9621,7 @@ async function runOnce(fresh = true, pv = preview) {
         if (openView !== s.view.group) {
           const sec = document.createElement("section");
           sec.className = "dp-views";
+          tagName(sec, s); // #518: the group's marker statement names its switcher
           curGroupScale = 1;
           if (container === curGrid) {
             const outerSpan = Math.min(12, nextSpan || 12);
@@ -9710,7 +9725,11 @@ async function runOnce(fresh = true, pv = preview) {
         nextIa = {};
         nextEmpty = "";
       } else if (isInput(s)) {
-        if (dd[i]) container.appendChild(makeControl(dd[i], container === curGrid));
+        if (dd[i]) {
+          const ctl = makeControl(dd[i], container === curGrid);
+          tagName(ctl, s);
+          container.appendChild(ctl);
+        }
       } else if (trackHost && trackHost.lazy) {
         // a ::TRACK under a chart that renders later: it renders with it
         trackHost.lazy.tracks.push({ i, height: nextHeight || 0 });
@@ -9778,8 +9797,11 @@ async function runOnce(fresh = true, pv = preview) {
       nextEmpty = "";
     } finally {
       // Tag this statement's panels (markPending finds them on the next run).
-      for (const root of [newGrid, tabWrap])
-        root?.querySelectorAll(".panel:not([data-stmt])").forEach((p) => (p.dataset.stmt = i));
+      for (const root of [newGrid, tabWrap]) {
+        const els = root?.querySelectorAll(".panel:not([data-stmt])");
+        els?.forEach((p) => (p.dataset.stmt = i));
+        tagName(els?.[0], s); // #518: the first panel of a multi-panel statement
+      }
     }
   }
   // If the remembered tab no longer exists, fall back to the first.
@@ -12299,6 +12321,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         }
         out.push(vc.map((c) => ({ v: head(c), style: "head" })));
         const hdr = out.length;
+        // #520: string cells returned bare (last line) are written by
+        // xlsxOf() as t="inlineStr" — never run as a formula, so no
+        // csvSafe() here either; see the comment above csvSafe.
         const cellOf = (v, c) => {
           if (v == null || unquote(v) === "") return null;
           const i = info[c];
@@ -14139,11 +14164,28 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+// #520 (OWASP "CSV injection"): a CSV/.xls cell has no type of its own, so
+// Excel/LibreOffice decides from the text alone whether to run it as a
+// formula when the file is opened — a value starting with = + - @ or a
+// tab/CR is executed. A leading single quote marks it as text instead;
+// Excel/LibreOffice show the value without that quote. A value that's just
+// a plain number (incl. a real negative one, "-1") is left as-is — it's a
+// number, not a formula, even though the dashboard always hands it over as
+// text; "-1+A1" is text and gets neutralised. This does NOT apply to the
+// .xlsx writer's string cells (xlsxOf below): those are written with an
+// explicit t="inlineStr" type, which Excel never re-parses as a formula —
+// and unlike CSV, prefixing one there would show up as a literal quote
+// character in the cell (the "leading apostrophe is hidden" behaviour is
+// Excel's formula-bar input convention, not something it applies when
+// loading a string already stored in a file).
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+const csvSafe = (s) => (FORMULA_LEAD.test(s) && !NUM_RE.test(s) ? "'" + s : s);
+
 function csvOf(table) {
   // Export the FULL result (all pages), not just the rendered page.
   if (table._rows && table._cols) return csvOfRows(table._rows, table._cols);
   return [...table.rows]
-    .map((r) => [...r.cells].map((c) => `"${c.textContent.replace(/"/g, '""')}"`).join(","))
+    .map((r) => [...r.cells].map((c) => `"${csvSafe(c.textContent).replace(/"/g, '""')}"`).join(","))
     .join("\n");
 }
 
@@ -14157,11 +14199,13 @@ const unq = (v) => String(v ?? "").replace(/^"|"$/g, "");
 
 // CSV / .xls (HTML-table Excel) directly from JSON result rows.
 function csvOfRows(rows, cols) {
-  const esc = (v) => `"${unq(v).replace(/"/g, '""')}"`;
+  const esc = (v) => `"${csvSafe(unq(v)).replace(/"/g, '""')}"`;
   return [cols.map(esc).join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
 }
 // The raw query rows as a workbook (::DOWNLOAD_XLSX): numbers stay numbers,
-// ISO dates become dates, a bold frozen header with a filter.
+// ISO dates become dates, a bold frozen header with a filter. String cells
+// go through xlsxOf()'s t="inlineStr" path untouched — no csvSafe() needed,
+// see the comment above csvSafe.
 function xlsxOfRows(rows, cols) {
   const cell = (v) => {
     if (v == null) return null;
