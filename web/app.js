@@ -12251,6 +12251,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
         }
         out.push(vc.map((c) => ({ v: head(c), style: "head" })));
         const hdr = out.length;
+        // #520: string cells returned bare (last line) are written by
+        // xlsxOf() as t="inlineStr" — never run as a formula, so no
+        // csvSafe() here either; see the comment above csvSafe.
         const cellOf = (v, c) => {
           if (v == null || unquote(v) === "") return null;
           const i = info[c];
@@ -14032,11 +14035,28 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+// #520 (OWASP "CSV injection"): a CSV/.xls cell has no type of its own, so
+// Excel/LibreOffice decides from the text alone whether to run it as a
+// formula when the file is opened — a value starting with = + - @ or a
+// tab/CR is executed. A leading single quote marks it as text instead;
+// Excel/LibreOffice show the value without that quote. A value that's just
+// a plain number (incl. a real negative one, "-1") is left as-is — it's a
+// number, not a formula, even though the dashboard always hands it over as
+// text; "-1+A1" is text and gets neutralised. This does NOT apply to the
+// .xlsx writer's string cells (xlsxOf below): those are written with an
+// explicit t="inlineStr" type, which Excel never re-parses as a formula —
+// and unlike CSV, prefixing one there would show up as a literal quote
+// character in the cell (the "leading apostrophe is hidden" behaviour is
+// Excel's formula-bar input convention, not something it applies when
+// loading a string already stored in a file).
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+const csvSafe = (s) => (FORMULA_LEAD.test(s) && !NUM_RE.test(s) ? "'" + s : s);
+
 function csvOf(table) {
   // Export the FULL result (all pages), not just the rendered page.
   if (table._rows && table._cols) return csvOfRows(table._rows, table._cols);
   return [...table.rows]
-    .map((r) => [...r.cells].map((c) => `"${c.textContent.replace(/"/g, '""')}"`).join(","))
+    .map((r) => [...r.cells].map((c) => `"${csvSafe(c.textContent).replace(/"/g, '""')}"`).join(","))
     .join("\n");
 }
 
@@ -14050,11 +14070,13 @@ const unq = (v) => String(v ?? "").replace(/^"|"$/g, "");
 
 // CSV / .xls (HTML-table Excel) directly from JSON result rows.
 function csvOfRows(rows, cols) {
-  const esc = (v) => `"${unq(v).replace(/"/g, '""')}"`;
+  const esc = (v) => `"${csvSafe(unq(v)).replace(/"/g, '""')}"`;
   return [cols.map(esc).join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n");
 }
 // The raw query rows as a workbook (::DOWNLOAD_XLSX): numbers stay numbers,
-// ISO dates become dates, a bold frozen header with a filter.
+// ISO dates become dates, a bold frozen header with a filter. String cells
+// go through xlsxOf()'s t="inlineStr" path untouched — no csvSafe() needed,
+// see the comment above csvSafe.
 function xlsxOfRows(rows, cols) {
   const cell = (v) => {
     if (v == null) return null;
