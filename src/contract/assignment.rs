@@ -5,6 +5,17 @@
 //! (`::CATEGORY` = item, `::BARCHART_STACKED` = size), several `model_id`s
 //! faceted (`::FACET`) to compare algorithms.
 //!
+//! Groups: `pack_by`/`wave_by`'s `group_col := '…'` splits the rows into
+//! instances (e.g. one packing per warehouse) and keeps the column under
+//! its own name next to `model_id` (anofox-optimize#14) — any column this
+//! module doesn't otherwise read (not the bin/wave key, `item`, `size`,
+//! `capacity`, `priority` or the model key) that carries more than one
+//! value. Two groups' own bin 1 must never stack into one bar (it would
+//! look over capacity), so a group column facets too: alone when there is
+//! one `model_id`, combined with it into one `"group · model_id"` facet
+//! title when both vary (ggplot-rs facets on a single column here — see
+//! [`group_key`]), or not at all when the table has only one group.
+//!
 //! Ordering: the bin/wave axis sorts numerically when every row's key parses
 //! as a number (`1, 2, 10`, not the row order's `1, 10, 2`), else
 //! lexicographically as text. A row whose key is NULL cannot be placed on
@@ -177,10 +188,58 @@ pub(super) fn columns(t: &Table, options: &Row) -> Result<Columns, String> {
             marks = Some(("capacity".to_string(), pairs));
         }
     }
-    if let Some(m) = t.model_key().filter(|m| t.distinct(m) > 1) {
-        cols.push(Column::new(m, Role::Facet, gather(&t.text(m))));
+    let model = t.model_key().filter(|m| t.distinct(m) > 1);
+    match (group_key(t, &key, model), model) {
+        (Some(g), Some(m)) => {
+            let gv = gather(&t.text(&g));
+            let mv = gather(&t.text(m));
+            let combined = gv
+                .iter()
+                .zip(&mv)
+                .map(|(gi, mi)| Value::Str(format!("{} · {}", facet_label(gi), facet_label(mi))))
+                .collect();
+            cols.push(Column::new(g.as_str(), Role::Facet, combined));
+        }
+        (Some(g), None) => cols.push(Column::new(g.as_str(), Role::Facet, gather(&t.text(&g)))),
+        (None, Some(m)) => cols.push(Column::new(m, Role::Facet, gather(&t.text(m)))),
+        (None, None) => {}
     }
     Ok((cols, warnings, marks))
+}
+
+/// The producer's own group column (see the module docs): the first column
+/// — in the row's own order, so a tie favours the column closest to the
+/// bin/wave key — outside the `assignment` schema with more than one
+/// distinct value. `key` is the bin/wave column actually in use (an
+/// explicit `x :=` or [`KEYS`]'s pick); `model` is the model-id column only
+/// when it already varies, so a single-model table never loses its one
+/// group to a `model_id` column that happens to sort first.
+fn group_key(t: &Table, key: &str, model: Option<&str>) -> Option<String> {
+    let first_row_keys: Vec<String> = t
+        .rows
+        .first()
+        .map(|r| r.keys().cloned().collect())
+        .unwrap_or_default();
+    first_row_keys.into_iter().find(|k| {
+        let k = k.as_str();
+        k != key
+            && !matches!(k, "item" | "size" | "capacity" | "priority")
+            && k != "model_id"
+            && k != "model_name"
+            && Some(k) != model
+            && t.distinct(k) > 1
+    })
+}
+
+/// A facet level's display text: `Value::Str` as given, else `"NA"` (the
+/// same substitution `contract::render_plot` makes for a bare `::FACET`
+/// column, so a combined `"group · model_id"` title matches a single-column
+/// one for a missing level).
+fn facet_label(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        _ => "NA".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +284,73 @@ mod tests {
         assert_eq!(cols[0].name, "wave");
         let facet = cols.iter().find(|c| c.role == Role::Facet).unwrap();
         assert_eq!(facet.name, "model_id");
+    }
+
+    /// anofox-optimize#14 / #499: `group_col := 'site'` keeps its own name
+    /// next to the schema columns. With one `model_id` (or none), the group
+    /// column alone facets — the fix for "two groups' bin 1 stack into one
+    /// bar and look over capacity".
+    #[test]
+    fn group_column_alone_facets_when_model_is_absent_or_single() {
+        let r = rows(
+            r#"[{"site":"a","bin":1,"item":"x","size":3,"capacity":10},
+                {"site":"b","bin":1,"item":"y","size":9,"capacity":10}]"#,
+        );
+        let t = table(&r);
+        let (cols, _, _) = columns(&t, &Row::new()).unwrap();
+        let facet = cols.iter().find(|c| c.role == Role::Facet).unwrap();
+        assert_eq!(facet.name, "site");
+        let labels: Vec<String> = facet
+            .values
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                _ => panic!("expected a text facet value"),
+            })
+            .collect();
+        assert_eq!(labels, vec!["a", "b"]);
+    }
+
+    /// A single group (no variation) is no different from one `model_id`:
+    /// no facet at all.
+    #[test]
+    fn a_single_group_is_not_faceted() {
+        let r = rows(
+            r#"[{"site":"a","bin":1,"item":"x","size":3},
+                {"site":"a","bin":2,"item":"y","size":4}]"#,
+        );
+        let t = table(&r);
+        let (cols, _, _) = columns(&t, &Row::new()).unwrap();
+        assert!(cols.iter().all(|c| c.role != Role::Facet));
+    }
+
+    /// Both a group column and several `model_id`s vary: ggplot-rs facets on
+    /// one column here, so the two combine into a single `"group · model"`
+    /// facet title rather than silently dropping one dimension.
+    #[test]
+    fn group_and_model_combine_into_one_facet_title() {
+        let r = rows(
+            r#"[{"site":"a","model_id":"as_given","bin":1,"item":"x","size":3},
+                {"site":"a","model_id":"best_of","bin":1,"item":"x","size":3},
+                {"site":"b","model_id":"as_given","bin":1,"item":"y","size":9},
+                {"site":"b","model_id":"best_of","bin":1,"item":"y","size":9}]"#,
+        );
+        let t = table(&r);
+        let (cols, _, _) = columns(&t, &Row::new()).unwrap();
+        let facet = cols.iter().find(|c| c.role == Role::Facet).unwrap();
+        assert_eq!(facet.name, "site");
+        let labels: Vec<String> = facet
+            .values
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                _ => panic!("expected a text facet value"),
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["a · as_given", "a · best_of", "b · as_given", "b · best_of"]
+        );
     }
 
     #[test]
