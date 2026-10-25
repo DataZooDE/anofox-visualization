@@ -20,7 +20,7 @@
 | Chart interactions (before the chart) | `'region' \| 'region multi'::SELECT_AS` (own selection variable + brushed `region_from` / `region_to`) · `'region > country > city'::DRILL` (drill-down + breadcrumb) · a `'#Tab?v.x={value}'::LINK` column (drill-through, charts and tables) |
 | Inputs | `::DROPDOWN` (a searchable combobox above ~50 options, like `::MULTISELECT`; `'search'`/`'native'::DROPDOWN_STYLE` overrides) · `::MULTISELECT` (a list) · `::BUTTONS` (segmented, ≤ ~5 options) · `::TOGGLE` (a BOOLEAN; value = default) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` · `::OPTION_LABEL` (an option's shown text; the value stays the variable's) |
 | Strips under a chart | right after a chart with a numeric / date x: `day::XAXIS, 'Promotions'::TRACK, name::LABEL` (ticks) · `… , detector::YAXIS, '#d64545'-style ::CATEGORY, 1::HEATMAP, 'Alarms'::TRACK` (lanes of tiles) · `day::XAXIS, price::STEP, 'Price'::TRACK` (sparkline) — same plot area and x window as the chart; a click on a strip mark shades its span on the chart |
-| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `cond::SHOW_IF` (the next panel, or `::GROUP` box, shows only while `cond` is `TRUE` — not access control) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `en-IE` (English, €) `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` · `max(loaded_at)::ASOF, 'stale=24h'` (a "Data as of …" chip, amber when stale — give every locked / exported dashboard one; a plain `DATE` reads as a calendar day, with no time and no time-zone shift) |
 
 A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name (else the bare column name), for an input it is the variable name, in a table the header. Without a `::CATEGORY`, several columns of the *same* chart kind (`events::LINECHART, failures::LINECHART`; `events::BARCHART, failures::BARCHART`) get a real legend named by column; a *mixed* overlay (bars + a different-kind line/area) instead keeps the base in the brand colour with no legend, each overlay just a distinct palette colour.
@@ -362,6 +362,21 @@ FROM sales GROUP BY region ORDER BY "Revenue" DESC;
 ```
 
 Keep a fitted tab small: if a panel would get under ~120 px the tab scrolls instead (with a notice). `dashboard --check` warns ahead of time — `layout/fit-too-many` (more rows than a 1366×768 screen holds — for a sub-tab / view, only its own panels count; aim for ≤ ~4 rows: a KPI strip and two rows of charts) and `layout/fit-ambiguous` (a `::FIT` before the first `::TAB` of a tabbed dashboard, twice for one tab, or cast beside a panel's columns instead of its own statement).
+
+### Show a panel only when … (`::SHOW_IF`)
+
+`SELECT cond::SHOW_IF;` is its own preceding statement (like `::COL`/`::EMPTY`): the **next** panel — or whole `::GROUP` box, to its matching `::ENDGROUP` — shows only while `cond` is the BOOLEAN `TRUE` (`FALSE`/`NULL`/no row/a non-boolean/an error all hide it, re-checked on every run). A quiz pattern: give a `::DROPDOWN` an empty first option (it defaults to its first option, so check `<> ''`, not `IS NOT NULL`):
+
+```sql dashboard
+SELECT v AS q1 ::DROPDOWN, l ::OPTION_LABEL, 'Which check sees concept drift?' ::LABEL
+FROM (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l) ORDER BY o;
+
+SELECT getvariable('q1') <> '' ::SHOW_IF;                -- only after an answer
+SELECT CASE getvariable('q1') WHEN 'measured error' THEN '**Right.**'
+            ELSE 'Not quite — try again.' END ::MARKDOWN;
+```
+
+A hidden panel loses its grid slot (no blank card); a hidden input keeps its variable's value. Stacked `::SHOW_IF`s AND together; modifiers (`::COL`, `::HEIGHT`, `::EMPTY`, `::ROWSELECT`, table options, `::SELECT_AS`, `::DRILL`) right before the condition travel with its target, so they never leak onto the next panel. `::TAB`/`::SUBTAB`/`::VIEW`/`::ENDGROUP`/`::FIT`/`::COLUMNS`/chrome can't be a target (`show_if/bad-target`) — use `-- @requires` for those. **Not access control**: on a locked server the hidden statement still answers `/api/panel`. `--check` also flags a condition beside other roles (`show_if/not-alone`), one that reads no variable (`show_if/constant`), a `getvariable()` this dashboard never sets (`show_if/unknown-variable`), and — under the defaults used while checking — a non-boolean cell or no row at all (`show_if/not-boolean` / `show_if/no-row`).
 
 ## Design contract
 

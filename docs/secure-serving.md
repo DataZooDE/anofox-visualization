@@ -681,6 +681,10 @@ Consumers pick a dashboard id and whitelisted params
   file, so every such input counts as missing here — a gated panel shows
   *Not available* (naming no file), a gated `::TRACK`, `::TAB` / `::SUBTAB`
   or `::VIEW` alternative is left out (#274).
+- `::SHOW_IF` (DOCS, #515) hides a panel **on the page only** — there is no
+  server-side gate for it, unlike `-- @requires` above: the condition and its
+  target are ordinary statements the server answers through `/api/panel`
+  like any other, whether or not the condition currently holds.
 - A panel's `::TITLE` is drawn as a title bar above its chart (first non-NULL
   value, trimmed and escaped, at most 200 characters; none on a KPI tile), as
   on a dashboard card.

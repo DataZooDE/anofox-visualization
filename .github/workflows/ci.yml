@@ -554,6 +554,15 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/fit-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/show-if-e2e.mjs (#515): on web/examples/onboarding-quiz.sql,
+      # a ::SHOW_IF panel is absent until its condition holds, the URL gains
+      # ?v.<name>=, a reload shows it immediately, a ::BUTTONS switch swaps
+      # two ::SHOW_IF ::GROUP boxes, focus stays on the dropdown, and 390px
+      # has no horizontal scroll — reuses the :8947 server and Chromium above.
+      - name: ::SHOW_IF e2e (#515)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/show-if-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/dropdown-search-e2e.mjs (#411): above ~50 options (or forced
       # by 'search'/'native'::DROPDOWN_STYLE) a ::DROPDOWN renders a
       # searchable combobox — filtering by value/::OPTION_LABEL, Arrow keys +
