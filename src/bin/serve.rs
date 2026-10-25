@@ -1873,7 +1873,16 @@ fn render_dashboard_page(
             let idx = anofox_visualization::inputs::input_index(&panel.roles);
             for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
                 let name = set.split('"').nth(1).unwrap_or("");
-                if !resolved.iter().any(|(n, _)| n == name) && !access::is_reserved_var(name) {
+                // #540: an embed link's locked variable (`scope.vars`, SET
+                // into `prefix` above, before any panel is queried) always
+                // wins — an ::INPUT's own default for that same name is
+                // never bound, however the viewer reaches this page.
+                let locked =
+                    scope.is_some_and(|s| s.vars.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)));
+                if !locked
+                    && !resolved.iter().any(|(n, _)| n == name)
+                    && !access::is_reserved_var(name)
+                {
                     prefix.push_str(&set);
                     prefix.push_str("; ");
                 }
