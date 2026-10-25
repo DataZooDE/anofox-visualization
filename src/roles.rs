@@ -342,6 +342,12 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
     e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
       "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
+    e("SUBMIT", &[], R::Submit, "input", false,
+      "a button (value = its label) that records SUBMIT_VARS for this viewer — requires a server with options.state; not active until that lands (#517 slice S2)"),
+    e("SUBMIT_VARS", &[], R::SubmitVars, "input", false,
+      "comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements"),
+    e("SUBMIT_DONE", &[], R::SubmitDone, "input", false,
+      "optional confirmation text shown after a successful ::SUBMIT"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
@@ -800,6 +806,9 @@ mod tests {
             Role::Hint,
             Role::OptionLabel,
             Role::DropdownStyle,
+            Role::Submit,
+            Role::SubmitVars,
+            Role::SubmitDone,
             Role::Placeholder,
             Role::HeaderImage,
             Role::FooterLink,
@@ -934,6 +943,9 @@ mod tests {
                 | Role::Hint
                 | Role::OptionLabel
                 | Role::DropdownStyle
+                | Role::Submit
+                | Role::SubmitVars
+                | Role::SubmitDone
                 | Role::Text(_)
                 | Role::KpiSize
                 | Role::Placeholder

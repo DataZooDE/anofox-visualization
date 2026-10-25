@@ -801,6 +801,66 @@ fn item_role(item: &str, inputs_ok: bool) -> Option<(&str, Role)> {
     Some((expr, role))
 }
 
+/// The raw text of the expression behind role `want` in `stmt`'s select
+/// list(s) — before its `::ROLE` cast and any trailing `AS alias` — for
+/// lints that need to see whether a cast's *source* is a plain literal
+/// (`submit/dynamic-vars`, #517). `None` when no item in `stmt` carries
+/// `want`. Looks at the raw statement text (casts intact), not a
+/// [`Panel`]'s rewritten `sql`.
+pub(crate) fn role_source_expr(stmt: &str, want: Role) -> Option<String> {
+    for (s, e) in select_list_spans(stmt) {
+        for item in lex::split_top_commas(&stmt[s..e]) {
+            if let Some((expr, role)) = item_role(&item, true) {
+                if role == want {
+                    let (core, _alias) = lex::trailing_alias(expr);
+                    return Some(core.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Does `stmt` (an item's expression, see [`role_source_expr`]) have to be
+/// computed — anything other than a single `'…'`/`E'…'` string literal?
+pub(crate) fn is_string_literal(expr: &str) -> bool {
+    let toks: Vec<lex::Token> = lex::tokenize(expr)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    matches!(toks.as_slice(), [t] if t.kind == lex::TokKind::String)
+}
+
+/// The `::SUBMIT`/`::SUBMIT_VARS`/`::SUBMIT_DONE` server-side temps (#517
+/// §5): `viewer_state` (one row per recorded variable) and
+/// `viewer_state_latest` (each viewer/dashboard/submit's newest row). Lint
+/// and headless renderers create these **empty** — one `run_query`/
+/// `execute` call per statement, since not every caller's connection runs
+/// several `;`-separated statements in one call — when a script mentions
+/// `viewer_state` or carries `::SUBMIT`, so a dashboard reading them
+/// doesn't fail just because no real server has populated them yet (S3).
+/// See [`script_needs_viewer_state`].
+pub fn viewer_state_setup_statements() -> [&'static str; 2] {
+    [
+        "CREATE TEMP TABLE viewer_state (seq BIGINT, ts TIMESTAMPTZ, \"user\" VARCHAR, \
+         dashboard VARCHAR, submit VARCHAR, name VARCHAR, value VARCHAR, value_list VARCHAR[])",
+        "CREATE TEMP VIEW viewer_state_latest AS SELECT * FROM viewer_state QUALIFY \
+         dense_rank() OVER (PARTITION BY \"user\", dashboard, submit ORDER BY seq DESC) = 1",
+    ]
+}
+
+/// Does `script` reference `viewer_state` (any case) or carry a `::SUBMIT`
+/// panel? Both mean a real server would (eventually, #517 S3) seed the temp
+/// [`viewer_state_setup_sql`] creates — lint and headless renderers create
+/// it themselves, empty, so a check or a static render doesn't fail on a
+/// missing table.
+pub fn script_needs_viewer_state(script: &str) -> bool {
+    script.to_ascii_lowercase().contains("viewer_state")
+        || plan(script)
+            .iter()
+            .any(|p| p.roles.iter().any(|(_, r)| matches!(r, Role::Submit)))
+}
+
 /// Alias prefix of a ::MARKDOWN statement's named (placeholder) columns:
 /// `revenue` → `revenue AS "md:revenue"`, read by `{{revenue}}`.
 pub const MD_PREFIX: &str = "md:";
