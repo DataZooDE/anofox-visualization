@@ -9798,8 +9798,18 @@ async function runOnce(fresh = true, pv = preview) {
         // built from `stepGroups` after this loop (decision 6).
         const group = s.step.group;
         const gvar = s.step.var;
-        const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i, pv));
-        const row0 = rows[0] || {};
+        // Fail closed (#532's lesson, same risk here): a bad viewer value
+        // reaching the label or the ::GATE expression must not blow up
+        // this step (and strand the group's later markers on the wrong
+        // container) — caught locally, not left to the per-statement catch
+        // below, which would also skip building this pane at all.
+        let row0 = {};
+        try {
+          const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i, pv));
+          row0 = rows[0] || {};
+        } catch (e) {
+          console.warn(`::GUIDE_STEP marker failed (stmt ${s.i + 1}) — treated as closed`, e);
+        }
         const labelRole = s.roles.find((r) => r[1] === "GUIDE_STEP");
         let label = s.step.label; // the plan's literal label, else read below
         if (label == null) label = labelRole ? String(row0["c" + labelRole[0]] ?? "") : "";

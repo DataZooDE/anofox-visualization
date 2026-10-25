@@ -1940,6 +1940,34 @@ fn render_dashboard_page(
             }
             continue;
         }
+        // `::GUIDE_STEP` (#516): like `::SHOW_IF` above, a failing marker
+        // query (its label or its `::GATE` reads a viewer-supplied
+        // variable through an expression that can error) must fail closed
+        // — the gate stays closed, the label falls back — without failing
+        // the whole page, and without the raw error reaching the log (the
+        // #532 lesson for `::SHOW_IF`, the same risk here).
+        if step_marker {
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
+                panel.sql.trim().trim_end_matches(';'),
+                st.max_rows + 1
+            );
+            let rows: Rows = match page_rows(st, &q) {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!(
+                        "[anofox-serve] dashboard '{}' ::GUIDE_STEP marker (stmt {}) failed — \
+                         treated as closed",
+                        dash.id,
+                        i + 1
+                    );
+                    Rows::new()
+                }
+            };
+            let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
+            queried.push((panel, rows, false, compact));
+            continue;
+        }
         let q = format!(
             "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
             panel.sql.trim().trim_end_matches(';'),
