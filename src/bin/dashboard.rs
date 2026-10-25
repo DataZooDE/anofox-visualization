@@ -55,11 +55,14 @@ const USAGE: &str = "usage:\n  \
                [--data <dir>]                 getvariable('anofox_data') = dir, as a locked server\n  \
      dashboard --site <folder> <out-dir>     publish a served folder as a static DuckDB-Wasm\n  \
                [--data <dir|url>]             site (#417) — a GitHub Pages workflow runs this\n  \
-               [--options locked.json]        after a scheduled data refresh. --options takes\n  \
-               [--app <web dir|tarball>]      the same path_vars/nav_picker/app/home/theme keys\n  \
-                                             as anofox_serve_dashboards; --app is the unpacked or\n  \
-                                             packed `anofox-visualization-web-*` release asset\n  \
-                                             (default: next to this binary) — never downloaded.\n  \
+               [--options locked.json]        after a scheduled data refresh. --options accepts\n  \
+               [--app <web dir|tarball>]      the locked server's own options file unedited:\n  \
+                                             path_vars/nav_picker/app/home/theme are used,\n  \
+                                             server-only limits (max_rows, threads, …) are\n  \
+                                             ignored (named on stderr), auth/policy still refuse.\n  \
+                                             --app is the unpacked or packed\n  \
+                                             `anofox-visualization-web-*` release asset (default:\n  \
+                                             next to this binary) — never downloaded.\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
      dashboard --themes                      list the built-in themes\n  \
@@ -871,7 +874,10 @@ struct SiteNavPicker {
 /// options that make sense for a site with no server behind it (no `auth`,
 /// no `policy` — the plan's own parity point: every query the browser runs
 /// is the author's, exactly as in the builder; see docs/secure-serving.md,
-/// "Publish as a static site").
+/// "Publish as a static site"). `--site` also accepts the locked server's
+/// own `options` file unedited (#501): a server-only limit such as
+/// `max_rows` is harmless here (it has no effect without a server) and ends
+/// up in `ignored` instead of refusing the whole file.
 #[derive(Default, Debug)]
 struct SiteOptions {
     path_vars: Vec<String>,
@@ -879,9 +885,13 @@ struct SiteOptions {
     app: Option<serde_json::Value>,
     home: Option<String>,
     theme: Option<String>,
+    /// Server-only keys this file had, that `--site` skipped — named once
+    /// on stderr by the caller ([`cmd_site`]), sorted for a stable message.
+    ignored: Vec<String>,
 }
 
 fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
+    use anofox_visualization::host::serve_options::{self, SiteOptionKind};
     let mut o = SiteOptions::default();
     let Some(json) = json.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(o);
@@ -909,8 +919,13 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                 let m = val.as_object().ok_or(
                     "options.nav_picker must be an object like {\"var\": \"model\", \"sql\": \"SELECT …\", \"label\": \"Model\"}",
                 )?;
-                if let Some(other) = m.keys().find(|k| !matches!(k.as_str(), "var" | "sql" | "label")) {
-                    return Err(format!("options.nav_picker: unknown key '{other}' (var, sql, label)"));
+                if let Some(other) = m
+                    .keys()
+                    .find(|k| !matches!(k.as_str(), "var" | "sql" | "label"))
+                {
+                    return Err(format!(
+                        "options.nav_picker: unknown key '{other}' (var, sql, label)"
+                    ));
                 }
                 let var = m
                     .get("var")
@@ -930,7 +945,12 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                     {
                         Some(s.clone())
                     }
-                    _ => return Err("options.nav_picker.label must be a short (<=100 character) string".into()),
+                    _ => {
+                        return Err(
+                            "options.nav_picker.label must be a short (<=100 character) string"
+                                .into(),
+                        )
+                    }
                 };
                 o.nav_picker = Some(SiteNavPicker {
                     var: var.to_string(),
@@ -945,7 +965,8 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                             .into(),
                     );
                 }
-                let a = AppBrand::from_json(&val.to_string()).map_err(|e| format!("options.app: {e}"))?;
+                let a = AppBrand::from_json(&val.to_string())
+                    .map_err(|e| format!("options.app: {e}"))?;
                 a.check().map_err(|e| format!("options.app: {e}"))?;
                 o.app = Some(val.clone());
             }
@@ -966,14 +987,33 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                 theme::resolve(&spec).map_err(|e| format!("options.theme: {e}"))?;
                 o.theme = Some(spec);
             }
-            other => {
-                return Err(format!(
-                    "options: unknown key '{other}' for --site (path_vars, nav_picker, app, home, theme — \
+            "auth" | "policy" => {
+                let msg = format!(
+                    "options: unknown key '{k}' for --site (path_vars, nav_picker, app, home, theme — \
                      auth/policy make no sense for a site with no server behind it)"
-                ))
+                );
+                return Err(msg);
             }
+            other => match serve_options::lookup(other) {
+                // A real `anofox_serve_dashboards` option with no effect on
+                // a static site (row caps, timeouts, `data`, …): skip it,
+                // `cmd_site` names it on stderr once below.
+                Some(SiteOptionKind::ServerOnly) => o.ignored.push(other.to_string()),
+                // `Site`/`Refused` keys are all matched by name above; a
+                // lookup hit here would mean this match and
+                // `SERVER_OPTION_KEYS` disagree — treat it like a typo
+                // rather than silently accepting or refusing it.
+                Some(SiteOptionKind::Site) | Some(SiteOptionKind::Refused) | None => {
+                    return Err(format!(
+                        "options: unknown key '{other}' for --site (not one of \
+                         anofox_serve_dashboards's own options either: {})",
+                        serve_options::all_keys_joined()
+                    ))
+                }
+            },
         }
     }
+    o.ignored.sort();
     if let Some(np) = &o.nav_picker {
         if !o.path_vars.iter().any(|p| p.eq_ignore_ascii_case(&np.var)) {
             return Err(format!(
@@ -1209,6 +1249,12 @@ fn cmd_site(args: &[String]) {
         std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("--options '{p}': {e}")))
     });
     let opts = parse_site_options(options_json.as_deref()).unwrap_or_else(|e| fail(e));
+    if !opts.ignored.is_empty() {
+        // #501: a locked server's own `options` file handed to `--site`
+        // unedited carries server-only limits that have no effect here —
+        // named once so a typo'd key doesn't silently vanish unnoticed.
+        eprintln!("--options: ignored for --site: {}", opts.ignored.join(", "));
+    }
 
     let data_value: Option<String> = match &data {
         Some(d) if is_data_url(d) => Some(d.trim_end_matches('/').to_string()),
@@ -1809,7 +1855,52 @@ mod site_tests {
 
     #[test]
     fn unknown_keys_are_refused() {
-        assert!(parse_site_options(Some(r#"{"max_rows": 10}"#)).is_err());
+        // Not a real `anofox_serve_dashboards` option under any name — a
+        // typo, refused like the locked server would refuse it too (#501).
+        let e = parse_site_options(Some(r#"{"max_rowz": 10}"#)).unwrap_err();
+        assert!(e.contains("unknown key 'max_rowz'"), "{e}");
+        assert!(e.contains("max_rows"), "{e}"); // the real option is suggested
+    }
+
+    #[test]
+    fn server_only_limits_are_ignored_not_refused() {
+        // #501: a locked server's own `options` file, used unedited for
+        // `--site`, carries limits that have no effect on a static site.
+        // They're skipped, not refused — only truly unknown keys and
+        // auth/policy still fail the whole file.
+        let o = parse_site_options(Some(r#"{"max_rows": 10, "threads": 2}"#)).unwrap();
+        assert_eq!(
+            o.ignored,
+            vec!["max_rows".to_string(), "threads".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_full_locked_json_builds_and_names_every_ignored_key() {
+        // A shape like docs/deployment.md's `anofox_serve_dashboards`
+        // options: site keys the publisher cares about, plus every
+        // server-only limit the locked server also accepts.
+        let json = r#"{
+            "max_rows": 10000, "timeout_ms": 5000, "threads": 4, "max_queries": 8,
+            "cache_mb": 32, "memory_limit": "1GB", "hosts": ["dash.example.com"],
+            "path_vars": ["model"], "home": "overview", "theme": "dark"
+        }"#;
+        let o = parse_site_options(Some(json)).unwrap();
+        assert_eq!(o.path_vars, vec!["model".to_string()]);
+        assert_eq!(o.home.as_deref(), Some("overview"));
+        assert_eq!(o.theme.as_deref(), Some("dark"));
+        assert_eq!(
+            o.ignored,
+            vec![
+                "cache_mb".to_string(),
+                "hosts".to_string(),
+                "max_queries".to_string(),
+                "max_rows".to_string(),
+                "memory_limit".to_string(),
+                "threads".to_string(),
+                "timeout_ms".to_string(),
+            ]
+        );
     }
 
     #[test]
