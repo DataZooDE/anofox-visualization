@@ -1699,18 +1699,32 @@ fn page_rows(st: &ServeState, q: &str) -> Result<Rows, PageError> {
     sql::parse_rows_json(json.trim()).map_err(PageError::Server)
 }
 
-/// May a `::GUIDE_STEP` (#516) bind its own variable on the script-free
-/// served page? `false` for a reserved name (`__claim_*`/`anofox_data` —
-/// `valid_id` alone accepts `__claim_x` as a step alias, which would
-/// otherwise overwrite the login's claim with an integer for every later
-/// panel; defense in depth, as lint's `step/var-reserved` already refuses
-/// it at the source) or a name an embed link's `scope.vars` already locks
-/// (review-537) — a step named the same as a locked variable binds nothing
-/// here, the same way a whitelisted `@param` sharing a locked name is
-/// simply never resolved into one.
-fn step_var_is_locked(var: &str, scope: Option<&Scope>) -> bool {
-    access::is_reserved_var(var)
-        || scope.is_some_and(|sc| sc.vars.iter().any(|(n, _)| n.eq_ignore_ascii_case(var)))
+/// Append `SET VARIABLE`s for every name the credential's `scope` locks
+/// (typed literals). Called once before any panel is queried, and again
+/// after any later bind that could otherwise collide with a locked name
+/// (#540 belt and braces): DuckDB's own rule is that the *last* `SET` for a
+/// name wins, so re-asserting the locks after a bind is what actually makes
+/// them stick, not just skipping them in [`may_bind_default`].
+fn append_locked_vars(prefix: &mut String, scope: Option<&Scope>) {
+    if let Some(s) = scope {
+        for (name, lit) in &s.vars {
+            prefix.push_str(&format!("SET VARIABLE {name} = {lit}; "));
+        }
+    }
+}
+
+/// Whether a default may still be bound for `name` while rendering a
+/// script-free page: not already resolved from a `@param`, not locked by the
+/// credential's `scope`, and not a reserved variable name. #540: a locked
+/// variable always wins over a dashboard's own default, however the viewer
+/// reaches this page — every place in `render_dashboard_page` that `SET`s a
+/// variable after the locked ones (the ::INPUT defaults below, and a
+/// `::GUIDE_STEP`'s own step variable, #516/review-537) must check this
+/// first.
+fn may_bind_default(name: &str, resolved: &[(String, String)], scope: Option<&Scope>) -> bool {
+    !resolved.iter().any(|(n, _)| n == name)
+        && !scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(name)))
+        && !access::is_reserved_var(name)
 }
 
 fn render_dashboard_page(
@@ -1740,9 +1754,7 @@ fn render_dashboard_page(
         ));
     }
     // An embed link's locked variables (typed literals), after the params.
-    for (name, lit) in scope.map(|s| s.vars.clone()).unwrap_or_default() {
-        prefix.push_str(&format!("SET VARIABLE {name} = {lit}; "));
-    }
+    append_locked_vars(&mut prefix, scope);
     // The login's claims (a @param can't name them: parse_dashboard_meta
     // ignores `__claim_*` params).
     for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
@@ -1891,11 +1903,16 @@ fn render_dashboard_page(
             let idx = anofox_visualization::inputs::input_index(&panel.roles);
             for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
                 let name = set.split('"').nth(1).unwrap_or("");
-                if !resolved.iter().any(|(n, _)| n == name) && !access::is_reserved_var(name) {
+                if may_bind_default(name, resolved, scope) {
                     prefix.push_str(&set);
                     prefix.push_str("; ");
                 }
             }
+            // #540 belt and braces: reassert the locked variables right
+            // after binding any default above, so a locked name can't stick
+            // overridden even if a future default-bind site here forgets
+            // `may_bind_default` — the last `SET` for a name wins.
+            append_locked_vars(&mut prefix, scope);
             continue;
         }
         let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
@@ -1910,9 +1927,12 @@ fn render_dashboard_page(
             let s = panel.step.as_ref().unwrap();
             let n = step_n.entry(s.group).or_insert(0);
             *n += 1;
-            if !step_var_is_locked(&s.var, scope) {
+            if may_bind_default(&s.var, resolved, scope) {
                 prefix.push_str(&format!("SET VARIABLE {} = {n}; ", s.var));
             }
+            // #540 belt and braces: reassert the locked variables right
+            // after, so a locked name can't stick overridden.
+            append_locked_vars(&mut prefix, scope);
         }
         // ::GROUP / ::ENDGROUP (#405): no box here (one figure per panel),
         // but a ::GROUP's own ::KPI_SIZE still cascades onto its tiles' own
@@ -2240,36 +2260,49 @@ mod tests {
         ));
     }
 
-    /// review-537: a `::GUIDE_STEP` can't bind a reserved variable name
-    /// (`__claim_*`/`anofox_data`) on the script-free served page, and
-    /// can't override a name an embed link's `scope.vars` already locks —
-    /// in either case the step's own `SET VARIABLE` is skipped.
+    /// review-537 + #540/#541: a `::GUIDE_STEP`'s own step variable goes
+    /// through the same `may_bind_default` / `append_locked_vars` pair an
+    /// `::INPUT` default does — a reserved name or one an embed link locks
+    /// never gets the step's own `SET VARIABLE`, and a locked value is
+    /// still the *last* `SET` for that name in the prefix even when the
+    /// step happens to share its alias (exactly the sequence the
+    /// step-marker branch of `render_dashboard_page` runs).
     #[test]
-    fn step_var_is_locked_rejects_reserved_and_scope_locked_names() {
-        assert!(step_var_is_locked("__claim_tenant", None));
-        assert!(
-            step_var_is_locked("__CLAIM_tenant", None),
-            "case-insensitive"
-        );
-        assert!(step_var_is_locked("anofox_data", None));
-        assert!(
-            !step_var_is_locked("lesson", None),
-            "an ordinary alias is fine"
-        );
-
-        let scope = Scope {
+    fn step_variable_binding_respects_locks_and_reserved_names() {
+        let resolved: Vec<(String, String)> = Vec::new();
+        let locked = Scope {
             dashboards: None,
             vars: vec![("region".into(), "'EU'".into())],
         };
-        assert!(step_var_is_locked("region", Some(&scope)));
+
+        // A step aliased the same as a locked variable: its own bind is
+        // skipped, and the lock is reasserted regardless.
+        let mut prefix = String::new();
+        if may_bind_default("region", &resolved, Some(&locked)) {
+            prefix.push_str("SET VARIABLE region = 2; ");
+        }
+        append_locked_vars(&mut prefix, Some(&locked));
+        assert!(!prefix.contains("SET VARIABLE region = 2"), "{prefix}");
+        assert!(prefix.contains("SET VARIABLE region = 'EU'"), "{prefix}");
+
+        // A step aliased a reserved name: same skip, no lock to reassert.
+        let mut reserved = String::new();
+        if may_bind_default("__claim_tenant", &resolved, None) {
+            reserved.push_str("SET VARIABLE __claim_tenant = 2; ");
+        }
+        append_locked_vars(&mut reserved, None);
         assert!(
-            step_var_is_locked("Region", Some(&scope)),
-            "case-insensitive"
+            reserved.is_empty(),
+            "a reserved name binds nothing: {reserved}"
         );
-        assert!(
-            !step_var_is_locked("lesson", Some(&scope)),
-            "a step named something else is unaffected"
-        );
+
+        // An ordinary step name binds normally, lock or not.
+        let mut ordinary = String::new();
+        if may_bind_default("lesson", &resolved, Some(&locked)) {
+            ordinary.push_str("SET VARIABLE lesson = 2; ");
+        }
+        append_locked_vars(&mut ordinary, Some(&locked));
+        assert!(ordinary.contains("SET VARIABLE lesson = 2"), "{ordinary}");
     }
 
     #[test]
@@ -2420,6 +2453,56 @@ mod tests {
         assert_ne!(
             cache_key("d", &r, Some(&eu), None),
             cache_key("d", &r, Some(&us), None)
+        );
+    }
+
+    /// #540: an embed link's locked variable always wins over a dashboard's
+    /// own `::INPUT` default, a whitelisted `-- @param`, or a reserved name
+    /// — whatever tries to bind a default for that same name afterward.
+    #[test]
+    fn may_bind_default_respects_locks_params_and_reserved_names() {
+        let resolved = vec![("already_set".to_string(), "'x'".to_string())];
+        let locked = Scope {
+            dashboards: None,
+            vars: vec![("region".into(), "'US'".into())],
+        };
+        assert!(!may_bind_default("region", &resolved, Some(&locked)));
+        // DuckDB variable names are case-insensitive, so is the lock.
+        assert!(!may_bind_default("REGION", &resolved, Some(&locked)));
+        assert!(!may_bind_default("already_set", &resolved, Some(&locked)));
+        assert!(!may_bind_default("already_set", &resolved, None));
+        assert!(!may_bind_default("anofox_data", &resolved, None));
+        assert!(may_bind_default("free_name", &resolved, Some(&locked)));
+        assert!(may_bind_default("free_name", &resolved, None));
+    }
+
+    /// #540 belt and braces: whatever runs between two calls of
+    /// [`append_locked_vars`] — a default bind that should have been
+    /// skipped, or one a future code path forgets to check against
+    /// [`may_bind_default`] at all — the *last* `SET VARIABLE` for a locked
+    /// name in the prefix is still the locked value, which is the one
+    /// DuckDB uses for every panel query run against that prefix from then
+    /// on.
+    #[test]
+    fn append_locked_vars_reasserts_the_lock_after_anything_between() {
+        let locked = Scope {
+            dashboards: None,
+            vars: vec![("region".into(), "'US'".into())],
+        };
+        let mut prefix = String::new();
+        append_locked_vars(&mut prefix, Some(&locked));
+        // Simulate a bind that `may_bind_default` should have refused, or a
+        // future site that never calls it.
+        prefix.push_str("SET VARIABLE region = 'EU'; ");
+        append_locked_vars(&mut prefix, Some(&locked));
+        let last = prefix
+            .rmatch_indices("SET VARIABLE region = ")
+            .next()
+            .map(|(i, _)| &prefix[i..])
+            .expect("a SET VARIABLE for region");
+        assert!(
+            last.starts_with("SET VARIABLE region = 'US';"),
+            "the locked value must be the last SET for 'region': {prefix}"
         );
     }
 }

@@ -1293,7 +1293,14 @@ exchanged for a **page session** scoped to that one dashboard:
   are **locked** — the viewer's values for them are dropped and the link's are
   set after the viewer's variables (before the claims), so `?v.region=US` or a
   crafted panel request changes nothing. The session's scope and claims are
-  signed by the server.
+  signed by the server. On `serve --dashboards` (no script), this also covers
+  an `::INPUT`'s own default: on the first render after exchanging the link,
+  the dashboard's `::DROPDOWN`/etc. default-binds its variable for every
+  downstream `getvariable()` panel (so they have something to read even
+  without a script picking a value) — fixed (#540) to skip that bind
+  entirely for a name the link already locked, same as it already skips one
+  a whitelisted `-- @param` set; before the fix, the default was bound
+  *after* the locked `SET VARIABLE` and won for the rest of that render.
 - The UI's code files (`.js`, `.css`, `.wasm`, fonts) are served without a
   credential when `embed` is configured — they are the open-source viewer, no
   data. Pages, `/api/panel` and data files still need one.
@@ -1411,6 +1418,7 @@ signed the request in.
 | Someone claims a victim's e-mail at the IdP without verifying it (nOAuth, #115) | An `email` identity needs `email_verified: true` |
 | A client's OIDC ID token replayed as an API bearer token | Refused unless `accept_id_tokens`; a `jwt` audience equal to the OIDC `client_id` fails the start |
 | A tampered or expired embed link; a link for one dashboard used on another; `?v.*` or a panel request overriding the link's variables | HMAC check in constant time; `exp` required and ≤ `max_link_ttl_s`; the link must name the dashboard; the page session is server-signed and scoped; locked variables replace the viewer's and are set after them (unit-tested order) |
+| A locked variable's `::INPUT` default (the script-free server's own first-load bind, not a viewer-chosen value) overriding the embed link's locked value (#540) | The default-bind is skipped entirely for a locked name, same as for a whitelisted `-- @param` (integration-tested) |
 | A replayed embed link | Short `max_link_ttl_s`; `one_time` with `jti` (per process); documented: a link is a bearer credential until it expires |
 | The host application mints server sessions (#114) | The embed link `secret` must differ from every other configured secret — both session secrets and the proxy's — or the start fails; a session claiming a longer life (`exp - iat`) than its method's `session_ttl_s` is refused |
 | A leaked API key file; a guessed key; a revoked key still working | Only SHA-256 hashes of 256-bit keys; constant-time hash compare; the file is re-read on change (≤ 2 s); revoked/expired keys refused; a broken or group/world-writable file disables every key |
