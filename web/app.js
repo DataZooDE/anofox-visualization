@@ -4018,6 +4018,11 @@ function dashStateReset() {
   dpPaged = {};
   dpFilterText = {};
   dpVars = {};
+  // Detached from `document.body` here (unlike every other reset in this
+  // function): these aren't part of the grid any run rebuilds, so nothing
+  // else ever removes them.
+  Object.values(dpStepAnnouncers).forEach((el) => el.remove());
+  dpStepAnnouncers = {};
 }
 function dashStateSave() {
   return {
@@ -6678,6 +6683,31 @@ let dpVarLast = {}; // … and at the end of the last completed run
 // Reset at the top of every run (runOnce); a derived `SET VARIABLE` that
 // reads one of these may need the corrective re-run pass below.
 let dpViewerVars = new Set();
+// `::GUIDE_STEP` (#516, review-537): one visually-hidden `aria-live` node
+// per group (keyed by its step variable), appended once to `document.body`
+// — never part of the grid a run rebuilds/patches/swaps, so it is never at
+// risk of being built into a tree that `patchSlots` then decides not to
+// use (a live region's *first* appearance is usually not announced either
+// way; only a text change on one already connected and stable is). See
+// `announceStep`.
+let dpStepAnnouncers = {};
+// Create (once) or reuse group `gvar`'s announcer and set its text — the
+// step and, when closed, the gate message, so both are reliably announced
+// even though the *visible* progress text / message nodes are rebuilt
+// every run (kept simple — see `patchSlots`'s slot-only reuse — rather
+// than risking the same bug this replaced, #537).
+function announceStep(gvar, text) {
+  let el = dpStepAnnouncers[gvar];
+  if (!el || !el.isConnected) {
+    el = document.createElement("div");
+    el.setAttribute("aria-live", "polite");
+    el.setAttribute("role", "status");
+    el.style.cssText = "position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap";
+    document.body.appendChild(el);
+    dpStepAnnouncers[gvar] = el;
+  }
+  el.textContent = text;
+}
 let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
 let dpZoomGroups = {}; // ::SYNC_ZOOM: group name → {view: {cx, cy, w} | null, members: Set<map holder>}
@@ -8777,7 +8807,13 @@ async function runOnce(fresh = true, pv = preview) {
           delete dpUrlSeed[gvar];
           dpVars[gvar] = seeded ?? 1;
         }
-        await runSql(`SET VARIABLE ${gvar} = ${Math.max(1, Math.trunc(Number(dpVars[gvar]) || 1))}`);
+        // review-537: `Number(x) || 1` lets `Infinity` through (it's
+        // truthy, and `Math.trunc` leaves it as `Infinity`) — a restored
+        // `dpVars` holding a non-finite value would emit an invalid `SET
+        // VARIABLE` literal. `Number.isFinite` catches it, same as NaN.
+        const rawN = Math.trunc(Number(dpVars[gvar]));
+        const gn = Number.isFinite(rawN) ? Math.max(1, rawN) : 1;
+        await runSql(`SET VARIABLE ${gvar} = ${gn}`);
       }
     } catch (e) {
       if (isOptionalMissing(s, e)) console.info(`skipped (optional input missing): ${requiresText(reqsOf(s))}`);
@@ -10015,7 +10051,6 @@ async function runOnce(fresh = true, pv = preview) {
     progWrap.className = "dp-step-progress-wrap";
     const text = document.createElement("span");
     text.className = "dp-step-progress-text";
-    text.setAttribute("aria-live", "polite");
     const label = g.labels[current - 1];
     text.textContent = `Step ${current} of ${count}` + (label ? ` · ${label}` : "");
     const bar = document.createElement("div");
@@ -10088,6 +10123,12 @@ async function runOnce(fresh = true, pv = preview) {
       foot.appendChild(next);
     }
     g.sec.appendChild(foot);
+    announceStep(
+      g.var,
+      `Step ${current} of ${count}` +
+        (label ? ` · ${label}` : "") +
+        (gateClosed ? `. ${g.gateMessages[current - 1] || "Finish this step to continue"}` : "")
+    );
     // Focus the new step's heading and bring the whole sequence into view
     // — but only on an actual step change (this run's `dpRefocus` key
     // matches), never on an ordinary re-render (a cross-filter elsewhere,

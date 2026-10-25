@@ -2388,20 +2388,19 @@ SELECT '…closing text…' ::MARKDOWN;
   all count as closed). `::GATE_MESSAGE` is the text shown beside the
   disabled Next; without one it reads "Finish this step to continue". A
   gate is re-evaluated on every run (the marker is a plan statement like any
-  other, so a change to a variable it reads re-triggers it). The browser's
-  input pre-pass binds every input's default before any query runs,
-  gate included — so a gate reading a variable its own step's input sets
-  (the common "answer this step's quiz to continue" shape) sees a real
-  BOOLEAN from the first load. `dashboard --check` / `--svg` have no such
-  pre-pass (one sequential pass, script order): a gate ahead of its own
-  input's declaration reads it as unset there and warns
-  (`step/gate-not-boolean` / `step/gate-no-row`) — expected, not a bug; the
-  interactive dashboard is unaffected. The step list
-  lets a viewer jump to any step up to the furthest one whose gate holds; a
+  other, so a change to a variable it reads re-triggers it). It's common for
+  a gate to read a variable its own step's input sets (the "answer this
+  step's quiz to continue" shape) — `dashboard --check` checks that reading
+  with that input's own default already bound, the same as the interactive
+  browser does. The step list lets a viewer jump to any step up to the
+  furthest one whose gate holds; a
   URL or seed past that clamps back to it. `::GATE`/`::GATE_MESSAGE` beside
   a statement without `::GUIDE_STEP` does nothing (`step/gate-without-step`,
   error); a gate on the last step does nothing either (`step/gate-on-last`,
-  warning, since there's no further step to hold back).
+  warning, since there's no further step to hold back). Because a gate is
+  re-evaluated on every run, changing an earlier step's answer while
+  further along can re-close a gate that already opened — the viewer is
+  clamped back to that step, same as a stale URL/seed would be.
 - **Accessibility.** Keyboard Back/Next/step-list buttons; focus moves to
   the new step's heading on every change; the progress strip is
   `aria-live="polite"` ("Step 2 of 5 · Drift sandbox"); a disabled Next is

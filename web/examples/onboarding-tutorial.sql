@@ -6,14 +6,6 @@
 -- `::GUIDE_STEP` (#516): a run of statements becomes a guided sequence —
 -- Back/Next, "Step n of N", and an optional `::GATE` that holds Next until
 -- a condition is met. See docs/DOCS.md, "Guided steps".
---
--- `dashboard --check` warns `step/gate-not-boolean` on step 2 below: the
--- gate reads `q2`, which its own dropdown (right after the marker) hasn't
--- set yet by the time the checker's single sequential pass evaluates the
--- marker — the same ordering note as `::SHOW_IF`'s own quiz pattern. The
--- interactive browser never sees this: its input pre-pass binds every
--- dropdown's default *before* any query runs, gate included, so Next opens
--- correctly from the very first load.
 
 SELECT 'The three doors' AS lesson ::GUIDE_STEP;
 SELECT 'A model''s accuracy is slipping. There are three places to look: the ' ||

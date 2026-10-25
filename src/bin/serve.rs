@@ -1699,6 +1699,20 @@ fn page_rows(st: &ServeState, q: &str) -> Result<Rows, PageError> {
     sql::parse_rows_json(json.trim()).map_err(PageError::Server)
 }
 
+/// May a `::GUIDE_STEP` (#516) bind its own variable on the script-free
+/// served page? `false` for a reserved name (`__claim_*`/`anofox_data` —
+/// `valid_id` alone accepts `__claim_x` as a step alias, which would
+/// otherwise overwrite the login's claim with an integer for every later
+/// panel; defense in depth, as lint's `step/var-reserved` already refuses
+/// it at the source) or a name an embed link's `scope.vars` already locks
+/// (review-537) — a step named the same as a locked variable binds nothing
+/// here, the same way a whitelisted `@param` sharing a locked name is
+/// simply never resolved into one.
+fn step_var_is_locked(var: &str, scope: Option<&Scope>) -> bool {
+    access::is_reserved_var(var)
+        || scope.is_some_and(|sc| sc.vars.iter().any(|(n, _)| n.eq_ignore_ascii_case(var)))
+}
+
 fn render_dashboard_page(
     st: &ServeState,
     dash: &Dashboard,
@@ -1896,7 +1910,9 @@ fn render_dashboard_page(
             let s = panel.step.as_ref().unwrap();
             let n = step_n.entry(s.group).or_insert(0);
             *n += 1;
-            prefix.push_str(&format!("SET VARIABLE {} = {n}; ", s.var));
+            if !step_var_is_locked(&s.var, scope) {
+                prefix.push_str(&format!("SET VARIABLE {} = {n}; ", s.var));
+            }
         }
         // ::GROUP / ::ENDGROUP (#405): no box here (one figure per panel),
         // but a ::GROUP's own ::KPI_SIZE still cascades onto its tiles' own
@@ -2222,6 +2238,38 @@ mod tests {
             ),
             PageError::Server(_)
         ));
+    }
+
+    /// review-537: a `::GUIDE_STEP` can't bind a reserved variable name
+    /// (`__claim_*`/`anofox_data`) on the script-free served page, and
+    /// can't override a name an embed link's `scope.vars` already locks —
+    /// in either case the step's own `SET VARIABLE` is skipped.
+    #[test]
+    fn step_var_is_locked_rejects_reserved_and_scope_locked_names() {
+        assert!(step_var_is_locked("__claim_tenant", None));
+        assert!(
+            step_var_is_locked("__CLAIM_tenant", None),
+            "case-insensitive"
+        );
+        assert!(step_var_is_locked("anofox_data", None));
+        assert!(
+            !step_var_is_locked("lesson", None),
+            "an ordinary alias is fine"
+        );
+
+        let scope = Scope {
+            dashboards: None,
+            vars: vec![("region".into(), "'EU'".into())],
+        };
+        assert!(step_var_is_locked("region", Some(&scope)));
+        assert!(
+            step_var_is_locked("Region", Some(&scope)),
+            "case-insensitive"
+        );
+        assert!(
+            !step_var_is_locked("lesson", Some(&scope)),
+            "a step named something else is unaffected"
+        );
     }
 
     #[test]

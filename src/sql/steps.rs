@@ -69,6 +69,22 @@ pub struct StepGroup {
     /// Closed by an explicit `::SUBTAB` while still open — `step/mixed-
     /// with-subtab`.
     pub mixed_with_subtab: bool,
+    /// A marker's otherwise-valid alias was a reserved name (`__claim_*`,
+    /// `anofox_data`) — refused as the group's `var` (the positional
+    /// fallback was used instead), reported as `step/var-reserved`
+    /// (review-537: a `__claim_*` step variable would let an author
+    /// overwrite the login's claim on the locked server).
+    pub reserved_alias: Option<String>,
+}
+
+/// May `name` be a `::GUIDE_STEP` group's variable? Not a reserved one
+/// (`__claim_*`, `anofox_data`, case-insensitive) — those are set by the
+/// server itself; a step claiming one would overwrite it for every later
+/// panel (review-537). `anofox_data` is also always `step/var-clash`
+/// (`sql::vars::declared` lists it); `__claim_*` is not declared anywhere
+/// else, so this is the only thing that catches it.
+fn reserved_step_var(name: &str) -> bool {
+    crate::host::access::is_reserved_var(name)
 }
 
 /// [`scan`]'s result.
@@ -135,13 +151,18 @@ pub fn scan(panels: &[Panel]) -> Scan {
                   groups: &mut Vec<StepGroup>,
                   unnamed_no: &mut usize| {
         let Some(o) = open.take() else { return };
-        let alias = o
+        let valid_aliases: Vec<String> = o
             .markers
             .iter()
             .filter_map(|&mi| marker_alias(&panels[mi]))
-            .find(|a| valid_id(a));
+            .filter(|a| valid_id(a))
+            .collect();
+        let alias = valid_aliases.iter().find(|a| !reserved_step_var(a));
+        let reserved_alias = (alias.is_none())
+            .then(|| valid_aliases.iter().find(|a| reserved_step_var(a)).cloned())
+            .flatten();
         let (var, named) = match alias {
-            Some(a) => (a, true),
+            Some(a) => (a.clone(), true),
             None => {
                 *unnamed_no += 1;
                 let v = if *unnamed_no == 1 {
@@ -159,6 +180,7 @@ pub fn scan(panels: &[Panel]) -> Scan {
             var,
             named,
             mixed_with_subtab,
+            reserved_alias,
         });
     };
 
@@ -329,6 +351,29 @@ mod tests {
         assert_eq!(step_of(&p, 1).var, "lesson");
         let g = groups(&p);
         assert!(g[0].named);
+    }
+
+    /// review-537: a `__claim_*` (or `anofox_data`) alias is never used as
+    /// the step variable — the server sets those, so a step claiming one
+    /// would overwrite it on every later panel. The group falls back to
+    /// the positional name, like an invalid-identifier alias would, and
+    /// `reserved_alias` records the rejected one for the lint pass.
+    #[test]
+    fn reserved_alias_falls_back_and_is_recorded() {
+        let p = plan("SELECT 'Intro' AS __claim_tenant ::GUIDE_STEP; SELECT 'Wrap' ::GUIDE_STEP;");
+        assert_eq!(step_of(&p, 0).var, "step");
+        assert!(!groups(&p)[0].named);
+        let g = groups(&p);
+        assert_eq!(g[0].reserved_alias.as_deref(), Some("__claim_tenant"));
+    }
+
+    #[test]
+    fn a_later_valid_alias_is_used_over_an_earlier_reserved_one() {
+        let p = plan(
+            "SELECT 'Intro' AS __claim_tenant ::GUIDE_STEP; SELECT 'Wrap' AS lesson ::GUIDE_STEP;",
+        );
+        assert_eq!(step_of(&p, 0).var, "lesson");
+        assert!(groups(&p)[0].reserved_alias.is_none());
     }
 
     #[test]
