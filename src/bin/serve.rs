@@ -1791,7 +1791,13 @@ fn render_dashboard_page(
     // #274 L1: memoized per render — the same gate is often asked more than
     // once (a tab/view marker's own check, then a panel inside it).
     let mut req_cache = RequiresCache::new();
-    for panel in sql::plan(&dash.script) {
+    // `::SHOW_IF` (#515): each condition's result, by plan index — a
+    // condition always precedes what it governs (`sql::show_if::assign`),
+    // so this is already populated by the time a later statement's
+    // `show_if` is checked below.
+    let mut show_if_cache: std::collections::HashMap<usize, bool> =
+        std::collections::HashMap::new();
+    for (i, panel) in sql::plan(&dash.script).into_iter().enumerate() {
         let hidden = sections.step(&panel, |reqs| {
             requires_unmet(st, &prefix, reqs, &mut req_cache)
         });
@@ -1799,6 +1805,27 @@ fn render_dashboard_page(
             continue; // read-only mode: setup is done once at --init, not per request
         }
         if hidden.is_some() || view_pick.drop_panel(&panel) {
+            continue;
+        }
+        if !panel.show_if.is_empty()
+            && !panel
+                .show_if
+                .iter()
+                .all(|c| show_if_cache.get(c).copied().unwrap_or(false))
+        {
+            continue;
+        }
+        if panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::ShowIf) {
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT 1",
+                panel.sql.trim().trim_end_matches(';'),
+            );
+            let rows: Rows = page_rows(st, &q)?;
+            let v = rows.first().and_then(|row| row.values().next().cloned());
+            show_if_cache.insert(
+                i,
+                anofox_visualization::sql::condition::holds_json(v.as_ref()),
+            );
             continue;
         }
         let chrome_role = panel

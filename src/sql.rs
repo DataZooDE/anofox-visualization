@@ -30,11 +30,14 @@
 //!
 //! Chain a role after a type cast to get both: `ts::DATE::XAXIS`.
 
+pub mod condition;
 pub mod contract_call;
 pub mod deps;
 pub mod lex;
 pub mod requires;
 pub mod shared;
+pub mod show_if;
+pub mod vars;
 pub mod views;
 
 pub use contract_call::ContractPanel;
@@ -86,6 +89,11 @@ pub struct Panel {
     /// set on every statement of the group, setup included. See
     /// [`views::assign_views`].
     pub view: Option<views::ViewAt>,
+    /// Plan indices of the `::SHOW_IF` conditions that must all hold
+    /// (BOOLEAN `TRUE`) for this statement to be shown (#515); empty = always
+    /// shown. Never set on a `::SHOW_IF` statement itself (a condition, not
+    /// content) or on setup (it always runs). See [`show_if::assign`].
+    pub show_if: Vec<usize>,
 }
 
 impl Panel {
@@ -176,6 +184,7 @@ pub fn plan(script: &str) -> Vec<Panel> {
     let mut panels = plan_statements(script);
     views::assign_views(&mut panels);
     section_requires(&mut panels);
+    show_if::assign(&mut panels);
     panels
 }
 
@@ -211,6 +220,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
+                    show_if: Vec::new(),
                 }
             } else {
                 Panel {
@@ -225,6 +235,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
+                    show_if: Vec::new(),
                 }
             })
         })

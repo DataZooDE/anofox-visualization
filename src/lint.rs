@@ -85,6 +85,10 @@ pub struct Diagnostic {
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
+    /// `::SHOW_IF` ([`show_if_diags`], #515): `show_if/not-alone` |
+    /// `show_if/bad-target` (errors) | `show_if/no-target` |
+    /// `show_if/not-boolean` | `show_if/no-row` | `show_if/unknown-variable` |
+    /// `show_if/constant` (warnings).
     pub code: &'static str,
     pub message: String,
     /// The offending statement, trimmed to one line.
@@ -830,18 +834,13 @@ where
         {
             let v = first_text(&rows);
             let sets = if *r == Role::Drill {
-                drill_prelude(&v)
+                sql::vars::drill_prelude(&v)
             } else {
-                select_as_prelude(&v)
+                sql::vars::select_as_prelude(&v)
             };
             if let Ok(sets) = &sets {
                 // the variable names the directive sets (`SET VARIABLE <name> = …`)
-                let names: Vec<String> = sets
-                    .lines()
-                    .filter_map(|l| l.strip_prefix("SET VARIABLE "))
-                    .filter_map(|l| l.split(' ').next())
-                    .map(str::to_string)
-                    .collect();
+                let names = sql::vars::names_from_sets(sets);
                 let kind = if *r == Role::Drill {
                     "::DRILL"
                 } else {
@@ -1201,6 +1200,41 @@ where
             if p.roles.iter().any(|(_, r)| *r == Role::RowSelect) {
                 pending_rowselect = Some((stmt, p.shared.clone()));
             }
+            // #515: with the defaults this condition's cell evaluated to, is
+            // its target shown? Only a JSON boolean `true` is (a `"true"`
+            // string is accepted too, like `condition::holds_json`); anything
+            // else — including no row at all — hides the target, which is
+            // worth a note if it looks like an oversight rather than intent.
+            if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::ShowIf) {
+                match rows.first().and_then(|row| row.values().nth(*idx)) {
+                    None => diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code: "show_if/no-row",
+                        message: "this condition's query returned no row — its target is \
+                                  always hidden"
+                            .into(),
+                        sql: short.clone(),
+                    }),
+                    Some(v)
+                        if !matches!(v, Value::Bool(_))
+                            && !matches!(v, Value::String(s) if s == "true" || s == "false") =>
+                    {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "show_if/not-boolean",
+                            message: format!(
+                                "::SHOW_IF's value (`{}`) is not a BOOLEAN — with the defaults \
+                                 used here its target is always hidden (fail closed)",
+                                one_line(&v.to_string())
+                            ),
+                            sql: short.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -1519,6 +1553,89 @@ where
     let plan = sql::plan(script);
     diags.extend(view_diags(&plan));
     diags.extend(fit_diags(&plan));
+    diags.extend(show_if_diags(&plan));
+    diags
+}
+
+/// `::SHOW_IF` checks (#515) that need the whole plan at once (a condition's
+/// target/range, and "every variable this dashboard sets" for
+/// `unknown-variable`) — see [`Diagnostic::code`] for the full `show_if/*`
+/// list. `show_if/no-row` / `show_if/not-boolean` are checked per-statement
+/// in the main loop above instead, since they need the condition's own
+/// query result.
+fn show_if_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let declared = sql::vars::declared(plan);
+    for (i, p) in plan.iter().enumerate() {
+        if !p.roles.iter().any(|(_, r)| *r == Role::ShowIf) {
+            continue;
+        }
+        if p.roles.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "show_if/not-alone",
+                message: "::SHOW_IF must be this statement's only role — put the condition on \
+                          its own statement; beside other roles it is ignored (the panel shows)"
+                    .into(),
+                sql: short(i),
+            });
+            continue; // not a real condition below (see sql::show_if::is_marker)
+        }
+        let reads = sql::deps::reads(&p.sql, &std::collections::HashMap::new());
+        if matches!(&reads, sql::deps::Deps::Vars(v) if v.is_empty()) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "show_if/constant",
+                message: "this condition reads no variable, so it never changes — filter with \
+                          WHERE instead, or drop the ::SHOW_IF"
+                    .into(),
+                sql: short(i),
+            });
+        }
+        if let sql::deps::Deps::Vars(vars) = &reads {
+            for v in vars {
+                if !v.starts_with("__claim_") && !declared.contains(v) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt: i + 1,
+                        code: "show_if/unknown-variable",
+                        message: format!(
+                            "getvariable('{v}') names no variable this dashboard sets (an \
+                             input, a SET VARIABLE, ::SELECT_AS/::DRILL, ::ROWSELECT's key \
+                             column, or anofox_data) — this condition is always false"
+                        ),
+                        sql: short(i),
+                    });
+                }
+            }
+        }
+    }
+    for c in sql::show_if::scan(plan) {
+        let (severity, message) = match c.problem {
+            Some("show_if/bad-target") => (
+                Severity::Error,
+                "::SHOW_IF can't govern this statement (::TAB/::SUBTAB/::VIEW/::ENDVIEW/\
+                 ::ENDGROUP/::FIT/::COLUMNS, a chrome directive or ::RELOAD) — it always \
+                 shows; use `-- @requires`, or #516's ::GATE, instead"
+                    .to_string(),
+            ),
+            Some(_) => (
+                Severity::Warning,
+                "nothing follows this ::SHOW_IF — it has no target".to_string(),
+            ),
+            None => continue,
+        };
+        diags.push(Diagnostic {
+            severity,
+            stmt: c.at + 1,
+            code: c.problem.unwrap(),
+            message,
+            sql: short(c.at),
+        });
+    }
     diags
 }
 
@@ -3711,66 +3828,6 @@ fn first_text(rows: &[Map<String, Value>]) -> String {
         .unwrap_or_default()
 }
 
-fn is_ident(s: &str) -> bool {
-    let mut c = s.chars();
-    matches!(c.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
-        && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && s.len() <= 60
-}
-
-/// `'name'` / `'name multi'` of a `::SELECT_AS` → the browser's initial
-/// variables: the selection (`''`, or `[]` in multi mode) and an unset brushed
-/// range (`<name>_from` / `<name>_to` = NULL).
-fn select_as_prelude(v: &str) -> Result<String, String> {
-    let mut parts = v
-        .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
-        .filter(|p| !p.is_empty());
-    let name = parts.next().unwrap_or("");
-    let mode = parts.next().unwrap_or("single").to_ascii_lowercase();
-    if !is_ident(name) || !matches!(mode.as_str(), "single" | "multi") || parts.next().is_some() {
-        return Err(format!(
-            "::SELECT_AS `{v}` — expected a variable name, optionally followed by \
-             'single' or 'multi' (e.g. 'region' or 'region multi'); the chart keeps \
-             the shared `selected` click"
-        ));
-    }
-    let sel = if mode == "multi" {
-        "[]::VARCHAR[]"
-    } else {
-        "''"
-    };
-    Ok(format!(
-        "SET VARIABLE {n} = {sel};\nSET VARIABLE {n}_from = NULL;\nSET VARIABLE {n}_to = NULL;\n",
-        n = name
-    ))
-}
-
-/// `'[prefix:] a > b > c'` of a `::DRILL` → the browser's initial variables:
-/// the top level, depth 0, an empty path and every level variable `''`.
-fn drill_prelude(v: &str) -> Result<String, String> {
-    let (prefix, path) = match v.split_once(':') {
-        Some((p, rest)) => (p.trim(), rest),
-        None => ("drill", v),
-    };
-    let levels: Vec<&str> = path.split('>').map(str::trim).collect();
-    if !is_ident(prefix) || levels.len() < 2 || !levels.iter().all(|l| is_ident(l)) {
-        return Err(format!(
-            "::DRILL `{v}` — expected two or more column names joined by '>' \
-             (e.g. 'region > country > city', optionally 'geo: region > …'); \
-             the chart does not drill"
-        ));
-    }
-    let mut out = format!(
-        "SET VARIABLE {prefix}_level = '{}';\nSET VARIABLE {prefix}_depth = 0;\n\
-         SET VARIABLE {prefix}_path = []::VARCHAR[];\n",
-        levels[0]
-    );
-    for l in &levels {
-        out.push_str(&format!("SET VARIABLE {l} = '';\n"));
-    }
-    Ok(out)
-}
-
 /// A `::LINK` template the browser follows: `#tab`, `?query`, a path, or an
 /// http(s) / mailto URL — never another scheme.
 fn link_target_ok(t: &str) -> bool {
@@ -5637,27 +5694,27 @@ mod design_tests {
             "{seen:?}"
         );
         assert_eq!(
-            select_as_prelude("region").unwrap(),
+            sql::vars::select_as_prelude("region").unwrap(),
             "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
         );
         for bad in ["", "1x", "a b c", "region many", "x; DROP"] {
-            assert!(select_as_prelude(bad).is_err(), "{bad}");
+            assert!(sql::vars::select_as_prelude(bad).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn drill_primes_its_variables_and_links_are_checked() {
         assert_eq!(
-            drill_prelude("geo: region > country").unwrap(),
+            sql::vars::drill_prelude("geo: region > country").unwrap(),
             "SET VARIABLE geo_level = 'region';\nSET VARIABLE geo_depth = 0;\n\
              SET VARIABLE geo_path = []::VARCHAR[];\nSET VARIABLE region = '';\n\
              SET VARIABLE country = '';\n"
         );
-        assert!(drill_prelude("region > country > city")
+        assert!(sql::vars::drill_prelude("region > country > city")
             .unwrap()
             .starts_with("SET VARIABLE drill_level = 'region';"));
         for bad in ["region", "a > ", "a > b c", "x y: a > b", "a > b; DROP"] {
-            assert!(drill_prelude(bad).is_err(), "{bad}");
+            assert!(sql::vars::drill_prelude(bad).is_err(), "{bad}");
         }
         for ok in [
             "#Detail",
@@ -7305,5 +7362,118 @@ mod design_tests {
             |_q| Ok(data.clone()),
         );
         assert!(!has(&d, "silent-setup"), "{d:?}");
+    }
+}
+
+/// `::SHOW_IF` lint checks (#515): one test per `show_if/*` code.
+#[cfg(test)]
+mod show_if_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn codes(d: &[Diagnostic]) -> Vec<&'static str> {
+        d.iter().map(|x| x.code).collect()
+    }
+
+    fn has(d: &[Diagnostic], code: &str) -> bool {
+        d.iter().any(|x| x.code == code)
+    }
+
+    /// `show_if_diags` alone (no query execution) — covers the plan-only
+    /// codes: `not-alone`, `bad-target`, `no-target`, `constant`,
+    /// `unknown-variable`.
+    fn static_diags(sql: &str) -> Vec<Diagnostic> {
+        show_if_diags(&crate::sql::plan(sql))
+    }
+
+    #[test]
+    fn not_alone() {
+        let d = static_diags("SELECT true::SHOW_IF, 1::COL; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["show_if/not-alone"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn bad_target() {
+        let d = static_diags(
+            "SELECT getvariable('anofox_data') IS NOT NULL ::SHOW_IF; SELECT 'p'::TAB;",
+        );
+        assert_eq!(codes(&d), ["show_if/bad-target"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn no_target() {
+        let d = static_diags(
+            "SELECT 'x'::MARKDOWN; SELECT getvariable('anofox_data') IS NOT NULL ::SHOW_IF;",
+        );
+        assert_eq!(codes(&d), ["show_if/no-target"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn constant() {
+        let d = static_diags("SELECT true::SHOW_IF; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["show_if/constant"], "{d:?}");
+    }
+
+    #[test]
+    fn unknown_variable() {
+        let d = static_diags("SELECT getvariable('nope') = 'a' ::SHOW_IF; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["show_if/unknown-variable"], "{d:?}");
+        assert!(d[0].message.contains("nope"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn a_known_variable_reads_clean() {
+        let d = static_diags(
+            "SELECT v AS q1 ::DROPDOWN FROM (VALUES ('a')) t(v);\n\
+             SELECT getvariable('q1') = 'a' ::SHOW_IF;\nSELECT 'x'::MARKDOWN;",
+        );
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    #[test]
+    fn claim_variables_are_never_unknown() {
+        let d = static_diags(
+            "SELECT getvariable('__claim_user') = 'alice' ::SHOW_IF; SELECT 'x'::MARKDOWN;",
+        );
+        assert!(!has(&d, "show_if/unknown-variable"), "{d:?}");
+    }
+
+    #[test]
+    fn not_boolean() {
+        let d = check("SELECT 1::SHOW_IF; SELECT 'x'::MARKDOWN;", |_q| {
+            Ok(vec![json!({ "c0": 1 }).as_object().unwrap().clone()])
+        });
+        assert!(has(&d, "show_if/not-boolean"), "{d:?}");
+    }
+
+    #[test]
+    fn a_true_boolean_cell_is_clean() {
+        let d = check("SELECT true::SHOW_IF; SELECT 'x'::MARKDOWN;", |q| {
+            if q.contains("'x'") {
+                Ok(vec![json!({ "c0": "x" }).as_object().unwrap().clone()])
+            } else {
+                Ok(vec![json!({ "c0": true }).as_object().unwrap().clone()])
+            }
+        });
+        assert!(!has(&d, "show_if/not-boolean"), "{d:?}");
+        assert!(!has(&d, "show_if/no-row"), "{d:?}");
+    }
+
+    #[test]
+    fn no_row() {
+        let d = check(
+            "SELECT true::SHOW_IF WHERE false; SELECT 'x'::MARKDOWN;",
+            |q| {
+                if q.contains("WHERE false") {
+                    Ok(vec![])
+                } else {
+                    Ok(vec![json!({ "c0": "x" }).as_object().unwrap().clone()])
+                }
+            },
+        );
+        assert!(has(&d, "show_if/no-row"), "{d:?}");
     }
 }

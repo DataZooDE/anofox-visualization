@@ -1035,6 +1035,7 @@ const FILE_SAMPLES = [
   "examples/tabular-dedup.sql",
   "examples/tabular-showcase.sql",
   "examples/diagram-pipeline.sql",
+  "examples/onboarding-quiz.sql",
   "examples/theming-branded.sql",
   "examples/theming-de-locale.sql",
 ];
@@ -6203,12 +6204,20 @@ function openTableAsDashboard(e, cards) {
 const MD_KEY = "dp_md";
 
 const role = (s, name) => s.roles.some((r) => r[1] === name);
+// `::SHOW_IF` / `::GATE` (#515/#516): does a condition's cell hold? `true`
+// only — `false`/`null`/`undefined`/anything else does not. DuckDB-Wasm and
+// the served JSON API both give booleans as JS `true`/`false`; a `"true"`
+// string is accepted too, in case either side ever stringifies one — the
+// native `sql::condition::holds_json` agrees (one comment, both languages).
+function condHolds(v) {
+  return v === true || v === "true";
+}
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -8799,6 +8808,35 @@ async function runOnce(fresh = true, pv = preview) {
     const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i));
     return rows[0] ? Object.values(rows[0])[0] : null;
   };
+  // `::SHOW_IF` (#515; `::GATE` reuses it, #516): run the condition
+  // statement at plan index `ci`, read its first row's `tok`-role cell
+  // through `condHolds`, and memoize the result in `cache` (a `Map`, made
+  // fresh per run) — several targets (a stacked condition) can share one.
+  // Fails closed: a query error, no row, no `tok` column or a non-boolean
+  // cell is `false`.
+  const conditionHolds = async (ci, tok, pv, cache) => {
+    if (cache.has(ci)) return cache.get(ci);
+    const s = stmts[ci];
+    let held = false;
+    try {
+      const r = s && s.roles.find((x) => x[1] === tok);
+      if (r) {
+        const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i, pv));
+        held = rows[0] ? condHolds(rows[0]["c" + r[0]]) : false;
+      }
+    } catch (e) {
+      console.warn(`::${tok} condition failed (stmt ${ci + 1})`, e);
+    }
+    cache.set(ci, held);
+    return held;
+  };
+  // Every index in `s.show_if` must hold (stacked conditions AND together).
+  const shownBy = async (s) => {
+    for (const ci of s.show_if || []) {
+      if (!(await conditionHolds(ci, "SHOW_IF", pv, cond))) return false;
+    }
+    return true;
+  };
   // One panel statement (a contract plot, a ::PAGED table, or a chart / table /
   // KPI / text card…): run its query and append its panel(s) to ctx.container.
   // The render loop calls it in place; a statement inside a hidden ::TAB pane
@@ -9335,6 +9373,7 @@ async function runOnce(fresh = true, pv = preview) {
   if (lazy) lazy.panelBody = panelBody;
   let lastYield = performance.now();
   let hiding = null; // "TAB" | "SUBTAB" | "VIEW": the section of a hidden tab/view, left out
+  const cond = new Map(); // ::SHOW_IF condition cache (#515), memoized per run
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
     if (s.setup) continue;
@@ -9363,6 +9402,16 @@ async function runOnce(fresh = true, pv = preview) {
     if (hiding && (d === "TAB" || (d === "SUBTAB" && hiding === "SUBTAB"))) hiding = null;
     if (hiding === "VIEW" && (!s.view || s.view.marker)) hiding = null;
     if (hiding) continue;
+    // `::SHOW_IF` (#515): a condition is evaluated eagerly, every run,
+    // including for a statement in a hidden tab pane (its lazy job is
+    // simply never queued below). The preceding modifiers (and, for a
+    // ::GROUP target, its whole range to ::ENDGROUP) are already in
+    // `s.show_if` (`sql::show_if::assign`), so no `next*` reset is needed
+    // here — a hidden ::COL never widens the panel after it.
+    if (s.show_if && s.show_if.length && !(await shownBy(s))) {
+      lastChart = null;
+      continue;
+    }
     if ((d === "TAB" || d === "SUBTAB") && !(await tabShown(s, pv))) {
       console.info(`${d === "TAB" ? "tab" : "sub-tab"} hidden (optional input missing): ${requiresText(s.requires)}`);
       hiding = d;
@@ -9448,6 +9497,9 @@ async function runOnce(fresh = true, pv = preview) {
         // pane; with no tabs the dashboard's grid) fits the window while it
         // is shown — see fitScreen(). The value is only a marker.
         curGrid.setAttribute("data-dp-fit", "");
+      } else if (d === "SHOW_IF") {
+        // A condition: evaluated above (`shownBy`) by whatever it governs,
+        // never drawn or queried again here.
       } else if (d === "ROWSELECT") {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")
@@ -10643,7 +10695,15 @@ function makeControl(meta, bar) {
     input = document.createElement("select");
     input.setAttribute("aria-label", meta.caption || meta.varname);
     fillSelectOptions(input, meta);
+    // #515: a plain (non-searchable) ::DROPDOWN had no refocus-after-rerun
+    // at all — unlike the searchable combobox ("dd:"), ::BUTTONS ("seg:")
+    // and ::TOGGLE ("toggle:") — so a run that redraws a NEW panel right
+    // after it (e.g. a ::SHOW_IF target appearing) left focus on <body>.
+    // Same key prefix as the searchable combobox: the two are mutually
+    // exclusive render paths for one varname.
+    refocus("dd:" + meta.varname, input);
     input.onchange = () => {
+      if (document.activeElement === input) dpRefocus = "dd:" + meta.varname;
       dpVars[meta.varname] = input.value;
       run(false);
     };

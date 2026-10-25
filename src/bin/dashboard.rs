@@ -201,7 +201,13 @@ fn render_dashboard_html(
     let mut view_pick = sql::views::StaticPick::default();
     // The enclosing ::GROUP's own ::KPI_SIZE (#405) — a tile's own wins.
     let mut group_compact = false;
-    for p in sql::plan(script) {
+    // `::SHOW_IF` (#515): each condition's result, by plan index — a
+    // condition always precedes what it governs (`sql::show_if::assign`), so
+    // by the time a later statement's `show_if` is checked below, its
+    // conditions were already run and cached here.
+    let mut show_if_cache: std::collections::HashMap<usize, bool> =
+        std::collections::HashMap::new();
+    for (i, p) in sql::plan(script).into_iter().enumerate() {
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
         // flattened here).
@@ -211,6 +217,22 @@ fn render_dashboard_html(
             lint::unmet_requirement(&mut exec, "", reqs).missing
         });
         if hidden.is_some() || view_pick.drop_panel(&p) {
+            continue;
+        }
+        if !p.setup
+            && !p.show_if.is_empty()
+            && !p
+                .show_if
+                .iter()
+                .all(|c| show_if_cache.get(c).copied().unwrap_or(false))
+        {
+            continue;
+        }
+        if p.roles.len() == 1 && matches!(p.roles[0].1, Role::ShowIf) {
+            let v = exec(&format!("{};", p.sql))
+                .ok()
+                .and_then(|rows| rows.first().and_then(|r| r.values().next().cloned()));
+            show_if_cache.insert(i, sql::condition::holds_json(v.as_ref()));
             continue;
         }
         if p.setup {

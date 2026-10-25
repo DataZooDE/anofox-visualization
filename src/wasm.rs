@@ -20,7 +20,8 @@ use wasm_bindgen::prelude::*;
 ///    "contract": null | {"macro": name, "rows": k, "args": k+1,
 ///                        "groups": [[colIdx, name], …]},
 ///    "view": null | {"group": idx, "alt": n, "marker": bool, "id": string,
-///                     "label": string?} }]` (#214).
+///                     "label": string?},
+///    "show_if": [condStmtIdx, …] }]` (#214, #515).
 /// The caller runs each `sql` through DuckDB-Wasm (setup statements for effect,
 /// panels with `-json`) and passes the rows back to [`render_panel`] — or, for
 /// a contract plot call (`SELECT anofox_plot_terms(t) FROM … t`, see
@@ -66,6 +67,7 @@ fn plan_json(script: &str) -> String {
                     "id": v.id,
                     "label": v.label,
                 })),
+                "show_if": p.show_if,
             })
         })
         .collect();

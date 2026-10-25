@@ -135,7 +135,7 @@ for (const url of lib.FILE_SAMPLES) {
   add(readFileSync(new URL(`../../web/${url}`, import.meta.url), "utf8"), f, f);
 }
 
-assert.equal(EXAMPLES.length, 34);
+assert.equal(EXAMPLES.length, 35);
 assert.ok(EXAMPLES.some((e) => e.name === "Where do our deliveries and customers cluster, and which regions are underserved?" && e.group === "Logistics & production"), "the delivery-coverage map showcase");
 assert.equal(new Set(EXAMPLES.map((e) => e.id)).size, EXAMPLES.length, "example ids are unique");
 for (const e of EXAMPLES) {
