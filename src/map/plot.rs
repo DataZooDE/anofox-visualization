@@ -722,29 +722,39 @@ pub(super) fn build(
             None => order.iter().map(|(i, _)| *i).collect(),
         };
         if !keep.is_empty() {
-            let label_geo: Vec<Value> = (0..n)
-                .map(|i| {
-                    if keep.contains(&i) {
-                        row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na)
-                    } else {
-                        Value::Na
-                    }
-                })
+            // Only the kept rows go into this layer's own data (`layer_data`
+            // is independent of the base plot's row count, see
+            // `GGPlot::layer_data`) — not all `n` rows padded with `Value::Na`
+            // for the ones `::LABEL_TOP`/`::DATALABELS` capped out. Padding
+            // with `Na` made `geom_sf_text`'s own `StatSf` report "removed N
+            // rows containing missing values" for every capped row — real
+            // for genuinely missing geometry, but spurious here: these rows
+            // were already filtered into `order` *because* they had real
+            // geometry, and are only absent from `keep` by our own
+            // intentional cap, not a data problem. Found via a native/
+            // browser lint parity failure on `delivery-coverage.sql`'s
+            // `::LABEL_TOP 8` panel (373 of 381 districts capped, each
+            // flagged as "missing" even though every one has a real
+            // boundary). Ascending by row index, same relative order as the
+            // old `(0..n)` map so `check_overlap`'s tie-breaking is
+            // unaffected.
+            let mut kept: Vec<usize> = keep.iter().copied().collect();
+            kept.sort_unstable();
+            let label_geo: Vec<Value> = kept
+                .iter()
+                .map(|&i| row_wkt(&m.features[i]).map(Value::Str).unwrap_or(Value::Na))
                 .collect();
-            let label_text: Vec<Value> = (0..n)
-                .map(|i| {
-                    if keep.contains(&i) {
-                        na_if_empty(
-                            m.label_of(i)
-                                .lines()
-                                .next()
-                                .unwrap_or("")
-                                .trim()
-                                .to_string(),
-                        )
-                    } else {
-                        Value::Na
-                    }
+            let label_text: Vec<Value> = kept
+                .iter()
+                .map(|&i| {
+                    na_if_empty(
+                        m.label_of(i)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                    )
                 })
                 .collect();
             let label_df: Df = vec![("geometry".into(), label_geo), ("label".into(), label_text)];
