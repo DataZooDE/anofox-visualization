@@ -1,9 +1,11 @@
-//! The legend box: category swatches, a gradient bar or stepped classes
-//! with counts, the no-data hatch — and, stacked under it, extras such as a
-//! graduated-symbol size key (`::SIZE`, M2a).
+//! The legend box's own sizing: how wide and tall a map's legend (category
+//! swatches, a gradient bar or stepped classes with counts, the no-data
+//! hatch — and, stacked under it, extras such as a graduated-symbol size
+//! key, `::SIZE`/M2a) would be, so [`layout`](super::layout) can fit the
+//! map's frame around it and the right corner can be picked. `ggplot-rs`'s
+//! own legend guides draw the real thing now (`plot.rs`, #420 slice 6) —
+//! this module no longer draws anything itself, only measures.
 
-use crate::format::escape_xml as esc;
-use crate::theme::hex;
 use crate::RenderOptions;
 
 use super::{Fill, Model, Rgb, FONT};
@@ -15,7 +17,12 @@ pub(super) const PAD: f64 = 5.0;
 /// Gap between the main legend and its first extra, and between extras.
 const EXTRA_GAP: f64 = 4.0;
 
-/// What the legend shows.
+/// What the legend shows — kept as real data (not just a size) because
+/// computing it faithfully (how many ticks fit, how wide the widest one
+/// is, …) is what makes `LegendBox::w`/`h` below accurate; no code reads
+/// a `Legend`/`Extra` value itself any more (ggplot-rs draws the real
+/// legend now, #420 slice 6 dropped this module's own `legend_svg`).
+#[allow(dead_code)]
 pub(super) enum Legend {
     None,
     Category(Vec<(String, Rgb)>),
@@ -31,7 +38,9 @@ pub(super) enum Legend {
     },
 }
 
-/// Extra content stacked under the main legend.
+/// Extra content stacked under the main legend — see [`Legend`]'s own note
+/// on why this still carries real data nothing reads.
+#[allow(dead_code)]
 pub(super) enum Extra {
     /// A graduated-symbol size key: nested circles with nice values.
     Sizes {
@@ -49,7 +58,11 @@ pub(super) enum Extra {
     Note(String),
 }
 
-/// The legend box: its content, the no-data count, the title and size.
+/// The legend box: its content, the no-data count, the title and size —
+/// only `w`/`h` are read outside this module (`layout`'s own corner-pick
+/// sizing); the rest stays `pub` so [`Legend`]/[`Extra`]'s own note applies
+/// uniformly, not because anything outside this module touches them.
+#[allow(dead_code)]
 pub(super) struct LegendBox {
     pub legend: Legend,
     pub nodata: usize,
@@ -239,10 +252,11 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
     let (legend, mut cw, mut ch) = match &m.fill {
         Fill::Plain(_) => (Legend::None, 0.0, 0.0),
         // `::BIVARIATE` (M2d): draws through `plot::build`'s own
-        // `GeomBivariateLegend` furniture, not `legend_svg` below (this old
-        // writer is unreachable for maps — `plot::eligible` is
-        // unconditionally `true`, #505) — but a non-zero `(cw, ch)` still
-        // matters here: `plot::build` treats `lg.w <= 0.0 && lg.h <= 0.0` as
+        // `GeomBivariateLegend` furniture, not this module's own drawing
+        // (dropped in #420 slice 6, once every map routed through
+        // `plot::build` — #505 made the old writer unreachable first) —
+        // but a non-zero `(cw, ch)` still matters here: `plot::build`
+        // treats `lg.w <= 0.0 && lg.h <= 0.0` as
         // "no legend content at all" and forces `LegendPosition::None`,
         // which would also suppress the `GeomBivariateLegend` furniture
         // layer itself (gated on "no override forced the legend off").
@@ -455,212 +469,4 @@ pub(super) fn category_rows(items: &[(String, Rgb)], w: f64) -> Vec<Vec<(f64, us
         x += iw;
     }
     rows
-}
-
-/// The legend box at `(x, y)`: the title, then category swatches, a
-/// gradient bar with ticks, or stepped classes with their counts; the
-/// no-data hatch with its count; then any extras (a size key).
-pub(super) fn legend_svg(
-    o: &RenderOptions,
-    lg: &LegendBox,
-    id: &str,
-    (x, y): (f64, f64),
-    font: &str,
-) -> String {
-    if lg.w <= 0.0 {
-        return String::new();
-    }
-    let t = &o.theme;
-    let ink = hex(t.chart_label());
-    let muted = hex(t.chart_text());
-    let text = |x: f64, y: f64, anchor: &str, fill: &str, weight: &str, s: &str| {
-        format!(
-            "<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"{anchor}\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"{FONT}\"{weight} fill=\"{fill}\">{}</text>",
-            esc(s)
-        )
-    };
-    let mut g = format!(
-        "<g class=\"dp-legend\" transform=\"translate({x:.1},{y:.1})\"><rect width=\"{:.1}\" height=\"{:.1}\" rx=\"3\" fill=\"{}\" fill-opacity=\".85\"/>",
-        lg.w,
-        lg.h,
-        hex(t.colors.card)
-    );
-    let mut y = PAD;
-    if let Some(title) = &lg.title {
-        g.push_str(&text(
-            PAD,
-            y + ROW / 2.0 - 1.0,
-            "start",
-            &muted,
-            " font-weight=\"600\"",
-            title,
-        ));
-        y += ROW;
-    }
-    let bar = lg.bar;
-    match &lg.legend {
-        Legend::None => {}
-        Legend::Category(items) => {
-            let rows = category_rows(items, lg.w - 2.0 * PAD);
-            for row in &rows {
-                let cy = y + ROW / 2.0;
-                for (cx, i) in row {
-                    let (name, c) = &items[*i];
-                    let cx = PAD + cx;
-                    g.push_str(&format!(
-                        "<rect x=\"{cx:.1}\" y=\"{:.1}\" width=\"9\" height=\"9\" rx=\"1.5\" fill=\"{}\"/>",
-                        cy - 4.5,
-                        hex(*c)
-                    ));
-                    g.push_str(&text(cx + 13.0, cy, "start", &ink, "", name));
-                }
-                y += ROW;
-            }
-        }
-        Legend::Gradient { ticks, .. } => {
-            g.push_str(&format!(
-                "<rect x=\"{PAD}\" y=\"{y:.1}\" width=\"{bar:.1}\" height=\"8\" rx=\"1.5\" fill=\"url(#{id}-g)\"/>"
-            ));
-            for (p, s) in ticks {
-                let tx = PAD + p * bar;
-                let anchor = if *p <= 0.0 {
-                    "start"
-                } else if *p >= 1.0 {
-                    "end"
-                } else {
-                    "middle"
-                };
-                g.push_str(&format!(
-                    "<path d=\"M{tx:.1} {:.1}v3\" stroke=\"{muted}\" stroke-width=\".6\"/>",
-                    y + 8.0
-                ));
-                g.push_str(&text(tx, y + 11.0 + ROW / 2.0, anchor, &ink, "", s));
-            }
-            y += 11.0 + ROW;
-        }
-        Legend::Steps {
-            colors,
-            ticks,
-            counts,
-        } => {
-            let tw = |s: &str| ggplot_rs::render::text::text_width(s, FONT);
-            for (i, c) in colors.iter().enumerate() {
-                let sx = PAD + i as f64 * bar;
-                g.push_str(&format!(
-                    "<rect x=\"{sx:.1}\" y=\"{y:.1}\" width=\"{bar:.1}\" height=\"12\" fill=\"{}\"/>",
-                    hex(*c)
-                ));
-                g.push_str(&format!(
-                    "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"7.5\" fill=\"{}\">{}</text>",
-                    sx + bar / 2.0,
-                    y + 6.5,
-                    hex(t.text_on(*c)),
-                    counts[i]
-                ));
-            }
-            // boundary labels, skipping one that would run into the last
-            let mut right = f64::NEG_INFINITY;
-            let n = ticks.len();
-            for (i, s) in ticks.iter().enumerate() {
-                let tx = PAD + i as f64 * bar;
-                let (anchor, l, r) = if i == 0 {
-                    ("start", tx, tx + tw(s))
-                } else {
-                    ("middle", tx - tw(s) / 2.0, tx + tw(s) / 2.0)
-                };
-                if l < right + 3.0 && i != n - 1 {
-                    continue;
-                }
-                right = r;
-                g.push_str(&format!(
-                    "<path d=\"M{tx:.1} {:.1}v3\" stroke=\"{muted}\" stroke-width=\".6\"/>",
-                    y + 12.0
-                ));
-                g.push_str(&text(tx, y + 15.0 + ROW / 2.0, anchor, &ink, "", s));
-            }
-            y += 15.0 + ROW;
-        }
-    }
-    if lg.nodata > 0 {
-        let cy = y + 2.0 + ROW / 2.0;
-        g.push_str(&format!(
-            "<rect x=\"{PAD}\" y=\"{:.1}\" width=\"11\" height=\"11\" fill=\"url(#{id}-nd)\" stroke=\"{}\" stroke-width=\".5\"/>",
-            cy - 5.5,
-            hex(t.chart_grid())
-        ));
-        g.push_str(&text(
-            PAD + 16.0,
-            cy,
-            "start",
-            &ink,
-            "",
-            &format!("No data ({})", lg.nodata),
-        ));
-        y += ROW + 2.0;
-    }
-    for extra in &lg.extras {
-        y += EXTRA_GAP;
-        match extra {
-            Extra::Sizes { title, items } => {
-                let r1 = items[0].0;
-                if let Some(t) = title {
-                    g.push_str(&text(
-                        PAD,
-                        y + ROW / 2.0 - 1.0,
-                        "start",
-                        &muted,
-                        " font-weight=\"600\"",
-                        t,
-                    ));
-                    y += ROW;
-                }
-                let cx = PAD + r1;
-                // nested circles, bottom-aligned on one baseline
-                let base_y = y + 2.0 * r1;
-                for (r, label) in items {
-                    g.push_str(&format!(
-                        "<circle cx=\"{cx:.1}\" cy=\"{:.1}\" r=\"{r:.1}\" fill=\"none\" stroke=\"{muted}\" stroke-width=\".75\"/>",
-                        base_y - r
-                    ));
-                    let lx = PAD + 2.0 * r1 + 4.0;
-                    g.push_str(&format!(
-                        "<path d=\"M{:.1} {:.1}v-3h{:.1}\" stroke=\"{muted}\" stroke-width=\".6\" fill=\"none\"/>",
-                        cx,
-                        base_y - 2.0 * r,
-                        lx - cx
-                    ));
-                    g.push_str(&text(lx, base_y - 2.0 * r - 3.0, "start", &ink, "", label));
-                }
-            }
-            Extra::Widths { title, items } => {
-                if let Some(t) = title {
-                    g.push_str(&text(
-                        PAD,
-                        y + ROW / 2.0 - 1.0,
-                        "start",
-                        &muted,
-                        " font-weight=\"600\"",
-                        t,
-                    ));
-                    y += ROW;
-                }
-                const LINE: f64 = 24.0;
-                for (w, label) in items {
-                    let cy = y + ROW / 2.0;
-                    g.push_str(&format!(
-                        "<line x1=\"{PAD}\" y1=\"{cy:.1}\" x2=\"{:.1}\" y2=\"{cy:.1}\" stroke=\"{muted}\" stroke-width=\"{w:.2}\" stroke-linecap=\"round\"/>",
-                        PAD + LINE
-                    ));
-                    g.push_str(&text(PAD + LINE + 6.0, cy, "start", &ink, "", label));
-                    y += ROW;
-                }
-            }
-            Extra::Note(note) => {
-                g.push_str(&text(PAD, y + ROW / 2.0 - 1.0, "start", &muted, "", note));
-                y += ROW;
-            }
-        }
-    }
-    g.push_str("</g>");
-    g
 }

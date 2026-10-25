@@ -1,6 +1,10 @@
-//! Feature labels: where a region's name goes (its pole of inaccessibility,
-//! so a C-shaped region keeps its label inside) and which labels fit
-//! (greedy by priority, no overlaps, none wider than its region).
+//! A region's pole of inaccessibility (so a C-shaped region keeps its own
+//! anchor inside it, [`polylabel`]) and a ring's screen area ([`area`]) —
+//! shared by `symbols.rs` (a polygon's graduated-symbol anchor) and
+//! `plot.rs` (`::LABEL_TOP`/`::DATALABELS` priority, `geom_sf_text` draws
+//! the labels themselves now — ggplot-rs's own public port of this
+//! module's old greedy placer, sipemu/ggplot-rs#195, dropped here in #420
+//! slice 6).
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -175,86 +179,6 @@ pub(crate) fn area(r: &[Pt]) -> f64 {
     (s / 2.0).abs()
 }
 
-/// A label that may be placed.
-pub(crate) struct Candidate {
-    /// The anchor: a region's pole, or a point mark.
-    pub at: Pt,
-    pub text: String,
-    /// Higher goes first.
-    pub priority: f64,
-    /// A region's width on screen (a label wider than it is dropped);
-    /// `None` for a point (labelled to its right).
-    pub room: Option<f64>,
-    /// How far right of the anchor a point-style label starts (a plain
-    /// point: 5 px; a graduated symbol, M2a: its radius + 3 px). Unused
-    /// when `room` is `Some` (an area's label is centred on its anchor).
-    pub dx: f64,
-}
-
-/// A placed label: its anchor, text and whether it starts at the anchor
-/// (a point's label) or is centred on it.
-pub(crate) struct Placed {
-    pub x: f64,
-    pub y: f64,
-    pub text: String,
-    pub start: bool,
-}
-
-/// Place labels greedily by priority: each one that doesn't overlap a
-/// label already placed, a `blocked` box (the legend) or the panel edge,
-/// and fits its region. With a `limit` only the `limit` most important are
-/// tried (`::LABEL_TOP n` names the top n, never the next ones instead).
-pub(crate) fn place(
-    mut cands: Vec<Candidate>,
-    limit: Option<usize>,
-    blocked: &[(f64, f64, f64, f64)],
-    (w, h): (f64, f64),
-    size: f64,
-) -> Vec<Placed> {
-    cands.sort_by(|a, b| b.priority.total_cmp(&a.priority));
-    if let Some(n) = limit {
-        cands.truncate(n);
-    }
-    let mut taken: Vec<(f64, f64, f64, f64)> = blocked.to_vec();
-    let mut out = Vec::new();
-    for c in cands {
-        let tw = ggplot_rs::render::text::text_width(&c.text, size);
-        let th = size * 1.15;
-        if c.room.is_some_and(|r| tw > r) {
-            continue;
-        }
-        let start = c.room.is_none();
-        let x0 = if start {
-            c.at.0 + c.dx
-        } else {
-            c.at.0 - tw / 2.0
-        };
-        let b = (
-            x0 - 1.0,
-            c.at.1 - th / 2.0,
-            x0 + tw + 1.0,
-            c.at.1 + th / 2.0,
-        );
-        if b.0 < 0.0 || b.1 < 0.0 || b.2 > w || b.3 > h {
-            continue;
-        }
-        if taken
-            .iter()
-            .any(|t| b.0 < t.2 && t.0 < b.2 && b.1 < t.3 && t.1 < b.3)
-        {
-            continue;
-        }
-        taken.push(b);
-        out.push(Placed {
-            x: if start { x0 } else { c.at.0 },
-            y: c.at.1,
-            text: c.text,
-            start,
-        });
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,53 +208,5 @@ mod tests {
         let sq = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
         let ((x, y), _) = polylabel(&[sq], 0.01).unwrap();
         assert!((x - 2.0).abs() < 0.05 && (y - 2.0).abs() < 0.05);
-    }
-
-    #[test]
-    fn labels_avoid_each_other_and_the_legend() {
-        let c = |x: f64, p: f64, t: &str| Candidate {
-            at: (x, 50.0),
-            text: t.into(),
-            priority: p,
-            room: Some(80.0),
-            dx: 0.0,
-        };
-        let placed = place(
-            vec![
-                c(50.0, 1.0, "Low"),
-                c(55.0, 9.0, "High"),
-                c(150.0, 5.0, "Far"),
-                c(250.0, 3.0, "Blocked"),
-            ],
-            None,
-            &[(230.0, 40.0, 300.0, 60.0)],
-            (400.0, 100.0),
-            9.0,
-        );
-        let t: Vec<&str> = placed.iter().map(|p| p.text.as_str()).collect();
-        assert_eq!(t, vec!["High", "Far"]);
-        // a label wider than its region is dropped; a limit stops early
-        let wide = Candidate {
-            at: (100.0, 50.0),
-            text: "A very long region name".into(),
-            priority: 1.0,
-            room: Some(20.0),
-            dx: 0.0,
-        };
-        assert!(place(vec![wide], None, &[], (400.0, 100.0), 9.0).is_empty());
-        let many = (0..5)
-            .map(|i| c(20.0 + i as f64 * 60.0, i as f64, "Xy"))
-            .collect();
-        let top: Vec<String> = place(many, Some(2), &[], (400.0, 100.0), 9.0)
-            .into_iter()
-            .map(|p| p.text)
-            .collect();
-        assert_eq!(top.len(), 2);
-        // the top 2 only: when one of them doesn't fit, no lower one stands in
-        let mut few: Vec<Candidate> = (0..3)
-            .map(|i| c(40.0 + i as f64 * 100.0, i as f64, "Xy"))
-            .collect();
-        few[2].room = Some(1.0);
-        assert_eq!(place(few, Some(2), &[], (400.0, 100.0), 9.0).len(), 1);
     }
 }

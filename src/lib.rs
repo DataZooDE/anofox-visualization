@@ -1822,6 +1822,18 @@ fn render_placed(
 /// formatter yet.
 fn finish_touches(svg: String, cols: &[Column], o: &RenderOptions) -> String {
     let svg = o.theme.with_font(svg);
+    // A map (`Panel::Plot` since #420) paints with the variant's own
+    // resolved tokens already (`o.theme.mix(...)`/`hex(...)` computed
+    // straight from this render's own theme, not ggplot-rs's hard-coded
+    // black/white geom defaults or the generic `DZ_PALETTE` indices
+    // `finish_svg`'s `remap_neutrals` targets) — running it on top would
+    // corrupt those colours, not just skip a no-op. Verified empirically
+    // while cleaning up #420 slice 6: forcing `finish_svg` to run
+    // unconditionally breaks `themes_paint_the_map_with_their_own_tokens`
+    // (`tests/maps.rs`) — the land backdrop's `theme::mix(muted, card,
+    // 0.92)` fill stops appearing in the SVG verbatim, remapped to
+    // something else. Not a leftover from the old hand-written writer;
+    // still required for the `geom_sf` path.
     let svg = if map::is_map(cols) {
         svg
     } else {
@@ -2022,14 +2034,30 @@ fn story_steps(cols: &[Column]) -> Option<String> {
 /// by hand); this pass only still replaces it — overriding whatever
 /// ggplot-rs already wrote natively, since there's no per-mark opt-out —
 /// for the cases that can't go through a `Scale` at all:
-///  - a map's own hand-drawn marks (`Panel::Own`, never a `GGPlot`);
 ///  - a Fill-mapped measure (`::HEATMAP`/`::CALENDAR`) banded by
 ///    `::THRESHOLDS` (`TileFill::Steps`/`StepFill`): a plain discrete
 ///    `Scale`, not one of the three gradient scales `with_value_formatter`
-///    (ggplot-rs 0.22.2, sipemu/ggplot-rs#164) was added to. A `::COLORSCALE`
-///    ramp (`TileFill::Ramp`/`FmtGradient`) wires that hook straight into
-///    `ScaleColorGradientN` instead (`FmtGradient::new`) and so no longer
-///    needs this fallback.
+///    (ggplot-rs 0.22.2, sipemu/ggplot-rs#164) was added to. A
+///    `::COLORSCALE` ramp (`TileFill::Ramp`/`FmtGradient`) wires that hook
+///    straight into `ScaleColorGradientN` instead (`FmtGradient::new`) and
+///    so no longer needs this fallback;
+///  - a map's own `::CLASSES`/`::BIVARIATE` fill — `ggplot_rs::scale::
+///    binned::ScaleFillBinned`/`scale::bivariate::ScaleFillBivariate`
+///    (`src/map/fill.rs`'s `scale_for`), the same "plain discrete `Scale`,
+///    no formatter hook" family as `TileFill::Steps` above. A map's plain
+///    continuous or `::CATEGORY` fill (`MapFill`/`fill::Reaimed`'s own
+///    `format_value`) *is* `svg_formatted_values`-native, as is a
+///    colour-less graduated `::SIZE`'s own size scale — verified by
+///    forcing this pass off for every map kind and re-running
+///    `tests/maps.rs` (`fvalue_is_written_once`, `hexbin_counts_or_sums`'s
+///    "never both" case): only a `::CLASSES`/`::BIVARIATE` map actually
+///    lost its `data-fvalue`, caught by the before/after example diff
+///    (`delivery-coverage.sql`'s districts tab) this pass's own narrowing
+///    (below) now keeps green. #420 slice 6 was the first to widen the
+///    condition past `map::is_map(cols)` wholesale and catch this — a map
+///    used to need the wholesale version too (its hand-drawn `Panel::Own`
+///    marks were never a `GGPlot` at all), dropped once every map kind
+///    routed through `plot::build`.
 ///
 /// `data-fx`, though, stays unconditional: a date x column rendered on a
 /// *discrete* axis (`::XAXIS` on a bar/category chart whose values happen
@@ -2047,9 +2075,11 @@ fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> Str
     let Role::Value(kind) = value.role else {
         return svg;
     };
-    let do_fvalue = map::is_map(cols)
-        || (matches!(kind, Kind::Heatmap | Kind::Calendar)
-            && thresholds_of(cols).ok().flatten().is_some());
+    let do_fvalue = (matches!(kind, Kind::Heatmap | Kind::Calendar)
+        && thresholds_of(cols).ok().flatten().is_some())
+        || (map::is_map(cols)
+            && (find_role(cols, Role::Classes).is_some()
+                || find_role(cols, Role::Bivariate).is_some()));
     let xfmt = role_fmt(cols, Role::XFormat).map(|s| format::ValueFmt::parse(&s));
     if !do_fvalue && xfmt.is_none() && o.locale.is_default() {
         return svg;
@@ -2196,21 +2226,10 @@ fn render_inner(
         )
     }) {
         return Ok(match map::build(o, cols, width, height) {
-            Some(map::MapOutput::Own(m)) => Panel::Own {
-                width,
-                height,
-                body: m.body,
-                attrs: m.attrs,
-                warnings: m.warnings,
-            },
-            // #420 slice 1: an eligible map is a real GGPlot now — the
-            // same Panel::Plot every other chart kind renders through.
-            Some(map::MapOutput::Plot {
-                plot,
-                attrs,
-                warnings,
-            }) => {
-                let mut p = Panel::plot(*plot, width, height);
+            // #420: every map is a real GGPlot now — the same Panel::Plot
+            // every other chart kind renders through.
+            Some((plot, attrs, warnings)) => {
+                let mut p = Panel::plot(plot, width, height);
                 if let Panel::Plot {
                     attrs: a,
                     warnings: w,
