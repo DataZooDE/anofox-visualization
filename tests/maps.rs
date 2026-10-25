@@ -600,14 +600,14 @@ fn bivariate_palette_is_distinguishable_in_every_theme() {
     }
 }
 
-/// The 3×3 legend grid: per-cell counts, and the no-data entry for rows
-/// missing either measure. `::REGION` (real German state codes) pulls in
-/// the BKG attribution footer, which keeps this fixture on the old writer
-/// (`render_with_model`/`legend.rs`) — the path whose `Legend::Bivariate`
-/// draws per-cell counts and the "{A} →"/"{B} →" captions; the new
-/// `geom_sf` path's `GeomBivariateLegend` (ggplot-rs's own, used when no
-/// footer is needed — see `bivariate_tertiles_and_nine_colours`) draws the
-/// swatches and plain axis names but not counts, so it's covered separately.
+/// The 3×3 legend grid draws through `geom_sf`'s own `GeomBivariateLegend`
+/// (ggplot-rs's furniture geom, `data-geom="bivariate_legend"`) — 9 swatch
+/// `<rect>`s plus the two measures' plain names as captions. No per-cell
+/// counts (sipemu/ggplot-rs#259 is open for that upstream; the a11y table's
+/// "value 2"/class columns carry the same information meanwhile). `::REGION`
+/// (real German state codes) pulls in the BKG attribution footer — since
+/// #505, that no longer keeps a map off the `geom_sf` path, so this fixture
+/// exercises the exact shape the real `delivery-coverage.sql` example draws.
 #[test]
 fn bivariate_legend_counts_and_captions() {
     let states = [
@@ -615,13 +615,6 @@ fn bivariate_legend_counts_and_captions() {
     ];
     let mut a: Vec<Value> = (0..9).map(|i| Value::Float((i % 3) as f64)).collect();
     let mut b: Vec<Value> = (0..9).map(|i| Value::Float((i / 3) as f64)).collect();
-    // The 10th row's own `a` (2.0, matching an existing tertile exactly, not
-    // the lone outlier that would otherwise skew the quantile-3 split away
-    // from the clean "one row per cell" grid the other 9 rows give) is
-    // missing `b` — the no-data cell. `Classes::build` sees all 10 `a`
-    // values (`bivariate::of` builds `a`'s tertiles from the whole column,
-    // not just the rows with both measures), so the extra value must keep
-    // the same three tertile edges, not merge two of them.
     a.push(Value::Float(2.0));
     b.push(Value::Na);
     let mut rv = Column::new("Revenue", Role::Value(Kind::Bar), a);
@@ -629,11 +622,21 @@ fn bivariate_legend_counts_and_captions() {
     let mut sh = Column::new("Share", Role::Bivariate, b);
     sh.name = "Share".into();
     let s = svg(vec![codes(&states), rv, sh]);
-    // every cell has exactly one row: its count is "1"
-    assert!(s.matches(">1</text>").count() >= 9, "{s}");
-    assert!(s.contains("Revenue →"), "{s}");
-    assert!(s.contains("Share"), "{s}");
-    assert!(s.contains("No data (1)"), "{s}");
+    assert!(s.contains("data-geom=\"bivariate_legend\""), "{s}");
+    assert_eq!(
+        s.matches("data-geom=\"bivariate_legend\"").count(),
+        9 + 2,
+        "9 swatches + 2 captions: {s}"
+    );
+    assert!(s.contains(">Revenue<"), "{s}");
+    assert!(s.contains(">Share<"), "{s}");
+    assert!(
+        s.contains("data-bivar-titles=\"[&quot;Revenue&quot;,&quot;Share&quot;]\""),
+        "{s}"
+    );
+    // BKG attribution still draws (#505's own geom_sf furniture), confirming
+    // this bivariate map is on the same path as the real example.
+    assert!(s.contains("data-geom=\"attribution\""), "{s}");
 }
 
 /// A row missing either measure is no data: hatched (areas), no

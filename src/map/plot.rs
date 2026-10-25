@@ -986,6 +986,18 @@ pub(super) fn build(
             serde_json::to_string(&labels).unwrap_or_default(),
         ));
     }
+    // `data-bivar-titles` (M2d): both measures' names, as JSON — the
+    // bivariate legend/a11y table's own caption/column-header source.
+    if let Fill::Bivariate(b) = &m.fill {
+        attrs.push((
+            "data-bivar-titles",
+            serde_json::to_string(&[
+                b.title_a.clone().unwrap_or_default(),
+                b.title_b.clone().unwrap_or_default(),
+            ])
+            .unwrap_or_default(),
+        ));
+    }
     // `data-hexbin`: the hex width (D7 — the zoom UI needs it anchored to
     // the unzoomed data box), same as the old writer's own `data-hexbin`.
     if let Some(hb) = &m.hexbin {

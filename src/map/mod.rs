@@ -1450,10 +1450,11 @@ fn render_with_model(
                 false,
             ),
             Fill::Plain(c) => (*c, None, None, false),
-            Fill::Bivariate(b) => match (b.ia[i], b.jb[i]) {
-                (Some(ii), Some(jj)) => (b.colors[ii][jj], b.a[i], None, false),
-                _ => (hatch_bg, b.a[i], None, true),
-            },
+            // `Model::new` never builds `Fill::Bivariate` while `eligible()`
+            // is unconditionally `true` (#505) — every map draws through
+            // `plot::build`'s `geom_sf` path now, this old writer is dead
+            // for maps; kept exhaustive only so the match compiles.
+            Fill::Bivariate(_) => (hatch_bg, None, None, false),
         };
         // the tooltip: "label: value", as the plotting engine wrote it
         let shown = match (&m.fill, value) {
@@ -1476,11 +1477,6 @@ fn render_with_model(
                     c.label(k, &|v| s.fmt.short(v, &o.locale))
                 ));
             }
-        }
-        // `::BIVARIATE` (M2d): its own tooltip shape replaces the generic
-        // one built above (which only knows about one measure).
-        if let Fill::Bivariate(b) = &m.fill {
-            title = b.title_of(i, &label, &o.locale);
         }
         // the key (when no label names it) and class first, then the row
         // metadata the browser reads
@@ -1505,18 +1501,6 @@ fn render_with_model(
         }
         if !label.is_empty() {
             data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
-        }
-        if let Fill::Bivariate(b) = &m.fill {
-            if let Some(v) = b.b[i] {
-                data.push_str(&format!(" data-value2=\"{v}\""));
-                data.push_str(&format!(
-                    " data-fvalue2=\"{}\"",
-                    attr(&b.fmt_b.full(v, &o.locale))
-                ));
-            }
-            if let (Some(ii), Some(jj)) = (b.ia[i], b.jb[i]) {
-                data.push_str(&format!(" data-bivar=\"{ii},{jj}\""));
-            }
         }
         let inner = if title.is_empty() {
             "/>".to_string()
@@ -1816,16 +1800,6 @@ fn render_with_model(
                 serde_json::to_string(&labels).unwrap_or_default(),
             ));
         }
-    }
-    if let Fill::Bivariate(b) = &m.fill {
-        attrs.push((
-            "data-bivar-titles",
-            serde_json::to_string(&[
-                b.title_a.clone().unwrap_or_default(),
-                b.title_b.clone().unwrap_or_default(),
-            ])
-            .unwrap_or_default(),
-        ));
     }
     if let Some(hb) = &m.hexbin {
         attrs.push(("data-hexbin", hexbin::fmt_num(hb.width)));
@@ -2398,6 +2372,9 @@ fn summary(o: &RenderOptions, m: &Model, extra_self: usize) -> String {
             ));
         }
         Fill::Plain(_) => {}
+        // `summary()` is shared by both render paths (`plot::build`'s
+        // `geom_sf` path calls it too, via `super::summary`) — unlike the
+        // per-row render loop above, this sentence is live for maps.
         Fill::Bivariate(b) => {
             let a_name = b.title_a.as_deref().unwrap_or("the first measure");
             let b_name = b.title_b.as_deref().unwrap_or("the second measure");
