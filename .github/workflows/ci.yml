@@ -301,6 +301,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # #493: a release tag can land on this same commit while this job is
+      # still running (pushing to master, which triggers this run, and tagging
+      # it `vYYYY.MM.DD` are two separate steps of the release). Capturing the
+      # exact `git describe` build.rs will see *now*, in this checkout, and
+      # shipping it alongside the wasm build means every later job compares
+      # against the describe this wasm was actually built with — not a fresh
+      # `git describe` of its own that might run after the tag shows up.
+      - name: Capture the build's git describe (for version_test.mjs)
+        run: |
+          git describe --tags --match 'v*' --long --dirty --abbrev=7 \
+            > .build-describe.txt 2>/dev/null || true
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -340,7 +352,7 @@ jobs:
       - name: Build the dashboard CLI
         run: cargo build --locked --bin dashboard
 
-      - name: Upload web/pkg, web/localext and the dashboard CLI
+      - name: Upload web/pkg, web/localext, the dashboard CLI and the build describe
         uses: actions/upload-artifact@v4
         with:
           name: web-build
@@ -348,6 +360,7 @@ jobs:
             web/pkg
             web/localext
             target/debug/dashboard
+            .build-describe.txt
           retention-days: 1
 
   web-mjs-shard:
@@ -368,10 +381,11 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      # Full history + tags: tests/web/version_test.mjs computes its own
-      # `git describe` and compares it against the wasm build's embedded
-      # version (built with full history in web-build) — a shallow checkout
-      # here makes `git describe` fail and the comparison mismatch (#464).
+      # Full history + tags, mainly so a non-CI run of version_test.mjs here
+      # (or any other git-describe-ing test) still works; the version check
+      # itself now reads the web-build artifact's .build-describe.txt (#493)
+      # rather than re-running `git describe` against this (later, possibly
+      # post-tag) checkout.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
