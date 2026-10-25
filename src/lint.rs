@@ -444,6 +444,17 @@ where
                     &mut diags,
                 );
             }
+            // #504: a ::ROWSELECT / ::TOTALS / ::EMPTY directive right above
+            // this statement was waiting for *this* table — which just got
+            // gated out by `-- @requires`, not skipped itself (blueprints put
+            // `@requires` on the content statement, after its directives).
+            // Its "Not available" card gets no row-select / totals-check /
+            // empty-is-expected; without this, the pending state would carry
+            // on to the next real table and get checked against *that* one
+            // instead (a false `interaction/shared-unused` et al.).
+            pending_rowselect = None;
+            next_totals = None;
+            empty_msg = false;
             continue;
         }
 
@@ -5801,6 +5812,46 @@ mod design_tests {
         // The real name is unaffected — no clash to report here anyway since
         // there's only one claimant, but the typo'd name itself is flagged.
         assert!(!has(&d, "interaction/rowselect-shared-name"), "{d:?}");
+    }
+
+    /// #504: `-- @requires` gates the table in front of which a
+    /// `::ROWSELECT` (with its own `-- @shared`) sits, but not the
+    /// `::ROWSELECT` itself — the directive's pending state must not then
+    /// leak onto the *next* (unrelated) table and get checked against it.
+    /// The issue's own repro: a gated `series` table with `-- @shared series`
+    /// above its `::ROWSELECT`, followed by a plain `Method` table.
+    #[test]
+    fn requires_gating_a_table_also_drops_its_rowselects_pending_shared_check() {
+        let d = check(
+            "-- @shared series\n\
+             SELECT 'single'::ROWSELECT;\n\
+             -- @requires missing.parquet\n\
+             SELECT unique_id AS series ::TABLE FROM read_parquet('missing.parquet');\n\
+             \n\
+             SELECT method AS \"Method\" ::TABLE, 1 AS \"Series\" FROM (VALUES ('a'), ('b')) t(method);",
+            |q| {
+                if q.contains("missing.parquet") {
+                    // glob(): no files match → the table is gated out.
+                    Ok(vec![json!({ "n": "0" }).as_object().unwrap().clone()])
+                } else if q.contains("'single'") {
+                    Ok(vec![json!({ "c0": "single" }).as_object().unwrap().clone()])
+                } else {
+                    let methods = ["a", "b"];
+                    Ok(rows(2, |i| {
+                        json!({ "Method": methods[i], "Series": 1 })
+                    }))
+                }
+            },
+        );
+        // The gated statement: a note, not an error.
+        assert!(has(&d, "optional/missing"), "{d:?}");
+        // Before the fix, the ::ROWSELECT's pending `-- @shared series`
+        // carried over and was checked against the Method table (which sets
+        // Method, not series) — a false shared-unused. Gated out, it must
+        // not be checked against anything else either.
+        assert!(!has(&d, "interaction/shared-unused"), "{d:?}");
+        assert!(!has(&d, "interaction/rowselect-shared-name"), "{d:?}");
+        assert!(passes(&d, true), "{d:?}");
     }
 
     #[test]
