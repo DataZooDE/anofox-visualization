@@ -624,6 +624,20 @@ const LINE_OVERHEAD: u64 = 1;
 /// some unrelated file (review of #530, the BLOCKER).
 const HEADER_MAGIC: &str = "{\"anofox_state\"";
 
+/// Is `owner_uid` an acceptable owner for a path [`Store::open`] touches —
+/// this process (`euid`) or root? Pulled out of the two call sites (the
+/// parent directory and the file itself) so the decision is unit-tested
+/// directly: fabricating a *real* file owned by a different uid needs
+/// root, which this sandbox doesn't have (confirmed by hand with a
+/// Docker bind-mount, owned by an unprivileged container uid, which
+/// `Store::open` correctly refused — not wired into the automated suite,
+/// since relying on Docker being available in CI for one edge case
+/// seemed the wrong trade-off; this pure function is what the real check
+/// actually decides on).
+fn owner_is_acceptable(owner_uid: u32, euid: u32) -> bool {
+    owner_uid == euid || owner_uid == 0
+}
+
 fn looks_like_our_header_prefix(buf: &str) -> bool {
     if buf.len() <= HEADER_MAGIC.len() {
         HEADER_MAGIC.starts_with(buf)
@@ -702,7 +716,7 @@ impl Store {
             ));
         }
         let euid = unsafe { libc::geteuid() };
-        if dstat.st_uid != euid && dstat.st_uid != 0 {
+        if !owner_is_acceptable(dstat.st_uid, euid) {
             return Err(format!(
                 "options.state.path: '{}' is not owned by this server (or root)",
                 parent_raw.display()
@@ -750,7 +764,7 @@ impl Store {
                 path.display()
             ));
         }
-        if fmeta.uid() != euid && fmeta.uid() != 0 {
+        if !owner_is_acceptable(fmeta.uid(), euid) {
             return Err(format!(
                 "options.state.path: '{}' is not owned by this server (or root)",
                 path.display()
@@ -2021,6 +2035,74 @@ mod tests {
         let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(e.contains("not a regular file"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn owner_is_acceptable_only_for_euid_or_root() {
+        assert!(
+            owner_is_acceptable(1000, 1000),
+            "the server's own euid owns it"
+        );
+        assert!(owner_is_acceptable(0, 1000), "root-owned is always trusted");
+        assert!(
+            !owner_is_acceptable(1001, 1000),
+            "a different, non-root local account owns it"
+        );
+        assert!(
+            !owner_is_acceptable(1000, 0),
+            "even running as root, a non-root owner is refused"
+        );
+    }
+
+    /// A file genuinely owned by a different (non-root) uid — needs real
+    /// privilege to set up, which this sandbox doesn't have as a plain
+    /// user, so it's faked with a Docker container bind-mounting a
+    /// throwaway, briefly world-writable directory and `chown`-ing the
+    /// file to an unprivileged uid inside its own user namespace. `#
+    /// [ignore]`d (not part of the default `cargo test` gate) since it
+    /// needs Docker; run explicitly with `cargo test --lib -- --ignored
+    /// a_file_owned_by_a_different_uid`. [`owner_is_acceptable_only_for_
+    /// euid_or_root`] above tests the same decision without that
+    /// dependency.
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn a_file_owned_by_a_different_uid_is_refused() {
+        let root = tmp("foreign-uid");
+        mkdir(&root);
+        let p = root.join("state.jsonl");
+        // Briefly world-writable so the container (a different uid) can
+        // write into it; restored before `Store::open` ever sees it, so
+        // this isn't exercising the *directory* ownership check too.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        let status = std::process::Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-u",
+                "12345:12345",
+                "-v",
+                &format!("{}:/mnt", root.display()),
+                "alpine",
+                "sh",
+                "-c",
+                "printf 'not a store\\n' > /mnt/state.jsonl && chmod 666 /mnt/state.jsonl",
+            ])
+            .status();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        match status {
+            Ok(s) if s.success() => {}
+            other => panic!("docker setup failed (is Docker installed and usable?): {other:?}"),
+        }
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("not owned by this server"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[cfg(unix)]
