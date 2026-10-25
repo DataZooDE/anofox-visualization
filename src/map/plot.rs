@@ -165,6 +165,12 @@ pub(super) fn build(
     let mut xs = Vec::with_capacity(n);
     let mut class_idxs: Vec<Value> = Vec::with_capacity(n);
     let mut titles: Vec<Value> = Vec::with_capacity(n);
+    // `::BIVARIATE` (M2d): a second measure's raw/formatted value and the
+    // composite class, plus the bivariate-specific tooltip (`Bivar::title_of`,
+    // which replaces the generic classed/measure one built above).
+    let mut value2s: Vec<Value> = Vec::with_capacity(n);
+    let mut fvalue2s: Vec<Value> = Vec::with_capacity(n);
+    let mut bivars: Vec<Value> = Vec::with_capacity(n);
     // `::HEXBIN` (M2c) takes over the point pass entirely — the per-row
     // features layer draws nothing (`m.fill`'s `ValueScale.values` is
     // indexed by *cell*, not row, when hexbin is active — same convention,
@@ -242,6 +248,18 @@ pub(super) fn build(
                     Value::Na,
                 ),
                 Fill::Plain(_) => (Value::Na, Value::Na),
+                // `ScaleFillBivariate`/`fill::BivariateScale::map_to_color`
+                // read a 1-indexed `"{i}-{j}"` composite class string
+                // (biscale's own convention); `measure` carries the row's
+                // own `a` value, same contract as `Fill::Measure` above, so
+                // `data-value`/`data-fvalue` keep working unchanged.
+                Fill::Bivariate(b) => (
+                    match (b.ia[i], b.jb[i]) {
+                        (Some(ii), Some(jj)) => Value::Str(format!("{}-{}", ii + 1, jj + 1)),
+                        _ => Value::Na,
+                    },
+                    b.a[i].map(Value::Float).unwrap_or(Value::Na),
+                ),
             }
         };
         fill_vals.push(fill);
@@ -291,8 +309,31 @@ pub(super) fn build(
             None => (Value::Na, Value::Na),
         };
         class_idxs.push(class_idx);
-        titles.push(title);
+        if let Fill::Bivariate(b) = &m.fill {
+            let label = m.label_of(i);
+            titles.push(na_if_empty(b.title_of(i, &label, &o.locale)));
+            match b.b[i] {
+                Some(v) => {
+                    value2s.push(Value::Float(v));
+                    fvalue2s.push(Value::Str(b.fmt_b.full(v, &o.locale)));
+                }
+                None => {
+                    value2s.push(Value::Na);
+                    fvalue2s.push(Value::Na);
+                }
+            }
+            bivars.push(match (b.ia[i], b.jb[i]) {
+                (Some(ii), Some(jj)) => Value::Str(format!("{ii},{jj}")),
+                _ => Value::Na,
+            });
+        } else {
+            titles.push(title);
+            value2s.push(Value::Na);
+            fvalue2s.push(Value::Na);
+            bivars.push(Value::Na);
+        }
     }
+    let has_bivariate = matches!(m.fill, Fill::Bivariate(_));
 
     // ---- graduated symbols (`::SIZE`, slice 3): a second `geom_sf` layer,
     // one anchor point per qualifying row (the features layer above
@@ -343,7 +384,9 @@ pub(super) fn build(
                     None => "no data".to_string(),
                 },
                 Fill::Category { .. } => m.text(m.category, i),
-                Fill::Plain(_) => String::new(),
+                // Never built alongside graduated symbols (`Model::new`
+                // only builds `Fill::Bivariate` when `symbols.is_none()`).
+                Fill::Plain(_) | Fill::Bivariate(_) => String::new(),
             };
             let size_title = sym.title.clone().unwrap_or_else(|| "Size".to_string());
             let mut title = if matches!(m.fill, Fill::Measure(_)) {
@@ -430,6 +473,9 @@ pub(super) fn build(
         ("xkey".into(), xs),
         ("class".into(), class_idxs),
         ("title".into(), titles),
+        ("value2".into(), value2s),
+        ("fvalue2".into(), fvalue2s),
+        ("bivar".into(), bivars),
     ];
     let mut features_aes = Aes::new()
         .label("label")
@@ -449,6 +495,13 @@ pub(super) fn build(
         .data_attr("x", "xkey");
     if classes.is_some() {
         features_aes = features_aes.data_attr("class", "class").tooltip("title");
+    }
+    if has_bivariate {
+        features_aes = features_aes
+            .tooltip("title")
+            .data_attr("value2", "value2")
+            .data_attr("fvalue2", "fvalue2")
+            .data_attr("bivar", "bivar");
     }
     let has_fill_aes = !matches!(m.fill, Fill::Plain(_));
     if has_fill_aes {
@@ -599,6 +652,30 @@ pub(super) fn build(
         if let Some(scale) = fill_scale {
             plot = plot.scale_fill(fill::Reaimed(Aesthetic::Fill, scale));
         }
+    }
+    // `::BIVARIATE` (M2d): the ordinary per-aesthetic Fill legend doesn't
+    // draw a 2-D grid, so it's hidden (`LegendPosition::None`, unless a
+    // `::LEGEND` override already forced a position above) in favour of
+    // `GeomBivariateLegend` — built from the *same* base/color_a/color_b
+    // `bivariate.rs::of` used, so its 9 swatches match the features' exactly.
+    let bivariate_legend = match &m.fill {
+        Fill::Bivariate(b) if forced_position.is_none() => {
+            use ggplot_rs::geom::bivariate_legend::GeomBivariateLegend;
+            Some(GeomBivariateLegend {
+                nx: 3,
+                ny: 3,
+                base: b.base,
+                color_x: b.color_a,
+                color_y: b.color_b,
+                x_name: b.title_a.clone().unwrap_or_default(),
+                y_name: b.title_b.clone().unwrap_or_default(),
+                ..Default::default()
+            })
+        }
+        _ => None,
+    };
+    if let Some(geom) = bivariate_legend {
+        plot = plot.bivariate_legend(geom);
     }
     let _ = legend_at;
 
@@ -868,6 +945,11 @@ pub(super) fn build(
     // time.
     if let Some(pos) = forced_position {
         plot = plot.legend_position(pos);
+    } else if matches!(m.fill, Fill::Bivariate(_)) {
+        // The dedicated `GeomBivariateLegend` furniture layer above is the
+        // real legend; the ordinary per-aesthetic one would just list the
+        // 9 composite classes as a vertical bar list.
+        plot = plot.legend_position(LegendPosition::None);
     } else if discrete_fill {
         plot = plot.legend_position(LegendPosition::Top);
     }

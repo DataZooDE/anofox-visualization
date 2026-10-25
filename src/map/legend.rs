@@ -29,6 +29,14 @@ pub(super) enum Legend {
         ticks: Vec<String>,
         counts: Vec<usize>,
     },
+    /// `::BIVARIATE` (M2d): a 3×3 grid, A increasing to the right, B
+    /// increasing upward, with per-cell counts and two axis captions.
+    Bivariate {
+        colors: [[Rgb; 3]; 3],
+        counts: [[usize; 3]; 3],
+        x_title: String,
+        y_title: String,
+    },
 }
 
 /// Extra content stacked under the main legend.
@@ -83,6 +91,24 @@ pub(super) fn legend_title(name: &str, fmt: &crate::format::ValueFmt) -> Option<
         Some(u) => format!("{name} ({u})"),
         None => name.to_string(),
     })
+}
+
+/// `s`, cut short with "…" so `tw(s) <= max_w` (a long measure name next to
+/// the bivariate legend's small 3×3 grid, M2d) — `tw` is the same
+/// `text_width` closure every caller already has.
+fn truncate_to_width(tw: &dyn Fn(&str) -> f64, s: &str, max_w: f64) -> String {
+    if tw(s) <= max_w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for ch in s.chars() {
+        let cand = format!("{out}{ch}…");
+        if tw(&cand) > max_w {
+            break;
+        }
+        out.push(ch);
+    }
+    format!("{out}…")
 }
 
 /// The largest "nice" value (1, 2, 2.5, 5 × 10ⁿ) that is ≤ `x` (`x > 0`).
@@ -229,6 +255,11 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
             (Fill::Measure(s), None) => (0..m.rows)
                 .filter(|i| s.values[*i].is_none() && !m.features[*i].is_empty())
                 .count(),
+            (Fill::Bivariate(b), _) => (0..m.rows)
+                .filter(|i| {
+                    (b.ia[*i].is_none() || b.jb[*i].is_none()) && !m.features[*i].is_empty()
+                })
+                .count(),
             _ => 0,
         }
     };
@@ -238,6 +269,52 @@ pub(super) fn legend_of(o: &RenderOptions, m: &Model, w: f64, h: f64) -> LegendB
     let mut bar = 0.0;
     let (legend, mut cw, mut ch) = match &m.fill {
         Fill::Plain(_) => (Legend::None, 0.0, 0.0),
+        // `::BIVARIATE` (M2d, D10): a 3×3 grid, 13 px cells, plus two axis
+        // captions — box size per plan-maps.md §15: `w = 14 + 39 + 4 +
+        // max(captionA width - 39, 0)`, `h = 39 + 2*ROW` (the "A × B"
+        // heading, when both are titled, adds its own `ROW` below, through
+        // the generic `title` slot every other legend uses).
+        Fill::Bivariate(b) => {
+            // Captions are truncated to the panel's own legend width ceiling
+            // (`max_w`, already clamped to the panel) — a long measure name
+            // ("Customers per 10,000 people") would otherwise size (or
+            // overflow) the box far past the map it sits on; the full name
+            // is still in the tooltip and `data-bivar-titles`.
+            let cap_w = (max_w - 20.0).max(40.0);
+            let x_title = truncate_to_width(&tw, &b.title_a.clone().unwrap_or_default(), cap_w);
+            // `y_title` is drawn rotated (vertical run), so its *readable*
+            // length is bounded by the grid's own height, not the panel's
+            // width.
+            let y_title = truncate_to_width(
+                &tw,
+                &b.title_b.clone().unwrap_or_default(),
+                3.0 * 13.0 + ROW,
+            );
+            if let (false, false) = (x_title.is_empty(), y_title.is_empty()) {
+                title = Some(truncate_to_width(
+                    &tw,
+                    &format!("{x_title} × {y_title}"),
+                    cap_w,
+                ));
+            }
+            let grid = 3.0 * 13.0;
+            let cap_a_w = tw(&format!("{x_title} →")).min(cap_w);
+            let cw = 14.0 + grid + 4.0 + (cap_a_w - grid).max(0.0);
+            // One `ROW` here for the x caption below the grid; the generic
+            // `if let Some(title)` step further down adds the second `ROW`
+            // for the "A × B" heading, when both measures are named.
+            let ch = grid + ROW;
+            (
+                Legend::Bivariate {
+                    colors: b.colors,
+                    counts: b.counts,
+                    x_title,
+                    y_title,
+                },
+                cw,
+                ch,
+            )
+        }
         Fill::Category { levels, .. } => {
             let rows = category_rows(levels, max_w);
             let cw = rows
@@ -567,6 +644,58 @@ pub(super) fn legend_svg(
                 g.push_str(&text(tx, y + 15.0 + ROW / 2.0, anchor, &ink, "", s));
             }
             y += 15.0 + ROW;
+        }
+        Legend::Bivariate {
+            colors,
+            counts,
+            x_title,
+            y_title,
+        } => {
+            const CELL: f64 = 13.0;
+            let y_cap_w = if y_title.is_empty() { 0.0 } else { 14.0 };
+            let grid_x = PAD + y_cap_w;
+            let grid_top = y;
+            for (i, row) in colors.iter().enumerate() {
+                for (j, c) in row.iter().enumerate() {
+                    // B increases upward: level 0 is the bottom row.
+                    let cx = grid_x + i as f64 * CELL;
+                    let cy = grid_top + (2 - j) as f64 * CELL;
+                    g.push_str(&format!(
+                        "<rect x=\"{cx:.1}\" y=\"{cy:.1}\" width=\"{CELL}\" height=\"{CELL}\" fill=\"{}\"/>",
+                        hex(*c)
+                    ));
+                    let n = counts[i][j];
+                    if n > 0 {
+                        g.push_str(&format!(
+                            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"7\" fill=\"{}\">{n}</text>",
+                            cx + CELL / 2.0,
+                            cy + CELL / 2.0,
+                            hex(t.text_on(*c))
+                        ));
+                    }
+                }
+            }
+            y = grid_top + 3.0 * CELL + ROW;
+            if !x_title.is_empty() {
+                g.push_str(&text(
+                    grid_x,
+                    y - ROW / 2.0,
+                    "start",
+                    &muted,
+                    "",
+                    &format!("{x_title} →"),
+                ));
+            }
+            if !y_title.is_empty() {
+                g.push_str(&format!(
+                    "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"{font}\" font-size=\"{FONT}\" fill=\"{muted}\" transform=\"rotate(-90 {:.1} {:.1})\">{} →</text>",
+                    PAD + y_cap_w / 2.0,
+                    grid_top + 1.5 * CELL,
+                    PAD + y_cap_w / 2.0,
+                    grid_top + 1.5 * CELL,
+                    esc(y_title)
+                ));
+            }
         }
     }
     if lg.nodata > 0 {

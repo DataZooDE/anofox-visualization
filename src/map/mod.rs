@@ -29,6 +29,7 @@
 //! classed, `data-class` (1-based), plus a `<title>`; the root carries
 //! `data-map`, `data-proj` and `data-classes` (the class labels as JSON).
 
+mod bivariate;
 pub(crate) mod boundaries;
 pub(crate) mod classes;
 mod fill;
@@ -49,6 +50,7 @@ use crate::{
     cell_num, find_role, legend_position_of, role_num, role_str, value_fmt, value_str, Column,
     Kind, Ramp, RenderOptions, Role,
 };
+use bivariate::Bivar;
 use classes::{Classes, Method};
 use flows::Flows;
 use ggplot_rs::prelude::Value;
@@ -371,6 +373,8 @@ enum Fill {
     },
     /// Nothing: a light brand tint.
     Plain(Rgb),
+    /// `::BIVARIATE` (M2d): two measures, each in tertiles — a 3×3 palette.
+    Bivariate(Box<Bivar>),
 }
 
 /// The colour scale of a measure.
@@ -684,8 +688,20 @@ impl<'a> Model<'a> {
         // makes the sequential ramp start a quarter in, so pale symbols
         // don't vanish into it
         let has_base = has_explicit_basemap || region_backdrop;
+        // `::BIVARIATE` (M2d): a second measure, crossed with the first in
+        // tertiles — only when there's a measure to cross it with, and only
+        // over areas/points (symbols take the point pass; hexbin takes over
+        // entirely); both are checked by `map_diags`, which warns instead of
+        // silently drawing a plain/measure map.
+        let bivariate_col = find_role(cols, Role::Bivariate)
+            .filter(|c| c.values.iter().any(|v| cell_num(v).is_some()));
         let fill = if let Some(hb) = &hexbin {
             hexbin::fill_of(o, cols, hb)
+        } else if let (Some(m), Some(b), true) = (&measure, &bivariate_col, symbols.is_none()) {
+            match bivariate::of(o, cols, m, b, rows) {
+                Some(biv) => Fill::Bivariate(Box::new(biv)),
+                None => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
+            }
         } else {
             match (&measure, category) {
                 (Some(m), _) => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
@@ -1434,6 +1450,10 @@ fn render_with_model(
                 false,
             ),
             Fill::Plain(c) => (*c, None, None, false),
+            Fill::Bivariate(b) => match (b.ia[i], b.jb[i]) {
+                (Some(ii), Some(jj)) => (b.colors[ii][jj], b.a[i], None, false),
+                _ => (hatch_bg, b.a[i], None, true),
+            },
         };
         // the tooltip: "label: value", as the plotting engine wrote it
         let shown = match (&m.fill, value) {
@@ -1456,6 +1476,11 @@ fn render_with_model(
                     c.label(k, &|v| s.fmt.short(v, &o.locale))
                 ));
             }
+        }
+        // `::BIVARIATE` (M2d): its own tooltip shape replaces the generic
+        // one built above (which only knows about one measure).
+        if let Fill::Bivariate(b) = &m.fill {
+            title = b.title_of(i, &label, &o.locale);
         }
         // the key (when no label names it) and class first, then the row
         // metadata the browser reads
@@ -1480,6 +1505,18 @@ fn render_with_model(
         }
         if !label.is_empty() {
             data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
+        }
+        if let Fill::Bivariate(b) = &m.fill {
+            if let Some(v) = b.b[i] {
+                data.push_str(&format!(" data-value2=\"{v}\""));
+                data.push_str(&format!(
+                    " data-fvalue2=\"{}\"",
+                    attr(&b.fmt_b.full(v, &o.locale))
+                ));
+            }
+            if let (Some(ii), Some(jj)) = (b.ia[i], b.jb[i]) {
+                data.push_str(&format!(" data-bivar=\"{ii},{jj}\""));
+            }
         }
         let inner = if title.is_empty() {
             "/>".to_string()
@@ -1608,6 +1645,9 @@ fn render_with_model(
                     false,
                 ),
                 Fill::Plain(col) => (*col, None, None, false),
+                // Never built alongside graduated symbols (`Model::new`
+                // only builds `Fill::Bivariate` when `symbols.is_none()`).
+                Fill::Bivariate(_) => (hatch_bg, None, None, false),
             };
             let shown = match (&m.fill, value) {
                 (Fill::Measure(s), Some(v)) => fmt_full(s, v),
@@ -1776,6 +1816,16 @@ fn render_with_model(
                 serde_json::to_string(&labels).unwrap_or_default(),
             ));
         }
+    }
+    if let Fill::Bivariate(b) = &m.fill {
+        attrs.push((
+            "data-bivar-titles",
+            serde_json::to_string(&[
+                b.title_a.clone().unwrap_or_default(),
+                b.title_b.clone().unwrap_or_default(),
+            ])
+            .unwrap_or_default(),
+        ));
     }
     if let Some(hb) = &m.hexbin {
         attrs.push(("data-hexbin", hexbin::fmt_num(hb.width)));
@@ -2348,6 +2398,25 @@ fn summary(o: &RenderOptions, m: &Model, extra_self: usize) -> String {
             ));
         }
         Fill::Plain(_) => {}
+        Fill::Bivariate(b) => {
+            let a_name = b.title_a.as_deref().unwrap_or("the first measure");
+            let b_name = b.title_b.as_deref().unwrap_or("the second measure");
+            let cell = |i: usize, j: usize| b.counts[i][j].to_string();
+            out.push_str(&format!(
+                ". {a_name} × {b_name} in tertiles: high–high {}, low–low {}, high {a_name}–low {b_name} {}, low {a_name}–high {b_name} {}",
+                cell(2, 2),
+                cell(0, 0),
+                cell(2, 0),
+                cell(0, 2),
+            ));
+            let missing = drawn
+                .iter()
+                .filter(|i| b.ia[**i].is_none() || b.jb[**i].is_none())
+                .count();
+            if missing > 0 {
+                out.push_str(&format!("; {missing} without data"));
+            }
+        }
     }
     out.push('.');
     out

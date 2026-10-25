@@ -205,3 +205,11 @@ SELECT 50 * floor(dc_km / 50) + 25 AS "Road km to the nearest DC" ::XAXIS,
        'Coverage falls off with distance'::TITLE,
        'Customers per 10,000 inhabitants of all districts in each 50-km band of road distance to their nearest DC: how much of the market we reach at each distance.'::INFO
 FROM dc_cover GROUP BY 1 ORDER BY 1;
+
+SELECT 12::COL;
+SELECT 560::HEIGHT;
+SELECT ags ::REGION, round(dc_km)::INTEGER AS "Road km to the nearest DC" ::BARCHART,
+       round(per_10k, 2) AS "Customers per 10,000 people" ::BIVARIATE, district ::LABEL,
+       'Far and thinly covered districts share one corner of the legend'::TITLE,
+       'Both measures in thirds: distance to the nearest DC and customers reached per 10,000 people.'::INFO
+FROM dc_cover ORDER BY ags;

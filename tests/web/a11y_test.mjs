@@ -123,4 +123,46 @@ assert.deepEqual(chartMarks({ querySelectorAll: () => [point, today] }), [point]
   const rows = [...html.matchAll(/<tr><td>(.*?)<\/td>/g)].map((m) => m[1]);
   assert.deepEqual(rows, ["Dortmund DC", "Hamburg DC"]);
 }
+
+// M2d: a bivariate map's as-table has a "value 2" column (data-fvalue2) and
+// the class column reads "{lvl_i} {A} · {lvl_j} {B}" from data-bivar + the
+// root's data-bivar-titles.
+{
+  const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const fmtTipValue = (v) => String(Math.round(Number(v) * 1000) / 1000);
+  const mapTableHtml = new Function("escapeHtml", "fmtTipValue", `${grab("mapTableHtml")}\nreturn mapTableHtml;`)(
+    escapeHtml,
+    fmtTipValue
+  );
+  const f = (a) => el(a);
+  const marks = [
+    f({
+      "data-row": "0",
+      "data-label": "Nord",
+      "data-value": "400",
+      "data-fvalue": "400 km",
+      "data-value2": "1.2",
+      "data-fvalue2": "1.2%",
+      "data-bivar": "2,0",
+    }),
+    f({
+      "data-row": "1",
+      "data-label": "Ost",
+      "data-value": "50",
+      "data-fvalue": "50 km",
+      "data-value2": "9.1",
+      "data-fvalue2": "9.1%",
+      "data-bivar": "0,2",
+    }),
+  ];
+  const svg = {
+    getAttribute: (k) => (k === "data-bivar-titles" ? '["Distance","Coverage"]' : null),
+    querySelectorAll: () => marks,
+  };
+  const html = mapTableHtml(svg, 200, "Coverage");
+  assert.ok(html.includes('<th scope="col">value 2</th>'), html);
+  assert.ok(html.includes("<td>1.2%</td>"), html);
+  assert.ok(html.includes("<td>high Distance · low Coverage</td>"), html);
+  assert.ok(html.includes("<td>low Distance · high Coverage</td>"), html);
+}
 console.log("a11y_test: ok");
