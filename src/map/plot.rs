@@ -1,14 +1,17 @@
-//! #420 slice 1+2+3+4+5: build a plain polygon/point choropleth (measure,
+//! #420 slice 1+2+3+4+5+6: build a plain polygon/point choropleth (measure,
 //! category or classed fill; graduated `::SIZE` symbols; flows/hexbin as
-//! extra layers; region labels, a scale bar and a single-line pack
-//! attribution — [`eligible`]) as one real `GGPlot`, instead of our own
-//! hand-written SVG.
+//! extra layers; region labels, a scale bar and a pack attribution of any
+//! line count, including the BKG/VG2500-style multi-line stacked note —
+//! [`eligible`]) as one real `GGPlot`, instead of our own hand-written
+//! SVG.
 //!
-//! What's still unported: a BKG/VG2500-style *multi-line* stacked
-//! attribution (needs `GeomAttribution::row`, sipemu/ggplot-rs#250 —
-//! [`eligible`] keeps any map needing 2+ attribution lines on the old
-//! writer until that ships) and labels anchored to a symbol/flow-end
-//! point rather than a region polygon (`geom_sf_text`'s own job stops at
+//! The multi-line attribution uses `GeomAttribution::new(..).runs(..)`
+//! for the first line and `.line(..)` for each further line (ggplot-rs
+//! 0.31.0, sipemu/ggplot-rs#250) — same corner, stacked without
+//! overlapping.
+//!
+//! What's still unported: labels anchored to a symbol/flow-end point
+//! rather than a region polygon (`geom_sf_text`'s own job stops at
 //! polygons — ggplot2's convention too; see its module doc — a point/line
 //! anchor needs `geom_text`'s own offset/overlap support, not audited
 //! this slice).
@@ -48,16 +51,15 @@ type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 /// them in as extra layers on the same plot, through
 /// [`overlay::flow_layers`]/[`overlay::hexbin_layer`], instead of a
 /// separately-rendered-and-spliced fragment. A footer (slice 5) is allowed
-/// too, as long as it's at most a scale bar (`annotation_scale` — any
-/// count) plus *one* attribution line (`annotation_attribution`) —
-/// [`foot_of`]'s own line list, reused rather than duplicated, since "does
-/// this map need a footer, and how many lines" already depends on pack
-/// layers *and* the projection/span. 2+ lines (a `de-*`/BKG pack's own
-/// "© BKG … Datenquellen:" + sources note) need `GeomAttribution::row`
-/// (sipemu/ggplot-rs#250, not yet released) to stack without overlapping —
-/// still the old writer's job until then.
-pub(super) fn eligible(o: &RenderOptions, m: &Model, w: f64) -> bool {
-    foot_of(o, m, w).lines.len() <= 1
+/// too, now at any line count: a scale bar (`annotation_scale`) plus any
+/// number of attribution lines (`annotation_attribution`/`.line(..)`,
+/// ggplot-rs 0.31.0, sipemu/ggplot-rs#250) — [`foot_of`]'s own line list,
+/// reused rather than duplicated, since "does this map need a footer, and
+/// how many lines" already depends on pack layers *and* the
+/// projection/span. A `de-*`/BKG pack's 2-line "© BKG … Datenquellen:" +
+/// sources note stacks via `.line(..)` same as any other footer now.
+pub(super) fn eligible(_o: &RenderOptions, _m: &Model, _w: f64) -> bool {
+    true
 }
 
 /// Build the `GGPlot` and its extra root attributes (`data-map`, …) for an
@@ -86,15 +88,41 @@ pub(super) fn build(
     } else {
         forced.clone()
     };
+    // `fill::scale_for` (much further down) decides between a discrete
+    // (`Category`/classed `Measure`) and continuous `Measure` fill scale —
+    // computed here too, early, only to size the footer below; the later
+    // `discrete_fill` binding is the same expression, kept local to where
+    // it drives the legend position/scale construction.
+    let continuous_fill = !matches!(m.fill, Fill::Category { .. })
+        && !matches!(&m.fill, Fill::Measure(s) if s.classes.is_some());
     // `eligible` only allows a footer this path can draw itself (a scale
-    // bar and/or one attribution line, via `annotation_scale`/
+    // bar and/or any number of attribution lines, via `annotation_scale`/
     // `annotation_attribution` below) — reuse the old writer's own height
     // calc so layout reserves exactly the same room it always did (the
     // `frame.window` trick frame_of callers rely on: fitting into a
     // shorter area then reporting the *unshrunk* `w`×`h` window stretches
     // the trained coord_sf domain so the unused band lands at the bottom,
     // without this geom_sf path needing its own pixel-perfect margin).
-    let ft = foot_of(o, m, w);
+    // A continuous fill's legend lands at ggplot-rs's own default
+    // `LegendPosition::Right` (below), not the old writer's horizontal
+    // top bar `lg`/`foot_of` were both sized around — it isn't forced
+    // elsewhere (`forced_position` wins when given) — consuming ~90px of
+    // panel width that `foot_of`'s own room/shrink-to-fit math doesn't
+    // know about unless told. Found by rendering a continuous-fill
+    // `de-*` map at 390px width: the (now 2-line, since this slice)
+    // BKG/VG2500 attribution overflowed past the panel's own left edge,
+    // underneath the legend, without this. 90px is this build's own
+    // measured reservation (bar + tick labels + margins, fairly stable
+    // across locales/fonts since it's digits-only); there's no exposed
+    // pre-render API for ggplot-rs's actual legend geometry to use
+    // instead (same gap as the `legend_position_inside` one already
+    // noted below, sipemu/ggplot-rs#225).
+    let legend_reserve = if continuous_fill && forced_position.is_none() {
+        90.0
+    } else {
+        0.0
+    };
+    let ft = foot_of(o, m, w - legend_reserve);
     let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced.clone())?;
     let [x0, x1, y0, y1] = frame.window(w, h);
 
@@ -755,16 +783,36 @@ pub(super) fn build(
                 .max_width_px(90.0),
         );
     }
-    // `eligible` only let a map through with at most one line, so this
-    // runs at most once — a `de-*`/BKG pack's 2-line note stays on the old
-    // writer until `GeomAttribution::row` ships (module doc above).
-    if let Some(line) = ft.lines.first() {
-        let runs: Vec<(&str, Option<&str>)> = line.iter().map(|(s, u)| (s.as_str(), *u)).collect();
-        plot = plot.annotation_attribution_with(
-            GeomAttribution::new(String::new())
-                .corner(MapCorner::BottomRight)
-                .runs(runs),
-        );
+    // `ft.lines` holds every attribution line this map needs, already in
+    // top-to-bottom reading order (a `de-*`/BKG pack's own "© BKG …
+    // Datenquellen:" line, then its sources line, or a `world` layer's
+    // single "Made with Natural Earth" line). `GeomAttribution`'s row 0
+    // (`.runs(..)`) is the row closest to the corner's own edge — for
+    // `BottomRight` that's the *bottom* line, i.e. `ft.lines`' *last*
+    // entry — and each further `.line(..)` call stacks one row further
+    // away (upward), so feeding `ft.lines` in reverse here is what
+    // reproduces the old writer's top-to-bottom order (ggplot-rs 0.31.0,
+    // sipemu/ggplot-rs#250).
+    if let Some((closest, farther)) = ft.lines.split_last() {
+        fn as_runs<'a>(
+            line: &'a [(String, Option<&'static str>)],
+        ) -> Vec<(&'a str, Option<&'static str>)> {
+            line.iter().map(|(s, u)| (s.as_str(), *u)).collect()
+        }
+        let mut attribution = GeomAttribution::new(String::new())
+            .corner(MapCorner::BottomRight)
+            .runs(as_runs(closest));
+        for line in farther.iter().rev() {
+            attribution = attribution.line(as_runs(line));
+        }
+        // `foot_of`'s own `ft.size` already shrinks the font to fit this
+        // panel's width (incl. the scale bar's own reservation) — reuse
+        // it instead of `GeomAttribution::new`'s fixed 7.5px default,
+        // same as the old writer's `foot_svg` did. `text_size` is a plain
+        // `pub` field; `#[non_exhaustive]` only blocks struct-literal
+        // construction, not mutating fields on an already-built value.
+        attribution.text_size = ft.size;
+        plot = plot.annotation_attribution_with(attribution);
     }
 
     // `crate::void_theme` (pie/gauge/map/sparkline) zeroes `legend_margin`
