@@ -623,6 +623,7 @@ fn badge_status(text: &str) -> Option<Status> {
         "prüfen",
         "offen",
         "delayed",
+        "late",
         "slow",
         "verzögert",
     ];
@@ -630,7 +631,6 @@ fn badge_status(text: &str) -> Option<Status> {
         "bad",
         "fail",
         "failed",
-        "late",
         "error",
         "down",
         "critical",
@@ -2764,6 +2764,20 @@ mod tests {
         assert_eq!(badge_status("alarm"), Some(Status::Bad));
         assert_eq!(badge_status("Fehler"), Some(Status::Bad));
         assert_eq!(badge_status("rerun"), None);
+    }
+
+    /// #553: "late" is its own warning (amber), distinct from "failed"
+    /// (red) — before this, both landed in the BAD bucket and a late node
+    /// and a failed node were colour-identical in the diagram. "delayed"
+    /// (already warn) and "late" share the warn colour, which is fine:
+    /// they're both timing problems, as opposed to a hard failure.
+    #[test]
+    fn late_is_a_warning_not_a_failure() {
+        assert_eq!(badge_status("late"), Some(Status::Warn));
+        assert_eq!(badge_status("running late"), Some(Status::Warn));
+        assert_eq!(badge_status("delayed"), Some(Status::Warn));
+        assert_eq!(badge_status("failed"), Some(Status::Bad));
+        assert_ne!(badge_status("late"), badge_status("failed"));
     }
 
     /// M2 motion: story steps keyed by node id, the entrance mode, edge

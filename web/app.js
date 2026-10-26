@@ -14379,9 +14379,9 @@ function badgeHtml(text) {
   // English and German status words (a dashboard may be localised)
   if (/\b(ok|good|on.?track|pass(ed)?|active|done|up|healthy|nominal|green|low|grow(ing|th)?|ris(e|ing)|improv(ed|ing)|correct|right|met|achieved|erreicht|gut|aktiv|erledigt)\b/.test(t))
     cls = "badge-good";
-  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|delayed|slow|knapp|prüfen|offen|verzögert)\b/.test(t))
+  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|delayed|late|slow|knapp|prüfen|offen|verzögert)\b/.test(t))
     cls = "badge-warn";
-  else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach|alarm|alert|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
+  else if (/\b(bad|fail(ed)?|error|down|critical|red|overdue|stale|high|breach|alarm|alert|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
     cls = "badge-bad";
   return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
 }
