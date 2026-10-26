@@ -534,6 +534,8 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-step-next{order:3;margin-left:auto}
 .dp-step-next[aria-disabled=true]{cursor:not-allowed;filter:none;background:var(--ax-input-bg);color:var(--ax-muted);border:1px solid var(--ax-line);box-shadow:none}
 .dp-step-next[aria-disabled=true]:hover{filter:none;background:var(--ax-input-bg)}
+/* #523: the ⤓ HTML export's offline note, replacing a dropped ::GATE's message/disabled Next */
+.dp-step-note{order:4;flex-basis:100%;margin:.4rem 0 0;font-size:.78rem;font-weight:500;color:var(--ax-muted)}
 @media(max-width:600px){
   .dp-step-list{display:none}
   .dp-step-foot{flex-wrap:wrap}

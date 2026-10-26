@@ -10516,11 +10516,18 @@ async function runOnce(fresh = true, pv = preview) {
         const pane = document.createElement("div");
         pane.className = "grid dp-steppane";
         pane.style.display = "none";
+        // #523: read by downloadHtml() — "1" if this marker carries its own
+        // ::GATE, so the export's offline note only appears on a sequence
+        // that actually had one to drop.
+        pane.dataset.dpGated = gateRole ? "1" : "";
         const h2 = document.createElement("h2");
         h2.className = "dp-step-title";
         h2.tabIndex = -1;
         h2.textContent = label || `Step ${g.panes.length + 1}`;
-        h2.dataset.dpLabel = label || ""; // read by downloadHtml()'s flattened "Step n of N · Label"
+        // #523: the raw label (downloadHtml()'s export reads this to build
+        // both the print heading and the offline stepper's own "Step n of N
+        // · Label" progress text as the viewer navigates).
+        h2.dataset.dpLabel = label || "";
         pane.appendChild(h2);
         g.sec.appendChild(pane);
         g.panes.push(pane);
@@ -15927,22 +15934,60 @@ async function downloadHtml() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
-  // `::GUIDE_STEP` (#516): a snapshot has no run loop to navigate with — it
-  // shows every step in sequence instead (decision 8, like a `::SUBTAB`'s
-  // panes do already, above the live DOM clone this runs on). The nav
-  // bar/footer go; each pane gets the same "Step n of N · Label" heading
-  // the static (`--svg`/CLI) output draws.
+  // `::GUIDE_STEP` (#523): unlike the old full flatten, the export keeps the
+  // stepper itself — Back/Next, the progress strip, the step list —
+  // SNAPSHOT_JS re-wires them the same way it re-wires tabs and the ::VIEW
+  // switcher (cloneNode drops the live listeners, not the markup; see the
+  // offline stepper block below). There is no query engine offline, so a
+  // ::GATE can't be re-checked: dropped here, same policy the static
+  // (`--svg`/CLI/served) renderers already use ("gates are ignored"); every
+  // step stays reachable, and the disabled/message markup a closed gate
+  // left on the live page is stripped, replaced by one small note — only on
+  // a sequence that actually had a gate to drop (`data-dp-gated`, #523).
+  // Each pane also gets its numbered print label (`data-dp-print`): a
+  // printed copy has no stepper to come back to for the rest, so printing
+  // still flattens every step, like the old full-export flatten did (see
+  // the print rule in the exported `<style>` below).
   snap.querySelectorAll(".dp-steps").forEach((sec) => {
-    sec.querySelectorAll(".dp-step-head, .dp-step-foot").forEach((el) => el.remove());
     const panes = [...sec.querySelectorAll(".dp-steppane")];
+    const hasGate = panes.some((p) => p.dataset.dpGated);
     panes.forEach((p, k) => {
-      p.style.display = "";
+      delete p.dataset.dpGated;
       const h2 = p.querySelector(".dp-step-title");
       if (!h2) return;
       const label = h2.dataset.dpLabel || "";
-      h2.textContent = `Step ${k + 1} of ${panes.length}` + (label ? ` · ${label}` : "");
-      delete h2.dataset.dpLabel;
+      h2.dataset.dpPrint = `Step ${k + 1} of ${panes.length}` + (label ? ` · ${label}` : "");
     });
+    sec.querySelectorAll(".dp-step-list button[aria-disabled]").forEach((b) => b.removeAttribute("aria-disabled"));
+    sec.querySelectorAll(".dp-step-message").forEach((el) => el.remove());
+    const foot = sec.querySelector(".dp-step-foot");
+    if (foot) {
+      let back = foot.querySelector(".dp-step-back");
+      if (!back) {
+        back = document.createElement("button");
+        back.type = "button";
+        back.className = "dp-step-back";
+        back.textContent = "Back";
+        foot.appendChild(back);
+      }
+      let next = foot.querySelector(".dp-step-next");
+      if (next) {
+        next.removeAttribute("aria-disabled");
+        next.removeAttribute("aria-describedby");
+      } else {
+        next = document.createElement("button");
+        next.type = "button";
+        next.className = "dp-step-next";
+        next.textContent = "Next";
+        foot.appendChild(next);
+      }
+      if (hasGate) {
+        const note = document.createElement("p");
+        note.className = "dp-step-note";
+        note.textContent = "Checks are not active in this offline copy.";
+        foot.appendChild(note);
+      }
+    }
   });
   // ::FIT (#400): the snapshot fits itself on load (SNAPSHOT_JS) — each panel
   // goes back to its authored size and keeps its authored chart height
@@ -15973,7 +16018,12 @@ async function downloadHtml() {
   const html =
     `<!doctype html><html data-ax-variant="${dpTheme.variant}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
     (fav ? `<link rel="icon" href="${escapeHtml(fav)}">` : "") +
-    `<style>${tokens}\n${base}\nbody{margin:0}</style>` +
+    // #523: print-only — flatten the offline stepper back to every step at
+    // once, numbered via `data-dp-print` (set above), the same way the old
+    // full-export flatten read on screen. Scoped to this exported copy (not
+    // theme-base.css's shared print rule), so the *live* page keeps
+    // printing just its current step, same as a ::TAB/::VIEW.
+    `<style>${tokens}\n${base}\nbody{margin:0}\n@media print{.dp-steppane{display:grid !important}.dp-step-title{font-size:0}.dp-step-title::before{content:attr(data-dp-print);display:block;font:700 1.1rem/1.3 var(--ax-font-display);letter-spacing:-.01em;color:var(--ax-heading)}}</style>` +
     (math ? `<style>${math}</style>` : "") +
     `</head><body class="embed">` +
     `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
@@ -16092,6 +16142,73 @@ const SNAPSHOT_JS = `(function(){
       e.preventDefault(); e.stopPropagation();
       viewActivate(target);
     });
+  });
+  // ::GUIDE_STEP (#523): Back/Next/the step list for the offline copy. A
+  // raw backtick can't appear anywhere below (it would close this very
+  // template literal early), so no code-span backticks in these comments.
+  // downloadHtml() already dropped every gate before this ran (there is no
+  // query engine here to re-check one), so every step is reachable and
+  // navigation is a plain clamp to [1, count] — no furthest-reachable logic
+  // to port from the live page's clampStep (tests/web/steps_test.mjs).
+  // No arrow-key paging either (the live page's own decision 7: arrows page
+  // charts instead) — Tab/Enter on these plain buttons already covers the
+  // keyboard.
+  function stepAnnounce(sec,text){
+    var el=sec._dpAnnouncer;
+    if(!el){
+      el=document.createElement('div');
+      el.setAttribute('aria-live','polite');el.setAttribute('role','status');
+      el.style.cssText='position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap';
+      document.body.appendChild(el);
+      sec._dpAnnouncer=el;
+    }
+    if(el.textContent!==text)el.textContent=text;
+  }
+  function stepSync(sec,n,count,label){
+    var list=sec.querySelector('.dp-step-list');
+    if(list)[].forEach.call(list.querySelectorAll('button'),function(b,k){
+      if(k===n-1)b.setAttribute('aria-current','step');else b.removeAttribute('aria-current');
+    });
+    var text='Step '+n+' of '+count+(label?' · '+label:'');
+    var pt=sec.querySelector('.dp-step-progress-text');if(pt)pt.textContent=text;
+    var bar=sec.querySelector('.dp-step-progress');
+    if(bar){bar.setAttribute('aria-valuenow',String(n));bar.setAttribute('aria-valuetext','Step '+n+' of '+count);}
+    var fill=sec.querySelector('.dp-step-progress-bar');if(fill)fill.style.width=(n/count*100)+'%';
+    var back=sec.querySelector('.dp-step-back');if(back)back.style.display=n>1?'':'none';
+    var next=sec.querySelector('.dp-step-next');if(next)next.style.display=n<count?'':'none';
+    return text;
+  }
+  function stepGo(sec,n,doFocus){
+    var panes=[].slice.call(sec.querySelectorAll('.dp-steppane')), count=panes.length;
+    n=Math.min(Math.max(n,1),count);
+    if(n===sec._dpCur)return;
+    panes.forEach(function(p,k){p.style.display=k===n-1?'':'none';});
+    var h2=panes[n-1].querySelector('.dp-step-title');
+    var text=stepSync(sec,n,count,h2?h2.dataset.dpLabel||'':'');
+    sec._dpCur=n;
+    stepAnnounce(sec,text);
+    refit();
+    if(doFocus){
+      if(h2)h2.focus();
+      sec.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
+    }
+  }
+  document.querySelectorAll('.dp-steps').forEach(function(sec){
+    var panes=[].slice.call(sec.querySelectorAll('.dp-steppane'));
+    if(!panes.length)return;
+    var cur=1;
+    for(var ci=0;ci<panes.length;ci++)if(panes[ci].style.display!=='none'){cur=ci+1;break;}
+    sec._dpCur=cur;
+    var h2=panes[cur-1].querySelector('.dp-step-title');
+    stepSync(sec,cur,panes.length,h2?h2.dataset.dpLabel||'':'');
+    var list=sec.querySelector('.dp-step-list');
+    if(list)[].forEach.call(list.querySelectorAll('button'),function(b,k){
+      b.addEventListener('click',function(e){e.stopPropagation();stepGo(sec,k+1,document.activeElement===b);});
+    });
+    var back=sec.querySelector('.dp-step-back');
+    if(back)back.addEventListener('click',function(e){e.stopPropagation();stepGo(sec,sec._dpCur-1,document.activeElement===back);});
+    var next=sec.querySelector('.dp-step-next');
+    if(next)next.addEventListener('click',function(e){e.stopPropagation();stepGo(sec,sec._dpCur+1,document.activeElement===next);});
   });
   refit();
 })();`;
