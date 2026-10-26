@@ -49,7 +49,7 @@ use anofox_visualization::host::serving::{
     RequestMeta,
 };
 use anofox_visualization::host::state::{
-    NewRecord, RateLimiter, StartContext, StateOptions, Store,
+    NewRecord, RateLimiter, Record, StartContext, StateOptions, Store,
 };
 use anofox_visualization::host::telemetry;
 use anofox_visualization::sql::deps::{self, Deps};
@@ -1478,12 +1478,16 @@ impl WarmPool {
 
 /// Check the access policy against a new snapshot and rewrite every dashboard
 /// for it. Fail closed: anything the policy refuses stops the start (or the
-/// refresh — the previous snapshot then stays in service).
+/// refresh — the previous snapshot then stays in service). `state_opts`
+/// (#517 S3, plan §5): seeds the server-provided `viewer_state`/
+/// `viewer_state_latest` temps into the rewrite for a state-enabled
+/// dashboard, so `Mode::Verify` accepts references to them.
 fn enforce(
     snap: &mut Snapshot,
     dashboards: &[Dash],
     policy: &Policy,
     key: &PolicyKey,
+    state_opts: Option<&StateOptions>,
 ) -> Result<(), String> {
     let c = snap.db.connect()?;
     crate::register_policy_hash(&c, key.0.clone())?;
@@ -1497,12 +1501,21 @@ fn enforce(
     })?;
     let mut scripts = Vec::new();
     for d in dashboards {
-        scripts.push(enf.rewrite_script(&mut duck, &d.stmts).map_err(|(i, e)| {
-            format!(
-                "dashboard '{}' statement {i}: {e} (refused by the access policy)",
-                d.id
-            )
-        })?);
+        let server_temps: &[&str] =
+            if state_opts.is_some_and(|o| state_trainer_view(o, &d.id, None).is_some()) {
+                &["viewer_state", "viewer_state_latest"]
+            } else {
+                &[]
+            };
+        scripts.push(
+            enf.rewrite_script(&mut duck, &d.stmts, server_temps)
+                .map_err(|(i, e)| {
+                    format!(
+                        "dashboard '{}' statement {i}: {e} (refused by the access policy)",
+                        d.id
+                    )
+                })?,
+        );
     }
     snap.policy = Some(Enforced { enf, scripts });
     Ok(())
@@ -1988,7 +2001,13 @@ impl Locked {
             build_snapshot(&conn, &self.opts, &self.loads, dir, source_result)?
         };
         if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
-            enforce(&mut snap, &self.dashboards, p, k)?;
+            enforce(
+                &mut snap,
+                &self.dashboards,
+                p,
+                k,
+                self.submit.as_deref().map(|s| &s.opts),
+            )?;
         }
         analyze_deps(&mut snap, &self.dashboards)?;
         Ok((snap, warnings))
@@ -2103,7 +2122,7 @@ pub fn start_locked(
         build_snapshot(&conn, &opts, &loads, startup_dir, source_result)?
     };
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
-        enforce(&mut snap, &dashboards, p, k)?;
+        enforce(&mut snap, &dashboards, p, k, opts.state_opts.as_ref())?;
     }
     analyze_deps(&mut snap, &dashboards)?;
     let policy_note = match (&opts.policy, &opts.auth) {
@@ -2171,6 +2190,7 @@ pub fn start_locked(
                 dashboard_dir: Path::new(dir),
                 known_dashboards: &known_dashboards,
                 reserved_names: &reserved_names,
+                search_path_entries: opts.search_path.len(),
             };
             state_opts.validate_start(&ctx)?;
             let store = Store::open(&state_opts.path, state_opts.max_mb)?;
@@ -3371,6 +3391,148 @@ fn valid_supersede(v: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.:/-".contains(&b))
 }
 
+/// #517 S3, plan §5 "which rows": whether `dash_id` is read-back-enabled
+/// under `options.state`, and if so, whose rows a viewer with `claims` may
+/// see. `None`: no `options.state`, or `dash_id` is in none of
+/// `dashboards`/`read`/`trainers.dashboards` — `viewer_state` is never
+/// created for it, and the cache/warm keys are unaffected ("dashboards
+/// without state don't change keys"). `Some(true)`: a trainer dashboard
+/// *and* this viewer is named in `trainers.groups`/`trainers.users` —
+/// every viewer's rows. `Some(false)`: this viewer's own rows only (every
+/// other case, including a *non*-trainer viewer on a trainer dashboard —
+/// fails safe, threat model #19: anyone else on that same dashboard still
+/// gets only their own).
+fn state_trainer_view(opts: &StateOptions, dash_id: &str, claims: Option<&Claims>) -> Option<bool> {
+    if let Some(t) = opts
+        .trainers
+        .as_ref()
+        .filter(|t| t.dashboards.iter().any(|d| d == dash_id))
+    {
+        let is_trainer = claims.is_some_and(|c| {
+            t.users.iter().any(|u| u == &c.user)
+                || c.groups.iter().any(|g| t.groups.iter().any(|tg| tg == g))
+        });
+        return Some(is_trainer);
+    }
+    (opts.dashboards.iter().any(|d| d == dash_id) || opts.read.iter().any(|d| d == dash_id))
+        .then_some(false)
+}
+
+/// The state generation a state-enabled dashboard's cache/warm keys fold in
+/// (plan §5 "cache and warm connections"): the viewer's own row count
+/// (`gen`), or the global `seq` for a trainer's all-rows read — append-only
+/// storage means rows at or below this generation never change, so two
+/// requests at the same generation always see the same `viewer_state`.
+/// `None` for a dashboard [`state_trainer_view`] says isn't state-enabled
+/// (the key is unaffected, same as before #517 S3).
+fn state_gen(submit: &SubmitRuntime, dash_id: &str, claims: Option<&Claims>) -> Option<u64> {
+    Some(match state_trainer_view(&submit.opts, dash_id, claims)? {
+        true => submit.store.global_seq(),
+        false => submit
+            .store
+            .user_count(claims.map(|c| c.user.as_str()).unwrap_or("")),
+    })
+}
+
+/// A scalar `vars_out` value (never `Null` or `Array`, both handled by the
+/// caller) as the text [`seed_viewer_state`] records in `viewer_state.value`.
+fn state_scalar_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        // `Null`/`Array` are handled by the caller before this is reached;
+        // a `Map` never appears in a recorded value.
+        _ => String::new(),
+    }
+}
+
+/// Creates and populates the per-request `viewer_state`/`viewer_state_latest`
+/// temps (plan §5) on a freshly-opened connection — called only on the
+/// *cold* path of [`run_panel`] (never on a warm reuse: [`state_gen`] is
+/// already part of `warm_key`, so a warm connection is only ever reused
+/// while its viewer_state content, inserted the same way at the same
+/// generation, is still exactly what this would build again). A no-op when
+/// `dash_id` isn't in any of `options.state`'s lists.
+///
+/// Every value goes through [`db::Prepared::bind_strs`] — never spliced
+/// into the SQL text — except a literal `NULL` for a `Null` value and the
+/// fixed `?`-placeholder count of a list's own array constructor, neither
+/// of which carries data from the request or the store.
+fn seed_viewer_state(
+    c: &Conn,
+    submit: &SubmitRuntime,
+    dash_id: &str,
+    claims: Option<&Claims>,
+) -> Result<(), String> {
+    let Some(is_trainer) = state_trainer_view(&submit.opts, dash_id, claims) else {
+        return Ok(());
+    };
+    let rows: Vec<Record> = if is_trainer {
+        let total = submit.store.len();
+        let rows = submit.store.all_rows(submit.opts.trainer_max_rows as usize);
+        if rows.len() < total {
+            eprintln!(
+                "[anofox-serve] trainer read-back for '{dash_id}' truncated to the newest {} \
+                 of {total} rows (options.state.trainer_max_rows)",
+                rows.len()
+            );
+        }
+        rows
+    } else {
+        let user = claims.map(|c| c.user.as_str()).unwrap_or("");
+        submit.store.rows_for_user(user)
+    };
+    for stmt in anofox_visualization::sql::viewer_state_setup_statements() {
+        c.exec(stmt)?;
+    }
+    for chunk in rows.chunks(500) {
+        let mut sql_buf = String::from(
+            "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, value, \
+             value_list) VALUES ",
+        );
+        let mut params: Vec<String> = Vec::new();
+        for rec in chunk {
+            for (name, val) in &rec.vars {
+                if !params.is_empty() {
+                    sql_buf.push(',');
+                }
+                params.push(rec.seq.to_string());
+                params.push(rec.ts.clone());
+                params.push(rec.user.clone());
+                params.push(rec.dashboard.clone());
+                params.push(rec.submit.clone());
+                params.push(name.clone());
+                match val {
+                    Value::Null => {
+                        sql_buf.push_str("(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, NULL, NULL)");
+                    }
+                    Value::Array(items) => {
+                        params.push(val.to_string());
+                        let placeholders = vec!["?"; items.len()].join(", ");
+                        for it in items {
+                            params.push(state_scalar_text(it));
+                        }
+                        sql_buf.push_str(&format!(
+                            "(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, [{placeholders}])"
+                        ));
+                    }
+                    other => {
+                        params.push(state_scalar_text(other));
+                        sql_buf.push_str("(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, NULL)");
+                    }
+                }
+            }
+        }
+        if params.is_empty() {
+            continue; // every record in this chunk recorded no variables
+        }
+        let refs: Vec<&str> = params.iter().map(String::as_str).collect();
+        c.execute_prepared(&sql_buf, &refs)?;
+    }
+    Ok(())
+}
+
 /// The cache key of a panel request: everything its result depends on
 /// besides the snapshot (each snapshot has its own cache), the `data` files
 /// (a refresh drops the cache) and the dashboards — the parsed request, with
@@ -3548,9 +3710,25 @@ fn locked_panel(
     if !key_deps.is_all() {
         r.vars.retain(|(n, _)| key_deps.contains(n));
     }
-    let key = panel_key(&r, claims, &key_deps);
+    // #517 S3, plan §5 "cache and warm connections": a state-enabled
+    // dashboard's keys fold in the viewer's own generation (or the global
+    // one, for a trainer's all-rows read) — a submission misses both this
+    // server's cache and any warm connection holding older rows, the same
+    // way a changed variable already would. `None` for every other
+    // dashboard: unaffected, same keys as before #517.
+    let sgen = st
+        .submit
+        .as_deref()
+        .and_then(|s| state_gen(s, &dash.id, claims));
+    let mut key = panel_key(&r, claims, &key_deps);
+    if let Some(g) = sgen {
+        key = format!("{key}/state{g}");
+    }
     let t0 = std::time::Instant::now();
-    let warm = warm_key(dash, gen.snap.warm_deps.get(di), stmts, &r, claims, scope);
+    let mut warm = warm_key(dash, gen.snap.warm_deps.get(di), stmts, &r, claims, scope);
+    if let Some(g) = sgen {
+        warm = warm.map(|w| format!("{w}/state{g}"));
+    }
     let warmed = AtomicBool::new(false);
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
         run_panel(
@@ -4284,11 +4462,24 @@ fn take_one_scalar_literal(s: &str) -> Option<(Value, &str)> {
         return None;
     }
     let (num, rest) = s.split_at(end);
+    // i64, then u64 (a literal `scalar_literal` built from a `u64` JSON
+    // number past `i64::MAX` parses as `i64` first and fails — review of
+    // #538 round 2 nit — falling straight through to `f64` would silently
+    // lose precision on a value that round-trips exactly as a `u64`), then
+    // `f64` via `Number::from_f64`, never `Value::from(f64)` directly
+    // (review nit): the latter accepts non-finite floats, this fails
+    // closed (`None`) on one instead of guessing.
     let v = num
         .parse::<i64>()
         .map(Value::from)
-        .or_else(|_| num.parse::<f64>().map(Value::from))
-        .ok()?;
+        .ok()
+        .or_else(|| num.parse::<u64>().map(Value::from).ok())
+        .or_else(|| {
+            num.parse::<f64>()
+                .ok()
+                .and_then(serde_json::Number::from_f64)
+                .map(Value::Number)
+        })?;
     Some((v, rest))
 }
 
@@ -4542,6 +4733,13 @@ fn run_panel(
         c.exec(&gen.snap.enter)?;
         for (_, set) in &sets {
             c.exec(set)?;
+        }
+        // #517 S3, plan §5: viewer_state/viewer_state_latest, before the
+        // policy's views and any setup statement, so every later statement
+        // (setup, the policy's own row filters, the panel itself) can read
+        // them. Cold path only (see seed_viewer_state's own doc comment).
+        if let Some(submit) = &st.submit {
+            seed_viewer_state(c, submit, dash_id, claims)?;
         }
         // The policy's views, for this viewer (before any dashboard SQL). The
         // row filters read the claims set above; the column rules are decided
@@ -6676,6 +6874,29 @@ mod tests {
     }
 
     #[test]
+    fn literal_to_json_inverts_a_u64_past_i64_max_exactly() {
+        // Review of #538 round 2 nit: `scalar_literal`'s own forward
+        // direction tries i64 then u64 (`sv::sql_literal`'s match on
+        // `n.as_i64()`/`n.as_u64()`) before f64 — the inverse must too, or
+        // a value that round-trips exactly as a u64 silently loses
+        // precision through f64.
+        let n = u64::MAX;
+        assert_eq!(literal_to_json(&n.to_string()), Some(serde_json::json!(n)));
+    }
+
+    #[test]
+    fn literal_to_json_refuses_a_non_finite_float_rather_than_guess() {
+        // Review of #538 round 2 nit: `Number::from_f64`, not
+        // `Value::from(f64)` directly — the latter accepts non-finite
+        // floats. `1e400` is made of only the characters the scanner
+        // accepts as a number (digits and `e`) and overflows `f64` to
+        // infinity on parse — never actually produced by `scalar_literal`
+        // (which checks `is_finite()` first), but this keeps the inverse
+        // itself from ever claiming to parse one.
+        assert_eq!(literal_to_json("1e400"), None);
+    }
+
+    #[test]
     fn literal_to_json_inverts_sql_literal_lists() {
         // Review of #538 round 2 nit: a credential locking a
         // ::MULTISELECT variable's value builds exactly this shape
@@ -6789,5 +7010,143 @@ mod tests {
             effective_value("region", &d, Some(&scope), &serde_json::json!({})),
             Ok(Some(serde_json::json!("EU")))
         );
+    }
+
+    // ───────────────────────────────── #517 S3: read-back (plan §5) ──────
+
+    /// `StateOptions::parse`, so these tests exercise the real parser, not
+    /// a hand-built struct — `extra` overrides/adds keys onto a minimal
+    /// `{"path": …}`.
+    fn state_opts(extra: serde_json::Value) -> StateOptions {
+        let mut o = serde_json::json!({"path": "/nonexistent/state.jsonl"});
+        for (k, v) in extra.as_object().unwrap() {
+            o[k] = v.clone();
+        }
+        StateOptions::parse(&o).unwrap()
+    }
+
+    fn claims(user: &str, groups: &[&str]) -> Claims {
+        Claims {
+            user: user.to_string(),
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            attrs: vec![],
+        }
+    }
+
+    /// A real, freshly-opened [`Store`] (not `opts.path` — that one never
+    /// has to exist for these tests) behind a [`SubmitRuntime`], for
+    /// [`state_gen`]/[`seed_viewer_state`] tests.
+    fn submit_runtime(opts: StateOptions) -> SubmitRuntime {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("submit-runtime-test-fixtures");
+        std::fs::create_dir_all(&dir).unwrap();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = dir.join(format!("state-{}-{nanos}.jsonl", std::process::id()));
+        let store = Store::open(&path, opts.max_mb).unwrap();
+        SubmitRuntime {
+            opts,
+            store,
+            rate: RateLimiter::new(600, 100, 10),
+            global: Mutex::new(GlobalBucket::new()),
+            viewer_locks: Mutex::new(ViewerLocks::new()),
+            recent: Mutex::new(RecentIds::new()),
+            full: AtomicBool::new(false),
+        }
+    }
+
+    fn new_record(user: &str, dashboard: &str, id: &str) -> NewRecord {
+        NewRecord {
+            user: user.to_string(),
+            auth: "proxy".to_string(),
+            dashboard: dashboard.to_string(),
+            submit: "quiz".to_string(),
+            id: id.to_string(),
+            vars: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn state_trainer_view_is_none_outside_every_list() {
+        let o = state_opts(serde_json::json!({"dashboards": ["d"]}));
+        assert_eq!(state_trainer_view(&o, "other", None), None);
+    }
+
+    #[test]
+    fn state_trainer_view_is_own_rows_for_a_plain_submit_or_read_dashboard() {
+        let o = state_opts(serde_json::json!({"dashboards": ["d"], "read": ["progress"]}));
+        assert_eq!(state_trainer_view(&o, "d", None), Some(false));
+        assert_eq!(state_trainer_view(&o, "progress", None), Some(false));
+    }
+
+    #[test]
+    fn state_trainer_view_is_every_row_only_for_a_named_trainer() {
+        // Threat model #19: anyone else on the *same* trainer dashboard
+        // still gets only their own rows — fails safe, never refused
+        // outright.
+        let o = state_opts(serde_json::json!({
+            "trainers": {"dashboards": ["progress"], "groups": ["trainers"], "users": ["root-admin"]}
+        }));
+        assert_eq!(
+            state_trainer_view(&o, "progress", Some(&claims("carol", &["trainers"]))),
+            Some(true)
+        );
+        assert_eq!(
+            state_trainer_view(&o, "progress", Some(&claims("root-admin", &[]))),
+            Some(true)
+        );
+        assert_eq!(
+            state_trainer_view(&o, "progress", Some(&claims("bob", &[]))),
+            Some(false)
+        );
+        assert_eq!(state_trainer_view(&o, "progress", None), Some(false));
+    }
+
+    #[test]
+    fn state_scalar_text_stringifies_each_json_scalar() {
+        assert_eq!(state_scalar_text(&serde_json::json!("B")), "B");
+        assert_eq!(state_scalar_text(&serde_json::json!(true)), "true");
+        assert_eq!(state_scalar_text(&serde_json::json!(false)), "false");
+        assert_eq!(state_scalar_text(&serde_json::json!(42)), "42");
+    }
+
+    #[test]
+    fn state_gen_is_the_viewers_own_row_count_for_a_plain_state_dashboard() {
+        let o = state_opts(serde_json::json!({"dashboards": ["d"]}));
+        let rt = submit_runtime(o);
+        let alice = claims("alice", &[]);
+        assert_eq!(state_gen(&rt, "d", Some(&alice)), Some(0));
+        rt.store.append(new_record("alice", "d", "a1")).unwrap();
+        assert_eq!(state_gen(&rt, "d", Some(&alice)), Some(1));
+        // A different user's own gen is unaffected by alice's submission.
+        assert_eq!(state_gen(&rt, "d", Some(&claims("bob", &[]))), Some(0));
+    }
+
+    #[test]
+    fn state_gen_is_the_global_seq_for_a_trainers_all_rows_read() {
+        let o = state_opts(serde_json::json!({
+            "trainers": {"dashboards": ["progress"], "groups": ["trainers"], "users": []}
+        }));
+        let rt = submit_runtime(o);
+        let carol = claims("carol", &["trainers"]);
+        assert_eq!(state_gen(&rt, "progress", Some(&carol)), Some(0));
+        rt.store
+            .append(new_record("alice", "progress", "a1"))
+            .unwrap();
+        rt.store
+            .append(new_record("bob", "progress", "b1"))
+            .unwrap();
+        // The global seq (2 submissions total), not carol's own (0).
+        assert_eq!(state_gen(&rt, "progress", Some(&carol)), Some(2));
+    }
+
+    #[test]
+    fn state_gen_is_none_outside_every_list() {
+        let o = state_opts(serde_json::json!({"dashboards": ["d"]}));
+        let rt = submit_runtime(o);
+        assert_eq!(state_gen(&rt, "other", None), None);
     }
 }
