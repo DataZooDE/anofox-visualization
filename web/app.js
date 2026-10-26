@@ -8824,6 +8824,21 @@ const dpLazyParams = new URLSearchParams(location.search);
 const dpLazyTabs = dpLazyParams.get("lazy") !== "0";
 const dpLazyPrefetch = dpLazyParams.get("prefetch") !== "0";
 const dpLazy = { gen: 0, tail: Promise.resolve(), cur: null, building: null, pumping: false, wake: null };
+// #554 review (N2, second re-review): a run id for embed blob: images,
+// independent of dpLazy's own `gen` (a different concern — the lazy-tab
+// job queue). Each runOnce() gets one `imgRunId` (below); mkImg's fetch
+// closes over it. `dpImgSwappedRuns` records which run ids have already
+// reached their own swap-time sweep — a blob that resolves *after* its
+// own run's sweep (late network response, still never attached) can then
+// tell itself apart from one resolving *before* it (where the sweep,
+// which already ran for every id in this set, is simply never coming
+// back to look at it again) and self-revoke instead of leaking. Capped
+// so a long session's run count can't grow this without bound; the
+// trimmed ids are always older than any run whose own fetches could
+// still be in flight (fetches don't outlive their own page lifetime by
+// more than a handful of runs).
+let dpImgRunSeq = 0;
+const dpImgSwappedRuns = new Set();
 let dpSetupRan = new Map(); // setup SQL run since the last full run -> its varSig
 let dpSetupEpoch = 0; // bumped by a setup statement that may change what a query read
 let dpCreated = new Set(); // objects setup created since the last full run
@@ -9166,6 +9181,9 @@ async function runOnce(fresh = true, pv = preview) {
   // concurrent previewExit() may change under us (see run()'s own capture
   // of `pv`, and clearApplyHold()/previewExit() nearby).
   runPreviewToken = pv;
+  // #554 review (N2): this run's own id for embed blob: images — see
+  // dpImgSwappedRuns' own comment.
+  const imgRunId = ++dpImgRunSeq;
   const tRun = performance.now();
   const grid = $("grid");
   const motion = dpMotion; // what started this run (a drill, a drill-through)
@@ -9890,7 +9908,14 @@ async function runOnce(fresh = true, pv = preview) {
             img.loading = "lazy";
             img.decoding = "async";
             img.draggable = false;
-            img.onerror = () => img.isConnected && img.replaceWith(missing(alt));
+            // #554 review N1: `parentNode`, not `isConnected` — this
+            // panel can still be sitting in the detached `newGrid` (not
+            // yet swapped into `.dash`) when a src fails, and `replaceWith`
+            // works fine on a detached parent too (the swap, whenever it
+            // happens, then carries the alt box in instead of a broken
+            // image). `isConnected` here would silently drop the failure
+            // on the floor — no image, no alt box either.
+            img.onerror = () => img.parentNode && img.replaceWith(missing(alt));
             // #554 review item 4: an embed page's session travels as the
             // X-Anofox-Session header (runSqlInner, below), not a cookie —
             // an <img src> can't send a header, so a relative assets/
@@ -9918,16 +9943,27 @@ async function runOnce(fresh = true, pv = preview) {
               // (`blob:` is already resolved locally, no new fetch on
               // attach). Cleanup for whichever `<img>`s this run discards
               // — the kept-vs-replaced decision isn't made until the
-              // swap, well after this promise can resolve — is entirely
-              // the swap-time sweep's job, below; this callback never
-              // revokes.
+              // swap, well after this promise can resolve — is mostly the
+              // swap-time sweep's job, below, EXCEPT for one case the
+              // sweep (synchronous, runs once) can't see: a fetch that
+              // resolves *after* this run's own sweep already ran (a slow
+              // response, or this run's swap discarded the panel before
+              // the fetch even got back). `dpImgSwappedRuns.has(imgRunId)`
+              // is exactly that signal — once true, this run's sweep is
+              // never coming back, so a disconnected `img` here is
+              // garbage now, not "not yet swapped" (review N2).
               fetch(url, { headers: { "X-Anofox-Session": window.__served.session }, credentials: "same-origin" })
                 .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("http " + r.status))))
                 .then((b) => {
-                  img.dataset.anofoxBlob = URL.createObjectURL(b);
-                  img.src = img.dataset.anofoxBlob;
+                  const blobUrl = URL.createObjectURL(b);
+                  if (!img.isConnected && dpImgSwappedRuns.has(imgRunId)) {
+                    URL.revokeObjectURL(blobUrl);
+                    return;
+                  }
+                  img.dataset.anofoxBlob = blobUrl;
+                  img.src = blobUrl;
                 })
-                .catch(() => img.isConnected && img.replaceWith(missing(alt)));
+                .catch(() => img.parentNode && img.replaceWith(missing(alt)));
             } else {
               img.src = url;
             }
@@ -10875,6 +10911,15 @@ async function runOnce(fresh = true, pv = preview) {
   }
   dash._shape = shape;
   for (const img of candidateBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
+  // #554 review (N2): mark this run's own sweep as having happened, so a
+  // same-run fetch that resolves *after* this point (too slow to make
+  // this sweep, or never attached because this run's own swap just
+  // discarded it) can tell itself apart and revoke on arrival instead of
+  // leaking — see mkImg's own comment. Capped well past any realistic
+  // number of fetches still in flight from an old run by the time this
+  // many newer runs have happened.
+  dpImgSwappedRuns.add(imgRunId);
+  if (dpImgSwappedRuns.size > 50) dpImgSwappedRuns.delete(dpImgSwappedRuns.values().next().value);
   performance.mark("dp:swap");
   dpLazy.cur = lazy;
   // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and

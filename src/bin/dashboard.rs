@@ -1395,20 +1395,53 @@ fn is_allowed_raster_data_uri(v: &str) -> bool {
         })
 }
 
-/// Does a (lowercased) CSS `style="…"` attribute value contain a `url(…)`
-/// that isn't a same-document `#fragment`? `url(#id)` is how an SVG
-/// legitimately references its own `<filter>`/`<clipPath>`/gradient by CSS;
-/// anything else — `url(javascript:…)`, `url(https://evil.example/x)` — is
-/// the same class of problem as an `href` pointing off-document.
-fn style_url_reason(low: &str) -> Option<String> {
-    let mut rest = low;
+/// Does `value` (any attribute's value, already XML-entity-decoded by the
+/// parser) try to reach something off-document through CSS? Review of
+/// #554 (second re-review, S1): checking only the `style` attribute left
+/// every *presentation* attribute (`fill`, `stroke`, `filter`,
+/// `clip-path`, `mask`, every `marker-*`, `cursor`, …) as an unguarded
+/// fetch — SVG's own CSS cascade applies to a presentation attribute
+/// exactly as if it were written in `style`, so `fill="url(https://…)"`
+/// fetches just as `style="fill:url(https://…)"` does. A CSS escape also
+/// defeated a literal `"url("` substring check (`u\72l(` decodes, in CSS,
+/// to `url(`), and `image-set('https://…')` reaches a URL with no `url(`
+/// at all. This function is applied to **every** attribute's value
+/// ([`svg_active_reason`], below), refusing:
+/// - any backslash at all — the escape vector; no legitimate value here
+///   needs one;
+/// - `url(…)` whose target isn't a same-document `#fragment` (`url(#id)`
+///   is how an SVG legitimately references its own
+///   `<filter>`/`<clipPath>`/gradient by CSS);
+/// - `image-set(` (a CSS image fallback list), `@import`, `src(` (the
+///   newer, unprefixed CSS font/image loading function), `javascript:`
+///   anywhere, `expression(` (old IE CSS, still worth refusing).
+fn external_ref_reason(value: &str) -> Option<String> {
+    if value.contains('\\') {
+        return Some(
+            "contains a backslash (a CSS escape can hide url()/javascript: from a literal scan)"
+                .to_string(),
+        );
+    }
+    let low = value.to_ascii_lowercase();
+    for bad in [
+        "@import",
+        "image-set(",
+        "src(",
+        "javascript:",
+        "expression(",
+    ] {
+        if low.contains(bad) {
+            return Some(format!("contains '{bad}'"));
+        }
+    }
+    let mut rest = low.as_str();
     while let Some(i) = rest.find("url(") {
         let after = &rest[i + 4..];
         let end = after.find(')').unwrap_or(after.len());
         let inner = after[..end].trim().trim_matches(['"', '\'']);
         if !inner.starts_with('#') {
             return Some(format!(
-                "contains a style url() that isn't a local #fragment ('{}')",
+                "contains a url() that isn't a local #fragment ('{}')",
                 truncate_for_message(inner)
             ));
         }
@@ -1515,6 +1548,13 @@ fn svg_active_reason(bytes: &[u8]) -> Option<String> {
             if local.len() >= 2 && local.as_bytes()[..2].eq_ignore_ascii_case(b"on") {
                 return Some(format!("contains an event-handler attribute ('{local}')"));
             }
+            // Review of #554 (second re-review, S1): checked on *every*
+            // attribute, not only `style` — a presentation attribute
+            // (`fill`, `filter`, `clip-path`, `mask`, `marker-*`,
+            // `cursor`, …) takes the same CSS syntax `style` does.
+            if let Some(why) = external_ref_reason(attr.value()) {
+                return Some(format!("attribute '{local}' {why}"));
+            }
             if local.eq_ignore_ascii_case("href") {
                 let v = attr.value().trim();
                 let ok =
@@ -1524,21 +1564,6 @@ fn svg_active_reason(bytes: &[u8]) -> Option<String> {
                         "references an external href/xlink:href ('{}')",
                         truncate_for_message(v)
                     ));
-                }
-            }
-            if local.eq_ignore_ascii_case("style") {
-                let low = attr.value().to_ascii_lowercase();
-                if low.contains("@import")
-                    || low.contains("javascript:")
-                    || low.contains("expression(")
-                {
-                    return Some(
-                        "contains a style attribute referencing @import/javascript:/expression()"
-                            .to_string(),
-                    );
-                }
-                if let Some(why) = style_url_reason(&low) {
-                    return Some(why);
                 }
             }
         }
@@ -2587,21 +2612,21 @@ mod site_tests {
             .unwrap()
             .contains("disallowed element ('a')"));
 
-        // An href on an allowed element, pointed off-document.
+        // An href on an allowed element, pointed off-document — caught by
+        // the generic `external_ref_reason` (its own `javascript:` check)
+        // before the href-specific check even runs.
         let jsurl =
             br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="javascript:alert(1)"/></svg>"#;
-        assert!(svg_active_reason(jsurl).unwrap().contains("external"));
+        assert!(svg_active_reason(jsurl).unwrap().contains("javascript:"));
 
         let external = br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.example/track.png"/></svg>"#;
         assert!(svg_active_reason(external).unwrap().contains("external"));
 
         let style = br#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1" style="fill:url(https://evil.example/x)"/></svg>"#;
-        assert!(svg_active_reason(style).unwrap().contains("style url()"));
+        assert!(svg_active_reason(style).unwrap().contains("url()"));
 
         let import = br#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1" style="background:@import url(evil.css)"/></svg>"#;
-        assert!(svg_active_reason(import)
-            .unwrap()
-            .contains("@import/javascript:/expression()"));
+        assert!(svg_active_reason(import).unwrap().contains("@import"));
 
         let doctype = br#"<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>"#;
         assert!(svg_active_reason(doctype).unwrap().contains("DOCTYPE"));
@@ -2663,6 +2688,36 @@ mod site_tests {
             // xmlns:h bound to the XHTML namespace again, this time an
             // <iframe> with a javascript: src.
             ("ifr.svg", "outside the SVG namespace"),
+        ];
+        for (file, expect) in cases {
+            let bytes = std::fs::read(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let reason = svg_active_reason(&bytes);
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains(expect)),
+                "{file}: expected a reason containing {expect:?}, got {reason:?}"
+            );
+        }
+    }
+
+    /// Review of #554's second re-review (S1): the first `external_ref_reason`
+    /// only checked `style`, leaving every presentation attribute, a CSS
+    /// escape and `image-set()` as unguarded fetches — all four verified
+    /// live in Chromium (opened directly, served as `image/svg+xml`, no
+    /// CSP) by the reviewer. Fixtures copied into `tests/fixtures/svg-xss-554/`.
+    #[test]
+    fn svg_active_reason_refuses_css_external_refs_in_any_attribute() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/svg-xss-554");
+        let cases: &[(&str, &str)] = &[
+            // fill/filter/clip-path/mask/marker-start — a presentation
+            // attribute reaches `url(…)` exactly like `style` does.
+            ("css-presentation-url.svg", "url()"),
+            // `url(…),auto` — a fallback list, same CSS <url> syntax.
+            ("css-cursor-url.svg", "url()"),
+            // `u\72l(` is `url(` to a CSS parser, invisible to a literal
+            // "url(" scan — caught by refusing any backslash at all.
+            ("css-escape-url.svg", "backslash"),
+            // a URL with no `url(` token at all.
+            ("css-image-set.svg", "image-set("),
         ];
         for (file, expect) in cases {
             let bytes = std::fs::read(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));

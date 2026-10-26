@@ -495,14 +495,21 @@ pub fn read_opened_asset(
     if len > max {
         return Err("too-large");
     }
+    // Review of #554 N4: `take(len + 1)`, not `max + 1` — the caller's own
+    // in-flight memory hold is sized to `min(len, max)` (`locked_asset`),
+    // so reading up to `max` here (when `max` is larger than `len`) could
+    // read more than was ever held. Refusing anything longer than the
+    // `fstat`-reported `len` also catches a file that grew after that
+    // `fstat` (only possible for someone who can already write inside
+    // `assets/`) rather than silently serving the extra bytes.
     let mut bytes = Vec::new();
     {
         use std::io::Read;
-        file.take(max + 1)
+        file.take(len + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| "io-error")?;
     }
-    if bytes.len() as u64 > max {
+    if bytes.len() as u64 > len {
         return Err("too-large");
     }
     let mime = crate::host::app_brand::sniff_image(&bytes).ok_or("not-an-image")?;

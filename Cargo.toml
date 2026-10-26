@@ -110,20 +110,28 @@ aws-lc-rs = { version = "1", features = ["prebuilt-nasm"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"], optional = true }
 base64 = { version = "0.22", optional = true }
+
+# The request log opens its file with O_NOFOLLOW (src/host/access.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # `--site`'s active-SVG check (src/bin/dashboard.rs::svg_active_reason,
 # review of #554 B1): parses every published assets/ SVG as XML rather
 # than scanning its text, so a namespace-prefixed <x:script> (bound to the
 # SVG namespace under a different prefix) or a foreign-namespace element
 # (<h:script>/<h:iframe> under the XHTML namespace) can't hide from a
-# literal "<script"/"<foreignobject" match. Also used by tests that parse
-# a rendered SVG as XML (well-formedness + XSS checks) — previously a
-# dev-dependency only; promoted since `--site` now needs it at runtime,
-# not just in `cargo test`. Pure computation, no I/O: wasm32-compatible.
+# literal "<script"/"<foreignobject" match. Lives only in `src/bin/
+# dashboard.rs`, which the wasm `--lib` build never compiles — review of
+# #554's second re-review: gated to non-wasm targets anyway, rather than
+# relying on dead-code elimination to keep it out of `web/pkg`, so the
+# wasm build doesn't even compile the crate. The `[dev-dependencies]`
+# entry below covers the one other user, `src/diagram.rs`'s `#[cfg(test)]`
+# code (tests that parse a rendered SVG as XML), for every target.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 roxmltree = "0.21"
 
-# The request log opens its file with O_NOFOLLOW (src/host/access.rs).
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+[dev-dependencies]
+roxmltree = "0.21"
 
 [features]
 default = []
