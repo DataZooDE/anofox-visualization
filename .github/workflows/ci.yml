@@ -743,6 +743,22 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-placement-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/frames-e2e.mjs (M2f-A, #149): the live ::FRAME player — step,
+      # slider, Play/Pause, reduced motion, zoom + step, as-table, the
+      # export's note, axe, and the perf budget (p95 draw(k) <= 150ms).
+      - name: ::FRAME player e2e (M2f-A, #149)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frames-e2e.mjs --url http://127.0.0.1:8947/ --out /tmp/frames-e2e-shots
+
+      # scripts/frames-export-e2e.mjs (M2f-B, #149): the HTML export embeds
+      # every frame of a time map within budget and rebuilds a swap-only
+      # player offline (no server, no wasm) — step/slider/Play, hover on
+      # the swapped-in marks, shared legend classes, ::FIT, dark mode, a
+      # non-last starting frame, and the over-budget note fallback.
+      - name: ::FRAME export e2e (M2f-B, #149)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frames-export-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |
