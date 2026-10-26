@@ -107,12 +107,16 @@ jobs:
             *) echo "::error::no binaryen release asset mapped for platform $PLATFORM"; exit 1 ;;
           esac
           ver=version_133
-          dir="$RUNNER_TEMP/binaryen"
-          mkdir -p "$dir"
-          curl -sSfL -o "$RUNNER_TEMP/binaryen.tar.gz" "https://github.com/WebAssembly/binaryen/releases/download/$ver/binaryen-$ver-$asset.tar.gz"
-          # --force-local: on windows_amd64, $RUNNER_TEMP is a Windows path
-          # ("D:\a\_temp\..."); GNU tar's -f otherwise reads the "D:" prefix
-          # as a "host:path" remote-archive spec ("Cannot connect to D:").
+          # cd first, then only relative paths reach tar: on windows_amd64,
+          # $RUNNER_TEMP is a Windows path ("D:\a\_temp\..."), and GNU tar's
+          # -f reads a "D:" prefix as a "host:path" remote-archive spec
+          # ("Cannot connect to D:") — GNU's own --force-local workaround
+          # for that isn't portable (macOS ships BSD tar, which rejects the
+          # flag outright: "Option --force-local is not supported").
+          # Relative paths sidestep the whole thing on every tar.
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o binaryen.tar.gz "https://github.com/WebAssembly/binaryen/releases/download/$ver/binaryen-$ver-$asset.tar.gz"
+          mkdir -p binaryen
           # --strip-components=1 (not pulling out just bin/wasm-opt): the
           # macOS builds dynamically link wasm-opt against
           # @rpath/libbinaryen.dylib, resolved relative to the binary's own
@@ -120,8 +124,8 @@ jobs:
           # Windows are statically linked (verified: `file`/`ldd` on the
           # linux_amd64 and linux_arm64 binaries, no .dll next to
           # wasm-opt.exe in the Windows tarball) so this costs them nothing.
-          tar --force-local -xzf "$RUNNER_TEMP/binaryen.tar.gz" --strip-components=1 -C "$dir"
-          echo "$dir/bin" >> "$GITHUB_PATH"
+          tar -xzf binaryen.tar.gz --strip-components=1 -C binaryen
+          echo "$RUNNER_TEMP/binaryen/bin" >> "$GITHUB_PATH"
 
       - name: Install the pinned DuckDB CLI
         run: echo "DUCKDB=$(scripts/release/install-duckdb-cli.sh)" >> "$GITHUB_ENV"
