@@ -749,6 +749,48 @@ pub fn rfc3339(t: std::time::SystemTime) -> String {
     )
 }
 
+/// The exact inverse of [`rfc3339`] — only ever called on `Record.ts`
+/// (#600), which is always this function's own output (`Store::append`
+/// builds it from `rfc3339(SystemTime::now())`, never from outside input),
+/// so a fixed-width parse of exactly `YYYY-MM-DDTHH:MM:SS.mmmZ` is enough:
+/// `None` on anything else, rather than a general RFC3339 parser this
+/// codebase has no other use for. Returns microseconds since the Unix
+/// epoch (UTC) — the DuckDB Appender's own `duckdb_timestamp.micros`.
+pub fn parse_rfc3339_micros(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 24 || &b[4..5] != b"-" || &b[7..8] != b"-" || &b[10..11] != b"T" {
+        return None;
+    }
+    if &b[13..14] != b":" || &b[16..17] != b":" || &b[19..20] != b"." || &b[23..24] != b"Z" {
+        return None;
+    }
+    let digits = |r: std::ops::Range<usize>| std::str::from_utf8(&b[r]).ok()?.parse::<i64>().ok();
+    let year = digits(0..4)?;
+    let month = digits(5..7)?;
+    let day = digits(8..10)?;
+    let hour = digits(11..13)?;
+    let min = digits(14..16)?;
+    let sec = digits(17..19)?;
+    let millis = digits(20..23)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    // Howard Hinnant's `days_from_civil` — the exact inverse of the
+    // `civil_from_days` arithmetic `rfc3339` itself already uses above.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3600 + min * 60 + sec;
+    Some(secs * 1_000_000 + millis * 1000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1179,6 +1221,33 @@ mod tests {
         assert_eq!(v["user"], serde_json::Value::Null);
         assert!(RequestLog::new("stderr", Some("bogus")).is_err());
         assert!(RequestLog::new("/nonexistent-dir/x.jsonl", None).is_err());
+    }
+
+    /// #600: `parse_rfc3339_micros` is `rfc3339`'s exact inverse, over a
+    /// round-trip through real `SystemTime`s (not just the string form),
+    /// since that's what `Store::append` actually feeds it and what the
+    /// Appender-based `seed_viewer_state` needs back out.
+    #[test]
+    fn parse_rfc3339_micros_round_trips_rfc3339() {
+        for t in [
+            std::time::UNIX_EPOCH,
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_792_152_000_123),
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(60 * 60 * 24 * 365 * 54), // ~2024
+        ] {
+            let s = rfc3339(t);
+            let micros = parse_rfc3339_micros(&s).unwrap_or_else(|| panic!("{s}"));
+            let want_micros = t.duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64;
+            // `rfc3339` truncates to milliseconds, so the parsed micros
+            // only need to agree down to that precision, not sub-ms.
+            assert_eq!(micros, want_micros / 1000 * 1000, "{s}");
+        }
+        assert_eq!(parse_rfc3339_micros(""), None);
+        assert_eq!(parse_rfc3339_micros("not-a-date"), None);
+        assert_eq!(parse_rfc3339_micros("2026-13-01T00:00:00.000Z"), None); // month 13
+        assert_eq!(parse_rfc3339_micros("2026-10-16T25:00:00.000Z"), None); // hour 25
+        assert_eq!(parse_rfc3339_micros("2026-10-16 12:00:00.000Z"), None); // no 'T'
+        assert_eq!(parse_rfc3339_micros("2026-10-16T12:00:00.000"), None); // no 'Z'
     }
 
     #[test]

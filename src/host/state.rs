@@ -1582,6 +1582,23 @@ impl Store {
         // returned or cached.
         let st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let gen = st.next_seq.saturating_sub(1);
+        // Review of #599/#600 R1: several concurrent misses queue on
+        // `inner` one at a time (the rebuild below runs under it); by the
+        // time this call's turn comes, an earlier one in the same queue
+        // may have already rebuilt and stored *this exact* `(gen, limit)`
+        // — `hint` above was read before taking `inner` and can't see
+        // that. Checking again now (still cheap: a small, separate lock)
+        // turns "N queued rebuilds" back into "the first one rebuilds,
+        // the rest just clone the `Arc`", without a separate single-flight
+        // mechanism.
+        {
+            let cache = self.trainer_cache.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(c) = cache.as_ref() {
+                if c.gen == gen && c.limit == limit {
+                    return (c.gen, c.rows.clone());
+                }
+            }
+        }
         let n = st.records.len();
         let rows: Arc<Vec<Arc<Record>>> = Arc::new(st.records[n.saturating_sub(limit)..].to_vec());
         {
