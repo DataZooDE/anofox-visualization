@@ -1776,8 +1776,13 @@ fn render_dashboard_page(
     let mut selects = String::new();
     for p in &dash.meta.params {
         let val = value_of(&p.name);
+        // No inline `onchange` here (#557): the page's CSP (#252) has no
+        // 'unsafe-inline'/'unsafe-hashes' for script-src, so a bare
+        // event-handler attribute is silently blocked — `page::CONTROLS_SCRIPT`
+        // wires the auto-submit instead, and the button below covers a
+        // viewer whose browser runs no script at all.
         selects.push_str(&format!(
-            "<label>{} <select name=\"{}\" onchange=\"this.form.submit()\">",
+            "<label>{} <select name=\"{}\">",
             esc(&caption_colon(&p.name)),
             esc(&p.name)
         ));
@@ -1799,7 +1804,8 @@ fn render_dashboard_page(
         String::new()
     } else {
         format!(
-            "<form class=\"controls\" method=\"{}\" action=\"/d/{}\">{selects}{}</form>",
+            "<form class=\"controls\" method=\"{}\" action=\"/d/{}\">{selects}\
+             <button type=\"submit\">Apply</button>{}</form>",
             if embed_link.is_some() { "post" } else { "get" },
             esc(&dash.id),
             embed_link

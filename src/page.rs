@@ -45,6 +45,18 @@ pub const ASOF_SCRIPT: &str = r#"(function(){
   tick(); setInterval(tick,60000);
 })();"#;
 
+/// A no-JS `form.controls` (the `@param` selects of `serve --dashboards`'
+/// script-free pages) submits on change, same as a JS-driven dashboard's own
+/// control would; the HTML keeps a visible submit button so the page still
+/// works with this script blocked or absent (#557: the CSP (#252) forbids
+/// the inline `onchange` attribute this replaced — a bare event-handler
+/// attribute isn't covered by a script nonce).
+pub const CONTROLS_SCRIPT: &str = r#"(function(){
+  [].slice.call(document.querySelectorAll('form.controls select')).forEach(function(el){
+    el.addEventListener('change',function(){el.form.submit();});
+  });
+})();"#;
+
 /// What goes on a static page.
 pub struct StaticPage<'a> {
     pub theme: &'a ResolvedTheme,
@@ -113,7 +125,7 @@ pub fn render(p: &StaticPage) -> String {
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
 <style>{css}{fit_css}</style></head>\
 <body class=\"dp-static{fit_class}\"><div class=\"grid\">{header}{sub}{controls}{panels}</div>\
-<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}</script></body></html>",
+<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
         variant = t.variant.as_str(),
