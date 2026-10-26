@@ -2695,8 +2695,14 @@ mod site_tests {
         // The repo's own example SVG (web/examples/diagram-pipeline.sql's
         // ::IMAGE data: URI, decoded) must still pass — a deny-to-allow
         // rewrite that broke a real, already-shipped asset would be its
-        // own kind of regression.
-        let example = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 60"><circle cx="20" cy="20" r="8" fill="#3aa876"/><text x="36" y="25" font-size="12" font-family="sans-serif" fill="#334">ok</text></svg>"##;
+        // own kind of regression. In its own fixture file, not inline
+        // here, so its hex colour literals don't trip `tests/theme.rs`'s
+        // `rust_page_writers_have_no_colour_literals` (no page writer
+        // outside `src/theme.rs` may hardcode a colour).
+        let example: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/svg-xss-554/benign-example.svg"
+        ));
         assert_eq!(svg_active_reason(example), None);
     }
 
