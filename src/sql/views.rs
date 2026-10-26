@@ -109,7 +109,7 @@ pub fn marker_alias(p: &Panel) -> Option<String> {
 /// same as an empty string literal — both are `view/empty-label`). Anything
 /// else (a column, a function call, any other expression) is "computed" —
 /// `None`.
-fn literal_text(core: &str) -> Option<String> {
+pub(super) fn literal_text(core: &str) -> Option<String> {
     let toks: Vec<lex::Token> = lex::tokenize(core)
         .into_iter()
         .filter(|t| !t.is_trivia())
@@ -186,7 +186,7 @@ pub fn scan(panels: &[Panel]) -> Scan {
 
     for (i, p) in panels.iter().enumerate() {
         let has = |r: Role| p.roles.iter().any(|(_, x)| *x == r);
-        if has(Role::Tab) || has(Role::SubTab) || has(Role::Section) {
+        if has(Role::Tab) || has(Role::SubTab) || has(Role::Section) || has(Role::GuideStep) {
             finish(&mut open, depth, i, false, &mut closed);
         }
         if has(Role::GroupEnd) {

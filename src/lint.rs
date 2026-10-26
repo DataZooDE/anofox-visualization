@@ -95,6 +95,15 @@ pub struct Diagnostic {
     /// another statement) | `name/not-drawn` (warning: the statement is
     /// setup, or a layout directive with no element of its own, so the name
     /// never reaches the page).
+    /// `::GUIDE_STEP` groups ([`step_diags`], #516): `step/inside-subtab` |
+    /// `step/var-clash` | `step/var-reserved` | `step/gate-without-step`
+    /// (errors) | `step/mixed-with-subtab` | `step/lone` |
+    /// `step/var-not-allowed` | `step/empty` | `step/fit-inside` |
+    /// `step/gate-on-last` | `step/gate-constant` |
+    /// `step/gate-unknown-variable` | `step/duplicate-label` (warnings) |
+    /// `step/computed-label` (a note) | `step/gate-not-boolean` |
+    /// `step/gate-no-row` (warnings, checked once the step closes — see
+    /// `finalize_pending_gate`).
     pub code: &'static str,
     pub message: String,
     /// The offending statement, trimmed to one line.
@@ -170,6 +179,76 @@ fn stmt_text(stateful_session: bool, prelude: &str, sql: &str) -> String {
         format!("{sql};")
     } else {
         format!("{prelude}{sql};")
+    }
+}
+
+/// A `::GUIDE_STEP`'s `::GATE`, waiting for its step to close so it can be
+/// re-checked once that step's own inputs have bound their defaults — see
+/// `check_opts`'s `pending_gate` and [`finalize_pending_gate`].
+struct PendingGate {
+    /// 1-based statement index to report against.
+    stmt: usize,
+    short: String,
+    /// The marker's own (rewritten) SQL — re-run as-is at close time.
+    sql: String,
+    /// The `::GATE` column's output position.
+    gate_idx: usize,
+}
+
+/// A `run_query` closure, type-erased so [`finalize_pending_gate`] can be
+/// called from both the in-loop and end-of-script sites without repeating
+/// the generic `F: FnMut(...)` bound `check_opts` carries.
+type RunQuery<'a> = &'a mut dyn FnMut(&str) -> Result<Vec<Map<String, Value>>, String>;
+
+/// Re-run a pending `::GATE` now that its step has closed (`prelude` —or,
+/// stateful, the session— has had the chance to pick up that step's own
+/// input defaults since the marker first ran) and report `step/gate-no-row`
+/// / `step/gate-not-boolean` exactly as `show_if_diags`' twins do. A
+/// re-query error is silently skipped: the marker's own `sql-error` already
+/// covers a genuinely broken statement (reported at the earlier,
+/// end-of-its-pre-pass point where `rows` is first read), so this would
+/// only double it.
+fn finalize_pending_gate(
+    diags: &mut Vec<Diagnostic>,
+    pending: PendingGate,
+    stateful_session: bool,
+    prelude: &str,
+    run_query: RunQuery,
+) {
+    let text = stmt_text(stateful_session, prelude, &pending.sql);
+    let Ok(rows) = run_query(&text) else {
+        return;
+    };
+    match rows
+        .first()
+        .and_then(|row| row.values().nth(pending.gate_idx))
+    {
+        None => diags.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt: pending.stmt,
+            code: "step/gate-no-row",
+            message: "this ::GATE's query returned no row — Next stays disabled with the \
+                      defaults used here"
+                .into(),
+            sql: pending.short,
+        }),
+        Some(v)
+            if !matches!(v, Value::Bool(_))
+                && !matches!(v, Value::String(s) if s == "true" || s == "false") =>
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: pending.stmt,
+                code: "step/gate-not-boolean",
+                message: format!(
+                    "::GATE's value (`{}`) is not a BOOLEAN — with the defaults used here \
+                     Next stays disabled (fail closed)",
+                    one_line(&v.to_string())
+                ),
+                sql: pending.short,
+            });
+        }
+        _ => {}
     }
 }
 
@@ -319,6 +398,16 @@ where
     // carries `-- @shared <name>` (#398: its statement index, and that
     // comment's names).
     let mut pending_rowselect: Option<(usize, Vec<String>)> = None;
+    // #516, review-537: a `::GUIDE_STEP`'s own `::GATE` is checked once its
+    // step *closes* (the next marker, or end of its group/script), not at
+    // the marker itself — the canonical pattern puts the gate's quiz in
+    // the same step (plan decision 2), so checking immediately would
+    // always see the quiz's input still unset and warn on every author's
+    // first, correct attempt. By the time the step closes, that input's
+    // own `SET VARIABLE` default has joined `prelude` (or run on the
+    // session) exactly as the browser's own pre-pass has it bound before
+    // any query — see [`finalize_pending_gate`].
+    let mut pending_gate: Option<PendingGate> = None;
     // What a ::TRACK here would sit under: `Some(true)` a chart with a numeric
     // / date x, `Some(false)` one with a discrete x, `None` no chart.
     let mut track_host: Option<bool> = None;
@@ -342,6 +431,20 @@ where
     for (i, p) in sql::plan(script).into_iter().enumerate() {
         let stmt = i + 1;
         let short = one_line(p.sql.trim());
+
+        // This statement closes the open step (the next marker, or having
+        // left the group entirely) — see `pending_gate`'s doc comment.
+        if p.step.is_none() || p.step.as_ref().is_some_and(|s| s.marker) {
+            if let Some(pending) = pending_gate.take() {
+                finalize_pending_gate(
+                    &mut diags,
+                    pending,
+                    opts.stateful_session,
+                    &prelude,
+                    &mut run_query,
+                );
+            }
+        }
 
         // A mistyped role token (::BARCHRT) silently drops that column's role.
         if let Some(raw) = raws.get(i) {
@@ -1495,6 +1598,19 @@ where
                     _ => {}
                 }
             }
+            // #516, review-537: a ::GATE is checked once its step closes,
+            // not here — see `pending_gate`'s doc comment and
+            // `finalize_pending_gate`. (`rows`, from this marker's own
+            // query above, still needs no use here: the re-query at close
+            // time is the one that counts.)
+            if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::Gate) {
+                pending_gate = Some(PendingGate {
+                    stmt,
+                    short: short.clone(),
+                    sql: p.sql.clone(),
+                    gate_idx: *idx,
+                });
+            }
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -1792,6 +1908,17 @@ where
             }
         }
     }
+    // A step still open at end of script (its group ran to EOF with no
+    // closer) — same close as the in-loop check.
+    if let Some(pending) = pending_gate.take() {
+        finalize_pending_gate(
+            &mut diags,
+            pending,
+            opts.stateful_session,
+            &prelude,
+            &mut run_query,
+        );
+    }
 
     // ---- design: end-of-script checks ----
     if opts.design {
@@ -1815,6 +1942,7 @@ where
     diags.extend(fit_diags(&plan));
     diags.extend(show_if_diags(&plan));
     diags.extend(name_diags(&plan));
+    diags.extend(step_diags(&plan, script));
     diags
 }
 
@@ -2637,6 +2765,227 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                         sql: short(*g.markers.last().unwrap()),
                     });
                 }
+            }
+        }
+    }
+    diags
+}
+
+/// `::GUIDE_STEP` group structure checks (#516): see [`Diagnostic::code`]
+/// for the full `step/*` list. Run once over the whole plan (mirrors
+/// [`view_diags`]). `step/gate-not-boolean` / `step/gate-no-row` are
+/// checked per-statement in the main loop above instead (like `::SHOW_IF`'s
+/// twins), since they need the gate's own query result.
+fn step_diags(plan: &[sql::Panel], script: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let scan = sql::steps::scan(plan);
+
+    for &i in &scan.inside_subtab {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            stmt: i + 1,
+            code: "step/inside-subtab",
+            message: "::GUIDE_STEP can't open inside a ::SUBTAB — a step sequence is a \
+                      sibling of ::SUBTAB under a ::TAB, never nested inside one; this \
+                      marker is drawn as a plain ::SECTION heading instead"
+                .into(),
+            sql: short(i),
+        });
+    }
+
+    // `::GATE` / `::GATE_MESSAGE` only mean anything beside `::GUIDE_STEP`
+    // on the same statement — elsewhere they're stray columns.
+    for (i, p) in plan.iter().enumerate() {
+        if p.roles.iter().any(|(_, r)| *r == Role::GuideStep) {
+            continue;
+        }
+        if p.roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Gate | Role::GateMessage))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "step/gate-without-step",
+                message: "::GATE / ::GATE_MESSAGE only take effect on the same statement as \
+                          a ::GUIDE_STEP marker — add one, or drop these columns"
+                    .into(),
+                sql: short(i),
+            });
+        }
+    }
+
+    let other_vars = sql::vars::declared_without_steps(plan);
+    let allowed_vars = crate::host::serving::parse_dashboard_meta("lint", script).vars;
+    let gate_declared = sql::vars::declared(plan);
+
+    for g in &scan.groups {
+        let marker_stmt = g.markers[0] + 1;
+        if g.mixed_with_subtab {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "step/mixed-with-subtab",
+                message: "a ::SUBTAB closed this guided sequence — a step sequence is a \
+                          sibling of ::SUBTAB under a ::TAB, never nested inside one; move \
+                          the ::SUBTAB, or drop it, so they don't mix"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if g.markers.len() == 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "step/lone",
+                message: "a guided sequence with a single step has no Back/Next to show — add \
+                          another ::GUIDE_STEP, or drop it"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if other_vars.iter().any(|v| v.eq_ignore_ascii_case(&g.var)) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "step/var-clash",
+                message: format!(
+                    "this guided sequence's variable `{}` is also set by an input, a \
+                     `SET VARIABLE`, ::SELECT_AS, ::DRILL or ::ROWSELECT elsewhere — give the \
+                     group its own alias (`'…' AS name ::GUIDE_STEP`)",
+                    g.var
+                ),
+                sql: short(g.markers[0]),
+            });
+        }
+        if let Some(reserved) = &g.reserved_alias {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "step/var-reserved",
+                message: format!(
+                    "this guided sequence's alias `{reserved}` is a reserved name \
+                     (`__claim_*`/`anofox_data`) — the server sets it, so a step can't claim \
+                     it (the group fell back to `{}`); pick a different alias",
+                    g.var
+                ),
+                sql: short(g.markers[0]),
+            });
+        }
+        if allowed_vars
+            .as_ref()
+            .is_some_and(|vs| !vs.iter().any(|v| v.eq_ignore_ascii_case(&g.var)))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "step/var-not-allowed",
+                message: format!(
+                    "this dashboard declares `-- @vars`, but it doesn't list `{}` — on a \
+                     locked server a viewer can't navigate this guided sequence by URL \
+                     (`?v.{}=`) until it's added",
+                    g.var, g.var
+                ),
+                sql: short(g.markers[0]),
+            });
+        }
+
+        // Per-step: label dedup/computed, a ::FIT inside, an empty step, a
+        // gate on the last step.
+        let mut labels: Vec<(String, usize)> = Vec::new();
+        for (idx, &mi) in g.markers.iter().enumerate() {
+            let p = &plan[mi];
+            match &p.step.as_ref().and_then(|s| s.label.clone()) {
+                None => diags.push(Diagnostic {
+                    severity: Severity::Note,
+                    stmt: mi + 1,
+                    code: "step/computed-label",
+                    message: "this step's label is a computed expression, not a plain string \
+                              literal — its heading text can't be checked here"
+                        .into(),
+                    sql: short(mi),
+                }),
+                Some(t) if !t.is_empty() => labels.push((t.clone(), mi + 1)),
+                Some(_) => {}
+            }
+            let end = g.markers.get(idx + 1).copied().unwrap_or(g.end);
+            if (mi + 1..end).all(|j| plan[j].setup || roles::is_directive_panel(&plan[j].roles)) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "step/empty",
+                    message: "this step has no rendering statement — it would show a blank pane"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            if (mi + 1..end).any(|j| plan[j].roles.iter().any(|(_, r)| *r == Role::Fit)) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "step/fit-inside",
+                    message: "::FIT inside a ::GUIDE_STEP is ignored — a step's content is \
+                              never the whole screen's fit target"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            let has_gate = p.roles.iter().any(|(_, r)| *r == Role::Gate);
+            if has_gate && idx + 1 == g.markers.len() {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "step/gate-on-last",
+                    message: "::GATE on the last step does nothing — there is no further step \
+                              for it to hold back"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            if has_gate {
+                let reads = sql::deps::reads(&p.sql, &std::collections::HashMap::new());
+                if matches!(&reads, sql::deps::Deps::Vars(v) if v.is_empty()) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt: mi + 1,
+                        code: "step/gate-constant",
+                        message: "this ::GATE reads no variable, so it never changes — filter \
+                                  with WHERE instead, or drop the ::GATE"
+                            .into(),
+                        sql: short(mi),
+                    });
+                }
+                if let sql::deps::Deps::Vars(vars) = &reads {
+                    for v in vars {
+                        if !v.starts_with("__claim_") && !gate_declared.contains(v) {
+                            diags.push(Diagnostic {
+                                severity: Severity::Warning,
+                                stmt: mi + 1,
+                                code: "step/gate-unknown-variable",
+                                message: format!(
+                                    "getvariable('{v}') names no variable this dashboard sets \
+                                     — this ::GATE is always false (Next stays disabled)"
+                                ),
+                                sql: short(mi),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for (k, (text, stmt)) in labels.iter().enumerate() {
+            if let Some((_, other)) = labels[..k].iter().find(|(t, _)| t == text) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: *stmt,
+                    code: "step/duplicate-label",
+                    message: format!(
+                        "this step's label `{text}` is also statement {other}'s — a repeated \
+                         label makes the step list harder to scan"
+                    ),
+                    sql: short(*stmt - 1),
+                });
             }
         }
     }
@@ -8300,5 +8649,217 @@ mod show_if_tests {
             },
         );
         assert!(has(&d, "show_if/no-row"), "{d:?}");
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn codes(d: &[Diagnostic]) -> Vec<&'static str> {
+        d.iter().map(|x| x.code).collect()
+    }
+
+    fn has(d: &[Diagnostic], code: &str) -> bool {
+        d.iter().any(|x| x.code == code)
+    }
+
+    /// `step_diags` alone (no query execution, no `-- @vars`).
+    fn static_diags(sql: &str) -> Vec<Diagnostic> {
+        step_diags(&crate::sql::plan(sql), sql)
+    }
+
+    #[test]
+    fn inside_subtab() {
+        let d =
+            static_diags("SELECT 'sub'::SUBTAB; SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["step/inside-subtab"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn mixed_with_subtab() {
+        let d =
+            static_diags("SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN; SELECT 'sub'::SUBTAB;");
+        assert!(has(&d, "step/mixed-with-subtab"), "{d:?}");
+    }
+
+    #[test]
+    fn lone_step() {
+        let d = static_diags("SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;");
+        assert!(has(&d, "step/lone"), "{d:?}");
+    }
+
+    #[test]
+    fn fit_inside() {
+        let d = static_diags(
+            "SELECT 'S1'::GUIDE_STEP; SELECT 'fit'::FIT; SELECT 'S2'::GUIDE_STEP; SELECT 'x'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/fit-inside"), "{d:?}");
+    }
+
+    #[test]
+    fn empty_step() {
+        let d =
+            static_diags("SELECT 'S1'::GUIDE_STEP; SELECT 'S2'::GUIDE_STEP; SELECT 'x'::MARKDOWN;");
+        assert!(has(&d, "step/empty"), "{d:?}");
+    }
+
+    #[test]
+    fn duplicate_label() {
+        let d = static_diags(
+            "SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN; SELECT 'S1'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/duplicate-label"), "{d:?}");
+    }
+
+    #[test]
+    fn computed_label() {
+        let d = static_diags("SELECT a || 'x' ::GUIDE_STEP FROM (VALUES ('p')) t(a);");
+        assert!(has(&d, "step/computed-label"), "{d:?}");
+    }
+
+    #[test]
+    fn var_clash_with_an_input() {
+        let d = static_diags(
+            "SELECT v AS step ::DROPDOWN FROM (VALUES ('a')) t(v);\nSELECT 'S1'::GUIDE_STEP; SELECT 'S2'::GUIDE_STEP;",
+        );
+        assert!(has(&d, "step/var-clash"), "{d:?}");
+    }
+
+    /// review-537: a `__claim_*` alias is refused as the step variable
+    /// (defense in depth alongside `serve.rs`'s own guard) and reported.
+    #[test]
+    fn var_reserved_claim_alias() {
+        let d =
+            static_diags("SELECT 'S1' AS __claim_tenant ::GUIDE_STEP; SELECT 'S2'::GUIDE_STEP;");
+        assert!(has(&d, "step/var-reserved"), "{d:?}");
+    }
+
+    #[test]
+    fn var_not_allowed() {
+        let sql = "-- @vars other\nSELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;\n\
+                   SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;";
+        let d = step_diags(&crate::sql::plan(sql), sql);
+        assert!(has(&d, "step/var-not-allowed"), "{d:?}");
+    }
+
+    #[test]
+    fn var_allowed_reads_clean() {
+        let sql = "-- @vars step\nSELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;\n\
+                   SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;";
+        let d = step_diags(&crate::sql::plan(sql), sql);
+        assert!(!has(&d, "step/var-not-allowed"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_without_step() {
+        let d = static_diags("SELECT true ::GATE, 'x' ::MARKDOWN;");
+        assert_eq!(codes(&d), ["step/gate-without-step"], "{d:?}");
+    }
+
+    #[test]
+    fn gate_on_last_step() {
+        let d = static_diags(
+            "SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;\n\
+             SELECT 'S2' ::GUIDE_STEP, true ::GATE; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/gate-on-last"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_constant() {
+        let d = static_diags(
+            "SELECT 'S1' ::GUIDE_STEP, true ::GATE; SELECT 'x'::MARKDOWN; SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/gate-constant"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_unknown_variable() {
+        let d = static_diags(
+            "SELECT 'S1' ::GUIDE_STEP, getvariable('nope') = 'a' ::GATE;\n\
+             SELECT 'x'::MARKDOWN; SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/gate-unknown-variable"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_not_boolean() {
+        let d = check(
+            "SELECT 'S1' ::GUIDE_STEP, 1 ::GATE; SELECT 'x'::MARKDOWN;\n\
+             SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+            |q| {
+                if q.contains("'S1'") {
+                    Ok(vec![json!({ "c0": "S1", "c1": 1 })
+                        .as_object()
+                        .unwrap()
+                        .clone()])
+                } else {
+                    Ok(vec![json!({ "c0": "x" }).as_object().unwrap().clone()])
+                }
+            },
+        );
+        assert!(has(&d, "step/gate-not-boolean"), "{d:?}");
+    }
+
+    /// review-537: the canonical pattern — a ::GATE on the same step as its
+    /// own quiz (plan decision 2) — must lint clean, not warn, once that
+    /// quiz's own `::DROPDOWN` default has bound by the time the step
+    /// closes (the next marker). `q2`'s binding only reaches later calls'
+    /// `prelude`, so this also exercises that `finalize_pending_gate` is
+    /// re-querying with it, not reusing the marker's first (unbound) read.
+    #[test]
+    fn gate_in_its_own_step_with_its_quiz_is_clean_once_the_step_closes() {
+        let sql = "SELECT 'Quiz' ::GUIDE_STEP, getvariable('q2') = 'measured error' ::GATE;\n\
+                   SELECT v AS q2 ::DROPDOWN FROM (VALUES ('measured error')) t(v);\n\
+                   SELECT 'Next' ::GUIDE_STEP;\nSELECT 'y' ::MARKDOWN;";
+        let d = check(sql, |q| {
+            let q2_bound = q.contains("SET VARIABLE \"q2\"");
+            if q.contains("getvariable('q2')") {
+                let v = if q2_bound { json!(true) } else { Value::Null };
+                return Ok(vec![json!({ "c0": "Quiz", "c1": v })
+                    .as_object()
+                    .unwrap()
+                    .clone()]);
+            }
+            if q.contains("VALUES ('measured error')") {
+                return Ok(vec![json!({ "q2": "measured error" })
+                    .as_object()
+                    .unwrap()
+                    .clone()]);
+            }
+            Ok(vec![json!({ "c0": "ok" }).as_object().unwrap().clone()])
+        });
+        assert!(!has(&d, "step/gate-not-boolean"), "{d:?}");
+        assert!(!has(&d, "step/gate-no-row"), "{d:?}");
+    }
+
+    /// The same pattern, but the quiz is never answered correctly in this
+    /// checker run (the dropdown's own default stays empty/never matches)
+    /// — a real BOOLEAN `false`, not a warning: the gate works, it's just
+    /// closed, same as #515's `a_known_variable_reads_clean`-style cases.
+    #[test]
+    fn gate_in_its_own_step_evaluates_a_real_false_not_a_warning() {
+        let sql = "SELECT 'Quiz' ::GUIDE_STEP, getvariable('q2') = 'measured error' ::GATE;\n\
+                   SELECT v AS q2 ::DROPDOWN FROM (VALUES ('')) t(v);\n\
+                   SELECT 'Next' ::GUIDE_STEP;\nSELECT 'y' ::MARKDOWN;";
+        let d = check(sql, |q| {
+            let q2_bound = q.contains("SET VARIABLE \"q2\"");
+            if q.contains("getvariable('q2')") {
+                let v = if q2_bound { json!(false) } else { Value::Null };
+                return Ok(vec![json!({ "c0": "Quiz", "c1": v })
+                    .as_object()
+                    .unwrap()
+                    .clone()]);
+            }
+            if q.contains("VALUES ('')") {
+                return Ok(vec![json!({ "q2": "" }).as_object().unwrap().clone()]);
+            }
+            Ok(vec![json!({ "c0": "ok" }).as_object().unwrap().clone()])
+        });
+        assert!(!has(&d, "step/gate-not-boolean"), "{d:?}");
+        assert!(!has(&d, "step/gate-no-row"), "{d:?}");
     }
 }

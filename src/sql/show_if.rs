@@ -107,6 +107,7 @@ fn bad_target(p: &Panel) -> bool {
                 | Role::Fit
                 | Role::Columns
                 | Role::Reload
+                | Role::GuideStep
         ) || is_chrome_directive(*r)
     })
 }

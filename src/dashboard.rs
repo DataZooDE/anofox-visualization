@@ -194,6 +194,12 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
     // shown alternative (#214) — the other alternatives' non-setup
     // statements never even reach a query.
     let mut view_pick = sql::views::StaticPick::default();
+    // `::GUIDE_STEP` (#516): each group's running count of shown markers
+    // (keyed by `StepAt::group`), so a marker's own `SET VARIABLE` binds
+    // the right 1-based step number as the script runs — "of N" (the
+    // group's total) isn't known yet at this point; `render_inner` fixes
+    // the heading text up afterwards, once every step has been collected.
+    let mut step_n: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
     let plan = sql::plan(script);
     // `::SHOW_IF` (#515): each condition statement's own SQL + roles, kept
     // alongside the plan so a later statement's `show_if` indices can run
@@ -270,6 +276,17 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             }
             continue;
         }
+        // `::GUIDE_STEP` (#516, decision 8): the static output flattens the
+        // stepper — each step is drawn in order, gates ignored. Bind this
+        // step's 1-based number (among the ones shown so far) before its
+        // own panels run, exactly like an input's default.
+        if let Some(s) = panel.step.as_ref().filter(|s| s.marker) {
+            let n = step_n.entry(s.group).or_insert(0);
+            *n += 1;
+            provider
+                .execute(&format!("SET VARIABLE {} = {n}", s.var))
+                .ok();
+        }
         let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
         // ::TOTALS is kept for the next table (#226), like the other layout
         // directives below, so its value reaches render_inner as a Step. A
@@ -279,6 +296,9 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
         // ::GROUP / ::ENDGROUP are kept too (#405): a ::GROUP's own
         // ::KPI_SIZE cascades onto its tiles (render_inner's compact_flags),
         // though neither ever draws a box itself (same comment as above).
+        // A `::GUIDE_STEP` marker is kept too, so `render_inner` can draw its
+        // "Step n of N · Label" heading (decision 8) — it never draws a box
+        // itself either.
         let layout = has(&|r| {
             matches!(
                 r,
@@ -290,6 +310,7 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
                     | Role::View
                     | Role::GroupStart
                     | Role::GroupEnd
+                    | Role::GuideStep
             )
         });
         if roles::is_directive_panel(&panel.roles) && !layout {
@@ -334,6 +355,12 @@ fn render_inner(
 ) -> Result<String, String> {
     let (steps, chrome) = execute(script, provider);
     let compact = compact_flags(&steps);
+    // `::GUIDE_STEP` (#516): `steps` only ever holds what `execute()` kept
+    // shown, so its total marker count per group ("of N") is known now —
+    // unlike `execute()`'s own pass, which can't see past the current
+    // statement.
+    let shown_panels: Vec<&sql::Panel> = steps.iter().map(|s| &s.panel).collect();
+    let mut static_steps = sql::steps::StaticSteps::new(&shown_panels);
     let set = chrome.resolve(opts.theme.as_deref())?;
     let theme = set.pick(opts.variant).clone();
     let locale = theme
@@ -556,11 +583,40 @@ fn render_inner(
             continue;
         }
 
-        // Heading (::LABEL alone, ::SECTION) → full-width section title, own row.
+        // Heading (::LABEL alone, ::SECTION, a ::GUIDE_STEP marker) →
+        // full-width section title, own row (#516 decision 8: the static
+        // output flattens the stepper into a run of these headings).
+        let step_n_of = panel.step.as_ref().filter(|s| s.marker).and_then(|_| {
+            static_steps.step(panel).into_iter().find_map(|e| match e {
+                sql::steps::StaticEvent::Heading { n, of, .. } => Some((n, of)),
+                _ => None,
+            })
+        });
         if has(&|r| matches!(r, Role::Section))
             || (roles.len() == 1 && matches!(roles[0].1, Role::Label))
+            || step_n_of.is_some()
         {
-            let text = first_text(rows).unwrap_or_default();
+            let text = match step_n_of {
+                Some((n, of)) => {
+                    // Read the marker's own ::GUIDE_STEP column by its role
+                    // index — unlike a lone ::SECTION/::LABEL, this
+                    // statement can carry ::GATE / ::GATE_MESSAGE columns
+                    // too, so the label isn't necessarily column 0.
+                    let label = roles
+                        .iter()
+                        .find(|(_, r)| *r == Role::GuideStep)
+                        .and_then(|(i, _)| column_at(rows, *i))
+                        .and_then(|(_, vals)| vals.first())
+                        .map(value_str)
+                        .unwrap_or_default();
+                    if label.is_empty() {
+                        format!("Step {n} of {of}")
+                    } else {
+                        format!("Step {n} of {of} · {label}")
+                    }
+                }
+                None => first_text(rows).unwrap_or_default(),
+            };
             if row_units > 0 {
                 new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
             }
