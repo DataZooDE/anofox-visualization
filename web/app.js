@@ -9066,6 +9066,71 @@ const dpLazy = { gen: 0, tail: Promise.resolve(), cur: null, building: null, pum
 // more than a handful of runs).
 let dpImgRunSeq = 0;
 const dpImgSwappedRuns = new Set();
+// #574 (follow-up from #554's review 3): `dpImgSwappedRuns` only ever gets
+// an id added to it from INSIDE that id's own swap-time sweep (below) — a
+// run that is superseded before it ever reaches that point (e.g. its own
+// statement loop is cut short) never adds itself, so a blob: that resolves
+// disconnected keeps assuming its sweep is merely still coming and never
+// revokes: a permanent leak, not just the late-resolving case
+// `dpImgSwappedRuns` already covers. `dpImgRunBlobs` (imgRunId -> Set<img>)
+// tracks every <img> a run's fetch has pointed at a blob: URL but isn't yet
+// KNOWN to be safely attached; every run's own sweep also reaps every
+// STRICTLY OLDER run's still-tracked, still-disconnected images, not just
+// its own — so the very next run to actually reach a sweep closes the gap
+// regardless of why the owning (older) run never got there itself. An
+// image found connected is simply dropped (the ordinary per-run sweep
+// below, which scans the live DOM every run, already owns its eventual
+// cleanup from here on). Never a run >= the sweeping one's own id: a run
+// that hasn't swapped yet (or doesn't exist yet) has its own images
+// legitimately sitting disconnected in its own not-yet-swapped fragment —
+// revoking those here would break a chart about to appear.
+const dpImgRunBlobs = new Map();
+// #574: called from every run's own swap-time sweep, right after it marks
+// itself in `dpImgSwappedRuns` — drops ITS OWN entry (`candidateBlobImgs`'
+// sweep, right above the call site, already resolved every image in it),
+// then reaps every run strictly OLDER than `ownRunId` (run ids are
+// monotonic, from `++dpImgRunSeq`) that still has tracked images: a
+// connected one is just dropped from tracking (the live-DOM sweep above
+// now owns it), a disconnected one is revoked via `revoke` (real caller:
+// `URL.revokeObjectURL`; a test passes a spy instead — `img` only needs
+// `.isConnected` and `.dataset.anofoxBlob`, no real DOM). A run `>=
+// ownRunId` is deliberately never touched, even though the single-flight
+// run queue means one can't currently exist yet at this point — a run
+// still mid-build has its own images sitting disconnected in its own
+// not-yet-swapped fragment, the same transient state an orphaned image is
+// in, and this function must not rely on timing to tell them apart. A
+// `Map`/`img` argument is mutated in place (matching `dpImgRunBlobs`
+// itself); returns the images it revoked.
+function reapOtherRunBlobs(runBlobs, ownRunId, revoke) {
+  runBlobs.delete(ownRunId);
+  const revoked = [];
+  for (const [rid, runSet] of runBlobs) {
+    // Review: only ever touch a STRICTLY OLDER run (run ids are monotonic,
+    // assigned by `++dpImgRunSeq` — see dpImgRunBlobs' own comment) — never
+    // one that is `ownRunId` or newer. The single-flight run queue means a
+    // newer run can't have started before THIS one finished, so `rid >
+    // ownRunId` can't currently happen in practice — but this function
+    // must not quietly rely on that: a newer run's own images sit
+    // disconnected in its own not-yet-swapped fragment for the entirety of
+    // its build, which is exactly the state a genuinely orphaned image is
+    // in too, and reaping it here (before that run's OWN sweep gets to
+    // decide) would revoke a blob still destined for the live DOM.
+    if (rid >= ownRunId) continue;
+    for (const img of runSet) {
+      if (img.isConnected) {
+        runSet.delete(img);
+        continue;
+      }
+      if (img.dataset.anofoxBlob) {
+        revoke(img.dataset.anofoxBlob);
+        revoked.push(img);
+      }
+      runSet.delete(img);
+    }
+    if (runSet.size === 0) runBlobs.delete(rid);
+  }
+  return revoked;
+}
 let dpSetupRan = new Map(); // setup SQL run since the last full run -> its varSig
 let dpSetupEpoch = 0; // bumped by a setup statement that may change what a query read
 let dpCreated = new Set(); // objects setup created since the last full run
@@ -9716,6 +9781,12 @@ async function runOnce(fresh = true, pv = preview) {
   // that same 12 used to also drive the chart's internal layout width,
   // ignoring the pane's own narrower slot).
   let curGroupScale = 1;
+  // ::HEIGHT pending when a ::VIEW group's first marker is reached (#573):
+  // applies to EVERY alternative of the group, not just the first — each
+  // later marker below restores it onto nextHeight when that alternative
+  // didn't set its own (an alternative's own ::HEIGHT right before its own
+  // marker still wins, by simply leaving nextHeight non-zero here).
+  let curGroupHeight = 0;
   let viewScale = 1;
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
@@ -10207,6 +10278,13 @@ async function runOnce(fresh = true, pv = preview) {
                   }
                   img.dataset.anofoxBlob = blobUrl;
                   img.src = blobUrl;
+                  // #574: not yet KNOWN safe (this run's own sweep may not
+                  // have run yet, or — the gap this fixes — may never run
+                  // at all, if this run is superseded before reaching it);
+                  // tracked so any later run's own sweep can still reap it.
+                  let runSet = dpImgRunBlobs.get(imgRunId);
+                  if (!runSet) dpImgRunBlobs.set(imgRunId, (runSet = new Set()));
+                  runSet.add(img);
                 })
                 .catch(() => img.parentNode && img.replaceWith(missing(alt)));
             } else {
@@ -10722,6 +10800,11 @@ async function runOnce(fresh = true, pv = preview) {
             curGroupScale = outerSpan / 12;
           }
           nextSpan = 0;
+          // #573: a pending ::HEIGHT right here (before the group's first
+          // marker) is the group's shared height — remembered so every
+          // later alternative's marker (below, unconditionally) can
+          // restore it, not just this first one.
+          curGroupHeight = nextHeight;
           const bar = document.createElement("div");
           bar.className = "dp-viewbar dp-seg";
           bar.setAttribute("role", "tablist");
@@ -10747,6 +10830,12 @@ async function runOnce(fresh = true, pv = preview) {
         // a full top-level column) down to the slot's own share of the page.
         defaultSpan = 12;
         viewScale = curGroupScale;
+        // #573: restore the group's shared ::HEIGHT (captured above as
+        // `curGroupHeight`) onto THIS alternative too, the same
+        // unconditional reapply as `viewScale` just above — unless its own
+        // pending ::HEIGHT (set directly before this marker) already left
+        // nextHeight non-zero, which still wins.
+        if (!nextHeight) nextHeight = curGroupHeight;
         const pane = document.createElement("div");
         pane.className = "grid dp-viewpane";
         pane.id = `dp-vp-${s.view.group}-${alt}`;
@@ -11205,6 +11294,14 @@ async function runOnce(fresh = true, pv = preview) {
   // many newer runs have happened.
   dpImgSwappedRuns.add(imgRunId);
   if (dpImgSwappedRuns.size > 50) dpImgSwappedRuns.delete(dpImgSwappedRuns.values().next().value);
+  // #574: this run's own candidateBlobImgs sweep (above) just resolved
+  // every image it tracked; reapOtherRunBlobs drops this run's own entry
+  // (already handled) and reaps every OTHER run's still-tracked images too.
+  // A run whose own sweep is reached normally never needed this (the loop
+  // above already covers it); this is for one that was superseded before
+  // ever getting here — the very next run to actually reach a sweep is the
+  // first chance anything revisits its blobs.
+  reapOtherRunBlobs(dpImgRunBlobs, imgRunId, (url) => URL.revokeObjectURL(url));
   performance.mark("dp:swap");
   dpLazy.cur = lazy;
   // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the full-toolkit extension for this machine's platform as a release
-# asset: web/pkg (wasm-pack, embedded builder UI) + release cdylib + metadata
+# asset: web/pkg (wasm-bindgen + wasm-opt, embedded builder UI — not
+# wasm-pack, #552) + release cdylib + metadata
 # footer (duckext/scripts/build-native.sh), then the release smoke test.
 #   output: $DIST/anofox_visualization.<tag>.duckdb-<duckdb>.<platform>.duckdb_extension
 #   env:    DUCKDB (CLI to test with; default: downloaded by install-duckdb-cli.sh)

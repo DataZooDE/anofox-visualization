@@ -13,8 +13,11 @@ duckext/scripts/build-native.sh --release   # → /tmp/anofox_visualization.duck
 duckdb -unsigned
 ```
 
-The script builds `web/pkg` with wasm-pack (embedded into the extension for the
-browser UI), builds the cdylib with `cargo build --locked -p
+The script builds `web/pkg` (embedded into the extension for the browser UI)
+with `cargo build --target wasm32-unknown-unknown` + `wasm-bindgen` +
+`wasm-opt` — the same inputs as CI's `wasm-pack build --target web`, done by
+hand (#552: wasm-pack itself doesn't work on every box, see the script's
+comments), builds the cdylib with `cargo build --locked -p
 anofox-visualization-duckdb`, packages it with the official metadata footer
 (abi `C_STRUCT`, C-API `v1.2.0`, version from the workspace `Cargo.toml`) via
 `scripts/append_extension_metadata.py`, and smoke-tests it (renders a chart;

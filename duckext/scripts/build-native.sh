@@ -16,15 +16,16 @@ case "$OUT" in /*|[A-Za-z]:*) ;; *) OUT="$PWD/$OUT" ;; esac
 PLATFORM="${PLATFORM:-$("$DUCKDB" -noheader -list -c 'PRAGMA platform;')}"
 # Single version source of truth: [workspace.package] in the root Cargo.toml.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$CORE/Cargo.toml" | head -1)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$CORE/target}"
 
 # The extension embeds web/ at compile time (include_dir!) so `SELECT
 # anofox_serve(port)` can serve the browser builder. Build the wasm module first
 # so web/pkg is present (REQUIRED unless SKIP_WASM=1, which builds a server
-# whose UI cannot render).
+# whose UI cannot render). The actual build (cargo to wasm32-unknown-unknown,
+# wasm-bindgen, wasm-opt — no wasm-pack, #552) lives in scripts/build-
+# wasm-pkg.sh, shared with scripts/release/common.sh's ensure_web_pkg() (#566).
 if [ "${SKIP_WASM:-0}" != "1" ]; then
-  command -v wasm-pack >/dev/null || { echo "wasm-pack is required (or SKIP_WASM=1)"; exit 1; }
-  echo "== build web/pkg (wasm) — embedded UI for anofox_serve =="
-  ( cd "$CORE" && wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm )
+  "$CORE/scripts/build-wasm-pkg.sh"
   touch "$HERE/src/serve.rs"   # force include_dir! to re-embed the fresh web/pkg
 else
   echo "== SKIP_WASM=1 — anofox_serve UI won't include the renderer =="
@@ -32,7 +33,6 @@ fi
 
 echo "== build cdylib (v$VERSION) =="
 cd "$CORE"
-TARGET_DIR="${CARGO_TARGET_DIR:-$CORE/target}"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}" cargo build --locked -p anofox-visualization-duckdb --lib "$@"
 PROFILE=debug
 for a in "$@"; do [ "$a" = "--release" ] && PROFILE=release; done

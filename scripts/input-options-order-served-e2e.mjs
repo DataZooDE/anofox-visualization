@@ -6,9 +6,12 @@
 // the variables the client's request sends, so a dropdown's OPTIONS
 // request made before the client knows the search box's value never sees
 // it, full stop — not just the previous value, every single time,
-// including a hard reload with `?v.q=...` already in the address bar. Not
-// run in CI (like scripts/served-e2e.mjs / scripts/varscope-e2e.mjs) — it
-// needs a native extension build.
+// including a hard reload with `?v.q=...` already in the address bar.
+// Needs a native extension build with the real UI embedded (not the
+// SKIP_WASM=1 one the `rust` job builds) — run in CI's `web-e2e` job
+// (#590), which already downloads web/pkg and builds that extension from
+// it. scripts/varscope-e2e.mjs still isn't run in CI (it's a before/after
+// measurement, see its own header).
 //
 //   node scripts/input-options-order-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8954] [--duckdb duckdb]
