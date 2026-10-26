@@ -120,6 +120,12 @@ pub(super) fn flow_layers(
     // sipemu/ggplot-rs#239.
     color_scale: Option<Box<dyn Scale>>,
     plain_fill: Rgb,
+    // `data-row` on a `::FRAME` flow map (review of #595, SHOULD-FIX 5):
+    // frame k's own source row for this flow (D22), not `fl_.row` (the
+    // view's own local feature index) — mirrors `plot.rs`'s own
+    // `frame_ctx.result_row[i]` for areas/points exactly. `None` outside
+    // a frame map.
+    frame_ctx: Option<&super::frames::FrameCtx>,
 ) -> (GGPlot, usize, usize, Option<String>) {
     let linestyle_col = find_role(cols, Role::LineStyle);
     let fmt_full = |s: &ValueScale, v: f64| s.fmt.full(v, &o.locale);
@@ -240,7 +246,14 @@ pub(super) fn flow_layers(
         // scaling (when one applies, see `width_const` below), not this row.
         sizes.push(Value::Float(fl_.raw.unwrap_or(fl_.w)));
         tooltips.push(Value::Str(title));
-        rows.push(Value::Integer(i as i64));
+        // review of #595 SHOULD-FIX 5: frame k's own source row for this
+        // flow (D22's `::LINK`/data-row contract), not `i` (this view's
+        // own local feature index) — same `frame_ctx.result_row[i]`
+        // `plot.rs` already uses for areas/points.
+        rows.push(Value::Integer(match frame_ctx {
+            Some(fc) => fc.result_row[i] as i64,
+            None => i as i64,
+        }));
         seriess.push(Value::Str(series));
         values.push(Value::Float(data_value));
         labels.push(Value::Str(flow_label));
