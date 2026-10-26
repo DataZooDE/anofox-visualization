@@ -85,6 +85,13 @@ struct Opts {
     /// only thing that also covers a computed or otherwise-missed path to
     /// the same hang.
     authoring_timeout: Duration,
+    /// `--assets <dir>` (authoring only, #522): opt-in; off (`None`) means
+    /// today's behaviour unchanged (no `/assets/<rest>` route, every
+    /// relative `::IMAGE`/markdown source draws the alt-text placeholder).
+    /// Validated and canonicalized once at startup
+    /// ([`anofox_visualization::image::validated_assets_root`]), not
+    /// derived from a dashboards folder — authoring has none.
+    assets_dir: Option<String>,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -99,7 +106,7 @@ static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -134,6 +141,7 @@ fn parse_args() -> Opts {
         app: AppBrand::default(),
         home: None,
         authoring_timeout: Duration::from_secs(120),
+        assets_dir: None,
     };
     let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut query_timeout_given = false;
@@ -180,6 +188,12 @@ fn parse_args() -> Opts {
                 query_timeout_given = true;
             }
             "--threads" => o.threads = num(args.next(), "--threads").clamp(1, 64) as usize,
+            "--assets" => {
+                o.assets_dir = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage("--assets needs a directory")),
+                )
+            }
             "--db" => o.db = args.next().unwrap_or_else(|| usage("--db needs a path")),
             "--theme" => {
                 let v = args
@@ -277,6 +291,12 @@ fn parse_args() -> Opts {
     // the authoring session).
     if o.dashboards_dir.is_some() && query_timeout_given {
         usage("--query-timeout applies to authoring mode only (serve <db>); --dashboards has --timeout");
+    }
+    // #522: `--dashboards` serving already resolves relative assets from
+    // its own folder's `assets/` subfolder (no option needed); `--assets`
+    // names authoring's otherwise-nonexistent root directly.
+    if o.dashboards_dir.is_some() && o.assets_dir.is_some() {
+        usage("--assets applies to authoring mode only (serve <db>); --dashboards already serves <dir>/assets");
     }
     if let Err(e) = o.app.check() {
         usage(if e.starts_with("logo_dark") {
@@ -602,8 +622,21 @@ fn authoring_mode(o: &Opts) {
         o.bind.clone()
     };
     let url = guard.login_url(&host);
+    // #522: opt-in only — refuse loudly at start rather than silently
+    // serving nothing (an author who passed --assets gets a wrong dir
+    // flagged immediately, not a page of broken images later).
+    let assets_root = o.assets_dir.as_deref().map(|d| {
+        anofox_visualization::image::validated_assets_root(Path::new(d)).unwrap_or_else(|e| {
+            eprintln!("error: --assets {e}");
+            std::process::exit(2)
+        })
+    });
+    let assets_note = assets_root
+        .as_ref()
+        .map(|p: &PathBuf| format!("\n  assets: {}", p.display()))
+        .unwrap_or_default();
     println!(
-        "anofox-visualization serving {url}\n  (authoring — client SQL; loopback only; the URL carries this run's token)\n  database: {db}\n  (Ctrl-C to stop)"
+        "anofox-visualization serving {url}\n  (authoring — client SQL; loopback only; the URL carries this run's token)\n  database: {db}{assets_note}\n  (Ctrl-C to stop)"
     );
     if o.open_browser {
         let _ = open::that(&url);
@@ -613,11 +646,16 @@ fn authoring_mode(o: &Opts) {
     install_cleanup_on_signal();
     let session = Mutex::new(AuthoringSession::new(db.clone(), o.authoring_timeout));
     run_workers(server, 1, move |req| {
-        handle_authoring(&guard, &session, req)
+        handle_authoring(&guard, &session, assets_root.as_deref(), req)
     });
 }
 
-fn handle_authoring(guard: &AuthoringGuard, session: &Mutex<AuthoringSession>, mut req: Request) {
+fn handle_authoring(
+    guard: &AuthoringGuard,
+    session: &Mutex<AuthoringSession>,
+    assets_root: Option<&Path>,
+    mut req: Request,
+) {
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("/").to_string();
     let m = meta(&req);
@@ -680,6 +718,17 @@ fn handle_authoring(guard: &AuthoringGuard, session: &Mutex<AuthoringSession>, m
             Err(msg) => text(req, 400, &msg),
         };
     }
+    // #522: before the generic GET-only check below (this route also
+    // answers HEAD) — `guard.check` above already gated every route this
+    // function handles, this one included.
+    if let Some(root) = assets_root {
+        if let Some(rest) = path.strip_prefix("/assets/") {
+            if req.method() != &Method::Get && req.method() != &Method::Head {
+                return text(req, 405, "GET/HEAD only");
+            }
+            return authoring_asset(root, rest, req);
+        }
+    }
     if req.method() != &Method::Get {
         return text(req, 405, "method not allowed");
     }
@@ -712,6 +761,65 @@ fn handle_authoring(guard: &AuthoringGuard, session: &Mutex<AuthoringSession>, m
         }
         Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),
+    }
+}
+
+/// `GET`/`HEAD /assets/<rest>` (#522, opt-in): one image file from
+/// authoring's own `--assets <dir>` root (`handle_authoring` only reaches
+/// this when `assets_root` is `Some`). Same containment/extension/
+/// magic-byte/size rules and response headers as the locked server's own
+/// `/d/<id>/assets/<rest>` (`duckext::serve::locked_asset`) — both go
+/// through `anofox_visualization::image`'s shared validator, nothing
+/// duplicated here. Every refusal is a plain 404: which one it was
+/// (missing, traversal, wrong extension, not really an image, too big) is
+/// not a caller's business.
+fn authoring_asset(root: &Path, rest: &str, req: Request) {
+    const MAX: u64 = anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES;
+    let headers = |mime: &str| {
+        vec![
+            header("Content-Type", mime),
+            header("X-Content-Type-Options", "nosniff"),
+            // Neutralises an SVG opened as a top-level document instead of
+            // inside an `<img>`.
+            header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            ),
+            // Loopback-only, single-token session — still `private`, and a
+            // short max-age since an asset can change under an author's
+            // feet mid-session, same as the dashboard script itself.
+            header("Cache-Control", "private, max-age=60"),
+            header("Cross-Origin-Resource-Policy", "same-origin"),
+        ]
+    };
+    if req.method() == &Method::Head {
+        return match anofox_visualization::image::stat_asset(root, rest, MAX) {
+            Ok((mime, len)) => {
+                let resp = Response::new(
+                    200.into(),
+                    headers(&mime),
+                    std::io::empty(),
+                    Some(len as usize),
+                    None,
+                );
+                let _ = req.respond(resp);
+            }
+            Err(_) => text(req, 404, "not found"),
+        };
+    }
+    match anofox_visualization::image::read_asset(root, rest, MAX) {
+        Ok((mime, bytes)) => {
+            let len = bytes.len();
+            let resp = Response::new(
+                200.into(),
+                headers(&mime),
+                std::io::Cursor::new(bytes),
+                Some(len),
+                None,
+            );
+            let _ = req.respond(resp);
+        }
+        Err(_) => text(req, 404, "not found"),
     }
 }
 

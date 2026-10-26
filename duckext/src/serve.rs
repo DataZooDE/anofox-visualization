@@ -384,19 +384,57 @@ struct Authoring {
     max_body: usize,
     /// `options` of `anofox_serve(port, options)`: the app bar's `<script>`.
     app: String,
+    /// `options.assets` (#522), already [`anofox_visualization::image::
+    /// validated_assets_root`]-checked at start — `None` (the default)
+    /// means exactly today's behaviour: no `/assets/<rest>` route, every
+    /// relative `::IMAGE`/markdown source draws the alt-text placeholder.
+    /// Unlike the locked server's `assets/` subfolder convention, this is
+    /// an explicit opt-in naming the root directly (authoring has no
+    /// dashboards folder to derive one from — plan-514 decision 5, now
+    /// overridden only when this option is given).
+    assets_root: Option<PathBuf>,
+}
+
+/// `options.assets`: pulled out of `options` before [`AppBrand::from_json`]
+/// sees the rest, so an unrecognised key there still refuses loudly (#522)
+/// — `AppBrand`'s own validation is otherwise untouched.
+fn parse_assets_option(options: &str) -> Result<(Option<PathBuf>, String), String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(options).map_err(|e| format!("bad JSON: {e}"))?;
+    let obj = v
+        .as_object_mut()
+        .ok_or_else(|| "options must be a JSON object".to_string())?;
+    let assets = match obj.remove("assets") {
+        None => None,
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(
+            anofox_visualization::image::validated_assets_root(Path::new(&s))
+                .map_err(|e| format!("options.assets: {e}"))?,
+        ),
+        Some(_) => return Err("options.assets must be a non-empty string path".into()),
+    };
+    Ok((assets, v.to_string()))
 }
 
 /// `anofox_serve(port[, options])`: start the authoring server on
 /// 127.0.0.1:`port`; `options` sets the builder's app bar (name, tagline,
-/// logo, logo_dark, link, favicon — see `AppBrand`).
+/// logo, logo_dark, link, favicon — see `AppBrand`) and, opt-in,
+/// `options.assets` (#522): a directory the builder also serves relative
+/// `::IMAGE`/markdown image sources from at `GET/HEAD /assets/<rest>`,
+/// under the same token/loopback/origin guard as every other authoring
+/// route. Off (`None`) unless given — authoring otherwise has no
+/// dashboards folder to serve `assets/` from at all (plan-514 decision 5).
 pub fn start_authoring(
     ctx: Arc<DbCtx>,
     port: u16,
     options: Option<&str>,
 ) -> Result<String, String> {
-    let app = match options {
-        Some(json) => AppBrand::from_json(json).map_err(|e| format!("options: {e}"))?,
-        None => AppBrand::default(),
+    let (assets_root, app) = match options {
+        Some(json) => {
+            let (assets, rest) = parse_assets_option(json)?;
+            let app = AppBrand::from_json(&rest).map_err(|e| format!("options: {e}"))?;
+            (assets, app)
+        }
+        None => (None, AppBrand::default()),
     };
     let mut servers = lock_servers();
     if servers.contains_key(&port) {
@@ -415,6 +453,7 @@ pub fn start_authoring(
         guard: AuthoringGuard::new(port),
         max_body: 4 << 20,
         app: app.script(),
+        assets_root: assets_root.clone(),
     });
     let url = state.guard.login_url("127.0.0.1");
     let stop = Arc::new(AtomicBool::new(false));
@@ -440,8 +479,13 @@ pub fn start_authoring(
     );
     drop(servers);
     let _ = open::that(&url);
+    // #522: logged once, here — the one place a resolved assets root is
+    // reported back to the caller.
+    let assets_note = assets_root
+        .map(|p| format!("; assets served from '{}'", p.display()))
+        .unwrap_or_default();
     Ok(format!(
-        "anofox-visualization serving {url} (authoring: runs SQL on this session; loopback only; the URL carries the session token)"
+        "anofox-visualization serving {url} (authoring: runs SQL on this session; loopback only; the URL carries the session token){assets_note}"
     ))
 }
 
@@ -500,10 +544,85 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
         }
         return;
     }
+    // #522: before the generic GET-only check below — this route also
+    // answers `HEAD`. `st.guard.check` above already gated every route
+    // this function handles, this one included; there is no further
+    // per-dashboard scope to check (unlike the locked server's own
+    // `/d/<id>/assets/<rest>`, authoring has no dashboards).
+    if let Some(root) = &st.assets_root {
+        if let Some(rest) = path.strip_prefix("/assets/") {
+            if req.method() != &Method::Get && req.method() != &Method::Head {
+                return text(req, 405, "GET/HEAD only");
+            }
+            return authoring_asset(root, rest, req);
+        }
+    }
     if req.method() != &Method::Get {
         return text(req, 405, "method not allowed");
     }
     serve_asset(req, &path, &st.app);
+}
+
+/// `GET`/`HEAD /assets/<rest>` (#522, opt-in): one image file from the
+/// authoring builder's own `options.assets` root ([`start_authoring`]) —
+/// reached only when that option was given (`handle_authoring` checks
+/// `st.assets_root` first). Same containment/extension/magic-byte/size
+/// rules and response headers as the locked server's own `/d/<id>/assets/
+/// <rest>` ([`locked_asset`]) — both go through [`anofox_visualization::
+/// image`]'s shared validator, nothing duplicated here. Every refusal is a
+/// plain 404, same reasoning as `locked_asset`'s own doc comment: which
+/// one it was (missing, traversal, wrong extension, not really an image,
+/// too big) is not a caller's business.
+fn authoring_asset(root: &Path, rest: &str, req: Request) {
+    const MAX: u64 = anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES;
+    let headers = |mime: &str| {
+        vec![
+            header("Content-Type", mime),
+            header("X-Content-Type-Options", "nosniff"),
+            // Neutralises an SVG opened as a top-level document — same
+            // reasoning as `locked_asset`'s identical header.
+            header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            ),
+            // Authoring is loopback-only, single-token, no viewer logout to
+            // outlive — still `private`, not the locked server's longer
+            // `max-age=300`, since an asset here can change under an
+            // author's feet mid-session just as easily as the dashboard
+            // script itself.
+            header("Cache-Control", "private, max-age=60"),
+            header("Cross-Origin-Resource-Policy", "same-origin"),
+        ]
+    };
+    if req.method() == &Method::Head {
+        return match anofox_visualization::image::stat_asset(root, rest, MAX) {
+            Ok((mime, len)) => {
+                let resp = Response::new(
+                    200.into(),
+                    headers(&mime),
+                    std::io::empty(),
+                    Some(len as usize),
+                    None,
+                );
+                let _ = req.respond(resp);
+            }
+            Err(_) => text(req, 404, "not found"),
+        };
+    }
+    match anofox_visualization::image::read_asset(root, rest, MAX) {
+        Ok((mime, bytes)) => {
+            let len = bytes.len();
+            let resp = Response::new(
+                200.into(),
+                headers(&mime),
+                std::io::Cursor::new(bytes),
+                Some(len),
+                None,
+            );
+            let _ = req.respond(resp);
+        }
+        Err(_) => text(req, 404, "not found"),
+    }
 }
 
 /// Authoring `/query`: run the body on the live connection. Statements are
@@ -626,9 +745,10 @@ fn run_check(st: &Authoring, body: &str) -> Result<String, String> {
             design,
             stateful_session: true,
             // The authoring builder has no dashboards folder (#514 PR B,
-            // decision 5: `anofox_serve`/`anofox_serve_dashboards`'s
-            // authoring mode never serves/checks `assets/`) —
-            // `image/missing-file` never fires here.
+            // decision 5), and `options.assets` (#522) is a plain serving
+            // root, not a dashboards folder with its own sibling `.sql`
+            // files to lint against — `image/missing-file` never fires
+            // here, with or without that option set.
             image_root: None,
         },
         Duration::from_millis(timeout_ms),

@@ -383,6 +383,42 @@ pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf>
         .filter(|p| p.is_dir())
 }
 
+/// Validate an **explicit, opt-in** assets root — the authoring builder's
+/// `--assets <dir>` / `anofox_serve(port, {assets: '<dir>'})` (#522) — not
+/// a dashboards folder's own `assets/` subfolder ([`canonical_assets_dir`],
+/// silently `None` when missing: an author just hasn't made one yet, no
+/// different from not passing the option at all).
+///
+/// Here the caller named this exact path on purpose, so every problem is a
+/// loud startup refusal rather than a silent "no assets served": `path`
+/// itself (not a sibling `assets` entry under it) must not be a symlink,
+/// must canonicalize, and the result must be a directory. Call once at
+/// startup, never per request — same posture as [`canonical_assets_dir`].
+///
+/// The message names only `path`, not the option (`--assets` for the CLI,
+/// `options.assets` for `anofox_serve`) — each caller prefixes its own
+/// name onto this `Err` rather than this function guessing which one it's
+/// talking to.
+pub fn validated_assets_root(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "'{}' is a symlink — refusing to serve it (it may point outside the intended \
+             folder); point it at a plain directory",
+            path.display()
+        ));
+    }
+    let real = path
+        .canonicalize()
+        .map_err(|e| format!("'{}': {e}", path.display()))?;
+    if !real.is_dir() {
+        return Err(format!("'{}' is not a directory", path.display()));
+    }
+    Ok(real)
+}
+
 /// Validate `rest` (a path under an `assets/` folder, already stripped of
 /// that prefix) against `root` — the dashboards folder's `assets/`
 /// directory, **already canonicalized by the caller** — and open the file

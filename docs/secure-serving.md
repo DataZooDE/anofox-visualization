@@ -2215,6 +2215,45 @@ anyone, only its own pre-rendered static charts and whatever `<image
 href>` the browser's `<img>`-only trust model already applies to a `data:`
 URI the same as any other accepted source).
 
+### `GET`/`HEAD` `/assets/<rest>` — authoring, opt-in (#522)
+
+The authoring builder (`serve [db]`, loopback-only; `anofox_serve(port,
+options)`) has no dashboards folder at all (plan-514 decision 5) — unlike
+`--dashboards <dir>`/`anofox_serve_dashboards`, there is no `<dir>/assets/`
+to derive a route from, so a relative `::IMAGE`/markdown source always drew
+the alt-text placeholder while authoring, even once PR B shipped. `--assets
+<dir>` (CLI) / `options.assets` (the extension, same key name) names a root
+directly and is **opt-in, off by default** — nothing changes unless it is
+given.
+
+- **Validated once at start, loudly.** Unlike `<dashboards dir>/assets/`
+  (silently `None` when missing — an author may just not have made one
+  yet), this path was named on purpose: a symlinked root, a missing path,
+  or a path that isn't a directory all refuse to start (exit 2 for the
+  CLI; an error from `anofox_serve` for the extension), not a silent
+  "nothing served" (`src/image.rs::validated_assets_root`). The resolved,
+  canonical path is logged/returned once.
+- **Same guard as every other authoring route.** `GET`/`HEAD
+  /assets/<rest>` sits behind the same per-run token (cookie or
+  `X-Anofox-Token`), loopback `Host`, and same-origin checks as `/query` —
+  there is no separate, weaker path to this route. Authoring has no
+  per-dashboard scope to additionally check (it has no dashboards).
+- **Same containment/extension/magic-byte/size rules and response headers
+  as the locked server's own route above** — both go through
+  `anofox_visualization::image`'s shared `open_validated_asset`/
+  `read_opened_asset`/`stat_opened_asset`. `Cache-Control` is `private,
+  max-age=60` (the locked server's shorter, `auth`-configured lifetime —
+  authoring has no logout to outlive, but an asset can change under an
+  author's feet mid-session just as easily as the dashboard script
+  itself).
+- **`GET`/`HEAD` only; no listing.** Any other method is `405`.
+- **Client.** A relative `assets/…` source resolves the same way in every
+  mode (`web/app.js::assetUrl`'s existing fallback: relative to the
+  page's own URL, always `/` for the authoring builder) — with the option
+  off, that request 404s and the viewer sees the alt-text placeholder,
+  exactly as before #522; with it on, the same request now succeeds. No
+  client-side flag or code path change was needed for this.
+
 What *is* worth a reviewer's attention: an `https:` image loads
 automatically, with no click, unlike `::LINK`. If a `::MARKDOWN` (or
 `::IMAGE`) column is built from a text column that end users influence — a
