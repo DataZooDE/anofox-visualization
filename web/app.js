@@ -9716,6 +9716,12 @@ async function runOnce(fresh = true, pv = preview) {
   // that same 12 used to also drive the chart's internal layout width,
   // ignoring the pane's own narrower slot).
   let curGroupScale = 1;
+  // ::HEIGHT pending when a ::VIEW group's first marker is reached (#573):
+  // applies to EVERY alternative of the group, not just the first — each
+  // later marker below restores it onto nextHeight when that alternative
+  // didn't set its own (an alternative's own ::HEIGHT right before its own
+  // marker still wins, by simply leaving nextHeight non-zero here).
+  let curGroupHeight = 0;
   let viewScale = 1;
   let nextSpan = 0;
   let nextHeight = 0; // ::HEIGHT → the next panel's height in px (optional)
@@ -10722,6 +10728,11 @@ async function runOnce(fresh = true, pv = preview) {
             curGroupScale = outerSpan / 12;
           }
           nextSpan = 0;
+          // #573: a pending ::HEIGHT right here (before the group's first
+          // marker) is the group's shared height — remembered so every
+          // later alternative's marker (below, unconditionally) can
+          // restore it, not just this first one.
+          curGroupHeight = nextHeight;
           const bar = document.createElement("div");
           bar.className = "dp-viewbar dp-seg";
           bar.setAttribute("role", "tablist");
@@ -10747,6 +10758,12 @@ async function runOnce(fresh = true, pv = preview) {
         // a full top-level column) down to the slot's own share of the page.
         defaultSpan = 12;
         viewScale = curGroupScale;
+        // #573: restore the group's shared ::HEIGHT (captured above as
+        // `curGroupHeight`) onto THIS alternative too, the same
+        // unconditional reapply as `viewScale` just above — unless its own
+        // pending ::HEIGHT (set directly before this marker) already left
+        // nextHeight non-zero, which still wins.
+        if (!nextHeight) nextHeight = curGroupHeight;
         const pane = document.createElement("div");
         pane.className = "grid dp-viewpane";
         pane.id = `dp-vp-${s.view.group}-${alt}`;
