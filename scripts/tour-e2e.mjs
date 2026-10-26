@@ -14,9 +14,15 @@
 // violation with the tour open; (i) at 390px the callout is a bottom sheet,
 // no horizontal scroll; (j) `-- @tour_autostart` fires once per browser,
 // not again on a reload once closed; (k) `?tour=` with garbage does
-// nothing. tourStart()/tourShowFrom()/revealTourAncestors()/placePop() in
-// web/app.js is what this exercises end to end — see
-// tests/web/tour_test.mjs for the pure helpers (readTourParam, placePop).
+// nothing; (l) switching to a DIFFERENT dashboard (the sidebar, as the
+// telemetry/library/dashboards e2e scripts do while opening every example
+// in turn against one page) ends a running tour and removes its overlay —
+// a regression: loadDash()/siteGo()/previewEnter() originally left the
+// scrim/ring/pop up over whichever dashboard came next, which could
+// intercept a click meant for it. tourStart()/tourShowFrom()/
+// revealTourAncestors()/placePop() in web/app.js is what this exercises
+// end to end — see tests/web/tour_test.mjs for the pure helpers
+// (readTourParam, placePop).
 //
 //   cargo build --lib --target wasm32-unknown-unknown --profile wasm --no-default-features --features wasm
 //   wasm-bindgen --target web --out-dir web/pkg <target>/wasm32-unknown-unknown/wasm/anofox_visualization.wasm
@@ -218,6 +224,28 @@ if (axe && existsSync(axe)) {
     const s = await tourState(page);
     check(!s.hasPop, `(k) garbage ?tour= (${bad}) starts nothing`);
   }
+  await ctx.close();
+}
+
+// (l) switching to a different dashboard (the sidebar) ends a running tour
+// and removes its overlay — the scrim/ring/pop must never outlive the
+// dashboard that started them (loadDash()/siteGo()/previewEnter() each
+// call tourEnd()).
+{
+  const { ctx, page } = await open({ width: 1440, height: 1000 }, "?tour=amplify_tour");
+  let s = await tourState(page);
+  check(s.hasPop, "(l) the tour is up before switching dashboards");
+  await page.evaluate(
+    (name) => [...document.querySelectorAll(".side-item")].find((b) => b.querySelector(".s-name")?.textContent === name)?.click(),
+    "Where do our sessions come from?"
+  );
+  await page.waitForFunction(() => document.getElementById("dash-name").value === "Where do our sessions come from?", null, { timeout: 15000 });
+  await settled(page);
+  await page.waitForTimeout(300);
+  s = await tourState(page);
+  check(!s.hasPop, `(l) the overlay is gone after switching dashboards, got ${JSON.stringify(s)}`);
+  const leftover = await page.evaluate(() => !!document.querySelector(".dp-tour-scrim, .dp-tour-ring, .dp-tour-pop"));
+  check(!leftover, "(l) no stray .dp-tour-* node left in the DOM");
   await ctx.close();
 }
 

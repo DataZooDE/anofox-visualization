@@ -4073,6 +4073,14 @@ function dashStateRestore(saved) {
   dpVars = saved.dpVars;
 }
 function loadDash(name, sql, key) {
+  // #518: a running tour belongs to the dashboard that started it — its
+  // overlay (scrim/ring/pop) lives outside `.dash` (so it survives a
+  // cross-filter re-run of the SAME dashboard) and so is never otherwise
+  // torn down by a run; leaving it up over a DIFFERENT dashboard would
+  // misdirect the spotlight at the wrong panels, or just sit there and
+  // intercept clicks. No focus to restore: the viewer just picked a new
+  // dashboard from elsewhere.
+  tourEnd(false);
   // #244: leaving a dashboard exits an active preview first (no rerun
   // prompt) — the preview's "before" state belongs to the dashboard we're
   // about to replace, not to the new one.
@@ -4168,6 +4176,7 @@ async function previewEnter({ sql, run: runner }) {
   previewRefreshSaved = $("refresh") ? $("refresh").value : null;
   previewSaved = dashStateSave();
   dashStateReset();
+  tourEnd(false); // #518: a tour never runs during a preview — see loadDash()
   preview = Object.freeze({ sql, run: runner });
   document.body.classList.add("previewing");
   if ($("preview-bar")) $("preview-bar").hidden = false;
@@ -8612,6 +8621,7 @@ async function siteGo(id, search = "", push = true) {
     return false;
   }
   if (preview) await previewExit({ rerun: false });
+  tourEnd(false); // #518: a running tour belongs to the dashboard being left — see loadDash()
   clearApplyHold();
   heldTexts.clear();
   heldStatements.clear();
