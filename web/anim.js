@@ -546,19 +546,166 @@ export function animKit(win) {
     return { show, step: () => k };
   }
 
+  // ---- ::FRAME: step a time map through its frames (M2f-A, #149) ---------
+  // Build the player for a map whose root <svg> carries data-frames (a JSON
+  // array of frame labels), data-frame (the index it shows) and
+  // data-frame-name (the ::FRAME column's display name). `draw(k)` is the
+  // caller's re-render of the same holder at frame k (app.js's renderChart,
+  // which keeps zoom/theme/size) — it must return the fresh <svg> (or a
+  // falsy value if it drew nothing). frames() owns only the bar and the
+  // timing; it never draws the chart itself, and the keyed colour/size tween
+  // between steps is the generic `tween()` above (D24).
+  // D14 (reduced motion): Play stays — stepping through time *is* the
+  // content — but a step lands instantly, 1.5s apart, and nothing autoplays.
+  function frames(panel, svg, start, draw) {
+    let labels;
+    try {
+      labels = JSON.parse(svg.getAttribute("data-frames") || "[]");
+    } catch (_) {
+      labels = [];
+    }
+    const holder = svg.parentElement;
+    if (!labels.length || !panel || !holder) return null;
+    const name = svg.getAttribute("data-frame-name") || "Frame";
+    panel.querySelectorAll(".dp-frames").forEach((e) => e.remove());
+    const bar = doc.createElement("div");
+    bar.className = "dp-frames";
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", `Time frames: ${name}`);
+    const btn = (cls, text, label) => {
+      const b = doc.createElement("button");
+      b.type = "button";
+      b.className = "dp-story-btn " + cls;
+      b.textContent = text;
+      if (label) b.setAttribute("aria-label", label);
+      bar.append(b);
+      return b;
+    };
+    const prev = btn("dp-frames-prev", "‹", "Previous frame");
+    const playBtn = btn("dp-frames-play", "▶ Play", "");
+    const next = btn("dp-frames-next", "›", "Next frame");
+    const range = doc.createElement("input");
+    range.type = "range";
+    range.min = "0";
+    range.max = String(labels.length - 1);
+    range.step = "1";
+    range.setAttribute("aria-label", name);
+    bar.append(range);
+    const pos = doc.createElement("span");
+    pos.className = "dp-frames-pos";
+    pos.setAttribute("aria-live", "polite");
+    bar.append(pos);
+    holder.after(bar);
+
+    let k = Math.max(0, Math.min(labels.length - 1, start | 0));
+    let timer = null;
+    let raf = 0;
+    let target = k;
+    const showLabel = (i) => {
+      pos.textContent = `${labels[i]} · ${i + 1} of ${labels.length}`;
+      range.value = String(i);
+      range.setAttribute("aria-valuetext", String(labels[i]));
+    };
+    const stop = () => {
+      if (timer) win.clearInterval(timer);
+      timer = null;
+      playBtn.textContent = "▶ Play";
+      playBtn.setAttribute("aria-pressed", "false");
+      pos.setAttribute("aria-live", "polite"); // back on once Play isn't flooding it
+    };
+    // One redraw per animation frame: scrubbing (or Play's own ticks) only
+    // updates `target` while a draw is already scheduled; the rAF that fires
+    // draws whatever `target` last settled on, never queues a second one.
+    const flush = () => {
+      raf = 0;
+      if (target === k) return;
+      const old = svg.hasAttribute("data-map") ? geom(svg) : null;
+      k = target;
+      const fresh = draw(k);
+      if (fresh) {
+        svg = fresh;
+        tween(svg, old, 300);
+      }
+    };
+    const request = (i) => {
+      target = Math.max(0, Math.min(labels.length - 1, i));
+      showLabel(target);
+      if (!raf) raf = win.requestAnimationFrame(flush);
+    };
+    const show = (i) => (stop(), request(i)); // a manual step stops any running Play
+    prev.onclick = () => show(k - 1 < 0 ? labels.length - 1 : k - 1);
+    next.onclick = () => show(k + 1 >= labels.length ? 0 : k + 1);
+    range.addEventListener("input", () => show(+range.value));
+    playBtn.onclick = () => {
+      if (timer) return stop();
+      playBtn.textContent = "❚❚ Pause";
+      playBtn.setAttribute("aria-pressed", "true");
+      pos.setAttribute("aria-live", "off"); // not flooded while playing (manual steps still announce)
+      request(k >= labels.length - 1 ? 0 : k + 1); // Play at the last frame restarts at 0
+      timer = win.setInterval(() => {
+        if (!svg.isConnected || doc.hidden) return stop(); // re-rendered/removed, or the tab/view is hidden
+        if (k >= labels.length - 1) return stop(); // reached the last frame: stop there, don't wrap
+        request(k + 1);
+      }, still() ? 1500 : 1000);
+    };
+    doc.addEventListener("visibilitychange", () => doc.hidden && stop());
+    // A re-run's persisted step may not be the frame the server-rendered SVG
+    // already shows (that one is always the last, D12) — jump there once,
+    // instantly (no tween), same convention as ::STORY's first show.
+    const shown = +svg.getAttribute("data-frame");
+    if (Number.isFinite(shown) && shown !== k) {
+      const fresh = draw(k);
+      if (fresh) svg = fresh;
+    }
+    showLabel(k);
+    return { show, step: () => k };
+  }
+
   // ---- ::TRANSITION 'tween': marks move to their new values on a re-run ---
-  const GEOM = { rect: ["x", "y", "width", "height"], circle: ["cx", "cy", "r"], polyline: ["points"], polygon: ["points"] };
+  // `path` carries no position (a map feature's `d` is the same shape in
+  // every frame, D20) — only its `stroke-width` tweens, same as the others.
+  const GEOM = { rect: ["x", "y", "width", "height"], circle: ["cx", "cy", "r"], polyline: ["points"], polygon: ["points"], path: ["stroke-width"] };
+  // A time map's area fills are `path[data-x]` (M2e-A, #149) — not part of
+  // marksOf (that drives entrance animation and emphasis, neither of which
+  // a map keys by path), but still a data mark for the keyed re-run join.
+  const mapAreasOf = (svg) => (svg.hasAttribute("data-map") ? [...svg.querySelectorAll("path[data-x]")] : []);
   // Each data mark by (tag, data-x, data-series) — the keyed join between
   // two renders of the same chart (repeats get a #n suffix).
   function keyed(svg) {
     const m = new Map();
-    for (const el of marksOf(svg)) {
+    for (const el of [...marksOf(svg), ...mapAreasOf(svg)]) {
       const t = el.tagName.toLowerCase();
       let k = `${t}|${el.getAttribute("data-x") ?? ""}|${el.getAttribute("data-series") ?? ""}`;
       for (let n = 1; m.has(k); n++) k = k.replace(/#\d+$/, "") + "#" + n;
       m.set(k, el);
     }
     return m;
+  }
+  // #rrggbb → [r,g,b], or null for anything else (a CSS name, "none", a
+  // pattern fill's url(#…)) — those ends swap at the tween's end, no lerp.
+  function parseHex(s) {
+    const m = /^#([0-9a-f]{6})$/i.exec(s || "");
+    return m ? [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)] : null;
+  }
+  // Linear RGB interpolation (D24), t in [0,1] → "#rrggbb".
+  function lerpRgb(a, b, t) {
+    const c = (i) => Math.max(0, Math.min(255, Math.round(a[i] + (b[i] - a[i]) * t))).toString(16).padStart(2, "0");
+    return `#${c(0)}${c(1)}${c(2)}`;
+  }
+  // fill/stroke colour jobs for one kept mark (D24): a hex-to-hex pair lerps
+  // in RGB over the tween; anything else (a pattern end, e.g. the "no data"
+  // hatch) holds the old value until the very end, then swaps — no lerp.
+  function colorJobs(el, oldEl) {
+    let jobs = null;
+    for (const attr of ["fill", "stroke"]) {
+      const from = oldEl.getAttribute(attr);
+      const to = el.getAttribute(attr);
+      if (from === to || from == null || to == null) continue;
+      const a = parseHex(from);
+      const b = parseHex(to);
+      (jobs ||= []).push(a && b ? { attr, hex: true, from: a, to: b, toRaw: to } : { attr, hex: false, from, toRaw: to });
+    }
+    return jobs;
   }
   // Remember a chart's marks before it is replaced (null for many marks).
   // A ::DIAGRAM's state for a re-run tween: what each edge, arrowhead and
@@ -653,26 +800,33 @@ export function animKit(win) {
         continue;
       }
       old.marks.delete(k);
+      const color = colorJobs(el, o.clone); // D24: fill/stroke, any mark
       const names = GEOM[el.tagName.toLowerCase()] || [];
       const to = names.map((a) => el.getAttribute(a));
       if (names[0] === "points") {
         const a = nums(o.attrs[0]);
         const b = nums(to[0]);
-        if (a.length === b.length && a.every(Number.isFinite) && b.every(Number.isFinite)) jobs.push({ el, names, pts: [a, b], to });
+        if (a.length === b.length && a.every(Number.isFinite) && b.every(Number.isFinite)) jobs.push({ el, names, pts: [a, b], to, color });
         else ghost(o.clone), fade(el, 0, 1); // reshaped: cross-fade
         continue;
       }
       const a = o.attrs.map(Number);
       const b = to.map(Number);
-      if (a.every(Number.isFinite) && b.every(Number.isFinite)) jobs.push({ el, names, from: a, b, to });
+      if (a.every(Number.isFinite) && b.every(Number.isFinite)) jobs.push({ el, names, from: a, b, to, color });
+      else if (color) jobs.push({ el, color }); // no geometry to tween (e.g. a map path's shape never moves), colour still does
     }
     for (const o of old.marks.values()) ghost(o.clone); // leaves
     play(jobs, dur);
   }
-  // Move each job's mark from its `from` geometry to `to` (attribute values)
-  // over `dur` ms, ease-out; the last frame sets the exact end state.
+  // Move each job's mark from its `from` geometry to `to` (attribute values),
+  // and its fill/stroke from old to new colour, over `dur` ms, ease-out; the
+  // last frame sets the exact end state (colour jobs included, D24).
   function play(jobs, dur) {
     if (!jobs.length) return;
+    const setColor = (j, k) => {
+      if (!j.color) return;
+      for (const c of j.color) j.el.setAttribute(c.attr, c.hex ? lerpRgb(c.from, c.to, k) : k < 1 ? c.from : c.toRaw);
+    };
     const set = (k) => {
       for (const j of jobs) {
         if (j.pts) {
@@ -680,7 +834,8 @@ export function animKit(win) {
           let p = "";
           for (let i = 0; i < a.length; i += 2) p += (i ? " " : "") + (a[i] + (b[i] - a[i]) * k).toFixed(2) + "," + (a[i + 1] + (b[i + 1] - a[i + 1]) * k).toFixed(2);
           j.el.setAttribute("points", p);
-        } else j.names.forEach((n, i) => j.el.setAttribute(n, (j.from[i] + (j.b[i] - j.from[i]) * k).toFixed(2)));
+        } else if (j.names) j.names.forEach((n, i) => j.el.setAttribute(n, (j.from[i] + (j.b[i] - j.from[i]) * k).toFixed(2)));
+        setColor(j, k);
       }
     };
     set(0);
@@ -690,7 +845,11 @@ export function animKit(win) {
       if (u < 1) {
         set(1 - Math.pow(1 - u, 3));
         win.requestAnimationFrame(frame);
-      } else for (const j of jobs) j.names.forEach((n, i) => j.el.setAttribute(n, j.to[i])); // exact end state
+      } else
+        for (const j of jobs) {
+          if (j.names) j.names.forEach((n, i) => j.el.setAttribute(n, j.to[i])); // exact end state
+          setColor(j, 1);
+        }
     };
     win.requestAnimationFrame(frame);
   }
@@ -772,11 +931,11 @@ export function animKit(win) {
   function strip(root) {
     root.querySelectorAll("clipPath.dp-clip").forEach((c) => c.remove());
     root.querySelectorAll('[clip-path^="url(#dp-clip-"]').forEach((e) => e.removeAttribute("clip-path"));
-    root.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link, .dp-ghost").forEach((e) => e.remove());
+    root.querySelectorAll(".dp-story, .dp-story-cap, .dp-story-link, .dp-frames, .dp-ghost").forEach((e) => e.remove());
     root.querySelectorAll(".dp-story-on").forEach((e) => e.classList.remove("dp-story-on"));
     root.querySelectorAll(".dp-emph-fade").forEach((e) => e.classList.remove("dp-emph-fade"));
     root.querySelectorAll(".panel svg [style*='opacity']").forEach((e) => (e.style.opacity = ""));
   }
 
-  return { enter, strip, emph, story, geom, tween, zoom, marksOf, plotOf, xPx, still, sameX };
+  return { enter, strip, emph, story, frames, geom, tween, zoom, marksOf, plotOf, xPx, still, sameX, lerpRgb, parseHex };
 }

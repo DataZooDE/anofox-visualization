@@ -6959,6 +6959,15 @@ function renderCtx() {
   if (dpPrimary) ctx.primary = dpPrimary;
   return JSON.stringify(ctx);
 }
+// renderCtx() merged with extra keys (M2f-A, #149: a map panel's current
+// `frame`) — renderCtx() itself may come back as "" or a bare brand colour
+// (the plain/byte-identical case) rather than JSON, so this is the one spot
+// that turns it into an object instead of every call site re-deriving one.
+function ctxWith(extra) {
+  const base = renderCtx();
+  const ctx = base.startsWith("{") ? JSON.parse(base) : base ? { primary: base } : {};
+  return JSON.stringify({ ...ctx, ...extra });
+}
 // The dashboard locale (::LOCALE or the theme's locale token), "" = en-US.
 function dashLocale() {
   // ?locale=de-DE: a viewer override (not in served/locked mode).
@@ -10944,11 +10953,13 @@ async function runOnce(fresh = true, pv = preview) {
     await lazyPool(lazy.jobs.filter((j) => paneShown(j.ph)), true);
     lazy.jobs = lazy.jobs.filter((j) => !j.done);
   }
-  // A re-run keeps each chart's ::STORY step (a full run starts at the overview).
-  if (fresh) dpStorySteps = {};
+  // A re-run keeps each chart's ::STORY step (a full run starts at the
+  // overview) and, for a time map, its ::FRAME step (M2f-A, #149).
+  if (fresh) dpStorySteps = dpFrameSteps = {};
   else
     document.querySelectorAll(".dash .panel[data-stmt]").forEach((p) => {
       if (p._story) dpStorySteps[p.dataset.stmt] = p._story.step();
+      if (p._frames) dpFrameSteps[p.dataset.stmt] = p._frames.step();
     });
   // A chart (or one of its marks) holding the keyboard focus hands it to its
   // replacement — however the run started (a click, an input, ::REFRESH).
@@ -11109,15 +11120,18 @@ function animateIn(panels = document.querySelectorAll(".dash .panel")) {
 // Render a chart's SVG into its holder — the dashboard run and every in-place
 // re-render (toolbox chart-type switch, zoom/pan) — with its entrance mode.
 // A chart with ::TRACKs (holder._tracks) renders as one stack, so the strips
-// keep its plot area and x window. Follow with wireCharts() once the holder
-// is in the page.
+// keep its plot area and x window. A time map mid-step (holder._frame set by
+// mountFrames, M2f-A, #149) carries its frame through the same context as
+// zoom's own window, so zoom, resize, theme and ::FIT re-renders all keep it.
+// Follow with wireCharts() once the holder is in the page.
 function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const t0 = performance.now();
+  const ctx = holder._frame != null ? ctxWith({ frame: holder._frame }) : renderCtx();
   const tracks = holder._tracks || [];
   if (tracks.length) {
     let svgs = [];
     try {
-      svgs = JSON.parse(render_stack(JSON.stringify({ chart: { rows, roles }, tracks }), w, ph, renderCtx(), zoom));
+      svgs = JSON.parse(render_stack(JSON.stringify({ chart: { rows, roles }, tracks }), w, ph, ctx, zoom));
     } catch (_) {}
     holder.innerHTML = svgs[0] || "";
     if (!holder._trackBox) {
@@ -11127,9 +11141,9 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
     }
     holder._trackBox.innerHTML = svgs.slice(1).join("");
     holder._trackBox.querySelectorAll(":scope > svg").forEach((svg, k) => (svg._track = tracks[k]));
-  } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
+  } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, ctx, zoom);
   holder._zoom = zoom; // a re-fit to a new width keeps the zoom window
-  widenDiagram(holder, w, (ww) => render_panel(rows, JSON.stringify(roles), ww, ph, renderCtx(), zoom));
+  widenDiagram(holder, w, (ww) => render_panel(rows, JSON.stringify(roles), ww, ph, ctx, zoom));
   markFitted(holder, ph);
   markAnim(holder, roles);
   performance.measure("dp:render", { start: t0 });
@@ -11617,10 +11631,11 @@ if (typeof ResizeObserver !== "undefined")
   });
 
 // Wire freshly rendered charts: hover, selection, toolbox and accessibility
-// (attachHover), then the ::STORY steppers.
+// (attachHover), then the ::STORY and ::FRAME steppers.
 function wireCharts() {
   attachHover();
   mountStories();
+  mountFrames();
   resumeLinkReturn();
 }
 
@@ -11640,6 +11655,71 @@ function mountStories() {
     const step = panel._story ? panel._story.step() : dpStorySteps[panel.dataset.stmt] || 0;
     panel._story = dpAnim.story(panel, svg, step);
   });
+}
+
+// ::FRAME players (web/anim.js, M2f-A #149) under every time map. The bar
+// outlives the svg — a zoom/resize/theme re-render only replaces the svg, so
+// a panel that already has one is left alone; only a fresh map (or a re-run
+// that dropped ::FRAME) (re)builds it.
+let dpFrameSteps = {}; // statement index → the frame to restore after a re-run
+function mountFrames() {
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const holder = panel.querySelector(":scope > .panel-svg");
+    const svg = holder && holder.querySelector(":scope > svg[data-frames]");
+    if (!svg) {
+      if (panel._frames) panel.querySelectorAll(".dp-frames").forEach((e) => e.remove());
+      panel._frames = null;
+      return;
+    }
+    if (panel._frames && panel.querySelector(":scope > .dp-frames")) return;
+    const dp = panel._dp;
+    const start = panel._frames ? panel._frames.step() : dpFrameSteps[panel.dataset.stmt] ?? +svg.dataset.frame;
+    // The step's own re-render + re-wire (the perf budget's "draw(k)"):
+    // render through the same path zoom/::FIT use (so it keeps the holder's
+    // current zoom window and size), then only what a step actually needs —
+    // hover/click on the fresh marks, the as-table view and an open tooltip —
+    // never the full wireCharts() sweep (mountStories et al. have nothing to
+    // redo here; a frame map carries no ::STORY, D25).
+    const draw = (k) => {
+      holder._frame = k;
+      if (dp) {
+        const [w, h] = chartSize(holder, dp);
+        renderChart(holder, dp.rows, dp.drawn || dp.roles, w, h, holder._zoom || "");
+        markFitted(holder, h);
+      }
+      attachHover();
+      refreshAsTableView(panel);
+      reopenMapTip(panel);
+      return holder.querySelector(":scope > svg");
+    };
+    panel._frames = dpAnim.frames(panel, svg, start, draw);
+  });
+}
+// "Charts as tables" (#401): a shown table view was built once from the old
+// svg — a frame step must rebuild it, or it keeps showing the previous
+// frame's values while the chart itself has moved on.
+function refreshAsTableView(panel) {
+  if (!dpAsTables) return;
+  const view = panel.querySelector(":scope > .dp-astable-view");
+  const msvg = panel.querySelector(":scope > .panel-svg > svg[data-map]");
+  if (!view || !msvg) return;
+  const title = panel.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
+  view.innerHTML = mapTableHtml(msvg, 200, title);
+}
+// A tooltip left open on a map feature (dpTipMark, set in attachHover)
+// re-shown on the same feature after a frame step — its value just changed
+// under a pointer that hasn't moved (M2f-A, #149).
+function reopenMapTip(panel) {
+  if (!dpTipMark || dpTipMark.panel !== panel) return;
+  const el = [...panel.querySelectorAll("svg[data-map] [data-x]")].find((e) => e.getAttribute("data-x") === dpTipMark.x);
+  if (!el) {
+    dpTipMark = null;
+    $("dp-tip")?.classList.remove("show");
+    return;
+  }
+  const at = { clientX: dpLastMouse.x, clientY: dpLastMouse.y };
+  el.dispatchEvent(new MouseEvent("mouseenter", at));
+  el.dispatchEvent(new MouseEvent("mousemove", at));
 }
 
 // The entrance a chart plays, on its root <svg> as `data-anim` (the static
@@ -16342,6 +16422,20 @@ async function downloadHtml() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
+  // D23 (M2f-A, #149): the live frame player doesn't survive the export
+  // (M2f-B embeds the frames themselves); strip() above already dropped the
+  // bar it stood in — leave one line where it was. Which frame is on screen
+  // is already named in the map's own subtitle (D19), drawn by ggplot-rs.
+  snap.querySelectorAll("svg[data-frames]").forEach((svg) => {
+    let n = 0;
+    try {
+      n = JSON.parse(svg.getAttribute("data-frames") || "[]").length;
+    } catch (_) {}
+    const note = document.createElement("p");
+    note.className = "dp-frames-note";
+    note.textContent = `${n} frames — Play in the live dashboard`;
+    svg.parentElement.after(note);
+  });
   // `::GUIDE_STEP` (#523): unlike the old full flatten, the export keeps the
   // stepper itself — Back/Next, the progress strip, the step list —
   // SNAPSHOT_JS re-wires them the same way it re-wires tabs and the ::VIEW
@@ -16960,6 +17054,12 @@ function isRuleMark(el) {
   return g === "vline" || g === "hline" || el.getAttribute("data-part") === "decorative";
 }
 
+// The feature a map tooltip is open on (M2f-A, #149: reopenMapTip reshows it
+// after a frame step moves the mouse off nothing) and the pointer's last
+// client position (every mousemove over a wired mark updates it), so the
+// re-show lands at the same spot without a real mouse event.
+let dpTipMark = null;
+let dpLastMouse = { x: 0, y: 0 };
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -17062,8 +17162,12 @@ function attachHover() {
         tipRow(info, fill);
       tip.classList.add("show");
       if (isMapMark) mapHoverEmph(series);
+      // M2f-A (#149): a time map's own value changes under the pointer at
+      // each frame step — remembered so reopenMapTip() can re-show it there.
+      if (isMapMark) dpTipMark = { panel: el.closest(".panel"), x: el.getAttribute("data-x") };
     });
     el.addEventListener("mousemove", (e) => {
+      dpLastMouse = { x: e.clientX, y: e.clientY };
       if (pointered()) return;
       tip.style.left = e.clientX + 14 + "px";
       tip.style.top = e.clientY + 14 + "px";
@@ -17071,6 +17175,7 @@ function attachHover() {
     el.addEventListener("mouseleave", () => {
       if (isMapMark) mapHoverEmph(null);
       else if (!rule && rootSvg(el)._dpHf) hoverFocus(rootSvg(el), null);
+      if (isMapMark && dpTipMark && dpTipMark.x === el.getAttribute("data-x")) dpTipMark = null;
       if (pointered()) return;
       tip.classList.remove("show");
     });
