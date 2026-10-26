@@ -72,6 +72,12 @@ type Rgb = (u8, u8, u8);
 pub(crate) const MARK_WARN: usize = 100_000;
 /// Legend and summary text size (as the plotting engine's legends).
 const FONT: f64 = 8.8;
+/// Floor size (px) for the pack attribution strip's `GeomAttribution::fit`
+/// (`plot.rs`, ggplot-rs 0.31.4, #546) — the smallest this crate considers
+/// still legible for the BKG/VG2500-style licence note. Shared with
+/// [`foot_of`]'s own `size` baseline below, which must stay at or above
+/// this (`fit`'s `min_size` clamps to `text_size`, never enlarging).
+pub(super) const ATTRIBUTION_FIT_FLOOR: f64 = 7.0;
 
 /// One drawable part of a feature, in lon/lat or projected units.
 #[derive(Clone, Debug)]
@@ -1371,6 +1377,26 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
         )]);
     }
     let scale = !matches!(m.proj, Proj::Identity) && span_km(m).is_some_and(|k| k < 3000.0);
+    // `plot.rs` now fits each attribution row against the *actual*
+    // rendered panel rect at draw time (`GeomAttribution::fit`/
+    // `.fit_overflow(Wrap)`, ggplot-rs 0.31.4, #546), so this no longer
+    // pre-shrinks `size` itself down to whatever a panel-width guess
+    // allows — that's what used to crush the BKG/VG2500 note to ~1px on
+    // a narrow panel in the first place. `size` is just the un-shrunk
+    // ceiling `fit` starts from; it must stay at or above
+    // `ATTRIBUTION_FIT_FLOOR` (`fit`'s `min_size` clamps to `text_size`,
+    // so a ceiling below the floor would make the floor a no-op).
+    let size = ATTRIBUTION_FIT_FLOOR + 0.5;
+    // Still used to pre-reserve enough footer height for the one row this
+    // crate's own content can make `fit` wrap even at the floor size: the
+    // BKG sources line (a long bare URL run plus a trailing note). `fit`
+    // decides wrapping against the real panel at draw time, which this
+    // pre-layout estimate can't see — this guess (same width heuristic
+    // `fit` itself uses) only has to be right often enough to avoid
+    // `frame_of` leaving too short a band, not pixel-perfect;
+    // `fit_overflow(Wrap)` caps any one row at 3 physical lines, but none
+    // of this crate's rows come close to needing more than one extra
+    // line at any width checked for #546.
     let room = (w - 8.0 - if scale { 70.0 } else { 0.0 }).max(40.0);
     let widest = lines
         .iter()
@@ -1379,11 +1405,8 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
             ggplot_rs::render::text::text_width(&t, 1.0)
         })
         .fold(0.0, f64::max);
-    let size = if widest > 0.0 {
-        (room / widest).min(6.5)
-    } else {
-        6.5
-    };
+    let extra_wrapped_row = widest > 0.0 && widest * ATTRIBUTION_FIT_FLOOR > room;
+    let rows = lines.len() as f64 + if extra_wrapped_row { 1.0 } else { 0.0 };
     let h = if lines.is_empty() {
         if scale {
             16.0
@@ -1391,7 +1414,7 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
             0.0
         }
     } else {
-        (lines.len() as f64 * size * 1.3 + 4.0).max(if scale { 16.0 } else { 0.0 })
+        (rows * size * 1.3 + 4.0).max(if scale { 16.0 } else { 0.0 })
     };
     Foot {
         lines,
