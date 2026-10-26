@@ -107,13 +107,21 @@ jobs:
             *) echo "::error::no binaryen release asset mapped for platform $PLATFORM"; exit 1 ;;
           esac
           ver=version_133
+          dir="$RUNNER_TEMP/binaryen"
+          mkdir -p "$dir"
           curl -sSfL -o "$RUNNER_TEMP/binaryen.tar.gz" "https://github.com/WebAssembly/binaryen/releases/download/$ver/binaryen-$ver-$asset.tar.gz"
-          mkdir -p "$RUNNER_TEMP/binaryen" "$HOME/.local/bin"
-          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/binaryen"
-          bin="$RUNNER_TEMP/binaryen/bin/wasm-opt"
-          [ "$PLATFORM" = windows_amd64 ] && bin="$bin.exe"
-          cp "$bin" "$HOME/.local/bin/"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # --force-local: on windows_amd64, $RUNNER_TEMP is a Windows path
+          # ("D:\a\_temp\..."); GNU tar's -f otherwise reads the "D:" prefix
+          # as a "host:path" remote-archive spec ("Cannot connect to D:").
+          # --strip-components=1 (not pulling out just bin/wasm-opt): the
+          # macOS builds dynamically link wasm-opt against
+          # @rpath/libbinaryen.dylib, resolved relative to the binary's own
+          # directory (../lib) — bin/ and lib/ must stay siblings. Linux and
+          # Windows are statically linked (verified: `file`/`ldd` on the
+          # linux_amd64 and linux_arm64 binaries, no .dll next to
+          # wasm-opt.exe in the Windows tarball) so this costs them nothing.
+          tar --force-local -xzf "$RUNNER_TEMP/binaryen.tar.gz" --strip-components=1 -C "$dir"
+          echo "$dir/bin" >> "$GITHUB_PATH"
 
       - name: Install the pinned DuckDB CLI
         run: echo "DUCKDB=$(scripts/release/install-duckdb-cli.sh)" >> "$GITHUB_ENV"
