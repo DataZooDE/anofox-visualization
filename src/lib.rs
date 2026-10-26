@@ -6469,6 +6469,7 @@ fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) 
         .or_else(|| column_text(cols, Role::Image))
         .filter(|s| !s.trim().is_empty());
     let alt = column_text(cols, Role::Alt)
+        .or_else(|| column_text(cols, Role::Title))
         .or_else(|| column_text(cols, Role::Label))
         .unwrap_or_default();
     let (w, h) = (width as f64, height as f64);

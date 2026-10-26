@@ -44,3 +44,20 @@ fn render_with_title_the_actual_serve_rs_call_site_handles_image_columns() {
     let svg = render_with_title(&cols, &[], 460, 300, &RenderOptions::default()).unwrap();
     assert!(svg.contains("<image "), "{svg}");
 }
+
+/// #544 re-review: without an `::ALT`, the alt text falls back to
+/// `::TITLE`, then `::LABEL` — the same order as `dashboard.rs`'s own
+/// `image_panel` (not `::LABEL` first). Uses `render_spec_checked` (→
+/// `render_with`, not `render_with_title`), so there's no separate title
+/// bar drawn from `::LABEL` to confound the assertion.
+#[test]
+fn alt_falls_back_to_title_then_label_like_dashboard_rs() {
+    let title_and_label = r#"{"rows":[{"c0":"javascript:alert(1)","c1":"the title","c2":"the label"}],"roles":[[0,"IMAGE"],[1,"TITLE"],[2,"LABEL"]],"width":460,"height":300}"#;
+    let svg = render_spec_checked(title_and_label).unwrap();
+    assert!(svg.contains("the title"), "{svg}");
+    assert!(!svg.contains("the label"), "{svg}");
+
+    let label_only = r#"{"rows":[{"c0":"javascript:alert(1)","c1":"the label"}],"roles":[[0,"IMAGE"],[1,"LABEL"]],"width":460,"height":300}"#;
+    let svg = render_spec_checked(label_only).unwrap();
+    assert!(svg.contains("the label"), "{svg}");
+}
