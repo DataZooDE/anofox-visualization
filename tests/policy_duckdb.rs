@@ -151,7 +151,7 @@ impl Fx {
             .map(|(i, s)| (i + 1 < stmts.len(), s.to_string()))
             .collect();
         self.enf
-            .rewrite_script(&mut |sql: &str| rows_as_text(&file, sql), &planned)
+            .rewrite_script(&mut |sql: &str| rows_as_text(&file, sql), &planned, &[])
             .map_err(|(i, e)| format!("statement {i}: {e}"))
     }
 

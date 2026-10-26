@@ -3220,8 +3220,23 @@ pub fn check_policy(
     use crate::host::policy::Mask;
     let plan = sql::plan(script);
     let stmts: Vec<(bool, String)> = plan.iter().map(|p| (p.setup, p.sql.clone())).collect();
+    // #517 S3: this check has no `options.state` to say whether the real
+    // server would enable read-back here (that's `--options`'s own
+    // submit/not-enabled and state/not-enabled diagnostics) — optimistic,
+    // same as the empty-temp seeding `check_opts` already does: if the
+    // script mentions `viewer_state` at all, accept it as the server's own
+    // temp rather than an unknown table.
+    let server_temps: &[&str] = if sql::script_needs_viewer_state(script) {
+        &["viewer_state", "viewer_state_latest"]
+    } else {
+        &[]
+    };
     let mut diags = Vec::new();
-    for (i, r) in enf.rewrite_each(duck, &stmts).into_iter().enumerate() {
+    for (i, r) in enf
+        .rewrite_each(duck, &stmts, server_temps)
+        .into_iter()
+        .enumerate()
+    {
         let stmt = i + 1;
         let short = one_line(stmts[i].1.trim());
         let uses = match r {
