@@ -377,6 +377,196 @@ impl Drop for Prepared {
     }
 }
 
+/// An Appender (#600): DuckDB's bulk-load path for one table, bypassing SQL
+/// text entirely — no `INSERT ... VALUES (…), (…), …` string to build,
+/// parse or bind. Used instead of [`Prepared`] wherever a caller is
+/// inserting many rows it already has as typed values, not running a
+/// query a user wrote.
+pub struct Appender(duckdb_appender);
+
+impl Appender {
+    /// Names the catalog/schema explicitly (`duckdb_appender_create_ext`)
+    /// — pass `None`/`None` to leave them to the connection's own default
+    /// catalog/`search_path`, same as `duckdb_appender_create` would, but
+    /// review of #611 N2: there is no separate, catalog-less constructor
+    /// here, because the one caller this type exists for must never use
+    /// one. For a `TEMP` table (#600: `viewer_state`), the connection's
+    /// own current default can resolve to a different, `READ_ONLY`-
+    /// attached catalog's own idea of the current database instead
+    /// (unlike ordinary SQL, which already resolves an unqualified name
+    /// to `temp` first — #548 item 1's own pinned test) — observed,
+    /// against a real locked server, to error "Cannot append to a
+    /// readonly database" rather than silently resolving to the wrong
+    /// table.
+    pub fn new_in(
+        conn: &Conn,
+        catalog: Option<&str>,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Appender, String> {
+        let t = cstring(table)?;
+        let cat_c = catalog.map(cstring).transpose()?;
+        let schema_c = schema.map(cstring).transpose()?;
+        let cat_ptr = cat_c.as_ref().map_or(ptr::null(), |c| c.as_ptr());
+        let schema_ptr = schema_c.as_ref().map_or(ptr::null(), |c| c.as_ptr());
+        unsafe {
+            let mut raw: duckdb_appender = ptr::null_mut();
+            let rc = capi!(duckdb_appender_create_ext)(
+                conn.raw,
+                cat_ptr,
+                schema_ptr,
+                t.as_ptr(),
+                &mut raw,
+            );
+            let a = Appender(raw);
+            if rc != duckdb_state::DuckDBSuccess {
+                return Err(if raw.is_null() {
+                    format!("could not create an appender for '{table}'")
+                } else {
+                    cstr_lossy(capi!(duckdb_appender_error)(a.0), "appender create failed")
+                });
+            }
+            Ok(a)
+        }
+    }
+
+    fn check(&self, rc: duckdb_state, what: &str) -> Result<(), String> {
+        if rc == duckdb_state::DuckDBSuccess {
+            Ok(())
+        } else {
+            Err(unsafe { cstr_lossy(capi!(duckdb_appender_error)(self.0), what) })
+        }
+    }
+
+    pub fn begin_row(&self) -> Result<(), String> {
+        self.check(
+            unsafe { capi!(duckdb_appender_begin_row)(self.0) },
+            "begin_row failed",
+        )
+    }
+
+    pub fn end_row(&self) -> Result<(), String> {
+        self.check(
+            unsafe { capi!(duckdb_appender_end_row)(self.0) },
+            "end_row failed",
+        )
+    }
+
+    pub fn append_null(&self) -> Result<(), String> {
+        self.check(
+            unsafe { capi!(duckdb_append_null)(self.0) },
+            "append_null failed",
+        )
+    }
+
+    pub fn append_int64(&self, v: i64) -> Result<(), String> {
+        self.check(
+            unsafe { capi!(duckdb_append_int64)(self.0, v) },
+            "append_int64 failed",
+        )
+    }
+
+    pub fn append_timestamp_micros(&self, micros: i64) -> Result<(), String> {
+        self.check(
+            unsafe { capi!(duckdb_append_timestamp)(self.0, duckdb_timestamp { micros }) },
+            "append_timestamp failed",
+        )
+    }
+
+    pub fn append_varchar(&self, v: &str) -> Result<(), String> {
+        let c = cstring(v)?;
+        self.check(
+            unsafe { capi!(duckdb_append_varchar)(self.0, c.as_ptr()) },
+            "append_varchar failed",
+        )
+    }
+
+    /// `VARCHAR[]`, each element either a string or SQL `NULL` (#548 item 3
+    /// nit: a `NULL` list item must stay a real `NULL`, not an empty
+    /// string) — the one column [`Appender`]'s simple per-value functions
+    /// above have no direct call for, so this builds one `duckdb_value`
+    /// per element plus the list `duckdb_value` itself
+    /// (`duckdb_create_list_value`), appends that, and destroys every
+    /// value it created, in the same call.
+    pub fn append_varchar_list(&self, items: &[Option<&str>]) -> Result<(), String> {
+        // Checked up front, before any `duckdb_value` is created: a NUL
+        // byte in one item (rare — a literal NUL inside recorded text)
+        // must not leave an earlier item's already-created `duckdb_value`
+        // leaked by an early return partway through the loop below.
+        let cstrs: Vec<Option<CString>> = items
+            .iter()
+            .map(|it| it.map(cstring).transpose())
+            .collect::<Result<_, _>>()?;
+        unsafe {
+            let mut elem_type = capi!(duckdb_create_logical_type)(duckdb_type::DUCKDB_TYPE_VARCHAR);
+            let mut values: Vec<duckdb_value> = cstrs
+                .iter()
+                .map(|c| match c {
+                    Some(c) => capi!(duckdb_create_varchar)(c.as_ptr()),
+                    None => capi!(duckdb_create_null_value)(),
+                })
+                .collect();
+            let mut list_val = capi!(duckdb_create_list_value)(
+                elem_type,
+                values.as_mut_ptr(),
+                values.len() as idx_t,
+            );
+            // #611 N1: `duckdb_create_list_value` returns NULL on failure
+            // (a NULL element value, or a type mismatch) — unreachable
+            // today (every element above is a valid UTF-8 `&str` turned
+            // into a real `duckdb_value`, and `elem_type` always matches),
+            // but `duckdb_append_value` would otherwise dereference a
+            // NULL `duckdb_value` if that ever stopped holding. Clean up
+            // what was already allocated and refuse instead of calling it.
+            if list_val.is_null() {
+                for v in &mut values {
+                    capi!(duckdb_destroy_value)(v);
+                }
+                capi!(duckdb_destroy_logical_type)(&mut elem_type);
+                return Err("could not build the list value to append".into());
+            }
+            let rc = capi!(duckdb_append_value)(self.0, list_val);
+            let err = if rc != duckdb_state::DuckDBSuccess {
+                Some(cstr_lossy(
+                    capi!(duckdb_appender_error)(self.0),
+                    "append_value (list) failed",
+                ))
+            } else {
+                None
+            };
+            capi!(duckdb_destroy_value)(&mut list_val);
+            for v in &mut values {
+                capi!(duckdb_destroy_value)(v);
+            }
+            capi!(duckdb_destroy_logical_type)(&mut elem_type);
+            match err {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        }
+    }
+
+    /// Flush and close explicitly, so a failure on the final batch's write
+    /// (disk full, a constraint violation DuckDB only catches at close)
+    /// surfaces as an `Err` here — not silently swallowed by [`Drop`],
+    /// which only destroys the handle (closing it first if this was never
+    /// called, but discarding whatever that implicit close returns).
+    pub fn close(&self) -> Result<(), String> {
+        self.check(
+            unsafe { capi!(duckdb_appender_close)(self.0) },
+            "appender close failed",
+        )
+    }
+}
+
+impl Drop for Appender {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { capi!(duckdb_appender_destroy)(&mut self.0) };
+        }
+    }
+}
+
 /// Run a single-statement query whose rows are converted to JSON by DuckDB
 /// (`to_json(row)`), returning a JSON array of row objects. `max_rows` caps the
 /// result (exceeding it is an error, not a silent truncation). The array is
