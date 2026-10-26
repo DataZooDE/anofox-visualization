@@ -88,10 +88,13 @@ const b = await chromium.launch();
 const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "acme" }, vars: { channel: "web" }, exp: now() + 120, jti: "e2e-1" });
 {
   const ctx = await b.newContext({ viewport: { width: 1100, height: 800 } });
-  const p = await ctx.newPage(); const errs = [], bad = [], sent = [];
+  const p = await ctx.newPage(); const errs = [], bad = [], sent = [], assetReqs = [];
   p.on("pageerror", (e) => errs.push(e.message));
   p.on("response", (r) => { if (r.status() >= 400) bad.push(r.status() + " " + r.url()); });
-  p.on("request", (r) => { if (r.url().endsWith("/api/panel")) sent.push(r.headers()["x-anofox-session"] ? "session" : "none"); });
+  p.on("request", (r) => {
+    if (r.url().endsWith("/api/panel")) sent.push(r.headers()["x-anofox-session"] ? "session" : "none");
+    if (r.url().includes("/assets/rls-logo.svg")) assetReqs.push(r.headers()["x-anofox-session"] ? "session" : "none");
+  });
   // a cross-site host page with the dashboard in an iframe; the URL tries to
   // widen the scope with ?v.channel=app
   await p.setContent(`<h1>Host app</h1><iframe id="f" src="${BASE}/d/rls?embed=${link}&v.channel=app" width="1000" height="650"></iframe>`);
@@ -102,6 +105,14 @@ const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "a
   assert.deepEqual(t, ["EU"]);
   assert.equal(lab, "Signed in as acme-viewer | tenant acme | channel web");
   assert.ok(sent.length > 0 && sent.every((s) => s === "session"), JSON.stringify(sent));
+  // #554 review item 4: a relative assets/ ::IMAGE can't be fetched by a
+  // bare <img src> in session-header (embed) mode — the browser's own
+  // fetch-with-header-then-blob: path (web/app.js) must have run instead.
+  await f.waitForFunction(() => { const img = document.querySelector(".dp-image img.dp-img"); return !!img && img.naturalWidth > 0; }, { timeout: 10000 });
+  const imgSrc = await f.evaluate(() => document.querySelector(".dp-image img.dp-img").src);
+  assert.ok(imgSrc.startsWith("blob:"), imgSrc);
+  assert.ok(assetReqs.length > 0 && assetReqs.every((s) => s === "session"), JSON.stringify(assetReqs));
+  ok("embed viewer's ::IMAGE (relative assets/rls-logo.svg) loads via a blob: URL fetched with the session header, not a bare <img src> (which would 401)");
   assert.equal((await ctx.cookies()).length, 0, "no cookies for an embed");
   const loc = await f.evaluate(() => location.search);
   assert.ok(!loc.includes("embed=") && loc.includes("v.channel=app"), loc);

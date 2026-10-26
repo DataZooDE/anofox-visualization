@@ -351,13 +351,32 @@ pub const ASSET_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "s
 /// no such option use this directly).
 pub const DEFAULT_MAX_ASSET_BYTES: u64 = 5 << 20;
 
+/// Is `dir`'s own `assets` entry a symlink (not followed)? Review of #554
+/// nit 8: `canonicalize` on a symlinked `assets -> /` (or anywhere else)
+/// would otherwise resolve it to that target and serve every image-typed
+/// file under it — `assets/` is meant to be a plain subfolder of the
+/// dashboards folder, never a pointer elsewhere. [`canonical_assets_dir`]
+/// treats this the same as a missing folder (`None`); the locked server
+/// and `--site` both call this first to refuse loudly instead (a startup
+/// error / a failed publish), since a silent `None` there would read as
+/// "no assets configured" rather than "a symlink was refused".
+pub fn assets_dir_is_symlink(dir: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(dir.join("assets"))
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 /// `dir`'s own `assets/` subfolder, canonicalized — `None` when there is no
-/// such folder (every relative `::IMAGE` source then draws the alt-text
-/// placeholder, as before PR B). Computed once at startup/call time by
-/// every reader of `assets/` — the locked server (`duckext`'s
-/// `start_locked`), the CLI (`dashboard`'s `--svg`/HTML output, `serve
-/// --dashboards`) and `--site` — never per request/render.
+/// such folder, or it is a symlink ([`assets_dir_is_symlink`]: every
+/// relative `::IMAGE` source then draws the alt-text placeholder, as before
+/// PR B, rather than this resolving a symlinked root). Computed once at
+/// startup/call time by every reader of `assets/` — the locked server
+/// (`duckext`'s `start_locked`), the CLI (`dashboard`'s `--svg`/HTML
+/// output, `serve --dashboards`) and `--site` — never per request/render.
 pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if assets_dir_is_symlink(dir) {
+        return None;
+    }
     dir.join("assets")
         .canonicalize()
         .ok()
@@ -387,11 +406,18 @@ pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf>
 /// file's own bytes are sniffed ([`crate::host::app_brand::sniff_image`]) —
 /// **not** its extension — for the returned MIME: a `.sql`/`.json` file
 /// renamed `.png` has the right extension but fails this and is refused too.
-pub fn read_asset(
+/// Validate `rest` and open the file it names under `root`, up to (and
+/// including) the point both [`read_asset`] (the whole file, `GET`) and
+/// [`stat_asset`] (its length and sniffed type only, `HEAD`) need: path
+/// checks, the extension allow-list, containment, and one race-closed
+/// handle. Returns the open file and its `fstat`-reported length (still
+/// `bytes`-capped by neither caller yet — each applies `max` itself, since
+/// `stat_asset` needs the real length even when it's over the cap, to
+/// refuse honestly rather than by coincidence of a short read).
+fn open_validated_asset(
     root: &std::path::Path,
     rest: &str,
-    max: u64,
-) -> Result<(String, Vec<u8>), &'static str> {
+) -> Result<(std::fs::File, u64), &'static str> {
     if rest.is_empty() || rest.len() > 512 {
         return Err("bad-path");
     }
@@ -420,16 +446,91 @@ pub fn read_asset(
     if !real.starts_with(root) {
         return Err("outside-folder");
     }
-    let meta = std::fs::metadata(&real).map_err(|_| "not-found")?;
+    // Review of #554, nit 5: one handle from here on, not a `stat` then a
+    // separate `read` — a symlink or a FIFO put in `real`'s place between
+    // the two would otherwise be followed/opened. `O_NOFOLLOW` refuses a
+    // symlink at this final, already-canonical path (closing that race);
+    // `O_NONBLOCK` means opening a FIFO never blocks waiting for a writer
+    // (it also stops a `stat`-reported size of 0 from skipping the real
+    // cap below — the read itself, not `stat`, is what's bounded). The
+    // size cap on the actual bytes read is each caller's own job
+    // (`read_asset`'s `take(max + 1)`), so an attacker-controlled FIFO
+    // can't lie about its length via `stat` either.
+    let file = open_asset_file(&real).map_err(|_| "not-found")?;
+    let meta = file.metadata().map_err(|_| "not-found")?;
     if !meta.is_file() {
         return Err("not-a-file");
     }
-    if meta.len() > max {
+    Ok((file, meta.len()))
+}
+
+pub fn read_asset(
+    root: &std::path::Path,
+    rest: &str,
+    max: u64,
+) -> Result<(String, Vec<u8>), &'static str> {
+    let (file, len) = open_validated_asset(root, rest)?;
+    if len > max {
         return Err("too-large");
     }
-    let bytes = std::fs::read(&real).map_err(|_| "io-error")?;
+    let mut bytes = Vec::new();
+    {
+        use std::io::Read;
+        file.take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "io-error")?;
+    }
+    if bytes.len() as u64 > max {
+        return Err("too-large");
+    }
     let mime = crate::host::app_brand::sniff_image(&bytes).ok_or("not-an-image")?;
     Ok((mime.to_string(), bytes))
+}
+
+/// Like [`read_asset`], but for a `HEAD` request: the sniffed MIME type and
+/// the file's real length (`fstat`, not a prior buffered read), without
+/// reading the whole file just to answer "what would `GET` send" (review of
+/// #554 nit 6). Reads only a `min(len, 4096)`-byte prefix — enough for
+/// every format [`crate::host::app_brand::sniff_image`] recognises (an
+/// SVG's own sniff already only looks at the first 4 KiB; every other
+/// signature is well under that).
+pub fn stat_asset(
+    root: &std::path::Path,
+    rest: &str,
+    max: u64,
+) -> Result<(String, u64), &'static str> {
+    let (file, len) = open_validated_asset(root, rest)?;
+    if len > max {
+        return Err("too-large");
+    }
+    let mut prefix = vec![0u8; len.min(4096) as usize];
+    {
+        use std::io::Read;
+        file.take(prefix.len() as u64)
+            .read_exact(&mut prefix)
+            .map_err(|_| "io-error")?;
+    }
+    let mime = crate::host::app_brand::sniff_image(&prefix).ok_or("not-an-image")?;
+    Ok((mime.to_string(), len))
+}
+
+/// Open `path` (already canonical — no symlink components) for reading,
+/// refusing a symlink or anything that would block waiting for a writer
+/// (a FIFO) at that final path component. Unix only: `O_NOFOLLOW` has no
+/// portable `std` equivalent, so other platforms fall back to a plain
+/// `File::open` (the containment check above still holds; this is the
+/// narrower TOCTOU-hardening belt, not the braces).
+#[cfg(unix)]
+fn open_asset_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+#[cfg(not(unix))]
+fn open_asset_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// `src` (whose [`src_ok`] verdict is [`SrcKind::Relative`]) read from
@@ -699,5 +800,63 @@ mod tests {
         assert!(resolve_relative("other/a.svg", Some(&root)).is_none());
         // No root at all (no `assets/` folder next to the dashboard).
         assert!(resolve_relative("assets/a.svg", None).is_none());
+    }
+
+    /// Review of #554 nit 6: `stat_asset` (HEAD) must agree with
+    /// `read_asset` (GET) — same MIME, and the real file length, without
+    /// reading the whole file.
+    #[test]
+    fn stat_asset_matches_read_asset() {
+        let d = AssetsDir::new();
+        let root = d.assets();
+        let (mime, bytes) = read_asset(&root, "a.svg", DEFAULT_MAX_ASSET_BYTES).unwrap();
+        let (stat_mime, len) = stat_asset(&root, "a.svg", DEFAULT_MAX_ASSET_BYTES).unwrap();
+        assert_eq!(stat_mime, mime);
+        assert_eq!(len, bytes.len() as u64);
+
+        let (mime, bytes) = read_asset(&root, "sub/b.png", DEFAULT_MAX_ASSET_BYTES).unwrap();
+        let (stat_mime, len) = stat_asset(&root, "sub/b.png", DEFAULT_MAX_ASSET_BYTES).unwrap();
+        assert_eq!(stat_mime, mime);
+        assert_eq!(len, bytes.len() as u64);
+
+        // Same refusals either way.
+        assert_eq!(
+            stat_asset(&root, "fake.png", DEFAULT_MAX_ASSET_BYTES),
+            Err("not-an-image")
+        );
+        assert_eq!(stat_asset(&root, "a.svg", 4), Err("too-large"));
+        assert_eq!(
+            stat_asset(&root, "../policy.json", DEFAULT_MAX_ASSET_BYTES),
+            Err("outside-folder")
+        );
+    }
+
+    /// Review of #554 nit 8: a symlinked `assets/` folder itself (not a
+    /// symlink *inside* an otherwise plain one, already covered above)
+    /// must never resolve — `canonicalize` would otherwise follow it to
+    /// its target and serve whatever is there.
+    #[test]
+    #[cfg(unix)]
+    fn canonical_assets_dir_refuses_a_symlinked_assets_folder() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-image-symlink-test-{}-{nanos}",
+            std::process::id()
+        ));
+        let elsewhere = std::env::temp_dir().join(format!(
+            "anofox-image-symlink-target-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("leak.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("assets")).unwrap();
+        assert!(assets_dir_is_symlink(&dir));
+        assert!(canonical_assets_dir(&dir).is_none());
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&elsewhere);
     }
 }

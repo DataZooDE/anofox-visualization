@@ -10,6 +10,7 @@
 # DuckDB 1.5 (DUCKDB, default `duckdb`). Ports: PORT (8950), IDP_PORT (8953),
 # BIN_PORT (8954, the `serve` binary).
 set -euo pipefail
+fail() { echo "FAIL: $*" >&2; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 EXT="$(cd "$(dirname "${1:?usage: run.sh <extension>}")" && pwd)/$(basename "$1")"
@@ -72,8 +73,18 @@ node "$HERE/p3.mjs"
 # scoped to `rls` only (see the `api-key new --dashboards rls` above).
 code() { curl -s -o /dev/null -w "%{http_code}" "$@"; }
 APIKEY="$(cat apikey.txt)"
-[ "$(code "http://127.0.0.1:$PORT/d/rls/assets/rls-logo.svg")" = 401 ] \
-  || fail "anonymous asset request should need login, like the page"
+# This server also has `oidc` configured (see OPTS above), so an anonymous
+# GET to a /d/ path is a 302 to /auth/login (`auth::login_redirect`), not a
+# bare 401 — the same thing the page itself does (p3.mjs section 1); only a
+# credential-bearing mode (api_keys, jwt, embed) with no OIDC configured
+# would 401 instead (test-locked-server.sh's own asset battery covers that
+# case). Checking the redirect target, not just "not 200", is what tells
+# this apart from some other reason a 302 might come back.
+asset_redirect=$(curl -s -o /dev/null -D - "http://127.0.0.1:$PORT/d/rls/assets/rls-logo.svg")
+echo "$asset_redirect" | grep -q "^HTTP/1.1 302" \
+  || fail "anonymous asset request should need login, like the page: $asset_redirect"
+echo "$asset_redirect" | grep -qi "^location: /auth/login" \
+  || fail "anonymous asset request's redirect should be to /auth/login, like the page: $asset_redirect"
 [ "$(code -H "Authorization: Bearer $APIKEY" "http://127.0.0.1:$PORT/d/rls/assets/rls-logo.svg")" = 200 ] \
   || fail "rls-scoped key should read rls's own asset"
 [ "$(code -H "Authorization: Bearer $APIKEY" "http://127.0.0.1:$PORT/d/other/assets/rls-logo.svg")" = 403 ] \

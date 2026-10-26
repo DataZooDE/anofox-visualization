@@ -1296,12 +1296,106 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// braces, and the only thing enforcing the extension/size rule at all
 /// (`copy_dir_recursive` is also used for plain `--data`, which has no such
 /// rule).
-fn check_assets_for_site(dir: &Path, max: u64) -> Result<(), String> {
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+/// Is `bytes` (already confirmed, by its magic bytes, to be an SVG) "active"
+/// — could it run script or fetch something external if a browser opens it
+/// as a *document* rather than drawing it through an `<img>`? Review of
+/// #554 item 1: the locked server neutralises this with its asset route's
+/// own `Content-Security-Policy: sandbox` header on a direct open, but a
+/// published static site has no server to send that header — `assets/x.svg`
+/// opened directly on GitHub Pages/S3/etc. just runs. So `--site` refuses to
+/// publish one instead. Not a full XML/CSS parser — a deliberately
+/// conservative, case-insensitive text scan for a `<script>` element, a
+/// `<foreignObject>` element (can hold arbitrary HTML), a `javascript:` URL
+/// anywhere (a `<script>`-free XSS vector via `xlink:href`/CSS `url()`), an
+/// `on…=` event-handler attribute (checked generically — SVG alone has
+/// dozens: `onload`, `onbegin`, `onend`, `onrepeat`, `onactivate`, …), or an
+/// external `href`/`xlink:href` that isn't a same-document `#fragment` or a
+/// `data:image/…` payload. Returns the reason, or `None` if none of this
+/// matched (still just pixels and markup, not a reason this file is safe in
+/// some deeper sense this scan can't see).
+fn svg_active_reason(bytes: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(bytes);
+    let low = text.to_ascii_lowercase();
+    if low.contains("<script") {
+        return Some("contains a <script> element");
+    }
+    if low.contains("<foreignobject") {
+        return Some("contains a <foreignObject> element");
+    }
+    if low.contains("javascript:") {
+        return Some("contains a javascript: URL");
+    }
+    let b = low.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = low[i..].find("on") {
+        let start = i + rel;
+        let mut j = start + 2;
+        while j < b.len() && b[j].is_ascii_lowercase() {
+            j += 1;
+        }
+        let boundary_ok = start == 0 || !b[start - 1].is_ascii_alphanumeric();
+        let mut k = j;
+        while k < b.len() && matches!(b[k], b' ' | b'\t' | b'\n' | b'\r') {
+            k += 1;
+        }
+        if boundary_ok && j > start + 2 && k < b.len() && b[k] == b'=' {
+            return Some("contains an event-handler attribute (on…=)");
+        }
+        i = start + 2;
+    }
+    for attr in ["href=\"", "href='", "xlink:href=\"", "xlink:href='"] {
+        let mut from = 0;
+        while let Some(rel) = low[from..].find(attr) {
+            let at = from + rel + attr.len();
+            let quote = if attr.ends_with('"') { '"' } else { '\'' };
+            let end = low[at..].find(quote).map_or(low.len(), |e| at + e);
+            let val = text[at..end.min(text.len())].trim();
+            let val_low = val.to_ascii_lowercase();
+            if !val.is_empty() && !val.starts_with('#') && !val_low.starts_with("data:image/") {
+                return Some("references an external href/xlink:href");
+            }
+            from = (end + attr.len()).max(at + 1);
+        }
+    }
+    None
+}
+
+/// `--site`'s own `assets/` pre-publish pass (#514 PR B; review of #554
+/// items 1/2): recurse `root`'s `rel` subdirectory (`rel` starts `""`),
+/// writing each validated file to `out/rel/name`. A dot-leading entry
+/// (`.secret.png`, `.DS_Store`, a stray `.git/`, …) is skipped — not
+/// copied, not a publish failure, the same as `read_asset`'s own
+/// `outside-folder` refusal for a hidden segment, which [`read_asset`]
+/// would otherwise report for it below. Every other file goes through
+/// [`anofox_visualization::image::read_asset`] — the exact extension
+/// allow-list, containment and real magic-byte MIME check the locked
+/// server applies per request — so "what the server would serve" and
+/// "what the site publishes" can't drift apart; a non-image renamed to an
+/// allowed extension fails the whole publish, same as a symlink. An SVG
+/// that passes `read_asset` is additionally checked by
+/// [`svg_active_reason`], since a published site has no server to send the
+/// locked route's own sandboxing CSP header.
+fn publish_assets(root: &Path, rel: &str, out: &Path, max: u64) -> Result<(), String> {
+    let dir = if rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel)
+    };
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
         let ft = entry
             .file_type()
             .map_err(|e| format!("stat {}: {e}", entry.path().display()))?;
+        let child_rel = if rel.is_empty() {
+            name_str.into_owned()
+        } else {
+            format!("{rel}/{name_str}")
+        };
         if ft.is_symlink() {
             return Err(format!(
                 "'{}' is a symlink — refusing to publish it (it may point outside assets/)",
@@ -1309,32 +1403,30 @@ fn check_assets_for_site(dir: &Path, max: u64) -> Result<(), String> {
             ));
         }
         if ft.is_dir() {
-            check_assets_for_site(&entry.path(), max)?;
+            publish_assets(root, &child_rel, out, max)?;
             continue;
         }
-        let ext = entry
-            .path()
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if !anofox_visualization::image::ASSET_EXTENSIONS.contains(&ext.as_str()) {
-            return Err(format!(
-                "'{}' is not an image file ('.{ext}') — assets/ only serves {}",
-                entry.path().display(),
-                anofox_visualization::image::ASSET_EXTENSIONS.join(", ")
-            ));
+        let (mime, bytes) =
+            anofox_visualization::image::read_asset(root, &child_rel, max).map_err(|reason| {
+                format!(
+                    "'{}': refused ({reason}) — assets/ only publishes files the locked server itself would serve",
+                    entry.path().display()
+                )
+            })?;
+        if mime == "image/svg+xml" {
+            if let Some(why) = svg_active_reason(&bytes) {
+                return Err(format!(
+                    "'{}' {why} — refusing to publish an active SVG to a static site with no CSP/sandbox header to neutralise it (docs/secure-serving.md)",
+                    entry.path().display()
+                ));
+            }
         }
-        let len = entry
-            .metadata()
-            .map_err(|e| format!("stat {}: {e}", entry.path().display()))?
-            .len();
-        if len > max {
-            return Err(format!(
-                "'{}' is {len} bytes — over the {max}-byte assets/ cap (options.max_asset_bytes)",
-                entry.path().display()
-            ));
+        let dst = out.join(&child_rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
+        std::fs::write(&dst, &bytes).map_err(|e| format!("write {}: {e}", dst.display()))?;
     }
     Ok(())
 }
@@ -1666,27 +1758,29 @@ fn cmd_site(args: &[String]) {
     // locked server's own `/d/<id>/assets/<rest>` route, and the CLI's own
     // relative-image inlining, both resolve against this same subfolder
     // (decision 5). A published site serves whatever lands here to the
-    // world with no login, so this is stricter than `copy_dir_recursive`'s
-    // own symlink-only refusal: a non-image extension or an oversized file
-    // fails the whole publish too, not just that one file.
+    // world with no login and no server to set any headers at request
+    // time, so `publish_assets` is stricter than `copy_dir_recursive`'s
+    // own symlink-only refusal: a non-image extension, an oversized file,
+    // a renamed non-image (checked by its real magic bytes, not just its
+    // extension — review of #554 item 2), or an "active" SVG (item 1)
+    // fails the whole publish too, not just that one file. A dot-leading
+    // entry is silently skipped, not published and not a failure (`.git`,
+    // `.DS_Store`, …).
     let assets_src = folder.join("assets");
-    let assets_is_symlink = std::fs::symlink_metadata(&assets_src)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false);
-    if assets_is_symlink {
+    if anofox_visualization::image::assets_dir_is_symlink(folder) {
         fail(format!(
             "'{}' is a symlink — refusing to publish it (it may point outside the dashboards folder)",
             assets_src.display()
         ));
     }
-    if assets_src.is_dir() {
-        check_assets_for_site(
-            &assets_src,
+    if let Some(assets_root) = anofox_visualization::image::canonical_assets_dir(folder) {
+        publish_assets(
+            &assets_root,
+            "",
+            &out.join("assets"),
             anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
         )
         .unwrap_or_else(|e| fail(format!("assets/: {e}")));
-        copy_dir_recursive(&assets_src, &out.join("assets"))
-            .unwrap_or_else(|e| fail(format!("copy assets/: {e}")));
     }
 
     let site_data = match (&data, &data_value) {
@@ -2272,6 +2366,102 @@ mod site_tests {
         copy_dir_recursive(&src.0, &dst.0).unwrap();
         assert_eq!(std::fs::read(dst.0.join("a.txt")).unwrap(), b"a");
         assert_eq!(std::fs::read(dst.0.join("sub/b.txt")).unwrap(), b"b");
+    }
+
+    /// Review of #554 item 1: `--site` refuses to publish an SVG that could
+    /// run script or fetch something external if opened directly (no
+    /// server there to send the locked route's own sandboxing CSP).
+    #[test]
+    fn svg_active_reason_catches_script_foreignobject_handlers_js_urls_and_external_hrefs() {
+        let plain = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>"#;
+        assert_eq!(svg_active_reason(plain), None);
+
+        let script = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#;
+        assert!(svg_active_reason(script).unwrap().contains("<script>"));
+
+        let fo = br#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><body xmlns="http://www.w3.org/1999/xhtml">hi</body></foreignObject></svg>"#;
+        assert!(svg_active_reason(fo).unwrap().contains("foreignObject"));
+
+        let onload = br#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><rect width="1" height="1"/></svg>"#;
+        assert!(svg_active_reason(onload).unwrap().contains("event-handler"));
+
+        let jsurl = br#"<svg xmlns="http://www.w3.org/2000/svg"><a xlink:href="javascript:alert(1)"><rect width="1" height="1"/></a></svg>"#;
+        assert!(svg_active_reason(jsurl).unwrap().contains("javascript"));
+
+        let external = br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.example/track.png"/></svg>"#;
+        assert!(svg_active_reason(external).unwrap().contains("external"));
+
+        // Allowed: a same-document fragment reference and an embedded
+        // data: image.
+        let frag = br##"<svg xmlns="http://www.w3.org/2000/svg"><use href="#icon"/></svg>"##;
+        assert_eq!(svg_active_reason(frag), None);
+        let data_img = br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,iVBORw0KGgo="/></svg>"#;
+        assert_eq!(svg_active_reason(data_img), None);
+    }
+
+    /// Review of #554 item 2: `publish_assets` skips dot-entries (not a
+    /// failure), refuses a renamed non-image by its real magic bytes (not
+    /// just its extension — `fake.png` here), and refuses an active SVG.
+    #[test]
+    fn publish_assets_skips_dotfiles_and_checks_real_content() {
+        let src = TempDir::new("publish-src");
+        let dst = TempDir::new("publish-dst");
+        std::fs::create_dir_all(src.0.join("sub")).unwrap();
+        // A real, inert SVG.
+        std::fs::write(
+            src.0.join("ok.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>"#,
+        )
+        .unwrap();
+        std::fs::write(src.0.join("sub").join(".hidden.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(src.0.join(".DS_Store"), b"whatever, no extension at all").unwrap();
+        let root = src.0.canonicalize().unwrap();
+        publish_assets(
+            &root,
+            "",
+            &dst.0,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap();
+        assert!(dst.0.join("ok.svg").exists());
+        assert!(!dst.0.join("sub").join(".hidden.png").exists());
+        assert!(!dst.0.join(".DS_Store").exists());
+
+        // A non-image renamed to an allowed extension fails the whole
+        // publish (not silently skipped like a dotfile).
+        let src2 = TempDir::new("publish-src2");
+        let dst2 = TempDir::new("publish-dst2");
+        std::fs::write(src2.0.join("fake.png"), b"not a png").unwrap();
+        let root2 = src2.0.canonicalize().unwrap();
+        let err = publish_assets(
+            &root2,
+            "",
+            &dst2.0,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not-an-image") || err.contains("refused"),
+            "{err}"
+        );
+
+        // An active SVG fails the whole publish too.
+        let src3 = TempDir::new("publish-src3");
+        let dst3 = TempDir::new("publish-dst3");
+        std::fs::write(
+            src3.0.join("evil.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+        )
+        .unwrap();
+        let root3 = src3.0.canonicalize().unwrap();
+        let err = publish_assets(
+            &root3,
+            "",
+            &dst3.0,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap_err();
+        assert!(err.contains("active SVG"), "{err}");
     }
 
     #[test]

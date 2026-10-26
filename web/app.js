@@ -9890,8 +9890,34 @@ async function runOnce(fresh = true, pv = preview) {
             img.loading = "lazy";
             img.decoding = "async";
             img.draggable = false;
-            img.src = url;
             img.onerror = () => img.isConnected && img.replaceWith(missing(alt));
+            // #554 review item 4: an embed page's session travels as the
+            // X-Anofox-Session header (runSqlInner, below), not a cookie —
+            // an <img src> can't send a header, so a relative assets/
+            // image 401s for an embed viewer. assetUrl() only ever
+            // produces a same-origin /d/<id>/assets/… path for this case
+            // (never for data:/https:, which must never carry the
+            // session to a third party anyway), so that's the one case
+            // fetched here instead, with the header, and shown from a
+            // blob: URL (img-src already allows blob: — host/serving.rs's
+            // page_csp). The dash-level render-swap (further down)
+            // revokes data-anofox-blob on whatever this run discards.
+            if (servedMode && window.__served?.session && url.startsWith("/d/")) {
+              fetch(url, { headers: { "X-Anofox-Session": window.__served.session }, credentials: "same-origin" })
+                .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("http " + r.status))))
+                .then((b) => {
+                  const blobUrl = URL.createObjectURL(b);
+                  if (img.isConnected) {
+                    img.dataset.anofoxBlob = blobUrl;
+                    img.src = blobUrl;
+                  } else {
+                    URL.revokeObjectURL(blobUrl);
+                  }
+                })
+                .catch(() => img.isConnected && img.replaceWith(missing(alt)));
+            } else {
+              img.src = url;
+            }
             return img;
           };
           for (const row of rows.length ? rows : [null]) {
@@ -10805,6 +10831,11 @@ async function runOnce(fresh = true, pv = preview) {
   // keeps its DOM (scroll, focus, hover state), only the changed ones and the
   // controls are replaced. Anything else replaces the whole content.
   const dash = document.querySelector(".dash");
+  // #554 review item 4: every embed-fetched assets/ <img> from the run
+  // this one replaces, whichever path below discards it (patched or
+  // wholesale) — checked by `.isConnected` after the swap, so this needs
+  // no knowledge of which path ran.
+  const oldBlobImgs = [...dash.querySelectorAll("img[data-anofox-blob]")];
   const newRoots = [newGrid, tabBar, tabWrap];
   for (const p of slotsOf(newRoots)) if (p.matches(".panel")) p._sig = p.outerHTML;
   const shape = shapeOf(newRoots);
@@ -10820,6 +10851,7 @@ async function runOnce(fresh = true, pv = preview) {
     if (!fresh) for (const p of slotsOf(newRoots)) if (old.has(p.dataset.stmt)) swaps.push([old.get(p.dataset.stmt), p]);
   }
   dash._shape = shape;
+  for (const img of oldBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
   performance.mark("dp:swap");
   dpLazy.cur = lazy;
   // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and

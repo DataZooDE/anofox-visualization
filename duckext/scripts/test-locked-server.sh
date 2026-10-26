@@ -762,9 +762,19 @@ grep -qi "^content-type: image/png" "$T/aheaders" || fail "sub/b.png content-typ
 [ "$(get /d/t/assets)" = 404 ] || fail "assets (the folder itself, no trailing file) should 404"
 [ "$(get /d/t/assets/b6m.png)" = 404 ] || fail "b6m.png (over max_asset_bytes) should 404"
 [ "$(get /d/nosuchdash/assets/a.svg)" = 404 ] || fail "no such dashboard should 404"
-head_code=$(curl -s -o "$T/abody" -D "$T/aheaders" -X HEAD -w "%{http_code}" "http://127.0.0.1:$PORT/d/t/assets/a.svg")
-[ "$head_code" = 200 ] && [ ! -s "$T/abody" ] || fail "HEAD should be 200 with no body: $head_code $(cat "$T/abody")"
+[ "$(get /d/t/assets/a.svg)" = 200 ] || fail "a.svg (re-check before HEAD): $(cat "$T/abody")"
+get_len=$(grep -i "^content-length:" "$T/aheaders" | tr -d '\r' | awk '{print $2}')
+# `--head`/`-I`, not `-X HEAD`: the latter only changes the request line,
+# it does not tell libcurl this request has no body — curl would then wait
+# to read Content-Length bytes that a real HEAD response never sends
+# (review of #554 nit 6's own `stat_asset` reports the real length via
+# `fstat`, not a buffered read, exactly so HEAD and GET agree) and hang.
+head_code=$(curl -s -o "$T/abody" -D "$T/aheaders" --head -w "%{http_code}" "http://127.0.0.1:$PORT/d/t/assets/a.svg")
+[ "$head_code" = 200 ] || fail "HEAD should be 200: $head_code $(cat "$T/aheaders")"
 grep -qi "^content-type: image/svg+xml" "$T/aheaders" || fail "HEAD content-type: $(cat "$T/aheaders")"
+head_len=$(grep -i "^content-length:" "$T/aheaders" | tr -d '\r' | awk '{print $2}')
+[ "$head_len" = "$get_len" ] && [ -n "$head_len" ] && [ "$head_len" != "0" ] \
+  || fail "HEAD Content-Length ($head_len) should be the real size and match GET's ($get_len)"
 post_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/d/t/assets/a.svg")
 [ "$post_code" = 405 ] || fail "POST to an asset should be 405: $post_code"
 stop

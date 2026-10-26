@@ -2079,7 +2079,16 @@ pub fn start_locked(
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
     // #514 PR B: computed once at startup, like every other path-derived
     // limit here (`options.data`) — an asset request never canonicalizes
-    // `dir` itself per request.
+    // `dir` itself per request. Review of #554 nit 8: a symlinked `assets`
+    // (e.g. `assets -> /`) refuses to start, loudly — `canonical_assets_dir`
+    // itself already treats it as `None` (no assets served), but silently
+    // starting with assets "just off" would look identical to "there's no
+    // assets/ folder here" to the operator; the mistake is worth surfacing.
+    if anofox_visualization::image::assets_dir_is_symlink(Path::new(dir)) {
+        return Err(format!(
+            "anofox-visualization: '{dir}/assets' is a symlink — refusing to serve it (it may point outside the dashboards folder); replace it with a plain directory"
+        ));
+    }
     let assets_root = anofox_visualization::image::canonical_assets_dir(Path::new(dir));
     if let Some(h) = &opts.home {
         if !dashboards.iter().any(|d| &d.id == h) {
@@ -3156,29 +3165,88 @@ fn locked_asset(
     let Some(root) = &st.assets_root else {
         return reply(req, 404, "not found");
     };
+    let max = st.opts.max_asset_bytes as u64;
+    // Review of #554 nit 7: bound concurrent asset memory the same way a
+    // panel result already is — each worker could otherwise hold up to
+    // `max_asset_bytes` at once with no shared cap across requests, unlike
+    // `locked_panel`'s own `charge`. Held (and released) for this whole
+    // request; the hold is pessimistic (`max`, not the file's real size —
+    // not known yet for `GET`, and deliberately not trusted from a `HEAD`
+    // `stat` either) so a run of worst-case-sized requests can't exceed
+    // the same `max_inflight_mb` budget query results answer to.
+    let mut charge = st.inflight.charge();
+    if let Err(e) = charge.hold(max as usize) {
+        busy(req, &e);
+        return 503;
+    }
+    let headers = |mime: &str| {
+        vec![
+            header("Content-Type", mime),
+            header("X-Content-Type-Options", "nosniff"),
+            // Neutralises an SVG opened as a top-level document (no
+            // symlink out, no XSS: it never runs a script, regardless of
+            // this header, when only ever drawn through `<img>` — this is
+            // belt-and-braces for a viewer who opens the asset URL
+            // directly).
+            header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            ),
+            // Review of #554 nit 9: on an `auth` server an image must not
+            // keep answering from a shared/browser cache for long after a
+            // logout or a revoked credential — a minute, not the plain
+            // five-minute default (still `private`, not `no-store`: the
+            // browser's own cache is fine to use meanwhile, just not for
+            // long).
+            header(
+                "Cache-Control",
+                if st.opts.auth.is_some() {
+                    "private, max-age=60"
+                } else {
+                    "private, max-age=300"
+                },
+            ),
+            header("Cross-Origin-Resource-Policy", "same-origin"),
+        ]
+    };
     // Read per request — no snapshot — so an edited/added asset shows
     // without a refresh, as documented.
-    let (mime, bytes) =
-        match anofox_visualization::image::read_asset(root, rest, st.opts.max_asset_bytes as u64) {
+    if req.method() == &Method::Head {
+        // Review of #554 nit 6: the real length (`fstat`, via
+        // `stat_asset`), not whatever an empty placeholder body happened
+        // to report — `GET` and `HEAD` must agree, and reading the whole
+        // file just to discard it for `HEAD` is wasted work besides.
+        // `tiny_http` itself already skips writing a `HEAD` response's
+        // body (`Request::respond`'s `do_not_send_body`); this only fixes
+        // the `Content-Length` this handler reports.
+        let (mime, len) = match anofox_visualization::image::stat_asset(root, rest, max) {
             Ok(ok) => ok,
             Err(_) => return reply(req, 404, "not found"),
         };
+        info.bytes = Some(len as usize);
+        let resp = Response::new(
+            200.into(),
+            headers(&mime),
+            std::io::empty(),
+            Some(len as usize),
+            None,
+        );
+        let _ = req.respond(resp);
+        return 200;
+    }
+    let (mime, bytes) = match anofox_visualization::image::read_asset(root, rest, max) {
+        Ok(ok) => ok,
+        Err(_) => return reply(req, 404, "not found"),
+    };
     info.bytes = Some(bytes.len());
-    let head = req.method() == &Method::Head;
-    let resp = Response::from_data(if head { Vec::new() } else { bytes })
-        .with_status_code(200)
-        .with_header(header("Content-Type", &mime))
-        .with_header(header("X-Content-Type-Options", "nosniff"))
-        // Neutralises an SVG opened as a top-level document (no symlink out,
-        // no XSS: it never runs a script, regardless of this header, when
-        // only ever drawn through `<img>` — this is belt-and-braces for a
-        // viewer who opens the asset URL directly).
-        .with_header(header(
-            "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-        ))
-        .with_header(header("Cache-Control", "private, max-age=300"))
-        .with_header(header("Cross-Origin-Resource-Policy", "same-origin"));
+    let len = bytes.len();
+    let resp = Response::new(
+        200.into(),
+        headers(&mime),
+        std::io::Cursor::new(bytes),
+        Some(len),
+        None,
+    );
     let _ = req.respond(resp);
     200
 }
