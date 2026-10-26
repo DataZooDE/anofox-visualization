@@ -64,6 +64,27 @@ const USAGE: &str = "usage:\n  \
                                              `anofox-visualization-web-*` release asset (default:\n  \
                                              next to this binary) — never downloaded.\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
+     dashboard state export <state.jsonl>    an options.state store (#517), offline — a live\n  \
+               [--user U] [--format jsonl|csv] server's own flock still refuses this while it's\n  \
+               [--out FILE] [--force]         running. Read-only: never creates, truncates or\n  \
+                                             touches the file's permissions. --user (exact,\n  \
+                                             case-sensitive — matches the stored claim) scopes\n  \
+                                             a data-subject export, and must not be empty;\n  \
+                                             --format csv is one row per recorded variable\n  \
+                                             (seq, ts, user, dashboard, submit, name, value,\n  \
+                                             value_list — the last two as literal JSON text,\n  \
+                                             lossless even for a list), jsonl (default) is the\n  \
+                                             store's own record shape. --out FILE writes a new\n  \
+                                             file (0600, never through a symlink); refuses one\n  \
+                                             that already exists unless --force.\n  \
+     dashboard state erase --user U <file>   remove every record of U from the store, offline;\n  \
+               [--yes] [--audit stderr|f]    --user is exact/case-sensitive and must not be\n  \
+                                             empty. Without --yes: read-only dry run, nothing\n  \
+                                             is written. --yes rewrites the store via a\n  \
+                                             temp-file-then-rename (crash-safe: the original is\n  \
+                                             never touched in place) and takes --audit (default\n  \
+                                             stderr) for one JSON line per attempt — outcome\n  \
+                                             ok/error, the operator's uid, never the values.\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
      dashboard --themes                      list the built-in themes\n  \
      dashboard --theme-css <T> [--dark]      print a theme's CSS design tokens\n  \
@@ -84,6 +105,7 @@ fn main() {
         Some("--check") => cmd_check(&args[1..]),
         Some("--site") => cmd_site(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
+        Some("state") => cmd_state(&args[1..]),
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
         Some("--themes") => cmd_themes(),
         Some("--svg") => cmd_svg(&args[1..]),
@@ -2278,6 +2300,470 @@ fn site_landing_csp(html: &str) -> String {
     )
 }
 
+/// `dashboard state export|erase` (#517 S5, plan §1 "Operator access", §10
+/// D7): batch, offline tooling against an `options.state` store file. The
+/// live server only ever appends — retention/erasure for a data-subject
+/// request is deliberately left to the operator, with this CLI as the
+/// supported way to do it. Both subcommands open the store's `flock`, the
+/// exact same one a server takes at start-up, so either one refuses outright
+/// — never silently races a running server's own appends — while the file
+/// is still open elsewhere. `export` and a dry-run `erase` take it
+/// [`anofox_visualization::host::state::Store::open_read_only`] (review of
+/// #555's should-fix: a read must never mutate the file it's reading — no
+/// torn-tail truncation, no permission tightening, no header write into an
+/// empty file); only an applied `erase --yes` opens for write.
+fn cmd_state(args: &[String]) {
+    const USAGE: &str = "usage:\n  \
+        dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]\n  \
+        dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]";
+    match args.first().map(String::as_str) {
+        Some("export") => cmd_state_export(&args[1..]),
+        Some("erase") => cmd_state_erase(&args[1..]),
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Open an existing store file for CLI use. Never the auto-create
+/// [`anofox_visualization::host::state::Store::open`] itself does for a
+/// server at start-up — right there (a fresh server's first run), wrong
+/// here (an operator who mistyped a path would get a silently-created,
+/// empty store instead of a clear error). Never the server's own
+/// `max_mb` either — this tool doesn't have it and isn't re-enforcing a
+/// live cap, only reading or rewriting a file already on disk — so the
+/// cap passed here is generous enough that an operator's own existing
+/// file is never spuriously refused by it. `read_only` picks
+/// [`anofox_visualization::host::state::Store::open_read_only`] (a shared
+/// `flock`, no mutation of the file at all) over the writable
+/// [`anofox_visualization::host::state::Store::open`] (an exclusive
+/// `flock`) — see [`cmd_state`].
+fn cmd_state_open(path: &str, read_only: bool) -> anofox_visualization::host::state::Store {
+    let p = std::path::Path::new(path);
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => {
+            eprintln!("{path}: not a regular file");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            std::process::exit(1);
+        }
+    }
+    let abs = std::fs::canonicalize(p).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        std::process::exit(1);
+    });
+    const CLI_MAX_MB: u64 = 1 << 20; // 1 TiB — effectively unlimited for this tool.
+    let open: fn(
+        &std::path::Path,
+        u64,
+    ) -> Result<anofox_visualization::host::state::Store, String> = if read_only {
+        anofox_visualization::host::state::Store::open_read_only
+    } else {
+        anofox_visualization::host::state::Store::open
+    };
+    open(&abs, CLI_MAX_MB).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        std::process::exit(1);
+    })
+}
+
+/// `dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]`.
+/// Opened read-only (review of #555's should-fix): an export must never
+/// mutate the store it's reading, and a live server's exclusive `flock`
+/// still refuses this while it's running (a shared lock still conflicts
+/// with an exclusive one).
+fn cmd_state_export(args: &[String]) {
+    let mut user: Option<String> = None;
+    let mut format = "jsonl".to_string();
+    let mut out: Option<String> = None;
+    let mut force = false;
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--user" => user = it.next().cloned(),
+            "--format" => format = it.next().cloned().unwrap_or(format),
+            "--out" => out = it.next().cloned(),
+            "--force" => force = true,
+            _ if !a.starts_with("--") && path.is_none() => path = Some(a.clone()),
+            _ => {
+                eprintln!("state export: unknown argument '{a}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(path) = path else {
+        eprintln!(
+            "usage: dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]"
+        );
+        std::process::exit(2);
+    };
+    if format != "jsonl" && format != "csv" {
+        eprintln!("state export: --format must be 'jsonl' or 'csv', got '{format}'");
+        std::process::exit(2);
+    }
+    // Review of #555, nit: an empty `--user` is never a meaningful filter
+    // (the store never records an empty `claims.user` — `append` refuses
+    // it) and silently exporting/matching nothing is more likely a typo
+    // (a dropped argument, an empty shell variable) than an intentional
+    // request — refuse it rather than guess.
+    if user.as_deref() == Some("") {
+        eprintln!("state export: --user must not be empty");
+        std::process::exit(2);
+    }
+    let store = cmd_state_open(&path, true);
+    let rows = match &user {
+        Some(u) => store.rows_for_user(u),
+        None => store.all_rows(usize::MAX),
+    };
+    let n = rows.len();
+    let body = if format == "csv" {
+        state_export_csv(&rows)
+    } else {
+        state_export_jsonl(&rows)
+    };
+    match &out {
+        Some(f) => {
+            if let Err(e) = write_export_output(f, body.as_bytes(), force) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        None => {
+            use std::io::Write;
+            std::io::stdout().write_all(body.as_bytes()).ok();
+        }
+    }
+    eprintln!(
+        "exported {n} record(s){}",
+        match &user {
+            Some(u) => format!(" for user '{u}'"),
+            None => String::new(),
+        }
+    );
+}
+
+/// The store's own on-disk encoding, one record per line — [`Record::to_json`]
+/// is the single source of truth for the field list, never duplicated here.
+fn state_export_jsonl(rows: &[anofox_visualization::host::state::Record]) -> String {
+    let mut out = String::new();
+    for r in rows {
+        out.push_str(&r.to_json().to_string());
+        out.push('\n');
+    }
+    out
+}
+
+/// A scalar `serde_json::Value` as the text a spreadsheet cell holds — the
+/// same rule `duckext::serve::state_scalar_text` applies to a recorded
+/// value server-side (kept independent: this binary doesn't depend on the
+/// `duckext` crate, and the rule is three lines).
+fn state_scalar_cell(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// OWASP "CSV injection" (review of #555, B1 — the exact rule #520/#526
+/// already gave `web/app.js`'s `csvSafe`/`FORMULA_LEAD`/`NUM_RE`, mirrored
+/// here rather than shared across languages): a CSV cell carries no type
+/// of its own, so Excel/LibreOffice decide from the text alone whether to
+/// run it as a formula when the file is opened — a value starting with
+/// `=`, `+`, `-`, `@` or a tab/CR is executed. A leading single quote
+/// marks it as text instead (Excel/LibreOffice show the value without
+/// it). A value that's a plain number — including a real negative one,
+/// `"-1"` — is left as-is: it's a number, not a formula, even though
+/// every field here arrives as text; `"-1+A1"` is NOT a plain number and
+/// still gets neutralised. Applied to every string cell this module
+/// writes to CSV, never only the ones that look dangerous at a glance —
+/// a free-text `::TEXT` answer (`name`/`value`/`value_list` below) is the
+/// field most likely to carry one, but `ts`/`user`/`dashboard`/`submit`/
+/// `id` get the same treatment on principle (cheap, and never wrong).
+fn csv_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) && !is_plain_number(s) {
+        std::borrow::Cow::Owned(format!("'{s}"))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// `^-?\d+(\.\d+)?([eE][+-]?\d+)?$`, by hand rather than pulling in the
+/// `regex` crate for one check (the core crate stays dependency-light by
+/// design, see Cargo.toml) — exactly `NUM_RE` in `web/app.js`.
+fn is_plain_number(s: &str) -> bool {
+    fn digits(s: &str) -> (&str, &str) {
+        match s.find(|c: char| !c.is_ascii_digit()) {
+            Some(i) => (&s[..i], &s[i..]),
+            None => (s, ""),
+        }
+    }
+    let s = s.strip_prefix('-').unwrap_or(s);
+    let (int_part, rest) = digits(s);
+    if int_part.is_empty() {
+        return false;
+    }
+    let rest = match rest.strip_prefix('.') {
+        Some(frac_and_more) => {
+            let (frac, more) = digits(frac_and_more);
+            if frac.is_empty() {
+                return false;
+            }
+            more
+        }
+        None => rest,
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(exp) = rest.strip_prefix(['e', 'E']) else {
+        return false;
+    };
+    let exp = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+    !exp.is_empty() && exp.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `,`, `"` or a newline forces quoting, doubling any embedded `"` — the
+/// one escaping rule every CSV reader agrees on (RFC 4180). Callers apply
+/// [`csv_safe`] first — this function only quotes, it never neutralises.
+fn csv_field(s: &str) -> String {
+    if s.contains(['"', ',', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// One row per *recorded variable* (plan §5's `viewer_state` schema, not
+/// the store's own one-row-per-submission shape) — a spreadsheet a data
+/// subject or a reviewer can open directly, matching what a trainer's
+/// read-back panel would show for the same rows. `value` is the scalar as
+/// text, or a list's own exact JSON array text (numbers/booleans keep
+/// their JSON type, never coerced to strings); `value_list` is the same
+/// list with every item rendered as spreadsheet-cell text, also as JSON
+/// array text (review of #555, nit: a `;`-joined string couldn't tell an
+/// item containing `;` apart from a separator — JSON array text always
+/// can, and a null item is JSON `null`, not an empty string lost in the
+/// join).
+fn state_export_csv(rows: &[anofox_visualization::host::state::Record]) -> String {
+    let mut out = String::from("seq,ts,user,auth,dashboard,submit,id,name,value,value_list\n");
+    for r in rows {
+        for (name, val) in &r.vars {
+            let (value, value_list) = match val {
+                serde_json::Value::Null => (String::new(), String::new()),
+                serde_json::Value::Array(items) => {
+                    let as_cells: Vec<serde_json::Value> = items
+                        .iter()
+                        .map(|it| {
+                            if it.is_null() {
+                                serde_json::Value::Null
+                            } else {
+                                serde_json::Value::String(state_scalar_cell(it))
+                            }
+                        })
+                        .collect();
+                    (
+                        val.to_string(),
+                        serde_json::Value::Array(as_cells).to_string(),
+                    )
+                }
+                other => (state_scalar_cell(other), String::new()),
+            };
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{}\n",
+                r.seq,
+                csv_field(&csv_safe(&r.ts)),
+                csv_field(&csv_safe(&r.user)),
+                csv_field(&csv_safe(&r.auth)),
+                csv_field(&csv_safe(&r.dashboard)),
+                csv_field(&csv_safe(&r.submit)),
+                csv_field(&csv_safe(&r.id)),
+                csv_field(&csv_safe(name)),
+                csv_field(&csv_safe(&value)),
+                csv_field(&csv_safe(&value_list)),
+            ));
+        }
+    }
+    out
+}
+
+/// Writes `body` to `path` as the operator's new export file (review of
+/// #555, should-fix #3): `std::fs::write` created the file at the
+/// process's umask — `-rw-r--r--` for a file of someone's personal data —
+/// and happily wrote through a symlink pointed at any other file the
+/// operator could write (`--out link.csv` where `link.csv → victim`
+/// overwrote `victim`). Here the file is always opened `0600` and
+/// `O_NOFOLLOW` (a symlink at `path` is refused, `--force` or not, rather
+/// than followed), and an existing `path` is refused outright unless
+/// `--force` is given.
+#[cfg(unix)]
+fn write_export_output(path: &str, body: &[u8], force: bool) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    if force {
+        opts.create(true).truncate(true);
+    } else {
+        opts.create_new(true);
+    }
+    let mut f = opts.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("{path}: already exists (pass --force to overwrite)")
+        } else if e.raw_os_error() == Some(libc::ELOOP) {
+            format!("{path}: refusing to write through a symlink")
+        } else {
+            format!("{path}: {e}")
+        }
+    })?;
+    // `.mode(0o600)` on `OpenOptions` only takes effect when `open` itself
+    // creates the file — the only case `create_new` allows, but `--force`
+    // may instead reuse an existing file whose permissions predate this
+    // call. Tighten explicitly so `--force` never leaves an export
+    // world/group-readable just because the file it's overwriting already
+    // was.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("{path}: {e}"))?;
+    f.write_all(body).map_err(|e| format!("{path}: {e}"))?;
+    f.sync_all().map_err(|e| format!("{path}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_export_output(path: &str, body: &[u8], force: bool) -> Result<(), String> {
+    if !force && std::path::Path::new(path).exists() {
+        return Err(format!(
+            "{path}: already exists (pass --force to overwrite)"
+        ));
+    }
+    std::fs::write(path, body).map_err(|e| format!("{path}: {e}"))
+}
+
+/// `dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]`.
+/// Dry run by default (prints what *would* be removed, touches nothing) —
+/// `--yes` is the confirm flag plan §10 D7 asks for. A successful or failed
+/// *applied* erase always gets one line in the audit log (default
+/// `stderr`; `--audit FILE` for a file, same target syntax `options.audit`
+/// takes) — never a dry run, which changes nothing to audit.
+fn cmd_state_erase(args: &[String]) {
+    let mut user: Option<String> = None;
+    let mut yes = false;
+    let mut audit_target = "stderr".to_string();
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--user" => user = it.next().cloned(),
+            "--yes" => yes = true,
+            "--audit" => audit_target = it.next().cloned().unwrap_or(audit_target),
+            _ if !a.starts_with("--") && path.is_none() => path = Some(a.clone()),
+            _ => {
+                eprintln!("state erase: unknown argument '{a}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (Some(path), Some(user)) = (path, user) else {
+        eprintln!(
+            "usage: dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]"
+        );
+        std::process::exit(2);
+    };
+    // Review of #555, nit: as with `export`, an empty `--user` can never
+    // match a real record and is far more likely a dropped argument than
+    // an intentional "erase nothing" — refuse it.
+    if user.is_empty() {
+        eprintln!("state erase: --user must not be empty");
+        std::process::exit(2);
+    }
+    // Dry run opens read-only (review of #555's should-fix: it must not
+    // mutate the file it's only reporting on); an applied erase needs the
+    // writable, exclusively-locked open `Store::erase_user` rewrites
+    // through.
+    let store = cmd_state_open(&path, !yes);
+    let n = store.rows_for_user(&user).len();
+    if !yes {
+        println!(
+            "dry run: would remove {n} record(s) for user '{user}' from {path} — pass --yes to actually erase"
+        );
+        return; // nothing written; the store's `flock` is released when it drops here.
+    }
+    match store.erase_user(&user) {
+        Ok(removed) => {
+            state_audit_line(
+                &audit_target,
+                "ok",
+                &user,
+                &format!("{removed} record(s) removed from {path}"),
+            );
+            println!("erased {removed} record(s) for user '{user}' from {path}");
+        }
+        Err(e) => {
+            state_audit_line(&audit_target, "error", &user, &e);
+            eprintln!("state erase: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One JSON audit line for an applied `state erase` — the same shape
+/// `options.audit`'s own events use (`src/host/auth/audit.rs`: `ts`,
+/// `audit`, `outcome`, …), but written directly through
+/// [`anofox_visualization::host::access::open_log`]/`rfc3339` rather than
+/// through `host::auth::audit::AuditLog`: that module sits behind the
+/// `auth` Cargo feature (needed by the locked server, not by this plain
+/// `dashboard` binary), and this is the one place the CLI needs an audit
+/// line, not a reason to pull `auth` (jsonwebtoken, rustls, …) into every
+/// build of `dashboard`. `target` is `"stderr"` or a file path, exactly
+/// like `options.audit`'s own `AuditLog::new`. `operator_uid` (review of
+/// #555, nit: "adding *who* ran it would make the line useful for a
+/// data-subject request trail") is this process's real uid — the
+/// operator's own login, not the erased viewer's `user` field above —
+/// since this CLI runs offline with no claims of its own to log instead.
+fn state_audit_line(target: &str, outcome: &str, user: &str, detail: &str) {
+    use anofox_visualization::host::access::{open_log, rfc3339};
+    use serde_json::json;
+    let line = json!({
+        "ts": rfc3339(std::time::SystemTime::now()),
+        "audit": "state_erase",
+        "outcome": outcome,
+        "user": user,
+        "operator_uid": operator_uid(),
+        "detail": detail,
+    })
+    .to_string();
+    match target.trim() {
+        "" | "stderr" | "-" => eprintln!("{line}"),
+        p => {
+            use std::io::Write;
+            let path = std::path::Path::new(p);
+            match open_log(path).and_then(|mut f| writeln!(f, "{line}")) {
+                Ok(()) => {}
+                Err(e) => eprintln!("--audit {p}: {e} (audit line: {line})"),
+            }
+        }
+    }
+}
+
+/// This process's real uid (review of #555's audit-line nit) — the
+/// operator who invoked the CLI, not whatever uid the store file happens
+/// to be owned by.
+#[cfg(unix)]
+fn operator_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+#[cfg(not(unix))]
+fn operator_uid() -> u32 {
+    0
+}
+
 /// Print `SUMMARIZE` (types, min/max, approx-distinct, null %) for a source —
 /// schema grounding so an author never invents columns.
 fn cmd_describe(args: &[String]) {
@@ -2913,5 +3399,60 @@ mod site_tests {
         {
             assert!(sv::too_broad(&home).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod state_csv_safety_tests {
+    // Review of #555, B1: `dashboard state export --format csv` must
+    // apply the exact #520/#526 rule `web/app.js`'s `csvSafe` already
+    // applies to every browser CSV export, to every string cell.
+    use super::{csv_field, csv_safe, is_plain_number};
+
+    #[test]
+    fn a_formula_cell_is_prefixed_with_a_single_quote() {
+        assert_eq!(
+            csv_safe("=HYPERLINK(\"https://evil\")"),
+            "'=HYPERLINK(\"https://evil\")"
+        );
+        assert_eq!(csv_safe("@SUM(A1:A9)"), "'@SUM(A1:A9)");
+        assert_eq!(csv_safe("-1+A1"), "'-1+A1");
+        assert_eq!(csv_safe("+1"), "'+1"); // a leading '+' is still a formula lead, not a number
+        assert_eq!(csv_safe("\tA1"), "'\tA1");
+        assert_eq!(csv_safe("\rA1"), "'\rA1");
+    }
+
+    #[test]
+    fn a_plain_number_is_left_alone_even_with_a_leading_minus() {
+        for n in ["-1", "-1.5", "-1e10", "-1E-3", "1", "0", "3.14"] {
+            assert_eq!(csv_safe(n), n, "{n} must not be prefixed");
+        }
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched() {
+        for s in ["Monday", "alice@example.com", "", "a = b"] {
+            assert_eq!(csv_safe(s), s);
+        }
+    }
+
+    #[test]
+    fn is_plain_number_matches_the_js_num_re() {
+        for n in ["-1", "0", "42", "3.14", "-3.14", "1e10", "-1E-3", "1e+3"] {
+            assert!(is_plain_number(n), "{n} should be a number");
+        }
+        for s in [
+            "-1+A1", "1a", "", "-", ".", "1.", "1e", "1e+", "1-1", "--1", "+1",
+        ] {
+            assert!(!is_plain_number(s), "{s} should not be a number");
+        }
+    }
+
+    #[test]
+    fn csv_field_still_quotes_after_csv_safe_prefixes_it() {
+        // The two helpers compose: csv_safe's "'" prefix never needs its
+        // own quoting, but a value with a comma still needs csv_field's.
+        let cell = csv_field(&csv_safe("=A1,B1"));
+        assert_eq!(cell, "\"'=A1,B1\"");
     }
 }

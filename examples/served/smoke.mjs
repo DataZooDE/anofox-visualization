@@ -5,7 +5,9 @@
 //   node examples/served/smoke.mjs [--port 8912] [--auth] [--browser]
 //
 // --auth     also run the login flow through auth-proxy.mjs (needs a server
-//            with options.auth, PR #78)
+//            with options.auth, PR #78) and the onboarding quiz's per-viewer
+//            state (::SUBMIT, viewer_state, trainer scoping; options.state,
+//            #517, only configured in this mode since it needs auth)
 // --browser  also open each dashboard in Chromium and fail on an error panel
 //            (needs Playwright: NODE_PATH=<dir>/node_modules)
 // Uses DUCKDB and ANOFOX_EXT like serve.sh.
@@ -96,6 +98,31 @@ const findPanel = (panels, pred) => panels.findIndex((p) => Array.isArray(p.rows
 const SALES = "how-did-our-bakeries-sell";
 const FORECAST = "what-will-each-store-sell";
 const MINE = "how-are-my-stores-doing";
+const TUTORIAL = "tutorial";
+const PROGRESS = "progress";
+// tutorial.sql's fixed statement order: 0 title, 1 locale, 2 intro, 3 group,
+// 4 the ::BUTTONS input, 5 the ::SUBMIT button, 6 endgroup, 7 the ::SHOW_IF
+// gate, 8 group, 9 input, 10 ::SUBMIT, 11 endgroup, 12 ::COL, 13 "My progress".
+const STEP1_SUBMIT = 5;
+const STEP1_GATE = 7;
+const STEP2_SUBMIT = 10;
+const MY_PROGRESS = 13;
+
+async function submit(base, dashboard, n, id, vars, { headers = {} } = {}) {
+  const h = { "Content-Type": "application/json", "X-Anofox-Submit": "1", Origin: base, ...headers };
+  const r = await fetch(`${base}/api/submit`, {
+    method: "POST",
+    headers: h,
+    body: JSON.stringify({ dashboard, panel: n, id, vars }),
+  });
+  const text = await r.text();
+  let body = null;
+  try {
+    body = JSON.parse(text);
+  } catch {}
+  return { status: r.status, body, text };
+}
+const newId = () => [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
 async function main() {
   rmSync(WORK, { recursive: true, force: true });
@@ -269,7 +296,77 @@ async function auth() {
   ok(lines.some((l) => l.user === "alice") && lines.some((l) => l.deny),
     "the request log names the user, and the refusals", `${lines.length} lines`);
   ok(!/[0-9a-f]{64}/.test(JSON.stringify(lines)), "… and never the secret");
+
+  await submitState(PROXY, cookies);
   await stop();
+}
+
+// ── per-viewer state: ::SUBMIT, viewer_state, trainer scoping (#517) ───────
+async function submitState(PROXY_BASE, cookies) {
+  console.log("== per-viewer state: ::SUBMIT, viewer_state, trainers (#517)");
+  const before = await panel(PROXY_BASE, TUTORIAL, MY_PROGRESS, {}, { headers: { Cookie: cookies.alice } });
+  ok(Array.isArray(before.rows) && before.rows.length === 0, "alice's progress starts empty", before.text.slice(0, 120));
+
+  const gate0 = await panel(PROXY_BASE, TUTORIAL, STEP1_GATE, {}, { headers: { Cookie: cookies.alice } });
+  ok(gate0.rows?.[0]?.c0 === false, "step 2 is hidden before step 1 is answered", JSON.stringify(gate0.rows));
+
+  const id1 = newId();
+  const r1 = await submit(PROXY_BASE, TUTORIAL, STEP1_SUBMIT, id1, { day: "Monday" }, { headers: { Cookie: cookies.alice } });
+  ok(r1.status === 201 && r1.body?.seq === 1, "alice submits step 1", JSON.stringify(r1.body || r1.text));
+  const retry1 = await submit(PROXY_BASE, TUTORIAL, STEP1_SUBMIT, id1, { day: "Monday" }, { headers: { Cookie: cookies.alice } });
+  ok(retry1.status === 201 && retry1.body?.seq === r1.body?.seq, "the same id retried is idempotent, not a second row",
+    JSON.stringify(retry1.body));
+
+  const gate1 = await panel(PROXY_BASE, TUTORIAL, STEP1_GATE, {}, { headers: { Cookie: cookies.alice } });
+  ok(gate1.rows?.[0]?.c0 === true, "step 2 unlocks once step 1 is recorded", JSON.stringify(gate1.rows));
+
+  const bad = await submit(PROXY_BASE, TUTORIAL, STEP1_SUBMIT, newId(), { day: "Christmas" }, { headers: { Cookie: cookies.alice } });
+  ok(bad.status === 400, "an answer outside the real options is refused", String(bad.status));
+
+  const mine = await panel(PROXY_BASE, TUTORIAL, MY_PROGRESS, {}, { headers: { Cookie: cookies.alice } });
+  ok(mine.rows?.length === 1 && mine.rows[0]["Your answer"] === "Monday", "alice reads her own answer back",
+    JSON.stringify(mine.rows));
+
+  const noAuth = await submit(PROXY_BASE, TUTORIAL, STEP1_SUBMIT, newId(), { day: "Monday" });
+  ok(noAuth.status === 401, "submitting without signing in is 401", String(noAuth.status));
+  const bypass = await submit(BASE, TUTORIAL, STEP1_SUBMIT, newId(), { day: "Monday" }, {
+    headers: { "X-Forwarded-User": "alice", "X-Forwarded-Groups": "" },
+  });
+  ok(bypass.status === 401, "/api/submit straight to the server, bypassing the proxy, is 401 (forged headers, no shared secret)",
+    String(bypass.status));
+
+  const idB = newId();
+  const rb = await submit(PROXY_BASE, TUTORIAL, STEP1_SUBMIT, idB, { day: "Thursday" }, { headers: { Cookie: cookies.bob } });
+  ok(rb.status === 201, "bob submits his own step 1 answer", JSON.stringify(rb.body || rb.text));
+
+  // progress.sql's own SQL never filters by who is asking (see the file) —
+  // this is entirely the server deciding what reaches each connection.
+  const bobView = await panel(PROXY_BASE, PROGRESS, 7, {}, { headers: { Cookie: cookies.bob } });
+  const bobNames = (bobView.rows || []).map((r) => r["Staff member"]).sort();
+  ok(JSON.stringify(bobNames) === JSON.stringify(["bob"]), "bob (not a trainer) sees only his own row on progress.sql",
+    JSON.stringify(bobNames));
+
+  const carolView = await panel(PROXY_BASE, PROGRESS, 7, {}, { headers: { Cookie: cookies.carol } });
+  const carolNames = (carolView.rows || []).map((r) => r["Staff member"]).sort();
+  ok(JSON.stringify(carolNames) === JSON.stringify(["alice", "bob"]),
+    "carol (the admins group — the configured trainer) sees every staff member", JSON.stringify(carolNames));
+
+  const auditLog = path.join(WORK, "run", "audit.jsonl");
+  const auditLines = existsSync(auditLog)
+    ? readFileSync(auditLog, "utf8").trim().split("\n").map((l) => JSON.parse(l))
+    : [];
+  const submitEvents = auditLines.filter((l) => l.audit === "submit");
+  const okEvents = submitEvents.filter((l) => l.outcome === "ok");
+  ok(okEvents.length === 2 && okEvents.every((l) => l.user && l.detail),
+    "the audit log has an 'ok' submit event per successful submission (never a replayed retry)",
+    `${okEvents.length} ok of ${submitEvents.length} total`);
+  ok(submitEvents.some((l) => l.outcome !== "ok"), "… and a deny event for the refused 'Christmas' answer",
+    JSON.stringify(submitEvents.filter((l) => l.outcome !== "ok")));
+  ok(!submitEvents.some((l) => /Monday|Thursday/.test(JSON.stringify(l))), "… and never the answer value",
+    JSON.stringify(submitEvents).slice(0, 200));
+
+  const stateFile = path.join(WORK, "run", "state.jsonl");
+  ok(existsSync(stateFile), "the state file exists under run/, not inside the data folder or the dashboard folder");
 }
 
 // ── optional: the real client in a browser ────────────────────────────────

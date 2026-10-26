@@ -399,6 +399,12 @@ pub enum Role {
     /// (`::BOUNDARIES`): `'world'`, `'world-50m'`, `'de-states'`,
     /// `'de-districts'`. Read from the first value.
     Boundaries,
+    /// A time map's frame key (`::FRAME`, M2e, #149): a week, a date — one
+    /// result holds every frame; the browser's Play steps through them with
+    /// shared colours, classes and sizes (D21); static output shows the
+    /// last frame, named in the subtitle (D19). Maps only (lint
+    /// `frame/not-a-map` elsewhere).
+    Frame,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -887,6 +893,11 @@ pub struct RenderOptions {
     /// below) — the browser's own `assetUrl()`/`imageSrc()` do this job for
     /// the interactive builder.
     pub asset_root: Option<std::path::PathBuf>,
+    /// Which `::FRAME` to show on a time map (M2e/M2f, #149): `None` means
+    /// the last frame (static output, D12) — the browser passes the
+    /// stepped-to index here, like `zoom` passes its window. Ignored by
+    /// every other chart kind.
+    pub frame: Option<usize>,
 }
 
 impl Default for RenderOptions {
@@ -900,6 +911,7 @@ impl Default for RenderOptions {
             locale: format::Locale::EN_US,
             record_warnings: true,
             asset_root: None,
+            frame: None,
         }
     }
 }
@@ -957,6 +969,13 @@ impl RenderOptions {
             .and_then(parse_rgb)
         {
             self.brand = Some(p);
+        }
+        // `"frame"` (M2f, #149): which frame of a `::FRAME` time map to
+        // draw, like `zoom`'s own window — a non-negative integer; anything
+        // else (negative, a float, absent) is ignored, not an error (the map
+        // code clamps to the last frame either way).
+        if let Some(n) = ctx.get("frame").and_then(|v| v.as_u64()) {
+            self.frame = Some(n as usize);
         }
         Ok(())
     }

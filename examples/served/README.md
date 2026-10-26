@@ -95,11 +95,27 @@ Open <http://127.0.0.1:8911/> and pick a person. This starts:
   claims: Alice sees the North, Bob the Midlands and the South, and Carol
   (group `admins`) every store. Log in as Alice in one browser and as Bob in a
   private window, and compare.
+- `options.state` (per-viewer, append-only answers, #517; also only set with
+  `--auth`, since recording an answer needs a signed-in person): two more
+  dashboards, **Staff onboarding quiz** (click through both steps — step 2
+  only appears once step 1 is answered — and watch "My progress" below fill
+  in) and **Who has finished the onboarding quiz?**, head office's view of
+  everyone's answers. Log in as Alice or Bob and answer the quiz, then as
+  Carol (`admins`) to see both their progress; log in as Bob again and open
+  the same "Who has finished" page — he sees only his own row, never
+  Alice's, even though it's the exact same dashboard URL (the server decides
+  what reaches the connection, never a filter in `progress.sql`'s own SQL).
+  The recorded answers live in `work/run/state.jsonl`; see
+  [secure-serving.md](../../docs/secure-serving.md) for the full contract,
+  and `dashboard state export|erase` for a data-subject export or erasure
+  request (run `serve.sh stop` first — both refuse while a server holds
+  the file).
 
 The secret is generated at every start and lives only in the environment of
 the two processes. The request log (`work/run/requests.jsonl`) has one line
-per request with the user, and never the secret. Try a request that skips the
-proxy:
+per request with the user, and never the secret; the audit log
+(`work/run/audit.jsonl`) has one line per login and per quiz submission,
+never the answer. Try a request that skips the proxy:
 
 ```sh
 curl -s -H 'X-Forwarded-User: carol' -H 'X-Forwarded-Groups: admins' \
@@ -132,6 +148,7 @@ an HTTP endpoint, so no viewer can trigger one.
 | `generate.sh` | the demo data: stores, products, daily sales per week, forecast runs |
 | `dashboards/*.sql` | the two dashboards |
 | `auth/how-are-my-stores-doing.sql` | the per-user dashboard (served only with `--auth`) |
+| `auth/tutorial.sql`, `auth/progress.sql` | the onboarding quiz and head office's progress view (`options.state`, #517; served only with `--auth`) |
 | `auth-proxy.mjs` | the demo login proxy |
 | `smoke.mjs` | the end-to-end check |
 
@@ -146,3 +163,7 @@ an HTTP endpoint, so no viewer can trigger one.
   provider behind oauth2-proxy, Caddy or Cloudflare Access (recipes in
   [secure-serving.md](../../docs/secure-serving.md)), with TLS. Mount the data
   folder read-only for the server's OS user.
+- `work/run/state.jsonl` (the quiz's recorded answers) is `0600`, like the
+  request and audit logs, and — like them — deleted when the demo stops
+  (`serve.sh stop`'s `run/` cleanup). In production, back up and retain the
+  real state file deliberately; it holds answers, not a throwaway demo run.

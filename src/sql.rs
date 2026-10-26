@@ -1190,6 +1190,19 @@ fn rewrite_list(list: &str) -> Rewritten {
                     }
                     format!("{core} AS c{i}")
                 }
+                // `::FRAME` (#149, M2e-A): remembers its own display name —
+                // a time map's subtitle ("{name}: {label}", D19) and the
+                // browser player's bar label (M2f) read it, the same as a
+                // measure's own name — but keeps the value's own type
+                // (unlike a measure, a frame key is often text or a date,
+                // not cast to DOUBLE).
+                Role::Frame => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 // Any other role: an explicit `AS alias` is replaced by c{i}.
                 _ => format!("{} AS c{i}", trailing_alias(expr).0),
             };
