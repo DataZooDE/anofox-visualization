@@ -88,12 +88,21 @@ fn levels_of(values: &[Option<f64>]) -> Vec<Option<usize>> {
 /// `::YFORMAT`, which is `a`'s own) to format `b` the way `a` is formatted
 /// — `crate::value_fmt`'s own rule, so a currency/percent `b` reads right
 /// without `a`'s y-axis format leaking onto it.
+///
+/// `force` (review of #595, SHOULD-FIX 6): on a `::FRAME` map, whether the
+/// map is bivariate at all was already decided over every frame
+/// (`frames::Shared::is_bivariate`) — when `true`, this never bails out
+/// just because frame k's own `b` values happen to be entirely `Na`; it
+/// still builds a `Bivar`, with every row's level `None` ("no data" — the
+/// same thing `levels_of` already gives an empty/degenerate distribution)
+/// instead of falling back to a plain measure ramp, a different legend.
 pub(super) fn of(
     o: &RenderOptions,
     cols: &[Column],
     a_col: &Column,
     b_col: &Column,
     rows: usize,
+    force: bool,
 ) -> Option<Bivar> {
     let b: Vec<Option<f64>> = (0..rows)
         .map(|i| {
@@ -104,7 +113,7 @@ pub(super) fn of(
                 .filter(|f| f.is_finite())
         })
         .collect();
-    if b.iter().all(Option::is_none) {
+    if !force && b.iter().all(Option::is_none) {
         return None;
     }
     let a: Vec<Option<f64>> = (0..rows)
@@ -165,6 +174,30 @@ pub(super) fn of(
         title_a,
         title_b,
     })
+}
+
+/// `::FRAME` (M2e-B, D21): recompute `biv`'s per-row tertile levels and
+/// 3×3 counts from its own per-frame raw `a`/`b` values, using breaks
+/// (`ca`/`cb`) built once over every frame (`frames::shared_bivariate`)
+/// instead of the frame's own subset — so a cell's `(i, j)` position means
+/// the same thing whichever frame is shown; only the counts stay frame k's
+/// own. `biv.colors`/`base`/`color_a`/`color_b` (the palette) and
+/// `fmt_a`/`fmt_b`/`title_a`/`title_b` are unaffected — they don't depend
+/// on which rows fall in which cell.
+pub(super) fn apply_shared(biv: &mut Bivar, ca: &Classes, cb: &Classes) {
+    let level =
+        |v: Option<f64>, c: &Classes| v.map(|v| level_of(c.index(v.clamp(c.lo, c.hi)), c.len()));
+    let ia: Vec<Option<usize>> = biv.a.iter().map(|v| level(*v, ca)).collect();
+    let jb: Vec<Option<usize>> = biv.b.iter().map(|v| level(*v, cb)).collect();
+    let mut counts = [[0usize; 3]; 3];
+    for k in 0..ia.len() {
+        if let (Some(i), Some(j)) = (ia[k], jb[k]) {
+            counts[i][j] += 1;
+        }
+    }
+    biv.ia = ia;
+    biv.jb = jb;
+    biv.counts = counts;
 }
 
 /// `"low"` / `"mid"` / `"high"` (de: `"niedrig"`/`"mittel"`/`"hoch"`) for
@@ -238,7 +271,7 @@ mod tests {
             Role::Bivariate,
             vec![crate::Value::Na, crate::Value::Na],
         );
-        assert!(of(&o, &[a.clone(), b.clone()], &a, &b, 2).is_none());
+        assert!(of(&o, &[a.clone(), b.clone()], &a, &b, 2, false).is_none());
     }
 
     #[test]
@@ -256,7 +289,7 @@ mod tests {
             Role::Bivariate,
             b_vals.iter().map(|v| crate::Value::Float(*v)).collect(),
         );
-        let biv = of(&o, &[a.clone(), b.clone()], &a, &b, 9).unwrap();
+        let biv = of(&o, &[a.clone(), b.clone()], &a, &b, 9, false).unwrap();
         let mut seen = std::collections::HashSet::new();
         for i in 0..9 {
             let (ii, jj) = (biv.ia[i].unwrap(), biv.jb[i].unwrap());
