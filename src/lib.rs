@@ -6600,17 +6600,56 @@ fn markdown_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOption
         theme::hex(t.colors.ink)
     );
     let mut y = 22.0;
+    // #601 review S1: a fresh per-panel budget, same as dashboard.rs's own
+    // render_panel_svg — resolves (reads/decodes, builds the href) only as
+    // many of this panel's own block images as the byte cap and its own
+    // height both allow.
+    let mut img_budget = dashboard::MD_IMAGE_BUDGET_BYTES;
     for line in dashboard::markdown_lines(&md, width as f64) {
         if y > height as f64 - 8.0 {
             break;
         }
-        if !line.is_empty() {
-            body.push_str(&format!(
-                "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
-                dashboard::markdown_line_svg(&line)
-            ));
+        match line {
+            dashboard::MdLine::Text(text) => {
+                if !text.is_empty() {
+                    body.push_str(&format!(
+                        "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                        dashboard::markdown_line_svg(&text)
+                    ));
+                }
+                y += dashboard::MD_LINE;
+            }
+            // #524: mirrors dashboard.rs's own render_panel_svg handling of
+            // a block markdown image — resolved lazily, right here, only
+            // now that it's known to actually need drawing (#601 S1).
+            dashboard::MdLine::Image { src, alt } => {
+                let avail_w = width as f64 - 2.0 * pad;
+                match dashboard::md_image(&src, o.asset_root.as_deref(), &mut img_budget) {
+                    Some((href, aspect)) => {
+                        match dashboard::markdown_image_height(
+                            aspect,
+                            avail_w,
+                            height as f64 - y - 8.0,
+                        ) {
+                            Some(ih) => {
+                                body.push_str(&dashboard::markdown_image_svg(
+                                    &href, &alt, pad, y, avail_w, ih,
+                                ));
+                                y += ih + dashboard::MD_IMAGE_GAP; // #601 N5
+                            }
+                            None => break,
+                        }
+                    }
+                    None => {
+                        body.push_str(&format!(
+                            "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                            dashboard::markdown_line_svg(&format!("[{alt}]"))
+                        ));
+                        y += dashboard::MD_LINE;
+                    }
+                }
+            }
         }
-        y += dashboard::MD_LINE;
     }
     body.push_str("</g>");
     Panel::own(width, height, body)
