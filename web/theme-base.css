@@ -617,6 +617,16 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
    at phone width instead of squeezing the dashboard links. */
 .served-nav-picker{display:inline-flex;align-items:center;gap:.4rem;margin-left:auto;font:600 14px system-ui;color:var(--ax-nav-ink);white-space:nowrap}
 .served-nav-picker select{font:inherit;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-nav-border);border-radius:6px;padding:.3rem .5rem;max-width:14rem}
+/* #556: the daterange nav picker — same control family as `.control`'s own
+   ::DATERANGE (web/theme-base.css, the .control rules), but compact enough
+   for the nav bar; wraps onto its own line(s) at phone width instead of
+   squeezing the dashboard links, same as the dropdown picker above. */
+.served-nav-daterange{flex-wrap:wrap;white-space:normal}
+.served-nav-daterange input[type=date]{font:inherit;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-nav-border);border-radius:6px;padding:.25rem .4rem;max-width:9.5rem}
+.served-nav-apply{font:600 13px system-ui;color:var(--ax-nav-active-ink);background:var(--ax-nav-active-bg);border:1px solid var(--ax-nav-border);border-radius:6px;padding:.3rem .7rem;cursor:pointer}
+.served-nav-presets{display:inline-flex;gap:.25rem;flex-wrap:wrap}
+.served-nav-presets button{font:600 12px system-ui;color:var(--ax-nav-ink);background:transparent;border:1px solid var(--ax-nav-border);border-radius:999px;padding:.2rem .55rem;cursor:pointer}
+.served-nav-presets button:hover{background:var(--ax-nav-active-bg);color:var(--ax-nav-active-ink)}
 
 /* ---- tooltip, crosshair, hover ---- */
 .dp-tip{position:fixed;pointer-events:none;background:var(--ax-tip-bg);backdrop-filter:blur(6px);color:var(--ax-tip-ink);padding:.55rem .7rem;border-radius:8px;font-size:.8rem;font-weight:500;border:1px solid var(--ax-tip-border);box-shadow:var(--ax-tip-shadow);opacity:0;transform:translateY(3px) scale(.98);transition:opacity .11s,transform .11s;z-index:50;white-space:nowrap;min-width:96px}

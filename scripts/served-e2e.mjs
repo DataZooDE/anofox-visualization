@@ -293,9 +293,11 @@ try {
   const html = await (await fetch(`http://127.0.0.1:${port4}/d/m1`)).text();
   const served = JSON.parse(html.match(/window\.__served=(\{.*?\});<\/script>/s)[1]);
   check(JSON.stringify(served.pathVars) === '["model"]', `window.__served.pathVars: ${JSON.stringify(served.pathVars)}`);
+  // #556: the locked server now sends `navPickers` (an array) — the
+  // singular `nav_picker` config option still works, as a one-element list.
   check(
-    JSON.stringify(served.navPicker.options) === JSON.stringify([{ value: "car-price", label: "Car price" }, { value: "van", label: "Van" }]),
-    `window.__served.navPicker.options drops the non-plain-name row: ${JSON.stringify(served.navPicker.options)}`
+    JSON.stringify(served.navPickers[0].options) === JSON.stringify([{ value: "car-price", label: "Car price" }, { value: "van", label: "Van" }]),
+    `window.__served.navPickers[0].options drops the non-plain-name row: ${JSON.stringify(served.navPickers?.[0]?.options)}`
   );
 
   // Opening with a value already on the URL: the picker starts on it, and

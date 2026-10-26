@@ -3868,6 +3868,15 @@ query-only and run once per snapshot, like a dashboard's own setup; full
 rules, including why it refuses to combine with an access policy, are in
 [`secure-serving.md`](secure-serving.md).
 
+`nav_pickers` (a list, drawn left to right) draws several of these controls
+at once, and adds a `"type": "daterange"` picker — two linked date inputs
+plus preset buttons ("last 7d", "last 30d", "last 90d", "all") for a global
+time window, e.g. `view_from`/`view_to` carried to every page instead of
+each dashboard repeating its own `::DATERANGE`. `nav_picker` (the bare
+object above) still works unchanged — a one-element `nav_pickers`. Full
+shape, validation and the request-time rules in
+[`secure-serving.md`](secure-serving.md).
+
 **Login and per-viewer data.** Behind an auth proxy (oauth2-proxy, Caddy
 `forward_auth`, nginx `auth_request`, Cloudflare Access), `options.auth`
 (`{"mode": "proxy", "shared_secret_env": "…"}`) makes every request carry the

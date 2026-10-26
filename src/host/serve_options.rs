@@ -46,6 +46,13 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("data", SiteOptionKind::ServerOnly),
     ("path_vars", SiteOptionKind::Site),
     ("nav_picker", SiteOptionKind::Site),
+    // #556: several pickers, and the `daterange` type, are locked-server-only
+    // for now — `--site` still only understands the singular `nav_picker`
+    // dropdown (`SiteNavPicker`, unchanged). Refused rather than silently
+    // ignored: a static site built from an options file that sets
+    // `nav_pickers` would otherwise publish without the nav bar the author
+    // configured, with no warning beyond the generic `--ignored` note.
+    ("nav_pickers", SiteOptionKind::Refused),
     ("auth", SiteOptionKind::Refused),
     ("audit", SiteOptionKind::ServerOnly),
     ("log", SiteOptionKind::ServerOnly),

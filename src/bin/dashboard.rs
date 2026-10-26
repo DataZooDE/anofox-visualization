@@ -1173,6 +1173,14 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                 );
                 return Err(msg);
             }
+            "nav_pickers" => {
+                return Err(
+                    "options.nav_pickers: --site only supports the singular nav_picker \
+                     (one dropdown) for now; several pickers and the daterange type need \
+                     the locked server (anofox_serve_dashboards)"
+                        .into(),
+                );
+            }
             "state" => {
                 return Err(
                     "options.state: a static site cannot store submissions (needs the \

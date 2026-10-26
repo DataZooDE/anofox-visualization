@@ -8439,12 +8439,36 @@ function refreshServedNavHrefs() {
       a.href = servedNavHref(a.dataset.navId, served);
     });
   }
-  const np = served.navPicker;
-  const sel = np && document.querySelector(".served-nav-picker select");
-  if (sel) {
+  for (const np of servedNavPickers(served)) {
+    if (np.type === "daterange") {
+      const [fromVar, toVar] = np.vars;
+      const wrap = document.querySelector('.served-nav-picker[data-vars="' + fromVar + "," + toVar + '"]');
+      if (!wrap) continue;
+      const from = wrap.querySelector('input[data-var="' + fromVar + '"]');
+      const to = wrap.querySelector('input[data-var="' + toVar + '"]');
+      const fv = pathVarValue(fromVar);
+      const tv = pathVarValue(toVar);
+      if (from && fv !== undefined && fv !== null && fv !== "") from.value = fv;
+      if (to && tv !== undefined && tv !== null && tv !== "") to.value = tv;
+      continue;
+    }
+    const sel = document.querySelector('.served-nav-picker[data-var="' + np.var + '"] select');
+    if (!sel) continue;
     const v = String(pathVarValue(np.var) ?? "");
     if (sel.value !== v && [...sel.options].some((o) => o.value === v)) sel.value = v;
   }
+}
+// #556: `window.__served.navPickers` (a locked server — several pickers,
+// including `daterange`) or the still-accepted singular `window.__served
+// .navPicker` (a static site, `dashboard --site`'s `site.json`: always a
+// plain dropdown) — normalized here so the rest of the served nav only
+// ever deals with one array, in one shape (`{type, ...}`, `type` defaults
+// to `"dropdown"`).
+function servedNavPickers(served) {
+  if (!served) return [];
+  if (Array.isArray(served.navPickers)) return served.navPickers;
+  if (served.navPicker) return [Object.assign({ type: "dropdown" }, served.navPicker)];
+  return [];
 }
 function servedNavLink(d, served) {
   const a = document.createElement("a");
@@ -8467,20 +8491,26 @@ function servedNavLink(d, served) {
   }
   return a;
 }
-// #407 part 3: the nav-bar picker for one `path_vars` variable — a plain
-// <select>, right of the dashboard links (CSS pushes it there: it's just
-// the last flex child). Its options come from `window.__served.navPicker`
-// (server-computed, see `build_nav_picker` in duckext/src/serve.rs); labels
-// are set with `textContent`, never `innerHTML`. `renderServedNav` runs
-// before the first `run()`, so `pathVarValue` doesn't hold the viewer's
-// value yet — the initial selection is read straight from `?v.<var>=`
-// instead; `refreshServedNavHrefs` (called from `syncUrlState` after every
-// run) keeps the control in sync with it from then on.
-function renderNavPicker(served) {
-  const np = served.navPicker;
-  if (!np || !Array.isArray(np.options) || !np.options.length) return null;
+// #407 part 3 / #556: the nav-bar's own controls, right of the dashboard
+// links (CSS pushes them there: they're just the last flex children).
+// `servedNavPickers` normalizes `window.__served.navPickers`/`.navPicker`
+// into one array; each entry is a dropdown (unchanged since #407) or a
+// `daterange` (#556, below). Labels are set with `textContent`, never
+// `innerHTML`. `renderServedNav` runs before the first `run()`, so
+// `pathVarValue` doesn't hold the viewer's value yet — the initial
+// selection is read straight from `?v.<var>=` instead; `refreshServedNavHrefs`
+// (called from `syncUrlState` after every run) keeps the controls in sync
+// with it from then on.
+function renderNavPickers(served) {
+  return servedNavPickers(served)
+    .map((np) => (np.type === "daterange" ? renderDateRangePicker(np) : renderDropdownPicker(np)))
+    .filter(Boolean);
+}
+function renderDropdownPicker(np) {
+  if (!Array.isArray(np.options) || !np.options.length) return null;
   const wrap = document.createElement("label");
   wrap.className = "served-nav-picker";
+  wrap.dataset.var = np.var;
   const cap = document.createElement("span");
   cap.className = "served-nav-picker-label";
   cap.textContent = captionColon(np.label || np.var);
@@ -8512,9 +8542,78 @@ function renderNavPicker(served) {
   wrap.append(cap, sel);
   return wrap;
 }
+// #556: a global time window — two <input type=date>, preset buttons
+// (computed server-side, never wall-clock "today" on the page — see
+// `daterange_preset_bounds` in duckext/src/serve.rs) and an explicit
+// "Apply" button. Applying runs both SET VARIABLEs, in order, before the
+// rerun, so the server is never asked to validate one half of the pair
+// against the *old* value of the other (it would otherwise see a
+// momentary from > to on every edit of either input). A plain button with
+// its listener attached here in script, not an inline onchange attribute —
+// the CSP (#252) has no 'unsafe-inline'/'unsafe-hashes' for script-src, the
+// exact bug #570 fixed for the script-free pages' own controls.
+function renderDateRangePicker(np) {
+  const [fromVar, toVar] = np.vars;
+  const wrap = document.createElement("div");
+  wrap.className = "served-nav-picker served-nav-daterange";
+  wrap.dataset.vars = fromVar + "," + toVar;
+  const cap = document.createElement("span");
+  cap.className = "served-nav-picker-label";
+  cap.textContent = captionColon(np.label || "Time window");
+  const params = new URLSearchParams(location.search);
+  const mk = (varname, kind) => {
+    const inp = document.createElement("input");
+    inp.type = "date";
+    inp.dataset.var = varname;
+    inp.setAttribute("aria-label", (np.label || "Time window") + ": " + kind);
+    if (np.min) inp.min = np.min;
+    if (np.max) inp.max = np.max;
+    inp.value = params.get("v." + varname) || "";
+    return inp;
+  };
+  const from = mk(fromVar, "from");
+  const to = mk(toVar, "to");
+  const arrow = document.createElement("span");
+  arrow.textContent = "→";
+  arrow.className = "daterange-arrow";
+  const setVars = async (f, t) => {
+    if (fromVar in dpVarDefault) dpVars[fromVar] = f;
+    else dpXf[fromVar] = f;
+    if (toVar in dpVarDefault) dpVars[toVar] = t;
+    else dpXf[toVar] = t;
+    await runSql(`SET VARIABLE ${fromVar} = '${f.replace(/'/g, "''")}'`);
+    await runSql(`SET VARIABLE ${toVar} = '${t.replace(/'/g, "''")}'`);
+    run(false);
+  };
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.className = "served-nav-apply";
+  apply.textContent = "Apply";
+  apply.onclick = () => from.value && to.value && setVars(from.value, to.value);
+  wrap.append(cap, from, arrow, to, apply);
+  if (Array.isArray(np.presets) && np.presets.length) {
+    const bar = document.createElement("span");
+    bar.className = "served-nav-presets";
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", "Presets");
+    for (const p of np.presets) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = p.label || p.key;
+      btn.onclick = () => {
+        from.value = p.from;
+        to.value = p.to;
+        setVars(p.from, p.to);
+      };
+      bar.appendChild(btn);
+    }
+    wrap.appendChild(bar);
+  }
+  return wrap;
+}
 function renderServedNav(served) {
   const hasLinks = !!served && Array.isArray(served.nav) && served.nav.length >= 2;
-  const hasPicker = !!served && !!served.navPicker;
+  const hasPicker = servedNavPickers(served).length > 0;
   if (!hasLinks && !hasPicker) return;
   if (document.querySelector(".served-nav")) return;
   const nav = document.createElement("nav");
@@ -8540,8 +8639,7 @@ function renderServedNav(served) {
       }
     } else nav.appendChild(servedNavMenu(served, groups));
   }
-  const picker = hasPicker && renderNavPicker(served);
-  if (picker) nav.appendChild(picker);
+  if (hasPicker) for (const picker of renderNavPickers(served)) nav.appendChild(picker);
   // #417: a published site has no server to answer a real /d/<id> request —
   // every nav link switches in place instead (siteGo), so Wasm and the
   // loaded data stay warm. A locked server's own nav still navigates for

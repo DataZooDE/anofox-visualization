@@ -418,7 +418,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
 }');
 ```
 
-- `var` must be one of `path_vars` — refused at start otherwise (`options.nav_picker.var '…' must be one of options.path_vars`).
+- `var` must be one of `path_vars` — refused at start otherwise (`options.nav_picker(s): '…' must be one of options.path_vars`).
 - `sql` is **author/config text, run on the server — never from the
   viewer.** It must be exactly one query, checked the same way every
   `data`-folder statement is (`json_serialize_sql`, SELECT-only), and must
@@ -479,6 +479,67 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
   `syncUrlState`.
 - `serve --dashboards` has no `nav_picker` either, for the same reason it
   has no `path_vars`.
+
+**Several pickers, and a date-range picker type (`nav_pickers`, #556).**
+`options.nav_picker` (the bare object above) is still accepted unchanged —
+internally a one-element list. `options.nav_pickers` is a list of pickers,
+drawn left to right in the nav bar; the two keys may not both be set, and
+at most 8 pickers are accepted (each is inlined into every served page, the
+same reasoning as the 2,000-option cap below). Each entry has a `"type"`:
+`"dropdown"` (the default — today's shape, `var`/`sql`/`label`) or
+`"daterange"`, a global time window:
+
+```sql
+"nav_pickers": [
+  {"type": "daterange", "vars": ["view_from", "view_to"], "label": "Time window",
+   "sql": "SELECT min(end_date)::DATE, max(end_date)::DATE FROM read_parquet(getvariable('anofox_data') || '/*/chunks.parquet')",
+   "presets": ["last 7d", "last 30d", "last 90d", "all"]},
+  {"var": "model", "label": "Model", "sql": "SELECT model_id, title FROM models"}
+]
+```
+
+- `vars` is `[from, to]` — exactly two distinct variable names, **both**
+  required to be in `path_vars` (refused at start otherwise, the same rule
+  a dropdown's `var` follows).
+- `sql` is optional; when given, it is the same trust level and run-once
+  cadence as a dropdown's — author/config text, never from the viewer, run
+  once per snapshot (startup + every refresh). It must return **exactly one
+  row of two columns, `(min, max)`**, both real calendar dates with
+  `min <= max` — anything else refuses the server start. Without `sql` the
+  picker is two plain, unbounded date inputs (no presets: see below).
+- `presets` names entries of a fixed vocabulary — `"last 7d"`, `"last 30d"`,
+  `"last 90d"`, `"all"` — an unknown name refuses the server start. Each is
+  computed **from the `sql`'s own `max`, never wall-clock `today()`**, so a
+  snapshot always answers "last 7d" the same way regardless of when a
+  viewer opens the page: `"last Nd"` is the N calendar days ending on `max`
+  inclusive, clamped up to `min` if the data doesn't reach back that far;
+  `"all"` is `(min, max)`. `presets` needs `sql` (refused at start
+  otherwise — there is no `max` to compute them from).
+- **Request-time validation beyond the generic `path_vars` shape check**
+  (`check_path_values` already accepts `YYYY-MM-DD` — digits and dashes are
+  a valid plain name): each of `vars` present on a request must be a real
+  calendar date (`parse_iso_date`; `2026-02-30` is refused, `400`), and when
+  *both* halves are present together, `from` must not be after `to`
+  (`400`). A value outside the picker's own `[min, max]` (when it has
+  `sql`) is **clamped**, not refused — those bounds are an author-chosen
+  display range, not a security boundary, the same posture a calendar
+  widget's own `min`/`max` attributes would take.
+- The policy conflict above extends to any picker that actually has `sql`
+  (a dropdown always does; a `daterange` only when given one) — a
+  `daterange` with no `sql` has nothing that would bypass the policy, so it
+  may be combined with one.
+- The same credential-lock and render rules apply: a `daterange` is omitted
+  entirely if either of its two variables is locked by a scoped credential,
+  and the nav builds it with `document.createElement`/`textContent` (two
+  `<input type="date">`, preset buttons, an explicit "Apply" button —
+  batched into both `SET VARIABLE`s + one re-run so the server is never
+  asked to validate one half of the pair against the stale value of the
+  other) — no inline `onchange`/`onclick` attributes (the CSP has no
+  `'unsafe-inline'`/`'unsafe-hashes'` for `script-src`; #570 is the bug that
+  pattern avoids).
+- `dashboard --site` (the static export) only understands the singular
+  `nav_picker` dropdown for now; `nav_pickers` is refused there
+  (`options.nav_pickers: --site only supports the singular nav_picker …`).
 
 **Content-Security-Policy header (#252).** Every HTML page of the locked server
 (the dashboard page, the `/` list, the login pages), of `dashboard serve` and
