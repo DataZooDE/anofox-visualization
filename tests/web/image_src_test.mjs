@@ -11,9 +11,16 @@ const grab = (name) => {
   assert.ok(m, `function ${name} not found in app.js`);
   return m[0];
 };
+// Grab the const declarations themselves too (#544 review), not a
+// hand-copied duplicate — so a drift in the allowed type list or the
+// length cap fails this test instead of silently going unparitied.
+const grabConst = (name) => {
+  const m = src.match(new RegExp(`^const ${name} = [^\\n]*;$`, "m"));
+  assert.ok(m, `const ${name} not found in app.js`);
+  return m[0];
+};
 const { imageSrc } = new Function(
-  `const IMAGE_DATA_TYPES = ["png", "jpeg", "jpg", "gif", "webp", "svg+xml"];\n` +
-    `const MAX_IMAGE_SRC_CHARS = 2000000;\n` +
+  `${grabConst("IMAGE_DATA_TYPES")}\n${grabConst("MAX_IMAGE_SRC_CHARS")}\n` +
     `${grab("assetUrl")}\n${grab("imageSrc")}\nreturn { imageSrc };`
 )();
 

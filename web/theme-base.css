@@ -249,6 +249,11 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-image img.dp-img.dp-img-dark{display:none}
 body.dark .dp-img-row.has-dark img.dp-img.dp-img-dark{display:block}
 body.dark .dp-img-row.has-dark img.dp-img:not(.dp-img-dark){display:none}
+/* #544 review: a rejected ::IMAGE but a valid ::IMAGE_DARK draws only the
+   light slot's placeholder (has-dark is set from the dark src alone) — in
+   dark mode the dark image takes over, so hide the placeholder the same way
+   the (would-be) light <img> is hidden above, or both show at once. */
+body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 /* ::HEIGHT, or ::FIT sizing the panel to a share of the row (fitDash's
    kind(), #400): a fixed box, the image centred and contained rather than
    stretched (decision 8 of plan-514). */

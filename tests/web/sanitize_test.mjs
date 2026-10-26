@@ -10,9 +10,15 @@ const grab = (name) => {
   assert.ok(m, `function ${name} not found in app.js`);
   return m[0];
 };
+// Grab the const declarations themselves too (#544 review), not a
+// hand-copied duplicate.
+const grabConst = (name) => {
+  const m = src.match(new RegExp(`^const ${name} = [^\\n]*;$`, "m"));
+  assert.ok(m, `const ${name} not found in app.js`);
+  return m[0];
+};
 const { escapeHtml, safeUrl, renderMarkdown } = new Function(
-  `const IMAGE_DATA_TYPES = ["png", "jpeg", "jpg", "gif", "webp", "svg+xml"];\n` +
-    `const MAX_IMAGE_SRC_CHARS = 2000000;\n` +
+  `${grabConst("IMAGE_DATA_TYPES")}\n${grabConst("MAX_IMAGE_SRC_CHARS")}\n` +
     `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("assetUrl")}\n${grab("imageSrc")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
 )();
 
@@ -97,5 +103,18 @@ assert.match(renderMarkdown("![](https://c/x.png)"), /alt=""/);
   assert.ok(html.startsWith("<p>before <img"), html);
   assert.ok(html.includes('class="md-math"'), html);
   assert.ok(html.endsWith(" after</p>"), html);
+}
+
+// A $…$ formula inside an image's alt bracket resolves to its own escaped
+// TeX source in the attribute, not a leaked math-token/index (review of #544).
+assert.match(renderMarkdown("![a $x$](https://c/i.png)"), /alt="a x"/);
+
+// A literal private-use token sequence in the input can't forge or
+// duplicate an already-tokenized <img> (review of #544): the real image
+// still renders exactly once, whatever a pasted forged-looking sequence
+// does.
+{
+  const html = renderMarkdown("![a](https://c/i.png) 0");
+  assert.equal((html.match(/<img/g) || []).length, 1, html);
 }
 console.log("web sanitize tests: ok");

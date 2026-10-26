@@ -88,7 +88,15 @@ pub fn src_ok(u: &str) -> SrcKind {
             };
         }
     }
-    // A `\` is already caught by `has_forbidden_char` above.
+    // A `\` is already caught by `has_forbidden_char` above. A relative path
+    // is never percent-encoded (review of #544): a browser's URL resolver
+    // decodes `%2e%2e`/`%2f`/`%5c` before this ever reaches a server, so
+    // `assets/%2e%2e/%2e%2e/x` would classify as `Relative` here — passing
+    // the lint and the browser's own `imageSrc()` — while actually escaping
+    // `assets/` once resolved. Simplest correct rule: reject any `%`.
+    if u.contains('%') {
+        return SrcKind::Bad("percent-encoded");
+    }
     for seg in u.split('/') {
         if seg.is_empty() || seg == "." || seg == ".." || seg.starts_with('.') {
             return SrcKind::Bad("outside-folder");
@@ -394,6 +402,29 @@ mod tests {
             src_ok("a\\b"),
             SrcKind::Bad("forbidden-character")
         ));
+    }
+
+    /// #544 review: a browser's URL resolver decodes `%2e`/`%2f`/`%5c`
+    /// before a fetch, so these must never classify as plain `Relative` —
+    /// `assets/%2e%2e/x` resolves outside `assets/` once fetched.
+    #[test]
+    fn percent_encoding_is_rejected_in_a_relative_path() {
+        for bad in [
+            "assets/%2e%2e/x",
+            "assets/%2E%2E%2Fx",
+            "assets/..%2fx",
+            "assets/..%2Fx",
+            "assets%2f..%2fx",
+            "assets/%5c..%5cx",
+            "assets/x%2esvg",
+        ] {
+            assert!(
+                matches!(src_ok(bad), SrcKind::Bad("percent-encoded")),
+                "{bad}"
+            );
+        }
+        // Still fine without any `%`.
+        assert_eq!(src_ok("assets/ok.svg"), SrcKind::Relative);
     }
 
     #[test]

@@ -42,6 +42,12 @@ SELECT 'Below: ![a status legend](${SVG_DATA})'::MARKDOWN;
 SELECT 'javascript:alert(1)'::IMAGE, 'rejected source'::ALT, 'Bad source'::TITLE;
 SELECT 200::HEIGHT;
 SELECT '${SVG_DATA}'::IMAGE, 'A fixed-height image'::ALT, 'Fixed height'::TITLE;
+-- review-544 #7: a rejected light src with a valid dark one — only the dark
+-- <img> should show in dark mode, not the placeholder too.
+SELECT 'javascript:alert(1)'::IMAGE, '${SVG_DARK}'::IMAGE_DARK, 'light rejected, dark ok'::ALT, 'Rejected light + valid dark'::TITLE;
+-- review-544 #2: a relative path at a real same-origin, non-image resource
+-- (served on this page's own origin) — the export must not inline its body.
+SELECT 'index.html'::IMAGE, 'not an image'::ALT, 'Non-image same-origin'::TITLE;
 `;
 
 const ready = (page) =>
@@ -122,6 +128,19 @@ async function open(viewport) {
   check(!!fixed && fixed.objectFit === "contain", `(e) ::HEIGHT box uses object-fit: contain (${fixed?.objectFit})`);
   check(!!fixed && fixed.imgBottom <= fixed.figBottom + 1, "(e) image stays inside its fixed box");
 
+  // (i) review-544 #7: a rejected ::IMAGE with a valid ::IMAGE_DARK — in
+  // dark mode (already toggled on above) only the dark <img> shows, not
+  // also the "rejected source" placeholder.
+  const mixedRow = await page.evaluate(() => {
+    const fig = [...document.querySelectorAll(".dp-image")].find((f) => f.textContent.includes("Rejected light + valid dark"));
+    if (!fig) return null;
+    const shown = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).display !== "none";
+    const dark = fig.querySelector("img.dp-img-dark");
+    const missing = fig.querySelector(".dp-img-missing");
+    return { dark: shown(dark), missing: shown(missing) };
+  });
+  check(!!mixedRow && mixedRow.dark && !mixedRow.missing, `(i) dark mode shows only the dark image, not also the placeholder (${JSON.stringify(mixedRow)})`);
+
   await page.close();
 }
 
@@ -170,6 +189,21 @@ if (axePath) {
   check(!!shown && shown.visible, "(h) exported HTML shows the image offline");
   check(!!shown && shown.src === "data:image", `(h) the export's image src is inlined as data: (${shown?.src})`);
   check(!exportErrs.length, "(h) no errors in the offline export: " + exportErrs.join(" | "));
+
+  // review-544 #2: a relative src resolving to a real, same-origin,
+  // non-image response (index.html) must not have its body inlined — the
+  // export's content-type check rejects it, falling back to the alt text.
+  const nonImage = await op.evaluate(() => {
+    const fig = [...document.querySelectorAll(".dp-image")].find((f) => f.textContent.includes("Non-image same-origin"));
+    if (!fig) return null;
+    return {
+      hasImg: !!fig.querySelector("img.dp-img"),
+      missingText: fig.querySelector(".dp-img-missing")?.textContent,
+    };
+  });
+  check(!!nonImage && !nonImage.hasImg, `(j) a non-image same-origin response is not inlined as an <img> (${JSON.stringify(nonImage)})`);
+  check(!!nonImage && nonImage.missingText === "not an image", `(j) it falls back to the alt text (${nonImage?.missingText})`);
+
   await off.close();
 }
 

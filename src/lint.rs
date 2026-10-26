@@ -1241,7 +1241,10 @@ where
                         push(
                             Severity::Note,
                             "image/https-offline",
-                            format!("`{src}` stays a link in static output (--svg, the CLI HTML) — it may not show offline"),
+                            format!(
+                                "`{}` stays a link in static output (--svg, the CLI HTML) — it may not show offline",
+                                one_line(src)
+                            ),
                         );
                     }
                 }
@@ -3860,7 +3863,9 @@ fn image_src_diag(src: &str) -> Option<(Severity, &'static str, String)> {
                 crate::image::MAX_SRC_CHARS
             ),
         )),
-        SrcKind::Bad(reason @ ("protocol-relative" | "absolute-path" | "outside-folder")) => {
+        SrcKind::Bad(
+            reason @ ("protocol-relative" | "absolute-path" | "outside-folder" | "percent-encoded"),
+        ) => {
             Some((
                 Severity::Error,
                 "outside-folder",

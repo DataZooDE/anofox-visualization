@@ -14232,6 +14232,10 @@ function imageSrc(raw) {
   if (low.startsWith("//") || u.startsWith("/")) return "";
   const i = low.indexOf(":");
   if (i >= 0 && !low.slice(0, i).includes("/")) return low.startsWith("https:") ? u : "";
+  // #544 review: the browser's own URL resolver decodes %2e/%2f/%5c before
+  // a fetch, so a relative path must never carry a %, or assets/%2e%2e/x
+  // would pass this classifier yet resolve outside assets/ once fetched.
+  if (u.includes("%")) return "";
   for (const seg of u.split("/")) {
     if (!seg || seg === "." || seg === ".." || seg.startsWith(".")) return "";
   }
@@ -14402,12 +14406,19 @@ function renderMarkdown(src) {
   // then become a .md-math span showing their TeX source until typesetMath
   // swaps in KaTeX; a token inside a tag (a link URL) is dropped.
   const inline = (s) => {
+    // #544 review: these private-use characters are this function's own
+    // internal token markers (math spans below, image tags in inlineMd) —
+    // never legitimate input. Strip any literal occurrence first, so typed
+    // or pasted text can't forge/duplicate an already-tokenized <img> or
+    // .md-math span (a stray "\uE0040\uE005" would otherwise be swapped for
+    // imgs[0] by the final pass below) or land out-of-range (undefined).
+    s = s.replace(/[\uE002-\uE005]/g, "");
     const math = [];
     const imgs = [];
     const md = mathSpans(s)
       .map((g) => (g.tex == null ? g.text : (math.push(g), `\uE002${math.length - 1}\uE003`)))
       .join("");
-    const html = inlineMd(md, imgs);
+    const html = inlineMd(md, imgs, math);
     if (!math.length && !imgs.length) return html;
     const mtok = /\uE002(\d+)\uE003/g;
     const itok = /\uE004(\d+)\uE005/g;
@@ -14428,14 +14439,19 @@ function renderMarkdown(src) {
   // rule ran first on the untokenized text, `[a](b)` inside what was meant
   // as alt text would become a live `<a href>`, landing inside the next
   // attribute this function builds (an attribute/HTML-injection path).
-  const inlineMd = (s, imgs) =>
+  const inlineMd = (s, imgs, math) =>
     esc(s)
-      .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, src) => {
+      .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, altRaw, src) => {
         // `src` is already HTML-escaped by esc(s) above; undo that to check
         // it with imageSrc(), the same as the link rule does for `u` below.
         const unesc = { amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" };
         const rawSrc = src.replace(/&(amp|lt|gt|quot|#39);/g, (_, e) => unesc[e]);
         const url = imageSrc(rawSrc);
+        // The alt bracket may itself contain a $\u2026$ formula's math token
+        // (mathSpans ran before this, over the whole line) \u2014 resolve it to
+        // its own (escaped) TeX source rather than leaking the private-use
+        // token / index into a plain-text attribute (#544 review).
+        const alt = altRaw.replace(/\uE002(\d+)\uE003/g, (_, k) => esc(math[+k]?.tex ?? ""));
         if (!url) return alt; // a rejected src renders the alt text (decision 7)
         // `alt` is already escaped (it's a substring of esc(s)); `url` isn't.
         imgs.push(`<img class="md-img" src="${esc(url)}" alt="${alt}" loading="lazy" decoding="async">`);
@@ -14937,6 +14953,71 @@ function shareLink(e) {
   );
 }
 
+// The image MIME types an exported <img>'s fetched response must declare
+// (review of #544): a relative ::IMAGE/markdown src can point at any
+// same-origin endpoint, not just a real image file, and that fetch carries
+// the viewer's own credentials (`credentials: "same-origin"`, the default).
+// Without this check, a non-image response body would still get written
+// into the exported HTML as a data: URI — inert inside <img>, but content
+// the viewer never meant to export.
+const EXPORT_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"];
+// Matches MAX_SRC_CHARS' data: URI budget (src/image.rs), roughly: a 2 MB
+// file is already a large inline image.
+const MAX_EXPORT_IMAGE_BYTES = 2 * 1024 * 1024;
+// Fetch `img`'s src for the ⤓ HTML export, verify it is really an image and
+// within the size cap — enforced while streaming, not only after buffering
+// the whole response — and inline it as a data: URI; on any failure, swap
+// `img` for the alt-text placeholder (the same fallback a live load error
+// gets). `fetch` here only ever resolves a src that already passed
+// imageSrc()'s rules: a same-origin relative path or an https: URL.
+async function inlineExportedImage(img) {
+  const src = img.getAttribute("src");
+  const alt = img.getAttribute("alt") || "";
+  try {
+    const r = await fetch(src, { redirect: "error" });
+    if (!r.ok) throw new Error(String(r.status));
+    const type = (r.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (!EXPORT_IMAGE_MIME_TYPES.includes(type)) throw new Error("not an allowed image content-type");
+    const declared = Number(r.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > MAX_EXPORT_IMAGE_BYTES) throw new Error("too large for the export");
+    let blob;
+    if (r.body?.getReader) {
+      const reader = r.body.getReader();
+      const chunks = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        if (received > MAX_EXPORT_IMAGE_BYTES) {
+          await reader.cancel();
+          throw new Error("too large for the export");
+        }
+        chunks.push(value);
+      }
+      blob = new Blob(chunks, { type });
+    } else {
+      // No streaming body (an opaque response, or a very old browser):
+      // r.blob() buffers first, so the cap is enforced after the fact —
+      // the Content-Length check above is the real guard in this branch.
+      blob = await r.blob();
+      if (blob.size > MAX_EXPORT_IMAGE_BYTES) throw new Error("too large for the export");
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = () => reject(fr.error || new Error("read failed"));
+      fr.readAsDataURL(blob);
+    });
+    img.setAttribute("src", dataUrl);
+  } catch (_) {
+    const span = document.createElement("span");
+    span.className = "dp-img-missing";
+    span.textContent = alt || "image";
+    img.replaceWith(span);
+  }
+}
+
 // Download the current dashboard as a standalone, self-contained HTML file.
 // It carries the dashboard stylesheet (web/theme-base.css) and the CURRENT
 // theme variant's tokens, so a dark dashboard stays dark when opened alone.
@@ -15021,30 +15102,7 @@ async function downloadHtml() {
   const toInline = [...snap.querySelectorAll("img.dp-img, img.md-img")].filter(
     (img) => !/^data:/i.test(img.getAttribute("src") || "")
   );
-  await Promise.all(
-    toInline.map(async (img) => {
-      const src = img.getAttribute("src");
-      const alt = img.getAttribute("alt") || "";
-      try {
-        const r = await fetch(src);
-        if (!r.ok) throw new Error(String(r.status));
-        const blob = await r.blob();
-        if (blob.size > 2 * 1024 * 1024) throw new Error("too large for the export");
-        const dataUrl = await new Promise((resolve, reject) => {
-          const fr = new FileReader();
-          fr.onload = () => resolve(fr.result);
-          fr.onerror = () => reject(fr.error || new Error("read failed"));
-          fr.readAsDataURL(blob);
-        });
-        img.setAttribute("src", dataUrl);
-      } catch (_) {
-        const span = document.createElement("span");
-        span.className = "dp-img-missing";
-        span.textContent = alt || "image";
-        img.replaceWith(span);
-      }
-    })
-  );
+  await Promise.all(toInline.map((img) => inlineExportedImage(img)));
   const content = snap.innerHTML;
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
