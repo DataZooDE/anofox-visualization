@@ -10,9 +10,11 @@
 // back to step 1; (f) the keyboard alone (Tab, Enter) completes the
 // tutorial; (g) at 390px no horizontal scroll, the step list is hidden and
 // the footer buttons are full width; (h) axe (--axe path/to/axe.min.js) has
-// no violations on the step section; (i) the ⤓ HTML export contains every
-// step's heading. conditionHolds()/clampStep() in web/app.js is what this
-// exercises end to end — see tests/web/steps_test.mjs for the pure helpers.
+// no violations on the step section; (i) the ⤓ HTML export (#523) keeps an
+// offline Back/Next/step-list/announcer, drops the gate with a note instead
+// of freezing it, and still flattens every step, numbered, when printed.
+// conditionHolds()/clampStep() in web/app.js is what this exercises end to
+// end — see tests/web/steps_test.mjs for the pure helpers.
 //
 //   wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 //   python3 serve_nocache.py 8798 &
@@ -173,15 +175,77 @@ if (axe && existsSync(axe)) {
   console.log("(h) skipped: no --axe axe.min.js given");
 }
 
-// (i) the ⤓ HTML export contains every step's heading, flattened in order.
+// (i) the ⤓ HTML export (#523): keeps an offline stepper (Back/Next, the
+// progress strip, the step list, a live announcer) wired up by
+// SNAPSHOT_JS — dropping the gate (there's no query engine offline to
+// re-check it: every step becomes reachable, with a note saying so) rather
+// than freezing whatever was disabled on the live page. Downloaded from
+// step 2 with its gate still closed (q2 unanswered), to prove the export
+// doesn't carry that frozen-closed state over. Its print stylesheet still
+// flattens every step, numbered, like the pre-#523 full export did.
 {
-  const { page } = await open({ width: 1440, height: 1000 });
+  const { page } = await open({ width: 1440, height: 1000 }, "?v.lesson=2");
   const [dl] = await Promise.all([page.waitForEvent("download"), page.click("#dlhtml")]);
   const html = readFileSync(await dl.path(), "utf8");
-  for (let n = 1; n <= 4; n++) check(html.includes(`Step ${n} of 4`), `(i) export carries the Step ${n} of 4 heading`);
-  check(!html.includes('class="dp-step-foot"'), "(i) export drops the Back/Next footer");
-  check(!html.includes('class="dp-step-head"'), "(i) export drops the progress/step-list nav");
+  check(html.includes('class="dp-step-foot"'), "(i) export keeps the Back/Next footer");
+  check(html.includes('class="dp-step-head"'), "(i) export keeps the progress/step-list nav");
+  check(!html.includes("Answer correctly above to continue"), "(i) export drops the gate message");
+  check(html.includes("Checks are not active in this offline copy."), "(i) export adds the offline note (this sequence has a gate)");
   await page.close();
+
+  // Open the export cold, offline, with no server and no live app.js — same
+  // isolation as scripts/subtabs-export-e2e.mjs.
+  const off = await browser.newContext({ offline: true, viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+  const op = await off.newPage();
+  const exportErrs = [];
+  op.on("pageerror", (e) => exportErrs.push(String(e)));
+  await op.route("**/*", (r) => (r.request().url().startsWith("http") ? (r.abort(), undefined) : r.continue()));
+  await op.setContent(html, { waitUntil: "load" });
+
+  const offProgress = () => op.locator(".dp-step-progress-text").first().innerText();
+  const offNext = () => op.locator(".dp-step-next").first();
+  const offBack = () => op.locator(".dp-step-back").first();
+
+  check((await offProgress()).includes("Step 2 of 4"), "(i) export opens on the step it was downloaded from");
+  check((await offNext().getAttribute("aria-disabled")) === null, "(i) export: Next is enabled even though its gate was closed when downloaded");
+
+  await offNext().focus();
+  await op.keyboard.press("Enter"); // keyboard-only -> step 3
+  await op.waitForFunction(() => document.querySelector(".dp-step-progress-text")?.textContent?.includes("Step 3 of 4"), null, { timeout: 15000 });
+  check((await offProgress()).includes("Drift sandbox"), "(i) export: keyboard Enter on Next advances to step 3");
+  const focusedOffline = await op.evaluate(() => document.activeElement?.classList.contains("dp-step-title"));
+  check(focusedOffline, "(i) export: focus lands on the new step's heading offline too");
+
+  await op.locator(".dp-step-list button", { hasText: "1" }).first().click();
+  await op.waitForFunction(() => document.querySelector(".dp-step-progress-text")?.textContent?.includes("Step 1 of 4"), null, { timeout: 15000 });
+  check((await offProgress()).includes("Step 1 of 4"), "(i) export: a step-list button jumps back to step 1");
+  check(!(await offBack().isVisible()), "(i) export: Back is hidden again on step 1");
+
+  const announced = await op.evaluate(() =>
+    [...document.body.children].some(
+      (el) => el.getAttribute("aria-live") === "polite" && el.getAttribute("role") === "status" && el.textContent.includes("Step 1 of 4")
+    )
+  );
+  check(announced, "(i) export: the persistent announcer exists offline and carries the current step");
+  check(!exportErrs.length, `(i) export: no page errors navigating the offline stepper: ${exportErrs.join(" | ")}`);
+
+  // Print: flattened back to every step, numbered, nav/footer hidden.
+  await op.emulateMedia({ media: "print" });
+  const printVisible = await op.evaluate(() =>
+    [...document.querySelectorAll(".dp-steppane")].every((p) => getComputedStyle(p).display !== "none")
+  );
+  check(printVisible, "(i) export print: every step pane is visible");
+  const printHeadings = await op.evaluate(() => [...document.querySelectorAll(".dp-step-title")].map((h2) => getComputedStyle(h2, "::before").content));
+  for (let n = 1; n <= 4; n++) check(printHeadings.some((c) => c.includes(`Step ${n} of 4`)), `(i) export print: a heading reads Step ${n} of 4`);
+  const navHidden = await op.evaluate(() => {
+    const head = document.querySelector(".dp-step-head"),
+      foot = document.querySelector(".dp-step-foot");
+    return getComputedStyle(head).display === "none" && getComputedStyle(foot).display === "none";
+  });
+  check(navHidden, "(i) export print: the nav bar and footer stay hidden");
+
+  await op.close();
+  await off.close();
 }
 
 // (j) review-537 re-review: the persistent announcer's text is only
