@@ -148,6 +148,7 @@ terminal.
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis) |
+| `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes and sizes; static output shows the last frame |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -1553,6 +1554,56 @@ or `::SIZE` (`map/bivariate-ignored`) — a statement is one layer.
   `data-fvalue2` (the second measure) and `data-bivar="{i},{j}"`
   (0-indexed tertile levels); no `data-class`. The root carries
   `data-bivar-titles` (both measures' names, as a JSON array).
+
+#### Time maps (`::FRAME`)
+
+```sql
+SELECT state ::REGION, week AS "Week" ::FRAME,
+       round(100 * on_time / deliveries, 1) AS "On time" ::BARCHART, ' %'::YFORMAT,
+       '0,80,85,90,100'::CLASSES
+FROM dc_weekly_on_time;
+```
+
+`::FRAME` turns a choropleth or graduated-symbol map into a time map: one
+result holds **every** frame (a week, a date, …) of every feature, and the
+map shows one frame at a time. Static output (`--svg`, PNG, PDF, a DuckDB
+function, the HTML export) shows the **last** frame, named in the
+subtitle ("Week: 12") so it's always clear which one that is; the browser
+adds a Play bar under the map to step through the rest (arriving with
+M2f) — reduced motion keeps Play available (stepping through time *is*
+the content) with instant, 1.5 s-apart steps, never autoplaying.
+
+- **Frame order:** ascending when every `::FRAME` value is numeric,
+  chronological when every value looks like a date, else first
+  appearance in the result (the SQL `ORDER BY`).
+- **A frame's view:** every feature appears in every frame — a feature
+  with no row in a given frame is drawn as no data (areas: the hatch
+  pattern; points/symbols: not drawn at all) rather than vanishing, so the
+  map's extent never moves between frames.
+- **Shared scales:** the measure's colour domain and `::CLASSES` breaks,
+  a `::CATEGORY`'s levels, and a graduated `::SIZE`'s domain are all
+  computed once over **every** frame and held fixed — the same value
+  gets the same colour/size whichever frame is on screen, the legend
+  never drops a level or re-wraps as counts change. A feature's key for
+  the browser's cross-frame animation (M2f) is its `::REGION` code, its
+  `::LAT`/`::LON` pair, or its WKT geometry — `::XAXIS` is ignored on a
+  time map (`map/frame-xaxis`).
+- **Duplicates:** a repeated (feature, frame) row keeps its first row
+  (`map/frame-duplicate`).
+- **Caps:** over 200 distinct `::FRAME` values, the last 200 are kept
+  (`map/too-many-frames`); over 100,000 feature × frame cells, the last
+  frames that fit are kept (`map/frame-cells`) — aggregate to a coarser
+  period instead.
+- **Maps only:** `::FRAME` on any other chart kind is ignored
+  (`frame/not-a-map`; the generic bar/line frame player is a follow-up).
+  `::STORY` is ignored on a frame map (`map/frame-story`) — Play already
+  steps through the frames. WKT geometry repeated per frame over 5 MB
+  total gets a note (`map/frame-wkt`) to join a `::REGION` code or one
+  geometry table instead.
+- **Attributes:** the root `<svg>` carries `data-frames` (every frame's
+  label, JSON), `data-frame` (the one shown, 0-indexed) and
+  `data-frame-name` (the `::FRAME` column's display name); each feature's
+  `data-row` follows the frame actually shown, like `::LINK` expects.
 
 #### Density on a planar scatter (`::HEXBIN` off the map)
 
@@ -4169,7 +4220,7 @@ wasm exports (`src/wasm.rs`):
 | Export | Purpose |
 |--------|---------|
 | `plan(script)` | statements + roles as JSON: `[{setup, sql, roles: [[i, "ROLE", name]]}]` |
-| `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), or a render context `{"primary","theme","variant","locale"}`; `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
+| `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), or a render context `{"primary","theme","variant","locale","frame"}` (`"frame"`: which `::FRAME` to draw on a time map, 0-indexed — absent/negative/non-integer means the last frame); `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
 | `resolve_dashboard_theme(spec, chrome_json)` | a theme spec (+ `{title,brand,logo,favicon,locale}`) → `{ok, name, mode, light:{css,…}, dark:{css,…}}` |
 | `format_number_locale(value, fmt, locale)` / `format_date_locale(iso, locale)` | KPI / table formatting in a dashboard locale |
 | `map_bounds(rows_json, roles_json, width, height)` | the projected window an unzoomed map panel shows (`[x0, x1, y0, y1]`, y up), the zoom UI's start |

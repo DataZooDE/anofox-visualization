@@ -16,7 +16,7 @@
 use ggplot_rs::aes::Aesthetic;
 use ggplot_rs::data::Value;
 use ggplot_rs::render::backend::FillPattern;
-use ggplot_rs::scale::binned::ScaleFillBinned;
+use ggplot_rs::scale::binned::{NaKey, ScaleFillBinned};
 use ggplot_rs::scale::Scale;
 
 use crate::format::Locale;
@@ -35,6 +35,12 @@ pub(super) fn scale_for(
     locale: Locale,
     hatch_bg: Rgb,
     hatch_fg: Rgb,
+    // `Some(max_count)` on a `::FRAME` map (D21/U1/U3): the "no data" key
+    // stays even on a frame with nothing missing, and every class's count
+    // label lays out as if it were `max_count` digits wide — the legend's
+    // size never changes as frames step. `None` (every non-frame map):
+    // unchanged, byte-identical output.
+    frame_max_count: Option<usize>,
 ) -> Option<Box<dyn Scale>> {
     match fill {
         Fill::Measure(s) if s.classes.is_some() => {
@@ -43,10 +49,13 @@ pub(super) fn scale_for(
                 .chain(c.edges.iter().copied())
                 .chain(std::iter::once(c.hi))
                 .collect();
-            let scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
+            let mut scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
                 .na_color(hatch_bg)
                 .na_pattern(FillPattern::stripe(hatch_fg, hatch_bg))
                 .na_label("No data");
+            if let Some(max_count) = frame_max_count {
+                scale = scale.na_key(NaKey::Always).count_reserve(max_count);
+            }
             Some(Box::new(scale))
         }
         Fill::Measure(s) => Some(Box::new(
