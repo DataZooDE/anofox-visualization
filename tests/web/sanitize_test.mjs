@@ -10,8 +10,16 @@ const grab = (name) => {
   assert.ok(m, `function ${name} not found in app.js`);
   return m[0];
 };
+// Grab the const declarations themselves too (#544 review), not a
+// hand-copied duplicate.
+const grabConst = (name) => {
+  const m = src.match(new RegExp(`^const ${name} = [^\\n]*;$`, "m"));
+  assert.ok(m, `const ${name} not found in app.js`);
+  return m[0];
+};
 const { escapeHtml, safeUrl, renderMarkdown } = new Function(
-  `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
+  `${grabConst("IMAGE_DATA_TYPES")}\n${grabConst("MAX_IMAGE_SRC_CHARS")}\n` +
+    `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("assetUrl")}\n${grab("imageSrc")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
 )();
 
 // escapeHtml is attribute-safe.
@@ -45,6 +53,8 @@ const cases = [
   "```\n</code><script>alert(1)</script>\n```",
   `# "quoted" 'title' <b>`,
   `> [a](data:text/html,<script>x</script>)`,
+  `![a](javascript:alert(1))`,
+  `![a](data:text/html,<script>x</script>)`,
 ];
 for (const md of cases) {
   const html = renderMarkdown(md);
@@ -58,4 +68,53 @@ for (const md of cases) {
 }
 // A good link still renders.
 assert.match(renderMarkdown("[docs](https://example.com/a?b=1&c=2)"), /<a href="https:\/\/example\.com\/a\?b=1&amp;c=2"/);
+
+// ---- markdown images (#514) ----
+// A rejected src renders the alt text, not a broken <img>.
+assert.doesNotMatch(renderMarkdown("![a](javascript:alert(1))"), /<img/i);
+assert.ok(renderMarkdown("![a](javascript:alert(1))").startsWith("<p>a"));
+
+// `![x [a](b)](c)`: the image rule runs before the link rule, so the `[a](b)`
+// inside what looks like alt text never becomes a live <a> — the plan's
+// named attribute/HTML-injection case. Exactly one <img>, no <a> anywhere,
+// and (critically) no "<a" landing inside an attribute value.
+{
+  const html = renderMarkdown("![x [a](https://b)](https://c/i.png)");
+  assert.equal((html.match(/<img/g) || []).length, 1, html);
+  assert.ok(!/<a\b/i.test(html), `a link leaked: ${html}`);
+  for (const m of html.matchAll(/="([^"]*)"/g)) assert.ok(!m[1].includes("<"), `tag inside an attribute: ${html}`);
+}
+
+// Alt text is escaped (never raw markup in the attribute).
+assert.match(renderMarkdown("![<b>](https://c/i.png)"), /alt="&lt;b&gt;"/);
+
+// A good data: image renders with that src.
+assert.match(
+  renderMarkdown("![a](data:image/svg+xml;base64,AAA)"),
+  /<img class="md-img" src="data:image\/svg\+xml;base64,AAA" alt="a" loading="lazy" decoding="async">/
+);
+
+// No alt text: alt="".
+assert.match(renderMarkdown("![](https://c/x.png)"), /alt=""/);
+
+// Text and a formula survive around an image.
+{
+  const html = renderMarkdown("before ![a](https://c/i.png) $x^2$ after");
+  assert.ok(html.startsWith("<p>before <img"), html);
+  assert.ok(html.includes('class="md-math"'), html);
+  assert.ok(html.endsWith(" after</p>"), html);
+}
+
+// A $…$ formula inside an image's alt bracket resolves to its own escaped
+// TeX source in the attribute, not a leaked math-token/index (review of #544).
+assert.match(renderMarkdown("![a $x$](https://c/i.png)"), /alt="a x"/);
+
+// A literal private-use token sequence in the input can't forge or
+// duplicate an already-tokenized <img> (review of #544): the real image
+// still renders exactly once, whatever a pasted forged-looking sequence
+// does.
+{
+  const html = renderMarkdown("![a](https://c/i.png) 0");
+  assert.equal((html.match(/<img/g) || []).length, 1, html);
+}
 console.log("web sanitize tests: ok");

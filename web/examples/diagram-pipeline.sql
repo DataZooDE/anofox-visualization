@@ -161,6 +161,17 @@ SELECT count(*) FILTER (WHERE status <> 'ok')::METRIC, 'Stages not ok'::LABEL, '
 FROM dg_stage_run WHERE run = getvariable('run');
 SELECT 1::ENDGROUP;
 
+-- A small legend for the diagram's edge colours (#514: ::IMAGE, a data: SVG,
+-- plus ::IMAGE_DARK — the light legend's #334 text was unreadable on a dark
+-- card). failed/late share one red here, matching src/diagram.rs's own
+-- status colours (both are its "bad" bucket) — a separate issue tracks
+-- giving them distinct colours there.
+SELECT 4::COL;
+SELECT 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMjAgNjAiPjxjaXJjbGUgY3g9IjIwIiBjeT0iMjAiIHI9IjgiIGZpbGw9IiMzYWE4NzYiLz48dGV4dCB4PSIzNiIgeT0iMjUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmaWxsPSIjMzM0Ij5vazwvdGV4dD48Y2lyY2xlIGN4PSIyMCIgY3k9IjQwIiByPSI4IiBmaWxsPSIjZThhMzNkIi8+PHRleHQgeD0iMzYiIHk9IjQ1IiBmb250LXNpemU9IjEyIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZmlsbD0iIzMzNCI+ZGVsYXllZDwvdGV4dD48Y2lyY2xlIGN4PSIxMjAiIGN5PSIyMCIgcj0iOCIgZmlsbD0iI2Q2NDU0NSIvPjx0ZXh0IHg9IjEzNiIgeT0iMjUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmaWxsPSIjMzM0Ij5mYWlsZWQ8L3RleHQ+PGNpcmNsZSBjeD0iMTIwIiBjeT0iNDAiIHI9IjgiIGZpbGw9IiNkNjQ1NDUiLz48dGV4dCB4PSIxMzYiIHk9IjQ1IiBmb250LXNpemU9IjEyIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZmlsbD0iIzMzNCI+bGF0ZTwvdGV4dD48L3N2Zz4='::IMAGE,
+       'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyMjAgNjAiPjxjaXJjbGUgY3g9IjIwIiBjeT0iMjAiIHI9IjgiIGZpbGw9IiM0YWRlODAiLz48dGV4dCB4PSIzNiIgeT0iMjUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmaWxsPSIjZTVlN2ViIj5vazwvdGV4dD48Y2lyY2xlIGN4PSIyMCIgY3k9IjQwIiByPSI4IiBmaWxsPSIjZmJiZjI0Ii8+PHRleHQgeD0iMzYiIHk9IjQ1IiBmb250LXNpemU9IjEyIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZmlsbD0iI2U1ZTdlYiI+ZGVsYXllZDwvdGV4dD48Y2lyY2xlIGN4PSIxMjAiIGN5PSIyMCIgcj0iOCIgZmlsbD0iI2Y4NzE3MSIvPjx0ZXh0IHg9IjEzNiIgeT0iMjUiIGZvbnQtc2l6ZT0iMTIiIGZvbnQtZmFtaWx5PSJzYW5zLXNlcmlmIiBmaWxsPSIjZTVlN2ViIj5mYWlsZWQ8L3RleHQ+PGNpcmNsZSBjeD0iMTIwIiBjeT0iNDAiIHI9IjgiIGZpbGw9IiNmODcxNzEiLz48dGV4dCB4PSIxMzYiIHk9IjQ1IiBmb250LXNpemU9IjEyIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZmlsbD0iI2U1ZTdlYiI+bGF0ZTwvdGV4dD48L3N2Zz4='::IMAGE_DARK,
+       'Legend: a green dot means the stage ran on time, amber delayed, red failed or late'::ALT,
+       'How to read the diagram below'::LABEL;
+
 -- 3. What moves where, and where it got stuck.
 SELECT 12::COL;
 SELECT 360::HEIGHT;

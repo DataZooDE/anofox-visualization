@@ -163,7 +163,8 @@ fn dashboard_text_channels_are_escaped() {
                   SELECT a AS \"A\" ::TABLE, b, c::TITLE FROM t;\n\
                   SELECT 'md'::MARKDOWN;\n\
                   SELECT 'txt'::TEXT_LARGE;\n\
-                  SELECT x::XAXIS, y::BARCHART, 't'::TITLE FROM t;";
+                  SELECT x::XAXIS, y::BARCHART, 't'::TITLE FROM t;\n\
+                  SELECT 'x.png'::IMAGE, a::ALT, b::LABEL FROM t;";
     for p in PAYLOADS {
         let leaked: &'static str = Box::leak(p.to_string().into_boxed_str());
         let svg =
