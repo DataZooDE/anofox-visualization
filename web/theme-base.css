@@ -238,6 +238,34 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-callout-success{background:var(--ax-badge-good-bg);border-color:transparent}
 .dp-callout-success::before,.dp-callout-success::after{background:var(--ax-positive)}
 .dp-callout-success .md-body{color:var(--ax-badge-good-ink)}
+
+/* ---- ::IMAGE / ::IMAGE_DARK (#514) ---- */
+.dp-image img.dp-img{display:block;width:100%;height:auto;border-radius:calc(var(--ax-radius) * .4)}
+.dp-image .dp-img-row+.dp-img-row{margin-top:.75rem}
+/* Specificity: these three must each outrank the plain `.dp-image img.dp-img`
+   rule above (which also matches a `dp-img-dark` image, since it carries
+   both classes) — each adds a class over it, so the cascade picks the
+   right one instead of both <img>s showing at once. */
+.dp-image img.dp-img.dp-img-dark{display:none}
+body.dark .dp-img-row.has-dark img.dp-img.dp-img-dark{display:block}
+body.dark .dp-img-row.has-dark img.dp-img:not(.dp-img-dark){display:none}
+/* #544 review: a rejected ::IMAGE but a valid ::IMAGE_DARK draws only the
+   light slot's placeholder (has-dark is set from the dark src alone) — in
+   dark mode the dark image takes over, so hide the placeholder the same way
+   the (would-be) light <img> is hidden above, or both show at once. */
+body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
+/* ::HEIGHT, or ::FIT sizing the panel to a share of the row (fitDash's
+   kind(), #400): a fixed box, the image centred and contained rather than
+   stretched (decision 8 of plan-514). */
+.dp-image{display:flex;flex-direction:column}
+.dp-image.dp-image-fixed,.dp-image.dp-fit,.dp-image.dp-fit-scroll{overflow:hidden}
+.dp-image.dp-image-fixed .dp-img-row,.dp-image.dp-fit .dp-img-row,.dp-image.dp-fit-scroll .dp-img-row{flex:1 1 auto;min-height:0}
+.dp-image.dp-image-fixed img.dp-img,.dp-image.dp-fit img.dp-img,.dp-image.dp-fit-scroll img.dp-img{height:100%;width:100%;object-fit:contain}
+.dp-image-caption{margin-top:.4rem;font-size:.8125rem;color:var(--ax-muted)}
+/* A rejected / missing src (decision 2 of plan-514): the alt text, never a
+   broken-image icon. Shared by ::IMAGE and markdown `![alt](src)`. */
+.dp-img-missing{display:block;color:var(--ax-muted);font-style:italic;border:1px dashed var(--ax-line);border-radius:calc(var(--ax-radius) * .4);padding:.6rem .75rem;font-size:.85rem}
+.md-img{max-width:100%;height:auto;vertical-align:middle;border-radius:3px}
 .dp-info{position:relative;display:inline-flex;vertical-align:middle;margin-left:.35rem}
 .dp-info.corner{position:absolute;top:.55rem;right:.6rem;margin:0;z-index:3}
 .dp-info-btn{font:inherit;font-size:.95rem;line-height:1;font-weight:400;color:var(--ax-muted);background:none;border:0;border-radius:50%;padding:.1rem .15rem;cursor:help}
@@ -448,6 +476,18 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .download-row{justify-content:flex-start}
 .dl-btn{background:var(--ax-btn-bg);color:var(--ax-btn-ink);border:0;border-radius:10px;padding:.55rem 1rem;font-weight:600;font-size:.85rem;cursor:pointer}
 .err{grid-column:1/-1;color:var(--ax-err-ink);background:var(--ax-err-bg);border:1px solid var(--ax-err-border);border-radius:12px;padding:.8rem 1rem;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap}
+
+/* ---- ::SUBMIT (#517 S4) ---- */
+.submit-panel{display:flex;flex-direction:column;align-items:flex-start;gap:.5rem;padding:1rem 1.1rem}
+.submit-btn{background:var(--ax-btn-bg);color:var(--ax-btn-ink);border:0;border-radius:10px;padding:.6rem 1.2rem;font-weight:600;font-size:.9rem;cursor:pointer}
+.submit-btn:disabled{opacity:.55;cursor:not-allowed}
+.submit-btn:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
+.submit-status{font-size:.85rem;color:var(--ax-positive);min-height:1.1em}
+.submit-status:empty{display:none}
+.submit-error{font-size:.85rem;color:var(--ax-negative);min-height:1.1em}
+.submit-error:empty{display:none}
+.submit-error.submit-reason{color:var(--ax-muted)}
+.submit-preview-note{grid-column:1/-1;margin:0 0 .3rem;font-size:.8rem;color:var(--ax-badge-warn-ink);background:var(--ax-badge-warn-bg);border-radius:8px;padding:.4rem .7rem}
 
 /* ---- tabs ---- */
 .tabbar{grid-column:1/-1;display:flex;gap:.25rem;border-bottom:1px solid var(--ax-line);margin:0 0 .9rem}

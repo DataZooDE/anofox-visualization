@@ -68,6 +68,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("LABEL", &[], R::Label, "encoding", true,
       "section heading when alone; chart title / per-mark or per-feature label otherwise"),
     e("TITLE", &["HEADING"], R::Title, "encoding", true, "a title bar above one panel"),
+    e("ALT", &["ALT_TEXT"], R::Alt, "encoding", true,
+      "an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL"),
     e("INFO", &["DESCRIPTION", "DEFINITION"], R::Info, "encoding", true,
       "a definition behind an ⓘ on the panel's title bar (hover, focus or click)"),
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
@@ -295,9 +297,13 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TEXT_MEDIUM", &[], R::Text(TextSize::Medium), "kpi", true, "medium text card"),
     e("TEXT_LARGE", &[], R::Text(TextSize::Large), "kpi", true, "large text card"),
     e("MARKDOWN", &["MD", "TEXTBOX", "RICHTEXT"], R::Markdown, "kpi", true,
-      "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas"),
+      "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE"),
     e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
       "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
+    e("IMAGE", &["PICTURE", "IMG"], R::Image, "kpi", true,
+      "a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption"),
+    e("IMAGE_DARK", &["IMG_DARK"], R::ImageDark, "kpi", true,
+      "the ::IMAGE shown while the dashboard is dark"),
     // ── tables ─────────────────────────────────────────────────────────────
     e("TABLE", &["GRID"], R::Table, "table", true,
       "the whole result as a table (one marker per panel)"),
@@ -863,6 +869,9 @@ mod tests {
             Role::Annotate,
             Role::Thresholds,
             Role::Markdown,
+            Role::Image,
+            Role::ImageDark,
+            Role::Alt,
             Role::Open,
             Role::High,
             Role::Low,
@@ -1007,6 +1016,9 @@ mod tests {
                 | Role::Annotate
                 | Role::Thresholds
                 | Role::Markdown
+                | Role::Image
+                | Role::ImageDark
+                | Role::Alt
                 | Role::Open
                 | Role::High
                 | Role::Low

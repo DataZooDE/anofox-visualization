@@ -31,15 +31,22 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # A spurious labeled/unlabeled run (one whose `lane` job skips below, #491)
-  # must not cancel the real run it shares a ref with: GitHub applies
+  # A spurious run (one whose `lane` job skips below — #491/#531) must not
+  # cancel the real run it shares a ref with: GitHub applies
   # cancel-in-progress at the whole-run level, before any job's `if` is
   # evaluated, so without this the spurious run still kills the real one
   # mid-flight and leaves its jobs looking like failures. Giving it a
   # per-run_id (so unique, never-colliding) group suffix instead opts it out
   # of the shared group entirely; every other trigger keeps the plain,
   # stable group (empty suffix) and the normal cancel-newer-wins behaviour.
-  group: "${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJson('[\"labeled\",\"unlabeled\"]'), github.event.action) && github.event.label.name != 'full-ci') && github.run_id || '' }}"
+  # Two cases are spurious, both kept in sync with `lane`'s `if` below:
+  #   - a labeled/unlabeled event whose label isn't `full-ci` (#491) — the
+  #     one label lane.yml looks at.
+  #   - (#531) an `opened` event where the PR *already* carries `full-ci`
+  #     (e.g. `gh pr create --label full-ci`): GitHub fires `opened` and
+  #     `labeled` as two separate events for the same label, so the
+  #     `labeled` one (not `opened`) is treated as the real run here.
+  group: "${{ github.workflow }}-${{ github.ref }}-${{ ((github.event_name == 'pull_request' && contains(fromJson('[\"labeled\",\"unlabeled\"]'), github.event.action) && github.event.label.name != 'full-ci') || (github.event_name == 'pull_request' && github.event.action == 'opened' && contains(github.event.pull_request.labels.*.name, 'full-ci'))) && github.run_id || '' }}"
   cancel-in-progress: true
 
 env:
@@ -49,21 +56,32 @@ env:
 
 jobs:
   # Opening a PR *with* a label already attached (e.g. `gh pr create --label
-  # full-ci`) fires `opened` and `labeled` together — two runs in the same
-  # concurrency group, so the first gets cancelled and its never-started jobs
-  # sit on the PR as "fail" checks (#491, as hit by #490/#492). `labeled`/
-  # `unlabeled` only needs to re-run the lane when the label itself is
-  # `full-ci` (the one label lane.yml looks at); every other trigger
-  # (opened/synchronize/reopened, push, schedule, workflow_dispatch) is
-  # unaffected. Skipping `lane` here skips every job below it too (they all
-  # `needs: lane` and check its outputs), and ci-gate treats "skipped" as
-  # passing, so a redundant labeled/unlabeled run resolves cleanly instead of
-  # leaving checks pending.
+  # full-ci`) fires `opened` and `labeled` together — two runs that, without
+  # the concurrency group's exemptions above, share a group, so one cancels
+  # the other and its never-started jobs sit on the PR as "fail" checks
+  # (#491, as hit by #490/#492; the `opened`+`full-ci` case specifically is
+  # #531, hit by #530). `labeled`/`unlabeled` only needs to re-run the lane
+  # when the label itself is `full-ci`; every other labeled/unlabeled event
+  # is unaffected (first condition). An `opened` event is itself spurious
+  # when the PR already has `full-ci` at open time, since a `labeled` event
+  # for that same label is guaranteed to follow right after and do the real
+  # run (second condition) — `synchronize`/`reopened`, push, schedule and
+  # workflow_dispatch are never spurious. Skipping `lane` here skips every
+  # job below it too (they all `needs: lane` and check its outputs), and
+  # ci-gate treats "skipped" as passing, so a redundant run resolves cleanly
+  # instead of leaving checks pending.
   lane:
     if: >-
-      github.event_name != 'pull_request' ||
-      !contains(fromJson('["labeled","unlabeled"]'), github.event.action) ||
-      github.event.label.name == 'full-ci'
+      (
+        github.event_name != 'pull_request' ||
+        !contains(fromJson('["labeled","unlabeled"]'), github.event.action) ||
+        github.event.label.name == 'full-ci'
+      ) &&
+      !(
+        github.event_name == 'pull_request' &&
+        github.event.action == 'opened' &&
+        contains(github.event.pull_request.labels.*.name, 'full-ci')
+      )
     uses: ./.github/workflows/lane.yml
 
   # ---- docs-only PRs: a markdown/link check instead of the whole lane ----
@@ -603,6 +621,17 @@ jobs:
       - name: SET VARIABLE order e2e (#416)
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/setvar-order-e2e.mjs --url http://127.0.0.1:8947/
+
+      # scripts/image-e2e.mjs (#514): ::IMAGE / ::IMAGE_DARK / markdown
+      # ![alt](src) images — a data: SVG panel's alt/caption, the dashboard's
+      # own dark toggle (not the OS setting) swapping ::IMAGE_DARK in, an
+      # inline markdown image, a rejected src drawing the alt-text
+      # placeholder with no network request, ::HEIGHT staying fixed and
+      # contained, no overflow at 390px, and the offline ⤓ HTML export.
+      # Reuses the :8947 server and Chromium above.
+      - name: Image panel e2e (::IMAGE, #514)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/image-e2e.mjs --url http://127.0.0.1:8947/
 
       # scripts/compact-kpi-e2e.mjs (#405): 'compact'::KPI_SIZE on a ::GROUP
       # packs its tiles onto one line each, well under the normal ~96px

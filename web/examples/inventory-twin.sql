@@ -112,7 +112,7 @@ WITH base AS (
            n.on_hand_now, n.on_order_now,
            n.on_hand_now / nullif((SELECT avg(demand) FROM it_trajectory t WHERE t.sku = r.sku
                                    AND t.period > (SELECT max(period) FROM it_trajectory) - 28), 0) AS cover_days,
-           (SELECT string_agg(DISTINCT it_detector(test), ', ') FROM it_status s WHERE s.sku = r.sku AND s.state = 'alarm') AS alarm_now,
+           (SELECT string_agg(DISTINCT it_detector(test), ', ' ORDER BY it_detector(test)) FROM it_status s WHERE s.sku = r.sku AND s.state = 'alarm') AS alarm_now,
            -- Class C items never change on their own: their proposals wait for
            -- the planner by design (routine). Escalated ones, and any waiting
            -- for class A / B, need a decision.
@@ -385,7 +385,8 @@ SELECT 'Monitoring'::TAB;
 SELECT 12::COL;
 SELECT ('**Does the twin still describe reality?** Every twin runs drift detectors on its own forecast error and on the demand it sees. Over the run they raised **' ||
         (SELECT count(*) FILTER (WHERE tier = 'alarm') FROM it_alarms) || '** alarms and **' || (SELECT count(*) FILTER (WHERE tier = 'warning') FROM it_alarms) ||
-        '** warnings, most on ' || (SELECT string_agg(DISTINCT it_detector(name), ' and ') FROM (SELECT name FROM it_alarms GROUP BY name ORDER BY count(*) DESC, name LIMIT 2)) || '. ' ||
+        '** warnings, most on ' || (SELECT string_agg(it_detector(name), ' and ' ORDER BY rn)
+                                     FROM (SELECT name, row_number() OVER (ORDER BY count(*) DESC, name) AS rn FROM it_alarms GROUP BY name) WHERE rn <= 2) || '. ' ||
         CASE WHEN (SELECT count(*) FROM it_alarms WHERE sku = it_sku()) = 0 THEN '**' || it_sku() || '** raised none.'
              ELSE '**' || it_sku() || '** raised ' || (SELECT count(*) FROM it_alarms WHERE sku = it_sku()) || ', the first on ' ||
                   (SELECT strftime(min(ds), '%-d %b') FROM it_alarms WHERE sku = it_sku()) || '.' END)::MARKDOWN;
@@ -450,7 +451,11 @@ SELECT ('**What did the twin change about itself, and what waits for a decision?
 SELECT 12::COL;
 SELECT 300::HEIGHT;
 SELECT t.ds ::XAXIS,
-       coalesce((SELECT sum(p.expected_rop_delta) FROM it_changes c JOIN it_proposals p ON p.id = c.proposal_id
+       -- round: a plain sum that a parallel hash aggregate can still combine
+       -- in a different partial order each run, leaving the last bit or two
+       -- of the double non-deterministic (#488/#528) — rounded well below
+       -- any meaningful precision for a reorder-point delta.
+       coalesce((SELECT round(sum(p.expected_rop_delta), 6) FROM it_changes c JOIN it_proposals p ON p.id = c.proposal_id
                  WHERE c.sku = t.sku AND c.status IN ('applied', 'approved') AND c.period < t.period), 0) ::STEP,
        0 ::REFLINE, 'as built' ::REFLINE_LABEL,
        (it_sku() || ': how calibration moved the reorder point (units, against the twin as built)')::TITLE,

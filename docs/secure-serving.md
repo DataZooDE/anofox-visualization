@@ -1812,6 +1812,37 @@ underneath it for however long that request had left to run.
 - What `heartbeat_timeout` (a `quack_query` parameter this prototype does
   not set) is appropriate for a production deployment?
 
+## Images in dashboards (`::IMAGE`, `::MARKDOWN`, #514)
+
+A dashboard's images come from the dashboard itself: a `data:image/…` URI, an
+`https:` URL, or (a later PR) a relative path under the dashboard folder's
+own `assets/`. `img-src` already allows `'self' data: https:` (`page_csp`,
+`host/serving.rs`) for `::LOGO`/`::HEADER_IMAGE`; `::IMAGE` and Markdown
+images reuse that, not a wider allowance — this PR makes no CSP change.
+
+What *is* worth a reviewer's attention: an `https:` image loads
+automatically, with no click, unlike `::LINK`. If a `::MARKDOWN` (or
+`::IMAGE`) column is built from a text column that end users influence — a
+support-ticket description, a free-text field — an attacker who controls
+that text can point an `<img>` at any `https:` host, which reveals the
+viewer's IP (and request timing) to that host. This is the same trust
+`::LINK` already carries, just without the click gate. **Recommend not
+rendering untrusted/user-supplied text as `::MARKDOWN`** (or feeding it into
+an `::IMAGE` source); an author-written dashboard script is trusted the same
+way its SQL already is.
+
+Everything is drawn through an `<img>` (browser) or an SVG
+`<image href=…>` (static output) — never inlined into the DOM, an
+`<object>` or an `<iframe>` — so a browser runs no script and loads no
+external resource from *inside* an SVG used as an image this way, even a
+`data:image/svg+xml` one with embedded `<script>`. The source rules
+(`src/image.rs::src_ok`, `web/app.js::imageSrc()`) refuse `javascript:`,
+`data:text/html` and anything else outside the three allowed forms; neither
+form admits raw HTML into the page (alt/caption text is always set with
+`textContent`/`setAttribute`, or HTML-escaped in the Markdown path — see
+`DOCS.md`'s Images section for the lint codes that catch a bad source at
+author time).
+
 ## Deployment
 
 [`deployment.md`](deployment.md) covers deploying a locked server: one process
