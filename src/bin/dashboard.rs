@@ -2706,18 +2706,23 @@ mod site_tests {
     /// CSP) by the reviewer. Fixtures copied into `tests/fixtures/svg-xss-554/`.
     #[test]
     fn svg_active_reason_refuses_css_external_refs_in_any_attribute() {
+        // Copied verbatim from the reviewer's own scratch probes — the
+        // ones they confirmed, live in Chromium, actually request
+        // `example.invalid` when the shipped (pre-fix) function returned
+        // `None` for each.
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/svg-xss-554");
         let cases: &[(&str, &str)] = &[
-            // fill/filter/clip-path/mask/marker-start — a presentation
-            // attribute reaches `url(…)` exactly like `style` does.
-            ("css-presentation-url.svg", "url()"),
-            // `url(…),auto` — a fallback list, same CSS <url> syntax.
-            ("css-cursor-url.svg", "url()"),
+            // `fill="url(…)"` — a presentation attribute reaches `url(…)`
+            // exactly like `style` does.
+            ("presattr.svg", "url()"),
+            // `cursor="url(…),auto"` (a fallback list) and `filter="url(…)"`
+            // on the same element — either is enough on its own.
+            ("cursor.svg", "url()"),
             // `u\72l(` is `url(` to a CSS parser, invisible to a literal
             // "url(" scan — caught by refusing any backslash at all.
-            ("css-escape-url.svg", "backslash"),
+            ("cssesc.svg", "backslash"),
             // a URL with no `url(` token at all.
-            ("css-image-set.svg", "image-set("),
+            ("imgset.svg", "image-set("),
         ];
         for (file, expect) in cases {
             let bytes = std::fs::read(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));

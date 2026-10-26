@@ -1923,10 +1923,15 @@ that resolves namespaces and decodes entities first) and allows only a
 fixed list of SVG elements, each in the SVG namespace; every attribute
 unprefixed or in the XLink namespace; no `on…=` attribute; `href`/
 `xlink:href` only a same-document `#fragment` or, on `<image>` only, a
-`data:image/(png|jpeg|gif|webp)` payload; no `style` attribute containing
-`@import`, `javascript:`, `expression(`, or a `url(…)` that isn't a
-`#fragment`; and no `<!DOCTYPE` or processing instruction anywhere. A
-dot-leading entry (`.secret.png`, `.DS_Store`, a stray `.git/`, …) is
+`data:image/(png|jpeg|gif|webp)` payload. Beyond that, **every** attribute
+value (not only `style` — a presentation attribute such as `fill`,
+`filter`, `clip-path`, `mask` or any `marker-*`/`cursor` takes the same
+CSS syntax `style` does, so it can fetch a URL exactly as `style` can) is
+refused if it contains a backslash (a CSS escape, e.g. `u\72l(`, reads as
+`url(` to a CSS parser but not to a literal substring scan), a `url(…)`
+that isn't a `#fragment`, or `image-set(`/`@import`/`src(`/`javascript:`/
+`expression(`. No `<!DOCTYPE` or processing instruction anywhere, either.
+A dot-leading entry (`.secret.png`, `.DS_Store`, a stray `.git/`, …) is
 silently skipped — not published, not a publish failure. If a static host
 can be configured to add response headers, add `X-Content-Type-Options:
 nosniff` and a `Content-Security-Policy: sandbox` (or stricter) for
