@@ -8483,7 +8483,7 @@ function renderNavPicker(served) {
   wrap.className = "served-nav-picker";
   const cap = document.createElement("span");
   cap.className = "served-nav-picker-label";
-  cap.textContent = (np.label || np.var) + ":";
+  cap.textContent = captionColon(np.label || np.var);
   const sel = document.createElement("select");
   sel.setAttribute("aria-label", np.label || np.var);
   const current = new URLSearchParams(location.search).get("v." + np.var) ?? "";
@@ -11565,7 +11565,7 @@ function makePeriodControl(meta, bar) {
   const capText = meta.caption || "Period";
   cont.setAttribute("aria-label", capText);
   const cap = document.createElement("span");
-  cap.textContent = capText + ":";
+  cap.textContent = captionColon(capText);
   cont.appendChild(cap);
 
   const sel = document.createElement("select");
@@ -11664,6 +11664,16 @@ function inputOptions(roles, rows, varname) {
   const hints = hin ? hin.map((v) => String(v ?? "")) : null;
   return { options, labels, hints };
 }
+// An input's caption (or its variable name, as a fallback), with a
+// trailing ":" — unless it already ends with its own terminal punctuation
+// (? ! : … .) once trailing whitespace is trimmed (#539): a question
+// caption like "concept drift?" stays "concept drift?", never
+// "concept drift?:". Standalone (DOM-free) so it's shared by every
+// control's caption/label text and unit-testable without a DOM.
+function captionColon(text) {
+  const t = String(text ?? "").replace(/\s+$/, "");
+  return t === "" || /[?!:….]$/.test(t) ? t : `${t}:`;
+}
 // What option k shows: its ::OPTION_LABEL, else its value.
 function optionLabel(meta, k) {
   return (meta.labels && meta.labels[k]) || meta.options[k];
@@ -11713,7 +11723,7 @@ function makeControl(meta, bar) {
   if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
   const wrap = document.createElement("label");
   wrap.className = "control";
-  wrap.textContent = (meta.caption || meta.varname || "date") + ":";
+  wrap.textContent = captionColon(meta.caption || meta.varname || "date");
   if (meta.kind === "DATERANGE") {
     const mk = (k) => {
       const inp = document.createElement("input");
@@ -11782,7 +11792,7 @@ function makeControl(meta, bar) {
     const cont = document.createElement("div");
     cont.className = "control";
     const cap = document.createElement("span");
-    cap.textContent = (meta.caption || meta.varname || "") + ":";
+    cap.textContent = captionColon(meta.caption || meta.varname || "");
     cont.appendChild(cap);
 
     const det = document.createElement("details");
@@ -11914,7 +11924,7 @@ function makeSearchableDropdown(meta) {
   const cont = document.createElement("div");
   cont.className = "control";
   const cap = document.createElement("span");
-  cap.textContent = (meta.caption || varname || "") + ":";
+  cap.textContent = captionColon(meta.caption || varname || "");
   cont.appendChild(cap);
 
   const dd = document.createElement("div");
@@ -12162,7 +12172,7 @@ function mkButtons(meta) {
   const cont = document.createElement("div");
   cont.className = "control";
   const cap = document.createElement("span");
-  cap.textContent = (meta.caption || meta.varname || "") + ":";
+  cap.textContent = captionColon(meta.caption || meta.varname || "");
   cap.id = "dp-seg-" + meta.varname;
   const seg = document.createElement("div");
   seg.className = "dp-seg";
@@ -14490,9 +14500,9 @@ function badgeHtml(text) {
   // English and German status words (a dashboard may be localised)
   if (/\b(ok|good|on.?track|pass(ed)?|active|done|up|healthy|nominal|green|low|grow(ing|th)?|ris(e|ing)|improv(ed|ing)|correct|right|met|achieved|erreicht|gut|aktiv|erledigt)\b/.test(t))
     cls = "badge-good";
-  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|delayed|slow|knapp|prüfen|offen|verzögert)\b/.test(t))
+  else if (/\b(warn(ing)?|risk|at.?risk|pending|review|amber|medium|hold|watch|flat|stable|delayed|late|slow|knapp|prüfen|offen|verzögert)\b/.test(t))
     cls = "badge-warn";
-  else if (/\b(bad|fail(ed)?|late|error|down|critical|red|overdue|stale|high|breach|alarm|alert|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
+  else if (/\b(bad|fail(ed)?|error|down|critical|red|overdue|stale|high|breach|alarm|alert|shrink(ing)?|declin(e|ing)|fall(ing)?|wrong|miss(ed)?|verfehlt|fehler|kritisch)\b/.test(t))
     cls = "badge-bad";
   return `<span class="badge ${cls}">${escapeHtml(text)}</span>`;
 }
