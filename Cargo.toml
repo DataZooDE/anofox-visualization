@@ -143,6 +143,24 @@ base64 = { version = "0.22", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# `--site`'s active-SVG check (src/bin/dashboard.rs::svg_active_reason,
+# review of #554 B1): parses every published assets/ SVG as XML rather
+# than scanning its text, so a namespace-prefixed <x:script> (bound to the
+# SVG namespace under a different prefix) or a foreign-namespace element
+# (<h:script>/<h:iframe> under the XHTML namespace) can't hide from a
+# literal "<script"/"<foreignobject" match. Lives only in `src/bin/
+# dashboard.rs`, which the wasm `--lib` build never compiles — review of
+# #554's second re-review: gated to non-wasm targets anyway, rather than
+# relying on dead-code elimination to keep it out of `web/pkg`, so the
+# wasm build doesn't even compile the crate. The `[dev-dependencies]`
+# entry below covers the one other user, `src/diagram.rs`'s `#[cfg(test)]`
+# code (tests that parse a rendered SVG as XML), for every target.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+roxmltree = "0.21"
+
+[dev-dependencies]
+roxmltree = "0.21"
+
 [features]
 default = []
 # Browser build (DuckDB-Wasm + the renderer). `wasm-pack build --features wasm`.
@@ -155,10 +173,6 @@ auth = ["dep:jsonwebtoken", "dep:aws-lc-rs", "dep:rustls", "dep:ureq", "dep:base
 [[bin]]
 name = "serve"
 required-features = ["serve"]
-
-[dev-dependencies]
-# Tests parse every rendered SVG as XML (well-formedness + XSS checks).
-roxmltree = "0.21"
 
 # tiny_http 0.12.0 with a lost wake-up fix in its worker pool (#86) and the
 # security fixes backported from tiny_http_dh 0.12.2. Every crate in the

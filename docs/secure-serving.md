@@ -551,6 +551,10 @@ of the authoring servers carries a
     every request always pass). The browser retries a `503` twice.
   - `max_response_mb` (default 32, at most `max_inflight_mb`) — one
     response; a larger result is an error (`413`), like `max_rows`.
+  - `max_asset_bytes` (default 5 MiB, bytes not MiB, also clamped to
+    `max_inflight_mb`) — one file read from the dashboards folder's
+    `assets/` subfolder (`GET /d/<id>/assets/<rest>`, #514 — see "Images
+    in dashboards" below); over it, `404`.
   - `search_path` — where the panels' unqualified names resolve:
     `"warehouse"`, `"warehouse.sales"`, or several, comma-separated (the first
     is `USE`d). The default is the serving database's default database:
@@ -1983,10 +1987,132 @@ underneath it for however long that request had left to run.
 ## Images in dashboards (`::IMAGE`, `::MARKDOWN`, #514)
 
 A dashboard's images come from the dashboard itself: a `data:image/…` URI, an
-`https:` URL, or (a later PR) a relative path under the dashboard folder's
-own `assets/`. `img-src` already allows `'self' data: https:` (`page_csp`,
-`host/serving.rs`) for `::LOGO`/`::HEADER_IMAGE`; `::IMAGE` and Markdown
-images reuse that, not a wider allowance — this PR makes no CSP change.
+`https:` URL, or a relative path under the dashboard folder's own `assets/`
+(PR B: `GET /d/<id>/assets/<rest>`, below). `img-src` already allows `'self'
+data: https:` (`page_csp`, `host/serving.rs`) for `::LOGO`/`::HEADER_IMAGE`;
+`::IMAGE` and Markdown images reuse that, not a wider allowance — neither PR
+changes that CSP directive.
+
+### `GET`/`HEAD` `/d/<id>/assets/<rest>` (PR B)
+
+Only `<dashboards dir>/assets/`, never the rest of the dashboards folder
+(`.sql`, `policy.json`, `blueprint.json`): the route is computed once at
+startup (`canonicalize(<dir>/assets)`), `None` when there is no such folder
+— every request then 404s.
+
+- **Same login as the dashboard page; scope is checked on `id`, not on
+  which file.** This route is **not** in `auth.public_asset`: every request
+  goes through the server's usual `authenticate()` first (401 without a
+  valid credential, same as `/d/<id>` itself), and an `auth`-scoped
+  credential (an embed link, an API key) must name `id` in its own scope
+  (403, same as the page). **But `assets/` is per *folder*, not per
+  dashboard**: the scope check only gates which `<id>` a credential's own
+  `/d/<id>/assets/…` URL may use — it does not, and cannot, know which
+  dashboard's script actually references which file. A credential scoped
+  to dashboard `A` can fetch *every* file under the shared `assets/`
+  folder as `/d/A/assets/<anything>`, including an image only `B`'s script
+  uses. That is a reasonable model (an image belongs to the folder it sits
+  in, not to the one dashboard that happens to reference it today), but it
+  means **anyone who may open any dashboard here can read every file in
+  `assets/`** — keep an image that only some viewers may see in a separate
+  dashboards folder (a separate `anofox_serve_dashboards` call, or a
+  separate server) from one everyone may see, rather than relying on
+  per-dashboard scoping to hide it.
+- **Containment.** `rest` is percent-decoded once, then refused (404) on:
+  empty; over 512 bytes; a `\`, NUL or other control character; an empty,
+  `.` or `..` segment; a segment starting with `.`. The resolved path
+  (`canonicalize(assets_root.join(rest))`) must `starts_with(assets_root)` —
+  this also blocks a symlink inside `assets/` that points outside it, since
+  canonicalizing follows the symlink to its real target before the
+  containment check runs.
+- **Extension allow-list, then a real magic-byte check.** The extension
+  must be `png`/`jpg`/`jpeg`/`gif`/`webp`/`svg` (case-insensitive) — checked
+  *before* any filesystem access, so a request can't even probe for a
+  non-image file's existence through this route. The file's own bytes are
+  then sniffed (`host::app_brand::sniff_image`, the same signatures as
+  `::LOGO`'s own inlining) for the `Content-Type` actually sent — **not**
+  trusted from the extension — so a `.sql`/`.json` file renamed `.png`
+  (right extension, wrong real type) is refused too (`src/image.rs::read_asset`,
+  shared with the CLI's/`--site`'s own readers of `assets/`).
+- **Size cap.** `options.max_asset_bytes` (bytes, default 5 MiB; the clamp
+  is 64 MiB, and it's additionally clamped to `max_inflight_mb` at parse
+  time — an asset cap above the whole server's in-flight budget could
+  never be honoured anyway, and would otherwise 503 every asset request
+  with nothing at startup saying why) — checked from the file's own
+  `fstat` before reading it, and again on what is actually read (so a FIFO
+  or a race can't lie about its reported size), reported in `/healthz`'s
+  `limits` for a signed-in caller. Held against the same `max_inflight_mb`
+  budget a panel result is: `min(the file's real size, max_asset_bytes)`
+  per `GET` in flight (not a pessimistic `max_asset_bytes` regardless of
+  the file's real size), or just the 4 KiB sniffing prefix per `HEAD` —
+  concurrent asset requests can't grow memory use past that shared cap
+  either, and a page full of small icons no longer pays for the full cap
+  each.
+- **Response headers:** `X-Content-Type-Options: nosniff`;
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
+  sandbox` (neutralises an SVG opened as a top-level document instead of
+  inside an `<img>` — it already never runs a script either way, see
+  below, but this is belt-and-braces for a viewer who opens the asset URL
+  directly); `Cache-Control: private, max-age=300` (or `max-age=60` with
+  `auth` set — a shorter lifetime so a cached image doesn't keep answering
+  long after a logout or a revoked credential; still `private`, not
+  `no-store`, since the browser's own cache is fine to use meanwhile);
+  `Cross-Origin-Resource-Policy: same-origin`.
+- **No snapshot.** The file is read fresh on every request — an edited or
+  newly added asset shows without a server refresh.
+- **`GET` and `HEAD` only.** `POST` (and any other method) is `405`, the
+  same as every other route here. `HEAD`'s `Content-Length` is the file's
+  real size (an `fstat`, not a prior read) — it agrees with what `GET`
+  would send, without reading the whole file just to answer `HEAD`.
+- **Embed links.** A page's embed session travels as the `X-Anofox-Session`
+  header, which an `<img src>` can't carry — the browser instead `fetch`es
+  an `assets/` image with that header and shows it from a `blob:` URL (`web/app.js`).
+  OIDC and JWT cookies need nothing special; an API key sent as an
+  `Authorization` header works the same way a page's own requests do.
+
+`--site` copies `<folder>/assets/` to `<out>/assets/` at publish time,
+through the same `read_asset` validation (extension allow-list,
+containment, real magic-byte MIME) the locked server applies per request
+— "what the server would serve" and "what the site publishes" can't drift
+apart. The size cap is `options.max_asset_bytes` when the same `--options`
+file passed to `anofox_serve_dashboards` sets one, falling back to the
+locked server's own 5 MiB default otherwise — not a fixed `--site`-only
+value, so a site built from a server's own options file can't refuse a
+file that server was configured to serve. It refuses the whole publish
+(not just skipping) on a symlink anywhere inside `assets/` (including
+`assets/` itself), a file whose real content isn't one of the allowed
+image types regardless of its extension, a file over the cap, or — since a
+published static site has no server to send the asset route's own
+sandboxing CSP header — an "active" SVG. That check parses the file as XML
+(not a text scan: a namespace-prefixed `<x:script>`, a foreign-namespace
+element needing no `<foreignObject>` wrapper at all, a DTD entity
+expansion, and entity-encoded text all defeat a text scan but not a parser
+that resolves namespaces and decodes entities first) and allows only a
+fixed list of SVG elements, each in the SVG namespace; every attribute
+unprefixed or in the XLink namespace; no `on…=` attribute; `href`/
+`xlink:href` only a same-document `#fragment` or, on `<image>` only, a
+`data:image/(png|jpeg|gif|webp)` payload. Beyond that, **every** attribute
+value (not only `style` — a presentation attribute such as `fill`,
+`filter`, `clip-path`, `mask` or any `marker-*`/`cursor` takes the same
+CSS syntax `style` does, so it can fetch a URL exactly as `style` can) is
+refused if it contains a backslash (a CSS escape, e.g. `u\72l(`, reads as
+`url(` to a CSS parser but not to a literal substring scan), a `url(…)`
+that isn't a `#fragment`, or `image-set(`/`@import`/`src(`/`javascript:`/
+`expression(`. No `<!DOCTYPE` or processing instruction anywhere, either.
+A dot-leading entry (`.secret.png`, `.DS_Store`, a stray `.git/`, …) is
+silently skipped — not published, not a publish failure. If a static host
+can be configured to add response headers, add `X-Content-Type-Options:
+nosniff` and a `Content-Security-Policy: sandbox` (or stricter) for
+`/assets/` there too, for the same belt-and-braces reason the locked route
+sends them — publish-time refusal is the real guarantee, those headers are
+defense in depth on top of it. `dashboard file.sql out.html`/`--svg` and
+the script-free `serve --dashboards` page read `assets/` the same way
+(`read_asset`) but inline the result as a `data:` URI rather than serving a
+route, since neither has a client that fetches one (nor, therefore, the
+active-SVG check above — the static output never serves the SVG markup to
+anyone, only its own pre-rendered static charts and whatever `<image
+href>` the browser's `<img>`-only trust model already applies to a `data:`
+URI the same as any other accepted source).
 
 What *is* worth a reviewer's attention: an `https:` image loads
 automatically, with no click, unlike `::LINK`. If a `::MARKDOWN` (or

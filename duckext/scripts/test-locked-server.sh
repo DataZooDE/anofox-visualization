@@ -710,3 +710,72 @@ fi
 grep -q "options.nav_picker cannot be combined with options.policy" "$T/out" || fail "nav_picker + policy refusal: $(cat "$T/out")"
 exec 3>&-
 echo "OK: #407 part 3: nav_picker.var must be one of path_vars; refuses to start with an access policy"
+
+# #514 PR B: GET/HEAD /d/<id>/assets/<rest> — containment, the extension
+# allow-list, the real (magic-byte) MIME, the size cap, and the response
+# headers. Scope/auth are checked in scripts/auth-e2e/run.sh (this server
+# has no `auth`, so nothing to check here beyond "every other /d/ route
+# needs none either").
+mkdir -p "$T/assetdash/assets/sub"
+cat > "$T/assetdash/t.sql" <<'SQL'
+SELECT 1::BIGINT AS n ::METRIC;
+SQL
+# A real (tiny) SVG and a real (tiny) PNG, so the magic-byte sniff accepts
+# both — not just the extension.
+cat > "$T/assetdash/assets/a.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>
+SVG
+python3 -c "
+import struct
+sig = b'\x89PNG\r\n\x1a\n'
+ihdr = b'IHDR' + struct.pack('>II', 2, 2) + bytes([8,2,0,0,0])
+open('$T/assetdash/assets/sub/b.png', 'wb').write(sig + struct.pack('>I', 13) + ihdr + b'\0\0\0\0')
+"
+cp "$T/assetdash/assets/sub/b.png" "$T/assetdash/assets/b6m.png"
+python3 -c "open('$T/assetdash/assets/b6m.png', 'ab').write(b'0' * (6 * 1024 * 1024))"
+echo '{}' > "$T/assetdash/policy.json"
+cp "$T/assetdash/t.sql" "$T/assetdash/assets/x.sql"
+cp "$T/assetdash/t.sql" "$T/assetdash/assets/a.SVG.sql"
+echo 'not actually a png' > "$T/assetdash/assets/fake.png"
+echo 'secret' > "$T/assetdash/assets/.secret.png"
+ln -s "../policy.json" "$T/assetdash/assets/link.png"
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/assetdash"), $PORT, '{\"max_asset_bytes\":1048576}');" || fail "assets: server"
+get() { curl -s -o "$T/abody" -D "$T/aheaders" -w "%{http_code}" "http://127.0.0.1:$PORT$1"; }
+[ "$(get /d/t/assets/a.svg)" = 200 ] || fail "a.svg: $(cat "$T/abody")"
+grep -qi "^content-type: image/svg+xml" "$T/aheaders" || fail "a.svg content-type: $(cat "$T/aheaders")"
+grep -qi "^x-content-type-options: nosniff" "$T/aheaders" || fail "a.svg nosniff: $(cat "$T/aheaders")"
+grep -qi "^content-security-policy: default-src 'none'; style-src 'unsafe-inline'; sandbox" "$T/aheaders" || fail "a.svg CSP: $(cat "$T/aheaders")"
+grep -qi "^cache-control: private, max-age=300" "$T/aheaders" || fail "a.svg cache-control: $(cat "$T/aheaders")"
+grep -qi "^cross-origin-resource-policy: same-origin" "$T/aheaders" || fail "a.svg CORP: $(cat "$T/aheaders")"
+[ "$(get /d/t/assets/sub/b.png)" = 200 ] || fail "sub/b.png: $(cat "$T/abody")"
+grep -qi "^content-type: image/png" "$T/aheaders" || fail "sub/b.png content-type: $(cat "$T/aheaders")"
+[ "$(get /d/t/assets//etc/passwd)" = 404 ] || fail "an absolute path (leading /) under assets/ should 404"
+[ "$(get /d/t/assets/../policy.json)" = 404 ] || fail "../policy.json should 404"
+[ "$(get /d/t/assets/%2e%2e/policy.json)" = 404 ] || fail "%2e%2e/policy.json should 404"
+[ "$(get /d/t/assets/..%2fpolicy.json)" = 404 ] || fail "..%2fpolicy.json should 404"
+[ "$(get /d/t/assets/.secret.png)" = 404 ] || fail ".secret.png (hidden) should 404"
+[ "$(get /d/t/assets/link.png)" = 404 ] || fail "link.png (symlink out) should 404"
+[ "$(get /d/t/assets/x.sql)" = 404 ] || fail "x.sql (not an image extension) should 404"
+[ "$(get /d/t/assets/a.SVG.sql)" = 404 ] || fail "a.SVG.sql (case + wrong real extension) should 404"
+[ "$(get /d/t/assets/fake.png)" = 404 ] || fail "fake.png (right extension, not really an image) should 404"
+[ "$(get /d/t/assets/nope.png)" = 404 ] || fail "nope.png (doesn't exist) should 404"
+[ "$(get /d/t/assets)" = 404 ] || fail "assets (the folder itself, no trailing file) should 404"
+[ "$(get /d/t/assets/b6m.png)" = 404 ] || fail "b6m.png (over max_asset_bytes) should 404"
+[ "$(get /d/nosuchdash/assets/a.svg)" = 404 ] || fail "no such dashboard should 404"
+[ "$(get /d/t/assets/a.svg)" = 200 ] || fail "a.svg (re-check before HEAD): $(cat "$T/abody")"
+get_len=$(grep -i "^content-length:" "$T/aheaders" | tr -d '\r' | awk '{print $2}')
+# `--head`/`-I`, not `-X HEAD`: the latter only changes the request line,
+# it does not tell libcurl this request has no body — curl would then wait
+# to read Content-Length bytes that a real HEAD response never sends
+# (review of #554 nit 6's own `stat_asset` reports the real length via
+# `fstat`, not a buffered read, exactly so HEAD and GET agree) and hang.
+head_code=$(curl -s -o "$T/abody" -D "$T/aheaders" --head -w "%{http_code}" "http://127.0.0.1:$PORT/d/t/assets/a.svg")
+[ "$head_code" = 200 ] || fail "HEAD should be 200: $head_code $(cat "$T/aheaders")"
+grep -qi "^content-type: image/svg+xml" "$T/aheaders" || fail "HEAD content-type: $(cat "$T/aheaders")"
+head_len=$(grep -i "^content-length:" "$T/aheaders" | tr -d '\r' | awk '{print $2}')
+[ "$head_len" = "$get_len" ] && [ -n "$head_len" ] && [ "$head_len" != "0" ] \
+  || fail "HEAD Content-Length ($head_len) should be the real size and match GET's ($get_len)"
+post_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/d/t/assets/a.svg")
+[ "$post_code" = 405 ] || fail "POST to an asset should be 405: $post_code"
+stop
+echo "OK: #514 PR B: GET/HEAD /d/<id>/assets/<rest> — containment, extension allow-list, magic-byte MIME, size cap, headers; POST 405"

@@ -1978,7 +1978,7 @@ the same verdict for every case):
 |---|---|---|
 | `data:image/(png\|jpeg\|jpg\|gif\|webp\|svg+xml)` | yes | followed by `;` or `,` |
 | `https://…` | yes | never `http:` — mixed content on a served https page |
-| a relative path | yes, if it stays inside the folder | no scheme, no leading `/` or `//`, no `\`, no `..`/`.` segment, no segment starting with `.`; a warning unless it starts with `assets/` (where `--site`/the locked server serve files — a later PR) |
+| a relative path | yes, if it stays inside the folder | no scheme, no leading `/` or `//`, no `\`, no `..`/`.` segment, no segment starting with `.`, no `%`; a warning unless it starts with `assets/` — the dashboards folder's `assets/` subfolder is the only one ever served/copied, see "Where `assets/` files come from" below |
 | anything else | no | the alt text shows in a muted box, never a broken-image icon |
 
 Quotes, `<`, `>`, `(`, `)`, backticks and control characters are never
@@ -2016,26 +2016,44 @@ any other panel — this is panel composition (`src/dashboard.rs`), not a new
 SVG writer for charts (plotting stays through ggplot-rs). `data:` sources are
 embedded as-is; `https:` is kept as a link (it may not show offline, and the
 assistant's preview CSP blocks it — `image/https-offline`); a relative path
-currently draws the alt-text placeholder (serving `assets/` files for static
-output is a later PR). Markdown images in static output render as their alt
-text in brackets (`[decision flow …]`) rather than as pixels. The browser's
-⤓ HTML export fetches and inlines any non-`data:` image so the download works
-fully offline (falling back to the alt text if that fetch fails, e.g. CORS
-on an `https:` source).
+under `assets/` is inlined as a `data:` URI (below) — missing or refused, it
+draws the alt-text placeholder. Markdown images in static output render as
+their alt text in brackets (`[decision flow …]`) rather than as pixels. The
+browser's ⤓ HTML export fetches and inlines any non-`data:` image so the
+download works fully offline (falling back to the alt text if that fetch
+fails, e.g. CORS on an `https:` source, or a non-image response).
+
+**Where `assets/` files come from.** A relative path means a file in
+`assets/` next to the dashboards, never anywhere else in that folder (which
+also holds `.sql`, `policy.json`, `blueprint.json`) — a path outside `assets/`
+is a `not-in-assets` warning and never resolves, on any host:
+
+| Host | Reads `assets/` from |
+|---|---|
+| Locked server (`anofox_serve_dashboards`) | `GET /d/<id>/assets/<rest>` — the same login and scope as the dashboard page, `options.max_asset_bytes` (default 5 MiB); see docs/secure-serving.md |
+| `--site` | copies `<folder>/assets/` to `<out>/assets/`, refusing the whole publish on a symlink or a non-image/oversized file |
+| `dashboard file.sql out.html` / `--svg` | `<dir of file.sql>/assets/<rest>`, inlined as a `data:` URI |
+| `serve --dashboards <dir>` (the script-free page) | `<dir>/assets/<rest>`, inlined as a `data:` URI |
+| Browser builder (no server) | unchanged — resolves against the app's own URL |
+| Authoring server (`serve [db]`, `anofox_serve`) | not served — a relative `::IMAGE` there draws the placeholder |
+
+Every reader validates the same way: the resolved path must stay inside
+`assets/` (symlinks included), the extension must be `png`/`jpg`/`jpeg`/
+`gif`/`webp`/`svg`, and the file's own bytes must actually sniff as that kind
+of image — not just its extension (`src/image.rs::read_asset`).
 
 **Limits.** `{{col}}`/`{{col:fmt}}` is **not** filled inside a Markdown image
 `src` (`markdownWithValues` strips tokens inside tags) — compute the path in
-an `::IMAGE` instead (`markdown/placeholder-in-image`, a warning). The
-authoring server (`serve [db]`, `anofox_serve`) does not yet serve a
-dashboard folder's `assets/`, so a relative `::IMAGE` there also shows the
-placeholder.
+an `::IMAGE` instead (`markdown/placeholder-in-image`, a warning).
 
 **Lint codes:** `image/bad-src`, `image/outside-folder` (errors);
 `image/not-in-assets`, `image/svg-no-size`, `image/too-large`, `image/empty`,
-`image/no-alt`, `image/many`, `image/https-offline` (warnings);
-`markdown/image-bad-src` (error); `markdown/image-not-in-assets`,
-`markdown/image-svg-no-size`, `markdown/image-too-large`,
-`markdown/image-no-alt`, `markdown/placeholder-in-image` (warnings).
+`image/no-alt`, `image/many`, `image/missing-file` (a relative `assets/…`
+that doesn't exist — only when `--check`/`--site` know the folder),
+`image/https-offline` (warnings); `markdown/image-bad-src` (error);
+`markdown/image-not-in-assets`, `markdown/image-svg-no-size`,
+`markdown/image-too-large`, `markdown/image-no-alt`,
+`markdown/placeholder-in-image` (warnings).
 
 **Images from data are a trust boundary worth knowing about.** A `::MARKDOWN`
 box built from a text column can point an `<img>` at any `https:` host —
