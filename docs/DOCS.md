@@ -2528,13 +2528,24 @@ SELECT '…closing text…' ::MARKDOWN;
   closed. A disabled Next is `aria-disabled="true"` (not `disabled`, so it
   stays focusable) and explains the gate through `aria-describedby`.
 - **Static output and the script-free served page** (`--svg`, the CLI
-  `dashboard file.sql out.html`, a dashboard served with no `.sql` on the
-  page, and ⤓ HTML export) **flatten the sequence**: every step is drawn in
-  order, preceded by a `::SECTION`-style "Step n of N · Label" heading
-  (`N` counts only the steps shown — one hidden by `-- @requires` is left
-  out), gates are ignored (there is no Next to disable), and the step
-  variable is bound in order while walking the script, so a panel reading
-  `getvariable('step')` shows that step's own value.
+  `dashboard file.sql out.html`, and a dashboard served with no `.sql` on
+  the page) **flatten the sequence**: every step is drawn in order,
+  preceded by a `::SECTION`-style "Step n of N · Label" heading (`N` counts
+  only the steps shown — one hidden by `-- @requires` is left out), gates
+  are ignored (there is no Next to disable), and the step variable is bound
+  in order while walking the script, so a panel reading `getvariable('step')`
+  shows that step's own value.
+- **The ⤓ HTML export** (#523) keeps the stepper itself — Back/Next, the
+  progress strip, the step list, the live announcer — re-wired by a small
+  self-contained script, so a downloaded copy still walks one step at a
+  time offline. There is no query engine in that copy, so a `::GATE` can't
+  be re-checked: it is dropped, same as the static output above ("gates are
+  ignored"), every step stays reachable, and the footer carries one line
+  saying so ("Checks are not active in this offline copy.") on any sequence
+  that had a gate to drop. Printing the export, unlike printing the live
+  page, shows every step in order with its "Step n of N · Label" heading —
+  like the flattened output above — because there is no second chance at
+  the rest of the sequence once the page is on paper.
 
 **`::GUIDE_STEP`/`::GATE` are not access control.** Like `::SHOW_IF`, a
 gated or hidden step only changes what the page shows — `/api/panel` still
