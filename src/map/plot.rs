@@ -761,6 +761,7 @@ pub(super) fn build(
             card,
             flow_color_scale,
             plain_fill_for_flows,
+            frame_ctx,
         );
         plot = new_plot;
         extra_self = extra;

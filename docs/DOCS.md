@@ -1591,7 +1591,11 @@ embedding every frame for an offline player is a follow-up.
 - **A frame's view:** every feature appears in every frame — a feature
   with no row in a given frame is drawn as no data (areas: the hatch
   pattern; points/symbols/flows/hex cells: not drawn at all) rather than
-  vanishing, so the map's extent never moves between frames.
+  vanishing, so the map's extent and projection never move between
+  frames — including on a flow map, where this means every flow's
+  endpoints count toward the shared extent even on a frame where that
+  flow isn't drawn (a flow only present in one frame doesn't zoom or
+  re-project the map on every step).
 - **Shared scales:** the measure's colour domain and `::CLASSES` breaks,
   a `::CATEGORY`'s levels, and a graduated `::SIZE`'s domain are all
   computed once over **every** frame and held fixed — the same value
@@ -1611,7 +1615,13 @@ embedding every frame for an offline player is a follow-up.
   geometry, or — on a flow map — its `"{origin}→{dest}"` pair (M2b's own
   key) — `::XAXIS` is ignored on a time map (`map/frame-xaxis`).
 - **Duplicates:** a repeated (feature, frame) row keeps its first row
-  (`map/frame-duplicate`).
+  (`map/frame-duplicate`). On a hexbin map, a feature is a distinct point
+  location (D22's `"{lat:.5},{lon:.5}"` key) — several events at the exact
+  same coordinates in one frame (several incidents at one address, say)
+  are duplicates of *that point*, so only the first is binned that frame;
+  the same data without `::FRAME` bins every one of them. Join a small
+  jitter, a nearby but distinct coordinate, or a count column summed
+  before `::FRAME` instead of relying on exact coincidence.
 - **Caps:** over 200 distinct `::FRAME` values, the last 200 are kept
   (`map/too-many-frames`); over 100,000 feature × frame cells, the last
   frames that fit are kept (`map/frame-cells`) — aggregate to a coarser

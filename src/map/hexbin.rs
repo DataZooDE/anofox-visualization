@@ -210,14 +210,27 @@ pub(super) fn of(cols: &[Column], proj: &Proj, present: Option<&[bool]>) -> Opti
         .filter(|(row, _, _)| present.is_none_or(|p| p.get(*row).copied().unwrap_or(true)))
         .copied()
         .collect();
-    if binned.is_empty() {
-        return None;
-    }
+    // Review #595 BLOCKER 3: on a frame map, a frame with zero *present*
+    // points still IS a hexbin map (D20 — not drawn, not "falls back to
+    // plain points") — `binned` empty is fine; `cells` ends up empty too,
+    // `Model::new`'s `hexbin.is_none()` symbol fallback never triggers.
+    // Outside a frame map `present` is `None`, so `binned == projected`
+    // (every point passes the filter above) and `projected.is_empty()`
+    // already returned `None` if there was truly nothing to bin.
     let measure = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
+    // Review #595 NIT: a non-frame map's `has_measure` stays the original
+    // "any row of `cols` at all" rule (byte-identical) — only a frame map
+    // (which can have a point with no row this frame, D20) narrows it to
+    // the rows actually binned, so an absent feature's stale measure value
+    // can't flip a frame between "sum" and "count" on its own.
     let has_measure = measure.is_some_and(|m| {
-        binned
-            .iter()
-            .any(|(row, _, _)| m.values.get(*row).and_then(cell_num).is_some())
+        if present.is_some() {
+            binned
+                .iter()
+                .any(|(row, _, _)| m.values.get(*row).and_then(cell_num).is_some())
+        } else {
+            m.values.iter().any(|v| cell_num(v).is_some())
+        }
     });
 
     // D7/the ggplot-rs plan's C1 §4: a fixed lattice (`binwidth` *and*
@@ -307,12 +320,27 @@ pub(super) fn of(cols: &[Column], proj: &Proj, present: Option<&[bool]>) -> Opti
 /// counting, `::YFORMAT` is dropped from the columns passed in, so a '€'
 /// format meant for the real measure doesn't leak onto a plain count.
 pub(super) fn fill_of(o: &RenderOptions, cols: &[Column], hb: &Hexbin) -> Fill {
-    let values: Vec<Value> = hb
+    let values: Vec<f64> = hb
         .cells
         .iter()
-        .map(|(_, c)| Value::Float(if hb.has_measure { c.sum } else { c.n as f64 }))
+        .map(|(_, c)| if hb.has_measure { c.sum } else { c.n as f64 })
         .collect();
-    let name = if hb.has_measure {
+    fill_of_values(o, cols, &values, hb.has_measure)
+}
+
+/// The value-scale part of [`fill_of`], over an arbitrary list of cell
+/// values rather than one `Hexbin`'s own `cells` — shared with
+/// `frames::apply_hexbin_shared` (M2e-B, review of #595 BLOCKER 2), whose
+/// shared cell-colour domain is the *union* of every frame's own cell
+/// values, not one `Hexbin`'s.
+pub(super) fn fill_of_values(
+    o: &RenderOptions,
+    cols: &[Column],
+    values: &[f64],
+    has_measure: bool,
+) -> Fill {
+    let vals: Vec<Value> = values.iter().map(|v| Value::Float(*v)).collect();
+    let name = if has_measure {
         cols.iter()
             .find(|c| matches!(c.role, Role::Value(_)))
             .map(|c| c.name.clone())
@@ -320,7 +348,7 @@ pub(super) fn fill_of(o: &RenderOptions, cols: &[Column], hb: &Hexbin) -> Fill {
     } else {
         String::new()
     };
-    let kind = if hb.has_measure {
+    let kind = if has_measure {
         match cols.iter().find_map(|c| match c.role {
             Role::Value(k) => Some(k),
             _ => None,
@@ -331,10 +359,10 @@ pub(super) fn fill_of(o: &RenderOptions, cols: &[Column], hb: &Hexbin) -> Fill {
     } else {
         Kind::Bar
     };
-    let synthetic = Column::new(name, Role::Value(kind), values);
+    let synthetic = Column::new(name, Role::Value(kind), vals);
     let has_base = find_role(cols, Role::Basemap).is_some();
-    let n = hb.cells.len();
-    let scale = if hb.has_measure {
+    let n = values.len();
+    let scale = if has_measure {
         super::value_scale(o, cols, &synthetic, has_base, n)
     } else {
         let filtered: Vec<Column> = cols

@@ -88,12 +88,21 @@ fn levels_of(values: &[Option<f64>]) -> Vec<Option<usize>> {
 /// `::YFORMAT`, which is `a`'s own) to format `b` the way `a` is formatted
 /// — `crate::value_fmt`'s own rule, so a currency/percent `b` reads right
 /// without `a`'s y-axis format leaking onto it.
+///
+/// `force` (review of #595, SHOULD-FIX 6): on a `::FRAME` map, whether the
+/// map is bivariate at all was already decided over every frame
+/// (`frames::Shared::is_bivariate`) — when `true`, this never bails out
+/// just because frame k's own `b` values happen to be entirely `Na`; it
+/// still builds a `Bivar`, with every row's level `None` ("no data" — the
+/// same thing `levels_of` already gives an empty/degenerate distribution)
+/// instead of falling back to a plain measure ramp, a different legend.
 pub(super) fn of(
     o: &RenderOptions,
     cols: &[Column],
     a_col: &Column,
     b_col: &Column,
     rows: usize,
+    force: bool,
 ) -> Option<Bivar> {
     let b: Vec<Option<f64>> = (0..rows)
         .map(|i| {
@@ -104,7 +113,7 @@ pub(super) fn of(
                 .filter(|f| f.is_finite())
         })
         .collect();
-    if b.iter().all(Option::is_none) {
+    if !force && b.iter().all(Option::is_none) {
         return None;
     }
     let a: Vec<Option<f64>> = (0..rows)
@@ -262,7 +271,7 @@ mod tests {
             Role::Bivariate,
             vec![crate::Value::Na, crate::Value::Na],
         );
-        assert!(of(&o, &[a.clone(), b.clone()], &a, &b, 2).is_none());
+        assert!(of(&o, &[a.clone(), b.clone()], &a, &b, 2, false).is_none());
     }
 
     #[test]
@@ -280,7 +289,7 @@ mod tests {
             Role::Bivariate,
             b_vals.iter().map(|v| crate::Value::Float(*v)).collect(),
         );
-        let biv = of(&o, &[a.clone(), b.clone()], &a, &b, 9).unwrap();
+        let biv = of(&o, &[a.clone(), b.clone()], &a, &b, 9, false).unwrap();
         let mut seen = std::collections::HashSet::new();
         for i in 0..9 {
             let (ii, jj) = (biv.ia[i].unwrap(), biv.jb[i].unwrap());

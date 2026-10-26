@@ -8,8 +8,10 @@
 //! legend.
 //!
 //! M2e-B extends the same machinery to flows, hexbin and bivariate maps:
-//! a flow's feature key is its `"{ok}→{dk}"` ([`row_key`], reusing
-//! [`flows::end_of`]); a flow's shared linewidth domain and a graduated
+//! a flow's feature key is its `ok`/`dk` ([`row_key`], reusing
+//! [`flows::end_of`], joined on a separator that can't occur in either —
+//! not the "→" the *drawn* `data-x` uses, which a region code could in
+//! principle contain); a flow's shared linewidth domain and a graduated
 //! symbol's shared radius domain are the same `shared.size_limits` (both
 //! read `::SIZE`, [`apply`]); a hexbin map's shared cell-colour domain
 //! comes from binning every frame's points at once
@@ -83,22 +85,33 @@ fn hash_wkt(s: &str) -> String {
 /// the boundary pack at all.
 fn flow_end_key(v: &Value) -> Option<String> {
     match flows::end_of(v) {
-        flows::End::Code(c) => Some(c.to_ascii_uppercase()),
+        // review of #595 NIT: `to_uppercase` (Unicode), matching
+        // `flows::of`'s own `resolve` exactly (`flows.rs`'s `c.to_
+        // uppercase()`, the value that becomes the drawn `data-x`) — a
+        // mismatched case-folding here and there could disagree for a
+        // non-ASCII code, splitting one feature's identity in two.
+        flows::End::Code(c) => Some(c.to_uppercase()),
         flows::End::Point(p, _) => Some(format!("{:.5},{:.5}", p[1], p[0])),
         flows::End::Missing => None,
     }
 }
 
-/// A row's D22 feature key: for a flow map, `"{ok}→{dk}"` (M2e-B,
-/// [`flow_end_key`] of each end — M2b's own key, so it is already
-/// `data-x`); otherwise a normalised `::REGION` code, a `"{lat:.5},
-/// {lon:.5}"` pair, or a WKT geometry's hash — whichever column this map
-/// uses. `None` when the row has none (dropped from every frame).
+/// A row's D22 feature key: for a flow map, `ok`/`dk` ([`flow_end_key`] of
+/// each end — M2b's own key, so the *drawn* `data-x`, built separately in
+/// `overlay.rs` as `"{ok}→{dk}"`, already matches) joined on a control
+/// character (review of #595 NIT: a code could itself contain "→", making
+/// origin "A→B"/dest "C" collide with origin "A"/dest "B→C" — `\u{1F}`
+/// (unit separator) can't occur in a region code or a formatted lat/lon
+/// pair, so this internal identity key stays unambiguous even though the
+/// *displayed* `data-x` still uses "→"); otherwise a normalised `::REGION`
+/// code, a `"{lat:.5}, {lon:.5}"` pair, or a WKT geometry's hash —
+/// whichever column this map uses. `None` when the row has none (dropped
+/// from every frame).
 fn row_key(cols: &[Column], i: usize) -> Option<String> {
     if let (Some(oc), Some(dc)) = (find_role(cols, Role::Origin), find_role(cols, Role::Dest)) {
         let ok = oc.values.get(i).and_then(flow_end_key)?;
         let dk = dc.values.get(i).and_then(flow_end_key)?;
-        return Some(format!("{ok}→{dk}"));
+        return Some(format!("{ok}\u{1f}{dk}"));
     }
     if let Some(region) = find_role(cols, Role::Region) {
         let s = region.values.get(i).map(value_str).unwrap_or_default();
@@ -239,8 +252,19 @@ pub(super) fn of(cols: &[Column]) -> Option<Frames> {
 /// region/lat-lon (its first row) and every other column's value from
 /// frame `k`'s row — `Value::Na` when the feature has none (D20).
 pub(super) fn view(cols: &[Column], fr: &Frames, k: usize) -> Vec<Column> {
-    let is_geometry_role =
-        |r: Role| matches!(r, Role::Region | Role::Geometry | Role::Lat | Role::Lon);
+    // Review #595 BLOCKER 1: `::ORIGIN`/`::DEST` are a flow map's own
+    // "geometry" — always taken from the feature's first row, same as an
+    // area/point's, so the extent and `Proj::setup('auto', …)` built from
+    // them (`Model::new`'s flow branch) never move between frames (D20).
+    // A flow absent from frame k is hidden by [`presence`] at draw time
+    // instead (mirroring hexbin's own point-presence filter), not by
+    // blanking its endpoints here.
+    let is_geometry_role = |r: Role| {
+        matches!(
+            r,
+            Role::Region | Role::Geometry | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+        )
+    };
     cols.iter()
         .map(|c| {
             let values: Vec<Value> = (0..fr.first_row.len())
@@ -305,6 +329,23 @@ pub(super) struct Shared {
     /// position then means the same thing whichever frame is shown; only
     /// the 3×3 counts are frame k's own ([`bivariate::apply_shared`]).
     pub bivariate: Option<(Classes, Classes)>,
+    /// Review #595 SHOULD-FIX 6: a flow's fixed-width/has-size decision,
+    /// made once over every frame's `::SIZE` values — a flow map never
+    /// flips between a fixed-width line and a sqrt-scaled one frame to
+    /// frame just because one frame's own rows happen to share a value
+    /// (or happen to be all NA). Passed into `flows::of`/`project`
+    /// directly (`Model::new`'s flow branch), not applied after the fact —
+    /// unlike `size_limits`/`fill`, the *per-row* widths these decide are
+    /// baked in during construction, too late for `apply` to fix up.
+    pub flow_has_size: bool,
+    pub flow_fixed: Option<f64>,
+    /// Review #595 SHOULD-FIX 6: whether the map is `::BIVARIATE` at all,
+    /// decided once over every frame's `b` values — a frame whose own `b`
+    /// values are all NA still renders the 3×3 bivariate fill (every
+    /// feature "no data" that frame), not a plain measure ramp (which
+    /// would also silently skip `bivariate::apply_shared` since `m.fill`
+    /// wouldn't match `Fill::Bivariate`).
+    pub is_bivariate: bool,
 }
 
 /// Build [`Shared`] from every row of `cols` (not a frame view) and `fr`'s
@@ -324,16 +365,37 @@ pub(super) fn shared_of(o: &RenderOptions, cols: &[Column], fr: &Frames) -> Shar
             .fold(0.0_f64, f64::max);
         (0.0, hi)
     });
-    let max_count = match &fill {
-        Some(Fill::Measure(scale)) if scale.classes.is_some() => max_class_count(cols, fr, scale),
-        _ => 0,
+    // Review #595 NIT: a hexbin map's shared fill is replaced wholesale by
+    // `apply_hexbin_shared` (a *cell*-value distribution, not this
+    // per-row one) — `max_class_count` below would size `count_reserve`
+    // from the wrong numbers, so it's skipped outright for a hexbin map
+    // rather than computing a value nothing ends up using correctly.
+    let max_count = if find_role(cols, Role::Hexbin).is_some() {
+        0
+    } else {
+        match &fill {
+            Some(Fill::Measure(scale)) if scale.classes.is_some() => {
+                max_class_count(cols, fr, scale)
+            }
+            _ => 0,
+        }
     };
-    let bivariate = shared_bivariate(cols, n);
+    let bivariate = shared_bivariate(cols, fr);
+    let flow_has_size = find_role(cols, Role::Size)
+        .is_some_and(|c| (0..n).any(|i| c.values.get(i).and_then(cell_num).is_some()));
+    let flow_fixed = find_role(cols, Role::Size)
+        .filter(|_| flow_has_size)
+        .and_then(flows::constant_width);
+    let is_bivariate = find_role(cols, Role::Bivariate)
+        .is_some_and(|c| (0..n).any(|i| c.values.get(i).and_then(cell_num).is_some()));
     Shared {
         fill,
         size_limits,
         max_count,
         bivariate,
+        flow_has_size,
+        flow_fixed,
+        is_bivariate,
     }
 }
 
@@ -341,11 +403,18 @@ pub(super) fn shared_of(o: &RenderOptions, cols: &[Column], fr: &Frames) -> Shar
 /// (quantile, 3) over every frame's finite `a` (the map's own measure) and
 /// `b` (`::BIVARIATE`) values — `None` without both, mirroring
 /// `bivariate::of`'s own "no finite value at all" bail-out.
-fn shared_bivariate(cols: &[Column], n: usize) -> Option<(Classes, Classes)> {
+/// Review of #595 NIT: built only from the rows a frame can actually show
+/// (`fr.row_in`'s own selection) — not blindly every row of `cols`, which
+/// would also count a row with no `::FRAME` value (dropped entirely,
+/// never in `fr`), a frame cut by the D15 cap, and a D13 duplicate's
+/// second+ row (first row wins). None of those ever reach the screen, so
+/// they shouldn't skew the shared tertile breaks either.
+fn shared_bivariate(cols: &[Column], fr: &Frames) -> Option<(Classes, Classes)> {
     let a_col = measure_of(cols, super::geometry(cols))?;
     let b_col = find_role(cols, Role::Bivariate)?;
+    let shown_rows = || fr.row_in.iter().flatten().filter_map(|r| *r);
     let finite = |c: &Column| -> Vec<f64> {
-        (0..n)
+        shown_rows()
             .filter_map(|i| c.values.get(i).and_then(cell_num).filter(|v| v.is_finite()))
             .collect()
     };
@@ -452,20 +521,65 @@ fn merge_fill(view: &mut Fill, all: &Fill) {
     }
 }
 
-/// `::HEXBIN`'s shared cell-colour domain (M2e-B, D21). A frame's own
-/// [`hexbin::of`] (inside [`Model::new`](super::Model::new)) already bins
-/// only its own present points on the frame-stable grid (D7/[`presence`]);
-/// this bins `cols` exactly as given — the *original*, unreduced result,
-/// i.e. every frame's points at once, on the same grid (same extent, so
-/// the same origin/width, D20) — to get the reference cell-value
-/// distribution, then [`merge_fill`]s `m`'s own (frame k's) fill onto it,
-/// the same way [`apply`] does for a plain measure: a cell's colour means
-/// the same magnitude whichever frame is shown; only its own cells' values
-/// stay frame k's own.
-pub(super) fn apply_hexbin_shared(m: &mut Model, o: &RenderOptions, cols: &[Column]) {
-    if let Some(union_hb) = hexbin::of(cols, &m.proj, None) {
-        let union_fill = hexbin::fill_of(o, cols, &union_hb);
-        merge_fill(&mut m.fill, &union_fill);
+/// `::HEXBIN`'s shared cell-colour domain (M2e-B, D21; review of #595,
+/// fixing BLOCKER 2). A frame's own [`hexbin::of`] (inside
+/// [`Model::new`](super::Model::new)) already bins only its own present
+/// points on the frame-stable grid (D7/[`presence`]); this bins *every
+/// frame separately*, the same way (same grid, same D13/D15 row
+/// selection via [`view`]/[`presence`]), and takes the shared domain/
+/// classes over the **union of every frame's own cell values** — not one
+/// combined bin of every frame's points at once, which would sum
+/// unrelated frames' values into the same cell and badly overstate the
+/// domain (e.g. three frames each with one cell at 10 would read as a
+/// single cell at 30). [`merge_fill`]s `m`'s own (frame k's) fill onto
+/// that shared domain, the same way [`apply`] does for a plain measure: a
+/// cell's colour means the same magnitude whichever frame is shown; only
+/// its own cells' values stay frame k's own. Also fills in `shared.
+/// max_count` (U3's `count_reserve`) from the same per-frame cell values,
+/// classed the same way — `shared_of` skips it for a hexbin map precisely
+/// because only this function has the right distribution to compute it
+/// from.
+pub(super) fn apply_hexbin_shared(
+    m: &mut Model,
+    o: &RenderOptions,
+    cols: &[Column],
+    fr: &Frames,
+    shared: &mut Shared,
+) {
+    let mut per_frame: Vec<Vec<f64>> = Vec::with_capacity(fr.labels.len());
+    let mut has_measure = false;
+    for k in 0..fr.labels.len() {
+        let view_k = view(cols, fr, k);
+        let present = presence(fr, k);
+        let values = hexbin::of(&view_k, &m.proj, Some(&present)).map(|hb| {
+            has_measure = has_measure || hb.has_measure;
+            hb.cells
+                .iter()
+                .map(|(_, c)| if hb.has_measure { c.sum } else { c.n as f64 })
+                .collect::<Vec<f64>>()
+        });
+        per_frame.push(values.unwrap_or_default());
+    }
+    let all_values: Vec<f64> = per_frame.iter().flatten().copied().collect();
+    if all_values.is_empty() {
+        return;
+    }
+    let union_fill = hexbin::fill_of_values(o, cols, &all_values, has_measure);
+    merge_fill(&mut m.fill, &union_fill);
+    if let Fill::Measure(scale) = &m.fill {
+        if let Some((_, classes, _)) = &scale.classes {
+            shared.max_count = per_frame
+                .iter()
+                .map(|vals| {
+                    let mut counts = vec![0usize; classes.len()];
+                    for v in vals {
+                        counts[classes.index(v.clamp(scale.lo, scale.hi))] += 1;
+                    }
+                    counts.into_iter().max().unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0);
+        }
     }
 }
 

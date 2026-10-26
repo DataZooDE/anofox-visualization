@@ -110,12 +110,20 @@ pub(super) struct RawFlows {
     pub fixed: Option<f64>,
     pub fmt: ValueFmt,
     pub title: Option<String>,
+    /// Review of #595 BLOCKER 1: every resolved endpoint (`o`/`d`),
+    /// present this frame or not (`flows` only holds the present/drawn
+    /// ones). `Model::new`'s flow branch builds the extent/projection
+    /// from this, not `flows`, so they never move between frames (D20):
+    /// an endpoint already resolved from the always-present view geometry
+    /// (`frames::view`) is still part of the map's geometry on a frame
+    /// where its own flow isn't drawn.
+    pub all_points: Vec<[f64; 2]>,
 }
 
 /// A `::SIZE` column holding one number on every row, clamped 0.5..12 px (a
 /// flow's constant width; `symbols.rs`'s `constant_size` clamps 1..12
 /// instead for a symbol radius, so this is its own small helper).
-fn constant_width(col: &Column) -> Option<f64> {
+pub(super) fn constant_width(col: &Column) -> Option<f64> {
     let first = col.values.first()?.as_f64().filter(|f| f.is_finite())?;
     col.values
         .iter()
@@ -126,7 +134,27 @@ fn constant_width(col: &Column) -> Option<f64> {
 /// Build the raw flow model from `::ORIGIN`/`::DEST` (`None` only when one
 /// of the two role columns is missing — the lint, not this function,
 /// reports `::ORIGIN` without `::DEST`).
-pub(super) fn of(cols: &[Column], german: bool) -> Option<RawFlows> {
+///
+/// `present` (M2e-B, review of #595, D20): on a `::FRAME` map, which view
+/// rows (one per feature) actually have a row in the frame being built —
+/// `None` outside a frame map. A feature's `::ORIGIN`/`::DEST` are always
+/// resolvable in the view (`frames::view`'s own geometry-role fill, so the
+/// extent/projection never move between frames), so an absent flow has to
+/// be skipped explicitly here instead of falling out of `resolve()`
+/// returning `None` — and skipped *before* the unplaced count, since it
+/// isn't "no location", just not part of this frame.
+/// `forced_size` (review of #595, SHOULD-FIX 6): `(has_size, fixed)`
+/// decided once over every frame's `::SIZE` values (`frames::Shared`), not
+/// this frame's own subset — `None` outside a frame map, where the
+/// frame's own (only) data already *is* every value there is. (Not named
+/// `forced` — this function already has its own local `forced`, the
+/// `::BOUNDARIES` layer override.)
+pub(super) fn of(
+    cols: &[Column],
+    german: bool,
+    present: Option<&[bool]>,
+    forced_size: Option<(bool, Option<f64>)>,
+) -> Option<RawFlows> {
     let oc = find_role(cols, Role::Origin)?;
     let dc = find_role(cols, Role::Dest)?;
     let rows = oc.values.len().max(dc.values.len());
@@ -189,22 +217,45 @@ pub(super) fn of(cols: &[Column], german: bool) -> Option<RawFlows> {
     };
 
     let size_col = find_role(cols, Role::Size);
-    let has_size = size_col.is_some_and(|c| c.values.iter().any(|v| cell_num(v).is_some()));
-    let fixed = size_col.filter(|_| has_size).and_then(constant_width);
+    let (has_size, fixed) = match forced_size {
+        Some((has_size, fixed)) => (has_size, fixed),
+        None => {
+            let has_size = size_col.is_some_and(|c| c.values.iter().any(|v| cell_num(v).is_some()));
+            let fixed = size_col.filter(|_| has_size).and_then(constant_width);
+            (has_size, fixed)
+        }
+    };
     let fmt = size_col
         .map(|c| value_fmt(cols, Kind::Bar, &c.values))
         .unwrap_or(ValueFmt::Plain);
     let title = size_col.and_then(|c| legend_title(&c.name, &fmt));
 
     let mut flows = Vec::new();
+    let mut all_points: Vec<[f64; 2]> = Vec::new();
     let (mut unplaced, mut self_flows) = (0usize, 0usize);
     for i in 0..rows {
+        // Review #595 BLOCKER 1: resolve *every* row regardless of
+        // presence — `::ORIGIN`/`::DEST` are always resolvable in the
+        // view now (`frames::view`'s own geometry-role fill), so a row's
+        // endpoints are real geometry even on a frame where it isn't
+        // drawn, and both go into `all_points` (the extent's own source)
+        // before any presence check. `unplaced`/`self_flows` (SHOULD-FIX
+        // 4) and the drawn `flows` list, below, are presence-gated —
+        // "no location" and "drawn this frame" are different things.
+        let is_present = present.is_none_or(|p| p.get(i).copied().unwrap_or(true));
         let o = resolve(&o_ends[i], i);
         let d = resolve(&d_ends[i], rows + i);
         let (Some((op, oname, ok)), Some((dp, dname, dk))) = (o, d) else {
-            unplaced += 1;
+            if is_present {
+                unplaced += 1;
+            }
             continue;
         };
+        all_points.push(op);
+        all_points.push(dp);
+        if !is_present {
+            continue; // resolved (extent above already has it) — not drawn this frame
+        }
         if ok == dk {
             self_flows += 1;
             continue;
@@ -224,6 +275,7 @@ pub(super) fn of(cols: &[Column], german: bool) -> Option<RawFlows> {
     Some(RawFlows {
         rows,
         flows,
+        all_points,
         unplaced,
         self_flows,
         layer,
@@ -274,13 +326,18 @@ pub(crate) const FLOW_CAP: usize = 10_000;
 /// Project `raw`'s ends, resolve widths (fixed, 1.5 without `::SIZE`, else
 /// `0.75 + 7.25*sqrt(v/vmax)` for a finite `v > 0`), sort largest-first, cap
 /// at [`FLOW_CAP`].
-pub(super) fn project(raw: RawFlows, proj: &Proj) -> Flows {
-    let vmax = raw
-        .flows
-        .iter()
-        .filter_map(|f| f.size)
-        .filter(|v| v.is_finite() && *v > 0.0)
-        .fold(0.0_f64, f64::max);
+/// `forced_vmax` (review of #595, SHOULD-FIX 6): the sqrt-scale's shared
+/// maximum over every frame's `::SIZE` values (`frames::Shared::
+/// size_limits`), not this frame's own subset — `None` outside a frame
+/// map, where the frame's own values are every value there is.
+pub(super) fn project(raw: RawFlows, proj: &Proj, forced_vmax: Option<f64>) -> Flows {
+    let vmax = forced_vmax.unwrap_or_else(|| {
+        raw.flows
+            .iter()
+            .filter_map(|f| f.size)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .fold(0.0_f64, f64::max)
+    });
     let width = |size: Option<f64>| -> Option<f64> {
         if let Some(f) = raw.fixed {
             return Some(f);
