@@ -17,7 +17,10 @@ description: >
   header comments (-- @title, -- @nav, -- @group, -- @tags, -- @description, -- @owner, -- @certified,
   -- @load, -- @param, -- @vars, -- @requires)
   and deployment (deploy/run-locked.sh, systemd, Docker, reverse proxy with
-  TLS, replicas behind a load balancer, sizing). Use when the user wants to
+  TLS, replicas behind a load balancer, sizing). Also covers options.state
+  (per-viewer, append-only answers from a ::SUBMIT button, #517),
+  viewer_state/viewer_state_latest read-back, and the dashboard state
+  export|erase CLI for retention/erasure. Use when the user wants to
   "share / publish / host / deploy a dashboard", "serve it to my team",
   "put it behind nginx / Caddy", "run it in Docker / Kubernetes", "open
   the builder on my data", asks whether serving is safe, how to refresh
@@ -96,6 +99,7 @@ Unknown keys and bad values fail the start, naming the valid ones.
 | `path_vars` | `[]` | variables used as path segments under `data` (plain names `[A-Za-z0-9_.-]`, no leading `.`, else `400`) |
 | `theme` | — | default theme for dashboards without `::THEME` |
 | `auth`, `policy`, `policy_key_env`, `log`, `log_vars`, `audit` | — | login, access policy and logs: access-control skill |
+| `state` | — | per-viewer, append-only answers from a `::SUBMIT` button (#517); `{"path", "dashboards", "read", "trainers": {"dashboards", "groups", "users"}, "text_max_chars", "rate": {"per_minute", "burst"}, "max_per_viewer", "max_mb"}`. Requires `auth`. See "Per-viewer state" below |
 
 ```sql skip
 -- a data folder: one parquet directory per forecast run, picked by a ::DROPDOWN or ?v.run=
@@ -115,6 +119,32 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
 - **Refresh** (`refresh_s` / `anofox_serve_refresh`): atomic swap, running requests finish on the old snapshot, a new empty cache; a failed rebuild keeps the old one. Needs the snapshot's disk and memory twice while it runs. No HTTP endpoint can trigger it.
 - **`GET /healthz`**: `{"status":"ok","dashboards":3,"epoch":1,"snapshot_age_s":4,…, "limits":{…}}` once the snapshot is ready (with `auth`: only `status` without a login).
 - **URL state**: `/d/<id>?tab=<name>&v.region=EU` opens a tab with inputs / selections pre-set (values validated like input changes), so other apps and dashboards can link in.
+
+## Per-viewer state (`options.state`, #517)
+
+The one write path on an otherwise read-only server: a dashboard with a
+`::SUBMIT` button (dashboards skill) and `options.state` naming it gets
+`POST /api/submit`, append-only, one JSON-Lines record per click (never a
+new table, never SQL doing the writing). Requires `auth`; neither an API
+key nor an embed link without its own `user` can submit (`403`, a shared
+identity can't be held individually accountable). A dashboard in
+`dashboards`/`read`/`trainers.dashboards` additionally gets
+`viewer_state`/`viewer_state_latest` temps at query time — the signed-in
+viewer's own rows, or every viewer's for a named trainer group — scoped by
+what's inserted into that connection, never a `WHERE` filter.
+
+Retention and data-subject requests are the operator's job, offline (both
+refuse while a server still has the file's `flock`):
+
+```sh
+dashboard state export state.jsonl --user alice@example.com --format csv > alice.csv
+dashboard state erase  --user alice@example.com state.jsonl              # dry run
+dashboard state erase  --user alice@example.com state.jsonl --yes        # actually erase, audited
+```
+
+Full contract, limits and threat model: `docs/secure-serving.md` →
+"Per-viewer state"; the `::SUBMIT`/`viewer_state` SQL side is the
+dashboards skill's "Recording a viewer's answers".
 
 ## Deployment (`docs/deployment.md`)
 

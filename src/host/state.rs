@@ -540,7 +540,11 @@ pub struct NewRecord {
 }
 
 impl Record {
-    fn to_json(&self) -> serde_json::Value {
+    /// The exact on-disk shape, as a `Value` — `pub` so `dashboard state
+    /// export` (S5) can print the same encoding the store itself writes,
+    /// rather than hand-rolling a second copy of this field list that
+    /// could drift from it.
+    pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "v": self.v,
             "seq": self.seq,
@@ -617,6 +621,9 @@ impl Record {
 
 struct StoreState {
     file: std::fs::File,
+    /// The header line verbatim, without its trailing `\n` (see
+    /// [`Index::header_line`]).
+    header_line: String,
     records: Vec<Record>,
     by_user: HashMap<String, Vec<usize>>,
     next_seq: u64,
@@ -882,16 +889,19 @@ impl Store {
 
         let mut state = StoreState {
             file,
+            header_line: index.header_line,
             records: index.records,
             by_user: index.by_user,
             next_seq: index.next_seq,
             size_bytes: index.size_bytes,
         };
         if clean.is_empty() {
-            let header = format!(
-                "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{}\"}}\n",
+            let header_body = format!(
+                "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{}\"}}",
                 crate::host::access::rfc3339(std::time::SystemTime::now())
             );
+            let mut header = header_body.clone();
+            header.push('\n');
             state
                 .file
                 .write_all(header.as_bytes())
@@ -901,6 +911,7 @@ impl Store {
                 .sync_data()
                 .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
             state.size_bytes = header.len() as u64;
+            state.header_line = header_body;
         }
         Ok(Store {
             inner: Mutex::new(state),
@@ -972,6 +983,122 @@ impl Store {
         st.by_user.entry(rec.user.clone()).or_default().push(idx);
         st.records.push(rec.clone());
         Ok(rec)
+    }
+
+    /// Rewrite the file, dropping every record whose `user` is an exact
+    /// (case-sensitive) match for `user` — the same string `claims.user`
+    /// carries, never normalised, since the store never normalises it on
+    /// the way in either. Keeps the header line and every other record
+    /// byte-for-byte. Operator tooling only (`dashboard state erase`, plan
+    /// §1 "Operator access", §10 D7: a data-subject erasure request) —
+    /// never called from the serve path, which only ever appends.
+    ///
+    /// Remaining `seq` values are untouched: append-only only promises
+    /// *strictly increasing*, never contiguous, so a gap left by an erase
+    /// changes nothing for any other viewer's `gen` or cache key. Returns
+    /// the number of records removed (`0` leaves the file untouched —
+    /// no-op, not an error, so a caller can erase a user with no rows at
+    /// all without special-casing it).
+    ///
+    /// Caveat (documented in `docs/secure-serving.md`, not hidden): if the
+    /// erased user held the *highest* `seq` in the file, a later restart
+    /// recomputes `next_seq` from what's left on disk, so a future
+    /// submission may be assigned a `seq` an erased record once had.
+    /// Harmless for every live-server guarantee this plan makes — `seq`
+    /// only orders one server run's own cache/consistency decisions, and
+    /// `erase` only ever runs while the server is stopped (the file's
+    /// `flock` enforces that), so no in-memory cache or warm connection
+    /// survives across an erase to be confused by the reuse. Not a
+    /// permanent, forensic identifier: the audit log (`options.audit`),
+    /// when configured, is the durable record of when a submission or an
+    /// erasure happened, never `seq` itself.
+    ///
+    /// Blocked by [`Self::failed`] like [`Self::append`] is: erasing
+    /// against a store a previous write already corrupted would just make
+    /// the on-disk file disagree with whatever this process still has in
+    /// memory, the exact inconsistency `failed` exists to prevent.
+    pub fn erase_user(&self, user: &str) -> Result<usize, String> {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::unix::io::AsRawFd;
+        let mut st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if self.failed.load(Ordering::SeqCst) {
+            return Err("state store: unavailable (a previous write failed)".into());
+        }
+        let kept: Vec<Record> = st
+            .records
+            .iter()
+            .filter(|r| r.user != user)
+            .cloned()
+            .collect();
+        let removed = st.records.len() - kept.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        // One buffer, one `write_all` (same reasoning as `append`: narrow
+        // the crash window to "wrote everything" vs "wrote nothing", never
+        // a partial rewrite in between) — truncate only *after* the new
+        // content is fully written and synced, so a crash mid-write leaves
+        // the OLD content intact rather than a half-written new one.
+        let mut buf = st.header_line.clone();
+        buf.push('\n');
+        for r in &kept {
+            buf.push_str(&r.to_line());
+            buf.push('\n');
+        }
+        let new_size = buf.len() as u64;
+
+        // The fd is opened `O_APPEND` (needed by `append`: every append
+        // must land at the end no matter what any other write did first).
+        // That also makes every write on this fd ignore `seek`'s offset
+        // and always write at the current end of file — true even for
+        // `pwrite` on Linux, so there is no offset-based write that gets
+        // around it. Clear `O_APPEND` on the fd for exactly the duration
+        // of this rewrite (never racy: this whole function runs under
+        // `self.inner`'s lock, so no other write reaches this fd while
+        // the flag is off), then restore it unconditionally, success or
+        // failure, before any other caller can append again.
+        let fd = st.file.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(format!(
+                "state store erase failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_APPEND) } < 0 {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(format!(
+                "state store erase failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let wrote = (|| -> std::io::Result<()> {
+            st.file.seek(SeekFrom::Start(0))?;
+            st.file.write_all(buf.as_bytes())?;
+            st.file.sync_data()?;
+            st.file.set_len(new_size)?;
+            st.file.sync_data()?;
+            Ok(())
+        })();
+        // Always restore O_APPEND, whether the rewrite above succeeded or
+        // not — a stray write landing at some other offset afterwards
+        // would be worse than a failed erase.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFL, flags);
+        }
+        if let Err(e) = wrote {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(format!("state store erase failed: {e}"));
+        }
+        let mut by_user: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, r) in kept.iter().enumerate() {
+            by_user.entry(r.user.clone()).or_default().push(i);
+        }
+        st.records = kept;
+        st.by_user = by_user;
+        st.size_bytes = new_size;
+        Ok(removed)
     }
 
     pub fn is_failed(&self) -> bool {
@@ -1079,6 +1206,12 @@ fn recover_torn_tail(buf: &str) -> (&str, usize) {
 /// ahead of validation, so a misconfigured path to an unrelated existing
 /// file could be destroyed before its content was ever checked).
 struct Index {
+    /// The header line verbatim (without its trailing `\n`), empty when
+    /// `clean` had no header line at all (a brand-new file) — `Store::open`
+    /// fills this in once it writes a fresh header. Kept so `erase_user`
+    /// can rewrite the file without inventing a new `created` timestamp
+    /// for an existing store (plan §1 "Operator access", S5).
+    header_line: String,
     records: Vec<Record>,
     by_user: HashMap<String, Vec<usize>>,
     next_seq: u64,
@@ -1106,6 +1239,7 @@ fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
 
     let Some(header_line) = lines.next() else {
         return Ok(Index {
+            header_line: String::new(),
             records,
             by_user,
             next_seq,
@@ -1181,6 +1315,7 @@ fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
     }
 
     Ok(Index {
+        header_line: header_line.to_string(),
         records,
         by_user,
         next_seq,
@@ -1883,6 +2018,83 @@ mod tests {
         // A third append after reload continues the sequence.
         let r3 = s2.append(new_rec("alice", json!({"q1": "C"}))).unwrap();
         assert_eq!(r3.seq, 3);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_drops_only_that_users_rows_and_survives_a_reload() {
+        let p = store_path("erase-basic");
+        {
+            let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+            s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+            s.append(new_rec("bob", json!({"q1": "A"}))).unwrap();
+            s.append(new_rec("alice", json!({"q1": "C"}))).unwrap();
+            assert_eq!(s.erase_user("alice").unwrap(), 2);
+            assert_eq!(s.user_count("alice"), 0);
+            assert_eq!(s.rows_for_user("alice").len(), 0);
+            // bob's row, and its seq, are untouched.
+            assert_eq!(s.user_count("bob"), 1);
+            assert_eq!(s.rows_for_user("bob")[0].seq, 2);
+            assert_eq!(s.len(), 1);
+        }
+        // Reopen: the file on disk agrees — bob's row survives with its
+        // original seq (gaps are fine; strictly increasing is all that's
+        // promised). `next_seq` is recomputed from what's left on disk,
+        // so a fresh append resumes right after the highest *surviving*
+        // seq (2), not the highest ever assigned (3, erased alice's) —
+        // the documented reuse caveat on `erase_user` itself.
+        let s2 = reopen(&p, DEFAULT_MAX_MB).unwrap();
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2.rows_for_user("bob")[0].seq, 2);
+        let r4 = s2.append(new_rec("carol", json!({"q1": "A"}))).unwrap();
+        assert_eq!(r4.seq, 3);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_is_a_no_op_for_a_user_with_no_rows() {
+        let p = store_path("erase-noop");
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        s.append(new_rec("bob", json!({"q1": "A"}))).unwrap();
+        assert_eq!(s.erase_user("nobody-ever-submitted").unwrap(), 0);
+        assert_eq!(s.len(), 1);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_preserves_the_original_header_line_verbatim() {
+        let p = store_path("erase-header");
+        {
+            let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+            s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+            s.erase_user("alice").unwrap();
+        }
+        let raw = std::fs::read_to_string(&p).unwrap();
+        let header_line = raw.lines().next().unwrap();
+        let header: serde_json::Value = serde_json::from_str(header_line).unwrap();
+        let created = header["created"].as_str().unwrap().to_string();
+        assert!(!created.is_empty());
+        // A reload still accepts its own rewritten file (same header,
+        // nothing is "ours but unrecognisable" after an erase).
+        let s2 = reopen(&p, DEFAULT_MAX_MB).unwrap();
+        assert_eq!(s2.len(), 0);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_refuses_once_the_store_has_failed() {
+        let p = store_path("erase-failed");
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+        s.force_fail.store(true, Ordering::SeqCst);
+        assert!(s.append(new_rec("alice", json!({"q1": "C"}))).is_err());
+        assert!(s.is_failed());
+        let e = s.erase_user("alice").unwrap_err();
+        assert!(e.contains("unavailable"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 

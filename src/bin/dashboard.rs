@@ -64,6 +64,17 @@ const USAGE: &str = "usage:\n  \
                                              `anofox-visualization-web-*` release asset (default:\n  \
                                              next to this binary) — never downloaded.\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
+     dashboard state export <state.jsonl>    an options.state store (#517), offline — the\n  \
+               [--user U] [--format jsonl|csv] server must be stopped (the file's own flock\n  \
+               [--out FILE]                   refuses otherwise). --user scopes a\n  \
+                                             data-subject export; --format csv is one row per\n  \
+                                             recorded variable (seq, ts, user, dashboard,\n  \
+                                             submit, name, value, value_list), jsonl (default)\n  \
+                                             is the store's own record shape.\n  \
+     dashboard state erase --user U <file>   remove every record of U from the store, offline.\n  \
+               [--yes] [--audit stderr|f]    without --yes: dry run, nothing is written.\n  \
+                                             --audit (default stderr) gets one JSON line for\n  \
+                                             the attempt, outcome ok/error, never the values.\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
      dashboard --themes                      list the built-in themes\n  \
      dashboard --theme-css <T> [--dark]      print a theme's CSS design tokens\n  \
@@ -84,6 +95,7 @@ fn main() {
         Some("--check") => cmd_check(&args[1..]),
         Some("--site") => cmd_site(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
+        Some("state") => cmd_state(&args[1..]),
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
         Some("--themes") => cmd_themes(),
         Some("--svg") => cmd_svg(&args[1..]),
@@ -1804,6 +1816,298 @@ fn site_landing_csp(html: &str) -> String {
         &format!("<head><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"),
         1,
     )
+}
+
+/// `dashboard state export|erase` (#517 S5, plan §1 "Operator access", §10
+/// D7): batch, offline tooling against an `options.state` store file. The
+/// live server only ever appends — retention/erasure for a data-subject
+/// request is deliberately left to the operator, with this CLI as the
+/// supported way to do it. Both subcommands open the store through
+/// [`anofox_visualization::host::state::Store::open`], the exact same path
+/// (and `flock`) a server takes at start-up, so either one refuses outright
+/// — never silently races a running server's own appends — while the file
+/// is still open elsewhere.
+fn cmd_state(args: &[String]) {
+    const USAGE: &str = "usage:\n  \
+        dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE]\n  \
+        dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]";
+    match args.first().map(String::as_str) {
+        Some("export") => cmd_state_export(&args[1..]),
+        Some("erase") => cmd_state_erase(&args[1..]),
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Open an existing store file for CLI use. Never the auto-create
+/// [`anofox_visualization::host::state::Store::open`] itself does for a
+/// server at start-up — right there (a fresh server's first run), wrong
+/// here (an operator who mistyped a path would get a silently-created,
+/// empty store instead of a clear error). Never the server's own
+/// `max_mb` either — this tool doesn't have it and isn't re-enforcing a
+/// live cap, only reading or rewriting a file already on disk — so the
+/// cap passed here is generous enough that an operator's own existing
+/// file is never spuriously refused by it.
+fn cmd_state_open(path: &str) -> anofox_visualization::host::state::Store {
+    let p = std::path::Path::new(path);
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => {
+            eprintln!("{path}: not a regular file");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            std::process::exit(1);
+        }
+    }
+    let abs = std::fs::canonicalize(p).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        std::process::exit(1);
+    });
+    const CLI_MAX_MB: u64 = 1 << 20; // 1 TiB — effectively unlimited for this tool.
+    anofox_visualization::host::state::Store::open(&abs, CLI_MAX_MB).unwrap_or_else(|e| {
+        eprintln!("{path}: {e}");
+        std::process::exit(1);
+    })
+}
+
+/// `dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE]`.
+/// Read-only in spirit, but opened through the same `flock`'d
+/// [`cmd_state_open`] as `erase` — an export mid-write by a live server
+/// could otherwise observe a torn record.
+fn cmd_state_export(args: &[String]) {
+    let mut user: Option<String> = None;
+    let mut format = "jsonl".to_string();
+    let mut out: Option<String> = None;
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--user" => user = it.next().cloned(),
+            "--format" => format = it.next().cloned().unwrap_or(format),
+            "--out" => out = it.next().cloned(),
+            _ if !a.starts_with("--") && path.is_none() => path = Some(a.clone()),
+            _ => {
+                eprintln!("state export: unknown argument '{a}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(path) = path else {
+        eprintln!(
+            "usage: dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE]"
+        );
+        std::process::exit(2);
+    };
+    if format != "jsonl" && format != "csv" {
+        eprintln!("state export: --format must be 'jsonl' or 'csv', got '{format}'");
+        std::process::exit(2);
+    }
+    let store = cmd_state_open(&path);
+    let rows = match &user {
+        Some(u) => store.rows_for_user(u),
+        None => store.all_rows(usize::MAX),
+    };
+    let n = rows.len();
+    let body = if format == "csv" {
+        state_export_csv(&rows)
+    } else {
+        state_export_jsonl(&rows)
+    };
+    match &out {
+        Some(f) => {
+            if let Err(e) = std::fs::write(f, &body) {
+                eprintln!("{f}: {e}");
+                std::process::exit(1);
+            }
+        }
+        None => {
+            use std::io::Write;
+            std::io::stdout().write_all(body.as_bytes()).ok();
+        }
+    }
+    eprintln!(
+        "exported {n} record(s){}",
+        match &user {
+            Some(u) => format!(" for user '{u}'"),
+            None => String::new(),
+        }
+    );
+}
+
+/// The store's own on-disk encoding, one record per line — [`Record::to_json`]
+/// is the single source of truth for the field list, never duplicated here.
+fn state_export_jsonl(rows: &[anofox_visualization::host::state::Record]) -> String {
+    let mut out = String::new();
+    for r in rows {
+        out.push_str(&r.to_json().to_string());
+        out.push('\n');
+    }
+    out
+}
+
+/// A scalar `serde_json::Value` as the text a spreadsheet cell holds — the
+/// same rule `duckext::serve::state_scalar_text` applies to a recorded
+/// value server-side (kept independent: this binary doesn't depend on the
+/// `duckext` crate, and the rule is three lines).
+fn state_scalar_cell(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// `,`, `"` or a newline forces quoting, doubling any embedded `"` — the
+/// one escaping rule every CSV reader agrees on (RFC 4180).
+fn csv_field(s: &str) -> String {
+    if s.contains(['"', ',', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// One row per *recorded variable* (plan §5's `viewer_state` schema, not
+/// the store's own one-row-per-submission shape) — a spreadsheet a data
+/// subject or a reviewer can open directly, matching what a trainer's
+/// read-back panel would show for the same rows. `value` is the scalar as
+/// text, or a list's own JSON text; `value_list` is that list's items,
+/// `;`-joined (an item itself containing `;` would be rare — a MULTISELECT
+/// option — and is not disambiguated further; the `jsonl` export is the
+/// lossless one).
+fn state_export_csv(rows: &[anofox_visualization::host::state::Record]) -> String {
+    let mut out = String::from("seq,ts,user,auth,dashboard,submit,id,name,value,value_list\n");
+    for r in rows {
+        for (name, val) in &r.vars {
+            let (value, value_list) = match val {
+                serde_json::Value::Null => (String::new(), String::new()),
+                serde_json::Value::Array(items) => (
+                    val.to_string(),
+                    items
+                        .iter()
+                        .map(|it| {
+                            if it.is_null() {
+                                String::new()
+                            } else {
+                                state_scalar_cell(it)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(";"),
+                ),
+                other => (state_scalar_cell(other), String::new()),
+            };
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{}\n",
+                r.seq,
+                csv_field(&r.ts),
+                csv_field(&r.user),
+                csv_field(&r.auth),
+                csv_field(&r.dashboard),
+                csv_field(&r.submit),
+                csv_field(&r.id),
+                csv_field(name),
+                csv_field(&value),
+                csv_field(&value_list),
+            ));
+        }
+    }
+    out
+}
+
+/// `dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]`.
+/// Dry run by default (prints what *would* be removed, touches nothing) —
+/// `--yes` is the confirm flag plan §10 D7 asks for. A successful or failed
+/// *applied* erase always gets one line in the audit log (default
+/// `stderr`; `--audit FILE` for a file, same target syntax `options.audit`
+/// takes) — never a dry run, which changes nothing to audit.
+fn cmd_state_erase(args: &[String]) {
+    let mut user: Option<String> = None;
+    let mut yes = false;
+    let mut audit_target = "stderr".to_string();
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--user" => user = it.next().cloned(),
+            "--yes" => yes = true,
+            "--audit" => audit_target = it.next().cloned().unwrap_or(audit_target),
+            _ if !a.starts_with("--") && path.is_none() => path = Some(a.clone()),
+            _ => {
+                eprintln!("state erase: unknown argument '{a}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (Some(path), Some(user)) = (path, user) else {
+        eprintln!(
+            "usage: dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]"
+        );
+        std::process::exit(2);
+    };
+    let store = cmd_state_open(&path);
+    let n = store.rows_for_user(&user).len();
+    if !yes {
+        println!(
+            "dry run: would remove {n} record(s) for user '{user}' from {path} — pass --yes to actually erase"
+        );
+        return; // nothing written; the store's `flock` is released when it drops here.
+    }
+    match store.erase_user(&user) {
+        Ok(removed) => {
+            state_audit_line(
+                &audit_target,
+                "ok",
+                &user,
+                &format!("{removed} record(s) removed from {path}"),
+            );
+            println!("erased {removed} record(s) for user '{user}' from {path}");
+        }
+        Err(e) => {
+            state_audit_line(&audit_target, "error", &user, &e);
+            eprintln!("state erase: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One JSON audit line for an applied `state erase` — the same shape
+/// `options.audit`'s own events use (`src/host/auth/audit.rs`: `ts`,
+/// `audit`, `outcome`, …), but written directly through
+/// [`anofox_visualization::host::access::open_log`]/`rfc3339` rather than
+/// through `host::auth::audit::AuditLog`: that module sits behind the
+/// `auth` Cargo feature (needed by the locked server, not by this plain
+/// `dashboard` binary), and this is the one place the CLI needs an audit
+/// line, not a reason to pull `auth` (jsonwebtoken, rustls, …) into every
+/// build of `dashboard`. `target` is `"stderr"` or a file path, exactly
+/// like `options.audit`'s own `AuditLog::new`.
+fn state_audit_line(target: &str, outcome: &str, user: &str, detail: &str) {
+    use anofox_visualization::host::access::{open_log, rfc3339};
+    use serde_json::json;
+    let line = json!({
+        "ts": rfc3339(std::time::SystemTime::now()),
+        "audit": "state_erase",
+        "outcome": outcome,
+        "user": user,
+        "detail": detail,
+    })
+    .to_string();
+    match target.trim() {
+        "" | "stderr" | "-" => eprintln!("{line}"),
+        p => {
+            use std::io::Write;
+            let path = std::path::Path::new(p);
+            match open_log(path).and_then(|mut f| writeln!(f, "{line}")) {
+                Ok(()) => {}
+                Err(e) => eprintln!("--audit {p}: {e} (audit line: {line})"),
+            }
+        }
+    }
 }
 
 /// Print `SUMMARIZE` (types, min/max, approx-distinct, null %) for a source —
