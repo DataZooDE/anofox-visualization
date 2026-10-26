@@ -148,6 +148,7 @@ terminal.
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis) |
+| `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes and sizes; static output shows the last frame |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -201,7 +202,7 @@ terminal.
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
 | `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
-| `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer — requires a server with options.state; not active until that lands (#517 slice S2) |
+| `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server) |
 | `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
 | `::SUBMIT_DONE` |  | input | optional confirmation text shown after a successful ::SUBMIT |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
@@ -341,6 +342,67 @@ The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 (the first option, every option of a `::MULTISELECT`, both ends of a
 `::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
 render as on first load in the browser.
+
+### Recording answers (`::SUBMIT`, `viewer_state`, #517)
+
+Inputs change what a dashboard shows; `::SUBMIT` *records* what a viewer
+picked, append-only, one row per recorded variable per click — a quiz a
+learner answers, a check-in a field worker files, any form whose answers
+need to outlive the page. It needs a **locked server** (`serve --locked`)
+with `options.state` naming this dashboard — the browser builder and
+`serve`'s live-authoring backend only ever preview it (below).
+
+```sql
+SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
+SELECT '' AS note ::TEXT, 'Anything else?' ::LABEL;
+
+SELECT 'Check my answer' AS quiz_1 ::SUBMIT,       -- the button; column name = submit id
+       'q1, note'        AS r      ::SUBMIT_VARS,  -- which inputs it records (≤ 32 names)
+       'Saved — thanks.' AS d      ::SUBMIT_DONE;  -- optional text shown after a successful click
+```
+
+- The `::SUBMIT` statement's own `SELECT` is the author's gate: zero rows
+  hides the button entirely (an "only once", "after step 1" or "until a
+  date" condition in SQL), exactly one row shows it (its value is the
+  label), more than one row is a lint/server error. It runs **as the
+  viewer** — same variables, claims and `-- @requires`/tab gating as every
+  other panel — so what the page shows and what the server accepts always
+  agree.
+- Only `::DROPDOWN`, `::BUTTONS`, `::MULTISELECT`, `::TOGGLE`, `::NUMBER`,
+  `::DATE` and `::TEXT` inputs can be named in `SUBMIT_VARS` (`::DATERANGE`/
+  `::PERIOD` cover several variables each and are refused, a lint error).
+  The server re-runs each named input as the viewer and checks the
+  recorded value is one of its real options (or, for a credential-locked
+  variable — an embed link's own fixed `vars`, say — records that locked
+  value instead, list or scalar alike, never the viewer's own pick).
+- Re-submitting appends a new row; it never overwrites. `note` (`::TEXT`)
+  is capped at `options.state.text_max_chars` (default 1000) and is the
+  one input kind worth a moment's thought before showing it back on a
+  trainer's page (see the CSV/XLSX and markup notes in
+  `docs/secure-serving.md`'s state section).
+- **Reading it back**: a dashboard named in `options.state.dashboards`,
+  `.read` or `.trainers.dashboards` gets two server-provided temp objects,
+  scoped by construction — the rows inserted into *this* connection are the
+  only rows it can ever see, never a `WHERE __claim_user = …` filter:
+  ```sql
+  -- viewer_state: seq, ts, "user", dashboard, submit, name, value, value_list
+  -- viewer_state_latest: the same columns, one row per (user, dashboard, submit, name) — the current answer
+  SELECT dashboard::XAXIS, count(*)::BARCHART FROM viewer_state GROUP BY ALL ::TABLE;
+  ```
+  A plain state dashboard sees only the signed-in viewer's own rows (a "my
+  progress" page can read several dashboards' state). A
+  `options.state.trainers` dashboard additionally shows **every** viewer's
+  rows, but only to a viewer in `trainers.groups`/`trainers.users` — anyone
+  else opening the same trainer dashboard still gets only their own rows
+  (fails safe, never refused).
+- **Preview (browser builder, and `serve`'s live-authoring backend)**:
+  clicking appends to an in-page `viewer_state` the preview session creates
+  empty on load, with a banner saying submissions stay in the tab and are
+  never saved — useful for authoring the SQL above, never a substitute for
+  a real server when checking who can see what.
+- Full contract, limits, logging and the threat model: `docs/secure-serving.md`
+  → "Per-viewer state (`options.state`, #517)". Retention/erasure is the
+  operator's job — `dashboard state export|erase`, same document.
 
 ### Periods: presets, grain and comparison (`::PERIOD`)
 
@@ -1493,6 +1555,56 @@ or `::SIZE` (`map/bivariate-ignored`) — a statement is one layer.
   (0-indexed tertile levels); no `data-class`. The root carries
   `data-bivar-titles` (both measures' names, as a JSON array).
 
+#### Time maps (`::FRAME`)
+
+```sql
+SELECT state ::REGION, week AS "Week" ::FRAME,
+       round(100 * on_time / deliveries, 1) AS "On time" ::BARCHART, ' %'::YFORMAT,
+       '0,80,85,90,100'::CLASSES
+FROM dc_weekly_on_time;
+```
+
+`::FRAME` turns a choropleth or graduated-symbol map into a time map: one
+result holds **every** frame (a week, a date, …) of every feature, and the
+map shows one frame at a time. Static output (`--svg`, PNG, PDF, a DuckDB
+function, the HTML export) shows the **last** frame, named in the
+subtitle ("Week: 12") so it's always clear which one that is; the browser
+adds a Play bar under the map to step through the rest (arriving with
+M2f) — reduced motion keeps Play available (stepping through time *is*
+the content) with instant, 1.5 s-apart steps, never autoplaying.
+
+- **Frame order:** ascending when every `::FRAME` value is numeric,
+  chronological when every value looks like a date, else first
+  appearance in the result (the SQL `ORDER BY`).
+- **A frame's view:** every feature appears in every frame — a feature
+  with no row in a given frame is drawn as no data (areas: the hatch
+  pattern; points/symbols: not drawn at all) rather than vanishing, so the
+  map's extent never moves between frames.
+- **Shared scales:** the measure's colour domain and `::CLASSES` breaks,
+  a `::CATEGORY`'s levels, and a graduated `::SIZE`'s domain are all
+  computed once over **every** frame and held fixed — the same value
+  gets the same colour/size whichever frame is on screen, the legend
+  never drops a level or re-wraps as counts change. A feature's key for
+  the browser's cross-frame animation (M2f) is its `::REGION` code, its
+  `::LAT`/`::LON` pair, or its WKT geometry — `::XAXIS` is ignored on a
+  time map (`map/frame-xaxis`).
+- **Duplicates:** a repeated (feature, frame) row keeps its first row
+  (`map/frame-duplicate`).
+- **Caps:** over 200 distinct `::FRAME` values, the last 200 are kept
+  (`map/too-many-frames`); over 100,000 feature × frame cells, the last
+  frames that fit are kept (`map/frame-cells`) — aggregate to a coarser
+  period instead.
+- **Maps only:** `::FRAME` on any other chart kind is ignored
+  (`frame/not-a-map`; the generic bar/line frame player is a follow-up).
+  `::STORY` is ignored on a frame map (`map/frame-story`) — Play already
+  steps through the frames. WKT geometry repeated per frame over 5 MB
+  total gets a note (`map/frame-wkt`) to join a `::REGION` code or one
+  geometry table instead.
+- **Attributes:** the root `<svg>` carries `data-frames` (every frame's
+  label, JSON), `data-frame` (the one shown, 0-indexed) and
+  `data-frame-name` (the `::FRAME` column's display name); each feature's
+  `data-row` follows the frame actually shown, like `::LINK` expects.
+
 #### Density on a planar scatter (`::HEXBIN` off the map)
 
 ```sql
@@ -1866,7 +1978,7 @@ the same verdict for every case):
 |---|---|---|
 | `data:image/(png\|jpeg\|jpg\|gif\|webp\|svg+xml)` | yes | followed by `;` or `,` |
 | `https://…` | yes | never `http:` — mixed content on a served https page |
-| a relative path | yes, if it stays inside the folder | no scheme, no leading `/` or `//`, no `\`, no `..`/`.` segment, no segment starting with `.`; a warning unless it starts with `assets/` (where `--site`/the locked server serve files — a later PR) |
+| a relative path | yes, if it stays inside the folder | no scheme, no leading `/` or `//`, no `\`, no `..`/`.` segment, no segment starting with `.`, no `%`; a warning unless it starts with `assets/` — the dashboards folder's `assets/` subfolder is the only one ever served/copied, see "Where `assets/` files come from" below |
 | anything else | no | the alt text shows in a muted box, never a broken-image icon |
 
 Quotes, `<`, `>`, `(`, `)`, backticks and control characters are never
@@ -1904,26 +2016,44 @@ any other panel — this is panel composition (`src/dashboard.rs`), not a new
 SVG writer for charts (plotting stays through ggplot-rs). `data:` sources are
 embedded as-is; `https:` is kept as a link (it may not show offline, and the
 assistant's preview CSP blocks it — `image/https-offline`); a relative path
-currently draws the alt-text placeholder (serving `assets/` files for static
-output is a later PR). Markdown images in static output render as their alt
-text in brackets (`[decision flow …]`) rather than as pixels. The browser's
-⤓ HTML export fetches and inlines any non-`data:` image so the download works
-fully offline (falling back to the alt text if that fetch fails, e.g. CORS
-on an `https:` source).
+under `assets/` is inlined as a `data:` URI (below) — missing or refused, it
+draws the alt-text placeholder. Markdown images in static output render as
+their alt text in brackets (`[decision flow …]`) rather than as pixels. The
+browser's ⤓ HTML export fetches and inlines any non-`data:` image so the
+download works fully offline (falling back to the alt text if that fetch
+fails, e.g. CORS on an `https:` source, or a non-image response).
+
+**Where `assets/` files come from.** A relative path means a file in
+`assets/` next to the dashboards, never anywhere else in that folder (which
+also holds `.sql`, `policy.json`, `blueprint.json`) — a path outside `assets/`
+is a `not-in-assets` warning and never resolves, on any host:
+
+| Host | Reads `assets/` from |
+|---|---|
+| Locked server (`anofox_serve_dashboards`) | `GET /d/<id>/assets/<rest>` — the same login and scope as the dashboard page, `options.max_asset_bytes` (default 5 MiB); see docs/secure-serving.md |
+| `--site` | copies `<folder>/assets/` to `<out>/assets/`, refusing the whole publish on a symlink or a non-image/oversized file |
+| `dashboard file.sql out.html` / `--svg` | `<dir of file.sql>/assets/<rest>`, inlined as a `data:` URI |
+| `serve --dashboards <dir>` (the script-free page) | `<dir>/assets/<rest>`, inlined as a `data:` URI |
+| Browser builder (no server) | unchanged — resolves against the app's own URL |
+| Authoring server (`serve [db]`, `anofox_serve`) | not served — a relative `::IMAGE` there draws the placeholder |
+
+Every reader validates the same way: the resolved path must stay inside
+`assets/` (symlinks included), the extension must be `png`/`jpg`/`jpeg`/
+`gif`/`webp`/`svg`, and the file's own bytes must actually sniff as that kind
+of image — not just its extension (`src/image.rs::read_asset`).
 
 **Limits.** `{{col}}`/`{{col:fmt}}` is **not** filled inside a Markdown image
 `src` (`markdownWithValues` strips tokens inside tags) — compute the path in
-an `::IMAGE` instead (`markdown/placeholder-in-image`, a warning). The
-authoring server (`serve [db]`, `anofox_serve`) does not yet serve a
-dashboard folder's `assets/`, so a relative `::IMAGE` there also shows the
-placeholder.
+an `::IMAGE` instead (`markdown/placeholder-in-image`, a warning).
 
 **Lint codes:** `image/bad-src`, `image/outside-folder` (errors);
 `image/not-in-assets`, `image/svg-no-size`, `image/too-large`, `image/empty`,
-`image/no-alt`, `image/many`, `image/https-offline` (warnings);
-`markdown/image-bad-src` (error); `markdown/image-not-in-assets`,
-`markdown/image-svg-no-size`, `markdown/image-too-large`,
-`markdown/image-no-alt`, `markdown/placeholder-in-image` (warnings).
+`image/no-alt`, `image/many`, `image/missing-file` (a relative `assets/…`
+that doesn't exist — only when `--check`/`--site` know the folder),
+`image/https-offline` (warnings); `markdown/image-bad-src` (error);
+`markdown/image-not-in-assets`, `markdown/image-svg-no-size`,
+`markdown/image-too-large`, `markdown/image-no-alt`,
+`markdown/placeholder-in-image` (warnings).
 
 **Images from data are a trust boundary worth knowing about.** A `::MARKDOWN`
 box built from a text column can point an `<img>` at any `https:` host —
@@ -2648,6 +2778,74 @@ characters), `tour/too-many-steps` (warning: over 20 steps), `tour/too-many`
 `--  target: text` line right after some other header line, with no
 `-- @tour` above it — likely a mis-indented tour; as written, it's read as
 an ordinary comment).
+
+### Remembering progress for a signed-in viewer (#525)
+
+Both `::GUIDE_STEP` sequences and `-- @tour` tours are client-only by
+default: "furthest step" and "tour seen" live in this browser's
+`localStorage`. On a server with `options.state` (`::SUBMIT`, see "Recording
+answers" above and `docs/secure-serving.md`), a signed-in viewer's progress
+can instead be remembered across devices — with **no new endpoint and no
+change to what Next does**. Both patterns are ordinary SQL and comments,
+reading `viewer_state` the same way a `::GATE` already can; neither needs a
+server change.
+
+**A tour that doesn't autostart twice.** Give the `::SUBMIT` that marks the
+tour done the **same id as the tour itself** (its own column alias), and
+gate it "record once" the usual way:
+
+```sql skip
+-- @tour cockpit_intro Cockpit in three steps
+--   page: This page lists every monitored model and what to do next.
+--   severity_kpi: This is a model's severity.
+-- @tour_autostart cockpit_intro
+
+-- @name done_toggle
+SELECT true AS done ::TOGGLE;
+SELECT 'Got it' AS cockpit_intro ::SUBMIT, 'done' AS r ::SUBMIT_VARS
+FROM (SELECT 1) t
+WHERE NOT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'cockpit_intro');
+```
+
+Once the viewer clicks that button, the statement returns zero rows and its
+panel disappears — exactly like any other empty-gated input. The browser
+reads that absence (no extra request: the `::SUBMIT` is already a
+statement in the page's own plan) to skip `-- @tour_autostart` on this
+viewer's next visit, from any browser, as long as they're signed in and
+`options.state` is enabled for this dashboard. Keep that panel out of a
+hidden `::TAB`/`::SUBTAB`/`::GUIDE_STEP` pane — a panel that simply hasn't
+been lazily rendered yet looks the same as one that returned zero rows.
+Without a matching `::SUBMIT`, or when `options.state` isn't on, tours keep
+working exactly as before — `localStorage` only.
+
+**Resuming a guide sequence.** Record progress with an explicit `::SUBMIT`
+on each gated step — never on Next itself, which stays pure navigation —
+then offer a link back to it from the intro, shown only once there's
+somewhere to resume to:
+
+```sql skip
+SELECT 'Drift sandbox' ::GUIDE_STEP,
+       getvariable('q2') = 'measured error' ::GATE,
+       'Answer question 2 correctly to go on' ::GATE_MESSAGE;
+SELECT v AS q2 ::DROPDOWN, l ::OPTION_LABEL FROM
+  (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l)
+  ORDER BY o;
+SELECT 'Mark step 2 done' AS step2_done ::SUBMIT, 'q2' AS r ::SUBMIT_VARS
+FROM (SELECT 1) t
+WHERE getvariable('q2') = 'measured error'
+  AND NOT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'step2_done');
+
+-- on step 1, the intro:
+SELECT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'step2_done') ::SHOW_IF;
+SELECT '[Resume at step 2 →](?v.lesson=2)' ::MARKDOWN;
+```
+
+`?v.<name>=n` is the same URL the step strip already writes, so clicking the
+link is an ordinary reload, not a new mechanism; a sequence with more than
+one recorded step chains the same `EXISTS` check per step (or a `CASE`
+picking the highest one recorded) to compute which step number to link to.
+The step variable's own default stays `1`: nothing here changes what step a
+visit without a stored answer, or without a sign-in, lands on.
 
 ### Loading, empty, error and "not available" panels
 
@@ -4117,7 +4315,7 @@ wasm exports (`src/wasm.rs`):
 | Export | Purpose |
 |--------|---------|
 | `plan(script)` | statements + roles as JSON: `[{setup, sql, roles: [[i, "ROLE", name]]}]` |
-| `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), or a render context `{"primary","theme","variant","locale"}`; `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
+| `render_panel(rows_json, roles_json, width, height, primary, zoom_json)` | one panel → SVG. `primary` = brand `rrggbb` (or `""`), or a render context `{"primary","theme","variant","locale","frame"}` (`"frame"`: which `::FRAME` to draw on a time map, 0-indexed — absent/negative/non-integer means the last frame); `zoom_json` = `[x0,x1,y0,y1]` (or `""`). Errors come back as a small error SVG. |
 | `resolve_dashboard_theme(spec, chrome_json)` | a theme spec (+ `{title,brand,logo,favicon,locale}`) → `{ok, name, mode, light:{css,…}, dark:{css,…}}` |
 | `format_number_locale(value, fmt, locale)` / `format_date_locale(iso, locale)` | KPI / table formatting in a dashboard locale |
 | `map_bounds(rows_json, roles_json, width, height)` | the projected window an unzoomed map panel shows (`[x0, x1, y0, y1]`, y up), the zoom UI's start |

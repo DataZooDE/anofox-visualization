@@ -12,7 +12,9 @@ description: >
   (policy.json: row filters, deny / null / mask / hash columns,
   table_functions, functions, policy_key_env), what a policy refuses,
   `dashboard --check --policy` (policy/* lints), the request log and the
-  audit log. Use when the user asks for "login / SSO / OIDC / Keycloak /
+  audit log, and which identities may submit through options.state's
+  ::SUBMIT (a personal sign-in only — no API key, no embed link without
+  its own user, #517). Use when the user asks for "login / SSO / OIDC / Keycloak /
   Entra / Auth0", "row-level security", "each customer / tenant / region
   sees only its rows", "hide or mask a column", "embed a dashboard in our
   app", "API key for a script", "audit who looked at what", or gets a 401 /
@@ -84,6 +86,20 @@ GROUP BY ALL ORDER BY 2 DESC;
 - `-- @vars region, channel, selected` in a dashboard's header limits the variables a viewer may set (others are dropped). List its inputs, named selections and `selected`.
 - Without `auth` the claims are `NULL`, so claim-filtered panels return no rows (not every row).
 - The result cache, single-flight and cancel tickets are keyed per viewer's claims.
+
+## Identity and `options.state` (`::SUBMIT`, #517)
+
+`options.state` (serving skill) — per-viewer, append-only answers — reuses
+these same identities, with one extra rule: only a **personal** sign-in may
+submit. An API key and an embed link opened without its own `user` (a
+*shared* identity, `embed:<id>`) are refused `403 "submissions need a
+personal sign-in"` even though both can read dashboards fine — a submission
+needs one accountable person behind it, not "whoever holds this link/key
+today". A credential-locked variable (an embed link's own `vars`, a claim
+mapped onto a variable) is recorded as the locked value, never the viewer's
+own pick — list-valued (`::MULTISELECT`) exactly like scalar. The audit log
+(below) gets a `submit` event the same way it gets `login`/`auth` ones,
+never the answers themselves.
 
 ## Row and column policies (`policy`)
 

@@ -131,7 +131,10 @@ start() {
       \"policy\": \"none\",
       \"auth\": {\"mode\": \"proxy\", \"shared_secret_env\": \"ANOFOX_PROXY_SECRET\",
                  \"trusted_proxies\": [\"127.0.0.1\"], \"header_groups\": \"X-Forwarded-Groups\"},
-      \"log\": $(j "$RUN/requests.jsonl")"
+      \"log\": $(j "$RUN/requests.jsonl"),
+      \"audit\": $(j "$RUN/audit.jsonl"),
+      \"state\": {\"path\": $(j "$RUN/state.jsonl"), \"dashboards\": [\"tutorial\"],
+                  \"trainers\": {\"dashboards\": [\"progress\"], \"groups\": [\"admins\"]}}"
   fi
 
   cat >"$RUN/session.sql" <<SQL

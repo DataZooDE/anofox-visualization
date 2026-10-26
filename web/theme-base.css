@@ -492,6 +492,11 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .submit-error:empty{display:none}
 .submit-error.submit-reason{color:var(--ax-muted)}
 .submit-preview-note{grid-column:1/-1;margin:0 0 .3rem;font-size:.8rem;color:var(--ax-badge-warn-ink);background:var(--ax-badge-warn-bg);border-radius:8px;padding:.4rem .7rem}
+/* #551: a focusable link in a ::SUBMIT error line, to the input it names. */
+.submit-error-link{background:none;border:0;padding:0;font:inherit;font-weight:600;color:var(--ax-link);text-decoration:underline;cursor:pointer}
+.submit-error-link:focus-visible{outline:none;box-shadow:var(--ax-focus-ring);border-radius:4px}
+/* #551: the input a ::SUBMIT error names, until its own value changes. */
+.control [aria-invalid="true"]{outline:2px solid var(--ax-negative);outline-offset:2px;border-radius:6px}
 
 /* ---- tabs ---- */
 .tabbar{grid-column:1/-1;display:flex;gap:.25rem;border-bottom:1px solid var(--ax-line);margin:0 0 .9rem}

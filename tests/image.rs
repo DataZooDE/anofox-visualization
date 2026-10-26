@@ -142,6 +142,86 @@ fn relative_path_draws_the_placeholder_not_a_broken_image() {
     );
 }
 
+/// A scratch `<dir>/assets/` folder, removed on drop — #514 PR B's
+/// `DashboardOptions.asset_root` tests need a real file to read.
+struct AssetsDir(std::path::PathBuf);
+impl AssetsDir {
+    fn new(tag: &str) -> AssetsDir {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-image-render-test-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        AssetsDir(dir)
+    }
+    fn assets_root(&self) -> std::path::PathBuf {
+        self.0.join("assets").canonicalize().unwrap()
+    }
+}
+impl Drop for AssetsDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn a_relative_asset_under_the_given_root_is_inlined() {
+    let d = AssetsDir::new("inline");
+    let bytes = png_bytes(4, 2);
+    std::fs::write(d.0.join("assets").join("x.png"), &bytes).unwrap();
+    let script = "SELECT 'assets/x.png'::IMAGE, 'alt text'::ALT;";
+    let mut provider = Steps::new(vec![vec![("c0", s("assets/x.png")), ("c1", s("alt text"))]]);
+    let opts = DashboardOptions {
+        asset_root: Some(d.assets_root()),
+        ..DashboardOptions::default()
+    };
+    let svg = render_dashboard_svg(script, &mut provider, &opts).unwrap();
+    assert!(svg.contains("<image "), "no <image> element: {svg}");
+    let want = data_uri("image/png", &bytes);
+    assert!(
+        svg.contains(&want),
+        "the file's own data: URI should be inlined, got: {svg}"
+    );
+    let (w, h) = image_wh(&svg).expect("width/height attrs");
+    assert!(
+        (h / w - 0.5).abs() < 0.02,
+        "the file's own aspect should drive the layout: {w}x{h} (want 2:1)"
+    );
+}
+
+#[test]
+fn a_relative_asset_missing_or_outside_assets_still_draws_the_placeholder() {
+    let d = AssetsDir::new("missing");
+    let opts = DashboardOptions {
+        asset_root: Some(d.assets_root()),
+        ..DashboardOptions::default()
+    };
+    // Not written to disk: `read_asset` refuses it (not-found).
+    let script = "SELECT 'assets/missing.png'::IMAGE, 'nope'::ALT;";
+    let mut provider = Steps::new(vec![vec![
+        ("c0", s("assets/missing.png")),
+        ("c1", s("nope")),
+    ]]);
+    let svg = render_dashboard_svg(script, &mut provider, &opts).unwrap();
+    assert!(!svg.contains("<image "), "missing file must not inline");
+    assert!(svg.contains("nope"));
+
+    // `src_ok` itself rejects a traversal attempt before a root is ever
+    // consulted — a root being configured must never relax that.
+    let script = "SELECT 'assets/../x.png'::IMAGE, 'nope too'::ALT;";
+    let mut provider = Steps::new(vec![vec![
+        ("c0", s("assets/../x.png")),
+        ("c1", s("nope too")),
+    ]]);
+    let svg = render_dashboard_svg(script, &mut provider, &opts).unwrap();
+    assert!(!svg.contains("<image "), "traversal must not inline");
+    assert!(svg.contains("nope too"));
+}
+
 #[test]
 fn bad_src_also_draws_the_placeholder() {
     let script = "SELECT 'javascript:alert(1)'::IMAGE, 'nope'::ALT;";

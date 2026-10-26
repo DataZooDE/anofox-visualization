@@ -7,3 +7,8 @@ WHERE (region IN (SELECT region FROM entitlements WHERE viewer = getvariable('__
        OR list_contains(getvariable('__claim_groups'), 'admins'))
   AND (getvariable('channel') IS NULL OR channel = getvariable('channel'))
 GROUP BY region ORDER BY region;
+-- #554 review item 4: a relative assets/ image, so the embed e2e (p3.mjs)
+-- can check it loads for a session-header (embed) viewer via the blob:
+-- fetch path, not a bare <img src> that would 401 (an <img> can't carry
+-- X-Anofox-Session).
+SELECT 'assets/rls-logo.svg'::IMAGE, 'Company mark'::ALT;

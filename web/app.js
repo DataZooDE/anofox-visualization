@@ -6319,6 +6319,31 @@ function markTourSeen(id) {
     localStorage.setItem(`dp:tour-seen:${tourDashKey()}:${id}`, "1");
   } catch (_) {}
 }
+// #525: a cross-device "seen" signal for a signed-in viewer, in place of
+// localStorage. The author records a tour's completion with an ordinary
+// `::SUBMIT` (#517) whose own id — its column alias, the same name plan
+// §4.6's audit log calls "the submit id" — equals this tour's id, gated the
+// usual "record once" way (e.g. `WHERE NOT EXISTS (SELECT 1 FROM
+// viewer_state WHERE submit = '<id>')`): once recorded, that statement
+// returns zero rows, so its panel is simply absent from the DOM, exactly
+// like any other empty-gated input (plan §6) — no extra request, since the
+// `::SUBMIT` panel is a statement in the dashboard's own plan and was
+// already fetched as part of this render. Author-facing contract (DOCS.md):
+// keep that panel out of a hidden tab/sub-tab/::GUIDE_STEP, or its absence
+// could just mean "not lazily rendered yet", not "already submitted".
+// Returns null when it can't tell (not served, `options.state` disabled, no
+// `::SUBMIT` with this id, or the plan isn't parsed yet) — callers then fall
+// back to `tourSeen()`/localStorage, same as before #525.
+function tourSeenViaState(id) {
+  if (!(window.__served && window.__served.state && window.__served.state.enabled)) return null;
+  if (!Array.isArray(servedPlan)) return null;
+  const idx = servedPlan.findIndex((s) => {
+    const r = Array.isArray(s.roles) && s.roles.find((rr) => rr[1] === "SUBMIT");
+    return r && r[2] === id;
+  });
+  if (idx < 0) return null;
+  return !document.querySelector(`.dash .panel[data-stmt="${idx}"]`);
+}
 
 // This dashboard's `-- @tour`/`-- @tour_autostart` header (parsed fresh —
 // cheap, and the builder's SQL can change at any moment); `null` on a parse
@@ -6781,9 +6806,15 @@ async function tourAfterSwap() {
     return;
   }
   const autoId = meta.tour_autostart;
-  if (autoId && meta.tours.some((t) => t.id === autoId) && !tourSeen(autoId)) {
-    markTourSeen(autoId);
-    await tourStart(autoId);
+  if (autoId && meta.tours.some((t) => t.id === autoId)) {
+    // #525: a matching ::SUBMIT's state (cross-device) wins when it has an
+    // opinion; otherwise this browser's localStorage, as before #525.
+    const viaState = tourSeenViaState(autoId);
+    const seen = viaState === null ? tourSeen(autoId) : viaState;
+    if (!seen) {
+      markTourSeen(autoId);
+      await tourStart(autoId);
+    }
   }
 }
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
@@ -8925,6 +8956,21 @@ const dpLazyParams = new URLSearchParams(location.search);
 const dpLazyTabs = dpLazyParams.get("lazy") !== "0";
 const dpLazyPrefetch = dpLazyParams.get("prefetch") !== "0";
 const dpLazy = { gen: 0, tail: Promise.resolve(), cur: null, building: null, pumping: false, wake: null };
+// #554 review (N2, second re-review): a run id for embed blob: images,
+// independent of dpLazy's own `gen` (a different concern — the lazy-tab
+// job queue). Each runOnce() gets one `imgRunId` (below); mkImg's fetch
+// closes over it. `dpImgSwappedRuns` records which run ids have already
+// reached their own swap-time sweep — a blob that resolves *after* its
+// own run's sweep (late network response, still never attached) can then
+// tell itself apart from one resolving *before* it (where the sweep,
+// which already ran for every id in this set, is simply never coming
+// back to look at it again) and self-revoke instead of leaking. Capped
+// so a long session's run count can't grow this without bound; the
+// trimmed ids are always older than any run whose own fetches could
+// still be in flight (fetches don't outlive their own page lifetime by
+// more than a handful of runs).
+let dpImgRunSeq = 0;
+const dpImgSwappedRuns = new Set();
 let dpSetupRan = new Map(); // setup SQL run since the last full run -> its varSig
 let dpSetupEpoch = 0; // bumped by a setup statement that may change what a query read
 let dpCreated = new Set(); // objects setup created since the last full run
@@ -9280,6 +9326,9 @@ async function runOnce(fresh = true, pv = preview) {
   // concurrent previewExit() may change under us (see run()'s own capture
   // of `pv`, and clearApplyHold()/previewExit() nearby).
   runPreviewToken = pv;
+  // #554 review (N2): this run's own id for embed blob: images — see
+  // dpImgSwappedRuns' own comment.
+  const imgRunId = ++dpImgRunSeq;
   const tRun = performance.now();
   const grid = $("grid");
   const motion = dpMotion; // what started this run (a drill, a drill-through)
@@ -10009,8 +10058,65 @@ async function runOnce(fresh = true, pv = preview) {
             img.loading = "lazy";
             img.decoding = "async";
             img.draggable = false;
-            img.src = url;
-            img.onerror = () => img.isConnected && img.replaceWith(missing(alt));
+            // #554 review N1: `parentNode`, not `isConnected` — this
+            // panel can still be sitting in the detached `newGrid` (not
+            // yet swapped into `.dash`) when a src fails, and `replaceWith`
+            // works fine on a detached parent too (the swap, whenever it
+            // happens, then carries the alt box in instead of a broken
+            // image). `isConnected` here would silently drop the failure
+            // on the floor — no image, no alt box either.
+            img.onerror = () => img.parentNode && img.replaceWith(missing(alt));
+            // #554 review item 4: an embed page's session travels as the
+            // X-Anofox-Session header (runSqlInner, below), not a cookie —
+            // an <img src> can't send a header, so a relative assets/
+            // image 401s for an embed viewer. assetUrl() only ever
+            // produces a same-origin /d/<id>/assets/… path for this case
+            // (never for data:/https:, which must never carry the
+            // session to a third party anyway), so that's the one case
+            // fetched here instead, with the header, and shown from a
+            // blob: URL (img-src already allows blob: — host/serving.rs's
+            // page_csp). The dash-level render-swap (further down)
+            // revokes data-anofox-blob on whatever this run discards.
+            if (servedMode && window.__served?.session && url.startsWith("/d/")) {
+              // #554 review (S1): `mkImg` runs while this panel is still
+              // part of the *detached* `newGrid` — it's only swapped into
+              // `.dash` later, after the rest of this run's panels have
+              // their own `/api/panel` awaits. So the common case is
+              // exactly "the fetch resolves before the swap", not a rare
+              // race: `img.isConnected` is false for essentially every
+              // image on every run, and gating `src` on it (as this used
+              // to) left the `<img>` with no `src` at all — no image, and
+              // with no `src`, `onerror` never fires either, so not even
+              // the alt box. `src`/`dataset.anofoxBlob` are now always
+              // set on success, detached or not: a detached `<img>` with
+              // `src` set renders correctly the moment it's attached
+              // (`blob:` is already resolved locally, no new fetch on
+              // attach). Cleanup for whichever `<img>`s this run discards
+              // — the kept-vs-replaced decision isn't made until the
+              // swap, well after this promise can resolve — is mostly the
+              // swap-time sweep's job, below, EXCEPT for one case the
+              // sweep (synchronous, runs once) can't see: a fetch that
+              // resolves *after* this run's own sweep already ran (a slow
+              // response, or this run's swap discarded the panel before
+              // the fetch even got back). `dpImgSwappedRuns.has(imgRunId)`
+              // is exactly that signal — once true, this run's sweep is
+              // never coming back, so a disconnected `img` here is
+              // garbage now, not "not yet swapped" (review N2).
+              fetch(url, { headers: { "X-Anofox-Session": window.__served.session }, credentials: "same-origin" })
+                .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("http " + r.status))))
+                .then((b) => {
+                  const blobUrl = URL.createObjectURL(b);
+                  if (!img.isConnected && dpImgSwappedRuns.has(imgRunId)) {
+                    URL.revokeObjectURL(blobUrl);
+                    return;
+                  }
+                  img.dataset.anofoxBlob = blobUrl;
+                  img.src = blobUrl;
+                })
+                .catch(() => img.parentNode && img.replaceWith(missing(alt)));
+            } else {
+              img.src = url;
+            }
             return img;
           };
           for (const row of rows.length ? rows : [null]) {
@@ -10963,6 +11069,21 @@ async function runOnce(fresh = true, pv = preview) {
   // re-places them once the swap has settled.
   unplaceViewHeaderBars(dash);
   const newRoots = [newGrid, tabBar, tabWrap];
+  // #554 review (S1): every embed-fetched assets/ <img> this run might
+  // discard — the old ones still in `.dash`, *and* any new ones (still
+  // detached in `newRoots` right now) whose fetch already resolved to a
+  // blob: URL before this swap runs (mkImg always sets `src` as soon as
+  // its fetch resolves, detached or not — see its own comment). A new
+  // image can be discarded too: `patchSlots` may decide to keep the *old*
+  // DOM for an unchanged panel instead of the new one this run just
+  // built. Checked by `.isConnected` after the swap below, so this needs
+  // no knowledge of which path (patched or wholesale) ran, or of whether
+  // a given image resolved before or after the swap — only every image
+  // whose fetch resolved *before* it.
+  const candidateBlobImgs = [
+    ...dash.querySelectorAll("img[data-anofox-blob]"),
+    ...newRoots.flatMap((r) => (r ? [...r.querySelectorAll("img[data-anofox-blob]")] : [])),
+  ];
   for (const p of slotsOf(newRoots)) if (p.matches(".panel")) p._sig = p.outerHTML;
   const shape = shapeOf(newRoots);
   const swaps = []; // [old, new] panels this run replaced
@@ -10977,6 +11098,16 @@ async function runOnce(fresh = true, pv = preview) {
     if (!fresh) for (const p of slotsOf(newRoots)) if (old.has(p.dataset.stmt)) swaps.push([old.get(p.dataset.stmt), p]);
   }
   dash._shape = shape;
+  for (const img of candidateBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
+  // #554 review (N2): mark this run's own sweep as having happened, so a
+  // same-run fetch that resolves *after* this point (too slow to make
+  // this sweep, or never attached because this run's own swap just
+  // discarded it) can tell itself apart and revoke on arrival instead of
+  // leaking — see mkImg's own comment. Capped well past any realistic
+  // number of fetches still in flight from an old run by the time this
+  // many newer runs have happened.
+  dpImgSwappedRuns.add(imgRunId);
+  if (dpImgSwappedRuns.size > 50) dpImgSwappedRuns.delete(dpImgSwappedRuns.values().next().value);
   performance.mark("dp:swap");
   dpLazy.cur = lazy;
   // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and
@@ -11844,6 +11975,11 @@ function makeControl(meta, bar) {
   if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
   const wrap = document.createElement("label");
   wrap.className = "control";
+  // #551: a ::SUBMIT panel's 400 error links back to *this* variable's own
+  // control — DATERANGE/PERIOD never carry it (the server already refuses
+  // to record either kind; see duckext serve.rs validate_recorded_value),
+  // so only the single-varname kinds below get it.
+  if (meta.varname) wrap.dataset.varname = meta.varname;
   wrap.textContent = captionColon(meta.caption || meta.varname || "date");
   if (meta.kind === "DATERANGE") {
     const mk = (k) => {
@@ -11912,6 +12048,7 @@ function makeControl(meta, bar) {
     const sel = new Set(dpVars[meta.varname] || []);
     const cont = document.createElement("div");
     cont.className = "control";
+    cont.dataset.varname = meta.varname; // #551
     const cap = document.createElement("span");
     cap.textContent = captionColon(meta.caption || meta.varname || "");
     cont.appendChild(cap);
@@ -12044,6 +12181,7 @@ function makeSearchableDropdown(meta) {
   const varname = meta.varname;
   const cont = document.createElement("div");
   cont.className = "control";
+  cont.dataset.varname = varname; // #551
   const cap = document.createElement("span");
   cap.textContent = captionColon(meta.caption || varname || "");
   cont.appendChild(cap);
@@ -12292,6 +12430,7 @@ function refocus(key, el) {
 function mkButtons(meta) {
   const cont = document.createElement("div");
   cont.className = "control";
+  cont.dataset.varname = meta.varname; // #551
   const cap = document.createElement("span");
   cap.textContent = captionColon(meta.caption || meta.varname || "");
   cap.id = "dp-seg-" + meta.varname;
@@ -15103,11 +15242,32 @@ function imageSrc(raw) {
   }
   return assetUrl(u);
 }
-// A relative image path (already validated by imageSrc) → the URL to fetch
-// it from. PR A (this): unchanged — resolves against the page's own URL, as
-// documented for the no-server browser builder. PR B adds the served
-// (`/d/<id>/assets/…`) and published-site cases (plan-514 decision 5).
+// A relative image path (already validated by imageSrc, so no `..`/`.`
+// segment, no leading `/`, no `%`) → the URL to fetch it from (plan-514
+// decision 5). Only `assets/` (or `assets` itself) is ever served/copied —
+// a relative path elsewhere in the dashboard's own folder (`.sql`,
+// `policy.json`, …) gives "" (the alt box) in served/published mode, the
+// same as a rejected source, rather than attempting a request that could
+// only ever 404 or leak an unrelated file's existence. The no-server
+// browser builder is unchanged (PR A): it resolves `p` against the page's
+// own URL either way.
 function assetUrl(p) {
+  if (servedMode && window.__served && window.__served.id) {
+    if (p !== "assets" && !p.startsWith("assets/")) return "";
+    const id = window.__served.id;
+    const encoded = p.split("/").map(encodeURIComponent).join("/");
+    return "/d/" + encodeURIComponent(id) + "/" + encoded;
+  }
+  if (published) {
+    if (p !== "assets" && !p.startsWith("assets/")) return "";
+    const site = window.__anofoxSite;
+    if (!site) return "";
+    try {
+      return new URL(p, site.base).href;
+    } catch (_) {
+      return "";
+    }
+  }
   return p;
 }
 // The SQL text with its `'…'::<roleName>` statement set to `value`: the first
@@ -15692,6 +15852,67 @@ function dpVarCI(name) {
   return key === undefined ? undefined : dpVars[key];
 }
 
+// #551: the focusable control for a dashboard variable named by the
+// server's `/api/submit` 400 (`data-varname`, set by `makeControl` /
+// `mkButtons` / `makeSearchableDropdown` / ::MULTISELECT on their own
+// wrapper) — case-insensitive, the same reason `dpVarCI` is. The checked
+// radio of a ::BUTTONS group when there is one, else the wrapper's first
+// native control / `<summary>` (::MULTISELECT's popover button) / anything
+// with a `tabindex`, else the wrapper itself. `null` when this variable
+// has no control on the page right now (a dashboard whose input isn't
+// currently shown — the error text still shows, just without a link).
+function submitVarControl(varname) {
+  if (!varname) return null;
+  const lower = varname.toLowerCase();
+  const wrap = [...document.querySelectorAll("[data-varname]")].find((e) => (e.dataset.varname || "").toLowerCase() === lower);
+  if (!wrap) return null;
+  return wrap.querySelector('[aria-checked="true"]') || wrap.querySelector("input,select,button,summary,[tabindex]") || wrap;
+}
+function markVarInvalid(varname) {
+  const el = submitVarControl(varname);
+  if (el) el.setAttribute("aria-invalid", "true");
+  return el;
+}
+function clearVarInvalid(varname) {
+  const el = submitVarControl(varname);
+  if (el) el.removeAttribute("aria-invalid");
+}
+function focusVar(varname) {
+  const el = submitVarControl(varname);
+  if (el && el.focus) el.focus();
+}
+
+// The server's `/api/submit` 400 body (#551): JSON `{"error", "var"}` when
+// it names one of this dashboard's own variables (duckext serve.rs
+// `reply_invalid_var`), otherwise the older plain text (also what a 401/
+// 403/404/409/429/network-failure body still is) — never throws.
+function parseSubmitError(raw) {
+  try {
+    const j = JSON.parse(raw);
+    if (j && typeof j.error === "string" && typeof j.var === "string") return { text: j.error, varName: j.var };
+  } catch {}
+  return { text: raw, varName: null };
+}
+
+// Render a submit failure's error line (plan §6 + #551): the text, plus —
+// when the server named a variable and that variable's control is still on
+// the page — `aria-invalid` on that control and a focusable link to it
+// right in the line, so a screen reader or keyboard user lands on the
+// input that needs fixing instead of just hearing the message.
+function renderSubmitError(errEl, text, varName) {
+  errEl.textContent = "";
+  errEl.append(text);
+  const el = varName ? markVarInvalid(varName) : null;
+  if (!el) return;
+  errEl.append(" ");
+  const link = document.createElement("button");
+  link.type = "button";
+  link.className = "submit-error-link";
+  link.textContent = "Go to it";
+  link.onclick = () => focusVar(varName);
+  errEl.appendChild(link);
+}
+
 // A ::SUBMIT panel (#517 S4, plan §6): a native button, a status line
 // (`role="status"`, polite) and an error line (`role="alert"`). `i` is the
 // statement's own plan index (= the server's `panel`); `rowsJson` is this
@@ -15742,12 +15963,21 @@ function mkSubmit(s, i, rowsJson) {
   // click that just set it; focus stays on the button, same timing.
   const saved = submitStatus[i];
   if (saved) {
-    const el = saved.kind === "err" ? errEl : statusEl;
     const text = saved.text;
     const focusAfter = saved.focusBtn;
     delete saved.focusBtn;
+    // #551: the aria-invalid marking (and its link) only survive while the
+    // flagged variable's value is still exactly what caused the error —
+    // "clear it on the next change" happens here, declaratively, because
+    // every value change re-renders this panel: once it no longer matches
+    // the snapshot taken when the error was recorded (`doSubmit`), the
+    // marking is simply never re-applied.
+    const stillInvalid = saved.invalidVar && JSON.stringify(dpVarCI(saved.invalidVar)) === saved.invalidVal;
+    if (saved.invalidVar && !stillInvalid) delete saved.invalidVar;
+    const varName = stillInvalid ? saved.invalidVar : null;
     requestAnimationFrame(() => {
-      el.textContent = text;
+      if (saved.kind === "err") renderSubmitError(errEl, text, varName);
+      else statusEl.textContent = text;
       if (focusAfter && btn.isConnected) btn.focus();
     });
   }
@@ -15833,11 +16063,20 @@ async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
     return;
   }
   // 400 (the message already names the input: "'q1' is not one of the
-  // options" / "answer 'q1' first"), 401, 403, 404, 409 — the server's own
-  // text, verbatim; 409 gets the plan's own prefix.
-  const text = r.status === 409 ? "This can't be submitted right now" + (msg ? ": " + msg : "") : msg || `Submission failed (${r.status})`;
-  submitStatus[i] = { text, kind: "err" };
-  errEl.textContent = text;
+  // options" / "answer 'q1' first" — #551: a JSON body `{"error","var"}`
+  // when the server could name which one, duckext serve.rs
+  // `reply_invalid_var`; still plain text for a 400 that doesn't name a
+  // variable at all), 401, 403, 404, 409 — the server's own text; 409 gets
+  // the plan's own prefix.
+  const parsed = r.status === 400 ? parseSubmitError(msg) : { text: msg, varName: null };
+  const text = r.status === 409 ? "This can't be submitted right now" + (parsed.text ? ": " + parsed.text : "") : parsed.text || `Submission failed (${r.status})`;
+  submitStatus[i] = {
+    text,
+    kind: "err",
+    invalidVar: parsed.varName || undefined,
+    invalidVal: parsed.varName ? JSON.stringify(dpVarCI(parsed.varName)) : undefined,
+  };
+  renderSubmitError(errEl, text, parsed.varName);
   reenable();
 }
 

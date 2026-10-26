@@ -612,6 +612,10 @@ of the authoring servers carries a
     every request always pass). The browser retries a `503` twice.
   - `max_response_mb` (default 32, at most `max_inflight_mb`) — one
     response; a larger result is an error (`413`), like `max_rows`.
+  - `max_asset_bytes` (default 5 MiB, bytes not MiB, also clamped to
+    `max_inflight_mb`) — one file read from the dashboards folder's
+    `assets/` subfolder (`GET /d/<id>/assets/<rest>`, #514 — see "Images
+    in dashboards" below); over it, `404`.
   - `search_path` — where the panels' unqualified names resolve:
     `"warehouse"`, `"warehouse.sales"`, or several, comma-separated (the first
     is `USE`d). The default is the serving database's default database:
@@ -723,6 +727,197 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
 SELECT anofox_serve_refresh(8095);   -- fresh data now, without a restart
 SELECT anofox_serve_stop(8095);
 ```
+
+### Per-viewer state (`options.state`, #517)
+
+**This is the one write path on a server that is otherwise read-only by
+design.** A viewer's click on a `::SUBMIT` button (see `docs/DOCS.md` →
+"Recording answers") is turned into one JSON Lines record, appended by the
+Rust server itself to a file no SQL ever reaches — never a new table, never
+a write through `COPY`/`INSERT`. The snapshot stays exactly as read-only and
+locked-down as everywhere else in this document.
+
+```json
+"state": {
+  "path": "/var/lib/anofox/state.jsonl",
+  "dashboards": ["tutorial"],
+  "read": ["my-progress"],
+  "trainers": {"dashboards": ["progress"], "groups": ["trainers"]},
+  "text_max_chars": 1000,
+  "rate": {"per_minute": 6, "burst": 3},
+  "max_per_viewer": 1000,
+  "max_mb": 256
+}
+```
+
+- **Storage.** One append-only JSON Lines file (`options.state.path`), opened
+  `O_NOFOLLOW` at `0600`, a single writer enforced with `flock` (a second
+  server, or this build's own `dashboard state export|erase` CLI, on the same
+  path refuses outright rather than risk interleaving writes — "in use by
+  another server"). Each submission is `write_all` + `fdatasync`'d **before**
+  the `201` response, so an acknowledged submission is durable; a crash mid-write
+  leaves a torn final line, truncated and logged at the next start. The path
+  must not sit inside `options.data`, the dashboard folder or the snapshot's
+  temp directory (it would otherwise become reachable through
+  `allowed_directories`) — the server refuses to start otherwise. `flock` is
+  unreliable over NFS/CIFS: keep `options.state.path` on local storage.
+- **Requires `auth`.** No anonymous submissions, and neither an API key nor an
+  embed link without its own `user` (a shared identity) can submit — both get
+  `403 "submissions need a personal sign-in"`. `state` with an `embed` login
+  also requires an explicit `frame_ancestors` (clickjacking the button through
+  an iframe).
+- **The endpoint**, `POST /api/submit`: re-runs the `::SUBMIT` statement for
+  the viewer (so what the page showed and what the server accepts always
+  agree), then re-runs each recorded input and checks the submitted value is
+  one of its real options — **or**, for a credential-locked variable (an
+  embed link's own fixed `vars`, an OIDC/JWT claim mapped onto a variable),
+  records that locked value instead of the viewer's own pick, **a locked
+  list exactly like a locked scalar** (a credential-locked `::MULTISELECT`
+  records its whole list; fixed in the same PR that added this section).
+  Requires `Origin` equal to `Host` (no "missing Origin passes", unlike a
+  read `/api/panel`), `Sec-Fetch-Site: same-origin` when present, and
+  `Content-Type: application/json` plus a custom header — a cross-site POST
+  gets no CORS preflight granted anywhere on this server, so it never lands.
+  A client nonce (`id`) makes a retry after a lost response idempotent: the
+  same `id` twice appends once; a *different* answer always needs a new one
+  (the client's job — this build's browser client only ever reuses a retry
+  id when the vars it is about to send are byte-identical to the failed
+  attempt's).
+- **Limits**, all per `options.state.rate`/`max_per_viewer`/`max_mb` (defaults
+  shown above): a per-user token bucket (`429` + `Retry-After`), a global
+  submit rate, a cap on submissions per viewer (`409` once reached), a store
+  size cap (`507`, logged once, `/healthz` reports `state.full`), 16 KiB body,
+  32 recorded variables, 1000-character `TEXT` values
+  (`options.state.text_max_chars`). A validation failure still consumes a
+  rate-limit token (so it can't be used as a free oracle loop); a refusal
+  before that (auth, CSRF) does not.
+- **Reading it back** (`viewer_state`/`viewer_state_latest`, schema in
+  `docs/DOCS.md`): rows are **scoped by construction** — a connection only
+  ever has the rows it may see inserted into it, never a `WHERE
+  __claim_user = …` filter sitting on top of everything. A dashboard in
+  `dashboards`/`read` gets the signed-in viewer's own rows; one in
+  `trainers.dashboards` gets every viewer's rows **only** for a viewer in
+  `trainers.groups`/`trainers.users` — anyone else on that same dashboard
+  still gets only their own (fails safe, not refused). The panel/warm-connection
+  cache keys fold in the relevant generation (the viewer's own row count, or
+  the global sequence for a trainer read), so a submission is reflected on
+  the very next read, never served from a cache or a warm connection that
+  predates it.
+- **Logging.** The request log (`options.log`) gets `/api/submit` like any
+  other path, with `vars` following `log_vars` as usual (`values` duplicates
+  answers into that log — a deliberate, documented trade-off, same as
+  everywhere else `log_vars: values` is set). The audit log (`options.audit`,
+  available because `state` requires `auth`) gets a `submit` event, `ok` or a
+  specific deny/error reason, **never the values** — who submitted what
+  `<submit id>`, when, not what they answered.
+- **Credential-locked lists are recordable.** A locked scalar variable (an
+  embed link's `vars`, say) was always recorded as the locked value, never
+  the viewer's own pick; a locked **list** (a credential-locked
+  `::MULTISELECT`) is too — it used to be refused outright with "is not a
+  settable variable on this dashboard", a misleading message for a variable
+  that *is* settable and *is* declared, just happened to be a list. If you
+  still see that message for a variable you can confirm is in `-- @vars`,
+  it means the dashboard's own `-- @vars` genuinely doesn't list it — the
+  one case that message still describes correctly.
+- **Retention and erasure are the operator's job** — nothing expires
+  automatically. `dashboard state export|erase` (run offline; both refuse
+  while a server still has the file open, the same `flock` the server
+  itself takes — `export` and a dry-run `erase` take it as a *shared* lock,
+  so either can run alongside the other, or alongside itself, but not
+  alongside a live server or an applied `erase`):
+  ```sh
+  dashboard state export /var/lib/anofox/state.jsonl --user alice@example.com --format csv --out alice.csv
+  dashboard state erase  --user alice@example.com /var/lib/anofox/state.jsonl            # dry run
+  dashboard state erase  --user alice@example.com /var/lib/anofox/state.jsonl --yes       # actually erase
+  ```
+  `--user` matches `claims.user` **exactly and case-sensitively** (the same
+  string the server stored it as) — an IdP that sends `Alice@example.com`
+  for one sign-in and `alice@example.com` for another produces two distinct
+  subjects as far as this CLI (and the store) are concerned; check the
+  stored `user` values (an unfiltered `export`, or `read_json` below) before
+  assuming one spelling covers a person. Neither subcommand accepts an empty
+  `--user` — refused outright, rather than silently matching nothing.
+  `export` prints matching records (`--user` scopes a data-subject request;
+  omit it for a full dump) as the store's own JSON Lines (`--format jsonl`,
+  default) or as one CSV row per recorded variable (`--format csv`, the same
+  shape `viewer_state` reads back; `value`/`value_list` are literal JSON
+  text, lossless even for a `MULTISELECT`'s list); `--out FILE` writes a new
+  file instead of stdout — created `0600`, never through a symlink, and
+  refused outright if it already exists unless `--force` is also given.
+  Prefer `--out` over stdout: without it, the export's personal data lands
+  wherever the shell's own redirection and the process's umask put it, with
+  no `0600` of its own — wrap it in a subshell that sets a tight umask first,
+  e.g. `(umask 077; dashboard state export … > alice.csv)`, rather than
+  relying on a later `chmod`.
+  Both `export` and a dry-run `erase` open the store **read-only**: neither
+  ever creates the file, truncates a torn tail, tightens loose permissions,
+  or writes a header into an empty file — only an applied `erase --yes`
+  touches the file on disk. Like a server at start-up, a running `export` or
+  `erase` (dry run or applied) takes the store's `flock`, so a server start
+  while one is running gets the same "state file '…' is in use by another
+  server" refusal a second server would. `erase` is a **dry run by
+  default** — it only reports how many records would be removed until
+  `--yes` is given — and writes one audit line per applied attempt
+  (`--audit stderr|FILE`, default `stderr`; same target syntax as
+  `options.audit`), outcome `ok`/`error`, the operator's own **numeric**
+  uid (`getuid()` — not `$USER`, and not the erased viewer's `user`), never
+  the values. An applied erase is crash-safe: it writes the kept rows and
+  the original header line, byte for byte, to a fresh temp file in the same
+  directory, `fsync`s it, then `rename`s it over the original and `fsync`s
+  the directory — the original is never modified in place, so a crash at
+  any point before the `rename` leaves it completely untouched, and from
+  the instant the `rename` lands the new content is the only content
+  anyone can ever open at that path again. A crash between the write and
+  the `rename` can leave a `.<store file>.erase-tmp-<pid>-<ns>` file next
+  to the store; it holds only the rows that would have been kept, so it's
+  still personal data in its own right and the operator should delete it
+  by hand. The erased user's `seq` numbers are not reserved — after a
+  restart a later submission may reuse one. That's harmless for every
+  guarantee above (no in-memory cache survives a restart to be confused by
+  it, and `erase` only ever runs while the server is stopped) but means
+  `seq` is not a permanent forensic id: the audit log, when configured, is
+  the durable record of *when* something happened. The raw file is also
+  plain JSON Lines for ad hoc batch analysis without this CLI at all —
+  `duckdb -c "FROM read_json('state.jsonl')"` — offline, same caveat.
+  **`erase` is a logical delete, not a secure wipe.** The `rename` only
+  ever points the directory entry at a new inode holding the kept rows;
+  the old inode's blocks are freed for reuse, never zeroed, so the erased
+  rows can still be recovered from the raw block device until something
+  else overwrites them. On a copy-on-write filesystem (btrfs, ZFS, APFS),
+  in a filesystem snapshot, or in a backup taken before the erase, the old
+  blocks are retained deliberately and `erase` has no way to reach them at
+  all. If an erasure request is a GDPR Article 17 matter, treat `dashboard
+  state erase` as covering the live store file only, and separately check
+  — and expire — any snapshot or backup retention that could otherwise
+  keep the same rows around indefinitely.
+- **Single replica in v1.** One `flock`'d file, one writer. Multiple
+  replicas behind a load balancer would need an external store; not planned
+  unless asked for.
+
+**Threat model.** Assets: learners' answers (A1, confidentiality); the
+record's integrity — who submitted what, when (A2); the read-only guarantee
+for `options.data` and the snapshot (A3); trainers' browsers/exports (A4);
+server availability and disk (A5); the audit trail (A6).
+
+| Threat | Mitigation |
+|---|---|
+| Submit as someone else (forged `user`) | `user` only from authenticated claims; the request body has no `user` field at all (unknown fields `400`) |
+| Read another viewer's answers via `viewer_state` | Rows are inserted into a connection only when permitted; trainer access needs dashboard **and** group; cache/warm keys fold in claims + the state generation |
+| Read the state file directly from dashboard SQL | `enable_external_access = false` + `lock_configuration`; the path is refused inside `options.data`; the file can't be snapshotted (it is never a DuckDB database) |
+| Record a value outside an input's real options | The server re-runs the input as the viewer and checks membership, kind by kind |
+| SQL injection through an answer | Values are never spliced into SQL: stored as JSON, read back through bound parameters |
+| Store-file injection (a forged record, an embedded newline) | `serde_json`'s single-line encoding; every line is re-validated at the next start, fail closed |
+| CSRF (a foreign page submits on the victim's behalf) | `Origin` required and equal to `Host`, `Sec-Fetch-Site`, JSON content type + a custom header (no CORS preflight is ever granted) |
+| Clickjacking the submit button | `frame-ancestors 'none'` by default; `state` + `embed` requires an explicit `frame_ancestors` |
+| Many people submit under one shared identity (an embed link without `user`, an API key) | Refused outright, `403`, audited |
+| Flood (disk fill, CPU via validation queries) | Per-user and global rate limits, a per-viewer cap, `max_mb`, body/text caps — validation is usually a cache hit already |
+| Double submit / racing the author's "once" gate | A client nonce dedups a retry; a per-viewer mutex makes the gate check and the append atomic |
+| Stored XSS / phishing link / formula injection against a trainer | Every cell/markdown value is escaped, links go through `safeUrl`; every CSV export — the browser's `::DOWNLOAD_CSV` / query export (`web/app.js`, #520/#526) and `dashboard state export --format csv` (this PR) — neutralises a leading `= + - @` or a tab/CR on every string cell (a plain number, including a real negative one, is left alone); the `.xlsx` writer needs no such prefix, since its string cells carry an explicit inline-string type Excel never re-parses as a formula; a lint warning flags markup built from `viewer_state` |
+| Submit without a login | `auth` is mandatory wherever `state` is configured; `401` before anything else runs |
+| Misconfiguration (state inside `data`, a shared/world-writable directory, a symlink, two servers on one file) | Start-time refusals, `O_NOFOLLOW`, `0600`, `flock` |
+| Crash or I/O error loses or tears a record | `fdatasync` before the `201`; a torn tail is truncated and logged at the next start; an I/O error marks the store failed (`503` from then on, never a silent retry) |
+| Answers leaking into logs | The audit log never carries values; the request log only with `log_vars: values` (documented, opt-in) |
+| Erasure/export rewriting the live file, or a crash tearing it | Both refuse outright while a server holds the file's `flock`; `export`/dry-run `erase` open read-only and never mutate the file; an applied `erase` writes to a temp file and `rename`s it over the original, so a crash leaves either the untouched original or the complete new file, never a torn mix |
 
 ## B. Static render — `serve --dashboards <dir>`
 
@@ -1876,10 +2071,132 @@ underneath it for however long that request had left to run.
 ## Images in dashboards (`::IMAGE`, `::MARKDOWN`, #514)
 
 A dashboard's images come from the dashboard itself: a `data:image/…` URI, an
-`https:` URL, or (a later PR) a relative path under the dashboard folder's
-own `assets/`. `img-src` already allows `'self' data: https:` (`page_csp`,
-`host/serving.rs`) for `::LOGO`/`::HEADER_IMAGE`; `::IMAGE` and Markdown
-images reuse that, not a wider allowance — this PR makes no CSP change.
+`https:` URL, or a relative path under the dashboard folder's own `assets/`
+(PR B: `GET /d/<id>/assets/<rest>`, below). `img-src` already allows `'self'
+data: https:` (`page_csp`, `host/serving.rs`) for `::LOGO`/`::HEADER_IMAGE`;
+`::IMAGE` and Markdown images reuse that, not a wider allowance — neither PR
+changes that CSP directive.
+
+### `GET`/`HEAD` `/d/<id>/assets/<rest>` (PR B)
+
+Only `<dashboards dir>/assets/`, never the rest of the dashboards folder
+(`.sql`, `policy.json`, `blueprint.json`): the route is computed once at
+startup (`canonicalize(<dir>/assets)`), `None` when there is no such folder
+— every request then 404s.
+
+- **Same login as the dashboard page; scope is checked on `id`, not on
+  which file.** This route is **not** in `auth.public_asset`: every request
+  goes through the server's usual `authenticate()` first (401 without a
+  valid credential, same as `/d/<id>` itself), and an `auth`-scoped
+  credential (an embed link, an API key) must name `id` in its own scope
+  (403, same as the page). **But `assets/` is per *folder*, not per
+  dashboard**: the scope check only gates which `<id>` a credential's own
+  `/d/<id>/assets/…` URL may use — it does not, and cannot, know which
+  dashboard's script actually references which file. A credential scoped
+  to dashboard `A` can fetch *every* file under the shared `assets/`
+  folder as `/d/A/assets/<anything>`, including an image only `B`'s script
+  uses. That is a reasonable model (an image belongs to the folder it sits
+  in, not to the one dashboard that happens to reference it today), but it
+  means **anyone who may open any dashboard here can read every file in
+  `assets/`** — keep an image that only some viewers may see in a separate
+  dashboards folder (a separate `anofox_serve_dashboards` call, or a
+  separate server) from one everyone may see, rather than relying on
+  per-dashboard scoping to hide it.
+- **Containment.** `rest` is percent-decoded once, then refused (404) on:
+  empty; over 512 bytes; a `\`, NUL or other control character; an empty,
+  `.` or `..` segment; a segment starting with `.`. The resolved path
+  (`canonicalize(assets_root.join(rest))`) must `starts_with(assets_root)` —
+  this also blocks a symlink inside `assets/` that points outside it, since
+  canonicalizing follows the symlink to its real target before the
+  containment check runs.
+- **Extension allow-list, then a real magic-byte check.** The extension
+  must be `png`/`jpg`/`jpeg`/`gif`/`webp`/`svg` (case-insensitive) — checked
+  *before* any filesystem access, so a request can't even probe for a
+  non-image file's existence through this route. The file's own bytes are
+  then sniffed (`host::app_brand::sniff_image`, the same signatures as
+  `::LOGO`'s own inlining) for the `Content-Type` actually sent — **not**
+  trusted from the extension — so a `.sql`/`.json` file renamed `.png`
+  (right extension, wrong real type) is refused too (`src/image.rs::read_asset`,
+  shared with the CLI's/`--site`'s own readers of `assets/`).
+- **Size cap.** `options.max_asset_bytes` (bytes, default 5 MiB; the clamp
+  is 64 MiB, and it's additionally clamped to `max_inflight_mb` at parse
+  time — an asset cap above the whole server's in-flight budget could
+  never be honoured anyway, and would otherwise 503 every asset request
+  with nothing at startup saying why) — checked from the file's own
+  `fstat` before reading it, and again on what is actually read (so a FIFO
+  or a race can't lie about its reported size), reported in `/healthz`'s
+  `limits` for a signed-in caller. Held against the same `max_inflight_mb`
+  budget a panel result is: `min(the file's real size, max_asset_bytes)`
+  per `GET` in flight (not a pessimistic `max_asset_bytes` regardless of
+  the file's real size), or just the 4 KiB sniffing prefix per `HEAD` —
+  concurrent asset requests can't grow memory use past that shared cap
+  either, and a page full of small icons no longer pays for the full cap
+  each.
+- **Response headers:** `X-Content-Type-Options: nosniff`;
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
+  sandbox` (neutralises an SVG opened as a top-level document instead of
+  inside an `<img>` — it already never runs a script either way, see
+  below, but this is belt-and-braces for a viewer who opens the asset URL
+  directly); `Cache-Control: private, max-age=300` (or `max-age=60` with
+  `auth` set — a shorter lifetime so a cached image doesn't keep answering
+  long after a logout or a revoked credential; still `private`, not
+  `no-store`, since the browser's own cache is fine to use meanwhile);
+  `Cross-Origin-Resource-Policy: same-origin`.
+- **No snapshot.** The file is read fresh on every request — an edited or
+  newly added asset shows without a server refresh.
+- **`GET` and `HEAD` only.** `POST` (and any other method) is `405`, the
+  same as every other route here. `HEAD`'s `Content-Length` is the file's
+  real size (an `fstat`, not a prior read) — it agrees with what `GET`
+  would send, without reading the whole file just to answer `HEAD`.
+- **Embed links.** A page's embed session travels as the `X-Anofox-Session`
+  header, which an `<img src>` can't carry — the browser instead `fetch`es
+  an `assets/` image with that header and shows it from a `blob:` URL (`web/app.js`).
+  OIDC and JWT cookies need nothing special; an API key sent as an
+  `Authorization` header works the same way a page's own requests do.
+
+`--site` copies `<folder>/assets/` to `<out>/assets/` at publish time,
+through the same `read_asset` validation (extension allow-list,
+containment, real magic-byte MIME) the locked server applies per request
+— "what the server would serve" and "what the site publishes" can't drift
+apart. The size cap is `options.max_asset_bytes` when the same `--options`
+file passed to `anofox_serve_dashboards` sets one, falling back to the
+locked server's own 5 MiB default otherwise — not a fixed `--site`-only
+value, so a site built from a server's own options file can't refuse a
+file that server was configured to serve. It refuses the whole publish
+(not just skipping) on a symlink anywhere inside `assets/` (including
+`assets/` itself), a file whose real content isn't one of the allowed
+image types regardless of its extension, a file over the cap, or — since a
+published static site has no server to send the asset route's own
+sandboxing CSP header — an "active" SVG. That check parses the file as XML
+(not a text scan: a namespace-prefixed `<x:script>`, a foreign-namespace
+element needing no `<foreignObject>` wrapper at all, a DTD entity
+expansion, and entity-encoded text all defeat a text scan but not a parser
+that resolves namespaces and decodes entities first) and allows only a
+fixed list of SVG elements, each in the SVG namespace; every attribute
+unprefixed or in the XLink namespace; no `on…=` attribute; `href`/
+`xlink:href` only a same-document `#fragment` or, on `<image>` only, a
+`data:image/(png|jpeg|gif|webp)` payload. Beyond that, **every** attribute
+value (not only `style` — a presentation attribute such as `fill`,
+`filter`, `clip-path`, `mask` or any `marker-*`/`cursor` takes the same
+CSS syntax `style` does, so it can fetch a URL exactly as `style` can) is
+refused if it contains a backslash (a CSS escape, e.g. `u\72l(`, reads as
+`url(` to a CSS parser but not to a literal substring scan), a `url(…)`
+that isn't a `#fragment`, or `image-set(`/`@import`/`src(`/`javascript:`/
+`expression(`. No `<!DOCTYPE` or processing instruction anywhere, either.
+A dot-leading entry (`.secret.png`, `.DS_Store`, a stray `.git/`, …) is
+silently skipped — not published, not a publish failure. If a static host
+can be configured to add response headers, add `X-Content-Type-Options:
+nosniff` and a `Content-Security-Policy: sandbox` (or stricter) for
+`/assets/` there too, for the same belt-and-braces reason the locked route
+sends them — publish-time refusal is the real guarantee, those headers are
+defense in depth on top of it. `dashboard file.sql out.html`/`--svg` and
+the script-free `serve --dashboards` page read `assets/` the same way
+(`read_asset`) but inline the result as a `data:` URI rather than serving a
+route, since neither has a client that fetches one (nor, therefore, the
+active-SVG check above — the static output never serves the SVG markup to
+anyone, only its own pre-rendered static charts and whatever `<image
+href>` the browser's `<img>`-only trust model already applies to a `data:`
+URI the same as any other accepted source).
 
 What *is* worth a reviewer's attention: an `https:` image loads
 automatically, with no click, unlike `::LINK`. If a `::MARKDOWN` (or
@@ -1927,3 +2244,8 @@ and sizing from the load test (`scripts/load-test.mjs`).
   query's structure), and never use one as an access filter.
 - **Process isolation**: run the server as an OS user without access to more
   than it needs.
+- **Retention and data-subject requests for `options.state` (#517)**: nothing
+  expires automatically. Back up the state file like any other data,
+  decide a retention policy, and use `dashboard state export|erase` (above,
+  under "Per-viewer state") for a data-subject export or erasure request —
+  both run offline and refuse while a server still has the file open.

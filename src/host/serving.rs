@@ -38,6 +38,30 @@ pub fn html_escape_attr_roundtrip(s: &str) -> String {
     crate::format::escape_xml_attr_roundtrip(s)
 }
 
+/// A `::SUBMIT` panel on a page that can never actually POST
+/// `/api/submit` — a static HTML export (`dashboard` binary) or the
+/// script-free served page (#551): a disabled button naming why, instead
+/// of rendering nothing. The same `.submit-panel`/`.submit-btn`/
+/// `.submit-error.submit-reason` classes `web/app.js`'s `mkSubmitDisabled`
+/// uses in the browser (`web/theme-base.css` already styles them), so
+/// this reuses that CSS rather than inventing its own. `idx` is the
+/// statement's own plan index, kept unique across a page with more than
+/// one `::SUBMIT` panel the same way the browser's `submit-reason-${i}`
+/// id is. `label` falls back to "Submit" when blank, same default as
+/// `mkSubmit`.
+pub fn submit_disabled_html(label: &str, idx: usize, reason: &str) -> String {
+    let label = if label.trim().is_empty() {
+        "Submit"
+    } else {
+        label
+    };
+    format!(
+        "<figure class=\"panel submit-panel\"><button type=\"button\" class=\"submit-btn\" disabled aria-disabled=\"true\" aria-describedby=\"submit-reason-{idx}\">{}</button><div id=\"submit-reason-{idx}\" class=\"submit-error submit-reason\" role=\"alert\">{}</div></figure>",
+        html_escape(label),
+        html_escape(reason)
+    )
+}
+
 /// Serialise JSON for embedding inside an inline `<script>`: escapes `<`, `>`,
 /// `&` and the JS line separators so the payload can never close the script
 /// element (`</script>`) or open a comment (`<!--`).
@@ -2022,6 +2046,25 @@ mod tests {
         // still valid JSON that decodes to the original
         let back: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(back["sql"], "</script><script>alert(1)</script>");
+    }
+
+    #[test]
+    fn submit_disabled_html_escapes_and_names_the_reason() {
+        let html = submit_disabled_html(
+            "Check <b>my</b> answer",
+            3,
+            "Submitting needs the dashboard server",
+        );
+        assert!(html.contains("class=\"panel submit-panel\""));
+        assert!(html.contains("class=\"submit-btn\" disabled aria-disabled=\"true\""));
+        assert!(html.contains("aria-describedby=\"submit-reason-3\""));
+        assert!(html.contains("id=\"submit-reason-3\""));
+        assert!(html.contains("Submitting needs the dashboard server"));
+        // The label's own markup is escaped, not rendered as HTML.
+        assert!(html.contains("Check &lt;b&gt;my&lt;/b&gt; answer"));
+        assert!(!html.contains("<b>my</b>"));
+        // A blank label falls back to "Submit", same default as `mkSubmit`.
+        assert!(submit_disabled_html("   ", 0, "x").contains(">Submit<"));
     }
 
     #[test]

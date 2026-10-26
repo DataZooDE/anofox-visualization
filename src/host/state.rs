@@ -539,8 +539,35 @@ pub struct NewRecord {
     pub vars: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The result of an *applied* [`Store::erase_user`] (review of #559, nit:
+/// a successful rewrite that then hit a non-fatal problem — the directory
+/// `fsync` after the `rename`, or re-opening/re-locking the rewritten file
+/// for this same `Store` handle — used to come back as a plain `Err`, so
+/// `dashboard state erase`'s audit line recorded `outcome: "error"` even
+/// though the erase itself had already landed on disk, durably, by the
+/// time either of those could fail). `warning` carries that non-fatal
+/// detail when there is one; its presence or absence is a real, structured
+/// signal rather than the brittle `e.contains("was rewritten on disk")`
+/// string match this replaces — the erase is unconditionally applied
+/// (`removed` rows gone) whenever `Store::erase_user` returns `Ok` at all.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EraseOutcome {
+    /// How many records were removed. `0` for a user with no rows — not
+    /// an error, just nothing to do.
+    pub removed: usize,
+    /// Set when the erase itself succeeded but a step after it didn't.
+    /// Still `outcome: "ok"` for an audit trail — the data is gone either
+    /// way — but worth surfacing to the operator.
+    pub warning: Option<String>,
+}
+
 impl Record {
-    fn to_json(&self) -> serde_json::Value {
+    /// The exact on-disk shape, as a `Value` — `pub` so `dashboard state
+    /// export` (S5) can print the same encoding the store itself writes,
+    /// rather than hand-rolling a second copy of this field list that
+    /// could drift from it.
+    pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "v": self.v,
             "seq": self.seq,
@@ -617,6 +644,9 @@ impl Record {
 
 struct StoreState {
     file: std::fs::File,
+    /// The header line verbatim, without its trailing `\n` (see
+    /// [`Index::header_line`]).
+    header_line: String,
     records: Vec<Record>,
     by_user: HashMap<String, Vec<usize>>,
     next_seq: u64,
@@ -630,6 +660,16 @@ struct StoreState {
 pub struct Store {
     inner: Mutex<StoreState>,
     max_bytes: u64,
+    /// The absolute path this `Store` was opened on — kept so
+    /// [`Self::erase_user`] can create its crash-safe temp file as a
+    /// sibling of the real file and `rename` over it (review of #555, B2).
+    path: PathBuf,
+    /// [`Self::open_read_only`] (review of #555's should-fix): [`Self::append`]
+    /// and [`Self::erase_user`] refuse outright on a read-only `Store`, in
+    /// addition to that `Store`'s own fd never having write access at the
+    /// OS level — belt and suspenders, since a mistaken call here would
+    /// otherwise surface only as a confusing `EBADF`/`write` failure.
+    read_only: bool,
     /// Set once an append's write/sync fails: every later append refuses
     /// (plan §1 "never retry silently, never acknowledge an unsynced row").
     failed: AtomicBool,
@@ -684,6 +724,89 @@ fn looks_like_our_header_prefix(buf: &str) -> bool {
     }
 }
 
+/// A raw fd that closes itself on drop — shared by [`Store::open_impl`]
+/// (the parent directory, held across the `openat` it protects) and
+/// [`Store::erase_user`] (same directory, reopened for its crash-safe
+/// temp-file-then-`renameat` rewrite, review of #555 B2).
+#[cfg(unix)]
+struct Fd(i32);
+#[cfg(unix)]
+impl Drop for Fd {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.0);
+        }
+    }
+}
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for Fd {
+    fn as_raw_fd(&self) -> i32 {
+        self.0
+    }
+}
+
+/// Open `path`'s parent directory `O_DIRECTORY|O_NOFOLLOW`, check it's
+/// owned by this process (or root) and not group/world-writable, and
+/// return it alongside `path`'s own file name and this process's `euid`
+/// — shared by [`Store::open_impl`] and [`Store::erase_user`] (review of
+/// #555 B2), so the two don't drift on what "the parent directory is
+/// safe to `openat`/`renameat` into" means.
+#[cfg(unix)]
+fn open_checked_parent_dir(path: &Path) -> Result<(Fd, &str, u32), String> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| format!("options.state.path: '{}' must name a file", path.display()))?;
+    let parent_raw = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("/"),
+    };
+
+    let dir_cstr = CString::new(parent_raw.as_os_str().as_bytes())
+        .map_err(|_| "options.state.path: the directory path has a NUL byte".to_string())?;
+    let dirfd = unsafe {
+        libc::open(
+            dir_cstr.as_ptr(),
+            libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if dirfd < 0 {
+        return Err(format!(
+            "options.state.path: '{}': {}",
+            parent_raw.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let dirfd = Fd(dirfd);
+
+    let mut dstat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(dirfd.0, &mut dstat) } != 0 {
+        return Err(format!(
+            "options.state.path: '{}': {}",
+            parent_raw.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let euid = unsafe { libc::geteuid() };
+    if !owner_is_acceptable(dstat.st_uid, euid) {
+        return Err(format!(
+            "options.state.path: '{}' is not owned by this server (or root)",
+            parent_raw.display()
+        ));
+    }
+    if dstat.st_mode as u32 & 0o022 != 0 {
+        return Err(format!(
+            "options.state.path: '{}' is group- or world-writable",
+            parent_raw.display()
+        ));
+    }
+    Ok((dirfd, file_name, euid))
+}
+
 impl Store {
     /// Open (creating if absent) and validate the whole file, holding an
     /// exclusive `flock` for as long as the returned `Store` lives.
@@ -699,9 +822,28 @@ impl Store {
     /// between `validate_start` and `open`).
     #[cfg(unix)]
     pub fn open(path: &Path, max_mb: u64) -> Result<Store, String> {
+        Self::open_impl(path, max_mb, false)
+    }
+
+    /// Open an *existing* file for reading only (`dashboard state
+    /// export`/the dry-run half of `erase`, review of #555's should-fix):
+    /// never creates it, never truncates a torn tail, never tightens loose
+    /// permissions, never writes a header into an empty file — a read must
+    /// never mutate the file it's reading, full stop. A shared (`LOCK_SH`)
+    /// `flock`, so two read-only opens (two concurrent exports) can
+    /// coexist; it still conflicts with a live server's or `erase`'s
+    /// exclusive lock, so this still refuses outright while either holds
+    /// the file (same "in use by another server" message — true either
+    /// way: something else has it open for writing).
+    #[cfg(unix)]
+    pub fn open_read_only(path: &Path, max_mb: u64) -> Result<Store, String> {
+        Self::open_impl(path, max_mb, true)
+    }
+
+    #[cfg(unix)]
+    fn open_impl(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
         use std::ffi::CString;
         use std::io::{Read, Write};
-        use std::os::unix::ffi::OsStrExt;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         use std::os::unix::io::{AsRawFd, FromRawFd};
 
@@ -709,74 +851,16 @@ impl Store {
         if !path.is_absolute() {
             return Err("options.state.path must be an absolute path".into());
         }
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .filter(|n| !n.is_empty())
-            .ok_or_else(|| format!("options.state.path: '{}' must name a file", path.display()))?;
-        let parent_raw = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("/"),
-        };
-
-        struct Fd(i32);
-        impl Drop for Fd {
-            fn drop(&mut self) {
-                unsafe {
-                    libc::close(self.0);
-                }
-            }
-        }
-
-        let dir_cstr = CString::new(parent_raw.as_os_str().as_bytes())
-            .map_err(|_| "options.state.path: the directory path has a NUL byte".to_string())?;
-        let dirfd = unsafe {
-            libc::open(
-                dir_cstr.as_ptr(),
-                libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if dirfd < 0 {
-            return Err(format!(
-                "options.state.path: '{}': {}",
-                parent_raw.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        let dirfd = Fd(dirfd);
-
-        let mut dstat: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(dirfd.0, &mut dstat) } != 0 {
-            return Err(format!(
-                "options.state.path: '{}': {}",
-                parent_raw.display(),
-                std::io::Error::last_os_error()
-            ));
-        }
-        let euid = unsafe { libc::geteuid() };
-        if !owner_is_acceptable(dstat.st_uid, euid) {
-            return Err(format!(
-                "options.state.path: '{}' is not owned by this server (or root)",
-                parent_raw.display()
-            ));
-        }
-        if dstat.st_mode as u32 & 0o022 != 0 {
-            return Err(format!(
-                "options.state.path: '{}' is group- or world-writable",
-                parent_raw.display()
-            ));
-        }
+        let (dirfd, file_name, euid) = open_checked_parent_dir(path)?;
 
         let name_cstr = CString::new(file_name)
             .map_err(|_| "options.state.path: the file name has a NUL byte".to_string())?;
-        let fd = unsafe {
-            libc::openat(
-                dirfd.0,
-                name_cstr.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
+        let open_flags = if read_only {
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        } else {
+            libc::O_RDWR | libc::O_CREAT | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC
         };
+        let fd = unsafe { libc::openat(dirfd.0, name_cstr.as_ptr(), open_flags, 0o600) };
         if fd < 0 {
             return Err(format!(
                 "options.state.path: '{}': {}",
@@ -813,8 +897,17 @@ impl Store {
         // fail to start, not silently interleave writes. `flock` is
         // unreliable over NFS/CIFS (review of #530: worth a line in the
         // operator-facing docs once they exist, S5) — `options.state.path`
-        // should be local storage.
-        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        // should be local storage. A read-only open takes a *shared* lock
+        // instead (review of #555): it still conflicts with any writer's
+        // exclusive lock (a live server, or `erase`), but not with another
+        // reader (#555's read-only `export`/dry-run can run concurrently
+        // with itself; it never conflicts with a second read-only open).
+        let lock_kind = if read_only {
+            libc::LOCK_SH
+        } else {
+            libc::LOCK_EX
+        };
+        let locked = unsafe { libc::flock(file.as_raw_fd(), lock_kind | libc::LOCK_NB) };
         if locked != 0 {
             return Err(format!(
                 "state file '{}' is in use by another server",
@@ -861,37 +954,52 @@ impl Store {
         // Only now, having confirmed `clean` is a valid (possibly empty)
         // store prefix, mutate the file: drop a torn tail, then tighten
         // loose permissions (never the other way around, and never when
-        // validation above failed).
-        if torn_bytes > 0 {
-            file.set_len(clean.len() as u64)
-                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+        // validation above failed). Never for a read-only open (review of
+        // #555's should-fix): a read must never mutate what it's reading
+        // — `dashboard state export`/`erase`'s dry run tolerate a torn
+        // tail or loose permissions exactly as found, byte-identical,
+        // rather than silently "fixing" a file nobody asked them to write.
+        if !read_only {
+            if torn_bytes > 0 {
+                file.set_len(clean.len() as u64)
+                    .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+                eprintln!(
+                    "[anofox-state] {}: truncated a torn last line ({torn_bytes} bytes) — a \
+                     crash or `kill -9` mid-write, recovered at start",
+                    path.display()
+                );
+            }
+            if fmeta.mode() & 0o077 != 0 {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
+                eprintln!(
+                    "[anofox-state] {}: tightened loose file permissions to 0600",
+                    path.display()
+                );
+            }
+        } else if torn_bytes > 0 {
             eprintln!(
-                "[anofox-state] {}: truncated a torn last line ({torn_bytes} bytes) — a \
-                 crash or `kill -9` mid-write, recovered at start",
-                path.display()
-            );
-        }
-        if fmeta.mode() & 0o077 != 0 {
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
-            eprintln!(
-                "[anofox-state] {}: tightened loose file permissions to 0600",
+                "[anofox-state] {}: a torn last line ({torn_bytes} bytes) was found and \
+                 ignored (read-only open: the file is left exactly as it was)",
                 path.display()
             );
         }
 
         let mut state = StoreState {
             file,
+            header_line: index.header_line,
             records: index.records,
             by_user: index.by_user,
             next_seq: index.next_seq,
             size_bytes: index.size_bytes,
         };
-        if clean.is_empty() {
-            let header = format!(
-                "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{}\"}}\n",
+        if !read_only && clean.is_empty() {
+            let header_body = format!(
+                "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{}\"}}",
                 crate::host::access::rfc3339(std::time::SystemTime::now())
             );
+            let mut header = header_body.clone();
+            header.push('\n');
             state
                 .file
                 .write_all(header.as_bytes())
@@ -901,10 +1009,13 @@ impl Store {
                 .sync_data()
                 .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
             state.size_bytes = header.len() as u64;
+            state.header_line = header_body;
         }
         Ok(Store {
             inner: Mutex::new(state),
             max_bytes,
+            path: path.to_path_buf(),
+            read_only,
             failed: AtomicBool::new(false),
             #[cfg(test)]
             force_fail: AtomicBool::new(false),
@@ -917,11 +1028,20 @@ impl Store {
         Err("the state store needs a Unix host (flock)".into())
     }
 
+    #[cfg(not(unix))]
+    pub fn open_read_only(path: &Path, max_mb: u64) -> Result<Store, String> {
+        let _ = (path, max_mb);
+        Err("the state store needs a Unix host (flock)".into())
+    }
+
     /// Append one submission, assigning its `seq`/`ts`. `fdatasync`s before
     /// returning `Ok` (plan §1: "an acknowledged submission is durable").
     #[cfg(unix)]
     pub fn append(&self, new: NewRecord) -> Result<Record, String> {
         use std::io::Write;
+        if self.read_only {
+            return Err("state store: opened read-only, cannot append".into());
+        }
         let mut st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         // Checked under the lock, not before it (review of #530 #2): a
         // concurrent append failing and one passing this check used to be
@@ -972,6 +1092,317 @@ impl Store {
         st.by_user.entry(rec.user.clone()).or_default().push(idx);
         st.records.push(rec.clone());
         Ok(rec)
+    }
+
+    /// Rewrite the file, dropping every record whose `user` is an exact
+    /// (case-sensitive) match for `user` — the same string `claims.user`
+    /// carries, never normalised, since the store never normalises it on
+    /// the way in either. Keeps the header line and every other record
+    /// byte-for-byte. Operator tooling only (`dashboard state erase`, plan
+    /// §1 "Operator access", §10 D7: a data-subject erasure request) —
+    /// never called from the serve path, which only ever appends.
+    ///
+    /// Remaining `seq` values are untouched: append-only only promises
+    /// *strictly increasing*, never contiguous, so a gap left by an erase
+    /// changes nothing for any other viewer's `gen` or cache key. Returns
+    /// an [`EraseOutcome`] — `removed` is the number of records removed
+    /// (`0` leaves the file untouched — no-op, not an error, so a caller
+    /// can erase a user with no rows at all without special-casing it);
+    /// `warning`, when set, means the erase itself still landed, in full,
+    /// on disk, but a step strictly after that (the directory `fsync`, or
+    /// re-opening/re-locking the rewritten file) did not — see the `Err`
+    /// branch below for why that's `Ok` with a warning, never an `Err`.
+    ///
+    /// Caveat (documented in `docs/secure-serving.md`, not hidden): if the
+    /// erased user held the *highest* `seq` in the file, a later restart
+    /// recomputes `next_seq` from what's left on disk, so a future
+    /// submission may be assigned a `seq` an erased record once had.
+    /// Harmless for every live-server guarantee this plan makes — `seq`
+    /// only orders one server run's own cache/consistency decisions, and
+    /// `erase` only ever runs while the server is stopped (the file's
+    /// `flock` enforces that), so no in-memory cache or warm connection
+    /// survives across an erase to be confused by the reuse. Not a
+    /// permanent, forensic identifier: the audit log (`options.audit`),
+    /// when configured, is the durable record of when a submission or an
+    /// erasure happened, never `seq` itself.
+    ///
+    /// Blocked by [`Self::failed`] like [`Self::append`] is: erasing
+    /// against a store a previous write already corrupted would just make
+    /// the on-disk file disagree with whatever this process still has in
+    /// memory, the exact inconsistency `failed` exists to prevent.
+    ///
+    /// Crash-safe by construction (review of #555, B2 — the in-place
+    /// `seek`+`write`+`truncate` this replaced could leave a half-written
+    /// file on a crash mid-rewrite): writes the new content to a **fresh
+    /// temp file** in the same directory (`O_EXCL|O_NOFOLLOW`, `0600`,
+    /// `fchown`'d to the original file's owner so an erase run as a
+    /// different uid — root, say — never silently reassigns ownership),
+    /// `fsync`s it, then `rename`s it over the original — atomic on the
+    /// same filesystem, so at every instant before the `rename` the
+    /// original is untouched, and from the instant it completes the new
+    /// content is the *only* content anyone can ever open at this path
+    /// again. `fsync`s the directory afterwards too, so the rename itself
+    /// survives a crash (a bare file `fsync` only guarantees the data,
+    /// not that the directory entry pointing at it is durable). The
+    /// original file's own `flock` is held the entire time (never
+    /// released, never even touched) — no writer can interleave with
+    /// this rewrite — and, once the rename lands, is handed off to a
+    /// fresh fd opened on the (now-renamed) file at the same path, so a
+    /// later call on this same `Store` keeps writing the real file, never
+    /// the orphaned pre-erase inode this fd pointed at a moment earlier.
+    ///
+    /// `#[cfg(unix)]` for the same reason every other OS-level piece of
+    /// this store is (`open_impl`, `open_checked_parent_dir`, `Fd`): the
+    /// body below calls straight into `libc` (`fchown`, `openat`,
+    /// `renameat`, `fsync`, …) and `std::os::unix`, neither of which
+    /// exist for a non-unix target — `libc` itself is a
+    /// `[target.'cfg(unix)'.dependencies]` dependency (Cargo.toml), so on
+    /// `wasm32-unknown-unknown` the crate isn't even present to link
+    /// against. Caught by CI's wasm lib build (`cargo build --lib
+    /// --target wasm32-unknown-unknown … --features wasm`): this method
+    /// originally had no gate at all, which compiled fine natively but
+    /// broke that build with "unresolved import `libc`". No
+    /// `#[cfg(not(unix))]` fallback is needed, matching [`Self::append`]
+    /// right above — `Store` can never exist on a non-unix target in the
+    /// first place ([`Self::open`]/[`Self::open_read_only`] always
+    /// return `Err` there), and nothing outside this `unix`-gated impl
+    /// block calls `erase_user` (its one caller, `dashboard state
+    /// erase`, is a `[[bin]]`, never part of the `--lib` wasm build).
+    #[cfg(unix)]
+    pub fn erase_user(&self, user: &str) -> Result<EraseOutcome, String> {
+        use std::ffi::CString;
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+
+        if self.read_only {
+            return Err("state store: opened read-only, cannot erase".into());
+        }
+        let mut st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if self.failed.load(Ordering::SeqCst) {
+            return Err("state store: unavailable (a previous write failed)".into());
+        }
+        let kept: Vec<Record> = st
+            .records
+            .iter()
+            .filter(|r| r.user != user)
+            .cloned()
+            .collect();
+        let removed = st.records.len() - kept.len();
+        if removed == 0 {
+            return Ok(EraseOutcome {
+                removed: 0,
+                warning: None,
+            });
+        }
+        let mut buf = st.header_line.clone();
+        buf.push('\n');
+        for r in &kept {
+            buf.push_str(&r.to_line());
+            buf.push('\n');
+        }
+        let new_size = buf.len() as u64;
+
+        let orig_meta = st
+            .file
+            .metadata()
+            .map_err(|e| format!("state store erase failed: {e}"))?;
+
+        let do_it = || -> Result<(std::fs::File, Option<String>), String> {
+            let (dirfd, file_name, _euid) = open_checked_parent_dir(&self.path)?;
+
+            // A name nothing else should ever guess or race: this
+            // process's pid + a nanosecond timestamp, and `O_EXCL` on top
+            // (belt and suspenders — `O_EXCL` alone is already enough to
+            // refuse a collision rather than silently open an existing
+            // file, which is the one property that actually matters
+            // here).
+            let now_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let tmp_name = format!(".{file_name}.erase-tmp-{}-{now_nanos}", std::process::id());
+            let tmp_cstr = CString::new(tmp_name.as_bytes())
+                .map_err(|_| "state store erase: temp file name has a NUL byte".to_string())?;
+            let tmp_fd = unsafe {
+                libc::openat(
+                    dirfd.as_raw_fd(),
+                    tmp_cstr.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if tmp_fd < 0 {
+                return Err(format!(
+                    "state store erase: creating a temp file next to '{}': {}",
+                    self.path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let mut tmp_file = unsafe { std::fs::File::from_raw_fd(tmp_fd) };
+
+            // Preserve the original owner (review of #555 B2): a fresh
+            // file this process creates is owned by its own euid/egid,
+            // which would silently reassign the store's ownership on an
+            // erase run as a different (typically more privileged) user
+            // than the one that normally owns it.
+            if unsafe { libc::fchown(tmp_fd, orig_meta.uid(), orig_meta.gid()) } != 0 {
+                let err = std::io::Error::last_os_error();
+                unsafe { libc::unlinkat(dirfd.as_raw_fd(), tmp_cstr.as_ptr(), 0) };
+                return Err(format!("state store erase: fchown the temp file: {err}"));
+            }
+            // Always `fchmod`, never conditioned on the original file's own
+            // mode (review of #559, nit): `openat`'s `0o600` argument is
+            // still subject to this process's umask, so an unusual umask
+            // such as `0277` left the temp file at `0400` whenever the
+            // original happened to already read `0600` — unreadable `O_RDWR`
+            // by the very next server start. `fchmod` on the fd, not
+            // `set_permissions` on a path, so this can't be raced onto a
+            // different file between the two.
+            if unsafe { libc::fchmod(tmp_fd, 0o600) } != 0 {
+                let err = std::io::Error::last_os_error();
+                unsafe { libc::unlinkat(dirfd.as_raw_fd(), tmp_cstr.as_ptr(), 0) };
+                return Err(format!("state store erase: chmod the temp file: {err}"));
+            }
+
+            let wrote = (|| -> std::io::Result<()> {
+                tmp_file.write_all(buf.as_bytes())?;
+                tmp_file.sync_data()?;
+                Ok(())
+            })();
+            if let Err(e) = wrote {
+                unsafe { libc::unlinkat(dirfd.as_raw_fd(), tmp_cstr.as_ptr(), 0) };
+                return Err(format!("state store erase: writing the temp file: {e}"));
+            }
+
+            // Review of #555 B2: deterministic fault injection standing in
+            // for a crash in exactly the one window that matters — the
+            // temp file is fully written and `fsync`'d, but `rename`
+            // hasn't run yet. Left un-unlinked (a real crash wouldn't
+            // clean it up either); the point of the test this exists for
+            // is that the ORIGINAL file at `self.path` is untouched by
+            // anything above this line.
+            #[cfg(test)]
+            if self.force_fail.load(Ordering::SeqCst) {
+                return Err("state store erase: forced test failure before rename".into());
+            }
+
+            let orig_cstr = CString::new(file_name)
+                .map_err(|_| "state store erase: file name has a NUL byte".to_string())?;
+            // Atomic within one directory: at every instant up to here the
+            // original is untouched; from here on, the new content is the
+            // only content anyone can open at this path.
+            if unsafe {
+                libc::renameat(
+                    dirfd.as_raw_fd(),
+                    tmp_cstr.as_ptr(),
+                    dirfd.as_raw_fd(),
+                    orig_cstr.as_ptr(),
+                )
+            } != 0
+            {
+                let err = std::io::Error::last_os_error();
+                unsafe { libc::unlinkat(dirfd.as_raw_fd(), tmp_cstr.as_ptr(), 0) };
+                return Err(format!("state store erase: renaming into place: {err}"));
+            }
+            // The rename's directory-entry update needs its own fsync to
+            // survive a crash — a file's own fsync (above) only makes its
+            // *data* durable, not that a directory now points at it there.
+            // Review of #559, nit 1: a failure here is NOT the same as a
+            // failure above the `rename` — the erase already took effect,
+            // on the one and only inode anyone can open at this path from
+            // here on. Losing the directory fsync only means a crash
+            // right now, before some *other* durability event flushes the
+            // directory anyway, could in principle roll the rename back on
+            // some filesystems. That's a warning on an otherwise-successful
+            // erase, never an `Err` that would make the CLI's audit line
+            // say `"error"` for an erase that, on every filesystem anyone
+            // actually runs this on, already happened.
+            let dir_fsync_warning = if unsafe { libc::fsync(dirfd.as_raw_fd()) } != 0 {
+                Some(format!(
+                    "state store erase: the file was rewritten on disk, but fsync-ing the \
+                     directory afterwards failed: {} — the erase took effect; this only \
+                     means that rename may not survive a crash happening right now",
+                    std::io::Error::last_os_error()
+                ))
+            } else {
+                None
+            };
+
+            // Re-open the file fresh at the same path (now the rewritten
+            // one) and take over its `flock`, so this `Store` keeps
+            // writing the real file on any later call — never the
+            // orphaned pre-erase inode `st.file` still otherwise points
+            // at. `O_NOFOLLOW`: `openat` on the SAME held `dirfd`, so
+            // nothing between the rename and this open could have
+            // swapped the entry for a symlink.
+            let new_fd = unsafe {
+                libc::openat(
+                    dirfd.as_raw_fd(),
+                    orig_cstr.as_ptr(),
+                    libc::O_RDWR | libc::O_APPEND | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if new_fd < 0 {
+                return Err(format!(
+                    "state store erase: the file was rewritten on disk, but re-opening it \
+                     failed: {} — this Store handle must not be used again (open a fresh \
+                     one to confirm the erase)",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let new_file = unsafe { std::fs::File::from_raw_fd(new_fd) };
+            if unsafe { libc::flock(new_fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Err(format!(
+                    "state store erase: the file was rewritten on disk, but re-locking it \
+                     failed: {} — this Store handle must not be used again (open a fresh \
+                     one to confirm the erase)",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok((new_file, dir_fsync_warning))
+        };
+
+        match do_it() {
+            Ok((new_file, warning)) => {
+                st.file = new_file;
+                let mut by_user: HashMap<String, Vec<usize>> = HashMap::new();
+                for (i, r) in kept.iter().enumerate() {
+                    by_user.entry(r.user.clone()).or_default().push(i);
+                }
+                st.records = kept;
+                st.by_user = by_user;
+                st.size_bytes = new_size;
+                if let Some(w) = &warning {
+                    eprintln!("[anofox-state] {w}");
+                }
+                Ok(EraseOutcome { removed, warning })
+            }
+            Err(e) => {
+                // The on-disk file is already erased and durable by the
+                // time a re-open/re-lock failure could happen (both come
+                // strictly after the `rename` + directory `fsync`) — only
+                // THIS Store handle's own fd is now unreliable, so refuse
+                // any further use of it rather than risk writing through
+                // a stale reference, while still telling the caller the
+                // erase itself succeeded.
+                self.failed.store(true, Ordering::SeqCst);
+                if e.contains("was rewritten on disk") {
+                    eprintln!("[anofox-state] {e}");
+                    Ok(EraseOutcome {
+                        removed,
+                        warning: Some(e),
+                    })
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     pub fn is_failed(&self) -> bool {
@@ -1079,6 +1510,12 @@ fn recover_torn_tail(buf: &str) -> (&str, usize) {
 /// ahead of validation, so a misconfigured path to an unrelated existing
 /// file could be destroyed before its content was ever checked).
 struct Index {
+    /// The header line verbatim (without its trailing `\n`), empty when
+    /// `clean` had no header line at all (a brand-new file) — `Store::open`
+    /// fills this in once it writes a fresh header. Kept so `erase_user`
+    /// can rewrite the file without inventing a new `created` timestamp
+    /// for an existing store (plan §1 "Operator access", S5).
+    header_line: String,
     records: Vec<Record>,
     by_user: HashMap<String, Vec<usize>>,
     next_seq: u64,
@@ -1106,6 +1543,7 @@ fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
 
     let Some(header_line) = lines.next() else {
         return Ok(Index {
+            header_line: String::new(),
             records,
             by_user,
             next_seq,
@@ -1181,6 +1619,7 @@ fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
     }
 
     Ok(Index {
+        header_line: header_line.to_string(),
         records,
         by_user,
         next_seq,
@@ -1888,6 +2327,130 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn erase_user_drops_only_that_users_rows_and_survives_a_reload() {
+        let p = store_path("erase-basic");
+        {
+            let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+            s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+            s.append(new_rec("bob", json!({"q1": "A"}))).unwrap();
+            s.append(new_rec("alice", json!({"q1": "C"}))).unwrap();
+            assert_eq!(s.erase_user("alice").unwrap().removed, 2);
+            assert_eq!(s.user_count("alice"), 0);
+            assert_eq!(s.rows_for_user("alice").len(), 0);
+            // bob's row, and its seq, are untouched.
+            assert_eq!(s.user_count("bob"), 1);
+            assert_eq!(s.rows_for_user("bob")[0].seq, 2);
+            assert_eq!(s.len(), 1);
+        }
+        // Reopen: the file on disk agrees — bob's row survives with its
+        // original seq (gaps are fine; strictly increasing is all that's
+        // promised). `next_seq` is recomputed from what's left on disk,
+        // so a fresh append resumes right after the highest *surviving*
+        // seq (2), not the highest ever assigned (3, erased alice's) —
+        // the documented reuse caveat on `erase_user` itself.
+        let s2 = reopen(&p, DEFAULT_MAX_MB).unwrap();
+        assert_eq!(s2.len(), 1);
+        assert_eq!(s2.rows_for_user("bob")[0].seq, 2);
+        let r4 = s2.append(new_rec("carol", json!({"q1": "A"}))).unwrap();
+        assert_eq!(r4.seq, 3);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_is_a_no_op_for_a_user_with_no_rows() {
+        let p = store_path("erase-noop");
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        s.append(new_rec("bob", json!({"q1": "A"}))).unwrap();
+        assert_eq!(s.erase_user("nobody-ever-submitted").unwrap().removed, 0);
+        assert_eq!(s.len(), 1);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_preserves_the_original_header_line_verbatim() {
+        let p = store_path("erase-header");
+        {
+            let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+            s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+            s.erase_user("alice").unwrap();
+        }
+        let raw = std::fs::read_to_string(&p).unwrap();
+        let header_line = raw.lines().next().unwrap();
+        let header: serde_json::Value = serde_json::from_str(header_line).unwrap();
+        let created = header["created"].as_str().unwrap().to_string();
+        assert!(!created.is_empty());
+        // A reload still accepts its own rewritten file (same header,
+        // nothing is "ours but unrecognisable" after an erase).
+        let s2 = reopen(&p, DEFAULT_MAX_MB).unwrap();
+        assert_eq!(s2.len(), 0);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// Review of #555 B2: "add a test that kills the process between
+    /// write and rename (or injects a failure there) and reopens". A real
+    /// `kill -9` isn't reproducible in a unit test, so `force_fail` (the
+    /// same hook `io_error_while_appending_flips_store_to_failed` uses)
+    /// injects the failure at the exact point requested — the crash-safe
+    /// rewrite's temp file is fully written and `fsync`'d, but `rename`
+    /// has not run. Everything the old in-place `seek`+`write`+`truncate`
+    /// got wrong is the property under test here: the ORIGINAL file must
+    /// still be byte-identical, bob's row must still be there, and
+    /// alice's rows must NOT have come back (nor ever have left — this
+    /// failure happens before the original is touched at all).
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_crash_before_rename_leaves_the_original_byte_identical() {
+        let p = store_path("erase-crash-before-rename");
+        let before;
+        {
+            let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+            s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+            s.append(new_rec("bob", json!({"q1": "A"}))).unwrap();
+            before = std::fs::read(&p).unwrap();
+
+            s.set_force_fail(true);
+            let e = s.erase_user("alice").unwrap_err();
+            assert!(e.contains("forced test failure"), "{e}");
+            // A Store an erase failed on refuses any further use (fails
+            // closed, same as a failed append) — this handle is done;
+            // what matters from here is only what's on disk.
+            assert!(s.is_failed());
+        }
+
+        let after = std::fs::read(&p).unwrap();
+        assert_eq!(
+            before, after,
+            "a crash before rename must leave the original file untouched, byte for byte"
+        );
+
+        // A fresh Store on the same path (the flock released when `s`
+        // dropped above) sees exactly the pre-erase content: alice's row
+        // is still there, never removed; bob's is unaffected either way.
+        let reopened = reopen(&p, DEFAULT_MAX_MB).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(reopened.user_count("alice"), 1);
+        assert_eq!(reopened.user_count("bob"), 1);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn erase_user_refuses_once_the_store_has_failed() {
+        let p = store_path("erase-failed");
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+        s.force_fail.store(true, Ordering::SeqCst);
+        assert!(s.append(new_rec("alice", json!({"q1": "C"}))).is_err());
+        assert!(s.is_failed());
+        let e = s.erase_user("alice").unwrap_err();
+        assert!(e.contains("unavailable"), "{e}");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn injected_control_characters_stay_one_line() {
         let p = store_path("injection");
         let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
@@ -1928,6 +2491,77 @@ mod tests {
         // The store still works after recovery.
         let r = s2.append(new_rec("carol", json!({"q1": "A"}))).unwrap();
         assert_eq!(r.seq, 2);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// Review of #555's should-fix #4: `export`/a dry-run `erase` must
+    /// never mutate the file they're reading — no torn-tail truncation,
+    /// no permission tightening, no header written into an empty file.
+    /// `Store::open` (used by every other test above) does all three;
+    /// `Store::open_read_only` must do none of them, on the exact same
+    /// torn-tail fixture `torn_last_line_is_truncated_and_recovered` uses.
+    #[cfg(unix)]
+    #[test]
+    fn open_read_only_never_mutates_a_torn_tail_or_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = store_path("read-only-torn");
+        {
+            let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+            s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
+        }
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+            f.write_all(br#"{"v":1,"seq":2,"ts":"2026-01-01T00:00:00.000Z","user":"bob","auth":"oidc","dashboard":"t","submit":"q","id":"x","vars":{"#).unwrap();
+        }
+        // Loosen the permissions too — a read-only open must leave these
+        // exactly as found, same as the torn tail.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let before_mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+
+        let s = Store::open_read_only(&p, DEFAULT_MAX_MB).unwrap();
+        assert_eq!(s.len(), 1, "the one complete record still reads back");
+        assert_eq!(s.global_seq(), 1);
+        drop(s);
+
+        let after = std::fs::read(&p).unwrap();
+        let after_mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            before, after,
+            "a read-only open must not truncate the torn tail"
+        );
+        assert_eq!(
+            before_mode, after_mode,
+            "a read-only open must not touch permissions"
+        );
+        assert_eq!(after_mode, 0o644, "still loose — nothing tightened it");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// `open_read_only`'s shared lock (review of #555): two read-only
+    /// opens on the same path coexist (two concurrent exports), but a
+    /// writable [`Store::open`] still refuses outright against either —
+    /// the one guarantee that actually matters (no write ever races a
+    /// read, or another write).
+    #[cfg(unix)]
+    #[test]
+    fn open_read_only_locks_are_shared_among_themselves_but_still_exclude_a_writer() {
+        let p = store_path("read-only-lock");
+        {
+            Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        }
+        let r1 = Store::open_read_only(&p, DEFAULT_MAX_MB).unwrap();
+        let r2 = Store::open_read_only(&p, DEFAULT_MAX_MB).unwrap();
+        let w = Store::open(&p, DEFAULT_MAX_MB);
+        assert!(
+            w.is_err_and(|e| e.contains("in use by another server")),
+            "a writable open must refuse while either read-only open is live"
+        );
+        drop(r1);
+        drop(r2);
+        // Both readers gone: a writer can now take the exclusive lock.
+        Store::open(&p, DEFAULT_MAX_MB).unwrap();
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
