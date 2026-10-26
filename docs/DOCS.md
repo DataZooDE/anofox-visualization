@@ -174,6 +174,7 @@ terminal.
 | `::TEXT_LARGE` |  | kpi | large text card |
 | `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
+| `::MARKDOWN_STYLE` | `::MD_STYLE` | kpi | a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style |
 | `::IMAGE` | `::PICTURE`, `::IMG` | kpi | a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption |
 | `::IMAGE_DARK` | `::IMG_DARK` | kpi | the ::IMAGE shown while the dashboard is dark |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
@@ -226,6 +227,7 @@ terminal.
 | `::GATE_MESSAGE` | `::GATE_HINT` | layout | on a ::GUIDE_STEP: why Next is disabled |
 | `::VIEW` | `::ALT_VIEW` | layout | one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`) |
 | `::ENDVIEW` | `::END_VIEW` | layout | close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it) |
+| `::VIEW_PLACEMENT` |  | layout | a ::VIEW group's switcher placement: 'row' (default, its own row above the card) or 'header' (right-aligned, compact, in the card's title row — folds into a dropdown below a minimum card width; only when every alternative is exactly one panel, else --check warns and it falls back to 'row'); set directly before the group's first ::VIEW marker, like ::COL/::SPAN |
 | `::FIT` | `::FIT_SCREEN` | layout | this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide) |
 | `::PLACEHOLDER` |  | layout | an empty grid cell |
 | `::TRACK` | `::STRIP_BELOW`, `::STRIP_UNDER` | layout | a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar |
@@ -1803,9 +1805,39 @@ SELECT '**Margins of the last two weeks are provisional** — late returns still
 
 `info` counts as `note`, `tip` as `success`, `caution` / `danger` as `warning`;
 `--check` warns on an unknown kind (`callout/unknown`) or a `::CALLOUT` without
-`::MARKDOWN` text (`callout/no-text`). Like `::MARKDOWN`, callouts are drawn by the
-browser (builder, `serve`, locked servers). The *A sales cockpit in your brand*
-sample has both.
+`::MARKDOWN` text (`callout/no-text`). The icon is browser-only (builder,
+`serve`, locked servers); the tinted box itself (see `::MARKDOWN_STYLE`
+below) is also drawn in `--svg` and other static output. The *A sales
+cockpit in your brand* sample has both.
+
+### Plain, card or callout (`::MARKDOWN_STYLE`)
+
+By default every `::MARKDOWN` box is drawn as a tinted callout — fine for a
+note or warning, but a methodology tab or a detail pane next to a diagram
+reads as a stack of "info boxes" even without `::CALLOUT`. `::MARKDOWN_STYLE`
+(#536) picks the box's chrome instead:
+
+```sql
+SELECT 'Monitoring answers three questions, chunk by chunk: is the input the
+same shape as training, does the model still predict well, and has the
+world it predicts moved on?'::MARKDOWN, 'plain'::MARKDOWN_STYLE;
+```
+
+| Value | Looks like |
+|---|---|
+| `plain` | Text on the page background: no card, no tint, no accent bar, normal page padding. |
+| `card` | A plain white card, like a chart or KPI panel — no tint, no bar. |
+| `callout` | Today's tinted box (the default). `::CALLOUT` implies this. |
+
+A dashboard-wide default comes from a `-- @markdown_style <plain\|card\|callout>`
+header (see *Dashboard header comments*); a panel's own `::MARKDOWN_STYLE`
+overrides it, and `::CALLOUT` always draws `'callout'` for its own panel
+regardless of that default. `::CALLOUT` together with `'plain'`/`'card'` is a
+lint warning (`markdown_style/conflicts-with-callout`): the explicit style
+wins, so the callout's tint, bar and icon are dropped. `--check` also warns
+on an unknown value (`markdown_style/unknown`) or a `::MARKDOWN_STYLE` without
+`::MARKDOWN` text (`markdown_style/no-text`). Browser, `--svg` and other
+static/HTML output all draw the same choice.
 
 ### Images (`::IMAGE`, `![alt](src)`)
 
@@ -2190,6 +2222,7 @@ with the browser through wasm):
 | `-- @order N` | Where it sits, ascending, among its siblings (same group, or ungrouped) in the served nav bar and the `/` start page's card grid — the server's default is alphabetical by file name, which ignores `blueprint.json`'s own `dashboards[]` order. `N` is a plain integer (ties, and dashboards without `@order`, keep sorting by id afterwards). |
 | `-- @refresh <s>` | Reload the page every *s* seconds (served dashboards). |
 | `-- @astables on` \| `off` | Shows the "▦ Charts as tables" bar on this dashboard for every viewer — off (no bar) by default, or with `off`. A viewer can still turn the feature itself on or off from the toolbar's **⋯ → Charts as tables** menu item whether or not the bar is shown; their choice is remembered across dashboards. |
+| `-- @markdown_style <plain\|card\|callout>` | The dashboard's own default `::MARKDOWN_STYLE` (#536) — used by every `::MARKDOWN` panel that sets no `::MARKDOWN_STYLE` of its own and carries no `::CALLOUT` (which always draws `'callout'`). Without it, every such panel falls back to `'callout'`, today's tinted box. A panel's own `::MARKDOWN_STYLE` overrides this. |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 | `-- @shared <name>, …` | Directly above one `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement: documents that *this* directive deliberately reuses `<name>` with another one, so `dashboard --check --strict` skips `interaction/rowselect-shared-name` / `interaction/name-clash` for it — every other clash still is flagged. See *Selecting table rows* below. |
@@ -2204,8 +2237,10 @@ more than 10 tags (`header/too-many-tags`), an empty `@owner`
 (`header/empty-owner`), a `@certified` that isn't a `YYYY-MM-DD` date
 (`header/bad-certified`), an `@order` that isn't a plain integer
 (`header/bad-order`), a `@description` over 160 characters
-(`header/long-description`) and an `@astables` that isn't `on` or `off`
-(`header/bad-astables`), reported as statement 0. `dashboard --check
+(`header/long-description`), an `@astables` that isn't `on` or `off`
+(`header/bad-astables`) and a `@markdown_style` that isn't `plain`, `card`
+or `callout` (`header/bad-markdown-style`), reported as statement 0.
+`dashboard --check
 <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the
 same title (`folder/duplicate-title`, ignoring case), a file name the

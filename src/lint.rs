@@ -63,7 +63,12 @@ pub struct Diagnostic {
     /// `view/unbalanced-group` (errors) | `view/lone` | `view/computed-label` |
     /// `view/mixed-names` | `view/empty` | `view/open-ended` |
     /// `view/stray-end` (warnings) | `view/input-inside` | `view/unnamed`
-    /// (notes).
+    /// (notes). `::VIEW_PLACEMENT` ([`view_diags`], #534):
+    /// `view-placement/unknown-value` (an error: not `'row'`/`'header'`) |
+    /// `view-placement/not-single-panel` | `view-placement/ambiguous` |
+    /// `view-placement/orphan` (warnings: each falls back to `'row'`) |
+    /// `view-placement/computed-value` (a warning: can't be checked here,
+    /// still works at render time, like `view/computed-label`).
     /// `::FIT` ([`fit_diags`], #400, warnings): `layout/fit-ambiguous` (before
     /// the first ::TAB of a tabbed dashboard, a second ::FIT for one section,
     /// or cast beside a panel's columns) | `layout/fit-too-many` (more rows
@@ -76,7 +81,10 @@ pub struct Diagnostic {
     /// `header/bad-certified` | `header/bad-order` | `header/long-description` |
     /// `header/empty-nav` | `header/long-nav` | `header/bad-astables` (not
     /// `on`/`off`, so the author's `-- @astables` is ignored — the bar stays
-    /// off unless a viewer turns it on). A served folder
+    /// off unless a viewer turns it on) | `header/bad-markdown-style` (not
+    /// `plain`/`card`/`callout`, so `-- @markdown_style` is ignored —
+    /// `::MARKDOWN` panels without their own `::MARKDOWN_STYLE` fall back to
+    /// 'callout'). A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
@@ -1160,6 +1168,54 @@ where
                     "callout/no-text",
                     "::CALLOUT needs a ::MARKDOWN column in the same SELECT (the callout's text)"
                         .into(),
+                );
+            }
+        }
+
+        // ::MARKDOWN_STYLE (#536): an unknown value falls back to 'callout'
+        // (today's look); it needs a ::MARKDOWN column in the same SELECT;
+        // and combined with ::CALLOUT it only makes sense as 'callout' —
+        // 'plain'/'card' would silently drop the chosen look.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::MarkdownStyle) {
+            let v = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let mut warn = |code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if !crate::roles::MARKDOWN_STYLE_KINDS.contains(&v.as_str()) {
+                warn(
+                    "markdown_style/unknown",
+                    format!(
+                        "::MARKDOWN_STYLE `{v}` — use 'plain', 'card' or 'callout' (drawn as \
+                         'callout')"
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                warn(
+                    "markdown_style/no-text",
+                    "::MARKDOWN_STYLE needs a ::MARKDOWN column in the same SELECT".into(),
+                );
+            }
+            if p.roles.iter().any(|(_, r)| *r == Role::Callout) && (v == "plain" || v == "card") {
+                warn(
+                    "markdown_style/conflicts-with-callout",
+                    format!(
+                        "::CALLOUT together with '{v}'::MARKDOWN_STYLE — the explicit style wins, \
+                         so ::CALLOUT's tint, bar and icon are dropped (drop ::CALLOUT, or set \
+                         ::MARKDOWN_STYLE to 'callout')"
+                    ),
                 );
             }
         }
@@ -3010,6 +3066,46 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
         });
     }
 
+    // `::VIEW_PLACEMENT` (#534), over the whole plan: a statement combining
+    // it with other roles (`view-placement/ambiguous`, like `::FIT`'s own
+    // check), or one `scan` never attached to any group as its
+    // `placement_stmt` (`view-placement/orphan`) — not directly before a
+    // `::VIEW` group's first marker, so it never reaches one. Both fall
+    // back to `'row'`.
+    let consumed: Vec<usize> = scan
+        .groups
+        .iter()
+        .filter_map(|g| g.placement_stmt)
+        .collect();
+    for (i, p) in plan.iter().enumerate() {
+        if p.setup || !p.roles.iter().any(|(_, r)| *r == Role::ViewPlacement) {
+            continue;
+        }
+        if p.roles.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "view-placement/ambiguous",
+                message: "::VIEW_PLACEMENT is a directive of its own — `SELECT 'header'::VIEW_PLACEMENT;` \
+                          directly before the ::VIEW group's first marker — not a column beside a \
+                          panel's own columns; this one is ignored, the group stays 'row'"
+                    .into(),
+                sql: short(i),
+            });
+        } else if !consumed.contains(&i) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "view-placement/orphan",
+                message: "this ::VIEW_PLACEMENT has no ::VIEW group to set — it needs to sit \
+                          directly before the group's first ::VIEW marker (setup and other \
+                          next-panel modifiers, like ::COL, may sit between them)"
+                    .into(),
+                sql: short(i),
+            });
+        }
+    }
+
     let mut seen_ids: Vec<(String, usize)> = Vec::new();
     for g in &scan.groups {
         let marker_stmt = g.markers[0] + 1;
@@ -3023,6 +3119,41 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                     .into(),
                 sql: short(g.markers[0]),
             });
+        }
+        if let Some(stmt) = g.placement_stmt {
+            match &g.placement_requested {
+                None => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: stmt + 1,
+                    code: "view-placement/computed-value",
+                    message: "this ::VIEW_PLACEMENT's value is a computed expression, not a \
+                              plain string literal — whether it ends up 'header' or 'row' can't \
+                              be checked here"
+                        .into(),
+                    sql: short(stmt),
+                }),
+                Some(v) if v != "row" && v != "header" => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: stmt + 1,
+                    code: "view-placement/unknown-value",
+                    message: format!(
+                        "::VIEW_PLACEMENT's value must be 'row' or 'header', not '{v}' — it \
+                         falls back to 'row'"
+                    ),
+                    sql: short(stmt),
+                }),
+                Some(v) if v == "header" && !g.single_panel => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: stmt + 1,
+                    code: "view-placement/not-single-panel",
+                    message: "'header' placement needs every alternative of this ::VIEW group \
+                              to be exactly one panel — this group has an alternative with more \
+                              than one, or none at all, so it falls back to 'row'"
+                        .into(),
+                    sql: short(stmt),
+                }),
+                _ => {}
+            }
         }
         if g.unbalanced_group {
             diags.push(Diagnostic {
@@ -3644,6 +3775,25 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                         "`-- @astables {a}` is not `on` or `off` — the \"▦ Charts as tables\" \
                          bar stays off on this dashboard unless a viewer switches it on \
                          themselves"
+                    )
+                },
+                line,
+            );
+        } else if let Some(v) = header_value(line, "markdown_style")
+            .filter(|v| crate::roles::markdown_style_of(v).is_none())
+        {
+            warn(
+                "header/bad-markdown-style",
+                if v.is_empty() {
+                    "`-- @markdown_style` has no value — write `plain`, `card` or `callout` \
+                     (without it, every ::MARKDOWN panel without its own ::MARKDOWN_STYLE \
+                     falls back to 'callout')"
+                        .into()
+                } else {
+                    format!(
+                        "`-- @markdown_style {v}` is not `plain`, `card` or `callout` — every \
+                         ::MARKDOWN panel without its own ::MARKDOWN_STYLE falls back to \
+                         'callout'"
                     )
                 },
                 line,
@@ -6381,6 +6531,14 @@ mod design_tests {
         assert_eq!(codes("-- @astables\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables yes\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables On\n"), ["header/bad-astables"]);
+        assert!(codes("-- @markdown_style plain\nSELECT 1;").is_empty());
+        assert!(codes("-- @markdown_style card\nSELECT 1;").is_empty());
+        assert!(codes("-- @markdown_style callout\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @markdown_style\n"), ["header/bad-markdown-style"]);
+        assert_eq!(
+            codes("-- @markdown_style boxed\n"),
+            ["header/bad-markdown-style"]
+        );
         assert!(codes(&format!("-- @description {}\n", "x".repeat(160))).is_empty());
         let long = format!(
             "-- @description {}\n-- @description {}\n",
@@ -7878,6 +8036,73 @@ mod design_tests {
     }
 
     #[test]
+    fn view_placement_header_is_clean_when_every_alt_is_one_panel() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(!has(&d, "view-placement/not-single-panel"), "{d:?}");
+        assert!(!has(&d, "view-placement/unknown-value"), "{d:?}");
+        assert!(!has(&d, "view-placement/orphan"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_not_single_panel_warns_and_still_renders() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\n\
+             SELECT a::XAXIS, b::BARCHART FROM t;\nSELECT a::XAXIS, c::LINECHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/not-single-panel"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_unknown_value_errors() {
+        let d = check(
+            "SELECT 'sidebar'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/unknown-value"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_computed_value_warns() {
+        let d = check(
+            "SELECT lower('HEADER')::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/computed-value"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_ambiguous_warns() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT, a::XAXIS FROM t;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/ambiguous"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_orphan_warns() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/orphan"), "{d:?}");
+    }
+
+    #[test]
     fn engine_warnings_become_render_warnings() {
         // A density per category where every group has one value: the stat
         // can't estimate anything, so ggplot-rs skips the layer with a warning.
@@ -8735,6 +8960,77 @@ mod design_tests {
         assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
         let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
         assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    #[test]
+    fn markdown_style_kind_and_text_are_checked() {
+        let one = |v: &str| {
+            let v = v.to_string();
+            move |_q: &str| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "**Heads up**", "c1": v.clone() }),
+                ))
+            }
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE;",
+            one("plain"),
+        );
+        assert!(
+            !d.iter().any(|x| x.code.starts_with("markdown_style/")),
+            "{d:?}"
+        );
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'invisible'::MARKDOWN_STYLE;",
+            one("invisible"),
+        );
+        assert!(
+            d.iter().any(|x| x.code == "markdown_style/unknown"),
+            "{d:?}"
+        );
+        let d = check(
+            "SELECT 'x'::TEXT_SMALL, 'plain'::MARKDOWN_STYLE;",
+            one("plain"),
+        );
+        assert!(
+            d.iter().any(|x| x.code == "markdown_style/no-text"),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_style_conflicting_with_callout_is_checked() {
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'warning'::CALLOUT;",
+            |_q| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "x", "c1": "plain", "c2": "warning" }),
+                ))
+            },
+        );
+        assert!(
+            d.iter()
+                .any(|x| x.code == "markdown_style/conflicts-with-callout"),
+            "{d:?}"
+        );
+        // 'callout' together with ::CALLOUT is the intended, non-conflicting
+        // combination.
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'callout'::MARKDOWN_STYLE, 'warning'::CALLOUT;",
+            |_q| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "x", "c1": "callout", "c2": "warning" }),
+                ))
+            },
+        );
+        assert!(
+            !d.iter()
+                .any(|x| x.code == "markdown_style/conflicts-with-callout"),
+            "{d:?}"
+        );
     }
 
     #[test]

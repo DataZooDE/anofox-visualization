@@ -7973,6 +7973,9 @@ function activateView(btn, focus) {
   }
   dpView[id] = label;
   setViewParam(id, label);
+  // #534: a 'header'-placed group's bar lives in whichever card is
+  // currently shown — move it into the one just activated.
+  if (sec.classList.contains("dp-views-header")) placeViewHeaderBar(sec);
   if (focus) refocus("view:" + id, btn);
 }
 // Esc on a drill-through's tab (not inside a chart, which has its own Esc, or
@@ -8991,6 +8994,12 @@ async function lazyRunJob(job, inline = false) {
   job.ph.replaceWith(frag);
   if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane, .dp-viewpane") === pane)) pane.removeAttribute("aria-busy");
   if (inline) return;
+  // #534: the job's real panel just replaced the lazy skeleton — a
+  // 'header'-placed group's run() call (placeViewHeaderBars) almost always
+  // ran too early to see it (the skeleton, not yet the real panel), so
+  // re-place it here now that there is something real to move into.
+  const headerSec = pane && pane.closest(".dp-views.dp-views-header");
+  if (headerSec) placeViewHeaderBar(headerSec);
   // The output a re-run's patch compares with (patchSlots), as the swap
   // records it for the panels it brings: before wiring.
   for (const p of made) if (!p.parentElement.closest(SLOTS)) p._sig = p.outerHTML;
@@ -9054,6 +9063,13 @@ async function lazyFlushAll() {
     dpLazy.tail = step.catch((e) => console.error(e));
     await dpLazy.tail;
   }
+  // #534: every job above ran `inline`, so none of them re-placed a
+  // 'header' switcher themselves (lazyRunJob only does that once it is
+  // driving its own wiring, which `inline` jobs are not) — e.g. a hidden
+  // ::VIEW alternative's panel, never shown yet, forced to load only now
+  // for the ⤓ HTML export snapshot. One pass over the whole dash covers
+  // every group at once.
+  placeViewHeaderBars(document);
   wireCharts();
   addExportButtons();
 }
@@ -9206,6 +9222,11 @@ async function runOnce(fresh = true, pv = preview) {
     grid.replaceChildren();
     return showError(grid, String(e));
   }
+  // ::MARKDOWN_STYLE (#536): this dashboard's own `-- @markdown_style`
+  // default, read once per run — a panel's own ::MARKDOWN_STYLE (or
+  // ::CALLOUT, which always draws 'callout') overrides it. See
+  // resolveMdStyle() / mdStyleDefault().
+  const dpMdStyleDefault = mdStyleDefault(pv ? pv.sql : $("sql").value);
   markPending(grid, stmts, fresh);
   if (fresh) {
     dpSetupRan = new Map();
@@ -9993,18 +10014,29 @@ async function runOnce(fresh = true, pv = preview) {
           panels++;
         } else if (role(s, "MARKDOWN")) {
           const fig = mkPanel();
-          fig.classList.add("md-box");
           const tr = s.roles.find((r) => r[1] === "TITLE");
           const r0 = JSON.parse(rowsJson)[0] || {};
           if (tr && r0["c" + tr[0]]) fig.appendChild(mkTitle(String(r0["c" + tr[0]])));
           const mdr = s.roles.find((r) => r[1] === "MARKDOWN");
-          // ::CALLOUT 'note' | 'warning' | 'success': a tinted box with an icon.
+          // ::MARKDOWN_STYLE (#536): 'plain' (page background, no card/tint/
+          // bar), 'card' (plain white card, like mkPanel()'s own look — no
+          // class needed) or 'callout' ::CALLOUT 'note' | 'warning' |
+          // 'success': a tinted box with an icon — today's look, the
+          // default. An explicit ::MARKDOWN_STYLE wins even over ::CALLOUT
+          // (resolveMdStyle(); --check warns: markdown_style/conflicts-
+          // with-callout), so the icon only ever shows with 'callout'.
+          const sr = s.roles.find((r) => r[1] === "MARKDOWN_STYLE");
           const cr = s.roles.find((r) => r[1] === "CALLOUT");
-          if (cr) {
-            const kind = calloutKind(r0["c" + cr[0]]);
-            fig.classList.add("dp-callout", "dp-callout-" + kind);
-            fig.setAttribute("role", "note"); // static text: never an assertive alert
-            fig.dataset.icon = { note: "ℹ", warning: "⚠", success: "✓" }[kind];
+          const mdStyle = resolveMdStyle(sr ? r0["c" + sr[0]] : null, !!cr, dpMdStyleDefault);
+          if (mdStyle === "plain") fig.classList.add("md-plain");
+          if (mdStyle === "callout") {
+            fig.classList.add("md-box");
+            if (cr) {
+              const kind = calloutKind(r0["c" + cr[0]]);
+              fig.classList.add("dp-callout", "dp-callout-" + kind);
+              fig.setAttribute("role", "note"); // static text: never an assertive alert
+              fig.dataset.icon = { note: "ℹ", warning: "⚠", success: "✓" }[kind];
+            }
           }
           const body = document.createElement("div");
           body.className = "md-body";
@@ -10334,6 +10366,11 @@ async function runOnce(fresh = true, pv = preview) {
         nextSpan = parseInt(await firstValue(s)) || 0;
       } else if (d === "HEIGHT") {
         nextHeight = parseInt(await firstValue(s)) || 0;
+      } else if (d === "VIEW_PLACEMENT") {
+        // #534: a pending ::VIEW_PLACEMENT right before a ::VIEW group's
+        // first marker. views.rs already resolved the effective placement
+        // (fallback to 'row' applied) onto every statement's `s.view.placement`
+        // — nothing to do here but not fall through to "draw a card".
       } else if (d === "FIT") {
         // 'fit'::FIT (#400): the section it is in (a tab / sub-tab / view
         // pane; with no tabs the dashboard's grid) fits the window while it
@@ -10447,6 +10484,12 @@ async function runOnce(fresh = true, pv = preview) {
         if (openView !== s.view.group) {
           const sec = document.createElement("section");
           sec.className = "dp-views";
+          // #534: 'header' (views.rs already applied the single-panel
+          // fallback to 'row' when the group doesn't qualify) moves the
+          // switcher into the shown alternative's own card title instead
+          // of its own row — see placeViewHeaderBar() below.
+          if (s.view.placement === "header") sec.classList.add("dp-views-header");
+          sec.dataset.placement = s.view.placement;
           tagName(sec, s); // #518: the group's marker statement names its switcher
           curGroupScale = 1;
           if (container === curGrid) {
@@ -10887,6 +10930,15 @@ async function runOnce(fresh = true, pv = preview) {
   // keeps its DOM (scroll, focus, hover state), only the changed ones and the
   // controls are replaced. Anything else replaces the whole content.
   const dash = document.querySelector(".dash");
+  // #534: a relocated 'header' switcher is nested inside a swappable PANEL
+  // slot, not the stable `.dp-views`/`.dp-viewpane` wrapper patchSlots
+  // keeps across a re-run (".dp-viewbar"/"dp-viewpane" are excluded from
+  // slot matching, see the NOTE in tests/web/views_test.mjs) — a panel
+  // whose own query changed gets discarded wholesale, taking a bar nested
+  // inside it down with it. Park every bar back in its wrapper (undo the
+  // relocation) before that can happen; placeViewHeaderBars(dash) below
+  // re-places them once the swap has settled.
+  unplaceViewHeaderBars(dash);
   const newRoots = [newGrid, tabBar, tabWrap];
   // #554 review (S1): every embed-fetched assets/ <img> this run might
   // discard — the old ones still in `.dash`, *and* any new ones (still
@@ -10960,6 +11012,7 @@ async function runOnce(fresh = true, pv = preview) {
   } else if (!wantBar && a11yBar) {
     a11yBar.remove();
   }
+  placeViewHeaderBars(dash); // #534: before fitScreen/fitCharts measure the title rows
   fitScreen(); // a ::FIT tab: every panel (patched-in ones too) at its fitted size, before the charts draw
   fitCharts(true);
   const tWire = performance.now();
@@ -11469,17 +11522,61 @@ document.addEventListener("fullscreenchange", refitSoon);
 // hover-only bar.
 function foldTools(panel) {
   const bar = panel.querySelector(":scope > .dp-toolbox");
-  if (!bar || !panel.clientWidth) return;
-  let fold = matchMedia("(hover: none)").matches || panel.clientWidth < 480;
-  const title = !fold && panel.querySelector(":scope > .panel-title");
-  if (title) {
-    panel.classList.remove("dp-narrow"); // measure the unfolded bar and title
-    const b = bar.getBoundingClientRect();
-    const range = document.createRange();
-    range.selectNodeContents(title);
-    fold = [...range.getClientRects()].some((t) => t.right > b.left && t.top < b.bottom && t.bottom > b.top);
+  if (bar && panel.clientWidth) {
+    let fold = matchMedia("(hover: none)").matches || panel.clientWidth < 480;
+    const title = !fold && panel.querySelector(":scope > .panel-title");
+    if (title) {
+      panel.classList.remove("dp-narrow"); // measure the unfolded bar and title
+      const b = bar.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(title);
+      fold = [...range.getClientRects()].some((t) => t.right > b.left && t.top < b.bottom && t.bottom > b.top);
+    }
+    panel.classList.toggle("dp-narrow", fold);
   }
-  panel.classList.toggle("dp-narrow", fold);
+  foldViewHeaderBar(panel);
+}
+
+// #534: below a minimum card width, a relocated header-placed ::VIEW
+// switcher folds from segmented buttons into one compact, labelled
+// <select> (a native dropdown — arrow keys then cycle it on their own,
+// still announced to assistive tech) instead of the row of buttons. The
+// <select> is a child of the bar itself, so it travels along for free
+// whenever placeViewHeaderBar() moves the bar to a different card.
+const VIEW_HEADER_FOLD_PX = 480;
+function foldViewHeaderBar(panel) {
+  const bar = panel.querySelector(":scope > .panel-title > .dp-viewbar");
+  if (!bar || !panel.clientWidth) return;
+  const fold = panel.clientWidth < VIEW_HEADER_FOLD_PX;
+  const tabs = [...bar.querySelectorAll(':scope > [role="tab"]')];
+  if (fold) {
+    let select = bar.querySelector(":scope > .dp-viewbar-select");
+    if (!select) {
+      select = document.createElement("select");
+      select.className = "dp-viewbar-select";
+      select.onchange = () => {
+        const btn = [...bar.querySelectorAll(':scope > [role="tab"]')][select.selectedIndex];
+        if (btn) activateView(btn, false);
+      };
+      bar.appendChild(select);
+    }
+    select.setAttribute("aria-label", bar.getAttribute("aria-label") || "Views");
+    const stale =
+      select.options.length !== tabs.length ||
+      tabs.some((b, i) => select.options[i]?.textContent !== b.textContent);
+    if (stale) {
+      select.replaceChildren(
+        ...tabs.map((b) => {
+          const opt = document.createElement("option");
+          opt.textContent = b.textContent;
+          return opt;
+        }),
+      );
+    }
+    const activeIdx = tabs.findIndex((b) => b.getAttribute("aria-selected") === "true");
+    select.selectedIndex = activeIdx >= 0 ? activeIdx : 0;
+  }
+  bar.classList.toggle("dp-viewbar-folded", fold);
 }
 
 if (typeof ResizeObserver !== "undefined")
@@ -12350,6 +12447,31 @@ function calloutKind(v) {
   if (k === "success" || k === "tip") return "success";
   return "note";
 }
+// ::MARKDOWN_STYLE / -- @markdown_style value → 'plain' | 'card' | 'callout',
+// or null for anything else (src/roles.rs MARKDOWN_STYLE_KINDS).
+const MD_STYLE_KINDS = ["plain", "card", "callout"];
+function mdStyleOf(v) {
+  const k = String(v ?? "").trim().toLowerCase();
+  return MD_STYLE_KINDS.includes(k) ? k : null;
+}
+// The effective ::MARKDOWN_STYLE for one ::MARKDOWN panel (src/roles.rs
+// resolve_markdown_style): an explicit, valid `explicit` (the panel's own
+// ::MARKDOWN_STYLE cell) wins outright — even over ::CALLOUT (--check warns:
+// markdown_style/conflicts-with-callout); else ::CALLOUT (`calloutPresent`)
+// always draws 'callout'; else `dashboardDefault` (-- @markdown_style); else
+// 'callout' (today's look).
+function resolveMdStyle(explicit, calloutPresent, dashboardDefault) {
+  return mdStyleOf(explicit) ?? (calloutPresent ? "callout" : mdStyleOf(dashboardDefault) ?? "callout");
+}
+// This dashboard's own `-- @markdown_style` default, or null without the
+// header / with an unrecognized value — see astablesBarOn() for the pattern.
+function mdStyleDefault(sql) {
+  try {
+    return mdStyleOf(JSON.parse(dashboard_meta(sql)).markdown_style);
+  } catch (_) {
+    return null;
+  }
+}
 // One cell of a result (by output position) as text.
 function cellAt(rowsJson, idx) {
   let r0;
@@ -12433,6 +12555,53 @@ function mkTitle(text) {
   c.className = "panel-title";
   c.textContent = text;
   return c;
+}
+
+// #534: a 'header'-placed ::VIEW group's switcher — one physical bar,
+// moved (not cloned) into whichever alternative is currently shown, so its
+// click handlers, aria-selected state and arrow-key wiring stay a single
+// source of truth. views.rs only grants `s.view.placement === "header"`
+// when every alternative is exactly one panel, so `pane.firstElementChild`
+// is always that one panel (a <figure class="panel"> for most kinds; an
+// empty title is grown for one with no ::TITLE of its own, so the bar has
+// somewhere to sit).
+function placeViewHeaderBar(sec) {
+  // Not scoped to a direct child: a re-entrant call (activateView, a
+  // resize) finds the bar already relocated, nested inside some pane's
+  // title rather than sitting in `sec` itself.
+  const bar = sec.querySelector(".dp-viewbar");
+  if (!bar) return;
+  const panes = [...sec.querySelectorAll(":scope > .dp-viewpane")];
+  const pane = panes.find((p) => p.style.display !== "none") || panes[0];
+  const host = pane && pane.firstElementChild;
+  // Still its lazy-loading skeleton (#534): moving the bar into it would
+  // only lose it the moment lazyRunJob's `job.ph.replaceWith(frag)` throws
+  // the skeleton away — leave the bar where it is (its own row) until that
+  // job's own call (right after the real panel replaces the skeleton)
+  // places it for real.
+  if (!host || host.classList.contains("dp-lazy")) return;
+  let title = host.querySelector(":scope > .panel-title");
+  if (!title) {
+    title = mkTitle("");
+    host.prepend(title);
+  }
+  if (bar.parentElement !== title) title.appendChild(bar);
+}
+// Every header-placed group currently in `root` (a fresh render, or a
+// patched-in subtree) — called once after the dashboard DOM settles, right
+// before fitCharts() first folds each panel's own toolbox (foldTools()
+// below folds this bar the same way, on the same pass).
+function placeViewHeaderBars(root) {
+  root.querySelectorAll(".dp-views.dp-views-header").forEach(placeViewHeaderBar);
+}
+// The other direction of placeViewHeaderBar: move a relocated bar back to
+// being `sec`'s own direct child (its row position) — see the #534 comment
+// at this function's one caller, in runOnce's patch step.
+function unplaceViewHeaderBars(root) {
+  root.querySelectorAll(".dp-views.dp-views-header").forEach((sec) => {
+    const bar = sec.querySelector(".dp-viewbar");
+    if (bar && bar.parentElement !== sec) sec.appendChild(bar);
+  });
 }
 
 // An empty result: the author's ::EMPTY message, else a generic note.
