@@ -28,6 +28,7 @@ pub mod duckdb_cli;
 pub mod policy;
 pub mod serve_options;
 pub mod serving;
+pub mod state;
 pub mod telemetry;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};

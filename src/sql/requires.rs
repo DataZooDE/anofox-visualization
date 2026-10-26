@@ -422,13 +422,17 @@ pub struct Sections {
     tab: Option<String>,
     /// … of the current `::SUBTAB`.
     sub: Option<String>,
+    /// … of the current `::GUIDE_STEP` (#516) — a sibling of `::SUBTAB`
+    /// under a `::TAB`, never nested inside one (a marker reached inside a
+    /// `::SUBTAB` never gets a `Panel::step` at all, see `sql::steps::scan`).
+    step: Option<String>,
     /// … of the current `::VIEW` alternative.
     view: Option<String>,
 }
 
 impl Sections {
     /// The next statement: `Some(requirement)` when it is left out (a hidden
-    /// tab/subtab/view alternative, or a statement in one). `unmet(reqs)`
+    /// tab/subtab/step/view alternative, or a statement in one). `unmet(reqs)`
     /// checks a section's own requirements (`Some(path)` = missing); it is
     /// not called for a section nested inside an already-hidden one.
     pub fn step(
@@ -440,6 +444,7 @@ impl Sections {
         match p.tab_kind() {
             Some(false) => {
                 self.sub = None;
+                self.step = None;
                 self.view = None;
                 self.tab = if own { unmet(&p.requires) } else { None };
                 return self.tab.clone();
@@ -450,35 +455,52 @@ impl Sections {
                 } else {
                     None
                 };
+                self.step = None;
                 self.view = None;
                 return self.tab.clone().or(self.sub.clone());
             }
             None => {}
         }
-        if p.view.as_ref().is_some_and(|v| v.marker) {
-            self.view = if own && self.tab.is_none() && self.sub.is_none() {
+        if p.step.as_ref().is_some_and(|s| s.marker) {
+            self.step = if own && self.tab.is_none() && self.sub.is_none() {
                 unmet(&p.requires)
             } else {
                 None
             };
-            return self.tab.clone().or(self.sub.clone()).or(self.view.clone());
+            self.view = None;
+            return self.tab.clone().or(self.sub.clone()).or(self.step.clone());
         }
-        // (`tab_requires` is empty for what a hidden tab/subtab never leaves
-        // out — chrome directives too, see `super::section_requires`.)
+        if p.view.as_ref().is_some_and(|v| v.marker) {
+            self.view = if own && self.tab.is_none() && self.sub.is_none() && self.step.is_none() {
+                unmet(&p.requires)
+            } else {
+                None
+            };
+            return self
+                .tab
+                .clone()
+                .or(self.sub.clone())
+                .or(self.step.clone())
+                .or(self.view.clone());
+        }
+        // (`tab_requires` is empty for what a hidden tab/subtab/step never
+        // leaves out — chrome directives too, see `super::section_requires`.)
         if p.setup || p.tab_requires.is_empty() {
             return None;
         }
-        // `self.view` only applies to a statement `assign_views` actually
-        // put in a group — it would otherwise be stale once that group
-        // closed without a new ::TAB/::SUBTAB to clear it (a ::SECTION, an
-        // outer ::ENDGROUP, or end of script all close a group in place).
+        // `self.step` / `self.view` only apply to a statement
+        // `assign_steps`/`assign_views` actually put in a group — they
+        // would otherwise be stale once that group closed without a new
+        // ::TAB/::SUBTAB/marker to clear it (a ::SECTION, an outer
+        // ::ENDGROUP, or end of script all close a group in place).
+        let step = p.step.is_some().then(|| self.step.clone()).flatten();
         let view = p.view.is_some().then(|| self.view.clone()).flatten();
-        self.tab.clone().or(self.sub.clone()).or(view)
+        self.tab.clone().or(self.sub.clone()).or(step).or(view)
     }
 
     /// Is the current section hidden (a setup statement in it still runs)?
     pub fn hiding(&self) -> bool {
-        self.tab.is_some() || self.sub.is_some() || self.view.is_some()
+        self.tab.is_some() || self.sub.is_some() || self.step.is_some() || self.view.is_some()
     }
 }
 
@@ -770,6 +792,26 @@ mod tests {
             .collect();
         let g = Some("gone".to_string());
         assert_eq!(h, [g.clone(), g.clone(), g.clone(), g]);
+    }
+
+    /// A `::GUIDE_STEP` marker with its own `-- @requires` hides its step,
+    /// like a `::SUBTAB` — the next (shown) step is not affected (#516).
+    #[test]
+    fn a_hidden_guide_step_leaves_out_only_its_own_step() {
+        let p = super::super::plan(
+            "-- @requires gone\nSELECT 'S1'::GUIDE_STEP;\n\
+             SELECT 'x'::MARKDOWN;\n\
+             SELECT 'S2'::GUIDE_STEP;\n\
+             SELECT 'y'::MARKDOWN;",
+        );
+        assert_eq!(p.len(), 4);
+        let mut sec = Sections::default();
+        let h: Vec<Option<String>> = p
+            .iter()
+            .map(|p| sec.step(p, |r| (r[0][0] == "gone").then(|| r[0][0].clone())))
+            .collect();
+        let g = Some("gone".to_string());
+        assert_eq!(h, [g.clone(), g, None, None], "step 1 hidden, step 2 shown");
     }
 
     #[test]

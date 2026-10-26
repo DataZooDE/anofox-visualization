@@ -1699,6 +1699,34 @@ fn page_rows(st: &ServeState, q: &str) -> Result<Rows, PageError> {
     sql::parse_rows_json(json.trim()).map_err(PageError::Server)
 }
 
+/// Append `SET VARIABLE`s for every name the credential's `scope` locks
+/// (typed literals). Called once before any panel is queried, and again
+/// after any later bind that could otherwise collide with a locked name
+/// (#540 belt and braces): DuckDB's own rule is that the *last* `SET` for a
+/// name wins, so re-asserting the locks after a bind is what actually makes
+/// them stick, not just skipping them in [`may_bind_default`].
+fn append_locked_vars(prefix: &mut String, scope: Option<&Scope>) {
+    if let Some(s) = scope {
+        for (name, lit) in &s.vars {
+            prefix.push_str(&format!("SET VARIABLE {name} = {lit}; "));
+        }
+    }
+}
+
+/// Whether a default may still be bound for `name` while rendering a
+/// script-free page: not already resolved from a `@param`, not locked by the
+/// credential's `scope`, and not a reserved variable name. #540: a locked
+/// variable always wins over a dashboard's own default, however the viewer
+/// reaches this page — every place in `render_dashboard_page` that `SET`s a
+/// variable after the locked ones (the ::INPUT defaults below, and a
+/// `::GUIDE_STEP`'s own step variable, #516/review-537) must check this
+/// first.
+fn may_bind_default(name: &str, resolved: &[(String, String)], scope: Option<&Scope>) -> bool {
+    !resolved.iter().any(|(n, _)| n == name)
+        && !scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(name)))
+        && !access::is_reserved_var(name)
+}
+
 fn render_dashboard_page(
     st: &ServeState,
     dash: &Dashboard,
@@ -1726,9 +1754,7 @@ fn render_dashboard_page(
         ));
     }
     // An embed link's locked variables (typed literals), after the params.
-    for (name, lit) in scope.map(|s| s.vars.clone()).unwrap_or_default() {
-        prefix.push_str(&format!("SET VARIABLE {name} = {lit}; "));
-    }
+    append_locked_vars(&mut prefix, scope);
     // The login's claims (a @param can't name them: parse_dashboard_meta
     // ignores `__claim_*` params).
     for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
@@ -1791,7 +1817,17 @@ fn render_dashboard_page(
     // #274 L1: memoized per render — the same gate is often asked more than
     // once (a tab/view marker's own check, then a panel inside it).
     let mut req_cache = RequiresCache::new();
-    for panel in sql::plan(&dash.script) {
+    // `::SHOW_IF` (#515): each condition's result, by plan index — a
+    // condition always precedes what it governs (`sql::show_if::assign`),
+    // so this is already populated by the time a later statement's
+    // `show_if` is checked below.
+    let mut show_if_cache: std::collections::HashMap<usize, bool> =
+        std::collections::HashMap::new();
+    // `::GUIDE_STEP` (#516): each group's running count of shown markers —
+    // see `dashboard::execute`'s identical `step_n` for why "of N" can't be
+    // filled in here (phase 2 does it, once every step is collected).
+    let mut step_n: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for (i, panel) in sql::plan(&dash.script).into_iter().enumerate() {
         let hidden = sections.step(&panel, |reqs| {
             requires_unmet(st, &prefix, reqs, &mut req_cache)
         });
@@ -1799,6 +1835,44 @@ fn render_dashboard_page(
             continue; // read-only mode: setup is done once at --init, not per request
         }
         if hidden.is_some() || view_pick.drop_panel(&panel) {
+            continue;
+        }
+        if !panel.show_if.is_empty()
+            && !panel
+                .show_if
+                .iter()
+                .all(|c| show_if_cache.get(c).copied().unwrap_or(false))
+        {
+            continue;
+        }
+        if panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::ShowIf) {
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT 1",
+                panel.sql.trim().trim_end_matches(';'),
+            );
+            // A query error is one of `::SHOW_IF`'s own fail-closed cases
+            // (decision 2: FALSE / NULL / no row / non-boolean / an error all
+            // hide the target) — never `?` here, unlike an ordinary panel's
+            // query failure, which is a real error that should abort the
+            // page. The raw DuckDB error can echo a viewer-supplied value
+            // (e.g. a failed cast on a `getvariable()`), so only a generic
+            // line reaches the log — never the error text itself.
+            let v = match page_rows(st, &q) {
+                Ok(rows) => rows.first().and_then(|row| row.values().next().cloned()),
+                Err(_) => {
+                    eprintln!(
+                        "[anofox-serve] dashboard '{}' ::SHOW_IF condition (stmt {}) failed — \
+                         treated as false",
+                        dash.id,
+                        i + 1
+                    );
+                    None
+                }
+            };
+            show_if_cache.insert(
+                i,
+                anofox_visualization::sql::condition::holds_json(v.as_ref()),
+            );
             continue;
         }
         let chrome_role = panel
@@ -1829,14 +1903,37 @@ fn render_dashboard_page(
             let idx = anofox_visualization::inputs::input_index(&panel.roles);
             for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
                 let name = set.split('"').nth(1).unwrap_or("");
-                if !resolved.iter().any(|(n, _)| n == name) && !access::is_reserved_var(name) {
+                if may_bind_default(name, resolved, scope) {
                     prefix.push_str(&set);
                     prefix.push_str("; ");
                 }
             }
+            // #540 belt and braces: reassert the locked variables right
+            // after binding any default above, so a locked name can't stick
+            // overridden even if a future default-bind site here forgets
+            // `may_bind_default` — the last `SET` for a name wins.
+            append_locked_vars(&mut prefix, scope);
             continue;
         }
         let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
+        let step_marker = panel.step.as_ref().is_some_and(|s| s.marker);
+        // `::GUIDE_STEP` (#516, decision 8): bind this step's 1-based
+        // number (among the ones shown so far) before its own (and every
+        // later) panel's query — this page has no persistent session, so
+        // the binding is a `SET VARIABLE` appended to the shared `prefix`
+        // every panel's query is built from, the same way an input's
+        // default already is above.
+        if step_marker {
+            let s = panel.step.as_ref().unwrap();
+            let n = step_n.entry(s.group).or_insert(0);
+            *n += 1;
+            if may_bind_default(&s.var, resolved, scope) {
+                prefix.push_str(&format!("SET VARIABLE {} = {n}; ", s.var));
+            }
+            // #540 belt and braces: reassert the locked variables right
+            // after, so a locked name can't stick overridden.
+            append_locked_vars(&mut prefix, scope);
+        }
         // ::GROUP / ::ENDGROUP (#405): no box here (one figure per panel),
         // but a ::GROUP's own ::KPI_SIZE still cascades onto its tiles' own
         // cards.
@@ -1861,6 +1958,7 @@ fn render_dashboard_page(
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()
             && !section
+            && !step_marker
             && anofox_visualization::roles::is_directive_panel(&panel.roles)
         {
             continue;
@@ -1876,6 +1974,34 @@ fn render_dashboard_page(
             if !track::is_track(&panel.roles) {
                 queried.push((panel, Rows::new(), true, false));
             }
+            continue;
+        }
+        // `::GUIDE_STEP` (#516): like `::SHOW_IF` above, a failing marker
+        // query (its label or its `::GATE` reads a viewer-supplied
+        // variable through an expression that can error) must fail closed
+        // — the gate stays closed, the label falls back — without failing
+        // the whole page, and without the raw error reaching the log (the
+        // #532 lesson for `::SHOW_IF`, the same risk here).
+        if step_marker {
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT {}",
+                panel.sql.trim().trim_end_matches(';'),
+                st.max_rows + 1
+            );
+            let rows: Rows = match page_rows(st, &q) {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!(
+                        "[anofox-serve] dashboard '{}' ::GUIDE_STEP marker (stmt {}) failed — \
+                         treated as closed",
+                        dash.id,
+                        i + 1
+                    );
+                    Rows::new()
+                }
+            };
+            let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
+            queried.push((panel, rows, false, compact));
             continue;
         }
         let q = format!(
@@ -1928,6 +2054,12 @@ fn render_dashboard_page(
 
     // Phase 2: render.
     let mut panels = String::new();
+    // `::GUIDE_STEP` (#516): `queried` only ever holds what phase 1 kept
+    // shown, so its total marker count per group ("of N") is known now.
+    let mut static_steps = {
+        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, ..)| p).collect();
+        sql::steps::StaticSteps::new(&shown)
+    };
     let mut queried = queried.into_iter().peekable();
     while let Some((panel, rows, na, compact)) = queried.next() {
         if na {
@@ -1954,13 +2086,41 @@ fn render_dashboard_page(
             continue;
         }
         let section = panel.roles.iter().any(|(_, r)| *r == Role::Section);
-        if section || (panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label)) {
-            let text = rows
-                .first()
-                .and_then(|r| r.values().next())
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            panels.push_str(&format!("<h2 class=\"section\">{}</h2>", esc(text)));
+        let step_n_of = panel.step.as_ref().filter(|s| s.marker).and_then(|_| {
+            static_steps.step(&panel).into_iter().find_map(|e| match e {
+                sql::steps::StaticEvent::Heading { n, of, .. } => Some((n, of)),
+                _ => None,
+            })
+        });
+        if section
+            || (panel.roles.len() == 1 && matches!(panel.roles[0].1, Role::Label))
+            || step_n_of.is_some()
+        {
+            let text = match step_n_of {
+                Some((n, of)) => {
+                    let idx = panel
+                        .roles
+                        .iter()
+                        .find(|(_, r)| *r == Role::GuideStep)
+                        .map(|(i, _)| *i);
+                    let label = idx
+                        .and_then(|i| rows.first().and_then(|r| r.get(&format!("c{i}"))))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if label.is_empty() {
+                        format!("Step {n} of {of}")
+                    } else {
+                        format!("Step {n} of {of} · {label}")
+                    }
+                }
+                None => rows
+                    .first()
+                    .and_then(|r| r.values().next())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            panels.push_str(&format!("<h2 class=\"section\">{}</h2>", esc(&text)));
             continue;
         }
         let mut cols = anofox_visualization::name_columns(
@@ -2098,6 +2258,51 @@ mod tests {
             ),
             PageError::Server(_)
         ));
+    }
+
+    /// review-537 + #540/#541: a `::GUIDE_STEP`'s own step variable goes
+    /// through the same `may_bind_default` / `append_locked_vars` pair an
+    /// `::INPUT` default does — a reserved name or one an embed link locks
+    /// never gets the step's own `SET VARIABLE`, and a locked value is
+    /// still the *last* `SET` for that name in the prefix even when the
+    /// step happens to share its alias (exactly the sequence the
+    /// step-marker branch of `render_dashboard_page` runs).
+    #[test]
+    fn step_variable_binding_respects_locks_and_reserved_names() {
+        let resolved: Vec<(String, String)> = Vec::new();
+        let locked = Scope {
+            dashboards: None,
+            vars: vec![("region".into(), "'EU'".into())],
+        };
+
+        // A step aliased the same as a locked variable: its own bind is
+        // skipped, and the lock is reasserted regardless.
+        let mut prefix = String::new();
+        if may_bind_default("region", &resolved, Some(&locked)) {
+            prefix.push_str("SET VARIABLE region = 2; ");
+        }
+        append_locked_vars(&mut prefix, Some(&locked));
+        assert!(!prefix.contains("SET VARIABLE region = 2"), "{prefix}");
+        assert!(prefix.contains("SET VARIABLE region = 'EU'"), "{prefix}");
+
+        // A step aliased a reserved name: same skip, no lock to reassert.
+        let mut reserved = String::new();
+        if may_bind_default("__claim_tenant", &resolved, None) {
+            reserved.push_str("SET VARIABLE __claim_tenant = 2; ");
+        }
+        append_locked_vars(&mut reserved, None);
+        assert!(
+            reserved.is_empty(),
+            "a reserved name binds nothing: {reserved}"
+        );
+
+        // An ordinary step name binds normally, lock or not.
+        let mut ordinary = String::new();
+        if may_bind_default("lesson", &resolved, Some(&locked)) {
+            ordinary.push_str("SET VARIABLE lesson = 2; ");
+        }
+        append_locked_vars(&mut ordinary, Some(&locked));
+        assert!(ordinary.contains("SET VARIABLE lesson = 2"), "{ordinary}");
     }
 
     #[test]
@@ -2248,6 +2453,56 @@ mod tests {
         assert_ne!(
             cache_key("d", &r, Some(&eu), None),
             cache_key("d", &r, Some(&us), None)
+        );
+    }
+
+    /// #540: an embed link's locked variable always wins over a dashboard's
+    /// own `::INPUT` default, a whitelisted `-- @param`, or a reserved name
+    /// — whatever tries to bind a default for that same name afterward.
+    #[test]
+    fn may_bind_default_respects_locks_params_and_reserved_names() {
+        let resolved = vec![("already_set".to_string(), "'x'".to_string())];
+        let locked = Scope {
+            dashboards: None,
+            vars: vec![("region".into(), "'US'".into())],
+        };
+        assert!(!may_bind_default("region", &resolved, Some(&locked)));
+        // DuckDB variable names are case-insensitive, so is the lock.
+        assert!(!may_bind_default("REGION", &resolved, Some(&locked)));
+        assert!(!may_bind_default("already_set", &resolved, Some(&locked)));
+        assert!(!may_bind_default("already_set", &resolved, None));
+        assert!(!may_bind_default("anofox_data", &resolved, None));
+        assert!(may_bind_default("free_name", &resolved, Some(&locked)));
+        assert!(may_bind_default("free_name", &resolved, None));
+    }
+
+    /// #540 belt and braces: whatever runs between two calls of
+    /// [`append_locked_vars`] — a default bind that should have been
+    /// skipped, or one a future code path forgets to check against
+    /// [`may_bind_default`] at all — the *last* `SET VARIABLE` for a locked
+    /// name in the prefix is still the locked value, which is the one
+    /// DuckDB uses for every panel query run against that prefix from then
+    /// on.
+    #[test]
+    fn append_locked_vars_reasserts_the_lock_after_anything_between() {
+        let locked = Scope {
+            dashboards: None,
+            vars: vec![("region".into(), "'US'".into())],
+        };
+        let mut prefix = String::new();
+        append_locked_vars(&mut prefix, Some(&locked));
+        // Simulate a bind that `may_bind_default` should have refused, or a
+        // future site that never calls it.
+        prefix.push_str("SET VARIABLE region = 'EU'; ");
+        append_locked_vars(&mut prefix, Some(&locked));
+        let last = prefix
+            .rmatch_indices("SET VARIABLE region = ")
+            .next()
+            .map(|(i, _)| &prefix[i..])
+            .expect("a SET VARIABLE for region");
+        assert!(
+            last.starts_with("SET VARIABLE region = 'US';"),
+            "the locked value must be the last SET for 'region': {prefix}"
         );
     }
 }

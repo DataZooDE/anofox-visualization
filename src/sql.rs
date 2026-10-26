@@ -30,15 +30,21 @@
 //!
 //! Chain a role after a type cast to get both: `ts::DATE::XAXIS`.
 
+pub mod condition;
 pub mod contract_call;
 pub mod deps;
 pub mod lex;
+pub mod name;
 pub mod requires;
 pub mod shared;
+pub mod show_if;
+pub mod steps;
+pub mod vars;
 pub mod views;
 
 pub use contract_call::ContractPanel;
 pub use lex::{split_top_commas, strip_comments, trailing_alias};
+pub use steps::StepAt;
 pub use views::ViewAt;
 
 use crate::roles::is_sql_type_token;
@@ -72,6 +78,11 @@ pub struct Panel {
     /// every other clash still is. A listed name this statement doesn't
     /// itself set (a typo) is flagged on its own (`interaction/shared-unused`).
     pub shared: Vec<String>,
+    /// The first `-- @name <name>` line directly above the statement (#518):
+    /// a stable, author-given name for what it draws, carried through to
+    /// wasm `plan()` and tagged on the element as `data-dp-name` in the
+    /// browser. See [`name`].
+    pub name: Option<String>,
     /// The `-- @requires` of the `::TAB` / `::SUBTAB` whose section the
     /// statement is in (a `::SUBTAB` statement: its `::TAB`'s), see
     /// [`section_requires`]. A tab whose own requirements are not met is
@@ -86,6 +97,15 @@ pub struct Panel {
     /// set on every statement of the group, setup included. See
     /// [`views::assign_views`].
     pub view: Option<views::ViewAt>,
+    /// Plan indices of the `::SHOW_IF` conditions that must all hold
+    /// (BOOLEAN `TRUE`) for this statement to be shown (#515); empty = always
+    /// shown. Never set on a `::SHOW_IF` statement itself (a condition, not
+    /// content) or on setup (it always runs). See [`show_if::assign`].
+    pub show_if: Vec<usize>,
+    /// This statement's place in a `::GUIDE_STEP` group (#516), if it is in
+    /// one — set on every statement of the group, setup included. See
+    /// [`steps::assign_steps`].
+    pub step: Option<steps::StepAt>,
 }
 
 impl Panel {
@@ -114,24 +134,29 @@ impl Panel {
 
 /// Fill each statement's [`Panel::tab_requires`]: a `::TAB`'s section runs to
 /// the next `::TAB`, a `::SUBTAB`'s to the next `::SUBTAB` or `::TAB`, a
+/// `::GUIDE_STEP`'s (#516) to the next marker or closer in its group — a
+/// sibling of `::SUBTAB` under a `::TAB`, never nested inside one — and a
 /// `::VIEW` alternative's to the next alternative, closer or end of its
-/// group (a third level inside a `::SUBTAB`'s, gated exactly like a
-/// `::SUBTAB`'s is inside a `::TAB`'s — see [`views::assign_views`], which
-/// has already filled [`Panel::view`] by the time this runs). Chrome
-/// directives (`::THEME`, `::DASHBOARD_TITLE`, …) apply to the whole
-/// dashboard wherever they sit: they inherit nothing.
+/// group (nested inside a `::SUBTAB` or a `::GUIDE_STEP`, gated exactly
+/// like those are inside a `::TAB` — see [`views::assign_views`] and
+/// [`steps::assign_steps`], which have already filled [`Panel::view`] /
+/// [`Panel::step`] by the time this runs). Chrome directives (`::THEME`,
+/// `::DASHBOARD_TITLE`, …) apply to the whole dashboard wherever they sit:
+/// they inherit nothing.
 fn section_requires(panels: &mut [Panel]) {
     let mut tab: Vec<requires::Requirement> = Vec::new();
     let mut sub: Vec<requires::Requirement> = Vec::new();
+    let mut step: Vec<requires::Requirement> = Vec::new();
     let mut view: Vec<requires::Requirement> = Vec::new();
-    let (mut tab_at, mut sub_at, mut view_at) = (None, None, None);
+    let (mut tab_at, mut sub_at, mut step_at, mut view_at) = (None, None, None, None);
     for (i, p) in panels.iter_mut().enumerate() {
         match p.tab_kind() {
             Some(false) => {
                 tab = p.requires.clone();
                 sub.clear();
+                step.clear();
                 view.clear();
-                (tab_at, sub_at, view_at) = (Some(i), None, None);
+                (tab_at, sub_at, step_at, view_at) = (Some(i), None, None, None);
                 continue;
             }
             Some(true) => {
@@ -139,6 +164,8 @@ fn section_requires(panels: &mut [Panel]) {
                 p.tabs = tab_at.into_iter().collect();
                 sub = p.requires.clone();
                 sub_at = Some(i);
+                step.clear();
+                step_at = None;
                 view.clear();
                 view_at = None;
                 continue;
@@ -151,11 +178,31 @@ fn section_requires(panels: &mut [Panel]) {
         {
             continue;
         }
+        // A `::GUIDE_STEP` marker (#516): like a `::SUBTAB`, its own
+        // requires gate everything from here to the next marker/closer in
+        // its group — a step never nests inside a `::SUBTAB` (steps.rs's
+        // `scan` never gives such a marker a `p.step` at all), so `sub` is
+        // always empty here.
+        if p.step.as_ref().is_some_and(|s| s.marker) {
+            p.tab_requires = tab.iter().chain(&sub).cloned().collect();
+            p.tabs = tab_at.into_iter().chain(sub_at).collect();
+            step = p.requires.clone();
+            step_at = Some(i);
+            view.clear();
+            view_at = None;
+            continue;
+        }
+        // Left the step group (or never in one): its level doesn't carry
+        // over to this statement.
+        if p.step.is_none() {
+            step.clear();
+            step_at = None;
+        }
         // A `::VIEW` marker: like a `::SUBTAB`, its own requires gate
         // everything from here to the next marker/closer in its group.
         if p.view.as_ref().is_some_and(|v| v.marker) {
-            p.tab_requires = tab.iter().chain(&sub).cloned().collect();
-            p.tabs = tab_at.into_iter().chain(sub_at).collect();
+            p.tab_requires = tab.iter().chain(&sub).chain(&step).cloned().collect();
+            p.tabs = tab_at.into_iter().chain(sub_at).chain(step_at).collect();
             view = p.requires.clone();
             view_at = Some(i);
             continue;
@@ -166,8 +213,19 @@ fn section_requires(panels: &mut [Panel]) {
             view.clear();
             view_at = None;
         }
-        p.tab_requires = tab.iter().chain(&sub).chain(&view).cloned().collect();
-        p.tabs = tab_at.into_iter().chain(sub_at).chain(view_at).collect();
+        p.tab_requires = tab
+            .iter()
+            .chain(&sub)
+            .chain(&step)
+            .chain(&view)
+            .cloned()
+            .collect();
+        p.tabs = tab_at
+            .into_iter()
+            .chain(sub_at)
+            .chain(step_at)
+            .chain(view_at)
+            .collect();
     }
 }
 
@@ -175,7 +233,9 @@ fn section_requires(panels: &mut [Panel]) {
 pub fn plan(script: &str) -> Vec<Panel> {
     let mut panels = plan_statements(script);
     views::assign_views(&mut panels);
+    steps::assign_steps(&mut panels);
     section_requires(&mut panels);
+    show_if::assign(&mut panels);
     panels
 }
 
@@ -186,6 +246,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
             let requires = requires::parse(&raw);
             let requires_issues = requires::issues(&raw);
             let shared = shared::parse(&raw);
+            let name = name::parse(&raw);
             let clean = strip_comments(&raw);
             let stmt = clean.trim();
             if stmt.is_empty() {
@@ -195,6 +256,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                 panel.requires = requires;
                 panel.requires_issues = requires_issues;
                 panel.shared = shared;
+                panel.name = name;
                 return Some(panel);
             }
             let (sql, roles, names) = rewrite(stmt);
@@ -208,9 +270,12 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     shared,
+                    name,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
+                    show_if: Vec::new(),
+                    step: None,
                 }
             } else {
                 Panel {
@@ -222,9 +287,12 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     shared,
+                    name,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
+                    show_if: Vec::new(),
+                    step: None,
                 }
             })
         })
@@ -801,6 +869,80 @@ fn item_role(item: &str, inputs_ok: bool) -> Option<(&str, Role)> {
     Some((expr, role))
 }
 
+/// The raw text of the expression behind role `want` in `stmt`'s select
+/// list(s) — before its `::ROLE` cast and any trailing `AS alias` — for
+/// lints that need to see whether a cast's *source* is a plain literal
+/// (`submit/dynamic-vars`, #517). `None` when no item in `stmt` carries
+/// `want`. Looks at the raw statement text (casts intact), not a
+/// [`Panel`]'s rewritten `sql`.
+pub(crate) fn role_source_expr(stmt: &str, want: Role) -> Option<String> {
+    for (s, e) in select_list_spans(stmt) {
+        for item in lex::split_top_commas(&stmt[s..e]) {
+            if let Some((expr, role)) = item_role(&item, true) {
+                if role == want {
+                    let (core, _alias) = lex::trailing_alias(expr);
+                    return Some(core.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Does `stmt` (an item's expression, see [`role_source_expr`]) have to be
+/// computed — anything other than a single `'…'`/`E'…'` string literal?
+pub(crate) fn is_string_literal(expr: &str) -> bool {
+    let toks: Vec<lex::Token> = lex::tokenize(expr)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    matches!(toks.as_slice(), [t] if t.kind == lex::TokKind::String)
+}
+
+/// The `::SUBMIT`/`::SUBMIT_VARS`/`::SUBMIT_DONE` server-side temps (#517
+/// §5): `viewer_state` (one row per recorded variable) and
+/// `viewer_state_latest` (each viewer/dashboard/submit's newest row). Lint
+/// and headless renderers create these **empty** — one `run_query`/
+/// `execute` call per statement, since not every caller's connection runs
+/// several `;`-separated statements in one call — when a script mentions
+/// `viewer_state` or carries `::SUBMIT`, so a dashboard reading them
+/// doesn't fail just because no real server has populated them yet (S3).
+/// See [`script_needs_viewer_state`].
+pub fn viewer_state_setup_statements() -> [&'static str; 2] {
+    [
+        "CREATE TEMP TABLE viewer_state (seq BIGINT, ts TIMESTAMPTZ, \"user\" VARCHAR, \
+         dashboard VARCHAR, submit VARCHAR, name VARCHAR, value VARCHAR, value_list VARCHAR[])",
+        "CREATE TEMP VIEW viewer_state_latest AS SELECT * FROM viewer_state QUALIFY \
+         dense_rank() OVER (PARTITION BY \"user\", dashboard, submit ORDER BY seq DESC) = 1",
+    ]
+}
+
+/// A query a caller runs **before** [`viewer_state_setup_statements`]:
+/// `n > 0` (the first column of its one row) means a real (non-temp)
+/// `viewer_state`/`viewer_state_latest` already exists on this connection
+/// — seeding our own empty temps on top would shadow it (confirmed in
+/// DuckDB: a later `CREATE TABLE viewer_state AS …` makes a `SELECT
+/// count(*) FROM viewer_state` return the *temp*'s row count, 0, not the
+/// real table's — review of #530 #5). The caller must skip seeding when
+/// this is `> 0`, so the dashboard's own `viewer_state` wins instead.
+pub fn viewer_state_exists_probe_sql() -> &'static str {
+    "SELECT count(*) AS n FROM (SELECT table_name AS name FROM duckdb_tables() \
+     WHERE NOT temporary UNION ALL SELECT view_name AS name FROM duckdb_views() \
+     WHERE NOT temporary) WHERE name IN ('viewer_state', 'viewer_state_latest')"
+}
+
+/// Does `script` reference `viewer_state` (any case) or carry a `::SUBMIT`
+/// panel? Both mean a real server would (eventually, #517 S3) seed the temp
+/// [`viewer_state_setup_sql`] creates — lint and headless renderers create
+/// it themselves, empty, so a check or a static render doesn't fail on a
+/// missing table.
+pub fn script_needs_viewer_state(script: &str) -> bool {
+    script.to_ascii_lowercase().contains("viewer_state")
+        || plan(script)
+            .iter()
+            .any(|p| p.roles.iter().any(|(_, r)| matches!(r, Role::Submit)))
+}
+
 /// Alias prefix of a ::MARKDOWN statement's named (placeholder) columns:
 /// `revenue` → `revenue AS "md:revenue"`, read by `{{revenue}}`.
 pub const MD_PREFIX: &str = "md:";
@@ -1025,6 +1167,18 @@ fn rewrite_list(list: &str) -> Rewritten {
                     }
                     format!("{core} AS c{i}")
                 }
+                // A `::GUIDE_STEP` marker's explicit `AS alias` names its
+                // group's step variable (#516, decision 4) — kept in
+                // `names` (`steps::assign_steps` reads it back), the
+                // value's own text kept intact so `steps::scan` can tell a
+                // literal label from a computed one, the same as `::VIEW`.
+                Role::GuideStep => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 // Any other role: an explicit `AS alias` is replaced by c{i}.
                 _ => format!("{} AS c{i}", trailing_alias(expr).0),
             };
@@ -1149,6 +1303,24 @@ mod requires_tests {
         );
         assert!(p[2].requires.is_empty());
         assert!(!p[1].sql.contains("@requires"));
+    }
+
+    #[test]
+    fn name_attaches_to_its_statement_across_a_blank_line() {
+        // `split_statements` splits on `;` alone, so everything between two
+        // `;`s — comments, blank lines and all — is one statement's raw
+        // text; a `-- @name` line reaches `Panel::name` the same way whether
+        // or not a blank line sits between it and the SQL (#518).
+        let p = plan(
+            "-- @name kpi\n\nSELECT 1 ::METRIC;\n\
+             -- @name chart\nSELECT a ::XAXIS, b ::BARCHART FROM t;\n\
+             SELECT 2 ::METRIC",
+        );
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0].name, Some("kpi".to_string()));
+        assert_eq!(p[1].name, Some("chart".to_string()));
+        assert_eq!(p[2].name, None);
+        assert!(!p[0].sql.contains("@name"));
     }
 
     #[test]

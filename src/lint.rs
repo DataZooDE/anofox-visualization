@@ -85,6 +85,25 @@ pub struct Diagnostic {
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
+    /// `::SHOW_IF` ([`show_if_diags`], #515): `show_if/not-alone` |
+    /// `show_if/bad-target` (errors) | `show_if/no-target` |
+    /// `show_if/not-boolean` | `show_if/no-row` | `show_if/unknown-variable` |
+    /// `show_if/constant` (warnings).
+    /// `-- @name` panel names ([`name_diags`], #518): `name/bad` |
+    /// `name/reserved` | `name/duplicate` (errors: not a plain identifier,
+    /// `page` — reserved for a guided tour's intro/outro, or reused on
+    /// another statement) | `name/not-drawn` (warning: the statement is
+    /// setup, or a layout directive with no element of its own, so the name
+    /// never reaches the page).
+    /// `::GUIDE_STEP` groups ([`step_diags`], #516): `step/inside-subtab` |
+    /// `step/var-clash` | `step/var-reserved` | `step/gate-without-step`
+    /// (errors) | `step/mixed-with-subtab` | `step/lone` |
+    /// `step/var-not-allowed` | `step/empty` | `step/fit-inside` |
+    /// `step/gate-on-last` | `step/gate-constant` |
+    /// `step/gate-unknown-variable` | `step/duplicate-label` (warnings) |
+    /// `step/computed-label` (a note) | `step/gate-not-boolean` |
+    /// `step/gate-no-row` (warnings, checked once the step closes — see
+    /// `finalize_pending_gate`).
     pub code: &'static str,
     pub message: String,
     /// The offending statement, trimmed to one line.
@@ -163,6 +182,76 @@ fn stmt_text(stateful_session: bool, prelude: &str, sql: &str) -> String {
     }
 }
 
+/// A `::GUIDE_STEP`'s `::GATE`, waiting for its step to close so it can be
+/// re-checked once that step's own inputs have bound their defaults — see
+/// `check_opts`'s `pending_gate` and [`finalize_pending_gate`].
+struct PendingGate {
+    /// 1-based statement index to report against.
+    stmt: usize,
+    short: String,
+    /// The marker's own (rewritten) SQL — re-run as-is at close time.
+    sql: String,
+    /// The `::GATE` column's output position.
+    gate_idx: usize,
+}
+
+/// A `run_query` closure, type-erased so [`finalize_pending_gate`] can be
+/// called from both the in-loop and end-of-script sites without repeating
+/// the generic `F: FnMut(...)` bound `check_opts` carries.
+type RunQuery<'a> = &'a mut dyn FnMut(&str) -> Result<Vec<Map<String, Value>>, String>;
+
+/// Re-run a pending `::GATE` now that its step has closed (`prelude` —or,
+/// stateful, the session— has had the chance to pick up that step's own
+/// input defaults since the marker first ran) and report `step/gate-no-row`
+/// / `step/gate-not-boolean` exactly as `show_if_diags`' twins do. A
+/// re-query error is silently skipped: the marker's own `sql-error` already
+/// covers a genuinely broken statement (reported at the earlier,
+/// end-of-its-pre-pass point where `rows` is first read), so this would
+/// only double it.
+fn finalize_pending_gate(
+    diags: &mut Vec<Diagnostic>,
+    pending: PendingGate,
+    stateful_session: bool,
+    prelude: &str,
+    run_query: RunQuery,
+) {
+    let text = stmt_text(stateful_session, prelude, &pending.sql);
+    let Ok(rows) = run_query(&text) else {
+        return;
+    };
+    match rows
+        .first()
+        .and_then(|row| row.values().nth(pending.gate_idx))
+    {
+        None => diags.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt: pending.stmt,
+            code: "step/gate-no-row",
+            message: "this ::GATE's query returned no row — Next stays disabled with the \
+                      defaults used here"
+                .into(),
+            sql: pending.short,
+        }),
+        Some(v)
+            if !matches!(v, Value::Bool(_))
+                && !matches!(v, Value::String(s) if s == "true" || s == "false") =>
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: pending.stmt,
+                code: "step/gate-not-boolean",
+                message: format!(
+                    "::GATE's value (`{}`) is not a BOOLEAN — with the defaults used here \
+                     Next stays disabled (fail closed)",
+                    one_line(&v.to_string())
+                ),
+                sql: pending.short,
+            });
+        }
+        _ => {}
+    }
+}
+
 /// Like [`check`], but with [`LintOptions`] (e.g. to disable the `design/*`
 /// advisory pass, or set [`LintOptions::stateful_session`]).
 pub fn check_opts<F>(script: &str, mut run_query: F, opts: LintOptions) -> Vec<Diagnostic>
@@ -175,10 +264,43 @@ where
     // `opts.stateful_session` — the persistent session already has every
     // earlier statement in scope, so there is nothing to replay.
     let mut prelude = String::new();
+    // #517 S1: a dashboard reading `viewer_state` (read-back, S3) or
+    // carrying `::SUBMIT` gets the server's own temps, empty — created
+    // here so neither this lint nor a headless render (`dashboard.rs`'s
+    // `render_dashboard_svg`) fails on a table no real server has
+    // populated yet. Skipped when a real (non-temp) `viewer_state`/
+    // `viewer_state_latest` already exists on this connection — seeding
+    // ours on top would shadow it (review of #530 #5).
+    if sql::script_needs_viewer_state(script) {
+        let shadows_a_real_table = run_query(&format!("{};", sql::viewer_state_exists_probe_sql()))
+            .ok()
+            .and_then(|rows| rows.first().and_then(|r| r.values().next()?.as_u64()))
+            .is_some_and(|n| n > 0);
+        if !shadows_a_real_table {
+            for stmt in sql::viewer_state_setup_statements() {
+                if opts.stateful_session {
+                    let _ = run_query(&format!("{stmt};"));
+                } else {
+                    prelude.push_str(stmt);
+                    prelude.push_str(";\n");
+                }
+            }
+        }
+    }
     let mut themes = 0usize; // ::THEME directives seen (theme/multiple)
                              // Variables set by inputs / ::SELECT_AS / ::DRILL: name -> (stmt, kind),
                              // so two different directives writing one variable are reported.
     let mut owners: std::collections::HashMap<String, (usize, &'static str)> =
+        std::collections::HashMap::new();
+    // #517: every input-declared variable name (lower case) -> the
+    // statement(s) that declare it, its kind, and that statement's (plan-
+    // rewritten) SQL — read by the `::SUBMIT` branch below to validate
+    // `SUBMIT_VARS` (`submit/unknown-variable`, `submit/unsupported-input`,
+    // `submit/duplicate-input`, `submit/options-from-variable`). A name can
+    // have more than one entry when two input statements declare it
+    // (ambiguous for SUBMIT_VARS, even though `owners`/`claim` above don't
+    // themselves flag two inputs sharing a name).
+    let mut declared_inputs: std::collections::HashMap<String, Vec<(usize, InputKind, String)>> =
         std::collections::HashMap::new();
     // #398: `-- @shared <name>, …` directly above a ::ROWSELECT / ::SELECT_AS
     // / ::DRILL / input statement documents that *this* directive deliberately
@@ -276,6 +398,16 @@ where
     // carries `-- @shared <name>` (#398: its statement index, and that
     // comment's names).
     let mut pending_rowselect: Option<(usize, Vec<String>)> = None;
+    // #516, review-537: a `::GUIDE_STEP`'s own `::GATE` is checked once its
+    // step *closes* (the next marker, or end of its group/script), not at
+    // the marker itself — the canonical pattern puts the gate's quiz in
+    // the same step (plan decision 2), so checking immediately would
+    // always see the quiz's input still unset and warn on every author's
+    // first, correct attempt. By the time the step closes, that input's
+    // own `SET VARIABLE` default has joined `prelude` (or run on the
+    // session) exactly as the browser's own pre-pass has it bound before
+    // any query — see [`finalize_pending_gate`].
+    let mut pending_gate: Option<PendingGate> = None;
     // What a ::TRACK here would sit under: `Some(true)` a chart with a numeric
     // / date x, `Some(false)` one with a discrete x, `None` no chart.
     let mut track_host: Option<bool> = None;
@@ -299,6 +431,20 @@ where
     for (i, p) in sql::plan(script).into_iter().enumerate() {
         let stmt = i + 1;
         let short = one_line(p.sql.trim());
+
+        // This statement closes the open step (the next marker, or having
+        // left the group entirely) — see `pending_gate`'s doc comment.
+        if p.step.is_none() || p.step.as_ref().is_some_and(|s| s.marker) {
+            if let Some(pending) = pending_gate.take() {
+                finalize_pending_gate(
+                    &mut diags,
+                    pending,
+                    opts.stateful_session,
+                    &prelude,
+                    &mut run_query,
+                );
+            }
+        }
 
         // A mistyped role token (::BARCHRT) silently drops that column's role.
         if let Some(raw) = raws.get(i) {
@@ -463,6 +609,23 @@ where
         // don't run it (the casts would just raise a confusing type error).
         // Genuine setup (DDL / SET / …) is run so later panels see its effects.
         if p.setup {
+            // #517 §5: `viewer_state`/`viewer_state_latest` are server-
+            // provided temps (read-back, S3) — a dashboard defining its own
+            // table/view of that name would be silently shadowed by the
+            // server's once that lands (or would collide at start, S2/S3).
+            if let Some(reserved) = creates_reserved_state_name(&p.sql) {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "state/shadowed",
+                    message: format!(
+                        "`{reserved}` is reserved for the server's own per-viewer state (#517) \
+                         — this dashboard's own table/view of that name would be shadowed by \
+                         it once a server with options.state serves this dashboard"
+                    ),
+                    sql: short.clone(),
+                });
+            }
             if looks_like_query(&p.sql) && has_role_cast(&p.sql) {
                 diags.push(Diagnostic {
                     severity: Severity::Error,
@@ -528,6 +691,12 @@ where
                         })
                         .unwrap_or_default();
                     claim(&mut diags, &names, stmt, "input", &short, &p.shared);
+                    for n in &names {
+                        declared_inputs
+                            .entry(n.to_ascii_lowercase())
+                            .or_default()
+                            .push((stmt, kind, p.sql.clone()));
+                    }
                     if kind == InputKind::Period {
                         let spec = rows
                             .first()
@@ -603,6 +772,204 @@ where
                 Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
             }
             continue;
+        }
+
+        // `::SUBMIT` panel (#517 S1): run it as the viewer and check it's
+        // self-consistent — a real server isn't wired to any of this yet
+        // (no endpoint, no `options.state`), so this only checks that the
+        // dashboard's own authoring agrees with itself (plan §3).
+        if p.roles.iter().any(|(_, r)| matches!(r, Role::Submit)) {
+            match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
+                Ok(rows) if rows.len() > 1 => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "submit/rows",
+                    message: format!(
+                        "this ::SUBMIT returns {} rows with the current defaults — exactly \
+                         one makes the button available, zero hides it, more than one is an \
+                         error",
+                        rows.len()
+                    ),
+                    sql: short.clone(),
+                }),
+                Ok(rows) if rows.is_empty() => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "submit/rows",
+                    message: "this ::SUBMIT returns no rows with the current defaults — \
+                              hidden by default (the author's own SQL gate)"
+                        .into(),
+                    sql: short.clone(),
+                }),
+                Ok(rows) => {
+                    let row = &rows[0];
+                    let vars_text = p
+                        .roles
+                        .iter()
+                        .find(|(_, r)| *r == Role::SubmitVars)
+                        .and_then(|(i, _)| row.values().nth(*i))
+                        .and_then(|v| v.as_str());
+                    match vars_text {
+                        None => diags.push(Diagnostic {
+                            severity: Severity::Error,
+                            stmt,
+                            code: "submit/no-vars",
+                            message: "this ::SUBMIT has no ::SUBMIT_VARS (or its value isn't a \
+                                      string) — nothing would be recorded"
+                                .into(),
+                            sql: short.clone(),
+                        }),
+                        Some(text) => {
+                            let names: Vec<String> = text
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .collect();
+                            if names.is_empty() {
+                                diags.push(Diagnostic {
+                                    severity: Severity::Error,
+                                    stmt,
+                                    code: "submit/no-vars",
+                                    message: "::SUBMIT_VARS is empty — nothing would be recorded"
+                                        .into(),
+                                    sql: short.clone(),
+                                });
+                            } else if names.len() > 32 {
+                                diags.push(Diagnostic {
+                                    severity: Severity::Error,
+                                    stmt,
+                                    code: "submit/too-many-vars",
+                                    message: format!(
+                                        "::SUBMIT_VARS names {} variables — at most 32 may be \
+                                         recorded",
+                                        names.len()
+                                    ),
+                                    sql: short.clone(),
+                                });
+                            }
+                            for n in &names {
+                                match declared_inputs.get(&n.to_ascii_lowercase()) {
+                                    None => diags.push(Diagnostic {
+                                        severity: Severity::Error,
+                                        stmt,
+                                        code: "submit/unknown-variable",
+                                        message: format!(
+                                            "::SUBMIT_VARS names `{n}`, which no input \
+                                             statement of this dashboard declares"
+                                        ),
+                                        sql: short.clone(),
+                                    }),
+                                    Some(entries) => {
+                                        let stmts: std::collections::HashSet<usize> =
+                                            entries.iter().map(|(s, _, _)| *s).collect();
+                                        if stmts.len() > 1 {
+                                            diags.push(Diagnostic {
+                                                severity: Severity::Error,
+                                                stmt,
+                                                code: "submit/duplicate-input",
+                                                message: format!(
+                                                    "`{n}` is declared by more than one input \
+                                                     statement (statements {}) — the server \
+                                                     wouldn't know which option list to \
+                                                     validate it against",
+                                                    stmts
+                                                        .iter()
+                                                        .map(usize::to_string)
+                                                        .collect::<Vec<_>>()
+                                                        .join(", ")
+                                                ),
+                                                sql: short.clone(),
+                                            });
+                                        } else if entries.iter().any(|(_, k, _)| {
+                                            matches!(k, InputKind::DateRange | InputKind::Period)
+                                        }) {
+                                            diags.push(Diagnostic {
+                                                severity: Severity::Error,
+                                                stmt,
+                                                code: "submit/unsupported-input",
+                                                message: format!(
+                                                    "`{n}` comes from a ::DATERANGE/::PERIOD \
+                                                     input — ::SUBMIT can't record those yet \
+                                                     (several variables each)"
+                                                ),
+                                                sql: short.clone(),
+                                            });
+                                        } else if let Some((_, _, input_sql)) = entries.first() {
+                                            let deps = sql::deps::reads(
+                                                input_sql,
+                                                &std::collections::HashMap::new(),
+                                            );
+                                            let depends_on_a_variable = !matches!(
+                                                &deps,
+                                                sql::deps::Deps::Vars(v) if v.is_empty()
+                                            );
+                                            if depends_on_a_variable {
+                                                diags.push(Diagnostic {
+                                                    severity: Severity::Warning,
+                                                    stmt,
+                                                    code: "submit/options-from-variable",
+                                                    message: format!(
+                                                        "`{n}`'s own option query reads a \
+                                                         viewer-settable variable — the viewer \
+                                                         then controls its option list, so \
+                                                         \"validated against the options\" \
+                                                         means less (fine when that cascade is \
+                                                         intended)"
+                                                    ),
+                                                    sql: short.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
+            }
+            // `submit/dynamic-vars`: syntactic, on the raw statement text —
+            // checked whether or not the query above succeeded.
+            if let Some(raw) = raws.get(i) {
+                if let Some(expr) = sql::role_source_expr(raw, Role::SubmitVars) {
+                    if !sql::is_string_literal(&expr) {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "submit/dynamic-vars",
+                            message: "::SUBMIT_VARS is not a string literal — it can't be \
+                                      checked statically; only what it evaluates to just now \
+                                      was checked"
+                                .into(),
+                            sql: short.clone(),
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        // #517 §8: a learner's own TEXT answer, read back through
+        // `viewer_state`, can carry a phishing link or HTML/markdown a
+        // trainer's page would then render — advisory only (the app already
+        // escapes these; see docs/secure-serving.md).
+        if p.sql.to_ascii_lowercase().contains("viewer_state")
+            && p.roles
+                .iter()
+                .any(|(_, r)| matches!(r, Role::Markdown | Role::Link | Role::Download(_)))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "state/markup-from-viewer",
+                message: "this ::MARKDOWN/::LINK/::DOWNLOAD_* column reads viewer_state.value \
+                          — a learner's own TEXT answer can carry a link or markup that would \
+                          then render on whoever reads this panel (e.g. a trainer); the app \
+                          escapes it, but double check the content is meant to be shown that way"
+                    .into(),
+                sql: short.clone(),
+            });
         }
 
         // Panel: run it (stateful: everything before it is already in
@@ -830,18 +1197,13 @@ where
         {
             let v = first_text(&rows);
             let sets = if *r == Role::Drill {
-                drill_prelude(&v)
+                sql::vars::drill_prelude(&v)
             } else {
-                select_as_prelude(&v)
+                sql::vars::select_as_prelude(&v)
             };
             if let Ok(sets) = &sets {
                 // the variable names the directive sets (`SET VARIABLE <name> = …`)
-                let names: Vec<String> = sets
-                    .lines()
-                    .filter_map(|l| l.strip_prefix("SET VARIABLE "))
-                    .filter_map(|l| l.split(' ').next())
-                    .map(str::to_string)
-                    .collect();
+                let names = sql::vars::names_from_sets(sets);
                 let kind = if *r == Role::Drill {
                     "::DRILL"
                 } else {
@@ -1201,6 +1563,54 @@ where
             if p.roles.iter().any(|(_, r)| *r == Role::RowSelect) {
                 pending_rowselect = Some((stmt, p.shared.clone()));
             }
+            // #515: with the defaults this condition's cell evaluated to, is
+            // its target shown? Only a JSON boolean `true` is (a `"true"`
+            // string is accepted too, like `condition::holds_json`); anything
+            // else — including no row at all — hides the target, which is
+            // worth a note if it looks like an oversight rather than intent.
+            if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::ShowIf) {
+                match rows.first().and_then(|row| row.values().nth(*idx)) {
+                    None => diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code: "show_if/no-row",
+                        message: "this condition's query returned no row — its target is \
+                                  always hidden"
+                            .into(),
+                        sql: short.clone(),
+                    }),
+                    Some(v)
+                        if !matches!(v, Value::Bool(_))
+                            && !matches!(v, Value::String(s) if s == "true" || s == "false") =>
+                    {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "show_if/not-boolean",
+                            message: format!(
+                                "::SHOW_IF's value (`{}`) is not a BOOLEAN — with the defaults \
+                                 used here its target is always hidden (fail closed)",
+                                one_line(&v.to_string())
+                            ),
+                            sql: short.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            // #516, review-537: a ::GATE is checked once its step closes,
+            // not here — see `pending_gate`'s doc comment and
+            // `finalize_pending_gate`. (`rows`, from this marker's own
+            // query above, still needs no use here: the re-query at close
+            // time is the one that counts.)
+            if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::Gate) {
+                pending_gate = Some(PendingGate {
+                    stmt,
+                    short: short.clone(),
+                    sql: p.sql.clone(),
+                    gate_idx: *idx,
+                });
+            }
             continue;
         }
         // A lone ::LABEL is a section heading, not a card. It also ends a run of
@@ -1498,6 +1908,17 @@ where
             }
         }
     }
+    // A step still open at end of script (its group ran to EOF with no
+    // closer) — same close as the in-loop check.
+    if let Some(pending) = pending_gate.take() {
+        finalize_pending_gate(
+            &mut diags,
+            pending,
+            opts.stateful_session,
+            &prelude,
+            &mut run_query,
+        );
+    }
 
     // ---- design: end-of-script checks ----
     if opts.design {
@@ -1519,6 +1940,181 @@ where
     let plan = sql::plan(script);
     diags.extend(view_diags(&plan));
     diags.extend(fit_diags(&plan));
+    diags.extend(show_if_diags(&plan));
+    diags.extend(name_diags(&plan));
+    diags.extend(step_diags(&plan, script));
+    diags
+}
+
+/// `::SHOW_IF` checks (#515) that need the whole plan at once (a condition's
+/// target/range, and "every variable this dashboard sets" for
+/// `unknown-variable`) — see [`Diagnostic::code`] for the full `show_if/*`
+/// list. `show_if/no-row` / `show_if/not-boolean` are checked per-statement
+/// in the main loop above instead, since they need the condition's own
+/// query result.
+fn show_if_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let declared = sql::vars::declared(plan);
+    for (i, p) in plan.iter().enumerate() {
+        if !p.roles.iter().any(|(_, r)| *r == Role::ShowIf) {
+            continue;
+        }
+        if p.roles.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "show_if/not-alone",
+                message: "::SHOW_IF must be this statement's only role — put the condition on \
+                          its own statement; beside other roles it is ignored (the panel shows)"
+                    .into(),
+                sql: short(i),
+            });
+            continue; // not a real condition below (see sql::show_if::is_marker)
+        }
+        let reads = sql::deps::reads(&p.sql, &std::collections::HashMap::new());
+        if matches!(&reads, sql::deps::Deps::Vars(v) if v.is_empty()) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "show_if/constant",
+                message: "this condition reads no variable, so it never changes — filter with \
+                          WHERE instead, or drop the ::SHOW_IF"
+                    .into(),
+                sql: short(i),
+            });
+        }
+        if let sql::deps::Deps::Vars(vars) = &reads {
+            for v in vars {
+                if !v.starts_with("__claim_") && !declared.contains(v) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt: i + 1,
+                        code: "show_if/unknown-variable",
+                        message: format!(
+                            "getvariable('{v}') names no variable this dashboard sets (an \
+                             input, a SET VARIABLE, ::SELECT_AS/::DRILL, ::ROWSELECT's key \
+                             column, or anofox_data) — this condition is always false"
+                        ),
+                        sql: short(i),
+                    });
+                }
+            }
+        }
+    }
+    for c in sql::show_if::scan(plan) {
+        let (severity, message) = match c.problem {
+            Some("show_if/bad-target") => (
+                Severity::Error,
+                "::SHOW_IF can't govern this statement (::TAB/::SUBTAB/::VIEW/::ENDVIEW/\
+                 ::ENDGROUP/::FIT/::COLUMNS, a chrome directive or ::RELOAD) — it always \
+                 shows; use `-- @requires`, or #516's ::GATE, instead"
+                    .to_string(),
+            ),
+            Some(_) => (
+                Severity::Warning,
+                "nothing follows this ::SHOW_IF — it has no target".to_string(),
+            ),
+            None => continue,
+        };
+        diags.push(Diagnostic {
+            severity,
+            stmt: c.at + 1,
+            code: c.problem.unwrap(),
+            message,
+            sql: short(c.at),
+        });
+    }
+    diags
+}
+
+/// Does this statement draw an element `-- @name` can anchor (#518 decision
+/// 3): a panel (including a contract plot call), an input, a `::GROUP` box,
+/// a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/
+/// `::SECTION` heading — not setup, and not an invisible directive (`::SPAN`,
+/// `::RELOAD`, chrome, a lone `::THRESHOLDS`, …).
+fn is_name_target(p: &sql::Panel) -> bool {
+    if p.setup {
+        return false;
+    }
+    if p.contract.is_some() {
+        return true;
+    }
+    if roles::is_table_thresholds(&p.roles) {
+        return false;
+    }
+    p.roles.iter().any(|(_, r)| {
+        r.renders()
+            || matches!(
+                r,
+                Role::Input(_)
+                    | Role::GroupStart
+                    | Role::Tab
+                    | Role::SubTab
+                    | Role::View
+                    | Role::Section
+            )
+    })
+}
+
+/// `-- @name` panel names (#518 PR A): see [`Diagnostic::code`] for the full
+/// `name/*` list. Run once over the whole plan so a reused name is caught
+/// wherever its other statement sits.
+fn name_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        let Some(name) = p.name.as_deref() else {
+            continue;
+        };
+        if name == "page" {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "name/reserved",
+                message: "-- @name `page` is reserved for a guided tour's intro/outro \
+                          callout — pick another name"
+                    .into(),
+                sql: short(i),
+            });
+        } else if !sql::name::valid(name) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "name/bad",
+                message: format!(
+                    "-- @name `{name}` is not a plain identifier — use \
+                     `^[A-Za-z_][A-Za-z0-9_-]{{0,63}}$`"
+                ),
+                sql: short(i),
+            });
+        } else if let Some(&(_, other)) = seen.iter().find(|(n, _)| *n == name) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "name/duplicate",
+                message: format!(
+                    "-- @name `{name}` is also statement {other}'s — names must be unique \
+                     on one dashboard"
+                ),
+                sql: short(i),
+            });
+        } else {
+            seen.push((name, i + 1));
+        }
+        if !is_name_target(p) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "name/not-drawn",
+                message: "-- @name on a statement that draws nothing (setup, or a layout \
+                          directive with no element of its own) — it never reaches the page"
+                    .into(),
+                sql: short(i),
+            });
+        }
+    }
     diags
 }
 
@@ -2175,6 +2771,227 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     diags
 }
 
+/// `::GUIDE_STEP` group structure checks (#516): see [`Diagnostic::code`]
+/// for the full `step/*` list. Run once over the whole plan (mirrors
+/// [`view_diags`]). `step/gate-not-boolean` / `step/gate-no-row` are
+/// checked per-statement in the main loop above instead (like `::SHOW_IF`'s
+/// twins), since they need the gate's own query result.
+fn step_diags(plan: &[sql::Panel], script: &str) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let scan = sql::steps::scan(plan);
+
+    for &i in &scan.inside_subtab {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            stmt: i + 1,
+            code: "step/inside-subtab",
+            message: "::GUIDE_STEP can't open inside a ::SUBTAB — a step sequence is a \
+                      sibling of ::SUBTAB under a ::TAB, never nested inside one; this \
+                      marker is drawn as a plain ::SECTION heading instead"
+                .into(),
+            sql: short(i),
+        });
+    }
+
+    // `::GATE` / `::GATE_MESSAGE` only mean anything beside `::GUIDE_STEP`
+    // on the same statement — elsewhere they're stray columns.
+    for (i, p) in plan.iter().enumerate() {
+        if p.roles.iter().any(|(_, r)| *r == Role::GuideStep) {
+            continue;
+        }
+        if p.roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Gate | Role::GateMessage))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "step/gate-without-step",
+                message: "::GATE / ::GATE_MESSAGE only take effect on the same statement as \
+                          a ::GUIDE_STEP marker — add one, or drop these columns"
+                    .into(),
+                sql: short(i),
+            });
+        }
+    }
+
+    let other_vars = sql::vars::declared_without_steps(plan);
+    let allowed_vars = crate::host::serving::parse_dashboard_meta("lint", script).vars;
+    let gate_declared = sql::vars::declared(plan);
+
+    for g in &scan.groups {
+        let marker_stmt = g.markers[0] + 1;
+        if g.mixed_with_subtab {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "step/mixed-with-subtab",
+                message: "a ::SUBTAB closed this guided sequence — a step sequence is a \
+                          sibling of ::SUBTAB under a ::TAB, never nested inside one; move \
+                          the ::SUBTAB, or drop it, so they don't mix"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if g.markers.len() == 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "step/lone",
+                message: "a guided sequence with a single step has no Back/Next to show — add \
+                          another ::GUIDE_STEP, or drop it"
+                    .into(),
+                sql: short(g.markers[0]),
+            });
+        }
+        if other_vars.iter().any(|v| v.eq_ignore_ascii_case(&g.var)) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "step/var-clash",
+                message: format!(
+                    "this guided sequence's variable `{}` is also set by an input, a \
+                     `SET VARIABLE`, ::SELECT_AS, ::DRILL or ::ROWSELECT elsewhere — give the \
+                     group its own alias (`'…' AS name ::GUIDE_STEP`)",
+                    g.var
+                ),
+                sql: short(g.markers[0]),
+            });
+        }
+        if let Some(reserved) = &g.reserved_alias {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: marker_stmt,
+                code: "step/var-reserved",
+                message: format!(
+                    "this guided sequence's alias `{reserved}` is a reserved name \
+                     (`__claim_*`/`anofox_data`) — the server sets it, so a step can't claim \
+                     it (the group fell back to `{}`); pick a different alias",
+                    g.var
+                ),
+                sql: short(g.markers[0]),
+            });
+        }
+        if allowed_vars
+            .as_ref()
+            .is_some_and(|vs| !vs.iter().any(|v| v.eq_ignore_ascii_case(&g.var)))
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: marker_stmt,
+                code: "step/var-not-allowed",
+                message: format!(
+                    "this dashboard declares `-- @vars`, but it doesn't list `{}` — on a \
+                     locked server a viewer can't navigate this guided sequence by URL \
+                     (`?v.{}=`) until it's added",
+                    g.var, g.var
+                ),
+                sql: short(g.markers[0]),
+            });
+        }
+
+        // Per-step: label dedup/computed, a ::FIT inside, an empty step, a
+        // gate on the last step.
+        let mut labels: Vec<(String, usize)> = Vec::new();
+        for (idx, &mi) in g.markers.iter().enumerate() {
+            let p = &plan[mi];
+            match &p.step.as_ref().and_then(|s| s.label.clone()) {
+                None => diags.push(Diagnostic {
+                    severity: Severity::Note,
+                    stmt: mi + 1,
+                    code: "step/computed-label",
+                    message: "this step's label is a computed expression, not a plain string \
+                              literal — its heading text can't be checked here"
+                        .into(),
+                    sql: short(mi),
+                }),
+                Some(t) if !t.is_empty() => labels.push((t.clone(), mi + 1)),
+                Some(_) => {}
+            }
+            let end = g.markers.get(idx + 1).copied().unwrap_or(g.end);
+            if (mi + 1..end).all(|j| plan[j].setup || roles::is_directive_panel(&plan[j].roles)) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "step/empty",
+                    message: "this step has no rendering statement — it would show a blank pane"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            if (mi + 1..end).any(|j| plan[j].roles.iter().any(|(_, r)| *r == Role::Fit)) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "step/fit-inside",
+                    message: "::FIT inside a ::GUIDE_STEP is ignored — a step's content is \
+                              never the whole screen's fit target"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            let has_gate = p.roles.iter().any(|(_, r)| *r == Role::Gate);
+            if has_gate && idx + 1 == g.markers.len() {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: mi + 1,
+                    code: "step/gate-on-last",
+                    message: "::GATE on the last step does nothing — there is no further step \
+                              for it to hold back"
+                        .into(),
+                    sql: short(mi),
+                });
+            }
+            if has_gate {
+                let reads = sql::deps::reads(&p.sql, &std::collections::HashMap::new());
+                if matches!(&reads, sql::deps::Deps::Vars(v) if v.is_empty()) {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt: mi + 1,
+                        code: "step/gate-constant",
+                        message: "this ::GATE reads no variable, so it never changes — filter \
+                                  with WHERE instead, or drop the ::GATE"
+                            .into(),
+                        sql: short(mi),
+                    });
+                }
+                if let sql::deps::Deps::Vars(vars) = &reads {
+                    for v in vars {
+                        if !v.starts_with("__claim_") && !gate_declared.contains(v) {
+                            diags.push(Diagnostic {
+                                severity: Severity::Warning,
+                                stmt: mi + 1,
+                                code: "step/gate-unknown-variable",
+                                message: format!(
+                                    "getvariable('{v}') names no variable this dashboard sets \
+                                     — this ::GATE is always false (Next stays disabled)"
+                                ),
+                                sql: short(mi),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for (k, (text, stmt)) in labels.iter().enumerate() {
+            if let Some((_, other)) = labels[..k].iter().find(|(t, _)| t == text) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: *stmt,
+                    code: "step/duplicate-label",
+                    message: format!(
+                        "this step's label `{text}` is also statement {other}'s — a repeated \
+                         label makes the step list harder to scan"
+                    ),
+                    sql: short(*stmt - 1),
+                });
+            }
+        }
+    }
+    diags
+}
+
 /// Access-policy lint (issue #49), for `dashboard --check --policy`: the
 /// statements the policy refuses (the locked server would not start), and the
 /// ones that use a column some viewers can't see — `policy/denied-column`
@@ -2710,6 +3527,54 @@ fn has_role_cast(sql: &str) -> bool {
     cast_tokens(sql)
         .iter()
         .any(|t| crate::parse_role(t).is_some() && !roles::is_sql_type_token(t))
+}
+
+/// Does a setup statement `CREATE` a table/view named `viewer_state` or
+/// `viewer_state_latest` (`state/shadowed`, #517 §5)? A simple forward scan
+/// for `TABLE`/`VIEW` (skipping `TEMP`/`OR REPLACE`/`IF NOT EXISTS` before
+/// it, and those words too) then the following (possibly dotted,
+/// `main.viewer_state`/`"x".viewer_state`) identifier, of which only the
+/// last segment is the table/view's own name — a schema or catalog
+/// qualifier never changes what the bare name resolves to for a later
+/// unqualified `FROM viewer_state` (review of #530, nits).
+fn creates_reserved_state_name(sql: &str) -> Option<&'static str> {
+    use sql::lex::{tokenize, TokKind};
+    let toks: Vec<_> = tokenize(sql)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    if !toks.first().is_some_and(|t| t.is_word(sql, "CREATE")) {
+        return None;
+    }
+    let table_or_view = toks
+        .iter()
+        .position(|t| t.is_word(sql, "TABLE") || t.is_word(sql, "VIEW"))?;
+    let mut j = table_or_view + 1;
+    while toks
+        .get(j)
+        .is_some_and(|t| t.is_word(sql, "IF") || t.is_word(sql, "NOT") || t.is_word(sql, "EXISTS"))
+    {
+        j += 1;
+    }
+    // The dotted name's last segment: `a.b.c` tokenizes as `a . b . c`, so
+    // keep consuming `. <ident>` pairs and remember the last identifier.
+    let mut name_tok = toks.get(j)?;
+    if !matches!(name_tok.kind, TokKind::Word | TokKind::QuotedIdent) {
+        return None;
+    }
+    j += 1;
+    while toks.get(j).is_some_and(|t| t.is_punct(sql, '.')) {
+        let Some(next) = toks.get(j + 1) else { break };
+        if !matches!(next.kind, TokKind::Word | TokKind::QuotedIdent) {
+            break;
+        }
+        name_tok = next;
+        j += 2;
+    }
+    let name = name_tok.text(sql).trim_matches('"');
+    ["viewer_state", "viewer_state_latest"]
+        .into_iter()
+        .find(|reserved| name.eq_ignore_ascii_case(reserved))
 }
 
 /// DuckDB scalar types that are *not* role tokens — so a `::TYPE` cast to one of
@@ -3709,66 +4574,6 @@ fn first_text(rows: &[Map<String, Value>]) -> String {
             v => v.to_string(),
         })
         .unwrap_or_default()
-}
-
-fn is_ident(s: &str) -> bool {
-    let mut c = s.chars();
-    matches!(c.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
-        && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && s.len() <= 60
-}
-
-/// `'name'` / `'name multi'` of a `::SELECT_AS` → the browser's initial
-/// variables: the selection (`''`, or `[]` in multi mode) and an unset brushed
-/// range (`<name>_from` / `<name>_to` = NULL).
-fn select_as_prelude(v: &str) -> Result<String, String> {
-    let mut parts = v
-        .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
-        .filter(|p| !p.is_empty());
-    let name = parts.next().unwrap_or("");
-    let mode = parts.next().unwrap_or("single").to_ascii_lowercase();
-    if !is_ident(name) || !matches!(mode.as_str(), "single" | "multi") || parts.next().is_some() {
-        return Err(format!(
-            "::SELECT_AS `{v}` — expected a variable name, optionally followed by \
-             'single' or 'multi' (e.g. 'region' or 'region multi'); the chart keeps \
-             the shared `selected` click"
-        ));
-    }
-    let sel = if mode == "multi" {
-        "[]::VARCHAR[]"
-    } else {
-        "''"
-    };
-    Ok(format!(
-        "SET VARIABLE {n} = {sel};\nSET VARIABLE {n}_from = NULL;\nSET VARIABLE {n}_to = NULL;\n",
-        n = name
-    ))
-}
-
-/// `'[prefix:] a > b > c'` of a `::DRILL` → the browser's initial variables:
-/// the top level, depth 0, an empty path and every level variable `''`.
-fn drill_prelude(v: &str) -> Result<String, String> {
-    let (prefix, path) = match v.split_once(':') {
-        Some((p, rest)) => (p.trim(), rest),
-        None => ("drill", v),
-    };
-    let levels: Vec<&str> = path.split('>').map(str::trim).collect();
-    if !is_ident(prefix) || levels.len() < 2 || !levels.iter().all(|l| is_ident(l)) {
-        return Err(format!(
-            "::DRILL `{v}` — expected two or more column names joined by '>' \
-             (e.g. 'region > country > city', optionally 'geo: region > …'); \
-             the chart does not drill"
-        ));
-    }
-    let mut out = format!(
-        "SET VARIABLE {prefix}_level = '{}';\nSET VARIABLE {prefix}_depth = 0;\n\
-         SET VARIABLE {prefix}_path = []::VARCHAR[];\n",
-        levels[0]
-    );
-    for l in &levels {
-        out.push_str(&format!("SET VARIABLE {l} = '';\n"));
-    }
-    Ok(out)
 }
 
 /// A `::LINK` template the browser follows: `#tab`, `?query`, a path, or an
@@ -5637,27 +6442,27 @@ mod design_tests {
             "{seen:?}"
         );
         assert_eq!(
-            select_as_prelude("region").unwrap(),
+            sql::vars::select_as_prelude("region").unwrap(),
             "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
         );
         for bad in ["", "1x", "a b c", "region many", "x; DROP"] {
-            assert!(select_as_prelude(bad).is_err(), "{bad}");
+            assert!(sql::vars::select_as_prelude(bad).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn drill_primes_its_variables_and_links_are_checked() {
         assert_eq!(
-            drill_prelude("geo: region > country").unwrap(),
+            sql::vars::drill_prelude("geo: region > country").unwrap(),
             "SET VARIABLE geo_level = 'region';\nSET VARIABLE geo_depth = 0;\n\
              SET VARIABLE geo_path = []::VARCHAR[];\nSET VARIABLE region = '';\n\
              SET VARIABLE country = '';\n"
         );
-        assert!(drill_prelude("region > country > city")
+        assert!(sql::vars::drill_prelude("region > country > city")
             .unwrap()
             .starts_with("SET VARIABLE drill_level = 'region';"));
         for bad in ["region", "a > ", "a > b c", "x y: a > b", "a > b; DROP"] {
-            assert!(drill_prelude(bad).is_err(), "{bad}");
+            assert!(sql::vars::drill_prelude(bad).is_err(), "{bad}");
         }
         for ok in [
             "#Detail",
@@ -7305,5 +8110,659 @@ mod design_tests {
             |_q| Ok(data.clone()),
         );
         assert!(!has(&d, "silent-setup"), "{d:?}");
+    }
+
+    #[test]
+    fn name_diags_flags_bad_reserved_duplicate_and_not_drawn() {
+        let codes = |script: &str| -> Vec<(usize, &'static str)> {
+            name_diags(&sql::plan(script))
+                .iter()
+                .map(|d| (d.stmt, d.code))
+                .collect()
+        };
+        // A well-formed, unique name on a drawn statement: clean.
+        assert!(codes("-- @name kpi\nSELECT 1::METRIC;").is_empty());
+        // A name on a `::GROUP`, a `::TAB`, an input and a heading: all draw
+        // something, so none of them is `name/not-drawn`.
+        assert!(codes("-- @name box\nSELECT 'Filters'::GROUP;").is_empty());
+        assert!(codes("-- @name t1\nSELECT 'Overview'::TAB;").is_empty());
+        assert!(
+            codes("-- @name region_filter\nSELECT DISTINCT region::DROPDOWN FROM t;").is_empty()
+        );
+        assert!(codes("-- @name heading\nSELECT 'Section'::LABEL;").is_empty());
+        // Not a plain identifier.
+        assert_eq!(codes("-- @name 1bad\nSELECT 1::METRIC;"), [(1, "name/bad")]);
+        assert_eq!(
+            codes("-- @name has space\nSELECT 1::METRIC;"),
+            [(1, "name/bad")]
+        );
+        // `page` is reserved for the guided tour's intro/outro.
+        assert_eq!(
+            codes("-- @name page\nSELECT 1::METRIC;"),
+            [(1, "name/reserved")]
+        );
+        // The same name on two statements.
+        assert_eq!(
+            codes("-- @name kpi\nSELECT 1::METRIC;\n-- @name kpi\nSELECT 2::METRIC;"),
+            [(2, "name/duplicate")]
+        );
+        // Setup, and an invisible layout directive, draw nothing.
+        assert_eq!(
+            codes("-- @name setup\nSET VARIABLE x = 1;"),
+            [(1, "name/not-drawn")]
+        );
+        assert_eq!(
+            codes("-- @name span\nSELECT 6::SPAN;\nSELECT 1::METRIC;"),
+            [(1, "name/not-drawn")]
+        );
+        // A bad name on an undrawn statement: both fire.
+        assert_eq!(
+            codes("-- @name 1bad\nSELECT 6::SPAN;\nSELECT 1::METRIC;"),
+            [(1, "name/bad"), (1, "name/not-drawn")]
+        );
+    }
+}
+
+/// `::SUBMIT`/`::SUBMIT_VARS`/`::SUBMIT_DONE` (#517 S1): roles + lint only —
+/// no endpoint, no `options.state`, no read-back yet. The fake session
+/// matches queries by a literal substring that survives the `::ROLE` → `AS
+/// c{i}` rewrite (the role casts, not the literals, are stripped).
+#[cfg(test)]
+mod submit_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(obj: serde_json::Value) -> Map<String, Value> {
+        obj.as_object().unwrap().clone()
+    }
+
+    fn has(diags: &[Diagnostic], code: &str) -> bool {
+        diags.iter().any(|d| d.code == code)
+    }
+
+    fn of<'a>(diags: &'a [Diagnostic], code: &str) -> Vec<&'a Diagnostic> {
+        diags.iter().filter(|d| d.code == code).collect()
+    }
+
+    const INPUT: &str = "SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);\n";
+
+    /// A one-input, one-submit script; `submit_vars` is the `::SUBMIT_VARS`
+    /// column's literal expression text (inserted as-is, so a test can pass
+    /// something other than a plain string literal).
+    fn script(submit_vars: &str) -> String {
+        format!(
+            "{INPUT}SELECT 'Check my answers' AS quiz_1::SUBMIT, {submit_vars} AS r::SUBMIT_VARS;\n"
+        )
+    }
+
+    /// Lints [`script`]`(submit_vars)`. `vars_value` is what the `::SUBMIT`
+    /// row's `SUBMIT_VARS` cell evaluates to at runtime — the test supplies
+    /// it directly (it already knows, having built `submit_vars`) rather
+    /// than this fake session re-deriving it from the rewritten query text.
+    fn lint_vars(submit_vars: &str, vars_value: serde_json::Value) -> Vec<Diagnostic> {
+        check(&script(submit_vars), |q| {
+            if q.contains("VALUES ('A')") {
+                // Input roles keep their original column name (`q1`), not a
+                // positional `c{i}` alias — see `sql::rewrite`'s
+                // `Role::Input(_)` branch.
+                Ok(vec![
+                    row(json!({"q1": "A"})),
+                    row(json!({"q1": "B"})),
+                    row(json!({"q1": "C"})),
+                ])
+            } else if q.contains("Check my answers") {
+                Ok(vec![row(
+                    json!({"c0": "Check my answers", "c1": vars_value}),
+                )])
+            } else {
+                // The injected `viewer_state` temp (setup) and anything else.
+                Ok(vec![])
+            }
+        })
+    }
+
+    /// [`lint_vars`] for the common case: `submit_vars` is a plain string
+    /// literal and also the value it evaluates to.
+    fn lint(submit_vars_literal: &str) -> Vec<Diagnostic> {
+        let value = submit_vars_literal
+            .trim()
+            .trim_start_matches('\'')
+            .trim_end_matches('\'')
+            .replace("''", "'");
+        lint_vars(submit_vars_literal, json!(value))
+    }
+
+    #[test]
+    fn valid_submit_is_clean() {
+        let d = lint("'q1'");
+        for code in [
+            "submit/unknown-variable",
+            "submit/unsupported-input",
+            "submit/duplicate-input",
+            "submit/no-vars",
+            "submit/too-many-vars",
+            "submit/rows",
+            "submit/dynamic-vars",
+        ] {
+            assert!(!has(&d, code), "unexpected {code} in {d:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_variable_is_an_error() {
+        let d = lint("'q1, nope'");
+        let found = of(&d, "submit/unknown-variable");
+        assert_eq!(found.len(), 1, "{d:?}");
+        assert_eq!(found[0].severity, Severity::Error);
+        assert!(found[0].message.contains("nope"), "{d:?}");
+    }
+
+    #[test]
+    fn no_vars_is_an_error_when_empty() {
+        let d = lint("''");
+        assert!(has(&d, "submit/no-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn no_vars_is_an_error_when_not_a_string() {
+        let script = format!("{INPUT}SELECT 'Check' AS quiz_1::SUBMIT, 1 AS r::SUBMIT_VARS;\n");
+        let d = check(&script, |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": 1}))])
+            }
+        });
+        assert!(has(&d, "submit/no-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn too_many_vars_is_an_error() {
+        let names: Vec<String> = (0..40).map(|i| format!("q1_{i}")).collect();
+        let d = lint(&format!("'{}'", names.join(", ")));
+        assert!(has(&d, "submit/too-many-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn unsupported_daterange_input_is_an_error() {
+        let script = "SELECT d0 ::DATERANGE, d1 FROM (VALUES (DATE '2026-01-01', DATE '2026-01-31')) t(d0, d1);\n\
+                       SELECT 'Check' AS quiz_1::SUBMIT, 'd0' AS r::SUBMIT_VARS;\n";
+        let d = check(script, |q| {
+            if q.contains("2026-01-01") && !q.contains("Check") {
+                Ok(vec![row(json!({"d0": "2026-01-01", "d1": "2026-01-31"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": "d0"}))])
+            }
+        });
+        assert!(has(&d, "submit/unsupported-input"), "{d:?}");
+    }
+
+    #[test]
+    fn duplicate_input_is_an_error() {
+        let script = format!(
+            "{INPUT}SELECT q1 ::DROPDOWN FROM (VALUES ('X'), ('Y')) t2(q1);\n\
+             SELECT 'Check' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS;\n"
+        );
+        let d = check(&script, |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else if q.contains("VALUES ('X')") {
+                Ok(vec![row(json!({"q1": "X"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": "q1"}))])
+            }
+        });
+        assert!(has(&d, "submit/duplicate-input"), "{d:?}");
+    }
+
+    #[test]
+    fn dynamic_vars_is_a_warning() {
+        // A computed expression instead of a literal — can't be checked
+        // statically, even though it happens to evaluate to 'q1' right now.
+        let d = lint_vars("(SELECT 'q1')", json!("q1"));
+        assert!(has(&d, "submit/dynamic-vars"), "{d:?}");
+    }
+
+    #[test]
+    fn zero_rows_is_a_warning_hidden_by_default() {
+        let d = check(&script("'q1'"), |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else {
+                // Both the ::SUBMIT statement and the injected viewer_state
+                // setup return no rows here — ::SUBMIT's 0 rows is the
+                // thing under test (hidden by default).
+                Ok(vec![])
+            }
+        });
+        let found = of(&d, "submit/rows");
+        assert_eq!(found.len(), 1, "{d:?}");
+        assert_eq!(found[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn more_than_one_row_is_an_error() {
+        let d = check(&script("'q1'"), |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else if q.contains("Check my answers") {
+                Ok(vec![
+                    row(json!({"c0": "Check my answers", "c1": "q1"})),
+                    row(json!({"c0": "Check my answers", "c1": "q1"})),
+                ])
+            } else {
+                Ok(vec![])
+            }
+        });
+        let found = of(&d, "submit/rows");
+        assert_eq!(found.len(), 1, "{d:?}");
+        assert_eq!(found[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn options_from_variable_is_a_warning() {
+        let script = "SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B')) t(q1) \
+                       WHERE q1 = getvariable('region') OR 1 = 1;\n\
+                       SELECT 'Check' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS;\n";
+        let d = check(script, |q| {
+            if q.contains("VALUES ('A')") {
+                Ok(vec![row(json!({"q1": "A"}))])
+            } else {
+                Ok(vec![row(json!({"c0": "Check", "c1": "q1"}))])
+            }
+        });
+        assert!(has(&d, "submit/options-from-variable"), "{d:?}");
+    }
+
+    #[test]
+    fn viewer_state_temp_is_seeded_so_reading_it_does_not_fail() {
+        // No ::SUBMIT at all — only a read-back reference — still gets the
+        // empty temp (headless/lint parity, plan §3 "Headless renderers and
+        // lint create an empty viewer_state").
+        let script = "SELECT value::TEXT_SMALL FROM viewer_state;\n";
+        let mut saw_create = false;
+        let d = check(script, |q| {
+            if q.contains("CREATE TEMP TABLE viewer_state") {
+                saw_create = true;
+            }
+            Ok(vec![row(json!({"c0": "hi"}))])
+        });
+        assert!(saw_create, "viewer_state temp was never created");
+        assert!(!has(&d, "sql-error"), "{d:?}");
+    }
+
+    #[test]
+    fn a_pre_existing_real_viewer_state_is_not_shadowed() {
+        // The probe (`sql::viewer_state_exists_probe_sql`) reports a real
+        // (non-temp) `viewer_state` already on the connection — e.g. an
+        // attached database's table — so lint must not create its own
+        // empty temp on top of it (review of #530 #5: that would shadow
+        // the real one for the rest of the session).
+        let script = "SELECT value::TEXT_SMALL FROM viewer_state;\n";
+        let mut saw_create = false;
+        let d = check(script, |q| {
+            if q.contains("duckdb_tables()") {
+                return Ok(vec![row(json!({"n": 1}))]);
+            }
+            if q.contains("CREATE TEMP TABLE viewer_state") {
+                saw_create = true;
+            }
+            Ok(vec![row(json!({"c0": "hi"}))])
+        });
+        assert!(
+            !saw_create,
+            "must not seed an empty viewer_state over a real one: {d:?}"
+        );
+    }
+
+    #[test]
+    fn shadowing_viewer_state_is_an_error() {
+        let d = check("CREATE TEMP TABLE viewer_state AS SELECT 1;\n", |_| {
+            Ok(vec![])
+        });
+        assert!(has(&d, "state/shadowed"), "{d:?}");
+    }
+
+    #[test]
+    fn shadowing_a_dotted_viewer_state_is_also_an_error() {
+        // `CREATE TABLE main.viewer_state …` — a schema/catalog qualifier
+        // doesn't change what a later bare `FROM viewer_state` resolves to
+        // (review of #530, nits).
+        let d = check("CREATE TABLE main.viewer_state AS SELECT 1;\n", |_| {
+            Ok(vec![])
+        });
+        assert!(has(&d, "state/shadowed"), "{d:?}");
+    }
+
+    #[test]
+    fn markup_from_viewer_state_is_a_warning() {
+        let script = "SELECT value::MARKDOWN FROM viewer_state;\n";
+        let d = check(script, |_| Ok(vec![row(json!({"c0": "hello"}))]));
+        assert!(has(&d, "state/markup-from-viewer"), "{d:?}");
+    }
+}
+
+/// `::SHOW_IF` lint checks (#515): one test per `show_if/*` code.
+#[cfg(test)]
+mod show_if_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn codes(d: &[Diagnostic]) -> Vec<&'static str> {
+        d.iter().map(|x| x.code).collect()
+    }
+
+    fn has(d: &[Diagnostic], code: &str) -> bool {
+        d.iter().any(|x| x.code == code)
+    }
+
+    /// `show_if_diags` alone (no query execution) — covers the plan-only
+    /// codes: `not-alone`, `bad-target`, `no-target`, `constant`,
+    /// `unknown-variable`.
+    fn static_diags(sql: &str) -> Vec<Diagnostic> {
+        show_if_diags(&crate::sql::plan(sql))
+    }
+
+    #[test]
+    fn not_alone() {
+        let d = static_diags("SELECT true::SHOW_IF, 1::COL; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["show_if/not-alone"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn bad_target() {
+        let d = static_diags(
+            "SELECT getvariable('anofox_data') IS NOT NULL ::SHOW_IF; SELECT 'p'::TAB;",
+        );
+        assert_eq!(codes(&d), ["show_if/bad-target"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn no_target() {
+        let d = static_diags(
+            "SELECT 'x'::MARKDOWN; SELECT getvariable('anofox_data') IS NOT NULL ::SHOW_IF;",
+        );
+        assert_eq!(codes(&d), ["show_if/no-target"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn constant() {
+        let d = static_diags("SELECT true::SHOW_IF; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["show_if/constant"], "{d:?}");
+    }
+
+    #[test]
+    fn unknown_variable() {
+        let d = static_diags("SELECT getvariable('nope') = 'a' ::SHOW_IF; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["show_if/unknown-variable"], "{d:?}");
+        assert!(d[0].message.contains("nope"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn a_known_variable_reads_clean() {
+        let d = static_diags(
+            "SELECT v AS q1 ::DROPDOWN FROM (VALUES ('a')) t(v);\n\
+             SELECT getvariable('q1') = 'a' ::SHOW_IF;\nSELECT 'x'::MARKDOWN;",
+        );
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    #[test]
+    fn claim_variables_are_never_unknown() {
+        let d = static_diags(
+            "SELECT getvariable('__claim_user') = 'alice' ::SHOW_IF; SELECT 'x'::MARKDOWN;",
+        );
+        assert!(!has(&d, "show_if/unknown-variable"), "{d:?}");
+    }
+
+    #[test]
+    fn not_boolean() {
+        let d = check("SELECT 1::SHOW_IF; SELECT 'x'::MARKDOWN;", |_q| {
+            Ok(vec![json!({ "c0": 1 }).as_object().unwrap().clone()])
+        });
+        assert!(has(&d, "show_if/not-boolean"), "{d:?}");
+    }
+
+    #[test]
+    fn a_true_boolean_cell_is_clean() {
+        let d = check("SELECT true::SHOW_IF; SELECT 'x'::MARKDOWN;", |q| {
+            if q.contains("'x'") {
+                Ok(vec![json!({ "c0": "x" }).as_object().unwrap().clone()])
+            } else {
+                Ok(vec![json!({ "c0": true }).as_object().unwrap().clone()])
+            }
+        });
+        assert!(!has(&d, "show_if/not-boolean"), "{d:?}");
+        assert!(!has(&d, "show_if/no-row"), "{d:?}");
+    }
+
+    #[test]
+    fn no_row() {
+        let d = check(
+            "SELECT true::SHOW_IF WHERE false; SELECT 'x'::MARKDOWN;",
+            |q| {
+                if q.contains("WHERE false") {
+                    Ok(vec![])
+                } else {
+                    Ok(vec![json!({ "c0": "x" }).as_object().unwrap().clone()])
+                }
+            },
+        );
+        assert!(has(&d, "show_if/no-row"), "{d:?}");
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn codes(d: &[Diagnostic]) -> Vec<&'static str> {
+        d.iter().map(|x| x.code).collect()
+    }
+
+    fn has(d: &[Diagnostic], code: &str) -> bool {
+        d.iter().any(|x| x.code == code)
+    }
+
+    /// `step_diags` alone (no query execution, no `-- @vars`).
+    fn static_diags(sql: &str) -> Vec<Diagnostic> {
+        step_diags(&crate::sql::plan(sql), sql)
+    }
+
+    #[test]
+    fn inside_subtab() {
+        let d =
+            static_diags("SELECT 'sub'::SUBTAB; SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;");
+        assert_eq!(codes(&d), ["step/inside-subtab"], "{d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn mixed_with_subtab() {
+        let d =
+            static_diags("SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN; SELECT 'sub'::SUBTAB;");
+        assert!(has(&d, "step/mixed-with-subtab"), "{d:?}");
+    }
+
+    #[test]
+    fn lone_step() {
+        let d = static_diags("SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;");
+        assert!(has(&d, "step/lone"), "{d:?}");
+    }
+
+    #[test]
+    fn fit_inside() {
+        let d = static_diags(
+            "SELECT 'S1'::GUIDE_STEP; SELECT 'fit'::FIT; SELECT 'S2'::GUIDE_STEP; SELECT 'x'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/fit-inside"), "{d:?}");
+    }
+
+    #[test]
+    fn empty_step() {
+        let d =
+            static_diags("SELECT 'S1'::GUIDE_STEP; SELECT 'S2'::GUIDE_STEP; SELECT 'x'::MARKDOWN;");
+        assert!(has(&d, "step/empty"), "{d:?}");
+    }
+
+    #[test]
+    fn duplicate_label() {
+        let d = static_diags(
+            "SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN; SELECT 'S1'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/duplicate-label"), "{d:?}");
+    }
+
+    #[test]
+    fn computed_label() {
+        let d = static_diags("SELECT a || 'x' ::GUIDE_STEP FROM (VALUES ('p')) t(a);");
+        assert!(has(&d, "step/computed-label"), "{d:?}");
+    }
+
+    #[test]
+    fn var_clash_with_an_input() {
+        let d = static_diags(
+            "SELECT v AS step ::DROPDOWN FROM (VALUES ('a')) t(v);\nSELECT 'S1'::GUIDE_STEP; SELECT 'S2'::GUIDE_STEP;",
+        );
+        assert!(has(&d, "step/var-clash"), "{d:?}");
+    }
+
+    /// review-537: a `__claim_*` alias is refused as the step variable
+    /// (defense in depth alongside `serve.rs`'s own guard) and reported.
+    #[test]
+    fn var_reserved_claim_alias() {
+        let d =
+            static_diags("SELECT 'S1' AS __claim_tenant ::GUIDE_STEP; SELECT 'S2'::GUIDE_STEP;");
+        assert!(has(&d, "step/var-reserved"), "{d:?}");
+    }
+
+    #[test]
+    fn var_not_allowed() {
+        let sql = "-- @vars other\nSELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;\n\
+                   SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;";
+        let d = step_diags(&crate::sql::plan(sql), sql);
+        assert!(has(&d, "step/var-not-allowed"), "{d:?}");
+    }
+
+    #[test]
+    fn var_allowed_reads_clean() {
+        let sql = "-- @vars step\nSELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;\n\
+                   SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;";
+        let d = step_diags(&crate::sql::plan(sql), sql);
+        assert!(!has(&d, "step/var-not-allowed"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_without_step() {
+        let d = static_diags("SELECT true ::GATE, 'x' ::MARKDOWN;");
+        assert_eq!(codes(&d), ["step/gate-without-step"], "{d:?}");
+    }
+
+    #[test]
+    fn gate_on_last_step() {
+        let d = static_diags(
+            "SELECT 'S1'::GUIDE_STEP; SELECT 'x'::MARKDOWN;\n\
+             SELECT 'S2' ::GUIDE_STEP, true ::GATE; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/gate-on-last"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_constant() {
+        let d = static_diags(
+            "SELECT 'S1' ::GUIDE_STEP, true ::GATE; SELECT 'x'::MARKDOWN; SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/gate-constant"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_unknown_variable() {
+        let d = static_diags(
+            "SELECT 'S1' ::GUIDE_STEP, getvariable('nope') = 'a' ::GATE;\n\
+             SELECT 'x'::MARKDOWN; SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+        );
+        assert!(has(&d, "step/gate-unknown-variable"), "{d:?}");
+    }
+
+    #[test]
+    fn gate_not_boolean() {
+        let d = check(
+            "SELECT 'S1' ::GUIDE_STEP, 1 ::GATE; SELECT 'x'::MARKDOWN;\n\
+             SELECT 'S2'::GUIDE_STEP; SELECT 'y'::MARKDOWN;",
+            |q| {
+                if q.contains("'S1'") {
+                    Ok(vec![json!({ "c0": "S1", "c1": 1 })
+                        .as_object()
+                        .unwrap()
+                        .clone()])
+                } else {
+                    Ok(vec![json!({ "c0": "x" }).as_object().unwrap().clone()])
+                }
+            },
+        );
+        assert!(has(&d, "step/gate-not-boolean"), "{d:?}");
+    }
+
+    /// review-537: the canonical pattern — a ::GATE on the same step as its
+    /// own quiz (plan decision 2) — must lint clean, not warn, once that
+    /// quiz's own `::DROPDOWN` default has bound by the time the step
+    /// closes (the next marker). `q2`'s binding only reaches later calls'
+    /// `prelude`, so this also exercises that `finalize_pending_gate` is
+    /// re-querying with it, not reusing the marker's first (unbound) read.
+    #[test]
+    fn gate_in_its_own_step_with_its_quiz_is_clean_once_the_step_closes() {
+        let sql = "SELECT 'Quiz' ::GUIDE_STEP, getvariable('q2') = 'measured error' ::GATE;\n\
+                   SELECT v AS q2 ::DROPDOWN FROM (VALUES ('measured error')) t(v);\n\
+                   SELECT 'Next' ::GUIDE_STEP;\nSELECT 'y' ::MARKDOWN;";
+        let d = check(sql, |q| {
+            let q2_bound = q.contains("SET VARIABLE \"q2\"");
+            if q.contains("getvariable('q2')") {
+                let v = if q2_bound { json!(true) } else { Value::Null };
+                return Ok(vec![json!({ "c0": "Quiz", "c1": v })
+                    .as_object()
+                    .unwrap()
+                    .clone()]);
+            }
+            if q.contains("VALUES ('measured error')") {
+                return Ok(vec![json!({ "q2": "measured error" })
+                    .as_object()
+                    .unwrap()
+                    .clone()]);
+            }
+            Ok(vec![json!({ "c0": "ok" }).as_object().unwrap().clone()])
+        });
+        assert!(!has(&d, "step/gate-not-boolean"), "{d:?}");
+        assert!(!has(&d, "step/gate-no-row"), "{d:?}");
+    }
+
+    /// The same pattern, but the quiz is never answered correctly in this
+    /// checker run (the dropdown's own default stays empty/never matches)
+    /// — a real BOOLEAN `false`, not a warning: the gate works, it's just
+    /// closed, same as #515's `a_known_variable_reads_clean`-style cases.
+    #[test]
+    fn gate_in_its_own_step_evaluates_a_real_false_not_a_warning() {
+        let sql = "SELECT 'Quiz' ::GUIDE_STEP, getvariable('q2') = 'measured error' ::GATE;\n\
+                   SELECT v AS q2 ::DROPDOWN FROM (VALUES ('')) t(v);\n\
+                   SELECT 'Next' ::GUIDE_STEP;\nSELECT 'y' ::MARKDOWN;";
+        let d = check(sql, |q| {
+            let q2_bound = q.contains("SET VARIABLE \"q2\"");
+            if q.contains("getvariable('q2')") {
+                let v = if q2_bound { json!(false) } else { Value::Null };
+                return Ok(vec![json!({ "c0": "Quiz", "c1": v })
+                    .as_object()
+                    .unwrap()
+                    .clone()]);
+            }
+            if q.contains("VALUES ('')") {
+                return Ok(vec![json!({ "q2": "" }).as_object().unwrap().clone()]);
+            }
+            Ok(vec![json!({ "c0": "ok" }).as_object().unwrap().clone()])
+        });
+        assert!(!has(&d, "step/gate-not-boolean"), "{d:?}");
+        assert!(!has(&d, "step/gate-no-row"), "{d:?}");
     }
 }
