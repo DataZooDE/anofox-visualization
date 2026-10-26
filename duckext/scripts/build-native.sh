@@ -16,15 +16,45 @@ case "$OUT" in /*|[A-Za-z]:*) ;; *) OUT="$PWD/$OUT" ;; esac
 PLATFORM="${PLATFORM:-$("$DUCKDB" -noheader -list -c 'PRAGMA platform;')}"
 # Single version source of truth: [workspace.package] in the root Cargo.toml.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$CORE/Cargo.toml" | head -1)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$CORE/target}"
 
 # The extension embeds web/ at compile time (include_dir!) so `SELECT
 # anofox_serve(port)` can serve the browser builder. Build the wasm module first
 # so web/pkg is present (REQUIRED unless SKIP_WASM=1, which builds a server
 # whose UI cannot render).
 if [ "${SKIP_WASM:-0}" != "1" ]; then
-  command -v wasm-pack >/dev/null || { echo "wasm-pack is required (or SKIP_WASM=1)"; exit 1; }
   echo "== build web/pkg (wasm) — embedded UI for anofox_serve =="
-  ( cd "$CORE" && wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm )
+  # No wasm-pack (#552): this box's wasm-pack (0.13.1) always adds an
+  # implicit --release alongside a custom --profile, which cargo then
+  # rejects ("the argument '--release' cannot be used with '--profile
+  # <PROFILE-NAME>'") — `--profile wasm` never got past `cargo build`
+  # locally, on any wasm-pack version with this regression. Do by hand what
+  # `wasm-pack build --target web` does under the hood instead, matching
+  # CI's own wasm step exactly (.github/workflows/ci.yml and pages.yml both
+  # run `wasm-pack build --target web --out-dir web/pkg --profile wasm
+  # --no-default-features --features wasm`): compile to
+  # wasm32-unknown-unknown with that same profile/features, run
+  # wasm-bindgen for the `--target web` JS/TS glue, then wasm-opt (wasm-pack
+  # bundles/fetches its own copy of that for the same effect; CI has none
+  # on PATH beyond what wasm-pack brings either).
+  command -v wasm-bindgen >/dev/null || { echo "wasm-bindgen (the CLI, not just the crate) is required (or SKIP_WASM=1)"; exit 1; }
+  command -v wasm-opt >/dev/null || { echo "wasm-opt is required (or SKIP_WASM=1)"; exit 1; }
+  rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true
+  # The wasm-bindgen CLI must be the exact version of the `wasm-bindgen`
+  # crate this links against (Cargo.lock) — a mismatch fails at runtime
+  # (the generated glue panics on load), not at build time.
+  WB_CRATE_VERSION="$(awk '/^name = "wasm-bindgen"$/{f=1;next} f && /^version = /{print; exit}' "$CORE/Cargo.lock" | sed 's/^version = "\(.*\)"/\1/')"
+  WB_CLI_VERSION="$(wasm-bindgen --version | awk '{print $2}')"
+  [ "$WB_CLI_VERSION" = "$WB_CRATE_VERSION" ] || {
+    echo "wasm-bindgen CLI ($WB_CLI_VERSION) must match the wasm-bindgen crate pinned in Cargo.lock ($WB_CRATE_VERSION)"
+    echo "  cargo install wasm-bindgen-cli --version $WB_CRATE_VERSION --locked"
+    exit 1
+  }
+  ( cd "$CORE" && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}" cargo build --locked --lib --target wasm32-unknown-unknown --profile wasm --no-default-features --features wasm )
+  rm -rf "$CORE/web/pkg"
+  wasm-bindgen --target web --out-dir "$CORE/web/pkg" --out-name anofox_visualization \
+    "$TARGET_DIR/wasm32-unknown-unknown/wasm/anofox_visualization.wasm"
+  wasm-opt -O "$CORE/web/pkg/anofox_visualization_bg.wasm" -o "$CORE/web/pkg/anofox_visualization_bg.wasm"
   touch "$HERE/src/serve.rs"   # force include_dir! to re-embed the fresh web/pkg
 else
   echo "== SKIP_WASM=1 — anofox_serve UI won't include the renderer =="
@@ -32,7 +62,6 @@ fi
 
 echo "== build cdylib (v$VERSION) =="
 cd "$CORE"
-TARGET_DIR="${CARGO_TARGET_DIR:-$CORE/target}"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}" cargo build --locked -p anofox-visualization-duckdb --lib "$@"
 PROFILE=debug
 for a in "$@"; do [ "$a" = "--release" ] && PROFILE=release; done

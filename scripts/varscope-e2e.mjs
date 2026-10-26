@@ -1,8 +1,10 @@
 // #210 measurement: how many /api/panel requests one click on a locked
 // dashboard sends, before and after the locked server keys its cache (and
 // re-requests) by the variables a panel actually depends on, not every
-// variable. Not run in CI (like served-e2e.mjs) — it's a before/after
-// measurement, run once against the extension built from each side.
+// variable. Not run in CI — it's a before/after measurement, run once
+// against the extension built from each side (unlike scripts/served-e2e.mjs
+// / scripts/input-options-order-served-e2e.mjs, which are plain pass/fail
+// checks and do run in CI's `web-e2e` job, #590).
 //
 //   node scripts/varscope-e2e.mjs --ext path/to/anofox_visualization.duckdb_extension \
 //       [--port 8931] [--duckdb duckdb] [--expect-max N] [--expect-last N]

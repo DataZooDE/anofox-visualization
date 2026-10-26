@@ -62,8 +62,10 @@ pub struct Diagnostic {
     /// `view/empty-label` | `view/duplicate-name` | `view/bad-name` |
     /// `view/unbalanced-group` (errors) | `view/lone` | `view/computed-label` |
     /// `view/mixed-names` | `view/empty` | `view/open-ended` |
-    /// `view/stray-end` (warnings) | `view/input-inside` | `view/unnamed`
-    /// (notes). `::VIEW_PLACEMENT` ([`view_diags`], #534):
+    /// `view/stray-end` | `view/height-conflict` (an alternative's own
+    /// `::HEIGHT` differs from another's, so the card still resizes when
+    /// switching between them, #573) (warnings) | `view/input-inside` |
+    /// `view/unnamed` (notes). `::VIEW_PLACEMENT` ([`view_diags`], #534):
     /// `view-placement/unknown-value` (an error: not `'row'`/`'header'`) |
     /// `view-placement/not-single-panel` | `view-placement/ambiguous` |
     /// `view-placement/orphan` (warnings: each falls back to `'row'`) |
@@ -2665,6 +2667,25 @@ fn literal_number(sql: &str) -> Option<f64> {
     num.trim_matches('\'').trim().parse().ok()
 }
 
+/// A pending `::HEIGHT` literal set directly before plan index `start` (a
+/// `::VIEW` marker) — backs up over setup and other next-panel modifiers in
+/// between (`::COL`/`::SPAN` and friends), the same walk
+/// [`sql::views::placement_before`]'s private twin does for a pending
+/// `::VIEW_PLACEMENT`. `None` when no `::HEIGHT` sits in that chain, or its
+/// value isn't a plain literal number — used by `view/height-conflict`
+/// (#573) to read each alternative's own pending height, the same value
+/// `web/app.js`'s `nextHeight` would carry into it.
+fn height_before(plan: &[sql::Panel], start: usize) -> Option<f64> {
+    let mut k = start;
+    while k > 0 && (plan[k - 1].setup || sql::show_if::is_modifier(&plan[k - 1].roles)) {
+        k -= 1;
+    }
+    (k..start)
+        .rev()
+        .find(|&j| !plan[j].setup && plan[j].roles.iter().any(|(_, r)| *r == Role::Height))
+        .and_then(|j| literal_number(&plan[j].sql))
+}
+
 /// A rewritten (`::ROLE` → `AS c{idx}`) statement's `c{idx}` output column,
 /// when the whole statement is a plain `SELECT <list>` with no `FROM` — a
 /// directive's literal value, readable without a `DataProvider` (`fit_diags`
@@ -3266,6 +3287,40 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                             .into(),
                         sql: short(j),
                     });
+                }
+            }
+        }
+        // `view/height-conflict` (#573): a pending ::HEIGHT right before the
+        // group's first marker now applies to every alternative (fixed in
+        // web/app.js) — but an alternative with its OWN pending ::HEIGHT
+        // still wins for just that one, so two alternatives asking for
+        // different explicit heights still make the card resize when
+        // switching between them. Only distinct EXPLICIT values conflict;
+        // an alternative with no ::HEIGHT of its own simply inherits the
+        // group's (no warning for it).
+        let own_heights: Vec<Option<f64>> = g
+            .markers
+            .iter()
+            .map(|&mi| height_before(plan, mi))
+            .collect();
+        if let Some(base) = own_heights.iter().flatten().next().copied() {
+            for (alt, &h) in own_heights.iter().enumerate() {
+                if let Some(h) = h {
+                    if h != base {
+                        let mi = g.markers[alt];
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt: mi + 1,
+                            code: "view/height-conflict",
+                            message: format!(
+                                "this alternative's own ::HEIGHT ({h}) differs from another \
+                                 alternative's ({base}) in the same ::VIEW group — the card \
+                                 still resizes when switching to/from it; drop one or match \
+                                 the values so every alternative shares one height"
+                            ),
+                            sql: short(mi),
+                        });
+                    }
                 }
             }
         }
@@ -8107,6 +8162,44 @@ mod design_tests {
             |_q| Ok(vec![]),
         );
         assert!(has(&d, "view/open-ended"), "{d:?}");
+    }
+
+    // #573: two alternatives of one group pending different explicit
+    // ::HEIGHT values — the card still resizes when switching between them,
+    // even once a shared ::HEIGHT propagates to every alternative.
+    #[test]
+    fn view_height_conflict_warns() {
+        let d = check(
+            "SELECT 112::HEIGHT;\nSELECT 'A'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 300::HEIGHT;\nSELECT 'B'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view/height-conflict"), "{d:?}");
+    }
+
+    // The common, now-fixed case: a ::HEIGHT pending before the group's
+    // first marker, no alternative setting its own — every alternative
+    // inherits it (web/app.js), nothing to flag.
+    #[test]
+    fn view_height_shared_before_group_does_not_conflict() {
+        let d = check(
+            "SELECT 112::HEIGHT;\nSELECT 'A'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'B'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(!has(&d, "view/height-conflict"), "{d:?}");
+    }
+
+    // Every alternative repeating the SAME explicit ::HEIGHT (today's
+    // documented workaround) is consistent, not a conflict.
+    #[test]
+    fn view_height_matching_per_alternative_does_not_conflict() {
+        let d = check(
+            "SELECT 112::HEIGHT;\nSELECT 'A'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 112::HEIGHT;\nSELECT 'B'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(!has(&d, "view/height-conflict"), "{d:?}");
     }
 
     #[test]

@@ -85,9 +85,47 @@ jobs:
         with:
           python-version: "3.12"
 
+      # #552: build-native.sh builds web/pkg itself now (cargo to
+      # wasm32-unknown-unknown + wasm-bindgen + wasm-opt — no wasm-pack,
+      # which doesn't work on every box; see that script's comments), so
+      # this installs the two CLIs it needs instead of wasm-pack.
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          # Must match the `wasm-bindgen` crate pinned in Cargo.lock —
+          # build-native.sh checks this itself and fails loudly on a
+          # mismatch.
+          tool: wasm-bindgen@0.2.129
+
+      - name: Install wasm-opt (binaryen)
+        run: |
+          case "$PLATFORM" in
+            linux_amd64)   asset=x86_64-linux ;;
+            linux_arm64)   asset=aarch64-linux ;;
+            osx_arm64)     asset=arm64-macos ;;
+            osx_amd64)     asset=x86_64-macos ;;
+            windows_amd64) asset=x86_64-windows ;;
+            *) echo "::error::no binaryen release asset mapped for platform $PLATFORM"; exit 1 ;;
+          esac
+          ver=version_133
+          # cd first, then only relative paths reach tar: on windows_amd64,
+          # $RUNNER_TEMP is a Windows path ("D:\a\_temp\..."), and GNU tar's
+          # -f reads a "D:" prefix as a "host:path" remote-archive spec
+          # ("Cannot connect to D:") — GNU's own --force-local workaround
+          # for that isn't portable (macOS ships BSD tar, which rejects the
+          # flag outright: "Option --force-local is not supported").
+          # Relative paths sidestep the whole thing on every tar.
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o binaryen.tar.gz "https://github.com/WebAssembly/binaryen/releases/download/$ver/binaryen-$ver-$asset.tar.gz"
+          mkdir -p binaryen
+          # --strip-components=1 (not pulling out just bin/wasm-opt): the
+          # macOS builds dynamically link wasm-opt against
+          # @rpath/libbinaryen.dylib, resolved relative to the binary's own
+          # directory (../lib) — bin/ and lib/ must stay siblings. Linux and
+          # Windows are statically linked (verified: `file`/`ldd` on the
+          # linux_amd64 and linux_arm64 binaries, no .dll next to
+          # wasm-opt.exe in the Windows tarball) so this costs them nothing.
+          tar -xzf binaryen.tar.gz --strip-components=1 -C binaryen
+          echo "$RUNNER_TEMP/binaryen/bin" >> "$GITHUB_PATH"
 
       - name: Install the pinned DuckDB CLI
         run: echo "DUCKDB=$(scripts/release/install-duckdb-cli.sh)" >> "$GITHUB_ENV"
