@@ -1123,6 +1123,25 @@ impl Store {
     /// fresh fd opened on the (now-renamed) file at the same path, so a
     /// later call on this same `Store` keeps writing the real file, never
     /// the orphaned pre-erase inode this fd pointed at a moment earlier.
+    ///
+    /// `#[cfg(unix)]` for the same reason every other OS-level piece of
+    /// this store is (`open_impl`, `open_checked_parent_dir`, `Fd`): the
+    /// body below calls straight into `libc` (`fchown`, `openat`,
+    /// `renameat`, `fsync`, …) and `std::os::unix`, neither of which
+    /// exist for a non-unix target — `libc` itself is a
+    /// `[target.'cfg(unix)'.dependencies]` dependency (Cargo.toml), so on
+    /// `wasm32-unknown-unknown` the crate isn't even present to link
+    /// against. Caught by CI's wasm lib build (`cargo build --lib
+    /// --target wasm32-unknown-unknown … --features wasm`): this method
+    /// originally had no gate at all, which compiled fine natively but
+    /// broke that build with "unresolved import `libc`". No
+    /// `#[cfg(not(unix))]` fallback is needed, matching [`Self::append`]
+    /// right above — `Store` can never exist on a non-unix target in the
+    /// first place ([`Self::open`]/[`Self::open_read_only`] always
+    /// return `Err` there), and nothing outside this `unix`-gated impl
+    /// block calls `erase_user` (its one caller, `dashboard state
+    /// erase`, is a `[[bin]]`, never part of the `--lib` wasm build).
+    #[cfg(unix)]
     pub fn erase_user(&self, user: &str) -> Result<usize, String> {
         use std::ffi::CString;
         use std::io::Write;
