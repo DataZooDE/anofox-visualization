@@ -203,6 +203,37 @@ try {
     await ctx.close();
   }
 
+  // (d2) #551: a 400 whose JSON body names one of this dashboard's own
+  // variables (`{"error","var"}`, duckext serve.rs `reply_invalid_var`) —
+  // that input's own control gets `aria-invalid`, and the error line
+  // carries a focusable link to it; picking a different answer (a real
+  // value change, not another submit) clears the marking on its own,
+  // before any further click.
+  {
+    const { page, errs, ctx } = await openAs("dana2", "light");
+    await page.route("**/api/submit", (route) =>
+      route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "'q1' is not one of the options", var: "q1" }) })
+    );
+    await page.locator(".submit-btn").click();
+    await page.waitForFunction(() => document.querySelector(".submit-error")?.textContent?.includes("not one of the options"), null, { timeout: 15000 });
+    const seg = page.locator(".dp-seg button[aria-checked='true']").first();
+    check((await seg.getAttribute("aria-invalid")) === "true", "(d2) the named input's control is aria-invalid");
+    const link = page.locator(".submit-error-link");
+    check((await link.count()) === 1, "(d2) the error line carries a focusable link");
+    if (shots) await page.screenshot({ path: `${shots}/submit-invalid-var-light-1440.png` });
+    await link.click();
+    check(await seg.evaluate((el) => el === document.activeElement), "(d2) the link focuses the named input");
+    // Picking a different option is a real change — the panel re-renders
+    // (a fresh DOM), and `mkSubmit`'s own restore no longer reapplies
+    // aria-invalid once the snapshotted bad value no longer matches.
+    await page.locator('.dp-seg button:text-is("B")').click();
+    await page.waitForFunction(() => !document.querySelector("[aria-invalid='true']"), null, { timeout: 5000 });
+    check(true, "(d2) aria-invalid is cleared once the answer actually changes");
+    await page.unroute("**/api/submit");
+    check(!errs.length, `(d2) no page errors: ${errs.join(" | ")}`);
+    await ctx.close();
+  }
+
   // (e) a 429 with Retry-After: "too many submissions" text, the button
   // stays disabled until the wait elapses.
   {

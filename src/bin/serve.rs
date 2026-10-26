@@ -1828,8 +1828,12 @@ fn render_dashboard_page(
     // Phase 1: query every panel (read-only) and collect the chrome
     // directives, so a ::THEME anywhere styles the whole page.
     let mut chrome = DashboardChrome::default();
-    // The fourth element is each panel's own `::KPI_SIZE` ('compact') (#405).
-    let mut queried: Vec<(sql::Panel, Rows, bool, bool)> = Vec::new();
+    // The fourth element is each panel's own `::KPI_SIZE` ('compact') (#405);
+    // the fifth is pre-rendered static HTML to push verbatim instead of the
+    // usual chart render (#551: a `::SUBMIT` panel's disabled-button card —
+    // never needs `opts`/the theme the usual render does, so it's built
+    // directly in phase 1 rather than threading a marker to phase 2).
+    let mut queried: Vec<(sql::Panel, Rows, bool, bool, Option<String>)> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
     // (#214); the others are never queried, and a `?view.*` request param
     // is not a thing — `resolve_params` above only reads declared `@param`s.
@@ -1982,6 +1986,39 @@ fn render_dashboard_page(
             group_compact = false;
             continue;
         }
+        // `::SUBMIT` (#551): the script-free page has no JS to ever POST
+        // `/api/submit`, so this renders a disabled button naming why
+        // instead of nothing — the plan §6 "never a silent no-op" rule
+        // `web/app.js`'s `mkSubmit` already follows in the browser. Gated
+        // (its own `-- @requires` unmet): left out entirely, like an
+        // `::INPUT` above — not shown-but-disabled.
+        if panel.roles.iter().any(|(_, r)| *r == Role::Submit) {
+            if gated {
+                continue;
+            }
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT 1",
+                panel.sql.trim().trim_end_matches(';'),
+            );
+            let idx = panel
+                .roles
+                .iter()
+                .find(|(_, r)| *r == Role::Submit)
+                .map(|(j, _)| *j);
+            let label = page_rows(st, &q)
+                .ok()
+                .and_then(|rows| {
+                    let j = idx?;
+                    rows.first()?
+                        .get(&format!("c{j}"))?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "Submit".to_string());
+            let html = sv::submit_disabled_html(&label, i, "Submitting is not enabled here");
+            queried.push((panel, Rows::new(), false, false, Some(html)));
+            continue;
+        }
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()
             && !section
@@ -1999,7 +2036,7 @@ fn render_dashboard_page(
         // left out of its chart instead.
         if chrome_role.is_none() && !section && gated {
             if !track::is_track(&panel.roles) {
-                queried.push((panel, Rows::new(), true, false));
+                queried.push((panel, Rows::new(), true, false, None));
             }
             continue;
         }
@@ -2028,7 +2065,7 @@ fn render_dashboard_page(
                 }
             };
             let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
-            queried.push((panel, rows, false, compact));
+            queried.push((panel, rows, false, compact, None));
             continue;
         }
         let q = format!(
@@ -2058,7 +2095,7 @@ fn render_dashboard_page(
             continue;
         }
         let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
-        queried.push((panel, rows, false, compact));
+        queried.push((panel, rows, false, compact, None));
     }
     let set = chrome.resolve(theme_default()).map_err(PageError::Server)?;
     let t = set.default_variant().clone();
@@ -2089,12 +2126,16 @@ fn render_dashboard_page(
         sql::steps::StaticSteps::new(&shown)
     };
     let mut queried = queried.into_iter().peekable();
-    while let Some((panel, rows, na, compact)) = queried.next() {
+    while let Some((panel, rows, na, compact, static_html)) = queried.next() {
+        if let Some(html) = static_html {
+            panels.push_str(&html);
+            continue;
+        }
         if na {
             panels.push_str(NOT_AVAILABLE_HTML);
             // its strips go with it
             while queried
-                .next_if(|(q, _, _, _)| track::is_track(&q.roles))
+                .next_if(|(q, _, _, _, _)| track::is_track(&q.roles))
                 .is_some()
             {}
             continue;
@@ -2168,7 +2209,9 @@ fn render_dashboard_page(
         }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _, _, _)) =
+            queried.next_if(|(q, _, _, _, _)| track::is_track(&q.roles))
+        {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
         // Its ::TITLE bar, as on a dashboard card (#232).
