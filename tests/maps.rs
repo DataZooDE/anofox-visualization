@@ -1405,8 +1405,15 @@ fn region_codes_draw_from_the_pack_with_its_names_and_credits() {
     assert!(s.contains("<a href=\"https://www.govdata.de/dl-de/by-2-0\""));
     assert!(s.contains(">https://sgx.geodatenzentrum.de/web_public/gdz/datenquellen/datenquellen_vg_nuts.pdf</tspan>"));
     // `GeomAttribution`'s own run text uses plain spaces, not the old
-    // writer's non-breaking ones
-    assert!(s.contains("(2026)") && s.contains("geometry modified (simplified)"));
+    // writer's non-breaking ones. This map's continuous-fill legend (many
+    // bins) narrows the panel enough that `.fit(7.0)` (#546) can't shrink
+    // the source line any further and wraps it onto a second physical
+    // line instead — the "(simplified)" clause lands on its own `<text>`
+    // element, so the two substrings are checked independently rather
+    // than as one contiguous run (ggplot-rs#267/#268: the wrap still
+    // keeps the text, split rather than truncated or overflowing).
+    assert!(s.contains("(2026)") && s.contains("geometry modified"));
+    assert!(s.contains("(simplified)"));
     assert!(!s.contains("Natural Earth"));
     // a scale bar (a state-sized map)
     assert!(s.contains("km</text>"), "scale bar");

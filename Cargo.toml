@@ -89,11 +89,24 @@ crate-type = ["cdylib", "rlib"]
 # generous for that character mix and the kept text overflows the panel).
 # `map/plot.rs` keeps its existing 90px legend-width reservation instead —
 # tracked as a ggplot-rs follow-up (wrap within one run + a tighter width
-# estimate for URL-heavy text), not blocking this bump. No API breaks in
-# any of 0.31.1-0.31.3 (cargo-semver-checks against the prior release each
-# time).
+# estimate for URL-heavy text), not blocking this bump. 0.31.4:
+# `AttributionOverflow::Wrap` now splits *inside* a run (not just between
+# runs) and both `Wrap`/`Ellipsis` keep each kept/split piece's `href`
+# (sipemu/ggplot-rs#267/#268) — the exact gap 0.31.3 above left open, so
+# `map/plot.rs` now adopts `.fit(7.0)`/`.fit_overflow(Wrap)` and drops the
+# 90px reservation (#546). Also adds `GeomAttribution::fit_width_scale`, an
+# opt-in multiplier on `fit`'s width estimate for a caller whose deployed
+# rendering measures wider than the heuristic; not used here — measuring
+# `foot_of`'s own BKG/EuroGeographics/Natural-Earth rows with `ab_glyph`
+# against real DejaVu Sans and Noto Sans glyph metrics (this box's two
+# installed fonts, Noto being rsvg's fallback without Hanken Grotesk
+# installed) found both render *narrower* than `text_width`'s heuristic
+# at every row (DejaVu up to ~0.99x, Noto up to ~0.79x) — the heuristic's
+# existing margin already covers both, same conclusion sipemu/ggplot-rs#268
+# reached measuring DejaVu + Hanken Grotesk itself. No API breaks in any of
+# 0.31.1-0.31.4 (cargo-semver-checks against the prior release each time).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.3", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.31.4", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
