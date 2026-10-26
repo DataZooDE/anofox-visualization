@@ -1157,6 +1157,13 @@ struct ServeState {
     timeout: Duration,
     auth: Option<Auth>,
     log: Option<RequestLog>,
+    /// `<dir>/assets`, canonicalized (#514 PR B) — `None` when there is no
+    /// such folder next to `--dashboards <dir>`. This script-free page has
+    /// no client JS to fetch a route with, so a relative `::IMAGE` source
+    /// is inlined from here as a `data:` URI at render time instead (see
+    /// `render_dashboard_page`'s `RenderOptions.asset_root`), the same as
+    /// `dashboard`'s own `--svg`/HTML CLI output.
+    assets_root: Option<PathBuf>,
 }
 
 fn serve_dashboards(dir: &str, o: &mut Opts) {
@@ -1241,6 +1248,7 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
         timeout: o.timeout,
         auth: o.auth.take(),
         log: o.log.take(),
+        assets_root: anofox_visualization::image::canonical_assets_dir(Path::new(dir)),
     };
     run_workers(server, o.threads, move |req| handle_serve(&st, req));
 }
@@ -2049,6 +2057,7 @@ fn render_dashboard_page(
         // afterwards) covers every SVG a render produces — a title bar's
         // chart, each ::TRACK, each contract row — not just the first one.
         record_warnings: false,
+        asset_root: st.assets_root.clone(),
         ..RenderOptions::default()
     };
 

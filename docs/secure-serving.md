@@ -551,6 +551,9 @@ of the authoring servers carries a
     every request always pass). The browser retries a `503` twice.
   - `max_response_mb` (default 32, at most `max_inflight_mb`) — one
     response; a larger result is an error (`413`), like `max_rows`.
+  - `max_asset_bytes` (default 5 MiB, bytes not MiB) — one file read from the
+    dashboards folder's `assets/` subfolder (`GET /d/<id>/assets/<rest>`,
+    #514 — see "Images in dashboards" below); over it, `404`.
   - `search_path` — where the panels' unqualified names resolve:
     `"warehouse"`, `"warehouse.sales"`, or several, comma-separated (the first
     is `USE`d). The default is the serving database's default database:
@@ -1815,10 +1818,65 @@ underneath it for however long that request had left to run.
 ## Images in dashboards (`::IMAGE`, `::MARKDOWN`, #514)
 
 A dashboard's images come from the dashboard itself: a `data:image/…` URI, an
-`https:` URL, or (a later PR) a relative path under the dashboard folder's
-own `assets/`. `img-src` already allows `'self' data: https:` (`page_csp`,
-`host/serving.rs`) for `::LOGO`/`::HEADER_IMAGE`; `::IMAGE` and Markdown
-images reuse that, not a wider allowance — this PR makes no CSP change.
+`https:` URL, or a relative path under the dashboard folder's own `assets/`
+(PR B: `GET /d/<id>/assets/<rest>`, below). `img-src` already allows `'self'
+data: https:` (`page_csp`, `host/serving.rs`) for `::LOGO`/`::HEADER_IMAGE`;
+`::IMAGE` and Markdown images reuse that, not a wider allowance — neither PR
+changes that CSP directive.
+
+### `GET`/`HEAD` `/d/<id>/assets/<rest>` (PR B)
+
+Only `<dashboards dir>/assets/`, never the rest of the dashboards folder
+(`.sql`, `policy.json`, `blueprint.json`): the route is computed once at
+startup (`canonicalize(<dir>/assets)`), `None` when there is no such folder
+— every request then 404s.
+
+- **Same login and scope as the dashboard page.** This route is **not** in
+  `auth.public_asset`: every request goes through the server's usual
+  `authenticate()` first (401 without a valid credential, same as `/d/<id>`
+  itself), and an `auth`-scoped credential (an embed link, an API key) must
+  name `id` in its own scope (403, same as the page) — a key scoped to one
+  dashboard cannot read another dashboard's assets, even though the
+  `assets/` folder is shared across every dashboard in the server.
+- **Containment.** `rest` is percent-decoded once, then refused (404) on:
+  empty; over 512 bytes; a `\`, NUL or other control character; an empty,
+  `.` or `..` segment; a segment starting with `.`. The resolved path
+  (`canonicalize(assets_root.join(rest))`) must `starts_with(assets_root)` —
+  this also blocks a symlink inside `assets/` that points outside it, since
+  canonicalizing follows the symlink to its real target before the
+  containment check runs.
+- **Extension allow-list, then a real magic-byte check.** The extension
+  must be `png`/`jpg`/`jpeg`/`gif`/`webp`/`svg` (case-insensitive) — checked
+  *before* any filesystem access, so a request can't even probe for a
+  non-image file's existence through this route. The file's own bytes are
+  then sniffed (`host::app_brand::sniff_image`, the same signatures as
+  `::LOGO`'s own inlining) for the `Content-Type` actually sent — **not**
+  trusted from the extension — so a `.sql`/`.json` file renamed `.png`
+  (right extension, wrong real type) is refused too (`src/image.rs::read_asset`,
+  shared with the CLI's/`--site`'s own readers of `assets/`).
+- **Size cap.** `options.max_asset_bytes` (bytes, default 5 MiB) — checked
+  from the file's metadata before reading it, reported in `/healthz`'s
+  `limits` for a signed-in caller.
+- **Response headers:** `X-Content-Type-Options: nosniff`;
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
+  sandbox` (neutralises an SVG opened as a top-level document instead of
+  inside an `<img>` — it already never runs a script either way, see
+  below, but this is belt-and-braces for a viewer who opens the asset URL
+  directly); `Cache-Control: private, max-age=300`;
+  `Cross-Origin-Resource-Policy: same-origin`.
+- **No snapshot.** The file is read fresh on every request — an edited or
+  newly added asset shows without a server refresh.
+- **`GET` and `HEAD` only.** `POST` (and any other method) is `405`, the
+  same as every other route here.
+
+`--site` copies `<folder>/assets/` to `<out>/assets/` at publish time
+(refusing the whole publish, not just skipping, on a symlink anywhere
+inside it, a non-image extension, or a file over the cap) — a published
+site has no server to enforce any of this at request time, so it is
+enforced once, up front, instead. `dashboard file.sql out.html`/`--svg` and
+the script-free `serve --dashboards` page read `assets/` the same way
+(`read_asset`) but inline the result as a `data:` URI rather than serving a
+route, since neither has a client that fetches one.
 
 What *is* worth a reviewer's attention: an `https:` image loads
 automatically, with no click, unlike `::LINK`. If a `::MARKDOWN` (or

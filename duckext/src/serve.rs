@@ -625,6 +625,11 @@ fn run_check(st: &Authoring, body: &str) -> Result<String, String> {
         lint::LintOptions {
             design,
             stateful_session: true,
+            // The authoring builder has no dashboards folder (#514 PR B,
+            // decision 5: `anofox_serve`/`anofox_serve_dashboards`'s
+            // authoring mode never serves/checks `assets/`) —
+            // `image/missing-file` never fires here.
+            image_root: None,
         },
         Duration::from_millis(timeout_ms),
     )?;
@@ -868,6 +873,9 @@ pub struct LockedOptions {
     /// then opens the store and builds the live [`SubmitRuntime`] this
     /// only describes.
     pub state_opts: Option<StateOptions>,
+    /// `max_asset_bytes` (#514 PR B): the cap on one file served from
+    /// `<dashboards dir>/assets/` (`GET /d/<id>/assets/<rest>`, [`locked_asset`]).
+    pub max_asset_bytes: usize,
 }
 
 /// `options.nav_picker`: `{"var": "model", "sql": "SELECT model_id, title FROM …", "label": "Model"}`.
@@ -927,6 +935,7 @@ impl Default for LockedOptions {
             home: None,
             source: None,
             state_opts: None,
+            max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
         }
     }
 }
@@ -1155,6 +1164,9 @@ impl LockedOptions {
                 "max_inflight_mb" => o.max_inflight = (num()?.min(1 << 20) as usize) << 20,
                 "max_response_mb" => o.max_response = (num()?.min(1 << 12) as usize) << 20,
                 "max_queries" => o.max_queries = num()?.min(1024) as usize,
+                // #514 PR B: a cap on one `assets/` file, in bytes (like
+                // `max_body_bytes`, not MB-scaled — an image file is small).
+                "max_asset_bytes" => o.max_asset_bytes = num()?.min(64 << 20) as usize,
                 "search_path" => {
                     let p = val.as_str().map(str::trim).ok_or("options.search_path must be a string like \"warehouse\" or \"warehouse.sales\"")?;
                     o.search_path =
@@ -1794,6 +1806,10 @@ struct Locked {
     source_build: Arc<SourceBuildState>,
     /// `options.state`'s live runtime (#517 S2) — `None` unless configured.
     submit: Option<Arc<SubmitRuntime>>,
+    /// `<dir>/assets`, canonicalized once at startup (#514 PR B) — `None`
+    /// when there is no such folder next to the dashboards, so every
+    /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
+    assets_root: Option<PathBuf>,
 }
 
 /// Live runtime for `options.state` (#517 S2, plan §1/§4): the open
@@ -2061,6 +2077,10 @@ pub fn start_locked(
         ));
     }
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
+    // #514 PR B: computed once at startup, like every other path-derived
+    // limit here (`options.data`) — an asset request never canonicalizes
+    // `dir` itself per request.
+    let assets_root = anofox_visualization::image::canonical_assets_dir(Path::new(dir));
     if let Some(h) = &opts.home {
         if !dashboards.iter().any(|d| &d.id == h) {
             return Err(format!(
@@ -2249,6 +2269,7 @@ pub fn start_locked(
         stop: stop.clone(),
         source_build: SourceBuildState::new(),
         submit,
+        assets_root,
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -3084,6 +3105,84 @@ fn handle_locked(st: &Locked, req: Request) {
     }
 }
 
+/// `/d/<id>/assets/<rest>` → `(id, rest)` — `None` for anything else
+/// (including a bare `/d/<id>/assets` with no trailing `/`, which never
+/// names a file, and a `path` that isn't under `/d/` at all). `id` is left
+/// exactly as it appears in the URL (not yet checked against any real
+/// dashboard — [`locked_asset`] does that); `rest` is still
+/// percent-encoded, exactly as the client sent it ([`route_locked`]'s
+/// `path` is `req.url()`, undecoded).
+fn split_asset_path(path: &str) -> Option<(&str, &str)> {
+    let tail = path.strip_prefix("/d/")?;
+    let (id, after_id) = tail.split_once('/')?;
+    if id.is_empty() {
+        return None;
+    }
+    let rest = after_id.strip_prefix("assets/")?;
+    Some((id, rest))
+}
+
+/// `GET`/`HEAD` `/d/<id>/assets/<rest>` (#514 PR B): one image file from
+/// `<dashboards dir>/assets/<rest>`, under the same login and scope as the
+/// dashboard's own page (this route is **not** in `auth.public_asset` —
+/// `route_locked`'s caller already enforced `auth` above this match arm;
+/// `scope` is that signed-in credential's own dashboard scope, or `None`
+/// without `auth` configured). Containment, the extension allow-list, the
+/// size cap and the real magic-byte MIME are all
+/// [`anofox_visualization::image::read_asset`]'s job — the same function
+/// `dashboard`'s `--svg`/HTML CLI output and `--site` use, so every reader
+/// of `assets/` enforces exactly the same rule. Every refusal here is a
+/// plain 404 (never 403/500): which reason it was (missing folder, no such
+/// dashboard, traversal, wrong extension, not really an image, too big) is
+/// not a viewer's business, and a distinguishable error would let a probe
+/// tell "exists but refused" apart from "doesn't exist" — except a scope
+/// mismatch, which (like the dashboard page itself) is its own 403.
+fn locked_asset(
+    st: &Locked,
+    req: Request,
+    id: &str,
+    rest: &str,
+    scope: Option<&Scope>,
+    info: &mut LogInfo,
+) -> u16 {
+    let Some(d) = st.dashboards.iter().find(|d| d.id == id) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    if !scope.is_none_or(|s| s.allows(&d.id)) {
+        info.dashboard = Some(d.id.clone());
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    info.dashboard = Some(d.id.clone());
+    let Some(root) = &st.assets_root else {
+        return reply(req, 404, "not found");
+    };
+    // Read per request — no snapshot — so an edited/added asset shows
+    // without a refresh, as documented.
+    let (mime, bytes) =
+        match anofox_visualization::image::read_asset(root, rest, st.opts.max_asset_bytes as u64) {
+            Ok(ok) => ok,
+            Err(_) => return reply(req, 404, "not found"),
+        };
+    info.bytes = Some(bytes.len());
+    let head = req.method() == &Method::Head;
+    let resp = Response::from_data(if head { Vec::new() } else { bytes })
+        .with_status_code(200)
+        .with_header(header("Content-Type", &mime))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        // Neutralises an SVG opened as a top-level document (no symlink out,
+        // no XSS: it never runs a script, regardless of this header, when
+        // only ever drawn through `<img>` — this is belt-and-braces for a
+        // viewer who opens the asset URL directly).
+        .with_header(header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        ))
+        .with_header(header("Cache-Control", "private, max-age=300"))
+        .with_header(header("Cross-Origin-Resource-Policy", "same-origin"));
+    let _ = req.respond(resp);
+    200
+}
+
 fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -> u16 {
     let m = meta(&req);
     // Request data in a diagnostic is escaped (access::diag): a `\n` in it
@@ -3295,6 +3394,12 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             respond_page(req, &list_page(st, scope), &st.opts, &[]);
             200
         }
+        // #514 PR B: before the generic `/d/<id>` arm below, so an asset
+        // path is never mistaken for a dashboard id.
+        (&Method::Get | &Method::Head, p) if split_asset_path(p).is_some() => {
+            let (id, rest) = split_asset_path(p).expect("checked by the guard above");
+            locked_asset(st, req, id, rest, scope, info)
+        }
         (&Method::Get, p) if p.starts_with("/d/") => {
             let id = p["/d/".len()..].trim_end_matches('/');
             match st.dashboards.iter().find(|d| d.id == id) {
@@ -3348,6 +3453,7 @@ fn limits_json(st: &Locked) -> serde_json::Value {
         "max_inflight_bytes": o.max_inflight,
         "cache_bytes": o.cache_bytes,
         "timeout_ms": o.timeout.as_millis() as u64,
+        "max_asset_bytes": o.max_asset_bytes,
         "memory_limit": o.memory_limit,
         "duckdb_threads": o.duckdb_threads,
         "queries_running": running,

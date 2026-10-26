@@ -133,6 +133,7 @@ fn cmd_render(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.html".to_string());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let asset_root = dashboard_assets_root(Path::new(&path));
 
     let (html, n) = render_dashboard_html(
         &script,
@@ -140,6 +141,7 @@ fn cmd_render(args: &[String]) {
         data.as_deref(),
         theme_arg.as_deref(),
         variant,
+        asset_root.as_deref(),
     );
     std::fs::write(&out, html).unwrap_or_else(|e| panic!("write {out}: {e}"));
     println!("wrote {out} ({n} panels) — open it in a browser");
@@ -169,6 +171,11 @@ fn cmd_render(args: &[String]) {
 /// its id for a folder/site render (#417), which can call this once per
 /// dashboard.
 ///
+/// `asset_root` (#514 PR B): the dashboard's own `assets/` folder,
+/// canonicalized — a relative `::IMAGE`/`::IMAGE_DARK` source is inlined
+/// from it as a `data:` URI; `None` (no such folder) draws the alt-text
+/// placeholder for every relative source, as before PR B.
+///
 /// Returns the HTML and the number of rendered panels.
 fn render_dashboard_html(
     script: &str,
@@ -176,6 +183,7 @@ fn render_dashboard_html(
     data: Option<&str>,
     theme_arg: Option<&str>,
     variant: Variant,
+    asset_root: Option<&Path>,
 ) -> (String, usize) {
     // Phase 1: run the script in order; collect chrome directives and the
     // panels' rows (a ::THEME anywhere applies to every panel).
@@ -331,6 +339,7 @@ fn render_dashboard_html(
             .and_then(Locale::from_tag)
             .unwrap_or_default(),
         theme: Arc::new(t.clone()),
+        asset_root: asset_root.map(Path::to_path_buf),
         ..RenderOptions::default()
     };
 
@@ -527,6 +536,18 @@ impl dashboard::DataProvider for CliProvider {
     }
 }
 
+/// `sql_path`'s own `assets/` folder (its parent directory's `assets/`),
+/// canonicalized — `None` when there is no such folder next to it. Shared
+/// by `cmd_svg` and `cmd_render` ([`render_dashboard_html`]'s `asset_root`
+/// argument). `cmd_check`'s `image_root` and `cmd_site`'s asset copy use
+/// [`anofox_visualization::image::canonical_assets_dir`] directly — they
+/// already have the dashboards *folder*, not a single `.sql` file's path.
+fn dashboard_assets_root(sql_path: &Path) -> Option<PathBuf> {
+    sql_path
+        .parent()
+        .and_then(anofox_visualization::image::canonical_assets_dir)
+}
+
 /// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N] [--data <dir>]`:
 /// the whole dashboard (KPIs, tables, charts, header) as one SVG.
 fn cmd_svg(args: &[String]) {
@@ -552,6 +573,10 @@ fn cmd_svg(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.svg".into());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    // #514 PR B: a relative `::IMAGE` source means `assets/` next to the
+    // .sql file; missing (no such folder) is not an error — every relative
+    // source just draws its placeholder, as before PR B.
+    o.asset_root = dashboard_assets_root(Path::new(&path));
     let session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");
@@ -714,6 +739,15 @@ fn cmd_check(args: &[String]) {
             None => (Vec::new(), Vec::new()),
         }
     });
+    let folder = std::path::Path::new(&path).is_dir();
+    // #514 PR B: `image/missing-file` needs the dashboard's own folder —
+    // `--check <file.sql>` uses its directory, `--check <folder>` the
+    // folder itself (plan-514's own rule, mirrored by `--site` below).
+    let image_root = if folder {
+        anofox_visualization::image::canonical_assets_dir(Path::new(&path))
+    } else {
+        dashboard_assets_root(Path::new(&path))
+    };
     let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
         // #435: one persistent session per file (in-memory, or read-only
         // against --db) backs the whole check — not a fresh process per
@@ -735,6 +769,7 @@ fn cmd_check(args: &[String]) {
             lint::LintOptions {
                 design,
                 stateful_session: true,
+                image_root: image_root.clone(),
             },
         );
         if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
@@ -744,7 +779,6 @@ fn cmd_check(args: &[String]) {
     };
     // (file, its diagnostics): one entry for a file, one per .sql for a folder
     let mut files: Vec<(String, Vec<lint::Diagnostic>)> = Vec::new();
-    let folder = std::path::Path::new(&path).is_dir();
     if folder {
         let mut names: Vec<String> = std::fs::read_dir(&path)
             .unwrap_or_else(|e| {
@@ -1254,6 +1288,57 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `--site`'s own `assets/` pre-publish check (#514 PR B): recurse `dir`,
+/// refusing (not skipping) a symlink anywhere inside it, a file whose
+/// extension isn't one of [`anofox_visualization::image::ASSET_EXTENSIONS`],
+/// or one over `max` bytes. `copy_dir_recursive`'s own symlink refusal
+/// (below) still applies to the actual copy — this is the belt to that
+/// braces, and the only thing enforcing the extension/size rule at all
+/// (`copy_dir_recursive` is also used for plain `--data`, which has no such
+/// rule).
+fn check_assets_for_site(dir: &Path, max: u64) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("stat {}: {e}", entry.path().display()))?;
+        if ft.is_symlink() {
+            return Err(format!(
+                "'{}' is a symlink — refusing to publish it (it may point outside assets/)",
+                entry.path().display()
+            ));
+        }
+        if ft.is_dir() {
+            check_assets_for_site(&entry.path(), max)?;
+            continue;
+        }
+        let ext = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !anofox_visualization::image::ASSET_EXTENSIONS.contains(&ext.as_str()) {
+            return Err(format!(
+                "'{}' is not an image file ('.{ext}') — assets/ only serves {}",
+                entry.path().display(),
+                anofox_visualization::image::ASSET_EXTENSIONS.join(", ")
+            ));
+        }
+        let len = entry
+            .metadata()
+            .map_err(|e| format!("stat {}: {e}", entry.path().display()))?
+            .len();
+        if len > max {
+            return Err(format!(
+                "'{}' is {len} bytes — over the {max}-byte assets/ cap (options.max_asset_bytes)",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Is `s` a `--data` URL (as opposed to a local directory)?
 fn is_data_url(s: &str) -> bool {
     s.starts_with("https://") || s.starts_with("http://")
@@ -1440,6 +1525,9 @@ fn cmd_site(args: &[String]) {
             .map(|d| format!("SET VARIABLE anofox_data = '{}';\n", d.replace('\'', "''")))
             .unwrap_or_default();
         let extra = lint::folder_diags(&scripts);
+        // #514 PR B: `--site`'s own pre-publish lint gets the folder, so
+        // `image/missing-file` runs here too.
+        let image_root = anofox_visualization::image::canonical_assets_dir(folder);
         for (i, d) in dashboards.iter().enumerate() {
             // #435: one persistent session per dashboard, not a fresh
             // process per statement replaying everything run so far.
@@ -1454,6 +1542,7 @@ fn cmd_site(args: &[String]) {
                 lint::LintOptions {
                     design: false,
                     stateful_session: true,
+                    image_root: image_root.clone(),
                 },
             );
             diags.extend(
@@ -1571,6 +1660,33 @@ fn cmd_site(args: &[String]) {
     for d in &dashboards {
         std::fs::write(dash_dir.join(format!("{}.sql", d.id)), &d.sql)
             .unwrap_or_else(|e| fail(format!("write dashboards/{}.sql: {e}", d.id)));
+    }
+
+    // #514 PR B: `<folder>/assets/` → `<out>/assets/`, if it's there — the
+    // locked server's own `/d/<id>/assets/<rest>` route, and the CLI's own
+    // relative-image inlining, both resolve against this same subfolder
+    // (decision 5). A published site serves whatever lands here to the
+    // world with no login, so this is stricter than `copy_dir_recursive`'s
+    // own symlink-only refusal: a non-image extension or an oversized file
+    // fails the whole publish too, not just that one file.
+    let assets_src = folder.join("assets");
+    let assets_is_symlink = std::fs::symlink_metadata(&assets_src)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if assets_is_symlink {
+        fail(format!(
+            "'{}' is a symlink — refusing to publish it (it may point outside the dashboards folder)",
+            assets_src.display()
+        ));
+    }
+    if assets_src.is_dir() {
+        check_assets_for_site(
+            &assets_src,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap_or_else(|e| fail(format!("assets/: {e}")));
+        copy_dir_recursive(&assets_src, &out.join("assets"))
+            .unwrap_or_else(|e| fail(format!("copy assets/: {e}")));
     }
 
     let site_data = match (&data, &data_value) {

@@ -64,6 +64,21 @@ for _ in $(seq 60); do curl -fsS "http://127.0.0.1:$PORT/healthz" > /dev/null 2>
 
 node "$HERE/p3.mjs"
 
+# #514 PR B: `GET /d/<id>/assets/<rest>` sits behind the exact same auth and
+# scope as the dashboard page itself — no code path reaches it before the
+# login/scope checks above, so this is really checking that construction,
+# not re-implementing auth for the new route. `dash/assets/rls-logo.svg` is
+# a committed fixture; `svc-etl`'s api_keys credential (apikey.txt) is
+# scoped to `rls` only (see the `api-key new --dashboards rls` above).
+code() { curl -s -o /dev/null -w "%{http_code}" "$@"; }
+APIKEY="$(cat apikey.txt)"
+[ "$(code "http://127.0.0.1:$PORT/d/rls/assets/rls-logo.svg")" = 401 ] \
+  || fail "anonymous asset request should need login, like the page"
+[ "$(code -H "Authorization: Bearer $APIKEY" "http://127.0.0.1:$PORT/d/rls/assets/rls-logo.svg")" = 200 ] \
+  || fail "rls-scoped key should read rls's own asset"
+[ "$(code -H "Authorization: Bearer $APIKEY" "http://127.0.0.1:$PORT/d/other/assets/rls-logo.svg")" = 403 ] \
+  || fail "rls-scoped key must not read another dashboard's asset (scope, not file existence)"
+
 # serve --dashboards (no script): the embed flow with a one-time link.
 export BIN_PORT="${BIN_PORT:-8954}"
 "$SERVE" --dashboards "$HERE/bindash" --db "$WORK/bin.duckdb" --init /dev/null --port "$BIN_PORT" --no-open \

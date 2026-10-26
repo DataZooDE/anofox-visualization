@@ -862,6 +862,16 @@ pub struct RenderOptions {
     /// bar's chart, each `::TRACK`, each contract row) — not stripped back
     /// out of some of them after the fact.
     pub record_warnings: bool,
+    /// The dashboard's own `assets/` folder, canonicalized, if a relative
+    /// `::IMAGE`/`::IMAGE_DARK` source should be inlined from it (#514 PR B:
+    /// [`crate::image::resolve_relative`]) — `None` wherever the caller
+    /// hasn't computed one (the no-server browser builder, wasm, or a
+    /// dashboard with no `assets/` folder next to it), so every relative
+    /// image draws the alt-text placeholder instead. Unused off the
+    /// static/headless render paths (`dashboard.rs`, `image_panel_svg`
+    /// below) — the browser's own `assetUrl()`/`imageSrc()` do this job for
+    /// the interactive builder.
+    pub asset_root: Option<std::path::PathBuf>,
 }
 
 impl Default for RenderOptions {
@@ -874,6 +884,7 @@ impl Default for RenderOptions {
             theme: theme::default_light(),
             locale: format::Locale::EN_US,
             record_warnings: true,
+            asset_root: None,
         }
     }
 }
@@ -6507,7 +6518,7 @@ fn column_text(cols: &[Column], role: Role) -> Option<String> {
 /// panel kind (its caller, `render_with_title`, already draws one bar from
 /// `::LABEL`, above whatever this returns).
 fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) -> Panel {
-    use crate::image::{src_ok, SrcKind};
+    use crate::image::{resolve_relative, src_ok, SrcKind};
     let dark = o.theme.variant == theme::Variant::Dark;
     let src = (dark.then(|| column_text(cols, Role::ImageDark)).flatten())
         .or_else(|| column_text(cols, Role::Image))
@@ -6520,8 +6531,20 @@ fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) 
     let pad = 8.0;
     let iw = (w - 2.0 * pad).max(1.0);
     let ih = (h - 2.0 * pad).max(1.0);
-    let body = match src.as_deref().map(src_ok) {
-        Some(SrcKind::Data(_)) | Some(SrcKind::Https) => {
+    // A `data:`/`https:` source is used as-is; a relative one (PR B) is
+    // inlined from `o.asset_root`'s `assets/` folder as a `data:` URI —
+    // missing, refused, or no root at all draws the alt-text placeholder,
+    // same as a rejected source.
+    let href = match src.as_deref().map(src_ok) {
+        Some(SrcKind::Data(_)) | Some(SrcKind::Https) => src.clone(),
+        Some(SrcKind::Relative) => src
+            .as_deref()
+            .and_then(|s| resolve_relative(s, o.asset_root.as_deref()))
+            .map(|(mime, bytes)| crate::host::app_brand::data_uri(&mime, &bytes)),
+        _ => None,
+    };
+    let body = match href {
+        Some(href) => {
             let alt_title = if alt.is_empty() {
                 String::new()
             } else {
@@ -6529,10 +6552,10 @@ fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) 
             };
             format!(
                 "<image href=\"{}\" x=\"{pad:.1}\" y=\"{pad:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" preserveAspectRatio=\"xMidYMid meet\">{alt_title}</image>",
-                format::escape_xml(&src.unwrap()),
+                format::escape_xml(&href),
             )
         }
-        _ => {
+        None => {
             let label = if alt.is_empty() { "image" } else { &alt };
             format!(
                 "<rect x=\"{pad:.1}\" y=\"{pad:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" fill=\"none\" stroke=\"{muted}\" stroke-dasharray=\"4 3\" rx=\"4\"/><text x=\"{cx:.1}\" y=\"{cy:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"12\" font-style=\"italic\" fill=\"{muted}\">{}</text>",

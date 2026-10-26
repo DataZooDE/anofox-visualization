@@ -88,8 +88,9 @@ pub struct Diagnostic {
     /// `::IMAGE` / `::IMAGE_DARK` (#514, [`image_src_diag`]): `image/bad-src`
     /// | `image/outside-folder` (errors) | `image/not-in-assets` |
     /// `image/svg-no-size` | `image/too-large` | `image/empty` |
-    /// `image/no-alt` | `image/many` (warnings) | `image/https-offline` (a
-    /// note). Markdown images
+    /// `image/no-alt` | `image/many` | `image/missing-file` (PR B — only
+    /// with [`LintOptions::image_root`]) (warnings) | `image/https-offline`
+    /// (a note). Markdown images
     /// (`![alt](src)`): `markdown/image-bad-src` (error) |
     /// `markdown/image-not-in-assets` | `markdown/image-svg-no-size` |
     /// `markdown/image-too-large` | `markdown/image-no-alt` |
@@ -129,7 +130,7 @@ pub struct Diagnostic {
 }
 
 /// Options for [`check_opts`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LintOptions {
     /// Also emit `design/*` advisory warnings (layout / chart-choice quality).
     /// On by default; the CLI's `--no-design` turns it off.
@@ -160,6 +161,13 @@ pub struct LintOptions {
     /// `dashboard --check`'s own queries), so this path must not change
     /// shape even as the stateful one does.
     pub stateful_session: bool,
+    /// The dashboard's own folder (#514 PR B), canonicalized, if a relative
+    /// `::IMAGE`/`::IMAGE_DARK`/markdown-image source under `assets/` should
+    /// be checked for `image/missing-file` (a warning: the file isn't
+    /// there). `None` (the default — the browser's own lint, which has no
+    /// folder to check against) skips that one diagnostic entirely; every
+    /// other image diagnostic is unaffected.
+    pub image_root: Option<std::path::PathBuf>,
 }
 
 impl Default for LintOptions {
@@ -167,6 +175,7 @@ impl Default for LintOptions {
         LintOptions {
             design: true,
             stateful_session: false,
+            image_root: None,
         }
     }
 }
@@ -1242,6 +1251,24 @@ where
                             _ => "image/too-large",
                         };
                         push(sev, code, msg);
+                    } else if let (crate::image::SrcKind::Relative, Some(root)) =
+                        (crate::image::src_ok(src), &opts.image_root)
+                    {
+                        // `image_src_diag` already returned `Some` (and this
+                        // branch never ran) for a Relative src outside
+                        // `assets/` — reaching here means it is under
+                        // `assets/`, so `None` can only mean the file isn't
+                        // actually there.
+                        if crate::image::resolve_relative(src, Some(root)).is_none() {
+                            push(
+                                Severity::Warning,
+                                "image/missing-file",
+                                format!(
+                                    "`{}` doesn't exist under this folder's assets/",
+                                    one_line(src)
+                                ),
+                            );
+                        }
                     } else if matches!(crate::image::src_ok(src), crate::image::SrcKind::Https) {
                         // The static HTML and `--svg` keep an https: source
                         // as a link rather than embedding it (it may not
@@ -3905,6 +3932,9 @@ pub fn step_json(script: &str, known_json: &str, opts_json: &str) -> String {
             // Each query runs in a fresh DuckDB-Wasm scratch session
             // (web/lint.js's `scratchRunner`) — not a persistent one.
             stateful_session: false,
+            // The browser lint has no folder to check `assets/` against
+            // (#514 PR B) — `image/missing-file` never fires here.
+            image_root: None,
         },
     );
     serde_json::json!({

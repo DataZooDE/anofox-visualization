@@ -17,8 +17,13 @@ const grabConst = (name) => {
   assert.ok(m, `const ${name} not found in app.js`);
   return m[0];
 };
+// #514 PR B: assetUrl() now reads servedMode/published/window.__served —
+// stub them to the plain no-server builder's values so a markdown image in
+// this test (imageSrc -> assetUrl) behaves exactly as PR A tested it
+// (assetUrl is the identity).
 const { escapeHtml, safeUrl, renderMarkdown } = new Function(
-  `${grabConst("IMAGE_DATA_TYPES")}\n${grabConst("MAX_IMAGE_SRC_CHARS")}\n` +
+  `let servedMode = false; const published = false; const window = {};\n` +
+    `${grabConst("IMAGE_DATA_TYPES")}\n${grabConst("MAX_IMAGE_SRC_CHARS")}\n` +
     `${grab("escapeHtml")}\n${grab("safeUrl")}\n${grab("assetUrl")}\n${grab("imageSrc")}\n${grab("mathSpans")}\n${grab("renderMarkdown")}\nreturn { escapeHtml, safeUrl, renderMarkdown };`
 )();
 

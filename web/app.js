@@ -14794,11 +14794,32 @@ function imageSrc(raw) {
   }
   return assetUrl(u);
 }
-// A relative image path (already validated by imageSrc) → the URL to fetch
-// it from. PR A (this): unchanged — resolves against the page's own URL, as
-// documented for the no-server browser builder. PR B adds the served
-// (`/d/<id>/assets/…`) and published-site cases (plan-514 decision 5).
+// A relative image path (already validated by imageSrc, so no `..`/`.`
+// segment, no leading `/`, no `%`) → the URL to fetch it from (plan-514
+// decision 5). Only `assets/` (or `assets` itself) is ever served/copied —
+// a relative path elsewhere in the dashboard's own folder (`.sql`,
+// `policy.json`, …) gives "" (the alt box) in served/published mode, the
+// same as a rejected source, rather than attempting a request that could
+// only ever 404 or leak an unrelated file's existence. The no-server
+// browser builder is unchanged (PR A): it resolves `p` against the page's
+// own URL either way.
 function assetUrl(p) {
+  if (servedMode && window.__served && window.__served.id) {
+    if (p !== "assets" && !p.startsWith("assets/")) return "";
+    const id = window.__served.id;
+    const encoded = p.split("/").map(encodeURIComponent).join("/");
+    return "/d/" + encodeURIComponent(id) + "/" + encoded;
+  }
+  if (published) {
+    if (p !== "assets" && !p.startsWith("assets/")) return "";
+    const site = window.__anofoxSite;
+    if (!site) return "";
+    try {
+      return new URL(p, site.base).href;
+    } catch (_) {
+      return "";
+    }
+  }
   return p;
 }
 // The SQL text with its `'…'::<roleName>` statement set to `value`: the first

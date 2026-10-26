@@ -340,6 +340,117 @@ fn svg_size(bytes: &[u8]) -> Option<(f64, f64)> {
 /// missing size doesn't collapse the panel to a sliver.
 pub const FALLBACK_ASPECT: (f64, f64) = (9.0, 16.0);
 
+/// Relative image file extensions the locked server, `--site` and the CLI
+/// will ever read from an `assets/` folder (case-insensitive; matches
+/// [`DATA_IMAGE_TYPES`] minus the `data:` spelling quirks — `jpg`/`jpeg` are
+/// both real extensions, `svg+xml` on disk is just `svg`).
+pub const ASSET_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+/// Default cap on one `assets/` file (`options.max_asset_bytes`,
+/// `duckext/src/serve.rs::LockedOptions`; the CLI/`--site` paths that have
+/// no such option use this directly).
+pub const DEFAULT_MAX_ASSET_BYTES: u64 = 5 << 20;
+
+/// `dir`'s own `assets/` subfolder, canonicalized — `None` when there is no
+/// such folder (every relative `::IMAGE` source then draws the alt-text
+/// placeholder, as before PR B). Computed once at startup/call time by
+/// every reader of `assets/` — the locked server (`duckext`'s
+/// `start_locked`), the CLI (`dashboard`'s `--svg`/HTML output, `serve
+/// --dashboards`) and `--site` — never per request/render.
+pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    dir.join("assets")
+        .canonicalize()
+        .ok()
+        .filter(|p| p.is_dir())
+}
+
+/// Read `rest` (a path under an `assets/` folder, already stripped of that
+/// prefix) from `root` — the dashboards folder's `assets/` directory,
+/// **already canonicalized by the caller** — validating containment and the
+/// file's own real type. Shared by the locked server's `GET
+/// /d/<id>/assets/<rest>` route ([`duckext`]'s `serve.rs`) and the CLI/static
+/// renderers ([`crate::dashboard`], [`crate::image_panel_svg`]'s caller), so
+/// every reader of `assets/` enforces exactly the same rule.
+///
+/// `rest` is percent-decoded once (a no-op for a CLI caller: its `rest` was
+/// never percent-encoded in the first place, because [`src_ok`] already
+/// rejects any `%` in a relative `src` — this matters for a locked server,
+/// whose `rest` comes straight off the URL path). Refused (`Err`, a short
+/// machine reason — never shown to a viewer): empty; longer than 512 bytes;
+/// a `\`, NUL or other control character; an empty, `.` or `..` segment; a
+/// segment starting with `.`; an extension outside [`ASSET_EXTENSIONS`]
+/// (case-insensitive) — checked *before* touching the filesystem, so a
+/// request can't even probe for a non-image file's existence through this
+/// route. Then: `root.join(rest)` must canonicalize to a path inside `root`
+/// (blocks `..`/absolute escapes missed above and a symlink pointing
+/// outside), be a regular file, and be at most `max` bytes. Finally the
+/// file's own bytes are sniffed ([`crate::host::app_brand::sniff_image`]) —
+/// **not** its extension — for the returned MIME: a `.sql`/`.json` file
+/// renamed `.png` has the right extension but fails this and is refused too.
+pub fn read_asset(
+    root: &std::path::Path,
+    rest: &str,
+    max: u64,
+) -> Result<(String, Vec<u8>), &'static str> {
+    if rest.is_empty() || rest.len() > 512 {
+        return Err("bad-path");
+    }
+    let decoded = percent_decode(rest);
+    let decoded = String::from_utf8(decoded).map_err(|_| "bad-path")?;
+    if decoded.is_empty() || decoded.len() > 512 {
+        return Err("bad-path");
+    }
+    if decoded.chars().any(|c| c == '\\' || c.is_control()) {
+        return Err("bad-path");
+    }
+    for seg in decoded.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.starts_with('.') {
+            return Err("outside-folder");
+        }
+    }
+    let ext = decoded
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !ASSET_EXTENSIONS.contains(&ext.as_str()) {
+        return Err("bad-extension");
+    }
+    let real = std::fs::canonicalize(root.join(&decoded)).map_err(|_| "not-found")?;
+    if !real.starts_with(root) {
+        return Err("outside-folder");
+    }
+    let meta = std::fs::metadata(&real).map_err(|_| "not-found")?;
+    if !meta.is_file() {
+        return Err("not-a-file");
+    }
+    if meta.len() > max {
+        return Err("too-large");
+    }
+    let bytes = std::fs::read(&real).map_err(|_| "io-error")?;
+    let mime = crate::host::app_brand::sniff_image(&bytes).ok_or("not-an-image")?;
+    Ok((mime.to_string(), bytes))
+}
+
+/// `src` (whose [`src_ok`] verdict is [`SrcKind::Relative`]) read from
+/// `asset_root`'s `assets/` folder — `None` when there is no root, `src`
+/// isn't under `assets/` (decision 5 of plan-514: the locked server,
+/// `--site` and the CLI only ever resolve that one subfolder), or
+/// [`read_asset`] refuses it for any reason. Shared by every static/headless
+/// render path (`dashboard.rs`'s `image_href`/`image_aspect`, `lib.rs`'s
+/// `image_panel_svg`) so a relative image inlines the same way everywhere.
+pub fn resolve_relative(
+    src: &str,
+    asset_root: Option<&std::path::Path>,
+) -> Option<(String, Vec<u8>)> {
+    let root = asset_root?;
+    if !is_under_assets(src) {
+        return None;
+    }
+    let rest = src.strip_prefix("assets/")?;
+    read_asset(root, rest, DEFAULT_MAX_ASSET_BYTES).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,5 +583,121 @@ mod tests {
     fn svg_no_size_is_none() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#;
         assert_eq!(intrinsic_size(svg, "image/svg+xml"), None);
+    }
+
+    /// A tiny `assets/` tree shared by [`read_asset`]'s own tests, dropped
+    /// (and its temp dir cleaned up) when the test ends.
+    struct AssetsDir(std::path::PathBuf);
+
+    impl AssetsDir {
+        fn new() -> AssetsDir {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("anofox-image-test-{}-{nanos}", std::process::id(),));
+            let assets = dir.join("assets");
+            fs::create_dir_all(assets.join("sub")).unwrap();
+            // A real (tiny) PNG: signature + IHDR, 1x1.
+            let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+            png.extend([0, 0, 0, 13]);
+            png.extend(b"IHDR");
+            png.extend(1u32.to_be_bytes());
+            png.extend(1u32.to_be_bytes());
+            fs::write(assets.join("sub").join("b.png"), &png).unwrap();
+            fs::write(
+                assets.join("a.svg"),
+                br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>"#,
+            )
+            .unwrap();
+            fs::write(assets.join("x.sql"), b"SELECT 1;").unwrap();
+            // A PNG-named file that is actually just text — the magic-byte
+            // check must refuse it even though the extension is fine.
+            fs::write(assets.join("fake.png"), b"not a png").unwrap();
+            fs::write(dir.join("policy.json"), b"{}").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::symlink;
+                let _ = symlink(dir.join("policy.json"), assets.join("link.png"));
+            }
+            AssetsDir(dir)
+        }
+        fn assets(&self) -> std::path::PathBuf {
+            self.0.join("assets").canonicalize().unwrap()
+        }
+    }
+    impl Drop for AssetsDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn read_asset_serves_real_images_under_the_root() {
+        let d = AssetsDir::new();
+        let root = d.assets();
+        let (mime, bytes) = read_asset(&root, "a.svg", DEFAULT_MAX_ASSET_BYTES).unwrap();
+        assert_eq!(mime, "image/svg+xml");
+        assert!(!bytes.is_empty());
+        let (mime, _) = read_asset(&root, "sub/b.png", DEFAULT_MAX_ASSET_BYTES).unwrap();
+        assert_eq!(mime, "image/png");
+    }
+
+    #[test]
+    fn read_asset_refuses_traversal_and_bad_files() {
+        let d = AssetsDir::new();
+        let root = d.assets();
+        for (rest, why) in [
+            ("../policy.json", "outside-folder"),
+            ("%2e%2e/policy.json", "outside-folder"),
+            ("..%2fpolicy.json", "outside-folder"),
+            (".secret.png", "outside-folder"),
+            ("x.sql", "bad-extension"),
+            ("a.SVG.sql", "bad-extension"),
+            ("", "bad-path"),
+            ("nope.png", "not-found"),
+        ] {
+            assert_eq!(
+                read_asset(&root, rest, DEFAULT_MAX_ASSET_BYTES),
+                Err(why),
+                "{rest}"
+            );
+        }
+        // A renamed non-image: right extension, wrong real bytes.
+        assert_eq!(
+            read_asset(&root, "fake.png", DEFAULT_MAX_ASSET_BYTES),
+            Err("not-an-image")
+        );
+        // Oversize.
+        assert_eq!(read_asset(&root, "a.svg", 4), Err("too-large"));
+        // A directory, not a file.
+        assert_eq!(
+            read_asset(&root, "sub", DEFAULT_MAX_ASSET_BYTES),
+            Err("bad-extension")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn read_asset_refuses_a_symlink_pointing_outside() {
+        let d = AssetsDir::new();
+        let root = d.assets();
+        assert_eq!(
+            read_asset(&root, "link.png", DEFAULT_MAX_ASSET_BYTES),
+            Err("outside-folder")
+        );
+    }
+
+    #[test]
+    fn resolve_relative_only_reads_under_assets() {
+        let d = AssetsDir::new();
+        let root = d.assets();
+        assert!(resolve_relative("assets/a.svg", Some(&root)).is_some());
+        assert!(resolve_relative("assets/sub/b.png", Some(&root)).is_some());
+        // Not under assets/: never resolved, even if the file exists.
+        assert!(resolve_relative("other/a.svg", Some(&root)).is_none());
+        // No root at all (no `assets/` folder next to the dashboard).
+        assert!(resolve_relative("assets/a.svg", None).is_none());
     }
 }

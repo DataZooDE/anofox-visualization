@@ -58,6 +58,10 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("max_inflight_mb", SiteOptionKind::ServerOnly),
     ("max_response_mb", SiteOptionKind::ServerOnly),
     ("max_queries", SiteOptionKind::ServerOnly),
+    // #514 PR B: a `--site` publish has its own fixed asset-size cap
+    // ([`crate::image::DEFAULT_MAX_ASSET_BYTES`]), not a running server to
+    // tune — no effect there.
+    ("max_asset_bytes", SiteOptionKind::ServerOnly),
     ("search_path", SiteOptionKind::ServerOnly),
     ("app", SiteOptionKind::Site),
     ("home", SiteOptionKind::Site),

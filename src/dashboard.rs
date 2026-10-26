@@ -28,6 +28,7 @@ use crate::{
     RenderOptions, Role, TableOpt,
 };
 use ggplot_rs::prelude::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// A data source for headless rendering. Implement this over your engine
@@ -58,6 +59,11 @@ pub struct DashboardOptions {
     pub theme: Option<String>,
     /// Which variant to draw when the theme follows the viewer (`auto`).
     pub variant: Variant,
+    /// The dashboard's own `assets/` folder, canonicalized (#514 PR B) — a
+    /// relative `::IMAGE`/`::IMAGE_DARK` source inlines from it as a `data:`
+    /// URI ([`crate::image::resolve_relative`]); `None` draws the alt-text
+    /// placeholder for every relative source, as PR A did for all of them.
+    pub asset_root: Option<PathBuf>,
 }
 
 impl Default for DashboardOptions {
@@ -70,6 +76,7 @@ impl Default for DashboardOptions {
             brand: None,
             theme: None,
             variant: Variant::Light,
+            asset_root: None,
         }
     }
 }
@@ -373,6 +380,7 @@ fn render_inner(
         brand: opts.brand,
         theme: Arc::new(theme.clone()),
         locale,
+        asset_root: opts.asset_root.clone(),
         ..RenderOptions::default()
     };
 
@@ -679,7 +687,7 @@ fn render_inner(
                         unit_w * span as f64 - gap
                     };
                     let title = roles.iter().any(|(_, r)| matches!(r, Role::Title));
-                    let (aw, ah) = image_aspect(&ip.src);
+                    let (aw, ah) = image_aspect(&ip.src, ropts.asset_root.as_deref());
                     let cap_h = if ip.caption.is_some() { 20.0 } else { 0.0 };
                     let title_h = if title { 26.0 } else { 0.0 };
                     // The image itself draws at `mw - 28` wide (render_panel_svg's
@@ -1053,7 +1061,7 @@ fn render_panel_svg(
         let iy = title_h + 4.0;
         let iw = (w - 2.0 * pad).max(1.0);
         let ih = (h - iy - cap_h - 6.0).max(1.0);
-        match image_href(&img.src) {
+        match image_href(&img.src, ropts.asset_root.as_deref()) {
             Some(href) => {
                 let alt_title = if img.alt.is_empty() {
                     String::new()
@@ -1830,30 +1838,38 @@ fn image_panel(
 }
 
 /// `src`'s href for a static `<image href=…>`: `data:`/`https:` sources are
-/// used as-is; a relative path (PR B inlines it from `assets/`) or anything
-/// [`crate::image::src_ok`] rejects draws the alt-text placeholder instead
-/// (`None`).
-fn image_href(src: &str) -> Option<String> {
-    use crate::image::{src_ok, SrcKind};
+/// used as-is; a relative path is inlined from `asset_root`'s `assets/`
+/// folder as a `data:` URI (PR B: [`crate::image::resolve_relative`]) when
+/// one is given and accepts it; anything else — no root, a path not under
+/// `assets/`, a refused file, or anything [`crate::image::src_ok`] itself
+/// rejects — draws the alt-text placeholder instead (`None`).
+fn image_href(src: &str, asset_root: Option<&std::path::Path>) -> Option<String> {
+    use crate::image::{resolve_relative, src_ok, SrcKind};
     match src_ok(src) {
         SrcKind::Data(_) | SrcKind::Https => Some(src.to_string()),
-        SrcKind::Relative | SrcKind::Bad(_) => None,
+        SrcKind::Relative => resolve_relative(src, asset_root)
+            .map(|(mime, bytes)| crate::host::app_brand::data_uri(&mime, &bytes)),
+        SrcKind::Bad(_) => None,
     }
 }
 
-/// `src`'s own aspect (width, height), decoded from a `data:` payload via
-/// [`crate::image::intrinsic_size`]; [`crate::image::FALLBACK_ASPECT`]
-/// otherwise (an `https:`/relative/bad source, or a size that can't be read).
-fn image_aspect(src: &str) -> (f64, f64) {
-    use crate::image::{decode_data_uri, intrinsic_size, src_ok, SrcKind, FALLBACK_ASPECT};
-    if let SrcKind::Data(_) = src_ok(src) {
-        if let Some((mime, bytes)) = decode_data_uri(src) {
-            if let Some(sz) = intrinsic_size(&bytes, &mime) {
-                return sz;
-            }
-        }
-    }
-    FALLBACK_ASPECT
+/// `src`'s own aspect (width, height): decoded from a `data:` payload, or
+/// (PR B) read from `asset_root`'s `assets/` folder for a relative path —
+/// either way via [`crate::image::intrinsic_size`]. [`crate::image::FALLBACK_ASPECT`]
+/// when there's nothing to read (an `https:`/bad source, no root, or a size
+/// that can't be read).
+fn image_aspect(src: &str, asset_root: Option<&std::path::Path>) -> (f64, f64) {
+    use crate::image::{
+        decode_data_uri, intrinsic_size, resolve_relative, src_ok, SrcKind, FALLBACK_ASPECT,
+    };
+    let payload = match src_ok(src) {
+        SrcKind::Data(_) => decode_data_uri(src),
+        SrcKind::Relative => resolve_relative(src, asset_root),
+        SrcKind::Https | SrcKind::Bad(_) => None,
+    };
+    payload
+        .and_then(|(mime, bytes)| intrinsic_size(&bytes, &mime))
+        .unwrap_or(FALLBACK_ASPECT)
 }
 
 /// The text of a ::MARKDOWN panel, if it is one.
