@@ -201,7 +201,17 @@ fn render_dashboard_html(
     let mut view_pick = sql::views::StaticPick::default();
     // The enclosing ::GROUP's own ::KPI_SIZE (#405) — a tile's own wins.
     let mut group_compact = false;
-    for p in sql::plan(script) {
+    // `::SHOW_IF` (#515): each condition's result, by plan index — a
+    // condition always precedes what it governs (`sql::show_if::assign`), so
+    // by the time a later statement's `show_if` is checked below, its
+    // conditions were already run and cached here.
+    let mut show_if_cache: std::collections::HashMap<usize, bool> =
+        std::collections::HashMap::new();
+    // `::GUIDE_STEP` (#516): each group's running count of shown markers —
+    // see `dashboard::execute`'s identical `step_n` for why "of N" can't be
+    // filled in here (phase 2 does it, once every step is collected).
+    let mut step_n: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for (i, p) in sql::plan(script).into_iter().enumerate() {
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
         // flattened here).
@@ -211,6 +221,22 @@ fn render_dashboard_html(
             lint::unmet_requirement(&mut exec, "", reqs).missing
         });
         if hidden.is_some() || view_pick.drop_panel(&p) {
+            continue;
+        }
+        if !p.setup
+            && !p.show_if.is_empty()
+            && !p
+                .show_if
+                .iter()
+                .all(|c| show_if_cache.get(c).copied().unwrap_or(false))
+        {
+            continue;
+        }
+        if p.roles.len() == 1 && matches!(p.roles[0].1, Role::ShowIf) {
+            let v = exec(&format!("{};", p.sql))
+                .ok()
+                .and_then(|rows| rows.first().and_then(|r| r.values().next().cloned()));
+            show_if_cache.insert(i, sql::condition::holds_json(v.as_ref()));
             continue;
         }
         if p.setup {
@@ -272,9 +298,20 @@ fn render_dashboard_html(
             continue;
         }
         let section = p.roles.iter().any(|(_, r)| *r == Role::Section);
+        let step_marker = p.step.as_ref().is_some_and(|s| s.marker);
+        // `::GUIDE_STEP` (#516, decision 8): bind this step's 1-based
+        // number (among the ones shown so far) before its own panels run,
+        // exactly like an input's default (#435: sent to the session right
+        // away, no prelude text to replay).
+        if step_marker {
+            let s = p.step.as_ref().unwrap();
+            let n = step_n.entry(s.group).or_insert(0);
+            *n += 1;
+            let _ = exec(&format!("SET VARIABLE {} = {n};", s.var));
+        }
         // Layout directives are interactive — the browser builder / `serve`
         // handle them; the static CLI output skips them (role registry).
-        if roles::is_directive_panel(&p.roles) && !section {
+        if roles::is_directive_panel(&p.roles) && !section && !step_marker {
             continue;
         }
         let rows = exec(&format!("{};", p.sql));
@@ -300,6 +337,12 @@ fn render_dashboard_html(
     // Phase 2: render.
     let mut panels = String::new();
     let mut n = 0;
+    // `::GUIDE_STEP` (#516): `queried` only ever holds what phase 1 kept
+    // shown, so its total marker count per group ("of N") is known now.
+    let mut static_steps = {
+        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, _, _)| p).collect();
+        sql::steps::StaticSteps::new(&shown)
+    };
     let mut queried = queried.into_iter().peekable();
     while let Some((p, rows, compact)) = queried.next() {
         let rows = match rows {
@@ -322,15 +365,45 @@ fn render_dashboard_html(
             }
             continue;
         }
-        // A label-only panel / ::SECTION is a spanning section heading, not a card.
+        // A label-only panel / ::SECTION is a spanning section heading, not
+        // a card — so is a ::GUIDE_STEP marker (#516 decision 8: the static
+        // output flattens the stepper into a run of these headings).
         let section = p.roles.iter().any(|(_, r)| *r == Role::Section);
-        if section || (p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label)) {
-            let text = rows
-                .first()
-                .and_then(|r| r.values().next())
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            panels.push_str(&format!("<h2 class=\"section\">{}</h2>", escape_xml(text)));
+        let step_n_of = p.step.as_ref().filter(|s| s.marker).and_then(|_| {
+            static_steps.step(&p).into_iter().find_map(|e| match e {
+                sql::steps::StaticEvent::Heading { n, of, .. } => Some((n, of)),
+                _ => None,
+            })
+        });
+        if section
+            || (p.roles.len() == 1 && matches!(p.roles[0].1, Role::Label))
+            || step_n_of.is_some()
+        {
+            let text = match step_n_of {
+                Some((n, of)) => {
+                    let idx = p
+                        .roles
+                        .iter()
+                        .find(|(_, r)| *r == Role::GuideStep)
+                        .map(|(i, _)| *i);
+                    let label = idx
+                        .and_then(|i| rows.first().and_then(|r| r.get(&format!("c{i}"))))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if label.is_empty() {
+                        format!("Step {n} of {of}")
+                    } else {
+                        format!("Step {n} of {of} · {label}")
+                    }
+                }
+                None => rows
+                    .first()
+                    .and_then(|r| r.values().next())
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            panels.push_str(&format!("<h2 class=\"section\">{}</h2>", escape_xml(&text)));
             continue;
         }
         let mut cols = anofox_visualization::name_columns(

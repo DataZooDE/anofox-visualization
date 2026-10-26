@@ -18,7 +18,8 @@ description: >
   (::UPSTREAM, ::EDGES, ::LANE, flow styles), motion (::ANIMATE, ::STORY,
   ::TRANSITION, ::LINESTYLE 'flow'), Markdown with {{col:fmt}} values and
   $LaTeX$, ::INFO / ::CALLOUT, ::ASOF, ::EMPTY / -- @requires panel states,
-  layout, themes / branding / locale, anofox_plot_* contract plots as
+  ::SHOW_IF conditional panels and boxes, layout, themes / branding / locale,
+  anofox_plot_* contract plots as
   panels, the Explore data page, the `dashboard --describe` / `--check`
   generate-validate-repair loop with its lint codes, the design contract
   and the gotchas that silently break a panel.
@@ -65,6 +66,11 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | `diagram/null-id`, `diagram/duplicate-node`, `diagram/unknown-node`, `diagram/bad-edges`, `diagram/bad-style`, `diagram/bad-direction`, `diagram/too-large` | warning | a `::DIAGRAM` row without an id; an id twice (the first row wins); an edge naming an id that is no row (not drawn); `::EDGES` that is not a list of `{from, to}` structs; an edge style that is not `solid`/`dashed`/`flow`; a `::DIRECTION` that is not `LR`/`TB`; more than 150 nodes / 300 edges (the first ones are drawn) |
 | `chart/needs-xaxis`, `input/many-buttons`, `thresholds/bad-rule`, `thresholds/no-column`, `thresholds/in-table`, `asof/unparseable`, `asof/bad-stale`, `callout/unknown`, `callout/no-text`, `markdown/unknown-placeholder`, `markdown/unknown-format`, `markdown/bad-math`, `diagram/bad-pin`, `diagram/partial-pins`, `policy/*` | mostly warning (`chart/needs-xaxis`: error) | a waterfall / bullet / funnel without `::XAXIS`; too many `::BUTTONS` options (use a dropdown); a malformed or misplaced `::THRESHOLDS`; an `::ASOF` that is no date / a bad `stale=`; a bad `::CALLOUT`; a `{{col}}` naming no column or an unknown `:fmt`; TeX KaTeX can't parse; diagram pins on only some nodes; with `--policy`: what an access policy refuses or hides (access-control skill) |
 | `unknown-cast` | warning | `::BARCHAT`: not a role and not a SQL type — the column lost its role |
+| `submit/unknown-variable`, `submit/unsupported-input`, `submit/duplicate-input`, `submit/no-vars`, `submit/too-many-vars`, `submit/rows` | error (`submit/rows`: warning at 0 rows) | #517 `::SUBMIT`/`::SUBMIT_VARS`: a named variable no input declares, or from a `::DATERANGE`/`::PERIOD` input, or declared by two inputs; no/too many (>32) recorded variables; the statement returns 0 (hidden by default) or >1 rows |
+| `submit/dynamic-vars`, `submit/options-from-variable`, `state/markup-from-viewer` | warning | `::SUBMIT_VARS` isn't a plain string literal (can't be checked statically); a recorded input's own option query reads a viewer-settable variable; a `::MARKDOWN`/`::LINK`/`::DOWNLOAD_*` column reads `viewer_state.value` (a learner's TEXT answer could carry markup/a link) |
+| `state/shadowed` | error | a dashboard's own `CREATE TABLE`/`VIEW` named `viewer_state`/`viewer_state_latest` — reserved for the server's per-viewer state (#517) |
+| `show_if/not-alone`, `show_if/bad-target` (error) · `show_if/no-target`, `show_if/not-boolean`, `show_if/no-row`, `show_if/unknown-variable`, `show_if/constant` (warning) | mostly warning, two are errors | a `::SHOW_IF` column beside other roles (ignored, the panel shows); its target is `::TAB`/`::SUBTAB`/`::VIEW`/`::ENDVIEW`/`::ENDGROUP`/`::FIT`/`::COLUMNS`/chrome/`::RELOAD` (always shows); nothing follows it; under the defaults used here the cell isn't a BOOLEAN, or there's no row (always hidden); its `getvariable()` names no variable this dashboard sets; it reads no variable at all |
+| `step/inside-subtab`, `step/var-clash`, `step/gate-without-step` (error) · `step/mixed-with-subtab`, `step/lone`, `step/var-not-allowed`, `step/empty`, `step/fit-inside`, `step/gate-on-last`, `step/gate-not-boolean`, `step/gate-no-row`, `step/gate-constant`, `step/gate-unknown-variable`, `step/duplicate-label` (warning) · `step/computed-label` (note) | mostly warning, three are errors | a `::GUIDE_STEP` marker inside a `::SUBTAB` (drawn as a plain heading instead); its variable also set by an input / `SET VARIABLE` / `::SELECT_AS` / `::DRILL` / `::ROWSELECT`; `::GATE`/`::GATE_MESSAGE` without `::GUIDE_STEP` on the same statement; a `::SUBTAB` closing an open sequence; a sequence with one step; the variable missing from a declared `-- @vars`; a step with nothing to show; `::FIT` inside a step (ignored); a `::GATE` on the last step (nothing to hold back); under the defaults used here the gate isn't a BOOLEAN, or there's no row (Next stays disabled); a gate that reads no variable, or a `getvariable()` this dashboard never sets; the same label on two steps; a computed (non-literal) step label |
 | `design/untitled-chart`, `design/pie-slices`, `design/unsorted-bars`, `design/many-series`, `design/too-many-panels`, `design/ungrouped-kpis`, `design/raw-table` | warning | design advisories (below); `--strict` makes them fail, `--no-design` hides them |
 
 `--check` gives each input a default (`SET VARIABLE`: the first option of a single input, every option of a `::MULTISELECT`, both ends of a `::DATERANGE`, the default period of a `::PERIOD`), so filtered panels are checked with real data. Variables nothing sets (`selected`, a clicked table's key) are unset: guard them with `COALESCE` / `NULLIF` as in the master-detail example. `--json` prints `{"ok": …, "diagnostics": [{"severity", "stmt", "code", "message", "sql"}]}`.
@@ -89,8 +95,9 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 | Table directives (before the table) | `'none' \| 'single' \| 'multi'::ROWSELECT` · `'sum'::TOTALS` (`::TOTAL`) · `'A: x, y \| B: z'::COLGROUP` · `'mape > 0.2'::FLAG` · `'Revenue: top 3'::HIGHLIGHT` (`::TOPN`) · `'region'::SUBTOTAL` · `'none' \| 'search,filters,totals,stats,columns,density,export'::TOOLBAR` (drop the toolbar on a tiny table) — see *Tables* |
 | Chart interactions (before the chart) | `'region' \| 'region multi'::SELECT_AS` (own selection variable + brushed `region_from` / `region_to`) · `'region > country > city'::DRILL` (drill-down + breadcrumb) · a `'#Tab?v.x={value}'::LINK` column (drill-through, charts and tables) |
 | Inputs | `::DROPDOWN` (a searchable combobox above ~50 options, like `::MULTISELECT`; `'search'`/`'native'::DROPDOWN_STYLE` overrides) · `::MULTISELECT` (a list) · `::BUTTONS` (segmented, ≤ ~5 options) · `::TOGGLE` (a BOOLEAN; value = default) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` · `::OPTION_LABEL` (an option's shown text; the value stays the variable's) |
+| Recording a viewer's answers (#517) | `'Check my answers' AS quiz_1::SUBMIT, 'q1, note'::SUBMIT_VARS, 'Saved.'::SUBMIT_DONE` — a button; its statement runs as the viewer (one row = available, zero = hidden, several = error); `SUBMIT_VARS` names input-declared variables (not `::DATERANGE`/`::PERIOD`) to record. **Requires a server with `options.state`; that server-side support has not shipped yet (#517) — the role lints clean today but the button has nowhere to post to.** |
 | Strips under a chart | right after a chart with a numeric / date x: `day::XAXIS, 'Promotions'::TRACK, name::LABEL` (ticks) · `… , detector::YAXIS, '#d64545'-style ::CATEGORY, 1::HEATMAP, 'Alarms'::TRACK` (lanes of tiles) · `day::XAXIS, price::STEP, 'Price'::TRACK` (sparkline) — same plot area and x window as the chart; a click on a strip mark shades its span on the chart |
-| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `cond::SHOW_IF` (the next panel, or `::GROUP` box, shows only while `cond` is `TRUE` — not access control) · `'Name' AS id ::GUIDE_STEP, cond ::GATE, 'msg' ::GATE_MESSAGE` (`::TUTORIAL_STEP`/`::WIZARD_STEP`; a guided sequence of steps with Back/Next and "Step n of N"; `::GATE` holds Next until `cond` is `TRUE` — not access control; `id` names the step variable, URL `?v.<id>=n`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `en-IE` (English, €) `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` · `max(loaded_at)::ASOF, 'stale=24h'` (a "Data as of …" chip, amber when stale — give every locked / exported dashboard one; a plain `DATE` reads as a calendar day, with no time and no time-zone shift) |
 
 A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name (else the bare column name), for an input it is the variable name, in a table the header. Without a `::CATEGORY`, several columns of the *same* chart kind (`events::LINECHART, failures::LINECHART`; `events::BARCHART, failures::BARCHART`) get a real legend named by column; a *mixed* overlay (bars + a different-kind line/area) instead keeps the base in the brand colour with no legend, each overlay just a distinct palette colour.
@@ -204,6 +211,7 @@ FROM sales GROUP BY ALL ORDER BY 2 DESC;
 - `dashboard --check` reports `theme/unknown`, `theme/multiple`, `locale/unknown`, `period/bad-spec`, `kpi/bad-delta-format`, `kpi/no-delta`, `kpi/sparkline-not-list`, `chrome/bad-url` (logos: relative, `https:` or `data:image/`).
 - For interactions it reports `interaction/bad-value` (a malformed `::SELECT_AS` / `::DRILL` value), `interaction/name-clash` (an input, a `::SELECT_AS` and a `::DRILL` level writing the same variable — rename one), `interaction/rowselect-shared-name` (two `::ROWSELECT` tables whose first column ends up with the same name — a click in either toggles both) and `link/bad-url` (a `::LINK` that is not `#tab`, `?…`, a path or http(s)); it primes `::SELECT_AS` / `::DRILL` variables to "nothing selected / top level" like the browser. When the sharing is deliberate (several registers fanning in to one detail panel, or a dropdown and a `::ROWSELECT` meant to hand a selection to each other), put `-- @shared <name>` directly above the `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement that would otherwise be flagged — `--check --strict` then skips both lints for just that name, everything else still checked. A `-- @shared` name the statement doesn't itself set (a typo) is flagged on its own: `interaction/shared-unused`.
 - `dashboard --themes` lists the built-ins; `dashboard file.sql --theme dark` / `serve … --theme T` set a default the script's `::THEME` overrides.
+- **Stable names**: `-- @name <name>` directly above any statement that draws something (a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, a `::LABEL`/`::SECTION` heading) tags its element `data-dp-name="<name>"` — a stable e2e selector, and later a deep-link / guided-tour target (#518). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`, unique per dashboard; `page` is reserved. `--check` reports `name/bad`, `name/reserved`, `name/duplicate` (errors) and `name/not-drawn` (a name on setup or an invisible directive).
 
 ## Contract plots as panels
 
@@ -431,6 +439,46 @@ FROM sales GROUP BY region ORDER BY "Revenue" DESC;
 ```
 
 Keep a fitted tab small: if a panel would get under ~120 px the tab scrolls instead (with a notice). `dashboard --check` warns ahead of time — `layout/fit-too-many` (more rows than a 1366×768 screen holds — for a sub-tab / view, only its own panels count; aim for ≤ ~4 rows: a KPI strip and two rows of charts) and `layout/fit-ambiguous` (a `::FIT` before the first `::TAB` of a tabbed dashboard, twice for one tab, or cast beside a panel's columns instead of its own statement).
+
+### Show a panel only when … (`::SHOW_IF`)
+
+`SELECT cond::SHOW_IF;` is its own preceding statement (like `::COL`/`::EMPTY`): the **next** panel — or whole `::GROUP` box, to its matching `::ENDGROUP` — shows only while `cond` is the BOOLEAN `TRUE` (`FALSE`/`NULL`/no row/a non-boolean/an error all hide it, re-checked on every run). A quiz pattern: give a `::DROPDOWN` an empty first option (it defaults to its first option, so check `<> ''`, not `IS NOT NULL`):
+
+```sql dashboard
+SELECT v AS q1 ::DROPDOWN, l ::OPTION_LABEL, 'Which check sees concept drift?' ::LABEL
+FROM (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l) ORDER BY o;
+
+SELECT getvariable('q1') <> '' ::SHOW_IF;                -- only after an answer
+SELECT CASE getvariable('q1') WHEN 'measured error' THEN '**Right.**'
+            ELSE 'Not quite — try again.' END ::MARKDOWN;
+```
+
+A hidden panel loses its grid slot (no blank card); a hidden input keeps its variable's value. Stacked `::SHOW_IF`s AND together; modifiers (`::COL`, `::HEIGHT`, `::EMPTY`, `::ROWSELECT`, table options, `::SELECT_AS`, `::DRILL`) right before the condition travel with its target, so they never leak onto the next panel. `::TAB`/`::SUBTAB`/`::VIEW`/`::ENDGROUP`/`::FIT`/`::COLUMNS`/chrome can't be a target (`show_if/bad-target`) — use `-- @requires` for those. **Not access control**: on a locked server the hidden statement still answers `/api/panel`. `--check` also flags a condition beside other roles (`show_if/not-alone`), one that reads no variable (`show_if/constant`), a `getvariable()` this dashboard never sets (`show_if/unknown-variable`), and — under the defaults used while checking — a non-boolean cell or no row at all (`show_if/not-boolean` / `show_if/no-row`).
+
+### Guided steps (`::GUIDE_STEP`)
+
+`SELECT 'Name' AS id ::GUIDE_STEP;` opens the next step of a guided sequence (onboarding, a tutorial): Back/Next, a progress strip ("Step n of N"), and — unlike `::VIEW` — its markers are *not* consecutive: everything after one belongs to that step, up to the next marker or the group's close (the next `::TAB`, a `::SUBTAB`, or end of script). Add `::GATE`/`::GATE_MESSAGE` columns on the marker to hold Next until a condition is met:
+
+```sql dashboard
+SELECT 'The three doors' AS lesson ::GUIDE_STEP;
+SELECT '**Scenario**: a model''s accuracy drops. Is the *input* drifting, or the *relationship* itself?' ::MARKDOWN;
+
+SELECT 'Check your understanding' ::GUIDE_STEP,         -- the gate lives on the SAME step as its own quiz
+       getvariable('q2') = 'measured error' ::GATE,
+       'Answer correctly above to continue' ::GATE_MESSAGE;
+SELECT v AS q2 ::DROPDOWN, l ::OPTION_LABEL, 'Which check sees concept drift?' ::LABEL
+FROM (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l) ORDER BY o;
+SELECT getvariable('q2') <> '' ::SHOW_IF;
+SELECT CASE getvariable('q2') WHEN 'measured error' THEN '**Right.**' ELSE 'Not quite — try again.' END ::MARKDOWN;
+
+SELECT 'Drift sandbox' ::GUIDE_STEP;
+SELECT 'A sandbox you only reach once the quiz is right.'::MARKDOWN;
+
+SELECT 'Wrap-up' ::GUIDE_STEP;
+SELECT 'Nice work — you can revisit any step from the list above.' ::MARKDOWN;
+```
+
+The step variable (`lesson` above; `step`/`step_2`/… for unnamed groups) is an ordinary `getvariable()` name, readable from any panel and carried in the URL as `?v.lesson=n`; list it in `-- @vars` if the dashboard declares one. The gate uses the same fail-closed rule as `::SHOW_IF` (`FALSE`/`NULL`/no row/non-boolean/an error all hold Next closed). It's common for a gate to read its own step's quiz (the shape above) — both the interactive browser and `dashboard --check` check that reading with the quiz's own input default already bound, so the canonical pattern lints clean. The step list lets a viewer jump to any step up to the furthest one whose gate holds, and clamps a URL/seed asking for one beyond that. **Not access control**: `/api/panel` answers every step's statement whether its gate holds or not. A `::GUIDE_STEP` marker closes an open `::VIEW` group / `::GROUP` box, like a `::TAB` does; it can't open inside a `::SUBTAB` (`step/inside-subtab`) — a sequence is a sibling of `::SUBTAB` under a `::TAB`, never nested in one. Static output (`--svg`, the CLI HTML, the script-free served page, ⤓ HTML export) flattens the sequence: every step draws in order under a "Step n of N · Label" heading, gates ignored.
 
 ## Design contract
 

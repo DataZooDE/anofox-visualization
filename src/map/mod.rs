@@ -1,4 +1,7 @@
-//! Maps: the extension's own SVG writer for `::MAP` panels.
+//! Maps: data prep for `::MAP` panels, drawn by ggplot-rs's `geom_sf`
+//! ([`plot`]) — see issue #420 (the hand-written SVG writer this module
+//! used to describe here is gone; #318 tracks the same move for every
+//! other panel kind).
 //!
 //! A map panel's rows carry WKT (`::MAP`), a region code looked up in the
 //! built-in boundary pack (`::REGION`, see [`boundaries`]) or a point
@@ -6,28 +9,31 @@
 //! layer such as `'world'`), a measure or a `::CATEGORY` to colour by, a
 //! `::LABEL`, a layer opacity (`::ALPHA`), labels on the map (`::LABEL_TOP`,
 //! `::DATALABELS`) and the map modifiers `::PROJECTION`, `::CLASSES`,
-//! `::MIDPOINT`, `::RANGE` and `::BOUNDARIES`. The writer:
+//! `::MIDPOINT`, `::RANGE` and `::BOUNDARIES`. This module:
 //!
 //! 1. resolves each row's geometry once (WKT via
 //!    `ggplot_rs::spatial::parse_wkt`, a pack region, or a point),
 //! 2. resolves the projection (`'auto'` by the data's extent) and projects
 //!    every vertex, densifying long edges where the projection curves them,
-//! 3. fits the projected box into the panel (or the browser's zoom window),
-//! 4. simplifies each ring in pixel space (0.5 px) and writes compact
-//!    relative `<path>` data — `fill-rule="evenodd"`, so holes are cut out —
-//!    and `<circle>`s for points,
-//! 5. colours by a themed sequential or diverging ramp (continuous, or in
-//!    classes with a stepped legend and counts), or by the theme palette,
-//! 6. writes a legend, haloed labels that don't collide, a scale bar, the
-//!    attribution a pack layer requires, a hatch for rows without a value
-//!    and a one-sentence summary (`<desc>` and `data-summary`).
+//! 3. picks the legend's sized footprint and the layout corner it goes in
+//!    (the data box fitted around it, or around the browser's zoom window —
+//!    [`layout`]/[`frame_of`], still this module's own job: [`plot::build`]
+//!    only draws the window these hand it),
+//! 4. resolves the fill (a themed sequential/diverging ramp, continuous or
+//!    classed, or the theme palette) and the graduated-symbol/flow/hexbin
+//!    models `plot::build` turns into `GeomSf`/`geom_curve`/`geom_hex`
+//!    layers,
+//! 5. composes the one-sentence summary (`data-summary`) and the
+//!    attribution/scale-bar text [`plot::build`] draws via
+//!    `annotation_attribution`/`annotation_scale`.
 //!
-//! Features are drawn in row order. Each carries `data-row`, `data-series`
-//! (its `::CATEGORY`, else its `::LABEL`), `data-value` (the raw measure),
-//! `data-label`, `data-x` (its `::XAXIS` — a `::STORY` step key — else, when it
-//! has no label, the row) and, when
-//! classed, `data-class` (1-based), plus a `<title>`; the root carries
-//! `data-map`, `data-proj` and `data-classes` (the class labels as JSON).
+//! Each feature mark carries `data-row`, `data-series` (its `::CATEGORY`,
+//! else its `::LABEL`), `data-value` (the raw measure), `data-label`,
+//! `data-x` (its `::XAXIS` — a `::STORY` step key — else, when it has no
+//! label, the row) and, when classed, `data-class` (1-based), plus a
+//! `<title>` — written by [`plot::build`] via `Aes::data_attr`/`GeomSf`'s own
+//! tooltip now, not hand-formatted here; the root carries `data-map`,
+//! `data-proj` and `data-classes` (the class labels as JSON).
 
 mod bivariate;
 pub(crate) mod boundaries;
@@ -42,10 +48,9 @@ mod plot;
 pub(crate) mod project;
 mod symbols;
 mod wkt;
-mod write;
 
-use crate::format::{escape_xml as esc, ValueFmt};
-use crate::theme::{contrast, hex, mix};
+use crate::format::ValueFmt;
+use crate::theme::{contrast, mix};
 use crate::{
     cell_num, find_role, legend_position_of, role_num, role_str, value_fmt, value_str, Column,
     Kind, Ramp, RenderOptions, Role,
@@ -56,21 +61,16 @@ use flows::Flows;
 use ggplot_rs::prelude::Value;
 use ggplot_rs::spatial::{parse_wkt, Geometry};
 use hexbin::Hexbin;
-use legend::{legend_of, legend_svg, legend_title, Legend, LegendBox};
+use legend::{legend_of, legend_title, LegendBox};
 use project::{Extent, Proj, Projection};
 use symbols::Symbols;
-use write::{push_path, simplify, tenths};
 
 type Rgb = (u8, u8, u8);
 
 /// Drawn marks above which a render warning suggests aggregating.
 pub(crate) const MARK_WARN: usize = 100_000;
-/// Pixel tolerance of the screen-space simplification.
-const SIMPLIFY_PX: f64 = 0.5;
 /// Legend and summary text size (as the plotting engine's legends).
 const FONT: f64 = 8.8;
-/// Point radius.
-const POINT_R: f64 = 3.0;
 
 /// One drawable part of a feature, in lon/lat or projected units.
 #[derive(Clone, Debug)]
@@ -1088,39 +1088,6 @@ fn padded(
     (x0 - mx, y0 - my, x1 + mx, y1 + my)
 }
 
-/// A stable id prefix for this map's `<defs>` (pages hold many SVGs).
-fn id_of(cols: &[Column], w: u32, h: u32) -> String {
-    let mut x: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |b: &[u8]| {
-        for c in b {
-            x ^= *c as u64;
-            x = x.wrapping_mul(0x0100_0000_01b3);
-        }
-    };
-    eat(&w.to_le_bytes());
-    eat(&h.to_le_bytes());
-    for c in cols {
-        eat(c.name.as_bytes());
-        for v in c.values.iter().take(64) {
-            eat(value_str(v).as_bytes());
-        }
-        eat(&c.values.len().to_le_bytes());
-    }
-    format!("m{:08x}", x as u32)
-}
-
-/// An attribute value: escaped, newlines kept as `&#10;`.
-fn attr(s: &str) -> String {
-    esc(s).replace('\n', "&#10;").replace('\r', "&#13;")
-}
-
-/// A rendered map: the SVG body, its root attributes and render warnings.
-pub(crate) struct Drawn {
-    pub body: String,
-    pub attrs: Vec<(&'static str, String)>,
-    pub warnings: Vec<String>,
-}
-
 /// `::LEGEND` on a map: `'none'` hides it outright (`lg` zeroed so
 /// [`layout`] reserves it no room); `'top'`/`'right'`/`'bottom'`/`'left'` is
 /// instead returned for [`layout`] to place it on that side.
@@ -1269,602 +1236,23 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
     layout(&m, &lg, w, h - ft.h, forced).map(|(f, _)| f.window(w, h))
 }
 
-/// Either a real `GGPlot` (#420 slice 1's `geom_sf` path) or the old
-/// writer's already-rendered body — [`build`]'s result, for `render_inner`
-/// (`src/lib.rs`) to turn into a `Panel::Plot` or `Panel::Own` accordingly.
-pub(crate) enum MapOutput {
-    Plot {
-        plot: Box<ggplot_rs::prelude::GGPlot>,
-        attrs: Vec<(&'static str, String)>,
-        warnings: Vec<String>,
-    },
-    Own(Drawn),
-}
-
-/// Build a map panel: the new `geom_sf`-backed `GGPlot` for an
-/// [`plot::eligible`] map, the old hand-written SVG otherwise. `None` when
-/// no row has geometry (the only case either path bails out on).
+/// Build a map panel's `GGPlot` and its extra root attributes
+/// (`data-map`, …) — `None` when no row has geometry.
 pub(crate) fn build(
     o: &RenderOptions,
     cols: &[Column],
     width: u32,
     height: u32,
-) -> Option<MapOutput> {
+) -> Option<plot::Built> {
     let m = Model::new(o, cols)?;
-    let w = width as f64;
-
-    if plot::eligible(o, &m, w) {
-        if let Some((p, attrs, mut warnings)) = plot::build(o, cols, &m, width, height) {
-            if m.rows > MARK_WARN {
-                warnings.push(format!(
-                    "map: {} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light",
-                    m.rows
-                ));
-            }
-            return Some(MapOutput::Plot {
-                plot: Box::new(p),
-                attrs,
-                warnings,
-            });
-        }
-    }
-    render_with_model(o, cols, &m, width, height).map(MapOutput::Own)
-}
-
-/// The old hand-written SVG writer, taking an already-built [`Model`] —
-/// [`build`] (#420 slice 1: the `geom_sf`-backed path for eligible maps)
-/// builds the `Model` once and routes to either this (every map not yet
-/// ported) or the new path, without computing it twice.
-fn render_with_model(
-    o: &RenderOptions,
-    cols: &[Column],
-    m: &Model,
-    width: u32,
-    height: u32,
-) -> Option<Drawn> {
-    let (w, h) = (width as f64, height as f64);
-    let mut lg = legend_of(o, m, w, h);
-    let forced = legend_override(cols, &mut lg);
-    let nodata = lg.nodata;
-    // `nodata` (above) only counts regular features/symbols without a
-    // value — a flow row without one (`Fill::Measure` + no value) isn't a
-    // "feature", so it needs its own check here to still get the hatch
-    // pattern + the `data-nd` CSS override defined (overlay::render sets
-    // `data-nd="1"` on those rows regardless of this map having any other
-    // no-data features).
-    let flow_nodata = m.flows.as_ref().is_some_and(|fl| {
-        matches!(&m.fill, Fill::Measure(s) if fl.flows.iter().any(|f| s.values[f.row].is_none()))
-    });
-    let ft = foot_of(o, m, w);
-    let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced)?;
-    let t = &o.theme;
-    let id = id_of(cols, width, height);
-    let card = t.colors.card;
-    let font = esc(&t.svg_font());
-    let mut out = String::with_capacity(16 * 1024);
-    let mut warnings = Vec::new();
-
-    // ---- defs: the no-data hatch, the gradient
-    let hatch_bg = mix(t.colors.muted, card, 0.85);
-    let hatch_fg = mix(t.colors.muted, card, 0.35);
-    let mut defs = String::new();
-    if nodata > 0 || flow_nodata {
-        defs.push_str(&format!(
-            "<pattern id=\"{id}-nd\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\"><rect width=\"4\" height=\"4\" fill=\"{}\"/><path d=\"M0 0v4\" stroke=\"{}\" stroke-width=\"1.2\"/></pattern>",
-            hex(hatch_bg),
-            hex(hatch_fg)
-        ));
-    }
-    // A flow's no-data rows carry `data-nd="1"` (set by overlay::render, via
-    // the ggplot-rs curve layer's own `data_attr`) instead of a hand-picked
-    // `fill`/`stroke`; this rule paints them with the hatch above, scoped to
-    // this map's own `id` so two maps on one dashboard don't cross-wire.
-    if flow_nodata {
-        defs.push_str(&format!(
-            "<style>#{id} [data-nd]{{stroke:url(#{id}-nd)}}</style>"
-        ));
-    }
-    if let Legend::Gradient { stops, .. } = &lg.legend {
-        defs.push_str(&format!("<linearGradient id=\"{id}-g\">"));
-        for (i, c) in stops.iter().enumerate() {
-            defs.push_str(&format!(
-                "<stop offset=\"{:.3}\" stop-color=\"{}\"/>",
-                i as f64 / (stops.len() - 1).max(1) as f64,
-                hex(*c)
-            ));
-        }
-        defs.push_str("</linearGradient>");
-    }
-    if !defs.is_empty() {
-        out.push_str(&format!("<defs>{defs}</defs>"));
-    }
-
-    // ---- the basemap
-    let viewport = (-20.0, -20.0, w + 20.0, h + 20.0);
-    let mut marks = 0usize;
-    let land = mix(t.colors.muted, card, 0.92);
-    let land_edge = mix(t.colors.muted, card, 0.7);
-    let mut base = String::new();
-    for f in &m.base {
-        let d = path_d(f, &frame, viewport, true);
-        if !d.is_empty() {
-            base.push_str(&format!("<path d=\"{d}\"/>"));
-            marks += 1;
-        }
-    }
-    if !base.is_empty() {
-        out.push_str(&format!(
-            "<g class=\"dp-basemap\" fill=\"{}\" fill-rule=\"evenodd\" stroke=\"{}\" stroke-width=\".5\" stroke-linejoin=\"round\">{base}</g>",
-            hex(land),
-            hex(land_edge)
-        ));
-    }
-
-    // ---- the features, in row order
-    let border = t.chart_grid();
-    let plain_edge = mix(t.colors.muted, card, 0.35);
-    let alpha = if m.alpha < 1.0 {
-        format!("{:.2}", m.alpha)
-    } else {
-        String::new()
-    };
-    let fmt_full = |s: &ValueScale, v: f64| s.fmt.full(v, &o.locale);
-    // the areas' border and fill rule sit on the group (lines and points
-    // set their own stroke)
-    let edge = if matches!(m.fill, Fill::Plain(_)) {
-        plain_edge
-    } else {
-        border
-    };
-    out.push_str(&format!(
-        "<g class=\"dp-features\" fill-rule=\"evenodd\" stroke=\"{}\" stroke-width=\".6\" stroke-linejoin=\"round\" stroke-linecap=\"round\">",
-        hex(edge)
-    ));
-    // an ::XAXIS keys the features for a ::STORY (a route stop by stop)
-    let step_x = find_role(cols, Role::X);
-    for (i, f) in m.features.iter().enumerate() {
-        // ::HEXBIN (M2c) takes over the point pass entirely — the per-row
-        // features group draws nothing (m.fill is indexed by cell, not row).
-        if f.is_empty() || m.hexbin.is_some() {
-            continue;
-        }
-        let label = m.label_of(i);
-        let cat = m.text(m.category, i);
-        let series = if cat.is_empty() {
-            label.clone()
-        } else {
-            cat.clone()
-        };
-        let (color, value, class, nd) = match &m.fill {
-            Fill::Measure(s) => match s.values[i] {
-                Some(v) => {
-                    let (c, k) = s.color(v);
-                    (c, Some(v), k, false)
-                }
-                None => (hatch_bg, None, None, true),
-            },
-            Fill::Category { of_row, levels } => (
-                of_row[i].map(|k| levels[k].1).unwrap_or(hatch_bg),
-                None,
-                None,
-                false,
-            ),
-            Fill::Plain(c) => (*c, None, None, false),
-            // `Model::new` never builds `Fill::Bivariate` while `eligible()`
-            // is unconditionally `true` (#505) — every map draws through
-            // `plot::build`'s `geom_sf` path now, this old writer is dead
-            // for maps; kept exhaustive only so the match compiles.
-            Fill::Bivariate(_) => (hatch_bg, None, None, false),
-        };
-        // the tooltip: "label: value", as the plotting engine wrote it
-        let shown = match (&m.fill, value) {
-            (Fill::Measure(s), Some(v)) => fmt_full(s, v),
-            (Fill::Measure(_), None) => "no data".to_string(),
-            (Fill::Category { .. }, _) => cat.clone(),
-            _ => String::new(),
-        };
-        let mut title = match (label.is_empty(), shown.is_empty()) {
-            (false, false) => format!("{label}: {shown}"),
-            (false, true) => label.clone(),
-            (true, _) => shown,
-        };
-        if let (Fill::Measure(s), Some(k)) = (&m.fill, class) {
-            if let Some((_, c, _)) = &s.classes {
-                title.push_str(&format!(
-                    " (class {} of {}: {})",
-                    k + 1,
-                    c.len(),
-                    c.label(k, &|v| s.fmt.short(v, &o.locale))
-                ));
-            }
-        }
-        // the key (when no label names it) and class first, then the row
-        // metadata the browser reads
-        let mut data = String::new();
-        if let Some(x) = step_x
-            .and_then(|c| c.values.get(i))
-            .and_then(crate::mark_key_text)
-        {
-            data.push_str(&format!(" data-x=\"{}\"", attr(&x)));
-        } else if label.is_empty() {
-            data.push_str(&format!(" data-x=\"{i}\""));
-        }
-        if let Some(k) = class {
-            data.push_str(&format!(" data-class=\"{}\"", k + 1));
-        }
-        data.push_str(&format!(" data-row=\"{i}\""));
-        if !series.is_empty() {
-            data.push_str(&format!(" data-series=\"{}\"", attr(&series)));
-        }
-        if let Some(v) = value {
-            data.push_str(&format!(" data-value=\"{v}\""));
-        }
-        if !label.is_empty() {
-            data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
-        }
-        let inner = if title.is_empty() {
-            "/>".to_string()
-        } else {
-            format!("><title>{}</title>", esc(&title))
-        };
-        let close = |tag: &str| {
-            if title.is_empty() {
-                String::new()
-            } else {
-                format!("</{tag}>")
-            }
-        };
-        let fill_attr = if nd {
-            format!("url(#{id}-nd)")
-        } else {
-            hex(color)
-        };
-        let fo = if alpha.is_empty() {
-            String::new()
-        } else {
-            format!(" fill-opacity=\"{alpha}\"")
-        };
-        let areas: Vec<&Shape> = f.iter().filter(|s| matches!(s, Shape::Area(_))).collect();
-        let lines: Vec<&Shape> = f.iter().filter(|s| matches!(s, Shape::Line(_))).collect();
-        // graduated symbols (M2a) take over areas and points — a symbol is
-        // drawn for the row below instead, in its own pass (largest first)
-        if !areas.is_empty() && m.symbols.is_none() {
-            let d = path_d_of(&areas, &frame, viewport, true);
-            if !d.is_empty() {
-                out.push_str(&format!(
-                    "<path d=\"{d}\" fill=\"{fill_attr}\"{fo}{data}{inner}{}",
-                    close("path")
-                ));
-                marks += 1;
-            }
-        }
-        if !lines.is_empty() {
-            let d = path_d_of(&lines, &frame, viewport, false);
-            if !d.is_empty() {
-                let so = if alpha.is_empty() {
-                    String::new()
-                } else {
-                    format!(" stroke-opacity=\"{alpha}\"")
-                };
-                out.push_str(&format!(
-                    "<path d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"{so}{data}{inner}{}",
-                    if nd { hex(hatch_fg) } else { hex(color) },
-                    close("path")
-                ));
-                marks += 1;
-            }
-        }
-        if m.symbols.is_none() && m.hexbin.is_none() {
-            for s in f {
-                if let Shape::Point(p) = s {
-                    let (x, y) = frame.at(*p);
-                    if x < viewport.0 || y < viewport.1 || x > viewport.2 || y > viewport.3 {
-                        continue;
-                    }
-                    out.push_str(&format!(
-                        "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"{POINT_R}\" fill=\"{fill_attr}\"{fo} stroke=\"{}\" stroke-width=\".5\"{data}{inner}{}",
-                        x,
-                        y,
-                        hex(card),
-                        close("circle")
-                    ));
-                    marks += 1;
-                }
-            }
-        }
-    }
-    out.push_str("</g>");
-
-    // ---- graduated symbols (::SIZE, M2a): one circle per anchor, largest
-    // first (D5) — a feature's area, pole of inaccessibility, or point.
-    if let Some(sym) = &m.symbols {
-        struct Circ {
-            r: f64,
-            row: usize,
-            pt: [f64; 2],
-            v: f64,
-        }
-        let rmax_px = symbols::rmax(w, h);
-        let mut circles: Vec<Circ> = Vec::new();
-        for i in 0..m.rows {
-            if sym.anchors[i].is_empty() {
-                continue;
-            }
-            let Some(v) = sym.size[i] else { continue };
-            let r = sym
-                .fixed
-                .unwrap_or_else(|| symbols::radius(rmax_px, v, sym.vmax));
-            for pt in &sym.anchors[i] {
-                circles.push(Circ {
-                    r,
-                    row: i,
-                    pt: *pt,
-                    v,
-                });
-            }
-        }
-        circles.sort_by(|a, b| b.r.total_cmp(&a.r));
-        out.push_str("<g class=\"dp-symbols\">");
-        for c in &circles {
-            let i = c.row;
-            let label = m.label_of(i);
-            let cat = m.text(m.category, i);
-            let series = if cat.is_empty() {
-                label.clone()
-            } else {
-                cat.clone()
-            };
-            let (color, value, class, nd) = match &m.fill {
-                Fill::Measure(s) => match s.values[i] {
-                    Some(v) => {
-                        let (col, k) = s.color(v);
-                        (col, Some(v), k, false)
-                    }
-                    None => (hatch_bg, None, None, true),
-                },
-                Fill::Category { of_row, levels } => (
-                    of_row[i].map(|k| levels[k].1).unwrap_or(hatch_bg),
-                    None,
-                    None,
-                    false,
-                ),
-                Fill::Plain(col) => (*col, None, None, false),
-                // Never built alongside graduated symbols (`Model::new`
-                // only builds `Fill::Bivariate` when `symbols.is_none()`).
-                Fill::Bivariate(_) => (hatch_bg, None, None, false),
-            };
-            let shown = match (&m.fill, value) {
-                (Fill::Measure(s), Some(v)) => fmt_full(s, v),
-                (Fill::Measure(_), None) => "no data".to_string(),
-                (Fill::Category { .. }, _) => cat.clone(),
-                _ => String::new(),
-            };
-            let fsize = sym.fmt.full(c.v, &o.locale);
-            let size_title = sym.title.clone().unwrap_or_else(|| "Size".to_string());
-            let mut title = if matches!(m.fill, Fill::Measure(_)) {
-                let head = match (label.is_empty(), shown.is_empty()) {
-                    (false, false) => format!("{label}: {shown}"),
-                    (false, true) => label.clone(),
-                    (true, _) => shown.clone(),
-                };
-                format!("{head}; {size_title}: {fsize}")
-            } else if !label.is_empty() {
-                format!("{label}: {fsize}")
-            } else {
-                fsize.clone()
-            };
-            if let (Fill::Measure(s), Some(k)) = (&m.fill, class) {
-                if let Some((_, cl, _)) = &s.classes {
-                    title.push_str(&format!(
-                        " (class {} of {}: {})",
-                        k + 1,
-                        cl.len(),
-                        cl.label(k, &|v| s.fmt.short(v, &o.locale))
-                    ));
-                }
-            }
-            let mut data = String::new();
-            if label.is_empty() {
-                data.push_str(&format!(" data-x=\"{i}\""));
-            }
-            if let Some(k) = class {
-                data.push_str(&format!(" data-class=\"{}\"", k + 1));
-            }
-            data.push_str(&format!(" data-row=\"{i}\""));
-            if !series.is_empty() {
-                data.push_str(&format!(" data-series=\"{}\"", attr(&series)));
-            }
-            let data_value = value.unwrap_or(c.v);
-            data.push_str(&format!(" data-value=\"{data_value}\""));
-            if !label.is_empty() {
-                data.push_str(&format!(" data-label=\"{}\"", attr(&label)));
-            }
-            data.push_str(&format!(" data-size=\"{}\"", c.v));
-            data.push_str(&format!(" data-fsize=\"{}\"", attr(&fsize)));
-            if !matches!(m.fill, Fill::Measure(_)) {
-                // no colour measure: with_formatted_values (src/lib.rs) only
-                // adds data-fvalue when a ::Value column exists, so write it
-                // ourselves here (never both — fvalue_is_written_once).
-                data.push_str(&format!(" data-fvalue=\"{}\"", attr(&fsize)));
-            }
-            let (x, y) = frame.at(c.pt);
-            let fill_attr = if nd {
-                format!("url(#{id}-nd)")
-            } else {
-                hex(color)
-            };
-            let fo = if alpha.is_empty() {
-                String::new()
-            } else {
-                format!(" fill-opacity=\"{alpha}\"")
-            };
-            let inner = if title.is_empty() {
-                "/>".to_string()
-            } else {
-                format!("><title>{}</title></circle>", esc(&title))
-            };
-            out.push_str(&format!(
-                "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"{:.1}\" fill=\"{fill_attr}\"{fo} stroke=\"{}\" stroke-width=\".75\"{data}{inner}",
-                c.r,
-                hex(card)
-            ));
-            marks += 1;
-        }
-        out.push_str("</g>");
-    }
-
-    // ---- flows (::ORIGIN/::DEST, M2b): a ggplot-rs overlay (`geom_curve` +
-    // `arrow()` + the `linewidth`/identity-colour/interactive aesthetics —
-    // see `overlay.rs` and issue #318), spliced in here: after the basemap
-    // and before `labels_svg` below.
-    let mut extra_self = 0usize; // L < 2px screen-coincident flows, counted at render time
-    if let Some(fl) = &m.flows {
-        let (frag, added_marks, self_ct, cap_warn) =
-            overlay::render(o, cols, m, &frame, fl, t, card, hatch_bg, hatch_fg, w, h);
-        out.push_str(&frag);
-        marks += added_marks;
-        extra_self += self_ct;
-        if let Some(cw) = cap_warn {
-            warnings.push(cw);
-        }
-    }
-
-    // ---- density binning (::HEXBIN, M2c): a ggplot-rs overlay (`geom_hex`
-    // drawing cells `hexbin::of` already binned via `StatBinHex` — see
-    // `overlay.rs` and issue #318), spliced in here the same way the flow
-    // overlay is above: after the basemap and before `labels_svg` below.
-    if let Some(hb) = &m.hexbin {
-        if let Fill::Measure(scale) = &m.fill {
-            let (frag, added_marks) =
-                overlay::render_hexbin(o, hb, scale, &frame, card, hatch_bg, hatch_fg, w, h);
-            out.push_str(&frag);
-            marks += added_marks;
-            if hb.cells.len() > hexbin::HEX_WARN {
-                warnings.push(format!(
-                    "map: {} hexagons — use a larger ::HEXBIN",
-                    hb.cells.len()
-                ));
-            }
-        }
-    }
-
-    if marks > MARK_WARN {
+    let (p, attrs, mut warnings) = plot::build(o, cols, &m, width, height)?;
+    if m.rows > MARK_WARN {
         warnings.push(format!(
-            "map: {marks} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light"
+            "map: {} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light",
+            m.rows
         ));
     }
-
-    // ---- labels on the map
-    let legend_box = (
-        legend_at.0,
-        legend_at.1,
-        legend_at.0 + lg.w,
-        legend_at.1 + lg.h,
-    );
-    out.push_str(&labels_svg(
-        o,
-        cols,
-        m,
-        &frame,
-        &[legend_box, (0.0, h - ft.h, w, h)],
-        (w, h),
-        &font,
-    ));
-
-    // ---- the legend, on a card-coloured backing
-    out.push_str(&legend_svg(o, &lg, &id, legend_at, &font));
-
-    // ---- the scale bar and the attribution the pack layers require
-    out.push_str(&foot_svg(o, m, &ft, &frame, (w, h), &font));
-
-    // ---- summary and root attributes
-    let summary = summary(o, m, extra_self);
-    out.insert_str(0, &format!("<desc>{}</desc>", esc(&summary)));
-    let mut attrs = vec![
-        ("data-map", String::new()),
-        ("data-proj", m.projection.name().to_string()),
-        ("data-summary", summary),
-    ];
-    // Only when the `data-nd` CSS rule above needs an anchor to scope to —
-    // every other map stays exactly as it was (no stray `id`).
-    if flow_nodata {
-        attrs.push(("id", id.clone()));
-    }
-    if let Fill::Measure(s) = &m.fill {
-        if let Some((_, c, _)) = &s.classes {
-            let labels: Vec<String> = (0..c.len())
-                .map(|k| c.label(k, &|v| s.fmt.short(v, &o.locale)))
-                .collect();
-            attrs.push((
-                "data-classes",
-                serde_json::to_string(&labels).unwrap_or_default(),
-            ));
-        }
-    }
-    if let Some(hb) = &m.hexbin {
-        attrs.push(("data-hexbin", hexbin::fmt_num(hb.width)));
-    }
-    Some(Drawn {
-        body: out,
-        attrs,
-        warnings,
-    })
-}
-
-/// Path data of one feature's shapes of one kind.
-fn path_d_of(shapes: &[&Shape], f: &Frame, vp: (f64, f64, f64, f64), close: bool) -> String {
-    let mut d = String::new();
-    for s in shapes {
-        match s {
-            Shape::Area(rings) => {
-                for r in rings {
-                    push_ring(&mut d, r, f, vp, true);
-                }
-            }
-            Shape::Line(cs) => push_ring(&mut d, cs, f, vp, close),
-            Shape::Point(_) => {}
-        }
-    }
-    d
-}
-
-/// Path data of a backdrop feature (areas and lines).
-fn path_d(shapes: &[Shape], f: &Frame, vp: (f64, f64, f64, f64), close: bool) -> String {
-    let refs: Vec<&Shape> = shapes.iter().collect();
-    path_d_of(&refs, f, vp, close)
-}
-
-/// Append one ring/line, simplified in pixel space; skipped when it lies
-/// wholly outside the viewport or shrinks below a pixel.
-fn push_ring(d: &mut String, pts: &[[f64; 2]], f: &Frame, vp: (f64, f64, f64, f64), close: bool) {
-    let scr: Vec<(f64, f64)> = pts.iter().map(|p| f.at(*p)).collect();
-    let (mut x0, mut y0, mut x1, mut y1) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    );
-    for (x, y) in &scr {
-        x0 = x0.min(*x);
-        y0 = y0.min(*y);
-        x1 = x1.max(*x);
-        y1 = y1.max(*y);
-    }
-    if x1 < vp.0 || y1 < vp.1 || x0 > vp.2 || y0 > vp.3 {
-        return;
-    }
-    if close && (x1 - x0).max(y1 - y0) < 0.5 {
-        return;
-    }
-    let s = simplify(&scr, SIMPLIFY_PX);
-    if close && s.len() < 3 {
-        // a sliver: keep its box corners so it still shows
-        let a = tenths((x0, y0));
-        let b = tenths((x1, y1));
-        push_path(d, &[a, (b.0, a.1), b, (a.0, b.1)], true);
-        return;
-    }
-    push_path(d, &s, close);
+    Some((p, attrs, warnings))
 }
 
 /// The attribution (and scale bar) strip at the bottom of a map.
@@ -1970,272 +1358,6 @@ fn span_km(m: &Model) -> Option<f64> {
     }
     let lat = ((e.y0 + e.y1) / 2.0).to_radians();
     Some((e.x1 - e.x0) * 111.32 * lat.cos())
-}
-
-/// The scale bar and the attribution lines (right-aligned, small, muted).
-fn foot_svg(
-    o: &RenderOptions,
-    m: &Model,
-    ft: &Foot,
-    frame: &Frame,
-    (w, h): (f64, f64),
-    font: &str,
-) -> String {
-    if ft.h <= 0.0 {
-        return String::new();
-    }
-    let t = &o.theme;
-    let muted = hex(t.chart_text());
-    let mut g = String::from("<g class=\"dp-map-foot\">");
-    if ft.scale {
-        if let Some((px, label)) = scale_bar(m, frame) {
-            let (x, y) = (6.0, h - 5.0);
-            g.push_str(&format!(
-                "<path d=\"M{x:.1} {:.1}v3h{px:.1}v-3\" fill=\"none\" stroke=\"{muted}\" stroke-width=\"1\"/><text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"7.5\" fill=\"{muted}\">{}</text>",
-                y - 3.0,
-                x + px / 2.0,
-                y - 5.0,
-                esc(&label)
-            ));
-        }
-    }
-    let lh = ft.size * 1.3;
-    let n = ft.lines.len() as f64;
-    for (k, line) in ft.lines.iter().enumerate() {
-        let y = h - 3.0 - (n - 1.0 - k as f64) * lh;
-        g.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{y:.1}\" text-anchor=\"end\" font-family=\"{font}\" font-size=\"{:.2}\" fill=\"{muted}\">",
-            w - 4.0,
-            ft.size
-        ));
-        for (s, link) in line {
-            match link {
-                Some(u) => g.push_str(&format!(
-                    "<a href=\"{u}\" target=\"_blank\"><tspan text-decoration=\"underline\">{}</tspan></a>",
-                    esc(s)
-                )),
-                // spaces at a run's ends would collapse: keep them
-                None => g.push_str(&format!("<tspan>{}</tspan>", esc(s).replace(' ', "\u{a0}"))),
-            }
-        }
-        g.push_str("</text>");
-    }
-    g.push_str("</g>");
-    g
-}
-
-/// A scale bar for the map's centre: `(length in px, "50 km")` — a "nice"
-/// 1/2/5 × 10ⁿ distance at most 90 px long.
-fn scale_bar(m: &Model, frame: &Frame) -> Option<(f64, String)> {
-    let e = &m.lonlat;
-    let (lon, lat) = ((e.x0 + e.x1) / 2.0, (e.y0 + e.y1) / 2.0);
-    let dlon = 1.0 / (111.32 * lat.to_radians().cos().max(0.01));
-    let a = m.proj.forward([lon, lat])?;
-    let b = m.proj.forward([lon + dlon, lat])?;
-    let px_km = ((b[0] - a[0]).hypot(b[1] - a[1])) * frame.s;
-    if px_km.is_nan() || px_km <= 0.0 || !px_km.is_finite() {
-        return None;
-    }
-    let max_km = 90.0 / px_km;
-    let mag = 10f64.powf(max_km.log10().floor());
-    let km = [5.0, 2.0, 1.0]
-        .iter()
-        .map(|f| f * mag)
-        .find(|k| *k <= max_km)
-        .unwrap_or(mag);
-    let px = km * px_km;
-    if px < 12.0 {
-        return None;
-    }
-    let label = if km >= 1.0 {
-        format!("{} km", km.round() as i64)
-    } else {
-        format!("{} m", (km * 1000.0).round() as i64)
-    };
-    Some((px, label))
-}
-
-/// Labels on the map (`::LABEL_TOP n`: the n most important; `::DATALABELS`:
-/// all that fit): each region's name at its pole of inaccessibility, a
-/// point's to its right, in the ink with a card-coloured halo; by `::RANK`,
-/// else |value|, else area; none overlapping, none wider than its region.
-fn labels_svg(
-    o: &RenderOptions,
-    cols: &[Column],
-    m: &Model,
-    frame: &Frame,
-    blocked: &[(f64, f64, f64, f64)],
-    size: (f64, f64),
-    font: &str,
-) -> String {
-    let top = role_num(cols, Role::LabelTop).map(|n| n.max(0.0) as usize);
-    if top.is_none() && find_role(cols, Role::DataLabels).is_none() {
-        return String::new();
-    }
-    // flow maps (M2b): ::LABEL_TOP/::DATALABELS label the distinct ends,
-    // not the arcs; priority is the sum of the sizes touching each end.
-    if let Some(fl) = &m.flows {
-        let mut ends: std::collections::HashMap<&str, (labels::Pt, f64, String)> =
-            std::collections::HashMap::new();
-        for f in &fl.flows {
-            let w = f.raw.unwrap_or(f.w);
-            let e = ends
-                .entry(f.ok.as_str())
-                .or_insert((frame.at(f.o), 0.0, f.o_name.clone()));
-            e.1 += w;
-            let e = ends
-                .entry(f.dk.as_str())
-                .or_insert((frame.at(f.d), 0.0, f.d_name.clone()));
-            e.1 += w;
-        }
-        let cands: Vec<labels::Candidate> = ends
-            .into_values()
-            .filter(|(_, _, name)| !name.is_empty())
-            .map(|(at, priority, text)| labels::Candidate {
-                at,
-                text,
-                priority,
-                room: None,
-                dx: 5.0,
-            })
-            .collect();
-        let placed = labels::place(cands, top, blocked, size, FONT);
-        if placed.is_empty() {
-            return String::new();
-        }
-        let t = &o.theme;
-        let mut g = format!(
-            "<g class=\"dp-map-labels\" font-family=\"{font}\" font-size=\"{FONT}\" font-weight=\"600\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2.4\" stroke-linejoin=\"round\" paint-order=\"stroke\" pointer-events=\"none\">",
-            hex(t.colors.ink),
-            hex(t.colors.card)
-        );
-        for p in placed {
-            g.push_str(&format!(
-                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"{}\" dominant-baseline=\"middle\">{}</text>",
-                p.x,
-                p.y,
-                if p.start { "start" } else { "middle" },
-                esc(&p.text)
-            ));
-        }
-        g.push_str("</g>");
-        return g;
-    }
-    let rank = find_role(cols, Role::Rank);
-    let rmax_px = m.symbols.as_ref().map(|_| symbols::rmax(size.0, size.1));
-    let mut cands = Vec::new();
-    for (i, f) in m.features.iter().enumerate() {
-        let text = m
-            .label_of(i)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let value = match &m.fill {
-            Fill::Measure(s) => s.values[i],
-            _ => None,
-        };
-        // a graduated symbol (M2a): anchor at the symbol, label to its
-        // right offset by its radius + 3 px, skipping the area/point logic
-        // below entirely (its anchor already is the symbol's)
-        if let Some(sym) = &m.symbols {
-            let Some(&pt) = sym.anchors[i].first() else {
-                continue;
-            };
-            let Some(v) = sym.size[i] else { continue };
-            let r = sym
-                .fixed
-                .unwrap_or_else(|| symbols::radius(rmax_px.unwrap_or(0.0), v, sym.vmax));
-            let priority = rank
-                .and_then(|r| r.values.get(i))
-                .and_then(cell_num)
-                .or(value.map(f64::abs))
-                .unwrap_or(v);
-            cands.push(labels::Candidate {
-                at: frame.at(pt),
-                text,
-                priority,
-                room: None,
-                dx: r + 3.0,
-            });
-            continue;
-        }
-        if f.is_empty() {
-            continue;
-        }
-        // the largest polygon on screen, else the first point
-        let mut best: Option<(f64, Vec<Vec<labels::Pt>>)> = None;
-        for s in f {
-            if let Shape::Area(rings) = s {
-                let scr: Vec<Vec<labels::Pt>> = rings
-                    .iter()
-                    .map(|r| {
-                        let step = (r.len() / 1500).max(1);
-                        r.iter().step_by(step).map(|p| frame.at(*p)).collect()
-                    })
-                    .collect();
-                let a = labels::area(&scr[0]);
-                if best.as_ref().is_none_or(|b| a > b.0) {
-                    best = Some((a, scr));
-                }
-            }
-        }
-        let (at, room, area) = match best {
-            Some((a, rings)) => {
-                let Some((p, _)) = labels::polylabel(&rings, 1.0) else {
-                    continue;
-                };
-                let (x0, x1) = rings[0]
-                    .iter()
-                    .fold((f64::MAX, f64::MIN), |(a, b), q| (a.min(q.0), b.max(q.0)));
-                (p, Some(x1 - x0), a)
-            }
-            None => match f.iter().find_map(|s| match s {
-                Shape::Point(p) => Some(frame.at(*p)),
-                _ => None,
-            }) {
-                Some(p) => (p, None, 0.0),
-                None => continue,
-            },
-        };
-        let priority = rank
-            .and_then(|r| r.values.get(i))
-            .and_then(cell_num)
-            .or(value.map(f64::abs))
-            .unwrap_or(area);
-        cands.push(labels::Candidate {
-            at,
-            text,
-            priority,
-            room,
-            dx: 5.0,
-        });
-    }
-    let placed = labels::place(cands, top, blocked, size, FONT);
-    if placed.is_empty() {
-        return String::new();
-    }
-    let t = &o.theme;
-    let mut g = format!(
-        "<g class=\"dp-map-labels\" font-family=\"{font}\" font-size=\"{FONT}\" font-weight=\"600\" fill=\"{}\" stroke=\"{}\" stroke-width=\"2.4\" stroke-linejoin=\"round\" paint-order=\"stroke\" pointer-events=\"none\">",
-        hex(t.colors.ink),
-        hex(t.colors.card)
-    );
-    for p in placed {
-        g.push_str(&format!(
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"{}\" dominant-baseline=\"middle\">{}</text>",
-            p.x,
-            p.y,
-            if p.start { "start" } else { "middle" },
-            esc(&p.text)
-        ));
-    }
-    g.push_str("</g>");
-    g
 }
 
 /// The classes part of a map summary, shared by the choropleth, symbol and
