@@ -351,6 +351,34 @@ pub const ASSET_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "s
 /// no such option use this directly).
 pub const DEFAULT_MAX_ASSET_BYTES: u64 = 5 << 20;
 
+/// The response headers every `assets/<rest>` route sends alongside a
+/// served image — the locked server's own `/d/<id>/assets/<rest>`
+/// (`duckext::serve::locked_asset`) and both authoring servers' opt-in
+/// `/assets/<rest>` (#522). Review of #604 N5: this list was three
+/// identical copies (one per caller); framework-agnostic `(name, value)`
+/// pairs here, built once, so the `Content-Security-Policy`/`Cross-
+/// Origin-Resource-Policy` set can't quietly drift between them — each
+/// caller still builds its own header type (`tiny_http::Header`) from
+/// these, since this crate's image module has no HTTP framework
+/// dependency of its own.
+///
+/// `content_type` is the sniffed MIME, never trusted from the request's
+/// own extension. `cache_control` is the one value callers choose
+/// differently on purpose (the locked server's shorter, `auth`-dependent
+/// lifetime vs. authoring's fixed one) — passed in rather than hardcoded.
+pub fn asset_header_values(content_type: &str, cache_control: &str) -> [(&'static str, String); 5] {
+    [
+        ("Content-Type", content_type.to_string()),
+        ("X-Content-Type-Options", "nosniff".to_string()),
+        (
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; sandbox".to_string(),
+        ),
+        ("Cache-Control", cache_control.to_string()),
+        ("Cross-Origin-Resource-Policy", "same-origin".to_string()),
+    ]
+}
+
 /// Is `dir`'s own `assets` entry a symlink (not followed)? Review of #554
 /// nit 8: `canonicalize` on a symlinked `assets -> /` (or anywhere else)
 /// would otherwise resolve it to that target and serve every image-typed
@@ -381,6 +409,88 @@ pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf>
         .canonicalize()
         .ok()
         .filter(|p| p.is_dir())
+}
+
+/// Validate an **explicit, opt-in** assets root — the authoring builder's
+/// `--assets <dir>` / `anofox_serve(port, {assets: '<dir>'})` (#522) — not
+/// a dashboards folder's own `assets/` subfolder ([`canonical_assets_dir`],
+/// silently `None` when missing: an author just hasn't made one yet, no
+/// different from not passing the option at all).
+///
+/// Here the caller named this exact path on purpose, so every problem is a
+/// loud startup refusal rather than a silent "no assets served": `path`
+/// itself (not a sibling `assets` entry under it) must not be a symlink,
+/// must canonicalize, and the result must be a directory. Call once at
+/// startup, never per request — same posture as [`canonical_assets_dir`].
+///
+/// The message names only `path`, not the option (`--assets` for the CLI,
+/// `options.assets` for `anofox_serve`) — each caller prefixes its own
+/// name onto this `Err` rather than this function guessing which one it's
+/// talking to.
+///
+/// Review of #604 S5/R4: `path` is normalized *lexically* (never touching
+/// the filesystem) before the symlink check, not after — a trailing `/`
+/// or `.` component, or a `..` anywhere that lexically cancels an earlier
+/// segment, all collapse first. `symlink_metadata` must resolve every
+/// *non-final* path component to reach the final one (that's what makes
+/// `rootlink/sub/..` follow the symlink `rootlink` to get to `sub` at
+/// all, even though the whole path lexically names `rootlink` itself),
+/// and a trailing `/` or `/.` similarly forces the OS to confirm the
+/// final component resolves to a directory, which means following it if
+/// it's a symlink. So `--assets rootlink/`, `--assets rootlink/.` and
+/// `--assets rootlink/sub/..` (a shell's own tab-completion produces the
+/// first; the third is a `cd`-and-back-out shape) all used to reach the
+/// `canonicalize`/`is_dir` checks below having never actually `lstat`-ed
+/// `rootlink` itself, and started right up serving the link's target.
+pub fn validated_assets_root(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = lexically_normalize(path);
+    let path = path.as_path();
+    if std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "'{}' is a symlink — refusing to serve it (it may point outside the intended \
+             folder); point it at a plain directory",
+            path.display()
+        ));
+    }
+    let real = path
+        .canonicalize()
+        .map_err(|e| format!("'{}': {e}", path.display()))?;
+    if !real.is_dir() {
+        return Err(format!("'{}' is not a directory", path.display()));
+    }
+    Ok(real)
+}
+
+/// `path`, normalized lexically (#604 S5/R4) — every `.` component
+/// dropped, every `..` cancelling the nearest earlier real segment (never
+/// popping past a root/prefix, and left in place if there's nothing to
+/// cancel), a trailing `/` making no difference either way. Never touches
+/// the filesystem: `Path::components()` already does this parsing
+/// (repeated `/` and a trailing `/` collapse on their own; `.` and `..`
+/// come out as their own distinguishable components, `CurDir`/
+/// `ParentDir`), this just resolves what those components mean against
+/// each other the same way a shell's own `cd a/b/..` would, without ever
+/// asking the OS to resolve a symlink along the way — the one thing a
+/// real `canonicalize`/`lstat` call cannot do.
+fn lexically_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                _ => out.push(comp),
+            },
+            other => out.push(other),
+        }
+    }
+    out.iter().collect()
 }
 
 /// Validate `rest` (a path under an `assets/` folder, already stripped of
@@ -611,6 +721,30 @@ pub fn resolve_relative(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// #604 R4: purely lexical, no filesystem access — checked directly so
+    /// the `..`-cancels-the-nearest-real-segment rule is pinned without
+    /// needing a real symlink on disk for every shape.
+    #[test]
+    fn lexically_normalize_collapses_dot_and_dot_dot_without_touching_disk() {
+        let n = |s: &str| {
+            lexically_normalize(std::path::Path::new(s))
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(n("/a/b"), "/a/b");
+        assert_eq!(n("/a/b/"), "/a/b");
+        assert_eq!(n("/a/b/."), "/a/b");
+        assert_eq!(n("/a/b/./"), "/a/b");
+        assert_eq!(n("/a/b/sub/.."), "/a/b");
+        assert_eq!(n("/a/b/sub/../"), "/a/b");
+        assert_eq!(n("/a/b/sub/c/../.."), "/a/b");
+        assert_eq!(n("/a/b/../c"), "/a/c");
+        // Nothing to cancel against (would escape the root) — left as-is,
+        // same posture `canonicalize` itself would take on this.
+        assert_eq!(n("/../a"), "/../a");
+        assert_eq!(n("a/../../b"), "../b");
+    }
 
     #[test]
     fn vectors_match_rust_and_js_contract() {

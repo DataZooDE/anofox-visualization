@@ -185,6 +185,9 @@ jobs:
       - name: Submit live e2e (auth, rate limits, credential locks)
         run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      - name: Opt-in assets route on a live (authoring) backend (#522)
+        run: duckext/scripts/test-authoring-assets.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # #357: the access policy's hash-mask key never reaches a panel, an
       # error, the dashboard page, /healthz, stderr or the request log, and
       # SQL that could reveal it is refused at start.
@@ -321,6 +324,9 @@ jobs:
 
       - name: Submit live e2e, against DuckDB 2.0
         run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Opt-in assets route on a live (authoring) backend, against DuckDB 2.0 (#522)
+        run: duckext/scripts/test-authoring-assets.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
       - name: Access policy key e2e, against DuckDB 2.0
         run: duckext/scripts/policy-key-e2e.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
@@ -516,6 +522,15 @@ jobs:
       # still embeds whatever is already in web/pkg, which the download
       # above just populated, so this stays a plain cdylib build (no wasm
       # toolchain needed here).
+      # #616: this build's own CARGO_TARGET_DIR (set here, before the
+      # toolchain/cache steps run, so they pick it up too), never the
+      # checkout's default `target/` — that one already holds the
+      # `dashboard` CLI the artifact download above just placed
+      # (target/debug/dashboard), and Swatinem/rust-cache's restore/save
+      # sharing that directory corrupted or deleted it (site-e2e.mjs, which
+      # runs well before the extension build step, saw a stale or missing
+      # binary).
+      - run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/served-ext-target" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

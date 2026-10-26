@@ -792,6 +792,20 @@ pub(crate) fn paint_theme(th: &mut Theme, o: &RenderOptions) {
     paint(&mut th.legend_title, t.chart_text());
     paint(&mut th.legend_text, t.chart_label());
     paint(&mut th.strip_text, t.colors.heading);
+    // #606: `theme.geom.ink` — every geom's `apply_element_geom` hook for
+    // recolouring its own hardcoded default ink (ggplot-rs's generic
+    // "unmapped mark" colour, distinct from the text elements painted
+    // above) reads this, not `th.text`/`th.axis_text_x` etc. A map's own
+    // geoms (`GeomSf`, symbols, …) never rely on this fallback — every one
+    // of their colours is set explicitly in `map::plot::build` — so this
+    // was never missed there. `GeomBivariateLegend`'s two axis captions
+    // are the one geom this crate attaches that DOES rely on it (its own
+    // `text_color` default, `(80, 80, 80)`, only gets replaced by
+    // `apply_element_geom` when `ink` is `Some`): left unset, they stayed
+    // at that fixed mid-grey regardless of theme, barely visible against
+    // a dark card. Same token as `axis_text_x`/`axis_text_y` above —
+    // reads as "ordinary chart text" either way.
+    th.geom.ink = Some(t.chart_text());
 }
 
 /// `.theme(chart_theme(..))` / `.theme(void_theme(..))` as plot builders.
