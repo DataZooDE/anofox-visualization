@@ -1188,12 +1188,40 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                 let m = val.as_object().ok_or(
                     "options.nav_picker must be an object like {\"var\": \"model\", \"sql\": \"SELECT …\", \"label\": \"Model\"}",
                 )?;
+                // Review of #556 (review-582 SF1): the locked server
+                // accepts `"type": "dropdown"` on the singular
+                // `nav_picker` (it's the default, explicit or not —
+                // `parse_dropdown_nav_picker` in duckext/src/serve.rs).
+                // `--site` used to reject that same key as "unknown",
+                // so one options file would work on the server and fail
+                // on the static export. Accept it here too, and give
+                // `"type": "daterange"` the same clear "needs the locked
+                // server" message `nav_pickers` already gets below,
+                // instead of falling through to the generic unknown-key
+                // error.
+                match m.get("type").and_then(|v| v.as_str()) {
+                    None | Some("dropdown") => {}
+                    Some("daterange") => {
+                        return Err(
+                            "options.nav_picker: type \"daterange\" needs the locked server \
+                             (anofox_serve_dashboards) — --site only supports a dropdown picker \
+                             for now"
+                                .into(),
+                        );
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "options.nav_picker.type: unknown '{other}' (dropdown; daterange \
+                             needs the locked server)"
+                        ));
+                    }
+                }
                 if let Some(other) = m
                     .keys()
-                    .find(|k| !matches!(k.as_str(), "var" | "sql" | "label"))
+                    .find(|k| !matches!(k.as_str(), "type" | "var" | "sql" | "label"))
                 {
                     return Err(format!(
-                        "options.nav_picker: unknown key '{other}' (var, sql, label)"
+                        "options.nav_picker: unknown key '{other}' (type, var, sql, label)"
                     ));
                 }
                 let var = m
@@ -3035,6 +3063,30 @@ mod site_tests {
         assert_eq!(np.var, "region");
         assert_eq!(np.sql, "SELECT 1, 2");
         assert_eq!(np.label.as_deref(), Some("Region"));
+    }
+
+    /// Review of #556 (review-582 SF1): the locked server's singular
+    /// `nav_picker` accepts an explicit `"type": "dropdown"` (it's just
+    /// the default), so a single options file should parse the same way
+    /// for `--site` and for `anofox_serve_dashboards`. `"type":
+    /// "daterange"` isn't supported by a static site at all (there's no
+    /// server to run the daterange Apply/clamp round trip), so it must
+    /// fail with a clear message rather than the generic "unknown key
+    /// 'type'" a naive parser would give.
+    #[test]
+    fn nav_picker_type_dropdown_is_accepted_daterange_is_refused_clearly() {
+        let json = r#"{"path_vars": ["region"], "nav_picker": {"type": "dropdown", "var": "region", "sql": "SELECT 1, 2"}}"#;
+        let o = parse_site_options(Some(json)).unwrap();
+        assert_eq!(o.nav_picker.unwrap().var, "region");
+
+        let json = r#"{"path_vars": ["from", "to"], "nav_picker": {"type": "daterange", "vars": ["from", "to"]}}"#;
+        let e = parse_site_options(Some(json)).unwrap_err();
+        assert!(e.contains("needs the locked server"), "{e}");
+        assert!(e.contains("daterange"), "{e}");
+
+        let json = r#"{"nav_picker": {"type": "bogus", "var": "region", "sql": "SELECT 1, 2"}}"#;
+        let e = parse_site_options(Some(json)).unwrap_err();
+        assert!(e.contains("unknown 'bogus'"), "{e}");
     }
 
     #[test]

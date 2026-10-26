@@ -531,15 +531,32 @@ same reasoning as the 2,000-option cap below). Each entry has a `"type"`:
 - The same credential-lock and render rules apply: a `daterange` is omitted
   entirely if either of its two variables is locked by a scoped credential,
   and the nav builds it with `document.createElement`/`textContent` (two
-  `<input type="date">`, preset buttons, an explicit "Apply" button —
-  batched into both `SET VARIABLE`s + one re-run so the server is never
-  asked to validate one half of the pair against the stale value of the
-  other) — no inline `onchange`/`onclick` attributes (the CSP has no
-  `'unsafe-inline'`/`'unsafe-hashes'` for `script-src`; #570 is the bug that
-  pattern avoids).
-- `dashboard --site` (the static export) only understands the singular
-  `nav_picker` dropdown for now; `nav_pickers` is refused there
-  (`options.nav_pickers: --site only supports the singular nav_picker …`).
+  `<input type="date">`, preset buttons, an explicit "Apply" button, a
+  "Clear" button, a status hint — batched into both `SET VARIABLE`s + one
+  re-run so the server is never asked to validate one half of the pair
+  against the stale value of the other) — no inline `onchange`/`onclick`
+  attributes (the CSP has no `'unsafe-inline'`/`'unsafe-hashes'` for
+  `script-src`; #570 is the bug that pattern avoids). "Clear" sends `SET
+  VARIABLE … = NULL` for both — `clamp_daterange_values` treats a NULL
+  `path_vars` value as "no value" (skips the date check and the clamp), so
+  this is the one way back to an unfiltered dashboard once a window has
+  been set; there is no sentinel date for "unset". With only one side
+  filled, Apply fills the other from the picker's own `min`/`max` (its
+  full `sql`-computed range) when it has one, else it stays disabled with
+  a hint — client-side convenience only, the server still re-checks
+  `from <= to` and re-clamps regardless.
+- A credential that locks a `daterange` variable to a value that isn't a
+  real calendar date 400s on **every** panel request for that dashboard
+  (the clamp checks locked values too, the same as a viewer-sent one) — a
+  config mistake to catch at credential-minting time, not something the
+  server works around.
+- `dashboard --site` (the static export) accepts the singular `nav_picker`
+  with an explicit `"type": "dropdown"` (the same as omitting `type` —
+  it's just the default), so one options file parses the same way for
+  `--site` and for `anofox_serve_dashboards`. A singular `nav_picker` with
+  `"type": "daterange"`, and `nav_pickers` (plural) under either type, are
+  both refused with a clear "needs the locked server" message — a static
+  site has no server to run the daterange Apply/clamp round trip through.
 
 **Content-Security-Policy header (#252).** Every HTML page of the locked server
 (the dashboard page, the `/` list, the login pages), of `dashboard serve` and

@@ -629,6 +629,12 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .served-nav-daterange{flex-wrap:wrap;white-space:normal}
 .served-nav-daterange input[type=date]{font:inherit;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-nav-border);border-radius:6px;padding:.25rem .4rem;max-width:9.5rem}
 .served-nav-apply{font:600 13px system-ui;color:var(--ax-nav-active-ink);background:var(--ax-nav-active-bg);border:1px solid var(--ax-nav-border);border-radius:6px;padding:.3rem .7rem;cursor:pointer}
+.served-nav-apply:disabled{opacity:.5;cursor:not-allowed}
+/* #556 nit (review-582): "clear" un-sets both vars (SET VARIABLE … NULL),
+   styled like a preset pill so it doesn't compete with Apply's emphasis. */
+.served-nav-clear{font:600 12px system-ui;color:var(--ax-nav-ink);background:transparent;border:1px solid var(--ax-nav-border);border-radius:999px;padding:.2rem .55rem;cursor:pointer}
+.served-nav-clear:hover{background:var(--ax-nav-active-bg);color:var(--ax-nav-active-ink)}
+.served-nav-hint{font:400 12px system-ui;color:var(--ax-muted)}
 .served-nav-presets{display:inline-flex;gap:.25rem;flex-wrap:wrap}
 .served-nav-presets button{font:600 12px system-ui;color:var(--ax-nav-ink);background:transparent;border:1px solid var(--ax-nav-border);border-radius:999px;padding:.2rem .55rem;cursor:pointer}
 .served-nav-presets button:hover{background:var(--ax-nav-active-bg);color:var(--ax-nav-active-ink)}

@@ -1300,7 +1300,12 @@ function servedVarSig(deps, vars) {
 // TRUE/FALSE/NULL) back into a JSON value for /api/panel.
 function sqlLiteralToJson(lit) {
   const t = String(lit).trim();
-  if (/^null$/i.test(t)) return null;
+  // #556 nit (review-582): `NULL::VARCHAR`, not just a bare `NULL`, is
+  // what the daterange picker's "Clear" sends (web/app.js's own `lit`,
+  // renderDateRangePicker) — an explicit type so a local/`--site` run
+  // doesn't give the variable DuckDB's default INTEGER type. Either
+  // spelling means the same "no value" here.
+  if (/^null(::\w+)?$/i.test(t)) return null;
   if (/^true$/i.test(t)) return true;
   if (/^false$/i.test(t)) return false;
   if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) return t.slice(1, -1).replace(/''/g, "'");
@@ -1327,7 +1332,9 @@ function sqlLiteralToJson(lit) {
 // because there is no server left to enforce it instead.
 function validPathValueLiteral(lit) {
   const t = String(lit).trim();
-  if (/^null$/i.test(t)) return true;
+  // #556 nit (review-582): accept the daterange "Clear" control's typed
+  // `NULL::VARCHAR` too (sqlLiteralToJson above takes the same pair).
+  if (/^null(::\w+)?$/i.test(t)) return true;
   if (t.length && /^[0-9]+$/.test(t)) return true;
   if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
     const inner = t.slice(1, -1).replace(/''/g, "'");
@@ -7679,7 +7686,15 @@ function coerceSeededSelection(name, mode) {
 async function setSelectionVars() {
   try {
     await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
-    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+    // #556 nit (review-582): a daterange "clear" is the first thing that
+    // ever puts a real `null` into `dpXf` for a `path_vars`-eligible key
+    // (a dropdown always SETs a string) — without this check it went out
+    // as the *string* `'null'`, not SQL `NULL` (`q(null)` → `String(null)`
+    // → `"null"`), so the var never actually unset and every later
+    // `getvariable()` on it kept returning the string "null" instead of
+    // NULL. Same convention as the period vars' own `v == null ? "NULL" :
+    // …` (below, `periodUrlParams`'s caller).
+    const q = (x) => (x == null ? "NULL" : `'${String(x).replace(/'/g, "''")}'`);
     for (const [k, v] of Object.entries(dpXf)) {
       if (URL_VAR_RE.test(k)) {
         // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
@@ -7697,7 +7712,11 @@ function urlStateParams() {
   const out = [];
   const add = (k, v) => (Array.isArray(v) ? (v.length ? v : [""]) : [v]).forEach((x) => out.push(["v." + k, String(x)]));
   for (const [k, def] of Object.entries(dpVarDefault)) {
-    if (dpVars[k] !== undefined && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
+    // #556 nit (review-582): a daterange "clear" sets dpVars[k] to null
+    // (the same NULL the dropdown branch below already skips via its own
+    // `v == null` check) — skip it here too, or `JSON.stringify(null)`
+    // ("null") would end up as a literal `?v.<k>=null` on the URL.
+    if (dpVars[k] !== undefined && dpVars[k] !== null && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
   }
   for (const [col, p] of Object.entries(dpPeriodUrl)) {
     for (const [k, v] of periodUrlParams(p.prefix, dpVars[col], p.def)) out.push(["v." + k, v]);
@@ -8607,21 +8626,87 @@ function renderDateRangePicker(np) {
   const arrow = document.createElement("span");
   arrow.textContent = "→";
   arrow.className = "daterange-arrow";
+  // #556 nit (review-582): a message for the from>to case and for why
+  // Apply is disabled — `role=status`/`aria-live` so it's announced
+  // without moving focus.
+  const hint = document.createElement("span");
+  hint.className = "served-nav-hint";
+  hint.setAttribute("role", "status");
+  hint.setAttribute("aria-live", "polite");
+  // `f`/`t` is `null` for "clear" (both sides) — `clamp_daterange_values`
+  // (duckext/src/serve.rs) treats a NULL path_vars value as "no value",
+  // skipping both the calendar-date check and the min/max clamp, so this
+  // is the one legal way to get back to an unfiltered dashboard once a
+  // window has been set (there's no sentinel date for "unset").
   const setVars = async (f, t) => {
     if (fromVar in dpVarDefault) dpVars[fromVar] = f;
     else dpXf[fromVar] = f;
     if (toVar in dpVarDefault) dpVars[toVar] = t;
     else dpXf[toVar] = t;
-    await runSql(`SET VARIABLE ${fromVar} = '${f.replace(/'/g, "''")}'`);
-    await runSql(`SET VARIABLE ${toVar} = '${t.replace(/'/g, "''")}'`);
+    // `NULL::VARCHAR`, not a bare `NULL` — DuckDB gives an untyped `SET
+    // VARIABLE x = NULL` the default INTEGER type, which then breaks any
+    // `coalesce(getvariable(x), '…')::VARCHAR` the dashboard does (the
+    // same fix `clamp_daterange_values`, duckext/src/serve.rs, applies
+    // server-side for a served page — this is the local/`--site` path).
+    const lit = (v) => (v == null ? "NULL::VARCHAR" : `'${v.replace(/'/g, "''")}'`);
+    await runSql(`SET VARIABLE ${fromVar} = ${lit(f)}`);
+    await runSql(`SET VARIABLE ${toVar} = ${lit(t)}`);
     run(false);
   };
   const apply = document.createElement("button");
   apply.type = "button";
   apply.className = "served-nav-apply";
   apply.textContent = "Apply";
-  apply.onclick = () => from.value && to.value && setVars(from.value, to.value);
-  wrap.append(cap, from, arrow, to, apply);
+  // #556 nit (review-582): Apply used to do nothing, silently, when only
+  // one input had a value. With only one side filled, the other side now
+  // falls back to the picker's own bound (`np.min`/`np.max`, the same
+  // full range a "clear"/"all" preset would use) when the picker has one
+  // — i.e. "from the earliest/latest available date". A plain two-input
+  // picker with no `sql` has no such bound to fall back on, so Apply
+  // stays disabled with a hint until both sides are filled. The server
+  // re-checks `from <= to` and re-clamps regardless — this is UX only.
+  const updateApplyState = () => {
+    hint.textContent = "";
+    const f = from.value,
+      t = to.value;
+    if (!f && !t) {
+      apply.disabled = true;
+      apply.title = "Pick a start and end date.";
+    } else if ((!f && !np.min) || (!t && !np.max)) {
+      apply.disabled = true;
+      apply.title = "This picker has no stored range to fill in the other date — pick both.";
+    } else {
+      apply.disabled = false;
+      apply.title = f && t ? "" : "The empty side uses the full available range.";
+    }
+  };
+  from.addEventListener("input", updateApplyState);
+  to.addEventListener("input", updateApplyState);
+  apply.onclick = () => {
+    const f = from.value || np.min || null;
+    const t = to.value || np.max || null;
+    if (!f || !t) return; // updateApplyState already disables this case
+    if (f > t) {
+      // ISO `YYYY-MM-DD` strings compare lexicographically in date order.
+      hint.textContent = "Start can't be after end.";
+      return;
+    }
+    hint.textContent = "";
+    setVars(f, t);
+  };
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "served-nav-clear";
+  clear.textContent = "Clear";
+  clear.title = "Clear the " + (np.label || "time window") + " filter";
+  clear.onclick = () => {
+    from.value = "";
+    to.value = "";
+    updateApplyState();
+    setVars(null, null);
+  };
+  updateApplyState();
+  wrap.append(cap, from, arrow, to, apply, clear, hint);
   if (Array.isArray(np.presets) && np.presets.length) {
     const bar = document.createElement("span");
     bar.className = "served-nav-presets";
@@ -8634,6 +8719,7 @@ function renderDateRangePicker(np) {
       btn.onclick = () => {
         from.value = p.from;
         to.value = p.to;
+        updateApplyState();
         setVars(p.from, p.to);
       };
       bar.appendChild(btn);

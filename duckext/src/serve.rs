@@ -3904,10 +3904,20 @@ fn clamp_daterange_values(
         };
         let mut days: [Option<i64>; 2] = [None, None];
         for (i, name) in names.iter().enumerate() {
-            let Some((_, lit)) = vars.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) else {
+            let Some(idx) = vars.iter().position(|(n, _)| n.eq_ignore_ascii_case(name)) else {
                 continue;
             };
-            let Some(text) = literal_text(lit) else {
+            let Some(text) = literal_text(&vars[idx].1) else {
+                // #556 nit (review-582): a NULL path_vars value ("no
+                // value" — see the fn doc above) has to be retyped as
+                // VARCHAR here, not left as the bare `NULL` a viewer or
+                // the nav picker's own "Clear" sent — DuckDB gives a bare
+                // `SET VARIABLE x = NULL` the default INTEGER type, and
+                // every dashboard reading a daterange var does
+                // `coalesce(getvariable(x), '…')::VARCHAR`, which then
+                // 400s with "Could not convert string '…' to INT32"
+                // instead of ever reaching the author's own SQL.
+                vars[idx].1 = "NULL::VARCHAR".to_string();
                 continue;
             };
             days[i] = Some(parse_iso_date(text).ok_or_else(|| {
@@ -6717,6 +6727,53 @@ mod tests {
         // A var this picker doesn't own is left alone.
         let mut vars = vec![("other".to_string(), "'garbage'".to_string())];
         assert!(clamp_daterange_values(&np, &snap, &mut vars).is_ok());
+    }
+
+    /// #556 nit (review-582): a NULL value (the nav picker's own "Clear",
+    /// or any viewer/credential value that's just NULL) is "no value" —
+    /// skipped by the date check and the clamp, same as before — but is
+    /// rewritten to `NULL::VARCHAR`, not left as the bare `NULL` it came
+    /// in as. A bare `SET VARIABLE x = NULL` gives DuckDB's own default
+    /// (INTEGER) type, and every dashboard reading a daterange var does
+    /// `coalesce(getvariable(x), '…')::VARCHAR` — untyped, that 400s with
+    /// a DuckDB conversion error instead of ever reaching the author's
+    /// SQL (caught by an actual browser round trip through the "Clear"
+    /// control, not by this unit test alone — see scripts/served-e2e.mjs).
+    #[test]
+    fn clamp_daterange_values_retypes_a_null_to_varchar() {
+        let np = vec![NavPicker::DateRange {
+            vars: ["view_from".to_string(), "view_to".to_string()],
+            sql: Some("SELECT 1,2".to_string()),
+            presets: Vec::new(),
+            label: None,
+        }];
+        let min = parse_iso_date("2026-01-01").unwrap();
+        let max = parse_iso_date("2026-01-31").unwrap();
+        let snap = vec![PickerSnapshot::DateRange {
+            min: Some(min),
+            max: Some(max),
+            presets: Vec::new(),
+        }];
+
+        // Both NULL ("Clear"): both retyped, no date/from<=to check applies.
+        let mut vars = vec![
+            ("view_from".to_string(), "NULL".to_string()),
+            ("view_to".to_string(), "NULL".to_string()),
+        ];
+        clamp_daterange_values(&np, &snap, &mut vars).unwrap();
+        assert_eq!(vars[0].1, "NULL::VARCHAR");
+        assert_eq!(vars[1].1, "NULL::VARCHAR");
+
+        // One NULL, one a real date: the NULL side is retyped, the date
+        // side is checked/clamped as usual, and `from <= to` is skipped
+        // (only one side present).
+        let mut vars = vec![
+            ("view_from".to_string(), "NULL".to_string()),
+            ("view_to".to_string(), "'2025-06-01'".to_string()),
+        ];
+        clamp_daterange_values(&np, &snap, &mut vars).unwrap();
+        assert_eq!(vars[0].1, "NULL::VARCHAR");
+        assert_eq!(vars[1].1, "'2026-01-01'"); // clamped up to min
     }
 
     /// #407 part 3: [`nav_picker_rows_to_options`] — the pure row-to-option
