@@ -21,7 +21,7 @@
 | Inputs | `::DROPDOWN` (a searchable combobox above ~50 options, like `::MULTISELECT`; `'search'`/`'native'::DROPDOWN_STYLE` overrides) · `::MULTISELECT` (a list) · `::BUTTONS` (segmented, ≤ ~5 options) · `::TOGGLE` (a BOOLEAN; value = default) · `::NUMBER` · `::DATE` · `::TEXT` · `::DATERANGE` (two columns → from / to) · `::PERIOD` (presets + grain + comparison) · `::HINT` · `::OPTION_LABEL` (an option's shown text; the value stays the variable's) |
 | Recording a viewer's answers (#517) | `'Check my answers' AS quiz_1::SUBMIT, 'q1, note'::SUBMIT_VARS, 'Saved.'::SUBMIT_DONE` — a button; its statement runs as the viewer (one row = available, zero = hidden, several = error); `SUBMIT_VARS` names input-declared variables (not `::DATERANGE`/`::PERIOD`) to record. **Requires a server with `options.state`; that server-side support has not shipped yet (#517) — the role lints clean today but the button has nowhere to post to.** |
 | Strips under a chart | right after a chart with a numeric / date x: `day::XAXIS, 'Promotions'::TRACK, name::LABEL` (ticks) · `… , detector::YAXIS, '#d64545'-style ::CATEGORY, 1::HEATMAP, 'Alarms'::TRACK` (lanes of tiles) · `day::XAXIS, price::STEP, 'Price'::TRACK` (sparkline) — same plot area and x window as the chart; a click on a strip mark shades its span on the chart |
-| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `cond::SHOW_IF` (the next panel, or `::GROUP` box, shows only while `cond` is `TRUE` — not access control) · `'Name' AS id ::GUIDE_STEP, cond ::GATE, 'msg' ::GATE_MESSAGE` (`::TUTORIAL_STEP`/`::WIZARD_STEP`; a guided sequence of steps with Back/Next and "Step n of N"; `::GATE` holds Next until `cond` is `TRUE` — not access control; `id` names the step variable, URL `?v.<id>=n`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
+| Layout and chrome | `n::COLUMNS` · `n::COL` (`::SPAN`, `::WIDTH`; of 12) · `n::HEIGHT` (px) · `'Box'::GROUP` … `1::ENDGROUP` · `'Name'::TAB` (`::PAGE`) / `::SUBTAB` · `::VIEW` / `::ENDVIEW` (alternative views of one panel — a segmented switcher over consecutive `::VIEW` sections; `'Name' AS id ::VIEW`, URL `?view.<id>=<label>`) · `'header'::VIEW_PLACEMENT` right before a `::VIEW` group's first marker (opt-in: the switcher moves into the card's title row — only when every alternative is exactly one panel) · `'fit'::FIT` (after a `::TAB` / `::SUBTAB` / `::VIEW`: that section fills the window, no page scroll; URL `?fit=1` / `?fit=0`) · `cond::SHOW_IF` (the next panel, or `::GROUP` box, shows only while `cond` is `TRUE` — not access control) · `'Name' AS id ::GUIDE_STEP, cond ::GATE, 'msg' ::GATE_MESSAGE` (`::TUTORIAL_STEP`/`::WIZARD_STEP`; a guided sequence of steps with Back/Next and "Step n of N"; `::GATE` holds Next until `cond` is `TRUE` — not access control; `id` names the step variable, URL `?v.<id>=n`) · `'Heading'::SECTION` · `::PLACEHOLDER` · `n::RELOAD` · `::HEADER_IMAGE` · `::FOOTER_LINK` |
 | Theme, branding, locale | `'dark'::THEME` (`light` `dark` `print` `colorblind` `high-contrast`, a stack `'acme+dark'`, or JSON: `content::THEME FROM read_text('acme.json')`) · `'de-DE'::LOCALE` (`en-US` `en-GB` `en-IE` (English, €) `de-DE` `fr-FR`) · `'Title'::DASHBOARD_TITLE` · `'ACME'::BRAND` · `'logo.svg'::LOGO` · `'favicon.svg'::FAVICON` · `max(loaded_at)::ASOF, 'stale=24h'` (a "Data as of …" chip, amber when stale — give every locked / exported dashboard one; a plain `DATE` reads as a calendar day, with no time and no time-zone shift) |
 
 A combo chart is several measure columns: `week::XAXIS, sales::BARCHART, revenue / 50::LINECHART`. A `::ROLE` may follow an `AS` alias: for a measure the alias is the legend name (else the bare column name), for an input it is the variable name, in a table the header. Without a `::CATEGORY`, several columns of the *same* chart kind (`events::LINECHART, failures::LINECHART`; `events::BARCHART, failures::BARCHART`) get a real legend named by column; a *mixed* overlay (bars + a different-kind line/area) instead keeps the base in the brand colour with no legend, each overlay just a distinct palette colour.
@@ -335,6 +335,20 @@ The three alternatives share one segmented switcher (button labels "Lines" /
 runs — switching views re-runs just that one, never all three up front. The
 group's id for the URL (`?view.layout=Bars`) comes from the `layout` alias on
 its first marker.
+
+**Switcher placement (opt-in, `::VIEW_PLACEMENT`)**: by default the switcher
+draws its own row above the card (`'row'`, same as leaving it out). Put
+`SELECT 'header'::VIEW_PLACEMENT;` directly before the group's first `::VIEW`
+marker (it can stack after `::COL`, like any other next-panel modifier) to
+move it into the card's own title row instead, right-aligned and compact —
+only when every alternative is exactly **one** panel (the three-alternative
+example above would not qualify: each alternative is one panel there too, so
+it does). With more than one panel in any alternative, `--check` warns
+(`view-placement/not-single-panel`) and it falls back to `'row'`. The title
+wraps before the buttons do; below a minimum card width the buttons fold
+into a labelled `<select>`. Static output (`--svg`, the CLI, the script-free
+served page, ⤓ HTML export) is unchanged either way — it always shows just
+the default alternative, with no switcher at all.
 
 ### Fit to screen (`::FIT`)
 

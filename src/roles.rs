@@ -395,6 +395,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`)"),
     e("ENDVIEW", &["END_VIEW"], R::ViewEnd, "layout", false,
       "close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it)"),
+    e("VIEW_PLACEMENT", &[], R::ViewPlacement, "layout", false,
+      "a ::VIEW group's switcher placement: 'row' (default, its own row above the card) or \
+       'header' (right-aligned, compact, in the card's title row — folds into a dropdown \
+       below a minimum card width; only when every alternative is exactly one panel, else \
+       --check warns and it falls back to 'row'); set directly before the group's first \
+       ::VIEW marker, like ::COL/::SPAN"),
     e("FIT", &["FIT_SCREEN"], R::Fit, "layout", false,
       "this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide)"),
     e("PLACEHOLDER", &[], R::Placeholder, "layout", false, "an empty grid cell"),
@@ -560,7 +566,7 @@ pub fn roles_json() -> String {
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
-                | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
+                | Role::ViewPlacement | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -682,6 +688,7 @@ mod tests {
             "DRILL",
             "VIEW",
             "ENDVIEW",
+            "VIEW_PLACEMENT",
             "FIT",
             "SHOW_IF",
             "GUIDE_STEP",
@@ -855,6 +862,7 @@ mod tests {
             Role::SubTab,
             Role::View,
             Role::ViewEnd,
+            Role::ViewPlacement,
             Role::Fit,
             Role::Size,
             Role::YFormat,
@@ -1002,6 +1010,7 @@ mod tests {
                 | Role::SubTab
                 | Role::View
                 | Role::ViewEnd
+                | Role::ViewPlacement
                 | Role::Fit
                 | Role::Size
                 | Role::YFormat
