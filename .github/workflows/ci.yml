@@ -703,6 +703,17 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/mini-charts-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/view-placement-e2e.mjs (#534): opt-in 'header'::VIEW_PLACEMENT
+      # moves a ::VIEW group's switcher into the shown card's own title row
+      # (right-aligned, the title wrapping first) instead of its own row
+      # above it — only when every alternative is one panel, else it stays
+      # 'row' untouched; below a minimum card width it folds into a
+      # labelled <select>; arrow-key navigation and focus-on-swap still
+      # work. Reuses the :8947 server and Chromium above.
+      - name: ::VIEW_PLACEMENT header e2e (#534)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-placement-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |

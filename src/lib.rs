@@ -410,6 +410,15 @@ pub enum Role {
     /// Layout: `::ENDVIEW` closes the current `::VIEW` group (`::TAB`,
     /// `::SUBTAB` and `::SECTION` also close it).
     ViewEnd,
+    /// Layout: a `::VIEW` group's switcher placement (#534) — `'row'`
+    /// (default: its own row above the card) or `'header'` (right-aligned
+    /// in the card's title row, compact, folding into a `<select>` below a
+    /// minimum card width — only when every alternative of the group is
+    /// exactly one panel; otherwise `--check` warns and it falls back to
+    /// `'row'`). Set directly before the group's first `::VIEW` marker,
+    /// like `::COL`/`::SPAN` setting a pending value for it. Browser only —
+    /// static renderers skip it (the switcher itself never shows there).
+    ViewPlacement,
     /// Layout: `::FIT` makes the enclosing `::TAB` / `::SUBTAB` / `::VIEW`
     /// section (with no tabs at all: the whole dashboard) fit the browser
     /// window while it is the one shown — its rows of panels scale to fill

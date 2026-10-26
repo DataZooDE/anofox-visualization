@@ -512,6 +512,22 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 }
 @media print{.dp-viewbar{display:none}}
 
+/* ---- ::VIEW_PLACEMENT 'header': the switcher in the card's title row
+   instead of its own row above it (#534). placeViewHeaderBar() moves the
+   same bar (JS) into whichever alternative is shown; this only styles it
+   once it is there — the title text wraps (its anonymous flex item
+   shrinks first; the bar never does) before the buttons do. */
+.panel-title:has(.dp-viewbar){display:flex;flex-wrap:wrap;align-items:baseline;gap:.3rem .6rem}
+.panel-title .dp-viewbar{flex:0 0 auto;align-self:center;margin-left:auto}
+.panel-title .dp-seg{padding:1px;gap:1px}
+.panel-title .dp-seg button{padding:.28rem .55rem;font-size:.76rem}
+/* below a minimum card width: segmented buttons fold into one <select> —
+   a child of the bar itself, so it travels with it when the card swaps. */
+.dp-viewbar-select{display:none;font:inherit;font-size:.78rem;font-weight:600;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:8px;padding:.3rem .5rem;cursor:pointer;max-width:100%}
+.dp-viewbar.dp-viewbar-folded{border:0;background:none;box-shadow:none;padding:0;gap:0}
+.dp-viewbar.dp-viewbar-folded>[role="tab"]{display:none}
+.dp-viewbar.dp-viewbar-folded>.dp-viewbar-select{display:inline-block}
+
 /* ---- ::GUIDE_STEP: guided sequences (onboarding, tutorials) (#516) ---- */
 .dp-steps{grid-column:1/-1;margin:0;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius);padding:1.1rem 1.3rem 1.3rem;box-shadow:var(--ax-shadow);display:flex;flex-direction:column;gap:.9rem}
 .dp-step-head{display:flex;flex-wrap:wrap;align-items:center;gap:.9rem;justify-content:space-between}

@@ -226,6 +226,7 @@ terminal.
 | `::GATE_MESSAGE` | `::GATE_HINT` | layout | on a ::GUIDE_STEP: why Next is disabled |
 | `::VIEW` | `::ALT_VIEW` | layout | one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`) |
 | `::ENDVIEW` | `::END_VIEW` | layout | close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it) |
+| `::VIEW_PLACEMENT` |  | layout | a ::VIEW group's switcher placement: 'row' (default, its own row above the card) or 'header' (right-aligned, compact, in the card's title row — folds into a dropdown below a minimum card width; only when every alternative is exactly one panel, else --check warns and it falls back to 'row'); set directly before the group's first ::VIEW marker, like ::COL/::SPAN |
 | `::FIT` | `::FIT_SCREEN` | layout | this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide) |
 | `::PLACEHOLDER` |  | layout | an empty grid cell |
 | `::TRACK` | `::STRIP_BELOW`, `::STRIP_UNDER` | layout | a thin panel under the previous chart, sharing its x axis (value = its name): ticks, ::HEATMAP tiles per ::YAXIS lane, or a line / bar |

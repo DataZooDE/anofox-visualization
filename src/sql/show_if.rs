@@ -56,8 +56,11 @@ fn is_marker(roles: &[(usize, Role)]) -> bool {
 }
 
 /// A next-panel modifier (decision 3): a statement whose roles are entirely
-/// drawn from the modifier set, and carries at least one.
-fn is_modifier(roles: &[(usize, Role)]) -> bool {
+/// drawn from the modifier set, and carries at least one. `pub(crate)`:
+/// [`super::views::scan`] reuses it to back up over a pending `::COL`/
+/// `::VIEW_PLACEMENT` directly before a `::VIEW` group's first marker
+/// (#534), the same way it backs up over a modifier before a `::SHOW_IF`.
+pub(crate) fn is_modifier(roles: &[(usize, Role)]) -> bool {
     if crate::roles::is_table_thresholds(roles) {
         return true;
     }
@@ -72,6 +75,7 @@ fn is_modifier(roles: &[(usize, Role)]) -> bool {
                     | Role::TableOpt(_)
                     | Role::SelectAs
                     | Role::Drill
+                    | Role::ViewPlacement
             )
         })
 }
@@ -103,6 +107,7 @@ fn bad_target(p: &Panel) -> bool {
                 | Role::SubTab
                 | Role::View
                 | Role::ViewEnd
+                | Role::ViewPlacement
                 | Role::GroupEnd
                 | Role::Fit
                 | Role::Columns

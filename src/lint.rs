@@ -63,7 +63,12 @@ pub struct Diagnostic {
     /// `view/unbalanced-group` (errors) | `view/lone` | `view/computed-label` |
     /// `view/mixed-names` | `view/empty` | `view/open-ended` |
     /// `view/stray-end` (warnings) | `view/input-inside` | `view/unnamed`
-    /// (notes).
+    /// (notes). `::VIEW_PLACEMENT` ([`view_diags`], #534):
+    /// `view-placement/unknown-value` (an error: not `'row'`/`'header'`) |
+    /// `view-placement/not-single-panel` | `view-placement/ambiguous` |
+    /// `view-placement/orphan` (warnings: each falls back to `'row'`) |
+    /// `view-placement/computed-value` (a warning: can't be checked here,
+    /// still works at render time, like `view/computed-label`).
     /// `::FIT` ([`fit_diags`], #400, warnings): `layout/fit-ambiguous` (before
     /// the first ::TAB of a tabbed dashboard, a second ::FIT for one section,
     /// or cast beside a panel's columns) | `layout/fit-too-many` (more rows
@@ -2983,6 +2988,46 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
         });
     }
 
+    // `::VIEW_PLACEMENT` (#534), over the whole plan: a statement combining
+    // it with other roles (`view-placement/ambiguous`, like `::FIT`'s own
+    // check), or one `scan` never attached to any group as its
+    // `placement_stmt` (`view-placement/orphan`) — not directly before a
+    // `::VIEW` group's first marker, so it never reaches one. Both fall
+    // back to `'row'`.
+    let consumed: Vec<usize> = scan
+        .groups
+        .iter()
+        .filter_map(|g| g.placement_stmt)
+        .collect();
+    for (i, p) in plan.iter().enumerate() {
+        if p.setup || !p.roles.iter().any(|(_, r)| *r == Role::ViewPlacement) {
+            continue;
+        }
+        if p.roles.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "view-placement/ambiguous",
+                message: "::VIEW_PLACEMENT is a directive of its own — `SELECT 'header'::VIEW_PLACEMENT;` \
+                          directly before the ::VIEW group's first marker — not a column beside a \
+                          panel's own columns; this one is ignored, the group stays 'row'"
+                    .into(),
+                sql: short(i),
+            });
+        } else if !consumed.contains(&i) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "view-placement/orphan",
+                message: "this ::VIEW_PLACEMENT has no ::VIEW group to set — it needs to sit \
+                          directly before the group's first ::VIEW marker (setup and other \
+                          next-panel modifiers, like ::COL, may sit between them)"
+                    .into(),
+                sql: short(i),
+            });
+        }
+    }
+
     let mut seen_ids: Vec<(String, usize)> = Vec::new();
     for g in &scan.groups {
         let marker_stmt = g.markers[0] + 1;
@@ -2996,6 +3041,41 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                     .into(),
                 sql: short(g.markers[0]),
             });
+        }
+        if let Some(stmt) = g.placement_stmt {
+            match &g.placement_requested {
+                None => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: stmt + 1,
+                    code: "view-placement/computed-value",
+                    message: "this ::VIEW_PLACEMENT's value is a computed expression, not a \
+                              plain string literal — whether it ends up 'header' or 'row' can't \
+                              be checked here"
+                        .into(),
+                    sql: short(stmt),
+                }),
+                Some(v) if v != "row" && v != "header" => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: stmt + 1,
+                    code: "view-placement/unknown-value",
+                    message: format!(
+                        "::VIEW_PLACEMENT's value must be 'row' or 'header', not '{v}' — it \
+                         falls back to 'row'"
+                    ),
+                    sql: short(stmt),
+                }),
+                Some(v) if v == "header" && !g.single_panel => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: stmt + 1,
+                    code: "view-placement/not-single-panel",
+                    message: "'header' placement needs every alternative of this ::VIEW group \
+                              to be exactly one panel — this group has an alternative with more \
+                              than one, or none at all, so it falls back to 'row'"
+                        .into(),
+                    sql: short(stmt),
+                }),
+                _ => {}
+            }
         }
         if g.unbalanced_group {
             diags.push(Diagnostic {
@@ -7845,6 +7925,73 @@ mod design_tests {
             |_q| Ok(vec![]),
         );
         assert!(!has(&d2, "view/unnamed"), "{d2:?}");
+    }
+
+    #[test]
+    fn view_placement_header_is_clean_when_every_alt_is_one_panel() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(!has(&d, "view-placement/not-single-panel"), "{d:?}");
+        assert!(!has(&d, "view-placement/unknown-value"), "{d:?}");
+        assert!(!has(&d, "view-placement/orphan"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_not_single_panel_warns_and_still_renders() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\n\
+             SELECT a::XAXIS, b::BARCHART FROM t;\nSELECT a::XAXIS, c::LINECHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/not-single-panel"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_unknown_value_errors() {
+        let d = check(
+            "SELECT 'sidebar'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/unknown-value"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_computed_value_warns() {
+        let d = check(
+            "SELECT lower('HEADER')::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/computed-value"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_ambiguous_warns() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT, a::XAXIS FROM t;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/ambiguous"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_orphan_warns() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/orphan"), "{d:?}");
     }
 
     #[test]

@@ -20,7 +20,7 @@ use wasm_bindgen::prelude::*;
 ///    "contract": null | {"macro": name, "rows": k, "args": k+1,
 ///                        "groups": [[colIdx, name], …]},
 ///    "view": null | {"group": idx, "alt": n, "marker": bool, "id": string,
-///                     "label": string?},
+///                     "label": string?, "placement": "row"|"header"},
 ///    "show_if": [condStmtIdx, …],
 ///    "step": null | {"group": idx, "index": n, "marker": bool,
 ///                     "var": string, "label": string?} }]`
@@ -70,6 +70,7 @@ fn plan_json(script: &str) -> String {
                     "marker": v.marker,
                     "id": v.id,
                     "label": v.label,
+                    "placement": v.placement.as_str(),
                 })),
                 "show_if": p.show_if,
                 "step": p.step.as_ref().map(|s| serde_json::json!({
