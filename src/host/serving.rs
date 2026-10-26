@@ -1083,6 +1083,14 @@ pub struct DashboardMeta {
     /// `dp-as-tables` remembered state) is independent of this and still
     /// applies even when the bar is hidden.
     pub astables: bool,
+    /// `-- @markdown_style <plain|card|callout>` (#536): the dashboard's own
+    /// default `::MARKDOWN_STYLE`, used by every `::MARKDOWN` panel that sets
+    /// no `::MARKDOWN_STYLE` of its own (and carries no `::CALLOUT`, which
+    /// always draws 'callout'). `None` without the header, or with an
+    /// unrecognized value (lint warns: `header/bad-markdown-style`) — every
+    /// reader then falls back to 'callout'. See
+    /// [`crate::roles::resolve_markdown_style`].
+    pub markdown_style: Option<String>,
     /// `-- @tour <id> [title]` blocks (#518 PR B), in file order. See
     /// [`parse_dashboard_meta`] for the syntax and [`Tour`] for the fields.
     pub tours: Vec<Tour>,
@@ -1370,6 +1378,10 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
                 // an unrecognized value doesn't turn the bar on (lint warns)
                 _ => {}
             }
+        } else if let Some(r) = header_value(l, "markdown_style") {
+            // an unrecognized value leaves it unset — every reader then
+            // falls back to 'callout' (lint warns: header/bad-markdown-style)
+            m.markdown_style = crate::roles::markdown_style_of(r).map(str::to_string);
         } else if let Some(r) = header_value(l, "tags") {
             for t in split_tags(r) {
                 if m.tags.len() < MAX_TAGS && !m.tags.contains(&t) {
@@ -2233,6 +2245,33 @@ mod tests {
             !parse_dashboard_meta("s", "-- @astables on\n-- @astables off\nSELECT 1;").astables
         );
         assert!(parse_dashboard_meta("s", "-- @astables off\n-- @astables on\nSELECT 1;").astables);
+        // #536: the dashboard's own ::MARKDOWN_STYLE default; a bad/missing
+        // value is `None`, same as not setting it; a later one wins.
+        assert_eq!(parse_dashboard_meta("s", "SELECT 1;").markdown_style, None);
+        assert_eq!(
+            parse_dashboard_meta("s", "-- @markdown_style plain\nSELECT 1;").markdown_style,
+            Some("plain".to_string())
+        );
+        assert_eq!(
+            parse_dashboard_meta("s", "-- @markdown_style PLAIN\nSELECT 1;").markdown_style,
+            Some("plain".to_string())
+        );
+        assert_eq!(
+            parse_dashboard_meta("s", "-- @markdown_style\nSELECT 1;").markdown_style,
+            None
+        );
+        assert_eq!(
+            parse_dashboard_meta("s", "-- @markdown_style boxed\nSELECT 1;").markdown_style,
+            None
+        );
+        assert_eq!(
+            parse_dashboard_meta(
+                "s",
+                "-- @markdown_style plain\n-- @markdown_style card\nSELECT 1;"
+            )
+            .markdown_style,
+            Some("card".to_string())
+        );
         let m = parse_dashboard_meta(
             "s",
             "-- @description Which stores sell\n-- @description  the most?\n-- @description\nSELECT 1;",
