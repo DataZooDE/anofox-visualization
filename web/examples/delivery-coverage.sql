@@ -16,7 +16,8 @@
 -- regions are underserved? Asked by the head of sales logistics, who plans
 -- where the next depot goes.
 --
--- Tabs: Coverage · Customers · Clusters · Flows · On time · Underserved.
+-- Tabs: Coverage · Customers · Clusters · Flows · On time (map: all 12
+-- weeks / week by week, a ::FRAME time map, #149) · Underserved.
 -- Natively, run from web/:  dashboard --check examples/delivery-coverage.sql
 
 SELECT 'Where do our deliveries and customers cluster, and which regions are underserved?'::DASHBOARD_TITLE;
@@ -172,12 +173,28 @@ FROM dc_deliveries v JOIN dc_dcs k USING (dc) JOIN dc_districts d USING (ags) GR
 -- ── 5 · On time ──────────────────────────────────────────────────────────────
 SELECT 'On time'::TAB;
 SELECT 6::COL;
+SELECT 'All 12 weeks' AS ontime ::VIEW;
 SELECT 520::HEIGHT;
 SELECT state ::REGION, round(100 * sum(on_time * deliveries) / sum(deliveries), 1) AS "On time" ::BARCHART,
        ' %'::YFORMAT, '0,80,85,90,100'::CLASSES, ''::DATALABELS,
        'Deliveries far from a DC arrive late more often'::TITLE,
        'Share of deliveries into the state that arrived inside the delivery window, last 12 weeks. Classes: under 80 %, 80–85 %, 85–90 %, 90 % and more.'::INFO
 FROM dc_cover WHERE deliveries > 0 GROUP BY state ORDER BY state;
+
+-- #149 M2e-A: a `::FRAME` time map — one result holds every week; shared
+-- classes keep the colours comparable from week to week. Saarland's weekly
+-- share swings from 0 % to 100 % (small weekly volumes), while Hamburg
+-- stays in the mid-90s every single week — a pattern the 12-week
+-- aggregate map above can't show.
+SELECT 'Week by week' AS ontime ::VIEW;
+SELECT 520::HEIGHT;
+SELECT d.state ::REGION, v.week AS "Week" ::FRAME,
+       round(100 * sum(v.on_time) / sum(v.deliveries), 1) AS "On time" ::BARCHART, ' %'::YFORMAT,
+       '0,80,85,90,100'::CLASSES,
+       'Saarland swings week to week; Hamburg stays steady near 97 %'::TITLE,
+       'On-time share per state and week; the classes are the same in every week.'::INFO
+FROM dc_deliveries v JOIN dc_districts d USING (ags) GROUP BY ALL ORDER BY v.week, d.state;
+SELECT 1::ENDVIEW;
 
 SELECT 6::COL;
 SELECT 520::HEIGHT;

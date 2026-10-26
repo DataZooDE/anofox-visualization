@@ -585,6 +585,28 @@ Settled against `docs/plans/plan-maps-m2.md` §1. The owner went with every reco
 | D17 | Supply-chain flow tab (M2b). | Fictional sites (Supplier Chemnitz, Factory Stuttgart, DC Kassel, Retailer Hamburg); goods downstream and orders upstream (`'flow'::LINESTYLE`), width = peak weekly quantity, so the bullwhip shows as order arcs widening upstream. |
 | D18 | Merge order. | Sequential: M2a → b → c → d → e → f. All touch `src/map/mod.rs`, `roles.rs`, the DOCS role table and SKILL.md — rebase after each merge. |
 
+**Re-planned 2026-10-26** (`plan-maps-m2ef.md`, against `master` once geom_sf
+replaced the hand-written map writer, #543): D12's export part and the
+`data-fv`/per-element-tuple design (D1's own M2e row above) were dropped —
+no own SVG output any more, so the browser can't hand-rewrite fills/radii
+in it. The replacement: one `GGPlot` rendered on demand per frame (Rust
+builds a *frame view*, scales shared across every frame), with the browser
+re-rendering through the panel's own `renderChart` and a keyed tween
+(extended to colours) — not a second renderer. M2e is split into M2e-A
+(choropleths/symbols, merged) and M2e-B (flows/hexbin/bivariate); M2f into
+M2f-A (the player) and M2f-B (export-embedded frames). New decisions:
+
+| # | Decision | Taken |
+|---|---|---|
+| D19 | Which frame is shown, in the SVG itself. | `.subtitle("{frame column name}: {label}")` — `--svg`, PNG, PDF and the export always say which frame they show. |
+| D20 | What a frame view contains. | Every distinct feature once (geometry from its first row, first-appearance order); every other column's value from the feature's row in frame k, else no data (areas: hatch; points/symbols: not drawn). Extent/fit computed over every feature, so the map never moves between frames. |
+| D21 | Shared scales. | The measure domain/classes, a category's levels, a `::SIZE` symbol's domain and the classed legend's widest per-class count — all computed once over every frame and forced onto each frame's own render (`ScaleFillBinned::na_key(Always)`/`count_reserve`, `ScaleSizeContinuous::with_limits`, sipemu/ggplot-rs#269-271). |
+| D22 | Feature key (`data-x`, joins frames for the browser's keyed tween). | `::REGION`: normalised code. `::LAT`/`::LON`: `"{lat:.5},{lon:.5}"`. WKT: a hash of the geometry text. `::XAXIS` is ignored on a frame map (lint `map/frame-xaxis`). |
+| D23 | HTML export under `::FRAME`. | M2f-A: shows the on-screen frame (named in its subtitle), the player bar replaced by a one-line note. M2f-B (separate PR): embeds every frame's pre-rendered SVG when ≤ 3 MB per map, with a tiny swap-only player. |
+| D24 | Frame steps and tween (M2f-A). | Every step tweens (300 ms) unless reduced motion: fills/strokes interpolate in RGB, radii/stroke-widths interpolate, cells that appear/disappear fade. No `::TRANSITION` needed. |
+| D25 | Where `::FRAME` applies. | Maps only (M2e/M2e-B); elsewhere it's ignored with lint `frame/not-a-map`. The generic bar/line frame player (M3e) reuses the same render-context `frame` key. |
+| D26 | WKT with frames. | Allowed, but it repeats per frame in the result; a note (`map/frame-wkt`) above 5 MB total suggests a `::REGION` code or a joined geometry table instead. |
+
 This replaces the §9 "M2: types" and "M3" rows:
 
 | PR | Scope | Size | Tests / exit |
