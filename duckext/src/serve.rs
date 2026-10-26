@@ -4230,12 +4230,30 @@ fn state_trainer_view(
 /// generation always see the same `viewer_state`. `None` for a dashboard
 /// [`state_trainer_view`] says isn't state-enabled (the key is unaffected,
 /// same as before #517 S3).
+///
+/// `Arc<Vec<Arc<Record>>>`, not `Vec<Record>` (#548 item 2; review of #599
+/// SF1/SF2: `Arc<Record>` elements, not owned `Record`s — the trainer
+/// branch is [`anofox_visualization::host::state::Store::snapshot_all`]'s
+/// own cache, and keeping a second deep copy of up to `trainer_max_rows`
+/// records' content alive in it would just move the cost this exists to
+/// avoid). Wrapping the (small, per-viewer) non-trainer branch's rows the
+/// same way keeps one return type for both — that branch pays one fresh
+/// `Arc` alloc per record, never cached, acceptable for a count that's
+/// never more than one viewer's own rows.
+///
+/// Review of #599 N3: the trainer branch's `submit.store.len()` call
+/// below, for the truncation log, takes the store's own lock every call
+/// regardless of whether `snapshot_all` just hit or missed its cache —
+/// cheap (it only reads a length), but real, so "a cache hit takes no
+/// lock on the store at all" ([`anofox_visualization::host::state::Store::
+/// snapshot_all`]'s own doc) is true of `snapshot_all` itself, not of this
+/// function as a whole.
 fn state_snapshot(
     submit: &SubmitRuntime,
     dash_id: &str,
     claims: Option<&Claims>,
     auth_method: Option<&str>,
-) -> Option<(u64, Vec<Record>)> {
+) -> Option<(u64, Arc<Vec<Arc<Record>>>)> {
     let is_trainer = state_trainer_view(&submit.opts, dash_id, claims, auth_method)?;
     Some(if is_trainer {
         let (gen, rows) = submit
@@ -4252,7 +4270,8 @@ fn state_snapshot(
         (gen, rows)
     } else {
         let user = claims.map(|c| c.user.as_str()).unwrap_or("");
-        submit.store.snapshot_for_user(user)
+        let (gen, rows) = submit.store.snapshot_for_user(user);
+        (gen, Arc::new(rows.into_iter().map(Arc::new).collect()))
     })
 }
 
@@ -4283,7 +4302,13 @@ fn state_scalar_text(v: &Value) -> String {
 /// item and the fixed `?`-placeholder count of a list's own array
 /// constructor, neither of which carries data from the request or the
 /// store.
-fn seed_viewer_state(c: &Conn, rows: &[Record]) -> Result<(), String> {
+///
+/// `&[Arc<Record>]`, not `&[Record]` (review of #599 SF1): this only ever
+/// reads fields through the `Arc` (auto-deref), so taking the trainer
+/// cache's own element type directly — rather than requiring its caller
+/// to deep-copy into owned `Record`s first — is free and removes that
+/// copy entirely, the point of the review's fix.
+fn seed_viewer_state(c: &Conn, rows: &[Arc<Record>]) -> Result<(), String> {
     for stmt in anofox_visualization::sql::viewer_state_setup_statements() {
         c.exec(stmt)?;
     }
@@ -4550,7 +4575,7 @@ fn locked_panel(
     // this viewer simply has no rows in yet) vs `None` (not state-enabled
     // at all, no viewer_state temp created) — run_panel must tell these
     // apart.
-    let state_rows: Option<Vec<Record>> = state_snap.map(|(_, rows)| rows);
+    let state_rows: Option<Arc<Vec<Arc<Record>>>> = state_snap.map(|(_, rows)| rows);
     let mut key = panel_key(&r, claims, &key_deps);
     if let Some(g) = sgen {
         key = format!("{key}/state{g}");
@@ -4572,7 +4597,7 @@ fn locked_panel(
             &r,
             &viewer_set,
             claims,
-            state_rows.as_deref(),
+            state_rows.as_deref().map(|v| v.as_slice()),
             abort,
             charge,
             warm.as_deref(),
@@ -5488,7 +5513,7 @@ fn run_panel(
     r: &sv::PanelRequest,
     viewer_set: &[String],
     claims: Option<&Claims>,
-    state_rows: Option<&[Record]>,
+    state_rows: Option<&[Arc<Record>]>,
     abort: &crate::panel_cache::Abort,
     charge: &mut Charge,
     warm_key: Option<&str>,

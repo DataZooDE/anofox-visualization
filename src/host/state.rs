@@ -25,8 +25,8 @@
 use crate::host::serving::too_broad;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 // ─────────────────────────────────────────────────────────────── options ──
 
@@ -646,7 +646,13 @@ struct StoreState {
     /// The header line verbatim, without its trailing `\n` (see
     /// [`Index::header_line`]).
     header_line: String,
-    records: Vec<Record>,
+    /// `Arc<Record>`, not `Record` (#548 item 2): every record is wrapped
+    /// once, here and in [`Index`], so [`Store::snapshot_all`]'s per-gen
+    /// rebuild only ever clones pointers (and refcounts) under this lock,
+    /// never the record's own `String`/JSON-map contents — that deep copy,
+    /// when it's still needed at all, happens in
+    /// [`Store::snapshot_all`] after the lock is released.
+    records: Vec<Arc<Record>>,
     by_user: HashMap<String, Vec<usize>>,
     next_seq: u64,
     size_bytes: u64,
@@ -680,6 +686,37 @@ pub struct Store {
     /// as a hard IO-safety violation and aborts the process over.
     #[cfg(test)]
     force_fail: AtomicBool,
+    /// #548 item 2: the last trainer "all rows" snapshot
+    /// ([`Self::snapshot_all`]) built, keyed by the `gen`/`limit` it was
+    /// built at. Append-only storage means the rows at or below a past
+    /// `gen` never change, so every later request at the same `gen` (every
+    /// panel of one trainer page load, until the next submission bumps the
+    /// global seq) gets this `Arc` cloned back to it instead of redoing
+    /// the clone. [`Self::erase_user`] clears this directly (it mutates
+    /// `records` without moving `gen`, the one way this store's content
+    /// isn't append-only) — review of #599 N1: both that clear and
+    /// [`Self::snapshot_all`]'s own (re)build run with [`Self::inner`]
+    /// held the whole time, so the two can never interleave; see
+    /// `snapshot_all`'s own doc for why that's affordable now.
+    trainer_cache: Mutex<Option<TrainerSnapshot>>,
+    /// A cheap, lock-free mirror of `next_seq.saturating_sub(1)` ([`Self::
+    /// global_seq`]), updated on every [`Self::append`]. Lets
+    /// [`Self::snapshot_all`]'s cache-*hit* path check "is the cache still
+    /// current" without ever taking [`Self::inner`]'s mutex (a *miss*
+    /// still does, to rebuild — see its own doc).
+    gen_hint: AtomicU64,
+}
+
+/// [`Store::snapshot_all`]'s cache (#548 item 2). `rows` holds `Arc<Record>`
+/// pointers, not owned `Record`s (review of #599 SF1/SF2): the whole point
+/// of caching this is to stop paying for a deep copy of up to
+/// `trainer_max_rows` records' own `String`/JSON-map content on every
+/// miss — keeping a *second* deep copy of that alive in the cache
+/// afterwards would be the same cost moved, not removed.
+struct TrainerSnapshot {
+    gen: u64,
+    limit: usize,
+    rows: Arc<Vec<Arc<Record>>>,
 }
 
 impl std::fmt::Debug for Store {
@@ -1010,6 +1047,7 @@ impl Store {
             state.size_bytes = header.len() as u64;
             state.header_line = header_body;
         }
+        let gen_hint = AtomicU64::new(state.next_seq.saturating_sub(1));
         Ok(Store {
             inner: Mutex::new(state),
             max_bytes,
@@ -1018,6 +1056,8 @@ impl Store {
             failed: AtomicBool::new(false),
             #[cfg(test)]
             force_fail: AtomicBool::new(false),
+            trainer_cache: Mutex::new(None),
+            gen_hint,
         })
     }
 
@@ -1089,8 +1129,13 @@ impl Store {
             .ok_or("state store: seq exhausted (u64::MAX reached)")?;
         let idx = st.records.len();
         st.by_user.entry(rec.user.clone()).or_default().push(idx);
+        let rec = Arc::new(rec);
         st.records.push(rec.clone());
-        Ok(rec)
+        // #548 item 2: kept in step with `next_seq` so `snapshot_all`'s
+        // cache-hit check never takes `self.inner`'s lock just to see
+        // whether a submission landed since the cache was built.
+        self.gen_hint.store(seq, Ordering::Release);
+        Ok((*rec).clone())
     }
 
     /// Rewrite the file, dropping every record whose `user` is an exact
@@ -1179,7 +1224,7 @@ impl Store {
         if self.failed.load(Ordering::SeqCst) {
             return Err("state store: unavailable (a previous write failed)".into());
         }
-        let kept: Vec<Record> = st
+        let kept: Vec<Arc<Record>> = st
             .records
             .iter()
             .filter(|r| r.user != user)
@@ -1375,6 +1420,16 @@ impl Store {
                 st.records = kept;
                 st.by_user = by_user;
                 st.size_bytes = new_size;
+                // #548 item 2: an erase changes `records` without moving
+                // `next_seq`/`gen` (the one way this store's content isn't
+                // append-only) — drop any cached snapshot rather than let a
+                // later `snapshot_all` at the same `gen` hand back erased
+                // rows. `st` (this function's own `inner` lock) is still
+                // held here, same as `snapshot_all`'s own rebuild-and-store
+                // — review of #599 N1: that's what rules out a rebuild
+                // racing this clear and re-storing the pre-erase rows,
+                // not just a best-effort ordering.
+                *self.trainer_cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
                 if let Some(w) = &warning {
                     eprintln!("[anofox-state] {w}");
                 }
@@ -1446,15 +1501,21 @@ impl Store {
         let st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         st.by_user
             .get(user)
-            .map(|idxs| idxs.iter().map(|&i| st.records[i].clone()).collect())
+            .map(|idxs| idxs.iter().map(|&i| (*st.records[i]).clone()).collect())
             .unwrap_or_default()
     }
 
-    /// Every row, newest `limit` kept (plan §5 `trainer_max_rows`).
+    /// Every row, newest `limit` kept (plan §5 `trainer_max_rows`). Not
+    /// cached (unlike [`Self::snapshot_all`]): this is the CLI export
+    /// path's own read, one-off rather than once per panel of a live
+    /// trainer page.
     pub fn all_rows(&self, limit: usize) -> Vec<Record> {
         let st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let n = st.records.len();
-        st.records[n.saturating_sub(limit)..].to_vec()
+        st.records[n.saturating_sub(limit)..]
+            .iter()
+            .map(|r| (**r).clone())
+            .collect()
     }
 
     /// [`Self::user_count`] and [`Self::rows_for_user`], read together
@@ -1468,19 +1529,73 @@ impl Store {
         match st.by_user.get(user) {
             Some(idxs) => (
                 idxs.len() as u64,
-                idxs.iter().map(|&i| st.records[i].clone()).collect(),
+                idxs.iter().map(|&i| (*st.records[i]).clone()).collect(),
             ),
             None => (0, Vec::new()),
         }
     }
 
-    /// [`Self::global_seq`] and [`Self::all_rows`], read together under one
-    /// lock. See [`Self::snapshot_for_user`].
-    pub fn snapshot_all(&self, limit: usize) -> (u64, Vec<Record>) {
+    /// [`Self::global_seq`] and [`Self::all_rows`]'s rows (trainer read-back,
+    /// plan §5 `trainer_max_rows`), read together under one lock — see
+    /// [`Self::snapshot_for_user`] for why. Cached per `(gen, limit)`
+    /// (`Self::trainer_cache`, #548 item 2): a trainer page's panels all
+    /// request this at the same `gen` (nothing moves it between them,
+    /// short of a learner's submission landing mid-page-load), so after
+    /// the first one rebuilds it, every later one just clones the `Arc` —
+    /// a cache *hit* takes no lock on `self.inner` at all.
+    ///
+    /// Review of #599 (SF1/SF2): a *miss* clones `Arc<Record>` pointers —
+    /// `records: Vec<Arc<Record>>` — never each record's own `String`/
+    /// JSON-map content, which is what made this expensive before #548
+    /// item 2. That clone is now cheap enough (and the resulting cache
+    /// entry small enough — pointers, not a second deep copy kept resident
+    /// indefinitely) that it's done, and the cache entry stored, **while
+    /// still holding `self.inner`** rather than released early: a served
+    /// page's several panels missing at once (the common case: it fetches
+    /// several in parallel, all well inside one rebuild's — now brief —
+    /// duration) each pay only this cheap clone, never a deep one, so
+    /// there is no "thundering herd of deep copies" left to avoid by
+    /// dropping the lock early. Holding `inner` for the whole rebuild also
+    /// fully serializes it against [`Self::erase_user`] (which needs the
+    /// same lock to clear this cache) by construction, closing #599 N1
+    /// without a separate epoch counter: whichever of the two acquires
+    /// `inner` first finishes its own cache write before the other can
+    /// start, so a rebuild can never re-store pre-erase rows after an
+    /// erase has already cleared them. N2: a cache already holding a
+    /// newer `gen` (stored by a *faster* concurrent rebuild while this one
+    /// was still running — contention on `inner` can reorder completion,
+    /// not just start, since this isn't single-flighted) is never
+    /// overwritten by this slower one's older result.
+    pub fn snapshot_all(&self, limit: usize) -> (u64, Arc<Vec<Arc<Record>>>) {
+        let hint = self.gen_hint.load(Ordering::Acquire);
+        {
+            let cache = self.trainer_cache.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(c) = cache.as_ref() {
+                if c.gen == hint && c.limit == limit {
+                    return (c.gen, c.rows.clone());
+                }
+            }
+        }
+        // Cache miss: `gen` and the rows must still come from the same
+        // lock (#548 item 3 nit) — `hint` above is only a fast-path guess
+        // at whether a rebuild is needed, never the value actually
+        // returned or cached.
         let st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let gen = st.next_seq.saturating_sub(1);
         let n = st.records.len();
-        (gen, st.records[n.saturating_sub(limit)..].to_vec())
+        let rows: Arc<Vec<Arc<Record>>> = Arc::new(st.records[n.saturating_sub(limit)..].to_vec());
+        {
+            let mut cache = self.trainer_cache.lock().unwrap_or_else(|p| p.into_inner());
+            if cache.as_ref().is_none_or(|c| c.gen <= gen) {
+                *cache = Some(TrainerSnapshot {
+                    gen,
+                    limit,
+                    rows: rows.clone(),
+                });
+            }
+        }
+        drop(st);
+        (gen, rows)
     }
 
     pub fn len(&self) -> usize {
@@ -1528,7 +1643,7 @@ struct Index {
     /// can rewrite the file without inventing a new `created` timestamp
     /// for an existing store (plan §1 "Operator access", S5).
     header_line: String,
-    records: Vec<Record>,
+    records: Vec<Arc<Record>>,
     by_user: HashMap<String, Vec<usize>>,
     next_seq: u64,
     size_bytes: u64,
@@ -1627,7 +1742,7 @@ fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
             .entry(rec.user.clone())
             .or_default()
             .push(records.len());
-        records.push(rec);
+        records.push(Arc::new(rec));
     }
 
     Ok(Index {
@@ -2189,6 +2304,120 @@ mod tests {
         );
     }
 
+    /// #548 item 2: the trainer read-back cost review flagged. Not run by
+    /// default (`cargo test` would otherwise pay this every run) — `cargo
+    /// test --lib --release -- --ignored --nocapture
+    /// bench_snapshot_all_for_a_busy_trainer_page`. Records are inserted
+    /// directly into `Store`'s private state, bypassing `append`'s
+    /// per-row `fdatasync` — that cost is unaffected by this fix and not
+    /// what's being measured; only `snapshot_all`'s own clone, under
+    /// contention from a busy trainer page's panels, is.
+    ///
+    /// Two measurements (review of #599 SF1: the first cut of this
+    /// benchmark only called `snapshot_all` *sequentially*, so every call
+    /// after the first was a cache hit by construction — not what a real
+    /// served page does, which fetches several panels concurrently
+    /// (`web/app.js`'s `lazyPool`, 6 in flight)):
+    /// - Sequential, `PANELS` calls one after another: only the first is
+    ///   ever a genuine miss.
+    /// - `PANELS` calls launched together from `PANELS` threads, cache
+    ///   cleared first so they all race for the same `(gen, limit)` entry
+    ///   — the shape SF1 described, the one worth actually measuring.
+    ///
+    /// Before #548 item 2's fix, every one of these calls cloned up to
+    /// `trainer_max_rows` records' own `String`/JSON-map content under
+    /// `Store`'s own mutex (measured: ~155ms/call for 200k rows, release
+    /// build, this box). After this PR (review of #599 SF1/SF2): a miss
+    /// clones only `Arc<Record>` pointers, so even every one of several
+    /// *concurrent* misses is cheap — there is no deep copy left to avoid
+    /// duplicating, so holding `self.inner` for the whole rebuild (see
+    /// `snapshot_all`'s own doc) costs only brief contention on that lock,
+    /// not a `trainer_max_rows`-sized copy per racing caller.
+    #[test]
+    #[ignore]
+    #[cfg(unix)]
+    fn bench_snapshot_all_for_a_busy_trainer_page() {
+        let root = tmp("bench-snapshot-all");
+        mkdir(&root);
+        let p = root.join("s.jsonl");
+        let s = retry_own_open(|| Store::open(&p, 512));
+        const ROWS: usize = 200_000;
+        const PANELS: usize = 12;
+        {
+            let mut st = s.inner.lock().unwrap();
+            for i in 0..ROWS {
+                let rec = Record {
+                    v: CURRENT_VERSION as u64,
+                    seq: (i + 1) as u64,
+                    ts: "2026-01-01T00:00:00Z".to_string(),
+                    user: format!("user{}", i % 500),
+                    auth: "oidc".to_string(),
+                    dashboard: "tutorial".to_string(),
+                    submit: "quiz_1".to_string(),
+                    id: format!("{i:032x}"),
+                    vars: serde_json::json!({
+                        "q1": "an answer text, not a single char",
+                        "q2": i as i64
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                };
+                let idx = st.records.len();
+                st.by_user.entry(rec.user.clone()).or_default().push(idx);
+                st.records.push(Arc::new(rec));
+            }
+            st.next_seq = (ROWS + 1) as u64;
+        }
+        s.gen_hint.store(ROWS as u64, Ordering::SeqCst);
+
+        // 1. Sequential.
+        let t0 = std::time::Instant::now();
+        let mut per_call = Vec::with_capacity(PANELS);
+        for _ in 0..PANELS {
+            let call0 = std::time::Instant::now();
+            let (_gen, rows) = s.snapshot_all(ROWS);
+            per_call.push(call0.elapsed());
+            assert_eq!(rows.len(), ROWS);
+        }
+        let elapsed = t0.elapsed();
+        eprintln!(
+            "sequential: {PANELS} snapshot_all({ROWS}) calls at the same gen took {elapsed:?} \
+             ({:?}/call); first call (rebuild) {:?}, 2nd..last (cache hits) {:?}",
+            elapsed / PANELS as u32,
+            per_call[0],
+            &per_call[1..]
+        );
+
+        // 2. Concurrent: PANELS threads, launched together, all racing for
+        // one freshly-cleared cache entry — the shape a served page's own
+        // parallel panel fetches actually produce.
+        *s.trainer_cache.lock().unwrap() = None;
+        let t0 = std::time::Instant::now();
+        let per_call: Vec<std::time::Duration> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..PANELS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let call0 = std::time::Instant::now();
+                        let (_gen, rows) = s.snapshot_all(ROWS);
+                        assert_eq!(rows.len(), ROWS);
+                        call0.elapsed()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let elapsed = t0.elapsed();
+        let slowest = per_call.iter().max().copied().unwrap_or_default();
+        let fastest = per_call.iter().min().copied().unwrap_or_default();
+        eprintln!(
+            "concurrent: {PANELS} snapshot_all({ROWS}) calls from {PANELS} threads at once, \
+             racing for one cleared cache entry, took {elapsed:?} wall-clock; \
+             fastest call {fastest:?}, slowest {slowest:?}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn validate_start_refuses_embed_without_frame_ancestors() {
         let root = tmp("embed");
@@ -2398,6 +2627,75 @@ mod tests {
         assert_eq!(s2.rows_for_user("bob")[0].seq, 2);
         let r4 = s2.append(new_rec("carol", json!({"q1": "A"}))).unwrap();
         assert_eq!(r4.seq, 3);
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// #599 SF3 (a): a submission after a warm `snapshot_all` call is
+    /// visible on the very next one — the cache is keyed on `gen`, which
+    /// `append` moves, not left stale.
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_all_after_an_append_returns_the_new_gen_and_row() {
+        let p = store_path("snapshot-all-append");
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        s.append(new_rec("alice", json!({"q1": "A"}))).unwrap();
+        let (gen, rows) = s.snapshot_all(100); // warms the cache at gen 1
+        assert_eq!(gen, 1);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        s.append(new_rec("bob", json!({"q1": "B"}))).unwrap();
+        let (gen, rows) = s.snapshot_all(100);
+        assert_eq!(
+            gen, 2,
+            "a submission must move the gen the cache is keyed on"
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1].user, "bob");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// #599 SF3 (b): an erase clears a cache warmed before it, so the very
+    /// next `snapshot_all` at the *same* gen (erase never moves it) does
+    /// not hand back the erased user's rows — the one case `gen` alone
+    /// can't tell apart from "nothing changed".
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_all_after_an_erase_drops_the_erased_users_rows_from_a_warm_cache() {
+        let p = store_path("snapshot-all-erase");
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        s.append(new_rec("alice", json!({"q1": "A"}))).unwrap();
+        s.append(new_rec("bob", json!({"q1": "B"}))).unwrap();
+        let (gen_before, rows) = s.snapshot_all(100); // warms the cache
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let removed = s.erase_user("alice").unwrap().removed;
+        assert_eq!(removed, 1);
+        let (gen_after, rows) = s.snapshot_all(100);
+        assert_eq!(gen_after, gen_before, "erase_user never moves next_seq/gen");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].user, "bob");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    /// #599 SF3 (c): a changed `limit` is a cache miss, not a stale hit —
+    /// `trainer_max_rows` could in principle change between two calls
+    /// (config reload is out of scope today, but the cache key already
+    /// accounts for it; this pins that it keeps working).
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_all_with_a_different_limit_is_a_miss_not_a_stale_hit() {
+        let p = store_path("snapshot-all-limit");
+        let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        for i in 0..5 {
+            s.append(new_rec(&format!("user{i}"), json!({"q1": "A"})))
+                .unwrap();
+        }
+        let (_, rows) = s.snapshot_all(3);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let (_, rows) = s.snapshot_all(5);
+        assert_eq!(
+            rows.len(),
+            5,
+            "a different limit must rebuild, not reuse the limit=3 entry: {rows:?}"
+        );
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
