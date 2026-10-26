@@ -2263,6 +2263,39 @@ mod tests {
         root.join("state.jsonl")
     }
 
+    /// Retry an open that is expected to succeed (#579): each test fixture
+    /// already gets its own unique directory (`tmp`'s pid+nanos suffix), so
+    /// there is no per-test file to collide on. The flake traced to this
+    /// instead — reproducible only running the *whole* `cargo test --lib`
+    /// at `--test-threads=64` (never isolating just the two affected
+    /// tests): `flock(LOCK_NB)` on one test's own, never-before-touched
+    /// fd occasionally returns `EWOULDBLOCK` with *no* corresponding
+    /// holder in `/proc/locks` for that inode. That's the ~700-test binary
+    /// hammering `flock()` across many files from 64 threads at once on
+    /// btrfs, not a conflict over this file — a real genuine conflict
+    /// (the negative assertions below) stays held for the test's whole
+    /// lifetime and would never clear on retry. So: retry a few times
+    /// instead of serializing the whole suite or inventing a per-test
+    /// resource that already exists.
+    #[cfg(unix)]
+    fn retry_own_open(open: impl Fn() -> Result<Store, String>) -> Store {
+        let mut last = None;
+        for _ in 0..50 {
+            match open() {
+                Ok(s) => return s,
+                Err(e) if e.contains("in use by another server") => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    last = Some(e);
+                }
+                Err(e) => panic!("unexpected open error: {e}"),
+            }
+        }
+        panic!(
+            "own open still refused after retries: {}",
+            last.unwrap_or_default()
+        );
+    }
+
     #[cfg(unix)]
     fn new_rec(user: &str, vars_json: serde_json::Value) -> NewRecord {
         NewRecord {
@@ -2520,7 +2553,7 @@ mod tests {
         let before = std::fs::read(&p).unwrap();
         let before_mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
 
-        let s = Store::open_read_only(&p, DEFAULT_MAX_MB).unwrap();
+        let s = retry_own_open(|| Store::open_read_only(&p, DEFAULT_MAX_MB));
         assert_eq!(s.len(), 1, "the one complete record still reads back");
         assert_eq!(s.global_seq(), 1);
         drop(s);
@@ -2549,10 +2582,10 @@ mod tests {
     fn open_read_only_locks_are_shared_among_themselves_but_still_exclude_a_writer() {
         let p = store_path("read-only-lock");
         {
-            Store::open(&p, DEFAULT_MAX_MB).unwrap();
+            retry_own_open(|| Store::open(&p, DEFAULT_MAX_MB));
         }
-        let r1 = Store::open_read_only(&p, DEFAULT_MAX_MB).unwrap();
-        let r2 = Store::open_read_only(&p, DEFAULT_MAX_MB).unwrap();
+        let r1 = retry_own_open(|| Store::open_read_only(&p, DEFAULT_MAX_MB));
+        let r2 = retry_own_open(|| Store::open_read_only(&p, DEFAULT_MAX_MB));
         let w = Store::open(&p, DEFAULT_MAX_MB);
         assert!(
             w.is_err_and(|e| e.contains("in use by another server")),
@@ -2561,7 +2594,7 @@ mod tests {
         drop(r1);
         drop(r2);
         // Both readers gone: a writer can now take the exclusive lock.
-        Store::open(&p, DEFAULT_MAX_MB).unwrap();
+        retry_own_open(|| Store::open(&p, DEFAULT_MAX_MB));
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 
