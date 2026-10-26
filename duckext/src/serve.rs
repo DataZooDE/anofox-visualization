@@ -3049,6 +3049,19 @@ fn reply(req: Request, status: u16, msg: &str) -> u16 {
     status
 }
 
+/// A `/api/submit` 400 that names one of *this dashboard's own input
+/// variables* (never the request's `panel`/`dashboard`/`id` fields, which
+/// aren't inputs a viewer can focus): JSON `{"error": msg, "var": name}`,
+/// so the viewer can mark that one input `aria-invalid` instead of only
+/// showing the text (#551). `msg` is still the same human-readable string
+/// `reply` would have sent as plain text; `var` is new and additive —
+/// nothing here changes `msg`'s wording.
+fn reply_invalid_var(req: Request, var: &str, msg: &str) -> u16 {
+    let body = serde_json::json!({ "error": msg, "var": var }).to_string();
+    respond(req, 400, "application/json", body.into_bytes());
+    400
+}
+
 fn handle_locked(st: &Locked, req: Request) {
     let t0 = std::time::Instant::now();
     let method = req.method().to_string();
@@ -4232,11 +4245,7 @@ fn handle_submit(
                 Some(&dash.id),
                 Some(&spec.name),
             );
-            return reply(
-                req,
-                400,
-                &format!("'{n}' is not a recordable variable name"),
-            );
+            return reply_invalid_var(req, n, &format!("'{n}' is not a recordable variable name"));
         }
         match dash.inputs.get(&lower) {
             None => {
@@ -4246,9 +4255,9 @@ fn handle_submit(
                     Some(&dash.id),
                     Some(&spec.name),
                 );
-                return reply(
+                return reply_invalid_var(
                     req,
-                    400,
+                    n,
                     &format!("'{n}' is not declared by an input of this dashboard"),
                 );
             }
@@ -4259,9 +4268,9 @@ fn handle_submit(
                     Some(&dash.id),
                     Some(&spec.name),
                 );
-                return reply(
+                return reply_invalid_var(
                     req,
-                    400,
+                    n,
                     &format!("'{n}' is declared by more than one input statement"),
                 );
             }
@@ -4286,9 +4295,9 @@ fn handle_submit(
                     Some(&dash.id),
                     Some(&spec.name),
                 );
-                return reply(
+                return reply_invalid_var(
                     req,
-                    400,
+                    name,
                     &format!("'{name}' is not a settable variable on this dashboard"),
                 );
             }
@@ -4316,7 +4325,7 @@ fn handle_submit(
                     Some(&dash.id),
                     Some(&spec.name),
                 );
-                return reply(req, 400, &msg);
+                return reply_invalid_var(req, name, &msg);
             }
         }
     }

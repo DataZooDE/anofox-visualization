@@ -11642,6 +11642,11 @@ function makeControl(meta, bar) {
   if (meta.kind === "PERIOD") return makePeriodControl(meta, bar);
   const wrap = document.createElement("label");
   wrap.className = "control";
+  // #551: a ::SUBMIT panel's 400 error links back to *this* variable's own
+  // control — DATERANGE/PERIOD never carry it (the server already refuses
+  // to record either kind; see duckext serve.rs validate_recorded_value),
+  // so only the single-varname kinds below get it.
+  if (meta.varname) wrap.dataset.varname = meta.varname;
   wrap.textContent = captionColon(meta.caption || meta.varname || "date");
   if (meta.kind === "DATERANGE") {
     const mk = (k) => {
@@ -11710,6 +11715,7 @@ function makeControl(meta, bar) {
     const sel = new Set(dpVars[meta.varname] || []);
     const cont = document.createElement("div");
     cont.className = "control";
+    cont.dataset.varname = meta.varname; // #551
     const cap = document.createElement("span");
     cap.textContent = captionColon(meta.caption || meta.varname || "");
     cont.appendChild(cap);
@@ -11842,6 +11848,7 @@ function makeSearchableDropdown(meta) {
   const varname = meta.varname;
   const cont = document.createElement("div");
   cont.className = "control";
+  cont.dataset.varname = varname; // #551
   const cap = document.createElement("span");
   cap.textContent = captionColon(meta.caption || varname || "");
   cont.appendChild(cap);
@@ -12090,6 +12097,7 @@ function refocus(key, el) {
 function mkButtons(meta) {
   const cont = document.createElement("div");
   cont.className = "control";
+  cont.dataset.varname = meta.varname; // #551
   const cap = document.createElement("span");
   cap.textContent = captionColon(meta.caption || meta.varname || "");
   cap.id = "dp-seg-" + meta.varname;
@@ -15418,6 +15426,67 @@ function dpVarCI(name) {
   return key === undefined ? undefined : dpVars[key];
 }
 
+// #551: the focusable control for a dashboard variable named by the
+// server's `/api/submit` 400 (`data-varname`, set by `makeControl` /
+// `mkButtons` / `makeSearchableDropdown` / ::MULTISELECT on their own
+// wrapper) — case-insensitive, the same reason `dpVarCI` is. The checked
+// radio of a ::BUTTONS group when there is one, else the wrapper's first
+// native control / `<summary>` (::MULTISELECT's popover button) / anything
+// with a `tabindex`, else the wrapper itself. `null` when this variable
+// has no control on the page right now (a dashboard whose input isn't
+// currently shown — the error text still shows, just without a link).
+function submitVarControl(varname) {
+  if (!varname) return null;
+  const lower = varname.toLowerCase();
+  const wrap = [...document.querySelectorAll("[data-varname]")].find((e) => (e.dataset.varname || "").toLowerCase() === lower);
+  if (!wrap) return null;
+  return wrap.querySelector('[aria-checked="true"]') || wrap.querySelector("input,select,button,summary,[tabindex]") || wrap;
+}
+function markVarInvalid(varname) {
+  const el = submitVarControl(varname);
+  if (el) el.setAttribute("aria-invalid", "true");
+  return el;
+}
+function clearVarInvalid(varname) {
+  const el = submitVarControl(varname);
+  if (el) el.removeAttribute("aria-invalid");
+}
+function focusVar(varname) {
+  const el = submitVarControl(varname);
+  if (el && el.focus) el.focus();
+}
+
+// The server's `/api/submit` 400 body (#551): JSON `{"error", "var"}` when
+// it names one of this dashboard's own variables (duckext serve.rs
+// `reply_invalid_var`), otherwise the older plain text (also what a 401/
+// 403/404/409/429/network-failure body still is) — never throws.
+function parseSubmitError(raw) {
+  try {
+    const j = JSON.parse(raw);
+    if (j && typeof j.error === "string" && typeof j.var === "string") return { text: j.error, varName: j.var };
+  } catch {}
+  return { text: raw, varName: null };
+}
+
+// Render a submit failure's error line (plan §6 + #551): the text, plus —
+// when the server named a variable and that variable's control is still on
+// the page — `aria-invalid` on that control and a focusable link to it
+// right in the line, so a screen reader or keyboard user lands on the
+// input that needs fixing instead of just hearing the message.
+function renderSubmitError(errEl, text, varName) {
+  errEl.textContent = "";
+  errEl.append(text);
+  const el = varName ? markVarInvalid(varName) : null;
+  if (!el) return;
+  errEl.append(" ");
+  const link = document.createElement("button");
+  link.type = "button";
+  link.className = "submit-error-link";
+  link.textContent = "Go to it";
+  link.onclick = () => focusVar(varName);
+  errEl.appendChild(link);
+}
+
 // A ::SUBMIT panel (#517 S4, plan §6): a native button, a status line
 // (`role="status"`, polite) and an error line (`role="alert"`). `i` is the
 // statement's own plan index (= the server's `panel`); `rowsJson` is this
@@ -15468,12 +15537,21 @@ function mkSubmit(s, i, rowsJson) {
   // click that just set it; focus stays on the button, same timing.
   const saved = submitStatus[i];
   if (saved) {
-    const el = saved.kind === "err" ? errEl : statusEl;
     const text = saved.text;
     const focusAfter = saved.focusBtn;
     delete saved.focusBtn;
+    // #551: the aria-invalid marking (and its link) only survive while the
+    // flagged variable's value is still exactly what caused the error —
+    // "clear it on the next change" happens here, declaratively, because
+    // every value change re-renders this panel: once it no longer matches
+    // the snapshot taken when the error was recorded (`doSubmit`), the
+    // marking is simply never re-applied.
+    const stillInvalid = saved.invalidVar && JSON.stringify(dpVarCI(saved.invalidVar)) === saved.invalidVal;
+    if (saved.invalidVar && !stillInvalid) delete saved.invalidVar;
+    const varName = stillInvalid ? saved.invalidVar : null;
     requestAnimationFrame(() => {
-      el.textContent = text;
+      if (saved.kind === "err") renderSubmitError(errEl, text, varName);
+      else statusEl.textContent = text;
       if (focusAfter && btn.isConnected) btn.focus();
     });
   }
@@ -15559,11 +15637,20 @@ async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
     return;
   }
   // 400 (the message already names the input: "'q1' is not one of the
-  // options" / "answer 'q1' first"), 401, 403, 404, 409 — the server's own
-  // text, verbatim; 409 gets the plan's own prefix.
-  const text = r.status === 409 ? "This can't be submitted right now" + (msg ? ": " + msg : "") : msg || `Submission failed (${r.status})`;
-  submitStatus[i] = { text, kind: "err" };
-  errEl.textContent = text;
+  // options" / "answer 'q1' first" — #551: a JSON body `{"error","var"}`
+  // when the server could name which one, duckext serve.rs
+  // `reply_invalid_var`; still plain text for a 400 that doesn't name a
+  // variable at all), 401, 403, 404, 409 — the server's own text; 409 gets
+  // the plan's own prefix.
+  const parsed = r.status === 400 ? parseSubmitError(msg) : { text: msg, varName: null };
+  const text = r.status === 409 ? "This can't be submitted right now" + (parsed.text ? ": " + parsed.text : "") : parsed.text || `Submission failed (${r.status})`;
+  submitStatus[i] = {
+    text,
+    kind: "err",
+    invalidVar: parsed.varName || undefined,
+    invalidVal: parsed.varName ? JSON.stringify(dpVarCI(parsed.varName)) : undefined,
+  };
+  renderSubmitError(errEl, text, parsed.varName);
   reenable();
 }
 

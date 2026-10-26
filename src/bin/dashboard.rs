@@ -181,8 +181,12 @@ fn render_dashboard_html(
     // panels' rows (a ::THEME anywhere applies to every panel).
     let mut chrome = DashboardChrome::default();
     type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
-    // The third element is each panel's own `::KPI_SIZE` ('compact') (#405).
-    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
+    // The third element is each panel's own `::KPI_SIZE` ('compact') (#405);
+    // the fourth is pre-rendered static HTML to push verbatim instead of the
+    // usual chart render (#551: a `::SUBMIT` panel's disabled-button card —
+    // this never needs the theme/opts the usual render does, so phase 1
+    // builds it directly rather than threading a marker through to phase 2).
+    let mut queried: Vec<(sql::Panel, Rows, bool, Option<String>)> = Vec::new();
     let mut session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");
@@ -309,6 +313,25 @@ fn render_dashboard_html(
             *n += 1;
             let _ = exec(&format!("SET VARIABLE {} = {n};", s.var));
         }
+        // `::SUBMIT` (#551): a static export can never POST `/api/submit`
+        // (no script runs it), so this renders a disabled button naming
+        // why instead of nothing — the plan §6 "never a silent no-op" rule
+        // `web/app.js`'s `mkSubmit` already follows in the browser.
+        if p.roles.iter().any(|(_, r)| *r == Role::Submit) {
+            let rows = exec(&format!("{};", p.sql)).unwrap_or_default();
+            let idx = p
+                .roles
+                .iter()
+                .find(|(_, r)| *r == Role::Submit)
+                .map(|(i, _)| *i);
+            let label = idx
+                .and_then(|i| rows.first().and_then(|r| r.get(&format!("c{i}"))))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Submit");
+            let html = sv::submit_disabled_html(label, i, "Submitting needs the dashboard server");
+            queried.push((p, Ok(Vec::new()), false, Some(html)));
+            continue;
+        }
         // Layout directives are interactive — the browser builder / `serve`
         // handle them; the static CLI output skips them (role registry).
         if roles::is_directive_panel(&p.roles) && !section && !step_marker {
@@ -316,7 +339,7 @@ fn render_dashboard_html(
         }
         let rows = exec(&format!("{};", p.sql));
         let compact = kpi_size_json(&p.roles, &rows).unwrap_or(group_compact);
-        queried.push((p, rows, compact));
+        queried.push((p, rows, compact, None));
     }
 
     let set = chrome.resolve(theme_arg).unwrap_or_else(|e| {
@@ -340,11 +363,16 @@ fn render_dashboard_html(
     // `::GUIDE_STEP` (#516): `queried` only ever holds what phase 1 kept
     // shown, so its total marker count per group ("of N") is known now.
     let mut static_steps = {
-        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, _, _)| p).collect();
+        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, _, _, _)| p).collect();
         sql::steps::StaticSteps::new(&shown)
     };
     let mut queried = queried.into_iter().peekable();
-    while let Some((p, rows, compact)) = queried.next() {
+    while let Some((p, rows, compact, static_html)) = queried.next() {
+        if let Some(html) = static_html {
+            panels.push_str(&html);
+            n += 1;
+            continue;
+        }
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
@@ -423,7 +451,7 @@ fn render_dashboard_html(
         }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| track::is_track(&q.roles)) {
             if let Ok(r) = r {
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
