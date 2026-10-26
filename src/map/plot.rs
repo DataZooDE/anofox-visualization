@@ -106,6 +106,17 @@ pub(super) fn build(
     // pre-render API for ggplot-rs's actual legend geometry to use
     // instead (same gap as the `legend_position_inside` one already
     // noted below, sipemu/ggplot-rs#225).
+    //
+    // `GeomAttribution::fit` (ggplot-rs 0.31.2/0.31.3) was tried as a
+    // replacement for this whole heuristic — shrink/truncate the
+    // attribution against the *actual* panel rect at draw time instead of
+    // guessing the legend's width up front — but both `AttributionOverflow`
+    // kinds still mis-measure this exact scenario (a continuous-fill `de-*`
+    // map's BKG source line at a narrow width: confirmed with a synthetic
+    // render + PNG crop, text overflowing the panel's left edge, same
+    // symptom this 90px reservation already guards against). Kept the
+    // heuristic for #510; `.fit` is a follow-up once ggplot-rs's own width
+    // estimate is tight enough for a URL-heavy line to drop it safely.
     let legend_reserve = if continuous_fill && forced_position.is_none() {
         90.0
     } else {
@@ -670,7 +681,21 @@ pub(super) fn build(
         _ => None,
     };
     if let Some(geom) = bivariate_legend {
-        plot = plot.bivariate_legend(geom);
+        // `Bivar::counts[i][j]` (`i` = `a`-level/x, `j` = `b`-level/y,
+        // see `bivariate.rs`) transposed to the `[j][i]` row-major shape
+        // `GeomBivariateLegend::counts`'s own `for j in 0..ny { for i in
+        // 0..nx }` draw loop expects (ggplot-rs 0.31.2, sipemu/
+        // ggplot-rs#259) — each swatch's row count, the old hand-written
+        // bivariate legend's own feature (#506), now drawn by ggplot-rs
+        // itself instead of a second, unused `Bivar::counts` field.
+        if let Fill::Bivariate(b) = &m.fill {
+            let counts: Vec<Vec<usize>> = (0..geom.ny)
+                .map(|j| (0..geom.nx).map(|i| b.counts[i][j]).collect())
+                .collect();
+            plot = plot.bivariate_legend_counts(geom.counts(counts));
+        } else {
+            plot = plot.bivariate_legend(geom);
+        }
     }
     let _ = legend_at;
 
@@ -893,6 +918,22 @@ pub(super) fn build(
         // same as the old writer's `foot_svg` did. `text_size` is a plain
         // `pub` field; `#[non_exhaustive]` only blocks struct-literal
         // construction, not mutating fields on an already-built value.
+        //
+        // `GeomAttribution::fit` (ggplot-rs 0.31.2/0.31.3, sipemu/
+        // ggplot-rs#258/#264) was tried here too — a floor size plus
+        // draw-time shrink/truncate against the real (legend-narrowed)
+        // panel rect, instead of `foot_of`'s own pre-render guess — but
+        // both `AttributionOverflow` kinds still mis-measure this map's
+        // own BKG source line (one logical row built from a bare-URL run
+        // plus a plain-text run) on `delivery-coverage.sql`'s bivariate
+        // map at 390px: `Wrap` only splits at the one inter-run space,
+        // leaving the still-oversized URL run as one physical line;
+        // `Ellipsis`'s own truncation budget is still too generous for
+        // that character mix and the kept (truncated) text itself
+        // overflows the panel's left edge. Tracked as a follow-up
+        // (ggplot-rs: wrap within a run + a tighter width estimate for
+        // URL-heavy text), not adopted here — `ft.size` alone has no
+        // overflow in any example checked for #510.
         attribution.text_size = ft.size;
         plot = plot.annotation_attribution_with(attribution);
     }
@@ -950,15 +991,16 @@ pub(super) fn build(
     }
 
     // The screen-reader summary (`super::summary`, shared by every map
-    // kind: choropleth, classed, symbols, flows, hexbin) as a root
-    // attribute, same text content as the old writer's own `data-summary`
-    // — found missing here entirely while widening `eligible` this slice
-    // (every map kind this path already drew, slices 1-4, was missing it
-    // too; `GGPlot` has no `<desc>` API yet for the old writer's own
-    // *child-element* `<desc>{summary}</desc>` though, so that part of
-    // the a11y contract stays a real, reported gap across the whole
-    // geom_sf path, not something this attribute alone fixes).
+    // kind: choropleth, classed, symbols, flows, hexbin) as both a root
+    // attribute (`data-summary`, for the app's own a11y table/motion
+    // code) and the rendered root `<svg>`'s `<desc>` (`svg_desc`,
+    // ggplot-rs 0.31.1, sipemu/ggplot-rs#255) — restoring the old
+    // hand-written writer's own `<desc>{summary}</desc>` child element
+    // (`map/mod.rs`'s now-dead path), lost when this geom_sf path took
+    // over every map kind (#498) because `GGPlot` had no `<desc>` API
+    // yet at the time.
     let summary_text = super::summary(o, m, extra_self);
+    plot = plot.svg_desc(summary_text.clone());
     let mut attrs: Vec<(&'static str, String)> = vec![
         ("data-map", String::new()),
         ("data-proj", m.projection.name().to_string()),

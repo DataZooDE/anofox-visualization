@@ -639,10 +639,21 @@ fn bivariate_legend_counts_and_captions() {
     sh.name = "Share".into();
     let s = svg(vec![codes(&states), rv, sh]);
     assert!(s.contains("data-geom=\"bivariate_legend\""), "{s}");
+    // 9 swatches + 2 axis captions + 9 per-cell counts (ggplot-rs 0.31.2,
+    // sipemu/ggplot-rs#259, #510: `bivariate_legend_counts` instead of
+    // `bivariate_legend`) — every cell here gets exactly one of the 9
+    // in-tertile rows (`a`/`b` built as `i % 3`/`i / 3` above), the 10th
+    // row (missing `b`) hatched and uncounted, so every count label reads
+    // "1".
     assert_eq!(
         s.matches("data-geom=\"bivariate_legend\"").count(),
-        9 + 2,
-        "9 swatches + 2 captions: {s}"
+        9 + 2 + 9,
+        "9 swatches + 2 captions + 9 counts: {s}"
+    );
+    assert_eq!(
+        s.matches("data-geom=\"bivariate_legend\">1</text>").count(),
+        9,
+        "every cell's count label reads 1: {s}"
     );
     assert!(s.contains(">Revenue<"), "{s}");
     assert!(s.contains(">Share<"), "{s}");
