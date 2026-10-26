@@ -351,6 +351,34 @@ pub const ASSET_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "s
 /// no such option use this directly).
 pub const DEFAULT_MAX_ASSET_BYTES: u64 = 5 << 20;
 
+/// The response headers every `assets/<rest>` route sends alongside a
+/// served image — the locked server's own `/d/<id>/assets/<rest>`
+/// (`duckext::serve::locked_asset`) and both authoring servers' opt-in
+/// `/assets/<rest>` (#522). Review of #604 N5: this list was three
+/// identical copies (one per caller); framework-agnostic `(name, value)`
+/// pairs here, built once, so the `Content-Security-Policy`/`Cross-
+/// Origin-Resource-Policy` set can't quietly drift between them — each
+/// caller still builds its own header type (`tiny_http::Header`) from
+/// these, since this crate's image module has no HTTP framework
+/// dependency of its own.
+///
+/// `content_type` is the sniffed MIME, never trusted from the request's
+/// own extension. `cache_control` is the one value callers choose
+/// differently on purpose (the locked server's shorter, `auth`-dependent
+/// lifetime vs. authoring's fixed one) — passed in rather than hardcoded.
+pub fn asset_header_values(content_type: &str, cache_control: &str) -> [(&'static str, String); 5] {
+    [
+        ("Content-Type", content_type.to_string()),
+        ("X-Content-Type-Options", "nosniff".to_string()),
+        (
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; sandbox".to_string(),
+        ),
+        ("Cache-Control", cache_control.to_string()),
+        ("Cross-Origin-Resource-Policy", "same-origin".to_string()),
+    ]
+}
+
 /// Is `dir`'s own `assets` entry a symlink (not followed)? Review of #554
 /// nit 8: `canonicalize` on a symlinked `assets -> /` (or anywhere else)
 /// would otherwise resolve it to that target and serve every image-typed
@@ -399,7 +427,19 @@ pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf>
 /// `options.assets` for `anofox_serve`) — each caller prefixes its own
 /// name onto this `Err` rather than this function guessing which one it's
 /// talking to.
+///
+/// Review of #604 S5: `path` is normalized (trailing `/` and a trailing
+/// `.` component stripped, lexically, before anything touches the
+/// filesystem) *before* the symlink check, not after. `symlink_metadata`
+/// on a path a trailing slash makes "must be a directory" is forced to
+/// resolve through a symlink at that final component to confirm it is
+/// one — so `--assets rootlink/` (the shape a shell's own tab-completion
+/// produces) used to reach the `canonicalize`/`is_dir` checks below
+/// having never actually `lstat`-ed the symlink itself, and started right
+/// up serving the link's target.
 pub fn validated_assets_root(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = strip_trailing_slash_and_dot(path);
+    let path = path.as_path();
     if std::fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
@@ -417,6 +457,27 @@ pub fn validated_assets_root(path: &std::path::Path) -> Result<std::path::PathBu
         return Err(format!("'{}' is not a directory", path.display()));
     }
     Ok(real)
+}
+
+/// `path` with every trailing `/` and a trailing `.` component removed,
+/// lexically (#604 S5) — `"link/"`, `"link/."` and `"link/./"` all become
+/// `"link"`; `"/"` alone is left as `"/"`. `std::path::Path` doesn't
+/// normalize this on its own (unlike `..`, a trailing `/.` survives
+/// `Path::components()` as a literal `CurDir` component), and leaving it
+/// in place changes whether a later `symlink_metadata` call follows a
+/// symlink at that final component or not.
+fn strip_trailing_slash_and_dot(path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = path.to_string_lossy().into_owned();
+    loop {
+        if s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        } else if s.len() > 1 && s.ends_with("/.") {
+            s.truncate(s.len() - 2);
+        } else {
+            break;
+        }
+    }
+    std::path::PathBuf::from(s)
 }
 
 /// Validate `rest` (a path under an `assets/` folder, already stripped of

@@ -161,11 +161,12 @@ fn parse_args() -> Opts {
                 std::process::exit(0)
             }
             "--port" | "-p" => {
+                // #604 S2: 0 is a real, meaningful value here — "ask the OS
+                // for any free loopback port", not a sentinel this parser
+                // should refuse. `authoring_mode`/`serve_dashboards` report
+                // the port actually bound, never the literal `0` back.
                 let p = num(args.next(), "--port");
-                o.port = u16::try_from(p)
-                    .ok()
-                    .filter(|p| *p != 0)
-                    .unwrap_or_else(|| usage("--port must be 1..=65535"));
+                o.port = u16::try_from(p).unwrap_or_else(|_| usage("--port must be 0..=65535"));
             }
             "--no-open" => o.open_browser = false,
             "--dashboards" => o.dashboards_dir = args.next(),
@@ -297,6 +298,12 @@ fn parse_args() -> Opts {
     // names authoring's otherwise-nonexistent root directly.
     if o.dashboards_dir.is_some() && o.assets_dir.is_some() {
         usage("--assets applies to authoring mode only (serve <db>); --dashboards already serves <dir>/assets");
+    }
+    // #604 S2: `--port 0` ("ask the OS for any free loopback port") is
+    // authoring-only — `serve_dashboards` doesn't resolve/report the real
+    // bound port back, so `--port 0` there would silently misreport `0`.
+    if o.dashboards_dir.is_some() && o.port == 0 {
+        usage("--port 0 is authoring-mode only (serve <db>); --dashboards needs an explicit port");
     }
     if let Err(e) = o.app.check() {
         usage(if e.starts_with("logo_dark") {
@@ -615,7 +622,15 @@ fn authoring_mode(o: &Opts) {
         eprintln!("error: bind {addr}: {e}");
         std::process::exit(1)
     });
-    let guard = AuthoringGuard::new(o.port);
+    // #604 S2: the port actually bound — equal to `o.port` unless that was
+    // `0`, in which case this is whatever the OS handed back. Every later
+    // use (the guard's cookie name, the printed/returned URL) is this one,
+    // never the literal `o.port` a caller may have passed as `0`.
+    let port = match server.server_addr() {
+        tiny_http::ListenAddr::IP(a) => a.port(),
+        tiny_http::ListenAddr::Unix(_) => o.port,
+    };
+    let guard = AuthoringGuard::new(port);
     let host = if o.bind.contains(':') {
         format!("[{}]", o.bind)
     } else {
@@ -775,22 +790,17 @@ fn handle_authoring(
 /// not a caller's business.
 fn authoring_asset(root: &Path, rest: &str, req: Request) {
     const MAX: u64 = anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES;
+    // Loopback-only, single-token session — still `private`, and a short
+    // max-age since an asset can change under an author's feet mid-session,
+    // same as the dashboard script itself. Review of #604 N5: the header
+    // list itself (CSP, nosniff, CORP) is `image::asset_header_values`,
+    // shared with `locked_asset` and the extension's own `authoring_asset`
+    // — only this lifetime and the mime differ by caller.
     let headers = |mime: &str| {
-        vec![
-            header("Content-Type", mime),
-            header("X-Content-Type-Options", "nosniff"),
-            // Neutralises an SVG opened as a top-level document instead of
-            // inside an `<img>`.
-            header(
-                "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-            ),
-            // Loopback-only, single-token session — still `private`, and a
-            // short max-age since an asset can change under an author's
-            // feet mid-session, same as the dashboard script itself.
-            header("Cache-Control", "private, max-age=60"),
-            header("Cross-Origin-Resource-Policy", "same-origin"),
-        ]
+        anofox_visualization::image::asset_header_values(mime, "private, max-age=60")
+            .into_iter()
+            .map(|(k, v)| header(k, &v))
+            .collect::<Vec<_>>()
     };
     if req.method() == &Method::Head {
         return match anofox_visualization::image::stat_asset(root, rest, MAX) {

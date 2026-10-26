@@ -127,6 +127,19 @@ so the protection is about making sure *only you* can send it:
   (and, if one was in flight, that round's query text) behind. Best-effort;
   a `kill -9` or a crash still cannot run any cleanup code.
 - Body limit 4 MiB; authoring results are capped at 1,000,000 rows.
+- **`GET`/`HEAD /assets/<rest>` (#522), opt-in.** Authoring has no
+  dashboards folder (unlike mode A/B below), so a relative `::IMAGE`/
+  markdown image source draws the alt-text placeholder by default. `--assets
+  <dir>` (`serve`) / `options.assets` (`anofox_serve`, same key) names a
+  root directly and turns the route on, behind the exact same token/
+  loopback/`Host`/same-origin guard as `/query` and `/check` above — there
+  is no separate, weaker path to it. `options.assets` additionally needs
+  `enable_external_access` on (and, if `allowed_directories` is set, the
+  root inside one of them): it reads files with plain `std::fs`, which
+  would otherwise bypass both. Full details, containment and response
+  headers (identical to mode A's own `/d/<id>/assets/<rest>` below) are in
+  "`GET`/`HEAD` `/assets/<rest>` — authoring, opt-in (#522)", next to mode
+  A's own assets route further down this document.
 
 `SELECT anofox_serve_stop(port)` stops an extension server.
 
@@ -2228,11 +2241,33 @@ given.
 
 - **Validated once at start, loudly.** Unlike `<dashboards dir>/assets/`
   (silently `None` when missing — an author may just not have made one
-  yet), this path was named on purpose: a symlinked root, a missing path,
-  or a path that isn't a directory all refuse to start (exit 2 for the
-  CLI; an error from `anofox_serve` for the extension), not a silent
-  "nothing served" (`src/image.rs::validated_assets_root`). The resolved,
-  canonical path is logged/returned once.
+  yet), this path was named on purpose: a symlinked root (including one
+  named with a trailing slash or a trailing `/.` — review of #604 S5,
+  `symlink_metadata` on such a path is forced to resolve through the link
+  to confirm it's a directory, so the literal path is normalized before
+  that check runs), a missing path, or a path that isn't a directory all
+  refuse to start (exit 2 for the CLI; an error from `anofox_serve` for
+  the extension), not a silent "nothing served"
+  (`src/image.rs::validated_assets_root`). The resolved, canonical path is
+  logged/returned once. `--assets /` (or `$HOME`) is accepted — it's an
+  opt-in on a loopback-only server, so this is a footgun, not a hole, but
+  it does mean every readable image on disk is one request away for
+  whoever holds the token. A hard link into the root (unlike a symlink)
+  is served: `canonicalize` has no way to see one, and making one needs
+  write access to the root already.
+- **`options.assets` additionally needs `enable_external_access`
+  (review of #604 S1).** Unlike every *SQL* read on the live connection,
+  this route reads files with plain `std::fs`, bypassing that connection's
+  own `enable_external_access`/`allowed_directories` sandbox entirely —
+  someone running untrusted SQL in a session deliberately locked down that
+  way could otherwise still get `anofox_serve(port, {"assets":
+  "/anything"})` to read any image-typed file the process can, handed to
+  whoever gets the token back. Refused outright instead: starting with
+  `options.assets` needs `enable_external_access = true` on that
+  connection, and if `allowed_directories` is non-empty, the root must
+  canonicalize to a path inside at least one of them. The CLI's `--assets`
+  is unaffected — the person running it is the operator, not untrusted
+  SQL.
 - **Same guard as every other authoring route.** `GET`/`HEAD
   /assets/<rest>` sits behind the same per-run token (cookie or
   `X-Anofox-Token`), loopback `Host`, and same-origin checks as `/query` —
@@ -2246,7 +2281,11 @@ given.
   authoring has no logout to outlive, but an asset can change under an
   author's feet mid-session just as easily as the dashboard script
   itself).
-- **`GET`/`HEAD` only; no listing.** Any other method is `405`.
+- **`GET`/`HEAD` only; no listing.** Any other method is `405` — including
+  with the option off, same as any other path on this server (a plain
+  `GET`/`HEAD /anything` with no `--assets` is `404`, but every *other*
+  method is already `405` everywhere on this server, not specific to this
+  route).
 - **Client.** A relative `assets/…` source resolves the same way in every
   mode (`web/app.js::assetUrl`'s existing fallback: relative to the
   page's own URL, always `/` for the authoring builder) — with the option

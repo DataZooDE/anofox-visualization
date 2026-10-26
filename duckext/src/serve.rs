@@ -64,7 +64,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tiny_http::{Header, ListenAddr, Method, Request, Response, Server};
 
 // The browser builder, embedded at compile time (needs web/pkg from wasm-pack —
 // build-native.sh and CI build it first).
@@ -415,6 +415,69 @@ fn parse_assets_option(options: &str) -> Result<(Option<PathBuf>, String), Strin
     Ok((assets, v.to_string()))
 }
 
+/// Review of #604 S1: `options.assets` reads a file with plain `std::fs`
+/// ([`anofox_visualization::image::read_asset`]), never through the live
+/// session's own DuckDB connection — so, unlike every *SQL* read on that
+/// connection, it was not held to that connection's own
+/// `enable_external_access`/`allowed_directories` lockdown at all. Someone
+/// running untrusted SQL in a session deliberately locked down that way
+/// (`enable_external_access = false`, the posture `docs/secure-serving.md`
+/// recommends before loading this extension at all for that purpose) could
+/// otherwise still get `anofox_serve(port, {"assets": "/anything"})` to
+/// read any image-typed file the process can read, handed to whoever gets
+/// the token back. Refuse the option outright instead:
+/// - `enable_external_access` must be `true` — fails closed: a query
+///   error, a missing setting or anything but the literal string `"true"`
+///   refuses, the same as the setting being off.
+/// - if `allowed_directories` is non-empty, `root` must canonicalize to a
+///   path inside at least one of them.
+///
+/// Checked once at start, on `ctx`'s own live connection (the one `/query`
+/// itself runs on) — never per asset request, same posture as
+/// `validated_assets_root` itself.
+fn assets_option_allowed(conn: &Conn, root: &Path) -> Result<(), String> {
+    let setting_text = |name: &str| -> Option<String> {
+        conn.query(&format!("SELECT current_setting('{name}')::VARCHAR"))
+            .and_then(|mut r| r.string_rows(1))
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next().flatten())
+    };
+    if setting_text("enable_external_access").as_deref() != Some("true") {
+        return Err(
+            "options.assets needs enable_external_access (it reads files with std::fs, \
+             bypassing that setting otherwise) — SET enable_external_access = true on this \
+             session first, or leave options.assets out"
+                .into(),
+        );
+    }
+    let allowed: Vec<String> = conn
+        .query("SELECT unnest(current_setting('allowed_directories')) AS d")
+        .and_then(|mut r| r.string_rows(4096))
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| row.into_iter().next().flatten())
+                .collect()
+        })
+        .unwrap_or_default();
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    let inside = allowed.iter().any(|d| {
+        Path::new(d)
+            .canonicalize()
+            .is_ok_and(|real| root.starts_with(&real))
+    });
+    if !inside {
+        return Err(format!(
+            "options.assets '{}' is outside every directory in allowed_directories ({})",
+            root.display(),
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// `anofox_serve(port[, options])`: start the authoring server on
 /// 127.0.0.1:`port`; `options` sets the builder's app bar (name, tagline,
 /// logo, logo_dark, link, favicon — see `AppBrand`) and, opt-in,
@@ -431,13 +494,40 @@ pub fn start_authoring(
     let (assets_root, app) = match options {
         Some(json) => {
             let (assets, rest) = parse_assets_option(json)?;
-            let app = AppBrand::from_json(&rest).map_err(|e| format!("options: {e}"))?;
+            if let Some(root) = &assets {
+                // #604 S1: before accepting the option at all, not after
+                // the server is already listening.
+                assets_option_allowed(&ctx.conn.lock().unwrap_or_else(|p| p.into_inner()), root)?;
+            }
+            // Review of #604 N3: `assets` is already gone from `rest` by
+            // this point (pulled out above), so `AppBrand::from_json`'s own
+            // "unknown key" hint never names it — append it here rather
+            // than teach `AppBrand` about a key it otherwise has nothing
+            // to do with.
+            let app = AppBrand::from_json(&rest).map_err(|e| {
+                format!(
+                    "options: {e}{}",
+                    if e.contains("unknown key") {
+                        ", or assets"
+                    } else {
+                        ""
+                    }
+                )
+            })?;
             (assets, app)
         }
         None => (None, AppBrand::default()),
     };
     let mut servers = lock_servers();
-    if servers.contains_key(&port) {
+    // #604 S2: `port == 0` asks the OS for any free loopback port instead
+    // of a caller guessing one and racing to bind it independently (the
+    // race a port-reuse-based test helper can lose under heavy parallel
+    // load — #607). The bind just below is the only atomic step; nothing
+    // before it can collide, so the registry check against an explicit,
+    // caller-chosen port is skipped for `0` (there is nothing yet to
+    // collide with) and repeated below against the port the OS actually
+    // handed back.
+    if port != 0 && servers.contains_key(&port) {
         return Err(format!(
             "anofox-visualization is already serving on port {port}"
         ));
@@ -448,6 +538,18 @@ pub fn start_authoring(
         Server::http(&addr)
             .map_err(|e| format!("anofox-visualization: could not bind {addr}: {e}"))?,
     );
+    let port = match server.server_addr() {
+        ListenAddr::IP(a) => a.port(),
+        ListenAddr::Unix(_) => port,
+    };
+    if servers.contains_key(&port) {
+        // Only reachable with `port == 0`, and only if the OS happened to
+        // hand back a port this process already tracks under this exact
+        // mechanism — refuse rather than clobber that entry.
+        return Err(format!(
+            "anofox-visualization is already serving on port {port}"
+        ));
+    }
     let state = Arc::new(Authoring {
         ctx,
         guard: AuthoringGuard::new(port),
@@ -575,24 +677,18 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
 /// too big) is not a caller's business.
 fn authoring_asset(root: &Path, rest: &str, req: Request) {
     const MAX: u64 = anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES;
+    // Authoring is loopback-only, single-token, no viewer logout to
+    // outlive — still `private`, not the locked server's longer
+    // `max-age=300`, since an asset here can change under an author's feet
+    // mid-session just as easily as the dashboard script itself. Review of
+    // #604 N5: the header list itself (CSP, nosniff, CORP) is `image::
+    // asset_header_values`, shared with `locked_asset` and the CLI's own
+    // `authoring_asset` — only this lifetime and the mime differ by caller.
     let headers = |mime: &str| {
-        vec![
-            header("Content-Type", mime),
-            header("X-Content-Type-Options", "nosniff"),
-            // Neutralises an SVG opened as a top-level document — same
-            // reasoning as `locked_asset`'s identical header.
-            header(
-                "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-            ),
-            // Authoring is loopback-only, single-token, no viewer logout to
-            // outlive — still `private`, not the locked server's longer
-            // `max-age=300`, since an asset here can change under an
-            // author's feet mid-session just as easily as the dashboard
-            // script itself.
-            header("Cache-Control", "private, max-age=60"),
-            header("Cross-Origin-Resource-Policy", "same-origin"),
-        ]
+        anofox_visualization::image::asset_header_values(mime, "private, max-age=60")
+            .into_iter()
+            .map(|(k, v)| header(k, &v))
+            .collect::<Vec<_>>()
     };
     if req.method() == &Method::Head {
         return match anofox_visualization::image::stat_asset(root, rest, MAX) {
@@ -3616,35 +3712,25 @@ fn locked_asset(
         busy(req, &e);
         return 503;
     }
+    // Review of #554 nit 9: on an `auth` server an image must not keep
+    // answering from a shared/browser cache for long after a logout or a
+    // revoked credential — a minute, not the plain five-minute default
+    // (still `private`, not `no-store`: the browser's own cache is fine to
+    // use meanwhile, just not for long). Review of #604 N5: the rest of
+    // the header list (CSP — belt-and-braces for a viewer who opens the
+    // asset URL directly, no symlink-out/XSS either way — nosniff, CORP)
+    // is `image::asset_header_values`, shared with both authoring servers'
+    // own `authoring_asset`; only this lifetime and the mime differ here.
+    let cache_control = if st.opts.auth.is_some() {
+        "private, max-age=60"
+    } else {
+        "private, max-age=300"
+    };
     let headers = |mime: &str| {
-        vec![
-            header("Content-Type", mime),
-            header("X-Content-Type-Options", "nosniff"),
-            // Neutralises an SVG opened as a top-level document (no
-            // symlink out, no XSS: it never runs a script, regardless of
-            // this header, when only ever drawn through `<img>` — this is
-            // belt-and-braces for a viewer who opens the asset URL
-            // directly).
-            header(
-                "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-            ),
-            // Review of #554 nit 9: on an `auth` server an image must not
-            // keep answering from a shared/browser cache for long after a
-            // logout or a revoked credential — a minute, not the plain
-            // five-minute default (still `private`, not `no-store`: the
-            // browser's own cache is fine to use meanwhile, just not for
-            // long).
-            header(
-                "Cache-Control",
-                if st.opts.auth.is_some() {
-                    "private, max-age=60"
-                } else {
-                    "private, max-age=300"
-                },
-            ),
-            header("Cross-Origin-Resource-Policy", "same-origin"),
-        ]
+        anofox_visualization::image::asset_header_values(mime, cache_control)
+            .into_iter()
+            .map(|(k, v)| header(k, &v))
+            .collect::<Vec<_>>()
     };
     // Read per request — no snapshot — so an edited/added asset shows
     // without a refresh, as documented.

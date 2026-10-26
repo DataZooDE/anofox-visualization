@@ -2046,7 +2046,7 @@ is a `not-in-assets` warning and never resolves, on any host:
 | `dashboard file.sql out.html` / `--svg` | `<dir of file.sql>/assets/<rest>`, inlined as a `data:` URI |
 | `serve --dashboards <dir>` (the script-free page) | `<dir>/assets/<rest>`, inlined as a `data:` URI |
 | Browser builder (no server) | unchanged — resolves against the app's own URL |
-| Authoring server (`serve [db]`, `anofox_serve`) | not served — a relative `::IMAGE` there draws the placeholder |
+| Authoring server (`serve [db]`, `anofox_serve`) | off by default (no dashboards folder to derive a root from); opt-in via `--assets <dir>` / `options.assets`, then `GET /assets/<rest>` under the same token/loopback guard as every other authoring route — see docs/secure-serving.md |
 
 Every reader validates the same way: the resolved path must stay inside
 `assets/` (symlinks included), the extension must be `png`/`jpg`/`jpeg`/
