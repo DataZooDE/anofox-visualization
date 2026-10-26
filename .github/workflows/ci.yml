@@ -701,6 +701,14 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-col-width-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/view-height-e2e.mjs (#573): a ::HEIGHT pending before a
+      # ::VIEW group's first marker must apply to every alternative, not
+      # just the first (the card jumped in height when switching) — an
+      # alternative's own ::HEIGHT still wins. ::COL's own twin, above.
+      - name: ::VIEW group ::HEIGHT e2e (#573)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-height-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/mini-charts-e2e.mjs (#463): Explore data's card histogram
       # (xpMini, both its histogram and rows-over-time-line branches), its
       # A/B distribution overlay (xpOverlay) and the table's own
