@@ -4096,7 +4096,7 @@ fn render_histogram(
         .primary_color(o.brand());
     if let Some(cat_col) = category {
         plot = plot
-            .scale_fill(dz_scale(o, Aesthetic::Fill, cat_col))
+            .scale_fill(category_scale(o, Aesthetic::Fill, cat_col, cols))
             .legend_position(
                 legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
             );
@@ -4144,8 +4144,8 @@ fn render_density(
                 alpha: 0.4,
                 ..Default::default()
             })
-            .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
-            .scale_color(dz_scale(o, Aesthetic::Color, cat))
+            .scale_fill(category_scale(o, Aesthetic::Fill, cat, cols))
+            .scale_color(category_scale(o, Aesthetic::Color, cat, cols))
             .house_theme(o)
             .legend_position(
                 legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
@@ -4314,8 +4314,8 @@ fn render_qq(
         .primary_color(o.brand());
     if let Some(cat) = category {
         plot = plot
-            .scale_fill(dz_scale(o, Aesthetic::Fill, cat))
-            .scale_color(dz_scale(o, Aesthetic::Color, cat))
+            .scale_fill(category_scale(o, Aesthetic::Fill, cat, cols))
+            .scale_color(category_scale(o, Aesthetic::Color, cat, cols))
             .legend_position(
                 legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
             );
@@ -5307,8 +5307,8 @@ fn render_radar(
         .legend_position(legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top));
     if let Some(cat) = category {
         plot = plot
-            .scale_color(dz_scale(o, Aesthetic::Color, cat))
-            .scale_fill(dz_scale(o, Aesthetic::Fill, cat));
+            .scale_color(category_scale(o, Aesthetic::Color, cat, cols))
+            .scale_fill(category_scale(o, Aesthetic::Fill, cat, cols));
     }
     // B2-4: the measure's own `data-fvalue` (`::YFORMAT`) — see
     // `cartesian`'s matching comment.
@@ -6432,7 +6432,7 @@ fn render_pie(
             ..card_col(o)
         })
         .position(PositionStack)
-        .scale_fill(dz_scale(o, Aesthetic::Fill, category))
+        .scale_fill(category_scale(o, Aesthetic::Fill, category, cols))
         // No y-axis padding, so the stack maps to a full 360° (closes the
         // pie). B2-4: the slice's own `data-fvalue` (`::YFORMAT`) — see
         // `cartesian`'s matching comment.

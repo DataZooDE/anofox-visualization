@@ -1528,6 +1528,50 @@ where
                          'Critical:bad; OK:good'::COLORS"
                             .into(),
                     );
+                } else if chart_kind(&p.roles) == Some(Kind::Waterfall) {
+                    // #535: a ::WATERFALL's ::CATEGORY marks which steps are
+                    // running totals (`waterfall_steps`'s `is_total_tag`), not
+                    // a colour group — the step/increase/decrease colours are
+                    // fixed, so ::COLORS never reaches a scale.
+                    warn(
+                        Severity::Warning,
+                        "colors/no-effect",
+                        "::COLORS has no effect on ::WATERFALL — its ::CATEGORY marks which \
+                         steps are totals, not colour groups; bars keep the theme's \
+                         total/increase/decrease colours"
+                            .into(),
+                    );
+                } else if matches!(chart_kind(&p.roles), Some(Kind::Point) | Some(Kind::Bubble))
+                    && p.roles.iter().any(|(_, r)| *r == Role::Hexbin)
+                {
+                    // #535: `cartesian` drops ::CATEGORY entirely for a
+                    // ::HEXBIN scatter (one density layer for the whole
+                    // panel, see `scatter_hexbin_diags`), so a ::COLORS level
+                    // map has nothing left to colour.
+                    warn(
+                        Severity::Warning,
+                        "colors/no-effect",
+                        "::COLORS has no effect on a ::HEXBIN scatter — hexagons are coloured \
+                         by point count alone; ::CATEGORY is dropped"
+                            .into(),
+                    );
+                } else if p.roles.iter().any(|(_, r)| *r == Role::Hexbin) && {
+                    let has = |want: Role| p.roles.iter().any(|(_, r)| *r == want);
+                    has(Role::Geometry)
+                        || has(Role::Region)
+                        || has(Role::Origin)
+                        || has(Role::Dest)
+                        || (has(Role::Lat) && has(Role::Lon))
+                } {
+                    // #535: same as above, for a ::LAT/::LON or geometry map's
+                    // ::HEXBIN (`hexbin_diags`'s "map/hexbin-category" note).
+                    warn(
+                        Severity::Warning,
+                        "colors/no-effect",
+                        "::COLORS has no effect on a ::HEXBIN map — hexagons are coloured by \
+                         count or sum alone; ::CATEGORY is dropped"
+                            .into(),
+                    );
                 }
             }
         }
@@ -6796,6 +6840,60 @@ mod design_tests {
             rows(2, |i| json!({ "c0": i, "c1": i, "c2": "Critical:bad" })),
         );
         assert!(has(&d, "colors/no-category"), "{d:?}");
+    }
+
+    /// #535: a `::WATERFALL`'s `::CATEGORY` tags "total" steps, not a colour
+    /// group (`waterfall_steps`'s `is_total_tag`) — a `::COLORS` level map
+    /// there has nothing to paint.
+    #[test]
+    fn colors_have_no_effect_on_a_waterfall_category_tag() {
+        let data = rows(
+            3,
+            |i| json!({ "c0": format!("s{i}"), "c1": (i + 1) as f64, "c2": "", "c3": "A:bad; B:good" }),
+        );
+        let d = lint_one(
+            "SELECT s::XAXIS, v::WATERFALL, tag::CATEGORY, 'A:bad; B:good'::COLORS FROM t;",
+            data,
+        );
+        assert!(has(&d, "colors/no-effect"), "{d:?}");
+    }
+
+    /// #535: `cartesian` drops `::CATEGORY` entirely for a `::HEXBIN` scatter
+    /// (`chart/hexbin-category`) and a `::HEXBIN` map (`map/hexbin-category`)
+    /// — a `::COLORS` level map there is just as void, and `--check` should
+    /// say so.
+    #[test]
+    fn colors_have_no_effect_on_a_hexbin_scatter_or_map() {
+        let data = rows(3, |i| {
+            json!({
+                "c0": i as f64,
+                "c1": i as f64,
+                "c2": "auto",
+                "c3": if i % 2 == 0 { "A" } else { "B" },
+                "c4": "A:bad; B:good",
+            })
+        });
+        let d = lint_one(
+            "SELECT x::XAXIS, y::SCATTER, h::HEXBIN, cat::CATEGORY, \
+             'A:bad; B:good'::COLORS FROM t;",
+            data.clone(),
+        );
+        assert!(has(&d, "colors/no-effect"), "{d:?}");
+        let data = rows(3, |i| {
+            json!({
+                "c0": i as f64,
+                "c1": i as f64,
+                "c2": "auto",
+                "c3": if i % 2 == 0 { "A" } else { "B" },
+                "c4": "A:bad; B:good",
+            })
+        });
+        let d = lint_one(
+            "SELECT lat::LAT, lon::LON, h::HEXBIN, cat::CATEGORY, \
+             'A:bad; B:good'::COLORS FROM t;",
+            data,
+        );
+        assert!(has(&d, "colors/no-effect"), "{d:?}");
     }
 
     #[test]
