@@ -2649,6 +2649,74 @@ characters), `tour/too-many-steps` (warning: over 20 steps), `tour/too-many`
 `-- @tour` above it — likely a mis-indented tour; as written, it's read as
 an ordinary comment).
 
+### Remembering progress for a signed-in viewer (#525)
+
+Both `::GUIDE_STEP` sequences and `-- @tour` tours are client-only by
+default: "furthest step" and "tour seen" live in this browser's
+`localStorage`. On a server with `options.state` (`::SUBMIT`, see "Recording
+answers" above and `docs/secure-serving.md`), a signed-in viewer's progress
+can instead be remembered across devices — with **no new endpoint and no
+change to what Next does**. Both patterns are ordinary SQL and comments,
+reading `viewer_state` the same way a `::GATE` already can; neither needs a
+server change.
+
+**A tour that doesn't autostart twice.** Give the `::SUBMIT` that marks the
+tour done the **same id as the tour itself** (its own column alias), and
+gate it "record once" the usual way:
+
+```sql skip
+-- @tour cockpit_intro Cockpit in three steps
+--   page: This page lists every monitored model and what to do next.
+--   severity_kpi: This is a model's severity.
+-- @tour_autostart cockpit_intro
+
+-- @name done_toggle
+SELECT true AS done ::TOGGLE;
+SELECT 'Got it' AS cockpit_intro ::SUBMIT, 'done' AS r ::SUBMIT_VARS
+FROM (SELECT 1) t
+WHERE NOT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'cockpit_intro');
+```
+
+Once the viewer clicks that button, the statement returns zero rows and its
+panel disappears — exactly like any other empty-gated input. The browser
+reads that absence (no extra request: the `::SUBMIT` is already a
+statement in the page's own plan) to skip `-- @tour_autostart` on this
+viewer's next visit, from any browser, as long as they're signed in and
+`options.state` is enabled for this dashboard. Keep that panel out of a
+hidden `::TAB`/`::SUBTAB`/`::GUIDE_STEP` pane — a panel that simply hasn't
+been lazily rendered yet looks the same as one that returned zero rows.
+Without a matching `::SUBMIT`, or when `options.state` isn't on, tours keep
+working exactly as before — `localStorage` only.
+
+**Resuming a guide sequence.** Record progress with an explicit `::SUBMIT`
+on each gated step — never on Next itself, which stays pure navigation —
+then offer a link back to it from the intro, shown only once there's
+somewhere to resume to:
+
+```sql skip
+SELECT 'Drift sandbox' ::GUIDE_STEP,
+       getvariable('q2') = 'measured error' ::GATE,
+       'Answer question 2 correctly to go on' ::GATE_MESSAGE;
+SELECT v AS q2 ::DROPDOWN, l ::OPTION_LABEL FROM
+  (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l)
+  ORDER BY o;
+SELECT 'Mark step 2 done' AS step2_done ::SUBMIT, 'q2' AS r ::SUBMIT_VARS
+FROM (SELECT 1) t
+WHERE getvariable('q2') = 'measured error'
+  AND NOT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'step2_done');
+
+-- on step 1, the intro:
+SELECT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'step2_done') ::SHOW_IF;
+SELECT '[Resume at step 2 →](?v.lesson=2)' ::MARKDOWN;
+```
+
+`?v.<name>=n` is the same URL the step strip already writes, so clicking the
+link is an ordinary reload, not a new mechanism; a sequence with more than
+one recorded step chains the same `EXISTS` check per step (or a `CASE`
+picking the highest one recorded) to compute which step number to link to.
+The step variable's own default stays `1`: nothing here changes what step a
+visit without a stored answer, or without a sign-in, lands on.
+
 ### Loading, empty, error and "not available" panels
 
 Every panel carries its own state — there is no full-page spinner:

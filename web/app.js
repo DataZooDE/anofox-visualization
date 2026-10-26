@@ -6319,6 +6319,31 @@ function markTourSeen(id) {
     localStorage.setItem(`dp:tour-seen:${tourDashKey()}:${id}`, "1");
   } catch (_) {}
 }
+// #525: a cross-device "seen" signal for a signed-in viewer, in place of
+// localStorage. The author records a tour's completion with an ordinary
+// `::SUBMIT` (#517) whose own id — its column alias, the same name plan
+// §4.6's audit log calls "the submit id" — equals this tour's id, gated the
+// usual "record once" way (e.g. `WHERE NOT EXISTS (SELECT 1 FROM
+// viewer_state WHERE submit = '<id>')`): once recorded, that statement
+// returns zero rows, so its panel is simply absent from the DOM, exactly
+// like any other empty-gated input (plan §6) — no extra request, since the
+// `::SUBMIT` panel is a statement in the dashboard's own plan and was
+// already fetched as part of this render. Author-facing contract (DOCS.md):
+// keep that panel out of a hidden tab/sub-tab/::GUIDE_STEP, or its absence
+// could just mean "not lazily rendered yet", not "already submitted".
+// Returns null when it can't tell (not served, `options.state` disabled, no
+// `::SUBMIT` with this id, or the plan isn't parsed yet) — callers then fall
+// back to `tourSeen()`/localStorage, same as before #525.
+function tourSeenViaState(id) {
+  if (!(window.__served && window.__served.state && window.__served.state.enabled)) return null;
+  if (!Array.isArray(servedPlan)) return null;
+  const idx = servedPlan.findIndex((s) => {
+    const r = Array.isArray(s.roles) && s.roles.find((rr) => rr[1] === "SUBMIT");
+    return r && r[2] === id;
+  });
+  if (idx < 0) return null;
+  return !document.querySelector(`.dash .panel[data-stmt="${idx}"]`);
+}
 
 // This dashboard's `-- @tour`/`-- @tour_autostart` header (parsed fresh —
 // cheap, and the builder's SQL can change at any moment); `null` on a parse
@@ -6781,9 +6806,15 @@ async function tourAfterSwap() {
     return;
   }
   const autoId = meta.tour_autostart;
-  if (autoId && meta.tours.some((t) => t.id === autoId) && !tourSeen(autoId)) {
-    markTourSeen(autoId);
-    await tourStart(autoId);
+  if (autoId && meta.tours.some((t) => t.id === autoId)) {
+    // #525: a matching ::SUBMIT's state (cross-device) wins when it has an
+    // opinion; otherwise this browser's localStorage, as before #525.
+    const viaState = tourSeenViaState(autoId);
+    const seen = viaState === null ? tourSeen(autoId) : viaState;
+    if (!seen) {
+      markTourSeen(autoId);
+      await tourStart(autoId);
+    }
   }
 }
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
