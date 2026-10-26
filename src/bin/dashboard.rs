@@ -2538,6 +2538,34 @@ fn state_scalar_cell(v: &serde_json::Value) -> String {
     }
 }
 
+/// #619 (review of #615, N1): a raw NUL byte — or another C0 control
+/// character no CSV reader expects in a text cell — only reaches here via
+/// a store file written or edited some other way (`::SUBMIT` already
+/// refuses a NUL byte in any value before it's ever recorded, #614/#625),
+/// but `state_export_csv` wrote it through unchanged regardless: some
+/// readers choke on it outright, others silently truncate the cell (and
+/// everything after it) right there. Same treatment [`escape_xml`] gives
+/// a character XML disallows: replaced with U+FFFD, not dropped —
+/// `csv_safe`'s own leading-character check and `csv_field`'s own quoting
+/// below both still see a real character at that position, not a cell one
+/// byte shorter than the store file's own. `\t`/`\n`/`\r` are left alone:
+/// legitimate CSV content `csv_field` already quotes/escapes the normal
+/// way, not something to replace.
+fn csv_control_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    fn is_bad(c: char) -> bool {
+        c.is_control() && !matches!(c, '\t' | '\n' | '\r')
+    }
+    if s.chars().any(is_bad) {
+        std::borrow::Cow::Owned(
+            s.chars()
+                .map(|c| if is_bad(c) { '\u{FFFD}' } else { c })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 /// OWASP "CSV injection" (review of #555, B1 — the exact rule #520/#526
 /// already gave `web/app.js`'s `csvSafe`/`FORMULA_LEAD`/`NUM_RE`, mirrored
 /// here rather than shared across languages): a CSV cell carries no type
@@ -2645,15 +2673,15 @@ fn state_export_csv(rows: &[anofox_visualization::host::state::Record]) -> Strin
             out.push_str(&format!(
                 "{},{},{},{},{},{},{},{},{},{}\n",
                 r.seq,
-                csv_field(&csv_safe(&r.ts)),
-                csv_field(&csv_safe(&r.user)),
-                csv_field(&csv_safe(&r.auth)),
-                csv_field(&csv_safe(&r.dashboard)),
-                csv_field(&csv_safe(&r.submit)),
-                csv_field(&csv_safe(&r.id)),
-                csv_field(&csv_safe(name)),
-                csv_field(&csv_safe(&value)),
-                csv_field(&csv_safe(&value_list)),
+                csv_field(&csv_safe(&csv_control_safe(&r.ts))),
+                csv_field(&csv_safe(&csv_control_safe(&r.user))),
+                csv_field(&csv_safe(&csv_control_safe(&r.auth))),
+                csv_field(&csv_safe(&csv_control_safe(&r.dashboard))),
+                csv_field(&csv_safe(&csv_control_safe(&r.submit))),
+                csv_field(&csv_safe(&csv_control_safe(&r.id))),
+                csv_field(&csv_safe(&csv_control_safe(name))),
+                csv_field(&csv_safe(&csv_control_safe(&value))),
+                csv_field(&csv_safe(&csv_control_safe(&value_list))),
             ));
         }
     }
@@ -3558,7 +3586,7 @@ mod state_csv_safety_tests {
     // Review of #555, B1: `dashboard state export --format csv` must
     // apply the exact #520/#526 rule `web/app.js`'s `csvSafe` already
     // applies to every browser CSV export, to every string cell.
-    use super::{csv_field, csv_safe, is_plain_number};
+    use super::{csv_control_safe, csv_field, csv_safe, is_plain_number, state_export_csv};
 
     #[test]
     fn a_formula_cell_is_prefixed_with_a_single_quote() {
@@ -3605,5 +3633,63 @@ mod state_csv_safety_tests {
         // own quoting, but a value with a comma still needs csv_field's.
         let cell = csv_field(&csv_safe("=A1,B1"));
         assert_eq!(cell, "\"'=A1,B1\"");
+    }
+
+    #[test]
+    fn csv_control_safe_replaces_a_raw_nul_byte_with_u_fffd() {
+        assert_eq!(csv_control_safe("x\0y"), "x\u{FFFD}y");
+        // More than one, and not only at the start/end.
+        assert_eq!(csv_control_safe("\0ab\0"), "\u{FFFD}ab\u{FFFD}");
+    }
+
+    #[test]
+    fn csv_control_safe_replaces_other_c0_controls_but_leaves_tab_newline_cr() {
+        assert_eq!(csv_control_safe("a\x01b"), "a\u{FFFD}b");
+        assert_eq!(csv_control_safe("a\x1fb"), "a\u{FFFD}b");
+        // \t/\n/\r are legitimate CSV content csv_field already quotes —
+        // left exactly as they are, not replaced.
+        for s in ["a\tb", "a\nb", "a\rb"] {
+            assert_eq!(csv_control_safe(s), s, "{s:?} must be left alone");
+        }
+    }
+
+    #[test]
+    fn csv_control_safe_leaves_ordinary_text_untouched() {
+        for s in ["Monday", "alice@example.com", "", "héllo", "日本語"] {
+            assert_eq!(csv_control_safe(s), s);
+        }
+    }
+
+    // #619: a record with an embedded NUL byte in a value — only
+    // reachable via a store file written or edited some other way
+    // (#614/#625) — exported to CSV must not carry a raw NUL byte
+    // through, the same way #614 fixed seeding one into `viewer_state`
+    // rather than refusing the whole row.
+    #[test]
+    fn state_export_csv_replaces_an_embedded_nul_byte_in_a_recorded_value() {
+        use anofox_visualization::host::state::Record;
+        let mut vars = serde_json::Map::new();
+        vars.insert("q1".to_string(), serde_json::Value::String("x\0y".into()));
+        let rec = Record {
+            v: 1,
+            seq: 1,
+            ts: "2026-01-01T00:00:00.000Z".to_string(),
+            ts_micros: None,
+            user: "alice".to_string(),
+            auth: "oidc".to_string(),
+            dashboard: "quiz".to_string(),
+            submit: "quiz_1".to_string(),
+            id: "d".repeat(32),
+            vars,
+        };
+        let csv = state_export_csv(&[rec]);
+        assert!(
+            !csv.as_bytes().contains(&0u8),
+            "no raw NUL byte in the CSV output: {csv:?}"
+        );
+        assert!(
+            csv.contains("x\u{FFFD}y"),
+            "the value's own NUL is replaced with U+FFFD, not dropped: {csv:?}"
+        );
     }
 }
