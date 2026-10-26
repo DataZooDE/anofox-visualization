@@ -339,12 +339,21 @@ impl Prepared {
         unsafe { capi!(duckdb_prepared_statement_type)(self.0) }
     }
 
+    /// `duckdb_bind_varchar_length`, not `duckdb_bind_varchar` (#614): the
+    /// latter goes through a C string, which `cstring()` refuses to build
+    /// for a `v` with an embedded NUL byte — a real possibility for a
+    /// recorded value (#611 N3/#614), and no reason to refuse it here:
+    /// the length-aware call binds exactly `v`'s own bytes, NUL included,
+    /// with no C-string round trip at all.
     pub fn bind_strs(&self, params: &[&str]) -> Result<(), String> {
         for (i, v) in params.iter().enumerate() {
-            let c = cstring(v)?;
             unsafe {
-                if capi!(duckdb_bind_varchar)(self.0, (i + 1) as idx_t, c.as_ptr())
-                    != duckdb_state::DuckDBSuccess
+                if capi!(duckdb_bind_varchar_length)(
+                    self.0,
+                    (i + 1) as idx_t,
+                    v.as_ptr() as *const std::os::raw::c_char,
+                    v.len() as idx_t,
+                ) != duckdb_state::DuckDBSuccess
                 {
                     return Err(format!("could not bind parameter {}", i + 1));
                 }
@@ -473,10 +482,21 @@ impl Appender {
         )
     }
 
+    /// `duckdb_append_varchar_length`, not `duckdb_append_varchar` (#614):
+    /// the latter goes through a C string, which `cstring()` refuses to
+    /// build for a `v` with an embedded NUL byte — a real possibility for
+    /// a recorded value (#611 N3/#614), and no reason to refuse it here:
+    /// the length-aware call appends exactly `v`'s own bytes, NUL
+    /// included, with no C-string round trip at all.
     pub fn append_varchar(&self, v: &str) -> Result<(), String> {
-        let c = cstring(v)?;
         self.check(
-            unsafe { capi!(duckdb_append_varchar)(self.0, c.as_ptr()) },
+            unsafe {
+                capi!(duckdb_append_varchar_length)(
+                    self.0,
+                    v.as_ptr() as *const std::os::raw::c_char,
+                    v.len() as idx_t,
+                )
+            },
             "append_varchar failed",
         )
     }
@@ -488,21 +508,22 @@ impl Appender {
     /// per element plus the list `duckdb_value` itself
     /// (`duckdb_create_list_value`), appends that, and destroys every
     /// value it created, in the same call.
+    ///
+    /// `duckdb_create_varchar_length`, not `duckdb_create_varchar` (#614):
+    /// each element is built from `it`'s own bytes directly, with no
+    /// C-string round trip — an embedded NUL byte in a recorded list
+    /// item (e.g. a `MULTISELECT` answer) is no longer a reason to
+    /// refuse the whole row.
     pub fn append_varchar_list(&self, items: &[Option<&str>]) -> Result<(), String> {
-        // Checked up front, before any `duckdb_value` is created: a NUL
-        // byte in one item (rare — a literal NUL inside recorded text)
-        // must not leave an earlier item's already-created `duckdb_value`
-        // leaked by an early return partway through the loop below.
-        let cstrs: Vec<Option<CString>> = items
-            .iter()
-            .map(|it| it.map(cstring).transpose())
-            .collect::<Result<_, _>>()?;
         unsafe {
             let mut elem_type = capi!(duckdb_create_logical_type)(duckdb_type::DUCKDB_TYPE_VARCHAR);
-            let mut values: Vec<duckdb_value> = cstrs
+            let mut values: Vec<duckdb_value> = items
                 .iter()
-                .map(|c| match c {
-                    Some(c) => capi!(duckdb_create_varchar)(c.as_ptr()),
+                .map(|it| match it {
+                    Some(s) => capi!(duckdb_create_varchar_length)(
+                        s.as_ptr() as *const std::os::raw::c_char,
+                        s.len() as idx_t,
+                    ),
                     None => capi!(duckdb_create_null_value)(),
                 })
                 .collect();

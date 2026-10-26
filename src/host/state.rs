@@ -518,6 +518,18 @@ pub struct Record {
     pub v: u64,
     pub seq: u64,
     pub ts: String,
+    /// `access::parse_rfc3339_micros(&ts)`, computed once — when this
+    /// record is read off disk ([`Record::from_json`]) or newly appended
+    /// ([`Store::append`]) — rather than every time a cold panel seeds
+    /// `viewer_state` from it (review of #614 R2). `None` means `ts` is
+    /// not the server's own canonical shape (a store file written or
+    /// edited some other way, #611 S2) and every seed of this record
+    /// still takes the one-`INSERT`-per-variable SQL fallback
+    /// (`seed_viewer_state_row_via_sql`) — paying that cost again each
+    /// time is unavoidable (a cold panel's `viewer_state` is a fresh
+    /// per-connection `TEMP TABLE`), but re-running the same parse to
+    /// reach the same `None` on every one of those cold panels is not.
+    pub ts_micros: Option<i64>,
     pub user: String,
     pub auth: String,
     pub dashboard: String,
@@ -625,10 +637,13 @@ impl Record {
             .and_then(|v| v.as_object())
             .cloned()
             .ok_or("missing or non-object 'vars'")?;
+        let ts = get_str("ts")?;
+        let ts_micros = crate::host::access::parse_rfc3339_micros(&ts);
         Ok(Record {
             v: v_ver,
             seq,
-            ts: get_str("ts")?,
+            ts,
+            ts_micros,
             user: get_str("user")?,
             auth: get_str("auth")?,
             dashboard: get_str("dashboard")?,
@@ -1090,10 +1105,17 @@ impl Store {
             return Err("state store: unavailable (a previous write failed)".into());
         }
         let seq = st.next_seq;
+        let ts = crate::host::access::rfc3339(std::time::SystemTime::now());
+        // Always the server's own canonical shape, so this always parses
+        // (review of #614 R2) — computed once here rather than leaving it
+        // to be discovered, repeatedly, by every later cold panel that
+        // seeds this record.
+        let ts_micros = crate::host::access::parse_rfc3339_micros(&ts);
         let rec = Record {
             v: CURRENT_VERSION as u64,
             seq,
-            ts: crate::host::access::rfc3339(std::time::SystemTime::now()),
+            ts,
+            ts_micros,
             user: new.user,
             auth: new.auth,
             dashboard: new.dashboard,
@@ -2367,6 +2389,12 @@ mod tests {
                     v: CURRENT_VERSION as u64,
                     seq: (i + 1) as u64,
                     ts: "2026-01-01T00:00:00Z".to_string(),
+                    // Not the canonical shape (missing `.mmm`) — same as
+                    // `Record::from_json` would compute for it, review of
+                    // #614 R2: every one of these rows deliberately still
+                    // takes the slow per-record SQL fallback this
+                    // benchmark measures.
+                    ts_micros: None,
                     user: format!("user{}", i % 500),
                     auth: "oidc".to_string(),
                     dashboard: "tutorial".to_string(),
