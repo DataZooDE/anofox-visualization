@@ -129,8 +129,14 @@ crate-type = ["cdylib", "rlib"]
 # `delivery-coverage.sql`'s "Week by week" time-map subtitle no longer
 # overlaps the legend title at 390px). Both confirmed with PNG crops. No
 # API breaks (cargo-semver-checks against 0.31.5).
+# 0.31.7 (sipemu/ggplot-rs#281, this crate's own #595): a `Top`
+# discrete/binned-fill legend's own band no longer clamps a `.subtitle()`
+# (no `.title()`) down into it — `::FRAME` time maps (a classed/binned
+# fill, Top legend, the frame label in `.subtitle()`, no title) no longer
+# overlap the subtitle with the legend. Confirmed with PNG crops. No API
+# breaks (cargo-semver-checks against 0.31.6).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.6", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.31.7", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
