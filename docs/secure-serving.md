@@ -685,6 +685,13 @@ Consumers pick a dashboard id and whitelisted params
   server-side gate for it, unlike `-- @requires` above: the condition and its
   target are ordinary statements the server answers through `/api/panel`
   like any other, whether or not the condition currently holds.
+- `::GUIDE_STEP` / `::GATE` (DOCS, #516) are page navigation, same as
+  `::SHOW_IF` — not access control. A gated or not-yet-reached step's
+  statements are ordinary statements too; `/api/panel` answers them the
+  same whether the gate holds or not. The step variable is an ordinary
+  viewer variable (a typed literal, like any input's): list it in
+  `-- @vars` if the dashboard declares one, the same as any other
+  viewer-settable name.
 - A panel's `::TITLE` is drawn as a title bar above its chart (first non-NULL
   value, trimmed and escaped, at most 200 characters; none on a KPI tile), as
   on a dashboard card.

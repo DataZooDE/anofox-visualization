@@ -563,6 +563,16 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/show-if-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/steps-e2e.mjs (#516): on web/examples/onboarding-tutorial.sql,
+      # the strip reads "Step n of N", Next is gated until a quiz is answered
+      # correctly, a URL/seed past a closed gate clamps back to it, the step
+      # list and Back/Next navigate, the keyboard alone completes it, 390px
+      # has no horizontal scroll, and the ⤓ HTML export shows every step
+      # flattened in order — reuses the :8947 server and Chromium above.
+      - name: ::GUIDE_STEP e2e (#516)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/steps-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/dropdown-search-e2e.mjs (#411): above ~50 options (or forced
       # by 'search'/'native'::DROPDOWN_STYLE) a ::DROPDOWN renders a
       # searchable combobox — filtering by value/::OPTION_LABEL, Arrow keys +

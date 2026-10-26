@@ -38,11 +38,13 @@ pub mod name;
 pub mod requires;
 pub mod shared;
 pub mod show_if;
+pub mod steps;
 pub mod vars;
 pub mod views;
 
 pub use contract_call::ContractPanel;
 pub use lex::{split_top_commas, strip_comments, trailing_alias};
+pub use steps::StepAt;
 pub use views::ViewAt;
 
 use crate::roles::is_sql_type_token;
@@ -100,6 +102,10 @@ pub struct Panel {
     /// shown. Never set on a `::SHOW_IF` statement itself (a condition, not
     /// content) or on setup (it always runs). See [`show_if::assign`].
     pub show_if: Vec<usize>,
+    /// This statement's place in a `::GUIDE_STEP` group (#516), if it is in
+    /// one — set on every statement of the group, setup included. See
+    /// [`steps::assign_steps`].
+    pub step: Option<steps::StepAt>,
 }
 
 impl Panel {
@@ -128,24 +134,29 @@ impl Panel {
 
 /// Fill each statement's [`Panel::tab_requires`]: a `::TAB`'s section runs to
 /// the next `::TAB`, a `::SUBTAB`'s to the next `::SUBTAB` or `::TAB`, a
+/// `::GUIDE_STEP`'s (#516) to the next marker or closer in its group — a
+/// sibling of `::SUBTAB` under a `::TAB`, never nested inside one — and a
 /// `::VIEW` alternative's to the next alternative, closer or end of its
-/// group (a third level inside a `::SUBTAB`'s, gated exactly like a
-/// `::SUBTAB`'s is inside a `::TAB`'s — see [`views::assign_views`], which
-/// has already filled [`Panel::view`] by the time this runs). Chrome
-/// directives (`::THEME`, `::DASHBOARD_TITLE`, …) apply to the whole
-/// dashboard wherever they sit: they inherit nothing.
+/// group (nested inside a `::SUBTAB` or a `::GUIDE_STEP`, gated exactly
+/// like those are inside a `::TAB` — see [`views::assign_views`] and
+/// [`steps::assign_steps`], which have already filled [`Panel::view`] /
+/// [`Panel::step`] by the time this runs). Chrome directives (`::THEME`,
+/// `::DASHBOARD_TITLE`, …) apply to the whole dashboard wherever they sit:
+/// they inherit nothing.
 fn section_requires(panels: &mut [Panel]) {
     let mut tab: Vec<requires::Requirement> = Vec::new();
     let mut sub: Vec<requires::Requirement> = Vec::new();
+    let mut step: Vec<requires::Requirement> = Vec::new();
     let mut view: Vec<requires::Requirement> = Vec::new();
-    let (mut tab_at, mut sub_at, mut view_at) = (None, None, None);
+    let (mut tab_at, mut sub_at, mut step_at, mut view_at) = (None, None, None, None);
     for (i, p) in panels.iter_mut().enumerate() {
         match p.tab_kind() {
             Some(false) => {
                 tab = p.requires.clone();
                 sub.clear();
+                step.clear();
                 view.clear();
-                (tab_at, sub_at, view_at) = (Some(i), None, None);
+                (tab_at, sub_at, step_at, view_at) = (Some(i), None, None, None);
                 continue;
             }
             Some(true) => {
@@ -153,6 +164,8 @@ fn section_requires(panels: &mut [Panel]) {
                 p.tabs = tab_at.into_iter().collect();
                 sub = p.requires.clone();
                 sub_at = Some(i);
+                step.clear();
+                step_at = None;
                 view.clear();
                 view_at = None;
                 continue;
@@ -165,11 +178,31 @@ fn section_requires(panels: &mut [Panel]) {
         {
             continue;
         }
+        // A `::GUIDE_STEP` marker (#516): like a `::SUBTAB`, its own
+        // requires gate everything from here to the next marker/closer in
+        // its group — a step never nests inside a `::SUBTAB` (steps.rs's
+        // `scan` never gives such a marker a `p.step` at all), so `sub` is
+        // always empty here.
+        if p.step.as_ref().is_some_and(|s| s.marker) {
+            p.tab_requires = tab.iter().chain(&sub).cloned().collect();
+            p.tabs = tab_at.into_iter().chain(sub_at).collect();
+            step = p.requires.clone();
+            step_at = Some(i);
+            view.clear();
+            view_at = None;
+            continue;
+        }
+        // Left the step group (or never in one): its level doesn't carry
+        // over to this statement.
+        if p.step.is_none() {
+            step.clear();
+            step_at = None;
+        }
         // A `::VIEW` marker: like a `::SUBTAB`, its own requires gate
         // everything from here to the next marker/closer in its group.
         if p.view.as_ref().is_some_and(|v| v.marker) {
-            p.tab_requires = tab.iter().chain(&sub).cloned().collect();
-            p.tabs = tab_at.into_iter().chain(sub_at).collect();
+            p.tab_requires = tab.iter().chain(&sub).chain(&step).cloned().collect();
+            p.tabs = tab_at.into_iter().chain(sub_at).chain(step_at).collect();
             view = p.requires.clone();
             view_at = Some(i);
             continue;
@@ -180,8 +213,19 @@ fn section_requires(panels: &mut [Panel]) {
             view.clear();
             view_at = None;
         }
-        p.tab_requires = tab.iter().chain(&sub).chain(&view).cloned().collect();
-        p.tabs = tab_at.into_iter().chain(sub_at).chain(view_at).collect();
+        p.tab_requires = tab
+            .iter()
+            .chain(&sub)
+            .chain(&step)
+            .chain(&view)
+            .cloned()
+            .collect();
+        p.tabs = tab_at
+            .into_iter()
+            .chain(sub_at)
+            .chain(step_at)
+            .chain(view_at)
+            .collect();
     }
 }
 
@@ -189,6 +233,7 @@ fn section_requires(panels: &mut [Panel]) {
 pub fn plan(script: &str) -> Vec<Panel> {
     let mut panels = plan_statements(script);
     views::assign_views(&mut panels);
+    steps::assign_steps(&mut panels);
     section_requires(&mut panels);
     show_if::assign(&mut panels);
     panels
@@ -230,6 +275,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     tabs: Vec::new(),
                     view: None,
                     show_if: Vec::new(),
+                    step: None,
                 }
             } else {
                 Panel {
@@ -246,6 +292,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     tabs: Vec::new(),
                     view: None,
                     show_if: Vec::new(),
+                    step: None,
                 }
             })
         })
@@ -1114,6 +1161,18 @@ fn rewrite_list(list: &str) -> Rewritten {
                 // re-aliased away) so views::assign_views can tell a literal
                 // label from a computed one straight off the rewritten SQL.
                 Role::View => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
+                // A `::GUIDE_STEP` marker's explicit `AS alias` names its
+                // group's step variable (#516, decision 4) — kept in
+                // `names` (`steps::assign_steps` reads it back), the
+                // value's own text kept intact so `steps::scan` can tell a
+                // literal label from a computed one, the same as `::VIEW`.
+                Role::GuideStep => {
                     let (core, alias) = trailing_alias(expr);
                     if let Some(nm) = alias {
                         names.push((i, nm));

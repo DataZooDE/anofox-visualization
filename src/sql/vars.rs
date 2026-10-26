@@ -25,6 +25,19 @@ use crate::{InputKind, Role};
 /// an input/`SET VARIABLE` with no simple name, is silently left out (see
 /// the module docs).
 pub fn declared(panels: &[Panel]) -> Vec<String> {
+    let mut out: Vec<String> = super::steps::groups(panels)
+        .into_iter()
+        .map(|g| g.var)
+        .collect();
+    out.extend(declared_without_steps(panels));
+    out.iter().map(|s| s.to_ascii_lowercase()).collect()
+}
+
+/// [`declared`] without each `::GUIDE_STEP` group's own variable (#516's
+/// `step/var-clash`: whether some *other* mechanism — an input, a setup
+/// `SET VARIABLE`, `::SELECT_AS`, `::DRILL`, `::ROWSELECT` — declares the
+/// same name a step group would use).
+pub(crate) fn declared_without_steps(panels: &[Panel]) -> Vec<String> {
     let mut out = vec!["anofox_data".to_string()];
     for (i, p) in panels.iter().enumerate() {
         if let Some(kind) = crate::inputs::input_kind(&p.roles) {
@@ -320,6 +333,14 @@ mod tests {
     fn set_variable_in_setup() {
         let p = plan("SET VARIABLE myvar = 1; SELECT 1;");
         assert!(declared(&p).contains(&"myvar".to_string()));
+    }
+
+    #[test]
+    fn guide_step_variable_is_declared() {
+        let p = plan("SELECT 'S1'::GUIDE_STEP; SELECT 'S2'::GUIDE_STEP;");
+        assert!(declared(&p).contains(&"step".to_string()));
+        let p2 = plan("SELECT 'S1' AS lesson ::GUIDE_STEP; SELECT 'S2' ::GUIDE_STEP;");
+        assert!(declared(&p2).contains(&"lesson".to_string()));
     }
 
     #[test]
