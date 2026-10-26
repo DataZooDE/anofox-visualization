@@ -85,9 +85,35 @@ jobs:
         with:
           python-version: "3.12"
 
+      # #552: build-native.sh builds web/pkg itself now (cargo to
+      # wasm32-unknown-unknown + wasm-bindgen + wasm-opt — no wasm-pack,
+      # which doesn't work on every box; see that script's comments), so
+      # this installs the two CLIs it needs instead of wasm-pack.
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-pack
+          # Must match the `wasm-bindgen` crate pinned in Cargo.lock —
+          # build-native.sh checks this itself and fails loudly on a
+          # mismatch.
+          tool: wasm-bindgen@0.2.129
+
+      - name: Install wasm-opt (binaryen)
+        run: |
+          case "$PLATFORM" in
+            linux_amd64)   asset=x86_64-linux ;;
+            linux_arm64)   asset=aarch64-linux ;;
+            osx_arm64)     asset=arm64-macos ;;
+            osx_amd64)     asset=x86_64-macos ;;
+            windows_amd64) asset=x86_64-windows ;;
+            *) echo "::error::no binaryen release asset mapped for platform $PLATFORM"; exit 1 ;;
+          esac
+          ver=version_133
+          curl -sSfL -o "$RUNNER_TEMP/binaryen.tar.gz" "https://github.com/WebAssembly/binaryen/releases/download/$ver/binaryen-$ver-$asset.tar.gz"
+          mkdir -p "$RUNNER_TEMP/binaryen" "$HOME/.local/bin"
+          tar -xzf "$RUNNER_TEMP/binaryen.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/binaryen"
+          bin="$RUNNER_TEMP/binaryen/bin/wasm-opt"
+          [ "$PLATFORM" = windows_amd64 ] && bin="$bin.exe"
+          cp "$bin" "$HOME/.local/bin/"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install the pinned DuckDB CLI
         run: echo "DUCKDB=$(scripts/release/install-duckdb-cli.sh)" >> "$GITHUB_ENV"

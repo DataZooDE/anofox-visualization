@@ -30,7 +30,7 @@ Then open <http://127.0.0.1:8910/>. Ctrl-C stops the server.
 
 You need a DuckDB 1.5 CLI (`duckdb` on `PATH`, or `DUCKDB=/path/to/duckdb`).
 On the first start the script builds the native extension into
-`examples/served/work/` (Rust and `wasm-pack`, a few minutes; see
+`examples/served/work/` (Rust, `wasm-bindgen` + `wasm-opt`, a few minutes; see
 [BUILD.md](../../BUILD.md)); point `ANOFOX_EXT` at an
 `anofox_visualization.duckdb_extension` you already have to skip that. It also
 generates the data on the first start.
