@@ -1673,6 +1673,19 @@ fn kpi_size_json(roles: &[(usize, Role)], rows: &Rows) -> Option<bool> {
     }
 }
 
+/// A caption (here, an `@param`'s name) with a trailing ":" — unless it
+/// already ends with its own terminal punctuation (`? ! : … .`) once
+/// trailing whitespace is trimmed (#539): a question caption like
+/// "concept drift?" stays "concept drift?", never "concept drift?:".
+fn caption_colon(text: &str) -> String {
+    let t = text.trim_end();
+    if t.is_empty() || t.ends_with(['?', '!', ':', '…', '.']) {
+        t.to_string()
+    } else {
+        format!("{t}:")
+    }
+}
+
 /// Why the script-free page could not be drawn (#279). `Viewer` text is safe
 /// to show (no data, SQL or paths: a timeout, the row cap); `Server` text — a
 /// DuckDB error, which can quote file paths, SQL and values — goes to the
@@ -1772,8 +1785,8 @@ fn render_dashboard_page(
     for p in &dash.meta.params {
         let val = value_of(&p.name);
         selects.push_str(&format!(
-            "<label>{}: <select name=\"{}\" onchange=\"this.form.submit()\">",
-            esc(&p.name),
+            "<label>{} <select name=\"{}\" onchange=\"this.form.submit()\">",
+            esc(&caption_colon(&p.name)),
             esc(&p.name)
         ));
         for opt in &p.allowed {
@@ -2254,6 +2267,29 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #539: an `@param`'s label gets a trailing ":" — unless it already
+    /// ends with its own terminal punctuation once trailing whitespace is
+    /// trimmed. Mirrors web/app.js's `captionColon` (tests/web/caption_colon_test.mjs).
+    #[test]
+    fn caption_colon_skips_the_colon_after_terminal_punctuation() {
+        assert_eq!(caption_colon("region"), "region:");
+        assert_eq!(
+            caption_colon("Which check sees concept drift?"),
+            "Which check sees concept drift?"
+        );
+        assert_eq!(caption_colon("Great job!"), "Great job!");
+        assert_eq!(caption_colon("Pick one:"), "Pick one:");
+        assert_eq!(caption_colon("Loading…"), "Loading…");
+        assert_eq!(caption_colon("Done."), "Done.");
+        assert_eq!(
+            caption_colon("Which check sees concept drift?  "),
+            "Which check sees concept drift?"
+        );
+        assert_eq!(caption_colon("region   "), "region:");
+        assert_eq!(caption_colon(""), "");
+        assert_eq!(caption_colon("   "), "");
+    }
 
     #[test]
     fn page_errors_show_only_safe_text() {

@@ -2,8 +2,10 @@
 //! scales, reference lines, top-k labels, smoothing methods) and for the
 //! rendering bugs fixed alongside them.
 
+mod common;
 use anofox_visualization::theme::DEFAULT_PALETTE;
 use anofox_visualization::{render, Column, Kind, Role};
+use common::tick_labels::x_tick_labels;
 use ggplot_rs::prelude::Value;
 
 fn strs(v: &[&str]) -> Vec<Value> {
@@ -3003,4 +3005,113 @@ fn hexbin_scatter_category_is_dropped_not_faceted_or_errored() {
     // One density for the whole panel — no error, no per-category facets.
     let s = svg(cols);
     assert!(!polygons(&s).is_empty(), "{s}");
+}
+
+// ── #533: a VARCHAR ::XAXIS that merely *looks* like ISO dates stays
+// discrete on violin/box/strip plots, whatever the strings look like ─────
+//
+// `sql::coerce_for_role`'s `maybe_datetime` reinterprets an all-ISO-date
+// VARCHAR column as `Value::DateTime` so a *line/bar* chart over daily dates
+// gets a sensible continuous datetime axis — but a violin/box/strip
+// (`::JITTER`/`::STRIP`) plot's x is never a continuous position: every row
+// at the same x already groups into one body/box/column, the same as any
+// other VARCHAR level (#444 made that true for heatmaps' VARCHAR axis).
+// Before the fix, every row collapsed into a single body labelled with the
+// first date; `cartesian`'s `group_by_day` now keeps a DateTime x grouped
+// on these chart kinds too, formatted with the same date text a reference
+// line uses (`xline_date_text`), not `value_str`'s raw epoch number.
+#[test]
+fn violin_box_strip_group_by_day_on_iso_date_strings() {
+    let dates = [
+        "2024-01-01",
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05",
+    ];
+    for kind in [Kind::Violin, Kind::Boxplot, Kind::Jitter] {
+        let x: Vec<Value> = (0..100)
+            .map(|i| Value::Str(dates[i % 5].to_string()))
+            .collect();
+        let y: Vec<f64> = (0..100)
+            .map(|i| (i % 5) as f64 + (i as f64 * 0.013).sin())
+            .collect();
+        let s = svg(vec![
+            Column::new("x", Role::X, x),
+            Column::new("y", Role::Value(kind), nums(&y)),
+        ]);
+        let labels: Vec<String> = x_tick_labels(&s).into_iter().map(|l| l.text).collect();
+        for d in dates {
+            assert!(
+                labels.iter().any(|l| l == d),
+                "{kind:?}: missing the {d} tick (collapsed into one group?) — got {labels:?}\n{s}"
+            );
+        }
+        assert_eq!(
+            labels.len(),
+            5,
+            "{kind:?}: 5 distinct day groups expected, not merged into one — got {labels:?}\n{s}"
+        );
+    }
+}
+
+/// Same as above, but a real DATE/TIMESTAMP `::XAXIS` (`Value::DateTime`
+/// straight from DuckDB, not a VARCHAR that happened to parse as one): still
+/// grouped by distinct day on these chart kinds, not drawn as one body on a
+/// continuous datetime scale.
+#[test]
+fn violin_groups_by_day_on_a_real_date_column() {
+    const DAY: i64 = 86_400;
+    const T0: i64 = 1_704_067_200; // 2024-01-01 UTC
+    let x: Vec<Value> = (0..100)
+        .map(|i| Value::DateTime(T0 + (i % 5) as i64 * DAY))
+        .collect();
+    let y: Vec<f64> = (0..100).map(|i| (i % 5) as f64).collect();
+    let s = svg(vec![
+        Column::new("x", Role::X, x),
+        Column::new("y", Role::Value(Kind::Violin), nums(&y)),
+    ]);
+    assert_eq!(
+        s.matches("data-geom=\"violin\"").count(),
+        5,
+        "5 distinct day groups, not merged into one violin — {s}"
+    );
+    let labels: Vec<String> = x_tick_labels(&s).into_iter().map(|l| l.text).collect();
+    assert!(
+        labels.iter().any(|l| l == "2024-01-01") && labels.iter().any(|l| l == "2024-01-05"),
+        "date-formatted group labels, not a raw epoch number — got {labels:?}\n{s}"
+    );
+}
+
+/// `2024-01-01` + `n` days, as `YYYY-MM-DD` (2024 is a leap year, so this
+/// stays correct through the end of February — as far as the test below
+/// needs it).
+fn iso_date_2024(n: u32) -> String {
+    const MONTH_DAYS: [u32; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut day = n; // days after 2024-01-01, 0-based
+    let mut month = 0usize;
+    while day >= MONTH_DAYS[month] {
+        day -= MONTH_DAYS[month];
+        month += 1;
+    }
+    format!("2024-{:02}-{:02}", month + 1, day + 1)
+}
+
+/// A continuous x isn't touched by the #533 fix: a daily `::LINECHART` over
+/// the same ISO date strings still gets a continuous datetime axis (sparse,
+/// evenly spaced ticks), not one discrete level per row.
+#[test]
+fn line_chart_still_treats_iso_date_strings_as_a_continuous_axis() {
+    let x: Vec<Value> = (0..60).map(|i| Value::Str(iso_date_2024(i))).collect();
+    let y: Vec<f64> = (0..60).map(|i| i as f64).collect();
+    let s = svg(vec![
+        Column::new("x", Role::X, x),
+        Column::new("y", Role::Value(Kind::Line), nums(&y)),
+    ]);
+    let labels = x_tick_labels(&s);
+    assert!(
+        labels.len() < 60,
+        "a continuous date axis thins its ticks, not one per row — got {} labels\n{s}",
+        labels.len()
+    );
 }

@@ -232,6 +232,162 @@ fn colors_level_map_paints_category_levels_in_status_colours() {
     assert!(c.is_some() && c < w && w < o, "legend Critical, Watch, OK");
 }
 
+/// #535: a `::COLORS` level map must colour the named `::CATEGORY` levels on
+/// every chart kind that takes a `::CATEGORY` and maps it to a colour/fill
+/// scale — not only `::SCATTER` (above): `::VIOLIN`, `::LINECHART` and
+/// `::BARCHART` already honoured it via `cartesian`'s `category_scale`
+/// (regression guard here); `::DENSITY`, `::HISTOGRAM`, `::QQ`, `::RADAR` and
+/// `::PIE`/`::DONUTCHART` fell back to the plain palette (`dz_scale`)
+/// instead, so the mapped status colours never appeared.
+#[test]
+fn colors_level_map_honoured_on_every_category_chart_kind() {
+    let colors = || {
+        Column::new(
+            "c",
+            Role::GaugeColors,
+            strs(&["Critical:bad; Watch:warn; OK:good"]),
+        )
+    };
+    let status = |n: usize| -> Vec<Value> {
+        ["Critical", "Watch", "OK"]
+            .iter()
+            .cycle()
+            .take(n)
+            .map(|s| Value::Str(s.to_string()))
+            .collect()
+    };
+    let wave = |n: usize| -> Vec<f64> {
+        (0..n)
+            .map(|i| (i as f64).sin() * 5.0 + (i % 7) as f64)
+            .collect()
+    };
+
+    let cases: Vec<(&str, Vec<Column>)> = vec![
+        (
+            "VIOLIN",
+            vec![
+                Column::new("x", Role::X, strs(&["G"; 60])),
+                Column::new("y", Role::Value(Kind::Violin), nums(&wave(60))),
+                Column::new("status", Role::Category, status(60)),
+                colors(),
+            ],
+        ),
+        (
+            "LINECHART",
+            vec![
+                Column::new(
+                    "x",
+                    Role::X,
+                    nums(&[1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]),
+                ),
+                Column::new(
+                    "y",
+                    Role::Value(Kind::Line),
+                    nums(&[10.0, 12.0, 9.0, 4.0, 6.0, 5.0, 20.0, 22.0, 19.0]),
+                ),
+                Column::new(
+                    "status",
+                    Role::Category,
+                    strs(&[
+                        "Critical", "Critical", "Critical", "Watch", "Watch", "Watch", "OK", "OK",
+                        "OK",
+                    ]),
+                ),
+                colors(),
+            ],
+        ),
+        (
+            "BARCHART",
+            vec![
+                Column::new("x", Role::X, strs(&["G1", "G1", "G1"])),
+                Column::new("y", Role::Value(Kind::Bar), nums(&[10.0, 20.0, 30.0])),
+                Column::new("status", Role::Category, strs(&["Critical", "Watch", "OK"])),
+                colors(),
+            ],
+        ),
+        (
+            "HISTOGRAM",
+            vec![
+                Column::new("v", Role::Value(Kind::Histogram), nums(&wave(60))),
+                Column::new("status", Role::Category, status(60)),
+                colors(),
+            ],
+        ),
+        (
+            "DENSITY",
+            vec![
+                Column::new("v", Role::Value(Kind::Density), nums(&wave(60))),
+                Column::new("status", Role::Category, status(60)),
+                colors(),
+            ],
+        ),
+        (
+            "QQ",
+            vec![
+                Column::new("v", Role::Value(Kind::QQ), nums(&wave(60))),
+                Column::new("status", Role::Category, status(60)),
+                colors(),
+            ],
+        ),
+        (
+            "RADAR",
+            vec![
+                Column::new(
+                    "x",
+                    Role::X,
+                    strs(&[
+                        "Speed", "Power", "Range", "Speed", "Power", "Range", "Speed", "Power",
+                        "Range",
+                    ]),
+                ),
+                Column::new(
+                    "y",
+                    Role::Value(Kind::Radar),
+                    nums(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+                ),
+                Column::new(
+                    "status",
+                    Role::Category,
+                    strs(&[
+                        "Critical", "Critical", "Critical", "Watch", "Watch", "Watch", "OK", "OK",
+                        "OK",
+                    ]),
+                ),
+                colors(),
+            ],
+        ),
+        (
+            "PIE",
+            vec![
+                Column::new("v", Role::Value(Kind::Pie), nums(&[30.0, 20.0, 50.0])),
+                Column::new("status", Role::Category, strs(&["Critical", "Watch", "OK"])),
+                colors(),
+            ],
+        ),
+        (
+            "DONUTCHART",
+            vec![
+                Column::new("v", Role::Value(Kind::Donut), nums(&[30.0, 20.0, 50.0])),
+                Column::new("status", Role::Category, strs(&["Critical", "Watch", "OK"])),
+                colors(),
+            ],
+        ),
+    ];
+
+    let t = anofox_visualization::theme::ResolvedTheme::default();
+    for (name, cols) in cases {
+        let svg = render(&cols, 480, 320).unwrap().to_lowercase();
+        for (r, g, b) in [t.colors.negative, t.colors.warning, t.colors.positive] {
+            let hex = format!("#{r:02x}{g:02x}{b:02x}");
+            let rgb = format!("rgb({r},{g},{b})");
+            assert!(
+                svg.contains(&hex) || svg.contains(&rgb),
+                "{name}: {hex} drawn\n{svg}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_constant_size_sets_the_point_size_without_a_legend() {
     // SELECT d::XAXIS, p::SCATTER, s::CATEGORY, 7::SIZE — 7 is no measure

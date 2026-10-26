@@ -106,7 +106,7 @@ SELECT 320::HEIGHT;
 SELECT check_name ::XAXIS, rows_to_fix ::BARCHART, 1 ::FLIP,
        'Rows to fix per failing check — orphan orders and malformed emails lead'::TITLE
 FROM tq_fix WHERE status = 'fail' AND rows_to_fix > 0 AND tq_scope(table_name)
-ORDER BY rows_to_fix;
+ORDER BY rows_to_fix, check_name;
 
 SELECT 12::COL;
 SELECT 'Failing checks — weekly trend for the order checks'::TITLE,
@@ -120,7 +120,7 @@ FROM tq_fix f
 LEFT JOIN (SELECT check_name, list(value ORDER BY week) AS trend, count(*) FILTER (WHERE status = 'fail') AS weeks_failing
            FROM tq_check_history WHERE tq_days(week) GROUP BY 1) h USING (check_name)
 WHERE f.status = 'fail' AND tq_scope(f.table_name)
-ORDER BY f.rows_to_fix DESC;
+ORDER BY f.rows_to_fix DESC, f.check_name;
 
 -- ── 2 · Rules: the order checks week by week ─────────────────────────────────
 SELECT 'Rules'::TAB;
@@ -209,7 +209,7 @@ SELECT 4::COL;
 SELECT 360::HEIGHT;
 SELECT 'channel'::SELECT_AS;
 SELECT channel ::XAXIS, count(*) ::BARCHART, 'Flagged orders by channel — click to filter'::TITLE
-FROM tq_anomaly WHERE anomaly_score >= tq_thr() AND tq_days(order_date) GROUP BY ALL ORDER BY 2 DESC;
+FROM tq_anomaly WHERE anomaly_score >= tq_thr() AND tq_days(order_date) GROUP BY ALL ORDER BY 2 DESC, 1;
 
 SELECT 8::COL;
 SELECT 'Flagged orders, with the outlier tree''s explanation'::TITLE,
@@ -218,7 +218,7 @@ SELECT 'Flagged orders, with the outlier tree''s explanation'::TITLE,
        coalesce(regexp_replace(t.explanation, ' \(mean.*\)', ''), '—') AS "Outlier tree"
 FROM tq_anomaly a LEFT JOIN tq_outlier_tree t USING (order_id)
 WHERE a.anomaly_score >= tq_thr() AND tq_days(a.order_date) AND coalesce(getvariable('channel'), '') IN ('', a.channel)
-ORDER BY a.anomaly_score DESC;
+ORDER BY a.anomaly_score DESC, a.order_id;
 
 -- ── 5 · Profiles: columns and field validity ─────────────────────────────────
 SELECT 'Profiles'::TAB;
