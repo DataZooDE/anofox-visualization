@@ -89,11 +89,39 @@ crate-type = ["cdylib", "rlib"]
 # generous for that character mix and the kept text overflows the panel).
 # `map/plot.rs` keeps its existing 90px legend-width reservation instead —
 # tracked as a ggplot-rs follow-up (wrap within one run + a tighter width
-# estimate for URL-heavy text), not blocking this bump. No API breaks in
-# any of 0.31.1-0.31.3 (cargo-semver-checks against the prior release each
-# time).
+# estimate for URL-heavy text), not blocking this bump. 0.31.4:
+# `AttributionOverflow::Wrap` now splits *inside* a run (not just between
+# runs) and both `Wrap`/`Ellipsis` keep each kept/split piece's `href`
+# (sipemu/ggplot-rs#267/#268) — the exact gap 0.31.3 above left open, so
+# `map/plot.rs` now adopts `.fit(7.0)`/`.fit_overflow(Wrap)` and drops the
+# 90px reservation (#546). Also adds `GeomAttribution::fit_width_scale`, an
+# opt-in multiplier on `fit`'s width estimate for a caller whose deployed
+# rendering measures wider than the heuristic; not used here — measuring
+# `foot_of`'s own BKG/EuroGeographics/Natural-Earth rows with `ab_glyph`
+# against real DejaVu Sans and Noto Sans glyph metrics (this box's two
+# installed fonts, Noto being rsvg's fallback without Hanken Grotesk
+# installed) found both render *narrower* than `text_width`'s heuristic
+# at every row (DejaVu up to ~0.99x, Noto up to ~0.79x) — the heuristic's
+# existing margin already covers both, same conclusion sipemu/ggplot-rs#268
+# reached measuring DejaVu + Hanken Grotesk itself. No API breaks in any of
+# 0.31.1-0.31.4 (cargo-semver-checks against the prior release each time).
+# 0.31.5 (sipemu/ggplot-rs#273, filed from this crate's own #546/#549): adds
+# a shared corner layout (`render::corner_layout`) so `GeomAttribution`,
+# `GeomAnnotationScale` and `GeomBivariateLegend` each measure their own box
+# and stack clear of whatever another one of them already claimed in the
+# same render pass, instead of drawing independently into the same corner
+# rect — `map/plot.rs` drops the `Foot::wrap_likely`-gated scale-bar corner
+# swap this crate had added as a workaround (#546) now that the library
+# does the clearing itself; confirmed with PNG crops. Also: a bottom-
+# anchored attribution's own wrapped physical lines now read top to bottom
+# (previously the opposite, upside down); `GeomBivariateLegend`'s x/y
+# captions now fit the grid's own width/height (wrap, then shrink, then
+# ellipsise — same fallback `GeomAttribution::fit` uses) instead of
+# growing the box to fit themselves; its rotated y caption now reads
+# bottom-to-top, matching the axis-title convention. No API breaks
+# (cargo-semver-checks against 0.31.4).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.3", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.31.5", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
@@ -115,6 +143,24 @@ base64 = { version = "0.22", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# `--site`'s active-SVG check (src/bin/dashboard.rs::svg_active_reason,
+# review of #554 B1): parses every published assets/ SVG as XML rather
+# than scanning its text, so a namespace-prefixed <x:script> (bound to the
+# SVG namespace under a different prefix) or a foreign-namespace element
+# (<h:script>/<h:iframe> under the XHTML namespace) can't hide from a
+# literal "<script"/"<foreignobject" match. Lives only in `src/bin/
+# dashboard.rs`, which the wasm `--lib` build never compiles — review of
+# #554's second re-review: gated to non-wasm targets anyway, rather than
+# relying on dead-code elimination to keep it out of `web/pkg`, so the
+# wasm build doesn't even compile the crate. The `[dev-dependencies]`
+# entry below covers the one other user, `src/diagram.rs`'s `#[cfg(test)]`
+# code (tests that parse a rendered SVG as XML), for every target.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+roxmltree = "0.21"
+
+[dev-dependencies]
+roxmltree = "0.21"
+
 [features]
 default = []
 # Browser build (DuckDB-Wasm + the renderer). `wasm-pack build --features wasm`.
@@ -127,10 +173,6 @@ auth = ["dep:jsonwebtoken", "dep:aws-lc-rs", "dep:rustls", "dep:ureq", "dep:base
 [[bin]]
 name = "serve"
 required-features = ["serve"]
-
-[dev-dependencies]
-# Tests parse every rendered SVG as XML (well-formedness + XSS checks).
-roxmltree = "0.21"
 
 # tiny_http 0.12.0 with a lost wake-up fix in its worker pool (#86) and the
 # security fixes backported from tiny_http_dh 0.12.2. Every crate in the

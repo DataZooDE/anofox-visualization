@@ -66,12 +66,28 @@ writeFileSync(
   "SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B')) t(q1);\n" +
     "SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS;\n"
 );
+// #525 (plan's worked example): a tour whose "seen" flag comes from
+// viewer_state instead of localStorage — the ::SUBMIT's own id
+// ("progress_tour") equals the tour's id, gated the ordinary "record once"
+// way (zero rows once a row for it exists), so its panel is absent from
+// the DOM exactly when the viewer has already completed the tour.
+writeFileSync(
+  path.join(dashDir, "progress.sql"),
+  "-- @tour progress_tour See your progress\n" +
+    "--   page: Welcome! Finish this tour once and reloading won't show it again.\n" +
+    "--   done_toggle: Click the button below the toggle to mark the tour done.\n" +
+    "-- @tour_autostart progress_tour\n\n" +
+    "-- @name done_toggle\n" +
+    "SELECT true AS done ::TOGGLE;\n" +
+    "SELECT 'Mark tour done' AS progress_tour ::SUBMIT, 'done' AS r ::SUBMIT_VARS\n" +
+    "FROM (SELECT 1) t WHERE NOT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'progress_tour');\n"
+);
 const sec = crypto.randomBytes(24).toString("hex");
 const statePath = path.join(W, "state.jsonl");
 const opts = {
   auth: { mode: "proxy", shared_secret: sec, trusted_proxies: ["127.0.0.1"] },
   policy: "none",
-  state: { path: statePath, dashboards: ["quiz"] },
+  state: { path: statePath, dashboards: ["quiz", "progress"] },
 };
 async function serve() {
   const p = spawn(duckdb, ["-unsigned", "-batch", ":memory:"], { stdio: ["pipe", "pipe", "pipe"] });
@@ -184,6 +200,37 @@ try {
     check(true, "(d) the server's own 400 text shows in the alert region");
     check(!(await page.locator(".submit-btn").isDisabled()), "(d) the button re-enables after a 400");
     check(!errs.length, `(d) no page errors: ${errs.join(" | ")}`);
+    await ctx.close();
+  }
+
+  // (d2) #551: a 400 whose JSON body names one of this dashboard's own
+  // variables (`{"error","var"}`, duckext serve.rs `reply_invalid_var`) —
+  // that input's own control gets `aria-invalid`, and the error line
+  // carries a focusable link to it; picking a different answer (a real
+  // value change, not another submit) clears the marking on its own,
+  // before any further click.
+  {
+    const { page, errs, ctx } = await openAs("dana2", "light");
+    await page.route("**/api/submit", (route) =>
+      route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "'q1' is not one of the options", var: "q1" }) })
+    );
+    await page.locator(".submit-btn").click();
+    await page.waitForFunction(() => document.querySelector(".submit-error")?.textContent?.includes("not one of the options"), null, { timeout: 15000 });
+    const seg = page.locator(".dp-seg button[aria-checked='true']").first();
+    check((await seg.getAttribute("aria-invalid")) === "true", "(d2) the named input's control is aria-invalid");
+    const link = page.locator(".submit-error-link");
+    check((await link.count()) === 1, "(d2) the error line carries a focusable link");
+    if (shots) await page.screenshot({ path: `${shots}/submit-invalid-var-light-1440.png` });
+    await link.click();
+    check(await seg.evaluate((el) => el === document.activeElement), "(d2) the link focuses the named input");
+    // Picking a different option is a real change — the panel re-renders
+    // (a fresh DOM), and `mkSubmit`'s own restore no longer reapplies
+    // aria-invalid once the snapshotted bad value no longer matches.
+    await page.locator('.dp-seg button:text-is("B")').click();
+    await page.waitForFunction(() => !document.querySelector("[aria-invalid='true']"), null, { timeout: 5000 });
+    check(true, "(d2) aria-invalid is cleared once the answer actually changes");
+    await page.unroute("**/api/submit");
+    check(!errs.length, `(d2) no page errors: ${errs.join(" | ")}`);
     await ctx.close();
   }
 
@@ -344,6 +391,32 @@ try {
     } finally {
       nocache.kill();
     }
+  }
+
+  // (i) #525: a signed-in viewer's tour "seen" flag can come from
+  // viewer_state instead of localStorage, when a ::SUBMIT's own id equals
+  // the tour's id and the author gates it "record once" — see
+  // progress.sql above and docs/DOCS.md's "Remembering progress" section.
+  {
+    const { page, ctx } = await openAsPage("progress", "progress-first");
+    await page.waitForSelector(".dp-tour-pop", { timeout: 15000 });
+    check(true, "(i) the tour autostarts on a signed-in viewer's first visit");
+    await page.locator(".submit-btn").click();
+    await page.waitForFunction(() => document.querySelector(".submit-status")?.textContent?.includes("Submitted at"), null, { timeout: 15000 });
+
+    // Clear localStorage too, to prove the second visit's skip comes from
+    // viewer_state (#525), not the ordinary per-browser "seen" flag.
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
+    await page.waitForSelector(".submit-btn");
+    await page.waitForTimeout(1500); // autostart, if any, fires right after the first swap
+    check(!(await page.locator(".dp-tour-pop").isVisible()), "(i) no autostart on a second visit: viewer_state already records it done");
+    await ctx.close();
+
+    const { page: page2, ctx: ctx2 } = await openAsPage("progress", "progress-second");
+    await page2.waitForSelector(".dp-tour-pop", { timeout: 15000 });
+    check(true, "(i) a different signed-in viewer (who hasn't submitted) still gets the autostart");
+    await ctx2.close();
   }
 
   // (h) axe: no serious/critical violation on the submit panel, light + dark.

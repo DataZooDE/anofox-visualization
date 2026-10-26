@@ -63,7 +63,12 @@ pub struct Diagnostic {
     /// `view/unbalanced-group` (errors) | `view/lone` | `view/computed-label` |
     /// `view/mixed-names` | `view/empty` | `view/open-ended` |
     /// `view/stray-end` (warnings) | `view/input-inside` | `view/unnamed`
-    /// (notes).
+    /// (notes). `::VIEW_PLACEMENT` ([`view_diags`], #534):
+    /// `view-placement/unknown-value` (an error: not `'row'`/`'header'`) |
+    /// `view-placement/not-single-panel` | `view-placement/ambiguous` |
+    /// `view-placement/orphan` (warnings: each falls back to `'row'`) |
+    /// `view-placement/computed-value` (a warning: can't be checked here,
+    /// still works at render time, like `view/computed-label`).
     /// `::FIT` ([`fit_diags`], #400, warnings): `layout/fit-ambiguous` (before
     /// the first ::TAB of a tabbed dashboard, a second ::FIT for one section,
     /// or cast beside a panel's columns) | `layout/fit-too-many` (more rows
@@ -76,7 +81,10 @@ pub struct Diagnostic {
     /// `header/bad-certified` | `header/bad-order` | `header/long-description` |
     /// `header/empty-nav` | `header/long-nav` | `header/bad-astables` (not
     /// `on`/`off`, so the author's `-- @astables` is ignored — the bar stays
-    /// off unless a viewer turns it on). A served folder
+    /// off unless a viewer turns it on) | `header/bad-markdown-style` (not
+    /// `plain`/`card`/`callout`, so `-- @markdown_style` is ignored —
+    /// `::MARKDOWN` panels without their own `::MARKDOWN_STYLE` fall back to
+    /// 'callout'). A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
@@ -88,8 +96,9 @@ pub struct Diagnostic {
     /// `::IMAGE` / `::IMAGE_DARK` (#514, [`image_src_diag`]): `image/bad-src`
     /// | `image/outside-folder` (errors) | `image/not-in-assets` |
     /// `image/svg-no-size` | `image/too-large` | `image/empty` |
-    /// `image/no-alt` | `image/many` (warnings) | `image/https-offline` (a
-    /// note). Markdown images
+    /// `image/no-alt` | `image/many` | `image/missing-file` (PR B — only
+    /// with [`LintOptions::image_root`]) (warnings) | `image/https-offline`
+    /// (a note). Markdown images
     /// (`![alt](src)`): `markdown/image-bad-src` (error) |
     /// `markdown/image-not-in-assets` | `markdown/image-svg-no-size` |
     /// `markdown/image-too-large` | `markdown/image-no-alt` |
@@ -129,7 +138,7 @@ pub struct Diagnostic {
 }
 
 /// Options for [`check_opts`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LintOptions {
     /// Also emit `design/*` advisory warnings (layout / chart-choice quality).
     /// On by default; the CLI's `--no-design` turns it off.
@@ -160,6 +169,13 @@ pub struct LintOptions {
     /// `dashboard --check`'s own queries), so this path must not change
     /// shape even as the stateful one does.
     pub stateful_session: bool,
+    /// The dashboard's own folder (#514 PR B), canonicalized, if a relative
+    /// `::IMAGE`/`::IMAGE_DARK`/markdown-image source under `assets/` should
+    /// be checked for `image/missing-file` (a warning: the file isn't
+    /// there). `None` (the default — the browser's own lint, which has no
+    /// folder to check against) skips that one diagnostic entirely; every
+    /// other image diagnostic is unaffected.
+    pub image_root: Option<std::path::PathBuf>,
 }
 
 impl Default for LintOptions {
@@ -167,6 +183,7 @@ impl Default for LintOptions {
         LintOptions {
             design: true,
             stateful_session: false,
+            image_root: None,
         }
     }
 }
@@ -1155,6 +1172,54 @@ where
             }
         }
 
+        // ::MARKDOWN_STYLE (#536): an unknown value falls back to 'callout'
+        // (today's look); it needs a ::MARKDOWN column in the same SELECT;
+        // and combined with ::CALLOUT it only makes sense as 'callout' —
+        // 'plain'/'card' would silently drop the chosen look.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::MarkdownStyle) {
+            let v = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let mut warn = |code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if !crate::roles::MARKDOWN_STYLE_KINDS.contains(&v.as_str()) {
+                warn(
+                    "markdown_style/unknown",
+                    format!(
+                        "::MARKDOWN_STYLE `{v}` — use 'plain', 'card' or 'callout' (drawn as \
+                         'callout')"
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                warn(
+                    "markdown_style/no-text",
+                    "::MARKDOWN_STYLE needs a ::MARKDOWN column in the same SELECT".into(),
+                );
+            }
+            if p.roles.iter().any(|(_, r)| *r == Role::Callout) && (v == "plain" || v == "card") {
+                warn(
+                    "markdown_style/conflicts-with-callout",
+                    format!(
+                        "::CALLOUT together with '{v}'::MARKDOWN_STYLE — the explicit style wins, \
+                         so ::CALLOUT's tint, bar and icon are dropped (drop ::CALLOUT, or set \
+                         ::MARKDOWN_STYLE to 'callout')"
+                    ),
+                );
+            }
+        }
+
         // {{col}} / {{col:fmt}} placeholders in a ::MARKDOWN text must name a
         // column of the same SELECT and a known format.
         if let (Some((i, _)), Some(row)) = (
@@ -1242,6 +1307,24 @@ where
                             _ => "image/too-large",
                         };
                         push(sev, code, msg);
+                    } else if let (crate::image::SrcKind::Relative, Some(root)) =
+                        (crate::image::src_ok(src), &opts.image_root)
+                    {
+                        // `image_src_diag` already returned `Some` (and this
+                        // branch never ran) for a Relative src outside
+                        // `assets/` — reaching here means it is under
+                        // `assets/`, so `None` can only mean the file isn't
+                        // actually there.
+                        if crate::image::resolve_relative(src, Some(root)).is_none() {
+                            push(
+                                Severity::Warning,
+                                "image/missing-file",
+                                format!(
+                                    "`{}` doesn't exist under this folder's assets/",
+                                    one_line(src)
+                                ),
+                            );
+                        }
                     } else if matches!(crate::image::src_ok(src), crate::image::SrcKind::Https) {
                         // The static HTML and `--svg` keep an https: source
                         // as a link rather than embedding it (it may not
@@ -2983,6 +3066,46 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
         });
     }
 
+    // `::VIEW_PLACEMENT` (#534), over the whole plan: a statement combining
+    // it with other roles (`view-placement/ambiguous`, like `::FIT`'s own
+    // check), or one `scan` never attached to any group as its
+    // `placement_stmt` (`view-placement/orphan`) — not directly before a
+    // `::VIEW` group's first marker, so it never reaches one. Both fall
+    // back to `'row'`.
+    let consumed: Vec<usize> = scan
+        .groups
+        .iter()
+        .filter_map(|g| g.placement_stmt)
+        .collect();
+    for (i, p) in plan.iter().enumerate() {
+        if p.setup || !p.roles.iter().any(|(_, r)| *r == Role::ViewPlacement) {
+            continue;
+        }
+        if p.roles.len() > 1 {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "view-placement/ambiguous",
+                message: "::VIEW_PLACEMENT is a directive of its own — `SELECT 'header'::VIEW_PLACEMENT;` \
+                          directly before the ::VIEW group's first marker — not a column beside a \
+                          panel's own columns; this one is ignored, the group stays 'row'"
+                    .into(),
+                sql: short(i),
+            });
+        } else if !consumed.contains(&i) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "view-placement/orphan",
+                message: "this ::VIEW_PLACEMENT has no ::VIEW group to set — it needs to sit \
+                          directly before the group's first ::VIEW marker (setup and other \
+                          next-panel modifiers, like ::COL, may sit between them)"
+                    .into(),
+                sql: short(i),
+            });
+        }
+    }
+
     let mut seen_ids: Vec<(String, usize)> = Vec::new();
     for g in &scan.groups {
         let marker_stmt = g.markers[0] + 1;
@@ -2996,6 +3119,41 @@ fn view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                     .into(),
                 sql: short(g.markers[0]),
             });
+        }
+        if let Some(stmt) = g.placement_stmt {
+            match &g.placement_requested {
+                None => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: stmt + 1,
+                    code: "view-placement/computed-value",
+                    message: "this ::VIEW_PLACEMENT's value is a computed expression, not a \
+                              plain string literal — whether it ends up 'header' or 'row' can't \
+                              be checked here"
+                        .into(),
+                    sql: short(stmt),
+                }),
+                Some(v) if v != "row" && v != "header" => diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: stmt + 1,
+                    code: "view-placement/unknown-value",
+                    message: format!(
+                        "::VIEW_PLACEMENT's value must be 'row' or 'header', not '{v}' — it \
+                         falls back to 'row'"
+                    ),
+                    sql: short(stmt),
+                }),
+                Some(v) if v == "header" && !g.single_panel => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: stmt + 1,
+                    code: "view-placement/not-single-panel",
+                    message: "'header' placement needs every alternative of this ::VIEW group \
+                              to be exactly one panel — this group has an alternative with more \
+                              than one, or none at all, so it falls back to 'row'"
+                        .into(),
+                    sql: short(stmt),
+                }),
+                _ => {}
+            }
         }
         if g.unbalanced_group {
             diags.push(Diagnostic {
@@ -3621,6 +3779,25 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                 },
                 line,
             );
+        } else if let Some(v) = header_value(line, "markdown_style")
+            .filter(|v| crate::roles::markdown_style_of(v).is_none())
+        {
+            warn(
+                "header/bad-markdown-style",
+                if v.is_empty() {
+                    "`-- @markdown_style` has no value — write `plain`, `card` or `callout` \
+                     (without it, every ::MARKDOWN panel without its own ::MARKDOWN_STYLE \
+                     falls back to 'callout')"
+                        .into()
+                } else {
+                    format!(
+                        "`-- @markdown_style {v}` is not `plain`, `card` or `callout` — every \
+                         ::MARKDOWN panel without its own ::MARKDOWN_STYLE falls back to \
+                         'callout'"
+                    )
+                },
+                line,
+            );
         }
     }
     if tags.len() > MAX_TAGS {
@@ -3949,6 +4126,9 @@ pub fn step_json(script: &str, known_json: &str, opts_json: &str) -> String {
             // Each query runs in a fresh DuckDB-Wasm scratch session
             // (web/lint.js's `scratchRunner`) — not a persistent one.
             stateful_session: false,
+            // The browser lint has no folder to check `assets/` against
+            // (#514 PR B) — `image/missing-file` never fires here.
+            image_root: None,
         },
     );
     serde_json::json!({
@@ -4413,11 +4593,23 @@ fn map_diags(
         || (has(Role::Lat) && has(Role::Lon))
         || has(Role::Origin)
         || has(Role::Dest);
+    // D25: `::FRAME` only plays on a map — on any other chart the rows of
+    // every frame are drawn together instead, which is almost never what
+    // was meant.
+    if !is_map && has(Role::Frame) {
+        out.push((
+            Severity::Warning,
+            "frame/not-a-map",
+            "::FRAME only plays on maps; this chart draws the rows of every frame together"
+                .to_string(),
+        ));
+    }
     if !is_map {
         return out;
     }
     out.extend(flow_diags(roles, rows));
     out.extend(hexbin_diags(roles, rows));
+    out.extend(frame_diags(roles, rows));
     let first = |want: Role| {
         roles
             .iter()
@@ -4843,6 +5035,113 @@ fn hexbin_diags(
             "::CATEGORY is ignored on a ::HEXBIN map — hexagons are coloured by count or sum"
                 .to_string(),
         ));
+    }
+    out
+}
+
+/// `::FRAME` time maps (M2e-A, #149, plan-maps-m2ef.md D13/D15/D25/D26):
+/// too many distinct frames or features×frames cells, a duplicate
+/// (feature, frame) row, `::STORY`/`::XAXIS` ignored on a frame map, and a
+/// large WKT payload repeated per frame. Only runs for a map panel that
+/// already carries `::FRAME` (`map_diags` calls this after confirming
+/// `is_map`; the `!is_map` case is `frame/not-a-map`, checked by the
+/// caller before that gate).
+fn frame_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let has = |want: Role| roles.iter().any(|(_, r)| *r == want);
+    let Some(fi) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Frame)
+        .map(|(i, _)| *i)
+    else {
+        return out;
+    };
+    let frame_vals = cells(rows, fi);
+    let distinct_frames: std::collections::HashSet<&str> =
+        frame_vals.iter().filter_map(|v| v.as_deref()).collect();
+    let n_frames = distinct_frames.len();
+    if n_frames > 200 {
+        out.push((
+            Severity::Warning,
+            "map/too-many-frames",
+            format!(
+                "{n_frames} ::FRAME values on one map (over 200) — the last 200 are kept; use a coarser period"
+            ),
+        ));
+    }
+    // The feature key: whichever identity column a time map uses, in the
+    // same priority as `src/map/frames.rs::row_key` (D22) — ::REGION else
+    // a WKT ::MAP geometry (::LAT/::LON pairs aren't a single column, so
+    // this count is approximate for that case and skipped rather than
+    // guessed at).
+    let feature_idx = roles
+        .iter()
+        .find(|(_, r)| matches!(r, Role::Region | Role::Geometry))
+        .map(|(i, _)| *i);
+    let feature_vals: Vec<Option<String>> = match feature_idx {
+        Some(i) => cells(rows, i),
+        None => vec![None; rows.len()],
+    };
+    let distinct_features: std::collections::HashSet<&str> =
+        feature_vals.iter().filter_map(|v| v.as_deref()).collect();
+    let n_features = distinct_features.len();
+    if feature_idx.is_some() && n_features > 0 && n_frames > 0 && n_features * n_frames > 100_000 {
+        let max_frames = (100_000 / n_features).max(1).min(n_frames);
+        out.push((
+            Severity::Warning,
+            "map/frame-cells",
+            format!(
+                "{n_features} features × {n_frames} frames is over 100,000 — the last {max_frames} frames are kept; aggregate or use fewer frames"
+            ),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = 0usize;
+    for (f, w) in feature_vals.iter().zip(frame_vals.iter()) {
+        if let (Some(f), Some(w)) = (f, w) {
+            if !seen.insert((f.as_str(), w.as_str())) {
+                duplicates += 1;
+            }
+        }
+    }
+    if duplicates > 0 {
+        out.push((
+            Severity::Warning,
+            "map/frame-duplicate",
+            format!(
+                "{duplicates} rows repeat a feature within one frame — the first row is used; aggregate per feature and frame"
+            ),
+        ));
+    }
+    if has(Role::Story) {
+        out.push((
+            Severity::Warning,
+            "map/frame-story",
+            "::STORY is ignored on a time map (::FRAME) — Play steps through the frames instead"
+                .to_string(),
+        ));
+    }
+    if has(Role::X) {
+        out.push((
+            Severity::Note,
+            "map/frame-xaxis",
+            "::XAXIS is ignored on a time map — features are keyed by their region, point or geometry"
+                .to_string(),
+        ));
+    }
+    if !has(Role::Region) && feature_idx.is_some() {
+        let wkt_bytes: usize = feature_vals.iter().flatten().map(|s| s.len()).sum();
+        if wkt_bytes > 5_000_000 {
+            out.push((
+                Severity::Note,
+                "map/frame-wkt",
+                "WKT repeats per frame and this map's geometry is over 5 MB total — join a ::REGION code or one geometry table instead"
+                    .to_string(),
+            ));
+        }
     }
     out
 }
@@ -6351,6 +6650,14 @@ mod design_tests {
         assert_eq!(codes("-- @astables\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables yes\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables On\n"), ["header/bad-astables"]);
+        assert!(codes("-- @markdown_style plain\nSELECT 1;").is_empty());
+        assert!(codes("-- @markdown_style card\nSELECT 1;").is_empty());
+        assert!(codes("-- @markdown_style callout\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @markdown_style\n"), ["header/bad-markdown-style"]);
+        assert_eq!(
+            codes("-- @markdown_style boxed\n"),
+            ["header/bad-markdown-style"]
+        );
         assert!(codes(&format!("-- @description {}\n", "x".repeat(160))).is_empty());
         let long = format!(
             "-- @description {}\n-- @description {}\n",
@@ -7848,6 +8155,73 @@ mod design_tests {
     }
 
     #[test]
+    fn view_placement_header_is_clean_when_every_alt_is_one_panel() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(!has(&d, "view-placement/not-single-panel"), "{d:?}");
+        assert!(!has(&d, "view-placement/unknown-value"), "{d:?}");
+        assert!(!has(&d, "view-placement/orphan"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_not_single_panel_warns_and_still_renders() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\n\
+             SELECT a::XAXIS, b::BARCHART FROM t;\nSELECT a::XAXIS, c::LINECHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/not-single-panel"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_unknown_value_errors() {
+        let d = check(
+            "SELECT 'sidebar'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/unknown-value"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_computed_value_warns() {
+        let d = check(
+            "SELECT lower('HEADER')::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/computed-value"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_ambiguous_warns() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT, a::XAXIS FROM t;\n\
+             SELECT 'Lines'::VIEW;\nSELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW;\nSELECT a::XAXIS, c::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/ambiguous"), "{d:?}");
+    }
+
+    #[test]
+    fn view_placement_orphan_warns() {
+        let d = check(
+            "SELECT 'header'::VIEW_PLACEMENT;\nSELECT a::XAXIS, b::BARCHART FROM t;",
+            |_q| Ok(vec![]),
+        );
+        assert!(has(&d, "view-placement/orphan"), "{d:?}");
+    }
+
+    #[test]
     fn engine_warnings_become_render_warnings() {
         // A density per category where every group has one value: the stat
         // can't estimate anything, so ggplot-rs skips the layer with a warning.
@@ -7955,6 +8329,65 @@ mod design_tests {
         assert_eq!(
             codes("SELECT lat::LAT, lon::LON FROM t;", pts),
             vec![(Severity::Warning, "map/too-many-marks")]
+        );
+    }
+
+    /// #149 M2e-A: `::FRAME` time maps — too many frames, a duplicate
+    /// (feature, frame) row, `::STORY`/`::XAXIS` ignored, and `::FRAME` off
+    /// a map entirely.
+    #[test]
+    fn frame_lints_cover_too_many_frames_duplicates_and_misuse() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.contains("frame"))
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let sql = "SELECT c::REGION, w::FRAME, v::BARCHART FROM t;";
+        let row = |c: &str, w: &str, v: f64| json!({ "c0": c, "c1": w, "c2": v });
+        assert_eq!(
+            codes(sql, vec![row("DE-BY", "1", 1.0), row("DE-BY", "1", 2.0)]),
+            vec![(Severity::Warning, "map/frame-duplicate")]
+        );
+        assert_eq!(
+            codes(
+                "SELECT w::FRAME, v::BARCHART FROM t;",
+                vec![json!({ "c0": "1", "c1": 1.0 })]
+            ),
+            vec![(Severity::Warning, "frame/not-a-map")]
+        );
+        assert_eq!(
+            codes(
+                "SELECT c::REGION, w::FRAME, v::BARCHART, l::STORY FROM t;",
+                vec![json!({ "c0": "DE-BY", "c1": "1", "c2": 1.0, "c3": "step" })]
+            ),
+            vec![(Severity::Warning, "map/frame-story")]
+        );
+        assert_eq!(
+            codes(
+                "SELECT c::REGION, w::FRAME, v::BARCHART, x::XAXIS FROM t;",
+                vec![json!({ "c0": "DE-BY", "c1": "1", "c2": 1.0, "c3": "x" })]
+            ),
+            vec![(Severity::Note, "map/frame-xaxis")]
+        );
+        let many: Vec<Value> = (0..201)
+            .map(|i| row("DE-BY", &i.to_string(), 1.0))
+            .collect();
+        assert_eq!(
+            codes(sql, many),
+            vec![(Severity::Warning, "map/too-many-frames")]
         );
     }
 
@@ -8705,6 +9138,77 @@ mod design_tests {
         assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
         let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
         assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    #[test]
+    fn markdown_style_kind_and_text_are_checked() {
+        let one = |v: &str| {
+            let v = v.to_string();
+            move |_q: &str| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "**Heads up**", "c1": v.clone() }),
+                ))
+            }
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE;",
+            one("plain"),
+        );
+        assert!(
+            !d.iter().any(|x| x.code.starts_with("markdown_style/")),
+            "{d:?}"
+        );
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'invisible'::MARKDOWN_STYLE;",
+            one("invisible"),
+        );
+        assert!(
+            d.iter().any(|x| x.code == "markdown_style/unknown"),
+            "{d:?}"
+        );
+        let d = check(
+            "SELECT 'x'::TEXT_SMALL, 'plain'::MARKDOWN_STYLE;",
+            one("plain"),
+        );
+        assert!(
+            d.iter().any(|x| x.code == "markdown_style/no-text"),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_style_conflicting_with_callout_is_checked() {
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'warning'::CALLOUT;",
+            |_q| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "x", "c1": "plain", "c2": "warning" }),
+                ))
+            },
+        );
+        assert!(
+            d.iter()
+                .any(|x| x.code == "markdown_style/conflicts-with-callout"),
+            "{d:?}"
+        );
+        // 'callout' together with ::CALLOUT is the intended, non-conflicting
+        // combination.
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'callout'::MARKDOWN_STYLE, 'warning'::CALLOUT;",
+            |_q| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "x", "c1": "callout", "c2": "warning" }),
+                ))
+            },
+        );
+        assert!(
+            !d.iter()
+                .any(|x| x.code == "markdown_style/conflicts-with-callout"),
+            "{d:?}"
+        );
     }
 
     #[test]

@@ -13,8 +13,31 @@
 //! renderers (`--svg`, the static HTML page, the script-free server page)
 //! use to keep only the first shown alternative of each group.
 
-use super::{lex, Panel};
+use super::{lex, show_if, Panel};
 use crate::Role;
+
+/// A `::VIEW` group's switcher placement (#534): `'row'` (its own row above
+/// the card, today's only behaviour) or `'header'` (compact, right-aligned
+/// in the card's title row — only valid when every alternative is exactly
+/// one panel). This is the *effective* placement, fallback already applied
+/// — see [`Group::placement_requested`] / [`Group::single_panel`] for the
+/// raw request the `view-placement/*` lint pass reports on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Placement {
+    #[default]
+    Row,
+    Header,
+}
+
+impl Placement {
+    /// The wire value sent to the browser (`plan()`'s JSON, `wasm::plan_json`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Placement::Row => "row",
+            Placement::Header => "header",
+        }
+    }
+}
 
 /// One statement's place in a `::VIEW` group — set on every statement of the
 /// group, setup included (see [`assign_views`]).
@@ -36,6 +59,9 @@ pub struct ViewAt {
     /// `None` for a computed label (not a lint error by itself —
     /// `view/computed-label` is a warning).
     pub label: Option<String>,
+    /// This group's effective switcher placement (#534), fallback already
+    /// applied — see [`Group::placement_requested`] / [`Group::single_panel`].
+    pub placement: Placement,
 }
 
 /// One `::VIEW` group, as [`scan`] resolved it — the structural facts a
@@ -65,6 +91,22 @@ pub struct Group {
     /// `::SECTION`/an outer `::ENDGROUP`/end of script) — see
     /// `view/open-ended`.
     pub closed_by_endview: bool,
+    /// Plan index of a lone `'…'::VIEW_PLACEMENT` statement set directly
+    /// before this group's first marker (#534, like a pending `::COL`),
+    /// if any — `view-placement/*` reads back its literal value for
+    /// [`placement_requested`](Group::placement_requested); `None` means no
+    /// such statement is there (the group stays `'row'`, the default).
+    pub placement_stmt: Option<usize>,
+    /// `placement_stmt`'s literal value (lowercased, trimmed), e.g.
+    /// `"header"` — `None` when there is no `placement_stmt`, or its value
+    /// is a computed expression (not a plain string literal), reported as
+    /// `view-placement/computed-value` (can't be validated here; it still
+    /// works at render time).
+    pub placement_requested: Option<String>,
+    /// Does every alternative of this group hold exactly one content
+    /// statement? Required for `'header'` placement — otherwise
+    /// `view-placement/not-single-panel` and a fallback to `'row'`.
+    pub single_panel: bool,
 }
 
 /// [`scan`]'s result.
@@ -141,6 +183,46 @@ fn marker_literal(p: &Panel, idx: usize) -> Option<String> {
     let item = items.get(idx)?.trim();
     let core = item.strip_suffix(&format!(" AS c{idx}"))?.trim();
     literal_text(core)
+}
+
+/// The plan index and literal value (lowercased, trimmed) of a lone
+/// `'…'::VIEW_PLACEMENT` statement set directly before `start` (a group's
+/// first marker) — backing up over setup and other next-panel modifiers in
+/// between (`::COL`/`::SPAN` and friends), the same walk
+/// [`show_if::scan`] does before a `::SHOW_IF`. The value is `None` when
+/// the statement is there but its own value is a computed expression, not
+/// a plain literal (`view-placement/computed-value`).
+fn placement_before(panels: &[Panel], start: usize) -> Option<(usize, Option<String>)> {
+    let mut k = start;
+    while k > 0 && (panels[k - 1].setup || show_if::is_modifier(&panels[k - 1].roles)) {
+        k -= 1;
+    }
+    panels[k..start].iter().enumerate().find_map(|(off, p)| {
+        if p.setup || p.roles.len() != 1 {
+            return None;
+        }
+        let (idx, r) = p.roles[0];
+        if r != Role::ViewPlacement {
+            return None;
+        }
+        let value = marker_literal(p, idx).map(|s| s.trim().to_ascii_lowercase());
+        Some((k + off, value))
+    })
+}
+
+/// Does every alternative of a group hold exactly one content statement
+/// (#534's `'header'` placement precondition)? The same per-alternative
+/// predicate `view/empty` already uses for "has anything to show"
+/// (`crate::lint::view_diags`'s `has_content`), just counted instead of
+/// only checked.
+fn single_panel_group(panels: &[Panel], markers: &[usize], end: usize) -> bool {
+    markers.iter().enumerate().all(|(alt, &mi)| {
+        let alt_end = markers.get(alt + 1).copied().unwrap_or(end);
+        (mi + 1..alt_end)
+            .filter(|&j| !panels[j].setup && !crate::roles::is_directive_panel(&panels[j].roles))
+            .count()
+            == 1
+    })
 }
 
 /// Scan a plan for `::VIEW` groups and stray `::ENDVIEW`s (the closer rules
@@ -237,6 +319,12 @@ pub fn scan(panels: &[Panel]) -> Scan {
                 Some(a) => (a, true),
                 None => (c.open.group_no.to_string(), false),
             };
+            let (placement_stmt, placement_requested) = match placement_before(panels, c.open.start)
+            {
+                Some((stmt, value)) => (Some(stmt), value),
+                None => (None, None),
+            };
+            let single_panel = single_panel_group(panels, &c.open.markers, c.end);
             Group {
                 start: c.open.start,
                 end: c.end,
@@ -245,6 +333,9 @@ pub fn scan(panels: &[Panel]) -> Scan {
                 named,
                 unbalanced_group: c.unbalanced_group,
                 closed_by_endview: c.closed_by_endview,
+                placement_stmt,
+                placement_requested,
+                single_panel,
             }
         })
         .collect();
@@ -272,6 +363,17 @@ pub fn assign_views(panels: &mut [Panel]) {
                     .and_then(|idx| marker_literal(&panels[mi], idx))
             })
             .collect();
+        // The effective placement (#534): 'header' only when it was
+        // actually requested AND every alternative qualifies (exactly one
+        // panel each) — otherwise the safe default, 'row'. An unrecognised
+        // or computed value also falls back to 'row' here (`view-
+        // placement/unknown-value` / `-computed-value` report it; this is
+        // never relied on to validate, only to render safely).
+        let placement = if g.placement_requested.as_deref() == Some("header") && g.single_panel {
+            Placement::Header
+        } else {
+            Placement::Row
+        };
         for (j, p) in panels.iter_mut().enumerate().take(g.end).skip(g.start) {
             let alt = g.markers.iter().rposition(|&m| m <= j).unwrap_or(0);
             let marker = g.markers.contains(&j);
@@ -281,6 +383,7 @@ pub fn assign_views(panels: &mut [Panel]) {
                 marker,
                 id: g.id.clone(),
                 label: alt_labels[alt].clone(),
+                placement,
             });
         }
     }
@@ -493,6 +596,97 @@ mod tests {
             None,
             "a computed expression is not a literal"
         );
+    }
+
+    #[test]
+    fn placement_defaults_to_row_without_a_request() {
+        let p = plan("SELECT 'Lines'::VIEW; SELECT 'Bars'::VIEW;");
+        assert_eq!(view_of(&p, 0).placement, Placement::Row);
+        assert_eq!(view_of(&p, 1).placement, Placement::Row);
+        let g = groups(&p);
+        assert_eq!(g[0].placement_stmt, None);
+        assert_eq!(g[0].placement_requested, None);
+    }
+
+    #[test]
+    fn placement_header_when_requested_and_every_alt_is_one_panel() {
+        let p = plan(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW; SELECT a::XAXIS, b::LINECHART FROM t;\n\
+             SELECT 'Bars'::VIEW; SELECT a::XAXIS, b::BARCHART FROM t;",
+        );
+        for i in 1..5 {
+            assert_eq!(view_of(&p, i).placement, Placement::Header, "stmt {i}");
+        }
+        let g = groups(&p);
+        assert_eq!(g[0].placement_stmt, Some(0));
+        assert_eq!(g[0].placement_requested.as_deref(), Some("header"));
+        assert!(g[0].single_panel);
+    }
+
+    #[test]
+    fn placement_value_is_case_and_space_insensitive() {
+        let p = plan(
+            "SELECT '  HEADER  '::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW; SELECT a::XAXIS, b::LINECHART FROM t;\n\
+             SELECT 'Bars'::VIEW; SELECT a::XAXIS, b::BARCHART FROM t;",
+        );
+        assert_eq!(view_of(&p, 1).placement, Placement::Header);
+    }
+
+    #[test]
+    fn placement_falls_back_to_row_when_an_alt_is_not_one_panel() {
+        // alt 0 has two panels — 'header' needs exactly one per alternative.
+        let p = plan(
+            "SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW;\n\
+             SELECT a::XAXIS, b::LINECHART FROM t;\n\
+             SELECT a::XAXIS, b::BARCHART FROM t;\n\
+             SELECT 'Bars'::VIEW; SELECT a::XAXIS, b::BARCHART FROM t;",
+        );
+        for i in 1..6 {
+            assert_eq!(view_of(&p, i).placement, Placement::Row, "stmt {i}");
+        }
+        let g = groups(&p);
+        assert_eq!(g[0].placement_requested.as_deref(), Some("header"));
+        assert!(!g[0].single_panel);
+    }
+
+    #[test]
+    fn placement_skips_over_a_pending_col_before_the_marker() {
+        // ::COL (width) and ::VIEW_PLACEMENT can both precede the marker,
+        // like other next-panel modifiers stacking before their target.
+        let p = plan(
+            "SELECT 6::COL; SELECT 'header'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW; SELECT a::XAXIS, b::LINECHART FROM t;\n\
+             SELECT 'Bars'::VIEW; SELECT a::XAXIS, b::BARCHART FROM t;",
+        );
+        assert_eq!(view_of(&p, 2).placement, Placement::Header);
+    }
+
+    #[test]
+    fn placement_unrecognised_value_is_not_picked_up_as_header() {
+        let p = plan(
+            "SELECT 'sidebar'::VIEW_PLACEMENT;\n\
+             SELECT 'Lines'::VIEW; SELECT a::XAXIS, b::LINECHART FROM t;\n\
+             SELECT 'Bars'::VIEW; SELECT a::XAXIS, b::BARCHART FROM t;",
+        );
+        assert_eq!(view_of(&p, 1).placement, Placement::Row);
+        let g = groups(&p);
+        assert_eq!(g[0].placement_requested.as_deref(), Some("sidebar"));
+    }
+
+    #[test]
+    fn placement_not_directly_before_the_marker_is_not_consumed() {
+        // A ::VIEW_PLACEMENT with an unrelated statement between it and the
+        // marker is not this group's — `scan` finds no `placement_stmt`.
+        let p = plan(
+            "SELECT 'header'::VIEW_PLACEMENT; SET VARIABLE unrelated = 1;\n\
+             SELECT a::XAXIS, b::LINECHART FROM t;\n\
+             SELECT 'Lines'::VIEW; SELECT 'Bars'::VIEW;",
+        );
+        let g = groups(&p);
+        assert_eq!(g[0].placement_stmt, None);
     }
 
     #[test]

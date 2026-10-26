@@ -399,6 +399,12 @@ pub enum Role {
     /// (`::BOUNDARIES`): `'world'`, `'world-50m'`, `'de-states'`,
     /// `'de-districts'`. Read from the first value.
     Boundaries,
+    /// A time map's frame key (`::FRAME`, M2e, #149): a week, a date — one
+    /// result holds every frame; the browser's Play steps through them with
+    /// shared colours, classes and sizes (D21); static output shows the
+    /// last frame, named in the subtitle (D19). Maps only (lint
+    /// `frame/not-a-map` elsewhere).
+    Frame,
     /// Layout: `::TAB` starts a new tab; following panels live under it.
     Tab,
     /// Layout: `::SUBTAB` starts a nested tab inside the current `::TAB`.
@@ -410,6 +416,15 @@ pub enum Role {
     /// Layout: `::ENDVIEW` closes the current `::VIEW` group (`::TAB`,
     /// `::SUBTAB` and `::SECTION` also close it).
     ViewEnd,
+    /// Layout: a `::VIEW` group's switcher placement (#534) — `'row'`
+    /// (default: its own row above the card) or `'header'` (right-aligned
+    /// in the card's title row, compact, folding into a `<select>` below a
+    /// minimum card width — only when every alternative of the group is
+    /// exactly one panel; otherwise `--check` warns and it falls back to
+    /// `'row'`). Set directly before the group's first `::VIEW` marker,
+    /// like `::COL`/`::SPAN` setting a pending value for it. Browser only —
+    /// static renderers skip it (the switcher itself never shows there).
+    ViewPlacement,
     /// Layout: `::FIT` makes the enclosing `::TAB` / `::SUBTAB` / `::VIEW`
     /// section (with no tabs at all: the whole dashboard) fit the browser
     /// window while it is the one shown — its rows of panels scale to fill
@@ -467,6 +482,12 @@ pub enum Role {
     /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
     /// `'warning'` or `'success'` (the value).
     Callout,
+    /// A `::MARKDOWN` box's chrome (`::MARKDOWN_STYLE`, #536): `'plain'` (text
+    /// on the page background — no card, no tint, no accent bar), `'card'`
+    /// (a plain white card, like a chart panel) or `'callout'` (today's
+    /// tinted box — the default, and what `::CALLOUT` implies). A
+    /// `-- @markdown_style` header sets the dashboard's own default.
+    MarkdownStyle,
     /// Candlestick open price (`::OPEN`).
     Open,
     /// Candlestick high price (`::HIGH`).
@@ -862,6 +883,21 @@ pub struct RenderOptions {
     /// bar's chart, each `::TRACK`, each contract row) — not stripped back
     /// out of some of them after the fact.
     pub record_warnings: bool,
+    /// The dashboard's own `assets/` folder, canonicalized, if a relative
+    /// `::IMAGE`/`::IMAGE_DARK` source should be inlined from it (#514 PR B:
+    /// [`crate::image::resolve_relative`]) — `None` wherever the caller
+    /// hasn't computed one (the no-server browser builder, wasm, or a
+    /// dashboard with no `assets/` folder next to it), so every relative
+    /// image draws the alt-text placeholder instead. Unused off the
+    /// static/headless render paths (`dashboard.rs`, `image_panel_svg`
+    /// below) — the browser's own `assetUrl()`/`imageSrc()` do this job for
+    /// the interactive builder.
+    pub asset_root: Option<std::path::PathBuf>,
+    /// Which `::FRAME` to show on a time map (M2e/M2f, #149): `None` means
+    /// the last frame (static output, D12) — the browser passes the
+    /// stepped-to index here, like `zoom` passes its window. Ignored by
+    /// every other chart kind.
+    pub frame: Option<usize>,
 }
 
 impl Default for RenderOptions {
@@ -874,6 +910,8 @@ impl Default for RenderOptions {
             theme: theme::default_light(),
             locale: format::Locale::EN_US,
             record_warnings: true,
+            asset_root: None,
+            frame: None,
         }
     }
 }
@@ -931,6 +969,13 @@ impl RenderOptions {
             .and_then(parse_rgb)
         {
             self.brand = Some(p);
+        }
+        // `"frame"` (M2f, #149): which frame of a `::FRAME` time map to
+        // draw, like `zoom`'s own window — a non-negative integer; anything
+        // else (negative, a float, absent) is ignored, not an error (the map
+        // code clamps to the last frame either way).
+        if let Some(n) = ctx.get("frame").and_then(|v| v.as_u64()) {
+            self.frame = Some(n as usize);
         }
         Ok(())
     }
@@ -6531,7 +6576,7 @@ fn column_text(cols: &[Column], role: Role) -> Option<String> {
 /// panel kind (its caller, `render_with_title`, already draws one bar from
 /// `::LABEL`, above whatever this returns).
 fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) -> Panel {
-    use crate::image::{src_ok, SrcKind};
+    use crate::image::{resolve_relative, src_ok, SrcKind};
     let dark = o.theme.variant == theme::Variant::Dark;
     let src = (dark.then(|| column_text(cols, Role::ImageDark)).flatten())
         .or_else(|| column_text(cols, Role::Image))
@@ -6544,8 +6589,20 @@ fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) 
     let pad = 8.0;
     let iw = (w - 2.0 * pad).max(1.0);
     let ih = (h - 2.0 * pad).max(1.0);
-    let body = match src.as_deref().map(src_ok) {
-        Some(SrcKind::Data(_)) | Some(SrcKind::Https) => {
+    // A `data:`/`https:` source is used as-is; a relative one (PR B) is
+    // inlined from `o.asset_root`'s `assets/` folder as a `data:` URI —
+    // missing, refused, or no root at all draws the alt-text placeholder,
+    // same as a rejected source.
+    let href = match src.as_deref().map(src_ok) {
+        Some(SrcKind::Data(_)) | Some(SrcKind::Https) => src.clone(),
+        Some(SrcKind::Relative) => src
+            .as_deref()
+            .and_then(|s| resolve_relative(s, o.asset_root.as_deref()))
+            .map(|(mime, bytes)| crate::host::app_brand::data_uri(&mime, &bytes)),
+        _ => None,
+    };
+    let body = match href {
+        Some(href) => {
             let alt_title = if alt.is_empty() {
                 String::new()
             } else {
@@ -6553,10 +6610,10 @@ fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) 
             };
             format!(
                 "<image href=\"{}\" x=\"{pad:.1}\" y=\"{pad:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" preserveAspectRatio=\"xMidYMid meet\">{alt_title}</image>",
-                format::escape_xml(&src.unwrap()),
+                format::escape_xml(&href),
             )
         }
-        _ => {
+        None => {
             let label = if alt.is_empty() { "image" } else { &alt };
             format!(
                 "<rect x=\"{pad:.1}\" y=\"{pad:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" fill=\"none\" stroke=\"{muted}\" stroke-dasharray=\"4 3\" rx=\"4\"/><text x=\"{cx:.1}\" y=\"{cy:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"12\" font-style=\"italic\" fill=\"{muted}\">{}</text>",

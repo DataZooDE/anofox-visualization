@@ -15,7 +15,9 @@
 //! polygons — ggplot2's convention too; see its module doc — a point/line
 //! anchor needs `geom_text`'s own offset/overlap support, not audited
 //! this slice).
-use ggplot_rs::geom::annotation_scale::{GeomAnnotationScale, GeomAttribution, MapCorner};
+use ggplot_rs::geom::annotation_scale::{
+    AttributionOverflow, GeomAnnotationScale, GeomAttribution, MapCorner,
+};
 use ggplot_rs::geom::sf::GeomSf;
 use ggplot_rs::geom::sf_text::{GeomSfText, SfLabelAnchor};
 use ggplot_rs::prelude::*;
@@ -27,6 +29,7 @@ use crate::theme::mix;
 use crate::{cell_num, find_role, role_num, Column, RenderOptions, Role};
 
 use super::fill;
+use super::frames::{FrameCtx, Shared};
 use super::legend::legend_of;
 use super::overlay;
 use super::wkt::row_wkt;
@@ -60,6 +63,8 @@ pub(super) fn build(
     m: &Model,
     width: u32,
     height: u32,
+    frame_ctx: Option<&FrameCtx>,
+    shared: Option<&Shared>,
 ) -> Option<Built> {
     let mut warnings: Vec<String> = Vec::new();
     let (w, h) = (width as f64, height as f64);
@@ -77,13 +82,6 @@ pub(super) fn build(
     } else {
         forced.clone()
     };
-    // `fill::scale_for` (much further down) decides between a discrete
-    // (`Category`/classed `Measure`) and continuous `Measure` fill scale —
-    // computed here too, early, only to size the footer below; the later
-    // `discrete_fill` binding is the same expression, kept local to where
-    // it drives the legend position/scale construction.
-    let continuous_fill = !matches!(m.fill, Fill::Category { .. })
-        && !matches!(&m.fill, Fill::Measure(s) if s.classes.is_some());
     // `eligible` only allows a footer this path can draw itself (a scale
     // bar and/or any number of attribution lines, via `annotation_scale`/
     // `annotation_attribution` below) — reuse the old writer's own height
@@ -92,37 +90,30 @@ pub(super) fn build(
     // shorter area then reporting the *unshrunk* `w`×`h` window stretches
     // the trained coord_sf domain so the unused band lands at the bottom,
     // without this geom_sf path needing its own pixel-perfect margin).
-    // A continuous fill's legend lands at ggplot-rs's own default
-    // `LegendPosition::Right` (below), not the old writer's horizontal
-    // top bar `lg`/`foot_of` were both sized around — it isn't forced
-    // elsewhere (`forced_position` wins when given) — consuming ~90px of
-    // panel width that `foot_of`'s own room/shrink-to-fit math doesn't
-    // know about unless told. Found by rendering a continuous-fill
-    // `de-*` map at 390px width: the (now 2-line, since this slice)
-    // BKG/VG2500 attribution overflowed past the panel's own left edge,
-    // underneath the legend, without this. 90px is this build's own
-    // measured reservation (bar + tick labels + margins, fairly stable
-    // across locales/fonts since it's digits-only); there's no exposed
-    // pre-render API for ggplot-rs's actual legend geometry to use
-    // instead (same gap as the `legend_position_inside` one already
-    // noted below, sipemu/ggplot-rs#225).
     //
-    // `GeomAttribution::fit` (ggplot-rs 0.31.2/0.31.3) was tried as a
-    // replacement for this whole heuristic — shrink/truncate the
-    // attribution against the *actual* panel rect at draw time instead of
-    // guessing the legend's width up front — but both `AttributionOverflow`
-    // kinds still mis-measure this exact scenario (a continuous-fill `de-*`
-    // map's BKG source line at a narrow width: confirmed with a synthetic
-    // render + PNG crop, text overflowing the panel's left edge, same
-    // symptom this 90px reservation already guards against). Kept the
-    // heuristic for #510; `.fit` is a follow-up once ggplot-rs's own width
-    // estimate is tight enough for a URL-heavy line to drop it safely.
-    let legend_reserve = if continuous_fill && forced_position.is_none() {
-        90.0
-    } else {
-        0.0
-    };
-    let ft = foot_of(o, m, w - legend_reserve);
+    // #510 reserved an extra ~90px of panel width here before calling
+    // `foot_of`, to keep a continuous fill's `LegendPosition::Right`
+    // legend from eating into the room `foot_of`'s own pre-render guess
+    // assumed the attribution had — `GeomAttribution::fit` existed
+    // upstream by then (ggplot-rs 0.31.2/0.31.3) but both
+    // `AttributionOverflow` kinds still mis-measured this crate's own
+    // BKG source line (a bare-URL run plus a trailing note) on a narrow
+    // continuous-fill `de-*` map: confirmed with a synthetic render + PNG
+    // crop, text overflowing the panel's left edge, the exact symptom
+    // that 90px reservation guarded against.
+    //
+    // Dropped for #546: ggplot-rs 0.31.4 fixes that actual gap
+    // (`AttributionOverflow::Wrap` now splits *inside* a run and both
+    // `Wrap`/`Ellipsis` keep each split piece's `href`, sipemu/
+    // ggplot-rs#267/#268) — `GeomAttribution::fit`/`.fit_overflow(Wrap)`
+    // below now shrinks/wraps the attribution against the real panel
+    // rect at draw time, which is already *after* ggplot-rs has placed
+    // any continuous-fill legend, so it no longer needs this pre-render
+    // guess at the legend's width at all. Re-checked with PNG crops at
+    // 390px and desktop widths, light/dark, for both maps this
+    // reservation was added for (`delivery-coverage.sql`'s bivariate +
+    // symbol maps) plus `supply-chain.sql`: no overflow without it.
+    let ft = foot_of(o, m, w);
     let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced.clone())?;
     let [x0, x1, y0, y1] = frame.window(w, h);
 
@@ -213,20 +204,32 @@ pub(super) fn build(
         let label_is_empty = label.is_empty();
         let cat = m.text(m.category, i);
         let series = if cat.is_empty() { label.clone() } else { cat };
-        rows.push(Value::Str(i.to_string()));
+        // `data-row` is the result row `::LINK` follows; on a frame map
+        // that's frame `k`'s own source row for this feature (D22), not
+        // this view's own local index `i`.
+        rows.push(match frame_ctx {
+            Some(fc) => Value::Str(fc.result_row[i].to_string()),
+            None => Value::Str(i.to_string()),
+        });
         seriess.push(na_if_empty(series));
         labels.push(na_if_empty(label));
         // `::XAXIS`/`::STORY` keying (the old writer's `step_x`/`mod.rs`
         // ~1449): an explicit `::XAXIS` value wins; else, a row with no
         // label falls back to its own row index so a story can still
         // step through unlabeled rows (a labeled row with no `::XAXIS`
-        // gets no `data-x` at all — `Value::Na` omits the attribute).
-        let x = step_x
-            .and_then(|c| c.values.get(i))
-            .and_then(crate::mark_key_text)
-            .map(Value::Str)
-            .or_else(|| label_is_empty.then(|| Value::Str(i.to_string())))
-            .unwrap_or(Value::Na);
+        // gets no `data-x` at all — `Value::Na` omits the attribute). A
+        // frame map ignores `::XAXIS` (lint `map/frame-xaxis`) — its own
+        // D22 feature key is `data-x` instead, so the browser's keyed
+        // tween (M2f) joins the same feature across every frame.
+        let x = match frame_ctx {
+            Some(fc) => Value::Str(fc.keys[i].clone()),
+            None => step_x
+                .and_then(|c| c.values.get(i))
+                .and_then(crate::mark_key_text)
+                .map(Value::Str)
+                .or_else(|| label_is_empty.then(|| Value::Str(i.to_string())))
+                .unwrap_or(Value::Na),
+        };
         xs.push(x);
         // `fill` (the scale input) and `value`/`data-value` (the *raw
         // measure* the browser's a11y table shows) are different things
@@ -617,6 +620,13 @@ pub(super) fn build(
         if fixed.is_none() {
             let rmax = symbols::rmax(w, h);
             let mut size_scale = ScaleSizeContinuous::new().area(rmax);
+            // A frame map's symbol sizes are comparable across frames
+            // (D21/U2): the same value gets the same radius whichever
+            // frame is shown, and the size legend's breaks come from this
+            // shared domain rather than this one frame's own data.
+            if let Some((lo, hi)) = shared.and_then(|s| s.size_limits) {
+                size_scale = size_scale.with_limits(lo, hi);
+            }
             size_scale.set_name(
                 m.symbols
                     .as_ref()
@@ -636,7 +646,13 @@ pub(super) fn build(
     // is real too, not just its features'.
     let discrete_fill = matches!(m.fill, Fill::Category { .. })
         || matches!(&m.fill, Fill::Measure(s) if s.classes.is_some());
-    let mut fill_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
+    // A frame map's classed legend never changes shape across frames (D21):
+    // `na_key(Always)` keeps the "no data" key even on a frame with no
+    // missing values, and `count_reserve` lays every key out at the widest
+    // per-class count any frame reaches, so the legend never re-wraps
+    // (U1/U3).
+    let frame_max_count = shared.map(|s| s.max_count);
+    let mut fill_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg, frame_max_count);
     if let Fill::Measure(s) = &m.fill {
         if s.classes.is_some() {
             if let Some(scale) = &mut fill_scale {
@@ -675,6 +691,32 @@ pub(super) fn build(
                 color_y: b.color_b,
                 x_name: b.title_a.clone().unwrap_or_default(),
                 y_name: b.title_b.clone().unwrap_or_default(),
+                // Kept at the library default `BottomRight`, which shares
+                // a corner with the pack attribution (further down) —
+                // *not* moved to `TopRight` to dodge it: tried for #546
+                // and reverted, because `GeomBivariateLegend::legend_layout`
+                // (ggplot-rs, before 0.31.5) sized its own box from
+                // `y_name`'s *thickness* (`text_size + 4.0`) only, never
+                // its rotated *length* — so the caption routinely drew
+                // past its own box already, and at `TopRight` that
+                // overflow ran off the top of the panel entirely
+                // (confirmed with a PNG crop: "Customers per 10,000
+                // people" clipped to "ers per 10,000 people"). Back then a
+                // `BottomRight` attribution readable enough to wrap onto
+                // several lines (#546) could also visually cross this
+                // legend's own caption on a narrow `::BIVARIATE` panel —
+                // both gaps reported to team-lead to file upstream.
+                // ggplot-rs 0.31.5 (sipemu/ggplot-rs#273) fixed both from
+                // the library side: the caption now fits the grid instead
+                // of growing past its box (so `TopRight` would no longer
+                // clip it), and the new shared corner layout stacks
+                // `GeomAttribution` clear of this legend's own claimed box
+                // whenever both land at `BottomRight` — confirmed with PNG
+                // crops (rsvg and a real browser) at 390px: the wrapped
+                // attribution now sits above the legend with a clear gap,
+                // not across it. Still left at `BottomRight` (not worth
+                // moving to `TopRight` now that the original reason to
+                // dodge it is gone).
                 ..Default::default()
             })
         }
@@ -728,7 +770,7 @@ pub(super) fn build(
     }
     if let Some(hb) = &m.hexbin {
         if let Fill::Measure(scale) = &m.fill {
-            let hex_color_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
+            let hex_color_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg, None);
             let (new_plot, _n) = overlay::hexbin_layer(plot, o, hb, scale, card, hex_color_scale);
             plot = new_plot;
             if hb.cells.len() > super::hexbin::HEX_WARN {
@@ -883,12 +925,33 @@ pub(super) fn build(
     // gap: a layer whose data has 0 rows draws nothing at all, even when
     // its own `draw()` ignores `data` entirely — worse than inheriting,
     // not better, so it's not done here.
+    // `GeomAnnotationScale` and `GeomAttribution` used to be independent
+    // corner-anchored geoms with no shared layout — each drew from
+    // `backend.plot_area()` alone, unaware of what the other put in its
+    // own corner (#546). With the old crushed-to-fit attribution this
+    // never showed (a single physical line thin enough to clear
+    // `BottomLeft`'s scale bar); once `.fit`/`Wrap` below started keeping
+    // every line readable and letting the BKG sources row wrap, that
+    // row's bottom-most physical line could run the full width of a
+    // narrow panel — confirmed with a PNG crop (`delivery-coverage.sql`'s
+    // symbol map at 390px: the wrapped line crossed straight through the
+    // "200 km" bar). #549 worked around it from this crate's side (moving
+    // the scale bar to `TopLeft` whenever `foot_of` predicted the
+    // attribution would wrap even at the floor size, `Foot::wrap_likely`)
+    // until ggplot-rs 0.31.5 added a real fix: a shared corner layout
+    // (`render::corner_layout`, sipemu/ggplot-rs#273, filed from this
+    // crate's own #546/#549 repro) where `GeomAttribution`,
+    // `GeomAnnotationScale` and `GeomBivariateLegend` each measure their
+    // own box and stack clear of whatever another one of them already
+    // claimed in the same render pass — not limited to same-corner
+    // claims, a plain rect-intersection check, so a `BottomRight`
+    // attribution wide enough to reach into `BottomLeft`'s scale bar now
+    // pushes itself up clear of it. The workaround is gone; the scale bar
+    // stays at its plain `BottomLeft` default always. Confirmed with PNG
+    // crops (#549) that the library now keeps both readable without this
+    // crate picking a corner for it.
     if ft.scale {
-        plot = plot.annotation_scale_with(
-            GeomAnnotationScale::default()
-                .corner(MapCorner::BottomLeft)
-                .max_width_px(90.0),
-        );
+        plot = plot.annotation_scale_with(GeomAnnotationScale::default().max_width_px(90.0));
     }
     // `ft.lines` holds every attribution line this map needs, already in
     // top-to-bottom reading order (a `de-*`/BKG pack's own "© BKG …
@@ -912,29 +975,43 @@ pub(super) fn build(
         for line in farther.iter().rev() {
             attribution = attribution.line(as_runs(line));
         }
-        // `foot_of`'s own `ft.size` already shrinks the font to fit this
-        // panel's width (incl. the scale bar's own reservation) — reuse
-        // it instead of `GeomAttribution::new`'s fixed 7.5px default,
-        // same as the old writer's `foot_svg` did. `text_size` is a plain
-        // `pub` field; `#[non_exhaustive]` only blocks struct-literal
-        // construction, not mutating fields on an already-built value.
+        // `foot_of`'s `ft.size` is the un-shrunk ceiling the attribution
+        // starts at (reuse it instead of `GeomAttribution::new`'s fixed
+        // 7.5px default, same as the old writer's `foot_svg` did);
+        // `text_size` is a plain `pub` field — `#[non_exhaustive]` only
+        // blocks struct-literal construction, not mutating fields on an
+        // already-built value.
         //
-        // `GeomAttribution::fit` (ggplot-rs 0.31.2/0.31.3, sipemu/
-        // ggplot-rs#258/#264) was tried here too — a floor size plus
-        // draw-time shrink/truncate against the real (legend-narrowed)
-        // panel rect, instead of `foot_of`'s own pre-render guess — but
-        // both `AttributionOverflow` kinds still mis-measure this map's
-        // own BKG source line (one logical row built from a bare-URL run
-        // plus a plain-text run) on `delivery-coverage.sql`'s bivariate
-        // map at 390px: `Wrap` only splits at the one inter-run space,
-        // leaving the still-oversized URL run as one physical line;
-        // `Ellipsis`'s own truncation budget is still too generous for
-        // that character mix and the kept (truncated) text itself
-        // overflows the panel's left edge. Tracked as a follow-up
-        // (ggplot-rs: wrap within a run + a tighter width estimate for
-        // URL-heavy text), not adopted here — `ft.size` alone has no
-        // overflow in any example checked for #510.
+        // `.fit`/`.fit_overflow(Wrap)` (ggplot-rs 0.31.2-0.31.4, sipemu/
+        // ggplot-rs#258/#264/#267/#268) then shrink that ceiling down to
+        // `ATTRIBUTION_FIT_FLOOR` and, if still too wide, wrap — against
+        // the *actual* panel rect at draw time (after any continuous-fill
+        // legend has been placed), which is why the ~90px legend-width
+        // reservation `foot_of`'s caller used to need is gone (#546). Two
+        // earlier attempts at this (0.31.2/0.31.3, #510) foundered on the
+        // same map's own BKG source line (one logical row built from a
+        // bare-URL run plus a plain-text note) at 390px: `Wrap` only split
+        // at the one inter-run space, leaving the still-oversized URL run
+        // as one physical line, and `Ellipsis`'s truncation budget was
+        // still too generous for that character mix, overflowing the
+        // panel's left edge either way — both fixed upstream in 0.31.4
+        // (`Wrap` now splits *inside* a run; both kinds keep each kept/
+        // split run's `href`). `fit_width_scale` (0.31.4's other new
+        // knob — a caller whose deployed *font* measures wider than the
+        // built-in heuristic) is left at its default (not called below):
+        // measuring `foot_of`'s own rows with real glyph metrics
+        // (`ab_glyph`) against both fonts installed on this box — DejaVu
+        // Sans and Noto Sans, the latter being rsvg's fallback without
+        // Hanken Grotesk installed — found both render *narrower* than
+        // the heuristic at every row (DejaVu up to ~0.99x, Noto up to
+        // ~0.79x), so the heuristic's existing margin already covers the
+        // fallback this box actually renders with; sipemu/ggplot-rs#268
+        // reached the same conclusion measuring DejaVu + Hanken Grotesk
+        // itself. No font-driven scale is applied.
         attribution.text_size = ft.size;
+        attribution = attribution
+            .fit(super::ATTRIBUTION_FIT_FLOOR)
+            .fit_overflow(AttributionOverflow::Wrap);
         plot = plot.annotation_attribution_with(attribution);
     }
 
@@ -999,13 +1076,38 @@ pub(super) fn build(
     // (`map/mod.rs`'s now-dead path), lost when this geom_sf path took
     // over every map kind (#498) because `GGPlot` had no `<desc>` API
     // yet at the time.
-    let summary_text = super::summary(o, m, extra_self);
+    let mut summary_text = super::summary(o, m, extra_self);
+    // D19: which frame this map shows, drawn by ggplot-rs itself so
+    // `--svg`, PNG, PDF and the export always say so (the static case —
+    // no `frame` in the render context — is the last frame, D12).
+    if let Some(fc) = frame_ctx {
+        plot = plot.subtitle(&format!("{}: {}", fc.name, fc.labels[fc.k]));
+        summary_text.push_str(&format!(
+            ". Showing {} ({} of {} frames, {} to {}); colours and classes are shared across all frames",
+            fc.labels[fc.k],
+            fc.k + 1,
+            fc.labels.len(),
+            fc.labels.first().map(String::as_str).unwrap_or(""),
+            fc.labels.last().map(String::as_str).unwrap_or(""),
+        ));
+    }
     plot = plot.svg_desc(summary_text.clone());
     let mut attrs: Vec<(&'static str, String)> = vec![
         ("data-map", String::new()),
         ("data-proj", m.projection.name().to_string()),
         ("data-summary", summary_text),
     ];
+    // `::FRAME` (D19/M2f): every frame's label, the one on screen, and the
+    // column's own display name — the browser player's bar reads these the
+    // same way `::STORY`'s `dpStorySteps` reads `data-story`.
+    if let Some(fc) = frame_ctx {
+        attrs.push((
+            "data-frames",
+            serde_json::to_string(&fc.labels).unwrap_or_default(),
+        ));
+        attrs.push(("data-frame", fc.k.to_string()));
+        attrs.push(("data-frame-name", fc.name.clone()));
+    }
     // `data-classes`: every class's short-formatted label, low to high, as
     // JSON (`mapTableHtml`'s "k of n: label" a11y row — `app.js:15454`) —
     // same shape as the old writer's own `data-classes` (`mod.rs`).

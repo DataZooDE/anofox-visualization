@@ -22,12 +22,13 @@
 use crate::format::escape_xml as esc;
 use crate::format::Locale;
 use crate::sql::contract_call;
-use crate::theme::{hex, DashboardChrome, ResolvedTheme, Variant};
+use crate::theme::{hex, luminance, mix, DashboardChrome, ResolvedTheme, Rgb, Variant};
 use crate::{
     error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Kind, Place,
     RenderOptions, Role, TableOpt,
 };
 use ggplot_rs::prelude::Value;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// A data source for headless rendering. Implement this over your engine
@@ -58,6 +59,11 @@ pub struct DashboardOptions {
     pub theme: Option<String>,
     /// Which variant to draw when the theme follows the viewer (`auto`).
     pub variant: Variant,
+    /// The dashboard's own `assets/` folder, canonicalized (#514 PR B) — a
+    /// relative `::IMAGE`/`::IMAGE_DARK` source inlines from it as a `data:`
+    /// URI ([`crate::image::resolve_relative`]); `None` draws the alt-text
+    /// placeholder for every relative source, as PR A did for all of them.
+    pub asset_root: Option<PathBuf>,
 }
 
 impl Default for DashboardOptions {
@@ -70,6 +76,7 @@ impl Default for DashboardOptions {
             brand: None,
             theme: None,
             variant: Variant::Light,
+            asset_root: None,
         }
     }
 }
@@ -369,10 +376,15 @@ fn render_inner(
         .and_then(Locale::from_tag)
         .unwrap_or_default();
     let t = &theme;
+    // #536: this dashboard's own `-- @markdown_style` default, read once —
+    // every ::MARKDOWN panel without its own ::MARKDOWN_STYLE (and without
+    // ::CALLOUT, which always draws 'callout') falls back to it.
+    let md_default = crate::host::serving::parse_dashboard_meta("", script).markdown_style;
     let ropts = RenderOptions {
         brand: opts.brand,
         theme: Arc::new(theme.clone()),
         locale,
+        asset_root: opts.asset_root.clone(),
         ..RenderOptions::default()
     };
 
@@ -383,7 +395,7 @@ fn render_inner(
     let mut default_span = (12 / columns).max(1);
 
     // A placed panel: (x, y, w, h, nested svg fragment positioned at x, y).
-    let mut placed: Vec<(f64, f64, f64, f64, String)> = Vec::new();
+    let mut placed: Vec<(f64, f64, f64, f64, String, PanelChrome)> = Vec::new();
     // Full-width headings (no card): nested svg fragments.
     let mut headings: Vec<String> = Vec::new();
     let mut x = pad;
@@ -575,7 +587,7 @@ fn render_inner(
                     ink = hex(t.colors.heading),
                     tt = esc(&tt),
                 );
-                placed.push((x, row_y, cw, ch, inner));
+                placed.push((x, row_y, cw, ch, inner, PanelChrome::Card));
                 x += unit_w * span as f64;
                 row_units += span;
                 row_h = row_h.max(ch);
@@ -679,7 +691,7 @@ fn render_inner(
                         unit_w * span as f64 - gap
                     };
                     let title = roles.iter().any(|(_, r)| matches!(r, Role::Title));
-                    let (aw, ah) = image_aspect(&ip.src);
+                    let (aw, ah) = image_aspect(&ip.src, ropts.asset_root.as_deref());
                     let cap_h = if ip.caption.is_some() { 20.0 } else { 0.0 };
                     let title_h = if title { 26.0 } else { 0.0 };
                     // The image itself draws at `mw - 28` wide (render_panel_svg's
@@ -764,7 +776,8 @@ fn render_inner(
             totals_spec.as_deref(),
             compact[si],
         );
-        placed.push((x, row_y, cw, ch, inner));
+        let chrome = panel_chrome(roles, rows, md_default.as_deref(), t);
+        placed.push((x, row_y, cw, ch, inner, chrome));
 
         x += advance;
         row_units += units;
@@ -786,14 +799,38 @@ fn render_inner(
         var = t.variant.as_str(),
         bg = hex(t.colors.bg),
     );
-    for (px, py, pw, ph, inner) in &placed {
-        out.push_str(&format!(
-            "<rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" rx=\"{r}\" \
-             fill=\"{card}\" stroke=\"{line}\" stroke-width=\"1\"/>",
-            r = (t.radius * 0.78).round(),
-            card = hex(t.colors.card),
-            line = hex(t.colors.line),
-        ));
+    let radius = (t.radius * 0.78).round();
+    for (ci, (px, py, pw, ph, inner, chrome)) in placed.iter().enumerate() {
+        match chrome {
+            // #536 'plain'::MARKDOWN_STYLE: no rect at all — the page
+            // background (painted above, full-size) shows through.
+            PanelChrome::Plain => {}
+            PanelChrome::Card => out.push_str(&format!(
+                "<rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" rx=\"{radius}\" \
+                 fill=\"{card}\" stroke=\"{line}\" stroke-width=\"1\"/>",
+                card = hex(t.colors.card),
+                line = hex(t.colors.line),
+            )),
+            // #536 'callout'::MARKDOWN_STYLE (the default; ::CALLOUT implies
+            // it): a tinted box with a left accent bar, like the browser's
+            // `.md-box` — the bar is clipped to the rounded corners the same
+            // way (an inner `<rect>` within a `<clipPath>` of the same
+            // radius).
+            PanelChrome::Callout { fill, border, bar } => {
+                let clip = format!("dp-md-clip-{ci}");
+                out.push_str(&format!(
+                    "<clipPath id=\"{clip}\"><rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" \
+                     height=\"{ph:.1}\" rx=\"{radius}\"/></clipPath>\
+                     <rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" rx=\"{radius}\" \
+                     fill=\"{fill}\" stroke=\"{border}\" stroke-width=\"1\"/>\
+                     <rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"5\" height=\"{ph:.1}\" \
+                     fill=\"{bar}\" clip-path=\"url(#{clip})\"/>",
+                    fill = hex(*fill),
+                    border = hex(*border),
+                    bar = hex(*bar),
+                ));
+            }
+        }
         // the panel itself: a nested <svg> already positioned at (px, py)
         out.push_str(inner);
     }
@@ -1053,7 +1090,7 @@ fn render_panel_svg(
         let iy = title_h + 4.0;
         let iw = (w - 2.0 * pad).max(1.0);
         let ih = (h - iy - cap_h - 6.0).max(1.0);
-        match image_href(&img.src) {
+        match image_href(&img.src, ropts.asset_root.as_deref()) {
             Some(href) => {
                 let alt_title = if img.alt.is_empty() {
                     String::new()
@@ -1830,30 +1867,38 @@ fn image_panel(
 }
 
 /// `src`'s href for a static `<image href=…>`: `data:`/`https:` sources are
-/// used as-is; a relative path (PR B inlines it from `assets/`) or anything
-/// [`crate::image::src_ok`] rejects draws the alt-text placeholder instead
-/// (`None`).
-fn image_href(src: &str) -> Option<String> {
-    use crate::image::{src_ok, SrcKind};
+/// used as-is; a relative path is inlined from `asset_root`'s `assets/`
+/// folder as a `data:` URI (PR B: [`crate::image::resolve_relative`]) when
+/// one is given and accepts it; anything else — no root, a path not under
+/// `assets/`, a refused file, or anything [`crate::image::src_ok`] itself
+/// rejects — draws the alt-text placeholder instead (`None`).
+fn image_href(src: &str, asset_root: Option<&std::path::Path>) -> Option<String> {
+    use crate::image::{resolve_relative, src_ok, SrcKind};
     match src_ok(src) {
         SrcKind::Data(_) | SrcKind::Https => Some(src.to_string()),
-        SrcKind::Relative | SrcKind::Bad(_) => None,
+        SrcKind::Relative => resolve_relative(src, asset_root)
+            .map(|(mime, bytes)| crate::host::app_brand::data_uri(&mime, &bytes)),
+        SrcKind::Bad(_) => None,
     }
 }
 
-/// `src`'s own aspect (width, height), decoded from a `data:` payload via
-/// [`crate::image::intrinsic_size`]; [`crate::image::FALLBACK_ASPECT`]
-/// otherwise (an `https:`/relative/bad source, or a size that can't be read).
-fn image_aspect(src: &str) -> (f64, f64) {
-    use crate::image::{decode_data_uri, intrinsic_size, src_ok, SrcKind, FALLBACK_ASPECT};
-    if let SrcKind::Data(_) = src_ok(src) {
-        if let Some((mime, bytes)) = decode_data_uri(src) {
-            if let Some(sz) = intrinsic_size(&bytes, &mime) {
-                return sz;
-            }
-        }
-    }
-    FALLBACK_ASPECT
+/// `src`'s own aspect (width, height): decoded from a `data:` payload, or
+/// (PR B) read from `asset_root`'s `assets/` folder for a relative path —
+/// either way via [`crate::image::intrinsic_size`]. [`crate::image::FALLBACK_ASPECT`]
+/// when there's nothing to read (an `https:`/bad source, no root, or a size
+/// that can't be read).
+fn image_aspect(src: &str, asset_root: Option<&std::path::Path>) -> (f64, f64) {
+    use crate::image::{
+        decode_data_uri, intrinsic_size, resolve_relative, src_ok, SrcKind, FALLBACK_ASPECT,
+    };
+    let payload = match src_ok(src) {
+        SrcKind::Data(_) => decode_data_uri(src),
+        SrcKind::Relative => resolve_relative(src, asset_root),
+        SrcKind::Https | SrcKind::Bad(_) => None,
+    };
+    payload
+        .and_then(|(mime, bytes)| intrinsic_size(&bytes, &mime))
+        .unwrap_or(FALLBACK_ASPECT)
 }
 
 /// The text of a ::MARKDOWN panel, if it is one.
@@ -1862,6 +1907,66 @@ fn markdown_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Opti
     column_at(rows, *i)
         .and_then(|(_, v)| v.first())
         .map(value_str)
+}
+
+/// How a panel's outer SVG `<rect>` is drawn (#536): today's bordered card
+/// (`Card` — every panel but a styled `::MARKDOWN`), nothing at all
+/// (`Plain` — the page background shows through) or a tinted box with a
+/// left accent bar (`Callout`). Mirrors the browser's `.md-box` / `.md-
+/// plain` (web/theme-base.css) and `resolveMdStyle()` (web/app.js); the
+/// icon itself stays browser-only.
+enum PanelChrome {
+    Card,
+    Plain,
+    Callout { fill: Rgb, border: Rgb, bar: Rgb },
+}
+
+/// `roles`/`rows`'s [`PanelChrome`]: `Card` for every panel that isn't a
+/// `::MARKDOWN`; otherwise [`crate::roles::resolve_markdown_style`] of its
+/// own `::MARKDOWN_STYLE` cell, `::CALLOUT`'s presence and `md_default`
+/// (the dashboard's own `-- @markdown_style`). A static render has no
+/// backdrop to alpha-blend a translucent wash against, so the tinted fill
+/// approximates the browser's look by mixing the kind's colour into the
+/// card colour instead — the same recipe as the existing `badge-warn-bg` /
+/// `badge-good-bg` tokens (`src/theme.rs`'s `derived_tokens`).
+fn panel_chrome(
+    roles: &[(usize, Role)],
+    rows: &[(String, Vec<Value>)],
+    md_default: Option<&str>,
+    t: &ResolvedTheme,
+) -> PanelChrome {
+    if !roles.iter().any(|(_, r)| matches!(r, Role::Markdown)) {
+        return PanelChrome::Card;
+    }
+    let text_of = |role: Role| -> Option<String> {
+        let (i, _) = roles.iter().find(|(_, r)| *r == role)?;
+        column_at(rows, *i)
+            .and_then(|(_, v)| v.first())
+            .map(value_str)
+    };
+    let explicit = text_of(Role::MarkdownStyle);
+    let callout_present = roles.iter().any(|(_, r)| matches!(r, Role::Callout));
+    let style =
+        crate::roles::resolve_markdown_style(explicit.as_deref(), callout_present, md_default);
+    match style {
+        "plain" => PanelChrome::Plain,
+        "card" => PanelChrome::Card,
+        _ => {
+            let kind = crate::roles::callout_kind(&text_of(Role::Callout).unwrap_or_default());
+            let dark = luminance(t.colors.card) < 0.25;
+            let m = if dark { 0.22 } else { 0.12 };
+            let base = match kind {
+                "warning" => t.colors.warning,
+                "success" => t.colors.positive,
+                _ => t.colors.accent,
+            };
+            PanelChrome::Callout {
+                fill: mix(t.colors.card, base, m),
+                border: mix(t.colors.card, base, (m * 1.5).min(1.0)),
+                bar: base,
+            }
+        }
+    }
 }
 
 /// `{{name}}` / `{{name:fmt}}` in a ::MARKDOWN panel's text, filled from the

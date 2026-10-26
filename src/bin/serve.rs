@@ -26,7 +26,7 @@ use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
 };
 use anofox_visualization::theme::DashboardChrome;
-use anofox_visualization::{page, render_with_title, sql, track, RenderOptions, Role};
+use anofox_visualization::{page, render_with_title, roles, sql, track, RenderOptions, Role};
 use include_dir::{include_dir, Dir};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1157,6 +1157,13 @@ struct ServeState {
     timeout: Duration,
     auth: Option<Auth>,
     log: Option<RequestLog>,
+    /// `<dir>/assets`, canonicalized (#514 PR B) — `None` when there is no
+    /// such folder next to `--dashboards <dir>`. This script-free page has
+    /// no client JS to fetch a route with, so a relative `::IMAGE` source
+    /// is inlined from here as a `data:` URI at render time instead (see
+    /// `render_dashboard_page`'s `RenderOptions.asset_root`), the same as
+    /// `dashboard`'s own `--svg`/HTML CLI output.
+    assets_root: Option<PathBuf>,
 }
 
 fn serve_dashboards(dir: &str, o: &mut Opts) {
@@ -1241,6 +1248,7 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
         timeout: o.timeout,
         auth: o.auth.take(),
         log: o.log.take(),
+        assets_root: anofox_visualization::image::canonical_assets_dir(Path::new(dir)),
     };
     run_workers(server, o.threads, move |req| handle_serve(&st, req));
 }
@@ -1776,8 +1784,13 @@ fn render_dashboard_page(
     let mut selects = String::new();
     for p in &dash.meta.params {
         let val = value_of(&p.name);
+        // No inline `onchange` here (#557): the page's CSP (#252) has no
+        // 'unsafe-inline'/'unsafe-hashes' for script-src, so a bare
+        // event-handler attribute is silently blocked — `page::CONTROLS_SCRIPT`
+        // wires the auto-submit instead, and the button below covers a
+        // viewer whose browser runs no script at all.
         selects.push_str(&format!(
-            "<label>{} <select name=\"{}\" onchange=\"this.form.submit()\">",
+            "<label>{} <select name=\"{}\">",
             esc(&caption_colon(&p.name)),
             esc(&p.name)
         ));
@@ -1799,7 +1812,8 @@ fn render_dashboard_page(
         String::new()
     } else {
         format!(
-            "<form class=\"controls\" method=\"{}\" action=\"/d/{}\">{selects}{}</form>",
+            "<form class=\"controls\" method=\"{}\" action=\"/d/{}\">{selects}\
+             <button type=\"submit\">Apply</button>{}</form>",
             if embed_link.is_some() { "post" } else { "get" },
             esc(&dash.id),
             embed_link
@@ -1814,8 +1828,12 @@ fn render_dashboard_page(
     // Phase 1: query every panel (read-only) and collect the chrome
     // directives, so a ::THEME anywhere styles the whole page.
     let mut chrome = DashboardChrome::default();
-    // The fourth element is each panel's own `::KPI_SIZE` ('compact') (#405).
-    let mut queried: Vec<(sql::Panel, Rows, bool, bool)> = Vec::new();
+    // The fourth element is each panel's own `::KPI_SIZE` ('compact') (#405);
+    // the fifth is pre-rendered static HTML to push verbatim instead of the
+    // usual chart render (#551: a `::SUBMIT` panel's disabled-button card —
+    // never needs `opts`/the theme the usual render does, so it's built
+    // directly in phase 1 rather than threading a marker to phase 2).
+    let mut queried: Vec<(sql::Panel, Rows, bool, bool, Option<String>)> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
     // (#214); the others are never queried, and a `?view.*` request param
     // is not a thing — `resolve_params` above only reads declared `@param`s.
@@ -1968,6 +1986,39 @@ fn render_dashboard_page(
             group_compact = false;
             continue;
         }
+        // `::SUBMIT` (#551): the script-free page has no JS to ever POST
+        // `/api/submit`, so this renders a disabled button naming why
+        // instead of nothing — the plan §6 "never a silent no-op" rule
+        // `web/app.js`'s `mkSubmit` already follows in the browser. Gated
+        // (its own `-- @requires` unmet): left out entirely, like an
+        // `::INPUT` above — not shown-but-disabled.
+        if panel.roles.iter().any(|(_, r)| *r == Role::Submit) {
+            if gated {
+                continue;
+            }
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT 1",
+                panel.sql.trim().trim_end_matches(';'),
+            );
+            let idx = panel
+                .roles
+                .iter()
+                .find(|(_, r)| *r == Role::Submit)
+                .map(|(j, _)| *j);
+            let label = page_rows(st, &q)
+                .ok()
+                .and_then(|rows| {
+                    let j = idx?;
+                    rows.first()?
+                        .get(&format!("c{j}"))?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "Submit".to_string());
+            let html = sv::submit_disabled_html(&label, i, "Submitting is not enabled here");
+            queried.push((panel, Rows::new(), false, false, Some(html)));
+            continue;
+        }
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()
             && !section
@@ -1985,7 +2036,7 @@ fn render_dashboard_page(
         // left out of its chart instead.
         if chrome_role.is_none() && !section && gated {
             if !track::is_track(&panel.roles) {
-                queried.push((panel, Rows::new(), true, false));
+                queried.push((panel, Rows::new(), true, false, None));
             }
             continue;
         }
@@ -2014,7 +2065,7 @@ fn render_dashboard_page(
                 }
             };
             let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
-            queried.push((panel, rows, false, compact));
+            queried.push((panel, rows, false, compact, None));
             continue;
         }
         let q = format!(
@@ -2044,7 +2095,7 @@ fn render_dashboard_page(
             continue;
         }
         let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
-        queried.push((panel, rows, false, compact));
+        queried.push((panel, rows, false, compact, None));
     }
     let set = chrome.resolve(theme_default()).map_err(PageError::Server)?;
     let t = set.default_variant().clone();
@@ -2062,6 +2113,7 @@ fn render_dashboard_page(
         // afterwards) covers every SVG a render produces — a title bar's
         // chart, each ::TRACK, each contract row — not just the first one.
         record_warnings: false,
+        asset_root: st.assets_root.clone(),
         ..RenderOptions::default()
     };
 
@@ -2074,12 +2126,16 @@ fn render_dashboard_page(
         sql::steps::StaticSteps::new(&shown)
     };
     let mut queried = queried.into_iter().peekable();
-    while let Some((panel, rows, na, compact)) = queried.next() {
+    while let Some((panel, rows, na, compact, static_html)) = queried.next() {
+        if let Some(html) = static_html {
+            panels.push_str(&html);
+            continue;
+        }
         if na {
             panels.push_str(NOT_AVAILABLE_HTML);
             // its strips go with it
             while queried
-                .next_if(|(q, _, _, _)| track::is_track(&q.roles))
+                .next_if(|(q, _, _, _, _)| track::is_track(&q.roles))
                 .is_some()
             {}
             continue;
@@ -2153,7 +2209,9 @@ fn render_dashboard_page(
         }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _, _, _)) =
+            queried.next_if(|(q, _, _, _, _)| track::is_track(&q.roles))
+        {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
         // Its ::TITLE bar, as on a dashboard card (#232).
@@ -2168,7 +2226,47 @@ fn render_dashboard_page(
             );
             PANEL_RENDER_ERROR_HTML.to_string()
         });
-        panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
+        // #536: a ::MARKDOWN panel's chrome — same resolution as the
+        // browser's resolveMdStyle(), drawn through the same CSS classes
+        // (web/theme-base.css, embedded in this page by `page::render`).
+        let text_of = |role: Role| -> Option<String> {
+            let (i, _) = panel.roles.iter().find(|(_, r)| *r == role)?;
+            rows.first()?
+                .get(&format!("c{i}"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        let (class, icon_attrs) = if panel.roles.iter().any(|(_, r)| matches!(r, Role::Markdown)) {
+            let explicit = text_of(Role::MarkdownStyle);
+            let callout_present = panel.roles.iter().any(|(_, r)| matches!(r, Role::Callout));
+            let style = roles::resolve_markdown_style(
+                explicit.as_deref(),
+                callout_present,
+                dash.meta.markdown_style.as_deref(),
+            );
+            match style {
+                "plain" => ("panel md-plain".to_string(), String::new()),
+                "callout" if callout_present => {
+                    let kind = roles::callout_kind(&text_of(Role::Callout).unwrap_or_default());
+                    let icon = match kind {
+                        "warning" => "⚠",
+                        "success" => "✓",
+                        _ => "ℹ",
+                    };
+                    (
+                        format!("panel md-box dp-callout dp-callout-{kind}"),
+                        format!(" role=\"note\" data-icon=\"{icon}\""),
+                    )
+                }
+                "callout" => ("panel md-box".to_string(), String::new()),
+                _ => ("panel".to_string(), String::new()), // 'card'
+            }
+        } else {
+            ("panel".to_string(), String::new())
+        };
+        panels.push_str(&format!(
+            "<figure class=\"{class}\"{icon_attrs}>{svg}</figure>"
+        ));
     }
 
     let meta = if dash.meta.refresh > 0 {

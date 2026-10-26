@@ -251,6 +251,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match)"),
     e("HEXBIN", &["HEX"], R::Hexbin, "modifier", true,
       "aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis)"),
+    e("FRAME", &["PLAY_BY", "TIME_FRAME"], R::Frame, "encoding", true,
+      "a time map's frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes and sizes; static output shows the last frame"),
     e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
       "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers)"),
@@ -300,6 +302,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE"),
     e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
       "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
+    e("MARKDOWN_STYLE", &["MD_STYLE"], R::MarkdownStyle, "kpi", true,
+      "a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style"),
     e("IMAGE", &["PICTURE", "IMG"], R::Image, "kpi", true,
       "a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption"),
     e("IMAGE_DARK", &["IMG_DARK"], R::ImageDark, "kpi", true,
@@ -349,7 +353,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
       "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
     e("SUBMIT", &[], R::Submit, "input", false,
-      "a button (value = its label) that records SUBMIT_VARS for this viewer — requires a server with options.state; not active until that lands (#517 slice S2)"),
+      "a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server)"),
     e("SUBMIT_VARS", &[], R::SubmitVars, "input", false,
       "comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements"),
     e("SUBMIT_DONE", &[], R::SubmitDone, "input", false,
@@ -395,6 +399,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`)"),
     e("ENDVIEW", &["END_VIEW"], R::ViewEnd, "layout", false,
       "close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it)"),
+    e("VIEW_PLACEMENT", &[], R::ViewPlacement, "layout", false,
+      "a ::VIEW group's switcher placement: 'row' (default, its own row above the card) or \
+       'header' (right-aligned, compact, in the card's title row — folds into a dropdown \
+       below a minimum card width; only when every alternative is exactly one panel, else \
+       --check warns and it falls back to 'row'); set directly before the group's first \
+       ::VIEW marker, like ::COL/::SPAN"),
     e("FIT", &["FIT_SCREEN"], R::Fit, "layout", false,
       "this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide)"),
     e("PLACEHOLDER", &[], R::Placeholder, "layout", false, "an empty grid cell"),
@@ -527,6 +537,54 @@ pub fn markdown_table() -> String {
     out
 }
 
+/// `::CALLOUT` value → `'note'` | `'warning'` | `'success'` (an unknown or
+/// missing value draws `'note'` — lint warns separately on an unknown one:
+/// `callout/unknown`). Mirrors `src/lint.rs`'s `CALLOUT_KINDS` and the
+/// browser's `calloutKind` (web/app.js).
+pub fn callout_kind(v: &str) -> &'static str {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "warning" | "caution" | "danger" => "warning",
+        "success" | "tip" => "success",
+        _ => "note",
+    }
+}
+
+/// `::MARKDOWN_STYLE` / `-- @markdown_style` values (#536): a `::MARKDOWN`
+/// box's chrome. The single source of truth for both — `src/lint.rs`'s panel
+/// and header checks, `src/dashboard.rs`'s SVG renderer and the browser's
+/// `MD_STYLE_KINDS` (web/app.js) all list the same three.
+pub const MARKDOWN_STYLE_KINDS: &[&str] = &["plain", "card", "callout"];
+
+/// `v`, trimmed and lower-cased, if it names one of [`MARKDOWN_STYLE_KINDS`].
+pub fn markdown_style_of(v: &str) -> Option<&'static str> {
+    MARKDOWN_STYLE_KINDS
+        .iter()
+        .find(|k| v.trim().eq_ignore_ascii_case(k))
+        .copied()
+}
+
+/// The effective `::MARKDOWN_STYLE` for one `::MARKDOWN` panel: an explicit,
+/// valid `explicit` (the panel's own `::MARKDOWN_STYLE` cell) wins outright —
+/// even over `::CALLOUT` (lint warns there, `markdown_style/conflicts-with-
+/// callout`); else `::CALLOUT` (`callout_present`) always draws 'callout',
+/// since that's the whole point of setting it; else the dashboard's own
+/// `-- @markdown_style` default; else 'callout' (today's look).
+pub fn resolve_markdown_style(
+    explicit: Option<&str>,
+    callout_present: bool,
+    dashboard_default: Option<&str>,
+) -> &'static str {
+    if let Some(v) = explicit.and_then(markdown_style_of) {
+        return v;
+    }
+    if callout_present {
+        return "callout";
+    }
+    dashboard_default
+        .and_then(markdown_style_of)
+        .unwrap_or("callout")
+}
+
 /// JSON export of the registry for the browser (wasm `roles_json()`):
 /// `{"roles":[{token, aliases, category, renders, summary}], "sets":{…}}`.
 /// `sets` are the derived token lists `web/app.js` matches on — `inputs`,
@@ -560,7 +618,7 @@ pub fn roles_json() -> String {
             Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
-                | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
+                | Role::ViewPlacement | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -616,6 +674,53 @@ mod tests {
                 assert_eq!(parse_role(&a.to_lowercase()), Some(d.role), "alias ::{a}");
             }
         }
+    }
+
+    #[test]
+    fn markdown_style_of_accepts_only_the_three_kinds() {
+        assert_eq!(markdown_style_of("plain"), Some("plain"));
+        assert_eq!(markdown_style_of(" Card "), Some("card"));
+        assert_eq!(markdown_style_of("CALLOUT"), Some("callout"));
+        assert_eq!(markdown_style_of(""), None);
+        assert_eq!(markdown_style_of("plainish"), None);
+    }
+
+    #[test]
+    fn resolve_markdown_style_precedence() {
+        // nothing set at all: 'callout', today's look.
+        assert_eq!(resolve_markdown_style(None, false, None), "callout");
+        // the dashboard's own default, with no panel-level override.
+        assert_eq!(resolve_markdown_style(None, false, Some("plain")), "plain");
+        // ::CALLOUT always draws 'callout', even over a 'plain' dashboard default.
+        assert_eq!(resolve_markdown_style(None, true, Some("plain")), "callout");
+        // an explicit, valid ::MARKDOWN_STYLE wins outright — even over ::CALLOUT.
+        assert_eq!(
+            resolve_markdown_style(Some("card"), true, Some("callout")),
+            "card"
+        );
+        assert_eq!(resolve_markdown_style(Some("plain"), true, None), "plain");
+        // an unrecognized explicit value is ignored, same as not set.
+        assert_eq!(
+            resolve_markdown_style(Some("weird"), false, Some("card")),
+            "card"
+        );
+        // an unrecognized dashboard default is ignored too.
+        assert_eq!(
+            resolve_markdown_style(None, false, Some("weird")),
+            "callout"
+        );
+    }
+
+    #[test]
+    fn callout_kind_groups_its_aliases() {
+        assert_eq!(callout_kind("warning"), "warning");
+        assert_eq!(callout_kind("caution"), "warning");
+        assert_eq!(callout_kind("danger"), "warning");
+        assert_eq!(callout_kind("success"), "success");
+        assert_eq!(callout_kind("tip"), "success");
+        assert_eq!(callout_kind("note"), "note");
+        assert_eq!(callout_kind("unknown"), "note");
+        assert_eq!(callout_kind(""), "note");
     }
 
     #[test]
@@ -682,6 +787,7 @@ mod tests {
             "DRILL",
             "VIEW",
             "ENDVIEW",
+            "VIEW_PLACEMENT",
             "FIT",
             "SHOW_IF",
             "GUIDE_STEP",
@@ -844,6 +950,7 @@ mod tests {
             Role::Classes,
             Role::Midpoint,
             Role::Hexbin,
+            Role::Frame,
             Role::Region,
             Role::Lat,
             Role::Lon,
@@ -855,6 +962,7 @@ mod tests {
             Role::SubTab,
             Role::View,
             Role::ViewEnd,
+            Role::ViewPlacement,
             Role::Fit,
             Role::Size,
             Role::YFormat,
@@ -911,6 +1019,7 @@ mod tests {
             Role::AsOf,
             Role::Info,
             Role::Callout,
+            Role::MarkdownStyle,
             Role::Section,
             Role::SelectAs,
             Role::Drill,
@@ -991,6 +1100,7 @@ mod tests {
                 | Role::Classes
                 | Role::Midpoint
                 | Role::Hexbin
+                | Role::Frame
                 | Role::Region
                 | Role::Lat
                 | Role::Lon
@@ -1002,6 +1112,7 @@ mod tests {
                 | Role::SubTab
                 | Role::View
                 | Role::ViewEnd
+                | Role::ViewPlacement
                 | Role::Fit
                 | Role::Size
                 | Role::YFormat
@@ -1058,6 +1169,7 @@ mod tests {
                 | Role::AsOf
                 | Role::Info
                 | Role::Callout
+                | Role::MarkdownStyle
                 | Role::Section
                 | Role::SelectAs
                 | Role::Drill

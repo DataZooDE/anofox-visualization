@@ -64,6 +64,27 @@ const USAGE: &str = "usage:\n  \
                                              `anofox-visualization-web-*` release asset (default:\n  \
                                              next to this binary) — never downloaded.\n  \
      dashboard --describe <source> [--db f]  schema + stats (SUMMARIZE)\n  \
+     dashboard state export <state.jsonl>    an options.state store (#517), offline — a live\n  \
+               [--user U] [--format jsonl|csv] server's own flock still refuses this while it's\n  \
+               [--out FILE] [--force]         running. Read-only: never creates, truncates or\n  \
+                                             touches the file's permissions. --user (exact,\n  \
+                                             case-sensitive — matches the stored claim) scopes\n  \
+                                             a data-subject export, and must not be empty;\n  \
+                                             --format csv is one row per recorded variable\n  \
+                                             (seq, ts, user, dashboard, submit, name, value,\n  \
+                                             value_list — the last two as literal JSON text,\n  \
+                                             lossless even for a list), jsonl (default) is the\n  \
+                                             store's own record shape. --out FILE writes a new\n  \
+                                             file (0600, never through a symlink); refuses one\n  \
+                                             that already exists unless --force.\n  \
+     dashboard state erase --user U <file>   remove every record of U from the store, offline;\n  \
+               [--yes] [--audit stderr|f]    --user is exact/case-sensitive and must not be\n  \
+                                             empty. Without --yes: read-only dry run, nothing\n  \
+                                             is written. --yes rewrites the store via a\n  \
+                                             temp-file-then-rename (crash-safe: the original is\n  \
+                                             never touched in place) and takes --audit (default\n  \
+                                             stderr) for one JSON line per attempt — outcome\n  \
+                                             ok/error, the operator's uid, never the values.\n  \
      dashboard --roles                       list every valid ::ROLE token\n  \
      dashboard --themes                      list the built-in themes\n  \
      dashboard --theme-css <T> [--dark]      print a theme's CSS design tokens\n  \
@@ -84,6 +105,7 @@ fn main() {
         Some("--check") => cmd_check(&args[1..]),
         Some("--site") => cmd_site(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
+        Some("state") => cmd_state(&args[1..]),
         Some("--roles") => print!("{}", anofox_visualization::roles::text()),
         Some("--themes") => cmd_themes(),
         Some("--svg") => cmd_svg(&args[1..]),
@@ -133,6 +155,7 @@ fn cmd_render(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.html".to_string());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let asset_root = dashboard_assets_root(Path::new(&path));
 
     let (html, n) = render_dashboard_html(
         &script,
@@ -140,6 +163,7 @@ fn cmd_render(args: &[String]) {
         data.as_deref(),
         theme_arg.as_deref(),
         variant,
+        asset_root.as_deref(),
     );
     std::fs::write(&out, html).unwrap_or_else(|e| panic!("write {out}: {e}"));
     println!("wrote {out} ({n} panels) — open it in a browser");
@@ -169,6 +193,11 @@ fn cmd_render(args: &[String]) {
 /// its id for a folder/site render (#417), which can call this once per
 /// dashboard.
 ///
+/// `asset_root` (#514 PR B): the dashboard's own `assets/` folder,
+/// canonicalized — a relative `::IMAGE`/`::IMAGE_DARK` source is inlined
+/// from it as a `data:` URI; `None` (no such folder) draws the alt-text
+/// placeholder for every relative source, as before PR B.
+///
 /// Returns the HTML and the number of rendered panels.
 fn render_dashboard_html(
     script: &str,
@@ -176,13 +205,18 @@ fn render_dashboard_html(
     data: Option<&str>,
     theme_arg: Option<&str>,
     variant: Variant,
+    asset_root: Option<&Path>,
 ) -> (String, usize) {
     // Phase 1: run the script in order; collect chrome directives and the
     // panels' rows (a ::THEME anywhere applies to every panel).
     let mut chrome = DashboardChrome::default();
     type Rows = Result<Vec<serde_json::Map<String, serde_json::Value>>, String>;
-    // The third element is each panel's own `::KPI_SIZE` ('compact') (#405).
-    let mut queried: Vec<(sql::Panel, Rows, bool)> = Vec::new();
+    // The third element is each panel's own `::KPI_SIZE` ('compact') (#405);
+    // the fourth is pre-rendered static HTML to push verbatim instead of the
+    // usual chart render (#551: a `::SUBMIT` panel's disabled-button card —
+    // this never needs the theme/opts the usual render does, so phase 1
+    // builds it directly rather than threading a marker through to phase 2).
+    let mut queried: Vec<(sql::Panel, Rows, bool, Option<String>)> = Vec::new();
     let mut session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");
@@ -309,6 +343,25 @@ fn render_dashboard_html(
             *n += 1;
             let _ = exec(&format!("SET VARIABLE {} = {n};", s.var));
         }
+        // `::SUBMIT` (#551): a static export can never POST `/api/submit`
+        // (no script runs it), so this renders a disabled button naming
+        // why instead of nothing — the plan §6 "never a silent no-op" rule
+        // `web/app.js`'s `mkSubmit` already follows in the browser.
+        if p.roles.iter().any(|(_, r)| *r == Role::Submit) {
+            let rows = exec(&format!("{};", p.sql)).unwrap_or_default();
+            let idx = p
+                .roles
+                .iter()
+                .find(|(_, r)| *r == Role::Submit)
+                .map(|(i, _)| *i);
+            let label = idx
+                .and_then(|i| rows.first().and_then(|r| r.get(&format!("c{i}"))))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Submit");
+            let html = sv::submit_disabled_html(label, i, "Submitting needs the dashboard server");
+            queried.push((p, Ok(Vec::new()), false, Some(html)));
+            continue;
+        }
         // Layout directives are interactive — the browser builder / `serve`
         // handle them; the static CLI output skips them (role registry).
         if roles::is_directive_panel(&p.roles) && !section && !step_marker {
@@ -316,7 +369,7 @@ fn render_dashboard_html(
         }
         let rows = exec(&format!("{};", p.sql));
         let compact = kpi_size_json(&p.roles, &rows).unwrap_or(group_compact);
-        queried.push((p, rows, compact));
+        queried.push((p, rows, compact, None));
     }
 
     let set = chrome.resolve(theme_arg).unwrap_or_else(|e| {
@@ -331,20 +384,32 @@ fn render_dashboard_html(
             .and_then(Locale::from_tag)
             .unwrap_or_default(),
         theme: Arc::new(t.clone()),
+        asset_root: asset_root.map(Path::to_path_buf),
         ..RenderOptions::default()
     };
 
+    // #536: this dashboard's own `-- @markdown_style` default, read once —
+    // every ::MARKDOWN panel without its own ::MARKDOWN_STYLE (and without
+    // ::CALLOUT, which always draws 'callout') falls back to it. Static
+    // output draws the chosen chrome through the same CSS classes the
+    // browser uses (web/theme-base.css, embedded by `page::render` below).
+    let md_default = sv::parse_dashboard_meta("", script).markdown_style;
     // Phase 2: render.
     let mut panels = String::new();
     let mut n = 0;
     // `::GUIDE_STEP` (#516): `queried` only ever holds what phase 1 kept
     // shown, so its total marker count per group ("of N") is known now.
     let mut static_steps = {
-        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, _, _)| p).collect();
+        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, _, _, _)| p).collect();
         sql::steps::StaticSteps::new(&shown)
     };
     let mut queried = queried.into_iter().peekable();
-    while let Some((p, rows, compact)) = queried.next() {
+    while let Some((p, rows, compact, static_html)) = queried.next() {
+        if let Some(html) = static_html {
+            panels.push_str(&html);
+            n += 1;
+            continue;
+        }
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
@@ -423,7 +488,7 @@ fn render_dashboard_html(
         }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r, _)) = queried.next_if(|(q, _, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| track::is_track(&q.roles)) {
             if let Ok(r) = r {
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
@@ -457,7 +522,47 @@ fn render_dashboard_html(
             render_with_title(&cols, &tracks, 460, 300, &opts)
                 .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
         };
-        panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
+        // #536: a ::MARKDOWN panel's chrome — same resolution as the
+        // browser's resolveMdStyle(), drawn through the same CSS classes
+        // (web/theme-base.css, embedded in this page by `page::render`).
+        let text_of = |role: Role| -> Option<String> {
+            let (i, _) = p.roles.iter().find(|(_, r)| *r == role)?;
+            rows.first()?
+                .get(&format!("c{i}"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        let (class, icon_attrs) = if p.roles.iter().any(|(_, r)| matches!(r, Role::Markdown)) {
+            let explicit = text_of(Role::MarkdownStyle);
+            let callout_present = p.roles.iter().any(|(_, r)| matches!(r, Role::Callout));
+            let style = roles::resolve_markdown_style(
+                explicit.as_deref(),
+                callout_present,
+                md_default.as_deref(),
+            );
+            match style {
+                "plain" => ("panel md-plain".to_string(), String::new()),
+                "callout" if callout_present => {
+                    let kind = roles::callout_kind(&text_of(Role::Callout).unwrap_or_default());
+                    let icon = match kind {
+                        "warning" => "⚠",
+                        "success" => "✓",
+                        _ => "ℹ",
+                    };
+                    (
+                        format!("panel md-box dp-callout dp-callout-{kind}"),
+                        format!(" role=\"note\" data-icon=\"{icon}\""),
+                    )
+                }
+                "callout" => ("panel md-box".to_string(), String::new()),
+                _ => ("panel".to_string(), String::new()), // 'card'
+            }
+        } else {
+            ("panel".to_string(), String::new())
+        };
+        panels.push_str(&format!(
+            "<figure class=\"{class}\"{icon_attrs}>{svg}</figure>"
+        ));
         n += 1;
     }
 
@@ -527,6 +632,18 @@ impl dashboard::DataProvider for CliProvider {
     }
 }
 
+/// `sql_path`'s own `assets/` folder (its parent directory's `assets/`),
+/// canonicalized — `None` when there is no such folder next to it. Shared
+/// by `cmd_svg` and `cmd_render` ([`render_dashboard_html`]'s `asset_root`
+/// argument). `cmd_check`'s `image_root` and `cmd_site`'s asset copy use
+/// [`anofox_visualization::image::canonical_assets_dir`] directly — they
+/// already have the dashboards *folder*, not a single `.sql` file's path.
+fn dashboard_assets_root(sql_path: &Path) -> Option<PathBuf> {
+    sql_path
+        .parent()
+        .and_then(anofox_visualization::image::canonical_assets_dir)
+}
+
 /// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N] [--data <dir>]`:
 /// the whole dashboard (KPIs, tables, charts, header) as one SVG.
 fn cmd_svg(args: &[String]) {
@@ -552,6 +669,10 @@ fn cmd_svg(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.svg".into());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    // #514 PR B: a relative `::IMAGE` source means `assets/` next to the
+    // .sql file; missing (no such folder) is not an error — every relative
+    // source just draws its placeholder, as before PR B.
+    o.asset_root = dashboard_assets_root(Path::new(&path));
     let session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)
         .unwrap_or_else(|e| {
             eprintln!("error: {e}");
@@ -714,6 +835,15 @@ fn cmd_check(args: &[String]) {
             None => (Vec::new(), Vec::new()),
         }
     });
+    let folder = std::path::Path::new(&path).is_dir();
+    // #514 PR B: `image/missing-file` needs the dashboard's own folder —
+    // `--check <file.sql>` uses its directory, `--check <folder>` the
+    // folder itself (plan-514's own rule, mirrored by `--site` below).
+    let image_root = if folder {
+        anofox_visualization::image::canonical_assets_dir(Path::new(&path))
+    } else {
+        dashboard_assets_root(Path::new(&path))
+    };
     let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
         // #435: one persistent session per file (in-memory, or read-only
         // against --db) backs the whole check — not a fresh process per
@@ -735,6 +865,7 @@ fn cmd_check(args: &[String]) {
             lint::LintOptions {
                 design,
                 stateful_session: true,
+                image_root: image_root.clone(),
             },
         );
         if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
@@ -744,7 +875,6 @@ fn cmd_check(args: &[String]) {
     };
     // (file, its diagnostics): one entry for a file, one per .sql for a folder
     let mut files: Vec<(String, Vec<lint::Diagnostic>)> = Vec::new();
-    let folder = std::path::Path::new(&path).is_dir();
     if folder {
         let mut names: Vec<String> = std::fs::read_dir(&path)
             .unwrap_or_else(|e| {
@@ -1018,6 +1148,12 @@ struct SiteOptions {
     app: Option<serde_json::Value>,
     home: Option<String>,
     theme: Option<String>,
+    /// The same cap the locked server would apply to its own `GET
+    /// /d/<id>/assets/<rest>` route (review of #554 N3) — `None` when
+    /// unset, so `cmd_site` falls back to
+    /// [`anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES`] exactly as
+    /// `LockedOptions::parse`'s own default does.
+    max_asset_bytes: Option<u64>,
     /// Server-only keys this file had, that `--site` skipped — named once
     /// on stderr by the caller ([`cmd_site`]), sorted for a stable message.
     ignored: Vec<String>,
@@ -1119,6 +1255,17 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                 };
                 theme::resolve(&spec).map_err(|e| format!("options.theme: {e}"))?;
                 o.theme = Some(spec);
+            }
+            // Review of #554 N3: the same cap the locked server would
+            // apply to its own asset route, not a fixed `--site`-only
+            // value — clamped the same way `LockedOptions::parse`
+            // (`duckext/src/serve.rs`) clamps it, its own 64 MiB ceiling.
+            "max_asset_bytes" => {
+                let n = val
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or("options.max_asset_bytes must be a positive integer (bytes)")?;
+                o.max_asset_bytes = Some(n.min(64 << 20));
             }
             "auth" | "policy" => {
                 let msg = format!(
@@ -1250,6 +1397,343 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         } else {
             std::fs::copy(entry.path(), &to)?;
         }
+    }
+    Ok(())
+}
+
+/// `--site`'s own `assets/` pre-publish check (#514 PR B): recurse `dir`,
+/// refusing (not skipping) a symlink anywhere inside it, a file whose
+/// extension isn't one of [`anofox_visualization::image::ASSET_EXTENSIONS`],
+/// or one over `max` bytes. `copy_dir_recursive`'s own symlink refusal
+/// (below) still applies to the actual copy — this is the belt to that
+/// braces, and the only thing enforcing the extension/size rule at all
+/// (`copy_dir_recursive` is also used for plain `--data`, which has no such
+/// rule).
+/// The SVG and XLink namespace URIs — the only two namespaces an accepted
+/// SVG may use anywhere in the document (review of #554 B1).
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+
+/// Local, SVG-spec-cased element names a published SVG may contain
+/// (`svg_active_reason`'s ALLOW-list). No animation element (`animate`,
+/// `set`, `animateTransform`, `animateMotion`, `mpath`) is in this list at
+/// all: SMIL's own `href`/`xlink:href`/`values` targeting (as in
+/// `<animate attributeName="href" values="javascript:…">`, review of #554
+/// B1's `anim.svg`) has no legitimate use in a static dashboard asset, so
+/// it's simplest to refuse every animation element outright rather than
+/// inspect what each one targets or decodes to. No `<a>` either (its
+/// `href` would need the same external-reference check `<image>` gets,
+/// for no real benefit in a static asset). No `<style>` element: CSS
+/// `url()`/`@import`/`expression()` is the same class of problem as a
+/// `style=` attribute (checked below), and a `<style>` element's full text
+/// content is a much larger surface to re-check than one attribute value.
+const SVG_ALLOWED_ELEMENTS: &[&str] = &[
+    "svg",
+    "g",
+    "defs",
+    "symbol",
+    "use",
+    "path",
+    "rect",
+    "circle",
+    "ellipse",
+    "line",
+    "polyline",
+    "polygon",
+    "text",
+    "tspan",
+    "textPath",
+    "title",
+    "desc",
+    "linearGradient",
+    "radialGradient",
+    "stop",
+    "pattern",
+    "clipPath",
+    "mask",
+    "marker",
+    "image",
+    // Filter primitives: pure pixel math, no script or external-resource
+    // surface — unlike `feImage`, deliberately left out here: it takes its
+    // own `href`, is rarely needed for a dashboard icon, and would need
+    // the same href check `<image>` gets below.
+    "filter",
+    "feGaussianBlur",
+    "feOffset",
+    "feMerge",
+    "feMergeNode",
+    "feComponentTransfer",
+    "feFuncR",
+    "feFuncG",
+    "feFuncB",
+    "feFuncA",
+    "feColorMatrix",
+    "feComposite",
+    "feBlend",
+    "feFlood",
+    "feTile",
+    "feDropShadow",
+    "feMorphology",
+];
+
+/// Raster `data:image/<t>` subtypes allowed on an `<image href="…">` inside
+/// an already-SVG asset — narrower than [`anofox_visualization::image::DATA_IMAGE_TYPES`]
+/// (no `svg+xml`: nesting another SVG payload here would reopen the same
+/// question `svg_active_reason` exists to close, one level down).
+const SVG_IMAGE_HREF_RASTER_TYPES: &[&str] = &["png", "jpeg", "jpg", "gif", "webp"];
+
+fn is_allowed_raster_data_uri(v: &str) -> bool {
+    let low = v.to_ascii_lowercase();
+    low.starts_with("data:image/")
+        && SVG_IMAGE_HREF_RASTER_TYPES.iter().any(|t| {
+            let p = format!("data:image/{t}");
+            low.starts_with(&format!("{p};")) || low.starts_with(&format!("{p},"))
+        })
+}
+
+/// Does `value` (any attribute's value, already XML-entity-decoded by the
+/// parser) try to reach something off-document through CSS? Review of
+/// #554 (second re-review, S1): checking only the `style` attribute left
+/// every *presentation* attribute (`fill`, `stroke`, `filter`,
+/// `clip-path`, `mask`, every `marker-*`, `cursor`, …) as an unguarded
+/// fetch — SVG's own CSS cascade applies to a presentation attribute
+/// exactly as if it were written in `style`, so `fill="url(https://…)"`
+/// fetches just as `style="fill:url(https://…)"` does. A CSS escape also
+/// defeated a literal `"url("` substring check (`u\72l(` decodes, in CSS,
+/// to `url(`), and `image-set('https://…')` reaches a URL with no `url(`
+/// at all. This function is applied to **every** attribute's value
+/// ([`svg_active_reason`], below), refusing:
+/// - any backslash at all — the escape vector; no legitimate value here
+///   needs one;
+/// - `url(…)` whose target isn't a same-document `#fragment` (`url(#id)`
+///   is how an SVG legitimately references its own
+///   `<filter>`/`<clipPath>`/gradient by CSS);
+/// - `image-set(` (a CSS image fallback list), `@import`, `src(` (the
+///   newer, unprefixed CSS font/image loading function), `javascript:`
+///   anywhere, `expression(` (old IE CSS, still worth refusing).
+fn external_ref_reason(value: &str) -> Option<String> {
+    if value.contains('\\') {
+        return Some(
+            "contains a backslash (a CSS escape can hide url()/javascript: from a literal scan)"
+                .to_string(),
+        );
+    }
+    let low = value.to_ascii_lowercase();
+    for bad in [
+        "@import",
+        "image-set(",
+        "src(",
+        "javascript:",
+        "expression(",
+    ] {
+        if low.contains(bad) {
+            return Some(format!("contains '{bad}'"));
+        }
+    }
+    let mut rest = low.as_str();
+    while let Some(i) = rest.find("url(") {
+        let after = &rest[i + 4..];
+        let end = after.find(')').unwrap_or(after.len());
+        let inner = after[..end].trim().trim_matches(['"', '\'']);
+        if !inner.starts_with('#') {
+            return Some(format!(
+                "contains a url() that isn't a local #fragment ('{}')",
+                truncate_for_message(inner)
+            ));
+        }
+        rest = &after[end.min(after.len())..];
+    }
+    None
+}
+
+fn truncate_for_message(s: &str) -> String {
+    const MAX: usize = 60;
+    if s.chars().count() <= MAX {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(MAX).collect::<String>())
+    }
+}
+
+/// Is `bytes` (already confirmed, by its magic bytes, to be an SVG) "active"
+/// — could it run script or fetch something external if a browser opens it
+/// as a *document* rather than drawing it through an `<img>`? Review of
+/// #554 item 1: the locked server neutralises this with its asset route's
+/// own `Content-Security-Policy: sandbox` header on a direct open, but a
+/// published static site has no server to send that header — `assets/x.svg`
+/// opened directly on GitHub Pages/S3/etc. just runs. So `--site` refuses to
+/// publish one instead.
+///
+/// An ALLOW-list over a *parsed* document, not a deny-list over the raw
+/// text (review of #554 B1: the previous text-scan version was bypassed by
+/// a namespace-prefixed `<x:script>` where `x` is bound to the SVG
+/// namespace under a prefix other than none; a foreign-namespace element
+/// — `<h:script>`/`<h:iframe>` bound to the XHTML namespace, needing no
+/// `<foreignObject>` wrapper at all; an internal DTD entity expanding to
+/// literal `<script>` text; and `&#106;avascript:` — entity-encoded `j` —
+/// hiding a `javascript:` URL from a literal substring match in an
+/// `<animate>`'s `values` and in a quoted `href`. A real XML parser that
+/// resolves namespaces and decodes entities before this function ever sees
+/// a string closes all four at once, instead of each needing its own
+/// pattern added to a text scan that will always be one bypass behind).
+///
+/// Every element must resolve to the SVG namespace (`tag_name().namespace()
+/// == Some(SVG_NS)`, never guessed from a prefix) and be in
+/// [`SVG_ALLOWED_ELEMENTS`]. Every attribute must be unprefixed or in the
+/// XLink namespace — any other namespace is refused outright, which is what
+/// actually stops `<h:script>`/`<h:iframe>` regardless of what prefix binds
+/// them. No attribute name may start with `on` (case-insensitively — SVG
+/// alone has dozens of event handlers: `onload`, `onbegin`, `onend`,
+/// `onrepeat`, `onactivate`, …). `href`/`xlink:href` may only be a
+/// same-document `#fragment`, or, on `<image>` only, a
+/// `data:image/(png|jpeg|gif|webp)` payload. A `style` attribute may not
+/// contain `@import`, `javascript:`, `expression(`, or a `url(…)` that
+/// isn't a `#fragment` ([`style_url_reason`]).
+///
+/// A literal `<!DOCTYPE`, anywhere in the raw bytes, is refused before
+/// parsing even starts — entity expansion is exactly how `ent.svg` (review
+/// of #554 B1) smuggled a `<script>` past the previous version; never let
+/// the parser expand an entity at all. Redundant with
+/// [`roxmltree::ParsingOptions::allow_dtd`]'s own default of `false`
+/// (`Document::parse` uses it), kept as a belt-and-braces check that
+/// doesn't depend on that default never changing. A processing instruction
+/// anywhere in the document is refused too — untested territory for
+/// whatever opens this file directly; simplest to disallow.
+///
+/// Returns the reason, or `None` if none of this matched (still just pixels
+/// and markup, not a reason this file is safe in some deeper sense this
+/// scan can't see).
+fn svg_active_reason(bytes: &[u8]) -> Option<String> {
+    let text = match std::str::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => return Some("is not valid UTF-8 (can't be parsed as XML)".to_string()),
+    };
+    if text.to_ascii_lowercase().contains("<!doctype") {
+        return Some("contains a <!DOCTYPE declaration (entity expansion risk)".to_string());
+    }
+    let doc = match roxmltree::Document::parse(text) {
+        Ok(d) => d,
+        Err(e) => return Some(format!("could not be parsed as well-formed XML ({e})")),
+    };
+    for node in doc.descendants() {
+        if node.is_pi() {
+            return Some("contains a processing instruction".to_string());
+        }
+        if !node.is_element() {
+            continue;
+        }
+        let tag = node.tag_name();
+        if tag.namespace() != Some(SVG_NS) {
+            return Some(format!(
+                "contains an element ('{}') outside the SVG namespace",
+                tag.name()
+            ));
+        }
+        if !SVG_ALLOWED_ELEMENTS.contains(&tag.name()) {
+            return Some(format!("contains a disallowed element ('{}')", tag.name()));
+        }
+        for attr in node.attributes() {
+            let ns = attr.namespace();
+            if ns.is_some() && ns != Some(XLINK_NS) {
+                return Some(format!(
+                    "contains an attribute ('{}') outside the SVG/XLink namespaces",
+                    attr.name()
+                ));
+            }
+            let local = attr.name();
+            if local.len() >= 2 && local.as_bytes()[..2].eq_ignore_ascii_case(b"on") {
+                return Some(format!("contains an event-handler attribute ('{local}')"));
+            }
+            // Review of #554 (second re-review, S1): checked on *every*
+            // attribute, not only `style` — a presentation attribute
+            // (`fill`, `filter`, `clip-path`, `mask`, `marker-*`,
+            // `cursor`, …) takes the same CSS syntax `style` does.
+            if let Some(why) = external_ref_reason(attr.value()) {
+                return Some(format!("attribute '{local}' {why}"));
+            }
+            if local.eq_ignore_ascii_case("href") {
+                let v = attr.value().trim();
+                let ok =
+                    v.starts_with('#') || (tag.name() == "image" && is_allowed_raster_data_uri(v));
+                if !ok {
+                    return Some(format!(
+                        "references an external href/xlink:href ('{}')",
+                        truncate_for_message(v)
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `--site`'s own `assets/` pre-publish pass (#514 PR B; review of #554
+/// items 1/2): recurse `root`'s `rel` subdirectory (`rel` starts `""`),
+/// writing each validated file to `out/rel/name`. A dot-leading entry
+/// (`.secret.png`, `.DS_Store`, a stray `.git/`, …) is skipped — not
+/// copied, not a publish failure, the same as `read_asset`'s own
+/// `outside-folder` refusal for a hidden segment, which [`read_asset`]
+/// would otherwise report for it below. Every other file goes through
+/// [`anofox_visualization::image::read_asset`] — the exact extension
+/// allow-list, containment and real magic-byte MIME check the locked
+/// server applies per request — so "what the server would serve" and
+/// "what the site publishes" can't drift apart; a non-image renamed to an
+/// allowed extension fails the whole publish, same as a symlink. An SVG
+/// that passes `read_asset` is additionally checked by
+/// [`svg_active_reason`], since a published site has no server to send the
+/// locked route's own sandboxing CSP header.
+fn publish_assets(root: &Path, rel: &str, out: &Path, max: u64) -> Result<(), String> {
+    let dir = if rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel)
+    };
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("stat {}: {e}", entry.path().display()))?;
+        let child_rel = if rel.is_empty() {
+            name_str.into_owned()
+        } else {
+            format!("{rel}/{name_str}")
+        };
+        if ft.is_symlink() {
+            return Err(format!(
+                "'{}' is a symlink — refusing to publish it (it may point outside assets/)",
+                entry.path().display()
+            ));
+        }
+        if ft.is_dir() {
+            publish_assets(root, &child_rel, out, max)?;
+            continue;
+        }
+        let (mime, bytes) =
+            anofox_visualization::image::read_asset(root, &child_rel, max).map_err(|reason| {
+                format!(
+                    "'{}': refused ({reason}) — assets/ only publishes files the locked server itself would serve",
+                    entry.path().display()
+                )
+            })?;
+        if mime == "image/svg+xml" {
+            if let Some(why) = svg_active_reason(&bytes) {
+                return Err(format!(
+                    "'{}' {why} — refusing to publish an active SVG to a static site with no CSP/sandbox header to neutralise it (docs/secure-serving.md)",
+                    entry.path().display()
+                ));
+            }
+        }
+        let dst = out.join(&child_rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&dst, &bytes).map_err(|e| format!("write {}: {e}", dst.display()))?;
     }
     Ok(())
 }
@@ -1440,6 +1924,9 @@ fn cmd_site(args: &[String]) {
             .map(|d| format!("SET VARIABLE anofox_data = '{}';\n", d.replace('\'', "''")))
             .unwrap_or_default();
         let extra = lint::folder_diags(&scripts);
+        // #514 PR B: `--site`'s own pre-publish lint gets the folder, so
+        // `image/missing-file` runs here too.
+        let image_root = anofox_visualization::image::canonical_assets_dir(folder);
         for (i, d) in dashboards.iter().enumerate() {
             // #435: one persistent session per dashboard, not a fresh
             // process per statement replaying everything run so far.
@@ -1454,6 +1941,7 @@ fn cmd_site(args: &[String]) {
                 lint::LintOptions {
                     design: false,
                     stateful_session: true,
+                    image_root: image_root.clone(),
                 },
             );
             diags.extend(
@@ -1571,6 +2059,40 @@ fn cmd_site(args: &[String]) {
     for d in &dashboards {
         std::fs::write(dash_dir.join(format!("{}.sql", d.id)), &d.sql)
             .unwrap_or_else(|e| fail(format!("write dashboards/{}.sql: {e}", d.id)));
+    }
+
+    // #514 PR B: `<folder>/assets/` → `<out>/assets/`, if it's there — the
+    // locked server's own `/d/<id>/assets/<rest>` route, and the CLI's own
+    // relative-image inlining, both resolve against this same subfolder
+    // (decision 5). A published site serves whatever lands here to the
+    // world with no login and no server to set any headers at request
+    // time, so `publish_assets` is stricter than `copy_dir_recursive`'s
+    // own symlink-only refusal: a non-image extension, an oversized file,
+    // a renamed non-image (checked by its real magic bytes, not just its
+    // extension — review of #554 item 2), or an "active" SVG (item 1)
+    // fails the whole publish too, not just that one file. A dot-leading
+    // entry is silently skipped, not published and not a failure (`.git`,
+    // `.DS_Store`, …).
+    let assets_src = folder.join("assets");
+    if anofox_visualization::image::assets_dir_is_symlink(folder) {
+        fail(format!(
+            "'{}' is a symlink — refusing to publish it (it may point outside the dashboards folder)",
+            assets_src.display()
+        ));
+    }
+    if let Some(assets_root) = anofox_visualization::image::canonical_assets_dir(folder) {
+        // Review of #554 N3: `opts.max_asset_bytes` (from `--options`,
+        // when set) rather than always the default — a site built from
+        // the same options file a locked server runs with must not
+        // refuse a file that server was configured to serve.
+        publish_assets(
+            &assets_root,
+            "",
+            &out.join("assets"),
+            opts.max_asset_bytes
+                .unwrap_or(anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES),
+        )
+        .unwrap_or_else(|e| fail(format!("assets/: {e}")));
     }
 
     let site_data = match (&data, &data_value) {
@@ -1804,6 +2326,533 @@ fn site_landing_csp(html: &str) -> String {
         &format!("<head><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">"),
         1,
     )
+}
+
+/// `dashboard state export|erase` (#517 S5, plan §1 "Operator access", §10
+/// D7): batch, offline tooling against an `options.state` store file. The
+/// live server only ever appends — retention/erasure for a data-subject
+/// request is deliberately left to the operator, with this CLI as the
+/// supported way to do it. Both subcommands open the store's `flock`, the
+/// exact same one a server takes at start-up, so either one refuses outright
+/// — never silently races a running server's own appends — while the file
+/// is still open elsewhere. `export` and a dry-run `erase` take it
+/// [`anofox_visualization::host::state::Store::open_read_only`] (review of
+/// #555's should-fix: a read must never mutate the file it's reading — no
+/// torn-tail truncation, no permission tightening, no header write into an
+/// empty file); only an applied `erase --yes` opens for write.
+fn cmd_state(args: &[String]) {
+    const USAGE: &str = "usage:\n  \
+        dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]\n  \
+        dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]";
+    match args.first().map(String::as_str) {
+        Some("export") => cmd_state_export(&args[1..]),
+        Some("erase") => cmd_state_erase(&args[1..]),
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Open an existing store file for CLI use. Never the auto-create
+/// [`anofox_visualization::host::state::Store::open`] itself does for a
+/// server at start-up — right there (a fresh server's first run), wrong
+/// here (an operator who mistyped a path would get a silently-created,
+/// empty store instead of a clear error). Never the server's own
+/// `max_mb` either — this tool doesn't have it and isn't re-enforcing a
+/// live cap, only reading or rewriting a file already on disk — so the
+/// cap passed here is generous enough that an operator's own existing
+/// file is never spuriously refused by it. `read_only` picks
+/// [`anofox_visualization::host::state::Store::open_read_only`] (a shared
+/// `flock`, no mutation of the file at all) over the writable
+/// [`anofox_visualization::host::state::Store::open`] (an exclusive
+/// `flock`) — see [`cmd_state`].
+///
+/// Returns the refusal as an `Err` instead of printing and exiting itself
+/// (review of #559, nit: `erase --yes`'s own open — the lock held by a
+/// running server, a bad path — used to exit here with no audit line at
+/// all, even though a refused *applied* erase is exactly the kind of
+/// attempt its audit trail exists to record). `export` and a dry-run
+/// `erase` aren't audited either way, so they still just print `{e}` and
+/// exit; only `cmd_state_erase`'s applied path needs to tell this `Err`
+/// apart from one further down the same `--yes` run.
+fn cmd_state_open(
+    path: &str,
+    read_only: bool,
+) -> Result<anofox_visualization::host::state::Store, String> {
+    let p = std::path::Path::new(path);
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Err(format!("{path}: not a regular file")),
+        Err(e) => return Err(format!("{path}: {e}")),
+    }
+    let abs = std::fs::canonicalize(p).map_err(|e| format!("{path}: {e}"))?;
+    const CLI_MAX_MB: u64 = 1 << 20; // 1 TiB — effectively unlimited for this tool.
+    let open: fn(
+        &std::path::Path,
+        u64,
+    ) -> Result<anofox_visualization::host::state::Store, String> = if read_only {
+        anofox_visualization::host::state::Store::open_read_only
+    } else {
+        anofox_visualization::host::state::Store::open
+    };
+    open(&abs, CLI_MAX_MB).map_err(|e| format!("{path}: {e}"))
+}
+
+/// `dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]`.
+/// Opened read-only (review of #555's should-fix): an export must never
+/// mutate the store it's reading, and a live server's exclusive `flock`
+/// still refuses this while it's running (a shared lock still conflicts
+/// with an exclusive one).
+fn cmd_state_export(args: &[String]) {
+    let mut user: Option<String> = None;
+    let mut format = "jsonl".to_string();
+    let mut out: Option<String> = None;
+    let mut force = false;
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--user" => user = it.next().cloned(),
+            "--format" => format = it.next().cloned().unwrap_or(format),
+            "--out" => out = it.next().cloned(),
+            "--force" => force = true,
+            _ if !a.starts_with("--") && path.is_none() => path = Some(a.clone()),
+            _ => {
+                eprintln!("state export: unknown argument '{a}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    let Some(path) = path else {
+        eprintln!(
+            "usage: dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]"
+        );
+        std::process::exit(2);
+    };
+    if format != "jsonl" && format != "csv" {
+        eprintln!("state export: --format must be 'jsonl' or 'csv', got '{format}'");
+        std::process::exit(2);
+    }
+    // Review of #555, nit: an empty `--user` is never a meaningful filter
+    // (the store never records an empty `claims.user` — `append` refuses
+    // it) and silently exporting/matching nothing is more likely a typo
+    // (a dropped argument, an empty shell variable) than an intentional
+    // request — refuse it rather than guess.
+    if user.as_deref() == Some("") {
+        eprintln!("state export: --user must not be empty");
+        std::process::exit(2);
+    }
+    let store = cmd_state_open(&path, true).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let rows = match &user {
+        Some(u) => store.rows_for_user(u),
+        None => store.all_rows(usize::MAX),
+    };
+    let n = rows.len();
+    let body = if format == "csv" {
+        state_export_csv(&rows)
+    } else {
+        state_export_jsonl(&rows)
+    };
+    match &out {
+        Some(f) => {
+            if let Err(e) = write_export_output(f, body.as_bytes(), force) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        None => {
+            use std::io::Write;
+            std::io::stdout().write_all(body.as_bytes()).ok();
+        }
+    }
+    eprintln!(
+        "exported {n} record(s){}",
+        match &user {
+            Some(u) => format!(" for user '{u}'"),
+            None => String::new(),
+        }
+    );
+}
+
+/// The store's own on-disk encoding, one record per line — [`Record::to_json`]
+/// is the single source of truth for the field list, never duplicated here.
+fn state_export_jsonl(rows: &[anofox_visualization::host::state::Record]) -> String {
+    let mut out = String::new();
+    for r in rows {
+        out.push_str(&r.to_json().to_string());
+        out.push('\n');
+    }
+    out
+}
+
+/// A scalar `serde_json::Value` as the text a spreadsheet cell holds — the
+/// same rule `duckext::serve::state_scalar_text` applies to a recorded
+/// value server-side (kept independent: this binary doesn't depend on the
+/// `duckext` crate, and the rule is three lines).
+fn state_scalar_cell(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// OWASP "CSV injection" (review of #555, B1 — the exact rule #520/#526
+/// already gave `web/app.js`'s `csvSafe`/`FORMULA_LEAD`/`NUM_RE`, mirrored
+/// here rather than shared across languages): a CSV cell carries no type
+/// of its own, so Excel/LibreOffice decide from the text alone whether to
+/// run it as a formula when the file is opened — a value starting with
+/// `=`, `+`, `-`, `@` or a tab/CR is executed. A leading single quote
+/// marks it as text instead (Excel/LibreOffice show the value without
+/// it). A value that's a plain number — including a real negative one,
+/// `"-1"` — is left as-is: it's a number, not a formula, even though
+/// every field here arrives as text; `"-1+A1"` is NOT a plain number and
+/// still gets neutralised. Applied to every string cell this module
+/// writes to CSV, never only the ones that look dangerous at a glance —
+/// a free-text `::TEXT` answer (`name`/`value`/`value_list` below) is the
+/// field most likely to carry one, but `ts`/`user`/`dashboard`/`submit`/
+/// `id` get the same treatment on principle (cheap, and never wrong).
+fn csv_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) && !is_plain_number(s) {
+        std::borrow::Cow::Owned(format!("'{s}"))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// `^-?\d+(\.\d+)?([eE][+-]?\d+)?$`, by hand rather than pulling in the
+/// `regex` crate for one check (the core crate stays dependency-light by
+/// design, see Cargo.toml) — exactly `NUM_RE` in `web/app.js`.
+fn is_plain_number(s: &str) -> bool {
+    fn digits(s: &str) -> (&str, &str) {
+        match s.find(|c: char| !c.is_ascii_digit()) {
+            Some(i) => (&s[..i], &s[i..]),
+            None => (s, ""),
+        }
+    }
+    let s = s.strip_prefix('-').unwrap_or(s);
+    let (int_part, rest) = digits(s);
+    if int_part.is_empty() {
+        return false;
+    }
+    let rest = match rest.strip_prefix('.') {
+        Some(frac_and_more) => {
+            let (frac, more) = digits(frac_and_more);
+            if frac.is_empty() {
+                return false;
+            }
+            more
+        }
+        None => rest,
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(exp) = rest.strip_prefix(['e', 'E']) else {
+        return false;
+    };
+    let exp = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+    !exp.is_empty() && exp.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `,`, `"` or a newline forces quoting, doubling any embedded `"` — the
+/// one escaping rule every CSV reader agrees on (RFC 4180). Callers apply
+/// [`csv_safe`] first — this function only quotes, it never neutralises.
+fn csv_field(s: &str) -> String {
+    if s.contains(['"', ',', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// One row per *recorded variable* (plan §5's `viewer_state` schema, not
+/// the store's own one-row-per-submission shape) — a spreadsheet a data
+/// subject or a reviewer can open directly, matching what a trainer's
+/// read-back panel would show for the same rows. `value` is the scalar as
+/// text, or a list's own exact JSON array text (numbers/booleans keep
+/// their JSON type, never coerced to strings); `value_list` is the same
+/// list with every item rendered as spreadsheet-cell text, also as JSON
+/// array text (review of #555, nit: a `;`-joined string couldn't tell an
+/// item containing `;` apart from a separator — JSON array text always
+/// can, and a null item is JSON `null`, not an empty string lost in the
+/// join).
+fn state_export_csv(rows: &[anofox_visualization::host::state::Record]) -> String {
+    let mut out = String::from("seq,ts,user,auth,dashboard,submit,id,name,value,value_list\n");
+    for r in rows {
+        for (name, val) in &r.vars {
+            let (value, value_list) = match val {
+                serde_json::Value::Null => (String::new(), String::new()),
+                serde_json::Value::Array(items) => {
+                    let as_cells: Vec<serde_json::Value> = items
+                        .iter()
+                        .map(|it| {
+                            if it.is_null() {
+                                serde_json::Value::Null
+                            } else {
+                                serde_json::Value::String(state_scalar_cell(it))
+                            }
+                        })
+                        .collect();
+                    (
+                        val.to_string(),
+                        serde_json::Value::Array(as_cells).to_string(),
+                    )
+                }
+                other => (state_scalar_cell(other), String::new()),
+            };
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{}\n",
+                r.seq,
+                csv_field(&csv_safe(&r.ts)),
+                csv_field(&csv_safe(&r.user)),
+                csv_field(&csv_safe(&r.auth)),
+                csv_field(&csv_safe(&r.dashboard)),
+                csv_field(&csv_safe(&r.submit)),
+                csv_field(&csv_safe(&r.id)),
+                csv_field(&csv_safe(name)),
+                csv_field(&csv_safe(&value)),
+                csv_field(&csv_safe(&value_list)),
+            ));
+        }
+    }
+    out
+}
+
+/// Writes `body` to `path` as the operator's new export file (review of
+/// #555, should-fix #3): `std::fs::write` created the file at the
+/// process's umask — `-rw-r--r--` for a file of someone's personal data —
+/// and happily wrote through a symlink pointed at any other file the
+/// operator could write (`--out link.csv` where `link.csv → victim`
+/// overwrote `victim`). Here the file is always opened `0600` and
+/// `O_NOFOLLOW` (a symlink at `path` is refused, `--force` or not, rather
+/// than followed), and an existing `path` is refused outright unless
+/// `--force` is given.
+#[cfg(unix)]
+fn write_export_output(path: &str, body: &[u8], force: bool) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    if force {
+        // No `.truncate(true)` here (review of #559, nit): that sets
+        // `O_TRUNC` at `open` itself, before this process gets a chance to
+        // look at what it just opened — an existing `path` that's a hard
+        // link to some other name (`ln victim.csv out.csv`) would already
+        // be zeroed by the time the hard-link check below could refuse it.
+        // `create(true)` opens (or creates) the file without truncating;
+        // the explicit `set_len(0)` after the check below does the
+        // truncating this used to do at `open` time.
+        opts.create(true);
+    } else {
+        opts.create_new(true);
+    }
+    let mut f = opts.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("{path}: already exists (pass --force to overwrite)")
+        } else if e.raw_os_error() == Some(libc::ELOOP) {
+            format!("{path}: refusing to write through a symlink")
+        } else {
+            format!("{path}: {e}")
+        }
+    })?;
+    if force {
+        // `fstat` the fd we just opened, never the path again — the path
+        // could have changed since `open` returned, the fd can't have.
+        // Refuse a hard link (`nlink() > 1`, so truncating this name would
+        // also truncate whatever other name(s) point at the same inode)
+        // and a non-regular file (a FIFO, device, … — nothing `--force`
+        // has any business truncating) BEFORE the `set_len(0)` below, so a
+        // refusal here never loses a byte of whatever was already at
+        // `path`.
+        let meta = f.metadata().map_err(|e| format!("{path}: {e}"))?;
+        if meta.nlink() > 1 {
+            return Err(format!(
+                "{path}: refusing to overwrite — it has {} hard links, so --force would \
+                 truncate another name too (remove it or pick a different --out path)",
+                meta.nlink()
+            ));
+        }
+        if !meta.is_file() {
+            return Err(format!(
+                "{path}: refusing to overwrite — not a regular file"
+            ));
+        }
+        f.set_len(0).map_err(|e| format!("{path}: {e}"))?;
+    }
+    // `.mode(0o600)` on `OpenOptions` only takes effect when `open` itself
+    // creates the file — the only case `create_new` allows, but `--force`
+    // may instead reuse an existing file whose permissions predate this
+    // call. Tighten explicitly so `--force` never leaves an export
+    // world/group-readable just because the file it's overwriting already
+    // was.
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("{path}: {e}"))?;
+    f.write_all(body).map_err(|e| format!("{path}: {e}"))?;
+    f.sync_all().map_err(|e| format!("{path}: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_export_output(path: &str, body: &[u8], force: bool) -> Result<(), String> {
+    if !force && std::path::Path::new(path).exists() {
+        return Err(format!(
+            "{path}: already exists (pass --force to overwrite)"
+        ));
+    }
+    std::fs::write(path, body).map_err(|e| format!("{path}: {e}"))
+}
+
+/// `dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]`.
+/// Dry run by default (prints what *would* be removed, touches nothing) —
+/// `--yes` is the confirm flag plan §10 D7 asks for. A successful or failed
+/// *applied* erase always gets one line in the audit log (default
+/// `stderr`; `--audit FILE` for a file, same target syntax `options.audit`
+/// takes) — never a dry run, which changes nothing to audit.
+fn cmd_state_erase(args: &[String]) {
+    let mut user: Option<String> = None;
+    let mut yes = false;
+    let mut audit_target = "stderr".to_string();
+    let mut path: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--user" => user = it.next().cloned(),
+            "--yes" => yes = true,
+            "--audit" => audit_target = it.next().cloned().unwrap_or(audit_target),
+            _ if !a.starts_with("--") && path.is_none() => path = Some(a.clone()),
+            _ => {
+                eprintln!("state erase: unknown argument '{a}'");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (Some(path), Some(user)) = (path, user) else {
+        eprintln!(
+            "usage: dashboard state erase --user U <state.jsonl> [--yes] [--audit stderr|FILE]"
+        );
+        std::process::exit(2);
+    };
+    // Review of #555, nit: as with `export`, an empty `--user` can never
+    // match a real record and is far more likely a dropped argument than
+    // an intentional "erase nothing" — refuse it.
+    if user.is_empty() {
+        eprintln!("state erase: --user must not be empty");
+        std::process::exit(2);
+    }
+    // Dry run opens read-only (review of #555's should-fix: it must not
+    // mutate the file it's only reporting on); an applied erase needs the
+    // writable, exclusively-locked open `Store::erase_user` rewrites
+    // through.
+    let store = match cmd_state_open(&path, !yes) {
+        Ok(s) => s,
+        Err(e) => {
+            // Review of #559, nit: a refused open (a server's `flock` still
+            // held, a bad path) is exactly the kind of failed *applied*
+            // erase attempt this audit trail exists for — only when
+            // applying (`--yes`); a dry run that can't even open the file
+            // isn't audited at all, matching the dry run it would have
+            // been otherwise.
+            if yes {
+                state_audit_line(&audit_target, "error", &user, &e, None);
+            }
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let n = store.rows_for_user(&user).len();
+    if !yes {
+        println!(
+            "dry run: would remove {n} record(s) for user '{user}' from {path} — pass --yes to actually erase"
+        );
+        return; // nothing written; the store's `flock` is released when it drops here.
+    }
+    match store.erase_user(&user) {
+        Ok(outcome) => {
+            let removed = outcome.removed;
+            state_audit_line(
+                &audit_target,
+                "ok",
+                &user,
+                &format!("{removed} record(s) removed from {path}"),
+                outcome.warning.as_deref(),
+            );
+            println!("erased {removed} record(s) for user '{user}' from {path}");
+            if let Some(w) = &outcome.warning {
+                eprintln!("state erase: warning: {w}");
+            }
+        }
+        Err(e) => {
+            state_audit_line(&audit_target, "error", &user, &e, None);
+            eprintln!("state erase: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// One JSON audit line for an applied `state erase` — the same shape
+/// `options.audit`'s own events use (`src/host/auth/audit.rs`: `ts`,
+/// `audit`, `outcome`, …), but written directly through
+/// [`anofox_visualization::host::access::open_log`]/`rfc3339` rather than
+/// through `host::auth::audit::AuditLog`: that module sits behind the
+/// `auth` Cargo feature (needed by the locked server, not by this plain
+/// `dashboard` binary), and this is the one place the CLI needs an audit
+/// line, not a reason to pull `auth` (jsonwebtoken, rustls, …) into every
+/// build of `dashboard`. `target` is `"stderr"` or a file path, exactly
+/// like `options.audit`'s own `AuditLog::new`. `operator_uid` (review of
+/// #555, nit: "adding *who* ran it would make the line useful for a
+/// data-subject request trail") is this process's real uid — the
+/// operator's own login, not the erased viewer's `user` field above —
+/// since this CLI runs offline with no claims of its own to log instead.
+fn state_audit_line(target: &str, outcome: &str, user: &str, detail: &str, warning: Option<&str>) {
+    use anofox_visualization::host::access::{open_log, rfc3339};
+    use serde_json::json;
+    let line = json!({
+        "ts": rfc3339(std::time::SystemTime::now()),
+        "audit": "state_erase",
+        "outcome": outcome,
+        "user": user,
+        "operator_uid": operator_uid(),
+        "detail": detail,
+        // Review of #559, nit 1: `outcome` stays `"ok"` even when the
+        // erase hit a non-fatal problem after it already landed on disk
+        // (a dir-fsync failure, a re-open/re-lock failure for this same
+        // `Store` handle) — `warning` is how that still shows up in the
+        // trail, rather than silently becoming indistinguishable from a
+        // clean erase. `null` when there isn't one, same as any other
+        // JSON field here that doesn't always apply.
+        "warning": warning,
+    })
+    .to_string();
+    match target.trim() {
+        "" | "stderr" | "-" => eprintln!("{line}"),
+        p => {
+            use std::io::Write;
+            let path = std::path::Path::new(p);
+            match open_log(path).and_then(|mut f| writeln!(f, "{line}")) {
+                Ok(()) => {}
+                Err(e) => eprintln!("--audit {p}: {e} (audit line: {line})"),
+            }
+        }
+    }
+}
+
+/// This process's real uid (review of #555's audit-line nit) — the
+/// operator who invoked the CLI, not whatever uid the store file happens
+/// to be owned by.
+#[cfg(unix)]
+fn operator_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+#[cfg(not(unix))]
+fn operator_uid() -> u32 {
+    0
 }
 
 /// Print `SUMMARIZE` (types, min/max, approx-distinct, null %) for a source —
@@ -2158,6 +3207,276 @@ mod site_tests {
         assert_eq!(std::fs::read(dst.0.join("sub/b.txt")).unwrap(), b"b");
     }
 
+    /// Review of #554 item 1: `--site` refuses to publish an SVG that could
+    /// run script or fetch something external if opened directly (no
+    /// server there to send the locked route's own sandboxing CSP).
+    #[test]
+    fn svg_active_reason_catches_script_foreignobject_handlers_js_urls_and_external_hrefs() {
+        let plain = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>"#;
+        assert_eq!(svg_active_reason(plain), None);
+
+        let script = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#;
+        assert!(svg_active_reason(script)
+            .unwrap()
+            .contains("disallowed element ('script')"));
+
+        let fo = br#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><body xmlns="http://www.w3.org/1999/xhtml">hi</body></foreignObject></svg>"#;
+        assert!(svg_active_reason(fo)
+            .unwrap()
+            .contains("disallowed element ('foreignObject')"));
+
+        let onload = br#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><rect width="1" height="1"/></svg>"#;
+        assert!(svg_active_reason(onload).unwrap().contains("event-handler"));
+
+        // <a> isn't in the allow-list at all (review of #554 B1: no real
+        // need for it in a static asset, and one less href to re-check).
+        let anchor = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><a xlink:href="javascript:alert(1)"><rect width="1" height="1"/></a></svg>"#;
+        assert!(svg_active_reason(anchor)
+            .unwrap()
+            .contains("disallowed element ('a')"));
+
+        // An href on an allowed element, pointed off-document — caught by
+        // the generic `external_ref_reason` (its own `javascript:` check)
+        // before the href-specific check even runs.
+        let jsurl =
+            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="javascript:alert(1)"/></svg>"#;
+        assert!(svg_active_reason(jsurl).unwrap().contains("javascript:"));
+
+        let external = br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.example/track.png"/></svg>"#;
+        assert!(svg_active_reason(external).unwrap().contains("external"));
+
+        let style = br#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1" style="fill:url(https://evil.example/x)"/></svg>"#;
+        assert!(svg_active_reason(style).unwrap().contains("url()"));
+
+        let import = br#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1" style="background:@import url(evil.css)"/></svg>"#;
+        assert!(svg_active_reason(import).unwrap().contains("@import"));
+
+        let doctype = br#"<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        assert!(svg_active_reason(doctype).unwrap().contains("DOCTYPE"));
+
+        let pi = br#"<?xml-stylesheet href="x.css"?><svg xmlns="http://www.w3.org/2000/svg"/>"#;
+        assert!(svg_active_reason(pi)
+            .unwrap()
+            .contains("processing instruction"));
+
+        // Allowed: a same-document fragment reference, an embedded raster
+        // data: image on <image>, a style url() referencing a local
+        // fragment, and a filter primitive.
+        let frag = br##"<svg xmlns="http://www.w3.org/2000/svg"><use href="#icon"/></svg>"##;
+        assert_eq!(svg_active_reason(frag), None);
+        let data_img = br#"<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,iVBORw0KGgo="/></svg>"#;
+        assert_eq!(svg_active_reason(data_img), None);
+        let style_frag = br##"<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1" style="filter:url(#blur)"/><filter id="blur"><feGaussianBlur stdDeviation="2"/></filter></svg>"##;
+        assert_eq!(svg_active_reason(style_frag), None);
+
+        // The repo's own example SVG (web/examples/diagram-pipeline.sql's
+        // ::IMAGE data: URI, decoded) must still pass — a deny-to-allow
+        // rewrite that broke a real, already-shipped asset would be its
+        // own kind of regression. In its own fixture file, not inline
+        // here, so its hex colour literals don't trip `tests/theme.rs`'s
+        // `rust_page_writers_have_no_colour_literals` (no page writer
+        // outside `src/theme.rs` may hardcode a colour).
+        let example: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/svg-xss-554/benign-example.svg"
+        ));
+        assert_eq!(svg_active_reason(example), None);
+    }
+
+    /// Review of #554 B1: the previous deny-list (a case-insensitive text
+    /// scan) was bypassed by every file here, each exercised live in a
+    /// real browser by the reviewer (`t.mjs`, Playwright/Chromium) before
+    /// being handed to this PR — each one set `document.title` to a
+    /// distinct marker when it ran, proving script execution, not just a
+    /// pattern match. Copied verbatim into
+    /// `tests/fixtures/svg-xss-554/` as the regression fixtures; this test
+    /// is the non-browser half (`svg_active_reason` itself refuses all
+    /// six) — the live-browser side stays the reviewer's own `t.mjs`,
+    /// outside CI like the rest of `scripts/*-e2e.mjs`.
+    #[test]
+    fn svg_active_reason_refuses_every_554_b1_bypass() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/svg-xss-554");
+        let cases: &[(&str, &str)] = &[
+            // xmlns:x bound to the SVG namespace itself, under a prefix
+            // other than none — still a real SVG <script>, just not
+            // spelled "<script" in the raw text.
+            ("ns.svg", "disallowed element ('script')"),
+            // xmlns:h bound to the XHTML namespace — an XHTML <script>,
+            // needing no <foreignObject> wrapper at all.
+            ("h.svg", "outside the SVG namespace"),
+            // An internal DTD entity expanding to literal <script> text.
+            ("ent.svg", "DOCTYPE"),
+            // <animate> targeting href with an entity-encoded javascript:
+            // URL, wrapped in an <a> — document order means the <a> (also
+            // not in the allow-list) is refused first; either element on
+            // its own would already be enough.
+            ("anim.svg", "disallowed element ('a')"),
+            // <a href=…> with an entity-encoded javascript: URL (<a> is
+            // not in the allow-list either).
+            ("sp.svg", "disallowed element ('a')"),
+            // xmlns:h bound to the XHTML namespace again, this time an
+            // <iframe> with a javascript: src.
+            ("ifr.svg", "outside the SVG namespace"),
+        ];
+        for (file, expect) in cases {
+            let bytes = std::fs::read(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let reason = svg_active_reason(&bytes);
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains(expect)),
+                "{file}: expected a reason containing {expect:?}, got {reason:?}"
+            );
+        }
+    }
+
+    /// Review of #554's second re-review (S1): the first `external_ref_reason`
+    /// only checked `style`, leaving every presentation attribute, a CSS
+    /// escape and `image-set()` as unguarded fetches — all four verified
+    /// live in Chromium (opened directly, served as `image/svg+xml`, no
+    /// CSP) by the reviewer. Fixtures copied into `tests/fixtures/svg-xss-554/`.
+    #[test]
+    fn svg_active_reason_refuses_css_external_refs_in_any_attribute() {
+        // Copied verbatim from the reviewer's own scratch probes — the
+        // ones they confirmed, live in Chromium, actually request
+        // `example.invalid` when the shipped (pre-fix) function returned
+        // `None` for each.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/svg-xss-554");
+        let cases: &[(&str, &str)] = &[
+            // `fill="url(…)"` — a presentation attribute reaches `url(…)`
+            // exactly like `style` does.
+            ("presattr.svg", "url()"),
+            // `cursor="url(…),auto"` (a fallback list) and `filter="url(…)"`
+            // on the same element — either is enough on its own.
+            ("cursor.svg", "url()"),
+            // `u\72l(` is `url(` to a CSS parser, invisible to a literal
+            // "url(" scan — caught by refusing any backslash at all.
+            ("cssesc.svg", "backslash"),
+            // a URL with no `url(` token at all.
+            ("imgset.svg", "image-set("),
+        ];
+        for (file, expect) in cases {
+            let bytes = std::fs::read(dir.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let reason = svg_active_reason(&bytes);
+            assert!(
+                reason.as_deref().is_some_and(|r| r.contains(expect)),
+                "{file}: expected a reason containing {expect:?}, got {reason:?}"
+            );
+        }
+    }
+
+    /// Review of #554 item 2: `publish_assets` skips dot-entries (not a
+    /// failure), refuses a renamed non-image by its real magic bytes (not
+    /// just its extension — `fake.png` here), and refuses an active SVG.
+    #[test]
+    fn publish_assets_skips_dotfiles_and_checks_real_content() {
+        let src = TempDir::new("publish-src");
+        let dst = TempDir::new("publish-dst");
+        std::fs::create_dir_all(src.0.join("sub")).unwrap();
+        // A real, inert SVG.
+        std::fs::write(
+            src.0.join("ok.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>"#,
+        )
+        .unwrap();
+        std::fs::write(src.0.join("sub").join(".hidden.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(src.0.join(".DS_Store"), b"whatever, no extension at all").unwrap();
+        let root = src.0.canonicalize().unwrap();
+        publish_assets(
+            &root,
+            "",
+            &dst.0,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap();
+        assert!(dst.0.join("ok.svg").exists());
+        assert!(!dst.0.join("sub").join(".hidden.png").exists());
+        assert!(!dst.0.join(".DS_Store").exists());
+
+        // A non-image renamed to an allowed extension fails the whole
+        // publish (not silently skipped like a dotfile).
+        let src2 = TempDir::new("publish-src2");
+        let dst2 = TempDir::new("publish-dst2");
+        std::fs::write(src2.0.join("fake.png"), b"not a png").unwrap();
+        let root2 = src2.0.canonicalize().unwrap();
+        let err = publish_assets(
+            &root2,
+            "",
+            &dst2.0,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not-an-image") || err.contains("refused"),
+            "{err}"
+        );
+
+        // An active SVG fails the whole publish too.
+        let src3 = TempDir::new("publish-src3");
+        let dst3 = TempDir::new("publish-dst3");
+        std::fs::write(
+            src3.0.join("evil.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+        )
+        .unwrap();
+        let root3 = src3.0.canonicalize().unwrap();
+        let err = publish_assets(
+            &root3,
+            "",
+            &dst3.0,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap_err();
+        assert!(err.contains("active SVG"), "{err}");
+    }
+
+    /// Review of #554 N3: `--site` honours `options.max_asset_bytes`
+    /// rather than always using [`anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES`]
+    /// — parsed, clamped the same way `LockedOptions::parse` clamps it,
+    /// and no longer in `ignored` (it's a `Site` key now, not
+    /// `ServerOnly`).
+    #[test]
+    fn max_asset_bytes_is_parsed_clamped_and_honoured_by_site() {
+        let o = parse_site_options(Some(r#"{"max_asset_bytes": 1024}"#)).unwrap();
+        assert_eq!(o.max_asset_bytes, Some(1024));
+        assert!(o.ignored.is_empty(), "{:?}", o.ignored);
+
+        let o = parse_site_options(Some(r#"{"max_asset_bytes": 999999999}"#)).unwrap();
+        assert_eq!(o.max_asset_bytes, Some(64 << 20));
+
+        assert!(parse_site_options(Some(r#"{"max_asset_bytes": 0}"#)).is_err());
+        assert!(parse_site_options(Some(r#"{"max_asset_bytes": -1}"#)).is_err());
+        assert!(parse_site_options(Some(r#"{"max_asset_bytes": "5"}"#)).is_err());
+    }
+
+    /// `publish_assets` itself (not just `parse_site_options`) actually
+    /// uses whatever cap it's given — the same file passes under the
+    /// default and is refused under a smaller one, confirming `cmd_site`'s
+    /// plumbing (`opts.max_asset_bytes.unwrap_or(DEFAULT_MAX_ASSET_BYTES)`)
+    /// has something real to change.
+    #[test]
+    fn publish_assets_honours_whatever_cap_it_is_given() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>"#;
+        let src = TempDir::new("site-cap-src");
+        std::fs::write(src.0.join("ok.svg"), svg).unwrap();
+        let root = src.0.canonicalize().unwrap();
+
+        let dst = TempDir::new("site-cap-dst-ok");
+        publish_assets(
+            &root,
+            "",
+            &dst.0,
+            anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES,
+        )
+        .unwrap();
+        assert!(dst.0.join("ok.svg").exists());
+
+        let dst2 = TempDir::new("site-cap-dst-too-small");
+        let err = publish_assets(&root, "", &dst2.0, 10).unwrap_err();
+        assert!(
+            err.contains("too-large") || err.contains("refused"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn site_data_cannot_be_home_or_the_filesystem_root() {
         // S1: --site --data shares `too_broad` with the locked server's
@@ -2171,5 +3490,60 @@ mod site_tests {
         {
             assert!(sv::too_broad(&home).is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod state_csv_safety_tests {
+    // Review of #555, B1: `dashboard state export --format csv` must
+    // apply the exact #520/#526 rule `web/app.js`'s `csvSafe` already
+    // applies to every browser CSV export, to every string cell.
+    use super::{csv_field, csv_safe, is_plain_number};
+
+    #[test]
+    fn a_formula_cell_is_prefixed_with_a_single_quote() {
+        assert_eq!(
+            csv_safe("=HYPERLINK(\"https://evil\")"),
+            "'=HYPERLINK(\"https://evil\")"
+        );
+        assert_eq!(csv_safe("@SUM(A1:A9)"), "'@SUM(A1:A9)");
+        assert_eq!(csv_safe("-1+A1"), "'-1+A1");
+        assert_eq!(csv_safe("+1"), "'+1"); // a leading '+' is still a formula lead, not a number
+        assert_eq!(csv_safe("\tA1"), "'\tA1");
+        assert_eq!(csv_safe("\rA1"), "'\rA1");
+    }
+
+    #[test]
+    fn a_plain_number_is_left_alone_even_with_a_leading_minus() {
+        for n in ["-1", "-1.5", "-1e10", "-1E-3", "1", "0", "3.14"] {
+            assert_eq!(csv_safe(n), n, "{n} must not be prefixed");
+        }
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched() {
+        for s in ["Monday", "alice@example.com", "", "a = b"] {
+            assert_eq!(csv_safe(s), s);
+        }
+    }
+
+    #[test]
+    fn is_plain_number_matches_the_js_num_re() {
+        for n in ["-1", "0", "42", "3.14", "-3.14", "1e10", "-1E-3", "1e+3"] {
+            assert!(is_plain_number(n), "{n} should be a number");
+        }
+        for s in [
+            "-1+A1", "1a", "", "-", ".", "1.", "1e", "1e+", "1-1", "--1", "+1",
+        ] {
+            assert!(!is_plain_number(s), "{s} should not be a number");
+        }
+    }
+
+    #[test]
+    fn csv_field_still_quotes_after_csv_safe_prefixes_it() {
+        // The two helpers compose: csv_safe's "'" prefix never needs its
+        // own quoting, but a value with a comma still needs csv_field's.
+        let cell = csv_field(&csv_safe("=A1,B1"));
+        assert_eq!(cell, "\"'=A1,B1\"");
     }
 }

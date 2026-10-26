@@ -40,6 +40,7 @@ pub(crate) mod boundaries;
 pub(crate) mod classes;
 mod fill;
 mod flows;
+mod frames;
 pub(crate) mod hexbin;
 mod labels;
 mod legend;
@@ -71,6 +72,12 @@ type Rgb = (u8, u8, u8);
 pub(crate) const MARK_WARN: usize = 100_000;
 /// Legend and summary text size (as the plotting engine's legends).
 const FONT: f64 = 8.8;
+/// Floor size (px) for the pack attribution strip's `GeomAttribution::fit`
+/// (`plot.rs`, ggplot-rs 0.31.4, #546) — the smallest this crate considers
+/// still legible for the BKG/VG2500-style licence note. Shared with
+/// [`foot_of`]'s own `size` baseline below, which must stay at or above
+/// this (`fit`'s `min_size` clamps to `text_size`, never enlarging).
+pub(super) const ATTRIBUTION_FIT_FLOOR: f64 = 7.0;
 
 /// One drawable part of a feature, in lon/lat or projected units.
 #[derive(Clone, Debug)]
@@ -1224,6 +1231,15 @@ fn frame_of(
 /// (the browser's zoom starts from it); `w`/`h` 0 = the data's box alone.
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) -> Option<[f64; 4]> {
+    // A `::FRAME` map's extent never moves between frames (D20: every
+    // feature is in every frame's view, geometry from its first row) — any
+    // resolved frame's view gives the same bbox, so this reuses `build`'s
+    // own view resolution rather than re-deriving which `k` to use.
+    let fr = frames::of(cols);
+    let view_cols: Option<Vec<Column>> = fr
+        .as_ref()
+        .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
+    let cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
     let m = Model::new(o, cols)?;
     if w == 0 || h == 0 {
         let (x0, y0, x1, y1) = m.bbox()?;
@@ -1244,13 +1260,54 @@ pub(crate) fn build(
     width: u32,
     height: u32,
 ) -> Option<plot::Built> {
-    let m = Model::new(o, cols)?;
-    let (p, attrs, mut warnings) = plot::build(o, cols, &m, width, height)?;
+    // `::FRAME` (M2e-A, #149): one result holds every frame; reduce it to
+    // one row per feature with frame `k`'s values (D20) and build the
+    // ordinary `Model` from that view, so every map kind renders a frame
+    // unchanged — then force its fill/size scale onto the quantities shared
+    // across every frame (D21, `frames::apply`).
+    let fr = frames::of(cols);
+    let shared = fr.as_ref().map(|fr| frames::shared_of(o, cols, fr));
+    let view_cols: Option<Vec<Column>> = fr
+        .as_ref()
+        .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
+    let use_cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
+    let mut m = Model::new(o, use_cols)?;
+    if let Some(shared) = &shared {
+        frames::apply(&mut m, shared);
+    }
+    let frame_ctx = fr
+        .as_ref()
+        .map(|fr| frames::FrameCtx::at(fr, fr.resolve_k(o.frame)));
+    let (p, attrs, mut warnings) = plot::build(
+        o,
+        use_cols,
+        &m,
+        width,
+        height,
+        frame_ctx.as_ref(),
+        shared.as_ref(),
+    )?;
     if m.rows > MARK_WARN {
         warnings.push(format!(
             "map: {} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light",
             m.rows
         ));
+    }
+    if let Some(fr) = &fr {
+        if fr.total_frames > frames::MAX_FRAMES {
+            warnings.push(format!(
+                "map: {} ::FRAME values on one map (over {}) — the last {} are kept; use a coarser period",
+                fr.total_frames,
+                frames::MAX_FRAMES,
+                fr.labels.len()
+            ));
+        }
+        if fr.duplicates > 0 {
+            warnings.push(format!(
+                "map: {} rows repeat a feature within one frame — the first row is used; aggregate per feature and frame",
+                fr.duplicates
+            ));
+        }
     }
     Some((p, attrs, warnings))
 }
@@ -1320,6 +1377,26 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
         )]);
     }
     let scale = !matches!(m.proj, Proj::Identity) && span_km(m).is_some_and(|k| k < 3000.0);
+    // `plot.rs` now fits each attribution row against the *actual*
+    // rendered panel rect at draw time (`GeomAttribution::fit`/
+    // `.fit_overflow(Wrap)`, ggplot-rs 0.31.4, #546), so this no longer
+    // pre-shrinks `size` itself down to whatever a panel-width guess
+    // allows — that's what used to crush the BKG/VG2500 note to ~1px on
+    // a narrow panel in the first place. `size` is just the un-shrunk
+    // ceiling `fit` starts from; it must stay at or above
+    // `ATTRIBUTION_FIT_FLOOR` (`fit`'s `min_size` clamps to `text_size`,
+    // so a ceiling below the floor would make the floor a no-op).
+    let size = ATTRIBUTION_FIT_FLOOR + 0.5;
+    // Still used to pre-reserve enough footer height for the one row this
+    // crate's own content can make `fit` wrap even at the floor size: the
+    // BKG sources line (a long bare URL run plus a trailing note). `fit`
+    // decides wrapping against the real panel at draw time, which this
+    // pre-layout estimate can't see — this guess (same width heuristic
+    // `fit` itself uses) only has to be right often enough to avoid
+    // `frame_of` leaving too short a band, not pixel-perfect;
+    // `fit_overflow(Wrap)` caps any one row at 3 physical lines, but none
+    // of this crate's rows come close to needing more than one extra
+    // line at any width checked for #546.
     let room = (w - 8.0 - if scale { 70.0 } else { 0.0 }).max(40.0);
     let widest = lines
         .iter()
@@ -1328,11 +1405,8 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
             ggplot_rs::render::text::text_width(&t, 1.0)
         })
         .fold(0.0, f64::max);
-    let size = if widest > 0.0 {
-        (room / widest).min(6.5)
-    } else {
-        6.5
-    };
+    let extra_wrapped_row = widest > 0.0 && widest * ATTRIBUTION_FIT_FLOOR > room;
+    let rows = lines.len() as f64 + if extra_wrapped_row { 1.0 } else { 0.0 };
     let h = if lines.is_empty() {
         if scale {
             16.0
@@ -1340,7 +1414,7 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
             0.0
         }
     } else {
-        (lines.len() as f64 * size * 1.3 + 4.0).max(if scale { 16.0 } else { 0.0 })
+        (rows * size * 1.3 + 4.0).max(if scale { 16.0 } else { 0.0 })
     };
     Foot {
         lines,

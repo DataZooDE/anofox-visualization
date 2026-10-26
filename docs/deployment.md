@@ -102,6 +102,7 @@ The extension is unsigned, so `run-locked.sh` passes `-unsigned`.
 | `max_queries` | 4 | Panel queries running at once. The others wait for a slot (up to `timeout_ms`, then `503`); cache hits don't. Bounds DuckDB's memory outside `memory_limit` (§6). |
 | `max_inflight_mb` | 256 | Results held outside DuckDB at once, until their responses are written. Over it: `503` + `Retry-After`. |
 | `max_response_mb` | 32 | One response; larger is `413`. |
+| `max_asset_bytes` | 5 MiB | One file from the dashboards folder's `assets/` subfolder (`GET /d/<id>/assets/<rest>`, #514). Over it: `404`. |
 | `search_path` | default database | `"warehouse"`, `"warehouse.sales"`, or several comma-separated: where unqualified names resolve. |
 
 The DuckDB settings apply before the configuration is locked. A request cannot
@@ -114,7 +115,7 @@ change them.
 ```sh
 install -D -m 755 deploy/run-locked.sh /opt/anofox/run-locked.sh
 install -m 755 duckdb anofox_visualization.duckdb_extension /opt/anofox/
-install -D -m 644 serve.sql /etc/anofox/serve.sql      # + /etc/anofox/dashboards/*.sql
+install -D -m 644 serve.sql /etc/anofox/serve.sql      # + /etc/anofox/dashboards/*.sql (+ an optional assets/ subfolder, #514)
 cp deploy/anofox-dashboards.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now anofox-dashboards
 journalctl -u anofox-dashboards -f                     # one line per request

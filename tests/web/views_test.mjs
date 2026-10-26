@@ -184,6 +184,46 @@ assert.deepEqual(readViewSeed("?v.region=EU"), {}, "readViewSeed must ignore v.*
   delete globalThis.history;
 }
 
+// ---- #534: opt-in ::VIEW_PLACEMENT ("header" placement) ----
+// placeViewHeaderBar/foldViewHeaderBar are DOM-manipulating (move nodes,
+// measure layout, build a <select>) — like patchSlots/shapeOf below, no
+// pure form this file's regex-extract convention can isolate without a
+// much bigger DOM harness. Covered instead by scripts/view-placement-e2e.mjs
+// (a real browser) and, for the role/fallback logic itself, src/sql/views.rs
+// and src/lint.rs's Rust unit tests (`cargo test`). What IS checked here,
+// the same "structural check on the source" the null-prototype block above
+// uses, is that the wiring these other layers depend on hasn't quietly
+// drifted: the class toggle reads the resolved (fallback-applied)
+// `s.view.placement` from the plan JSON — never re-deriving it in JS — and
+// the fold threshold/selectors foldViewHeaderBar relies on are still there.
+{
+  assert.match(
+    src,
+    /classList\.add\("dp-views-header"\)/,
+    "the VIEW branch must mark a header-placed group's section (#534)"
+  );
+  assert.match(
+    src,
+    /s\.view\.placement === "header"/,
+    "placement must come from the plan's resolved s.view.placement, not be re-derived in JS (#534)"
+  );
+  assert.match(src, /function placeViewHeaderBar\(/, "placeViewHeaderBar must exist (#534)");
+  assert.match(src, /function foldViewHeaderBar\(/, "foldViewHeaderBar must exist (#534)");
+  assert.match(
+    src,
+    /const VIEW_HEADER_FOLD_PX = \d+;/,
+    "the header-switcher fold width threshold must be a named constant (#534)"
+  );
+  // the bar moves as a WHOLE unit (never cloned per alternative) — the
+  // same physical node's click handlers, aria-selected state and arrow-key
+  // wiring built once in the "VIEW" branch keep working after a move.
+  assert.match(
+    src,
+    /if \(bar\.parentElement !== title\) title\.appendChild\(bar\);/,
+    "placeViewHeaderBar must relocate the existing bar, not clone it (#534)"
+  );
+}
+
 // NOTE on coverage (per the plan): a patchSlots/shapeOf DOM-diff case for
 // ".dp-viewbar [role=tab]" / ".dp-viewpane" exclusion, and the default-view
 // fallback (no seed / an unmatched seed picks the first SHOWN alternative),
