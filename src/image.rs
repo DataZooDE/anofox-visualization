@@ -428,17 +428,22 @@ pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf>
 /// name onto this `Err` rather than this function guessing which one it's
 /// talking to.
 ///
-/// Review of #604 S5: `path` is normalized (trailing `/` and a trailing
-/// `.` component stripped, lexically, before anything touches the
-/// filesystem) *before* the symlink check, not after. `symlink_metadata`
-/// on a path a trailing slash makes "must be a directory" is forced to
-/// resolve through a symlink at that final component to confirm it is
-/// one — so `--assets rootlink/` (the shape a shell's own tab-completion
-/// produces) used to reach the `canonicalize`/`is_dir` checks below
-/// having never actually `lstat`-ed the symlink itself, and started right
-/// up serving the link's target.
+/// Review of #604 S5/R4: `path` is normalized *lexically* (never touching
+/// the filesystem) before the symlink check, not after — a trailing `/`
+/// or `.` component, or a `..` anywhere that lexically cancels an earlier
+/// segment, all collapse first. `symlink_metadata` must resolve every
+/// *non-final* path component to reach the final one (that's what makes
+/// `rootlink/sub/..` follow the symlink `rootlink` to get to `sub` at
+/// all, even though the whole path lexically names `rootlink` itself),
+/// and a trailing `/` or `/.` similarly forces the OS to confirm the
+/// final component resolves to a directory, which means following it if
+/// it's a symlink. So `--assets rootlink/`, `--assets rootlink/.` and
+/// `--assets rootlink/sub/..` (a shell's own tab-completion produces the
+/// first; the third is a `cd`-and-back-out shape) all used to reach the
+/// `canonicalize`/`is_dir` checks below having never actually `lstat`-ed
+/// `rootlink` itself, and started right up serving the link's target.
 pub fn validated_assets_root(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let path = strip_trailing_slash_and_dot(path);
+    let path = lexically_normalize(path);
     let path = path.as_path();
     if std::fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
@@ -459,25 +464,33 @@ pub fn validated_assets_root(path: &std::path::Path) -> Result<std::path::PathBu
     Ok(real)
 }
 
-/// `path` with every trailing `/` and a trailing `.` component removed,
-/// lexically (#604 S5) — `"link/"`, `"link/."` and `"link/./"` all become
-/// `"link"`; `"/"` alone is left as `"/"`. `std::path::Path` doesn't
-/// normalize this on its own (unlike `..`, a trailing `/.` survives
-/// `Path::components()` as a literal `CurDir` component), and leaving it
-/// in place changes whether a later `symlink_metadata` call follows a
-/// symlink at that final component or not.
-fn strip_trailing_slash_and_dot(path: &std::path::Path) -> std::path::PathBuf {
-    let mut s = path.to_string_lossy().into_owned();
-    loop {
-        if s.len() > 1 && s.ends_with('/') {
-            s.pop();
-        } else if s.len() > 1 && s.ends_with("/.") {
-            s.truncate(s.len() - 2);
-        } else {
-            break;
+/// `path`, normalized lexically (#604 S5/R4) — every `.` component
+/// dropped, every `..` cancelling the nearest earlier real segment (never
+/// popping past a root/prefix, and left in place if there's nothing to
+/// cancel), a trailing `/` making no difference either way. Never touches
+/// the filesystem: `Path::components()` already does this parsing
+/// (repeated `/` and a trailing `/` collapse on their own; `.` and `..`
+/// come out as their own distinguishable components, `CurDir`/
+/// `ParentDir`), this just resolves what those components mean against
+/// each other the same way a shell's own `cd a/b/..` would, without ever
+/// asking the OS to resolve a symlink along the way — the one thing a
+/// real `canonicalize`/`lstat` call cannot do.
+fn lexically_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                _ => out.push(comp),
+            },
+            other => out.push(other),
         }
     }
-    std::path::PathBuf::from(s)
+    out.iter().collect()
 }
 
 /// Validate `rest` (a path under an `assets/` folder, already stripped of
@@ -708,6 +721,30 @@ pub fn resolve_relative(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// #604 R4: purely lexical, no filesystem access — checked directly so
+    /// the `..`-cancels-the-nearest-real-segment rule is pinned without
+    /// needing a real symlink on disk for every shape.
+    #[test]
+    fn lexically_normalize_collapses_dot_and_dot_dot_without_touching_disk() {
+        let n = |s: &str| {
+            lexically_normalize(std::path::Path::new(s))
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(n("/a/b"), "/a/b");
+        assert_eq!(n("/a/b/"), "/a/b");
+        assert_eq!(n("/a/b/."), "/a/b");
+        assert_eq!(n("/a/b/./"), "/a/b");
+        assert_eq!(n("/a/b/sub/.."), "/a/b");
+        assert_eq!(n("/a/b/sub/../"), "/a/b");
+        assert_eq!(n("/a/b/sub/c/../.."), "/a/b");
+        assert_eq!(n("/a/b/../c"), "/a/c");
+        // Nothing to cancel against (would escape the root) — left as-is,
+        // same posture `canonicalize` itself would take on this.
+        assert_eq!(n("/../a"), "/../a");
+        assert_eq!(n("a/../../b"), "../b");
+    }
 
     #[test]
     fn vectors_match_rust_and_js_contract() {

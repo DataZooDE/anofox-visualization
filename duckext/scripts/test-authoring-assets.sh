@@ -22,8 +22,9 @@
 #   * GET/HEAD only; POST is 405.
 #   * the option off (default) is a plain 404, same as any unknown path.
 #   * `options.assets` pointing at a missing path, a non-directory, or a
-#     symlinked root (even named with a trailing slash — #604 S5) all
-#     refuse to start (`anofox_serve` itself errors) — never silently
+#     symlinked root — even named with a trailing slash, or reached via a
+#     real subdirectory backed out of (`rootlink/sub/..`) — #604 S5/R4 —
+#     all refuse to start (`anofox_serve` itself errors) — never silently
 #     serve nothing.
 #   * `options.assets` refuses to start when the live session has
 #     `enable_external_access = false`, or when `allowed_directories` is
@@ -99,6 +100,18 @@ echo "OK: options.assets refuses a symlinked root at start"
 OUT="$(run_serve "{\"assets\": \"$LINK/\"}" "$((PORT+6))" || true)"
 echo "$OUT" | grep -qi "symlink" || fail "a symlinked options.assets root with a trailing slash should refuse to start: $OUT"
 echo "OK: options.assets refuses a symlinked root at start even with a trailing slash"
+
+# #604 R4: `rootlink/sub/..` — not the symlinked root named with a
+# trailing slash (above), but a real subdirectory *through* the symlink,
+# backed out of. `symlink_metadata` on the whole path must resolve
+# `rootlink` (follow it) to even find `sub`, even though the path
+# lexically names `rootlink` itself — this reached the canonicalize/is_dir
+# checks never having lstat-ed `rootlink` unless `sub/..` is collapsed
+# lexically first.
+mkdir -p "$LINK/sub"
+OUT="$(run_serve "{\"assets\": \"$LINK/sub/..\"}" "$((PORT+10))" || true)"
+echo "$OUT" | grep -qi "symlink" || fail "a symlinked options.assets root reached via sub/.. should refuse to start: $OUT"
+echo "OK: options.assets refuses a symlinked root at start even via a cd-and-back-out path"
 rm -f "$LINK"
 
 OUT="$(run_serve '{"nope_key": "x"}' "$((PORT+4))" || true)"

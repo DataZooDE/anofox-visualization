@@ -2356,6 +2356,43 @@ fn hexbin_classes_and_legend_note() {
     assert!(s.contains("(1)"), "a per-class count in the legend: {s}");
 }
 
+/// Team-lead's screenshot finding on #595 (confirmed pre-existing on master,
+/// not frame-specific: reproduces with a plain, non-frame classed hexbin
+/// map too, and without `::FRAME` at all here). A hexbin cell has no "no
+/// data" concept — it either exists (has member points) or doesn't; there's
+/// no NA cell the way an area/point row can have a missing measure. Before
+/// the fix, the legend showed a spurious "No data (N)" key, N == the number
+/// of original rows — `plot::build`'s main features layer (suppressed to
+/// `Value::Na` for every row when hexbin takes over the point pass, so it
+/// draws nothing) still carried a "fill" *data column* of nothing but `Na`,
+/// and ggplot-rs's `ScaleFillBinned::train` picks up a "fill"-named column
+/// by its aesthetic registration on that layer's own `GGData`/`GGPlot`
+/// construction regardless of whether a geom is ever attached to draw it —
+/// confirmed by instrumenting `ScaleFillBinned::train` directly (not
+/// guessed): two `train` calls, one real (hexbin's own cell values, 0 NAs)
+/// and one spurious (this layer's column, every value NA). The fix leaves
+/// the "fill" column out of that layer's `GGData` entirely when it isn't
+/// aes-mapped (hexbin_takes_over), not just unmapped — `overlay.rs`'s
+/// symbols layer already got this right; the main layer didn't.
+#[test]
+fn hexbin_has_no_no_data_key() {
+    let lat = Column::new("lat", Role::Lat, nums(&[48.0, 48.1, 48.2, 48.3, 48.4]));
+    let lon = Column::new("lon", Role::Lon, nums(&[9.0, 9.2, 9.4, 9.6, 9.8]));
+    let v = Column::new(
+        "v",
+        Role::Value(Kind::Bar),
+        nums(&[1.0, 2.0, 3.0, 4.0, 5.0]),
+    );
+    let h = Column::new("h", Role::Hexbin, strs(&["auto"]));
+    let c = Column::new("c", Role::Classes, konst("quantile 3", 1));
+    let s = svg(vec![lat, lon, v, h, c]);
+    assert!(!hexes(&s).is_empty(), "{s}");
+    assert!(
+        !s.contains("No data"),
+        "a hexbin map's legend must never show a \"No data\" key — a cell either exists or doesn't, it's never NA: {s}"
+    );
+}
+
 #[test]
 fn hexbin_light_dark() {
     for (name, dark) in [("default", false), ("default", true)] {
@@ -2728,6 +2765,525 @@ fn symbol_sizes_are_comparable_across_frames() {
     if let (Some(r0), Some(r1)) = (r0, r1) {
         assert!(r0 < r1, "frame 1's lone point (value 5) must read small against the shared max (100): r0={r0} r1={r1}\n{s0}");
     }
+}
+
+// ---- M2e-B: ::FRAME on flows, hexbin and bivariate maps ---------------
+
+#[test]
+fn flow_widths_and_keys_are_shared_across_frames() {
+    // A→B appears in both frames (value 100, then 400); A→C only in frame
+    // "1". A flow's `::SIZE` shares the same domain a graduated symbol's
+    // does (M2e-B): A→B's stroke-width in frame "1" must read against the
+    // combined max (400), not its own frame's lone 100 (which alone would
+    // be a full-width line).
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "2"]));
+    let o = Column::new(
+        "o",
+        Role::Origin,
+        vec![pt(9.0, 50.0, "A"), pt(9.0, 50.0, "A"), pt(9.0, 50.0, "A")],
+    );
+    let d = Column::new(
+        "d",
+        Role::Dest,
+        vec![
+            pt(10.0, 51.0, "B"),
+            pt(11.0, 52.0, "C"),
+            pt(10.0, 51.0, "B"),
+        ],
+    );
+    let n = Column::new("n", Role::Size, nums(&[100.0, 50.0, 400.0]));
+    let cols = vec![o, d, week, n];
+    let o0 = RenderOptions {
+        frame: Some(0),
+        ..RenderOptions::default()
+    };
+    let o1 = RenderOptions {
+        frame: Some(1),
+        ..RenderOptions::default()
+    };
+    let s0 = draw(cols.clone(), &o0);
+    let s1 = draw(cols, &o1);
+    let f0 = flow_arcs(&s0);
+    let f1 = flow_arcs(&s1);
+    assert_eq!(f0.len(), 2, "frame 1 has A->B and A->C: {s0}");
+    assert_eq!(f1.len(), 1, "frame 2 only has A->B: {s1}");
+    // A→B's own D22 key (a point end's "{lat:.5},{lon:.5}" pair, M2b's own
+    // key, computed without the boundary pack) is the same in both frames.
+    let ab_key = format!("{:.5},{:.5}→{:.5},{:.5}", 50.0, 9.0, 51.0, 10.0);
+    let ab0 = f0
+        .iter()
+        .find(|t| attr(t, "data-x") == Some(ab_key.as_str()))
+        .unwrap_or_else(|| panic!("A->B not found in frame 1: {s0}"));
+    let ab1 = f1
+        .iter()
+        .find(|t| attr(t, "data-x") == Some(ab_key.as_str()))
+        .unwrap_or_else(|| panic!("A->B not found in frame 2: {s1}"));
+    let w0: f64 = attr(ab0, "stroke-width").unwrap().parse().unwrap();
+    let w1: f64 = attr(ab1, "stroke-width").unwrap().parse().unwrap();
+    let expect0 = 0.75 + 7.25 * (100.0_f64 / 400.0).sqrt();
+    let expect1 = 0.75 + 7.25 * (400.0_f64 / 400.0).sqrt();
+    assert!((w0 - expect0).abs() < 0.05, "w0={w0} {s0}");
+    assert!((w1 - expect1).abs() < 0.05, "w1={w1} {s1}");
+}
+
+/// Review of #595 BLOCKER 1 / the plan's own `frame_panel_is_stable`
+/// (never written for flows): A→B appears in both frames; C→D, far away,
+/// appears only in frame "1". Before the fix, an absent flow's `::ORIGIN`/
+/// `::DEST` were blanked to `Value::Na` in the view, so `Model::new`'s
+/// flow branch built the projection and extent from whichever flows
+/// happened to be present *in that one frame* — C→D (far away) pulled
+/// frame "1"'s own extent/projection wide, while frame "2" (A→B alone)
+/// stayed tight, moving and re-projecting the whole map on every Play
+/// step. D20 requires the extent/projection to come from every frame's
+/// endpoints at once; only *drawing* follows the frame's own presence.
+#[test]
+fn flow_extent_and_projection_are_frame_stable() {
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "2"]));
+    let o = Column::new(
+        "o",
+        Role::Origin,
+        vec![pt(9.0, 50.0, "A"), pt(20.0, 40.0, "C"), pt(9.0, 50.0, "A")],
+    );
+    let d = Column::new(
+        "d",
+        Role::Dest,
+        vec![
+            pt(10.0, 51.0, "B"),
+            pt(25.0, 45.0, "D"),
+            pt(10.0, 51.0, "B"),
+        ],
+    );
+    let n = Column::new("n", Role::Size, nums(&[100.0, 50.0, 400.0]));
+    let cols = vec![o, d, week, n];
+    let o0 = RenderOptions {
+        frame: Some(0),
+        ..RenderOptions::default()
+    };
+    let o1 = RenderOptions {
+        frame: Some(1),
+        ..RenderOptions::default()
+    };
+    let s0 = draw(cols.clone(), &o0);
+    let s1 = draw(cols, &o1);
+    assert_eq!(
+        attr(root(&s0), "data-proj"),
+        attr(root(&s1), "data-proj"),
+        "'auto' picked a different projection frame to frame: {s0}\n{s1}"
+    );
+    // A→B's own key (D22) is stable (already covered elsewhere); its drawn
+    // *pixel* start point must be too — not just present in both frames,
+    // but at the exact same spot, proving the projection/window didn't
+    // move even though frame "1" also has the far-off C→D and frame "2"
+    // doesn't.
+    let ab_key = format!("{:.5},{:.5}\u{2192}{:.5},{:.5}", 50.0, 9.0, 51.0, 10.0);
+    let ab_path = |s: &str| -> String {
+        flow_arcs(s)
+            .into_iter()
+            .find(|t| attr(t, "data-x") == Some(ab_key.as_str()))
+            .and_then(|t| attr(t, "d"))
+            .unwrap_or_else(|| panic!("A->B not found: {s}"))
+            .to_string()
+    };
+    assert_eq!(
+        ab_path(&s0),
+        ab_path(&s1),
+        "A->B's drawn arc moved between frames (extent/projection not frame-stable)"
+    );
+    // Review #595 SHOULD-FIX 4: C→D isn't part of frame "2" at all — not a
+    // flow with no resolvable location. Frame "2"'s own summary must not
+    // claim one "not drawn (no location)".
+    let summary1 = attr(root(&s1), "data-summary").unwrap();
+    assert!(
+        !summary1.contains("not drawn (no location)"),
+        "frame 2 wrongly reports an unplaced flow: {summary1}"
+    );
+}
+
+/// Re-review of #595, R1: BLOCKER 1's own fix (every resolved endpoint
+/// feeds the extent, so an absent-this-frame flow doesn't shrink a frame
+/// map's extent) must not leak onto a **non-frame** flow map, where there
+/// is no "other frame" to stay stable against — the extent/fit must still
+/// come from only what's actually *drawn*: A→B (size 100) draws; a
+/// self-flow X→X (far away) never draws (`ok == dk`); C→D (far away, NULL
+/// `::SIZE`) never draws either (`flows::project`'s own width filter).
+/// Before the fix, `all_points` (and so the extent/projected fit box) was
+/// built unconditionally, pulling X→X and C→D's far-off endpoints into a
+/// plain flow map's domain and zooming it out around places nothing is
+/// drawn.
+#[test]
+fn flow_extent_on_a_non_frame_map_only_covers_drawn_flows() {
+    let o = Column::new(
+        "o",
+        Role::Origin,
+        vec![pt(9.0, 50.0, "A"), pt(30.0, 60.0, "X"), pt(-5.0, 40.0, "C")],
+    );
+    let d = Column::new(
+        "d",
+        Role::Dest,
+        vec![
+            pt(10.0, 51.0, "B"),
+            pt(30.0, 60.0, "X"),
+            pt(-4.0, 41.0, "D"),
+        ],
+    );
+    let n = Column::new(
+        "n",
+        Role::Size,
+        vec![Value::Float(100.0), Value::Float(5.0), Value::Na],
+    );
+    let s = svg(vec![o, d, n]);
+    assert_eq!(attr(root(&s), "data-proj"), Some("conic"), "{s}");
+    let domain = attr(root(&s), "data-domain").unwrap();
+    let nums: Vec<f64> = domain.split(' ').map(|v| v.parse().unwrap()).collect();
+    assert_eq!(nums.len(), 4, "{domain}");
+    // The domain must be tight around A→B alone (roughly 386777..603393,
+    // 5220649..5365060 for this fixture) — not stretched out to cover the
+    // self-flow (30°E 60°N) or the NULL-size flow (-5..-4°E 40..41°N),
+    // which are tens of thousands of km away and would blow the domain's
+    // span past 1,000,000 units if wrongly included.
+    let span_x = nums[1] - nums[0];
+    let span_y = nums[3] - nums[2];
+    assert!(
+        span_x < 500_000.0 && span_y < 500_000.0,
+        "a non-frame flow map's domain must cover only its drawn flow (A->B), not the self-flow or the NULL-size one: {domain}"
+    );
+}
+
+/// Review of #595 SHOULD-FIX 6: frame "1"'s own two flows happen to share
+/// one `::SIZE` value (200, 200) — classed *alone*, that would be a fixed-
+/// width line with no legend (`flows::constant_width`'s own rule). Frame
+/// "2"'s own two flows vary (100, 300). The fixed/has-size decision must
+/// be made once over every frame: since the values aren't constant
+/// *globally*, every frame sqrt-scales against the shared max (300), frame
+/// "1" included — it must not flip to a fixed 12px line just because its
+/// own two rows happen to agree.
+#[test]
+fn flow_fixed_width_decision_is_shared_across_frames() {
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "2", "2"]));
+    let o = Column::new(
+        "o",
+        Role::Origin,
+        vec![
+            pt(9.0, 50.0, "A"),
+            pt(9.0, 50.0, "A"),
+            pt(9.0, 50.0, "A"),
+            pt(9.0, 50.0, "A"),
+        ],
+    );
+    let d = Column::new(
+        "d",
+        Role::Dest,
+        vec![
+            pt(10.0, 51.0, "B"),
+            pt(11.0, 52.0, "C"),
+            pt(10.0, 51.0, "B"),
+            pt(11.0, 52.0, "C"),
+        ],
+    );
+    let n = Column::new("n", Role::Size, nums(&[200.0, 200.0, 100.0, 300.0]));
+    let cols = vec![o, d, week, n];
+    let o0 = RenderOptions {
+        frame: Some(0),
+        ..RenderOptions::default()
+    };
+    let s0 = draw(cols, &o0);
+    let f0 = flow_arcs(&s0);
+    assert_eq!(f0.len(), 2, "{s0}");
+    // A fixed-width line would clamp 200 to 12px (`constant_width`'s own
+    // 0.5..12 clamp) with no linewidth scale/legend; the shared, scaled
+    // decision instead reads against vmax=300 (frame 2's own max, shared).
+    let expect = 0.75 + 7.25 * (200.0_f64 / 300.0).sqrt();
+    for tag in &f0 {
+        let w: f64 = attr(tag, "stroke-width").unwrap().parse().unwrap();
+        assert!(
+            (w - expect).abs() < 0.05,
+            "frame 1's flows must sqrt-scale against the shared max (expected {expect:.2}, got {w}): {s0}"
+        );
+    }
+}
+
+#[test]
+fn hexbin_frames_bin_only_their_own_present_points() {
+    // Five distinct points (features, D22): P/Q close together near 50°N
+    // (frame "1" only), R/S close together near 52°N (frame "2" only), and
+    // T near 54°N present in *both* frames — each pair 2° apart, far
+    // enough at this grid width to land in different cells.
+    let lat = Column::new(
+        "lat",
+        Role::Lat,
+        nums(&[50.0, 50.01, 52.0, 52.01, 54.0, 54.0]),
+    );
+    let lon = Column::new(
+        "lon",
+        Role::Lon,
+        nums(&[10.0, 10.01, 10.0, 10.01, 10.0, 10.0]),
+    );
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "2", "2", "1", "2"]));
+    let h = Column::new("h", Role::Hexbin, strs(&["auto"]));
+    let cols = vec![lat, lon, week, h];
+    let o0 = RenderOptions {
+        frame: Some(0),
+        ..RenderOptions::default()
+    };
+    let o1 = RenderOptions {
+        frame: Some(1),
+        ..RenderOptions::default()
+    };
+    let s0 = draw(cols.clone(), &o0);
+    let s1 = draw(cols, &o1);
+    // Without presence filtering (D20), every frame would bin all 5
+    // points, since `view`'s geometry columns are always present — these
+    // totals must stay at 3, each frame's own points (its own pair plus T).
+    let total = |s: &str| -> usize {
+        hexes(s)
+            .iter()
+            .filter_map(|t| attr(t, "data-count").and_then(|c| c.parse::<usize>().ok()))
+            .sum()
+    };
+    assert_eq!(total(&s0), 3, "frame 1 bins P, Q and T only: {s0}");
+    assert_eq!(total(&s1), 3, "frame 2 bins R, S and T only: {s1}");
+    // D7/D20: the grid itself doesn't move between frames even though
+    // each frame only has a subset of the points.
+    assert_eq!(
+        attr(root(&s0), "data-hexbin"),
+        attr(root(&s1), "data-hexbin"),
+        "the hex width must not change between frames"
+    );
+    // Review of #595 NIT: a cell present in *both* frames (T's own, the
+    // only count-1 cell either frame draws, since P+Q and R+S each merge
+    // into a count-2 cell) must keep the exact same "q,r" key in both —
+    // if the grid's origin had moved, the same point would fall into a
+    // different cell.
+    let lone_cell_key = |s: &str| -> Option<String> {
+        hexes(s)
+            .iter()
+            .find(|t| attr(t, "data-count") == Some("1"))
+            .and_then(|t| attr(t, "data-x"))
+            .map(str::to_string)
+    };
+    let (t0, t1) = (lone_cell_key(&s0), lone_cell_key(&s1));
+    assert!(
+        t0.is_some() && t0 == t1,
+        "T's own cell must keep the same grid key in both frames: {t0:?} vs {t1:?}\n{s0}\n{s1}"
+    );
+}
+
+#[test]
+fn hexbin_cell_colours_share_their_domain_across_frames() {
+    // Frame "1" has one low-value cell (1); frame "2" has one high-value
+    // cell (100), far away. Sharing the colour domain (M2e-B, D21) must
+    // make frame "1"'s cell read differently than a stand-alone map with
+    // that same lone cell would.
+    let lat = Column::new("lat", Role::Lat, nums(&[50.0, 52.0]));
+    let lon = Column::new("lon", Role::Lon, nums(&[10.0, 10.0]));
+    let week = Column::new("week", Role::Frame, strs(&["1", "2"]));
+    let v = Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 100.0]));
+    let h = Column::new("h", Role::Hexbin, strs(&["auto"]));
+    let cols = vec![lat, lon, week, v, h];
+    let o0 = RenderOptions {
+        frame: Some(0),
+        ..RenderOptions::default()
+    };
+    let s0 = draw(cols, &o0);
+    let unframed = svg(vec![
+        Column::new("lat", Role::Lat, nums(&[50.0])),
+        Column::new("lon", Role::Lon, nums(&[10.0])),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[1.0])),
+        Column::new("h", Role::Hexbin, strs(&["auto"])),
+    ]);
+    let fill_framed = hexes(&s0)
+        .into_iter()
+        .find_map(|t| attr(t, "fill"))
+        .unwrap();
+    let fill_unframed = hexes(&unframed)
+        .into_iter()
+        .find_map(|t| attr(t, "fill"))
+        .unwrap();
+    assert_ne!(
+        fill_framed, fill_unframed,
+        "frame 1's lone cell (value 1) must read differently once the \
+         domain is shared with frame 2's value 100, not the colour a \
+         stand-alone one-cell map would give it: {fill_framed} vs {fill_unframed}"
+    );
+}
+
+/// Review of #595 BLOCKER 2: `apply_hexbin_shared` used to bin every
+/// frame's points *together* into one combined grid, so a cell present in
+/// several frames summed across all of them — P (50°N) has value 10 in
+/// frames "1", "2" and "3" (summing to 30 combined); Q (52°N) has value 30
+/// in frame "1" only. The combined-bin domain treated both as 30 and
+/// coloured them identically in frame "1", even though P's own frame-1
+/// value (10) and Q's (30) are nothing alike. The fix bins each frame
+/// separately and takes the shared domain from the *union* of those
+/// per-frame cell values ([10, 30, 10, 10]), not one summed bin.
+#[test]
+fn hexbin_shared_domain_is_the_union_of_per_frame_cells_not_their_sum() {
+    let lat = Column::new("lat", Role::Lat, nums(&[50.0, 52.0, 50.0, 50.0]));
+    let lon = Column::new("lon", Role::Lon, nums(&[10.0, 10.0, 10.0, 10.0]));
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "2", "3"]));
+    let v = Column::new("v", Role::Value(Kind::Bar), nums(&[10.0, 30.0, 10.0, 10.0]));
+    let h = Column::new("h", Role::Hexbin, strs(&["auto"]));
+    // Frame "1" (index 0) — not the default-shown last frame (week "3",
+    // D12), which only has P: both P and Q are present in week "1".
+    let o0 = RenderOptions {
+        frame: Some(0),
+        ..RenderOptions::default()
+    };
+    let s0 = draw(vec![lat, lon, week, v, h], &o0);
+    let hx = hexes(&s0);
+    assert_eq!(hx.len(), 2, "frame 1 draws P's and Q's own cells: {s0}");
+    let fills: Vec<&str> = hx.iter().filter_map(|t| attr(t, "fill")).collect();
+    assert_eq!(fills.len(), 2);
+    assert_ne!(
+        fills[0], fills[1],
+        "P (value 10) and Q (value 30) must not read as the same colour: {s0}"
+    );
+}
+
+/// Review of #595 BLOCKER 3: a frame with zero *present* points on a
+/// hexbin map used to make `hexbin::of` return `None`, so `Model::new`
+/// fell back to drawing every feature's point marker instead (D20 says
+/// "not drawn", not "draw plain points this one frame").
+#[test]
+fn hexbin_empty_frame_draws_nothing_not_plain_points() {
+    // Frame "2" has one row, with no location at all (`Value::Na`) —
+    // zero present points once presence-filtered, not just zero after
+    // binning.
+    let lat = Column::new(
+        "lat",
+        Role::Lat,
+        vec![Value::Float(50.0), Value::Float(50.5), Value::Na],
+    );
+    let lon = Column::new(
+        "lon",
+        Role::Lon,
+        vec![Value::Float(10.0), Value::Float(10.5), Value::Na],
+    );
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "2"]));
+    let h = Column::new("h", Role::Hexbin, strs(&["auto"]));
+    let o1 = RenderOptions {
+        frame: Some(1),
+        ..RenderOptions::default()
+    };
+    let s1 = draw(vec![lat, lon, week, h], &o1);
+    assert_eq!(
+        features(&s1).len(),
+        0,
+        "frame 2 (no present points) must draw nothing at all, not frame 1's points as plain markers: {s1}"
+    );
+}
+
+#[test]
+fn bivariate_tertiles_are_shared_across_frames() {
+    // 3 features × 2 frames: frame "1"'s own a/b values (0, 1, 2) would,
+    // classed alone, put the feature at 2 in the *top* tertile; classed
+    // together with frame "2"'s own (10, 11, 12), it's near the *bottom*
+    // of the combined range. The shared breaks (M2e-B, D21) must be used
+    // even when rendering frame "1".
+    let one: Vec<Value> = (0..3)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let geom: Vec<Value> = one.iter().chain(one.iter()).cloned().collect();
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "1", "2", "2", "2"]));
+    let a = Column::new(
+        "a",
+        Role::Value(Kind::Bar),
+        nums(&[0.0, 1.0, 2.0, 10.0, 11.0, 12.0]),
+    );
+    let b = Column::new(
+        "b",
+        Role::Bivariate,
+        nums(&[0.0, 1.0, 2.0, 10.0, 11.0, 12.0]),
+    );
+    let cols = vec![Column::new("g", Role::Geometry, geom), week, a, b];
+    let o0 = RenderOptions {
+        frame: Some(0),
+        ..RenderOptions::default()
+    };
+    let o1 = RenderOptions {
+        frame: Some(1),
+        ..RenderOptions::default()
+    };
+    let s0 = draw(cols.clone(), &o0);
+    let s1 = draw(cols, &o1);
+    let f0 = features(&s0);
+    let f1 = features(&s1);
+    assert_eq!(f0.len(), 3, "{s0}");
+    assert_eq!(f1.len(), 3, "{s1}");
+    // review of #595 NIT: a positive assertion, not just "not the top
+    // tertile". The combined 0..12 range's quantile(3) edges are built
+    // from the data itself (2, 11, picking actual values — half-open
+    // classes put an edge value in the class *above* it), so frame 1's
+    // own highest (2) and frame 2's own lowest (10) land in the *middle*
+    // class, not the extremes a naive "frame 1 = low, frame 2 = high"
+    // split would predict — asserted directly below instead. What's
+    // always true regardless of exactly where the edges fall: the
+    // combined range's global minimum (0, frame 1's own lowest) is in the
+    // bottom class, and the global maximum (12, frame 2's own highest) is
+    // in the top one — and no value from either frame reaches the
+    // *opposite* extreme a per-frame-only break would give it.
+    assert_eq!(
+        attr(f0[0], "data-bivar"),
+        Some("0,0"),
+        "frame 1, value 0 (the combined range's global min): {s0}"
+    );
+    assert_eq!(
+        attr(f1[2], "data-bivar"),
+        Some("2,2"),
+        "frame 2, value 12 (the combined range's global max): {s1}"
+    );
+    for tag in &f0 {
+        assert_ne!(attr(tag, "data-bivar"), Some("2,2"), "frame 1: {tag}\n{s0}");
+    }
+    for tag in &f1 {
+        assert_ne!(attr(tag, "data-bivar"), Some("0,0"), "frame 2: {tag}\n{s1}");
+    }
+}
+
+/// Review of #595 SHOULD-FIX 6: frame "2"'s own `::BIVARIATE` values are
+/// all `Na` (no `b` data that frame) — before the fix, that made
+/// `bivariate_col`'s per-frame filter (and `bivariate::of`'s own early
+/// bail) fall back to a plain measure ramp for that one frame, a
+/// different legend entirely (and silently skipping `bivariate::
+/// apply_shared`, since `m.fill` no longer matched `Fill::Bivariate`).
+/// Whether the map is bivariate at all is decided once, over every frame.
+#[test]
+fn bivariate_fill_type_is_shared_even_when_a_frame_has_no_b_data() {
+    let geom: Vec<Value> = (0..2)
+        .map(|i| {
+            let x = i as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let geom: Vec<Value> = geom.iter().chain(geom.iter()).cloned().collect();
+    let week = Column::new("week", Role::Frame, strs(&["1", "1", "2", "2"]));
+    let a = Column::new("a", Role::Value(Kind::Bar), nums(&[1.0, 2.0, 3.0, 4.0]));
+    let b = Column::new(
+        "b",
+        Role::Bivariate,
+        vec![Value::Float(1.0), Value::Float(2.0), Value::Na, Value::Na],
+    );
+    let cols = vec![Column::new("g", Role::Geometry, geom), week, a, b];
+    let o1 = RenderOptions {
+        frame: Some(1),
+        ..RenderOptions::default()
+    };
+    let s1 = draw(cols, &o1);
+    assert!(
+        s1.contains("data-geom=\"bivariate_legend\""),
+        "frame 2 (no b data) must still render the 3x3 bivariate legend, not fall back to a plain measure ramp: {s1}"
+    );
 }
 
 /// A real-example check (found rendering `delivery-coverage.sql`'s "Week by
