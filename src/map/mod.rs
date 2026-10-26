@@ -517,7 +517,12 @@ fn measure_of(cols: &[Column], geom: Option<&Column>) -> Option<Column> {
 }
 
 impl<'a> Model<'a> {
-    fn new(o: &RenderOptions, cols: &'a [Column]) -> Option<Model<'a>> {
+    /// `present` (M2e-B, D20): on a `::FRAME` map, which view rows (one per
+    /// feature) actually had a row in the frame being built — threaded
+    /// through to [`hexbin::of`], the only place frame presence needs
+    /// anything beyond the per-row `Value::Na` `view` already leaves
+    /// behind. `None` outside a frame map.
+    fn new(o: &RenderOptions, cols: &'a [Column], present: Option<&[bool]>) -> Option<Model<'a>> {
         let german = o.locale.tag.starts_with("de");
         let is_flow = find_role(cols, Role::Origin)
             .is_some_and(|c| c.values.iter().any(|v| *v != Value::Na))
@@ -682,7 +687,7 @@ impl<'a> Model<'a> {
             .collect();
         // ::HEXBIN (M2c) takes over the point pass entirely — no graduated
         // symbols alongside it (::SIZE is ignored when both are present).
-        let hexbin = hexbin::of(cols, &proj);
+        let hexbin = hexbin::of(cols, &proj, present);
         let symbols = if hexbin.is_none() {
             symbols::of(cols, &features)
         } else {
@@ -1240,7 +1245,9 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
         .as_ref()
         .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
     let cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
-    let m = Model::new(o, cols)?;
+    // `None`: the hexbin presence mask only changes which points a cell
+    // sums, never the grid/bbox this function reports.
+    let m = Model::new(o, cols, None)?;
     if w == 0 || h == 0 {
         let (x0, y0, x1, y1) = m.bbox()?;
         return Some([x0, x1, y0, y1]);
@@ -1260,24 +1267,31 @@ pub(crate) fn build(
     width: u32,
     height: u32,
 ) -> Option<plot::Built> {
-    // `::FRAME` (M2e-A, #149): one result holds every frame; reduce it to
-    // one row per feature with frame `k`'s values (D20) and build the
-    // ordinary `Model` from that view, so every map kind renders a frame
-    // unchanged — then force its fill/size scale onto the quantities shared
-    // across every frame (D21, `frames::apply`).
+    // `::FRAME` (M2e-A/M2e-B, #149): one result holds every frame; reduce
+    // it to one row per feature with frame `k`'s values (D20) and build
+    // the ordinary `Model` from that view, so every map kind renders a
+    // frame unchanged — then force its fill/size/width/tertile scales onto
+    // the quantities shared across every frame (D21, `frames::apply`).
+    // Hexbin's own shared cell-colour domain needs `m.proj` (`m` built
+    // already), so it's applied separately just below (M2e-B).
     let fr = frames::of(cols);
+    let k = fr.as_ref().map(|fr| fr.resolve_k(o.frame));
     let shared = fr.as_ref().map(|fr| frames::shared_of(o, cols, fr));
-    let view_cols: Option<Vec<Column>> = fr
-        .as_ref()
-        .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
+    let present: Option<Vec<bool>> = fr.as_ref().zip(k).map(|(fr, k)| frames::presence(fr, k));
+    let view_cols: Option<Vec<Column>> =
+        fr.as_ref().zip(k).map(|(fr, k)| frames::view(cols, fr, k));
     let use_cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
-    let mut m = Model::new(o, use_cols)?;
+    let mut m = Model::new(o, use_cols, present.as_deref())?;
     if let Some(shared) = &shared {
         frames::apply(&mut m, shared);
     }
+    if fr.is_some() && m.hexbin.is_some() {
+        frames::apply_hexbin_shared(&mut m, o, cols);
+    }
     let frame_ctx = fr
         .as_ref()
-        .map(|fr| frames::FrameCtx::at(fr, fr.resolve_k(o.frame)));
+        .zip(k)
+        .map(|(fr, k)| frames::FrameCtx::at(fr, k));
     let (p, attrs, mut warnings) = plot::build(
         o,
         use_cols,

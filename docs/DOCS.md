@@ -1564,9 +1564,10 @@ SELECT state ::REGION, week AS "Week" ::FRAME,
 FROM dc_weekly_on_time;
 ```
 
-`::FRAME` turns a choropleth or graduated-symbol map into a time map: one
-result holds **every** frame (a week, a date, …) of every feature, and the
-map shows one frame at a time. Static output (`--svg`, PNG, PDF, a DuckDB
+`::FRAME` turns a choropleth, graduated-symbol, flow, hexbin or bivariate
+map into a time map: one result holds **every** frame (a week, a date, …)
+of every feature, and the map shows one frame at a time. Static output
+(`--svg`, PNG, PDF, a DuckDB
 function) shows the **last** frame, named in the subtitle ("Week: 12") so
 it's always clear which one that is. The browser adds a Play bar under the
 map — ‹/› step a frame, Play/Pause auto-advances every second (1.5 s under
@@ -1589,16 +1590,26 @@ embedding every frame for an offline player is a follow-up.
   appearance in the result (the SQL `ORDER BY`).
 - **A frame's view:** every feature appears in every frame — a feature
   with no row in a given frame is drawn as no data (areas: the hatch
-  pattern; points/symbols: not drawn at all) rather than vanishing, so the
-  map's extent never moves between frames.
+  pattern; points/symbols/flows/hex cells: not drawn at all) rather than
+  vanishing, so the map's extent never moves between frames.
 - **Shared scales:** the measure's colour domain and `::CLASSES` breaks,
   a `::CATEGORY`'s levels, and a graduated `::SIZE`'s domain are all
   computed once over **every** frame and held fixed — the same value
   gets the same colour/size whichever frame is on screen, the legend
-  never drops a level or re-wraps as counts change. A feature's key for
-  the browser's cross-frame animation (M2f) is its `::REGION` code, its
-  `::LAT`/`::LON` pair, or its WKT geometry — `::XAXIS` is ignored on a
-  time map (`map/frame-xaxis`).
+  never drops a level or re-wraps as counts change. A flow's `::SIZE`
+  (linewidth) shares that same domain. A hexbin map's grid (origin and
+  width) is anchored to every frame's points at once, same as zooming
+  never re-bins it (D7); a cell's colour is classed against every
+  frame's cells binned once, not just the frame on screen, so a cell
+  reads the same magnitude whichever frame is shown — a feature absent
+  from a frame simply isn't binned into it that frame (not drawn with a
+  stale value). `::BIVARIATE`'s tertile breaks for both measures are
+  built once over every frame too — a cell's position in the 3×3 grid
+  means the same thing whichever frame is shown; only its count is the
+  frame's own. A feature's key for the browser's cross-frame animation
+  (M2f) is its `::REGION` code, its `::LAT`/`::LON` pair, its WKT
+  geometry, or — on a flow map — its `"{origin}→{dest}"` pair (M2b's own
+  key) — `::XAXIS` is ignored on a time map (`map/frame-xaxis`).
 - **Duplicates:** a repeated (feature, frame) row keeps its first row
   (`map/frame-duplicate`).
 - **Caps:** over 200 distinct `::FRAME` values, the last 200 are kept

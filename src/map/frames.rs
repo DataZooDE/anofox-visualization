@@ -7,15 +7,29 @@
 //! (areas) or not at all (points/symbols), it is never a jump in the
 //! legend.
 //!
-//! Plan: `~/projects/duckdb/plans/plan-maps-m2ef.md` §M2e-A, decisions
-//! D11-D22.
+//! M2e-B extends the same machinery to flows, hexbin and bivariate maps:
+//! a flow's feature key is its `"{ok}→{dk}"` ([`row_key`], reusing
+//! [`flows::end_of`]); a flow's shared linewidth domain and a graduated
+//! symbol's shared radius domain are the same `shared.size_limits` (both
+//! read `::SIZE`, [`apply`]); a hexbin map's shared cell-colour domain
+//! comes from binning every frame's points at once
+//! ([`apply_hexbin_shared`]), while each frame's own binning pass only
+//! bins its own present points ([`presence`], D20 — hexbin's point
+//! coordinates come from `view`'s always-present geometry fill, unlike a
+//! value column); `::BIVARIATE`'s tertile breaks are built once over every
+//! frame ([`Shared::bivariate`]) and forced onto each frame's own raw
+//! values ([`bivariate::apply_shared`]).
+//!
+//! Plan: `~/projects/duckdb/plans/plan-maps-m2ef.md` §M2e-A/§M2e-B,
+//! decisions D11-D22.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::{cell_num, find_role, value_str, Column, RenderOptions, Role, Value};
 
-use super::{category_fill, measure_of, value_scale, Fill, Model};
+use super::classes::{Classes, Method};
+use super::{bivariate, category_fill, flows, hexbin, measure_of, value_scale, Fill, Model};
 
 /// Above this many distinct `::FRAME` values, the last this-many are kept
 /// (D15); the renderer warns.
@@ -62,10 +76,30 @@ fn hash_wkt(s: &str) -> String {
     format!("{:x}", h.finish())
 }
 
-/// A row's D22 feature key: a normalised `::REGION` code, a `"{lat:.5},
+/// A flow endpoint's own D22 key (M2e-B): the same normalisation
+/// `flows::of`'s `resolve` uses before any boundary match — a region
+/// code upper-cased, or `"{lat:.5},{lon:.5}"` — computed straight from the
+/// raw `::ORIGIN`/`::DEST` cell, so a flow's frame identity doesn't need
+/// the boundary pack at all.
+fn flow_end_key(v: &Value) -> Option<String> {
+    match flows::end_of(v) {
+        flows::End::Code(c) => Some(c.to_ascii_uppercase()),
+        flows::End::Point(p, _) => Some(format!("{:.5},{:.5}", p[1], p[0])),
+        flows::End::Missing => None,
+    }
+}
+
+/// A row's D22 feature key: for a flow map, `"{ok}→{dk}"` (M2e-B,
+/// [`flow_end_key`] of each end — M2b's own key, so it is already
+/// `data-x`); otherwise a normalised `::REGION` code, a `"{lat:.5},
 /// {lon:.5}"` pair, or a WKT geometry's hash — whichever column this map
 /// uses. `None` when the row has none (dropped from every frame).
 fn row_key(cols: &[Column], i: usize) -> Option<String> {
+    if let (Some(oc), Some(dc)) = (find_role(cols, Role::Origin), find_role(cols, Role::Dest)) {
+        let ok = oc.values.get(i).and_then(flow_end_key)?;
+        let dk = dc.values.get(i).and_then(flow_end_key)?;
+        return Some(format!("{ok}→{dk}"));
+    }
     if let Some(region) = find_role(cols, Role::Region) {
         let s = region.values.get(i).map(value_str).unwrap_or_default();
         let s = s.trim();
@@ -257,12 +291,20 @@ impl FrameCtx {
 
 /// The scales shared across every frame (D21): the measure's domain and
 /// classes, or the category's levels — computed once from every row of the
-/// *original*, unreduced result — plus `::SIZE`'s shared domain and the
-/// classed legend's widest per-class count (for `count_reserve`, U3).
+/// *original*, unreduced result — plus `::SIZE`'s shared domain (a
+/// graduated symbol's radius and a flow's linewidth both read the same
+/// `::SIZE` role column, M2e-B — [`apply`] applies it to either), the
+/// classed legend's widest per-class count (for `count_reserve`, U3), and
+/// `::BIVARIATE`'s shared tertile breaks (M2e-B).
 pub(super) struct Shared {
     pub fill: Option<Fill>,
     pub size_limits: Option<(f64, f64)>,
     pub max_count: usize,
+    /// Tertile `Classes` of the map's own measure and of `::BIVARIATE`,
+    /// built once over every frame's finite values — a cell's grid
+    /// position then means the same thing whichever frame is shown; only
+    /// the 3×3 counts are frame k's own ([`bivariate::apply_shared`]).
+    pub bivariate: Option<(Classes, Classes)>,
 }
 
 /// Build [`Shared`] from every row of `cols` (not a frame view) and `fr`'s
@@ -286,11 +328,44 @@ pub(super) fn shared_of(o: &RenderOptions, cols: &[Column], fr: &Frames) -> Shar
         Some(Fill::Measure(scale)) if scale.classes.is_some() => max_class_count(cols, fr, scale),
         _ => 0,
     };
+    let bivariate = shared_bivariate(cols, n);
     Shared {
         fill,
         size_limits,
         max_count,
+        bivariate,
     }
+}
+
+/// `::BIVARIATE`'s shared tertile breaks (M2e-B, D21): `Classes::build`
+/// (quantile, 3) over every frame's finite `a` (the map's own measure) and
+/// `b` (`::BIVARIATE`) values — `None` without both, mirroring
+/// `bivariate::of`'s own "no finite value at all" bail-out.
+fn shared_bivariate(cols: &[Column], n: usize) -> Option<(Classes, Classes)> {
+    let a_col = measure_of(cols, super::geometry(cols))?;
+    let b_col = find_role(cols, Role::Bivariate)?;
+    let finite = |c: &Column| -> Vec<f64> {
+        (0..n)
+            .filter_map(|i| c.values.get(i).and_then(cell_num).filter(|v| v.is_finite()))
+            .collect()
+    };
+    let b_vals = finite(b_col);
+    if b_vals.is_empty() {
+        return None;
+    }
+    let ca = Classes::build(&Method::Quantile(3), &finite(&a_col))?;
+    let cb = Classes::build(&Method::Quantile(3), &b_vals)?;
+    Some((ca, cb))
+}
+
+/// Per feature, whether frame `k` had its own row (D20). Hexbin's own
+/// binning pass needs this directly ([`hexbin::of`]'s `present`): its
+/// point coordinates come from `view`'s always-present geometry fill
+/// (every feature's first row, so the grid stays frame-stable, D7/D20),
+/// unlike a value column, which `view` already turns into `Value::Na` when
+/// a feature has no row in frame `k`.
+pub(super) fn presence(fr: &Frames, k: usize) -> Vec<bool> {
+    fr.row_in[k].iter().map(Option::is_some).collect()
 }
 
 /// The widest per-class feature count over every frame (U3: a frame map's
@@ -321,24 +396,47 @@ fn max_class_count(cols: &[Column], fr: &Frames, scale: &super::ValueScale) -> u
 
 /// Force `m`'s own fill (built from one frame's view) onto `shared`'s —
 /// same domain/classes/ramp or the same category levels — keeping only
-/// this frame's own per-feature `values`/formatter/title (D21); and widen
-/// `m`'s graduated-symbol size domain to `shared.size_limits` (U2).
+/// this frame's own per-feature `values`/formatter/title (D21); widen
+/// `m`'s graduated-symbol size domain, and a flow map's linewidth domain
+/// (M2e-B — both read `::SIZE`), to `shared.size_limits` (U2); and
+/// recompute a `::BIVARIATE` fill's per-row tertile levels and 3×3 counts
+/// from `shared.bivariate`'s breaks (M2e-B).
 pub(super) fn apply(m: &mut Model, shared: &Shared) {
-    match (&mut m.fill, &shared.fill) {
-        (Fill::Measure(view), Some(Fill::Measure(all))) => {
-            let values = std::mem::take(&mut view.values);
-            let fmt = view.fmt.clone();
-            let title = view.title.clone();
-            **view = (**all).clone();
-            view.values = values;
-            view.fmt = fmt;
-            view.title = title;
+    if let Some(all) = &shared.fill {
+        merge_fill(&mut m.fill, all);
+    }
+    if let (Some(sym), Some((_, hi))) = (&mut m.symbols, shared.size_limits) {
+        sym.vmax = hi;
+    }
+    if let (Some(fl), Some((_, hi))) = (&mut m.flows, shared.size_limits) {
+        fl.vmax = hi;
+    }
+    if let (Fill::Bivariate(biv), Some((ca, cb))) = (&mut m.fill, &shared.bivariate) {
+        bivariate::apply_shared(biv, ca, cb);
+    }
+}
+
+/// Force `view`'s own fill onto `all`'s domain/classes/ramp (a measure) or
+/// levels (a category), keeping `view`'s own per-feature `values` (plus a
+/// measure's formatter/title) — the merge [`apply`] does for the ordinary
+/// `Shared::fill`, factored out so [`apply_hexbin_shared`] can reuse it for
+/// a hexbin map's own, differently-computed shared fill.
+fn merge_fill(view: &mut Fill, all: &Fill) {
+    match (view, all) {
+        (Fill::Measure(v), Fill::Measure(a)) => {
+            let values = std::mem::take(&mut v.values);
+            let fmt = v.fmt.clone();
+            let title = v.title.clone();
+            **v = (**a).clone();
+            v.values = values;
+            v.fmt = fmt;
+            v.title = title;
         }
         (
             Fill::Category { of_row, levels },
-            Some(Fill::Category {
+            Fill::Category {
                 levels: all_levels, ..
-            }),
+            },
         ) => {
             let remapped: Vec<Option<usize>> = of_row
                 .iter()
@@ -352,8 +450,22 @@ pub(super) fn apply(m: &mut Model, shared: &Shared) {
         }
         _ => {}
     }
-    if let (Some(sym), Some((_, hi))) = (&mut m.symbols, shared.size_limits) {
-        sym.vmax = hi;
+}
+
+/// `::HEXBIN`'s shared cell-colour domain (M2e-B, D21). A frame's own
+/// [`hexbin::of`] (inside [`Model::new`](super::Model::new)) already bins
+/// only its own present points on the frame-stable grid (D7/[`presence`]);
+/// this bins `cols` exactly as given — the *original*, unreduced result,
+/// i.e. every frame's points at once, on the same grid (same extent, so
+/// the same origin/width, D20) — to get the reference cell-value
+/// distribution, then [`merge_fill`]s `m`'s own (frame k's) fill onto it,
+/// the same way [`apply`] does for a plain measure: a cell's colour means
+/// the same magnitude whichever frame is shown; only its own cells' values
+/// stay frame k's own.
+pub(super) fn apply_hexbin_shared(m: &mut Model, o: &RenderOptions, cols: &[Column]) {
+    if let Some(union_hb) = hexbin::of(cols, &m.proj, None) {
+        let union_fill = hexbin::fill_of(o, cols, &union_hb);
+        merge_fill(&mut m.fill, &union_fill);
     }
 }
 

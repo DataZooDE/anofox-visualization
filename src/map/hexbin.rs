@@ -161,7 +161,16 @@ fn raw_points(cols: &[Column]) -> Vec<(usize, [f64; 2])> {
 
 /// Bin the map's points into hexagons (`None`: no `::HEXBIN`, or the input
 /// has no points — the lint, not this function, reports that case).
-pub(super) fn of(cols: &[Column], proj: &Proj) -> Option<Hexbin> {
+///
+/// `present` (M2e-B, D20): on a `::FRAME` map, which of `cols`'s rows
+/// (indexed the same way `raw_points` returns them) actually belong to the
+/// frame being bound — `None` outside a frame map, where every row counts.
+/// It only gates *which points get binned*: the grid's `width`/`origin`
+/// below are still sized from *every* point `cols` carries (every frame at
+/// once, when called on the frame's own view — `view`'s geometry columns
+/// are always present, D20/D7 — so the grid never moves between frames),
+/// not just the present ones.
+pub(super) fn of(cols: &[Column], proj: &Proj, present: Option<&[bool]>) -> Option<Hexbin> {
     find_role(cols, Role::Hexbin)?;
     let pts = raw_points(cols);
     if pts.is_empty() {
@@ -190,8 +199,26 @@ pub(super) fn of(cols: &[Column], proj: &Proj) -> Option<Hexbin> {
         super::legend::nice_floor(span / 40.0).max(f64::MIN_POSITIVE)
     });
     let origin = (extent.x0, extent.y0);
+
+    // The points actually binned: every one of them outside a frame map,
+    // else only those with a row in this frame (D20 — not drawn, rather
+    // than counted as a zero-weight member of their cell, which `locate`
+    // would still do since `projected` carries every feature's point
+    // regardless of presence).
+    let binned: Vec<(usize, [f64; 2], [f64; 2])> = projected
+        .iter()
+        .filter(|(row, _, _)| present.is_none_or(|p| p.get(*row).copied().unwrap_or(true)))
+        .copied()
+        .collect();
+    if binned.is_empty() {
+        return None;
+    }
     let measure = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
-    let has_measure = measure.is_some_and(|m| m.values.iter().any(|v| cell_num(v).is_some()));
+    let has_measure = measure.is_some_and(|m| {
+        binned
+            .iter()
+            .any(|(row, _, _)| m.values.get(*row).and_then(cell_num).is_some())
+    });
 
     // D7/the ggplot-rs plan's C1 §4: a fixed lattice (`binwidth` *and*
     // `origin` both given), so zoom/export never re-bin. A `weight` column
@@ -202,22 +229,16 @@ pub(super) fn of(cols: &[Column], proj: &Proj) -> Option<Hexbin> {
     let mut df = DataFrame::new();
     df.add_column(
         "x".to_string(),
-        projected
-            .iter()
-            .map(|(_, _, p)| Value::Float(p[0]))
-            .collect(),
+        binned.iter().map(|(_, _, p)| Value::Float(p[0])).collect(),
     );
     df.add_column(
         "y".to_string(),
-        projected
-            .iter()
-            .map(|(_, _, p)| Value::Float(p[1]))
-            .collect(),
+        binned.iter().map(|(_, _, p)| Value::Float(p[1])).collect(),
     );
     if let Some(m) = measure {
         df.add_column(
             "weight".to_string(),
-            projected
+            binned
                 .iter()
                 .map(|(row, _, _)| {
                     m.values
@@ -239,7 +260,7 @@ pub(super) fn of(cols: &[Column], proj: &Proj) -> Option<Hexbin> {
     // label): `locate()` each raw point on the same lattice it used.
     let lattice = HexLattice::new(width, width, origin);
     let mut means: BTreeMap<(i64, i64), (f64, f64)> = BTreeMap::new();
-    for (_, raw, p) in &projected {
+    for (_, raw, p) in &binned {
         let (q, r) = lattice.locate(p[0], p[1]);
         let e = means.entry((q, r)).or_insert((0.0, 0.0));
         e.0 += raw[0];
@@ -274,7 +295,7 @@ pub(super) fn of(cols: &[Column], proj: &Proj) -> Option<Hexbin> {
         width,
         origin,
         cells,
-        n_points: projected.len(),
+        n_points: binned.len(),
         has_measure,
         planar,
     })

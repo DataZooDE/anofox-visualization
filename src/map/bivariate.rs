@@ -167,6 +167,30 @@ pub(super) fn of(
     })
 }
 
+/// `::FRAME` (M2e-B, D21): recompute `biv`'s per-row tertile levels and
+/// 3×3 counts from its own per-frame raw `a`/`b` values, using breaks
+/// (`ca`/`cb`) built once over every frame (`frames::shared_bivariate`)
+/// instead of the frame's own subset — so a cell's `(i, j)` position means
+/// the same thing whichever frame is shown; only the counts stay frame k's
+/// own. `biv.colors`/`base`/`color_a`/`color_b` (the palette) and
+/// `fmt_a`/`fmt_b`/`title_a`/`title_b` are unaffected — they don't depend
+/// on which rows fall in which cell.
+pub(super) fn apply_shared(biv: &mut Bivar, ca: &Classes, cb: &Classes) {
+    let level =
+        |v: Option<f64>, c: &Classes| v.map(|v| level_of(c.index(v.clamp(c.lo, c.hi)), c.len()));
+    let ia: Vec<Option<usize>> = biv.a.iter().map(|v| level(*v, ca)).collect();
+    let jb: Vec<Option<usize>> = biv.b.iter().map(|v| level(*v, cb)).collect();
+    let mut counts = [[0usize; 3]; 3];
+    for k in 0..ia.len() {
+        if let (Some(i), Some(j)) = (ia[k], jb[k]) {
+            counts[i][j] += 1;
+        }
+    }
+    biv.ia = ia;
+    biv.jb = jb;
+    biv.counts = counts;
+}
+
 /// `"low"` / `"mid"` / `"high"` (de: `"niedrig"`/`"mittel"`/`"hoch"`) for
 /// level `0..=2`.
 pub(super) fn level_word(level: usize, locale: &Locale) -> &'static str {
