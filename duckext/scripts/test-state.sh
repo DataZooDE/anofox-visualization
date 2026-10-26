@@ -43,12 +43,17 @@ SEC="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
 mkdir -p "$W/dash"
 
 # `quiz`: a plain state dashboard (submit + read own rows). Panel 2 counts
-# viewer_state's rows (own only); panel 3 lists them.
+# viewer_state's rows (own only); panel 3 lists them. Panel 4/5 add a
+# MULTISELECT whose own options include NULL, to exercise a NULL item
+# inside a recorded list (#548 item 3 nit: must store as real SQL NULL
+# inside value_list, not an empty string).
 cat > "$W/dash/quiz.sql" <<'EOF'
 SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
 SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
 SELECT count(*) AS n ::METRIC FROM viewer_state;
-SELECT "user" ::TABLE, dashboard, submit, name, value FROM viewer_state ORDER BY seq;
+SELECT "user" ::TABLE, dashboard, submit, name, value, value_list FROM viewer_state ORDER BY seq;
+SELECT val AS q4 ::MULTISELECT FROM (VALUES ('A'), ('B'), (NULL)) t(val);
+SELECT 'Check q4' AS quiz_4::SUBMIT, 'q4' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
 EOF
 
 # `progress`: a trainer dashboard — no ::SUBMIT of its own, read-only.
@@ -64,7 +69,22 @@ SELECT seq ::TABLE, "user" FROM read_json('__STATE_PATH__');
 EOF
 sed -i "s#__STATE_PATH__#$W/state.jsonl#" "$W/dash/leak.sql"
 
-AUTH="\"auth\": {\"mode\": \"proxy\", \"shared_secret_env\": \"SEC\", \"trusted_proxies\": [\"127.0.0.1\"], \"header_groups\": \"X-Forwarded-Groups\"}"
+# A server-issued API key for "carol", with the SAME trainers.groups
+# membership her real (proxy) identity has — #548 item 3 nit: an api_key
+# identity must never act as a trainer, whatever its claimed groups.
+APIKEY="$(python3 - "$W/keys.json" <<'PY'
+import hashlib, json, secrets, sys
+path = sys.argv[1]
+kid = "0123456789ab"
+secret = secrets.token_hex(32)
+key = f"afx_{kid}_{secret}"
+h = hashlib.sha256(key.encode()).hexdigest()
+json.dump({"keys": [{"id": kid, "sha256": h, "user": "carol", "groups": ["trainers"]}]}, open(path, "w"))
+print(key)
+PY
+)"
+
+AUTH="\"auth\": [{\"mode\": \"proxy\", \"shared_secret_env\": \"SEC\", \"trusted_proxies\": [\"127.0.0.1\"], \"header_groups\": \"X-Forwarded-Groups\"}, {\"mode\": \"api_keys\", \"file\": \"$W/keys.json\"}]"
 STATE="\"state\": {\"path\": \"$W/state.jsonl\", \"dashboards\": [\"quiz\"], \"trainers\": {\"dashboards\": [\"progress\"], \"groups\": [\"trainers\"], \"users\": []}}"
 OPTS="{$AUTH, \"policy\": \"none\", $STATE, \"log\": \"$W/requests.jsonl\", \"audit\": \"$W/audit.jsonl\"}"
 
@@ -166,5 +186,28 @@ LEAK_CODE=$(curl -s -o "$W/leak_out" -w '%{http_code}' -X POST "localhost:$PORT/
   -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: alice" -d '{"dashboard":"leak","panel":0,"vars":{}}')
 [ "$LEAK_CODE" != "200" ] || fail "a dashboard reading the state file via read_json() must fail, got 200: $(cat "$W/leak_out")"
 echo "OK: a dashboard statement cannot read the state file directly (enable_external_access stays off)"
+
+# --- #548 item 3 nit: an api_key identity is never a trainer, even with
+# the same group a real trainer has.
+CAROL_KEY_ROWS=$(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
+  -H "Authorization: Bearer $APIKEY" -d '{"dashboard":"progress","panel":1,"vars":{}}')
+echo "$CAROL_KEY_ROWS" | grep -q '"user":"alice"' && fail "an api_key identity (carol's, group trainers) must not see alice's rows: $CAROL_KEY_ROWS"
+CAROL_KEY_N=$(n_of <(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
+  -H "Authorization: Bearer $APIKEY" -d '{"dashboard":"progress","panel":0,"vars":{}}'))
+[ "$CAROL_KEY_N" = "0" ] || fail "an api_key identity must fall back to its own (here: zero) rows, got $CAROL_KEY_N: $CAROL_KEY_ROWS"
+echo "OK: an api_key identity is never a trainer, whatever its claimed groups"
+
+# --- #548 item 3 nit: a NULL item inside a recorded list is stored as a
+# real SQL NULL in value_list, never an empty string. q4's own MULTISELECT
+# options (panel 4) include a literal NULL, so ["A", null] is a valid
+# selection; its ::SUBMIT is panel 5.
+CODE=$(curl -s -o "$W/sub_out" -w '%{http_code}' -X POST "localhost:$PORT/api/submit" \
+  -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: alice" "${SUBMIT_H[@]}" \
+  -d '{"dashboard":"quiz","panel":5,"id":"c0ffee01","vars":{"q4":["A",null]}}')
+[ "$CODE" = "201" ] || fail "a MULTISELECT with a NULL option should be 201, got $CODE: $(cat "$W/sub_out")"
+Q4_ROW=$(panel alice quiz 3)
+echo "$Q4_ROW" | grep -q '"name":"q4"' || fail "expected a recorded q4 row: $Q4_ROW"
+echo "$Q4_ROW" | grep -q '"value_list":\["A",null\]' || fail "a NULL item in the list must be stored as a real SQL NULL (value_list=[\"A\",null]), not an empty string: $Q4_ROW"
+echo "OK: a NULL item inside a recorded list is stored as a real NULL, not ''"
 
 echo "PASS: state-live"
