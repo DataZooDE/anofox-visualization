@@ -1143,15 +1143,26 @@ impl Enforcer {
 
     /// Rewrite one dashboard (`(is_setup, sql)` statements, as planned).
     /// `Err((statement index, reason))` for the first statement the policy
-    /// refuses.
+    /// refuses. `server_temps` (#517 S3, plan §5): names the server itself
+    /// provides before any dashboard statement runs (`viewer_state`,
+    /// `viewer_state_latest`, for a state-enabled dashboard) — references
+    /// to them are accepted the same way a dashboard's own `CREATE TEMP`
+    /// would make a later reference accepted, but no `CREATE` for one of
+    /// these names ever reaches here (the server creates them in Rust, not
+    /// SQL); empty for every dashboard that isn't state-enabled.
     pub fn rewrite_script(
         &self,
         duck: &mut dyn Duck,
         stmts: &[(bool, String)],
+        server_temps: &[&str],
     ) -> Result<Script, (usize, String)> {
         let mut out = Script::default();
         let mut all = BTreeSet::new();
-        for (i, r) in self.rewrite_each(duck, stmts).into_iter().enumerate() {
+        for (i, r) in self
+            .rewrite_each(duck, stmts, server_temps)
+            .into_iter()
+            .enumerate()
+        {
             let (text, used, cols) = r.map_err(|e| (i, e))?;
             all.extend(used.iter().copied());
             out.stmts.push((stmts[i].0, text));
@@ -1163,13 +1174,18 @@ impl Enforcer {
 
     /// Rewrite every statement, carrying on after a refusal (for the lint):
     /// the rewritten SQL, the policy tables and the column names it uses.
+    /// `server_temps`: see [`Self::rewrite_script`].
     #[allow(clippy::type_complexity)]
     pub fn rewrite_each(
         &self,
         duck: &mut dyn Duck,
         stmts: &[(bool, String)],
+        server_temps: &[&str],
     ) -> Vec<Result<(String, BTreeSet<usize>, BTreeSet<String>), String>> {
-        let mut temps: HashSet<String> = HashSet::new();
+        let mut temps: HashSet<String> = server_temps
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
         stmts
             .iter()
             .map(|(_, sql)| {

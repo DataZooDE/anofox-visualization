@@ -396,6 +396,28 @@ pub fn valid_dashboard_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
+/// The dashboard id a `.sql` path yields when the server's own directory
+/// loader scans it (`duckext`'s `load_dashboards`: a `.sql` extension,
+/// [`std::path::Path::file_stem`], then [`valid_dashboard_id`]) — or
+/// `None` when the server would skip this path entirely (not `.sql`, no
+/// stem, or a stem that isn't a valid id). `dashboard --check --options`
+/// must derive a file's id this exact way too (review of #538 round 2):
+/// its submit/not-enabled and state/not-enabled diagnostics name the
+/// dashboard id `options.state.dashboards` is matched against, which must
+/// be the same id the running server actually registers this file under.
+/// Recomputing it differently — e.g. trimming a literal `".sql"` off the
+/// bare filename — disagrees with `file_stem()` on a name with more than
+/// one `.` before the extension (`"d.sql.sql"`: `file_stem()` strips only
+/// the last one, giving `"d.sql"`; repeatedly trimming the suffix `".sql"`
+/// strips both, giving `"d"`).
+pub fn dashboard_id_from_path(path: &std::path::Path) -> Option<String> {
+    if path.extension().and_then(|s| s.to_str()) != Some("sql") {
+        return None;
+    }
+    let id = path.file_stem()?.to_str()?.to_string();
+    valid_dashboard_id(&id).then_some(id)
+}
+
 /// A SQL string literal (`'…'` with `'` doubled). DuckDB string literals have no
 /// backslash escapes, so this is a complete escaping.
 pub fn sql_string_literal(s: &str) -> String {
@@ -561,6 +583,35 @@ pub fn dedup_last_spelling(vars: Vec<(String, String)>) -> Vec<(String, String)>
     vars
 }
 
+/// The `vars` object of a panel or submit request body: each name a valid,
+/// non-reserved identifier, at most [`MAX_VARS`] of them, each value a typed
+/// SQL literal ([`sql_literal`]) — the same parser and limits for both, so
+/// `/api/submit` accepts exactly what `/api/panel` would have (plan §4.2
+/// step 6: "parse vars exactly like a panel request"). Deduplicated by
+/// [`dedup_last_spelling`].
+pub fn parse_vars_object(v: Option<&serde_json::Value>) -> Result<Vec<(String, String)>, String> {
+    let mut vars = Vec::new();
+    if let Some(vs) = v {
+        let vs = vs.as_object().ok_or("'vars' must be an object")?;
+        if vs.len() > MAX_VARS {
+            return Err(format!("more than {MAX_VARS} variables"));
+        }
+        for (k, val) in vs {
+            if !valid_ident(k) {
+                return Err(format!("invalid variable name '{k}'"));
+            }
+            if crate::host::access::is_reserved_var(k) {
+                return Err(format!(
+                    "variable '{k}' is reserved: __claim_* (the viewer's login) and anofox_data are set by the server"
+                ));
+            }
+            let lit = sql_literal(val).map_err(|e| format!("variable '{k}': {e}"))?;
+            vars.push((k.clone(), lit));
+        }
+    }
+    Ok(dedup_last_spelling(vars))
+}
+
 /// Parse + validate a locked-mode panel request body.
 pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
     let v: serde_json::Value =
@@ -581,26 +632,7 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
         .get("panel")
         .and_then(|p| p.as_u64())
         .ok_or("'panel' must be a non-negative integer")? as usize;
-    let mut vars = Vec::new();
-    if let Some(vs) = o.get("vars") {
-        let vs = vs.as_object().ok_or("'vars' must be an object")?;
-        if vs.len() > MAX_VARS {
-            return Err(format!("more than {MAX_VARS} variables"));
-        }
-        for (k, val) in vs {
-            if !valid_ident(k) {
-                return Err(format!("invalid variable name '{k}'"));
-            }
-            if crate::host::access::is_reserved_var(k) {
-                return Err(format!(
-                    "variable '{k}' is reserved: __claim_* (the viewer's login) and anofox_data are set by the server"
-                ));
-            }
-            let lit = sql_literal(val).map_err(|e| format!("variable '{k}': {e}"))?;
-            vars.push((k.clone(), lit));
-        }
-    }
-    let vars = dedup_last_spelling(vars);
+    let vars = parse_vars_object(o.get("vars"))?;
     let page = match o.get("page") {
         None | Some(serde_json::Value::Null) => None,
         Some(p) => Some(parse_page(p)?),
@@ -611,6 +643,70 @@ pub fn parse_panel_request(body: &str) -> Result<PanelRequest, String> {
         vars,
         page,
     })
+}
+
+/// `POST /api/submit`'s body (#517 S2, plan §4.1): `{"dashboard", "panel",
+/// "id", "vars"}` — no `user`/`ts`/`seq` (those are the server's).
+#[derive(Debug, Clone)]
+pub struct SubmitRequest {
+    pub dashboard: String,
+    pub panel: usize,
+    /// Client nonce for idempotency, a retry after a network error must not
+    /// append twice. 1 to 64 hex digits (plan: "<32 hex, per click>" —
+    /// bounded a little looser than exactly 32 so a slightly different
+    /// client-side generator isn't refused for no security reason).
+    pub id: String,
+    /// `(name, typed SQL literal)`, like [`PanelRequest::vars`].
+    pub vars: Vec<(String, String)>,
+}
+
+/// A client nonce: 1 to 64 ASCII hex digits.
+pub fn valid_submit_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub fn parse_submit_request(body: &str) -> Result<SubmitRequest, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("bad request JSON: {e}"))?;
+    let o = v.as_object().ok_or("request must be a JSON object")?;
+    for k in o.keys() {
+        if !matches!(k.as_str(), "dashboard" | "panel" | "id" | "vars") {
+            return Err(format!("unknown request field '{k}'"));
+        }
+    }
+    let dashboard = o
+        .get("dashboard")
+        .and_then(|d| d.as_str())
+        .filter(|d| valid_dashboard_id(d))
+        .ok_or("'dashboard' must be a dashboard id")?
+        .to_string();
+    let panel = o
+        .get("panel")
+        .and_then(|p| p.as_u64())
+        .ok_or("'panel' must be a non-negative integer")? as usize;
+    let id = o
+        .get("id")
+        .and_then(|p| p.as_str())
+        .filter(|id| valid_submit_id(id))
+        .ok_or("'id' must be 1 to 64 hex digits")?
+        .to_string();
+    let vars = parse_vars_object(o.get("vars"))?;
+    Ok(SubmitRequest {
+        dashboard,
+        panel,
+        id,
+        vars,
+    })
+}
+
+/// The stricter CSRF gate for a write (`/api/submit`, plan §4.3): unlike
+/// [`origin_matches_host`] (used for the read-only panel/page routes, where
+/// a *missing* `Origin` is let through), a write requires `Origin` to be
+/// present *and* match `Host` — a browser's own `fetch` POST always sends
+/// one, so the real page is unaffected; a curl-style script with no Origin
+/// at all is not a use case this endpoint serves.
+pub fn origin_required_and_matches_host(origin: Option<&str>, host: Option<&str>) -> bool {
+    origin.is_some() && origin_matches_host(origin, host)
 }
 
 /// Parse + validate the `page` object of a panel request (also used by the
@@ -963,6 +1059,88 @@ pub struct DashboardMeta {
     /// `dp-as-tables` remembered state) is independent of this and still
     /// applies even when the bar is hidden.
     pub astables: bool,
+    /// `-- @tour <id> [title]` blocks (#518 PR B), in file order. See
+    /// [`parse_dashboard_meta`] for the syntax and [`Tour`] for the fields.
+    pub tours: Vec<Tour>,
+    /// `-- @tour_autostart <id>`: start this tour once per browser on a
+    /// viewer's first visit (`None` without the header, or if it names no
+    /// tour — lint checks that: `tour/autostart-unknown`).
+    pub tour_autostart: Option<String>,
+}
+
+/// One `-- @tour <id> [title]` block: an id (`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`,
+/// shared with [`crate::sql::name::valid`]), a title (the rest of the
+/// `@tour` line, or `id` with `_`/`-` turned into spaces when omitted), and
+/// its steps in file order. Neither the id's shape nor its uniqueness is
+/// checked here — see `lint::tour_diags` (`tour/bad-id`, `tour/duplicate-id`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tour {
+    pub id: String,
+    pub title: String,
+    pub steps: Vec<TourStep>,
+}
+
+/// One step of a [`Tour`]: `<target>: <text>`. `target` is `page` (a
+/// centred, spotlight-less callout) or a `-- @name`d element; `text` is
+/// shown as plain text (never HTML) in the tour's callout. Neither is
+/// validated here — see `lint::tour_diags` (`tour/unknown-panel`,
+/// `tour/long-text`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TourStep {
+    pub target: String,
+    pub text: String,
+}
+
+/// The most steps one [`Tour`] keeps before the linter warns
+/// (`tour/too-many-steps`) — steps beyond this are still parsed and shown,
+/// the limit is advisory.
+pub const MAX_TOUR_STEPS: usize = 20;
+/// The most `-- @tour` blocks one dashboard keeps before the linter warns
+/// (`tour/too-many`) — advisory, like [`MAX_TOUR_STEPS`].
+pub const MAX_TOURS: usize = 10;
+/// The longest a tour step's text may be before the linter warns
+/// (`tour/long-text`) — advisory; the text is kept in full either way.
+pub const MAX_TOUR_TEXT_CHARS: usize = 400;
+
+/// `page` is reserved as a tour step's target: a centred callout with no
+/// spotlight, for an intro or an outro. Shared with `-- @name` (#518 PR A),
+/// which reserves the same word for the same reason.
+pub const TOUR_PAGE_TARGET: &str = "page";
+
+/// `-- @tour <id> [title]` (the header line only — not its step lines, see
+/// [`tour_step_line`]): `id` is the text up to the first run of whitespace,
+/// `title` is whatever follows it, trimmed (`""` when there is none).
+pub fn tour_header_line(line: &str) -> Option<(&str, &str)> {
+    let r = header_value(line, "tour")?;
+    Some(match r.split_once(char::is_whitespace) {
+        Some((id, title)) => (id, title.trim()),
+        None => (r, ""),
+    })
+}
+
+/// `id` with `_`/`-` turned into spaces — a `-- @tour`'s default title when
+/// the author writes none.
+pub fn default_tour_title(id: &str) -> String {
+    id.chars()
+        .map(|c| if c == '_' || c == '-' { ' ' } else { c })
+        .collect()
+}
+
+/// One `-- @tour`'s step line: `--` then at least two spaces or a tab, then
+/// `<target>: <text>`. `line` is expected trimmed at its outer edges only
+/// (as `parse_dashboard_meta` passes it), so the interior run of whitespace
+/// right after `--` survives and is what tells a step line apart from an
+/// ordinary `-- @key value` header line (a single space). Only the first
+/// `:` splits target from text, so text may itself contain `:`.
+pub fn tour_step_line(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("--")?;
+    let indented = match rest.strip_prefix('\t') {
+        Some(r) => r,
+        None => rest.strip_prefix("  ")?,
+    };
+    let (target, text) = indented.trim_start().split_once(':')?;
+    let target = target.trim();
+    (!target.is_empty()).then(|| (target, text.trim()))
 }
 
 impl DashboardMeta {
@@ -1090,18 +1268,59 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 /// `-- @param name [a, b] = a`, `-- @load <extension>`, `-- @vars a, b`,
 /// `-- @group a / b`, `-- @tags a, b`, `-- @description <text>`,
 /// `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`, `-- @order N`,
-/// `-- @astables on|off` header comments (a repeated `@group`/`@nav`/
-/// `@astables` wins over the earlier one; `@tags` lines add up). A `@param` or
-/// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
-/// never viewer-settable.
+/// `-- @astables on|off`, `-- @tour <id> [title]` + its step lines,
+/// `-- @tour_autostart <id>` header comments (a repeated `@group`/`@nav`/
+/// `@astables`/`@tour_autostart` wins over the earlier one; `@tags` lines add
+/// up; `@tour` blocks each add a [`Tour`]). A `@param` or `@vars` entry
+/// naming a reserved `__claim_*` variable is ignored: claims are never
+/// viewer-settable.
+///
+/// `-- @tour <id> [title]` starts a block; the immediately following lines
+/// of the form `--` + two spaces or a tab + `<target>: <text>` are its
+/// steps, in order, until a line that isn't shaped that way (even another
+/// header line, or a blank one) ends the block — see [`tour_header_line`]
+/// and [`tour_step_line`]. Neither the id's shape, its uniqueness, a step's
+/// target, nor any of the advisory limits ([`MAX_TOURS`],
+/// [`MAX_TOUR_STEPS`], [`MAX_TOUR_TEXT_CHARS`]) are enforced here — see
+/// `lint::tour_diags`. The parser may scan the whole file, as it already
+/// does for every other header key; put `@tour` blocks in the header.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
     let mut m = DashboardMeta {
         title: id.to_string(),
         ..Default::default()
     };
+    // `-- @tour`'s step lines (#518 PR B) are the comment lines *directly
+    // following* the `@tour` line (or an already-accepted step line) — this
+    // index names the tour still accepting them; any other line (even
+    // another header key, or a blank line) closes the block.
+    let mut current_tour: Option<usize> = None;
     for line in script.lines() {
         let l = line.trim();
-        if let Some(r) = l.strip_prefix("-- @title ") {
+        if let Some(i) = current_tour {
+            if let Some((target, text)) = tour_step_line(l) {
+                m.tours[i].steps.push(TourStep {
+                    target: target.to_string(),
+                    text: text.to_string(),
+                });
+                continue;
+            }
+            current_tour = None;
+        }
+        if let Some((tid, title)) = tour_header_line(l) {
+            let title = if title.is_empty() {
+                default_tour_title(tid)
+            } else {
+                title.to_string()
+            };
+            m.tours.push(Tour {
+                id: tid.to_string(),
+                title,
+                steps: Vec::new(),
+            });
+            current_tour = Some(m.tours.len() - 1);
+        } else if let Some(r) = header_value(l, "tour_autostart") {
+            m.tour_autostart = Some(r.to_string()).filter(|s| !s.is_empty());
+        } else if let Some(r) = l.strip_prefix("-- @title ") {
             m.title = r.trim().to_string();
         } else if let Some(r) = header_value(l, "nav") {
             m.nav = Some(r.to_string()).filter(|s| !s.is_empty());
@@ -1505,6 +1724,39 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dashboard_id_from_path_matches_file_stem_not_a_repeated_suffix_trim() {
+        // Review of #538 round 2: must agree with `Path::file_stem()`
+        // (what the server's own loader uses), not with trimming a
+        // literal ".sql" suffix (which, unlike file_stem, repeats).
+        assert_eq!(
+            dashboard_id_from_path(Path::new("d.sql")),
+            Some("d".to_string())
+        );
+        // A name with an extra dot before the extension: file_stem()
+        // strips only the final ".sql", leaving the other dot in the id
+        // (".": allowed mid-id by valid_dashboard_id).
+        assert_eq!(
+            dashboard_id_from_path(Path::new("d.sql.sql")),
+            Some("d.sql".to_string())
+        );
+        // Only the last path component matters (the server's own
+        // `read_dir` isn't recursive either, but `file_stem()` itself
+        // only ever looks at the final component).
+        assert_eq!(
+            dashboard_id_from_path(Path::new("nested/dir/my-report_v2.sql")),
+            Some("my-report_v2".to_string())
+        );
+        // Not a .sql file at all (and a dotfile like ".sql" has no
+        // extension at all by `Path`'s own rules — one dot, at the
+        // start — so it is refused the same way).
+        assert_eq!(dashboard_id_from_path(Path::new("d.txt")), None);
+        assert_eq!(dashboard_id_from_path(Path::new(".sql")), None);
+        // A stem the server would never register: a space isn't in
+        // `valid_dashboard_id`'s allowed set.
+        assert_eq!(dashboard_id_from_path(Path::new("odd name.sql")), None);
+    }
 
     #[test]
     fn escaping() {
@@ -1983,6 +2235,88 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_meta_tours() {
+        // Two tours, a `page` step, and `@tour_autostart`.
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @tour cockpit_intro Cockpit in three steps\n\
+             --   page: This page lists every monitored model.\n\
+             --   severity_kpi: This is a model's severity.\n\
+             --   status_table: Click a model to open its page.\n\
+             -- @tour_autostart cockpit_intro\n\
+             -- @tour details\n\
+             --   detail_chart: Trend over time.\n\
+             SELECT 1;",
+        );
+        assert_eq!(m.tours.len(), 2);
+        assert_eq!(m.tours[0].id, "cockpit_intro");
+        assert_eq!(m.tours[0].title, "Cockpit in three steps");
+        assert_eq!(
+            m.tours[0].steps,
+            vec![
+                TourStep {
+                    target: "page".into(),
+                    text: "This page lists every monitored model.".into()
+                },
+                TourStep {
+                    target: "severity_kpi".into(),
+                    text: "This is a model's severity.".into()
+                },
+                TourStep {
+                    target: "status_table".into(),
+                    text: "Click a model to open its page.".into()
+                },
+            ]
+        );
+        assert_eq!(m.tour_autostart.as_deref(), Some("cockpit_intro"));
+        assert_eq!(m.tours[1].id, "details");
+        assert_eq!(m.tours[1].title, "details"); // no title given: id, unchanged (no `_`/`-`)
+        assert_eq!(m.tours[1].steps.len(), 1);
+
+        // No title: `_`/`-` become spaces.
+        let m = parse_dashboard_meta("s", "-- @tour my_cool-tour\nSELECT 1;");
+        assert_eq!(m.tours[0].title, "my cool tour");
+
+        // A tab character also starts a step line.
+        let m = parse_dashboard_meta("s", "-- @tour t\n--\tkpi: text\nSELECT 1;");
+        assert_eq!(m.tours[0].steps[0].target, "kpi");
+
+        // The block ends at the first non-step line — even a blank one, or
+        // another header key — so a later stray `--  x: y` isn't a step of
+        // the tour that came before it.
+        let m = parse_dashboard_meta("s", "-- @tour t\n--   a: one\n\n--   b: two\nSELECT 1;");
+        assert_eq!(m.tours[0].steps.len(), 1);
+        assert_eq!(m.tours[0].steps[0].target, "a");
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @tour t\n--   a: one\n-- @title x\n--   b: two\nSELECT 1;",
+        );
+        assert_eq!(m.tours[0].steps.len(), 1);
+
+        // A step's text may itself contain `:` — only the first one splits.
+        let m = parse_dashboard_meta("s", "-- @tour t\n--   kpi: ratio: 3:1\nSELECT 1;");
+        assert_eq!(m.tours[0].steps[0].text, "ratio: 3:1");
+
+        // A single space after `--` is a header line, not a step — single-
+        // space `-- @…` lines (even one that looks like a step but isn't
+        // indented enough) never attach.
+        let m = parse_dashboard_meta("s", "-- @tour t\n-- not a step\nSELECT 1;");
+        assert_eq!(m.tours[0].steps.len(), 0);
+
+        // Without `-- @tour`, `@tour_autostart` is still just a plain value.
+        let m = parse_dashboard_meta("s", "SELECT 1;");
+        assert_eq!((m.tours.len(), m.tour_autostart), (0, None));
+        let m = parse_dashboard_meta("s", "-- @tour_autostart\nSELECT 1;");
+        assert_eq!(m.tour_autostart, None, "an empty value is no autostart");
+
+        // Two consecutive `@tour` blocks with no steps in between.
+        let m = parse_dashboard_meta("s", "-- @tour a\n-- @tour b\n--   x: y\nSELECT 1;");
+        assert_eq!(m.tours.len(), 2);
+        assert_eq!(m.tours[0].steps.len(), 0);
+        assert_eq!(m.tours[1].steps.len(), 1);
+    }
+
+    #[test]
     fn reserved_claim_variables_are_rejected() {
         for name in [
             "__claim_user",
@@ -2096,5 +2430,72 @@ mod tests {
         assert!(too_broad(&tmp.join("anofox-runs")).is_none());
         assert!(too_broad(Path::new("/srv/runs")).is_none());
         assert!(too_broad(Path::new("/data")).is_none());
+    }
+
+    // ── #517 S2: /api/submit's own request parsing + CSRF gate ───────────
+
+    #[test]
+    fn origin_required_and_matches_host_needs_a_real_origin() {
+        assert!(origin_required_and_matches_host(
+            Some("https://d.example.com"),
+            Some("d.example.com")
+        ));
+        // Unlike `origin_matches_host`, a *missing* Origin is refused here.
+        assert!(!origin_required_and_matches_host(
+            None,
+            Some("d.example.com")
+        ));
+        assert!(!origin_required_and_matches_host(
+            Some("https://evil.example.com"),
+            Some("d.example.com")
+        ));
+    }
+
+    #[test]
+    fn submit_id_is_bounded_hex() {
+        assert!(valid_submit_id("deadbeef"));
+        assert!(valid_submit_id(&"a".repeat(64)));
+        assert!(!valid_submit_id(""));
+        assert!(!valid_submit_id(&"a".repeat(65)));
+        assert!(!valid_submit_id("not-hex!"));
+        assert!(!valid_submit_id("DEAD BEEF"));
+    }
+
+    #[test]
+    fn parse_submit_request_accepts_the_plan_example() {
+        let r = parse_submit_request(
+            r#"{"dashboard": "tutorial", "panel": 7, "id": "deadbeef", "vars": {"q1": "B", "note": "hi", "region": "EU"}}"#,
+        )
+        .unwrap();
+        assert_eq!(r.dashboard, "tutorial");
+        assert_eq!(r.panel, 7);
+        assert_eq!(r.id, "deadbeef");
+        assert_eq!(r.vars.len(), 3);
+    }
+
+    #[test]
+    fn parse_submit_request_refuses_a_user_or_seq_field() {
+        // Plan §4.1: "There is no `user`, `ts` or `seq` field" — those are
+        // the server's; a client naming one is an unknown field, not
+        // silently ignored.
+        for extra in ["user", "ts", "seq"] {
+            let body = format!(r#"{{"dashboard": "t", "panel": 0, "id": "ab", "{extra}": "x"}}"#);
+            assert!(
+                parse_submit_request(&body).is_err(),
+                "unexpected field '{extra}' should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_submit_request_refuses_a_reserved_or_invalid_var() {
+        assert!(parse_submit_request(
+            r#"{"dashboard": "t", "panel": 0, "id": "ab", "vars": {"__claim_user": "x"}}"#
+        )
+        .is_err());
+        assert!(parse_submit_request(
+            r#"{"dashboard": "t", "panel": 0, "id": "ab", "vars": {"anofox_data": "x"}}"#
+        )
+        .is_err());
     }
 }

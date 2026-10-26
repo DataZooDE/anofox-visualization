@@ -2175,7 +2175,9 @@ with the browser through wasm):
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 | `-- @shared <name>, …` | Directly above one `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement: documents that *this* directive deliberately reuses `<name>` with another one, so `dashboard --check --strict` skips `interaction/rowselect-shared-name` / `interaction/name-clash` for it — every other clash still is flagged. See *Selecting table rows* below. |
-| `-- @name <name>` | Directly above any statement that draws something — a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/`::SECTION` heading: tags its element `data-dp-name="<name>"`, a stable anchor for e2e selectors and (later) deep links / guided tours (#518). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`; names must be unique on one dashboard (`name/duplicate`); `page` is reserved (`name/reserved`); a bad name is `name/bad`; one on a statement that draws nothing warns (`name/not-drawn`). See *Interactivity* below. |
+| `-- @name <name>` | Directly above any statement that draws something — a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/`::SECTION` heading: tags its element `data-dp-name="<name>"`, a stable anchor for e2e selectors and a guided tour's target (`-- @tour`, below). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`; names must be unique on one dashboard (`name/duplicate`); `page` is reserved (`name/reserved`); a bad name is `name/bad`; one on a statement that draws nothing warns (`name/not-drawn`). See *Interactivity* below. |
+| `-- @tour <id> [title]` + step lines | A guided tour over the dashboard's own panels: see *Guided tours* below. |
+| `-- @tour_autostart <id>` | Start that tour once per browser, on a viewer's first visit: see *Guided tours* below. |
 
 `dashboard --check` warns about an empty `@nav` (`header/empty-nav`), one
 longer than 24 characters (`header/long-nav`), an empty `@group`
@@ -2528,6 +2530,78 @@ nothing) and, for the gate, `step/gate-not-boolean` / `step/gate-no-row`
 (warnings, the condition's result under the defaults used while checking)
 and `step/gate-constant` / `step/gate-unknown-variable` (warnings, the same
 checks as `::SHOW_IF`'s).
+
+### Guided tours (`-- @tour`)
+
+A tour is a client-side walkthrough over a dashboard's *existing* panels —
+a spotlight and a callout per step, Back/Next/Done — for onboarding and
+product tours. Unlike `::GUIDE_STEP`, it adds no panels and changes nothing
+a viewer can save or share by SQL alone; it lives entirely in the header
+comments, next to `-- @title`:
+
+```sql
+-- @title Which models need attention?
+-- @tour cockpit_intro Cockpit in three steps
+--   page: This page lists every monitored model and what to do next.
+--   severity_kpi: This is a model's severity.
+--   status_table: Click a model to open its Model Monitoring page.
+-- @tour_autostart cockpit_intro
+
+-- @name severity_kpi
+SELECT max(severity) ::METRIC, 'Worst severity' ::LABEL FROM problems;
+-- @name status_table
+SELECT model_id, status ::BADGE, … ::TABLE FROM status;
+```
+
+- **Syntax.** `-- @tour <id> [title]` starts a tour; `id` matches
+  `^[A-Za-z_][A-Za-z0-9_-]{0,63}$` (the same shape as `-- @name`); the title
+  is the rest of the line, or `id` with `_`/`-` turned into spaces when
+  omitted. Its steps are the comment lines *directly following* it (no
+  other line — even a blank one, or another header key — in between): `--`
+  then at least two spaces or a tab, then `<target>: <text>`. `target` is
+  either the reserved word `page` (a centred callout with no spotlight, for
+  an intro/outro) or a `-- @name` on this dashboard; `text` is up to 400
+  characters and is shown as **plain text**, never Markdown or HTML. One
+  tour holds up to 20 steps; a dashboard holds up to 10 tours. The parser
+  scans the whole file, so put `-- @tour` blocks in the header, near
+  `-- @title`.
+- **Starting.** `?tour=<id>` on the URL, the toolbar's **🧭 Tour** button
+  (a small menu when the dashboard declares more than one), or
+  `-- @tour_autostart <id>`: once per browser, per dashboard, keyed by
+  `localStorage` (never on a server, and never in the assistant's preview
+  or the ⤓ HTML export, which has no tour script at all). While a tour
+  runs, `?tour=<id>` stays in the address bar; ending it removes it.
+- **Reaching a hidden target.** Before showing a step, the tour opens
+  whichever `::TAB`/`::SUBTAB`/`::VIEW` pane its target sits in, the same
+  way a click would (`?tab=`/`?view.*` update as usual). A target inside a
+  `::GUIDE_STEP` pane is only opened when that step is **reachable** — a
+  tour never bypasses a `::GATE`. A target hidden by `::SHOW_IF` or
+  `-- @requires`, or a name that doesn't exist, is skipped (logged to the
+  console); "k of m" still counts every step as written, skipped ones
+  included. If nothing resolves at all, the tour doesn't start.
+- **Accessibility.** The callout is a non-modal dialog
+  (`role="dialog"`, `aria-modal="false"`) — the page stays clickable
+  outside it, so "click a model" keeps working. Esc ends the tour from
+  anywhere; focus moves to Next/Done on every step and returns to whatever
+  had it when the tour started once it ends. The step text is also carried
+  by a visually-hidden live region, for a screen reader that doesn't
+  announce the focus move alone. `prefers-reduced-motion` drops the
+  scroll-into-view and ring-repositioning animation; under 600px the
+  callout becomes a full-width bottom sheet, clamped on screen either way.
+- **Not access control.** Like `::SHOW_IF`/`::GATE`, a tour only changes
+  what the page shows for a moment — `/api/panel` still answers every
+  panel's statement regardless of whether a tour ever points at it.
+
+`dashboard --check` reports `tour/bad-id` / `tour/duplicate-id` (errors: not
+a plain identifier, or reused by another tour), `tour/unknown-panel` (error:
+a step target that is neither `page` nor any `-- @name`),
+`tour/autostart-unknown` (error: `-- @tour_autostart` names no tour),
+`tour/empty` (warning: no steps), `tour/long-text` (warning: over 400
+characters), `tour/too-many-steps` (warning: over 20 steps), `tour/too-many`
+(warning: over 10 tours) and `tour/stray-step` (warning: a
+`--  target: text` line right after some other header line, with no
+`-- @tour` above it — likely a mis-indented tour; as written, it's read as
+an ordinary comment).
 
 ### Loading, empty, error and "not available" panels
 

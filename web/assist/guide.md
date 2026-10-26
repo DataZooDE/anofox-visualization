@@ -135,7 +135,7 @@ FROM sales GROUP BY ALL ORDER BY 2 DESC;
 - `dashboard --check` reports `theme/unknown`, `theme/multiple`, `locale/unknown`, `period/bad-spec`, `kpi/bad-delta-format`, `kpi/no-delta`, `kpi/sparkline-not-list`, `chrome/bad-url` (logos: relative, `https:` or `data:image/`).
 - For interactions it reports `interaction/bad-value` (a malformed `::SELECT_AS` / `::DRILL` value), `interaction/name-clash` (an input, a `::SELECT_AS` and a `::DRILL` level writing the same variable — rename one), `interaction/rowselect-shared-name` (two `::ROWSELECT` tables whose first column ends up with the same name — a click in either toggles both) and `link/bad-url` (a `::LINK` that is not `#tab`, `?…`, a path or http(s)); it primes `::SELECT_AS` / `::DRILL` variables to "nothing selected / top level" like the browser. When the sharing is deliberate (several registers fanning in to one detail panel, or a dropdown and a `::ROWSELECT` meant to hand a selection to each other), put `-- @shared <name>` directly above the `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement that would otherwise be flagged — `--check --strict` then skips both lints for just that name, everything else still checked. A `-- @shared` name the statement doesn't itself set (a typo) is flagged on its own: `interaction/shared-unused`.
 - `dashboard --themes` lists the built-ins; `dashboard file.sql --theme dark` / `serve … --theme T` set a default the script's `::THEME` overrides.
-- **Stable names**: `-- @name <name>` directly above any statement that draws something (a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, a `::LABEL`/`::SECTION` heading) tags its element `data-dp-name="<name>"` — a stable e2e selector, and later a deep-link / guided-tour target (#518). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`, unique per dashboard; `page` is reserved. `--check` reports `name/bad`, `name/reserved`, `name/duplicate` (errors) and `name/not-drawn` (a name on setup or an invisible directive).
+- **Stable names**: `-- @name <name>` directly above any statement that draws something (a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, a `::LABEL`/`::SECTION` heading) tags its element `data-dp-name="<name>"` — a stable e2e selector and a guided tour's target (`-- @tour`, below). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`, unique per dashboard; `page` is reserved. `--check` reports `name/bad`, `name/reserved`, `name/duplicate` (errors) and `name/not-drawn` (a name on setup or an invisible directive).
 
 ## Contract plots as panels
 
@@ -403,6 +403,20 @@ SELECT 'Nice work — you can revisit any step from the list above.' ::MARKDOWN;
 ```
 
 The step variable (`lesson` above; `step`/`step_2`/… for unnamed groups) is an ordinary `getvariable()` name, readable from any panel and carried in the URL as `?v.lesson=n`; list it in `-- @vars` if the dashboard declares one. The gate uses the same fail-closed rule as `::SHOW_IF` (`FALSE`/`NULL`/no row/non-boolean/an error all hold Next closed). It's common for a gate to read its own step's quiz (the shape above) — both the interactive browser and `dashboard --check` check that reading with the quiz's own input default already bound, so the canonical pattern lints clean. The step list lets a viewer jump to any step up to the furthest one whose gate holds, and clamps a URL/seed asking for one beyond that. **Not access control**: `/api/panel` answers every step's statement whether its gate holds or not. A `::GUIDE_STEP` marker closes an open `::VIEW` group / `::GROUP` box, like a `::TAB` does; it can't open inside a `::SUBTAB` (`step/inside-subtab`) — a sequence is a sibling of `::SUBTAB` under a `::TAB`, never nested in one. Static output (`--svg`, the CLI HTML, the script-free served page, ⤓ HTML export) flattens the sequence: every step draws in order under a "Step n of N · Label" heading, gates ignored.
+
+### Guided tours (`-- @tour`)
+
+A client-side walkthrough over a dashboard's *existing* panels — a spotlight + callout per step, Back/Next/Done — for onboarding and product tours. Unlike `::GUIDE_STEP` it adds no panels; it lives entirely in header comments, next to `-- @title`, and targets statements by their `-- @name`:
+
+```sql skip
+-- @tour cockpit_intro Cockpit in three steps
+--   page: This page lists every monitored model and what to do next.
+--   severity_kpi: This is a model's severity.
+--   status_table: Click a model to open its Model Monitoring page.
+-- @tour_autostart cockpit_intro
+```
+
+`id` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`; its steps are the comment lines *directly following* it (`--` + two spaces or a tab + `target: text`) — a blank line, or any other header line, ends the block. `target` is `page` (a centred callout, no spotlight — for an intro/outro) or a `-- @name` on this dashboard; `text` is up to 400 characters, shown as plain text only (never Markdown/HTML). Up to 20 steps per tour, 10 tours per dashboard. Start it with `?tour=<id>`, the toolbar's **🧭 Tour** button, or once per browser with `-- @tour_autostart <id>` (never during a preview or in the ⤓ HTML export). The tour opens whichever tab/sub-tab/`::VIEW` pane a target sits in, like a click would; a target inside a `::GUIDE_STEP` pane is only opened when that step is reachable (a tour never bypasses a `::GATE`); an unknown or hidden (`::SHOW_IF`/`-- @requires`) target is skipped. **Not access control**: like `::SHOW_IF`, it only changes what the page shows for a moment. `--check` reports `tour/bad-id`, `tour/duplicate-id`, `tour/unknown-panel`, `tour/autostart-unknown` (errors) and `tour/empty`, `tour/long-text`, `tour/too-many-steps`, `tour/too-many`, `tour/stray-step` (warnings).
 
 ## Design contract
 

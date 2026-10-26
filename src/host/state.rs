@@ -301,6 +301,28 @@ impl StateOptions {
                 ));
             }
         }
+        // #517 S3, plan §5 "name resolution without a policy": read-back
+        // (`viewer_state`) relies on an unqualified reference always
+        // resolving to the per-connection TEMP table, never a same-named
+        // object `options.search_path` points at. Verified against both
+        // pinned DuckDB builds: a `SET search_path` never moves `temp`
+        // out of first place, however many entries it names or whichever
+        // schema they are — but this is pinning an *observed* behaviour,
+        // not a documented guarantee, so a multi-entry search_path still
+        // refuses rather than bet a viewer's read-back isolation on it
+        // continuing to hold in a future DuckDB. A single-entry path
+        // (today's only supported shape with an access policy, too) is
+        // unaffected.
+        if ctx.search_path_entries > 1 {
+            return Err(
+                "options.state needs options.search_path to name at most one database: \
+                 whether an unqualified viewer_state always resolves to the server's own \
+                 per-request temp (never something options.search_path points at) is \
+                 pinned by a test against the shipped DuckDB builds, not guaranteed by \
+                 DuckDB itself for an arbitrary search_path"
+                    .into(),
+            );
+        }
         check_path_rules(&self.path, ctx.data_dir, ctx.dashboard_dir)?;
         Ok(())
     }
@@ -321,6 +343,8 @@ pub struct StartContext<'a> {
     pub known_dashboards: &'a [String],
     /// Table/view names already defined in the snapshot's default database.
     pub reserved_names: &'a [String],
+    /// Number of entries in `options.search_path` (0: unset, the default).
+    pub search_path_entries: usize,
 }
 
 /// Plan §1's placement rules for `options.state.path`. Fails closed: any
@@ -351,6 +375,20 @@ pub fn check_path_rules(
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("/"),
     };
+    // `Store::open` opens the parent with `O_NOFOLLOW` and refuses a
+    // symlink outright (review of #530 residual nit 1) — `canonicalize`
+    // below would otherwise silently follow one and validate whatever it
+    // resolves to, passing this check only for `open` to then refuse for
+    // a reason this function never told the operator about.
+    let parent_symlink_meta = std::fs::symlink_metadata(parent_raw)
+        .map_err(|e| format!("options.state.path: '{}': {e}", parent_raw.display()))?;
+    if parent_symlink_meta.file_type().is_symlink() {
+        return Err(format!(
+            "options.state.path: '{}' is a symlink — point options.state.path at the real \
+             directory, not a link to it",
+            parent_raw.display()
+        ));
+    }
     let parent = std::fs::canonicalize(parent_raw)
         .map_err(|e| format!("options.state.path: '{}': {e}", parent_raw.display()))?;
     if !parent.is_dir() {
@@ -1486,6 +1524,28 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn check_path_rules_refuses_a_symlinked_parent_like_store_open_does() {
+        // Residual nit from the #530 review: `check_path_rules` used to
+        // `canonicalize` straight through a symlinked parent and validate
+        // whatever it resolved to, passing a config `Store::open` (which
+        // opens the parent with `O_NOFOLLOW`) would then refuse — fixed
+        // so both agree, with the clearer message coming from the
+        // earlier, config-time check.
+        let root = tmp("symlink-parent-check");
+        mkdir(&root);
+        let dash = root.join("dashboards");
+        mkdir(&dash);
+        let real_dir = root.join("real");
+        mkdir(&real_dir);
+        let link_dir = root.join("link");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+        let e = check_path_rules(&link_dir.join("state.jsonl"), None, &dash).unwrap_err();
+        assert!(e.contains("symlink"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn path_inside_system_temp_dir_is_refused() {
         let dash = tmp("temp-dash");
@@ -1551,6 +1611,7 @@ mod tests {
             dashboard_dir,
             known_dashboards: known,
             reserved_names: reserved,
+            search_path_entries: 0,
         }
     }
 
@@ -1571,6 +1632,35 @@ mod tests {
         ctx.has_auth = false;
         let e = o.validate_start(&ctx).unwrap_err();
         assert!(e.contains("options.auth"), "{e}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_start_refuses_a_multi_entry_search_path() {
+        // #517 S3, plan §5: read-back relies on an unqualified
+        // `viewer_state` always resolving to the per-request TEMP, which a
+        // test against the shipped DuckDB builds pins — but only for a
+        // single-entry (or unset) search_path; refuse rather than extend
+        // that pin to an untested shape.
+        let root = tmp("search-path");
+        mkdir(&root);
+        let dash = root.join("dashboards");
+        mkdir(&dash);
+        let o = StateOptions::parse(&json!({
+            "path": root.join("store").join("s.jsonl").to_str().unwrap(),
+            "dashboards": ["tutorial"]
+        }))
+        .unwrap();
+        mkdir(&root.join("store"));
+        let known = vec!["tutorial".to_string()];
+        let mut ctx = base_ctx(&dash, &known, &[]);
+        ctx.search_path_entries = 2;
+        let e = o.validate_start(&ctx).unwrap_err();
+        assert!(e.contains("options.search_path"), "{e}");
+        // One entry (or none) is fine (checked by every other test using
+        // `base_ctx`'s default of 0 — this just confirms 1 specifically).
+        ctx.search_path_entries = 1;
+        assert!(o.validate_start(&ctx).is_ok());
         std::fs::remove_dir_all(&root).ok();
     }
 

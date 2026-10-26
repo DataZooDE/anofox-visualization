@@ -645,12 +645,17 @@ fn cmd_check(args: &[String]) {
     let mut strict = false; // --strict makes design/* warnings fail the exit code
                             // --data <dir>: the data root a locked server sets as anofox_data.
     let mut data: Option<String> = None;
+    // --options locked.json (#517 S2): the locked server's own options
+    // file, for submit/not-enabled and state/not-enabled — whether this
+    // dashboard's id is actually named in that file's options.state.
+    let mut options: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--db" => db = it.next().cloned(),
             "--data" => data = it.next().cloned(),
             "--policy" => policy = it.next().cloned(),
+            "--options" => options = it.next().cloned(),
             "--json" => {}
             "--no-design" => design = false,
             "--strict" => strict = true,
@@ -661,7 +666,7 @@ fn cmd_check(args: &[String]) {
     let Some(path) = path else {
         eprintln!(
             "usage: dashboard --check <file.sql | folder> [--json] [--db prebuilt.duckdb] \
-             [--policy policy.json] [--data dir] [--strict] [--no-design]"
+             [--policy policy.json] [--data dir] [--options locked.json] [--strict] [--no-design]"
         );
         std::process::exit(2);
     };
@@ -678,6 +683,37 @@ fn cmd_check(args: &[String]) {
     // `SET VARIABLE anofox_data = '<dir>'` opens every session (as on a
     // locked server, before the dashboard's own statements).
     let data_set = data.as_deref().map(data_set_stmt).unwrap_or_default();
+    // (submit-enabled dashboards, state-enabled dashboards) from
+    // `--options`'s `options.state`, or `None` when `--options` wasn't
+    // given — submit/not-enabled and state/not-enabled are skipped
+    // entirely then (plan §3: "With --options locked.json").
+    let state_enablement: Option<(Vec<String>, Vec<String>)> = options.as_deref().map(|p| {
+        let json = read(p);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| {
+            eprintln!("--options: bad JSON: {e}");
+            std::process::exit(2);
+        });
+        let m = v.as_object().unwrap_or_else(|| {
+            eprintln!("--options must be a JSON object");
+            std::process::exit(2);
+        });
+        match m.get("state") {
+            Some(state_val) => {
+                let parsed = anofox_visualization::host::state::StateOptions::parse(state_val)
+                    .unwrap_or_else(|e| {
+                        eprintln!("--options: state: {e}");
+                        std::process::exit(2);
+                    });
+                let state_enabled: Vec<String> = parsed
+                    .named_dashboards()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                (parsed.dashboards.clone(), state_enabled)
+            }
+            None => (Vec::new(), Vec::new()),
+        }
+    });
     let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
         // #435: one persistent session per file (in-memory, or read-only
         // against --db) backs the whole check — not a fresh process per
@@ -737,11 +773,35 @@ fn cmd_check(args: &[String]) {
         for (n, script) in &scripts {
             let mut d = lint_one(script);
             d.extend(extra.iter().filter(|(f, _)| f == n).map(|(_, d)| d.clone()));
+            // The exact id the running server's own loader would derive
+            // for this file (review of #538 round 2: reuse
+            // `dashboard_id_from_path`, not a hand-rolled ".sql" trim —
+            // `str::trim_end_matches` repeats, `Path::file_stem` doesn't,
+            // so they disagree on a name like "d.sql.sql"). `None`: the
+            // server would skip this file outright (not even load it as
+            // a dashboard), so there is no submit/state enablement to
+            // report either way.
+            if let (Some((submit_ok, state_ok)), Some(id)) =
+                (&state_enablement, sv::dashboard_id_from_path(Path::new(n)))
+            {
+                d.extend(lint::state_enablement_diags(
+                    script, &id, submit_ok, state_ok,
+                ));
+            }
             files.push((n.clone(), d));
         }
     } else {
         let script = read(&path);
-        files.push((path.clone(), lint_one(&script)));
+        let mut d = lint_one(&script);
+        if let (Some((submit_ok, state_ok)), Some(id)) = (
+            &state_enablement,
+            sv::dashboard_id_from_path(Path::new(&path)),
+        ) {
+            d.extend(lint::state_enablement_diags(
+                &script, &id, submit_ok, state_ok,
+            ));
+        }
+        files.push((path.clone(), d));
     }
 
     let all = || files.iter().flat_map(|(_, d)| d.iter());
@@ -1066,6 +1126,13 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
                      auth/policy make no sense for a site with no server behind it)"
                 );
                 return Err(msg);
+            }
+            "state" => {
+                return Err(
+                    "options.state: a static site cannot store submissions (needs the \
+                     dashboard server)"
+                        .into(),
+                );
             }
             other => match serve_options::lookup(other) {
                 // A real `anofox_serve_dashboards` option with no effect on
@@ -1879,6 +1946,13 @@ mod site_tests {
         assert!(e.contains("unknown key 'auth'"), "{e}");
         let e = parse_site_options(Some(r#"{"policy": "none"}"#)).unwrap_err();
         assert!(e.contains("unknown key 'policy'"), "{e}");
+    }
+
+    #[test]
+    fn state_is_refused_for_a_site_with_no_server() {
+        // #517 S2, plan §2: a static site cannot store submissions.
+        let e = parse_site_options(Some(r#"{"state": {"path": "s.jsonl"}}"#)).unwrap_err();
+        assert!(e.contains("cannot store submissions"), "{e}");
     }
 
     #[test]

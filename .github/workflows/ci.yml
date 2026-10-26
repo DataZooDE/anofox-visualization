@@ -573,6 +573,19 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/steps-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/tour-e2e.mjs (#518 PR B): on web/examples/supply-chain.sql's
+      # `amplify_tour`, `?tour=<id>` starts it ("1 of 4", a centred `page`
+      # step), Next/Back open whichever tab a step's target sits in and the
+      # ring tracks it, Esc ends the tour and returns focus, the toolbar's
+      # Tour button starts it, an unknown target is skipped, a cross-filter
+      # re-run keeps the ring on the re-rendered target, 390px is a bottom
+      # sheet with no horizontal scroll, `-- @tour_autostart` fires once (not
+      # again on reload), and garbage `?tour=` does nothing — reuses the
+      # :8947 server and Chromium above.
+      - name: Guided tour e2e (#518)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/tour-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/dropdown-search-e2e.mjs (#411): above ~50 options (or forced
       # by 'search'/'native'::DROPDOWN_STYLE) a ::DROPDOWN renders a
       # searchable combobox — filtering by value/::OPTION_LABEL, Arrow keys +
