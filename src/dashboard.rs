@@ -1828,7 +1828,7 @@ fn link_label(url: &str) -> String {
 }
 
 /// Line height of a headless ::MARKDOWN box.
-const MD_LINE: f64 = 18.0;
+pub(crate) const MD_LINE: f64 = 18.0;
 
 /// A static ::IMAGE panel's resolved content (#514).
 struct ImagePanel {
@@ -1902,7 +1902,10 @@ fn image_aspect(src: &str, asset_root: Option<&std::path::Path>) -> (f64, f64) {
 }
 
 /// The text of a ::MARKDOWN panel, if it is one.
-fn markdown_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<String> {
+pub(crate) fn markdown_text(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+) -> Option<String> {
     let (i, _) = roles.iter().find(|(_, r)| matches!(r, Role::Markdown))?;
     column_at(rows, *i)
         .and_then(|(_, v)| v.first())
@@ -1977,7 +1980,7 @@ fn panel_chrome(
 /// does not depend on a script. An unknown column, or anything that is not a
 /// `{{…}}` placeholder (a `$…$` TeX formula, `**bold**`, …), is left exactly
 /// as written for `markdown_lines` below to handle (#327).
-fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale) -> String {
+pub(crate) fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale) -> String {
     let keys: Vec<&String> = rows.iter().map(|(n, _)| n).collect();
     let mut out = String::new();
     let mut rest = md;
@@ -2075,7 +2078,7 @@ const MD_SIZE: f64 = 13.0;
 /// not a fixed chars-per-line guess (#569: the old guess under-counted how
 /// much text actually fits at the browser's real proportional-font width —
 /// 5 ragged lines with a wide empty right margin where the browser fits 3).
-fn markdown_lines(md: &str, w: f64) -> Vec<String> {
+pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<String> {
     // 0.96: a small safety cushion against text_width's own estimate error
     // (it models Hanken Grotesk; a box without that font, e.g. this crate's
     // own rsvg-based PNG crops, substitutes a wider fallback — see
@@ -2174,7 +2177,7 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
 /// One [`markdown_lines`] line as SVG text content (escaped). Formula words
 /// are now already plain text ([`crate::math::tex_to_text`], #351), so this
 /// is no longer anything more than that.
-fn markdown_line_svg(line: &str) -> String {
+pub(crate) fn markdown_line_svg(line: &str) -> String {
     esc(line)
 }
 
