@@ -1167,6 +1167,17 @@ fn rewrite_list(list: &str) -> Rewritten {
                     }
                     format!("{core} AS c{i}")
                 }
+                // #517 S2: the submit id for the audit log ("<submit id>
+                // seq=<n>", plan §4.6) is the author's own column name —
+                // kept the same way ::VIEW's group name is, instead of
+                // being erased into `c{i}` like a plain role.
+                Role::Submit => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 // A `::GUIDE_STEP` marker's explicit `AS alias` names its
                 // group's step variable (#516, decision 4) — kept in
                 // `names` (`steps::assign_steps` reads it back), the
