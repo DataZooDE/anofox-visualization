@@ -95,6 +95,15 @@ pub struct Diagnostic {
     /// another statement) | `name/not-drawn` (warning: the statement is
     /// setup, or a layout directive with no element of its own, so the name
     /// never reaches the page).
+    /// `-- @tour` guided tours ([`tour_diags`], #518 PR B): `tour/bad-id` |
+    /// `tour/duplicate-id` | `tour/unknown-panel` (errors: not a plain
+    /// identifier, reused by another tour, or a step target that is
+    /// neither `page` nor any `-- @name`) | `tour/autostart-unknown` (an
+    /// error: `-- @tour_autostart` names no tour) | `tour/empty` |
+    /// `tour/long-text` | `tour/too-many-steps` | `tour/too-many` |
+    /// `tour/stray-step` (warnings: no steps, a step's text over 400
+    /// characters, over 20 steps, over 10 tours, a `--  x: y` line right
+    /// after a non-tour header line — likely mis-indented).
     /// `::GUIDE_STEP` groups ([`step_diags`], #516): `step/inside-subtab` |
     /// `step/var-clash` | `step/var-reserved` | `step/gate-without-step`
     /// (errors) | `step/mixed-with-subtab` | `step/lone` |
@@ -1942,6 +1951,7 @@ where
     diags.extend(fit_diags(&plan));
     diags.extend(show_if_diags(&plan));
     diags.extend(name_diags(&plan));
+    diags.extend(tour_diags(script, &plan));
     diags.extend(step_diags(&plan, script));
     diags
 }
@@ -2112,6 +2122,211 @@ fn name_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                           directive with no element of its own) — it never reaches the page"
                     .into(),
                 sql: short(i),
+            });
+        }
+    }
+    diags
+}
+
+/// Is `l` (trimmed at its outer edges, like [`crate::host::serving::parse_dashboard_meta`]
+/// passes it) some OTHER recognized header-comment line — any key
+/// `parse_dashboard_meta` itself understands, besides `@tour`/
+/// `@tour_autostart`? Used only by [`tour_diags`]'s `tour/stray-step` check.
+fn other_header_line(l: &str) -> bool {
+    use crate::host::serving::header_value;
+    [
+        "nav",
+        "group",
+        "description",
+        "owner",
+        "certified",
+        "order",
+        "astables",
+        "tags",
+    ]
+    .iter()
+    .any(|k| header_value(l, k).is_some())
+        || l.strip_prefix("-- @title ").is_some()
+        || l.strip_prefix("-- @refresh ").is_some()
+        || l.strip_prefix("-- @load ").is_some()
+        || l.strip_prefix("-- @vars ").is_some()
+        || l.strip_prefix("-- @param ").is_some()
+}
+
+/// `-- @tour` guided tours (#518 PR B): see [`Diagnostic::code`] for the
+/// full `tour/*` list. Needs the raw `script` (a tour's header comments
+/// aren't statements, so [`sql::plan`] never sees them) and `plan` (to
+/// cross-check a step's target against every `-- @name`, #518 PR A).
+/// Replays [`crate::host::serving::parse_dashboard_meta`]'s own tour/step
+/// adjacency so every diagnostic points at its own line — that parser
+/// itself doesn't enforce any of this: a bad id, an unknown target, an
+/// over-long tour, or a mis-indented step line all still parse, silently.
+fn tour_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    use crate::host::serving::{
+        header_value, tour_header_line, tour_step_line, MAX_TOURS, MAX_TOUR_STEPS,
+        MAX_TOUR_TEXT_CHARS, TOUR_PAGE_TARGET,
+    };
+    let mut diags = Vec::new();
+    let names: std::collections::HashSet<&str> =
+        plan.iter().filter_map(|p| p.name.as_deref()).collect();
+
+    // One tour: its id, header line (for diagnostics with no better line to
+    // point at) and its steps (target, text, step line).
+    struct T<'a> {
+        id: &'a str,
+        line: &'a str,
+        steps: Vec<(&'a str, &'a str, &'a str)>,
+    }
+    let mut tours: Vec<T> = Vec::new();
+    let mut current: Option<usize> = None;
+    let mut ids_seen: Vec<&str> = Vec::new();
+    let mut autostart: Option<(&str, &str)> = None; // (id, its line)
+                                                    // Did the PREVIOUS line recognizably belong to the header (another key,
+                                                    // or this tour's own header/step lines)? Only a step-shaped line right
+                                                    // after one of THOSE is flagged `tour/stray-step` — a blank line, or an
+                                                    // ordinary comment, in between means it's probably not a mis-indented
+                                                    // tour at all.
+    let mut prev_recognized = false;
+    for line in script.lines() {
+        let l = line.trim();
+        if let Some(i) = current {
+            if let Some((target, text)) = tour_step_line(l) {
+                tours[i].steps.push((target, text, l));
+                prev_recognized = true;
+                continue;
+            }
+            current = None;
+        }
+        if let Some((tid, _)) = tour_header_line(l) {
+            if ids_seen.contains(&tid) {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: 0,
+                    code: "tour/duplicate-id",
+                    message: format!(
+                        "-- @tour `{tid}` is already used by another tour on this dashboard"
+                    ),
+                    sql: one_line(l),
+                });
+            } else {
+                ids_seen.push(tid);
+            }
+            if !sql::name::valid(tid) {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: 0,
+                    code: "tour/bad-id",
+                    message: format!(
+                        "-- @tour `{tid}` is not a plain identifier — use \
+                         `^[A-Za-z_][A-Za-z0-9_-]{{0,63}}$`"
+                    ),
+                    sql: one_line(l),
+                });
+            }
+            tours.push(T {
+                id: tid,
+                line: l,
+                steps: Vec::new(),
+            });
+            current = Some(tours.len() - 1);
+            prev_recognized = true;
+        } else if let Some(r) = header_value(l, "tour_autostart") {
+            if !r.is_empty() {
+                autostart = Some((r, l));
+            }
+            prev_recognized = true;
+        } else if tour_step_line(l).is_some() && prev_recognized {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: 0,
+                code: "tour/stray-step",
+                message: "a `--  <target>: <text>` line right after a header line, with no \
+                          `-- @tour` above it — likely a mis-indented tour (as written, it's \
+                          just a comment)"
+                    .into(),
+                sql: one_line(l),
+            });
+            prev_recognized = false;
+        } else {
+            prev_recognized = other_header_line(l);
+        }
+    }
+    if tours.len() > MAX_TOURS {
+        diags.push(Diagnostic {
+            severity: Severity::Warning,
+            stmt: 0,
+            code: "tour/too-many",
+            message: format!(
+                "{} tours on this dashboard — keep it to {MAX_TOURS} or fewer (too many \
+                 crowd the toolbar's Tour menu)",
+                tours.len()
+            ),
+            sql: one_line(tours.last().map_or("", |t| t.line)),
+        });
+    }
+    for t in &tours {
+        if t.steps.is_empty() {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: 0,
+                code: "tour/empty",
+                message: format!("-- @tour `{}` has no steps — it never starts", t.id),
+                sql: one_line(t.line),
+            });
+        }
+        if t.steps.len() > MAX_TOUR_STEPS {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: 0,
+                code: "tour/too-many-steps",
+                message: format!(
+                    "-- @tour `{}` has {} steps — keep it to {MAX_TOUR_STEPS} or fewer (a long \
+                     tour loses the viewer)",
+                    t.id,
+                    t.steps.len()
+                ),
+                sql: one_line(t.line),
+            });
+        }
+        for (target, text, line) in &t.steps {
+            if *target != TOUR_PAGE_TARGET && !names.contains(target) {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt: 0,
+                    code: "tour/unknown-panel",
+                    message: format!(
+                        "-- @tour `{}`: `{target}` is neither `page` nor any `-- @name` on this \
+                         dashboard — this step is skipped",
+                        t.id
+                    ),
+                    sql: one_line(line),
+                });
+            }
+            if text.chars().count() > MAX_TOUR_TEXT_CHARS {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt: 0,
+                    code: "tour/long-text",
+                    message: format!(
+                        "-- @tour `{}`: this step's text is {} characters — keep it to \
+                         {MAX_TOUR_TEXT_CHARS} or fewer (the callout is meant to be read at a \
+                         glance)",
+                        t.id,
+                        text.chars().count()
+                    ),
+                    sql: one_line(line),
+                });
+            }
+        }
+    }
+    if let Some((id, line)) = autostart {
+        if !ids_seen.contains(&id) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: 0,
+                code: "tour/autostart-unknown",
+                message: format!("-- @tour_autostart `{id}` names no `-- @tour` on this dashboard"),
+                sql: one_line(line),
             });
         }
     }
@@ -8160,6 +8375,63 @@ mod design_tests {
             codes("-- @name 1bad\nSELECT 6::SPAN;\nSELECT 1::METRIC;"),
             [(1, "name/bad"), (1, "name/not-drawn")]
         );
+    }
+
+    #[test]
+    fn tour_diags_flags_every_code() {
+        let codes = |script: &str| -> Vec<&'static str> {
+            tour_diags(script, &sql::plan(script))
+                .iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        // A clean tour pointing at `page` and a real `-- @name`: no diagnostic.
+        assert!(codes(
+            "-- @tour t Intro\n--   page: hello\n--   kpi: a kpi\n-- @name kpi\nSELECT 1::METRIC;"
+        )
+        .is_empty());
+        // Not a plain identifier.
+        assert_eq!(codes("-- @tour 1bad\n--   page: x\n"), ["tour/bad-id"]);
+        // The same id on two tours.
+        assert_eq!(
+            codes("-- @tour t\n--   page: x\n-- @tour t\n--   page: y\n"),
+            ["tour/duplicate-id"]
+        );
+        // No steps.
+        assert_eq!(codes("-- @tour t\n"), ["tour/empty"]);
+        // Neither `page` nor any `-- @name`.
+        assert_eq!(codes("-- @tour t\n--   nope: x\n"), ["tour/unknown-panel"]);
+        // Over 400 characters.
+        assert_eq!(
+            codes(&format!("-- @tour t\n--   page: {}\n", "x".repeat(401))),
+            ["tour/long-text"]
+        );
+        // Over 20 steps.
+        let many_steps = (0..21)
+            .map(|i| format!("--   page: step {i}\n"))
+            .collect::<String>();
+        assert_eq!(
+            codes(&format!("-- @tour t\n{many_steps}")),
+            ["tour/too-many-steps"]
+        );
+        // Over 10 tours.
+        let many_tours = (0..11)
+            .map(|i| format!("-- @tour t{i}\n--   page: x\n"))
+            .collect::<String>();
+        assert_eq!(codes(&many_tours), ["tour/too-many"]);
+        // `-- @tour_autostart` naming no tour.
+        assert_eq!(
+            codes("-- @tour_autostart nope\n-- @tour t\n--   page: x\n"),
+            ["tour/autostart-unknown"]
+        );
+        // `-- @tour_autostart` naming a real tour: clean.
+        assert!(codes("-- @tour_autostart t\n-- @tour t\n--   page: x\n").is_empty());
+        // A step-shaped line right after another header line, with no
+        // `-- @tour` above it — likely mis-indented.
+        assert_eq!(codes("-- @owner Ops\n--   x: y\n"), ["tour/stray-step"]);
+        // The same, but after a blank/ordinary comment line: not flagged
+        // (most likely just a comment, not a mis-indented tour).
+        assert!(codes("-- plain comment\n--   x: y\n").is_empty());
     }
 }
 

@@ -4073,6 +4073,14 @@ function dashStateRestore(saved) {
   dpVars = saved.dpVars;
 }
 function loadDash(name, sql, key) {
+  // #518: a running tour belongs to the dashboard that started it — its
+  // overlay (scrim/ring/pop) lives outside `.dash` (so it survives a
+  // cross-filter re-run of the SAME dashboard) and so is never otherwise
+  // torn down by a run; leaving it up over a DIFFERENT dashboard would
+  // misdirect the spotlight at the wrong panels, or just sit there and
+  // intercept clicks. No focus to restore: the viewer just picked a new
+  // dashboard from elsewhere.
+  tourEnd(false);
   // #244: leaving a dashboard exits an active preview first (no rerun
   // prompt) — the preview's "before" state belongs to the dashboard we're
   // about to replace, not to the new one.
@@ -4168,6 +4176,7 @@ async function previewEnter({ sql, run: runner }) {
   previewRefreshSaved = $("refresh") ? $("refresh").value : null;
   previewSaved = dashStateSave();
   dashStateReset();
+  tourEnd(false); // #518: a tour never runs during a preview — see loadDash()
   preview = Object.freeze({ sql, run: runner });
   document.body.classList.add("previewing");
   if ($("preview-bar")) $("preview-bar").hidden = false;
@@ -6224,6 +6233,546 @@ function condHolds(v) {
 function tagName(el, s) {
   if (el && s && s.name && !el.dataset.dpName) el.dataset.dpName = s.name;
 }
+
+// ---- #518: guided tours (`-- @tour <id> [title]`) ----
+// Client-only: the servers never see a tour, only the dashboard's own SQL
+// text they already send (`served_index`'s "sql", or the builder's own
+// editor). State lives in one object, `dpTour`, `null` while no tour runs:
+// `{id, title, steps: [{target, text}], k, prevFocus, target}`.
+// `steps`/`k` index the tour's full, as-written list — "k of m" (decision
+// 7) always counts against that list, even when earlier/later steps are
+// skipped (their target doesn't resolve, or sits behind a closed #516
+// ::GATE). Never starts during the assistant preview (`preview`) or the
+// ⤓ HTML export (that output has no app.js at all — see downloadHtml()).
+let dpTour = null;
+let dpTourBtn = null;
+let dpTourMenu = null;
+let dpTourRAF = null;
+let dpTourOutsideClickWired = false; // the document click listener below is installed once, ever
+
+// `^[A-Za-z_][A-Za-z0-9_-]{0,63}$` — the same shape `src/sql/name.rs::valid`
+// and `src/host/serving.rs::tour_header_line` give a tour/panel id.
+const TOUR_ID_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+
+// `?tour=<id>` (pure, side-effect-free — unit-tested directly): `null` when
+// absent, empty, too long, or not a well-formed id (repeated `?tour=` keys:
+// `URLSearchParams.get` already answers with the first one).
+function readTourParam(search) {
+  let v;
+  try {
+    v = new URLSearchParams(search).get("tour");
+  } catch (_) {
+    return null;
+  }
+  return v && TOUR_ID_RE.test(v) ? v : null;
+}
+function setTourUrlParam(id) {
+  if (preview) return; // #244: the URL never carries the preview's state
+  try {
+    const u = new URL(location.href);
+    u.searchParams.set("tour", id);
+    history.replaceState(null, "", u);
+  } catch (_) {}
+}
+function clearTourUrlParam() {
+  if (preview) return;
+  try {
+    const u = new URL(location.href);
+    u.searchParams.delete("tour");
+    history.replaceState(null, "", u);
+  } catch (_) {}
+}
+
+// Where a tour's "seen" flag is filed: the served dashboard's own id, else
+// the builder's open entry ("ex:<id>" | "my:<id>"), else a last-resort
+// constant (an unsaved, unlinked draft — autostart still only fires once
+// per browser for it, just not distinguished from another unsaved draft).
+function tourDashKey() {
+  return (window.__served && window.__served.id) || curDash || "untitled";
+}
+// `-- @tour_autostart` (decision 6): once per browser, per dashboard, per
+// tour. Every access wrapped in try/catch (private windows, blocked site
+// data, …) — no storage reads as "already seen", so autostart simply never
+// fires rather than firing on every load.
+function tourSeen(id) {
+  try {
+    return localStorage.getItem(`dp:tour-seen:${tourDashKey()}:${id}`) === "1";
+  } catch (_) {
+    return true;
+  }
+}
+function markTourSeen(id) {
+  try {
+    localStorage.setItem(`dp:tour-seen:${tourDashKey()}:${id}`, "1");
+  } catch (_) {}
+}
+
+// This dashboard's `-- @tour`/`-- @tour_autostart` header (parsed fresh —
+// cheap, and the builder's SQL can change at any moment); `null` on a parse
+// error. Only ever read for the LIVE dashboard (every caller already
+// guards on `!preview`), so `$("sql").value` is the right source, exactly
+// like `runOnce`'s own `pv ? pv.sql : $("sql").value` with `pv` falsy.
+function currentTourMeta() {
+  try {
+    return JSON.parse(dashboard_meta($("sql").value));
+  } catch (_) {
+    return null;
+  }
+}
+
+// `-- @name <name>`'s DOM anchor (decision 4): the first element the named
+// statement drew, however it is currently reached (a hidden tab/sub-tab/
+// view/step pane included — resolving that is `revealTourAncestors`'s job).
+function findTourTarget(name) {
+  try {
+    return document.querySelector('.dash [data-dp-name="' + CSS.escape(name) + '"]');
+  } catch (_) {
+    return null;
+  }
+}
+
+// Reveal every hidden tab / sub-tab / ::VIEW / #516 step pane standing
+// between `name`'s element and the page, by clicking the SAME buttons a
+// viewer would (so `?tab=`/`?view.*` update as usual, decision 7) — never
+// more than a bounded number of times, since each click can itself
+// uncover another still-hidden ancestor. Re-resolves `name` fresh on every
+// try, not just once: a step pill's Next (unlike a tab/sub-tab/view
+// button) re-runs the WHOLE dashboard (`goTo` → `run(false)`), which can
+// rebuild the element a once-captured reference pointed at, leaving it
+// detached and permanently "hidden" to a stale `.closest()` walk. Returns
+// `false` (without revealing anything further) the moment a step pane
+// turns out to be behind a closed ::GATE — a tour step never bypasses a
+// gate — or the name no longer resolves at all.
+async function revealTourAncestors(name) {
+  for (let tries = 0; tries < 12; tries++) {
+    const el = findTourTarget(name);
+    if (!el) return false;
+    const pane = el.closest(".tabpane, .subtabpane, .dp-viewpane, .dp-steppane");
+    const hidden = pane && pane.style.display === "none" ? pane : null;
+    if (!hidden) return true;
+    if (hidden.classList.contains("dp-steppane")) {
+      const sec = hidden.closest(".dp-steps");
+      const panes = sec ? [...sec.querySelectorAll(":scope > .dp-steppane")] : [];
+      const n = panes.indexOf(hidden) + 1;
+      const btn = n > 0 ? sec.querySelector(`.dp-step-list li:nth-child(${n}) button`) : null;
+      if (!btn || btn.hasAttribute("aria-disabled")) return false; // closed gate: never bypassed
+      btn.click();
+      if (runActive) await runActive; // ::GUIDE_STEP's Next re-runs the dashboard (goTo)
+      continue;
+    }
+    let btn;
+    if (hidden.classList.contains("dp-viewpane")) {
+      btn = document.querySelector(`[aria-controls="${hidden.id}"]`);
+    } else {
+      // .tabpane / .subtabpane: the matching button sits at the same
+      // position in the bar that is this pane's wrap's previous sibling
+      // (tabBar/tabWrap and subBar/subWrap are always built as that pair —
+      // see the ::TAB / ::SUBTAB branches above).
+      const wrap = hidden.parentElement;
+      const bar = wrap && wrap.previousElementSibling;
+      const idx = wrap ? [...wrap.children].indexOf(hidden) : -1;
+      btn = bar && idx >= 0 ? bar.children[idx] : null;
+    }
+    if (!btn) return false;
+    btn.click(); // synchronous: a tab/sub-tab/view switch never re-runs the dashboard
+  }
+  // Gave up after 12 tries — true only if the name resolves and nothing
+  // hides it any more.
+  const el = findTourTarget(name);
+  if (!el) return false;
+  const stillHidden = el.closest(".tabpane, .subtabpane, .dp-viewpane, .dp-steppane");
+  return !(stillHidden && stillHidden.style.display === "none");
+}
+
+// Try to show step `k` (the as-written index); on a target that doesn't
+// resolve (unknown name, or a #516 step behind a closed gate) it tries
+// `k + 1`, `k + 2`, … and so on, until one resolves or the steps run out
+// (`false`: the caller decides what that means — `tourStart` gives up,
+// `tourNext` ends the tour).
+async function tourShowFrom(k) {
+  if (!dpTour) return false;
+  while (k >= 0 && k < dpTour.steps.length) {
+    const step = dpTour.steps[k];
+    let el = null;
+    if (step.target !== "page") {
+      el = findTourTarget(step.target);
+      if (el) {
+        dpTour.k = k; // set before revealing: a reveal can itself trigger
+        // a dashboard run, whose tourAfterSwap() must see the right step
+        dpTour._revealing = true;
+        const ok = await revealTourAncestors(step.target);
+        dpTour._revealing = false;
+        if (!ok) {
+          console.info(`tour: "${step.target}" is behind a closed step gate — skipped`);
+          k++;
+          continue;
+        }
+        // revealTourAncestors may have re-run the whole dashboard (a #516
+        // step pill's Next), which can rebuild this element — re-resolve
+        // by name rather than risk a stale, now-detached reference.
+        el = findTourTarget(step.target);
+        if (!el) {
+          console.info(`tour: "${step.target}" vanished while revealing it — skipped`);
+          k++;
+          continue;
+        }
+      } else {
+        console.info(`tour: "${step.target}" names no visible -- @name — skipped`);
+        k++;
+        continue;
+      }
+    }
+    dpTour.k = k;
+    tourRender(el);
+    return true;
+  }
+  return false;
+}
+function tourNext() {
+  if (!dpTour) return;
+  tourShowFrom(dpTour.k + 1).then((ok) => {
+    if (!ok) tourEnd();
+  });
+}
+function tourBack() {
+  if (!dpTour) return;
+  tourShowFrom(dpTour.k - 1); // nothing earlier resolves: stay put
+}
+
+// Build (once) or reuse the scrim/ring/pop and lay out step `dpTour.k`
+// against `el` (`null` for the reserved `page` target: a centred callout,
+// no spotlight). `opts.silent` (the after-swap re-resolve, decision 7's
+// last bullet): never moves focus or scrolls — only repositions, since the
+// viewer didn't ask for this step, a run of theirs just landed on it again.
+function tourRender(el, opts = {}) {
+  if (!dpTour) return;
+  if (!dpTour._pop) {
+    const scrim = document.createElement("div");
+    scrim.className = "dp-tour-scrim";
+    const ring = document.createElement("div");
+    ring.className = "dp-tour-ring";
+    ring.hidden = true;
+    const pop = document.createElement("div");
+    pop.className = "dp-tour-pop";
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-modal", "false");
+    const head = document.createElement("div");
+    head.className = "dp-tour-head";
+    const count = document.createElement("span");
+    count.className = "dp-tour-count";
+    count.id = "dp-tour-count-" + Math.random().toString(36).slice(2);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "dp-tour-close";
+    close.textContent = "✕";
+    close.setAttribute("aria-label", "End tour");
+    close.onclick = () => tourEnd();
+    head.append(count, close);
+    const body = document.createElement("p");
+    body.className = "dp-tour-body";
+    body.id = "dp-tour-body-" + Math.random().toString(36).slice(2);
+    const foot = document.createElement("div");
+    foot.className = "dp-tour-foot";
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "btn2 dp-tour-back";
+    back.textContent = "Back";
+    back.onclick = () => tourBack();
+    const next = document.createElement("button");
+    next.type = "button";
+    next.className = "btn2 dp-tour-next";
+    foot.append(back, next);
+    pop.setAttribute("aria-labelledby", count.id);
+    pop.setAttribute("aria-describedby", body.id);
+    pop.append(head, body, foot);
+    document.body.append(scrim, ring, pop);
+    dpTour._scrim = scrim;
+    dpTour._ring = ring;
+    dpTour._pop = pop;
+    dpTour._count = count;
+    dpTour._body = body;
+    dpTour._back = back;
+    dpTour._next = next;
+    dpTour._announce = document.createElement("div");
+    dpTour._announce.setAttribute("aria-live", "polite");
+    dpTour._announce.setAttribute("role", "status");
+    dpTour._announce.style.cssText = "position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap";
+    document.body.appendChild(dpTour._announce);
+  }
+  dpTour.target = el || null;
+  if (dpTour._ro) dpTour._ro.disconnect();
+  if (el && "ResizeObserver" in window) {
+    dpTour._ro = new ResizeObserver(tourReposition);
+    dpTour._ro.observe(el);
+  }
+  const n = dpTour.k + 1,
+    m = dpTour.steps.length,
+    step = dpTour.steps[dpTour.k];
+  dpTour._count.textContent = `${n} of ${m}`;
+  dpTour._body.textContent = step.text; // plain text only — never HTML (decision 5)
+  dpTour._back.hidden = dpTour.k === 0;
+  dpTour._next.textContent = dpTour.k === m - 1 ? "Done" : "Next";
+  dpTour._next.onclick = dpTour.k === m - 1 ? () => tourEnd() : tourNext;
+  if (!opts.silent) {
+    const live = [dpTour.title, dpTour._count.textContent, step.text].filter(Boolean).join(". ");
+    if (dpTour._announce.textContent !== live) dpTour._announce.textContent = live;
+  }
+  tourPlace();
+  if (!opts.silent) {
+    if (el) {
+      el.scrollIntoView({
+        behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "center",
+      });
+    }
+    dpTour._next.focus();
+  }
+}
+
+// Pure placement (unit-tested): the callout below the target if it fits,
+// else above, else beside, always clamped to stay on screen; under 600 px
+// wide it's a bottom sheet instead — `side: "sheet"`, caller leaves
+// top/left alone and the CSS media query positions it (decision 5).
+function placePop(targetRect, popSize, viewport) {
+  if (viewport.w < 600) return { top: null, left: null, side: "sheet" };
+  const GAP = 10;
+  const pw = popSize.width,
+    ph = popSize.height;
+  const spaceBelow = viewport.h - targetRect.bottom;
+  const spaceAbove = targetRect.top;
+  let side, top, left;
+  if (spaceBelow >= ph + GAP || spaceBelow >= spaceAbove) {
+    side = "below";
+    top = targetRect.bottom + GAP;
+  } else {
+    side = "above";
+    top = targetRect.top - ph - GAP;
+  }
+  if (spaceBelow < ph + GAP && spaceAbove < ph + GAP) {
+    side = "beside";
+    top = targetRect.top;
+    left = targetRect.right + GAP;
+    if (left + pw > viewport.w - GAP) left = targetRect.left - pw - GAP;
+  } else {
+    left = targetRect.left + targetRect.width / 2 - pw / 2;
+  }
+  top = Math.max(GAP, Math.min(top, viewport.h - ph - GAP));
+  left = Math.max(GAP, Math.min(left, viewport.w - pw - GAP));
+  return { top, left, side };
+}
+function tourPlace() {
+  if (!dpTour || !dpTour._pop) return;
+  const { _pop: pop, _ring: ring, target } = dpTour;
+  if (!target) {
+    ring.hidden = true;
+    pop.classList.add("dp-tour-center");
+    pop.classList.remove("dp-tour-sheet");
+    pop.style.top = "";
+    pop.style.left = "";
+    return;
+  }
+  pop.classList.remove("dp-tour-center");
+  const rect = target.getBoundingClientRect();
+  const PAD = 6;
+  ring.hidden = false;
+  ring.style.top = rect.top - PAD + "px";
+  ring.style.left = rect.left - PAD + "px";
+  ring.style.width = rect.width + PAD * 2 + "px";
+  ring.style.height = rect.height + PAD * 2 + "px";
+  const { top, left, side } = placePop(rect, { width: pop.offsetWidth, height: pop.offsetHeight }, { w: innerWidth, h: innerHeight });
+  pop.classList.toggle("dp-tour-sheet", side === "sheet");
+  if (side === "sheet") {
+    pop.style.top = "";
+    pop.style.left = "";
+  } else {
+    pop.style.top = top + "px";
+    pop.style.left = left + "px";
+  }
+}
+function tourReposition() {
+  if (dpTourRAF) return;
+  dpTourRAF = requestAnimationFrame(() => {
+    dpTourRAF = null;
+    tourPlace();
+  });
+}
+
+function tourKeydown(e) {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    tourEnd();
+  }
+}
+
+// Start tour `id` of the CURRENT dashboard (`?tour=<id>`, the toolbar
+// button, or `-- @tour_autostart`). `opts.from`: the element focus returns
+// to on end (decision 8) — defaults to whatever has focus right now.
+async function tourStart(id, opts = {}) {
+  if (preview) return; // never during an assistant preview (decision 6)
+  if (dpTour) tourEnd(false); // replace a running tour, no focus bounce
+  const meta = currentTourMeta();
+  const tour = meta && meta.tours.find((t) => t.id === id);
+  if (!tour || !tour.steps.length) {
+    console.info(`tour: no such tour "${id}" (or it has no steps)`);
+    return;
+  }
+  dpTour = {
+    id: tour.id,
+    title: tour.title,
+    steps: tour.steps,
+    k: 0,
+    prevFocus: opts.from || document.activeElement,
+  };
+  document.addEventListener("keydown", tourKeydown, true);
+  window.addEventListener("scroll", tourReposition, true);
+  window.addEventListener("resize", tourReposition);
+  setTourUrlParam(id);
+  const ok = await tourShowFrom(0);
+  if (!ok) tourEnd(false); // no step resolved: the tour never starts (decision 7)
+}
+// `restoreFocus`: false when another tour is about to replace this one
+// (tourStart), or the page itself is navigating away underneath it.
+function tourEnd(restoreFocus = true) {
+  if (!dpTour) return;
+  document.removeEventListener("keydown", tourKeydown, true);
+  window.removeEventListener("scroll", tourReposition, true);
+  window.removeEventListener("resize", tourReposition);
+  if (dpTour._ro) dpTour._ro.disconnect();
+  if (dpTourRAF) {
+    cancelAnimationFrame(dpTourRAF);
+    dpTourRAF = null;
+  }
+  dpTour._scrim?.remove();
+  dpTour._ring?.remove();
+  dpTour._pop?.remove();
+  dpTour._announce?.remove();
+  clearTourUrlParam();
+  const prevFocus = dpTour.prevFocus;
+  dpTour = null;
+  if (restoreFocus && prevFocus && document.contains(prevFocus)) {
+    try {
+      prevFocus.focus();
+    } catch (_) {}
+  }
+}
+
+// The toolbar's Tour entry: built/removed on every non-preview swap
+// (`tourAfterSwap`), since which dashboard (and which tours it declares)
+// can change under the builder's editor at any time. One button when the
+// dashboard has exactly one tour (starts it directly); a small menu above
+// that.
+function updateTourButton() {
+  const meta = currentTourMeta();
+  const tours = (meta && meta.tours.filter((t) => t.steps.length)) || [];
+  const actions = $("actions");
+  if (!tours.length) {
+    dpTourBtn?.remove();
+    dpTourMenu?.remove();
+    dpTourBtn = null;
+    dpTourMenu = null;
+    return;
+  }
+  if (!dpTourBtn) {
+    dpTourBtn = document.createElement("button");
+    dpTourBtn.type = "button";
+    dpTourBtn.id = "dp-tour-btn";
+    dpTourBtn.className = "btn2 dp-tour-btn";
+    dpTourBtn.setAttribute("aria-haspopup", "true");
+    dpTourBtn.setAttribute("aria-expanded", "false");
+    dpTourMenu = document.createElement("div");
+    dpTourMenu.className = "dp-tour-menu";
+    dpTourMenu.setAttribute("role", "menu");
+    dpTourMenu.hidden = true;
+    dpTourBtn.onclick = (e) => {
+      e.stopPropagation();
+      const cur = (currentTourMeta()?.tours || []).filter((t) => t.steps.length);
+      if (cur.length <= 1) {
+        if (cur[0]) tourStart(cur[0].id, { from: dpTourBtn });
+        return;
+      }
+      const open = dpTourMenu.hidden;
+      closeTourMenu();
+      if (open) openTourMenu(cur);
+    };
+    actions?.insertBefore(dpTourBtn, $("dark") || null);
+    actions?.insertBefore(dpTourMenu, $("dark") || null);
+    // Installed once, ever (not per button rebuild — the button/menu pair
+    // is torn down and recreated across dashboards, but this listener
+    // reads the live `dpTourMenu` each time, so it never needs to move).
+    if (!dpTourOutsideClickWired) {
+      dpTourOutsideClickWired = true;
+      document.addEventListener("click", (e) => {
+        if (dpTourMenu && !dpTourMenu.hidden && !e.target.closest("#dp-tour-btn, .dp-tour-menu")) closeTourMenu();
+      });
+    }
+  }
+  dpTourBtn.title = tours.length === 1 ? `Start the "${tours[0].title}" tour` : `Start a guided tour (${tours.length})`;
+  dpTourBtn.textContent = "🧭 Tour";
+}
+function tourMenuKeydown(e) {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    closeTourMenu();
+    dpTourBtn?.focus();
+  }
+}
+function openTourMenu(tours) {
+  dpTourMenu.replaceChildren();
+  for (const t of tours) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.textContent = t.title;
+    b.onclick = () => {
+      closeTourMenu();
+      tourStart(t.id, { from: dpTourBtn });
+    };
+    dpTourMenu.appendChild(b);
+  }
+  dpTourMenu.hidden = false;
+  dpTourBtn.setAttribute("aria-expanded", "true");
+  document.addEventListener("keydown", tourMenuKeydown, true);
+}
+function closeTourMenu() {
+  if (!dpTourMenu) return;
+  dpTourMenu.hidden = true;
+  dpTourBtn?.setAttribute("aria-expanded", "false");
+  document.removeEventListener("keydown", tourMenuKeydown, true);
+}
+
+// Called once at the end of every non-preview run (`runOnce`, after the
+// swap has fully settled — fit/wire/lazy included). Keeps the toolbar
+// entry in step with whichever dashboard is now showing, re-resolves a
+// running tour's current step against the fresh DOM (advancing past a step
+// whose target vanished), and otherwise checks whether this render is the
+// one `?tour=`/`-- @tour_autostart` should start on.
+async function tourAfterSwap() {
+  updateTourButton();
+  if (dpTour) {
+    if (dpTour._revealing) return; // tourShowFrom's own reveal triggered this run
+    const step = dpTour.steps[dpTour.k];
+    const el = step.target === "page" ? null : findTourTarget(step.target);
+    if (step.target !== "page" && !el) {
+      const ok = await tourShowFrom(dpTour.k + 1);
+      if (!ok) tourEnd();
+    } else {
+      tourRender(el, { silent: true });
+    }
+    return;
+  }
+  const meta = currentTourMeta();
+  if (!meta) return;
+  const urlId = readTourParam(location.search);
+  if (urlId && meta.tours.some((t) => t.id === urlId)) {
+    await tourStart(urlId);
+    return;
+  }
+  const autoId = meta.tour_autostart;
+  if (autoId && meta.tours.some((t) => t.id === autoId) && !tourSeen(autoId)) {
+    markTourSeen(autoId);
+    await tourStart(autoId);
+  }
+}
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
@@ -8072,6 +8621,7 @@ async function siteGo(id, search = "", push = true) {
     return false;
   }
   if (preview) await previewExit({ rerun: false });
+  tourEnd(false); // #518: a running tour belongs to the dashboard being left — see loadDash()
   clearApplyHold();
   heldTexts.clear();
   heldStatements.clear();
@@ -10253,6 +10803,9 @@ async function runOnce(fresh = true, pv = preview) {
   document.body.classList.remove("loading");
   performance.measure("dp:run", { start: tRun, detail: fresh ? "fresh" : "rerun" });
   if (lazy && lazy.jobs.length) setTimeout(lazyPump); // after the queued follow-up run, if any
+  // #518: never during an assistant preview — `pv` is this run's own,
+  // never the live `preview` (see runOnce's own H-1R note above `pv`).
+  if (!pv) await tourAfterSwap();
 }
 
 // Entrance animation on a fresh render: panels fade+rise in and each chart

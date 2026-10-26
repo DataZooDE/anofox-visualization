@@ -963,6 +963,88 @@ pub struct DashboardMeta {
     /// `dp-as-tables` remembered state) is independent of this and still
     /// applies even when the bar is hidden.
     pub astables: bool,
+    /// `-- @tour <id> [title]` blocks (#518 PR B), in file order. See
+    /// [`parse_dashboard_meta`] for the syntax and [`Tour`] for the fields.
+    pub tours: Vec<Tour>,
+    /// `-- @tour_autostart <id>`: start this tour once per browser on a
+    /// viewer's first visit (`None` without the header, or if it names no
+    /// tour — lint checks that: `tour/autostart-unknown`).
+    pub tour_autostart: Option<String>,
+}
+
+/// One `-- @tour <id> [title]` block: an id (`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`,
+/// shared with [`crate::sql::name::valid`]), a title (the rest of the
+/// `@tour` line, or `id` with `_`/`-` turned into spaces when omitted), and
+/// its steps in file order. Neither the id's shape nor its uniqueness is
+/// checked here — see `lint::tour_diags` (`tour/bad-id`, `tour/duplicate-id`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tour {
+    pub id: String,
+    pub title: String,
+    pub steps: Vec<TourStep>,
+}
+
+/// One step of a [`Tour`]: `<target>: <text>`. `target` is `page` (a
+/// centred, spotlight-less callout) or a `-- @name`d element; `text` is
+/// shown as plain text (never HTML) in the tour's callout. Neither is
+/// validated here — see `lint::tour_diags` (`tour/unknown-panel`,
+/// `tour/long-text`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TourStep {
+    pub target: String,
+    pub text: String,
+}
+
+/// The most steps one [`Tour`] keeps before the linter warns
+/// (`tour/too-many-steps`) — steps beyond this are still parsed and shown,
+/// the limit is advisory.
+pub const MAX_TOUR_STEPS: usize = 20;
+/// The most `-- @tour` blocks one dashboard keeps before the linter warns
+/// (`tour/too-many`) — advisory, like [`MAX_TOUR_STEPS`].
+pub const MAX_TOURS: usize = 10;
+/// The longest a tour step's text may be before the linter warns
+/// (`tour/long-text`) — advisory; the text is kept in full either way.
+pub const MAX_TOUR_TEXT_CHARS: usize = 400;
+
+/// `page` is reserved as a tour step's target: a centred callout with no
+/// spotlight, for an intro or an outro. Shared with `-- @name` (#518 PR A),
+/// which reserves the same word for the same reason.
+pub const TOUR_PAGE_TARGET: &str = "page";
+
+/// `-- @tour <id> [title]` (the header line only — not its step lines, see
+/// [`tour_step_line`]): `id` is the text up to the first run of whitespace,
+/// `title` is whatever follows it, trimmed (`""` when there is none).
+pub fn tour_header_line(line: &str) -> Option<(&str, &str)> {
+    let r = header_value(line, "tour")?;
+    Some(match r.split_once(char::is_whitespace) {
+        Some((id, title)) => (id, title.trim()),
+        None => (r, ""),
+    })
+}
+
+/// `id` with `_`/`-` turned into spaces — a `-- @tour`'s default title when
+/// the author writes none.
+pub fn default_tour_title(id: &str) -> String {
+    id.chars()
+        .map(|c| if c == '_' || c == '-' { ' ' } else { c })
+        .collect()
+}
+
+/// One `-- @tour`'s step line: `--` then at least two spaces or a tab, then
+/// `<target>: <text>`. `line` is expected trimmed at its outer edges only
+/// (as `parse_dashboard_meta` passes it), so the interior run of whitespace
+/// right after `--` survives and is what tells a step line apart from an
+/// ordinary `-- @key value` header line (a single space). Only the first
+/// `:` splits target from text, so text may itself contain `:`.
+pub fn tour_step_line(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("--")?;
+    let indented = match rest.strip_prefix('\t') {
+        Some(r) => r,
+        None => rest.strip_prefix("  ")?,
+    };
+    let (target, text) = indented.trim_start().split_once(':')?;
+    let target = target.trim();
+    (!target.is_empty()).then(|| (target, text.trim()))
 }
 
 impl DashboardMeta {
@@ -1090,18 +1172,59 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 /// `-- @param name [a, b] = a`, `-- @load <extension>`, `-- @vars a, b`,
 /// `-- @group a / b`, `-- @tags a, b`, `-- @description <text>`,
 /// `-- @owner <text>`, `-- @certified <YYYY-MM-DD>`, `-- @order N`,
-/// `-- @astables on|off` header comments (a repeated `@group`/`@nav`/
-/// `@astables` wins over the earlier one; `@tags` lines add up). A `@param` or
-/// `@vars` entry naming a reserved `__claim_*` variable is ignored: claims are
-/// never viewer-settable.
+/// `-- @astables on|off`, `-- @tour <id> [title]` + its step lines,
+/// `-- @tour_autostart <id>` header comments (a repeated `@group`/`@nav`/
+/// `@astables`/`@tour_autostart` wins over the earlier one; `@tags` lines add
+/// up; `@tour` blocks each add a [`Tour`]). A `@param` or `@vars` entry
+/// naming a reserved `__claim_*` variable is ignored: claims are never
+/// viewer-settable.
+///
+/// `-- @tour <id> [title]` starts a block; the immediately following lines
+/// of the form `--` + two spaces or a tab + `<target>: <text>` are its
+/// steps, in order, until a line that isn't shaped that way (even another
+/// header line, or a blank one) ends the block — see [`tour_header_line`]
+/// and [`tour_step_line`]. Neither the id's shape, its uniqueness, a step's
+/// target, nor any of the advisory limits ([`MAX_TOURS`],
+/// [`MAX_TOUR_STEPS`], [`MAX_TOUR_TEXT_CHARS`]) are enforced here — see
+/// `lint::tour_diags`. The parser may scan the whole file, as it already
+/// does for every other header key; put `@tour` blocks in the header.
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
     let mut m = DashboardMeta {
         title: id.to_string(),
         ..Default::default()
     };
+    // `-- @tour`'s step lines (#518 PR B) are the comment lines *directly
+    // following* the `@tour` line (or an already-accepted step line) — this
+    // index names the tour still accepting them; any other line (even
+    // another header key, or a blank line) closes the block.
+    let mut current_tour: Option<usize> = None;
     for line in script.lines() {
         let l = line.trim();
-        if let Some(r) = l.strip_prefix("-- @title ") {
+        if let Some(i) = current_tour {
+            if let Some((target, text)) = tour_step_line(l) {
+                m.tours[i].steps.push(TourStep {
+                    target: target.to_string(),
+                    text: text.to_string(),
+                });
+                continue;
+            }
+            current_tour = None;
+        }
+        if let Some((tid, title)) = tour_header_line(l) {
+            let title = if title.is_empty() {
+                default_tour_title(tid)
+            } else {
+                title.to_string()
+            };
+            m.tours.push(Tour {
+                id: tid.to_string(),
+                title,
+                steps: Vec::new(),
+            });
+            current_tour = Some(m.tours.len() - 1);
+        } else if let Some(r) = header_value(l, "tour_autostart") {
+            m.tour_autostart = Some(r.to_string()).filter(|s| !s.is_empty());
+        } else if let Some(r) = l.strip_prefix("-- @title ") {
             m.title = r.trim().to_string();
         } else if let Some(r) = header_value(l, "nav") {
             m.nav = Some(r.to_string()).filter(|s| !s.is_empty());
@@ -1980,6 +2103,88 @@ mod tests {
             assert!(!valid_iso_date(bad), "{bad}");
         }
         assert_eq!(header_value("-- @title x", "group"), None);
+    }
+
+    #[test]
+    fn dashboard_meta_tours() {
+        // Two tours, a `page` step, and `@tour_autostart`.
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @tour cockpit_intro Cockpit in three steps\n\
+             --   page: This page lists every monitored model.\n\
+             --   severity_kpi: This is a model's severity.\n\
+             --   status_table: Click a model to open its page.\n\
+             -- @tour_autostart cockpit_intro\n\
+             -- @tour details\n\
+             --   detail_chart: Trend over time.\n\
+             SELECT 1;",
+        );
+        assert_eq!(m.tours.len(), 2);
+        assert_eq!(m.tours[0].id, "cockpit_intro");
+        assert_eq!(m.tours[0].title, "Cockpit in three steps");
+        assert_eq!(
+            m.tours[0].steps,
+            vec![
+                TourStep {
+                    target: "page".into(),
+                    text: "This page lists every monitored model.".into()
+                },
+                TourStep {
+                    target: "severity_kpi".into(),
+                    text: "This is a model's severity.".into()
+                },
+                TourStep {
+                    target: "status_table".into(),
+                    text: "Click a model to open its page.".into()
+                },
+            ]
+        );
+        assert_eq!(m.tour_autostart.as_deref(), Some("cockpit_intro"));
+        assert_eq!(m.tours[1].id, "details");
+        assert_eq!(m.tours[1].title, "details"); // no title given: id, unchanged (no `_`/`-`)
+        assert_eq!(m.tours[1].steps.len(), 1);
+
+        // No title: `_`/`-` become spaces.
+        let m = parse_dashboard_meta("s", "-- @tour my_cool-tour\nSELECT 1;");
+        assert_eq!(m.tours[0].title, "my cool tour");
+
+        // A tab character also starts a step line.
+        let m = parse_dashboard_meta("s", "-- @tour t\n--\tkpi: text\nSELECT 1;");
+        assert_eq!(m.tours[0].steps[0].target, "kpi");
+
+        // The block ends at the first non-step line — even a blank one, or
+        // another header key — so a later stray `--  x: y` isn't a step of
+        // the tour that came before it.
+        let m = parse_dashboard_meta("s", "-- @tour t\n--   a: one\n\n--   b: two\nSELECT 1;");
+        assert_eq!(m.tours[0].steps.len(), 1);
+        assert_eq!(m.tours[0].steps[0].target, "a");
+        let m = parse_dashboard_meta(
+            "s",
+            "-- @tour t\n--   a: one\n-- @title x\n--   b: two\nSELECT 1;",
+        );
+        assert_eq!(m.tours[0].steps.len(), 1);
+
+        // A step's text may itself contain `:` — only the first one splits.
+        let m = parse_dashboard_meta("s", "-- @tour t\n--   kpi: ratio: 3:1\nSELECT 1;");
+        assert_eq!(m.tours[0].steps[0].text, "ratio: 3:1");
+
+        // A single space after `--` is a header line, not a step — single-
+        // space `-- @…` lines (even one that looks like a step but isn't
+        // indented enough) never attach.
+        let m = parse_dashboard_meta("s", "-- @tour t\n-- not a step\nSELECT 1;");
+        assert_eq!(m.tours[0].steps.len(), 0);
+
+        // Without `-- @tour`, `@tour_autostart` is still just a plain value.
+        let m = parse_dashboard_meta("s", "SELECT 1;");
+        assert_eq!((m.tours.len(), m.tour_autostart), (0, None));
+        let m = parse_dashboard_meta("s", "-- @tour_autostart\nSELECT 1;");
+        assert_eq!(m.tour_autostart, None, "an empty value is no autostart");
+
+        // Two consecutive `@tour` blocks with no steps in between.
+        let m = parse_dashboard_meta("s", "-- @tour a\n-- @tour b\n--   x: y\nSELECT 1;");
+        assert_eq!(m.tours.len(), 2);
+        assert_eq!(m.tours[0].steps.len(), 0);
+        assert_eq!(m.tours[1].steps.len(), 1);
     }
 
     #[test]
