@@ -111,14 +111,26 @@ const panelInfo = (page) =>
   if (shots) await page.screenshot({ path: `${shots}/markdown-style-1440-light.png`, fullPage: true });
 
   // (b) the dashboard's own dark toggle — the classes must not change with
-  // the theme, only the CSS tokens behind them.
+  // the theme, only the CSS tokens behind them. The toggle rewrites the
+  // page's single #ax-theme <style> block (applyTheme(), web/app.js) during
+  // the async re-run the click kicks off — body.dark alone flips instantly,
+  // but the tokens (and so a panel's computed background) only repaint once
+  // that finishes, so wait for documentElement.dataset.axVariant to actually
+  // read "dark" before comparing anything token-derived (#536 CI failure:
+  // reading right after the click, before the rewrite landed, saw the same
+  // light rgba twice).
+  const calloutBgToken = () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--ax-callout-bg").trim());
+  const lightToken = await calloutBgToken();
   await page.click("#dark");
+  await page.waitForFunction(() => document.documentElement.dataset.axVariant === "dark", null, { timeout: 15000 });
+  const darkToken = await calloutBgToken();
+  check(darkToken !== "" && darkToken !== lightToken, `(b) dark mode repaints the --ax-callout-bg token (${lightToken} -> ${darkToken})`);
   const infoDark = await panelInfo(page);
   check(
     infoDark.map((p) => p.classes).join("|") === info.map((p) => p.classes).join("|"),
     "(b) dark mode keeps the same chrome classes as light"
   );
-  check(infoDark[0].bg !== info[0].bg, `(b) dark mode does repaint the tokens (${infoDark[0].bg} vs ${info[0].bg})`);
+  check(infoDark[0].bg !== info[0].bg, `(b) a panel's own computed background follows the token too (${infoDark[0].bg} vs ${info[0].bg})`);
   if (shots) await page.screenshot({ path: `${shots}/markdown-style-1440-dark.png`, fullPage: true });
   await page.close();
 }
