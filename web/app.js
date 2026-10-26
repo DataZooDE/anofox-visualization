@@ -8035,7 +8035,27 @@ function activateView(btn, focus) {
   // #534: a 'header'-placed group's bar lives in whichever card is
   // currently shown — move it into the one just activated.
   if (sec.classList.contains("dp-views-header")) placeViewHeaderBar(sec);
-  if (focus) refocus("view:" + id, btn);
+  // #597: focus `btn` back SYNCHRONOUSLY when it is actually visible right
+  // now, rather than always going through refocus()'s requestAnimationFrame
+  // hop. Hiding the OLD panes above force-blurs `btn` immediately whenever
+  // it was sitting inside one of them (a 'header'-placed group's bar lives
+  // inside whatever card is currently shown — see placeViewHeaderBar) — a
+  // focused descendant of a newly `display: none` ancestor loses focus the
+  // instant that style applies, not on the next frame. Deferring the
+  // restore by even one rAF left a real, observable gap where
+  // document.activeElement was <body> (a Playwright check caught it under
+  // CI's timing variance). `btn.offsetParent` is non-null exactly when
+  // it's actually focusable right now: 'row' placement (never hidden) and
+  // the common 'header' case (its pane's content already loaded, so
+  // placeViewHeaderBar just relocated the bar into the now-visible pane)
+  // both qualify. The one case that doesn't — the activated alternative is
+  // still a lazy-loading skeleton, so placeViewHeaderBar left the bar
+  // exactly where it was (its own comment) — still falls back to
+  // refocus()'s existing deferred attempt, unchanged from before.
+  if (focus) {
+    if (btn.offsetParent !== null) btn.focus();
+    else refocus("view:" + id, btn);
+  }
 }
 // Esc on a drill-through's tab (not inside a chart, which has its own Esc, or
 // a control): back to the tab it came from, focus on the mark or link followed.
