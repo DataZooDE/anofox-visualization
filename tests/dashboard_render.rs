@@ -939,6 +939,72 @@ fn markdown_placeholders_are_filled_not_printed_literally() {
     );
 }
 
+// #536: ::MARKDOWN_STYLE picks a ::MARKDOWN panel's outer chrome in headless
+// SVG too (not just the browser): 'plain' draws no rect at all for that
+// panel (no `stroke=`, the only user of it in a single, trackless panel);
+// 'card' keeps today's bordered rect; 'callout' (the default, and what
+// ::CALLOUT implies) additionally draws a clipped accent-bar rect. An
+// explicit ::MARKDOWN_STYLE wins even over ::CALLOUT, and a dashboard's own
+// `-- @markdown_style` is the fallback a panel-level role overrides.
+struct FixedRows(Vec<(&'static str, Vec<Value>)>);
+impl DataProvider for FixedRows {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        Ok(self
+            .0
+            .iter()
+            .map(|(n, v)| ((*n).to_string(), v.clone()))
+            .collect())
+    }
+}
+#[test]
+fn markdown_style_chrome_in_headless_svg() {
+    let render = |script: &str, rows: Vec<(&'static str, Vec<Value>)>| {
+        let mut db = FixedRows(rows);
+        render_dashboard_svg(script, &mut db, &DashboardOptions::default()).unwrap()
+    };
+
+    // 'plain': no card rect — nothing strokes this single, trackless panel.
+    let svg = render(
+        "SELECT 'hello'::MARKDOWN, 'plain'::MARKDOWN_STYLE;",
+        vec![("c0", s(&["hello"])), ("c1", s(&["plain"]))],
+    );
+    assert!(!svg.contains("stroke="), "{svg}");
+
+    // 'card': today's bordered rect, no tint/bar.
+    let svg = render(
+        "SELECT 'hello'::MARKDOWN, 'card'::MARKDOWN_STYLE;",
+        vec![("c0", s(&["hello"])), ("c1", s(&["card"]))],
+    );
+    assert!(svg.contains("stroke="), "{svg}");
+    assert!(!svg.contains("dp-md-clip-"), "{svg}");
+
+    // No ::MARKDOWN_STYLE / ::CALLOUT at all: 'callout', today's look —
+    // the tinted box with its clipped accent bar.
+    let svg = render("SELECT 'hello'::MARKDOWN;", vec![("c0", s(&["hello"]))]);
+    assert!(svg.contains("dp-md-clip-"), "{svg}");
+
+    // An explicit ::MARKDOWN_STYLE wins even over ::CALLOUT.
+    let svg = render(
+        "SELECT 'hello'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'warning'::CALLOUT;",
+        vec![
+            ("c0", s(&["hello"])),
+            ("c1", s(&["plain"])),
+            ("c2", s(&["warning"])),
+        ],
+    );
+    assert!(!svg.contains("stroke="), "{svg}");
+
+    // A dashboard-wide `-- @markdown_style` default, with no panel override.
+    let svg = render(
+        "-- @markdown_style plain\nSELECT 'hello'::MARKDOWN;",
+        vec![("c0", s(&["hello"]))],
+    );
+    assert!(!svg.contains("stroke="), "{svg}");
+}
+
 // #427: a `::TABLE`'s `list(v ORDER BY i)::SPARKLINE` column was dropped
 // entirely by the headless table renderer (`table_svg`'s own `vis` filter
 // excluded every `SPARKLINE`-formatted column) — the other columns rendered,

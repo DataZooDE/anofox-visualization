@@ -300,6 +300,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE"),
     e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
       "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
+    e("MARKDOWN_STYLE", &["MD_STYLE"], R::MarkdownStyle, "kpi", true,
+      "a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style"),
     e("IMAGE", &["PICTURE", "IMG"], R::Image, "kpi", true,
       "a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption"),
     e("IMAGE_DARK", &["IMG_DARK"], R::ImageDark, "kpi", true,
@@ -533,6 +535,54 @@ pub fn markdown_table() -> String {
     out
 }
 
+/// `::CALLOUT` value → `'note'` | `'warning'` | `'success'` (an unknown or
+/// missing value draws `'note'` — lint warns separately on an unknown one:
+/// `callout/unknown`). Mirrors `src/lint.rs`'s `CALLOUT_KINDS` and the
+/// browser's `calloutKind` (web/app.js).
+pub fn callout_kind(v: &str) -> &'static str {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "warning" | "caution" | "danger" => "warning",
+        "success" | "tip" => "success",
+        _ => "note",
+    }
+}
+
+/// `::MARKDOWN_STYLE` / `-- @markdown_style` values (#536): a `::MARKDOWN`
+/// box's chrome. The single source of truth for both — `src/lint.rs`'s panel
+/// and header checks, `src/dashboard.rs`'s SVG renderer and the browser's
+/// `MD_STYLE_KINDS` (web/app.js) all list the same three.
+pub const MARKDOWN_STYLE_KINDS: &[&str] = &["plain", "card", "callout"];
+
+/// `v`, trimmed and lower-cased, if it names one of [`MARKDOWN_STYLE_KINDS`].
+pub fn markdown_style_of(v: &str) -> Option<&'static str> {
+    MARKDOWN_STYLE_KINDS
+        .iter()
+        .find(|k| v.trim().eq_ignore_ascii_case(k))
+        .copied()
+}
+
+/// The effective `::MARKDOWN_STYLE` for one `::MARKDOWN` panel: an explicit,
+/// valid `explicit` (the panel's own `::MARKDOWN_STYLE` cell) wins outright —
+/// even over `::CALLOUT` (lint warns there, `markdown_style/conflicts-with-
+/// callout`); else `::CALLOUT` (`callout_present`) always draws 'callout',
+/// since that's the whole point of setting it; else the dashboard's own
+/// `-- @markdown_style` default; else 'callout' (today's look).
+pub fn resolve_markdown_style(
+    explicit: Option<&str>,
+    callout_present: bool,
+    dashboard_default: Option<&str>,
+) -> &'static str {
+    if let Some(v) = explicit.and_then(markdown_style_of) {
+        return v;
+    }
+    if callout_present {
+        return "callout";
+    }
+    dashboard_default
+        .and_then(markdown_style_of)
+        .unwrap_or("callout")
+}
+
 /// JSON export of the registry for the browser (wasm `roles_json()`):
 /// `{"roles":[{token, aliases, category, renders, summary}], "sets":{…}}`.
 /// `sets` are the derived token lists `web/app.js` matches on — `inputs`,
@@ -622,6 +672,53 @@ mod tests {
                 assert_eq!(parse_role(&a.to_lowercase()), Some(d.role), "alias ::{a}");
             }
         }
+    }
+
+    #[test]
+    fn markdown_style_of_accepts_only_the_three_kinds() {
+        assert_eq!(markdown_style_of("plain"), Some("plain"));
+        assert_eq!(markdown_style_of(" Card "), Some("card"));
+        assert_eq!(markdown_style_of("CALLOUT"), Some("callout"));
+        assert_eq!(markdown_style_of(""), None);
+        assert_eq!(markdown_style_of("plainish"), None);
+    }
+
+    #[test]
+    fn resolve_markdown_style_precedence() {
+        // nothing set at all: 'callout', today's look.
+        assert_eq!(resolve_markdown_style(None, false, None), "callout");
+        // the dashboard's own default, with no panel-level override.
+        assert_eq!(resolve_markdown_style(None, false, Some("plain")), "plain");
+        // ::CALLOUT always draws 'callout', even over a 'plain' dashboard default.
+        assert_eq!(resolve_markdown_style(None, true, Some("plain")), "callout");
+        // an explicit, valid ::MARKDOWN_STYLE wins outright — even over ::CALLOUT.
+        assert_eq!(
+            resolve_markdown_style(Some("card"), true, Some("callout")),
+            "card"
+        );
+        assert_eq!(resolve_markdown_style(Some("plain"), true, None), "plain");
+        // an unrecognized explicit value is ignored, same as not set.
+        assert_eq!(
+            resolve_markdown_style(Some("weird"), false, Some("card")),
+            "card"
+        );
+        // an unrecognized dashboard default is ignored too.
+        assert_eq!(
+            resolve_markdown_style(None, false, Some("weird")),
+            "callout"
+        );
+    }
+
+    #[test]
+    fn callout_kind_groups_its_aliases() {
+        assert_eq!(callout_kind("warning"), "warning");
+        assert_eq!(callout_kind("caution"), "warning");
+        assert_eq!(callout_kind("danger"), "warning");
+        assert_eq!(callout_kind("success"), "success");
+        assert_eq!(callout_kind("tip"), "success");
+        assert_eq!(callout_kind("note"), "note");
+        assert_eq!(callout_kind("unknown"), "note");
+        assert_eq!(callout_kind(""), "note");
     }
 
     #[test]
@@ -919,6 +1016,7 @@ mod tests {
             Role::AsOf,
             Role::Info,
             Role::Callout,
+            Role::MarkdownStyle,
             Role::Section,
             Role::SelectAs,
             Role::Drill,
@@ -1067,6 +1165,7 @@ mod tests {
                 | Role::AsOf
                 | Role::Info
                 | Role::Callout
+                | Role::MarkdownStyle
                 | Role::Section
                 | Role::SelectAs
                 | Role::Drill

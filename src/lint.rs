@@ -81,7 +81,10 @@ pub struct Diagnostic {
     /// `header/bad-certified` | `header/bad-order` | `header/long-description` |
     /// `header/empty-nav` | `header/long-nav` | `header/bad-astables` (not
     /// `on`/`off`, so the author's `-- @astables` is ignored — the bar stays
-    /// off unless a viewer turns it on). A served folder
+    /// off unless a viewer turns it on) | `header/bad-markdown-style` (not
+    /// `plain`/`card`/`callout`, so `-- @markdown_style` is ignored —
+    /// `::MARKDOWN` panels without their own `::MARKDOWN_STYLE` fall back to
+    /// 'callout'). A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
@@ -1156,6 +1159,54 @@ where
                     "callout/no-text",
                     "::CALLOUT needs a ::MARKDOWN column in the same SELECT (the callout's text)"
                         .into(),
+                );
+            }
+        }
+
+        // ::MARKDOWN_STYLE (#536): an unknown value falls back to 'callout'
+        // (today's look); it needs a ::MARKDOWN column in the same SELECT;
+        // and combined with ::CALLOUT it only makes sense as 'callout' —
+        // 'plain'/'card' would silently drop the chosen look.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::MarkdownStyle) {
+            let v = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let mut warn = |code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if !crate::roles::MARKDOWN_STYLE_KINDS.contains(&v.as_str()) {
+                warn(
+                    "markdown_style/unknown",
+                    format!(
+                        "::MARKDOWN_STYLE `{v}` — use 'plain', 'card' or 'callout' (drawn as \
+                         'callout')"
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                warn(
+                    "markdown_style/no-text",
+                    "::MARKDOWN_STYLE needs a ::MARKDOWN column in the same SELECT".into(),
+                );
+            }
+            if p.roles.iter().any(|(_, r)| *r == Role::Callout) && (v == "plain" || v == "card") {
+                warn(
+                    "markdown_style/conflicts-with-callout",
+                    format!(
+                        "::CALLOUT together with '{v}'::MARKDOWN_STYLE — the explicit style wins, \
+                         so ::CALLOUT's tint, bar and icon are dropped (drop ::CALLOUT, or set \
+                         ::MARKDOWN_STYLE to 'callout')"
+                    ),
                 );
             }
         }
@@ -3697,6 +3748,25 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                         "`-- @astables {a}` is not `on` or `off` — the \"▦ Charts as tables\" \
                          bar stays off on this dashboard unless a viewer switches it on \
                          themselves"
+                    )
+                },
+                line,
+            );
+        } else if let Some(v) = header_value(line, "markdown_style")
+            .filter(|v| crate::roles::markdown_style_of(v).is_none())
+        {
+            warn(
+                "header/bad-markdown-style",
+                if v.is_empty() {
+                    "`-- @markdown_style` has no value — write `plain`, `card` or `callout` \
+                     (without it, every ::MARKDOWN panel without its own ::MARKDOWN_STYLE \
+                     falls back to 'callout')"
+                        .into()
+                } else {
+                    format!(
+                        "`-- @markdown_style {v}` is not `plain`, `card` or `callout` — every \
+                         ::MARKDOWN panel without its own ::MARKDOWN_STYLE falls back to \
+                         'callout'"
                     )
                 },
                 line,
@@ -6431,6 +6501,14 @@ mod design_tests {
         assert_eq!(codes("-- @astables\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables yes\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables On\n"), ["header/bad-astables"]);
+        assert!(codes("-- @markdown_style plain\nSELECT 1;").is_empty());
+        assert!(codes("-- @markdown_style card\nSELECT 1;").is_empty());
+        assert!(codes("-- @markdown_style callout\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @markdown_style\n"), ["header/bad-markdown-style"]);
+        assert_eq!(
+            codes("-- @markdown_style boxed\n"),
+            ["header/bad-markdown-style"]
+        );
         assert!(codes(&format!("-- @description {}\n", "x".repeat(160))).is_empty());
         let long = format!(
             "-- @description {}\n-- @description {}\n",
@@ -8852,6 +8930,77 @@ mod design_tests {
         assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
         let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
         assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    #[test]
+    fn markdown_style_kind_and_text_are_checked() {
+        let one = |v: &str| {
+            let v = v.to_string();
+            move |_q: &str| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "**Heads up**", "c1": v.clone() }),
+                ))
+            }
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE;",
+            one("plain"),
+        );
+        assert!(
+            !d.iter().any(|x| x.code.starts_with("markdown_style/")),
+            "{d:?}"
+        );
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'invisible'::MARKDOWN_STYLE;",
+            one("invisible"),
+        );
+        assert!(
+            d.iter().any(|x| x.code == "markdown_style/unknown"),
+            "{d:?}"
+        );
+        let d = check(
+            "SELECT 'x'::TEXT_SMALL, 'plain'::MARKDOWN_STYLE;",
+            one("plain"),
+        );
+        assert!(
+            d.iter().any(|x| x.code == "markdown_style/no-text"),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_style_conflicting_with_callout_is_checked() {
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'warning'::CALLOUT;",
+            |_q| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "x", "c1": "plain", "c2": "warning" }),
+                ))
+            },
+        );
+        assert!(
+            d.iter()
+                .any(|x| x.code == "markdown_style/conflicts-with-callout"),
+            "{d:?}"
+        );
+        // 'callout' together with ::CALLOUT is the intended, non-conflicting
+        // combination.
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'callout'::MARKDOWN_STYLE, 'warning'::CALLOUT;",
+            |_q| {
+                Ok(rows(
+                    1,
+                    |_| json!({ "c0": "x", "c1": "callout", "c2": "warning" }),
+                ))
+            },
+        );
+        assert!(
+            !d.iter()
+                .any(|x| x.code == "markdown_style/conflicts-with-callout"),
+            "{d:?}"
+        );
     }
 
     #[test]

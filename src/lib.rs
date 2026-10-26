@@ -476,6 +476,12 @@ pub enum Role {
     /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
     /// `'warning'` or `'success'` (the value).
     Callout,
+    /// A `::MARKDOWN` box's chrome (`::MARKDOWN_STYLE`, #536): `'plain'` (text
+    /// on the page background — no card, no tint, no accent bar), `'card'`
+    /// (a plain white card, like a chart panel) or `'callout'` (today's
+    /// tinted box — the default, and what `::CALLOUT` implies). A
+    /// `-- @markdown_style` header sets the dashboard's own default.
+    MarkdownStyle,
     /// Candlestick open price (`::OPEN`).
     Open,
     /// Candlestick high price (`::HIGH`).

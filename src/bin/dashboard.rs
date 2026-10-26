@@ -334,6 +334,12 @@ fn render_dashboard_html(
         ..RenderOptions::default()
     };
 
+    // #536: this dashboard's own `-- @markdown_style` default, read once —
+    // every ::MARKDOWN panel without its own ::MARKDOWN_STYLE (and without
+    // ::CALLOUT, which always draws 'callout') falls back to it. Static
+    // output draws the chosen chrome through the same CSS classes the
+    // browser uses (web/theme-base.css, embedded by `page::render` below).
+    let md_default = sv::parse_dashboard_meta("", script).markdown_style;
     // Phase 2: render.
     let mut panels = String::new();
     let mut n = 0;
@@ -457,7 +463,47 @@ fn render_dashboard_html(
             render_with_title(&cols, &tracks, 460, 300, &opts)
                 .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
         };
-        panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
+        // #536: a ::MARKDOWN panel's chrome — same resolution as the
+        // browser's resolveMdStyle(), drawn through the same CSS classes
+        // (web/theme-base.css, embedded in this page by `page::render`).
+        let text_of = |role: Role| -> Option<String> {
+            let (i, _) = p.roles.iter().find(|(_, r)| *r == role)?;
+            rows.first()?
+                .get(&format!("c{i}"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        let (class, icon_attrs) = if p.roles.iter().any(|(_, r)| matches!(r, Role::Markdown)) {
+            let explicit = text_of(Role::MarkdownStyle);
+            let callout_present = p.roles.iter().any(|(_, r)| matches!(r, Role::Callout));
+            let style = roles::resolve_markdown_style(
+                explicit.as_deref(),
+                callout_present,
+                md_default.as_deref(),
+            );
+            match style {
+                "plain" => ("panel md-plain".to_string(), String::new()),
+                "callout" if callout_present => {
+                    let kind = roles::callout_kind(&text_of(Role::Callout).unwrap_or_default());
+                    let icon = match kind {
+                        "warning" => "⚠",
+                        "success" => "✓",
+                        _ => "ℹ",
+                    };
+                    (
+                        format!("panel md-box dp-callout dp-callout-{kind}"),
+                        format!(" role=\"note\" data-icon=\"{icon}\""),
+                    )
+                }
+                "callout" => ("panel md-box".to_string(), String::new()),
+                _ => ("panel".to_string(), String::new()), // 'card'
+            }
+        } else {
+            ("panel".to_string(), String::new())
+        };
+        panels.push_str(&format!(
+            "<figure class=\"{class}\"{icon_attrs}>{svg}</figure>"
+        ));
         n += 1;
     }
 
