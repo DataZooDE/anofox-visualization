@@ -45,6 +45,27 @@ const spy = () => {
   assert.equal(runBlobs.has(7), false, "run 7's now-empty entry is pruned, not left to grow forever");
 }
 
+// ---- review (team-lead): a NEWER run's own image must never be touched,
+// even disconnected — it is still mid-build, sitting in its own
+// not-yet-swapped fragment, which is a normal, temporary state (the exact
+// state the >= ownRunId bound exists to tell apart from a genuinely
+// abandoned older run). Only run ids STRICTLY OLDER than the sweeping run
+// are ever reaped. ----
+{
+  // Run 12 (newer than the sweeping run 10) has a disconnected image —
+  // its own build just hasn't swapped yet. Run 10's sweep must leave it
+  // alone entirely: not revoked, not even dropped from tracking, so run
+  // 12's own eventual sweep can still find and correctly resolve it.
+  const newerImg = img(false, "blob:building-12");
+  const runBlobs = new Map([[12, new Set([newerImg])]]);
+  const revoke = spy();
+  const revoked = reapOtherRunBlobs(runBlobs, 10, revoke);
+  assert.deepEqual(revoke.calls, [], "a newer, still-building run's blob is never revoked");
+  assert.equal(revoked.length, 0);
+  assert.equal(runBlobs.has(12), true, "run 12's entry is left completely untouched, not pruned either");
+  assert.equal(runBlobs.get(12).has(newerImg), true);
+}
+
 // ---- a connected image from an older, abandoned run is left alone (still
 // in use — the live-DOM sweep around the call site, not this function, now
 // owns its eventual cleanup) ----

@@ -9075,25 +9075,47 @@ const dpImgSwappedRuns = new Set();
 // `dpImgSwappedRuns` already covers. `dpImgRunBlobs` (imgRunId -> Set<img>)
 // tracks every <img> a run's fetch has pointed at a blob: URL but isn't yet
 // KNOWN to be safely attached; every run's own sweep also reaps every
-// OTHER run's still-tracked, still-disconnected images, not just its own —
-// so the very next run to actually reach a sweep closes the gap regardless
-// of why the owning run never got there itself. An image found connected
-// is simply dropped (the ordinary per-run sweep below, which scans the
-// live DOM every run, already owns its eventual cleanup from here on).
+// STRICTLY OLDER run's still-tracked, still-disconnected images, not just
+// its own — so the very next run to actually reach a sweep closes the gap
+// regardless of why the owning (older) run never got there itself. An
+// image found connected is simply dropped (the ordinary per-run sweep
+// below, which scans the live DOM every run, already owns its eventual
+// cleanup from here on). Never a run >= the sweeping one's own id: a run
+// that hasn't swapped yet (or doesn't exist yet) has its own images
+// legitimately sitting disconnected in its own not-yet-swapped fragment —
+// revoking those here would break a chart about to appear.
 const dpImgRunBlobs = new Map();
 // #574: called from every run's own swap-time sweep, right after it marks
 // itself in `dpImgSwappedRuns` — drops ITS OWN entry (`candidateBlobImgs`'
 // sweep, right above the call site, already resolved every image in it),
-// then reaps every OTHER run's still-tracked images: a connected one is
-// just dropped from tracking (the live-DOM sweep above now owns it), a
-// disconnected one is revoked via `revoke` (real caller: `URL.revokeObjectURL`;
-// a test passes a spy instead — `img` only needs `.isConnected` and
-// `.dataset.anofoxBlob`, no real DOM). A `Map`/`img` argument is mutated in
-// place (matching `dpImgRunBlobs` itself); returns the images it revoked.
+// then reaps every run strictly OLDER than `ownRunId` (run ids are
+// monotonic, from `++dpImgRunSeq`) that still has tracked images: a
+// connected one is just dropped from tracking (the live-DOM sweep above
+// now owns it), a disconnected one is revoked via `revoke` (real caller:
+// `URL.revokeObjectURL`; a test passes a spy instead — `img` only needs
+// `.isConnected` and `.dataset.anofoxBlob`, no real DOM). A run `>=
+// ownRunId` is deliberately never touched, even though the single-flight
+// run queue means one can't currently exist yet at this point — a run
+// still mid-build has its own images sitting disconnected in its own
+// not-yet-swapped fragment, the same transient state an orphaned image is
+// in, and this function must not rely on timing to tell them apart. A
+// `Map`/`img` argument is mutated in place (matching `dpImgRunBlobs`
+// itself); returns the images it revoked.
 function reapOtherRunBlobs(runBlobs, ownRunId, revoke) {
   runBlobs.delete(ownRunId);
   const revoked = [];
   for (const [rid, runSet] of runBlobs) {
+    // Review: only ever touch a STRICTLY OLDER run (run ids are monotonic,
+    // assigned by `++dpImgRunSeq` — see dpImgRunBlobs' own comment) — never
+    // one that is `ownRunId` or newer. The single-flight run queue means a
+    // newer run can't have started before THIS one finished, so `rid >
+    // ownRunId` can't currently happen in practice — but this function
+    // must not quietly rely on that: a newer run's own images sit
+    // disconnected in its own not-yet-swapped fragment for the entirety of
+    // its build, which is exactly the state a genuinely orphaned image is
+    // in too, and reaping it here (before that run's OWN sweep gets to
+    // decide) would revoke a blob still destined for the live DOM.
+    if (rid >= ownRunId) continue;
     for (const img of runSet) {
       if (img.isConnected) {
         runSet.delete(img);
