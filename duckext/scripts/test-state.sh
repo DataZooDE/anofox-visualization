@@ -59,7 +59,7 @@ EOF
 # `progress`: a trainer dashboard — no ::SUBMIT of its own, read-only.
 cat > "$W/dash/progress.sql" <<'EOF'
 SELECT count(*) AS n ::METRIC FROM viewer_state;
-SELECT "user" ::TABLE, dashboard, submit, name, value FROM viewer_state ORDER BY seq, "user", name;
+SELECT "user" ::TABLE, dashboard, submit, name, value, value_list FROM viewer_state ORDER BY seq, "user", name;
 EOF
 
 # `leak`: not state-enabled at all — tries to read the state file straight
@@ -223,17 +223,19 @@ echo "OK: value for a list (MULTISELECT) answer holds its JSON text, not NULL"
 # `scalar_literal` (src/host/serving.rs) refuses a NUL byte in any
 # viewer-submitted value before it is ever `SET` as a variable — so this
 # is only reachable via a store file written or edited some other way,
-# same as #611 S2's own non-canonical-`ts` scenario (and the two are
-# combined here: one record below has a canonical `ts`, taking the fast
-# Appender path; the other doesn't, taking the slow SQL fallback path).
-# Before this fix, `Appender::append_varchar`/`append_varchar_list` and
-# the fallback's `Prepared::bind_strs` all refused the whole row
-# (`CString::new` on an embedded NUL, #611 N3) — every panel on this
-# generation errored, not just the one holding this record. Stop the
-# server, hand-edit state.jsonl to add both records directly, then
-# restart on the SAME file and read them back, alongside every row
-# already recorded above (proving the restart and the hand-edit didn't
-# lose or corrupt anything either).
+# same as #611 S2's own non-canonical-`ts` scenario (combined here: one
+# record below has a canonical `ts`, taking the fast Appender path; one
+# doesn't, taking the slow SQL fallback path; one is a MULTISELECT (list)
+# answer, exercising append_varchar_list's own NUL-safety separately
+# from a plain scalar value's append_varchar). Before this fix,
+# Appender::append_varchar/append_varchar_list and the fallback's
+# Prepared::bind_strs all refused the whole row (`CString::new` on an
+# embedded NUL, #611 N3) — every panel on this generation errored, not
+# just the one holding this record. Stop the server, hand-edit
+# state.jsonl to add all three records directly, then restart on the
+# SAME file and read them back, alongside every row already recorded
+# above (proving the restart and the hand-edit didn't lose or corrupt
+# anything either).
 kill "$SERVER_PID" "$FIFO_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
 wait "$FIFO_PID" 2>/dev/null || true
@@ -251,6 +253,9 @@ recs = [
     {"v": 1, "seq": next_seq + 1, "ts": "2026-10-01T00:00:00Z", "user": "erin",
      "auth": "oidc", "dashboard": "quiz", "submit": "quiz_1", "id": "e" * 32,
      "vars": {"q1": "p\u0000q"}},
+    {"v": 1, "seq": next_seq + 2, "ts": "2026-10-01T00:00:00.000Z", "user": "frank",
+     "auth": "oidc", "dashboard": "quiz", "submit": "quiz_4", "id": "f" * 32,
+     "vars": {"q4": ["x\u0000y", None]}},
 ]
 with open(path, "a") as f:
     for rec in recs:
@@ -271,8 +276,33 @@ CAROL_AFTER_RESTART=$(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $O
 echo "$CAROL_AFTER_RESTART" | grep -q '"user":"alice"' || fail "#614: a trainer must still see every pre-restart row after the hand-edit, got: $CAROL_AFTER_RESTART"
 echo "$CAROL_AFTER_RESTART" | grep -q '"user":"dave"' || fail "#614: the hand-edited canonical-ts/NUL record (fast Appender path) must seed and read back, got: $CAROL_AFTER_RESTART"
 echo "$CAROL_AFTER_RESTART" | grep -q '"user":"erin"' || fail "#614: the hand-edited non-canonical-ts/NUL record (slow SQL fallback path, #611 S2) must seed and read back, got: $CAROL_AFTER_RESTART"
+echo "$CAROL_AFTER_RESTART" | grep -q '"user":"frank"' || fail "#614: the hand-edited MULTISELECT/NUL record (append_varchar_list path) must seed and read back, got: $CAROL_AFTER_RESTART"
 echo "$CAROL_AFTER_RESTART" | grep -q '"value":"x\\u0000y"' || fail "#614: dave's embedded-NUL value must round-trip unchanged (fast Appender path), got: $CAROL_AFTER_RESTART"
 echo "$CAROL_AFTER_RESTART" | grep -q '"value":"p\\u0000q"' || fail "#614: erin's embedded-NUL value must round-trip unchanged (slow SQL fallback path), got: $CAROL_AFTER_RESTART"
-echo "OK: a record with an embedded NUL byte in a value seeds and reads back correctly, on both the fast Appender path and the slow SQL fallback path"
+echo "$CAROL_AFTER_RESTART" | grep -q '"value_list":\["x\\u0000y",null\]' || fail "#614: frank's embedded-NUL list item must round-trip unchanged (append_varchar_list path), got: $CAROL_AFTER_RESTART"
+echo "OK: a record with an embedded NUL byte in a value seeds and reads back correctly, on the fast Appender path, the slow SQL fallback path and the MULTISELECT (list) path"
+
+# --- #614 output check (security review): a NUL-containing value is now
+# seeded, so it can flow into panel OUTPUT too. The JSON API (`/api/panel`,
+# just exercised above) already escapes it correctly (`serde_json`'s own
+# `\u0000`, confirmed by the greps above against the RAW response bytes,
+# not a bash variable — bash strings can't hold an embedded NUL, so a
+# bug that let a literal 0x00 byte through would have silently vanished
+# from `$CAROL_AFTER_RESTART` instead of failing this script). The served
+# dashboard page (`GET /d/<id>`) carries the dashboard's own SQL text and
+# static UI chrome only — never a live `viewer_state` value — so there is
+# nothing for a value to flow into there. No current code path renders a
+# real, Store-backed `viewer_state` value into server-side SVG/XML: the
+# locked server's `/api/panel`/`/api/submit` are JSON-only; chart/table
+# rendering of that data happens entirely client-side (the browser's own
+# JS/renderer), which is out of this script's (and this PR's) reach.
+# `dashboard --svg`/`--site` and the standalone `serve` binary's own
+# SVG/HTML rendering (`src/format::escape_xml`, already NUL-safe — see
+# its own `escape_xml_replaces_xml_invalid_control_characters` test) never
+# see a live Store at all (`viewer_state` is always empty there), so
+# they can't be the vehicle for this either. If a future change adds a
+# server-side render of a real recorded value, `escape_xml`/`html_escape`
+# are already there and already NUL-safe.
+echo "OK: the JSON API escapes an embedded NUL byte in panel output (serde_json's \\u0000); no server-side SVG/XML render path exists for a real recorded value to flow into (chart/table rendering of viewer_state data is client-side only)"
 
 echo "PASS: state-live"
