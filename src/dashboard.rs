@@ -664,7 +664,12 @@ fn render_inner(
             None => next_span.clamp(1, 12),
         };
         next_span = 0;
-        let md = markdown_text(rows, roles);
+        // #601 review S2: filled here (not the raw `{{col}}` template) so
+        // the height estimate below sees exactly what render_panel_svg
+        // will actually draw — the raw text undercounted a `{{col}}` image
+        // source as Alt (one line), squashing the real image into a tiny
+        // box and silently dropping whatever paragraph came after it.
+        let md = markdown_text(rows, roles).map(|t| markdown_fill(&t, rows, &ropts.locale));
         let img = image_panel(rows, roles, ropts.theme.variant == Variant::Dark);
         let ch = match strip {
             _ if next_height > 0 => next_height as f64,
@@ -682,13 +687,28 @@ fn render_inner(
                     // height estimate (the same calc the ::IMAGE box just
                     // below uses) instead of a flat MD_LINE — a markdown
                     // figure can be much taller than one line of text.
+                    // #601 review S1: a fresh per-panel budget — only
+                    // resolves (reads/decodes) as many of this panel's own
+                    // block images as fit in it, for aspect only, never
+                    // building the (possibly large) href string the render
+                    // pass needs (md_image_aspect).
                     let iw = (mw - 28.0).max(10.0);
-                    let content_h: f64 = markdown_lines(t, mw, opts.asset_root.as_deref())
+                    let mut budget = MD_IMAGE_BUDGET_BYTES;
+                    let content_h: f64 = markdown_lines(t, mw)
                         .iter()
                         .map(|line| match line {
                             MdLine::Text(_) => MD_LINE,
-                            MdLine::Image { aspect, .. } => {
-                                iw * (aspect.1 / aspect.0.max(1.0)).clamp(0.05, 20.0) + 8.0
+                            MdLine::Image { src, .. } => {
+                                match md_image_aspect(src, opts.asset_root.as_deref(), &mut budget)
+                                {
+                                    Some(aspect) => {
+                                        iw * (aspect.1 / aspect.0.max(1.0)).clamp(0.05, 20.0) + 8.0
+                                    }
+                                    // unresolvable (or the budget ran out) —
+                                    // render_panel_svg falls back to [alt]
+                                    // text for it too (one line).
+                                    None => MD_LINE,
+                                }
                             }
                         })
                         .sum();
@@ -1053,7 +1073,13 @@ fn render_panel_svg(
             hex(t.colors.ink)
         ));
         let mut y = title_h + 22.0;
-        for line in markdown_lines(&md, w, ropts.asset_root.as_deref()) {
+        // #601 review S1: a fresh per-panel budget — only resolves
+        // (reads/decodes, builds the href) as many of this panel's own
+        // block images as the byte cap and the panel's own height both
+        // allow; an image past either falls back to [alt] text, same as
+        // an unresolvable source always has.
+        let mut img_budget = MD_IMAGE_BUDGET_BYTES;
+        for line in markdown_lines(&md, w) {
             if y > h - 8.0 {
                 break;
             }
@@ -1067,23 +1093,48 @@ fn render_panel_svg(
                     }
                     y += MD_LINE;
                 }
-                // #524: a block markdown image, embedded (or kept/alt-boxed
-                // as text — see md_image) — drawn as its own row, sized to
-                // the panel's own width and whatever vertical room is left.
-                MdLine::Image { href, alt, aspect } => {
-                    match markdown_image_height(aspect, w - 2.0 * pad, h - y - 8.0) {
-                        Some(ih) => {
-                            svg.push_str(&markdown_image_svg(
-                                &href,
-                                &alt,
-                                pad,
-                                y,
-                                w - 2.0 * pad,
-                                ih,
-                            ));
-                            y += ih + 8.0;
+                // #524: a block markdown image — resolved lazily, right
+                // here, only now that it's known to actually need drawing
+                // (#601 review S1) — drawn as its own row, sized to the
+                // panel's own width and whatever vertical room is left.
+                MdLine::Image { src, alt } => {
+                    match md_image(&src, ropts.asset_root.as_deref(), &mut img_budget) {
+                        Some((href, aspect)) => {
+                            match markdown_image_height(aspect, w - 2.0 * pad, h - y - 8.0) {
+                                Some(ih) => {
+                                    svg.push_str(&markdown_image_svg(
+                                        &href,
+                                        &alt,
+                                        pad,
+                                        y,
+                                        w - 2.0 * pad,
+                                        ih,
+                                    ));
+                                    // #601 review N5: roughly the same gap
+                                    // as the blank line a text paragraph
+                                    // gets before it (MD_LINE, via the
+                                    // blank MdLine::Text("") markdown_lines
+                                    // pushes ahead of every block), not a
+                                    // much smaller one after it — cosmetic,
+                                    // not pixel-exact (an SVG <text>'s own
+                                    // baseline offset vs. this box's flush
+                                    // top still differ).
+                                    y += ih + MD_IMAGE_GAP;
+                                }
+                                None => break, // no room left at all
+                            }
                         }
-                        None => break,
+                        // unresolvable now (the budget ran out, or the
+                        // file/data: payload failed to resolve at THIS
+                        // exact moment) — the alt text still deserves a
+                        // line, the same as a rejected source always gets.
+                        None => {
+                            svg.push_str(&format!(
+                                "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                                markdown_line_svg(&format!("[{alt}]"))
+                            ));
+                            y += MD_LINE;
+                        }
                     }
                 }
             }
@@ -1865,6 +1916,12 @@ fn link_label(url: &str) -> String {
 
 /// Line height of a headless ::MARKDOWN box.
 pub(crate) const MD_LINE: f64 = 18.0;
+/// Gap (px) below a block `MdLine::Image` row before the next line (#601
+/// review N5) — close to [`MD_LINE`], the gap a text paragraph already
+/// gets ABOVE it (the blank `MdLine::Text("")` [`markdown_lines`] pushes
+/// ahead of every block), so the whitespace around an image reads roughly
+/// even instead of a wide gap above and a narrow one below.
+pub(crate) const MD_IMAGE_GAP: f64 = 16.0;
 
 /// A static ::IMAGE panel's resolved content (#514).
 struct ImagePanel {
@@ -2103,27 +2160,34 @@ const MD_BREAK: &str = "\u{E003}";
 const MD_SIZE: f64 = 13.0;
 
 /// One line of a static `::MARKDOWN` panel's content (#524). Plain wrapped
-/// text, same as before — or a markdown image resolved into something this
-/// headless renderer can actually draw as its own row: `![alt](src)` as the
-/// WHOLE of its own paragraph (a block figure — #514's own motivating
-/// examples, an SVG infographic, are all this shape; this renderer has no
-/// inline image layout, so an image mixed with other text in the same
-/// paragraph still falls back to `[alt]`, same as before #524) — resolved
-/// through #514/#554's own source rules ([`md_image`]), not a new one.
+/// text, same as before — or a markdown image that is the WHOLE of its own
+/// paragraph (a block figure — #514's own motivating examples, an SVG
+/// infographic, are all this shape; this renderer has no inline image
+/// layout, so an image mixed with other text in the same paragraph still
+/// falls back to `[alt]`/the raw syntax as plain text, same as before
+/// #524), kept UNRESOLVED (`src`, not a `data:` href) — #601 review S1:
+/// resolving every block image up front, including ones a caller will
+/// never actually draw (past its panel's own height cutoff), read
+/// arbitrarily many files into memory and base64-encoded them for
+/// nothing. [`md_image`] / [`md_image_aspect`] resolve one LAZILY, only
+/// when a caller is actually about to draw or measure it, through
+/// #514/#554's own source rules — not a new one.
 #[derive(Debug, PartialEq)]
 pub(crate) enum MdLine {
     Text(String),
-    Image {
-        href: String,
-        alt: String,
-        aspect: (f64, f64),
-    },
+    Image { src: String, alt: String },
 }
 
 /// Trims a paragraph, markdown is one in whole `![alt](src)` and nothing
 /// else — `(alt, src)` if so. The same manual bracket-scan style
 /// [`markdown_lines`]' own inline image handling already uses (no `regex`
-/// dependency for this crate's wasm build).
+/// dependency for this crate's wasm build). `src`'s optional CommonMark
+/// title (`src "title"` / `src 'title'`, #601 review N2) is stripped —
+/// `crate::image::src_ok` rejects a bare quote, so a titled source used to
+/// always fall back to `[alt]`; the title text itself has nowhere to show
+/// in this headless renderer (no hover tooltip on plain SVG text; the
+/// `<image>` row this becomes already gets its own SVG `<title>` from the
+/// alt text) and is simply dropped, not shown anywhere.
 fn whole_paragraph_image(trimmed: &str) -> Option<(String, String)> {
     let rest = trimmed.strip_prefix("![")?;
     let b = rest.find("](")?;
@@ -2132,55 +2196,113 @@ fn whole_paragraph_image(trimmed: &str) -> Option<(String, String)> {
     if !after[c + 1..].trim().is_empty() {
         return None; // trailing content after the `)` — not the WHOLE paragraph
     }
-    Some((rest[..b].to_string(), after[..c].to_string()))
+    Some((
+        rest[..b].to_string(),
+        strip_image_title(&after[..c]).to_string(),
+    ))
 }
 
-/// A markdown image's `src` resolved for static output (#524), reusing
-/// #514/#554's own source rules exactly ([`crate::image::src_ok`] /
-/// [`crate::image::resolve_relative`] / [`crate::image::intrinsic_size`] —
-/// no new path handling). `Embed` only when the bytes are available
-/// locally: a `data:` source used as-is, or a `relative` path read from
-/// `asset_root`'s `assets/` folder and inlined as a `data:` URI — either
-/// way with its real aspect ratio. An `https:` source is `Keep`: a static
-/// export never fetches a remote URL on its own account, so the raw
-/// `![alt](src)` markdown syntax is kept as plain text instead of drawing
-/// it — a reader still sees the alt text AND the url this way, unlike
-/// `[alt]`, which drops the url entirely. Anything [`crate::image::src_ok`]
-/// rejects, or a `relative` path that fails to resolve, is `Alt` — the
-/// `[alt]` placeholder, same as every markdown image before #524.
-enum MdImage {
-    Embed { href: String, aspect: (f64, f64) },
-    Keep,
-    Alt,
+/// `src "title"` / `src 'title'` → `src` (#601 review N2) — see
+/// [`whole_paragraph_image`]'s own comment for why the title is dropped,
+/// not shown. A quote not preceded by a space (so not a title at all, just
+/// a malformed source) is left as-is — `src_ok` then correctly rejects it.
+fn strip_image_title(spec: &str) -> &str {
+    let t = spec.trim_end();
+    let Some(q @ ('"' | '\'')) = t.chars().last() else {
+        return spec;
+    };
+    let body = &t[..t.len() - q.len_utf8()];
+    let Some(open) = body.rfind(q) else {
+        return spec;
+    };
+    let before = &body[..open];
+    if before.ends_with(' ') {
+        before.trim_end()
+    } else {
+        spec
+    }
 }
 
-fn md_image(src: &str, asset_root: Option<&std::path::Path>) -> MdImage {
+/// Per-panel byte budget for resolving markdown block images (#601 review
+/// S1) — shared across every image ONE height-estimate or render pass
+/// actually resolves for a single `::MARKDOWN` panel (a fresh budget each
+/// call — the CLI path's own two passes, estimate then render, #601 S2,
+/// get roughly this much each, not a combined cap across both). A `data:`
+/// source is already capped near 1.5 MB by `crate::image::MAX_SRC_CHARS`;
+/// a `relative` one at `crate::image::DEFAULT_MAX_ASSET_BYTES` (5 MiB)
+/// each — this budget just bounds how many of either ONE panel's worth of
+/// paragraphs can actually be read/decoded, so a markdown cell of dozens
+/// of large block images (an author's mistake, or — the script-free
+/// served page resolves `{{col}}` placeholders first — a reflected viewer
+/// value) can't read or base64-encode arbitrarily much.
+pub(crate) const MD_IMAGE_BUDGET_BYTES: i64 = 8 * 1024 * 1024;
+
+/// An `MdLine::Image`'s `src`, resolved to an embeddable `(href, aspect)` —
+/// reusing #514/#554's own source rules exactly
+/// ([`crate::image::resolve_relative`] / [`crate::image::intrinsic_size`],
+/// no new path handling). Only ever called for a `src` [`markdown_lines`]
+/// already classified `Data`/`Relative` (an `Https`/rejected source
+/// becomes `MdLine::Text` there directly, never reaching this function) —
+/// called LAZILY, only for an image a caller is actually about to draw,
+/// never from `markdown_lines` itself (#601 review S1). `budget` (a fresh
+/// [`MD_IMAGE_BUDGET_BYTES`] per call site's own loop) is decremented by
+/// every file actually read or `data:` payload actually decoded; `None`
+/// once it's exhausted (the caller then draws `[alt]` instead, same as a
+/// source [`crate::image::resolve_relative`] itself refuses). See
+/// [`md_image_aspect`] for the height-ESTIMATE twin, which never builds
+/// this (possibly large) href string.
+pub(crate) fn md_image(
+    src: &str,
+    asset_root: Option<&std::path::Path>,
+    budget: &mut i64,
+) -> Option<(String, (f64, f64))> {
     use crate::image::{
         decode_data_uri, intrinsic_size, resolve_relative, src_ok, SrcKind, FALLBACK_ASPECT,
     };
-    match src_ok(src) {
-        SrcKind::Data(_) => {
-            let aspect = decode_data_uri(src)
-                .and_then(|(mime, bytes)| intrinsic_size(&bytes, &mime))
-                .unwrap_or(FALLBACK_ASPECT);
-            MdImage::Embed {
-                href: src.to_string(),
-                aspect,
-            }
-        }
-        SrcKind::Relative => match resolve_relative(src, asset_root) {
-            Some((mime, bytes)) => {
-                let aspect = intrinsic_size(&bytes, &mime).unwrap_or(FALLBACK_ASPECT);
-                MdImage::Embed {
-                    href: crate::host::app_brand::data_uri(&mime, &bytes),
-                    aspect,
-                }
-            }
-            None => MdImage::Alt,
-        },
-        SrcKind::Https => MdImage::Keep,
-        SrcKind::Bad(_) => MdImage::Alt,
+    if *budget <= 0 {
+        return None;
     }
+    let (mime, bytes, href) = match src_ok(src) {
+        SrcKind::Data(_) => {
+            let (mime, bytes) = decode_data_uri(src)?;
+            let href = src.to_string();
+            (mime, bytes, href)
+        }
+        SrcKind::Relative => {
+            let (mime, bytes) = resolve_relative(src, asset_root)?;
+            let href = crate::host::app_brand::data_uri(&mime, &bytes);
+            (mime, bytes, href)
+        }
+        SrcKind::Https | SrcKind::Bad(_) => return None, // unreachable via markdown_lines' own classification below; defensive
+    };
+    *budget -= bytes.len() as i64;
+    Some((
+        href,
+        intrinsic_size(&bytes, &mime).unwrap_or(FALLBACK_ASPECT),
+    ))
+}
+
+/// [`md_image`]'s height-ESTIMATE twin (`render_inner`): same budget-gated
+/// resolution, but only the aspect ratio — never builds the href string at
+/// all (#601 review S1).
+pub(crate) fn md_image_aspect(
+    src: &str,
+    asset_root: Option<&std::path::Path>,
+    budget: &mut i64,
+) -> Option<(f64, f64)> {
+    use crate::image::{
+        decode_data_uri, intrinsic_size, resolve_relative, src_ok, SrcKind, FALLBACK_ASPECT,
+    };
+    if *budget <= 0 {
+        return None;
+    }
+    let (mime, bytes) = match src_ok(src) {
+        SrcKind::Data(_) => decode_data_uri(src)?,
+        SrcKind::Relative => resolve_relative(src, asset_root)?,
+        SrcKind::Https | SrcKind::Bad(_) => return None,
+    };
+    *budget -= bytes.len() as i64;
+    Some(intrinsic_size(&bytes, &mime).unwrap_or(FALLBACK_ASPECT))
 }
 
 /// An `MdLine::Image`'s `<image>` SVG element, boxed at `(x, y, w, h)` —
@@ -2188,8 +2310,12 @@ fn md_image(src: &str, asset_root: Option<&std::path::Path>) -> MdImage {
 /// even though `h` here is only an estimate (from the image's own aspect,
 /// capped to the panel's remaining room), the same pattern the standalone
 /// `::IMAGE` panel branch (`render_panel_svg`, below) and `image_panel_svg`
-/// (`lib.rs`) already use for a fixed box. Shared by both of those call
-/// sites so there is exactly one `<image>` markup writer for this shape.
+/// (`lib.rs`) draw their own `<image>` with too. Shared by this file's own
+/// `render_panel_svg` and `lib.rs`'s `markdown_panel_svg` — the two
+/// MARKDOWN-image call sites — so there is exactly one `<image>` writer
+/// for a markdown figure (#601 review N4: the ::IMAGE panel kind is its
+/// own, separate writer in each of those files, not this one — it draws a
+/// fixed box with its own title/caption chrome this shape doesn't have).
 pub(crate) fn markdown_image_svg(href: &str, alt: &str, x: f64, y: f64, w: f64, h: f64) -> String {
     let alt_title = if alt.is_empty() {
         String::new()
@@ -2220,6 +2346,32 @@ pub(crate) fn markdown_image_height(
     Some(natural.min(remaining))
 }
 
+/// Greedy word-wraps `text` into `out` as `MdLine::Text` lines, each at
+/// most `avail` px wide (ggplot-rs's own text-width estimate) — the same
+/// wrap [`markdown_lines`]' own per-paragraph loop below does for ordinary
+/// text, reused for a markdown image's `Https`/rejected text (#601 review
+/// N3: a long `https:` url now wraps like any other long text instead of
+/// overflowing the panel's right edge as one unbroken line).
+fn push_wrapped_text(out: &mut Vec<MdLine>, text: &str, avail: f64) {
+    let mut line = String::new();
+    for wd in text.split_whitespace() {
+        let candidate = if line.is_empty() {
+            wd.to_string()
+        } else {
+            format!("{line} {wd}")
+        };
+        if !line.is_empty() && ggplot_rs::render::text::text_width(&candidate, MD_SIZE) > avail {
+            out.push(MdLine::Text(std::mem::take(&mut line)));
+            line = wd.to_string();
+        } else {
+            line = candidate;
+        }
+    }
+    if !line.is_empty() {
+        out.push(MdLine::Text(line));
+    }
+}
+
 /// Markdown as plain text lines wrapped to a `w`-wide box (13 px text):
 /// emphasis / code / heading marks dropped, `[text](url)` → text, paragraphs
 /// separated by an empty line. A formula is rendered to plain text by
@@ -2233,15 +2385,13 @@ pub(crate) fn markdown_image_height(
 /// much text actually fits at the browser's real proportional-font width —
 /// 5 ragged lines with a wide empty right margin where the browser fits 3).
 ///
-/// `asset_root` is only for a markdown image that is the WHOLE of its own
-/// paragraph (#524: [`whole_paragraph_image`] / [`md_image`]) — passed
-/// through to [`crate::image::resolve_relative`] exactly as the standalone
-/// `::IMAGE` panel's own `asset_root` is.
-pub(crate) fn markdown_lines(
-    md: &str,
-    w: f64,
-    asset_root: Option<&std::path::Path>,
-) -> Vec<MdLine> {
+/// An `MdLine::Image` is never produced for an `https:`/rejected source —
+/// [`crate::image::src_ok`]'s own classification is cheap (no I/O), so
+/// `markdown_lines` decides that much eagerly; only the possibly-expensive
+/// part (reading a `relative` file / decoding a `data:` payload, #601
+/// review S1) is deferred to [`md_image`]/[`md_image_aspect`], called
+/// lazily by a caller that is actually about to draw or measure the image.
+pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<MdLine> {
     // 0.96: a small safety cushion against text_width's own estimate error
     // (it models Hanken Grotesk; a box without that font, e.g. this crate's
     // own rsvg-based PNG crops, substitutes a wider fallback — see
@@ -2249,23 +2399,60 @@ pub(crate) fn markdown_lines(
     // so a wrapped line never clips the panel's right edge.
     let avail = ((w - 28.0) * 0.96).max(40.0);
     let mut out: Vec<MdLine> = Vec::new();
+    // #601 review N1: an image inside a fenced (```/~~~) or indented (4+
+    // leading spaces/tab) code block must not be treated as a live block
+    // image — shown as inert text instead, same as any other code content
+    // (this renderer has no code-block styling at all, a pre-existing gap;
+    // the point here is only to not wrongly EMBED it as a real image). A
+    // fence can itself span several `\n\n`-separated paragraphs, so
+    // `in_fence` carries across loop iterations; `fence_marks` (this
+    // paragraph's own count of fence-marker lines) also guards a
+    // self-contained single-paragraph fence, open and close both inside it.
+    let mut in_fence = false;
     for para in md.split("\n\n") {
         let trimmed = para.trim();
+        let is_indented = para.starts_with("    ") || para.starts_with('\t');
+        let fence_marks = trimmed
+            .lines()
+            .filter(|l| {
+                let s = l.trim_start();
+                s.starts_with("```") || s.starts_with("~~~")
+            })
+            .count();
+        let was_fenced = in_fence;
+        if fence_marks % 2 == 1 {
+            in_fence = !in_fence;
+        }
+        let in_code = was_fenced || fence_marks > 0 || is_indented;
         // #524: the paragraph is nothing but one markdown image — drawn as
         // its own row (or kept/alt-boxed as text), not word-wrapped. An
         // image mixed with other text in the same paragraph falls through
         // to the inline substitution below instead (no inline image layout
         // here).
-        if let Some((alt, src)) = whole_paragraph_image(trimmed) {
-            if !out.is_empty() {
-                out.push(MdLine::Text(String::new()));
+        if !in_code {
+            if let Some((alt, src)) = whole_paragraph_image(trimmed) {
+                if !out.is_empty() {
+                    out.push(MdLine::Text(String::new()));
+                }
+                match crate::image::src_ok(&src) {
+                    crate::image::SrcKind::Data(_) | crate::image::SrcKind::Relative => {
+                        out.push(MdLine::Image { src, alt });
+                    }
+                    // #524: a static export never fetches a remote url on
+                    // its own account — kept as the raw markdown image
+                    // syntax instead of drawing it; #601 review N3: through
+                    // the SAME word-wrap as any other text (not pushed as
+                    // one raw unbroken line), so a long url wraps instead
+                    // of overflowing the panel's right edge.
+                    crate::image::SrcKind::Https => {
+                        push_wrapped_text(&mut out, &format!("![{alt}]({src})"), avail);
+                    }
+                    crate::image::SrcKind::Bad(_) => {
+                        push_wrapped_text(&mut out, &format!("[{alt}]"), avail);
+                    }
+                }
+                continue;
             }
-            out.push(match md_image(&src, asset_root) {
-                MdImage::Embed { href, aspect } => MdLine::Image { href, alt, aspect },
-                MdImage::Keep => MdLine::Text(format!("![{alt}]({src})")),
-                MdImage::Alt => MdLine::Text(format!("[{alt}]")),
-            });
-            continue;
         }
         let mut words: Vec<String> = Vec::new();
         for seg in crate::math::spans(trimmed) {
@@ -2292,7 +2479,9 @@ pub(crate) fn markdown_lines(
                         let is_image = a > 0 && rest.as_bytes()[a - 1] == b'!';
                         let pre_end = if is_image { a - 1 } else { a };
                         plain.push_str(&rest[..pre_end]);
-                        let src = &rest[b + 2..c];
+                        // #601 review N2: drop an optional title the same
+                        // way whole_paragraph_image does.
+                        let src = strip_image_title(&rest[b + 2..c]);
                         if is_image
                             && matches!(crate::image::src_ok(src), crate::image::SrcKind::Https)
                         {
@@ -2378,6 +2567,7 @@ pub(crate) fn markdown_line_svg(line: &str) -> String {
 #[cfg(test)]
 mod md_tests {
     use super::MdLine;
+    use ggplot_rs::prelude::Value;
 
     /// A test-only unwrap: every line in these (non-image) fixtures is
     /// `MdLine::Text` — panics (with a clear message) if #524's image
@@ -2394,7 +2584,6 @@ mod md_tests {
         let l = super::markdown_lines(
             "## Hi\n\nOne **bold** and `code` with a [link](https://x.y) — and a longer tail.",
             200.0,
-            None,
         );
         let t: Vec<&str> = l.iter().map(text_of).collect();
         assert_eq!(t[0], "Hi");
@@ -2421,7 +2610,6 @@ mod md_tests {
         let l = super::markdown_lines(
             "Smoothing $\\hat{y}_t = \\alpha y_t$ for $5 and $10:\n$$ \\sum_i x_i $$\nafter",
             400.0,
-            None,
         );
         assert_eq!(l.len(), 3, "{l:?}");
         let t: Vec<&str> = l.iter().map(text_of).collect();
@@ -2434,28 +2622,32 @@ mod md_tests {
     }
 
     // ---- #524: block/inline markdown images in static output ----
+    // #601 review S1: markdown_lines itself never resolves a block image
+    // any more (Data:/Relative: become an unresolved `MdLine::Image{src,
+    // alt}`) — resolution is asserted separately, via md_image/
+    // md_image_aspect, as a caller would call them lazily.
 
     #[test]
-    fn a_block_data_uri_image_embeds() {
+    fn a_block_data_uri_image_is_unresolved_in_markdown_lines_but_embeds_via_md_image() {
         let src = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMmE3OGQ2Ii8+PC9zdmc+";
-        let l = super::markdown_lines(&format!("![data drift]({src})"), 200.0, None);
-        assert_eq!(l.len(), 1, "{l:?}");
-        match &l[0] {
-            MdLine::Image { href, alt, aspect } => {
-                assert_eq!(href, src);
-                assert_eq!(alt, "data drift");
-                assert_eq!(
-                    *aspect,
-                    (40.0, 40.0),
-                    "the decoded SVG's own intrinsic size"
-                );
-            }
-            other => panic!("expected MdLine::Image, got {other:?}"),
-        }
+        let l = super::markdown_lines(&format!("![data drift]({src})"), 200.0);
+        assert_eq!(
+            l,
+            vec![MdLine::Image {
+                src: src.to_string(),
+                alt: "data drift".to_string(),
+            }],
+            "{l:?}"
+        );
+        let mut budget = super::MD_IMAGE_BUDGET_BYTES;
+        let (href, aspect) = super::md_image(src, None, &mut budget).expect("should embed");
+        assert_eq!(href, src);
+        assert_eq!(aspect, (40.0, 40.0), "the decoded SVG's own intrinsic size");
+        assert!(budget < super::MD_IMAGE_BUDGET_BYTES, "budget was spent");
     }
 
     #[test]
-    fn a_block_relative_image_under_assets_embeds() {
+    fn a_block_relative_image_under_assets_resolves_via_md_image() {
         // A real assets/ folder this time (#524's `asset_root` threaded
         // through to [`crate::image::resolve_relative`], exactly as the
         // standalone `::IMAGE` panel's own `image_href` already does).
@@ -2475,32 +2667,52 @@ mod md_tests {
         )
         .unwrap();
         let root = assets.canonicalize().unwrap();
-        let l = super::markdown_lines("![concept](assets/concept.svg)", 200.0, Some(&root));
-        match &l[..] {
-            [MdLine::Image { href, alt, aspect }] => {
-                assert!(href.starts_with("data:image/svg+xml"), "{href}");
-                assert_eq!(alt, "concept");
-                assert_eq!(*aspect, (80.0, 20.0));
-            }
-            other => panic!("expected one MdLine::Image, got {other:?}"),
-        }
+        let l = super::markdown_lines("![concept](assets/concept.svg)", 200.0);
+        assert_eq!(
+            l,
+            vec![MdLine::Image {
+                src: "assets/concept.svg".to_string(),
+                alt: "concept".to_string(),
+            }],
+            "{l:?} — markdown_lines itself never touches the filesystem (#601 S1)"
+        );
+        let mut budget = super::MD_IMAGE_BUDGET_BYTES;
+        let (href, aspect) =
+            super::md_image("assets/concept.svg", Some(&root), &mut budget).expect("should embed");
+        assert!(href.starts_with("data:image/svg+xml"), "{href}");
+        assert_eq!(aspect, (80.0, 20.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_block_relative_image_outside_assets_falls_back_to_alt() {
+    fn a_block_relative_image_outside_assets_falls_back_to_alt_via_md_image() {
+        // markdown_lines still classifies it as an (unresolved) Image —
+        // the fallback to [alt] is now the CALLER's decision, made only
+        // once resolution is actually attempted (#601 S1).
+        let l = super::markdown_lines("![concept](assets/concept.svg)", 200.0);
+        assert_eq!(
+            l,
+            vec![MdLine::Image {
+                src: "assets/concept.svg".to_string(),
+                alt: "concept".to_string(),
+            }]
+        );
         // No asset_root at all: a relative path can never resolve (#524,
         // reusing #514/#554's own rule — a locked/static render with no
         // folder to read from draws the alt placeholder, same as ::IMAGE).
-        let l = super::markdown_lines("![concept](assets/concept.svg)", 200.0, None);
-        assert_eq!(l, vec![MdLine::Text("[concept]".to_string())], "{l:?}");
+        let mut budget = super::MD_IMAGE_BUDGET_BYTES;
+        assert_eq!(
+            super::md_image("assets/concept.svg", None, &mut budget),
+            None
+        );
     }
 
     #[test]
     fn a_block_https_image_keeps_the_raw_markdown_syntax() {
         // #524: never fetched into a static export — kept as plain text so
-        // the reader still sees the alt AND the url, unlike `[alt]`.
-        let l = super::markdown_lines("![chart](https://example.com/a.png)", 200.0, None);
+        // the reader still sees the alt AND the url, unlike `[alt]`. Still
+        // decided eagerly, inside markdown_lines (src_ok is cheap, no I/O).
+        let l = super::markdown_lines("![chart](https://example.com/a.png)", 200.0);
         assert_eq!(
             l,
             vec![MdLine::Text(
@@ -2512,7 +2724,7 @@ mod md_tests {
 
     #[test]
     fn a_rejected_block_source_falls_back_to_alt() {
-        let l = super::markdown_lines("![x](../outside/escape.svg)", 200.0, None);
+        let l = super::markdown_lines("![x](../outside/escape.svg)", 200.0);
         assert_eq!(l, vec![MdLine::Text("[x]".to_string())], "{l:?}");
     }
 
@@ -2521,11 +2733,7 @@ mod md_tests {
         // Mixed with other text in the same paragraph: can't be drawn as a
         // real image here (no inline image layout), but an https source
         // still keeps its full markdown syntax, not just `[alt]`.
-        let l = super::markdown_lines(
-            "See ![chart](https://example.com/a.png) above.",
-            400.0,
-            None,
-        );
+        let l = super::markdown_lines("See ![chart](https://example.com/a.png) above.", 400.0);
         let t: Vec<&str> = l.iter().map(text_of).collect();
         assert!(
             t.join(" ").contains("![chart](https://example.com/a.png)"),
@@ -2538,14 +2746,210 @@ mod md_tests {
         // Mixed with text: even a normally-embeddable data: source can't be
         // drawn inline here, so it's still `[x]`, unchanged from before
         // #524 (only a WHOLE-paragraph image embeds).
-        let l = super::markdown_lines(
-            "See ![x](data:image/png;base64,iVBORw0KGgo=) here.",
-            400.0,
-            None,
-        );
+        let l = super::markdown_lines("See ![x](data:image/png;base64,iVBORw0KGgo=) here.", 400.0);
         let t: Vec<&str> = l.iter().map(text_of).collect();
         assert!(t.join(" ").contains("See [x] here."), "{t:?}");
         assert!(!t.join(" ").contains("data:image"), "{t:?}");
+    }
+
+    // ---- #601 review S1: the per-panel byte budget ----
+
+    #[test]
+    fn md_image_stops_resolving_once_the_budget_runs_out() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-md-budget-test-{}-{nanos}",
+            std::process::id()
+        ));
+        let assets = dir.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#;
+        std::fs::write(assets.join("a.svg"), svg).unwrap();
+        let root = assets.canonicalize().unwrap();
+        // Just enough budget for ONE read of this exact file.
+        let mut budget = svg.len() as i64;
+        let first = super::md_image("assets/a.svg", Some(&root), &mut budget);
+        assert!(first.is_some(), "the first image, within budget, resolves");
+        assert!(budget <= 0, "the budget is now spent: {budget}");
+        // A second image would need to read the SAME (or another) file —
+        // the exhausted budget refuses it WITHOUT even trying (checked by
+        // pointing at a asset_root that would error loudly if read were
+        // attempted — a nonexistent one still just resolves to None either
+        // way, so the real assertion is the budget check alone, above, has
+        // already made any further read moot).
+        let second = super::md_image("assets/a.svg", Some(&root), &mut budget);
+        assert_eq!(second, None, "no budget left for a second image");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn md_image_aspect_shares_the_same_budget_semantics_as_md_image() {
+        let src = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMmE3OGQ2Ii8+PC9zdmc+";
+        let mut budget = 0i64; // already exhausted
+        assert_eq!(super::md_image_aspect(src, None, &mut budget), None);
+        let mut budget = super::MD_IMAGE_BUDGET_BYTES;
+        assert_eq!(
+            super::md_image_aspect(src, None, &mut budget),
+            Some((40.0, 40.0))
+        );
+    }
+
+    // ---- #601 review S2: the height estimate must see the FILLED text ----
+
+    #[test]
+    fn a_templated_image_source_only_resolves_once_filled() {
+        // render_inner's own height estimate used to call markdown_lines on
+        // the RAW `{{col}}` template while the actual render filled it
+        // first — a mismatched, squashed estimate (#601 S2). Both the
+        // unfilled AND the filled text classify as an (unresolved, #601
+        // S1) `MdLine::Image` — `src_ok`'s cheap, syntax-only check can't
+        // tell a template placeholder from a real relative path (neither
+        // has a forbidden character or a recognised scheme) — so the gap
+        // only shows up at RESOLVE time: "{{src}}" is never under
+        // `assets/` at all, so it never resolves to anything, while the
+        // FILLED real path does. render_inner now composes markdown_fill
+        // then markdown_lines, the same order render_panel_svg already
+        // used — asserted here through that exact composition, down to
+        // resolution.
+        let raw = "![filled]({{src}})";
+        let rows = vec![(
+            "md:src".to_string(),
+            vec![Value::Str("assets/wide.svg".into())],
+        )];
+        let filled = super::markdown_fill(raw, &rows, &crate::format::Locale::EN_US);
+        assert_eq!(
+            filled, "![filled](assets/wide.svg)",
+            "the placeholder is substituted"
+        );
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("anofox-md-s2-test-{}-{nanos}", std::process::id()));
+        let assets = dir.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(
+            assets.join("wide.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"/>"#,
+        )
+        .unwrap();
+        let root = assets.canonicalize().unwrap();
+
+        // Unfilled (today's bug, before render_inner's fix): the estimate
+        // would see "{{src}}" — classified as an Image (not Alt — #601 S1
+        // made this syntax-only, no I/O), but it never resolves to an
+        // actual aspect: not a real path under assets/ at all.
+        match &super::markdown_lines(raw, 400.0)[..] {
+            [MdLine::Image { src, .. }] => {
+                let mut budget = super::MD_IMAGE_BUDGET_BYTES;
+                assert_eq!(
+                    super::md_image_aspect(src, Some(&root), &mut budget),
+                    None,
+                    "an unfilled template never resolves, whatever the real file's aspect is"
+                );
+            }
+            other => panic!("expected one MdLine::Image, got {other:?}"),
+        }
+        // Filled (render_inner's own fix: fill BEFORE calling
+        // markdown_lines, matching render_panel_svg): the real relative
+        // path resolves to the real image's own aspect.
+        match &super::markdown_lines(&filled, 400.0)[..] {
+            [MdLine::Image { src, .. }] => {
+                let mut budget = super::MD_IMAGE_BUDGET_BYTES;
+                assert_eq!(
+                    super::md_image_aspect(src, Some(&root), &mut budget),
+                    Some((80.0, 20.0))
+                );
+            }
+            other => panic!("expected one MdLine::Image, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- #601 review N1: an image inside a fenced/indented code block ----
+
+    #[test]
+    fn a_fenced_block_image_is_shown_as_inert_text_not_embedded() {
+        let l = super::markdown_lines("```\n\n![fenced](assets/ok.svg)\n\n```", 200.0);
+        assert!(
+            l.iter().all(|x| !matches!(x, MdLine::Image { .. })),
+            "no MdLine::Image anywhere: {l:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_paragraph_fence_around_an_image_is_also_left_as_text() {
+        let l = super::markdown_lines("```\n![fenced](assets/ok.svg)\n```", 200.0);
+        assert!(
+            l.iter().all(|x| !matches!(x, MdLine::Image { .. })),
+            "{l:?}"
+        );
+    }
+
+    #[test]
+    fn an_indented_block_image_is_shown_as_inert_text_not_embedded() {
+        let l = super::markdown_lines("    ![indented](assets/ok.svg)", 200.0);
+        assert!(
+            l.iter().all(|x| !matches!(x, MdLine::Image { .. })),
+            "{l:?}"
+        );
+    }
+
+    #[test]
+    fn a_block_image_after_a_closed_fence_still_embeds_normally() {
+        // The fence state must not leak past its own close.
+        let l = super::markdown_lines("```\ncode\n```\n\n![after](assets/ok.svg)", 200.0);
+        assert!(
+            matches!(l.last(), Some(MdLine::Image { src, .. }) if src == "assets/ok.svg"),
+            "{l:?}"
+        );
+    }
+
+    // ---- #601 review N2: an optional CommonMark image title ----
+
+    #[test]
+    fn whole_paragraph_image_strips_a_double_quoted_title() {
+        assert_eq!(
+            super::whole_paragraph_image(r#"![t](assets/ok.svg "a title")"#),
+            Some(("t".to_string(), "assets/ok.svg".to_string()))
+        );
+    }
+
+    #[test]
+    fn whole_paragraph_image_strips_a_single_quoted_title() {
+        assert_eq!(
+            super::whole_paragraph_image("![t](assets/ok.svg 'a title')"),
+            Some(("t".to_string(), "assets/ok.svg".to_string()))
+        );
+    }
+
+    #[test]
+    fn whole_paragraph_image_without_a_title_is_unaffected() {
+        assert_eq!(
+            super::whole_paragraph_image("![t](assets/ok.svg)"),
+            Some(("t".to_string(), "assets/ok.svg".to_string()))
+        );
+    }
+
+    // ---- #601 review N3: a long Keep/Alt line wraps like any other text ----
+
+    #[test]
+    fn a_long_https_block_image_wraps_across_multiple_lines() {
+        let url =
+            "https://example.com/a/very/long/path/that/does/not/fit/on/one/line/at/all/chart.png";
+        let l = super::markdown_lines(&format!("![a long chart title]({url})"), 200.0);
+        assert!(l.len() > 1, "expected more than one wrapped line: {l:?}");
+        assert!(
+            l.iter().all(|x| !matches!(x, MdLine::Image { .. })),
+            "{l:?}"
+        );
+        let t: Vec<&str> = l.iter().map(text_of).collect();
+        assert!(t.join(" ").contains(url), "{t:?}");
     }
 }
 
