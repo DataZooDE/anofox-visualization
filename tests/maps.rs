@@ -2686,3 +2686,31 @@ fn symbol_sizes_are_comparable_across_frames() {
         assert!(r0 < r1, "frame 1's lone point (value 5) must read small against the shared max (100): r0={r0} r1={r1}\n{s0}");
     }
 }
+
+/// A real-example check (found rendering `delivery-coverage.sql`'s "Week by
+/// week" view): `::FRAME`'s own alias must survive the SQL rewrite into the
+/// plan's `names` (`src/sql.rs`), the same way a measure's does — the
+/// subtitle (D19) and `data-frame-name` read it. Before this fix `week AS
+/// "Week" ::FRAME` rendered a subtitle of "c1: 12", not "Week: 12".
+#[test]
+fn frame_column_keeps_its_display_name_through_the_sql_plan() {
+    let panels = anofox_visualization::sql::plan(
+        "SELECT state ::REGION, week AS \"Week\" ::FRAME, v ::BARCHART FROM t;",
+    );
+    let p = panels.iter().find(|p| !p.setup).expect("a chart panel");
+    let week_idx = p
+        .roles
+        .iter()
+        .find(|(_, r)| *r == Role::Frame)
+        .map(|(i, _)| *i)
+        .expect("a ::FRAME role");
+    assert_eq!(
+        p.names
+            .iter()
+            .find(|(i, _)| *i == week_idx)
+            .map(|(_, n)| n.as_str()),
+        Some("Week"),
+        "{:?}",
+        p.names
+    );
+}
