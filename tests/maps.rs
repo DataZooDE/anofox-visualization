@@ -2063,6 +2063,42 @@ fn flow_linestyle_sets_data_linestyle_flow_and_dashes() {
 }
 
 #[test]
+fn flow_linestyle_draws_no_legend_of_its_own_581() {
+    // #581: `::LINESTYLE` is a drawing hint (DOCS.md never promises it a
+    // legend) — the `linetype` aes must still drive the actual dash
+    // pattern (covered above) without ggplot-rs auto-growing a "NA, flow,
+    // dashed, solid" legend key for it. Mixed solid/flow rows, including
+    // one with no `::LINESTYLE` value at all (the "solid"/NULL default),
+    // so both the never-trained "NA" seed and the never-mapped "solid"
+    // value are exercised.
+    let s = svg(vec![
+        Column::new(
+            "o",
+            Role::Origin,
+            vec![pt(9.0, 50.0, "A"), pt(9.0, 50.0, "A2")],
+        ),
+        Column::new(
+            "d",
+            Role::Dest,
+            vec![pt(10.0, 51.0, "B"), pt(10.5, 51.5, "B2")],
+        ),
+        Column::new("ls", Role::LineStyle, strs(&["flow", ""])),
+    ]);
+    let f = flow_arcs(&s);
+    assert_eq!(f.len(), 2);
+    assert_eq!(attr(f[0], "data-linestyle"), Some("flow"));
+    assert_eq!(attr(f[1], "data-linestyle"), Some("solid"));
+    for (needle, label) in [
+        (">NA<", "NA"),
+        (">flow<", "lowercase flow"),
+        (">dashed<", "dashed"),
+        (">solid<", "solid"),
+    ] {
+        assert!(!s.contains(needle), "legend leaked a {label} key: {s}");
+    }
+}
+
+#[test]
 fn self_and_unplaced_flows_are_counted_in_the_summary() {
     let s = svg(vec![
         Column::new(
