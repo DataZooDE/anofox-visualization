@@ -1211,6 +1211,14 @@ impl LockedOptions {
         o.max_response = o
             .max_response
             .min(o.max_inflight.max(crate::limits::FREE_BYTES));
+        // Review of #554 S2: an asset request charges against this same
+        // in-flight budget (`locked_asset`, below) — left unclamped,
+        // `max_asset_bytes` above `max_inflight` would mean every asset
+        // request unconditionally overruns the budget and 503s, with
+        // nothing at startup saying why. Clamped the same way, just above.
+        o.max_asset_bytes = o
+            .max_asset_bytes
+            .min(o.max_inflight.max(crate::limits::FREE_BYTES));
         if !o.path_vars.is_empty() && o.data.is_none() {
             return Err("options.path_vars needs options.data".into());
         }
@@ -3166,16 +3174,24 @@ fn locked_asset(
         return reply(req, 404, "not found");
     };
     let max = st.opts.max_asset_bytes as u64;
-    // Review of #554 nit 7: bound concurrent asset memory the same way a
-    // panel result already is — each worker could otherwise hold up to
-    // `max_asset_bytes` at once with no shared cap across requests, unlike
-    // `locked_panel`'s own `charge`. Held (and released) for this whole
-    // request; the hold is pessimistic (`max`, not the file's real size —
-    // not known yet for `GET`, and deliberately not trusted from a `HEAD`
-    // `stat` either) so a run of worst-case-sized requests can't exceed
-    // the same `max_inflight_mb` budget query results answer to.
+    // Review of #554 S2 (follow-up to nit 7): open + `fstat` *first*, so
+    // the in-flight hold reflects the file's real size, not a pessimistic
+    // `max_asset_bytes` for every request regardless of how big the file
+    // actually is. `max_asset_bytes` is already clamped to `max_inflight`
+    // at parse time (`LockedOptions::parse`), so this can't itself let a
+    // run of requests exceed that shared budget — it just stops a page
+    // full of small icons from each paying for the full cap.
+    let (file, len) = match anofox_visualization::image::open_validated_asset(root, rest) {
+        Ok(ok) => ok,
+        Err(_) => return reply(req, 404, "not found"),
+    };
+    let is_head = req.method() == &Method::Head;
+    // `HEAD` (via `stat_opened_asset`, below) never reads more than a
+    // 4 KiB sniffing prefix — hold that, not the whole file, which only
+    // `GET` actually reads.
+    let hold = if is_head { len.min(4096) } else { len.min(max) } as usize;
     let mut charge = st.inflight.charge();
-    if let Err(e) = charge.hold(max as usize) {
+    if let Err(e) = charge.hold(hold) {
         busy(req, &e);
         return 503;
     }
@@ -3211,15 +3227,15 @@ fn locked_asset(
     };
     // Read per request — no snapshot — so an edited/added asset shows
     // without a refresh, as documented.
-    if req.method() == &Method::Head {
-        // Review of #554 nit 6: the real length (`fstat`, via
-        // `stat_asset`), not whatever an empty placeholder body happened
-        // to report — `GET` and `HEAD` must agree, and reading the whole
+    if is_head {
+        // Review of #554 nit 6: the real length (`fstat`, already known
+        // as `len`), not whatever an empty placeholder body happened to
+        // report — `GET` and `HEAD` must agree, and reading the whole
         // file just to discard it for `HEAD` is wasted work besides.
         // `tiny_http` itself already skips writing a `HEAD` response's
         // body (`Request::respond`'s `do_not_send_body`); this only fixes
         // the `Content-Length` this handler reports.
-        let (mime, len) = match anofox_visualization::image::stat_asset(root, rest, max) {
+        let (mime, len) = match anofox_visualization::image::stat_opened_asset(file, len, max) {
             Ok(ok) => ok,
             Err(_) => return reply(req, 404, "not found"),
         };
@@ -3234,7 +3250,7 @@ fn locked_asset(
         let _ = req.respond(resp);
         return 200;
     }
-    let (mime, bytes) = match anofox_visualization::image::read_asset(root, rest, max) {
+    let (mime, bytes) = match anofox_visualization::image::read_opened_asset(file, len, max) {
         Ok(ok) => ok,
         Err(_) => return reply(req, 404, "not found"),
     };

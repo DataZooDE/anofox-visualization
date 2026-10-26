@@ -1,0 +1,2 @@
+<!DOCTYPE svg [<!ENTITY s "&#60;script&#62;document.title='PWN-ent'&#60;/script&#62;">]>
+<svg xmlns="http://www.w3.org/2000/svg">&s;</svg>

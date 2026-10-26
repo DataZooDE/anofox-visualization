@@ -383,38 +383,54 @@ pub fn canonical_assets_dir(dir: &std::path::Path) -> Option<std::path::PathBuf>
         .filter(|p| p.is_dir())
 }
 
-/// Read `rest` (a path under an `assets/` folder, already stripped of that
-/// prefix) from `root` — the dashboards folder's `assets/` directory,
-/// **already canonicalized by the caller** — validating containment and the
-/// file's own real type. Shared by the locked server's `GET
-/// /d/<id>/assets/<rest>` route ([`duckext`]'s `serve.rs`) and the CLI/static
-/// renderers ([`crate::dashboard`], [`crate::image_panel_svg`]'s caller), so
-/// every reader of `assets/` enforces exactly the same rule.
+/// Validate `rest` (a path under an `assets/` folder, already stripped of
+/// that prefix) against `root` — the dashboards folder's `assets/`
+/// directory, **already canonicalized by the caller** — and open the file
+/// it names, up to (and including) the point both [`read_asset`] (the
+/// whole file, `GET`) and [`stat_asset`] (its length and sniffed type
+/// only, `HEAD`) need. Shared by the locked server's `GET
+/// /d/<id>/assets/<rest>` route ([`duckext`]'s `serve.rs` — which, review
+/// of #554 S2, calls this directly itself so it can hold its own
+/// in-flight memory budget against the file's real `fstat`-reported
+/// length rather than a pessimistic `max_asset_bytes` regardless of size)
+/// and the CLI/static renderers ([`crate::dashboard`],
+/// [`crate::image_panel_svg`]'s caller), so every reader of `assets/`
+/// enforces exactly the same rule.
 ///
-/// `rest` is percent-decoded once (a no-op for a CLI caller: its `rest` was
-/// never percent-encoded in the first place, because [`src_ok`] already
-/// rejects any `%` in a relative `src` — this matters for a locked server,
-/// whose `rest` comes straight off the URL path). Refused (`Err`, a short
-/// machine reason — never shown to a viewer): empty; longer than 512 bytes;
-/// a `\`, NUL or other control character; an empty, `.` or `..` segment; a
-/// segment starting with `.`; an extension outside [`ASSET_EXTENSIONS`]
-/// (case-insensitive) — checked *before* touching the filesystem, so a
-/// request can't even probe for a non-image file's existence through this
-/// route. Then: `root.join(rest)` must canonicalize to a path inside `root`
-/// (blocks `..`/absolute escapes missed above and a symlink pointing
-/// outside), be a regular file, and be at most `max` bytes. Finally the
-/// file's own bytes are sniffed ([`crate::host::app_brand::sniff_image`]) —
-/// **not** its extension — for the returned MIME: a `.sql`/`.json` file
-/// renamed `.png` has the right extension but fails this and is refused too.
-/// Validate `rest` and open the file it names under `root`, up to (and
-/// including) the point both [`read_asset`] (the whole file, `GET`) and
-/// [`stat_asset`] (its length and sniffed type only, `HEAD`) need: path
-/// checks, the extension allow-list, containment, and one race-closed
-/// handle. Returns the open file and its `fstat`-reported length (still
-/// `bytes`-capped by neither caller yet — each applies `max` itself, since
-/// `stat_asset` needs the real length even when it's over the cap, to
-/// refuse honestly rather than by coincidence of a short read).
-fn open_validated_asset(
+/// `rest` is percent-decoded once (a no-op for a CLI caller: its `rest`
+/// was never percent-encoded in the first place, because [`src_ok`]
+/// already rejects any `%` in a relative `src` — this matters for a
+/// locked server, whose `rest` comes straight off the URL path). Refused
+/// (`Err`, a short machine reason — never shown to a viewer): empty;
+/// longer than 512 bytes; a `\`, NUL or other control character; an
+/// empty, `.` or `..` segment; a segment starting with `.`; an extension
+/// outside [`ASSET_EXTENSIONS`] (case-insensitive) — checked *before*
+/// touching the filesystem, so a request can't even probe for a
+/// non-image file's existence through this route. Then: `root.join(rest)`
+/// must canonicalize to a path inside `root` (blocks `..`/absolute
+/// escapes missed above and a symlink pointing outside), and the final
+/// path component must open as a regular file, not a symlink or a FIFO
+/// ([`open_asset_file`]).
+///
+/// Returns the open file and its `fstat`-reported length — **not yet
+/// capped against any `max`**, since [`stat_asset`] needs the real length
+/// even when it's over the cap, to refuse honestly rather than by
+/// coincidence of a short read; each caller applies `max` itself
+/// ([`read_opened_asset`], [`stat_opened_asset`]).
+///
+/// Review of #554 N1: `O_NOFOLLOW` on [`open_asset_file`] covers only this
+/// *final* path component, after `canonicalize` has already resolved
+/// every symlink in `rest`'s own path into `real`. A **parent** directory
+/// on that already-canonical path that gets swapped for a symlink between
+/// the `canonicalize` call above and this `open` — only possible for
+/// someone who can already write inside `assets/` — is still followed;
+/// closing that fully needs `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`
+/// (Linux-only, no portable `std` wrapper) or re-deriving the opened path
+/// from `/proc/self/fd/<fd>` after the fact and re-checking containment.
+/// Left as this comment, not code, until #514/#554's own low-privilege
+/// threat model (a dashboards folder's own author, not an outside
+/// attacker) calls for it.
+pub fn open_validated_asset(
     root: &std::path::Path,
     rest: &str,
 ) -> Result<(std::fs::File, u64), &'static str> {
@@ -454,8 +470,8 @@ fn open_validated_asset(
     // (it also stops a `stat`-reported size of 0 from skipping the real
     // cap below — the read itself, not `stat`, is what's bounded). The
     // size cap on the actual bytes read is each caller's own job
-    // (`read_asset`'s `take(max + 1)`), so an attacker-controlled FIFO
-    // can't lie about its length via `stat` either.
+    // (`read_opened_asset`'s `take(max + 1)`), so an attacker-controlled
+    // FIFO can't lie about its length via `stat` either.
     let file = open_asset_file(&real).map_err(|_| "not-found")?;
     let meta = file.metadata().map_err(|_| "not-found")?;
     if !meta.is_file() {
@@ -464,12 +480,18 @@ fn open_validated_asset(
     Ok((file, meta.len()))
 }
 
-pub fn read_asset(
-    root: &std::path::Path,
-    rest: &str,
+/// Read the whole of an already-[`open_validated_asset`]-opened file
+/// (`file`, `len` its `fstat`-reported size) and sniff its real MIME type
+/// — the shared tail of [`read_asset`] and the locked server's own
+/// `locked_asset` (review of #554 S2: it calls [`open_validated_asset`]
+/// directly first, to hold `min(len, max)` of its in-flight memory budget
+/// *before* this read, rather than a pessimistic `max` regardless of the
+/// file's real size).
+pub fn read_opened_asset(
+    file: std::fs::File,
+    len: u64,
     max: u64,
 ) -> Result<(String, Vec<u8>), &'static str> {
-    let (file, len) = open_validated_asset(root, rest)?;
     if len > max {
         return Err("too-large");
     }
@@ -487,19 +509,32 @@ pub fn read_asset(
     Ok((mime.to_string(), bytes))
 }
 
-/// Like [`read_asset`], but for a `HEAD` request: the sniffed MIME type and
-/// the file's real length (`fstat`, not a prior buffered read), without
-/// reading the whole file just to answer "what would `GET` send" (review of
-/// #554 nit 6). Reads only a `min(len, 4096)`-byte prefix — enough for
-/// every format [`crate::host::app_brand::sniff_image`] recognises (an
-/// SVG's own sniff already only looks at the first 4 KiB; every other
-/// signature is well under that).
-pub fn stat_asset(
+/// `rest` (a path under `root`'s `assets/`), fully read and sniffed. See
+/// [`open_validated_asset`] for the path/containment/open rules and
+/// [`read_opened_asset`] for the read/size-cap/sniff rules this composes.
+pub fn read_asset(
     root: &std::path::Path,
     rest: &str,
     max: u64,
-) -> Result<(String, u64), &'static str> {
+) -> Result<(String, Vec<u8>), &'static str> {
     let (file, len) = open_validated_asset(root, rest)?;
+    read_opened_asset(file, len, max)
+}
+
+/// Like [`read_opened_asset`], but for a `HEAD` request: the sniffed MIME
+/// type and the file's real length (`fstat`, already known as `len`),
+/// without reading the whole file just to answer "what would `GET` send"
+/// (review of #554 nit 6). Reads only a `min(len, 4096)`-byte prefix —
+/// enough for every format [`crate::host::app_brand::sniff_image`]
+/// recognises (an SVG's own sniff already only looks at the first 4 KiB;
+/// every other signature is well under that) — so the locked server's own
+/// in-flight hold for a `HEAD` (review of #554 S2) only needs to cover
+/// that prefix, not the whole file.
+pub fn stat_opened_asset(
+    file: std::fs::File,
+    len: u64,
+    max: u64,
+) -> Result<(String, u64), &'static str> {
     if len > max {
         return Err("too-large");
     }
@@ -512,6 +547,19 @@ pub fn stat_asset(
     }
     let mime = crate::host::app_brand::sniff_image(&prefix).ok_or("not-an-image")?;
     Ok((mime.to_string(), len))
+}
+
+/// `rest` (a path under `root`'s `assets/`), `fstat`-sized and sniffed
+/// without a full read. See [`open_validated_asset`] for the path/
+/// containment/open rules and [`stat_opened_asset`] for the sniff rule
+/// this composes.
+pub fn stat_asset(
+    root: &std::path::Path,
+    rest: &str,
+    max: u64,
+) -> Result<(String, u64), &'static str> {
+    let (file, len) = open_validated_asset(root, rest)?;
+    stat_opened_asset(file, len, max)
 }
 
 /// Open `path` (already canonical — no symlink components) for reading,

@@ -58,10 +58,13 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("max_inflight_mb", SiteOptionKind::ServerOnly),
     ("max_response_mb", SiteOptionKind::ServerOnly),
     ("max_queries", SiteOptionKind::ServerOnly),
-    // #514 PR B: a `--site` publish has its own fixed asset-size cap
-    // ([`crate::image::DEFAULT_MAX_ASSET_BYTES`]), not a running server to
-    // tune — no effect there.
-    ("max_asset_bytes", SiteOptionKind::ServerOnly),
+    // #514 PR B: `--site` *does* honour this (review of #554 N3) — it
+    // caps every published `assets/` file exactly like the live server's
+    // own route would, falling back to
+    // [`crate::image::DEFAULT_MAX_ASSET_BYTES`] when unset, so a site
+    // built from the same `options` file a locked server runs with can't
+    // refuse a file that server was configured to serve.
+    ("max_asset_bytes", SiteOptionKind::Site),
     ("search_path", SiteOptionKind::ServerOnly),
     ("app", SiteOptionKind::Site),
     ("home", SiteOptionKind::Site),

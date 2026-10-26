@@ -9903,16 +9903,29 @@ async function runOnce(fresh = true, pv = preview) {
             // page_csp). The dash-level render-swap (further down)
             // revokes data-anofox-blob on whatever this run discards.
             if (servedMode && window.__served?.session && url.startsWith("/d/")) {
+              // #554 review (S1): `mkImg` runs while this panel is still
+              // part of the *detached* `newGrid` — it's only swapped into
+              // `.dash` later, after the rest of this run's panels have
+              // their own `/api/panel` awaits. So the common case is
+              // exactly "the fetch resolves before the swap", not a rare
+              // race: `img.isConnected` is false for essentially every
+              // image on every run, and gating `src` on it (as this used
+              // to) left the `<img>` with no `src` at all — no image, and
+              // with no `src`, `onerror` never fires either, so not even
+              // the alt box. `src`/`dataset.anofoxBlob` are now always
+              // set on success, detached or not: a detached `<img>` with
+              // `src` set renders correctly the moment it's attached
+              // (`blob:` is already resolved locally, no new fetch on
+              // attach). Cleanup for whichever `<img>`s this run discards
+              // — the kept-vs-replaced decision isn't made until the
+              // swap, well after this promise can resolve — is entirely
+              // the swap-time sweep's job, below; this callback never
+              // revokes.
               fetch(url, { headers: { "X-Anofox-Session": window.__served.session }, credentials: "same-origin" })
                 .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("http " + r.status))))
                 .then((b) => {
-                  const blobUrl = URL.createObjectURL(b);
-                  if (img.isConnected) {
-                    img.dataset.anofoxBlob = blobUrl;
-                    img.src = blobUrl;
-                  } else {
-                    URL.revokeObjectURL(blobUrl);
-                  }
+                  img.dataset.anofoxBlob = URL.createObjectURL(b);
+                  img.src = img.dataset.anofoxBlob;
                 })
                 .catch(() => img.isConnected && img.replaceWith(missing(alt)));
             } else {
@@ -10831,12 +10844,22 @@ async function runOnce(fresh = true, pv = preview) {
   // keeps its DOM (scroll, focus, hover state), only the changed ones and the
   // controls are replaced. Anything else replaces the whole content.
   const dash = document.querySelector(".dash");
-  // #554 review item 4: every embed-fetched assets/ <img> from the run
-  // this one replaces, whichever path below discards it (patched or
-  // wholesale) — checked by `.isConnected` after the swap, so this needs
-  // no knowledge of which path ran.
-  const oldBlobImgs = [...dash.querySelectorAll("img[data-anofox-blob]")];
   const newRoots = [newGrid, tabBar, tabWrap];
+  // #554 review (S1): every embed-fetched assets/ <img> this run might
+  // discard — the old ones still in `.dash`, *and* any new ones (still
+  // detached in `newRoots` right now) whose fetch already resolved to a
+  // blob: URL before this swap runs (mkImg always sets `src` as soon as
+  // its fetch resolves, detached or not — see its own comment). A new
+  // image can be discarded too: `patchSlots` may decide to keep the *old*
+  // DOM for an unchanged panel instead of the new one this run just
+  // built. Checked by `.isConnected` after the swap below, so this needs
+  // no knowledge of which path (patched or wholesale) ran, or of whether
+  // a given image resolved before or after the swap — only every image
+  // whose fetch resolved *before* it.
+  const candidateBlobImgs = [
+    ...dash.querySelectorAll("img[data-anofox-blob]"),
+    ...newRoots.flatMap((r) => (r ? [...r.querySelectorAll("img[data-anofox-blob]")] : [])),
+  ];
   for (const p of slotsOf(newRoots)) if (p.matches(".panel")) p._sig = p.outerHTML;
   const shape = shapeOf(newRoots);
   const swaps = []; // [old, new] panels this run replaced
@@ -10851,7 +10874,7 @@ async function runOnce(fresh = true, pv = preview) {
     if (!fresh) for (const p of slotsOf(newRoots)) if (old.has(p.dataset.stmt)) swaps.push([old.get(p.dataset.stmt), p]);
   }
   dash._shape = shape;
-  for (const img of oldBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
+  for (const img of candidateBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
   performance.mark("dp:swap");
   dpLazy.cur = lazy;
   // A replaced chart moves from its old marks: its 'tween'::TRANSITION, and

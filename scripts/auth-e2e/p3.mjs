@@ -149,6 +149,41 @@ const link = hs256({ dashboard: "rls", user: "acme-viewer", claims: { tenant: "a
   await ctx.close();
 }
 
+// ---- 2b. S1: a relative ::IMAGE as the *first* statement -----------------
+// Review of #554 re-review: the rls.sql case above didn't catch S1 because
+// its ::IMAGE is the dashboard's *last* statement. imgfirst.sql puts it
+// first, with a panel after it — mkImg runs while the panel is still part
+// of the detached newGrid, and the grid only gets swapped into `.dash`
+// after every panel's own /api/panel await, so the image's blob: fetch has
+// every chance (not just a rare race) to resolve while `img.isConnected`
+// is still false. Before the fix this left a blank <img> with no `src` at
+// all (and so no `onerror`, not even the alt box); the fix always sets
+// `src` once the fetch resolves, detached or not.
+{
+  const imgLink = hs256({ dashboard: "imgfirst", user: "img-viewer", exp: now() + 120, jti: "e2e-imgfirst" });
+  const ctx = await b.newContext({ viewport: { width: 700, height: 500 } });
+  const p = await ctx.newPage();
+  const errs = [];
+  p.on("pageerror", (e) => errs.push(e.message));
+  await p.setContent(`<iframe id="f" src="${BASE}/d/imgfirst?embed=${imgLink}" width="650" height="400"></iframe>`);
+  const f = await (await p.waitForSelector("#f")).contentFrame();
+  await f.waitForSelector(".dash .metric", { timeout: 60000 });
+  await f.waitForFunction(
+    () => {
+      const img = document.querySelector(".dp-image img.dp-img");
+      return !!img && img.naturalWidth > 0;
+    },
+    { timeout: 10000 },
+  );
+  const imgSrc = await f.evaluate(() => document.querySelector(".dp-image img.dp-img").src);
+  assert.ok(imgSrc.startsWith("blob:"), imgSrc);
+  const missing = await f.evaluate(() => !!document.querySelector(".dp-img-missing"));
+  assert.ok(!missing, "the image-first panel should not have fallen back to the alt box");
+  assert.deepEqual(errs, []);
+  ok("S1: a relative ::IMAGE as the dashboard's first statement (a later panel's await delays the swap) still loads via blob:, not a blank <img>");
+  await ctx.close();
+}
+
 // ---- 3. API keys and JWT bearer -----------------------------------------
 {
   const api = await request.newContext({ ignoreHTTPSErrors: true });
