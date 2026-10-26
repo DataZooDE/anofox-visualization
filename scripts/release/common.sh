@@ -54,9 +54,10 @@ ext_asset_name() {
 rust_target() { rustc -vV | sed -n 's/^host: //p' | tr -d '\r'; }
 
 # Build web/pkg (the wasm renderer the builder UI loads) unless it is already
-# there or SKIP_WASM=1.
+# there or SKIP_WASM=1. The actual build (cargo to wasm32-unknown-unknown,
+# wasm-bindgen, wasm-opt — no wasm-pack, #552) lives in scripts/build-
+# wasm-pkg.sh, shared with duckext/scripts/build-native.sh (#566).
 ensure_web_pkg() {
   if [ "${SKIP_WASM:-0}" = "1" ] || [ -f "$ROOT/web/pkg/anofox_visualization_bg.wasm" ]; then return 0; fi
-  command -v wasm-pack >/dev/null || { echo "wasm-pack is required (or SKIP_WASM=1)" >&2; return 1; }
-  ( cd "$ROOT" && wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm )
+  "$ROOT/scripts/build-wasm-pkg.sh"
 }
