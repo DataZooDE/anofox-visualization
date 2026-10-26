@@ -1267,6 +1267,19 @@ const servedCache = new Map(); // key -> response text
 const SERVED_CACHE_MAX = 400;
 let servedDepsOff = false;
 
+// #517 S4: per-statement ::SUBMIT UI state that must survive the re-render
+// a successful or failed submission triggers (run(true) rebuilds every
+// panel, including this one, from the server's row data — which carries
+// none of "Submitted at …" or an error; that is purely this tab's own,
+// ephemeral state). Keyed by the statement's plan index.
+const submitStatus = {};
+// Set once per dashboard load, lazily, the first time a ::SUBMIT button is
+// clicked in preview/authoring mode (no locked server — plan §6's "wasm
+// builder, and the live authoring backend"). `run()`'s full rebuild on
+// reload (a new `preview`, Discard, etc.) never un-sets this on its own;
+// previewExit()/boot() do, where `submitStatus` is also cleared.
+let previewViewerStateReady = false;
+
 // The variables statement `idx` of the served dashboard depends on (lower
 // case), or null: all of them.
 function servedDepsOf(served, planLen, idx) {
@@ -9835,6 +9848,18 @@ async function runOnce(fresh = true, pv = preview) {
         } else if (role(s, "DOWNLOAD_CSV") || role(s, "DOWNLOAD_XLSX") || role(s, "DOWNLOAD_PDF")) {
           const rows = JSON.parse(rowsJson);
           container.appendChild(mkDownload(s, rows));
+        } else if (role(s, "SUBMIT")) {
+          // #517 S4, plan §6: zero rows (the author's own "once"/"until a
+          // date" gate) hides the panel entirely, like an empty input —
+          // never an empty card (so this skips `mkPanel()` itself — it
+          // tracks every figure it makes in `made`, assumed appended).
+          const fig = mkSubmit(s, i, rowsJson);
+          if (fig) {
+            if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+            if (boxH) fig.style.minHeight = boxH + "px";
+            container.appendChild(fig);
+            panels++;
+          }
         } else if (role(s, "IMAGE")) {
           // A static picture panel (#514): one <img> per row (::IMAGE_DARK
           // shown instead while body.dark — CSS, not a reload), stacked in
@@ -15332,6 +15357,280 @@ function excelDate(v) {
   if (!m) return null;
   const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), 0) + 1000 * +(m[6] || 0);
   return isFinite(ms) ? (ms - Date.UTC(1899, 11, 30)) / 864e5 : null;
+}
+
+// 16 random bytes, hex — a client submit nonce, the same shape as
+// `servedViewer` (#210).
+function newSubmitId() {
+  return [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Plan §6 "where submitting can't work": a visible, read-out reason the
+// button is disabled, or null when it isn't. Never a silent no-op —
+// `mkSubmit` always gives *some* feedback, whichever of the three modes
+// (served, published, preview/authoring) this page is in.
+function submitDisabledReason() {
+  if (servedMode) {
+    const enabled = window.__served && window.__served.state && window.__served.state.enabled;
+    return enabled ? null : "Submitting is not enabled on this server";
+  }
+  if (published) return "Submitting needs the dashboard server";
+  // Review of #550 SF2: preview/authoring must never send CREATE/INSERT to
+  // a server. The live-authoring backend's `/query` runs against the
+  // author's own REAL session (unlike the plain wasm builder, whose
+  // queries never leave this tab) — simpler and correct to disable there,
+  // rather than keep viewer_state rows page-side only and reconcile them
+  // with every other panel's own query.
+  if (backend === "live") return "Submitting isn't available in live-authoring preview";
+  return null; // the plain wasm builder: never disabled — see mkSubmit's banner
+}
+
+// Render the button disabled with a visible, `aria-describedby` reason —
+// shared by every "submitting can't work here" case (plan §6: never a
+// silent no-op).
+function mkSubmitDisabled(fig, btn, errEl, i, reason) {
+  btn.disabled = true;
+  btn.setAttribute("aria-disabled", "true");
+  const rid = `submit-reason-${i}`;
+  errEl.id = rid;
+  errEl.textContent = reason;
+  errEl.classList.add("submit-reason");
+  btn.setAttribute("aria-describedby", rid);
+  return fig;
+}
+
+// Case-insensitive `dpVars` lookup (DuckDB variable names are
+// case-insensitive; SUBMIT_VARS's own spelling need not match whatever
+// case the input's SET VARIABLE used).
+function dpVarCI(name) {
+  const lower = name.toLowerCase();
+  const key = Object.keys(dpVars).find((k) => k.toLowerCase() === lower);
+  return key === undefined ? undefined : dpVars[key];
+}
+
+// A ::SUBMIT panel (#517 S4, plan §6): a native button, a status line
+// (`role="status"`, polite) and an error line (`role="alert"`). `i` is the
+// statement's own plan index (= the server's `panel`); `rowsJson` is this
+// statement's own query result, run the same way any other panel's is —
+// the author's gate (zero rows = not available yet) already decided
+// whether this renders at all.
+function mkSubmit(s, i, rowsJson) {
+  const rows = JSON.parse(rowsJson);
+  if (rows.length !== 1) return null; // 0: the author's gate; >1: the lint already refuses this at the source
+  const row = rows[0];
+  const subR = s.roles.find((r) => r[1] === "SUBMIT");
+  const varsR = s.roles.find((r) => r[1] === "SUBMIT_VARS");
+  const doneR = s.roles.find((r) => r[1] === "SUBMIT_DONE");
+  if (!subR || !varsR) return null; // the lint already requires both; fail closed if this ever disagrees
+  const unq = (v) => String(v ?? "").replace(/^"|"$/g, "");
+  const label = unq(row["c" + subR[0]]) || "Submit";
+  const names = unq(row["c" + varsR[0]])
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean);
+  const doneText = doneR ? unq(row["c" + doneR[0]]) : "";
+
+  const fig = document.createElement("figure");
+  fig.className = "panel submit-panel";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "submit-btn";
+  btn.textContent = label;
+  const statusEl = document.createElement("div");
+  statusEl.className = "submit-status";
+  statusEl.setAttribute("role", "status");
+  statusEl.setAttribute("aria-live", "polite");
+  const errEl = document.createElement("div");
+  errEl.className = "submit-error";
+  errEl.setAttribute("role", "alert");
+  fig.append(btn, statusEl, errEl);
+
+  const reason = submitDisabledReason();
+  if (reason) return mkSubmitDisabled(fig, btn, errEl, i, reason);
+
+  // A status/error left over from this same panel's *own* last submission
+  // (this render is the "panels re-run" step right after one) — the row
+  // data above carries none of it. Set *after* this figure is connected
+  // (next frame), not now — a live region's initial content (set before
+  // it's ever in the document) is not reliably announced; this is the one
+  // case where `mkSubmit`'s own caller connects `fig` only after this
+  // function returns. `focusBtn`: this render is the direct result of the
+  // click that just set it; focus stays on the button, same timing.
+  const saved = submitStatus[i];
+  if (saved) {
+    const el = saved.kind === "err" ? errEl : statusEl;
+    const text = saved.text;
+    const focusAfter = saved.focusBtn;
+    delete saved.focusBtn;
+    requestAnimationFrame(() => {
+      el.textContent = text;
+      if (focusAfter && btn.isConnected) btn.focus();
+    });
+  }
+
+  if (!servedMode && !published) {
+    // The plain wasm builder only (the live-authoring backend is refused
+    // above, by submitDisabledReason — #550 SF2): a visible note, since
+    // nothing here reaches a server.
+    const note = document.createElement("p");
+    note.className = "submit-preview-note";
+    note.textContent = "Preview: submissions stay in this tab and are not saved.";
+    fig.insertBefore(note, btn);
+    btn.onclick = () => doSubmitPreview(s, i, names, doneText, btn, statusEl, errEl);
+    return fig;
+  }
+  btn.onclick = () => doSubmit(s, i, names, doneText, btn, statusEl, errEl);
+  return fig;
+}
+
+// The real server path: POST /api/submit (plan §4.1/§6).
+async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
+  const prev = submitStatus[i];
+  // Review of #550 SF1: a retry id is reused only when the vars being sent
+  // now are *exactly* what the failed attempt sent — a changed answer
+  // always gets a fresh nonce. Reusing a stale id for a changed answer
+  // risked a 503/507/network failure that actually reached the server
+  // (only its response was lost) silently replaying that *earlier*
+  // answer's cached 201 on retry, discarding the viewer's edit.
+  const varsNow = JSON.stringify({ ...servedVars });
+  const id = prev && prev.retryId && prev.retryVars === varsNow ? prev.retryId : newSubmitId();
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  btn.setAttribute("aria-disabled", "true");
+  statusEl.textContent = "";
+  errEl.textContent = "";
+  const reenable = () => {
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    btn.removeAttribute("aria-disabled");
+  };
+  const headers = { "Content-Type": "application/json", "X-Anofox-Submit": "1" };
+  if (window.__served.session) headers["X-Anofox-Session"] = window.__served.session;
+  const body = { dashboard: window.__served.id, panel: i, id, vars: { ...servedVars } };
+  let r;
+  try {
+    r = await fetch("/api/submit", { method: "POST", headers, body: JSON.stringify(body) });
+  } catch {
+    // Network failure: the same "couldn't save, answers still here, retry
+    // reuses the id (only while the answer stays the same)" treatment as a
+    // 503/507 below.
+    reenable();
+    submitStatus[i] = { text: "Couldn't save — your answers are still here.", kind: "err", retryId: id, retryVars: varsNow };
+    errEl.textContent = submitStatus[i].text;
+    return;
+  }
+  if (r.status === 201) {
+    const hhmm = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const text = "Submitted at " + hhmm + "." + (doneText ? " " + doneText : "");
+    // Re-submitting appends a new row (the author gates "once" in SQL);
+    // the button is enabled again right away.
+    submitStatus[i] = { text, kind: "ok", focusBtn: true };
+    reenable();
+    servedCache.clear();
+    run(true);
+    return;
+  }
+  const msg = await r.text().catch(() => "");
+  if (r.status === 429) {
+    // Capped (review of #550 nit): a server-sent Retry-After has no upper
+    // bound otherwise — an hour is already generous for a UI timer.
+    const wait = Math.min(3600, Math.max(1, Number(r.headers.get("Retry-After")) || 1));
+    submitStatus[i] = { text: `Too many submissions — try again in ${wait}s`, kind: "err" };
+    errEl.textContent = submitStatus[i].text;
+    btn.setAttribute("aria-disabled", "true");
+    btn.removeAttribute("aria-busy");
+    setTimeout(reenable, wait * 1000);
+    return;
+  }
+  if (r.status === 503 || r.status === 507) {
+    submitStatus[i] = { text: "Couldn't save — your answers are still here.", kind: "err", retryId: id, retryVars: varsNow };
+    errEl.textContent = submitStatus[i].text;
+    reenable();
+    return;
+  }
+  // 400 (the message already names the input: "'q1' is not one of the
+  // options" / "answer 'q1' first"), 401, 403, 404, 409 — the server's own
+  // text, verbatim; 409 gets the plan's own prefix.
+  const text = r.status === 409 ? "This can't be submitted right now" + (msg ? ": " + msg : "") : msg || `Submission failed (${r.status})`;
+  submitStatus[i] = { text, kind: "err" };
+  errEl.textContent = text;
+  reenable();
+}
+
+// Preview path (plan §6, the plain wasm builder only — #550 SF2: the
+// live-authoring backend is refused before this is ever wired up, by
+// submitDisabledReason): appends to an in-page `viewer_state` temp
+// instead of a server, via `pageConn()` directly (never `runSql`'s normal
+// dispatch — this stays structurally local whatever `backend` is, not
+// just because its caller already checked). Created empty on first need,
+// this tab only, nothing persists past a reload. Validation here is
+// deliberately only what's cheap client-side (a name must have a current
+// value); the real per-kind checks (options membership, TEXT length, …)
+// are the server's.
+async function previewEnsureViewerState() {
+  if (previewViewerStateReady) return;
+  // `pconn`, not `conn` (a page-wide lint, G8/G9 in assist_ui_test.mjs,
+  // refuses a bare `conn.*` anywhere outside boot() — it's a text pattern
+  // over the raw, unguarded global, so the local name matters, not just
+  // what it holds; this already *is* the guarded pageConn() result).
+  const pconn = pageConn();
+  await pconn.query(
+    'CREATE TEMP TABLE IF NOT EXISTS viewer_state (seq BIGINT, ts TIMESTAMPTZ, "user" VARCHAR, dashboard VARCHAR, submit VARCHAR, name VARCHAR, value VARCHAR, value_list VARCHAR[]);'
+  );
+  await pconn.query(
+    'CREATE OR REPLACE TEMP VIEW viewer_state_latest AS SELECT * FROM viewer_state QUALIFY dense_rank() OVER (PARTITION BY "user", dashboard, submit ORDER BY seq DESC) = 1;'
+  );
+  previewViewerStateReady = true;
+}
+
+async function doSubmitPreview(s, i, names, doneText, btn, statusEl, errEl) {
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  errEl.textContent = "";
+  statusEl.textContent = "";
+  try {
+    const unanswered = names.filter((n) => dpVarCI(n) === undefined);
+    if (unanswered.length) {
+      const text = `answer '${unanswered[0]}' first`;
+      submitStatus[i] = { text, kind: "err" };
+      errEl.textContent = text;
+      return;
+    }
+    await previewEnsureViewerState();
+    const pconn = pageConn(); // see previewEnsureViewerState's naming note
+    const uRows = JSON.parse(rowsJson(await pconn.query("SELECT coalesce(getvariable('__claim_user'), 'preview') AS u;")));
+    const user = String((uRows[0] && uRows[0].u) || "preview");
+    const seqRows = JSON.parse(rowsJson(await pconn.query("SELECT coalesce(max(seq), 0) + 1 AS n FROM viewer_state;")));
+    const seq = Number((seqRows[0] && seqRows[0].n) || 1);
+    const dashId = String((window.__served && window.__served.id) || "preview");
+    const subR = s.roles.find((r) => r[1] === "SUBMIT");
+    const subName = (subR && subR[2]) || "submit";
+    // Bound parameters, never spliced (review of #550 nit) — the list
+    // column is a bound JSON-text param cast to VARCHAR[], since
+    // DuckDB-Wasm's own bind only takes scalars; a JSON `null` item casts
+    // to a real SQL NULL inside the array, matching the server's own rule.
+    const stmt = await pconn.prepare("INSERT INTO viewer_state VALUES (?, now(), ?, ?, ?, ?, ?, (?::JSON)::VARCHAR[]);");
+    try {
+      for (const n of names) {
+        const v = dpVarCI(n);
+        const isList = Array.isArray(v);
+        const value = v === null || v === undefined ? null : isList ? JSON.stringify(v) : String(v);
+        const valueList = isList ? JSON.stringify(v) : null;
+        await stmt.query(seq, user, dashId, subName, n, value, valueList);
+      }
+    } finally {
+      await stmt.close();
+    }
+    const hhmm = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    submitStatus[i] = { text: "Submitted at " + hhmm + "." + (doneText ? " " + doneText : ""), kind: "ok", focusBtn: true };
+    run(true);
+  } catch (e) {
+    submitStatus[i] = { text: "Couldn't save in preview: " + (e && e.message ? e.message : String(e)), kind: "err" };
+    errEl.textContent = submitStatus[i].text;
+  } finally {
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+  }
 }
 
 // A ::DOWNLOAD_CSV/_XLSX/_PDF button. CSV/XLSX export the query rows; PDF prints.

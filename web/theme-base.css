@@ -477,6 +477,18 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dl-btn{background:var(--ax-btn-bg);color:var(--ax-btn-ink);border:0;border-radius:10px;padding:.55rem 1rem;font-weight:600;font-size:.85rem;cursor:pointer}
 .err{grid-column:1/-1;color:var(--ax-err-ink);background:var(--ax-err-bg);border:1px solid var(--ax-err-border);border-radius:12px;padding:.8rem 1rem;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap}
 
+/* ---- ::SUBMIT (#517 S4) ---- */
+.submit-panel{display:flex;flex-direction:column;align-items:flex-start;gap:.5rem;padding:1rem 1.1rem}
+.submit-btn{background:var(--ax-btn-bg);color:var(--ax-btn-ink);border:0;border-radius:10px;padding:.6rem 1.2rem;font-weight:600;font-size:.9rem;cursor:pointer}
+.submit-btn:disabled{opacity:.55;cursor:not-allowed}
+.submit-btn:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
+.submit-status{font-size:.85rem;color:var(--ax-positive);min-height:1.1em}
+.submit-status:empty{display:none}
+.submit-error{font-size:.85rem;color:var(--ax-negative);min-height:1.1em}
+.submit-error:empty{display:none}
+.submit-error.submit-reason{color:var(--ax-muted)}
+.submit-preview-note{grid-column:1/-1;margin:0 0 .3rem;font-size:.8rem;color:var(--ax-badge-warn-ink);background:var(--ax-badge-warn-bg);border-radius:8px;padding:.4rem .7rem}
+
 /* ---- tabs ---- */
 .tabbar{grid-column:1/-1;display:flex;gap:.25rem;border-bottom:1px solid var(--ax-line);margin:0 0 .9rem}
 .tab-btn{position:relative;background:none;color:var(--ax-tab-ink);border:0;border-radius:9px 9px 0 0;padding:.6rem 1.05rem;font-family:var(--ax-font-display);font-weight:600;font-size:.95rem;letter-spacing:-.01em;cursor:pointer;box-shadow:none;transition:color .14s,background .14s}
