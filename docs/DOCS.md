@@ -200,6 +200,9 @@ terminal.
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
 | `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
+| `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer — requires a server with options.state; not active until that lands (#517 slice S2) |
+| `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
+| `::SUBMIT_DONE` |  | input | optional confirmation text shown after a successful ::SUBMIT |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
@@ -212,11 +215,15 @@ terminal.
 | `::TOOLBAR` |  | layout | next table's toolbar: 'none' hides it entirely (row count and chips too; a multi-select's "N selected" chip stays), or an allow-list of the parts to keep — 'search,filters,totals,stats,columns,density,export' ('totals' only hides its toggle button, not the row; 'density' covers Pages\|Scroll too; each kept part still needs its own row/column threshold); an excluded 'export' still gets a small hover CSV button |
 | `::SELECT_AS` | `::SELECTAS`, `::SELECTION` | layout | next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to |
 | `::EMPTY` | `::EMPTY_MESSAGE`, `::NODATA` | layout | next panel's message when its result is empty: 'No orders in range — widen the dates' |
+| `::SHOW_IF` | `::SHOWIF`, `::VISIBLE_IF` | layout | show the next panel (or ::GROUP box) only while this BOOLEAN is TRUE — re-checked on every input change: getvariable('q1') <> '' |
 | `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
+| `::GUIDE_STEP` | `::TUTORIAL_STEP`, `::WIZARD_STEP` | layout | a step of a guided sequence (onboarding, tutorials): Back / Next, 'Step 2 of 5', ?v.<name>=n; the alias names the step variable (default 'step') |
+| `::GATE` | `::STEP_GATE`, `::NEXT_IF` | layout | on a ::GUIDE_STEP: Next stays disabled until this BOOLEAN is TRUE |
+| `::GATE_MESSAGE` | `::GATE_HINT` | layout | on a ::GUIDE_STEP: why Next is disabled |
 | `::VIEW` | `::ALT_VIEW` | layout | one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`) |
 | `::ENDVIEW` | `::END_VIEW` | layout | close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it) |
 | `::FIT` | `::FIT_SCREEN` | layout | this ::TAB / ::SUBTAB / ::VIEW (no tabs: the whole dashboard) fits the window while shown — rows scale to fill it, no page scroll ('fit'::FIT; ?fit=1 / ?fit=0 override it; ignored below 600 px wide) |
@@ -2205,7 +2212,9 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
 | `SELECT 1::ENDVIEW;` | close a `::VIEW` group (optional when a `::TAB`/`::SUBTAB`/`::SECTION` or the end of the script follows) |
+| `SELECT 'Name' AS id ::GUIDE_STEP, cond ::GATE, 'msg' ::GATE_MESSAGE;` | open the next step of a guided sequence (Back/Next, "Step n of N") — see *Guided steps* below |
 | `SELECT 'fit'::FIT;` | the `::TAB` / `::SUBTAB` / `::VIEW` it is in fits the window, no page scroll — see *Fit to screen* below |
+| `SELECT cond::SHOW_IF;` | the **next** panel (or `::GROUP` box) shows only while `cond` is `TRUE` — see *Show a panel only when …* below |
 | KPIs in a `::GROUP` box | metrics inside a `::GROUP`…`::ENDGROUP` render as a compact KPI strip (dividers) instead of full cards |
 | `SELECT day::XAXIS, 'Name'::TRACK …;` right after a chart | a thin strip **under** that chart, in its panel, on the same x axis (see [strips](#fans-shaded-regions-and-strips-under-a-chart)) |
 
@@ -2294,6 +2303,66 @@ SELECT * ::TABLE FROM orders;
   page, so a tab's, sub-tab's or view's `::FIT` is ignored there. `dashboard
   --svg` draws one fixed-size image: `::FIT` has no effect.
 
+### Show a panel only when … (`::SHOW_IF`)
+
+`SELECT cond::SHOW_IF;` is a layout directive, like `::SPAN`/`::EMPTY`: a
+statement on its own, applying to whatever comes right after it. Its target
+shows only while `cond` evaluates to the BOOLEAN `TRUE` — `FALSE`, `NULL`, no
+row, a non-boolean value or a query error all hide it (fail closed). It is
+re-checked on every run: a full run, an input change or a cross-filter.
+
+A common pattern is a quiz-style dropdown with an empty first option (a
+`::DROPDOWN` defaults to its **first** option, so `getvariable('q1') IS NOT
+NULL` is always true — check against `''`/`<> ''` instead):
+
+```sql
+SELECT v AS q1 ::DROPDOWN, l ::OPTION_LABEL, 'Which check sees concept drift?' ::LABEL
+FROM (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l)
+ORDER BY o;
+
+SELECT getvariable('q1') <> '' ::SHOW_IF;               -- only after an answer
+SELECT CASE getvariable('q1') WHEN 'measured error' THEN '**Right.**'
+            ELSE 'Not quite — try again.' END ::MARKDOWN;
+```
+
+The target is the first statement after the `::SHOW_IF` that is not setup,
+not another stacked `::SHOW_IF` (stacked conditions AND together), and not a
+next-panel modifier (`::SPAN`/`::COL`, `::HEIGHT`, `::EMPTY`, `::ROWSELECT`, a
+table option, a lone `::THRESHOLDS`, `::SELECT_AS`, `::DRILL`) — those travel
+with the target, so a `::COL` right before a hidden panel never leaks onto
+the next one. A **`::GROUP` target** hides the whole box, including its
+`::ENDGROUP`:
+
+```sql
+SELECT getvariable('view') = 'detail' ::SHOW_IF;        -- a whole box
+SELECT 'Detail'::GROUP;
+SELECT …;
+SELECT 1::ENDGROUP;
+```
+
+A hidden panel gives up its grid slot (no card; the row reflows) rather than
+leaving a blank one. A hidden input draws no control, but its variable keeps
+its value — a learner's answer survives the control being hidden.
+
+Not every statement can be a target: `::TAB`, `::SUBTAB`, `::VIEW`,
+`::ENDVIEW`, `::ENDGROUP`, `::FIT`, `::COLUMNS` and chrome directives always
+show (`dashboard --check` reports `show_if/bad-target`); use `-- @requires`
+to hide those instead. Nothing after a `::SHOW_IF` at all is
+`show_if/no-target`. `--check` also flags a condition beside other roles
+(`show_if/not-alone`, ignored — the panel shows), a non-boolean or no-row
+result under the defaults used while checking (`show_if/not-boolean` /
+`show_if/no-row`), a `getvariable()` naming no variable this dashboard sets
+(`show_if/unknown-variable`) and a condition that reads no variable at all
+(`show_if/constant`).
+
+**`::SHOW_IF` is not access control.** Unlike a hidden `-- @requires` tab
+(which the server also refuses, answering "Not available" to a direct
+request), `::SHOW_IF` only hides a panel on the page — in served mode the
+hidden statement's own query can still be requested through `/api/panel`
+(see `docs/secure-serving.md`). Static output (`--svg`, the CLI's HTML, the
+script-free page of `serve --dashboards`) evaluates every condition with the
+defaults in scope at render time, same as the browser's first load.
+
 ### Alternative views of one panel (`::VIEW`)
 
 `::VIEW` is a statement of its own, like `::SUBTAB`: it opens one alternative
@@ -2363,6 +2432,102 @@ inside a view was not closed inside it), `view/stray-end` (warning: an
 `optional/missing` also covers a `-- @requires`-hidden alternative ("this
 ::VIEW is hidden"), and `design/too-many-panels` counts only the shown
 alternative of each group.
+
+### Guided steps (`::GUIDE_STEP`)
+
+`::GUIDE_STEP` (aliases `::TUTORIAL_STEP`, `::WIZARD_STEP`) turns a run of
+statements into a guided sequence — Back/Next, a progress strip ("Step 2 of
+5"), and an optional gate that holds Next until a condition is met. It's for
+onboarding and tutorials, not wizards that submit at the end (there is no
+submit here — see `-- @requires`/`::SHOW_IF` for that).
+
+```sql
+SELECT 'The three doors' AS lesson ::GUIDE_STEP;
+SELECT '…intro text…' ::MARKDOWN;
+
+SELECT 'Drift sandbox' ::GUIDE_STEP,
+       getvariable('q2') = 'measured error' ::GATE,
+       'Answer question 2 correctly to go on' ::GATE_MESSAGE;
+SELECT v AS q2 ::DROPDOWN, l ::OPTION_LABEL FROM
+  (VALUES (1, '', '— choose —'), (2, 'input drift', NULL), (3, 'measured error', NULL)) t(o, v, l)
+  ORDER BY o;
+
+SELECT 'Wrap-up' ::GUIDE_STEP;
+SELECT '…closing text…' ::MARKDOWN;
+```
+
+- **Grammar.** A `::GUIDE_STEP` statement opens a step; everything after it
+  — panels, inputs, a `::GROUP` box, a `::VIEW` group, `::SHOW_IF` — belongs
+  to it, up to the next marker or the group's close. Unlike `::VIEW`, the
+  markers of one group are *not* consecutive — each one opens the next step
+  of the sequence.
+- **Grouping.** A **step group** is the run of markers inside one top-level
+  section: the whole dashboard with no `::TAB`s, otherwise the current
+  `::TAB`. A group closes at the next `::TAB`, a `::SUBTAB`
+  (`step/mixed-with-subtab`: a sequence never nests inside a sub-tab) or end
+  of script. A marker reached while inside a `::SUBTAB` never opens a
+  sequence at all (`step/inside-subtab`, an error) — it draws as a plain
+  `::SECTION` heading instead. A `::GUIDE_STEP` marker closes an open
+  `::VIEW` group and an open `::GROUP` box, the same way a `::TAB` does.
+- **The step variable.** Each group keeps its current step (1-based) in a
+  variable, readable with `getvariable()` like any other: the alias of the
+  group's first marker when it's a valid identifier (`lesson` above), else
+  `step` for the first unnamed group on the dashboard and `step_2`, `step_3`,
+  … for the ones after it. It travels in the URL as `?v.<name>=n` (only when
+  not on step 1) through the same mechanism as an input, and on a locked
+  server it must be listed in `-- @vars` if the dashboard declares one
+  (`step/var-not-allowed`). Reusing the name for an input or a `SET
+  VARIABLE` elsewhere is `step/var-clash` (error).
+- **The gate.** `::GATE` is a BOOLEAN column on the marker: Next stays
+  disabled until it evaluates to `TRUE` — the same fail-closed rule as
+  `::SHOW_IF` (`FALSE`, `NULL`, no row, a non-boolean value or a query error
+  all count as closed). `::GATE_MESSAGE` is the text shown beside the
+  disabled Next; without one it reads "Finish this step to continue". A
+  gate is re-evaluated on every run (the marker is a plan statement like any
+  other, so a change to a variable it reads re-triggers it). It's common for
+  a gate to read a variable its own step's input sets (the "answer this
+  step's quiz to continue" shape) — `dashboard --check` checks that reading
+  with that input's own default already bound, the same as the interactive
+  browser does. The step list lets a viewer jump to any step up to the
+  furthest one whose gate holds; a
+  URL or seed past that clamps back to it. `::GATE`/`::GATE_MESSAGE` beside
+  a statement without `::GUIDE_STEP` does nothing (`step/gate-without-step`,
+  error); a gate on the last step does nothing either (`step/gate-on-last`,
+  warning, since there's no further step to hold back). Because a gate is
+  re-evaluated on every run, changing an earlier step's answer while
+  further along can re-close a gate that already opened — the viewer is
+  clamped back to that step, same as a stale URL/seed would be.
+- **Accessibility.** Keyboard Back/Next/step-list buttons; focus moves to
+  the new step's heading on every change. The visible progress strip
+  ("Step 2 of 5 · Drift sandbox") is not itself a live region (it is
+  rebuilt every run, and a screen reader usually only announces a text
+  change on a node already in the page, not a brand-new one); a small
+  visually-hidden, persistent announcer — one per sequence, updated in
+  place, only when its text actually changes, and only while its section
+  is shown — carries the same text, plus the gate message while Next is
+  closed. A disabled Next is `aria-disabled="true"` (not `disabled`, so it
+  stays focusable) and explains the gate through `aria-describedby`.
+- **Static output and the script-free served page** (`--svg`, the CLI
+  `dashboard file.sql out.html`, a dashboard served with no `.sql` on the
+  page, and ⤓ HTML export) **flatten the sequence**: every step is drawn in
+  order, preceded by a `::SECTION`-style "Step n of N · Label" heading
+  (`N` counts only the steps shown — one hidden by `-- @requires` is left
+  out), gates are ignored (there is no Next to disable), and the step
+  variable is bound in order while walking the script, so a panel reading
+  `getvariable('step')` shows that step's own value.
+
+**`::GUIDE_STEP`/`::GATE` are not access control.** Like `::SHOW_IF`, a
+gated or hidden step only changes what the page shows — `/api/panel` still
+answers every step's statement, gated or not (see `docs/secure-serving.md`).
+
+`dashboard --check` also reports `step/lone` (warning: a sequence with a
+single step), `step/empty` (warning: a step with no rendering statement),
+`step/duplicate-label` (warning), `step/computed-label` (note: not a plain
+string literal), `step/fit-inside` (warning: `::FIT` inside a step does
+nothing) and, for the gate, `step/gate-not-boolean` / `step/gate-no-row`
+(warnings, the condition's result under the defaults used while checking)
+and `step/gate-constant` / `step/gate-unknown-variable` (warnings, the same
+checks as `::SHOW_IF`'s).
 
 ### Loading, empty, error and "not available" panels
 

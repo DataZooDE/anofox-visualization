@@ -495,6 +495,36 @@ body.dark .dp-img-row.has-dark img.dp-img:not(.dp-img-dark){display:none}
 }
 @media print{.dp-viewbar{display:none}}
 
+/* ---- ::GUIDE_STEP: guided sequences (onboarding, tutorials) (#516) ---- */
+.dp-steps{grid-column:1/-1;margin:0;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius);padding:1.1rem 1.3rem 1.3rem;box-shadow:var(--ax-shadow);display:flex;flex-direction:column;gap:.9rem}
+.dp-step-head{display:flex;flex-wrap:wrap;align-items:center;gap:.9rem;justify-content:space-between}
+.dp-step-progress-wrap{display:flex;flex-direction:column;gap:.35rem;min-width:180px;flex:1 1 auto}
+.dp-step-progress-text{font-size:.82rem;font-weight:700;color:var(--ax-heading)}
+.dp-step-progress{height:6px;border-radius:999px;background:var(--ax-line);overflow:hidden}
+.dp-step-progress-bar{height:100%;background:var(--ax-accent-bar);border-radius:999px;transition:width .18s ease}
+.dp-step-list{display:flex;flex-wrap:wrap;gap:.35rem;margin:0;padding:0;list-style:none}
+.dp-step-list button{min-width:1.9rem;height:1.9rem;padding:0 .3rem;border-radius:999px;background:var(--ax-input-bg);color:var(--ax-muted);border:1px solid var(--ax-line);font-weight:700;font-size:.8rem;box-shadow:none;cursor:pointer}
+.dp-step-list button:hover:not([aria-disabled=true]){color:var(--ax-ink);background:var(--ax-tab-hover-bg)}
+.dp-step-list button[aria-current=step]{background:var(--ax-accent);color:var(--ax-accent-ink);border-color:transparent}
+.dp-step-list button[aria-disabled=true]{color:var(--ax-muted);opacity:.5;cursor:default;background:transparent}
+.dp-step-list button:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
+.dp-steppane{margin:0}
+.dp-step-title{font-family:var(--ax-font-display);font-size:1.1rem;font-weight:700;letter-spacing:-.01em;color:var(--ax-heading);margin:0 0 .5rem;grid-column:1/-1}
+.dp-step-title:focus-visible{outline:none}
+.dp-step-foot{display:flex;align-items:center;gap:.9rem;flex-wrap:wrap}
+.dp-step-foot .dp-step-back{order:1;background:var(--ax-btn2-bg);color:var(--ax-ink);border:1px solid var(--ax-line);box-shadow:var(--ax-btn2-shadow)}
+.dp-step-message{order:2;flex:1 1 auto;font-size:.82rem;font-weight:600;color:var(--ax-badge-warn-ink)}
+.dp-step-next{order:3;margin-left:auto}
+.dp-step-next[aria-disabled=true]{cursor:not-allowed;filter:none;background:var(--ax-input-bg);color:var(--ax-muted);border:1px solid var(--ax-line);box-shadow:none}
+.dp-step-next[aria-disabled=true]:hover{filter:none;background:var(--ax-input-bg)}
+@media(max-width:600px){
+  .dp-step-list{display:none}
+  .dp-step-foot{flex-wrap:wrap}
+  .dp-step-foot .dp-step-back,.dp-step-foot .dp-step-next{flex:1 1 calc(50% - .45rem);margin-left:0}
+  .dp-step-message{order:4;flex-basis:100%}
+}
+@media print{.dp-step-head,.dp-step-foot{display:none}}
+
 /* ---- served nav (serve / locked pages with 2+ dashboards) ---- */
 .served-nav{position:sticky;top:0;z-index:50;display:flex;gap:.25rem;padding:.5rem 1rem;background:var(--ax-nav-bg);border-bottom:1px solid var(--ax-nav-border);flex-wrap:wrap;align-items:center;box-shadow:var(--ax-nav-shadow)}
 .served-nav a{padding:.35rem .8rem;border-radius:6px;text-decoration:none;font:600 14px system-ui;color:var(--ax-nav-ink)}

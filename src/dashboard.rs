@@ -142,10 +142,51 @@ fn first_text(rows: &[(String, Vec<Value>)]) -> Option<String> {
     rows.first().and_then(|(_, v)| v.first()).map(value_str)
 }
 
+/// Run a `::SHOW_IF` condition statement at plan index `idx` (#515): the
+/// first row's cell of its `Role::ShowIf` column, through
+/// [`sql::condition::holds`]. `false` for a query error, no row, no such
+/// column or a non-`TRUE` value (fail closed) — the same rule everywhere.
+fn show_if_holds(
+    provider: &mut dyn DataProvider,
+    cond_src: &[(String, Vec<(usize, Role)>)],
+    idx: usize,
+) -> bool {
+    let Some((sql, roles)) = cond_src.get(idx) else {
+        return false;
+    };
+    let Some((i, _)) = roles.iter().find(|(_, r)| *r == Role::ShowIf) else {
+        return false;
+    };
+    provider
+        .query(sql)
+        .ok()
+        .and_then(|rows| column_at(&rows, *i).and_then(|(_, vals)| vals.first().cloned()))
+        .is_some_and(|v| sql::condition::holds(Some(&v)))
+}
+
 /// Run the script in order (setup for effect, panels queried) and collect
 /// the dashboard chrome directives — so a `::THEME` anywhere applies to every
 /// panel.
 fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, DashboardChrome) {
+    // #517 S1: a dashboard reading `viewer_state` (read-back, S3) or
+    // carrying `::SUBMIT` gets the server's own temps, empty — see
+    // `lint::check_opts`'s matching injection and
+    // `sql::script_needs_viewer_state`'s doc comment. Skipped when a real
+    // (non-temp) `viewer_state`/`viewer_state_latest` already exists on
+    // this connection, which seeding ours would otherwise shadow (review
+    // of #530 #5).
+    if sql::script_needs_viewer_state(script) {
+        let shadows_a_real_table = provider
+            .query(sql::viewer_state_exists_probe_sql())
+            .ok()
+            .and_then(|cols| cols.first().and_then(|(_, vals)| vals.first()?.as_f64()))
+            .is_some_and(|n| n > 0.0);
+        if !shadows_a_real_table {
+            for stmt in sql::viewer_state_setup_statements() {
+                let _ = provider.execute(stmt);
+            }
+        }
+    }
     let mut chrome = DashboardChrome::default();
     let mut steps = Vec::new();
     let mut sections = sql::requires::Sections::default();
@@ -153,7 +194,37 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
     // shown alternative (#214) — the other alternatives' non-setup
     // statements never even reach a query.
     let mut view_pick = sql::views::StaticPick::default();
-    for panel in sql::plan(script) {
+    // `::GUIDE_STEP` (#516): each group's running count of shown markers
+    // (keyed by `StepAt::group`), so a marker's own `SET VARIABLE` binds
+    // the right 1-based step number as the script runs — "of N" (the
+    // group's total) isn't known yet at this point; `render_inner` fixes
+    // the heading text up afterwards, once every step has been collected.
+    let mut step_n: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let plan = sql::plan(script);
+    // `::SHOW_IF` (#515): each condition statement's own SQL + roles, kept
+    // alongside the plan so a later statement's `show_if` indices can run
+    // (and cache) that condition on demand — a condition is itself a
+    // directive (`renders() == false`) and never reaches a query any other
+    // way below.
+    let cond_src: Vec<(String, Vec<(usize, Role)>)> = plan
+        .iter()
+        .map(|p| (p.sql.clone(), p.roles.clone()))
+        .collect();
+    let mut cond_cache: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
+    for panel in plan {
+        // Skip any non-setup statement whose `::SHOW_IF` conditions don't
+        // all hold, before the `-- @requires` / `::VIEW` checks below (a
+        // hidden statement never even reaches those).
+        if !panel.setup
+            && !panel.show_if.is_empty()
+            && !panel.show_if.iter().all(|&c| {
+                *cond_cache
+                    .entry(c)
+                    .or_insert_with(|| show_if_holds(provider, &cond_src, c))
+            })
+        {
+            continue;
+        }
         // A ::TAB / ::VIEW alternative whose `-- @requires` input is missing
         // is hidden: none of its panels are drawn (the tabs themselves are
         // flattened here).
@@ -205,6 +276,17 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             }
             continue;
         }
+        // `::GUIDE_STEP` (#516, decision 8): the static output flattens the
+        // stepper — each step is drawn in order, gates ignored. Bind this
+        // step's 1-based number (among the ones shown so far) before its
+        // own panels run, exactly like an input's default.
+        if let Some(s) = panel.step.as_ref().filter(|s| s.marker) {
+            let n = step_n.entry(s.group).or_insert(0);
+            *n += 1;
+            provider
+                .execute(&format!("SET VARIABLE {} = {n}", s.var))
+                .ok();
+        }
         let has = |f: &dyn Fn(&Role) -> bool| panel.roles.iter().any(|(_, r)| f(r));
         // ::TOTALS is kept for the next table (#226), like the other layout
         // directives below, so its value reaches render_inner as a Step. A
@@ -214,6 +296,9 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
         // ::GROUP / ::ENDGROUP are kept too (#405): a ::GROUP's own
         // ::KPI_SIZE cascades onto its tiles (render_inner's compact_flags),
         // though neither ever draws a box itself (same comment as above).
+        // A `::GUIDE_STEP` marker is kept too, so `render_inner` can draw its
+        // "Step n of N · Label" heading (decision 8) — it never draws a box
+        // itself either.
         let layout = has(&|r| {
             matches!(
                 r,
@@ -225,6 +310,7 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
                     | Role::View
                     | Role::GroupStart
                     | Role::GroupEnd
+                    | Role::GuideStep
             )
         });
         if roles::is_directive_panel(&panel.roles) && !layout {
@@ -269,6 +355,12 @@ fn render_inner(
 ) -> Result<String, String> {
     let (steps, chrome) = execute(script, provider);
     let compact = compact_flags(&steps);
+    // `::GUIDE_STEP` (#516): `steps` only ever holds what `execute()` kept
+    // shown, so its total marker count per group ("of N") is known now —
+    // unlike `execute()`'s own pass, which can't see past the current
+    // statement.
+    let shown_panels: Vec<&sql::Panel> = steps.iter().map(|s| &s.panel).collect();
+    let mut static_steps = sql::steps::StaticSteps::new(&shown_panels);
     let set = chrome.resolve(opts.theme.as_deref())?;
     let theme = set.pick(opts.variant).clone();
     let locale = theme
@@ -491,11 +583,40 @@ fn render_inner(
             continue;
         }
 
-        // Heading (::LABEL alone, ::SECTION) → full-width section title, own row.
+        // Heading (::LABEL alone, ::SECTION, a ::GUIDE_STEP marker) →
+        // full-width section title, own row (#516 decision 8: the static
+        // output flattens the stepper into a run of these headings).
+        let step_n_of = panel.step.as_ref().filter(|s| s.marker).and_then(|_| {
+            static_steps.step(panel).into_iter().find_map(|e| match e {
+                sql::steps::StaticEvent::Heading { n, of, .. } => Some((n, of)),
+                _ => None,
+            })
+        });
         if has(&|r| matches!(r, Role::Section))
             || (roles.len() == 1 && matches!(roles[0].1, Role::Label))
+            || step_n_of.is_some()
         {
-            let text = first_text(rows).unwrap_or_default();
+            let text = match step_n_of {
+                Some((n, of)) => {
+                    // Read the marker's own ::GUIDE_STEP column by its role
+                    // index — unlike a lone ::SECTION/::LABEL, this
+                    // statement can carry ::GATE / ::GATE_MESSAGE columns
+                    // too, so the label isn't necessarily column 0.
+                    let label = roles
+                        .iter()
+                        .find(|(_, r)| *r == Role::GuideStep)
+                        .and_then(|(i, _)| column_at(rows, *i))
+                        .and_then(|(_, vals)| vals.first())
+                        .map(value_str)
+                        .unwrap_or_default();
+                    if label.is_empty() {
+                        format!("Step {n} of {of}")
+                    } else {
+                        format!("Step {n} of {of} · {label}")
+                    }
+                }
+                None => first_text(rows).unwrap_or_default(),
+            };
             if row_units > 0 {
                 new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
             }
