@@ -466,9 +466,8 @@ pub(super) fn build(
         Some((df, aes))
     });
 
-    let features_df: Vec<(String, Vec<Value>)> = vec![
+    let mut features_df: Vec<(String, Vec<Value>)> = vec![
         ("geometry".into(), geometry),
-        ("fill".into(), fill_vals),
         ("label".into(), labels),
         ("row".into(), rows),
         ("series".into(), seriess),
@@ -506,8 +505,35 @@ pub(super) fn build(
             .data_attr("fvalue2", "fvalue2")
             .data_attr("bivar", "bivar");
     }
-    let has_fill_aes = !matches!(m.fill, Fill::Plain(_));
+    // Review of #595 (team-lead, hexbin "No data" finding): when hexbin
+    // takes over, this layer's own `fill` column is already suppressed to
+    // `Value::Na` for every row (the geometry suppression a few lines up,
+    // same `hexbin_takes_over` condition) — it draws nothing. But mapping
+    // `fill` on it anyway still *trains* the shared scale with one `Na` per
+    // original row, so `ScaleFillBinned` shows a spurious "No data (row
+    // count)" key even though a hexbin cell has no such concept (a cell
+    // either exists or doesn't — there's no "cell with an NA value"). Not a
+    // frame-specific bug (reproduces on a plain, non-frame classed hexbin
+    // map on master too) — hexbin's own legend/colours come from a wholly
+    // separate scale registration (`overlay::hexbin_layer`'s own
+    // `color_scale` parameter, built independently a few hundred lines
+    // below), unaffected by skipping this layer's redundant one.
+    let has_fill_aes = !matches!(m.fill, Fill::Plain(_)) && !hexbin_takes_over;
     if has_fill_aes {
+        // Review of #595 (team-lead, hexbin "No data" finding): the data
+        // column must be left out entirely when it isn't aes-mapped, not
+        // just unmapped — ggplot-rs's `Scale::train` is invoked by column
+        // *name* convention (a "fill" column trains the fill scale even
+        // with no `.fill("fill")` aes on this layer), confirmed by
+        // instrumenting `ScaleFillBinned::train` directly: a hexbin map's
+        // suppressed main layer was still training the shared scale with
+        // one `Value::Na` per original row (the `fill_vals` this layer
+        // never draws), on top of `overlay::hexbin_layer`'s own, separate,
+        // all-real-value training — hence the spurious "No data (row
+        // count)" key. The symbols layer a little above already gets this
+        // right (`if has_fill_aes { df.push(("fill", ...)) }`); the main
+        // layer didn't.
+        features_df.push(("fill".into(), fill_vals));
         features_aes = features_aes.fill("fill");
     }
     let plain_fill = match &m.fill {

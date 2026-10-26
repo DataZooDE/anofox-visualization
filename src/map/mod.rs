@@ -585,11 +585,26 @@ impl<'a> Model<'a> {
                 .and_then(|s| Projection::parse(&s))
                 .unwrap_or(Projection::Auto);
             let mut extent = Extent::new();
-            // Review #595 BLOCKER 1: every resolved endpoint, not just the
-            // ones this frame draws (`raw.flows`) — D20's extent/
-            // projection are computed over every frame at once.
-            for p in &raw.all_points {
-                extent.add(*p);
+            // Review #595 BLOCKER 1 / re-review R1: on a `::FRAME` map
+            // (`present.is_some()`), every resolved, non-self-flow
+            // endpoint (`all_points`, present this frame or not) — D20's
+            // extent/projection are computed over every frame at once.
+            // Outside a frame map, the *original* rule, unchanged: a
+            // drawn flow's own endpoints (`raw.flows`, already self-flow-
+            // filtered) — not `all_points`, which doesn't additionally
+            // drop a `::SIZE`-invalid or beyond-`FLOW_CAP` flow the way
+            // `raw.flows`/`flows::project` do, so using it unconditionally
+            // zoomed a plain (non-frame) flow map out around a flow that
+            // was never actually drawn.
+            if present.is_some() {
+                for p in &raw.all_points {
+                    extent.add(*p);
+                }
+            } else {
+                for f in &raw.flows {
+                    extent.add(f.o);
+                    extent.add(f.d);
+                }
             }
             if base_fitted {
                 for s in base.iter().flatten() {
@@ -598,12 +613,13 @@ impl<'a> Model<'a> {
             }
             let (projection, proj) = Proj::setup(projection, &extent);
             let lonlat = extent;
-            // Review #595 BLOCKER 1: the *projected* fit box from every
-            // resolved endpoint, before `raw` moves into `flows::project`
-            // (which keeps only this frame's drawn flows) — `bbox()`
-            // reads this instead of re-deriving from the drawn-only
-            // `Flows`, so the zoom-to-fit window stays frame-stable too.
-            let flow_bbox = {
+            // Review #595 BLOCKER 1 / re-review R1: the *projected* fit
+            // box from every resolved (non-self-flow) endpoint, before
+            // `raw` moves into `flows::project` (which keeps only this
+            // frame's drawn flows) — frame-map only (`bbox()` falls back
+            // to the drawn `Flows` itself, the original rule, when this is
+            // `None`), for the same reason as the extent above.
+            let flow_bbox = if present.is_some() {
                 let mut e = Extent::new();
                 for p in &raw.all_points {
                     if let Some(pp) = proj.forward(*p) {
@@ -611,6 +627,8 @@ impl<'a> Model<'a> {
                     }
                 }
                 (!e.is_empty()).then_some((e.x0, e.y0, e.x1, e.y1))
+            } else {
+                None
             };
             let base: Vec<Vec<Shape>> = base
                 .iter()
@@ -798,13 +816,21 @@ impl<'a> Model<'a> {
     /// backdrop only when it's fitted — [`Model::base_fitted`]).
     fn bbox(&self) -> Option<(f64, f64, f64, f64)> {
         let mut e = Extent::new();
-        if self.flows.is_some() {
-            // Review #595 BLOCKER 1: `flow_bbox` (every resolved endpoint,
-            // present this frame or not) — not `self.flows`' own drawn-
-            // only arcs, which would zoom the fit in/out per frame.
+        if let Some(fl) = &self.flows {
+            // Review #595 BLOCKER 1 / re-review R1: `flow_bbox` (every
+            // resolved endpoint, present this frame or not) on a `::FRAME`
+            // map — not `fl`'s own drawn-only arcs, which would zoom the
+            // fit in/out per frame. `None` outside a frame map (the
+            // original rule, unaffected by BLOCKER 1's fix): the drawn
+            // flows themselves, same as before `::FRAME` existed.
             if let Some((x0, y0, x1, y1)) = self.flow_bbox {
                 e.add([x0, y0]);
                 e.add([x1, y1]);
+            } else {
+                for f in &fl.flows {
+                    e.add(f.o);
+                    e.add(f.d);
+                }
             }
         } else {
             let features = self.core.as_ref().unwrap_or(&self.features);

@@ -251,10 +251,21 @@ pub(super) fn of(
             }
             continue;
         };
-        all_points.push(op);
-        all_points.push(dp);
+        // Review #595 re-review R1: a self-flow is never drawn in *any*
+        // frame (`ok == dk` only depends on the always-first-row-resolved
+        // endpoints, so it's frame-independent) — excluded from
+        // `all_points` before it's pushed, the same way the pre-review
+        // code already excluded it from `raw.flows`. `present == None`
+        // (no `::FRAME`) doesn't use `all_points` for extent/bbox at all
+        // (`Model::new`/`bbox()` keep the old, `raw.flows`-based rules
+        // there — this function's job is just to not blank a frame-
+        // absent flow's endpoints any more, D20/BLOCKER 1).
+        if ok != dk && present.is_some() {
+            all_points.push(op);
+            all_points.push(dp);
+        }
         if !is_present {
-            continue; // resolved (extent above already has it) — not drawn this frame
+            continue; // resolved — not drawn this frame
         }
         if ok == dk {
             self_flows += 1;

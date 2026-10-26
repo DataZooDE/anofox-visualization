@@ -2356,6 +2356,43 @@ fn hexbin_classes_and_legend_note() {
     assert!(s.contains("(1)"), "a per-class count in the legend: {s}");
 }
 
+/// Team-lead's screenshot finding on #595 (confirmed pre-existing on master,
+/// not frame-specific: reproduces with a plain, non-frame classed hexbin
+/// map too, and without `::FRAME` at all here). A hexbin cell has no "no
+/// data" concept — it either exists (has member points) or doesn't; there's
+/// no NA cell the way an area/point row can have a missing measure. Before
+/// the fix, the legend showed a spurious "No data (N)" key, N == the number
+/// of original rows — `plot::build`'s main features layer (suppressed to
+/// `Value::Na` for every row when hexbin takes over the point pass, so it
+/// draws nothing) still carried a "fill" *data column* of nothing but `Na`,
+/// and ggplot-rs's `ScaleFillBinned::train` picks up a "fill"-named column
+/// by its aesthetic registration on that layer's own `GGData`/`GGPlot`
+/// construction regardless of whether a geom is ever attached to draw it —
+/// confirmed by instrumenting `ScaleFillBinned::train` directly (not
+/// guessed): two `train` calls, one real (hexbin's own cell values, 0 NAs)
+/// and one spurious (this layer's column, every value NA). The fix leaves
+/// the "fill" column out of that layer's `GGData` entirely when it isn't
+/// aes-mapped (hexbin_takes_over), not just unmapped — `overlay.rs`'s
+/// symbols layer already got this right; the main layer didn't.
+#[test]
+fn hexbin_has_no_no_data_key() {
+    let lat = Column::new("lat", Role::Lat, nums(&[48.0, 48.1, 48.2, 48.3, 48.4]));
+    let lon = Column::new("lon", Role::Lon, nums(&[9.0, 9.2, 9.4, 9.6, 9.8]));
+    let v = Column::new(
+        "v",
+        Role::Value(Kind::Bar),
+        nums(&[1.0, 2.0, 3.0, 4.0, 5.0]),
+    );
+    let h = Column::new("h", Role::Hexbin, strs(&["auto"]));
+    let c = Column::new("c", Role::Classes, konst("quantile 3", 1));
+    let s = svg(vec![lat, lon, v, h, c]);
+    assert!(!hexes(&s).is_empty(), "{s}");
+    assert!(
+        !s.contains("No data"),
+        "a hexbin map's legend must never show a \"No data\" key — a cell either exists or doesn't, it's never NA: {s}"
+    );
+}
+
 #[test]
 fn hexbin_light_dark() {
     for (name, dark) in [("default", false), ("default", true)] {
@@ -2859,6 +2896,56 @@ fn flow_extent_and_projection_are_frame_stable() {
     assert!(
         !summary1.contains("not drawn (no location)"),
         "frame 2 wrongly reports an unplaced flow: {summary1}"
+    );
+}
+
+/// Re-review of #595, R1: BLOCKER 1's own fix (every resolved endpoint
+/// feeds the extent, so an absent-this-frame flow doesn't shrink a frame
+/// map's extent) must not leak onto a **non-frame** flow map, where there
+/// is no "other frame" to stay stable against — the extent/fit must still
+/// come from only what's actually *drawn*: A→B (size 100) draws; a
+/// self-flow X→X (far away) never draws (`ok == dk`); C→D (far away, NULL
+/// `::SIZE`) never draws either (`flows::project`'s own width filter).
+/// Before the fix, `all_points` (and so the extent/projected fit box) was
+/// built unconditionally, pulling X→X and C→D's far-off endpoints into a
+/// plain flow map's domain and zooming it out around places nothing is
+/// drawn.
+#[test]
+fn flow_extent_on_a_non_frame_map_only_covers_drawn_flows() {
+    let o = Column::new(
+        "o",
+        Role::Origin,
+        vec![pt(9.0, 50.0, "A"), pt(30.0, 60.0, "X"), pt(-5.0, 40.0, "C")],
+    );
+    let d = Column::new(
+        "d",
+        Role::Dest,
+        vec![
+            pt(10.0, 51.0, "B"),
+            pt(30.0, 60.0, "X"),
+            pt(-4.0, 41.0, "D"),
+        ],
+    );
+    let n = Column::new(
+        "n",
+        Role::Size,
+        vec![Value::Float(100.0), Value::Float(5.0), Value::Na],
+    );
+    let s = svg(vec![o, d, n]);
+    assert_eq!(attr(root(&s), "data-proj"), Some("conic"), "{s}");
+    let domain = attr(root(&s), "data-domain").unwrap();
+    let nums: Vec<f64> = domain.split(' ').map(|v| v.parse().unwrap()).collect();
+    assert_eq!(nums.len(), 4, "{domain}");
+    // The domain must be tight around A→B alone (roughly 386777..603393,
+    // 5220649..5365060 for this fixture) — not stretched out to cover the
+    // self-flow (30°E 60°N) or the NULL-size flow (-5..-4°E 40..41°N),
+    // which are tens of thousands of km away and would blow the domain's
+    // span past 1,000,000 units if wrongly included.
+    let span_x = nums[1] - nums[0];
+    let span_y = nums[3] - nums[2];
+    assert!(
+        span_x < 500_000.0 && span_y < 500_000.0,
+        "a non-frame flow map's domain must cover only its drawn flow (A->B), not the self-flow or the NULL-size one: {domain}"
     );
 }
 
