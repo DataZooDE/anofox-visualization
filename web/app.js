@@ -1300,7 +1300,12 @@ function servedVarSig(deps, vars) {
 // TRUE/FALSE/NULL) back into a JSON value for /api/panel.
 function sqlLiteralToJson(lit) {
   const t = String(lit).trim();
-  if (/^null$/i.test(t)) return null;
+  // #556 nit (review-582): `NULL::VARCHAR`, not just a bare `NULL`, is
+  // what the daterange picker's "Clear" sends (web/app.js's own `lit`,
+  // renderDateRangePicker) — an explicit type so a local/`--site` run
+  // doesn't give the variable DuckDB's default INTEGER type. Either
+  // spelling means the same "no value" here.
+  if (/^null(::\w+)?$/i.test(t)) return null;
   if (/^true$/i.test(t)) return true;
   if (/^false$/i.test(t)) return false;
   if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) return t.slice(1, -1).replace(/''/g, "'");
@@ -1327,7 +1332,9 @@ function sqlLiteralToJson(lit) {
 // because there is no server left to enforce it instead.
 function validPathValueLiteral(lit) {
   const t = String(lit).trim();
-  if (/^null$/i.test(t)) return true;
+  // #556 nit (review-582): accept the daterange "Clear" control's typed
+  // `NULL::VARCHAR` too (sqlLiteralToJson above takes the same pair).
+  if (/^null(::\w+)?$/i.test(t)) return true;
   if (t.length && /^[0-9]+$/.test(t)) return true;
   if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
     const inner = t.slice(1, -1).replace(/''/g, "'");
@@ -7688,7 +7695,15 @@ function coerceSeededSelection(name, mode) {
 async function setSelectionVars() {
   try {
     await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
-    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+    // #556 nit (review-582): a daterange "clear" is the first thing that
+    // ever puts a real `null` into `dpXf` for a `path_vars`-eligible key
+    // (a dropdown always SETs a string) — without this check it went out
+    // as the *string* `'null'`, not SQL `NULL` (`q(null)` → `String(null)`
+    // → `"null"`), so the var never actually unset and every later
+    // `getvariable()` on it kept returning the string "null" instead of
+    // NULL. Same convention as the period vars' own `v == null ? "NULL" :
+    // …` (below, `periodUrlParams`'s caller).
+    const q = (x) => (x == null ? "NULL" : `'${String(x).replace(/'/g, "''")}'`);
     for (const [k, v] of Object.entries(dpXf)) {
       if (URL_VAR_RE.test(k)) {
         // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
@@ -7706,7 +7721,11 @@ function urlStateParams() {
   const out = [];
   const add = (k, v) => (Array.isArray(v) ? (v.length ? v : [""]) : [v]).forEach((x) => out.push(["v." + k, String(x)]));
   for (const [k, def] of Object.entries(dpVarDefault)) {
-    if (dpVars[k] !== undefined && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
+    // #556 nit (review-582): a daterange "clear" sets dpVars[k] to null
+    // (the same NULL the dropdown branch below already skips via its own
+    // `v == null` check) — skip it here too, or `JSON.stringify(null)`
+    // ("null") would end up as a literal `?v.<k>=null` on the URL.
+    if (dpVars[k] !== undefined && dpVars[k] !== null && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
   }
   for (const [col, p] of Object.entries(dpPeriodUrl)) {
     for (const [k, v] of periodUrlParams(p.prefix, dpVars[col], p.def)) out.push(["v." + k, v]);
@@ -8479,12 +8498,36 @@ function refreshServedNavHrefs() {
       a.href = servedNavHref(a.dataset.navId, served);
     });
   }
-  const np = served.navPicker;
-  const sel = np && document.querySelector(".served-nav-picker select");
-  if (sel) {
+  for (const np of servedNavPickers(served)) {
+    if (np.type === "daterange") {
+      const [fromVar, toVar] = np.vars;
+      const wrap = document.querySelector('.served-nav-picker[data-vars="' + fromVar + "," + toVar + '"]');
+      if (!wrap) continue;
+      const from = wrap.querySelector('input[data-var="' + fromVar + '"]');
+      const to = wrap.querySelector('input[data-var="' + toVar + '"]');
+      const fv = pathVarValue(fromVar);
+      const tv = pathVarValue(toVar);
+      if (from && fv !== undefined && fv !== null && fv !== "") from.value = fv;
+      if (to && tv !== undefined && tv !== null && tv !== "") to.value = tv;
+      continue;
+    }
+    const sel = document.querySelector('.served-nav-picker[data-var="' + np.var + '"] select');
+    if (!sel) continue;
     const v = String(pathVarValue(np.var) ?? "");
     if (sel.value !== v && [...sel.options].some((o) => o.value === v)) sel.value = v;
   }
+}
+// #556: `window.__served.navPickers` (a locked server — several pickers,
+// including `daterange`) or the still-accepted singular `window.__served
+// .navPicker` (a static site, `dashboard --site`'s `site.json`: always a
+// plain dropdown) — normalized here so the rest of the served nav only
+// ever deals with one array, in one shape (`{type, ...}`, `type` defaults
+// to `"dropdown"`).
+function servedNavPickers(served) {
+  if (!served) return [];
+  if (Array.isArray(served.navPickers)) return served.navPickers;
+  if (served.navPicker) return [Object.assign({ type: "dropdown" }, served.navPicker)];
+  return [];
 }
 function servedNavLink(d, served) {
   const a = document.createElement("a");
@@ -8507,20 +8550,26 @@ function servedNavLink(d, served) {
   }
   return a;
 }
-// #407 part 3: the nav-bar picker for one `path_vars` variable — a plain
-// <select>, right of the dashboard links (CSS pushes it there: it's just
-// the last flex child). Its options come from `window.__served.navPicker`
-// (server-computed, see `build_nav_picker` in duckext/src/serve.rs); labels
-// are set with `textContent`, never `innerHTML`. `renderServedNav` runs
-// before the first `run()`, so `pathVarValue` doesn't hold the viewer's
-// value yet — the initial selection is read straight from `?v.<var>=`
-// instead; `refreshServedNavHrefs` (called from `syncUrlState` after every
-// run) keeps the control in sync with it from then on.
-function renderNavPicker(served) {
-  const np = served.navPicker;
-  if (!np || !Array.isArray(np.options) || !np.options.length) return null;
+// #407 part 3 / #556: the nav-bar's own controls, right of the dashboard
+// links (CSS pushes them there: they're just the last flex children).
+// `servedNavPickers` normalizes `window.__served.navPickers`/`.navPicker`
+// into one array; each entry is a dropdown (unchanged since #407) or a
+// `daterange` (#556, below). Labels are set with `textContent`, never
+// `innerHTML`. `renderServedNav` runs before the first `run()`, so
+// `pathVarValue` doesn't hold the viewer's value yet — the initial
+// selection is read straight from `?v.<var>=` instead; `refreshServedNavHrefs`
+// (called from `syncUrlState` after every run) keeps the controls in sync
+// with it from then on.
+function renderNavPickers(served) {
+  return servedNavPickers(served)
+    .map((np) => (np.type === "daterange" ? renderDateRangePicker(np) : renderDropdownPicker(np)))
+    .filter(Boolean);
+}
+function renderDropdownPicker(np) {
+  if (!Array.isArray(np.options) || !np.options.length) return null;
   const wrap = document.createElement("label");
   wrap.className = "served-nav-picker";
+  wrap.dataset.var = np.var;
   const cap = document.createElement("span");
   cap.className = "served-nav-picker-label";
   cap.textContent = captionColon(np.label || np.var);
@@ -8552,9 +8601,145 @@ function renderNavPicker(served) {
   wrap.append(cap, sel);
   return wrap;
 }
+// #556: a global time window — two <input type=date>, preset buttons
+// (computed server-side, never wall-clock "today" on the page — see
+// `daterange_preset_bounds` in duckext/src/serve.rs) and an explicit
+// "Apply" button. Applying runs both SET VARIABLEs, in order, before the
+// rerun, so the server is never asked to validate one half of the pair
+// against the *old* value of the other (it would otherwise see a
+// momentary from > to on every edit of either input). A plain button with
+// its listener attached here in script, not an inline onchange attribute —
+// the CSP (#252) has no 'unsafe-inline'/'unsafe-hashes' for script-src, the
+// exact bug #570 fixed for the script-free pages' own controls.
+function renderDateRangePicker(np) {
+  const [fromVar, toVar] = np.vars;
+  const wrap = document.createElement("div");
+  wrap.className = "served-nav-picker served-nav-daterange";
+  wrap.dataset.vars = fromVar + "," + toVar;
+  const cap = document.createElement("span");
+  cap.className = "served-nav-picker-label";
+  cap.textContent = captionColon(np.label || "Time window");
+  const params = new URLSearchParams(location.search);
+  const mk = (varname, kind) => {
+    const inp = document.createElement("input");
+    inp.type = "date";
+    inp.dataset.var = varname;
+    inp.setAttribute("aria-label", (np.label || "Time window") + ": " + kind);
+    if (np.min) inp.min = np.min;
+    if (np.max) inp.max = np.max;
+    inp.value = params.get("v." + varname) || "";
+    return inp;
+  };
+  const from = mk(fromVar, "from");
+  const to = mk(toVar, "to");
+  const arrow = document.createElement("span");
+  arrow.textContent = "→";
+  arrow.className = "daterange-arrow";
+  // #556 nit (review-582): a message for the from>to case and for why
+  // Apply is disabled — `role=status`/`aria-live` so it's announced
+  // without moving focus.
+  const hint = document.createElement("span");
+  hint.className = "served-nav-hint";
+  hint.setAttribute("role", "status");
+  hint.setAttribute("aria-live", "polite");
+  // `f`/`t` is `null` for "clear" (both sides) — `clamp_daterange_values`
+  // (duckext/src/serve.rs) treats a NULL path_vars value as "no value",
+  // skipping both the calendar-date check and the min/max clamp, so this
+  // is the one legal way to get back to an unfiltered dashboard once a
+  // window has been set (there's no sentinel date for "unset").
+  const setVars = async (f, t) => {
+    if (fromVar in dpVarDefault) dpVars[fromVar] = f;
+    else dpXf[fromVar] = f;
+    if (toVar in dpVarDefault) dpVars[toVar] = t;
+    else dpXf[toVar] = t;
+    // `NULL::VARCHAR`, not a bare `NULL` — DuckDB gives an untyped `SET
+    // VARIABLE x = NULL` the default INTEGER type, which then breaks any
+    // `coalesce(getvariable(x), '…')::VARCHAR` the dashboard does (the
+    // same fix `clamp_daterange_values`, duckext/src/serve.rs, applies
+    // server-side for a served page — this is the local/`--site` path).
+    const lit = (v) => (v == null ? "NULL::VARCHAR" : `'${v.replace(/'/g, "''")}'`);
+    await runSql(`SET VARIABLE ${fromVar} = ${lit(f)}`);
+    await runSql(`SET VARIABLE ${toVar} = ${lit(t)}`);
+    run(false);
+  };
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.className = "served-nav-apply";
+  apply.textContent = "Apply";
+  // #556 nit (review-582): Apply used to do nothing, silently, when only
+  // one input had a value. With only one side filled, the other side now
+  // falls back to the picker's own bound (`np.min`/`np.max`, the same
+  // full range a "clear"/"all" preset would use) when the picker has one
+  // — i.e. "from the earliest/latest available date". A plain two-input
+  // picker with no `sql` has no such bound to fall back on, so Apply
+  // stays disabled with a hint until both sides are filled. The server
+  // re-checks `from <= to` and re-clamps regardless — this is UX only.
+  const updateApplyState = () => {
+    hint.textContent = "";
+    const f = from.value,
+      t = to.value;
+    if (!f && !t) {
+      apply.disabled = true;
+      apply.title = "Pick a start and end date.";
+    } else if ((!f && !np.min) || (!t && !np.max)) {
+      apply.disabled = true;
+      apply.title = "This picker has no stored range to fill in the other date — pick both.";
+    } else {
+      apply.disabled = false;
+      apply.title = f && t ? "" : "The empty side uses the full available range.";
+    }
+  };
+  from.addEventListener("input", updateApplyState);
+  to.addEventListener("input", updateApplyState);
+  apply.onclick = () => {
+    const f = from.value || np.min || null;
+    const t = to.value || np.max || null;
+    if (!f || !t) return; // updateApplyState already disables this case
+    if (f > t) {
+      // ISO `YYYY-MM-DD` strings compare lexicographically in date order.
+      hint.textContent = "Start can't be after end.";
+      return;
+    }
+    hint.textContent = "";
+    setVars(f, t);
+  };
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "served-nav-clear";
+  clear.textContent = "Clear";
+  clear.title = "Clear the " + (np.label || "time window") + " filter";
+  clear.onclick = () => {
+    from.value = "";
+    to.value = "";
+    updateApplyState();
+    setVars(null, null);
+  };
+  updateApplyState();
+  wrap.append(cap, from, arrow, to, apply, clear, hint);
+  if (Array.isArray(np.presets) && np.presets.length) {
+    const bar = document.createElement("span");
+    bar.className = "served-nav-presets";
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", "Presets");
+    for (const p of np.presets) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = p.label || p.key;
+      btn.onclick = () => {
+        from.value = p.from;
+        to.value = p.to;
+        updateApplyState();
+        setVars(p.from, p.to);
+      };
+      bar.appendChild(btn);
+    }
+    wrap.appendChild(bar);
+  }
+  return wrap;
+}
 function renderServedNav(served) {
   const hasLinks = !!served && Array.isArray(served.nav) && served.nav.length >= 2;
-  const hasPicker = !!served && !!served.navPicker;
+  const hasPicker = servedNavPickers(served).length > 0;
   if (!hasLinks && !hasPicker) return;
   if (document.querySelector(".served-nav")) return;
   const nav = document.createElement("nav");
@@ -8580,8 +8765,7 @@ function renderServedNav(served) {
       }
     } else nav.appendChild(servedNavMenu(served, groups));
   }
-  const picker = hasPicker && renderNavPicker(served);
-  if (picker) nav.appendChild(picker);
+  if (hasPicker) for (const picker of renderNavPickers(served)) nav.appendChild(picker);
   // #417: a published site has no server to answer a real /d/<id> request —
   // every nav link switches in place instead (siteGo), so Wasm and the
   // loaded data stay warm. A locked server's own nav still navigates for

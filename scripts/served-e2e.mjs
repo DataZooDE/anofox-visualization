@@ -17,9 +17,18 @@
 // without clicking), and clicking that link opens the sibling already on
 // the carried-over value — axe on the nav bar + picker, no overflow at
 // --width 390.
-// Runs five servers (4 and 10 dashboards, one with options.home, one with a
-// ::VIEW switcher, one with path_vars + nav_picker), each started and
-// stopped by this script.
+// #556 on its own locked server (options.nav_pickers: a daterange alongside
+// a dropdown): window.__served.navPickers has both, the daterange's min/max
+// come through; Apply SETs both vars and re-runs, an "all" preset fills and
+// applies in one click, "Clear" sends both vars back to NULL (the inputs
+// empty, ?v.view_from= drops off the URL), Apply is disabled with both
+// inputs empty and stays enabled with only one filled (this picker has
+// sql-computed bounds for the other side), and a from > to pick shows a
+// client-side hint instead of going to the server — axe on the nav bar, no
+// overflow at --width 390.
+// Runs six servers (4 and 10 dashboards, one with options.home, one with a
+// ::VIEW switcher, one with path_vars + nav_picker, one with nav_pickers),
+// each started and stopped by this script.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8930] \
@@ -293,9 +302,11 @@ try {
   const html = await (await fetch(`http://127.0.0.1:${port4}/d/m1`)).text();
   const served = JSON.parse(html.match(/window\.__served=(\{.*?\});<\/script>/s)[1]);
   check(JSON.stringify(served.pathVars) === '["model"]', `window.__served.pathVars: ${JSON.stringify(served.pathVars)}`);
+  // #556: the locked server now sends `navPickers` (an array) — the
+  // singular `nav_picker` config option still works, as a one-element list.
   check(
-    JSON.stringify(served.navPicker.options) === JSON.stringify([{ value: "car-price", label: "Car price" }, { value: "van", label: "Van" }]),
-    `window.__served.navPicker.options drops the non-plain-name row: ${JSON.stringify(served.navPicker.options)}`
+    JSON.stringify(served.navPickers[0].options) === JSON.stringify([{ value: "car-price", label: "Car price" }, { value: "van", label: "Van" }]),
+    `window.__served.navPickers[0].options drops the non-plain-name row: ${JSON.stringify(served.navPickers?.[0]?.options)}`
   );
 
   // Opening with a value already on the URL: the picker starts on it, and
@@ -335,10 +346,82 @@ try {
   stop(srv);
 }
 
+// ── 6. #556: options.nav_pickers — a daterange alongside a dropdown, the
+// same shape the issue's own example and the nav_pickers_list/
+// nav_picker_daterange_option Rust tests use. Two dashboards reading
+// view_from/view_to (no ::DATERANGE of their own — the whole point of the
+// picker) ──
+const drData = mkdtempSync(path.join(tmpdir(), "dp-served-drdata-"));
+const drDir = folder([
+  ["r1", "-- @title Report one\nSELECT coalesce(getvariable('view_from'), 'none')::VARCHAR || ' .. ' || coalesce(getvariable('view_to'), 'none')::VARCHAR AS w ::TEXT_SMALL;"],
+  ["r2", "-- @title Report two\nSELECT coalesce(getvariable('view_from'), 'none')::VARCHAR || ' .. ' || coalesce(getvariable('view_to'), 'none')::VARCHAR AS w ::TEXT_SMALL;"],
+]);
+const port5 = port0 + 5;
+srv = await serve(drDir, port5, {
+  data: drData,
+  path_vars: ["view_from", "view_to", "model"],
+  nav_pickers: [
+    { type: "daterange", vars: ["view_from", "view_to"], label: "Time window", sql: "SELECT DATE '2026-01-01', DATE '2026-01-31'", presets: ["last 7d", "all"] },
+    { var: "model", label: "Model", sql: "SELECT * FROM (VALUES ('car-price','Car price'), ('van','Van')) t(value, label)" },
+  ],
+});
+try {
+  const html = await (await fetch(`http://127.0.0.1:${port5}/d/r1`)).text();
+  const served = JSON.parse(html.match(/window\.__served=(\{.*?\});<\/script>/s)[1]);
+  check(served.navPickers?.length === 2, `window.__served.navPickers: two entries (${JSON.stringify(served.navPickers)})`);
+  check(served.navPickers[0].type === "daterange" && served.navPickers[0].min === "2026-01-01" && served.navPickers[0].max === "2026-01-31", `daterange bounds come through: ${JSON.stringify(served.navPickers[0])}`);
+  check(served.navPickers[1].type === "dropdown", "a dropdown picker alongside the daterange one");
+
+  const p = await page(`http://127.0.0.1:${port5}/d/r1`);
+  await p.waitForSelector(".served-nav-daterange", { timeout: 60000 });
+  await p.waitForSelector(".served-nav-picker select", { timeout: 60000 });
+  await axeCheck(p, ".served-nav", "nav bar + daterange + dropdown");
+  if (shots) await p.screenshot({ path: `${shots}/${tag}-nav-daterange.png` });
+  if (width <= 820) {
+    const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    check(overflow <= 1, `daterange: no horizontal overflow at ${width}px (${overflow}px)`);
+  }
+
+  // Apply with both dates filled: SETs both vars and re-runs.
+  await p.fill('.served-nav-daterange input[data-var="view_from"]', "2026-01-10");
+  await p.fill('.served-nav-daterange input[data-var="view_to"]', "2026-01-20");
+  await p.click(".served-nav-apply");
+  await p.waitForFunction(() => document.querySelector(".panel")?.textContent.includes("2026-01-10"), null, { timeout: 60000 });
+  check((await p.textContent(".panel")).includes("2026-01-10 .. 2026-01-20"), "Apply SETs both vars and re-runs");
+  check(/[?&]v\.view_from=2026-01-10(&|$)/.test(await p.evaluate(() => location.href)), "Apply updates ?v.view_from= on the URL");
+
+  // A preset button fills both inputs and applies in one click.
+  const preset = p.locator(".served-nav-presets button", { hasText: "All" });
+  check((await preset.count()) === 1, "an 'all' preset button exists (sql + presets given)");
+  await preset.click();
+  await p.waitForFunction(() => document.querySelector(".panel")?.textContent.includes("2026-01-01"), null, { timeout: 60000 });
+  check((await p.textContent(".panel")).includes("2026-01-01 .. 2026-01-31"), "the 'all' preset applies the picker's full bounds");
+
+  // Clear: both vars go back to NULL (no sentinel date means "unset"), the
+  // inputs empty out and ?v.view_from= drops off the URL.
+  await p.click(".served-nav-clear");
+  await p.waitForFunction(() => document.querySelector(".panel")?.textContent.includes("none .. none"), null, { timeout: 60000 });
+  check((await p.$eval('.served-nav-daterange input[data-var="view_from"]', (i) => i.value)) === "", "Clear empties the from input");
+  check(!/[?&]v\.view_from=/.test(await p.evaluate(() => location.href)), "Clear drops ?v.view_from= from the URL");
+
+  // Apply starts disabled with both inputs empty, and stays enabled with
+  // only one filled (this picker has sql-computed bounds for the other).
+  check(await p.$eval(".served-nav-apply", (b) => b.disabled), "Apply starts disabled with both inputs empty");
+  await p.fill('.served-nav-daterange input[data-var="view_from"]', "2026-01-25");
+  check(!(await p.$eval(".served-nav-apply", (b) => b.disabled)), "Apply enables with one side filled (the other falls back to the picker's own bound)");
+
+  // from > to: a client-side hint, never a request to the server.
+  await p.fill('.served-nav-daterange input[data-var="view_to"]', "2026-01-05");
+  await p.click(".served-nav-apply");
+  check((await p.textContent(".served-nav-hint")).includes("Start can't be after end"), "from > to shows a client-side hint, not a server round trip");
+} finally {
+  stop(srv);
+}
+
 check(!errs.length, `no page errors ${errs.join(" | ")}`);
 // #244: never requested on a served (locked) page.
 const assistLeak = allRequests.filter((u) => /assist-ui\.(js|css)|vendor\/anthropic-sdk|assist\/(guide|instructions)\.md/.test(u));
 check(assistLeak.length === 0, `no assistant request on a served page (${JSON.stringify(assistLeak)})`);
 await browser.close();
-for (const d of [small, big, viewsDir, navDir, navData]) rmSync(d, { recursive: true, force: true });
+for (const d of [small, big, viewsDir, navDir, navData, drDir, drData]) rmSync(d, { recursive: true, force: true });
 if (!process.exitCode) console.log(`served-e2e (${tag}): ok`);

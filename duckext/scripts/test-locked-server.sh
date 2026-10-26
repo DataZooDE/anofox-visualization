@@ -676,8 +676,8 @@ start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/navdash"), $PO
     'nav_picker', json_object('var', 'model', 'label', 'Model', 'sql', $(q "$PICKER_SQL"))));" || fail "nav_picker server"
 page_html="$(curl -s "http://127.0.0.1:$PORT/d/m1")"
 echo "$page_html" | grep -oq '"pathVars":\["model"\]' || fail "#407: window.__served.pathVars missing: $page_html"
-echo "$page_html" | grep -oq '"navPicker":{"var":"model","label":"Model","options":\[{"value":"car-price","label":"Car price"},{"value":"van","label":"Van"}\]}' \
-  || fail "#407: window.__served.navPicker (the bad row must be dropped): $page_html"
+echo "$page_html" | grep -oq '"navPickers":\[{"type":"dropdown","var":"model","label":"Model","options":\[{"value":"car-price","label":"Car price"},{"value":"van","label":"Van"}\]}\]' \
+  || fail "#556: window.__served.navPickers (the bad row must be dropped): $page_html"
 # An unknown/unused viewer variable on a panel request is accepted (ignored),
 # not rejected — the nav relies on this to carry a path_vars value to a
 # dashboard that doesn't happen to read it.
@@ -693,7 +693,7 @@ if QUIET=1 start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/nav
     'nav_picker', json_object('var', 'other', 'sql', 'SELECT 1, 2')));"; then
   fail "nav_picker.var not in path_vars was accepted"
 fi
-grep -q "options.nav_picker.var 'other' must be one of options.path_vars" "$T/out" || fail "nav_picker.var check: $(cat "$T/out")"
+grep -q "options.nav_picker(s): 'other' must be one of options.path_vars" "$T/out" || fail "nav_picker.var check: $(cat "$T/out")"
 exec 3>&-
 
 # nav_picker refuses to start together with an access policy: its SQL runs
@@ -707,9 +707,36 @@ if QUIET=1 start "$T/main.duckdb" "" "CREATE TABLE sales AS SELECT 1 AS x;
     'nav_picker', json_object('var', 'model', 'sql', 'SELECT 1, 2')));"; then
   fail "nav_picker with an access policy was accepted"
 fi
-grep -q "options.nav_picker cannot be combined with options.policy" "$T/out" || fail "nav_picker + policy refusal: $(cat "$T/out")"
+grep -q "options.nav_picker(s) cannot be combined with options.policy" "$T/out" || fail "nav_picker + policy refusal: $(cat "$T/out")"
 exec 3>&-
 echo "OK: #407 part 3: nav_picker.var must be one of path_vars; refuses to start with an access policy"
+
+# #556: `nav_pickers` (an array) with a `daterange` entry — `sql`'s
+# (min, max) and `presets` computed from it land in window.__served
+# .navPickers, and a request is real-date-checked, from<=to-checked, and
+# out-of-range values are clamped (not refused) to [min, max].
+mkdir -p "$T/drdash" "$T/drruns"
+cat > "$T/drdash/w1.sql" <<'SQL'
+SELECT coalesce(getvariable('view_from'), 'none')::VARCHAR || '/' || coalesce(getvariable('view_to'), 'none')::VARCHAR AS m ::TEXT_SMALL;
+SQL
+DR_SQL="SELECT DATE '2026-01-01', DATE '2026-01-31'"
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/drdash"), $PORT,
+  json_object('data', $(q "$T/drruns"), 'path_vars', ['view_from','view_to'],
+    'nav_pickers', [json_object('type','daterange','vars',['view_from','view_to'],'label','Time window','sql',$(q "$DR_SQL"),'presets',['last 7d','all'])]));" \
+  || fail "nav_pickers daterange server"
+page_html="$(curl -s "http://127.0.0.1:$PORT/d/w1")"
+echo "$page_html" | grep -oq '"navPickers":\[{"type":"daterange","vars":\["view_from","view_to"\],"label":"Time window","min":"2026-01-01","max":"2026-01-31","presets":\[{"key":"last 7d","label":"Last 7 days","from":"2026-01-25","to":"2026-01-31"},{"key":"all","label":"All","from":"2026-01-01","to":"2026-01-31"}\]}\]' \
+  || fail "#556: window.__served.navPickers (daterange): $page_html"
+[ "$(panel 0 '{"view_from":"2026-01-05","view_to":"2026-01-10"}' w1)" = 200 ] && grep -q '"c0":"2026-01-05/2026-01-10"' "$T/body" \
+  || fail "#556: in-range daterange: $(cat "$T/body")"
+[ "$(panel 0 '{"view_from":"2025-01-01","view_to":"2026-06-01"}' w1)" = 200 ] && grep -q '"c0":"2026-01-01/2026-01-31"' "$T/body" \
+  || fail "#556: out-of-range daterange clamp: $(cat "$T/body")"
+[ "$(panel 0 '{"view_from":"2026-01-20","view_to":"2026-01-10"}' w1)" = 400 ] \
+  || fail "#556: from > to was accepted: $(cat "$T/body")"
+[ "$(panel 0 '{"view_from":"2026-02-30","view_to":"2026-01-10"}' w1)" = 400 ] \
+  || fail "#556: an invalid calendar date was accepted: $(cat "$T/body")"
+stop
+echo "OK: #556: nav_pickers (array) with a daterange entry — min/max/presets from sql, request-time real-date + from<=to check, clamp to [min,max]"
 
 # #514 PR B: GET/HEAD /d/<id>/assets/<rest> — containment, the extension
 # allow-list, the real (magic-byte) MIME, the size cap, and the response
