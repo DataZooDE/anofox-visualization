@@ -267,7 +267,7 @@ There are two native builds (see [BUILD.md](BUILD.md) for why):
 | Provides | rendering: `anofox_render` + macros | **full toolkit**: rendering + `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` (embedded web builder) |
 | Same as | the community binary | — |
 | DuckDB | exactly the pinned version (v1.5.6) | any DuckDB with C-API v1.2.0+ (v1.2 or newer) |
-| Needs | submodules, CMake, a C++ toolchain, Rust | Rust, libclang (bindgen), `wasm-pack`, Python 3, a `duckdb` CLI |
+| Needs | submodules, CMake, a C++ toolchain, Rust | Rust, libclang (bindgen), `wasm-bindgen` + `wasm-opt` (not `wasm-pack`, #552), Python 3, a `duckdb` CLI |
 
 Both binaries are unsigned: start DuckDB with `-unsigned` (or set
 `allow_unsigned_extensions`).
