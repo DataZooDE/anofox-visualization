@@ -30,6 +30,10 @@ const fail = (m) => {
 };
 const ok = (m) => console.log("ok: " + m);
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
+function check(c, m) {
+  if (c) ok(m);
+  else fail(m);
+}
 
 const sqlPath = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "web", "examples", "delivery-coverage.sql");
 const SQL = readFileSync(sqlPath, "utf8");
@@ -40,6 +44,25 @@ async function openMap(page) {
   await page.locator('.dp-viewbar [role="tab"]', { hasText: "Week by week" }).click();
   await page.waitForTimeout(150);
   await page.waitForFunction(() => !!document.querySelector(".dash .panel-svg > svg[data-frames]"), null, { timeout: 60000 });
+}
+
+// Trigger the real downloadHtml() via #dlhtml (hidden by ?embed=1, needed so
+// the dashboard auto-runs from the #sql hash — clicked programmatically
+// rather than requiring it visible) and return the exported file's text.
+async function exportHtml(page) {
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.evaluate(() => document.getElementById("dlhtml").click())]);
+  return readFileSync(await dl.path(), "utf8");
+}
+
+// Open an export cold, offline, with no server, no live app.js and no wasm.
+async function openOffline(browser, html, viewport = { width: 1200, height: 900 }, colorScheme) {
+  const off = await browser.newContext({ offline: true, viewport, colorScheme });
+  const op = await off.newPage();
+  const errs = [];
+  op.on("pageerror", (e) => errs.push(String(e)));
+  await op.route("**/*", (r) => (r.request().url().startsWith("http") ? (r.abort(), undefined) : r.continue()));
+  await op.setContent(html, { waitUntil: "load" });
+  return { op, errs };
 }
 
 async function run() {
@@ -61,12 +84,7 @@ async function run() {
   const liveLabel = await subtitleOf(page);
   ok(`live: subtitle reads "${liveLabel}" (last frame, D12)`);
 
-  // Download the real, self-contained export (the actual downloadHtml() —
-  // not a re-simulation). The toolbar (and so #dlhtml) is hidden by
-  // ?embed=1 (needed above so the dashboard auto-runs from the #sql hash),
-  // so this clicks it programmatically rather than requiring it visible.
-  const [dl] = await Promise.all([page.waitForEvent("download"), page.evaluate(() => document.getElementById("dlhtml").click())]);
-  const html = readFileSync(await dl.path(), "utf8");
+  const html = await exportHtml(page);
 
   // 15 states × 12 weeks is well under the 3 MB budget: every frame must be
   // embedded as a <template>, no fallback note for this panel.
@@ -75,13 +93,7 @@ async function run() {
   check(!/<p class="dp-frames-note">/.test(html), "export has no fallback note when the map is within budget");
   check(!/<div class="dp-frames"/.test(html), "the export's markup carries no live bar of its own (built offline, by snapshotMotion())");
 
-  // Open the export cold, offline, with no server, no live app.js and no wasm.
-  const off = await browser.newContext({ offline: true, viewport: { width: 1200, height: 900 } });
-  const op = await off.newPage();
-  const exportErrs = [];
-  op.on("pageerror", (e) => exportErrs.push(String(e)));
-  await op.route("**/*", (r) => (r.request().url().startsWith("http") ? (r.abort(), undefined) : r.continue()));
-  await op.setContent(html, { waitUntil: "load" });
+  const { op, errs: exportErrs } = await openOffline(browser, html);
 
   const bar = await op.$(".dash .dp-frames");
   check(!!bar, "export: the offline player bar built itself (snapshotMotion()'s K.frames)");
@@ -108,6 +120,9 @@ async function run() {
 
   // Hover still works on the swapped-in marks (wireHits() re-run per step,
   // app.js) — a .dp-hit element on the fresh svg carries a working tooltip.
+  // review of #602 S1: wireHits() used to only convert path[data-row]
+  // titles (areas) — this map is a choropleth, so it alone wouldn't catch
+  // a regression there (see runPointMap() below for the circle-mark case).
   const hoverWorks = await op.evaluate(() => {
     const mark = document.querySelector(".dash svg[data-frames] .dp-hit");
     if (!mark) return null;
@@ -139,10 +154,150 @@ async function run() {
   await browser.close();
 }
 
-function check(c, m) {
-  if (c) ok(m);
-  else fail(m);
+// review of #602 S3: a point/symbol map's own marks are <circle>, not
+// <path> — wireHits()'s old selector (svg[data-map] path[data-row] title)
+// never matched them, so hover silently broke after the first offline
+// step. This is the one existing scenario (above) couldn't catch, since
+// delivery-coverage's "Week by week" map is a choropleth (path marks).
+async function runPointMap() {
+  const SQL = `SELECT lat::LAT, lon::LON, week AS "Week" ::FRAME, v ::BARCHART
+FROM (SELECT 48.0 + 0.05 * i AS lat, 9.0 + 0.05 * i AS lon, (1 + i % 3)::VARCHAR AS week, i AS v FROM range(15) t(i));`;
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 900, height: 700 }, acceptDownloads: true });
+  await page.goto(`${base}?embed=1#sql=${b64(SQL)}`);
+  await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  await page.waitForFunction(() => !!document.querySelector(".dash .panel-svg > svg[data-frames]"), null, { timeout: 60000 });
+  const html = await exportHtml(page);
+  const { op, errs } = await openOffline(browser, html);
+  await op.click(".dp-frames-prev"); // step away from the last (server-rendered) frame
+  await op.waitForTimeout(400);
+  const mark = await op.$(".dash svg[data-frames] circle[data-row]");
+  check(!!mark, "point map export: the swapped-in frame still draws circle marks");
+  // A circle with no value this frame (NA) correctly gets no tooltip at
+  // all (attachHover's own live rule) — pick one that actually carries a
+  // value (.dp-hit, the class wireHits() adds), same as the choropleth
+  // case above, not just "the first circle[data-row]".
+  const hoverWorks = await op.evaluate(() => {
+    const el = document.querySelector(".dash svg[data-frames] circle.dp-hit[data-row]");
+    if (!el) return "not-wired";
+    el.dispatchEvent(new MouseEvent("mouseenter"));
+    const shown = document.getElementById("dp-tip")?.classList.contains("show");
+    el.dispatchEvent(new MouseEvent("mouseleave"));
+    return shown;
+  });
+  check(hoverWorks === true, `point map export: hover works on a swapped-in circle mark after a step (${hoverWorks})`);
+  check(!errs.length, "point map export: no page errors " + errs.join(" | "));
+  await browser.close();
+}
+
+// review of #602 S3: a ::FIT export's scaleSvg() (SNAPSHOT_JS) sizes the
+// map's svg to the fitted panel height on load; stepping must not drop
+// back to the authored (unfitted) height (S2's own fix).
+async function runFit() {
+  const SQL = `SELECT 'Main'::TAB;
+SELECT 'fit'::FIT;
+SELECT 900::HEIGHT;
+SELECT lat::LAT, lon::LON, week AS "Week" ::FRAME, v ::BARCHART
+FROM (SELECT 48.0 + 0.05 * i AS lat, 9.0 + 0.05 * i AS lon, (1 + i % 3)::VARCHAR AS week, i AS v FROM range(15) t(i));`;
+  const browser = await chromium.launch();
+  // A viewport short enough, against the authored 900px panel height, that
+  // fitDash() actually has to shrink it (otherwise scaleSvg() has nothing
+  // to do and this test would pass vacuously).
+  const page = await browser.newPage({ viewport: { width: 900, height: 560 }, acceptDownloads: true });
+  await page.goto(`${base}?embed=1#sql=${b64(SQL)}`);
+  await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  await page.waitForFunction(() => !!document.querySelector(".dash .panel-svg > svg[data-frames]"), null, { timeout: 60000 });
+  const html = await exportHtml(page);
+  const { op, errs } = await openOffline(browser, html, { width: 900, height: 560 });
+  const before = await op.evaluate(() => {
+    const s = document.querySelector(".dash svg[data-frames]");
+    return s && { h: s.getAttribute("height"), scaled: s.hasAttribute("data-dp-scaled") };
+  });
+  check(!!before && before.scaled, `::FIT export: the map loads already scaled (${JSON.stringify(before)})`);
+  await op.click(".dp-frames-prev");
+  await op.waitForTimeout(400);
+  const after = await op.evaluate(() => {
+    const s = document.querySelector(".dash svg[data-frames]");
+    return s && { h: s.getAttribute("height"), scaled: s.hasAttribute("data-dp-scaled") };
+  });
+  check(
+    !!after && after.scaled && after.h === before.h,
+    `::FIT export: the scaled height survives a step (before ${JSON.stringify(before)}, after ${JSON.stringify(after)})`
+  );
+  check(!errs.length, "::FIT export: no page errors " + errs.join(" | "));
+  await browser.close();
+}
+
+// A dark export's embedded frames must stay dark after a step — frames are
+// pre-rendered through ctxWith({frame:k}), which already carries the
+// current theme variant (renderCtx()); this just confirms the swap doesn't
+// somehow lose it.
+async function runDark() {
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, acceptDownloads: true, colorScheme: "dark" });
+  await page.goto(`${base}?embed=1&theme=dark#sql=${b64(SQL)}`);
+  await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  await openMap(page);
+  const html = await exportHtml(page);
+  check(/data-ax-variant="dark"/.test(html), "dark export: the exported page itself is marked dark");
+  const { op, errs } = await openOffline(browser, html, { width: 1200, height: 900 }, "dark");
+  const bg = (p) => p.evaluate(() => document.querySelector(".dash svg[data-frames] rect")?.getAttribute("fill"));
+  const before = await bg(op);
+  await op.click(".dp-frames-prev");
+  await op.waitForTimeout(400);
+  const after = await bg(op);
+  check(!!before && before === after, `dark export: the panel background stays the same dark fill across a step (before ${before}, after ${after})`);
+  check(!errs.length, "dark export: no page errors " + errs.join(" | "));
+  await browser.close();
+}
+
+// Stepping the live map before exporting must carry that frame into the
+// export (the server-rendered svg's own data-frame, D12's "else the last").
+async function runNonLastStart() {
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, acceptDownloads: true });
+  await page.goto(`${base}?embed=1#sql=${b64(SQL)}`);
+  await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  await openMap(page);
+  await page.click(".dp-frames-prev");
+  await page.click(".dp-frames-prev");
+  await page.waitForTimeout(400);
+  const livePos = await page.locator(".dp-frames-pos").textContent();
+  check(/10 of 12/.test(livePos || ""), `live: stepped back twice to frame 10 ("${livePos}")`);
+  const html = await exportHtml(page);
+  const { op, errs } = await openOffline(browser, html);
+  const exportPos = await op.locator(".dp-frames-pos").textContent();
+  check(/10 of 12/.test(exportPos || ""), `export: opens on the frame the live dashboard was stepped to, not always the last ("${exportPos}")`);
+  check(!errs.length, "non-last-start export: no page errors " + errs.join(" | "));
+  await browser.close();
+}
+
+// The plan's own "a synthetic 52 x 401 map falls back to the note" case
+// (§M2f-B Tests): a map whose embedded frames would exceed the 3 MB/map
+// budget gets no templates at all, just M2f-A's static note.
+async function runOverBudget() {
+  const SQL = `SELECT lat::LAT, lon::LON, week AS "Week" ::FRAME, v ::BARCHART
+FROM (SELECT 48.0 + (i % 200) * 0.005 AS lat, 9.0 + ((i / 200) % 10) * 0.02 AS lon, (1 + i % 40)::VARCHAR AS week, i AS v FROM range(80000) t(i));`;
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 1200, height: 900 }, acceptDownloads: true });
+  await page.goto(`${base}?embed=1#sql=${b64(SQL)}`);
+  await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 180000 });
+  await page.waitForFunction(() => !!document.querySelector(".dash .panel-svg > svg[data-frames]"), null, { timeout: 60000 });
+  const t0 = Date.now();
+  const html = await exportHtml(page);
+  const ms = Date.now() - t0;
+  const tplCount = (html.match(/<template data-frame="\d+">/g) || []).length;
+  check(tplCount === 0, `over-budget export: no frames embedded (found ${tplCount})`);
+  check(/<p class="dp-frames-note">40 frames — Play in the live dashboard<\/p>/.test(html), "over-budget export: the static note is present");
+  check(!/<div class="dp-frames"/.test(html), "over-budget export: no live bar markup either");
+  ok(`over-budget export: took ${ms} ms (budget check stops the render loop early, not a full 40 frames)`);
+  await browser.close();
 }
 
 await run();
+await runPointMap();
+await runFit();
+await runDark();
+await runNonLastStart();
+await runOverBudget();
 if (!process.exitCode) console.log("frames-export-e2e: ok");

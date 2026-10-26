@@ -4130,12 +4130,19 @@ function loadDash(name, sql, key) {
 // to "Preview again" once the preview actually ends (Discard, Apply, a new
 // Send, or the viewer navigating away via loadDash/setMode/#sql input).
 const previewExitListeners = new Set();
-// The toolbar buttons a preview disables (nothing may Run/Save/Share/export/
+// The toolbar buttons a preview disables (nothing may Run/Save/Share/
 // Check/start a new dashboard while the grid shows someone else's SQL that
 // isn't in the editor). Each button's own `disabled`/`title` is restored on
 // exit. The dark toggle and the refresh select stay enabled: a re-run of the
 // preview stays in the engine (runSqlInner dispatches to it regardless).
-const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "dlhtml", "lint-run", "side-new"];
+// `dlhtml` is handled separately, below (M2f-B review of #602, N1): it has
+// its *own* independent busy state (an in-flight export, possibly still
+// running when a preview starts or still running after one ends) that a
+// snapshot/restore pair can't track correctly — a preview entered mid-
+// export would restore the button to "disabled" forever once the export
+// (which snapshot never saw finish) completes, or an export finishing mid-
+// preview would wrongly re-enable the button while the preview is still up.
+const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "lint-run", "side-new"];
 let previewToolbarPrev = null;
 function previewToolbar(on) {
   if (on) {
@@ -4156,6 +4163,21 @@ function previewToolbar(on) {
     }
     previewToolbarPrev = null;
   }
+  syncDlhtmlDisabled();
+}
+// M2f-B (#149) review N1: `dlhtml`'s disabled/title state, computed fresh
+// from the two independent reasons it can be disabled (an export in
+// flight, `dpExporting`; a preview up, `previewToolbarPrev`) — never
+// snapshotted/restored, so the two can start and end in any order without
+// leaving the button stuck.
+let dpExporting = false;
+function syncDlhtmlDisabled() {
+  const btn = document.getElementById("dlhtml");
+  if (!btn) return;
+  if (btn._dpOrigTitle === undefined) btn._dpOrigTitle = btn.title;
+  const previewing = !!previewToolbarPrev;
+  btn.disabled = dpExporting || previewing;
+  btn.title = previewing ? "Apply or discard the preview first" : btn._dpOrigTitle;
 }
 // The grid while a preview was applied without running ("Apply, don't run").
 function notRunCard() {
@@ -16589,16 +16611,18 @@ async function inlineExportedImage(img) {
 async function downloadHtml() {
   const btn = document.getElementById("dlhtml");
   const was = btn && btn.textContent;
+  dpExporting = true;
+  syncDlhtmlDisabled();
   if (btn) {
-    btn.disabled = true;
     btn.setAttribute("aria-busy", "true");
     btn.textContent = "Preparing…";
   }
   try {
     await downloadHtmlInner();
   } finally {
+    dpExporting = false;
+    syncDlhtmlDisabled();
     if (btn) {
-      btn.disabled = false;
       btn.removeAttribute("aria-busy");
       btn.textContent = was;
     }
@@ -16844,10 +16868,13 @@ function snapshotMotion() {
   document.querySelectorAll('.panel svg[data-anim]').forEach(function(s){K.enter(s,s.getAttribute('data-anim'));});
   document.querySelectorAll('.panel-svg > svg[data-story]').forEach(function(s){K.story(s.closest('.panel'),s);});
   // M2f-B (#149): a time map within the embed budget gets every frame as a
-  // sibling <template data-frame="k"> (downloadHtml()); the swap-only
-  // player reuses anim.js's own frames()/tween() exactly like the live
-  // dashboard does (web/app.js's mountFrames) — draw(k) just swaps in the
-  // pre-rendered markup instead of calling render_panel (no wasm offline).
+  // sibling frame-indexed TEMPLATE element (downloadHtml(); review of #602
+  // N5: not spelled out literally here — this comment ships inside the
+  // export's own <script>, where a naive grep for that tag would wrongly
+  // count it as one). The swap-only player reuses anim.js's own frames()/
+  // tween() exactly like the live dashboard does (web/app.js's
+  // mountFrames) — draw(k) just swaps in the pre-rendered markup instead
+  // of calling render_panel (no wasm offline).
   // A map over budget has no templates here, so this is a no-op for it;
   // its static note (downloadHtml()) is already in the page.
   document.querySelectorAll('.panel').forEach(function(panel){
@@ -16859,8 +16886,23 @@ function snapshotMotion() {
     function draw(k){
       var t=tpls[k];
       if(!t)return null;
+      // review of #602 S2: a ::FIT export's scaleSvg() (SNAPSHOT_JS) sized
+      // the *old* svg (height attr, style.height, data-dp-scaled, the
+      // _h0 it stashed for unscale() to restore later) — none of that
+      // survives swapping in the template's own raw markup, so carry it
+      // across when the old svg was actually scaled, or every step snaps
+      // back to the authored (unfitted) height until the next resize.
+      var old=holder.querySelector(':scope > svg');
+      var scaled=old&&old.hasAttribute('data-dp-scaled');
+      var h0=old&&old._h0, h=old&&old.getAttribute('height');
       holder.innerHTML=t.innerHTML;
       var fresh=holder.querySelector(':scope > svg');
+      if(fresh&&scaled){
+        fresh._h0=h0;
+        fresh.setAttribute('height',h);
+        fresh.style.height=h+'px';
+        fresh.setAttribute('data-dp-scaled','');
+      }
       if(fresh&&window.__dpWireHits)window.__dpWireHits(fresh);
       return fresh;
     }
@@ -16899,7 +16941,10 @@ const SNAPSHOT_JS = `(function(){
     // verbatim, matching attachHover's own el.setAttribute("data-tip", txt)
     // call), scoped to maps (the only kind that swaps in fresh markup
     // offline). Not a full attachHover(): no series emphasis/crosshair/a11y.
-    scope.querySelectorAll('svg[data-map] path[data-row] title').forEach(function(t){
+    // review of #602 S1: every data-row mark, not just path (areas) — a
+    // point/symbol map's own marks are circle, and attachHover's own
+    // selector (rect/circle/polygon/polyline/path[in data-map]) agrees.
+    scope.querySelectorAll('svg[data-map] [data-row] > title').forEach(function(t){
       var el=t.parentElement; if(!el)return;
       el.setAttribute('data-tip',t.textContent);
       el.removeChild(t);
