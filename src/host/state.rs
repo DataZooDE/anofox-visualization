@@ -1014,6 +1014,32 @@ impl Store {
         st.records[n.saturating_sub(limit)..].to_vec()
     }
 
+    /// [`Self::user_count`] and [`Self::rows_for_user`], read together
+    /// under one lock (#548 item 3, nit: a caller folding the first into a
+    /// cache key and the second into what it actually inserts must never
+    /// see two different, racing reads of the store — a submission
+    /// landing between two separate locks could make a key claim a
+    /// generation the inserted rows don't match).
+    pub fn snapshot_for_user(&self, user: &str) -> (u64, Vec<Record>) {
+        let st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match st.by_user.get(user) {
+            Some(idxs) => (
+                idxs.len() as u64,
+                idxs.iter().map(|&i| st.records[i].clone()).collect(),
+            ),
+            None => (0, Vec::new()),
+        }
+    }
+
+    /// [`Self::global_seq`] and [`Self::all_rows`], read together under one
+    /// lock. See [`Self::snapshot_for_user`].
+    pub fn snapshot_all(&self, limit: usize) -> (u64, Vec<Record>) {
+        let st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let gen = st.next_seq.saturating_sub(1);
+        let n = st.records.len();
+        (gen, st.records[n.saturating_sub(limit)..].to_vec())
+    }
+
     pub fn len(&self) -> usize {
         self.inner
             .lock()
@@ -1662,6 +1688,54 @@ mod tests {
         ctx.search_path_entries = 1;
         assert!(o.validate_start(&ctx).is_ok());
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn temp_resolves_before_search_path_for_unqualified_names() {
+        // #548 item 1: the pin itself, automated (`validate_start_refuses_
+        // a_multi_entry_search_path`'s own refusal only names this test;
+        // it didn't exist until now). A real DuckDB session: ATTACH two
+        // other databases, SET a multi-entry search_path naming them
+        // (never `temp`), create a TEMP table, then a same-named REAL
+        // table in the first attached database — an unqualified reference
+        // must still resolve to the TEMP one. If a future DuckDB build
+        // ever changes this, this test fails (CI), not a viewer's
+        // read-back isolation silently breaking in production.
+        //
+        // Review of #550 (#548 item 1 nit): no `duckdb` on PATH must FAIL
+        // this test, never skip-pass it — this one exists specifically to
+        // catch a security-relevant catalog-resolution change, and CI's
+        // own `test (core incl. serve)` job always installs the pinned
+        // CLI first (ci.yml), so "missing" here is itself a real problem
+        // to surface, not a reason to pretend the property was checked.
+        assert!(
+            std::process::Command::new("duckdb")
+                .arg("-version")
+                .output()
+                .is_ok(),
+            "no `duckdb` on PATH: this security pin cannot be skipped — install the \
+             pinned CLI (see ci.yml's \"Install DuckDB CLI\" step) rather than letting \
+             this test silently not check anything"
+        );
+        let mut s = crate::host::duckdb_cli::SessionRunner::spawn(None).unwrap();
+        s.run("ATTACH ':memory:' AS warehouse;").unwrap();
+        s.run("ATTACH ':memory:' AS warehouse2;").unwrap();
+        s.run("SET search_path = 'warehouse.main,warehouse2.main';")
+            .unwrap();
+        s.run("CREATE TEMP TABLE viewer_state (x INT);").unwrap();
+        s.run("INSERT INTO viewer_state VALUES (1);").unwrap();
+        s.run("CREATE TABLE warehouse.main.viewer_state (x INT);")
+            .unwrap();
+        s.run("INSERT INTO warehouse.main.viewer_state VALUES (999);")
+            .unwrap();
+        let rows = s.run("SELECT * FROM viewer_state;").unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].get("x").and_then(serde_json::Value::as_i64),
+            Some(1),
+            "an unqualified viewer_state must resolve to the TEMP table, not \
+             warehouse.main.viewer_state, however options.search_path is set: {rows:?}"
+        );
     }
 
     #[test]
