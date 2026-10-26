@@ -1701,14 +1701,22 @@ mod tests {
         // must still resolve to the TEMP one. If a future DuckDB build
         // ever changes this, this test fails (CI), not a viewer's
         // read-back isolation silently breaking in production.
-        if std::process::Command::new("duckdb")
-            .arg("-version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipped: no `duckdb` on PATH");
-            return;
-        }
+        //
+        // Review of #550 (#548 item 1 nit): no `duckdb` on PATH must FAIL
+        // this test, never skip-pass it — this one exists specifically to
+        // catch a security-relevant catalog-resolution change, and CI's
+        // own `test (core incl. serve)` job always installs the pinned
+        // CLI first (ci.yml), so "missing" here is itself a real problem
+        // to surface, not a reason to pretend the property was checked.
+        assert!(
+            std::process::Command::new("duckdb")
+                .arg("-version")
+                .output()
+                .is_ok(),
+            "no `duckdb` on PATH: this security pin cannot be skipped — install the \
+             pinned CLI (see ci.yml's \"Install DuckDB CLI\" step) rather than letting \
+             this test silently not check anything"
+        );
         let mut s = crate::host::duckdb_cli::SessionRunner::spawn(None).unwrap();
         s.run("ATTACH ':memory:' AS warehouse;").unwrap();
         s.run("ATTACH ':memory:' AS warehouse2;").unwrap();

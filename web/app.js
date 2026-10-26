@@ -15214,18 +15214,6 @@ function excelDate(v) {
   return isFinite(ms) ? (ms - Date.UTC(1899, 11, 30)) / 864e5 : null;
 }
 
-// #517 S4, plan §6: a scalar JSON value (or a flat array of them) as the
-// SQL literal `runSql` can splice into a preview-only INSERT — this tab's
-// own local DuckDB, never a server, so this is a convenience, not a
-// security boundary. Mirrors `sv::sql_literal`'s scalar forms.
-function sqlLit(v) {
-  if (v === null || v === undefined) return "NULL";
-  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
-  if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  if (Array.isArray(v)) return "[" + v.map(sqlLit).join(", ") + "]";
-  return "'" + String(v).replace(/'/g, "''") + "'";
-}
-
 // 16 random bytes, hex — a client submit nonce, the same shape as
 // `servedViewer` (#210).
 function newSubmitId() {
@@ -15242,7 +15230,37 @@ function submitDisabledReason() {
     return enabled ? null : "Submitting is not enabled on this server";
   }
   if (published) return "Submitting needs the dashboard server";
-  return null; // preview/authoring: never disabled — see mkSubmit's banner
+  // Review of #550 SF2: preview/authoring must never send CREATE/INSERT to
+  // a server. The live-authoring backend's `/query` runs against the
+  // author's own REAL session (unlike the plain wasm builder, whose
+  // queries never leave this tab) — simpler and correct to disable there,
+  // rather than keep viewer_state rows page-side only and reconcile them
+  // with every other panel's own query.
+  if (backend === "live") return "Submitting isn't available in live-authoring preview";
+  return null; // the plain wasm builder: never disabled — see mkSubmit's banner
+}
+
+// Render the button disabled with a visible, `aria-describedby` reason —
+// shared by every "submitting can't work here" case (plan §6: never a
+// silent no-op).
+function mkSubmitDisabled(fig, btn, errEl, i, reason) {
+  btn.disabled = true;
+  btn.setAttribute("aria-disabled", "true");
+  const rid = `submit-reason-${i}`;
+  errEl.id = rid;
+  errEl.textContent = reason;
+  errEl.classList.add("submit-reason");
+  btn.setAttribute("aria-describedby", rid);
+  return fig;
+}
+
+// Case-insensitive `dpVars` lookup (DuckDB variable names are
+// case-insensitive; SUBMIT_VARS's own spelling need not match whatever
+// case the input's SET VARIABLE used).
+function dpVarCI(name) {
+  const lower = name.toLowerCase();
+  const key = Object.keys(dpVars).find((k) => k.toLowerCase() === lower);
+  return key === undefined ? undefined : dpVars[key];
 }
 
 // A ::SUBMIT panel (#517 S4, plan §6): a native button, a status line
@@ -15283,34 +15301,32 @@ function mkSubmit(s, i, rowsJson) {
   fig.append(btn, statusEl, errEl);
 
   const reason = submitDisabledReason();
-  if (reason) {
-    btn.disabled = true;
-    btn.setAttribute("aria-disabled", "true");
-    const rid = `submit-reason-${i}`;
-    errEl.id = rid;
-    errEl.textContent = reason;
-    errEl.classList.add("submit-reason");
-    btn.setAttribute("aria-describedby", rid);
-    return fig;
-  }
+  if (reason) return mkSubmitDisabled(fig, btn, errEl, i, reason);
 
   // A status/error left over from this same panel's *own* last submission
   // (this render is the "panels re-run" step right after one) — the row
-  // data above carries none of it. `focusBtn`: this render is the direct
-  // result of the click that just set it; focus stays on the button.
+  // data above carries none of it. Set *after* this figure is connected
+  // (next frame), not now — a live region's initial content (set before
+  // it's ever in the document) is not reliably announced; this is the one
+  // case where `mkSubmit`'s own caller connects `fig` only after this
+  // function returns. `focusBtn`: this render is the direct result of the
+  // click that just set it; focus stays on the button, same timing.
   const saved = submitStatus[i];
   if (saved) {
-    (saved.kind === "err" ? errEl : statusEl).textContent = saved.text;
-    if (saved.focusBtn) {
-      delete saved.focusBtn;
-      requestAnimationFrame(() => btn.isConnected && btn.focus());
-    }
+    const el = saved.kind === "err" ? errEl : statusEl;
+    const text = saved.text;
+    const focusAfter = saved.focusBtn;
+    delete saved.focusBtn;
+    requestAnimationFrame(() => {
+      el.textContent = text;
+      if (focusAfter && btn.isConnected) btn.focus();
+    });
   }
 
   if (!servedMode && !published) {
-    // Preview/authoring (wasm builder, or the live authoring backend —
-    // either way, `runSql` below already dispatches correctly: a `preview`
-    // token's own `/query`, or this tab's local DuckDB).
+    // The plain wasm builder only (the live-authoring backend is refused
+    // above, by submitDisabledReason — #550 SF2): a visible note, since
+    // nothing here reaches a server.
     const note = document.createElement("p");
     note.className = "submit-preview-note";
     note.textContent = "Preview: submissions stay in this tab and are not saved.";
@@ -15325,7 +15341,14 @@ function mkSubmit(s, i, rowsJson) {
 // The real server path: POST /api/submit (plan §4.1/§6).
 async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
   const prev = submitStatus[i];
-  const id = (prev && prev.retryId) || newSubmitId();
+  // Review of #550 SF1: a retry id is reused only when the vars being sent
+  // now are *exactly* what the failed attempt sent — a changed answer
+  // always gets a fresh nonce. Reusing a stale id for a changed answer
+  // risked a 503/507/network failure that actually reached the server
+  // (only its response was lost) silently replaying that *earlier*
+  // answer's cached 201 on retry, discarding the viewer's edit.
+  const varsNow = JSON.stringify({ ...servedVars });
+  const id = prev && prev.retryId && prev.retryVars === varsNow ? prev.retryId : newSubmitId();
   btn.disabled = true;
   btn.setAttribute("aria-busy", "true");
   btn.setAttribute("aria-disabled", "true");
@@ -15344,9 +15367,10 @@ async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
     r = await fetch("/api/submit", { method: "POST", headers, body: JSON.stringify(body) });
   } catch {
     // Network failure: the same "couldn't save, answers still here, retry
-    // reuses the id" treatment as a 503/507 below.
+    // reuses the id (only while the answer stays the same)" treatment as a
+    // 503/507 below.
     reenable();
-    submitStatus[i] = { text: "Couldn't save — your answers are still here.", kind: "err", retryId: id };
+    submitStatus[i] = { text: "Couldn't save — your answers are still here.", kind: "err", retryId: id, retryVars: varsNow };
     errEl.textContent = submitStatus[i].text;
     return;
   }
@@ -15363,7 +15387,9 @@ async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
   }
   const msg = await r.text().catch(() => "");
   if (r.status === 429) {
-    const wait = Math.max(1, Number(r.headers.get("Retry-After")) || 1);
+    // Capped (review of #550 nit): a server-sent Retry-After has no upper
+    // bound otherwise — an hour is already generous for a UI timer.
+    const wait = Math.min(3600, Math.max(1, Number(r.headers.get("Retry-After")) || 1));
     submitStatus[i] = { text: `Too many submissions — try again in ${wait}s`, kind: "err" };
     errEl.textContent = submitStatus[i].text;
     btn.setAttribute("aria-disabled", "true");
@@ -15372,7 +15398,7 @@ async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
     return;
   }
   if (r.status === 503 || r.status === 507) {
-    submitStatus[i] = { text: "Couldn't save — your answers are still here.", kind: "err", retryId: id };
+    submitStatus[i] = { text: "Couldn't save — your answers are still here.", kind: "err", retryId: id, retryVars: varsNow };
     errEl.textContent = submitStatus[i].text;
     reenable();
     return;
@@ -15386,19 +15412,29 @@ async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
   reenable();
 }
 
-// Preview/authoring path (plan §6): appends to an in-page `viewer_state`
-// temp instead of a server — created empty on first need, this tab only,
-// nothing persists past a reload. Validation here is deliberately only
-// what's cheap client-side (a name must have a current value); the real
-// per-kind checks (options membership, TEXT length, …) are the server's.
+// Preview path (plan §6, the plain wasm builder only — #550 SF2: the
+// live-authoring backend is refused before this is ever wired up, by
+// submitDisabledReason): appends to an in-page `viewer_state` temp
+// instead of a server, via `pageConn()` directly (never `runSql`'s normal
+// dispatch — this stays structurally local whatever `backend` is, not
+// just because its caller already checked). Created empty on first need,
+// this tab only, nothing persists past a reload. Validation here is
+// deliberately only what's cheap client-side (a name must have a current
+// value); the real per-kind checks (options membership, TEXT length, …)
+// are the server's.
 async function previewEnsureViewerState() {
   if (previewViewerStateReady) return;
-  for (const stmt of [
-    'CREATE TEMP TABLE IF NOT EXISTS viewer_state (seq BIGINT, ts TIMESTAMPTZ, "user" VARCHAR, dashboard VARCHAR, submit VARCHAR, name VARCHAR, value VARCHAR, value_list VARCHAR[]);',
-    'CREATE OR REPLACE TEMP VIEW viewer_state_latest AS SELECT * FROM viewer_state QUALIFY dense_rank() OVER (PARTITION BY "user", dashboard, submit ORDER BY seq DESC) = 1;',
-  ]) {
-    await runSql(stmt, undefined, undefined, true);
-  }
+  // `pconn`, not `conn` (a page-wide lint, G8/G9 in assist_ui_test.mjs,
+  // refuses a bare `conn.*` anywhere outside boot() — it's a text pattern
+  // over the raw, unguarded global, so the local name matters, not just
+  // what it holds; this already *is* the guarded pageConn() result).
+  const pconn = pageConn();
+  await pconn.query(
+    'CREATE TEMP TABLE IF NOT EXISTS viewer_state (seq BIGINT, ts TIMESTAMPTZ, "user" VARCHAR, dashboard VARCHAR, submit VARCHAR, name VARCHAR, value VARCHAR, value_list VARCHAR[]);'
+  );
+  await pconn.query(
+    'CREATE OR REPLACE TEMP VIEW viewer_state_latest AS SELECT * FROM viewer_state QUALIFY dense_rank() OVER (PARTITION BY "user", dashboard, submit ORDER BY seq DESC) = 1;'
+  );
   previewViewerStateReady = true;
 }
 
@@ -15408,7 +15444,7 @@ async function doSubmitPreview(s, i, names, doneText, btn, statusEl, errEl) {
   errEl.textContent = "";
   statusEl.textContent = "";
   try {
-    const unanswered = names.filter((n) => dpVars[n] === undefined);
+    const unanswered = names.filter((n) => dpVarCI(n) === undefined);
     if (unanswered.length) {
       const text = `answer '${unanswered[0]}' first`;
       submitStatus[i] = { text, kind: "err" };
@@ -15416,24 +15452,29 @@ async function doSubmitPreview(s, i, names, doneText, btn, statusEl, errEl) {
       return;
     }
     await previewEnsureViewerState();
-    const uRows = JSON.parse(await runSql("SELECT coalesce(getvariable('__claim_user'), 'preview') AS u;", undefined, undefined, true));
-    const user = String((uRows[0] && uRows[0].u) || "preview").replace(/'/g, "''");
-    const seqRows = JSON.parse(await runSql("SELECT coalesce(max(seq), 0) + 1 AS n FROM viewer_state;", undefined, undefined, true));
-    const seq = (seqRows[0] && seqRows[0].n) || 1;
-    const dashId = String((window.__served && window.__served.id) || "preview").replace(/'/g, "''");
+    const pconn = pageConn(); // see previewEnsureViewerState's naming note
+    const uRows = JSON.parse(rowsJson(await pconn.query("SELECT coalesce(getvariable('__claim_user'), 'preview') AS u;")));
+    const user = String((uRows[0] && uRows[0].u) || "preview");
+    const seqRows = JSON.parse(rowsJson(await pconn.query("SELECT coalesce(max(seq), 0) + 1 AS n FROM viewer_state;")));
+    const seq = Number((seqRows[0] && seqRows[0].n) || 1);
+    const dashId = String((window.__served && window.__served.id) || "preview");
     const subR = s.roles.find((r) => r[1] === "SUBMIT");
-    const subName = ((subR && subR[2]) || "submit").replace(/'/g, "''");
-    for (const n of names) {
-      const v = dpVars[n];
-      const isList = Array.isArray(v);
-      const value = isList ? sqlLit(JSON.stringify(v)) : sqlLit(v);
-      const valueList = isList ? sqlLit(v) : "NULL";
-      await runSql(
-        `INSERT INTO viewer_state VALUES (${seq}, now(), '${user}', '${dashId}', '${subName}', '${n.replace(/'/g, "''")}', ${value}, ${valueList});`,
-        undefined,
-        undefined,
-        true
-      );
+    const subName = (subR && subR[2]) || "submit";
+    // Bound parameters, never spliced (review of #550 nit) — the list
+    // column is a bound JSON-text param cast to VARCHAR[], since
+    // DuckDB-Wasm's own bind only takes scalars; a JSON `null` item casts
+    // to a real SQL NULL inside the array, matching the server's own rule.
+    const stmt = await pconn.prepare("INSERT INTO viewer_state VALUES (?, now(), ?, ?, ?, ?, ?, (?::JSON)::VARCHAR[]);");
+    try {
+      for (const n of names) {
+        const v = dpVarCI(n);
+        const isList = Array.isArray(v);
+        const value = v === null || v === undefined ? null : isList ? JSON.stringify(v) : String(v);
+        const valueList = isList ? JSON.stringify(v) : null;
+        await stmt.query(seq, user, dashId, subName, n, value, valueList);
+      }
+    } finally {
+      await stmt.close();
     }
     const hhmm = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     submitStatus[i] = { text: "Submitted at " + hhmm + "." + (doneText ? " " + doneText : ""), kind: "ok", focusBtn: true };

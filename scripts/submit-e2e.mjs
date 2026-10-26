@@ -7,8 +7,14 @@
 // options.state renders the button disabled with a visible, read-out
 // reason; a crafted 400/429 response (page.route) shows the plan's own
 // error text and re-enables (429: after Retry-After). Axe on both themes;
-// no horizontal overflow at 390px. See duckext/scripts/test-state.sh for
-// the server-side isolation/trainer/cache coverage this doesn't repeat.
+// no horizontal overflow at 390px. Review of #550: a network failure
+// *after* the POST actually landed (route.fetch(), then abort) doesn't
+// replay a stale answer once the viewer changes it before retrying (SF1);
+// the plain wasm builder's preview submit works locally (bound params);
+// a route()-mocked live-authoring backend never gets a viewer_state
+// CREATE/INSERT, and the button shows disabled with that reason (SF2).
+// See duckext/scripts/test-state.sh for the server-side isolation/
+// trainer/cache coverage this doesn't repeat.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/submit-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8931] \
@@ -196,6 +202,37 @@ try {
     await ctx.close();
   }
 
+  // (e2) review of #550 SF1: a network failure *after* the POST actually
+  // landed (route.fetch() really sends it, then the client is told the
+  // request failed) must not silently replay a stale answer on retry once
+  // the viewer has changed it — the retry id is only reused while the
+  // vars are unchanged. route.fetch() really submits q1=A (recorded
+  // server-side); the client sees only a network error; changing the
+  // answer to B and retrying must append a *second*, distinct row (B), not
+  // a replay of the first (A)'s cached reply.
+  {
+    const { page, errs, ctx } = await openAs("ivy", "light");
+    let first = true;
+    await page.route("**/api/submit", async (route) => {
+      if (first) {
+        first = false;
+        await route.fetch(); // really reaches the server; the row for A is recorded
+        await route.abort("failed"); // but the client never sees that response
+      } else {
+        await route.continue();
+      }
+    });
+    await page.locator(".submit-btn").click();
+    await page.waitForFunction(() => document.querySelector(".submit-error")?.textContent?.includes("Couldn't save"), null, { timeout: 15000 });
+    await page.locator('.dp-seg button:text-is("B")').click(); // change the answer before retrying
+    await page.locator(".submit-btn").click();
+    await page.waitForFunction(() => document.querySelector(".submit-status")?.textContent?.includes("Submitted at"), null, { timeout: 15000 });
+    await page.waitForFunction(() => document.querySelector(".metric-value")?.textContent === "2", null, { timeout: 15000 });
+    check((await metricN(page)) === "2", `(e2) both the landed-but-lost A and the retried B are recorded, got ${await metricN(page)}`);
+    check(!errs.length, `(e2) no page errors: ${errs.join(" | ")}`);
+    await ctx.close();
+  }
+
   // (f) a dashboard without options.state: the button renders disabled,
   // with a visible, read-out (aria-describedby) reason — never silent.
   {
@@ -216,6 +253,97 @@ try {
     if (shots) await page.screenshot({ path: `${shots}/submit-390.png` });
     check(!errs.length, `(g) no page errors: ${errs.join(" | ")}`);
     await ctx.close();
+  }
+
+  // (i)/(j): preview/authoring mode — a plain static file server for
+  // web/ (no locked server at all), the same way the plain wasm builder
+  // is actually reached. Independent of the `srv` locked server above.
+  {
+    const staticPort = port + 1;
+    const nocache = spawn("python3", ["serve_nocache.py", String(staticPort)], { cwd: path.dirname(path.dirname(new URL(import.meta.url).pathname)) });
+    try {
+      for (let i = 0; i < 100; i++) {
+        try {
+          if ((await fetch(`http://127.0.0.1:${staticPort}/`)).ok) break;
+        } catch (_) {}
+        await sleep(100);
+      }
+      const previewSql =
+        "SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);\n" +
+        "SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS, 'Saved!' AS d::SUBMIT_DONE;\n";
+      const b64 = Buffer.from(previewSql, "utf8").toString("base64");
+      const settled = (page) =>
+        page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || ""), null, { timeout: 30000 });
+
+      // (i) the plain wasm builder: a functional preview submit — the
+      // banner shows, clicking inserts locally (bound params; #550 nit)
+      // and shows "Submitted at …". Nothing here is the locked server at
+      // all (a different origin/port), so this is never reachable from
+      // a real network response — a genuine local-only path.
+      {
+        const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+        const page = await ctx.newPage();
+        const errs = [];
+        page.on("pageerror", (e) => errs.push(String(e)));
+        await page.goto(`http://127.0.0.1:${staticPort}/#sql=${b64}`);
+        await settled(page);
+        check((await page.locator(".submit-preview-note").count()) === 1, "(i) the preview banner shows on the plain wasm builder");
+        await page.locator(".submit-btn").click();
+        await page.waitForFunction(
+          () => document.querySelector(".submit-status")?.textContent?.includes("Submitted at") || document.querySelector(".submit-error")?.textContent,
+          null,
+          { timeout: 15000 }
+        );
+        const status = await page.locator(".submit-status").innerText();
+        check(status.includes("Submitted at") && status.includes("Saved!"), `(i) preview submit succeeds locally, got status="${status}" error="${await page.locator(".submit-error").innerText()}"`);
+        check(!errs.length, `(i) no page errors: ${errs.join(" | ")}`);
+        await ctx.close();
+      }
+
+      // (j) review of #550 SF2: the live-authoring backend must never see
+      // a viewer_state CREATE/INSERT. No real live-authoring server is
+      // even started — route() makes app.js's own startup /query probe
+      // succeed, so it sets backend="live" purely client-side; every
+      // request this page ever sends to /query is recorded and checked
+      // for "viewer_state" at the end (the strongest form of "never
+      // sent" — not just "the button looks disabled").
+      {
+        const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+        const page = await ctx.newPage();
+        const errs = [];
+        const queryBodies = [];
+        page.on("pageerror", (e) => errs.push(String(e)));
+        await page.route("**/query", async (route) => {
+          queryBodies.push(route.request().postData() || "");
+          // One generic row (enough columns for any statement, including
+          // the ::SUBMIT one — mkSubmit needs exactly 1 row to render at
+          // all, not an empty panel) — the point of this test is never
+          // what renders, only that viewer_state SQL never reaches here.
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: '[{"c0":"A","c1":"ok","c2":"ok","c3":"ok","c4":"ok"}]',
+          });
+        });
+        await page.goto(`http://127.0.0.1:${staticPort}/#sql=${b64}`);
+        await settled(page);
+        check((await page.locator(".submit-btn").isDisabled()) === true, '(j) the button is disabled once backend="live" (no real live server needed to prove this: route() alone flips it)');
+        const reasonId = await page.locator(".submit-btn").getAttribute("aria-describedby");
+        check(!!reasonId && (await page.locator("#" + reasonId).innerText()).includes("live-authoring"), "(j) the reason names live-authoring preview");
+        // Clicking (if it somehow weren't disabled) must still never reach
+        // /query with viewer_state SQL — belt and braces on top of the
+        // disabled check above.
+        await page.locator(".submit-btn").click({ force: true }).catch(() => {});
+        check(
+          !queryBodies.some((b) => /viewer_state/i.test(b)),
+          `(j) no /query request ever mentions viewer_state (${queryBodies.length} request(s) sent): ${JSON.stringify(queryBodies)}`
+        );
+        check(!errs.length, `(j) no page errors: ${errs.join(" | ")}`);
+        await ctx.close();
+      }
+    } finally {
+      nocache.kill();
+    }
   }
 
   // (h) axe: no serious/critical violation on the submit panel, light + dark.
