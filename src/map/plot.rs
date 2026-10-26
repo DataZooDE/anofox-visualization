@@ -39,32 +39,21 @@ type Df = Vec<(String, Vec<Value>)>;
 /// [`build`]'s result: the plot, its extra root attributes (`data-map`,
 /// …) and any extra warnings (a flow's over-cap/hexbin's over-budget
 /// note — `MARK_WARN`'s own check in `mod.rs` only covers `m.rows`).
-type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
+/// The built `GGPlot`, its extra root attributes (`data-map`, …) and any
+/// render warnings — [`build`]'s result, for [`super::build`] to hand to
+/// `render_inner` (`src/lib.rs`) as a `Panel::Plot`.
+pub(super) type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 
-/// Whether `m` (already built from `cols`) is simple enough for the new
-/// `geom_sf` path. `::CLASSES` (slice 2) is allowed — [`build`] routes a
-/// classed measure through `ggplot_rs::scale::binned::ScaleFillBinned`
-/// instead of [`MapFill`]. Graduated `::SIZE` symbols (slice 3) are allowed
-/// too — a symbol map's anchor rows route through `GeomSf`'s own `size`
-/// aesthetic (sipemu/ggplot-rs#194) instead of our hand-rolled circle
-/// drawing. Flows/hexbin (slice 4) are allowed as well — [`build`] folds
-/// them in as extra layers on the same plot, through
-/// [`overlay::flow_layers`]/[`overlay::hexbin_layer`], instead of a
-/// separately-rendered-and-spliced fragment. A footer (slice 5) is allowed
-/// too, now at any line count: a scale bar (`annotation_scale`) plus any
-/// number of attribution lines (`annotation_attribution`/`.line(..)`,
-/// ggplot-rs 0.31.0, sipemu/ggplot-rs#250) — [`foot_of`]'s own line list,
-/// reused rather than duplicated, since "does this map need a footer, and
-/// how many lines" already depends on pack layers *and* the
-/// projection/span. A `de-*`/BKG pack's 2-line "© BKG … Datenquellen:" +
-/// sources note stacks via `.line(..)` same as any other footer now.
-pub(super) fn eligible(_o: &RenderOptions, _m: &Model, _w: f64) -> bool {
-    true
-}
-
-/// Build the `GGPlot` and its extra root attributes (`data-map`, …) for an
-/// [`eligible`] map. `None` only on the same degenerate-input cases
-/// [`super::render_with_model`] itself bails out on (an empty fitted box).
+/// Build the map's `GGPlot` and its extra root attributes (`data-map`, …).
+/// Every map kind routes through here (#420) — `::CLASSES`, graduated
+/// `::SIZE` symbols (`GeomSf`'s own `size` aesthetic, sipemu/ggplot-rs#194),
+/// flows/hexbin as extra layers ([`overlay::flow_layers`]/
+/// [`overlay::hexbin_layer`]) and a footer of any line count (a scale bar
+/// via `annotation_scale` plus any number of attribution lines via
+/// `annotation_attribution`/`.line(..)`, ggplot-rs 0.31.0,
+/// sipemu/ggplot-rs#250 — [`foot_of`]'s own line list, reused rather than
+/// duplicated, since "does this map need a footer, and how many lines"
+/// already depends on pack layers *and* the projection/span).
 pub(super) fn build(
     o: &RenderOptions,
     cols: &[Column],
@@ -551,15 +540,21 @@ pub(super) fn build(
     // all-`Na` `features_df` anyway would never draw a mark, only report
     // `StatSf`'s own "removed N rows containing missing values" warning
     // for every single row. Found via a native/browser lint parity
-    // failure (`tests/web/lint_test.mjs`) on two different `de-states`-
-    // backed statements (a hexbin one, then a graduated-symbols one with
-    // every row anchored — the same bug, same fix) that resolved their
-    // pack natively (2 BKG attribution lines, `eligible` keeps it on the
-    // old writer) but not in the browser's lint pass (no pack registered
-    // there yet, 0 lines, `eligible` routes it here instead) — exposing
-    // this pre-existing slice-3/4 gap for the first time; not specific to
-    // that resolution mismatch, so fixed for both suppression kinds
-    // uniformly, not just hexbin. `features_df` still backs the plot's
+    // failure (`tests/web/lint_test.mjs`, 30e9143) on two different
+    // `de-states`-backed statements (a hexbin one, then a graduated-
+    // symbols one with every row anchored — the same bug, same fix):
+    // back when `eligible()` still branched on the footer's own line
+    // count, a map resolved its BKG pack (and so that branch) one way
+    // natively (2 attribution lines) and another in the browser's lint
+    // pass, where the pack isn't registered yet (0 lines) — exposing
+    // this pre-existing slice-3/4 gap for the first time. `eligible()`
+    // is gone now (#420 slice 6: this is the only map render path, so
+    // native and browser lint can no longer disagree on *which* path
+    // runs) but the underlying gap this skip closes is independent of
+    // that — fixed for both suppression kinds uniformly, not just
+    // hexbin, and guarded directly by
+    // `fully_suppressed_features_draw_no_spurious_removed_rows_warning`
+    // (`tests/maps.rs`). `features_df` still backs the plot's
     // own base data when there's no real basemap either (a non-empty
     // `GGData`, not the `0`-row kind `annotation_scale`/`annotation_
     // attribution` need to avoid, see their own comment below) — just
