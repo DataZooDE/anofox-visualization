@@ -75,24 +75,23 @@ crate-type = ["cdylib", "rlib"]
 # clipped (sipemu/ggplot-rs#211) — used by `render_heatmap`/
 # `render_calendar`/`cartesian`'s hexbin branch to put a narrow panel's
 # gradient legend at `Bottom` instead of ggplot-rs's own `Right` default
-# (`narrow_continuous_legend`, #510). 0.31.2: `GeomAttribution::fit`/
-# `.fit_overflow(..)` — shrink then truncate/wrap an attribution line that
-# would overflow the panel (sipemu/ggplot-rs#258), replacing `map/plot.rs`'s
-# own fixed 90px legend-width reservation; `GGPlot::bivariate_legend_counts`
+# (`narrow_continuous_legend`, #510). 0.31.2: `GGPlot::bivariate_legend_counts`
 # — a `::BIVARIATE` map's legend swatches with each cell's row count
-# (sipemu/ggplot-rs#259, #506's bivariate choropleths). 0.31.3: `.fit`'s
-# width estimate gained a safety margin (was a few percent too generous for
-# a URL/date/prose mix, clipping a right-anchored line past the panel's
-# left edge at its floor size — found rendering `map/plot.rs`'s own BKG/
-# VG2500 note at 342px, sipemu/ggplot-rs#264) and `AttributionOverflow::
-# Wrap` on a bare URL (no whitespace) now breaks after `/ . _ - ? & =`
-# instead of char-slicing, capped at 3 lines instead of laddering
-# indefinitely — `map/plot.rs` still stays on the default `Ellipsis`
-# though: `Wrap` still mis-splits that same BKG source line once it's
-# followed by more plain-text runs in the same logical row (only the
-# inter-run space gets used, so the still-too-wide URL run isn't broken up
-# internally) — reported upstream, not yet fixed. No API breaks in any of
-# 0.31.1-0.31.3 (cargo-semver-checks against the prior release each time).
+# (sipemu/ggplot-rs#259, #506's bivariate choropleths); also adds
+# `GeomAttribution::fit`/`.fit_overflow(..)`, tuned further in 0.31.3
+# (sipemu/ggplot-rs#264: a safety margin on the width estimate, and
+# separator-aware wrapping for a bare URL instead of char-slicing it) — NOT
+# adopted by `map/plot.rs` in #510: both `AttributionOverflow` kinds still
+# mis-measure/mis-split this map's own BKG source line at a narrow width
+# (confirmed with PNG crops — `Wrap` only splits at the one inter-run space
+# between its URL run and the trailing plain-text note, leaving the URL run
+# itself unbroken; `Ellipsis`'s truncation budget is still a bit too
+# generous for that character mix and the kept text overflows the panel).
+# `map/plot.rs` keeps its existing 90px legend-width reservation instead —
+# tracked as a ggplot-rs follow-up (wrap within one run + a tighter width
+# estimate for URL-heavy text), not blocking this bump. No API breaks in
+# any of 0.31.1-0.31.3 (cargo-semver-checks against the prior release each
+# time).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
 ggplot-rs = { version = "0.31.3", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }

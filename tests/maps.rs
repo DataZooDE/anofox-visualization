@@ -1392,21 +1392,7 @@ fn codes(v: &[&str]) -> Column {
 fn region_codes_draw_from_the_pack_with_its_names_and_credits() {
     let mut v = Column::new("v", Role::Value(Kind::Bar), nums(&[820.0, 700.0, 310.0]));
     v.name = "Orders".into();
-    // Wide enough that the BKG source note's own bare PDF URL (no spaces)
-    // never needs `GeomAttribution::fit` to shrink/wrap it (ggplot-rs
-    // 0.31.3's `ATTRIBUTION_FIT_SAFETY_MARGIN`, sipemu/ggplot-rs#264, made
-    // the default `svg()` width of 480px — already narrowed further by
-    // this continuous-fill map's own `Right` legend — just barely too
-    // narrow for the unshrunk URL) — this test is about the pack's names/
-    // links/credits rendering correctly, not about narrow-panel fitting
-    // (covered separately by #510's own narrow-width example renders).
-    let s = render_with(
-        &[codes(&["DE-BY", "DE-BW", "DE-BE"]), v],
-        900,
-        320,
-        &RenderOptions::default(),
-    )
-    .expect("renders");
+    let s = svg(vec![codes(&["DE-BY", "DE-BW", "DE-BE"]), v]);
     let f = features(&s);
     assert_eq!(f.len(), 3);
     // the pack's (English) name is the label, the series and the title
@@ -1426,23 +1412,17 @@ fn region_codes_draw_from_the_pack_with_its_names_and_credits() {
     assert!(s.contains("km</text>"), "scale bar");
 
     // the German locale names in German and notes the modification in German
-    // (wide for the same reason as the first render above: the bare-URL
-    // BKG source line needs room so `.fit(..)` never truncates "Geometrie
-    // verändert" away)
     let o = RenderOptions {
         locale: anofox_visualization::format::Locale::DE_DE,
         ..RenderOptions::default()
     };
-    let s = render_with(
-        &[
+    let s = draw(
+        vec![
             codes(&["DE-BY"]),
             Column::new("v", Role::Value(Kind::Bar), nums(&[1.0])),
         ],
-        900,
-        320,
         &o,
-    )
-    .expect("renders");
+    );
     assert!(s.contains("data-label=\"Bayern\"") && s.contains("Geometrie verändert"));
     // ::LABEL from the data wins
     let s = svg(vec![

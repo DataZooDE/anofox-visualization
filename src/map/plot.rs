@@ -44,17 +44,6 @@ type Df = Vec<(String, Vec<Value>)>;
 /// `render_inner` (`src/lib.rs`) as a `Panel::Plot`.
 pub(super) type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 
-/// The floor `GeomAttribution::fit` shrinks a pack attribution line down
-/// to before truncating it with "…" (#510, sipemu/ggplot-rs#258) — ~7px is
-/// about the smallest this build's font stays legible at. The BKG/VG2500
-/// attribution's licence text is still never *lost*: only the visible
-/// label is shortened, the `href` itself (`as_runs` below) always stays
-/// the real link — see the longer comment at the `.fit(..)` call for why
-/// this stays on the default `Ellipsis` rather than `AttributionOverflow::
-/// Wrap` (tried again for ggplot-rs 0.31.3, still broken for this map's
-/// own multi-run BKG source line).
-const ATTRIBUTION_FIT_MIN_PX: f64 = 7.0;
-
 /// Build the map's `GGPlot` and its extra root attributes (`data-map`, …).
 /// Every map kind routes through here (#420) — `::CLASSES`, graduated
 /// `::SIZE` symbols (`GeomSf`'s own `size` aesthetic, sipemu/ggplot-rs#194),
@@ -88,6 +77,13 @@ pub(super) fn build(
     } else {
         forced.clone()
     };
+    // `fill::scale_for` (much further down) decides between a discrete
+    // (`Category`/classed `Measure`) and continuous `Measure` fill scale —
+    // computed here too, early, only to size the footer below; the later
+    // `discrete_fill` binding is the same expression, kept local to where
+    // it drives the legend position/scale construction.
+    let continuous_fill = !matches!(m.fill, Fill::Category { .. })
+        && !matches!(&m.fill, Fill::Measure(s) if s.classes.is_some());
     // `eligible` only allows a footer this path can draw itself (a scale
     // bar and/or any number of attribution lines, via `annotation_scale`/
     // `annotation_attribution` below) — reuse the old writer's own height
@@ -99,21 +95,34 @@ pub(super) fn build(
     // A continuous fill's legend lands at ggplot-rs's own default
     // `LegendPosition::Right` (below), not the old writer's horizontal
     // top bar `lg`/`foot_of` were both sized around — it isn't forced
-    // elsewhere (`forced_position` wins when given) — consuming panel
-    // width that `foot_of`'s own room/shrink-to-fit math doesn't know
-    // about unless told. Found by rendering a continuous-fill `de-*` map
-    // at 390px width: the (now 2-line, since this slice) BKG/VG2500
-    // attribution overflowed past the panel's own left edge, underneath
-    // the legend. Previously worked around with a fixed 90px reservation
-    // (this build's own measured guess at the legend's width — bar + tick
-    // labels + margins); replaced (ggplot-rs 0.31.2, sipemu/ggplot-rs#258)
-    // by `GeomAttribution::fit` below, which shrinks/truncates each line
-    // against the *actual* panel rect at draw time — the real legend
-    // width, in any locale/font, not a guess — so `foot_of` no longer
-    // needs a narrowed `w` to pre-size around at all. (The
-    // `legend_position_inside` gap noted below, sipemu/ggplot-rs#225, is
-    // unrelated and still open.)
-    let ft = foot_of(o, m, w);
+    // elsewhere (`forced_position` wins when given) — consuming ~90px of
+    // panel width that `foot_of`'s own room/shrink-to-fit math doesn't
+    // know about unless told. Found by rendering a continuous-fill
+    // `de-*` map at 390px width: the (now 2-line, since this slice)
+    // BKG/VG2500 attribution overflowed past the panel's own left edge,
+    // underneath the legend, without this. 90px is this build's own
+    // measured reservation (bar + tick labels + margins, fairly stable
+    // across locales/fonts since it's digits-only); there's no exposed
+    // pre-render API for ggplot-rs's actual legend geometry to use
+    // instead (same gap as the `legend_position_inside` one already
+    // noted below, sipemu/ggplot-rs#225).
+    //
+    // `GeomAttribution::fit` (ggplot-rs 0.31.2/0.31.3) was tried as a
+    // replacement for this whole heuristic — shrink/truncate the
+    // attribution against the *actual* panel rect at draw time instead of
+    // guessing the legend's width up front — but both `AttributionOverflow`
+    // kinds still mis-measure this exact scenario (a continuous-fill `de-*`
+    // map's BKG source line at a narrow width: confirmed with a synthetic
+    // render + PNG crop, text overflowing the panel's left edge, same
+    // symptom this 90px reservation already guards against). Kept the
+    // heuristic for #510; `.fit` is a follow-up once ggplot-rs's own width
+    // estimate is tight enough for a URL-heavy line to drop it safely.
+    let legend_reserve = if continuous_fill && forced_position.is_none() {
+        90.0
+    } else {
+        0.0
+    };
+    let ft = foot_of(o, m, w - legend_reserve);
     let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced.clone())?;
     let [x0, x1, y0, y1] = frame.window(w, h);
 
@@ -904,54 +913,28 @@ pub(super) fn build(
             attribution = attribution.line(as_runs(line));
         }
         // `foot_of`'s own `ft.size` already shrinks the font to fit this
-        // panel's width (incl. the scale bar's own reservation), down to
-        // whatever `widest`/`room` demands — often well under
-        // `ATTRIBUTION_FIT_MIN_PX` on a narrow panel, since `foot_of` has
-        // no floor of its own. Floor it here at `ATTRIBUTION_FIT_MIN_PX`
-        // (never *below* `ft.size` — a wide panel's already-larger
-        // `ft.size`, capped at 6.5 by `foot_of`, is untouched) rather than
-        // feeding `ft.size` straight through: `GeomAttribution::fit`'s own
-        // `min_size` is clamped to *at most* the `text_size` it's shrinking
-        // from (ggplot-rs 0.31.2's `fit_row`), so handing it an
-        // already-sub-floor `text_size` would make `.fit(..)` a no-op —
-        // there'd be nothing left to shrink from. `text_size` is a plain
+        // panel's width (incl. the scale bar's own reservation) — reuse
+        // it instead of `GeomAttribution::new`'s fixed 7.5px default,
+        // same as the old writer's `foot_svg` did. `text_size` is a plain
         // `pub` field; `#[non_exhaustive]` only blocks struct-literal
         // construction, not mutating fields on an already-built value.
-        attribution.text_size = ft.size.max(ATTRIBUTION_FIT_MIN_PX);
-        // `foot_of` sizes `ft.size` against the *full* panel width `w` —
-        // it has no idea a continuous fill's legend (`LegendPosition::
-        // Right`, ggplot-rs's own default) is about to narrow the actual
-        // panel rect, nor by how much in this locale/font. `.fit(..)`
-        // (ggplot-rs 0.31.2, sipemu/ggplot-rs#258) closes that gap at
-        // draw time instead: it re-measures against the real panel rect
-        // and shrinks toward `ATTRIBUTION_FIT_MIN_PX`, replacing the
-        // fixed 90px legend-width guess this build used to subtract from
-        // `w` before calling `foot_of` (see the comment above `foot_of`'s
-        // call).
         //
-        // `AttributionOverflow::Wrap` was tried again for 0.31.3 (sipemu/
-        // ggplot-rs#264 fixed 0.31.2's char-slicing-a-bare-URL bug — see
-        // git history on this comment for that one's own repro), but
-        // exposed a second, still-open `wrap_text` bug on the *same* BKG
-        // source line: `foot_of` (`mod.rs`) builds that line as one
-        // logical row with two runs — the bare URL (linked) then
-        // `" · geometry modified (simplified)"` (plain) — concatenated
-        // before wrapping. At 342px (`delivery-coverage.sql`'s bivariate
-        // map, #510 PR) `wrap_text` only ever finds the one *inter-run*
-        // space (between the URL run and "geometry") to split on; the
-        // oversized first physical line it produces still contains the
-        // whole unbroken URL and renders past the panel's left edge,
-        // confirmed with a PNG crop — the separator-aware (`/ . _ - ? &
-        // =`) break #264 added never gets a chance to apply *inside*
-        // that first line. Reported, not fixed here (no `[patch.crates-
-        // io]`): kept the default `Ellipsis` instead, which still
-        // measures and truncates the *whole* concatenated row correctly
-        // regardless of how many runs it's built from. Only the visible
-        // label is ever shortened; the BKG/VG2500 note's `href`s
-        // (`as_runs` above) are the real, unshortened links either way,
-        // so the licence attribution itself is never actually lost, just
-        // the on-panel text.
-        attribution = attribution.fit(ATTRIBUTION_FIT_MIN_PX);
+        // `GeomAttribution::fit` (ggplot-rs 0.31.2/0.31.3, sipemu/
+        // ggplot-rs#258/#264) was tried here too — a floor size plus
+        // draw-time shrink/truncate against the real (legend-narrowed)
+        // panel rect, instead of `foot_of`'s own pre-render guess — but
+        // both `AttributionOverflow` kinds still mis-measure this map's
+        // own BKG source line (one logical row built from a bare-URL run
+        // plus a plain-text run) on `delivery-coverage.sql`'s bivariate
+        // map at 390px: `Wrap` only splits at the one inter-run space,
+        // leaving the still-oversized URL run as one physical line;
+        // `Ellipsis`'s own truncation budget is still too generous for
+        // that character mix and the kept (truncated) text itself
+        // overflows the panel's left edge. Tracked as a follow-up
+        // (ggplot-rs: wrap within a run + a tighter width estimate for
+        // URL-heavy text), not adopted here — `ft.size` alone has no
+        // overflow in any example checked for #510.
+        attribution.text_size = ft.size;
         plot = plot.annotation_attribution_with(attribution);
     }
 
