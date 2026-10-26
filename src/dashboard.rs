@@ -678,8 +678,21 @@ fn render_inner(
                         unit_w * span as f64 - gap
                     };
                     let title = roles.iter().any(|(_, r)| matches!(r, Role::Title));
-                    let lines = markdown_lines(t, mw).len() as f64;
-                    (lines * MD_LINE + if title { 26.0 } else { 0.0 } + 26.0)
+                    // #524: a block ::Image line adds its own aspect-based
+                    // height estimate (the same calc the ::IMAGE box just
+                    // below uses) instead of a flat MD_LINE — a markdown
+                    // figure can be much taller than one line of text.
+                    let iw = (mw - 28.0).max(10.0);
+                    let content_h: f64 = markdown_lines(t, mw, opts.asset_root.as_deref())
+                        .iter()
+                        .map(|line| match line {
+                            MdLine::Text(_) => MD_LINE,
+                            MdLine::Image { aspect, .. } => {
+                                iw * (aspect.1 / aspect.0.max(1.0)).clamp(0.05, 20.0) + 8.0
+                            }
+                        })
+                        .sum();
+                    (content_h + if title { 26.0 } else { 0.0 } + 26.0)
                         .min(opts.panel_height as f64)
                 }
                 // an ::IMAGE box: its own width × the image's own aspect
@@ -1040,17 +1053,40 @@ fn render_panel_svg(
             hex(t.colors.ink)
         ));
         let mut y = title_h + 22.0;
-        for line in markdown_lines(&md, w) {
+        for line in markdown_lines(&md, w, ropts.asset_root.as_deref()) {
             if y > h - 8.0 {
                 break;
             }
-            if !line.is_empty() {
-                svg.push_str(&format!(
-                    "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
-                    markdown_line_svg(&line)
-                ));
+            match line {
+                MdLine::Text(text) => {
+                    if !text.is_empty() {
+                        svg.push_str(&format!(
+                            "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                            markdown_line_svg(&text)
+                        ));
+                    }
+                    y += MD_LINE;
+                }
+                // #524: a block markdown image, embedded (or kept/alt-boxed
+                // as text — see md_image) — drawn as its own row, sized to
+                // the panel's own width and whatever vertical room is left.
+                MdLine::Image { href, alt, aspect } => {
+                    match markdown_image_height(aspect, w - 2.0 * pad, h - y - 8.0) {
+                        Some(ih) => {
+                            svg.push_str(&markdown_image_svg(
+                                &href,
+                                &alt,
+                                pad,
+                                y,
+                                w - 2.0 * pad,
+                                ih,
+                            ));
+                            y += ih + 8.0;
+                        }
+                        None => break,
+                    }
+                }
             }
-            y += MD_LINE;
         }
         svg.push_str("</g></svg>");
         return svg;
@@ -2066,6 +2102,124 @@ const MD_BREAK: &str = "\u{E003}";
 /// it, not a guessed chars-per-line count.
 const MD_SIZE: f64 = 13.0;
 
+/// One line of a static `::MARKDOWN` panel's content (#524). Plain wrapped
+/// text, same as before — or a markdown image resolved into something this
+/// headless renderer can actually draw as its own row: `![alt](src)` as the
+/// WHOLE of its own paragraph (a block figure — #514's own motivating
+/// examples, an SVG infographic, are all this shape; this renderer has no
+/// inline image layout, so an image mixed with other text in the same
+/// paragraph still falls back to `[alt]`, same as before #524) — resolved
+/// through #514/#554's own source rules ([`md_image`]), not a new one.
+#[derive(Debug, PartialEq)]
+pub(crate) enum MdLine {
+    Text(String),
+    Image {
+        href: String,
+        alt: String,
+        aspect: (f64, f64),
+    },
+}
+
+/// Trims a paragraph, markdown is one in whole `![alt](src)` and nothing
+/// else — `(alt, src)` if so. The same manual bracket-scan style
+/// [`markdown_lines`]' own inline image handling already uses (no `regex`
+/// dependency for this crate's wasm build).
+fn whole_paragraph_image(trimmed: &str) -> Option<(String, String)> {
+    let rest = trimmed.strip_prefix("![")?;
+    let b = rest.find("](")?;
+    let after = &rest[b + 2..];
+    let c = after.find(')')?;
+    if !after[c + 1..].trim().is_empty() {
+        return None; // trailing content after the `)` — not the WHOLE paragraph
+    }
+    Some((rest[..b].to_string(), after[..c].to_string()))
+}
+
+/// A markdown image's `src` resolved for static output (#524), reusing
+/// #514/#554's own source rules exactly ([`crate::image::src_ok`] /
+/// [`crate::image::resolve_relative`] / [`crate::image::intrinsic_size`] —
+/// no new path handling). `Embed` only when the bytes are available
+/// locally: a `data:` source used as-is, or a `relative` path read from
+/// `asset_root`'s `assets/` folder and inlined as a `data:` URI — either
+/// way with its real aspect ratio. An `https:` source is `Keep`: a static
+/// export never fetches a remote URL on its own account, so the raw
+/// `![alt](src)` markdown syntax is kept as plain text instead of drawing
+/// it — a reader still sees the alt text AND the url this way, unlike
+/// `[alt]`, which drops the url entirely. Anything [`crate::image::src_ok`]
+/// rejects, or a `relative` path that fails to resolve, is `Alt` — the
+/// `[alt]` placeholder, same as every markdown image before #524.
+enum MdImage {
+    Embed { href: String, aspect: (f64, f64) },
+    Keep,
+    Alt,
+}
+
+fn md_image(src: &str, asset_root: Option<&std::path::Path>) -> MdImage {
+    use crate::image::{
+        decode_data_uri, intrinsic_size, resolve_relative, src_ok, SrcKind, FALLBACK_ASPECT,
+    };
+    match src_ok(src) {
+        SrcKind::Data(_) => {
+            let aspect = decode_data_uri(src)
+                .and_then(|(mime, bytes)| intrinsic_size(&bytes, &mime))
+                .unwrap_or(FALLBACK_ASPECT);
+            MdImage::Embed {
+                href: src.to_string(),
+                aspect,
+            }
+        }
+        SrcKind::Relative => match resolve_relative(src, asset_root) {
+            Some((mime, bytes)) => {
+                let aspect = intrinsic_size(&bytes, &mime).unwrap_or(FALLBACK_ASPECT);
+                MdImage::Embed {
+                    href: crate::host::app_brand::data_uri(&mime, &bytes),
+                    aspect,
+                }
+            }
+            None => MdImage::Alt,
+        },
+        SrcKind::Https => MdImage::Keep,
+        SrcKind::Bad(_) => MdImage::Alt,
+    }
+}
+
+/// An `MdLine::Image`'s `<image>` SVG element, boxed at `(x, y, w, h)` —
+/// `preserveAspectRatio="xMidYMid meet"` letterboxes it without distortion
+/// even though `h` here is only an estimate (from the image's own aspect,
+/// capped to the panel's remaining room), the same pattern the standalone
+/// `::IMAGE` panel branch (`render_panel_svg`, below) and `image_panel_svg`
+/// (`lib.rs`) already use for a fixed box. Shared by both of those call
+/// sites so there is exactly one `<image>` markup writer for this shape.
+pub(crate) fn markdown_image_svg(href: &str, alt: &str, x: f64, y: f64, w: f64, h: f64) -> String {
+    let alt_title = if alt.is_empty() {
+        String::new()
+    } else {
+        format!("<title>{}</title>", esc(alt))
+    };
+    format!(
+        "<image href=\"{}\" x=\"{x:.1}\" y=\"{y:.1}\" width=\"{w:.1}\" height=\"{h:.1}\" preserveAspectRatio=\"xMidYMid meet\">{alt_title}</image>",
+        esc(href),
+    )
+}
+
+/// The render height (px) an `MdLine::Image` of `aspect` gets within an
+/// `avail_w`-wide, `remaining`-tall budget: its own aspect against the full
+/// available width, capped to whatever vertical room is left — `None` when
+/// there isn't enough of either to be worth drawing (mirrors the `y > h -
+/// 8.0` cutoff [`markdown_lines`]' own callers already use for a text
+/// line).
+pub(crate) fn markdown_image_height(
+    aspect: (f64, f64),
+    avail_w: f64,
+    remaining: f64,
+) -> Option<f64> {
+    if remaining < 20.0 || avail_w <= 0.0 {
+        return None;
+    }
+    let natural = avail_w * aspect.1 / aspect.0.max(1.0);
+    Some(natural.min(remaining))
+}
+
 /// Markdown as plain text lines wrapped to a `w`-wide box (13 px text):
 /// emphasis / code / heading marks dropped, `[text](url)` → text, paragraphs
 /// separated by an empty line. A formula is rendered to plain text by
@@ -2078,25 +2232,56 @@ const MD_SIZE: f64 = 13.0;
 /// not a fixed chars-per-line guess (#569: the old guess under-counted how
 /// much text actually fits at the browser's real proportional-font width —
 /// 5 ragged lines with a wide empty right margin where the browser fits 3).
-pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<String> {
+///
+/// `asset_root` is only for a markdown image that is the WHOLE of its own
+/// paragraph (#524: [`whole_paragraph_image`] / [`md_image`]) — passed
+/// through to [`crate::image::resolve_relative`] exactly as the standalone
+/// `::IMAGE` panel's own `asset_root` is.
+pub(crate) fn markdown_lines(
+    md: &str,
+    w: f64,
+    asset_root: Option<&std::path::Path>,
+) -> Vec<MdLine> {
     // 0.96: a small safety cushion against text_width's own estimate error
     // (it models Hanken Grotesk; a box without that font, e.g. this crate's
     // own rsvg-based PNG crops, substitutes a wider fallback — see
     // rules.md) — tuned by eye against this exact fallback-font rendering
     // so a wrapped line never clips the panel's right edge.
     let avail = ((w - 28.0) * 0.96).max(40.0);
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<MdLine> = Vec::new();
     for para in md.split("\n\n") {
+        let trimmed = para.trim();
+        // #524: the paragraph is nothing but one markdown image — drawn as
+        // its own row (or kept/alt-boxed as text), not word-wrapped. An
+        // image mixed with other text in the same paragraph falls through
+        // to the inline substitution below instead (no inline image layout
+        // here).
+        if let Some((alt, src)) = whole_paragraph_image(trimmed) {
+            if !out.is_empty() {
+                out.push(MdLine::Text(String::new()));
+            }
+            out.push(match md_image(&src, asset_root) {
+                MdImage::Embed { href, aspect } => MdLine::Image { href, alt, aspect },
+                MdImage::Keep => MdLine::Text(format!("![{alt}]({src})")),
+                MdImage::Alt => MdLine::Text(format!("[{alt}]")),
+            });
+            continue;
+        }
         let mut words: Vec<String> = Vec::new();
-        for seg in crate::math::spans(para.trim()) {
+        for seg in crate::math::spans(trimmed) {
             match seg {
                 crate::math::Seg::Text(t) => {
                     let mut plain = String::new();
                     let mut rest = t.as_str();
-                    // [text](url) → text; ![alt](src) → [alt] (#514: a
-                    // markdown image has no pixels here — PR A draws its alt
-                    // text in brackets so the reader knows a figure was
-                    // there; embedding it is a documented follow-up).
+                    // [text](url) → text; ![alt](src) → [alt], except an
+                    // `https:` source (#524: kept as the raw markdown image
+                    // syntax instead — a static export never fetches a
+                    // remote url on its own account, but a reader can still
+                    // see and open it this way, unlike `[alt]` dropping the
+                    // url entirely). A block image (its own paragraph) is
+                    // handled above instead — this loop only ever sees one
+                    // mixed inline with other text, where it can't be drawn
+                    // as a real image regardless of its source kind.
                     while let Some(a) = rest.find('[') {
                         let Some(b) = rest[a..].find("](").map(|b| a + b) else {
                             break;
@@ -2107,7 +2292,16 @@ pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<String> {
                         let is_image = a > 0 && rest.as_bytes()[a - 1] == b'!';
                         let pre_end = if is_image { a - 1 } else { a };
                         plain.push_str(&rest[..pre_end]);
-                        if is_image {
+                        let src = &rest[b + 2..c];
+                        if is_image
+                            && matches!(crate::image::src_ok(src), crate::image::SrcKind::Https)
+                        {
+                            plain.push_str("![");
+                            plain.push_str(&rest[a + 1..b]);
+                            plain.push_str("](");
+                            plain.push_str(src);
+                            plain.push(')');
+                        } else if is_image {
                             plain.push('[');
                             plain.push_str(&rest[a + 1..b]);
                             plain.push(']');
@@ -2144,13 +2338,13 @@ pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<String> {
             continue;
         }
         if !out.is_empty() {
-            out.push(String::new());
+            out.push(MdLine::Text(String::new()));
         }
         let mut line = String::new();
         for wd in words {
             if wd == MD_BREAK {
                 if !line.is_empty() {
-                    out.push(std::mem::take(&mut line));
+                    out.push(MdLine::Text(std::mem::take(&mut line)));
                 }
                 continue;
             }
@@ -2161,14 +2355,14 @@ pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<String> {
             };
             if !line.is_empty() && ggplot_rs::render::text::text_width(&candidate, MD_SIZE) > avail
             {
-                out.push(std::mem::take(&mut line));
+                out.push(MdLine::Text(std::mem::take(&mut line)));
                 line = wd;
             } else {
                 line = candidate;
             }
         }
         if !line.is_empty() {
-            out.push(line);
+            out.push(MdLine::Text(line));
         }
     }
     out
@@ -2183,24 +2377,38 @@ pub(crate) fn markdown_line_svg(line: &str) -> String {
 
 #[cfg(test)]
 mod md_tests {
+    use super::MdLine;
+
+    /// A test-only unwrap: every line in these (non-image) fixtures is
+    /// `MdLine::Text` — panics (with a clear message) if #524's image
+    /// handling ever misclassifies one of them.
+    fn text_of(l: &MdLine) -> &str {
+        match l {
+            MdLine::Text(t) => t,
+            MdLine::Image { .. } => panic!("expected MdLine::Text, got {l:?}"),
+        }
+    }
+
     #[test]
     fn markdown_is_plain_and_wrapped() {
         let l = super::markdown_lines(
             "## Hi\n\nOne **bold** and `code` with a [link](https://x.y) — and a longer tail.",
             200.0,
+            None,
         );
-        assert_eq!(l[0], "Hi");
-        assert_eq!(l[1], "");
+        let t: Vec<&str> = l.iter().map(text_of).collect();
+        assert_eq!(t[0], "Hi");
+        assert_eq!(t[1], "");
         // #569: pixel-width wrap fits more per line than the old
         // chars-per-line guess did (it used to break after "with a").
-        assert!(l[2].starts_with("One bold and code with a"), "{l:?}");
+        assert!(t[2].starts_with("One bold and code with a"), "{t:?}");
         assert!(
-            l.iter()
+            t.iter()
                 .all(|x| ggplot_rs::render::text::text_width(x, super::MD_SIZE)
                     <= (200.0 - 28.0) * 0.96),
-            "{l:?}"
+            "{t:?}"
         );
-        assert!(l.join(" ").contains("link —"), "{l:?}");
+        assert!(t.join(" ").contains("link —"), "{t:?}");
     }
 
     #[test]
@@ -2213,14 +2421,131 @@ mod md_tests {
         let l = super::markdown_lines(
             "Smoothing $\\hat{y}_t = \\alpha y_t$ for $5 and $10:\n$$ \\sum_i x_i $$\nafter",
             400.0,
+            None,
         );
         assert_eq!(l.len(), 3, "{l:?}");
-        assert!(l[0].contains("\\hat{y}ₜ = α yₜ"), "{l:?}");
-        assert!(l[0].contains("$5 and $10"), "{l:?}");
-        assert!(l[1].contains("Σᵢ xᵢ"), "{l:?}");
-        let svg = super::markdown_line_svg(&l[0]);
+        let t: Vec<&str> = l.iter().map(text_of).collect();
+        assert!(t[0].contains("\\hat{y}ₜ = α yₜ"), "{t:?}");
+        assert!(t[0].contains("$5 and $10"), "{t:?}");
+        assert!(t[1].contains("Σᵢ xᵢ"), "{t:?}");
+        let svg = super::markdown_line_svg(t[0]);
         assert!(!svg.contains("<tspan") && !svg.contains("md-tex"), "{svg}");
         assert!(svg.contains("Smoothing \\hat{y}ₜ = α yₜ for"), "{svg}");
+    }
+
+    // ---- #524: block/inline markdown images in static output ----
+
+    #[test]
+    fn a_block_data_uri_image_embeds() {
+        let src = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCI+PHJlY3Qgd2lkdGg9IjQwIiBoZWlnaHQ9IjQwIiBmaWxsPSIjMmE3OGQ2Ii8+PC9zdmc+";
+        let l = super::markdown_lines(&format!("![data drift]({src})"), 200.0, None);
+        assert_eq!(l.len(), 1, "{l:?}");
+        match &l[0] {
+            MdLine::Image { href, alt, aspect } => {
+                assert_eq!(href, src);
+                assert_eq!(alt, "data drift");
+                assert_eq!(
+                    *aspect,
+                    (40.0, 40.0),
+                    "the decoded SVG's own intrinsic size"
+                );
+            }
+            other => panic!("expected MdLine::Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_block_relative_image_under_assets_embeds() {
+        // A real assets/ folder this time (#524's `asset_root` threaded
+        // through to [`crate::image::resolve_relative`], exactly as the
+        // standalone `::IMAGE` panel's own `image_href` already does).
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "anofox-md-image-test-{}-{nanos}",
+            std::process::id()
+        ));
+        let assets = dir.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(
+            assets.join("concept.svg"),
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"/>"#,
+        )
+        .unwrap();
+        let root = assets.canonicalize().unwrap();
+        let l = super::markdown_lines("![concept](assets/concept.svg)", 200.0, Some(&root));
+        match &l[..] {
+            [MdLine::Image { href, alt, aspect }] => {
+                assert!(href.starts_with("data:image/svg+xml"), "{href}");
+                assert_eq!(alt, "concept");
+                assert_eq!(*aspect, (80.0, 20.0));
+            }
+            other => panic!("expected one MdLine::Image, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_block_relative_image_outside_assets_falls_back_to_alt() {
+        // No asset_root at all: a relative path can never resolve (#524,
+        // reusing #514/#554's own rule — a locked/static render with no
+        // folder to read from draws the alt placeholder, same as ::IMAGE).
+        let l = super::markdown_lines("![concept](assets/concept.svg)", 200.0, None);
+        assert_eq!(l, vec![MdLine::Text("[concept]".to_string())], "{l:?}");
+    }
+
+    #[test]
+    fn a_block_https_image_keeps_the_raw_markdown_syntax() {
+        // #524: never fetched into a static export — kept as plain text so
+        // the reader still sees the alt AND the url, unlike `[alt]`.
+        let l = super::markdown_lines("![chart](https://example.com/a.png)", 200.0, None);
+        assert_eq!(
+            l,
+            vec![MdLine::Text(
+                "![chart](https://example.com/a.png)".to_string()
+            )],
+            "{l:?}"
+        );
+    }
+
+    #[test]
+    fn a_rejected_block_source_falls_back_to_alt() {
+        let l = super::markdown_lines("![x](../outside/escape.svg)", 200.0, None);
+        assert_eq!(l, vec![MdLine::Text("[x]".to_string())], "{l:?}");
+    }
+
+    #[test]
+    fn an_inline_https_image_keeps_the_raw_syntax_mid_text() {
+        // Mixed with other text in the same paragraph: can't be drawn as a
+        // real image here (no inline image layout), but an https source
+        // still keeps its full markdown syntax, not just `[alt]`.
+        let l = super::markdown_lines(
+            "See ![chart](https://example.com/a.png) above.",
+            400.0,
+            None,
+        );
+        let t: Vec<&str> = l.iter().map(text_of).collect();
+        assert!(
+            t.join(" ").contains("![chart](https://example.com/a.png)"),
+            "{t:?}"
+        );
+    }
+
+    #[test]
+    fn an_inline_data_image_still_falls_back_to_alt() {
+        // Mixed with text: even a normally-embeddable data: source can't be
+        // drawn inline here, so it's still `[x]`, unchanged from before
+        // #524 (only a WHOLE-paragraph image embeds).
+        let l = super::markdown_lines(
+            "See ![x](data:image/png;base64,iVBORw0KGgo=) here.",
+            400.0,
+            None,
+        );
+        let t: Vec<&str> = l.iter().map(text_of).collect();
+        assert!(t.join(" ").contains("See [x] here."), "{t:?}");
+        assert!(!t.join(" ").contains("data:image"), "{t:?}");
     }
 }
 

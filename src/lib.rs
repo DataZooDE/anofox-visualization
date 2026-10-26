@@ -6600,17 +6600,35 @@ fn markdown_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOption
         theme::hex(t.colors.ink)
     );
     let mut y = 22.0;
-    for line in dashboard::markdown_lines(&md, width as f64) {
+    for line in dashboard::markdown_lines(&md, width as f64, o.asset_root.as_deref()) {
         if y > height as f64 - 8.0 {
             break;
         }
-        if !line.is_empty() {
-            body.push_str(&format!(
-                "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
-                dashboard::markdown_line_svg(&line)
-            ));
+        match line {
+            dashboard::MdLine::Text(text) => {
+                if !text.is_empty() {
+                    body.push_str(&format!(
+                        "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                        dashboard::markdown_line_svg(&text)
+                    ));
+                }
+                y += dashboard::MD_LINE;
+            }
+            // #524: mirrors dashboard.rs's own render_panel_svg handling of
+            // a block markdown image — same shared drawer/height estimate.
+            dashboard::MdLine::Image { href, alt, aspect } => {
+                let avail_w = width as f64 - 2.0 * pad;
+                match dashboard::markdown_image_height(aspect, avail_w, height as f64 - y - 8.0) {
+                    Some(ih) => {
+                        body.push_str(&dashboard::markdown_image_svg(
+                            &href, &alt, pad, y, avail_w, ih,
+                        ));
+                        y += ih + 8.0;
+                    }
+                    None => break,
+                }
+            }
         }
-        y += dashboard::MD_LINE;
     }
     body.push_str("</g>");
     Panel::own(width, height, body)
