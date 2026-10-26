@@ -2686,7 +2686,21 @@ fn cartesian(
     let label_top = role_num(cols, Role::LabelTop).map(|k| k.clamp(0.0, 10_000.0) as usize);
     let title = if label_top.is_some() { None } else { title };
 
-    let x_discrete = x.values.iter().any(|v| matches!(v, Value::Str(_)));
+    // #533: a VARCHAR ::XAXIS whose values all happen to parse as ISO dates
+    // (`strftime(…, '%Y-%m-%d')`) is reinterpreted as `Value::DateTime` by
+    // `sql::coerce_for_role` — intentionally, so a daily line/bar chart gets
+    // a sensible continuous datetime axis (#424-adjacent). But a violin/box/
+    // strip plot's x is never a continuous position: every mark at the same
+    // x already groups into one body, the same as any other VARCHAR level
+    // (#444 made that true for heatmaps too) — so grouping still has to
+    // split on distinct *days*, not silently merge every row into the first
+    // one because a datetime scale has nowhere discrete to put them.
+    let group_by_day = matches!(kind, Kind::Violin | Kind::Boxplot | Kind::Jitter)
+        && x.values.iter().any(|v| matches!(v, Value::DateTime(_)))
+        && x.values
+            .iter()
+            .all(|v| matches!(v, Value::DateTime(_) | Value::Na));
+    let x_discrete = group_by_day || x.values.iter().any(|v| matches!(v, Value::Str(_)));
     let bar = matches!(
         kind,
         Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
@@ -2739,7 +2753,17 @@ fn cartesian(
     // already, but a `Value::Na` gap on the same axis isn't, and a mixed
     // column would otherwise make ggplot-rs guess the column's type.
     let xvals = if x_discrete {
-        x.values.iter().map(|v| Value::Str(value_str(v))).collect()
+        x.values
+            .iter()
+            .map(|v| match v {
+                // A date/timestamp group label (`group_by_day` above, or a
+                // genuine DATE/TIMESTAMP ::XAXIS on these same chart kinds)
+                // reads like the date axis elsewhere, not `value_str`'s
+                // epoch-seconds number.
+                Value::DateTime(secs) => Value::Str(xline_date_text(*secs)),
+                v => Value::Str(value_str(v)),
+            })
+            .collect()
     } else {
         x.values.clone()
     };
