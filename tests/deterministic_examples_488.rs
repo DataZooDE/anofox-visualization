@@ -7,6 +7,14 @@
 //! and (tabular-feed, found by a separate pass over #488) a window-function
 //! total tied across categories with no tie-break beyond a non-unique column.
 //!
+//! #528 (a follow-up found while byte-comparing for #510): tabular-showcase
+//! had `GROUP BY ALL ORDER BY 2 DESC` bar/table queries with no tie-break on
+//! the category, so count-tied categories (e.g. "app"/"marketplace") swapped
+//! places. inventory-twin had a `string_agg(DISTINCT ..., sep)` with no
+//! `ORDER BY` (an unordered-concatenation tie, same class as the others) and
+//! a correlated `sum(...)` (the same partial-sum-order float bug as
+//! supplier-lead-times' quantity-weighted mean).
+//!
 //! This renders each listed example twice, with `SET threads=8;` forced (so
 //! the duckdb CLI subprocess parallelizes even on a small CI runner — the
 //! same condition that exposed the bug), and asserts byte-identical SVG.
@@ -47,6 +55,8 @@ const EXAMPLES: &[&str] = &[
     "optimize-delivery",
     "supplier-lead-times",
     "tabular-feed",
+    "tabular-showcase",
+    "inventory-twin",
 ];
 
 /// Renders `web/examples/<name>.sql` to SVG, with `SET threads=8;` forced at
