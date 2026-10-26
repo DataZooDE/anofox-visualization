@@ -351,7 +351,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
       "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
     e("SUBMIT", &[], R::Submit, "input", false,
-      "a button (value = its label) that records SUBMIT_VARS for this viewer — requires a server with options.state; not active until that lands (#517 slice S2)"),
+      "a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server)"),
     e("SUBMIT_VARS", &[], R::SubmitVars, "input", false,
       "comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements"),
     e("SUBMIT_DONE", &[], R::SubmitDone, "input", false,

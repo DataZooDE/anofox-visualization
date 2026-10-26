@@ -201,7 +201,7 @@ terminal.
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
 | `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
-| `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer — requires a server with options.state; not active until that lands (#517 slice S2) |
+| `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server) |
 | `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
 | `::SUBMIT_DONE` |  | input | optional confirmation text shown after a successful ::SUBMIT |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
@@ -341,6 +341,67 @@ The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 (the first option, every option of a `::MULTISELECT`, both ends of a
 `::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
 render as on first load in the browser.
+
+### Recording answers (`::SUBMIT`, `viewer_state`, #517)
+
+Inputs change what a dashboard shows; `::SUBMIT` *records* what a viewer
+picked, append-only, one row per recorded variable per click — a quiz a
+learner answers, a check-in a field worker files, any form whose answers
+need to outlive the page. It needs a **locked server** (`serve --locked`)
+with `options.state` naming this dashboard — the browser builder and
+`serve`'s live-authoring backend only ever preview it (below).
+
+```sql
+SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
+SELECT '' AS note ::TEXT, 'Anything else?' ::LABEL;
+
+SELECT 'Check my answer' AS quiz_1 ::SUBMIT,       -- the button; column name = submit id
+       'q1, note'        AS r      ::SUBMIT_VARS,  -- which inputs it records (≤ 32 names)
+       'Saved — thanks.' AS d      ::SUBMIT_DONE;  -- optional text shown after a successful click
+```
+
+- The `::SUBMIT` statement's own `SELECT` is the author's gate: zero rows
+  hides the button entirely (an "only once", "after step 1" or "until a
+  date" condition in SQL), exactly one row shows it (its value is the
+  label), more than one row is a lint/server error. It runs **as the
+  viewer** — same variables, claims and `-- @requires`/tab gating as every
+  other panel — so what the page shows and what the server accepts always
+  agree.
+- Only `::DROPDOWN`, `::BUTTONS`, `::MULTISELECT`, `::TOGGLE`, `::NUMBER`,
+  `::DATE` and `::TEXT` inputs can be named in `SUBMIT_VARS` (`::DATERANGE`/
+  `::PERIOD` cover several variables each and are refused, a lint error).
+  The server re-runs each named input as the viewer and checks the
+  recorded value is one of its real options (or, for a credential-locked
+  variable — an embed link's own fixed `vars`, say — records that locked
+  value instead, list or scalar alike, never the viewer's own pick).
+- Re-submitting appends a new row; it never overwrites. `note` (`::TEXT`)
+  is capped at `options.state.text_max_chars` (default 1000) and is the
+  one input kind worth a moment's thought before showing it back on a
+  trainer's page (see the CSV/XLSX and markup notes in
+  `docs/secure-serving.md`'s state section).
+- **Reading it back**: a dashboard named in `options.state.dashboards`,
+  `.read` or `.trainers.dashboards` gets two server-provided temp objects,
+  scoped by construction — the rows inserted into *this* connection are the
+  only rows it can ever see, never a `WHERE __claim_user = …` filter:
+  ```sql
+  -- viewer_state: seq, ts, "user", dashboard, submit, name, value, value_list
+  -- viewer_state_latest: the same columns, one row per (user, dashboard, submit, name) — the current answer
+  SELECT dashboard::XAXIS, count(*)::BARCHART FROM viewer_state GROUP BY ALL ::TABLE;
+  ```
+  A plain state dashboard sees only the signed-in viewer's own rows (a "my
+  progress" page can read several dashboards' state). A
+  `options.state.trainers` dashboard additionally shows **every** viewer's
+  rows, but only to a viewer in `trainers.groups`/`trainers.users` — anyone
+  else opening the same trainer dashboard still gets only their own rows
+  (fails safe, never refused).
+- **Preview (browser builder, and `serve`'s live-authoring backend)**:
+  clicking appends to an in-page `viewer_state` the preview session creates
+  empty on load, with a banner saying submissions stay in the tab and are
+  never saved — useful for authoring the SQL above, never a substitute for
+  a real server when checking who can see what.
+- Full contract, limits, logging and the threat model: `docs/secure-serving.md`
+  → "Per-viewer state (`options.state`, #517)". Retention/erasure is the
+  operator's job — `dashboard state export|erase`, same document.
 
 ### Periods: presets, grain and comparison (`::PERIOD`)
 
