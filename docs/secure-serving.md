@@ -2268,6 +2268,16 @@ given.
   canonicalize to a path inside at least one of them. The CLI's `--assets`
   is unaffected — the person running it is the operator, not untrusted
   SQL.
+  **Checked once, at `anofox_serve`'s own start — not on every request,
+  and not again if the setting changes afterward** (review of #604 R1):
+  once a server with `options.assets` is already running, `SET
+  enable_external_access = false` on that same connection does not stop
+  it from continuing to answer `/assets/<rest>` (the token already went
+  only to whoever started it, and no SQL function here lists a running
+  server's own token back to anyone). Lock the session down — and,
+  stronger still, `SET lock_configuration = true` — *before* calling
+  `anofox_serve` with this option if that's the posture wanted for its
+  whole lifetime, not after.
 - **Same guard as every other authoring route.** `GET`/`HEAD
   /assets/<rest>` sits behind the same per-run token (cookie or
   `X-Anofox-Token`), loopback `Host`, and same-origin checks as `/query` —
@@ -2281,11 +2291,13 @@ given.
   authoring has no logout to outlive, but an asset can change under an
   author's feet mid-session just as easily as the dashboard script
   itself).
-- **`GET`/`HEAD` only; no listing.** Any other method is `405` — including
-  with the option off, same as any other path on this server (a plain
-  `GET`/`HEAD /anything` with no `--assets` is `404`, but every *other*
-  method is already `405` everywhere on this server, not specific to this
-  route).
+- **`GET`/`HEAD` only; no listing.** Any other method on `/assets/<rest>`
+  is `405`. With the option off, `/assets/<rest>` isn't a route at all, so
+  it falls through to the same rule every other unknown path on this
+  server already has: `GET` is `404`, and `HEAD` — along with every
+  method but `GET` — is `405` (the static-file fallback only ever
+  answers `GET`). Review of #604 R5: an earlier draft of this paragraph
+  said `HEAD` was `404` too; it is not, with or without the option.
 - **Client.** A relative `assets/…` source resolves the same way in every
   mode (`web/app.js::assetUrl`'s existing fallback: relative to the
   page's own URL, always `/` for the authoring builder) — with the option

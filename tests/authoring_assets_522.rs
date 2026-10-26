@@ -101,15 +101,38 @@ fn spawn_authoring(scratch: &Scratch, extra: &[&str]) -> (Kill, u16, String) {
         .next()
         .unwrap()
         .to_string();
+    wait_ready(port);
+    (Kill(child), port, tok)
+}
+
+/// Wait until `port` answers a real HTTP request, not just a bare TCP
+/// connect. Review of #604 S2 (CI re-review): the first cut of this probe
+/// only opened a connection and dropped it the instant `connect`
+/// succeeded, sending and reading nothing — a bare `GET /` right after,
+/// on this single-worker (`run_workers(server, 1, …)`) authoring server,
+/// could then occasionally read back an empty response (status `0`)
+/// under the heavy concurrent-process load `cargo nextest` produces (the
+/// reviewer reproduced it 1 run in 250). No bug found in `run_workers`/
+/// `handle_authoring` itself — `server.incoming_requests()` only ever
+/// yields a *parsed* request, so a connection that sends no bytes before
+/// closing is tiny_http's own problem to skip, not this code's; this
+/// reads like a TCP-level drop under connection bursts against a single
+/// accept thread on an overloaded box, triggered more easily by a probe
+/// that opens and immediately drops right before the real request does
+/// the same. Waiting for a real, fully-read response here removes that
+/// trigger; [`req`]'s own bounded retry (below) covers whatever of it is
+/// left.
+fn wait_ready(port: u16) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(_) => break,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
+        if req_once(port, "GET", "/", None).is_ok_and(|(status, _, _)| status != 0) {
+            return;
         }
+        if Instant::now() >= deadline {
+            panic!("serve did not become ready on {port} within 20s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    (Kill(child), port, tok)
 }
 
 /// `serve --db <scratch>/a.duckdb --assets <bad> --port 0` is expected to
@@ -127,21 +150,27 @@ fn spawn_expect_refusal(scratch: &Scratch, assets: &str) -> String {
 
 /// One raw HTTP/1.1 request (no cookie dance: the token goes straight in
 /// `X-Anofox-Token`, the same header `/query`'s own tests use) over a
-/// fresh connection: `(status, lowercased head, body)`.
-fn req(port: u16, method: &str, path: &str, tok: Option<&str>) -> (u16, String, String) {
-    let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    conn.set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
+/// fresh connection: `(status, lowercased head, body)`, or `Err` on a
+/// connect/write/read failure (never a panic — [`req`], the caller every
+/// test actually uses, is what turns this into one, after its own
+/// retries are exhausted).
+fn req_once(
+    port: u16,
+    method: &str,
+    path: &str,
+    tok: Option<&str>,
+) -> std::io::Result<(u16, String, String)> {
+    let mut conn = TcpStream::connect(("127.0.0.1", port))?;
+    conn.set_read_timeout(Some(Duration::from_secs(10)))?;
     let tok_header = tok
         .map(|t| format!("X-Anofox-Token: {t}\r\n"))
         .unwrap_or_default();
     write!(
         conn,
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{tok_header}Connection: close\r\n\r\n"
-    )
-    .unwrap();
+    )?;
     let mut resp = String::new();
-    conn.read_to_string(&mut resp).unwrap();
+    conn.read_to_string(&mut resp)?;
     let (head, body) = resp.split_once("\r\n\r\n").unwrap_or((resp.as_str(), ""));
     let status: u16 = head
         .lines()
@@ -149,7 +178,29 @@ fn req(port: u16, method: &str, path: &str, tok: Option<&str>) -> (u16, String, 
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    (status, head.to_ascii_lowercase(), body.to_string())
+    Ok((status, head.to_ascii_lowercase(), body.to_string()))
+}
+
+/// [`req_once`], retried a bounded number of times on a connect/write/read
+/// error *or* status `0` (an empty response — never a real HTTP status) —
+/// review of #604 S2 (CI re-review): restores the retry the pre-`--port 0`
+/// version of this helper had and the rewrite dropped, now covering
+/// connection errors too, not just an empty-but-received response. See
+/// [`wait_ready`] for why this still shows up occasionally even after
+/// that fix.
+fn req(port: u16, method: &str, path: &str, tok: Option<&str>) -> (u16, String, String) {
+    for attempt in 0..5 {
+        match req_once(port, method, path, tok) {
+            Ok((status, head, body)) if status != 0 || attempt == 4 => {
+                return (status, head, body);
+            }
+            Ok(_) => {}
+            Err(e) if attempt == 4 => panic!("{method} {path}: {e}"),
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    unreachable!()
 }
 
 #[test]
@@ -298,5 +349,24 @@ fn assets_option_refuses_a_symlinked_root_at_start_even_with_a_trailing_slash() 
     std::os::unix::fs::symlink(s.assets_dir(), &link).unwrap();
     let with_slash = format!("{}/", link.to_str().unwrap());
     let err = spawn_expect_refusal(&s, &with_slash);
+    assert!(err.contains("symlink"), "{err}");
+}
+
+/// Review of #604 R4: `rootlink/sub/..` is not the symlinked root named
+/// with a trailing `/`/`.` (the test above) — `sub` is a real
+/// subdirectory *through* the symlink, so `symlink_metadata` on the whole
+/// path must resolve `rootlink` (follow it) to even find `sub` to back
+/// out of, even though the path lexically names `rootlink` itself.
+/// Without lexically collapsing `sub/..` first, this reached the
+/// `canonicalize`/`is_dir` checks never having `lstat`-ed `rootlink`.
+#[cfg(unix)]
+#[test]
+fn assets_option_refuses_a_symlinked_root_at_start_via_a_cd_and_back_out() {
+    let s = Scratch::new("bad-symlink-cd-back-out");
+    let link = s.0.join("assets-link");
+    std::os::unix::fs::symlink(s.assets_dir(), &link).unwrap();
+    std::fs::create_dir(link.join("sub")).unwrap();
+    let via_sub = format!("{}/sub/..", link.to_str().unwrap());
+    let err = spawn_expect_refusal(&s, &via_sub);
     assert!(err.contains("symlink"), "{err}");
 }
