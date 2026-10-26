@@ -120,8 +120,17 @@ crate-type = ["cdylib", "rlib"]
 # growing the box to fit themselves; its rotated y caption now reads
 # bottom-to-top, matching the axis-title convention. No API breaks
 # (cargo-semver-checks against 0.31.4).
+# 0.31.6 (sipemu/ggplot-rs#277, #279): a continuous size/legend-width
+# colourbar/legend anchored `Top`/`Bottom` now wraps its entries to the
+# panel width instead of overflowing it (#277, this crate's own #545 —
+# `supply-chain.sql`'s flow legend at 390px no longer overflows); and a
+# titled `Top` colourbar's own title no longer collides with the plot's
+# title/subtitle above it (#279, this crate's own #577 —
+# `delivery-coverage.sql`'s "Week by week" time-map subtitle no longer
+# overlaps the legend title at 390px). Both confirmed with PNG crops. No
+# API breaks (cargo-semver-checks against 0.31.5).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.5", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.31.6", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
