@@ -4297,11 +4297,16 @@ fn state_scalar_text(v: &Value) -> String {
 /// existing viewer_state content, inserted the same way at the same
 /// generation, is still exactly what this would build again).
 ///
-/// Every value goes through [`db::Prepared::bind_strs`] — never spliced
-/// into the SQL text — except a literal `NULL` for a `Null` scalar or list
-/// item and the fixed `?`-placeholder count of a list's own array
-/// constructor, neither of which carries data from the request or the
-/// store.
+/// Every value goes through `db::Appender`'s typed `append_*` calls (#600)
+/// — no SQL text built from `rec`'s own fields at all, so there is
+/// nothing here for a value to be spliced into. Review of #611 S2: one
+/// exception — a record whose `ts` the strict `parse_rfc3339_micros`
+/// refuses (never the server's own output; only a store file written or
+/// edited some other way, #611 S1) falls back to
+/// [`seed_viewer_state_row_via_sql`], a single `INSERT ... VALUES
+/// (?::BIGINT, ?::TIMESTAMPTZ, ...)` per variable for *that one record* —
+/// the exact cast the pre-#600 code relied on for every row — rather than
+/// failing every panel that reads this generation over one odd record.
 ///
 /// `&[Arc<Record>]`, not `&[Record]` (review of #599 SF1): this only ever
 /// reads fields through the `Arc` (auto-deref), so taking the trainer
@@ -4312,61 +4317,135 @@ fn seed_viewer_state(c: &Conn, rows: &[Arc<Record>]) -> Result<(), String> {
     for stmt in anofox_visualization::sql::viewer_state_setup_statements() {
         c.exec(stmt)?;
     }
-    for chunk in rows.chunks(500) {
-        let mut sql_buf = String::from(
-            "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, value, \
-             value_list) VALUES ",
-        );
-        let mut params: Vec<String> = Vec::new();
-        for rec in chunk {
-            for (name, val) in &rec.vars {
-                if !params.is_empty() {
-                    sql_buf.push(',');
+    // #600: an `Appender` (`db::Appender`), not `INSERT ... VALUES (…),
+    // (…), …` built as SQL text — measured at ~22s per cold panel for a
+    // 200k-row trainer store (the whole point of this rewrite; see the
+    // PR for the before/after numbers). No text to build, parse or bind:
+    // every value here is still a bound value in the sense that matters
+    // (never spliced into SQL text), just handed to DuckDB through the
+    // Appender's typed `append_*` calls instead.
+    // `temp`/`main` explicit (`Appender::new_in`): `viewer_state` is
+    // always the per-connection TEMP table `viewer_state_setup_statements`
+    // just (re)created above, never left to the connection's own current
+    // default catalog to resolve.
+    // Review of #611 N4: the more likely reason an appender created
+    // without a catalog/schema would miss it is that it resolves against
+    // the connection's own *current default database* (whatever `USE`
+    // last pointed at, which on a cold panel connection can be one of the
+    // snapshot's own `READ_ONLY`-attached databases) rather than doing
+    // the same `temp`-first unqualified-name resolution ordinary SQL
+    // does — not necessarily a same-named object actually existing
+    // there, just resolving to the wrong database before DuckDB even
+    // gets as far as checking whether `viewer_state` exists in it.
+    let app = crate::db::Appender::new_in(c, Some("temp"), Some("main"), "viewer_state")?;
+    for rec in rows {
+        // #611 N6: parsed once per record, not once per variable.
+        let ts_micros = anofox_visualization::host::access::parse_rfc3339_micros(&rec.ts);
+        if ts_micros.is_none() {
+            seed_viewer_state_row_via_sql(c, rec)?;
+            continue;
+        }
+        for (name, val) in &rec.vars {
+            app.begin_row()?;
+            app.append_int64(
+                i64::try_from(rec.seq).map_err(|_| "seq out of range for BIGINT".to_string())?,
+            )?;
+            app.append_timestamp_micros(ts_micros.expect("checked above"))?;
+            app.append_varchar(&rec.user)?;
+            app.append_varchar(&rec.dashboard)?;
+            app.append_varchar(&rec.submit)?;
+            app.append_varchar(name)?;
+            match val {
+                Value::Null => {
+                    app.append_null()?; // value
+                    app.append_null()?; // value_list
                 }
-                params.push(rec.seq.to_string());
-                params.push(rec.ts.clone());
-                params.push(rec.user.clone());
-                params.push(rec.dashboard.clone());
-                params.push(rec.submit.clone());
-                params.push(name.clone());
-                match val {
-                    Value::Null => {
-                        sql_buf.push_str("(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, NULL, NULL)");
-                    }
-                    Value::Array(items) => {
-                        params.push(val.to_string());
-                        // A `Null` item is a literal `NULL` in the array
-                        // constructor, never a bound `''` (#548 item 3
-                        // nit: `state_scalar_text(&Value::Null)` would
-                        // otherwise store an empty string, not SQL NULL).
-                        let tokens: Vec<&str> = items
-                            .iter()
-                            .map(|it| {
-                                if it.is_null() {
-                                    "NULL"
-                                } else {
-                                    params.push(state_scalar_text(it));
-                                    "?"
-                                }
-                            })
-                            .collect();
-                        sql_buf.push_str(&format!(
-                            "(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, [{}])",
-                            tokens.join(", ")
-                        ));
-                    }
-                    other => {
-                        params.push(state_scalar_text(other));
-                        sql_buf.push_str("(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, NULL)");
-                    }
+                Value::Array(items) => {
+                    // #611 B1: `value` holds the same JSON text of the
+                    // whole array the pre-#600 SQL path bound and the
+                    // browser's own live preview still writes
+                    // (`web/app.js`) — a served dashboard reading
+                    // `value` for a list (`MULTISELECT`) answer must see
+                    // what it always has, not `NULL`.
+                    app.append_varchar(&val.to_string())?; // value
+                                                           // A `Null` item is a real SQL `NULL` inside the list,
+                                                           // never an empty string (#548 item 3 nit). Owned
+                                                           // first (`state_scalar_text` allocates), then
+                                                           // borrowed for the call — `append_varchar_list`'s
+                                                           // `&str`s only need to live for that one call.
+                    let owned: Vec<Option<String>> = items
+                        .iter()
+                        .map(|it| (!it.is_null()).then(|| state_scalar_text(it)))
+                        .collect();
+                    let borrowed: Vec<Option<&str>> = owned.iter().map(|s| s.as_deref()).collect();
+                    app.append_varchar_list(&borrowed)?;
+                }
+                other => {
+                    app.append_varchar(&state_scalar_text(other))?; // value
+                    app.append_null()?; // value_list
                 }
             }
+            app.end_row()?;
         }
-        if params.is_empty() {
-            continue; // every record in this chunk recorded no variables
-        }
+    }
+    app.close()
+}
+
+/// #611 S2: one record whose `ts` [`seed_viewer_state`]'s fast parser
+/// refused, inserted the slow way — one `INSERT ... VALUES (?::BIGINT,
+/// ?::TIMESTAMPTZ, ...)` per variable, the exact SQL cast the pre-#600
+/// code relied on for every row (so a non-canonical but still valid
+/// RFC3339 shape such as a missing `.mmm` or a `+00` offset, which
+/// `?::TIMESTAMPTZ` accepts and `parse_rfc3339_micros` by design does
+/// not, still seeds correctly) — never spliced SQL text, same as the
+/// pre-#600 path. Only reached for a store file written or edited by
+/// something other than this server's own [`Store::append`]
+/// (`anofox_visualization::host::state::Store::append`); the server
+/// never writes a `ts` this falls back for.
+fn seed_viewer_state_row_via_sql(c: &Conn, rec: &Record) -> Result<(), String> {
+    for (name, val) in &rec.vars {
+        let mut params: Vec<String> = vec![
+            rec.seq.to_string(),
+            rec.ts.clone(),
+            rec.user.clone(),
+            rec.dashboard.clone(),
+            rec.submit.clone(),
+            name.clone(),
+        ];
+        let sql = match val {
+            Value::Null => {
+                "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, value, \
+                 value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, NULL, NULL)"
+                    .to_string()
+            }
+            Value::Array(items) => {
+                params.push(val.to_string()); // value: the JSON text (#611 B1)
+                let tokens: Vec<&str> = items
+                    .iter()
+                    .map(|it| {
+                        if it.is_null() {
+                            "NULL"
+                        } else {
+                            params.push(state_scalar_text(it));
+                            "?"
+                        }
+                    })
+                    .collect();
+                format!(
+                    "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, \
+                     value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, [{}])",
+                    tokens.join(", ")
+                )
+            }
+            other => {
+                params.push(state_scalar_text(other));
+                "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, value, \
+                 value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, NULL)"
+                    .to_string()
+            }
+        };
         let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        c.execute_prepared(&sql_buf, &refs)?;
+        c.execute_prepared(&sql, &refs)?;
     }
     Ok(())
 }

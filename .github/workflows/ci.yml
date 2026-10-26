@@ -175,6 +175,16 @@ jobs:
       - name: Check button on a live (authoring) backend (#199)
         run: duckext/scripts/test-check-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # #611 CI gap: these two ran by hand only until now — the only
+      # end-to-end coverage of ::SUBMIT read-back (plan §5) and the
+      # Appender-based viewer_state seeding (#600) was a developer's own
+      # local run, never CI.
+      - name: Submit/read-back state end to end (plan §5, #517 S3)
+        run: duckext/scripts/test-state.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Submit live e2e (auth, rate limits, credential locks)
+        run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Opt-in assets route on a live (authoring) backend (#522)
         run: duckext/scripts/test-authoring-assets.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
@@ -308,6 +318,12 @@ jobs:
 
       - name: Check button on a live (authoring) backend, against DuckDB 2.0 (#199)
         run: duckext/scripts/test-check-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Submit/read-back state end to end, against DuckDB 2.0
+        run: duckext/scripts/test-state.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Submit live e2e, against DuckDB 2.0
+        run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
       - name: Opt-in assets route on a live (authoring) backend, against DuckDB 2.0 (#522)
         run: duckext/scripts/test-authoring-assets.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
