@@ -2,6 +2,12 @@
 -- @group Logistics & production
 -- @tags  inventory, simulation, bullwhip
 -- @description How orders swing more at each stage of a four-stage chain, and which policy calms them.
+-- @tour amplify_tour Where the bullwhip comes from
+--   page: A four-stage supply chain, simulated for 52 weeks — see where small swings in consumer sales turn into big swings in orders upstream, and what would calm them.
+--   chain_diagram: Each stage's bullwhip ratio, and the goods and orders flowing between them.
+--   stock_backlog_chart: Stock on hand and backlog over the 52 weeks, for the stage you've picked.
+--   policy_table: Every policy compared — pick the calmest, or the cheapest.
+-- @tour_autostart amplify_tour
 --
 -- Where does our supply chain amplify demand, and what would stabilise it?
 --
@@ -123,6 +129,7 @@ SELECT 'Where it amplifies'::TAB;
 SELECT 12::COL;
 SELECT 260::HEIGHT;
 SELECT 'stage'::SELECT_AS;
+-- @name chain_diagram
 WITH s AS (
   SELECT st.stage_no, st.stage, st.title, st.short,
          CASE WHEN st.stage = 'Consumers' THEN 1.0 ELSE c.bullwhip END AS ratio,
@@ -259,6 +266,7 @@ SELECT 1::ENDGROUP;
 
 SELECT 12::COL;
 SELECT 340::HEIGHT;
+-- @name stock_backlog_chart
 SELECT r.week ::XAXIS, v.series ::CATEGORY, v.units ::LINECHART,
        CASE WHEN v.series = 'On hand' AND r.backlog > 0 THEN r.week END ::MARKAREA,
        0 ::REFLINE,
@@ -329,6 +337,7 @@ SELECT 12::COL;
 SELECT 'Bullwhip at supplier: >=8:bad; >=3:warn; good | Consumer fill rate: <90:bad; <97:warn; good'::THRESHOLDS;
 SELECT 'Chain cost: bottom 1'::HIGHLIGHT;
 SELECT 'Cost: Holding, Backlog, Chain cost'::COLGROUP;
+-- @name policy_table
 SELECT policy || ', ' || CASE smoothing WHEN 'None' THEN 'no smoothing' ELSE 'smoothing ' || smoothing END AS "Policy" ::TABLE,
        round(bullwhip_top, 1) AS "Bullwhip at supplier",
        round(customer_fill, 1) AS "Consumer fill rate" ::PERCENT,
