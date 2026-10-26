@@ -150,8 +150,9 @@ docker run -d --name dash -p 127.0.0.1:8080:8080 --read-only -v /tmp \
   -v $PWD/data:/data:ro anofox-dashboards
 ```
 
-The build stage compiles the extension (Rust, wasm-pack for the embedded web
-client, the DuckDB CLI for packaging and the smoke test). The runtime image is
+The build stage compiles the extension (Rust, wasm-bindgen + wasm-opt for the
+embedded web client — not wasm-pack, #552 — the DuckDB CLI for packaging and
+the smoke test). The runtime image is
 `debian:bookworm-slim` with the CLI, the extension and `run-locked.sh`, running
 as an unprivileged user under `tini`. As PID 1 without its own signal handler,
 DuckDB would ignore `SIGTERM` and `docker stop` would take 10 s. With `tini` it
