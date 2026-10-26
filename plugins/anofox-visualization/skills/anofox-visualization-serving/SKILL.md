@@ -137,10 +137,15 @@ Retention and data-subject requests are the operator's job, offline (both
 refuse while a server still has the file's `flock`):
 
 ```sh
-dashboard state export state.jsonl --user alice@example.com --format csv > alice.csv
+dashboard state export state.jsonl --user alice@example.com --format csv --out alice.csv
 dashboard state erase  --user alice@example.com state.jsonl              # dry run
 dashboard state erase  --user alice@example.com state.jsonl --yes        # actually erase, audited
 ```
+
+`export`/a dry-run `erase` open the store read-only (never mutate it); `--out`
+refuses to overwrite a file that already exists (`--force` to allow it) and
+never follows a symlink. `--user` matches `claims.user` exactly and
+case-sensitively, and must not be empty.
 
 Full contract, limits and threat model: `docs/secure-serving.md` →
 "Per-viewer state"; the `::SUBMIT`/`viewer_state` SQL side is the

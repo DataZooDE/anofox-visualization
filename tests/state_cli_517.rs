@@ -126,18 +126,21 @@ fn export_csv_is_one_row_per_recorded_variable_with_a_real_null_list_item_blank(
         "seq,ts,user,auth,dashboard,submit,id,name,value,value_list"
     );
     let rows: Vec<&str> = lines.collect();
-    // bob's MULTISELECT ("notes") becomes its own row: value is the JSON
-    // array text, value_list is the items `;`-joined, the trailing NULL
-    // item rendered as nothing (never the string "null").
+    // bob's MULTISELECT ("notes") becomes its own row: both `value` and
+    // `value_list` are the exact JSON array text (review of #555, nit —
+    // a `;`-joined string couldn't tell an item containing `;` apart from
+    // the separator; JSON array text always can, and a null item stays
+    // JSON `null` rather than disappearing into an empty join). CSV's own
+    // quoting (RFC 4180: a field with a `"` or `,` is wrapped and its
+    // `"` doubled) then wraps that JSON text as `"[""x"",""y"",null]"`.
     let notes_row = rows
         .iter()
         .find(|l| l.contains(",notes,"))
         .unwrap_or_else(|| panic!("no notes row in: {stdout}"));
-    // `value_list` (the trailing field, `;`-joined) renders the null item
-    // as nothing, never the text "null" — `value` (the JSON text just
-    // before it) legitimately still says `null`, faithfully, since that
-    // column is meant to be lossless.
-    assert!(notes_row.ends_with("x;y;"), "{notes_row}");
+    assert!(
+        notes_row.ends_with(r#",notes,"[""x"",""y"",null]","[""x"",""y"",null]""#),
+        "{notes_row}"
+    );
     // alice's "q2" was recorded as a scalar NULL: both cells blank, not "null".
     let q2_row = rows.iter().find(|l| l.contains(",q2,")).unwrap();
     assert!(q2_row.ends_with(",q2,,"), "{q2_row}");
@@ -314,5 +317,276 @@ fn erase_refuses_while_the_store_is_still_open_elsewhere_in_process() {
         String::from_utf8_lossy(&export_out.stderr).contains("in use by another server"),
         "{}",
         String::from_utf8_lossy(&export_out.stderr)
+    );
+}
+
+#[test]
+fn export_user_must_not_be_empty() {
+    let s = Scratch::new("export-empty-user");
+    let p = s.0.join("state.jsonl");
+    write_store(&p);
+    let out = dashboard()
+        .arg("state")
+        .arg("export")
+        .arg(&p)
+        .arg("--user")
+        .arg("")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("must not be empty"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn erase_user_must_not_be_empty() {
+    let s = Scratch::new("erase-empty-user");
+    let p = s.0.join("state.jsonl");
+    write_store(&p);
+    let before = std::fs::read(&p).unwrap();
+    let out = dashboard()
+        .arg("state")
+        .arg("erase")
+        .arg("--user")
+        .arg("")
+        .arg(&p)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("must not be empty"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&p).unwrap(),
+        before,
+        "must not touch the store"
+    );
+}
+
+#[test]
+fn erase_audit_line_carries_the_operators_own_uid_never_a_value() {
+    let s = Scratch::new("erase-audit-uid");
+    let p = s.0.join("state.jsonl");
+    write_store(&p);
+    let out = dashboard()
+        .arg("state")
+        .arg("erase")
+        .arg("--user")
+        .arg("alice@example.com")
+        .arg(&p)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // review of #555, nit: the audit line now names the operator (this
+    // test process's own real uid — the CLI has no other identity to log)
+    // alongside the viewer `user` whose rows were removed.
+    let my_uid = unsafe { libc::getuid() };
+    assert!(
+        stderr.contains(&format!("\"operator_uid\":{my_uid}")),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn export_out_creates_a_0600_file_and_never_a_world_or_group_readable_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Scratch::new("export-out-mode");
+    let p = s.0.join("state.jsonl");
+    write_store(&p);
+    let out_path = s.0.join("alice.jsonl");
+    let out = dashboard()
+        .arg("state")
+        .arg("export")
+        .arg(&p)
+        .arg("--out")
+        .arg(&out_path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let meta = std::fs::metadata(&out_path).unwrap();
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o600,
+        "export --out must never be created group/world readable, regardless of umask"
+    );
+    assert!(std::fs::read_to_string(&out_path)
+        .unwrap()
+        .contains("alice@example.com"));
+}
+
+#[test]
+fn export_out_refuses_an_existing_file_without_force_and_overwrites_with_it() {
+    let s = Scratch::new("export-out-exists");
+    let p = s.0.join("state.jsonl");
+    write_store(&p);
+    let out_path = s.0.join("out.csv");
+    std::fs::write(&out_path, "pre-existing content\n").unwrap();
+
+    let refused = dashboard()
+        .arg("state")
+        .arg("export")
+        .arg(&p)
+        .arg("--out")
+        .arg(&out_path)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--force"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&out_path).unwrap(),
+        "pre-existing content\n",
+        "a refused export must not touch the existing file"
+    );
+
+    let forced = dashboard()
+        .arg("state")
+        .arg("export")
+        .arg(&p)
+        .arg("--out")
+        .arg(&out_path)
+        .arg("--force")
+        .output()
+        .unwrap();
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    let after = std::fs::read_to_string(&out_path).unwrap();
+    assert!(after.contains("alice@example.com"), "{after}");
+    assert!(!after.contains("pre-existing"), "{after}");
+}
+
+#[test]
+fn export_out_never_follows_a_symlink_even_with_force() {
+    let s = Scratch::new("export-out-symlink");
+    let p = s.0.join("state.jsonl");
+    write_store(&p);
+    let victim = s.0.join("victim.csv");
+    std::fs::write(&victim, "do not touch\n").unwrap();
+    let link = s.0.join("link.csv");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+    for force in [false, true] {
+        let mut cmd = dashboard();
+        cmd.arg("state")
+            .arg("export")
+            .arg(&p)
+            .arg("--out")
+            .arg(&link);
+        if force {
+            cmd.arg("--force");
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "force={force}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("symlink"),
+            "force={force}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "do not touch\n",
+            "force={force}: must never write through the symlink to the victim"
+        );
+    }
+}
+
+/// A store file with a torn (no trailing `\n`) final line — stands in for
+/// a crash or `kill -9` mid-`append`, the same fixture `Store::open`'s own
+/// unit tests use, but exercised here through the CLI.
+fn write_torn_store(path: &Path) {
+    std::fs::write(
+        path,
+        "{\"anofox_state\":1,\"created\":\"2026-10-26T00:00:00.000Z\"}\n\
+         {\"v\":1,\"seq\":1,\"ts\":\"2026-10-26T00:01:00.000Z\",\"user\":\"alice@example.com\",\"auth\":\"oidc\",\"dashboard\":\"tutorial\",\"submit\":\"quiz_1\",\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"vars\":{\"q1\":\"B\"}}\n\
+         {\"v\":1,\"seq\":2,\"ts\":\"2026-10-26T00:02:00.000Z\",\"user\":\"bob@example.com\",\"auth\":\"oidc\",\"dashboard\":\"tutorial\",\"submit\":\"quiz_1\",\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"vars\":{\"q1\":\"A\"",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+#[test]
+fn export_on_a_torn_tail_store_leaves_the_file_byte_identical() {
+    let s = Scratch::new("export-torn");
+    let p = s.0.join("state.jsonl");
+    write_torn_store(&p);
+    let before = std::fs::read(&p).unwrap();
+    let out = dashboard()
+        .arg("state")
+        .arg("export")
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Only alice's complete record is readable; bob's torn one is dropped
+    // from the *output*, but — review of #555's should-fix — the file on
+    // disk must stay exactly as found, torn tail and all: a read must
+    // never "fix" a file nobody asked it to write.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("alice@example.com"), "{stdout}");
+    assert!(!stdout.contains("bob@example.com"), "{stdout}");
+    let after = std::fs::read(&p).unwrap();
+    assert_eq!(before, after, "export must never truncate a torn tail");
+}
+
+#[test]
+fn erase_dry_run_on_a_torn_tail_store_leaves_the_file_byte_identical() {
+    let s = Scratch::new("erase-dry-torn");
+    let p = s.0.join("state.jsonl");
+    write_torn_store(&p);
+    let before = std::fs::read(&p).unwrap();
+    let out = dashboard()
+        .arg("state")
+        .arg("erase")
+        .arg("--user")
+        .arg("alice@example.com")
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("dry run"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let after = std::fs::read(&p).unwrap();
+    assert_eq!(
+        before, after,
+        "a dry run must never truncate a torn tail, even on its read-only open"
     );
 }

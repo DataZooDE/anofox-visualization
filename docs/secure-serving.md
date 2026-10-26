@@ -757,30 +757,51 @@ locked-down as everywhere else in this document.
 - **Retention and erasure are the operator's job** — nothing expires
   automatically. `dashboard state export|erase` (run offline; both refuse
   while a server still has the file open, the same `flock` the server
-  itself takes):
+  itself takes — `export` and a dry-run `erase` take it as a *shared* lock,
+  so either can run alongside the other, or alongside itself, but not
+  alongside a live server or an applied `erase`):
   ```sh
-  dashboard state export /var/lib/anofox/state.jsonl --user alice@example.com --format csv > alice.csv
+  dashboard state export /var/lib/anofox/state.jsonl --user alice@example.com --format csv --out alice.csv
   dashboard state erase  --user alice@example.com /var/lib/anofox/state.jsonl            # dry run
   dashboard state erase  --user alice@example.com /var/lib/anofox/state.jsonl --yes       # actually erase
   ```
+  `--user` matches `claims.user` **exactly and case-sensitively** (the same
+  string the server stored it as) — an IdP that sends `Alice@example.com`
+  for one sign-in and `alice@example.com` for another produces two distinct
+  subjects as far as this CLI (and the store) are concerned; check the
+  stored `user` values (an unfiltered `export`, or `read_json` below) before
+  assuming one spelling covers a person. Neither subcommand accepts an empty
+  `--user` — refused outright, rather than silently matching nothing.
   `export` prints matching records (`--user` scopes a data-subject request;
   omit it for a full dump) as the store's own JSON Lines (`--format jsonl`,
   default) or as one CSV row per recorded variable (`--format csv`, the same
-  shape `viewer_state` reads back); `--out FILE` writes to a file instead of
-  stdout. `erase` is a **dry run by default** — it only reports how many
-  records would be removed until `--yes` is given — and writes one audit
-  line per applied attempt (`--audit stderr|FILE`, default `stderr`; same
-  target syntax as `options.audit`), outcome `ok`/`error`, never the values.
-  An erase rewrites the file in place, keeping every other viewer's rows and
-  the header line byte for byte; the erased user's `seq` numbers are not
-  reserved — after a restart a later submission may reuse one. That's
-  harmless for every guarantee above (no in-memory cache survives a restart
-  to be confused by it, and `erase` only ever runs while the server is
-  stopped) but means `seq` is not a permanent forensic id: the audit log,
-  when configured, is the durable record of *when* something happened.
-  The raw file is also plain JSON Lines for ad hoc batch analysis without
-  this CLI at all — `duckdb -c "FROM read_json('state.jsonl')"` — offline,
-  same caveat.
+  shape `viewer_state` reads back; `value`/`value_list` are literal JSON
+  text, lossless even for a `MULTISELECT`'s list); `--out FILE` writes a new
+  file instead of stdout — created `0600`, never through a symlink, and
+  refused outright if it already exists unless `--force` is also given.
+  Both `export` and a dry-run `erase` open the store **read-only**: neither
+  ever creates the file, truncates a torn tail, tightens loose permissions,
+  or writes a header into an empty file — only an applied `erase --yes`
+  touches the file on disk. `erase` is a **dry run by default** — it only
+  reports how many records would be removed until `--yes` is given — and
+  writes one audit line per applied attempt (`--audit stderr|FILE`, default
+  `stderr`; same target syntax as `options.audit`), outcome `ok`/`error`,
+  the operator's own uid (`$USER`'s, not the erased viewer's), never the
+  values. An applied erase is crash-safe: it writes the kept rows and the
+  original header line, byte for byte, to a fresh temp file in the same
+  directory, `fsync`s it, then `rename`s it over the original and `fsync`s
+  the directory — the original is never modified in place, so a crash at
+  any point before the `rename` leaves it completely untouched, and from
+  the instant the `rename` lands the new content is the only content
+  anyone can ever open at that path again. The erased user's `seq` numbers
+  are not reserved — after a restart a later submission may reuse one.
+  That's harmless for every guarantee above (no in-memory cache survives a
+  restart to be confused by it, and `erase` only ever runs while the server
+  is stopped) but means `seq` is not a permanent forensic id: the audit
+  log, when configured, is the durable record of *when* something
+  happened. The raw file is also plain JSON Lines for ad hoc batch analysis
+  without this CLI at all — `duckdb -c "FROM read_json('state.jsonl')"` —
+  offline, same caveat.
 - **Single replica in v1.** One `flock`'d file, one writer. Multiple
   replicas behind a load balancer would need an external store; not planned
   unless asked for.
@@ -803,12 +824,12 @@ server availability and disk (A5); the audit trail (A6).
 | Many people submit under one shared identity (an embed link without `user`, an API key) | Refused outright, `403`, audited |
 | Flood (disk fill, CPU via validation queries) | Per-user and global rate limits, a per-viewer cap, `max_mb`, body/text caps — validation is usually a cache hit already |
 | Double submit / racing the author's "once" gate | A client nonce dedups a retry; a per-viewer mutex makes the gate check and the append atomic |
-| Stored XSS / phishing link / formula injection against a trainer | Every cell/markdown value is escaped, links go through `safeUrl`; CSV/XLSX exports neutralise a leading `= + - @`; a lint warning flags markup built from `viewer_state` |
+| Stored XSS / phishing link / formula injection against a trainer | Every cell/markdown value is escaped, links go through `safeUrl`; every CSV export — the browser's `::DOWNLOAD_CSV` / query export (`web/app.js`, #520/#526) and `dashboard state export --format csv` (this PR) — neutralises a leading `= + - @` or a tab/CR on every string cell (a plain number, including a real negative one, is left alone); the `.xlsx` writer needs no such prefix, since its string cells carry an explicit inline-string type Excel never re-parses as a formula; a lint warning flags markup built from `viewer_state` |
 | Submit without a login | `auth` is mandatory wherever `state` is configured; `401` before anything else runs |
 | Misconfiguration (state inside `data`, a shared/world-writable directory, a symlink, two servers on one file) | Start-time refusals, `O_NOFOLLOW`, `0600`, `flock` |
 | Crash or I/O error loses or tears a record | `fdatasync` before the `201`; a torn tail is truncated and logged at the next start; an I/O error marks the store failed (`503` from then on, never a silent retry) |
 | Answers leaking into logs | The audit log never carries values; the request log only with `log_vars: values` (documented, opt-in) |
-| Erasure/export rewriting the live file | Both refuse outright while a server holds the file's `flock`; `erase` is a dry run until `--yes` |
+| Erasure/export rewriting the live file, or a crash tearing it | Both refuse outright while a server holds the file's `flock`; `export`/dry-run `erase` open read-only and never mutate the file; an applied `erase` writes to a temp file and `rename`s it over the original, so a crash leaves either the untouched original or the complete new file, never a torn mix |
 
 ## B. Static render — `serve --dashboards <dir>`
 
