@@ -1740,6 +1740,161 @@ pub fn nav_picker_rows_to_options(
     Ok(out)
 }
 
+// --------------------------------------------- nav_pickers: daterange ---
+// #556: a second nav-picker type, a global time window (`options.nav_pickers`
+// / the still-accepted singular `options.nav_picker`). Its `sql` (optional)
+// returns exactly one row of two columns, `(min, max)`, the full available
+// date range — the same author-text, run-once-per-snapshot trust level as a
+// dropdown picker's `sql` ([`nav_picker_rows_to_options`], above). `presets`
+// are computed from that `max` (never wall-clock `today()`, so a published
+// snapshot's "last 7d" means the same thing on every viewer's clock and
+// still means the same thing on a later refresh only if the data's own max
+// date moved) — pure Rust date arithmetic here, not a second DuckDB query,
+// so it needs no connection and is reusable by `dashboard --site`'s
+// connection-free parts the same way `valid_path_value_text` already is.
+
+/// `DATERANGE_PRESET_NAMES`: the fixed, documented preset vocabulary
+/// `options.nav_pickers[].presets` may list — an unknown entry refuses the
+/// server start (`LockedOptions::parse`) rather than being silently dropped,
+/// the same posture as an unknown `options` key.
+pub const DATERANGE_PRESET_NAMES: &[&str] = &["last 7d", "last 30d", "last 90d", "all"];
+
+pub fn valid_daterange_preset(name: &str) -> bool {
+    DATERANGE_PRESET_NAMES.contains(&name)
+}
+
+/// `s` parses as `YYYY-MM-DD`, a real proleptic-Gregorian calendar date
+/// (month `01`-`12`, day valid for that month, leap years handled) — never
+/// from the viewer directly, only from a `nav_pickers[].sql` row (already
+/// cast to `VARCHAR` the way [`wrap_nav_picker_sql`] casts every column) or
+/// a `path_vars` literal a viewer already passed [`valid_path_value`]'s
+/// plain-name shape check. Returns the date as a day count (days since
+/// `0000-03-01`, Howard Hinnant's `days_from_civil`) so callers can compare
+/// and do arithmetic (`to - from`, `max - 6`) with plain integer ops instead
+/// of a second date library.
+pub fn parse_iso_date(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    if !b.iter().enumerate().all(|(i, c)| {
+        if matches!(i, 4 | 7) {
+            *c == b'-'
+        } else {
+            c.is_ascii_digit()
+        }
+    }) {
+        return None;
+    }
+    let (y, m, d) = (
+        s[0..4].parse::<i64>().ok()?,
+        s[5..7].parse::<i64>().ok()?,
+        s[8..10].parse::<i64>().ok()?,
+    );
+    if !(1..=12).contains(&m) || d < 1 {
+        return None;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let max_day = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    if d > max_day {
+        return None;
+    }
+    Some(days_from_civil(y, m, d))
+}
+
+/// Howard Hinnant's `days_from_civil`: proleptic-Gregorian `(y, m, d)` to a
+/// day count relative to `1970-01-01` (so it also lines up with Unix epoch
+/// day numbers, useful only as a sanity check, never relied on here).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// The inverse of [`days_from_civil`] via [`parse_iso_date`]: a day count
+/// back to `YYYY-MM-DD`.
+pub fn format_iso_date(days: i64) -> String {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `rows` (already fetched, one row of two `VARCHAR` columns) to `(min,
+/// max)` day counts — `options.nav_pickers[].sql`'s documented shape: exactly
+/// one row, two columns, each a real calendar date, `min <= max`. Shared by
+/// the locked server's connection and `dashboard --site`'s `duckdb` CLI rows,
+/// same as [`nav_picker_rows_to_options`] is for a dropdown picker.
+pub fn daterange_bounds_from_rows(rows: &[Vec<Option<String>>]) -> Result<(i64, i64), String> {
+    if rows.len() != 1 {
+        return Err(format!(
+            "options.nav_pickers[].sql (daterange) must return exactly one row (min, max), got {}",
+            rows.len()
+        ));
+    }
+    let row = &rows[0];
+    if row.len() != 2 {
+        return Err(format!(
+            "options.nav_pickers[].sql (daterange) must return exactly two columns (min, max), got {}",
+            row.len()
+        ));
+    }
+    let parse = |i: usize, which: &str| -> Result<i64, String> {
+        let v = row[i]
+            .as_deref()
+            .ok_or_else(|| format!("options.nav_pickers[].sql (daterange): {which} is NULL"))?;
+        parse_iso_date(v).ok_or_else(|| {
+            format!(
+                "options.nav_pickers[].sql (daterange): {which} ({}) is not a YYYY-MM-DD date",
+                crate::host::access::diag(v)
+            )
+        })
+    };
+    let min = parse(0, "min")?;
+    let max = parse(1, "max")?;
+    if min > max {
+        return Err("options.nav_pickers[].sql (daterange) must return min <= max".to_string());
+    }
+    Ok((min, max))
+}
+
+/// `preset` (one of [`DATERANGE_PRESET_NAMES`]) to a `(from, to)` day-count
+/// window inside `[min, max]`, computed from `max` — never wall-clock
+/// `today()`, so the same snapshot always answers "last 7d" the same way.
+/// `"last Nd"` is the N calendar days ending on `max`, inclusive, clamped up
+/// to `min` if the data doesn't go back that far; `"all"` is `(min, max)`.
+pub fn daterange_preset_bounds(preset: &str, min: i64, max: i64) -> Option<(i64, i64)> {
+    let n: i64 = match preset {
+        "all" => return Some((min, max)),
+        "last 7d" => 7,
+        "last 30d" => 30,
+        "last 90d" => 90,
+        _ => return None,
+    };
+    Some(((max - (n - 1)).max(min), max))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1760,6 +1915,92 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    /// #556: `parse_iso_date`/`format_iso_date` round-trip, and reject the
+    /// shapes a `nav_pickers[].sql` row or a viewer-chosen `path_vars` value
+    /// could send that merely *look* plain-name-shaped (digits and dashes)
+    /// without being a real calendar date.
+    #[test]
+    fn iso_date_round_trips_and_rejects_garbage() {
+        for s in [
+            "2026-01-15",
+            "2026-02-28",
+            "2024-02-29",
+            "0001-01-01",
+            "9999-12-31",
+        ] {
+            let d = parse_iso_date(s).unwrap_or_else(|| panic!("{s} should parse"));
+            assert_eq!(format_iso_date(d), s);
+        }
+        // Not a leap year.
+        assert!(parse_iso_date("2023-02-29").is_none());
+        // Month/day out of range, wrong shape, not digits.
+        for s in [
+            "2026-13-01",
+            "2026-00-01",
+            "2026-02-30",
+            "2026-1-15",
+            "20260115",
+            "2026/01/15",
+            "",
+            "2026-01-15x",
+            "DROP TABLE",
+        ] {
+            assert!(parse_iso_date(s).is_none(), "{s} should not parse");
+        }
+        // Ordering across a day count must agree with calendar order (used
+        // for `from <= to` and for clamping).
+        assert!(parse_iso_date("2026-01-01").unwrap() < parse_iso_date("2026-01-02").unwrap());
+        assert!(parse_iso_date("2025-12-31").unwrap() < parse_iso_date("2026-01-01").unwrap());
+    }
+
+    #[test]
+    fn daterange_bounds_from_rows_checks_shape_and_order() {
+        let row = |a: Option<&str>, b: Option<&str>| {
+            vec![vec![a.map(str::to_string), b.map(str::to_string)]]
+        };
+        let (min, max) =
+            daterange_bounds_from_rows(&row(Some("2026-01-01"), Some("2026-01-31"))).unwrap();
+        assert_eq!(
+            (format_iso_date(min), format_iso_date(max)),
+            ("2026-01-01".to_string(), "2026-01-31".to_string())
+        );
+        // min > max.
+        assert!(daterange_bounds_from_rows(&row(Some("2026-02-01"), Some("2026-01-01"))).is_err());
+        // Not a date / NULL / wrong column count.
+        assert!(daterange_bounds_from_rows(&row(Some("not a date"), Some("2026-01-31"))).is_err());
+        assert!(daterange_bounds_from_rows(&row(None, Some("2026-01-31"))).is_err());
+        assert!(daterange_bounds_from_rows(&[vec![Some("2026-01-01".into())]]).is_err());
+        // No rows, or more than one.
+        assert!(daterange_bounds_from_rows(&[]).is_err());
+        assert!(daterange_bounds_from_rows(&[
+            row(Some("2026-01-01"), Some("2026-01-31")).remove(0),
+            row(Some("2026-01-01"), Some("2026-01-31")).remove(0),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn daterange_preset_bounds_relative_to_max_not_wall_clock() {
+        let min = parse_iso_date("2026-01-01").unwrap();
+        let max = parse_iso_date("2026-01-31").unwrap();
+        let (f, t) = daterange_preset_bounds("last 7d", min, max).unwrap();
+        assert_eq!(
+            (format_iso_date(f), format_iso_date(t)),
+            ("2026-01-25".to_string(), "2026-01-31".to_string())
+        );
+        // Clamped to `min` when the window would reach past it.
+        let tight_min = parse_iso_date("2026-01-29").unwrap();
+        let (f, _) = daterange_preset_bounds("last 7d", tight_min, max).unwrap();
+        assert_eq!(f, tight_min);
+        let (f, t) = daterange_preset_bounds("all", min, max).unwrap();
+        assert_eq!((f, t), (min, max));
+        assert!(daterange_preset_bounds("last 7 days", min, max).is_none());
+        for p in DATERANGE_PRESET_NAMES {
+            assert!(valid_daterange_preset(p));
+        }
+        assert!(!valid_daterange_preset("last week"));
+    }
 
     #[test]
     fn dashboard_id_from_path_matches_file_stem_not_a_repeated_suffix_trim() {

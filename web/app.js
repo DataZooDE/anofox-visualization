@@ -1300,7 +1300,12 @@ function servedVarSig(deps, vars) {
 // TRUE/FALSE/NULL) back into a JSON value for /api/panel.
 function sqlLiteralToJson(lit) {
   const t = String(lit).trim();
-  if (/^null$/i.test(t)) return null;
+  // #556 nit (review-582): `NULL::VARCHAR`, not just a bare `NULL`, is
+  // what the daterange picker's "Clear" sends (web/app.js's own `lit`,
+  // renderDateRangePicker) — an explicit type so a local/`--site` run
+  // doesn't give the variable DuckDB's default INTEGER type. Either
+  // spelling means the same "no value" here.
+  if (/^null(::\w+)?$/i.test(t)) return null;
   if (/^true$/i.test(t)) return true;
   if (/^false$/i.test(t)) return false;
   if (t.startsWith("'") && t.endsWith("'") && t.length >= 2) return t.slice(1, -1).replace(/''/g, "'");
@@ -1327,7 +1332,9 @@ function sqlLiteralToJson(lit) {
 // because there is no server left to enforce it instead.
 function validPathValueLiteral(lit) {
   const t = String(lit).trim();
-  if (/^null$/i.test(t)) return true;
+  // #556 nit (review-582): accept the daterange "Clear" control's typed
+  // `NULL::VARCHAR` too (sqlLiteralToJson above takes the same pair).
+  if (/^null(::\w+)?$/i.test(t)) return true;
   if (t.length && /^[0-9]+$/.test(t)) return true;
   if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
     const inner = t.slice(1, -1).replace(/''/g, "'");
@@ -6959,6 +6966,15 @@ function renderCtx() {
   if (dpPrimary) ctx.primary = dpPrimary;
   return JSON.stringify(ctx);
 }
+// renderCtx() merged with extra keys (M2f-A, #149: a map panel's current
+// `frame`) — renderCtx() itself may come back as "" or a bare brand colour
+// (the plain/byte-identical case) rather than JSON, so this is the one spot
+// that turns it into an object instead of every call site re-deriving one.
+function ctxWith(extra) {
+  const base = renderCtx();
+  const ctx = base.startsWith("{") ? JSON.parse(base) : base ? { primary: base } : {};
+  return JSON.stringify({ ...ctx, ...extra });
+}
 // The dashboard locale (::LOCALE or the theme's locale token), "" = en-US.
 function dashLocale() {
   // ?locale=de-DE: a viewer override (not in served/locked mode).
@@ -7679,7 +7695,15 @@ function coerceSeededSelection(name, mode) {
 async function setSelectionVars() {
   try {
     await runSql(`SET VARIABLE selected = '${dpFilter.replace(/'/g, "''")}'`);
-    const q = (x) => `'${String(x).replace(/'/g, "''")}'`;
+    // #556 nit (review-582): a daterange "clear" is the first thing that
+    // ever puts a real `null` into `dpXf` for a `path_vars`-eligible key
+    // (a dropdown always SETs a string) — without this check it went out
+    // as the *string* `'null'`, not SQL `NULL` (`q(null)` → `String(null)`
+    // → `"null"`), so the var never actually unset and every later
+    // `getvariable()` on it kept returning the string "null" instead of
+    // NULL. Same convention as the period vars' own `v == null ? "NULL" :
+    // …` (below, `periodUrlParams`'s caller).
+    const q = (x) => (x == null ? "NULL" : `'${String(x).replace(/'/g, "''")}'`);
     for (const [k, v] of Object.entries(dpXf)) {
       if (URL_VAR_RE.test(k)) {
         // a multi-select table keeps a list: getvariable('<column>') is VARCHAR[]
@@ -7697,7 +7721,11 @@ function urlStateParams() {
   const out = [];
   const add = (k, v) => (Array.isArray(v) ? (v.length ? v : [""]) : [v]).forEach((x) => out.push(["v." + k, String(x)]));
   for (const [k, def] of Object.entries(dpVarDefault)) {
-    if (dpVars[k] !== undefined && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
+    // #556 nit (review-582): a daterange "clear" sets dpVars[k] to null
+    // (the same NULL the dropdown branch below already skips via its own
+    // `v == null` check) — skip it here too, or `JSON.stringify(null)`
+    // ("null") would end up as a literal `?v.<k>=null` on the URL.
+    if (dpVars[k] !== undefined && dpVars[k] !== null && JSON.stringify(dpVars[k]) !== def) add(k, dpVars[k]);
   }
   for (const [col, p] of Object.entries(dpPeriodUrl)) {
     for (const [k, v] of periodUrlParams(p.prefix, dpVars[col], p.def)) out.push(["v." + k, v]);
@@ -8470,12 +8498,36 @@ function refreshServedNavHrefs() {
       a.href = servedNavHref(a.dataset.navId, served);
     });
   }
-  const np = served.navPicker;
-  const sel = np && document.querySelector(".served-nav-picker select");
-  if (sel) {
+  for (const np of servedNavPickers(served)) {
+    if (np.type === "daterange") {
+      const [fromVar, toVar] = np.vars;
+      const wrap = document.querySelector('.served-nav-picker[data-vars="' + fromVar + "," + toVar + '"]');
+      if (!wrap) continue;
+      const from = wrap.querySelector('input[data-var="' + fromVar + '"]');
+      const to = wrap.querySelector('input[data-var="' + toVar + '"]');
+      const fv = pathVarValue(fromVar);
+      const tv = pathVarValue(toVar);
+      if (from && fv !== undefined && fv !== null && fv !== "") from.value = fv;
+      if (to && tv !== undefined && tv !== null && tv !== "") to.value = tv;
+      continue;
+    }
+    const sel = document.querySelector('.served-nav-picker[data-var="' + np.var + '"] select');
+    if (!sel) continue;
     const v = String(pathVarValue(np.var) ?? "");
     if (sel.value !== v && [...sel.options].some((o) => o.value === v)) sel.value = v;
   }
+}
+// #556: `window.__served.navPickers` (a locked server — several pickers,
+// including `daterange`) or the still-accepted singular `window.__served
+// .navPicker` (a static site, `dashboard --site`'s `site.json`: always a
+// plain dropdown) — normalized here so the rest of the served nav only
+// ever deals with one array, in one shape (`{type, ...}`, `type` defaults
+// to `"dropdown"`).
+function servedNavPickers(served) {
+  if (!served) return [];
+  if (Array.isArray(served.navPickers)) return served.navPickers;
+  if (served.navPicker) return [Object.assign({ type: "dropdown" }, served.navPicker)];
+  return [];
 }
 function servedNavLink(d, served) {
   const a = document.createElement("a");
@@ -8498,20 +8550,26 @@ function servedNavLink(d, served) {
   }
   return a;
 }
-// #407 part 3: the nav-bar picker for one `path_vars` variable — a plain
-// <select>, right of the dashboard links (CSS pushes it there: it's just
-// the last flex child). Its options come from `window.__served.navPicker`
-// (server-computed, see `build_nav_picker` in duckext/src/serve.rs); labels
-// are set with `textContent`, never `innerHTML`. `renderServedNav` runs
-// before the first `run()`, so `pathVarValue` doesn't hold the viewer's
-// value yet — the initial selection is read straight from `?v.<var>=`
-// instead; `refreshServedNavHrefs` (called from `syncUrlState` after every
-// run) keeps the control in sync with it from then on.
-function renderNavPicker(served) {
-  const np = served.navPicker;
-  if (!np || !Array.isArray(np.options) || !np.options.length) return null;
+// #407 part 3 / #556: the nav-bar's own controls, right of the dashboard
+// links (CSS pushes them there: they're just the last flex children).
+// `servedNavPickers` normalizes `window.__served.navPickers`/`.navPicker`
+// into one array; each entry is a dropdown (unchanged since #407) or a
+// `daterange` (#556, below). Labels are set with `textContent`, never
+// `innerHTML`. `renderServedNav` runs before the first `run()`, so
+// `pathVarValue` doesn't hold the viewer's value yet — the initial
+// selection is read straight from `?v.<var>=` instead; `refreshServedNavHrefs`
+// (called from `syncUrlState` after every run) keeps the controls in sync
+// with it from then on.
+function renderNavPickers(served) {
+  return servedNavPickers(served)
+    .map((np) => (np.type === "daterange" ? renderDateRangePicker(np) : renderDropdownPicker(np)))
+    .filter(Boolean);
+}
+function renderDropdownPicker(np) {
+  if (!Array.isArray(np.options) || !np.options.length) return null;
   const wrap = document.createElement("label");
   wrap.className = "served-nav-picker";
+  wrap.dataset.var = np.var;
   const cap = document.createElement("span");
   cap.className = "served-nav-picker-label";
   cap.textContent = captionColon(np.label || np.var);
@@ -8543,9 +8601,145 @@ function renderNavPicker(served) {
   wrap.append(cap, sel);
   return wrap;
 }
+// #556: a global time window — two <input type=date>, preset buttons
+// (computed server-side, never wall-clock "today" on the page — see
+// `daterange_preset_bounds` in duckext/src/serve.rs) and an explicit
+// "Apply" button. Applying runs both SET VARIABLEs, in order, before the
+// rerun, so the server is never asked to validate one half of the pair
+// against the *old* value of the other (it would otherwise see a
+// momentary from > to on every edit of either input). A plain button with
+// its listener attached here in script, not an inline onchange attribute —
+// the CSP (#252) has no 'unsafe-inline'/'unsafe-hashes' for script-src, the
+// exact bug #570 fixed for the script-free pages' own controls.
+function renderDateRangePicker(np) {
+  const [fromVar, toVar] = np.vars;
+  const wrap = document.createElement("div");
+  wrap.className = "served-nav-picker served-nav-daterange";
+  wrap.dataset.vars = fromVar + "," + toVar;
+  const cap = document.createElement("span");
+  cap.className = "served-nav-picker-label";
+  cap.textContent = captionColon(np.label || "Time window");
+  const params = new URLSearchParams(location.search);
+  const mk = (varname, kind) => {
+    const inp = document.createElement("input");
+    inp.type = "date";
+    inp.dataset.var = varname;
+    inp.setAttribute("aria-label", (np.label || "Time window") + ": " + kind);
+    if (np.min) inp.min = np.min;
+    if (np.max) inp.max = np.max;
+    inp.value = params.get("v." + varname) || "";
+    return inp;
+  };
+  const from = mk(fromVar, "from");
+  const to = mk(toVar, "to");
+  const arrow = document.createElement("span");
+  arrow.textContent = "→";
+  arrow.className = "daterange-arrow";
+  // #556 nit (review-582): a message for the from>to case and for why
+  // Apply is disabled — `role=status`/`aria-live` so it's announced
+  // without moving focus.
+  const hint = document.createElement("span");
+  hint.className = "served-nav-hint";
+  hint.setAttribute("role", "status");
+  hint.setAttribute("aria-live", "polite");
+  // `f`/`t` is `null` for "clear" (both sides) — `clamp_daterange_values`
+  // (duckext/src/serve.rs) treats a NULL path_vars value as "no value",
+  // skipping both the calendar-date check and the min/max clamp, so this
+  // is the one legal way to get back to an unfiltered dashboard once a
+  // window has been set (there's no sentinel date for "unset").
+  const setVars = async (f, t) => {
+    if (fromVar in dpVarDefault) dpVars[fromVar] = f;
+    else dpXf[fromVar] = f;
+    if (toVar in dpVarDefault) dpVars[toVar] = t;
+    else dpXf[toVar] = t;
+    // `NULL::VARCHAR`, not a bare `NULL` — DuckDB gives an untyped `SET
+    // VARIABLE x = NULL` the default INTEGER type, which then breaks any
+    // `coalesce(getvariable(x), '…')::VARCHAR` the dashboard does (the
+    // same fix `clamp_daterange_values`, duckext/src/serve.rs, applies
+    // server-side for a served page — this is the local/`--site` path).
+    const lit = (v) => (v == null ? "NULL::VARCHAR" : `'${v.replace(/'/g, "''")}'`);
+    await runSql(`SET VARIABLE ${fromVar} = ${lit(f)}`);
+    await runSql(`SET VARIABLE ${toVar} = ${lit(t)}`);
+    run(false);
+  };
+  const apply = document.createElement("button");
+  apply.type = "button";
+  apply.className = "served-nav-apply";
+  apply.textContent = "Apply";
+  // #556 nit (review-582): Apply used to do nothing, silently, when only
+  // one input had a value. With only one side filled, the other side now
+  // falls back to the picker's own bound (`np.min`/`np.max`, the same
+  // full range a "clear"/"all" preset would use) when the picker has one
+  // — i.e. "from the earliest/latest available date". A plain two-input
+  // picker with no `sql` has no such bound to fall back on, so Apply
+  // stays disabled with a hint until both sides are filled. The server
+  // re-checks `from <= to` and re-clamps regardless — this is UX only.
+  const updateApplyState = () => {
+    hint.textContent = "";
+    const f = from.value,
+      t = to.value;
+    if (!f && !t) {
+      apply.disabled = true;
+      apply.title = "Pick a start and end date.";
+    } else if ((!f && !np.min) || (!t && !np.max)) {
+      apply.disabled = true;
+      apply.title = "This picker has no stored range to fill in the other date — pick both.";
+    } else {
+      apply.disabled = false;
+      apply.title = f && t ? "" : "The empty side uses the full available range.";
+    }
+  };
+  from.addEventListener("input", updateApplyState);
+  to.addEventListener("input", updateApplyState);
+  apply.onclick = () => {
+    const f = from.value || np.min || null;
+    const t = to.value || np.max || null;
+    if (!f || !t) return; // updateApplyState already disables this case
+    if (f > t) {
+      // ISO `YYYY-MM-DD` strings compare lexicographically in date order.
+      hint.textContent = "Start can't be after end.";
+      return;
+    }
+    hint.textContent = "";
+    setVars(f, t);
+  };
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "served-nav-clear";
+  clear.textContent = "Clear";
+  clear.title = "Clear the " + (np.label || "time window") + " filter";
+  clear.onclick = () => {
+    from.value = "";
+    to.value = "";
+    updateApplyState();
+    setVars(null, null);
+  };
+  updateApplyState();
+  wrap.append(cap, from, arrow, to, apply, clear, hint);
+  if (Array.isArray(np.presets) && np.presets.length) {
+    const bar = document.createElement("span");
+    bar.className = "served-nav-presets";
+    bar.setAttribute("role", "group");
+    bar.setAttribute("aria-label", "Presets");
+    for (const p of np.presets) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = p.label || p.key;
+      btn.onclick = () => {
+        from.value = p.from;
+        to.value = p.to;
+        updateApplyState();
+        setVars(p.from, p.to);
+      };
+      bar.appendChild(btn);
+    }
+    wrap.appendChild(bar);
+  }
+  return wrap;
+}
 function renderServedNav(served) {
   const hasLinks = !!served && Array.isArray(served.nav) && served.nav.length >= 2;
-  const hasPicker = !!served && !!served.navPicker;
+  const hasPicker = servedNavPickers(served).length > 0;
   if (!hasLinks && !hasPicker) return;
   if (document.querySelector(".served-nav")) return;
   const nav = document.createElement("nav");
@@ -8571,8 +8765,7 @@ function renderServedNav(served) {
       }
     } else nav.appendChild(servedNavMenu(served, groups));
   }
-  const picker = hasPicker && renderNavPicker(served);
-  if (picker) nav.appendChild(picker);
+  if (hasPicker) for (const picker of renderNavPickers(served)) nav.appendChild(picker);
   // #417: a published site has no server to answer a real /d/<id> request —
   // every nav link switches in place instead (siteGo), so Wasm and the
   // loaded data stay warm. A locked server's own nav still navigates for
@@ -10944,11 +11137,13 @@ async function runOnce(fresh = true, pv = preview) {
     await lazyPool(lazy.jobs.filter((j) => paneShown(j.ph)), true);
     lazy.jobs = lazy.jobs.filter((j) => !j.done);
   }
-  // A re-run keeps each chart's ::STORY step (a full run starts at the overview).
-  if (fresh) dpStorySteps = {};
+  // A re-run keeps each chart's ::STORY step (a full run starts at the
+  // overview) and, for a time map, its ::FRAME step (M2f-A, #149).
+  if (fresh) dpStorySteps = dpFrameSteps = {};
   else
     document.querySelectorAll(".dash .panel[data-stmt]").forEach((p) => {
       if (p._story) dpStorySteps[p.dataset.stmt] = p._story.step();
+      if (p._frames) dpFrameSteps[p.dataset.stmt] = p._frames.step();
     });
   // A chart (or one of its marks) holding the keyboard focus hands it to its
   // replacement — however the run started (a click, an input, ::REFRESH).
@@ -11109,15 +11304,18 @@ function animateIn(panels = document.querySelectorAll(".dash .panel")) {
 // Render a chart's SVG into its holder — the dashboard run and every in-place
 // re-render (toolbox chart-type switch, zoom/pan) — with its entrance mode.
 // A chart with ::TRACKs (holder._tracks) renders as one stack, so the strips
-// keep its plot area and x window. Follow with wireCharts() once the holder
-// is in the page.
+// keep its plot area and x window. A time map mid-step (holder._frame set by
+// mountFrames, M2f-A, #149) carries its frame through the same context as
+// zoom's own window, so zoom, resize, theme and ::FIT re-renders all keep it.
+// Follow with wireCharts() once the holder is in the page.
 function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const t0 = performance.now();
+  const ctx = holder._frame != null ? ctxWith({ frame: holder._frame }) : renderCtx();
   const tracks = holder._tracks || [];
   if (tracks.length) {
     let svgs = [];
     try {
-      svgs = JSON.parse(render_stack(JSON.stringify({ chart: { rows, roles }, tracks }), w, ph, renderCtx(), zoom));
+      svgs = JSON.parse(render_stack(JSON.stringify({ chart: { rows, roles }, tracks }), w, ph, ctx, zoom));
     } catch (_) {}
     holder.innerHTML = svgs[0] || "";
     if (!holder._trackBox) {
@@ -11127,9 +11325,9 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
     }
     holder._trackBox.innerHTML = svgs.slice(1).join("");
     holder._trackBox.querySelectorAll(":scope > svg").forEach((svg, k) => (svg._track = tracks[k]));
-  } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, renderCtx(), zoom);
+  } else holder.innerHTML = render_panel(rows, JSON.stringify(roles), w, ph, ctx, zoom);
   holder._zoom = zoom; // a re-fit to a new width keeps the zoom window
-  widenDiagram(holder, w, (ww) => render_panel(rows, JSON.stringify(roles), ww, ph, renderCtx(), zoom));
+  widenDiagram(holder, w, (ww) => render_panel(rows, JSON.stringify(roles), ww, ph, ctx, zoom));
   markFitted(holder, ph);
   markAnim(holder, roles);
   performance.measure("dp:render", { start: t0 });
@@ -11617,10 +11815,11 @@ if (typeof ResizeObserver !== "undefined")
   });
 
 // Wire freshly rendered charts: hover, selection, toolbox and accessibility
-// (attachHover), then the ::STORY steppers.
+// (attachHover), then the ::STORY and ::FRAME steppers.
 function wireCharts() {
   attachHover();
   mountStories();
+  mountFrames();
   resumeLinkReturn();
 }
 
@@ -11640,6 +11839,71 @@ function mountStories() {
     const step = panel._story ? panel._story.step() : dpStorySteps[panel.dataset.stmt] || 0;
     panel._story = dpAnim.story(panel, svg, step);
   });
+}
+
+// ::FRAME players (web/anim.js, M2f-A #149) under every time map. The bar
+// outlives the svg — a zoom/resize/theme re-render only replaces the svg, so
+// a panel that already has one is left alone; only a fresh map (or a re-run
+// that dropped ::FRAME) (re)builds it.
+let dpFrameSteps = {}; // statement index → the frame to restore after a re-run
+function mountFrames() {
+  document.querySelectorAll(".dash .panel").forEach((panel) => {
+    const holder = panel.querySelector(":scope > .panel-svg");
+    const svg = holder && holder.querySelector(":scope > svg[data-frames]");
+    if (!svg) {
+      if (panel._frames) panel.querySelectorAll(".dp-frames").forEach((e) => e.remove());
+      panel._frames = null;
+      return;
+    }
+    if (panel._frames && panel.querySelector(":scope > .dp-frames")) return;
+    const dp = panel._dp;
+    const start = panel._frames ? panel._frames.step() : dpFrameSteps[panel.dataset.stmt] ?? +svg.dataset.frame;
+    // The step's own re-render + re-wire (the perf budget's "draw(k)"):
+    // render through the same path zoom/::FIT use (so it keeps the holder's
+    // current zoom window and size), then only what a step actually needs —
+    // hover/click on the fresh marks, the as-table view and an open tooltip —
+    // never the full wireCharts() sweep (mountStories et al. have nothing to
+    // redo here; a frame map carries no ::STORY, D25).
+    const draw = (k) => {
+      holder._frame = k;
+      if (dp) {
+        const [w, h] = chartSize(holder, dp);
+        renderChart(holder, dp.rows, dp.drawn || dp.roles, w, h, holder._zoom || "");
+        markFitted(holder, h);
+      }
+      attachHover();
+      refreshAsTableView(panel);
+      reopenMapTip(panel);
+      return holder.querySelector(":scope > svg");
+    };
+    panel._frames = dpAnim.frames(panel, svg, start, draw);
+  });
+}
+// "Charts as tables" (#401): a shown table view was built once from the old
+// svg — a frame step must rebuild it, or it keeps showing the previous
+// frame's values while the chart itself has moved on.
+function refreshAsTableView(panel) {
+  if (!dpAsTables) return;
+  const view = panel.querySelector(":scope > .dp-astable-view");
+  const msvg = panel.querySelector(":scope > .panel-svg > svg[data-map]");
+  if (!view || !msvg) return;
+  const title = panel.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
+  view.innerHTML = mapTableHtml(msvg, 200, title);
+}
+// A tooltip left open on a map feature (dpTipMark, set in attachHover)
+// re-shown on the same feature after a frame step — its value just changed
+// under a pointer that hasn't moved (M2f-A, #149).
+function reopenMapTip(panel) {
+  if (!dpTipMark || dpTipMark.panel !== panel) return;
+  const el = [...panel.querySelectorAll("svg[data-map] [data-x]")].find((e) => e.getAttribute("data-x") === dpTipMark.x);
+  if (!el) {
+    dpTipMark = null;
+    $("dp-tip")?.classList.remove("show");
+    return;
+  }
+  const at = { clientX: dpLastMouse.x, clientY: dpLastMouse.y };
+  el.dispatchEvent(new MouseEvent("mouseenter", at));
+  el.dispatchEvent(new MouseEvent("mousemove", at));
 }
 
 // The entrance a chart plays, on its root <svg> as `data-anim` (the static
@@ -16342,6 +16606,20 @@ async function downloadHtml() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
+  // D23 (M2f-A, #149): the live frame player doesn't survive the export
+  // (M2f-B embeds the frames themselves); strip() above already dropped the
+  // bar it stood in — leave one line where it was. Which frame is on screen
+  // is already named in the map's own subtitle (D19), drawn by ggplot-rs.
+  snap.querySelectorAll("svg[data-frames]").forEach((svg) => {
+    let n = 0;
+    try {
+      n = JSON.parse(svg.getAttribute("data-frames") || "[]").length;
+    } catch (_) {}
+    const note = document.createElement("p");
+    note.className = "dp-frames-note";
+    note.textContent = `${n} frames — Play in the live dashboard`;
+    svg.parentElement.after(note);
+  });
   // `::GUIDE_STEP` (#523): unlike the old full flatten, the export keeps the
   // stepper itself — Back/Next, the progress strip, the step list —
   // SNAPSHOT_JS re-wires them the same way it re-wires tabs and the ::VIEW
@@ -16960,6 +17238,12 @@ function isRuleMark(el) {
   return g === "vline" || g === "hline" || el.getAttribute("data-part") === "decorative";
 }
 
+// The feature a map tooltip is open on (M2f-A, #149: reopenMapTip reshows it
+// after a frame step moves the mouse off nothing) and the pointer's last
+// client position (every mousemove over a wired mark updates it), so the
+// re-show lands at the same spot without a real mouse event.
+let dpTipMark = null;
+let dpLastMouse = { x: 0, y: 0 };
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -17062,8 +17346,12 @@ function attachHover() {
         tipRow(info, fill);
       tip.classList.add("show");
       if (isMapMark) mapHoverEmph(series);
+      // M2f-A (#149): a time map's own value changes under the pointer at
+      // each frame step — remembered so reopenMapTip() can re-show it there.
+      if (isMapMark) dpTipMark = { panel: el.closest(".panel"), x: el.getAttribute("data-x") };
     });
     el.addEventListener("mousemove", (e) => {
+      dpLastMouse = { x: e.clientX, y: e.clientY };
       if (pointered()) return;
       tip.style.left = e.clientX + 14 + "px";
       tip.style.top = e.clientY + 14 + "px";
@@ -17071,6 +17359,7 @@ function attachHover() {
     el.addEventListener("mouseleave", () => {
       if (isMapMark) mapHoverEmph(null);
       else if (!rule && rootSvg(el)._dpHf) hoverFocus(rootSvg(el), null);
+      if (isMapMark && dpTipMark && dpTipMark.x === el.getAttribute("data-x")) dpTipMark = null;
       if (pointered()) return;
       tip.classList.remove("show");
     });

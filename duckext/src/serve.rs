@@ -819,11 +819,14 @@ pub struct LockedOptions {
     /// Variables whose values name a file or folder inside `data`: each must
     /// be a plain name (`[A-Za-z0-9_.-]`, not starting with `.`).
     pub path_vars: Vec<String>,
-    /// `nav_picker` (#407 part 3): a dropdown in the served nav bar that sets
-    /// one `path_vars` variable for every page. `var` must be one of
-    /// `path_vars`; `sql` is author text, run once per snapshot (never from
-    /// the viewer) — see [`NavPicker`] and `build_nav_picker`.
-    pub nav_picker: Option<NavPicker>,
+    /// `nav_pickers` (#407 part 3, #556): controls in the served nav bar
+    /// that each set one or two `path_vars` variables for every page —
+    /// drawn left to right in list order. `options.nav_picker` (singular, a
+    /// bare object) is still accepted as a one-element list; the two keys
+    /// may not both be set. Every `sql` is author text, run once per
+    /// snapshot (never from the viewer) — see [`NavPicker`] and
+    /// `build_nav_picker`.
+    pub nav_pickers: Vec<NavPicker>,
     /// `auth`: the viewer login — an auth proxy, JWT/OIDC, embed links, API
     /// keys (every request but `/health` needs it; the claims become
     /// `__claim_*` variables).
@@ -878,17 +881,197 @@ pub struct LockedOptions {
     pub max_asset_bytes: usize,
 }
 
-/// `options.nav_picker`: `{"var": "model", "sql": "SELECT model_id, title FROM …", "label": "Model"}`.
-/// `sql` must be exactly one query (checked like every `data`-folder
-/// statement) and is run once per snapshot build (startup + every refresh),
-/// with `anofox_data` set and no viewer context — never per-request, never
-/// with the viewer's claims. Its rows become the picker's options, each
-/// re-checked against the same plain-name rule as a `path_vars` value.
+/// One entry of `options.nav_pickers` (or the single-element list
+/// `options.nav_picker` unwraps to): `{"var": "model", "sql": "SELECT
+/// model_id, title FROM …", "label": "Model"}` (`Dropdown`, today's only
+/// shape — `type` defaults to it) or `{"type": "daterange", "vars":
+/// ["view_from", "view_to"], "sql": "SELECT min(d)::DATE, max(d)::DATE FROM
+/// …", "presets": ["last 7d", "all"]}` (#556).
+///
+/// A `Dropdown`'s `sql` must be exactly one query (checked like every
+/// `data`-folder statement) and is run once per snapshot build (startup +
+/// every refresh), with `anofox_data` set and no viewer context — never
+/// per-request, never with the viewer's claims. Its rows become the
+/// picker's options, each re-checked against the same plain-name rule as a
+/// `path_vars` value ([`nav_picker_rows_to_options`]).
+///
+/// A `DateRange`'s `vars` are `[from, to]`, both required to be in
+/// `path_vars` ([`LockedOptions::parse`]). Its `sql` is optional and, when
+/// given, has the same trust level and run-once cadence as a dropdown's:
+/// exactly one row of two columns, `(min, max)`, the full available date
+/// range (`daterange_bounds_from_rows`). `presets` names entries of
+/// `DATERANGE_PRESET_NAMES`, each computed from that `max` — never
+/// wall-clock `today()` — and requires `sql` (there is no `max` to compute
+/// them from otherwise); refused at parse time without it. Without `sql`
+/// the picker is two plain, unbounded date inputs.
 #[derive(Clone, Debug)]
-pub struct NavPicker {
-    pub var: String,
-    pub sql: String,
-    pub label: Option<String>,
+pub enum NavPicker {
+    Dropdown {
+        var: String,
+        sql: String,
+        label: Option<String>,
+    },
+    DateRange {
+        vars: [String; 2],
+        sql: Option<String>,
+        presets: Vec<String>,
+        label: Option<String>,
+    },
+}
+
+impl NavPicker {
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            NavPicker::Dropdown { label, .. } | NavPicker::DateRange { label, .. } => {
+                label.as_deref()
+            }
+        }
+    }
+    /// Every `path_vars` name this picker sets (one for a dropdown, two for
+    /// a date range) — shared by the startup `path_vars` check and the
+    /// request-time daterange validation.
+    pub fn vars(&self) -> &[String] {
+        match self {
+            NavPicker::Dropdown { var, .. } => std::slice::from_ref(var),
+            NavPicker::DateRange { vars, .. } => vars,
+        }
+    }
+}
+
+/// `options.nav_pickers`/`options.nav_picker`: at most this many pickers —
+/// each is inlined into every served page, so an unbounded list would be as
+/// wasteful as an unbounded `nav_picker.sql` result.
+const MAX_NAV_PICKERS: usize = 8;
+
+/// One `options.nav_picker`/`options.nav_pickers[]` entry: `"type"` picks
+/// `Dropdown` (default — today's only shape, so an untyped object parses
+/// exactly as before) or `"daterange"` (#556).
+fn parse_nav_picker(val: &serde_json::Value) -> Result<NavPicker, String> {
+    let m = val.as_object().ok_or(
+        "options.nav_picker(s): must be an object like {\"var\": \"model\", \"sql\": \"SELECT …\", \"label\": \"Model\"} or {\"type\": \"daterange\", \"vars\": [\"from\", \"to\"], …}",
+    )?;
+    match m.get("type").and_then(|v| v.as_str()) {
+        None | Some("dropdown") => parse_dropdown_nav_picker(m),
+        Some("daterange") => parse_daterange_nav_picker(m),
+        Some(other) => Err(format!(
+            "options.nav_picker(s).type: unknown '{other}' (dropdown, daterange)"
+        )),
+    }
+}
+
+fn parse_dropdown_nav_picker(
+    m: &serde_json::Map<String, serde_json::Value>,
+) -> Result<NavPicker, String> {
+    if let Some(other) = m
+        .keys()
+        .find(|k| !matches!(k.as_str(), "type" | "var" | "sql" | "label"))
+    {
+        return Err(format!(
+            "options.nav_picker(s): unknown key '{other}' (type, var, sql, label)"
+        ));
+    }
+    let var = m
+        .get("var")
+        .and_then(|v| v.as_str())
+        .filter(|v| sv::valid_ident(v))
+        .ok_or("options.nav_picker(s).var must be a variable name")?;
+    let sql = m
+        .get("sql")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("options.nav_picker(s).sql must be a SELECT query")?;
+    let label = parse_nav_picker_label(m)?;
+    Ok(NavPicker::Dropdown {
+        var: var.to_string(),
+        sql: sql.to_string(),
+        label,
+    })
+}
+
+fn parse_daterange_nav_picker(
+    m: &serde_json::Map<String, serde_json::Value>,
+) -> Result<NavPicker, String> {
+    if let Some(other) = m
+        .keys()
+        .find(|k| !matches!(k.as_str(), "type" | "vars" | "sql" | "label" | "presets"))
+    {
+        return Err(format!(
+            "options.nav_picker(s) (daterange): unknown key '{other}' (type, vars, sql, label, presets)"
+        ));
+    }
+    let vars_arr = m
+        .get("vars")
+        .and_then(|v| v.as_array())
+        .filter(|a| a.len() == 2)
+        .ok_or(
+            "options.nav_picker(s) (daterange).vars must be an array of exactly two variable names [from, to]",
+        )?;
+    let mut vars = [String::new(), String::new()];
+    for (i, v) in vars_arr.iter().enumerate() {
+        let v = v
+            .as_str()
+            .filter(|v| sv::valid_ident(v))
+            .ok_or("options.nav_picker(s) (daterange).vars must name variables")?;
+        vars[i] = v.to_string();
+    }
+    if vars[0].eq_ignore_ascii_case(&vars[1]) {
+        return Err(
+            "options.nav_picker(s) (daterange).vars: from and to must be different variables"
+                .into(),
+        );
+    }
+    let sql = match m.get("sql") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or("options.nav_picker(s) (daterange).sql must be a SELECT query")?
+                .to_string(),
+        ),
+    };
+    let mut presets = Vec::new();
+    if let Some(p) = m.get("presets") {
+        if sql.is_none() {
+            return Err(
+                "options.nav_picker(s) (daterange).presets needs .sql (presets are computed \
+                 from its max date, which there is none of without it)"
+                    .into(),
+            );
+        }
+        let arr = p
+            .as_array()
+            .ok_or("options.nav_picker(s) (daterange).presets must be an array of preset names")?;
+        for p in arr {
+            let p = p.as_str().filter(|p| sv::valid_daterange_preset(p)).ok_or_else(|| {
+                format!(
+                    "options.nav_picker(s) (daterange).presets: unknown preset (expected one of {})",
+                    sv::DATERANGE_PRESET_NAMES.join(", ")
+                )
+            })?;
+            presets.push(p.to_string());
+        }
+    }
+    let label = parse_nav_picker_label(m)?;
+    Ok(NavPicker::DateRange {
+        vars,
+        sql,
+        presets,
+        label,
+    })
+}
+
+fn parse_nav_picker_label(
+    m: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<String>, String> {
+    match m.get("label") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() && s.chars().count() <= 100 => {
+            Ok(Some(s.clone()))
+        }
+        _ => Err("options.nav_picker(s).label must be a short (<=100 character) string".into()),
+    }
 }
 
 /// The `hash` mask's HMAC key. Never printed.
@@ -918,7 +1101,7 @@ impl Default for LockedOptions {
             refresh: None,
             data: None,
             path_vars: Vec::new(),
-            nav_picker: None,
+            nav_pickers: Vec::new(),
             auth: None,
             log: None,
             bind: std::net::Ipv4Addr::LOCALHOST.into(),
@@ -951,6 +1134,7 @@ impl LockedOptions {
         let m = v.as_object().ok_or("options must be a JSON object")?;
         let (mut log, mut log_vars) = (None, None);
         let (mut auth_cfg, mut audit) = (None, None);
+        let (mut saw_nav_picker, mut saw_nav_pickers) = (false, false);
         for (k, val) in m {
             let num = || {
                 val.as_u64()
@@ -1063,46 +1247,29 @@ impl LockedOptions {
                     }
                 }
                 "nav_picker" => {
-                    let m = val.as_object().ok_or(
-                        "options.nav_picker must be an object like {\"var\": \"model\", \"sql\": \"SELECT …\", \"label\": \"Model\"}",
-                    )?;
-                    if let Some(other) = m
-                        .keys()
-                        .find(|k| !matches!(k.as_str(), "var" | "sql" | "label"))
-                    {
+                    if saw_nav_pickers {
+                        return Err("options: nav_picker and nav_pickers cannot both be set".into());
+                    }
+                    saw_nav_picker = true;
+                    o.nav_pickers = vec![parse_nav_picker(val)?];
+                }
+                "nav_pickers" => {
+                    if saw_nav_picker {
+                        return Err("options: nav_picker and nav_pickers cannot both be set".into());
+                    }
+                    saw_nav_pickers = true;
+                    let arr = val
+                        .as_array()
+                        .ok_or("options.nav_pickers must be an array of pickers")?;
+                    if arr.len() > MAX_NAV_PICKERS {
                         return Err(format!(
-                            "options.nav_picker: unknown key '{other}' (var, sql, label)"
+                            "options.nav_pickers: at most {MAX_NAV_PICKERS} pickers (each is \
+                             inlined into every served page)"
                         ));
                     }
-                    let var = m
-                        .get("var")
-                        .and_then(|v| v.as_str())
-                        .filter(|v| sv::valid_ident(v))
-                        .ok_or("options.nav_picker.var must be a variable name")?;
-                    let sql = m
-                        .get("sql")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .ok_or("options.nav_picker.sql must be a SELECT query")?;
-                    let label =
-                        match m.get("label") {
-                            None | Some(serde_json::Value::Null) => None,
-                            Some(serde_json::Value::String(s))
-                                if !s.trim().is_empty() && s.chars().count() <= 100 =>
-                            {
-                                Some(s.clone())
-                            }
-                            _ => return Err(
-                                "options.nav_picker.label must be a short (<=100 character) string"
-                                    .into(),
-                            ),
-                        };
-                    o.nav_picker = Some(NavPicker {
-                        var: var.to_string(),
-                        sql: sql.to_string(),
-                        label,
-                    });
+                    for item in arr {
+                        o.nav_pickers.push(parse_nav_picker(item)?);
+                    }
                 }
                 "auth" => auth_cfg = Some(val),
                 "audit" => {
@@ -1222,29 +1389,34 @@ impl LockedOptions {
         if !o.path_vars.is_empty() && o.data.is_none() {
             return Err("options.path_vars needs options.data".into());
         }
-        if let Some(np) = &o.nav_picker {
-            if !o.path_vars.iter().any(|p| p.eq_ignore_ascii_case(&np.var)) {
-                return Err(format!(
-                    "options.nav_picker.var '{}' must be one of options.path_vars",
-                    np.var
-                ));
+        for np in &o.nav_pickers {
+            for v in np.vars() {
+                if !o.path_vars.iter().any(|p| p.eq_ignore_ascii_case(v)) {
+                    return Err(format!(
+                        "options.nav_picker(s): '{v}' must be one of options.path_vars"
+                    ));
+                }
             }
-            // `nav_picker.sql` runs once per snapshot, directly on the
-            // locked connection — never through the access policy's
-            // per-viewer row/column rewrite (`Enforcer::rewrite_script`
-            // only ever sees `dashboards`). Running it anyway under a
-            // policy would silently bypass that policy's row and column
-            // rules for whatever table it reads, so the safer choice is to
-            // refuse the combination outright rather than guess at a scope
-            // to run it under.
-            if o.policy.is_some() {
-                return Err(
-                    "options.nav_picker cannot be combined with options.policy — nav_picker.sql \
-                     runs once per snapshot outside the access policy's row/column rewrite, so \
-                     it would bypass the policy for whatever table it reads; remove one of them"
-                        .into(),
-                );
-            }
+        }
+        // A picker's `sql` runs once per snapshot, directly on the locked
+        // connection — never through the access policy's per-viewer
+        // row/column rewrite (`Enforcer::rewrite_script` only ever sees
+        // `dashboards`). Running it anyway under a policy would silently
+        // bypass that policy's row and column rules for whatever table it
+        // reads, so the safer choice is to refuse the combination outright
+        // rather than guess at a scope to run it under. A dropdown always
+        // has `sql`; a daterange picker only when given one.
+        let any_picker_sql = o.nav_pickers.iter().any(|np| match np {
+            NavPicker::Dropdown { .. } => true,
+            NavPicker::DateRange { sql, .. } => sql.is_some(),
+        });
+        if any_picker_sql && o.policy.is_some() {
+            return Err(
+                "options.nav_picker(s) cannot be combined with options.policy — a picker's sql \
+                 runs once per snapshot outside the access policy's row/column rewrite, so it \
+                 would bypass the policy for whatever table it reads; remove one of them"
+                    .into(),
+            );
         }
         if let Some(val) = auth_cfg {
             let mut a = Auth::from_json(val, |k| std::env::var(k).ok())
@@ -1439,10 +1611,11 @@ struct Snapshot {
     /// Per dashboard, per statement: the request variables the setup before
     /// it reads ([`deps::setup_deps`]): what a warm connection is keyed on.
     warm_deps: Vec<Vec<Deps>>,
-    /// `options.nav_picker`'s options for this snapshot: (value, label) pairs,
-    /// already checked read-only and value-validated ([`build_nav_picker`]).
-    /// Recomputed on every refresh; empty without `nav_picker`.
-    nav_picker_options: Vec<(String, String)>,
+    /// `options.nav_pickers`' computed state for this snapshot, aligned
+    /// index-for-index with `opts.nav_pickers` — already checked read-only
+    /// and value-validated ([`build_nav_picker`]). Recomputed on every
+    /// refresh; empty without any pickers.
+    nav_picker_snapshots: Vec<PickerSnapshot>,
     _dir: SnapshotDir,
 }
 
@@ -2415,8 +2588,9 @@ fn check_read_only(c: &Conn, dashboards: &[Dash]) -> Result<(), String> {
 // (`sv`) so `dashboard --site`'s own pre-publish check and build-time
 // `nav_picker` share the exact same rules instead of a second, drifting copy.
 use sv::{
-    nav_picker_rows_to_options, read_only_statement, valid_path_value, wrap_nav_picker_sql,
-    NAV_PICKER_MAX_OPTIONS,
+    daterange_bounds_from_rows, daterange_preset_bounds, format_iso_date,
+    nav_picker_rows_to_options, parse_iso_date, read_only_statement, valid_path_value,
+    wrap_nav_picker_sql, NAV_PICKER_MAX_OPTIONS,
 };
 
 /// A DuckDB error as a viewer sees it: the data folder's absolute path is
@@ -2443,35 +2617,148 @@ fn var_locked(scope: Option<&Scope>, name: &str) -> bool {
     scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(name)))
 }
 
-/// Run and validate `options.nav_picker.sql` against the snapshot just built
-/// on `c` (startup, or every refresh): classified read-only by the same
-/// check every `data`-folder statement gets ([`read_only_statement`]), then
+/// A preset key ([`sv::DATERANGE_PRESET_NAMES`]) to the short label the nav
+/// bar shows on its button — `renderNavPickers` (`web/app.js`) never needs
+/// its own copy of this mapping.
+fn daterange_preset_label(key: &str) -> &'static str {
+    match key {
+        "last 7d" => "Last 7 days",
+        "last 30d" => "Last 30 days",
+        "last 90d" => "Last 90 days",
+        "all" => "All",
+        _ => "",
+    }
+}
+
+/// `np`/`snap` (a parallel `opts.nav_pickers`/snapshot `nav_picker_snapshots`
+/// pair, already filtered for a locked variable by the caller) to the JSON
+/// one entry of `window.__served.navPickers` gets. Dates are ISO text
+/// (`format_iso_date`); a `daterange` with no `sql` sends `min`/`max` as
+/// `null` (two plain, unbounded date inputs) and an empty `presets` list.
+fn nav_picker_json(np: &NavPicker, snap: &PickerSnapshot) -> serde_json::Value {
+    match (np, snap) {
+        (NavPicker::Dropdown { var, label, .. }, PickerSnapshot::Dropdown(options)) => {
+            serde_json::json!({
+                "type": "dropdown",
+                "var": var,
+                "label": label,
+                "options": options.iter()
+                    .map(|(v, l)| serde_json::json!({"value": v, "label": l}))
+                    .collect::<Vec<_>>(),
+            })
+        }
+        (
+            NavPicker::DateRange { vars, label, .. },
+            PickerSnapshot::DateRange { min, max, presets },
+        ) => {
+            serde_json::json!({
+                "type": "daterange",
+                "vars": vars,
+                "label": label,
+                "min": min.map(format_iso_date),
+                "max": max.map(format_iso_date),
+                "presets": presets.iter().map(|(key, from, to)| serde_json::json!({
+                    "key": key,
+                    "label": daterange_preset_label(key),
+                    "from": format_iso_date(*from),
+                    "to": format_iso_date(*to),
+                })).collect::<Vec<_>>(),
+            })
+        }
+        // `opts.nav_pickers` and `snap.nav_picker_snapshots` are built
+        // index-for-index by `build_nav_picker` (same match on `np`), so
+        // the kinds always agree; this arm is unreachable in practice.
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// One `options.nav_pickers[]` entry's computed state for a snapshot — a
+/// dropdown's options, or a daterange's bounds and preset windows (day
+/// counts, [`parse_iso_date`]/[`format_iso_date`]). `None` bounds: a
+/// daterange picker with no `sql` (two plain, unbounded date inputs).
+#[derive(Debug)]
+enum PickerSnapshot {
+    Dropdown(Vec<(String, String)>),
+    DateRange {
+        min: Option<i64>,
+        max: Option<i64>,
+        presets: Vec<(String, i64, i64)>,
+    },
+}
+
+/// Run and validate one picker's `sql` against the snapshot just built on
+/// `c` (startup, or every refresh): classified read-only by the same check
+/// every `data`-folder statement gets ([`read_only_statement`]), then
 /// actually executed — once per snapshot, with `anofox_data` set and no
 /// viewer context at all (no claims, no viewer variables): the result is
-/// the same for every viewer and is never re-run per request. Each row must
-/// have exactly two columns (value, label); a value that is not a plain
-/// `path_vars` name — the same rule [`check_path_values`] enforces on every
-/// request — is dropped and logged, never sent to a page.
+/// the same for every viewer and is never re-run per request.
+///
+/// A dropdown's rows must have exactly two columns (value, label); a value
+/// that is not a plain `path_vars` name — the same rule
+/// [`check_path_values`] enforces on every request — is dropped and
+/// logged, never sent to a page ([`nav_picker_rows_to_options`]). A
+/// daterange's row must be exactly one row of two columns, `(min, max)`,
+/// both real calendar dates with `min <= max`
+/// ([`daterange_bounds_from_rows`]); its `presets` are then computed from
+/// `max` ([`daterange_preset_bounds`]) — refusing the whole snapshot build
+/// if a preset computes outside `[min, max]` can't happen: the function
+/// clamps, never refuses, by construction.
 fn build_nav_picker(
     c: &Conn,
     opts: &LockedOptions,
     np: &NavPicker,
-) -> Result<Vec<(String, String)>, String> {
-    let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
-    read_only_statement(&np.sql, false, &mut duck)
-        .map_err(|e| format!("options.nav_picker.sql: {e}"))?;
-    if let Some(data) = &opts.data {
-        c.exec(&format!(
-            "SET VARIABLE {DATA_VAR} = {}",
-            sql_string_literal(&data.to_string_lossy())
-        ))?;
+) -> Result<PickerSnapshot, String> {
+    let checked_rows = |sql: &str, max_rows: usize| -> Result<Vec<Vec<Option<String>>>, String> {
+        let mut duck = |q: &str| c.query(q)?.string_rows(1_000_000);
+        read_only_statement(sql, false, &mut duck)
+            .map_err(|e| format!("options.nav_picker(s).sql: {e}"))?;
+        if let Some(data) = &opts.data {
+            c.exec(&format!(
+                "SET VARIABLE {DATA_VAR} = {}",
+                sql_string_literal(&data.to_string_lossy())
+            ))?;
+        }
+        c.query(&wrap_nav_picker_sql(sql))
+            .and_then(|mut r| r.string_rows(max_rows))
+            .map_err(|e| format!("options.nav_picker(s).sql: {e}"))
+    };
+    match np {
+        NavPicker::Dropdown { sql, .. } => {
+            let rows = checked_rows(sql, NAV_PICKER_MAX_OPTIONS + 1)?;
+            Ok(PickerSnapshot::Dropdown(nav_picker_rows_to_options(&rows)?))
+        }
+        NavPicker::DateRange { sql: None, .. } => Ok(PickerSnapshot::DateRange {
+            min: None,
+            max: None,
+            presets: Vec::new(),
+        }),
+        NavPicker::DateRange {
+            sql: Some(sql),
+            presets,
+            ..
+        } => {
+            // One extra row over the expected 1, same "fetch one more than
+            // the limit so the real check below can see the overflow"
+            // pattern as the dropdown branch above.
+            let rows = checked_rows(sql, 2)?;
+            let (min, max) = daterange_bounds_from_rows(&rows)?;
+            let preset_bounds = presets
+                .iter()
+                .map(|p| {
+                    daterange_preset_bounds(p, min, max)
+                        .map(|(from, to)| (p.clone(), from, to))
+                        .ok_or_else(|| {
+                            format!("options.nav_picker(s) (daterange): unknown preset '{p}'")
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(PickerSnapshot::DateRange {
+                min: Some(min),
+                max: Some(max),
+                presets: preset_bounds,
+            })
+        }
     }
-    let wrapped = wrap_nav_picker_sql(&np.sql);
-    let rows = c
-        .query(&wrapped)
-        .and_then(|mut r| r.string_rows(NAV_PICKER_MAX_OPTIONS + 1))
-        .map_err(|e| format!("options.nav_picker.sql: {e}"))?;
-    nav_picker_rows_to_options(&rows)
 }
 
 /// Load `*.sql` dashboards from `dir`. Returns them plus the union of their
@@ -2943,7 +3230,7 @@ fn build_snapshot(
     // name in the working directory, so open a plain ":memory:"; its default
     // catalog is called "memory", which only matters if a source has that name.)
     let db = Database::open(":memory:", &cfg)?;
-    let nav_picker_options;
+    let nav_picker_snapshots;
     {
         let c = db.connect()?;
         if copied
@@ -3032,10 +3319,11 @@ fn build_snapshot(
         // Fail now, not on every request (e.g. a schema that doesn't exist).
         c.exec(&enter)
             .map_err(|e| format!("options.search_path: {}", e.lines().next().unwrap_or("")))?;
-        nav_picker_options = match &opts.nav_picker {
-            Some(np) => build_nav_picker(&c, opts, np)?,
-            None => Vec::new(),
-        };
+        nav_picker_snapshots = opts
+            .nav_pickers
+            .iter()
+            .map(|np| build_nav_picker(&c, opts, np))
+            .collect::<Result<Vec<_>, _>>()?;
     }
     Ok((
         Snapshot {
@@ -3047,7 +3335,7 @@ fn build_snapshot(
             deps: Vec::new(),
             deps_tags: Vec::new(),
             warm_deps: Vec::new(),
-            nav_picker_options,
+            nav_picker_snapshots,
             _dir: dir,
         },
         warnings,
@@ -3578,6 +3866,97 @@ fn check_path_values(path_vars: &[String], vars: &[(String, String)]) -> Result<
     Ok(())
 }
 
+/// A `sv::sql_literal`-shaped value's own text — the quoted string's
+/// contents, or the literal itself for the all-digits/`NULL` shapes
+/// [`valid_path_value`] also accepts. `None` for `NULL` (no value).
+fn literal_text(lit: &str) -> Option<&str> {
+    if lit == "NULL" {
+        return None;
+    }
+    Some(
+        lit.strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .unwrap_or(lit),
+    )
+}
+
+/// #556: every `options.nav_pickers`/`options.nav_picker` `daterange`
+/// entry's two `vars` — already shape-checked by [`check_path_values`]
+/// (`path_vars`'s generic `[A-Za-z0-9_.-]` rule happens to already accept
+/// `YYYY-MM-DD`) — get the picker's own, stricter rules: each value present
+/// in `vars` must be a real calendar date, and when *both* halves of the
+/// pair are present in this same request, `from` must not be after `to`.
+/// A value outside the picker's own `[min, max]` (when it has `sql`) is
+/// **clamped in place**, not refused: those bounds are an author-chosen
+/// display range, not a security boundary (unlike the `path_vars` shape
+/// check above, which guards a filesystem path) — the same posture a
+/// calendar widget's own `min`/`max` attributes would take.
+fn clamp_daterange_values(
+    nav_pickers: &[NavPicker],
+    snapshots: &[PickerSnapshot],
+    vars: &mut [(String, String)],
+) -> Result<(), (u16, String)> {
+    for (np, snap) in nav_pickers.iter().zip(snapshots.iter()) {
+        let (NavPicker::DateRange { vars: names, .. }, PickerSnapshot::DateRange { min, max, .. }) =
+            (np, snap)
+        else {
+            continue;
+        };
+        let mut days: [Option<i64>; 2] = [None, None];
+        for (i, name) in names.iter().enumerate() {
+            let Some(idx) = vars.iter().position(|(n, _)| n.eq_ignore_ascii_case(name)) else {
+                continue;
+            };
+            let Some(text) = literal_text(&vars[idx].1) else {
+                // #556 nit (review-582): a NULL path_vars value ("no
+                // value" — see the fn doc above) has to be retyped as
+                // VARCHAR here, not left as the bare `NULL` a viewer or
+                // the nav picker's own "Clear" sent — DuckDB gives a bare
+                // `SET VARIABLE x = NULL` the default INTEGER type, and
+                // every dashboard reading a daterange var does
+                // `coalesce(getvariable(x), '…')::VARCHAR`, which then
+                // 400s with "Could not convert string '…' to INT32"
+                // instead of ever reaching the author's own SQL.
+                vars[idx].1 = "NULL::VARCHAR".to_string();
+                continue;
+            };
+            days[i] = Some(parse_iso_date(text).ok_or_else(|| {
+                (
+                    400,
+                    format!("variable '{name}' must be a real calendar date (YYYY-MM-DD)"),
+                )
+            })?);
+        }
+        if let [Some(from), Some(to)] = days {
+            if from > to {
+                return Err((
+                    400,
+                    format!(
+                        "variables '{}'/'{}': the time window's start must not be after its end",
+                        names[0], names[1]
+                    ),
+                ));
+            }
+        }
+        for (i, day) in days.into_iter().enumerate() {
+            let Some(day) = day else { continue };
+            let clamped = match (min, max) {
+                (Some(min), Some(max)) => day.clamp(*min, *max),
+                _ => day,
+            };
+            if clamped != day {
+                if let Some(entry) = vars
+                    .iter_mut()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(&names[i]))
+                {
+                    entry.1 = sql_string_literal(&format_iso_date(clamped));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `X-Anofox-Supersede: <viewer>/<panel>/<kind>` — a newer request with the
 /// same value cancels the older one (`409`). The viewer id is 128 random bits
 /// (32 hex digits) chosen by the page, so one viewer can't cancel another's.
@@ -3864,6 +4243,11 @@ fn locked_panel(
         // review of #210/#222, M2). The later SET (DuckDB's own rule) wins.
         r.vars = sv::dedup_last_spelling(r.vars);
     }
+    clamp_daterange_values(
+        &st.opts.nav_pickers,
+        &gen.snap.nav_picker_snapshots,
+        &mut r.vars,
+    )?;
     info.vars = r.vars.clone();
     // The variables whose values the viewer chose (not a path variable, not
     // locked by the credential): a `${name}` in `-- @requires` may not name
@@ -5308,11 +5692,11 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
     // wins — the viewer's (or the picker's, or a carried-over nav link's)
     // value is dropped and the locked one set instead (`locked_panel`). A
     // locked `path_vars` name is therefore pointless to carry (its value on
-    // the link is simply ignored), and `nav_picker`'s full option list would
-    // otherwise disclose every other value this credential can never
+    // the link is simply ignored), and a picker's full option list/bounds
+    // would otherwise disclose every other value this credential can never
     // actually choose (e.g. every tenant's model name to a credential locked
-    // to one tenant). So: never carry a locked path_vars name, and omit
-    // `navPicker` entirely when its variable is locked.
+    // to one tenant). So: never carry a locked path_vars name, and omit a
+    // picker entirely when any variable it sets is locked.
     let path_vars: Vec<&String> = st
         .opts
         .path_vars
@@ -5325,16 +5709,16 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
     // What each statement depends on (#210): the page re-requests a panel
     // only when one of its variables changed.
     let gen = st.current.get();
-    if let Some(np) = &st.opts.nav_picker {
-        if !var_locked(scope, &np.var) {
-            cfg["navPicker"] = serde_json::json!({
-                "var": np.var,
-                "label": np.label,
-                "options": gen.snap.nav_picker_options.iter()
-                    .map(|(v, l)| serde_json::json!({"value": v, "label": l}))
-                    .collect::<Vec<_>>(),
-            });
-        }
+    let nav_pickers: Vec<serde_json::Value> = st
+        .opts
+        .nav_pickers
+        .iter()
+        .zip(gen.snap.nav_picker_snapshots.iter())
+        .filter(|(np, _)| !np.vars().iter().any(|v| var_locked(scope, v)))
+        .map(|(np, snap)| nav_picker_json(np, snap))
+        .collect();
+    if !nav_pickers.is_empty() {
+        cfg["navPickers"] = serde_json::json!(nav_pickers);
     }
     if let Some(di) = st.dashboards.iter().position(|d| d.id == dash.id) {
         if let (Some(ds), Some(tag)) = (gen.snap.deps.get(di), gen.snap.deps_tags.get(di)) {
@@ -6063,17 +6447,22 @@ mod tests {
             r#""nav_picker":{"var":"model","sql":"SELECT model_id, title FROM models","label":"Model"}"#,
         )))
         .unwrap();
-        let np = o.nav_picker.unwrap();
-        assert_eq!(np.var, "model");
-        assert_eq!(np.sql, "SELECT model_id, title FROM models");
-        assert_eq!(np.label, Some("Model".to_string()));
+        assert_eq!(o.nav_pickers.len(), 1);
+        match &o.nav_pickers[0] {
+            NavPicker::Dropdown { var, sql, label } => {
+                assert_eq!(var, "model");
+                assert_eq!(sql, "SELECT model_id, title FROM models");
+                assert_eq!(label, &Some("Model".to_string()));
+            }
+            NavPicker::DateRange { .. } => panic!("expected a dropdown"),
+        }
 
         // `label` is optional.
         let o = LockedOptions::parse(Some(&with(
             r#""nav_picker":{"var":"model","sql":"SELECT 1, 2"}"#,
         )))
         .unwrap();
-        assert!(o.nav_picker.unwrap().label.is_none());
+        assert!(o.nav_pickers[0].label().is_none());
 
         // `var` must be one of `path_vars` …
         assert!(LockedOptions::parse(Some(&with(
@@ -6125,6 +6514,266 @@ mod tests {
             serde_json::json!(dir.to_string_lossy())
         );
         assert!(LockedOptions::parse(Some(&with_policy_none)).is_ok());
+    }
+
+    /// #556: `options.nav_picker` and `options.nav_pickers` may not both be
+    /// set, `nav_pickers` draws several controls left to right (order
+    /// preserved), an untyped entry is a dropdown (same shape as the
+    /// singular key), and the list is capped.
+    #[test]
+    fn nav_pickers_list() {
+        let sub = SnapshotDir::create().unwrap();
+        let dir = sub.0.canonicalize().unwrap();
+        let base = format!(
+            r#"{{"data":{},"path_vars":["model","view_from","view_to"]"#,
+            serde_json::json!(dir.to_string_lossy())
+        );
+        let with = |extra: &str| format!("{base},{extra}}}");
+
+        let o = LockedOptions::parse(Some(&with(
+            r#""nav_pickers":[
+                {"type":"daterange","vars":["view_from","view_to"],"label":"Time window"},
+                {"var":"model","sql":"SELECT 1,2","label":"Model"}
+            ]"#,
+        )))
+        .unwrap();
+        assert_eq!(o.nav_pickers.len(), 2);
+        assert!(matches!(o.nav_pickers[0], NavPicker::DateRange { .. }));
+        assert!(matches!(o.nav_pickers[1], NavPicker::Dropdown { .. }));
+
+        // Both keys at once: refused regardless of which comes first.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"var":"model","sql":"SELECT 1,2"},"nav_pickers":[{"var":"model","sql":"SELECT 1,2"}]"#
+        )))
+        .is_err());
+
+        // More than `MAX_NAV_PICKERS` entries.
+        let many = (0..MAX_NAV_PICKERS + 1)
+            .map(|_| r#"{"var":"model","sql":"SELECT 1,2"}"#)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(LockedOptions::parse(Some(&with(&format!(r#""nav_pickers":[{many}]"#)))).is_err());
+        // Exactly the cap is fine.
+        let ok_many = (0..MAX_NAV_PICKERS)
+            .map(|_| r#"{"var":"model","sql":"SELECT 1,2"}"#)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            LockedOptions::parse(Some(&with(&format!(r#""nav_pickers":[{ok_many}]"#)))).is_ok()
+        );
+
+        // Not an array.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_pickers":{"var":"model","sql":"SELECT 1,2"}"#
+        )))
+        .is_err());
+    }
+
+    /// #556: `"type": "daterange"` picker config — `vars` must be exactly
+    /// two distinct variable names, both in `path_vars`; `sql` is optional
+    /// but `presets` needs it; an unknown preset or `type` is refused; the
+    /// policy conflict applies only when this picker actually has `sql`.
+    #[test]
+    fn nav_picker_daterange_option() {
+        let sub = SnapshotDir::create().unwrap();
+        let dir = sub.0.canonicalize().unwrap();
+        let base = format!(
+            r#"{{"data":{},"path_vars":["view_from","view_to"]"#,
+            serde_json::json!(dir.to_string_lossy())
+        );
+        let with = |extra: &str| format!("{base},{extra}}}");
+
+        let o = LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"type":"daterange","vars":["view_from","view_to"],"label":"Time window","sql":"SELECT min(d)::DATE, max(d)::DATE FROM t","presets":["last 7d","all"]}"#,
+        )))
+        .unwrap();
+        match &o.nav_pickers[0] {
+            NavPicker::DateRange {
+                vars,
+                sql,
+                presets,
+                label,
+            } => {
+                assert_eq!(vars, &["view_from".to_string(), "view_to".to_string()]);
+                assert_eq!(
+                    sql.as_deref(),
+                    Some("SELECT min(d)::DATE, max(d)::DATE FROM t")
+                );
+                assert_eq!(presets, &["last 7d".to_string(), "all".to_string()]);
+                assert_eq!(label.as_deref(), Some("Time window"));
+            }
+            NavPicker::Dropdown { .. } => panic!("expected a daterange"),
+        }
+
+        // `sql` is optional without `presets`.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"type":"daterange","vars":["view_from","view_to"]}"#
+        )))
+        .is_ok());
+
+        // `vars` must have exactly two entries …
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"type":"daterange","vars":["view_from"]}"#
+        )))
+        .is_err());
+        // … distinct …
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"type":"daterange","vars":["view_from","view_from"]}"#
+        )))
+        .is_err());
+        // … and each one of `path_vars` (a daterange var not in path_vars).
+        assert!(LockedOptions::parse(Some(&format!(
+            r#"{{"data":{},"path_vars":["view_from"],"nav_picker":{{"type":"daterange","vars":["view_from","view_to"]}}}}"#,
+            serde_json::json!(dir.to_string_lossy())
+        )))
+        .is_err());
+
+        // `presets` without `sql`.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"type":"daterange","vars":["view_from","view_to"],"presets":["all"]}"#
+        )))
+        .is_err());
+        // Unknown preset name.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"type":"daterange","vars":["view_from","view_to"],"sql":"SELECT 1,2","presets":["last week"]}"#
+        )))
+        .is_err());
+        // Unknown picker type.
+        assert!(LockedOptions::parse(Some(&with(
+            r#""nav_picker":{"type":"weekpicker","vars":["view_from","view_to"]}"#
+        )))
+        .is_err());
+
+        // Policy conflict only when this picker has `sql`.
+        let f = dir.join(format!("policy-{}.json", sv::random_token()));
+        std::fs::write(&f, r#"{"tables": {"sales": {"rows": true}}}"#).unwrap();
+        let policy = serde_json::json!(f.to_string_lossy());
+        assert!(LockedOptions::parse(Some(&format!(
+            r#"{{"data":{},"path_vars":["view_from","view_to"],"policy":{policy},"nav_picker":{{"type":"daterange","vars":["view_from","view_to"],"sql":"SELECT 1,2"}}}}"#,
+            serde_json::json!(dir.to_string_lossy())
+        )))
+        .is_err());
+        assert!(LockedOptions::parse(Some(&format!(
+            r#"{{"data":{},"path_vars":["view_from","view_to"],"policy":{policy},"nav_picker":{{"type":"daterange","vars":["view_from","view_to"]}}}}"#,
+            serde_json::json!(dir.to_string_lossy())
+        )))
+        .is_ok());
+    }
+
+    /// #556: [`clamp_daterange_values`] — the request-time half of a
+    /// daterange picker: a real-date check beyond `check_path_values`'s
+    /// generic plain-name shape check, `from <= to` when both halves of a
+    /// request carry a value, and clamping (not refusing) an out-of-range
+    /// value to the picker's own `[min, max]`.
+    #[test]
+    fn clamp_daterange_values_test() {
+        let np = vec![NavPicker::DateRange {
+            vars: ["view_from".to_string(), "view_to".to_string()],
+            sql: Some("SELECT 1,2".to_string()),
+            presets: Vec::new(),
+            label: None,
+        }];
+        let min = parse_iso_date("2026-01-01").unwrap();
+        let max = parse_iso_date("2026-01-31").unwrap();
+        let snap = vec![PickerSnapshot::DateRange {
+            min: Some(min),
+            max: Some(max),
+            presets: Vec::new(),
+        }];
+
+        // Garbage date: not a real calendar day.
+        let mut vars = vec![
+            ("view_from".to_string(), "'2026-02-30'".to_string()),
+            ("view_to".to_string(), "'2026-01-15'".to_string()),
+        ];
+        assert!(clamp_daterange_values(&np, &snap, &mut vars).is_err());
+
+        // Wrong shape (not a date at all, e.g. SQL smuggled in).
+        let mut vars = vec![(
+            "view_from".to_string(),
+            "'2026-01-01'' OR 1=1 --'".to_string(),
+        )];
+        assert!(clamp_daterange_values(&np, &snap, &mut vars).is_err());
+
+        // from > to.
+        let mut vars = vec![
+            ("view_from".to_string(), "'2026-01-20'".to_string()),
+            ("view_to".to_string(), "'2026-01-10'".to_string()),
+        ];
+        assert!(clamp_daterange_values(&np, &snap, &mut vars).is_err());
+
+        // Clamped up to `min`, clamped down to `max`.
+        let mut vars = vec![
+            ("view_from".to_string(), "'2025-12-01'".to_string()),
+            ("view_to".to_string(), "'2026-02-15'".to_string()),
+        ];
+        clamp_daterange_values(&np, &snap, &mut vars).unwrap();
+        assert_eq!(vars[0].1, "'2026-01-01'");
+        assert_eq!(vars[1].1, "'2026-01-31'");
+
+        // In range: untouched.
+        let mut vars = vec![
+            ("view_from".to_string(), "'2026-01-05'".to_string()),
+            ("view_to".to_string(), "'2026-01-10'".to_string()),
+        ];
+        clamp_daterange_values(&np, &snap, &mut vars).unwrap();
+        assert_eq!(vars[0].1, "'2026-01-05'");
+        assert_eq!(vars[1].1, "'2026-01-10'");
+
+        // Only one half present: no from<=to comparison, still date-checked.
+        let mut vars = vec![("view_to".to_string(), "'not-a-date'".to_string())];
+        assert!(clamp_daterange_values(&np, &snap, &mut vars).is_err());
+
+        // A var this picker doesn't own is left alone.
+        let mut vars = vec![("other".to_string(), "'garbage'".to_string())];
+        assert!(clamp_daterange_values(&np, &snap, &mut vars).is_ok());
+    }
+
+    /// #556 nit (review-582): a NULL value (the nav picker's own "Clear",
+    /// or any viewer/credential value that's just NULL) is "no value" —
+    /// skipped by the date check and the clamp, same as before — but is
+    /// rewritten to `NULL::VARCHAR`, not left as the bare `NULL` it came
+    /// in as. A bare `SET VARIABLE x = NULL` gives DuckDB's own default
+    /// (INTEGER) type, and every dashboard reading a daterange var does
+    /// `coalesce(getvariable(x), '…')::VARCHAR` — untyped, that 400s with
+    /// a DuckDB conversion error instead of ever reaching the author's
+    /// SQL (caught by an actual browser round trip through the "Clear"
+    /// control, not by this unit test alone — see scripts/served-e2e.mjs).
+    #[test]
+    fn clamp_daterange_values_retypes_a_null_to_varchar() {
+        let np = vec![NavPicker::DateRange {
+            vars: ["view_from".to_string(), "view_to".to_string()],
+            sql: Some("SELECT 1,2".to_string()),
+            presets: Vec::new(),
+            label: None,
+        }];
+        let min = parse_iso_date("2026-01-01").unwrap();
+        let max = parse_iso_date("2026-01-31").unwrap();
+        let snap = vec![PickerSnapshot::DateRange {
+            min: Some(min),
+            max: Some(max),
+            presets: Vec::new(),
+        }];
+
+        // Both NULL ("Clear"): both retyped, no date/from<=to check applies.
+        let mut vars = vec![
+            ("view_from".to_string(), "NULL".to_string()),
+            ("view_to".to_string(), "NULL".to_string()),
+        ];
+        clamp_daterange_values(&np, &snap, &mut vars).unwrap();
+        assert_eq!(vars[0].1, "NULL::VARCHAR");
+        assert_eq!(vars[1].1, "NULL::VARCHAR");
+
+        // One NULL, one a real date: the NULL side is retyped, the date
+        // side is checked/clamped as usual, and `from <= to` is skipped
+        // (only one side present).
+        let mut vars = vec![
+            ("view_from".to_string(), "NULL".to_string()),
+            ("view_to".to_string(), "'2025-06-01'".to_string()),
+        ];
+        clamp_daterange_values(&np, &snap, &mut vars).unwrap();
+        assert_eq!(vars[0].1, "NULL::VARCHAR");
+        assert_eq!(vars[1].1, "'2026-01-01'"); // clamped up to min
     }
 
     /// #407 part 3: [`nav_picker_rows_to_options`] — the pure row-to-option

@@ -1828,7 +1828,7 @@ fn link_label(url: &str) -> String {
 }
 
 /// Line height of a headless ::MARKDOWN box.
-const MD_LINE: f64 = 18.0;
+pub(crate) const MD_LINE: f64 = 18.0;
 
 /// A static ::IMAGE panel's resolved content (#514).
 struct ImagePanel {
@@ -1902,7 +1902,10 @@ fn image_aspect(src: &str, asset_root: Option<&std::path::Path>) -> (f64, f64) {
 }
 
 /// The text of a ::MARKDOWN panel, if it is one.
-fn markdown_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<String> {
+pub(crate) fn markdown_text(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+) -> Option<String> {
     let (i, _) = roles.iter().find(|(_, r)| matches!(r, Role::Markdown))?;
     column_at(rows, *i)
         .and_then(|(_, v)| v.first())
@@ -1977,7 +1980,7 @@ fn panel_chrome(
 /// does not depend on a script. An unknown column, or anything that is not a
 /// `{{…}}` placeholder (a `$…$` TeX formula, `**bold**`, …), is left exactly
 /// as written for `markdown_lines` below to handle (#327).
-fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale) -> String {
+pub(crate) fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale) -> String {
     let keys: Vec<&String> = rows.iter().map(|(n, _)| n).collect();
     let mut out = String::new();
     let mut rest = md;
@@ -2058,13 +2061,30 @@ fn md_metric_fmt(spec: &str) -> Option<crate::MetricFmt> {
 /// A forced line break in [`markdown_lines`]' word list (around `$$…$$`).
 const MD_BREAK: &str = "\u{E003}";
 
+/// 13 px is the ::MARKDOWN body's own font size (`markdown_panel_svg` /
+/// `render_panel_svg`'s `md-text` group) — [`markdown_lines`] wraps against
+/// it, not a guessed chars-per-line count.
+const MD_SIZE: f64 = 13.0;
+
 /// Markdown as plain text lines wrapped to a `w`-wide box (13 px text):
 /// emphasis / code / heading marks dropped, `[text](url)` → text, paragraphs
 /// separated by an empty line. A formula is rendered to plain text by
 /// [`crate::math::tex_to_text`] (#351: this has no KaTeX) — a `$$…$$` one
 /// gets lines of its own.
-fn markdown_lines(md: &str, w: f64) -> Vec<String> {
-    let max = (((w - 28.0) / 6.6).floor() as usize).max(10);
+///
+/// Wraps by ggplot-rs's own (Hanken Grotesk) pixel-width estimate
+/// (`ggplot_rs::render::text::text_width`, the same estimator
+/// `truncate_header`/`map::legend` already use elsewhere in this codebase),
+/// not a fixed chars-per-line guess (#569: the old guess under-counted how
+/// much text actually fits at the browser's real proportional-font width —
+/// 5 ragged lines with a wide empty right margin where the browser fits 3).
+pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<String> {
+    // 0.96: a small safety cushion against text_width's own estimate error
+    // (it models Hanken Grotesk; a box without that font, e.g. this crate's
+    // own rsvg-based PNG crops, substitutes a wider fallback — see
+    // rules.md) — tuned by eye against this exact fallback-font rendering
+    // so a wrapped line never clips the panel's right edge.
+    let avail = ((w - 28.0) * 0.96).max(40.0);
     let mut out: Vec<String> = Vec::new();
     for para in md.split("\n\n") {
         let mut words: Vec<String> = Vec::new();
@@ -2127,24 +2147,25 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
             out.push(String::new());
         }
         let mut line = String::new();
-        let mut len = 0;
         for wd in words {
-            let n = wd.chars().count();
-            if wd == MD_BREAK || (!line.is_empty() && len + 1 + n > max) {
+            if wd == MD_BREAK {
                 if !line.is_empty() {
                     out.push(std::mem::take(&mut line));
-                    len = 0;
                 }
-                if wd == MD_BREAK {
-                    continue;
-                }
+                continue;
             }
-            if !line.is_empty() {
-                line.push(' ');
-                len += 1;
+            let candidate = if line.is_empty() {
+                wd.clone()
+            } else {
+                format!("{line} {wd}")
+            };
+            if !line.is_empty() && ggplot_rs::render::text::text_width(&candidate, MD_SIZE) > avail
+            {
+                out.push(std::mem::take(&mut line));
+                line = wd;
+            } else {
+                line = candidate;
             }
-            line.push_str(&wd);
-            len += n;
         }
         if !line.is_empty() {
             out.push(line);
@@ -2156,7 +2177,7 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
 /// One [`markdown_lines`] line as SVG text content (escaped). Formula words
 /// are now already plain text ([`crate::math::tex_to_text`], #351), so this
 /// is no longer anything more than that.
-fn markdown_line_svg(line: &str) -> String {
+pub(crate) fn markdown_line_svg(line: &str) -> String {
     esc(line)
 }
 
@@ -2170,8 +2191,15 @@ mod md_tests {
         );
         assert_eq!(l[0], "Hi");
         assert_eq!(l[1], "");
+        // #569: pixel-width wrap fits more per line than the old
+        // chars-per-line guess did (it used to break after "with a").
         assert!(l[2].starts_with("One bold and code with a"), "{l:?}");
-        assert!(l.iter().all(|x| x.chars().count() <= 26), "{l:?}");
+        assert!(
+            l.iter()
+                .all(|x| ggplot_rs::render::text::text_width(x, super::MD_SIZE)
+                    <= (200.0 - 28.0) * 0.96),
+            "{l:?}"
+        );
         assert!(l.join(" ").contains("link —"), "{l:?}");
     }
 

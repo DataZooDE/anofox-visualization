@@ -106,6 +106,13 @@ fn web_story_keys_match_marks() {
     run_node("anim_test.mjs");
 }
 
+/// M2f-A (#149): the ::FRAME player's pure colour helpers and its stepping
+/// control flow (clamping, coalescing, Play, reduced motion, tab-hidden).
+#[test]
+fn web_frame_player() {
+    run_node("frames_test.mjs");
+}
+
 #[test]
 fn web_examples_library_keeps_old_links() {
     run_node("examples_lib_test.mjs");

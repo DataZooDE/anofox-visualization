@@ -2308,6 +2308,13 @@ fn render_inner(
     if find_role(cols, Role::Image).is_some() || find_role(cols, Role::ImageDark).is_some() {
         return Ok(image_panel_svg(cols, width, height, o));
     }
+    // A static ::MARKDOWN panel (#568): checked before the measure-column
+    // branches below for the same reason as ::IMAGE above — a markdown
+    // column set has no Role::Value column either, and must not fall
+    // through to the Kpi/map/value logic.
+    if find_role(cols, Role::Markdown).is_some() {
+        return Ok(markdown_panel_svg(cols, width, height, o));
+    }
     // A KPI / text card (value, change, sparkline, goal) — the same tile as
     // the headless dashboard; at most its natural height.
     if let Some(k) = kpi::Kpi::from_columns(cols, &o.locale, false) {
@@ -6564,6 +6571,49 @@ fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
 /// The column's single value as text, or `None` if the role isn't present.
 fn column_text(cols: &[Column], role: Role) -> Option<String> {
     find_role(cols, role)?.values.first().map(value_str)
+}
+
+/// A static `::MARKDOWN` panel on this render path (#568: `render_spec` /
+/// `serve.rs`'s script-free page previously had no `::MARKDOWN` branch at
+/// all here and fell through to an empty title-only heading — see the
+/// `::IMAGE` comment below, which already anticipated this gap). Reuses
+/// `dashboard.rs`'s own composer's text machinery (`markdown_text` /
+/// `markdown_fill` / `markdown_lines` / `markdown_line_svg`) rather than a
+/// second SVG text writer. No title drawn here: `render_with_title` /
+/// `panel_title` draws the title bar separately, same as the `::IMAGE` /
+/// KPI / table panels in this file.
+fn markdown_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) -> Panel {
+    let rows: Vec<(String, Vec<Value>)> = cols
+        .iter()
+        .map(|c| (c.name.clone(), c.values.clone()))
+        .collect();
+    let roles: Vec<(usize, Role)> = cols.iter().enumerate().map(|(i, c)| (i, c.role)).collect();
+    let Some(raw) = dashboard::markdown_text(&rows, &roles) else {
+        return Panel::own(width, height, String::new());
+    };
+    let md = dashboard::markdown_fill(&raw, &rows, &o.locale);
+    let t = &o.theme;
+    let pad = 14.0;
+    let mut body = format!(
+        "<g class=\"md-text\" font-family=\"{}\" font-size=\"13\" fill=\"{}\">",
+        format::escape_xml(&t.font.family),
+        theme::hex(t.colors.ink)
+    );
+    let mut y = 22.0;
+    for line in dashboard::markdown_lines(&md, width as f64) {
+        if y > height as f64 - 8.0 {
+            break;
+        }
+        if !line.is_empty() {
+            body.push_str(&format!(
+                "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                dashboard::markdown_line_svg(&line)
+            ));
+        }
+        y += dashboard::MD_LINE;
+    }
+    body.push_str("</g>");
+    Panel::own(width, height, body)
 }
 
 /// A static `::IMAGE` panel on this render path (#514: `render_spec` /
