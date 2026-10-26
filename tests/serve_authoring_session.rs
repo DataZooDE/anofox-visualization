@@ -6,7 +6,7 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -70,6 +70,62 @@ impl Drop for Kill {
     }
 }
 
+/// Spawn `serve --db <scratch>/a.duckdb --port 0 --no-open [extra]` (plus
+/// `envs`), parse the port and token the server itself resolved and printed
+/// on its first stdout line (`anofox-visualization serving http://
+/// 127.0.0.1:<port>/?token=<tok>`), and wait until it accepts connections on
+/// that exact port.
+///
+/// Review of #607: `--port 0` (added for #604's own `--assets` tests)
+/// replaces this file's original pattern — bind a `TcpListener` to port 0,
+/// read `local_addr().port()`, drop the listener, then race a spawned
+/// child to bind that "free" port before anyone else does. Under `cargo
+/// nextest`, which runs each test in its own *process*, nothing here can
+/// serialize that race away (no shared memory for an in-process `Mutex`
+/// to coordinate on — see the fix this exact problem got in #604's own
+/// test file first), and CI hit it as `ConnectionReset`. `--port 0`
+/// removes the race itself rather than working around it: the only bind
+/// is the server's own, atomic by construction, and it reports back
+/// whatever the OS actually gave it.
+fn spawn(scratch: &Scratch, extra: &[&str], envs: &[(&str, &str)]) -> (Kill, u16, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_serve"));
+    cmd.arg(scratch.0.join("a.duckdb"))
+        .args(["--port", "0", "--no-open"])
+        .args(extra)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let port: u16 = line
+        .split("127.0.0.1:")
+        .nth(1)
+        .and_then(|s| s.split(['/', '?']).next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no port in first stdout line: {line:?}"));
+    let tok = line
+        .split("token=")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no token in first stdout line: {line:?}"))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(_) => break,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => panic!("serve did not start on {port}: {e}"),
+        }
+    }
+    (Kill(child), port, tok)
+}
+
 /// `POST /query` with the session's token, over a fresh connection: `(status,
 /// body)`.
 fn q(port: u16, tok: &str, sql: &str) -> (u16, String) {
@@ -99,40 +155,7 @@ fn authoring_session_persists_state() {
         return;
     }
     let s = Scratch::new("auth");
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut child = Kill(
-        Command::new(env!("CARGO_BIN_EXE_serve"))
-            .arg(s.0.join("a.duckdb"))
-            .args(["--port", &port.to_string(), "--no-open"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let mut out = BufReader::new(child.0.stdout.take().unwrap());
-    let mut line = String::new();
-    out.read_line(&mut line).unwrap();
-    let tok = line
-        .split("token=")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(_) => break,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    }
+    let (_child, port, tok) = spawn(&s, &[], &[]);
 
     // 1. SET VARIABLE persists to the next request.
     let (st, _) = q(port, &tok, "SET VARIABLE x = 42");
@@ -245,45 +268,7 @@ fn authoring_session_recovers_from_an_unblocked_stdin_read_via_the_round_timeout
         return;
     }
     let s = Scratch::new("timeout");
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut child = Kill(
-        Command::new(env!("CARGO_BIN_EXE_serve"))
-            .arg(s.0.join("a.duckdb"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--no-open",
-                "--query-timeout",
-                "2",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let mut out = BufReader::new(child.0.stdout.take().unwrap());
-    let mut line = String::new();
-    out.read_line(&mut line).unwrap();
-    let tok = line
-        .split("token=")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(_) => break,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    }
+    let (_child, port, tok) = spawn(&s, &["--query-timeout", "2"], &[]);
 
     // A path built at query time (string concatenation): `reads_stdin`
     // cannot see this is `/dev/stdin`, so it reaches the CLI and blocks —
@@ -342,40 +327,8 @@ fn authoring_session_removes_private_dir_on_sigterm() {
     // reads `TMPDIR`, so this keeps the two from colliding.
     let tmp = s.0.join("tmp");
     std::fs::create_dir(&tmp).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut child = Kill(
-        Command::new(env!("CARGO_BIN_EXE_serve"))
-            .arg(s.0.join("a.duckdb"))
-            .args(["--port", &port.to_string(), "--no-open"])
-            .env("TMPDIR", &tmp)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let mut out = BufReader::new(child.0.stdout.take().unwrap());
-    let mut line = String::new();
-    out.read_line(&mut line).unwrap();
-    let tok = line
-        .split("token=")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(_) => break,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    }
+    let (mut child, port, tok) = spawn(&s, &[], &[("TMPDIR", tmp.to_str().unwrap())]);
+
     // The session's directory is created eagerly at startup (#275), but make
     // sure the session (and the private dir holding this round's q.sql) is
     // fully up before we kill it.
@@ -431,46 +384,8 @@ fn authoring_session_fast_rounds_do_not_leak_watchdog_threads() {
         return;
     }
     let s = Scratch::new("threads");
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut child = Kill(
-        Command::new(env!("CARGO_BIN_EXE_serve"))
-            .arg(s.0.join("a.duckdb"))
-            .args([
-                "--port",
-                &port.to_string(),
-                "--no-open",
-                "--query-timeout",
-                "2",
-            ])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
+    let (child, port, tok) = spawn(&s, &["--query-timeout", "2"], &[]);
     let pid = child.0.id();
-    let mut out = BufReader::new(child.0.stdout.take().unwrap());
-    let mut line = String::new();
-    out.read_line(&mut line).unwrap();
-    let tok = line
-        .split("token=")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(_) => break,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => panic!("serve did not start on {port}: {e}"),
-        }
-    }
     // One round so the session's `duckdb` child (and its stderr-reader
     // thread) is already up before the baseline is taken.
     let (st, _) = q(port, &tok, "SELECT 1");
