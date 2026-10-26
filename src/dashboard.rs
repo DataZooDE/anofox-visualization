@@ -653,12 +653,13 @@ fn render_inner(
         };
         next_span = 0;
         let md = markdown_text(rows, roles);
+        let img = image_panel(rows, roles, ropts.theme.variant == Variant::Dark);
         let ch = match strip {
             _ if next_height > 0 => next_height as f64,
             Some((_, _, _, th)) => th,
             // a ::MARKDOWN box: as tall as its wrapped text (≤ the default)
-            None => match &md {
-                Some(t) => {
+            None => match (&md, &img) {
+                (Some(t), _) => {
                     let mw = if span == 0 {
                         content_w
                     } else {
@@ -669,7 +670,26 @@ fn render_inner(
                     (lines * MD_LINE + if title { 26.0 } else { 0.0 } + 26.0)
                         .min(opts.panel_height as f64)
                 }
-                None => opts.panel_height as f64,
+                // an ::IMAGE box: its own width × the image's own aspect
+                // (fallback 9:16), plus the title bar and caption (#514).
+                (None, Some(ip)) => {
+                    let mw = if span == 0 {
+                        content_w
+                    } else {
+                        unit_w * span as f64 - gap
+                    };
+                    let title = roles.iter().any(|(_, r)| matches!(r, Role::Title));
+                    let (aw, ah) = image_aspect(&ip.src);
+                    let cap_h = if ip.caption.is_some() { 20.0 } else { 0.0 };
+                    let title_h = if title { 26.0 } else { 0.0 };
+                    // The image itself draws at `mw - 28` wide (render_panel_svg's
+                    // 14 px side padding), so the aspect is computed from that,
+                    // not the full card width.
+                    let iw = (mw - 28.0).max(10.0);
+                    (iw * (ah / aw).clamp(0.05, 20.0) + title_h + cap_h + 10.0)
+                        .clamp(80.0, opts.panel_height as f64)
+                }
+                (None, None) => opts.panel_height as f64,
             },
         };
         next_height = 0;
@@ -999,6 +1019,81 @@ fn render_panel_svg(
         return svg;
     }
 
+    // A static ::IMAGE / ::IMAGE_DARK panel (#514): an SVG <image> inside the
+    // panel frame, with the title bar and an optional ::LABEL caption like
+    // other panels — panel composition, not a new SVG writer for charts
+    // (plotting stays through ggplot-rs). The source is always drawn through
+    // `<image href=…>`, never inlined into the DOM, `<object>` or `<iframe>`:
+    // a browser (and this static renderer) runs no script and loads no
+    // external resource from inside an SVG used as an image this way.
+    if let Some(img) = image_panel(rows, roles, ropts.theme.variant == Variant::Dark) {
+        let t = &ropts.theme;
+        let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
+        if let Some(tt) = &title {
+            let mark = info
+                .as_deref()
+                .map(|i| {
+                    format!(
+                        "<tspan class=\"dp-info\" fill=\"{m}\" font-weight=\"400\">{sp}ⓘ<title>{}</title></tspan>",
+                        esc(i),
+                        m = hex(t.colors.muted),
+                        sp = if tt.is_empty() { "" } else { " " },
+                    )
+                })
+                .unwrap_or_default();
+            svg.push_str(&format!(
+                "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}{mark}</text>",
+                esc(tt),
+                f = esc(&t.font.display),
+                hd = hex(t.colors.heading),
+            ));
+        }
+        let cap_h = if img.caption.is_some() { 20.0 } else { 0.0 };
+        let ix = pad;
+        let iy = title_h + 4.0;
+        let iw = (w - 2.0 * pad).max(1.0);
+        let ih = (h - iy - cap_h - 6.0).max(1.0);
+        match image_href(&img.src) {
+            Some(href) => {
+                let alt_title = if img.alt.is_empty() {
+                    String::new()
+                } else {
+                    format!("<title>{}</title>", esc(&img.alt))
+                };
+                svg.push_str(&format!(
+                    "<image href=\"{}\" x=\"{ix:.1}\" y=\"{iy:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" preserveAspectRatio=\"xMidYMid meet\">{alt_title}</image>",
+                    esc(&href),
+                ));
+            }
+            None => {
+                let label = if img.alt.is_empty() {
+                    "image"
+                } else {
+                    &img.alt
+                };
+                svg.push_str(&format!(
+                    "<rect x=\"{ix:.1}\" y=\"{iy:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" fill=\"none\" stroke=\"{muted}\" stroke-dasharray=\"4 3\" rx=\"4\"/><text x=\"{cx:.1}\" y=\"{cy:.1}\" font-family=\"{f}\" font-size=\"12\" fill=\"{muted}\" text-anchor=\"middle\" font-style=\"italic\">{}</text>",
+                    esc(label),
+                    muted = hex(t.colors.muted),
+                    f = esc(&t.font.family),
+                    cx = ix + iw / 2.0,
+                    cy = iy + ih / 2.0,
+                ));
+            }
+        }
+        if let Some(cap) = &img.caption {
+            svg.push_str(&format!(
+                "<text x=\"{pad}\" y=\"{y:.1}\" font-family=\"{f}\" font-size=\"12\" fill=\"{muted}\">{}</text>",
+                esc(cap),
+                f = esc(&t.font.family),
+                muted = hex(t.colors.muted),
+                y = h - 6.0,
+            ));
+        }
+        svg.push_str("</svg>");
+        return svg;
+    }
+
     // Otherwise a chart — render at the content area, then wrap with a title.
     // Its ::TRACKs sit right under it, sharing its plot area and x window.
     let tracks_h: u32 = crate::track::heights(tracks).iter().sum();
@@ -1047,7 +1142,12 @@ fn is_chart(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], o: &RenderOp
         && !has(&|r| {
             matches!(
                 r,
-                Role::Table | Role::PagedTable | Role::Markdown | Role::Track
+                Role::Table
+                    | Role::PagedTable
+                    | Role::Markdown
+                    | Role::Track
+                    | Role::Image
+                    | Role::ImageDark
             )
         })
         // `compact` doesn't change whether this is a KPI, only how it draws.
@@ -1693,6 +1793,69 @@ fn link_label(url: &str) -> String {
 /// Line height of a headless ::MARKDOWN box.
 const MD_LINE: f64 = 18.0;
 
+/// A static ::IMAGE panel's resolved content (#514).
+struct ImagePanel {
+    src: String,
+    alt: String,
+    caption: Option<String>,
+}
+
+/// `rows`/`roles` as an ::IMAGE panel, if it is one. `dark` picks
+/// ::IMAGE_DARK when set, else falls back to ::IMAGE. `::ALT` is read even
+/// when `''` (decorative — no fallback then); when ::ALT is absent
+/// entirely, the alt text falls back to ::TITLE, then ::LABEL (decision 4).
+fn image_panel(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    dark: bool,
+) -> Option<ImagePanel> {
+    let text_of = |role: Role| -> Option<String> {
+        let (i, _) = roles.iter().find(|(_, r)| *r == role)?;
+        column_at(rows, *i)
+            .and_then(|(_, v)| v.first())
+            .map(value_str)
+    };
+    let src = (dark.then(|| text_of(Role::ImageDark)).flatten())
+        .or_else(|| text_of(Role::Image))
+        .filter(|s| !s.trim().is_empty())?;
+    let alt = if roles.iter().any(|(_, r)| *r == Role::Alt) {
+        text_of(Role::Alt).unwrap_or_default()
+    } else {
+        text_of(Role::Title)
+            .or_else(|| text_of(Role::Label))
+            .unwrap_or_default()
+    };
+    let caption = text_of(Role::Label).filter(|s| !s.trim().is_empty());
+    Some(ImagePanel { src, alt, caption })
+}
+
+/// `src`'s href for a static `<image href=…>`: `data:`/`https:` sources are
+/// used as-is; a relative path (PR B inlines it from `assets/`) or anything
+/// [`crate::image::src_ok`] rejects draws the alt-text placeholder instead
+/// (`None`).
+fn image_href(src: &str) -> Option<String> {
+    use crate::image::{src_ok, SrcKind};
+    match src_ok(src) {
+        SrcKind::Data(_) | SrcKind::Https => Some(src.to_string()),
+        SrcKind::Relative | SrcKind::Bad(_) => None,
+    }
+}
+
+/// `src`'s own aspect (width, height), decoded from a `data:` payload via
+/// [`crate::image::intrinsic_size`]; [`crate::image::FALLBACK_ASPECT`]
+/// otherwise (an `https:`/relative/bad source, or a size that can't be read).
+fn image_aspect(src: &str) -> (f64, f64) {
+    use crate::image::{decode_data_uri, intrinsic_size, src_ok, SrcKind, FALLBACK_ASPECT};
+    if let SrcKind::Data(_) = src_ok(src) {
+        if let Some((mime, bytes)) = decode_data_uri(src) {
+            if let Some(sz) = intrinsic_size(&bytes, &mime) {
+                return sz;
+            }
+        }
+    }
+    FALLBACK_ASPECT
+}
+
 /// The text of a ::MARKDOWN panel, if it is one.
 fn markdown_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<String> {
     let (i, _) = roles.iter().find(|(_, r)| matches!(r, Role::Markdown))?;
@@ -1805,7 +1968,10 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
                 crate::math::Seg::Text(t) => {
                     let mut plain = String::new();
                     let mut rest = t.as_str();
-                    // [text](url) → text
+                    // [text](url) → text; ![alt](src) → [alt] (#514: a
+                    // markdown image has no pixels here — PR A draws its alt
+                    // text in brackets so the reader knows a figure was
+                    // there; embedding it is a documented follow-up).
                     while let Some(a) = rest.find('[') {
                         let Some(b) = rest[a..].find("](").map(|b| a + b) else {
                             break;
@@ -1813,8 +1979,16 @@ fn markdown_lines(md: &str, w: f64) -> Vec<String> {
                         let Some(c) = rest[b..].find(')').map(|c| b + c) else {
                             break;
                         };
-                        plain.push_str(&rest[..a]);
-                        plain.push_str(&rest[a + 1..b]);
+                        let is_image = a > 0 && rest.as_bytes()[a - 1] == b'!';
+                        let pre_end = if is_image { a - 1 } else { a };
+                        plain.push_str(&rest[..pre_end]);
+                        if is_image {
+                            plain.push('[');
+                            plain.push_str(&rest[a + 1..b]);
+                            plain.push(']');
+                        } else {
+                            plain.push_str(&rest[a + 1..b]);
+                        }
                         rest = &rest[c + 1..];
                     }
                     plain.push_str(rest);

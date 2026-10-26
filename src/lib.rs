@@ -30,6 +30,7 @@ mod downsample;
 pub mod format;
 pub mod freshness;
 pub mod host;
+pub mod image;
 pub mod inputs;
 pub mod kpi;
 pub mod lint;
@@ -241,6 +242,9 @@ pub enum Role {
     Label,
     /// A per-box title bar (`::TITLE`/`::HEADING`) drawn above a single panel.
     Title,
+    /// An image's text alternative (`::ALT`); `''` means decorative
+    /// (`alt=""`, no lint warning).
+    Alt,
     /// The measured value, carrying the chart kind (`count()::BARCHART`).
     Value(Kind),
     /// A control input (`::DROPDOWN`/`::NUMBER`/`::DATE`/`::TEXT`) — the output
@@ -452,6 +456,12 @@ pub enum Role {
     /// A rich-text panel whose (string) value is rendered as Markdown
     /// (`::MARKDOWN`/`::MD`). Presentation-only — handled by the browser.
     Markdown,
+    /// A static picture panel (`::IMAGE`/`::PICTURE`/`::IMG`): `assets/x.svg`,
+    /// a `data:image/…` URI or an `https:` URL. See `src/image.rs::src_ok`.
+    Image,
+    /// The `::IMAGE` shown instead, while the dashboard is in dark mode
+    /// (`::IMAGE_DARK`/`::IMG_DARK`).
+    ImageDark,
     /// A panel's definition (`::INFO`): an ⓘ on its title bar shows the text.
     Info,
     /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
@@ -2245,6 +2255,13 @@ fn render_inner(
     // A thin panel under a chart, sharing its x axis.
     if find_role(cols, Role::Track).is_some() {
         return track::render(o, cols, width, height);
+    }
+    // A static ::IMAGE / ::IMAGE_DARK panel (#514): checked before the
+    // measure-column branches below, which would otherwise error with "no
+    // measure column" (this render path has no Role::Value column for an
+    // image panel, same as a ::MARKDOWN or ::TABLE one would today).
+    if find_role(cols, Role::Image).is_some() || find_role(cols, Role::ImageDark).is_some() {
+        return Ok(image_panel_svg(cols, width, height, o));
     }
     // A KPI / text card (value, change, sparkline, goal) — the same tile as
     // the headless dashboard; at most its natural height.
@@ -6473,6 +6490,60 @@ fn note_svg(title: Option<&str>, note: &str, width: u32, height: u32) -> Panel {
             format::escape_xml(note)
         ),
     )
+}
+
+/// The column's single value as text, or `None` if the role isn't present.
+fn column_text(cols: &[Column], role: Role) -> Option<String> {
+    find_role(cols, role)?.values.first().map(value_str)
+}
+
+/// A static `::IMAGE` panel on this render path (#514: `render_spec` /
+/// `serve.rs`'s script-free page), mirroring `dashboard.rs`'s own `::IMAGE`
+/// branch: a `data:`/`https:` source is drawn through `<image href>`; a
+/// relative path or a rejected source draws the alt-text placeholder
+/// (the script-free page doesn't yet serve `assets/…` — PR B) rather than
+/// the generic "panel render failed" card its caller would otherwise show.
+/// No title bar or caption here: this render path draws neither for any
+/// panel kind (its caller, `render_with_title`, already draws one bar from
+/// `::LABEL`, above whatever this returns).
+fn image_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOptions) -> Panel {
+    use crate::image::{src_ok, SrcKind};
+    let dark = o.theme.variant == theme::Variant::Dark;
+    let src = (dark.then(|| column_text(cols, Role::ImageDark)).flatten())
+        .or_else(|| column_text(cols, Role::Image))
+        .filter(|s| !s.trim().is_empty());
+    let alt = column_text(cols, Role::Alt)
+        .or_else(|| column_text(cols, Role::Title))
+        .or_else(|| column_text(cols, Role::Label))
+        .unwrap_or_default();
+    let (w, h) = (width as f64, height as f64);
+    let pad = 8.0;
+    let iw = (w - 2.0 * pad).max(1.0);
+    let ih = (h - 2.0 * pad).max(1.0);
+    let body = match src.as_deref().map(src_ok) {
+        Some(SrcKind::Data(_)) | Some(SrcKind::Https) => {
+            let alt_title = if alt.is_empty() {
+                String::new()
+            } else {
+                format!("<title>{}</title>", format::escape_xml(&alt))
+            };
+            format!(
+                "<image href=\"{}\" x=\"{pad:.1}\" y=\"{pad:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" preserveAspectRatio=\"xMidYMid meet\">{alt_title}</image>",
+                format::escape_xml(&src.unwrap()),
+            )
+        }
+        _ => {
+            let label = if alt.is_empty() { "image" } else { &alt };
+            format!(
+                "<rect x=\"{pad:.1}\" y=\"{pad:.1}\" width=\"{iw:.1}\" height=\"{ih:.1}\" fill=\"none\" stroke=\"{muted}\" stroke-dasharray=\"4 3\" rx=\"4\"/><text x=\"{cx:.1}\" y=\"{cy:.1}\" text-anchor=\"middle\" dominant-baseline=\"middle\" font-family=\"system-ui,sans-serif\" font-size=\"12\" font-style=\"italic\" fill=\"{muted}\">{}</text>",
+                format::escape_xml(label),
+                muted = theme::SVG_NOTE,
+                cx = w / 2.0,
+                cy = h / 2.0,
+            )
+        }
+    };
+    Panel::own(width, height, body)
 }
 
 /// The `<text>` title strip of a [`note_svg`] placeholder, or `""` without a

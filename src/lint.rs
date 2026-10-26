@@ -85,6 +85,15 @@ pub struct Diagnostic {
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
+    /// `::IMAGE` / `::IMAGE_DARK` (#514, [`image_src_diag`]): `image/bad-src`
+    /// | `image/outside-folder` (errors) | `image/not-in-assets` |
+    /// `image/svg-no-size` | `image/too-large` | `image/empty` |
+    /// `image/no-alt` | `image/many` (warnings) | `image/https-offline` (a
+    /// note). Markdown images
+    /// (`![alt](src)`): `markdown/image-bad-src` (error) |
+    /// `markdown/image-not-in-assets` | `markdown/image-svg-no-size` |
+    /// `markdown/image-too-large` | `markdown/image-no-alt` |
+    /// `markdown/placeholder-in-image` (warnings).
     /// `::SHOW_IF` ([`show_if_diags`], #515): `show_if/not-alone` |
     /// `show_if/bad-target` (errors) | `show_if/no-target` |
     /// `show_if/not-boolean` | `show_if/no-row` | `show_if/unknown-variable` |
@@ -1192,6 +1201,139 @@ where
                             sql: short.clone(),
                         });
                     }
+                }
+            }
+        }
+
+        // ::IMAGE / ::IMAGE_DARK (#514): the same source rules as
+        // web/app.js's imageSrc() (parity: tests/fixtures/image_src_vectors.json).
+        {
+            let mut push = |severity: Severity, code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            let mut any_image = false;
+            for role in [Role::Image, Role::ImageDark] {
+                let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == role) else {
+                    continue;
+                };
+                any_image = true;
+                let texts = column_texts(&rows, *i);
+                if texts.is_empty() {
+                    push(
+                        Severity::Warning,
+                        "image/empty",
+                        "empty ::IMAGE value — nothing is drawn".into(),
+                    );
+                    continue;
+                }
+                for src in &texts {
+                    if let Some((sev, suffix, msg)) = image_src_diag(src) {
+                        let code = match suffix {
+                            "bad-src" => "image/bad-src",
+                            "outside-folder" => "image/outside-folder",
+                            "not-in-assets" => "image/not-in-assets",
+                            "svg-no-size" => "image/svg-no-size",
+                            _ => "image/too-large",
+                        };
+                        push(sev, code, msg);
+                    } else if matches!(crate::image::src_ok(src), crate::image::SrcKind::Https) {
+                        // The static HTML and `--svg` keep an https: source
+                        // as a link rather than embedding it (it may not
+                        // show offline), and the assistant's preview CSP
+                        // blocks it — worth knowing, not worth a warning.
+                        push(
+                            Severity::Note,
+                            "image/https-offline",
+                            format!(
+                                "`{}` stays a link in static output (--svg, the CLI HTML) — it may not show offline",
+                                one_line(src)
+                            ),
+                        );
+                    }
+                }
+            }
+            if any_image {
+                if !p.roles.iter().any(|(_, r)| *r == Role::Alt) {
+                    push(
+                        Severity::Warning,
+                        "image/no-alt",
+                        "no ::ALT — falls back to ::TITLE, then ::LABEL, then \"\" (add ''::ALT if the image is decorative)"
+                            .into(),
+                    );
+                }
+                if rows.len() > 6 {
+                    push(
+                        Severity::Warning,
+                        "image/many",
+                        format!(
+                            "{} rows — more than 6 images stack in one panel",
+                            rows.len()
+                        ),
+                    );
+                }
+            }
+        }
+
+        // Markdown images (`![alt](src)`, #514): the same source rules,
+        // under `markdown/image-*` codes so authors know which panel kind
+        // (::MARKDOWN vs ::IMAGE) a warning is about.
+        if let (Some((i, _)), Some(row)) = (
+            p.roles.iter().find(|(_, r)| *r == Role::Markdown),
+            rows.first(),
+        ) {
+            let md = row.values().nth(*i).and_then(Value::as_str).unwrap_or("");
+            let mut push = |severity: Severity, code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            for (alt, src) in md_images(md) {
+                // A `{{col}}` placeholder in the src is never filled here
+                // (markdownWithValues strips tokens inside tags) — report
+                // just that, not also whatever the literal, unfilled text
+                // happens to look like as a path.
+                if !md_placeholders(&src).is_empty() {
+                    push(
+                        Severity::Warning,
+                        "markdown/placeholder-in-image",
+                        "{{col}} inside an image src is not filled (markdownWithValues strips tokens inside tags) — compute the path in an ::IMAGE instead".into(),
+                    );
+                } else {
+                    match image_src_diag(&src) {
+                        Some((Severity::Error, _, msg)) => {
+                            push(Severity::Error, "markdown/image-bad-src", msg)
+                        }
+                        Some((Severity::Warning, "not-in-assets", msg)) => {
+                            push(Severity::Warning, "markdown/image-not-in-assets", msg)
+                        }
+                        Some((Severity::Warning, "svg-no-size", msg)) => {
+                            push(Severity::Warning, "markdown/image-svg-no-size", msg)
+                        }
+                        Some((Severity::Warning, _, msg)) => {
+                            push(Severity::Warning, "markdown/image-too-large", msg)
+                        }
+                        _ => {}
+                    }
+                }
+                if alt.is_empty() {
+                    push(
+                        Severity::Warning,
+                        "markdown/image-no-alt",
+                        format!(
+                            "![](…) has no alt text — `{}` shown with empty alt",
+                            one_line(&src)
+                        ),
+                    );
                 }
             }
         }
@@ -3979,6 +4121,110 @@ fn md_placeholders(md: &str) -> Vec<(String, Option<String>)> {
         if ident {
             out.push((name.to_string(), spec));
         }
+    }
+    out
+}
+
+/// One `::IMAGE`/`::IMAGE_DARK`/markdown-image `src`'s diagnostic, if any:
+/// `(severity, machine suffix, message)`. Callers prefix the suffix with
+/// `image/` or `markdown/image-` (decision: markdown images get their own
+/// code family so an author knows which panel kind a warning is about).
+/// `None` when `src` is fine as given (still possibly worth a lint-level
+/// `not-in-assets` nudge, which this *does* report — only a clean relative
+/// `assets/…` / `https:` / `data:` source with no size issue is silent).
+fn image_src_diag(src: &str) -> Option<(Severity, &'static str, String)> {
+    use crate::image::{decode_data_uri, intrinsic_size, is_under_assets, src_ok, SrcKind};
+    match src_ok(src) {
+        SrcKind::Bad("too-long") => Some((
+            Severity::Error,
+            "too-large",
+            format!(
+                "image source is {} characters — the cap is {}",
+                src.chars().count(),
+                crate::image::MAX_SRC_CHARS
+            ),
+        )),
+        SrcKind::Bad(
+            reason @ ("protocol-relative" | "absolute-path" | "outside-folder" | "percent-encoded"),
+        ) => {
+            Some((
+                Severity::Error,
+                "outside-folder",
+                format!(
+                    "`{}` leaves the dashboard's own folder ({reason})",
+                    one_line(src)
+                ),
+            ))
+        }
+        SrcKind::Bad(reason) => Some((
+            Severity::Error,
+            "bad-src",
+            format!(
+                "`{}` is not an allowed image source ({reason}) — use a relative path, data:image/… or https:",
+                one_line(src)
+            ),
+        )),
+        SrcKind::Relative if !is_under_assets(src) => Some((
+            Severity::Warning,
+            "not-in-assets",
+            format!("`{src}` is outside assets/ — relative images are only served from there"),
+        )),
+        SrcKind::Data("svg+xml") => decode_data_uri(src)
+            .filter(|(m, bytes)| intrinsic_size(bytes, m).is_none())
+            .map(|_| {
+                (
+                    Severity::Warning,
+                    "svg-no-size",
+                    "this SVG has no viewBox and no width+height on its root element — it draws at 300×150".to_string(),
+                )
+            })
+            .or_else(|| too_large(src)),
+        _ => too_large(src),
+    }
+}
+
+/// The >512 000 character soft-warning shared by every accepted `src` kind
+/// ([`image_src_diag`]) — still drawn, just worth a smaller file.
+fn too_large(src: &str) -> Option<(Severity, &'static str, String)> {
+    (src.chars().count() > 512_000).then(|| {
+        (
+            Severity::Warning,
+            "too-large",
+            format!(
+                "image source is {} characters — consider a smaller file or a relative assets/ path",
+                src.chars().count()
+            ),
+        )
+    })
+}
+
+/// `![alt](src)` occurrences in Markdown text, in order — the lint-time
+/// counterpart of `web/app.js::renderMarkdown`'s image regex
+/// (`/!\[([^\]]*)\]\(([^)\s]+)\)/g`), over the raw (un-rendered) text.
+fn md_images(md: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = md;
+    while let Some(bang) = rest.find("![") {
+        let after = &rest[bang + 2..];
+        let Some(alt_end) = after.find(']') else {
+            break;
+        };
+        let alt = &after[..alt_end];
+        let rest2 = &after[alt_end + 1..];
+        let Some(paren) = rest2.strip_prefix('(') else {
+            rest = rest2;
+            continue;
+        };
+        let src_end = paren
+            .find(|c: char| c == ')' || c.is_whitespace())
+            .unwrap_or(paren.len());
+        let src = &paren[..src_end];
+        if src.is_empty() || paren.as_bytes().get(src_end) != Some(&b')') {
+            rest = rest2;
+            continue;
+        }
+        out.push((alt.to_string(), src.to_string()));
+        rest = &paren[src_end + 1..];
     }
     out
 }
