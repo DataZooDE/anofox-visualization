@@ -230,6 +230,10 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .md-box{position:relative;overflow:hidden;background:var(--ax-callout-bg);border-color:var(--ax-callout-border);padding-left:1.4rem}
 .md-box::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--ax-callout-bar)}
 .md-body{font-size:.9rem;line-height:1.6;color:var(--ax-md-ink)}
+/* 'plain'::MARKDOWN_STYLE (#536): text on the page background — no card, no
+   tint, no accent bar; .panel's own padding stays (normal page padding),
+   just its card chrome goes. */
+.md-plain{background:transparent;border-color:transparent;box-shadow:none}
 .dp-callout{padding-left:3rem}
 .dp-callout::after{content:attr(data-icon);position:absolute;left:1.15rem;top:1.05rem;width:1.3rem;height:1.3rem;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.78rem;font-weight:800;color:var(--ax-card);background:var(--ax-callout-bar)}
 .dp-callout-warning{background:var(--ax-badge-warn-bg);border-color:transparent}

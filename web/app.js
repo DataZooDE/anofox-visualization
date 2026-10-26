@@ -9188,6 +9188,11 @@ async function runOnce(fresh = true, pv = preview) {
     grid.replaceChildren();
     return showError(grid, String(e));
   }
+  // ::MARKDOWN_STYLE (#536): this dashboard's own `-- @markdown_style`
+  // default, read once per run — a panel's own ::MARKDOWN_STYLE (or
+  // ::CALLOUT, which always draws 'callout') overrides it. See
+  // resolveMdStyle() / mdStyleDefault().
+  const dpMdStyleDefault = mdStyleDefault(pv ? pv.sql : $("sql").value);
   markPending(grid, stmts, fresh);
   if (fresh) {
     dpSetupRan = new Map();
@@ -9918,18 +9923,29 @@ async function runOnce(fresh = true, pv = preview) {
           panels++;
         } else if (role(s, "MARKDOWN")) {
           const fig = mkPanel();
-          fig.classList.add("md-box");
           const tr = s.roles.find((r) => r[1] === "TITLE");
           const r0 = JSON.parse(rowsJson)[0] || {};
           if (tr && r0["c" + tr[0]]) fig.appendChild(mkTitle(String(r0["c" + tr[0]])));
           const mdr = s.roles.find((r) => r[1] === "MARKDOWN");
-          // ::CALLOUT 'note' | 'warning' | 'success': a tinted box with an icon.
+          // ::MARKDOWN_STYLE (#536): 'plain' (page background, no card/tint/
+          // bar), 'card' (plain white card, like mkPanel()'s own look — no
+          // class needed) or 'callout' ::CALLOUT 'note' | 'warning' |
+          // 'success': a tinted box with an icon — today's look, the
+          // default. An explicit ::MARKDOWN_STYLE wins even over ::CALLOUT
+          // (resolveMdStyle(); --check warns: markdown_style/conflicts-
+          // with-callout), so the icon only ever shows with 'callout'.
+          const sr = s.roles.find((r) => r[1] === "MARKDOWN_STYLE");
           const cr = s.roles.find((r) => r[1] === "CALLOUT");
-          if (cr) {
-            const kind = calloutKind(r0["c" + cr[0]]);
-            fig.classList.add("dp-callout", "dp-callout-" + kind);
-            fig.setAttribute("role", "note"); // static text: never an assertive alert
-            fig.dataset.icon = { note: "ℹ", warning: "⚠", success: "✓" }[kind];
+          const mdStyle = resolveMdStyle(sr ? r0["c" + sr[0]] : null, !!cr, dpMdStyleDefault);
+          if (mdStyle === "plain") fig.classList.add("md-plain");
+          if (mdStyle === "callout") {
+            fig.classList.add("md-box");
+            if (cr) {
+              const kind = calloutKind(r0["c" + cr[0]]);
+              fig.classList.add("dp-callout", "dp-callout-" + kind);
+              fig.setAttribute("role", "note"); // static text: never an assertive alert
+              fig.dataset.icon = { note: "ℹ", warning: "⚠", success: "✓" }[kind];
+            }
           }
           const body = document.createElement("div");
           body.className = "md-body";
@@ -12232,6 +12248,31 @@ function calloutKind(v) {
   if (k === "warning" || k === "caution" || k === "danger") return "warning";
   if (k === "success" || k === "tip") return "success";
   return "note";
+}
+// ::MARKDOWN_STYLE / -- @markdown_style value → 'plain' | 'card' | 'callout',
+// or null for anything else (src/roles.rs MARKDOWN_STYLE_KINDS).
+const MD_STYLE_KINDS = ["plain", "card", "callout"];
+function mdStyleOf(v) {
+  const k = String(v ?? "").trim().toLowerCase();
+  return MD_STYLE_KINDS.includes(k) ? k : null;
+}
+// The effective ::MARKDOWN_STYLE for one ::MARKDOWN panel (src/roles.rs
+// resolve_markdown_style): an explicit, valid `explicit` (the panel's own
+// ::MARKDOWN_STYLE cell) wins outright — even over ::CALLOUT (--check warns:
+// markdown_style/conflicts-with-callout); else ::CALLOUT (`calloutPresent`)
+// always draws 'callout'; else `dashboardDefault` (-- @markdown_style); else
+// 'callout' (today's look).
+function resolveMdStyle(explicit, calloutPresent, dashboardDefault) {
+  return mdStyleOf(explicit) ?? (calloutPresent ? "callout" : mdStyleOf(dashboardDefault) ?? "callout");
+}
+// This dashboard's own `-- @markdown_style` default, or null without the
+// header / with an unrecognized value — see astablesBarOn() for the pattern.
+function mdStyleDefault(sql) {
+  try {
+    return mdStyleOf(JSON.parse(dashboard_meta(sql)).markdown_style);
+  } catch (_) {
+    return null;
+  }
 }
 // One cell of a result (by output position) as text.
 function cellAt(rowsJson, idx) {
