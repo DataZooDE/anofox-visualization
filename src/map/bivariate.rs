@@ -6,9 +6,9 @@
 //! `ggplot_rs::scale::bivariate::bivariate_cell_color` — the exact function
 //! backing `ScaleFillBivariate`/`GeomBivariateLegend`, built upstream for
 //! this feature (sipemu/ggplot-rs's own #177–#182) — not a second,
-//! hand-rolled colour mix: one source of truth for the 9 cells, whichever
-//! render path (this module's old writer, or `plot.rs`'s `geom_sf` path)
-//! draws them.
+//! hand-rolled colour mix: one source of truth for the 9 cells, whether
+//! `plot.rs`'s `geom_sf` path colours a feature or draws the legend swatch
+//! for it.
 
 use ggplot_rs::scale::bivariate::bivariate_cell_color;
 

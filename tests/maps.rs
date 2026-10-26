@@ -1,8 +1,8 @@
-//! Render regression for `::MAP` panels drawn by the extension's own map
-//! writer: every projection, every class method, light and dark (and the
-//! colour-blind theme), holes cut out, row order, the per-feature attribute
-//! contract the browser keys on, the no-data hatch, the legend and the
-//! summary.
+//! Render regression for `::MAP` panels, drawn by ggplot-rs's `geom_sf`
+//! (`src/map/plot.rs`, #420): every projection, every class method, light
+//! and dark (and the colour-blind theme), holes cut out, row order, the
+//! per-feature attribute contract the browser keys on, the no-data hatch,
+//! the legend and the summary.
 
 use std::sync::Arc;
 
@@ -425,6 +425,14 @@ fn classed_measure_routes_through_geom_sf_with_counts_and_a_hatch() {
         "the no-data row has no class"
     );
     assert_eq!(attr(f[3], "data-class"), Some("2"));
+    // #420 slice 6: `ScaleFillBinned` (the classed `fill` scale) has no
+    // `Scale::format_value` of its own — found via the before/after example
+    // diff on `delivery-coverage.sql`'s districts tab when a first pass at
+    // this slice dropped the `data-fvalue` fallback for every map
+    // unconditionally — `with_formatted_values` (`src/lib.rs`) must still
+    // cover a classed measure specifically.
+    assert_eq!(attr(f[0], "data-fvalue"), Some("1"));
+    assert_eq!(attr(f[3], "data-fvalue"), Some("1,000"));
     // the no-data row: a pattern-filled hatch (#206), not a flat colour,
     // and no `data-value`/`data-class`.
     assert!(attr(f[2], "fill").unwrap().starts_with("url(#"), "{}", f[2]);
@@ -511,6 +519,14 @@ fn bivariate_tertiles_and_nine_colours() {
             "{tag}"
         );
         assert!(attr(tag, "data-class").is_none(), "no data-class: {tag}");
+        // #420 slice 6: same gap as the classed test above, for
+        // `ScaleFillBivariate`'s own wrapper (`fill::BivariateScale`) —
+        // the `fill` aes here is the composite `"{ai}-{bi}"` class string
+        // (`map_to_color`'s own convention), not the raw measure, so a
+        // native `Scale::format_value` on it couldn't reproduce `a[i]`
+        // even if one were added; `with_formatted_values` stays the only
+        // source of the primary measure's `data-fvalue`.
+        assert_eq!(attr(tag, "data-fvalue"), Some(ai.to_string().as_str()));
         fills.insert(attr(tag, "fill").unwrap().to_string());
     }
     assert_eq!(fills.len(), 9, "{fills:?}");
@@ -1133,6 +1149,75 @@ fn many_marks_warn() {
     .unwrap();
     assert!(
         r.warnings.iter().any(|w| w.contains("100001 marks")),
+        "{:?}",
+        r.warnings
+    );
+}
+
+/// #420 slice 6: `plot::build` is the *only* map render path now — browser
+/// lint and native `dashboard --check` always run the same code, so they
+/// can no longer disagree the way `eligible()`'s old footer-line-count
+/// gate let them (fixed in 30e9143, "skip the geom_sf features layer when
+/// every row's own geometry is suppressed": a `de-states`-backed map
+/// resolved its BKG pack — and thus `eligible()`'s branch — differently in
+/// the browser's lint pass, where the pack isn't registered yet, than
+/// natively). That specific divergence is moot by construction with one
+/// path, but the underlying bug class it exposed — adding a `geom_sf`
+/// features layer for an all-suppressed `features_df` (every row's own
+/// geometry replaced by a `::HEXBIN`/`::SIZE` anchor) spuriously reporting
+/// `StatSf`'s "removed N rows containing missing values" — is still worth
+/// guarding directly, independent of pack timing.
+#[test]
+fn fully_suppressed_features_draw_no_spurious_removed_rows_warning() {
+    // every row taken over by ::HEXBIN's own point pass
+    let r = render_with_warnings(
+        &[
+            Column::new("lat", Role::Lat, nums(&[50.0, 50.1, 49.9])),
+            Column::new("lon", Role::Lon, nums(&[10.0, 10.1, 9.9])),
+            Column::new("h", Role::Hexbin, strs(&["auto"])),
+        ],
+        480,
+        320,
+        &RenderOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        !r.warnings
+            .iter()
+            .any(|w| w.contains("containing missing values")),
+        "{:?}",
+        r.warnings
+    );
+
+    // every row anchored by a finite ::SIZE (planar, so this stays simple)
+    // — a point or a polygon's pole, never a line (`symbols::anchors_of`:
+    // "a line alone has no anchor"), so a line row here would stay real
+    // geometry in the features layer, a *different*, still-legitimate
+    // "removed N rows" case (some real, some symbol-suppressed) this test
+    // isn't about.
+    let r = render_with_warnings(
+        &[
+            Column::new(
+                "g",
+                Role::Geometry,
+                strs(&[
+                    "POINT(0 0)",
+                    "POLYGON((2 0, 3 0, 3 1, 2 1, 2 0))",
+                    "POINT(1 1)",
+                ]),
+            ),
+            Column::new("n", Role::Size, nums(&[100.0, 400.0, 10.0])),
+            Column::new("p", Role::Projection, konst("none", 3)),
+        ],
+        480,
+        320,
+        &RenderOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        !r.warnings
+            .iter()
+            .any(|w| w.contains("containing missing values")),
         "{:?}",
         r.warnings
     );
