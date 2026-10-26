@@ -1580,9 +1580,11 @@ no lerp) and `stroke-width` interpolates, same as `'tween'::TRANSITION`'s
 re-run join elsewhere. Reduced motion keeps Play available (stepping
 through time *is* the content) with instant, 1.5 s-apart steps, and it
 never autoplays on its own. The step persists per statement across a
-re-run, like `::STORY`'s step does. The HTML export has no live player (a
-static note takes its place — "12 frames — Play in the live dashboard");
-embedding every frame for an offline player is a follow-up.
+re-run, like `::STORY`'s step does. The ⤓ HTML export embeds every frame
+(pre-rendered, so it still plays with no live query engine) and rebuilds the
+same bar offline, as long as their total stays within 3 MB per map; above
+that, a static note takes its place instead — "12 frames — Play in the live
+dashboard".
 
 - **Frame order:** ascending when every `::FRAME` value is numeric,
   chronological when every value looks like a date, else first
