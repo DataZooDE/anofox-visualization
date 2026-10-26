@@ -667,22 +667,28 @@ pub(super) fn build(
                 // a corner with the pack attribution (further down) —
                 // *not* moved to `TopRight` to dodge it: tried for #546
                 // and reverted, because `GeomBivariateLegend::legend_layout`
-                // (ggplot-rs) sizes its own box from `y_name`'s *thickness*
-                // (`text_size + 4.0`) only, never its rotated *length* —
-                // so the caption routinely draws past its own box already,
-                // and at `TopRight` that overflow runs off the top of the
-                // panel entirely (confirmed with a PNG crop: "Customers
-                // per 10,000 people" clipped to "ers per 10,000 people").
-                // A `BottomRight` attribution now readable enough to wrap
-                // onto several lines (#546) can still visually cross this
+                // (ggplot-rs, before 0.31.5) sized its own box from
+                // `y_name`'s *thickness* (`text_size + 4.0`) only, never
+                // its rotated *length* — so the caption routinely drew
+                // past its own box already, and at `TopRight` that
+                // overflow ran off the top of the panel entirely
+                // (confirmed with a PNG crop: "Customers per 10,000
+                // people" clipped to "ers per 10,000 people"). Back then a
+                // `BottomRight` attribution readable enough to wrap onto
+                // several lines (#546) could also visually cross this
                 // legend's own caption on a narrow `::BIVARIATE` panel —
-                // confirmed too, but overlapping text stays fully present
-                // (zoomable), unlike `TopRight`'s silently clipped one, so
-                // it's the lesser of the two here. `GeomBivariateLegend`
-                // and `GeomAttribution` don't coordinate on a shared
-                // corner at all (same gap as the scale bar above) — both
-                // gaps reported to team-lead to file upstream; #546 covers
-                // the attribution's own readability/overflow, not this.
+                // both gaps reported to team-lead to file upstream.
+                // ggplot-rs 0.31.5 (sipemu/ggplot-rs#273) fixed both from
+                // the library side: the caption now fits the grid instead
+                // of growing past its box (so `TopRight` would no longer
+                // clip it), and the new shared corner layout stacks
+                // `GeomAttribution` clear of this legend's own claimed box
+                // whenever both land at `BottomRight` — confirmed with PNG
+                // crops (rsvg and a real browser) at 390px: the wrapped
+                // attribution now sits above the legend with a clear gap,
+                // not across it. Still left at `BottomRight` (not worth
+                // moving to `TopRight` now that the original reason to
+                // dodge it is gone).
                 ..Default::default()
             })
         }
@@ -891,39 +897,33 @@ pub(super) fn build(
     // gap: a layer whose data has 0 rows draws nothing at all, even when
     // its own `draw()` ignores `data` entirely — worse than inheriting,
     // not better, so it's not done here.
-    // `GeomAnnotationScale` and `GeomAttribution` are independent
-    // corner-anchored geoms with no shared layout — each draws from
-    // `backend.plot_area()` alone, unaware of what the other puts in its
+    // `GeomAnnotationScale` and `GeomAttribution` used to be independent
+    // corner-anchored geoms with no shared layout — each drew from
+    // `backend.plot_area()` alone, unaware of what the other put in its
     // own corner (#546). With the old crushed-to-fit attribution this
     // never showed (a single physical line thin enough to clear
-    // `BottomLeft`'s scale bar); once `.fit`/`Wrap` below keeps every
-    // line readable and lets the BKG sources row wrap, that row's
-    // bottom-most physical line can run the full width of a narrow panel
-    // — confirmed with a PNG crop (`delivery-coverage.sql`'s symbol map
-    // at 390px: the wrapped line crossed straight through the "200 km"
-    // bar). ggplot-rs has no API for one of these geoms to reserve space
-    // against a sibling's footprint (a real gap, reported to team-lead to
-    // file upstream); moving the scale bar to the opposite vertical half
-    // — a plain `corner()` call, and `GeomAnnotationScale`'s own compact
-    // "⊢── 200 km" mark has no rotated caption to overflow a box with —
-    // is the fix available from this crate's side, confirmed clean with a
-    // PNG crop. Gated on `ft.wrap_likely` (not just "an attribution
-    // exists") so every other, typically wider map keeps its usual
-    // `BottomLeft` scale bar unchanged — this only kicks in on the same
-    // narrow panels `foot_of`'s own `h` already budgets an extra wrapped
-    // line for. The sibling `GeomBivariateLegend` (further up) has the
-    // *same* no-coordination gap with the attribution but is deliberately
-    // *not* relocated the same way — see its own comment for why.
+    // `BottomLeft`'s scale bar); once `.fit`/`Wrap` below started keeping
+    // every line readable and letting the BKG sources row wrap, that
+    // row's bottom-most physical line could run the full width of a
+    // narrow panel — confirmed with a PNG crop (`delivery-coverage.sql`'s
+    // symbol map at 390px: the wrapped line crossed straight through the
+    // "200 km" bar). #549 worked around it from this crate's side (moving
+    // the scale bar to `TopLeft` whenever `foot_of` predicted the
+    // attribution would wrap even at the floor size, `Foot::wrap_likely`)
+    // until ggplot-rs 0.31.5 added a real fix: a shared corner layout
+    // (`render::corner_layout`, sipemu/ggplot-rs#273, filed from this
+    // crate's own #546/#549 repro) where `GeomAttribution`,
+    // `GeomAnnotationScale` and `GeomBivariateLegend` each measure their
+    // own box and stack clear of whatever another one of them already
+    // claimed in the same render pass — not limited to same-corner
+    // claims, a plain rect-intersection check, so a `BottomRight`
+    // attribution wide enough to reach into `BottomLeft`'s scale bar now
+    // pushes itself up clear of it. The workaround is gone; the scale bar
+    // stays at its plain `BottomLeft` default always. Confirmed with PNG
+    // crops (#549) that the library now keeps both readable without this
+    // crate picking a corner for it.
     if ft.scale {
-        plot = plot.annotation_scale_with(
-            GeomAnnotationScale::default()
-                .corner(if ft.wrap_likely {
-                    MapCorner::TopLeft
-                } else {
-                    MapCorner::BottomLeft
-                })
-                .max_width_px(90.0),
-        );
+        plot = plot.annotation_scale_with(GeomAnnotationScale::default().max_width_px(90.0));
     }
     // `ft.lines` holds every attribution line this map needs, already in
     // top-to-bottom reading order (a `de-*`/BKG pack's own "© BKG …

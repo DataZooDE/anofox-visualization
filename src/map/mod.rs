@@ -1269,15 +1269,6 @@ struct Foot {
     h: f64,
     /// Room for a scale bar on the left.
     scale: bool,
-    /// This panel is narrow enough that the longest attribution row is
-    /// predicted to still need `fit`'s `Wrap` even at
-    /// `ATTRIBUTION_FIT_FLOOR` (`plot.rs`, #546) — the same signal `h`
-    /// above already budgets an extra line for. `plot.rs` uses it to move
-    /// the scale bar out of the attribution's bottom-right corner only
-    /// when the wrapped attribution is actually tall enough to risk
-    /// reaching it, leaving every other (typical, wider) map's scale bar
-    /// at its usual `BottomLeft`.
-    wrap_likely: bool,
 }
 
 /// The BKG's source list (part of its required source note).
@@ -1379,7 +1370,6 @@ fn foot_of(o: &RenderOptions, m: &Model, w: f64) -> Foot {
         size,
         h,
         scale,
-        wrap_likely: extra_wrapped_row,
     }
 }
 
