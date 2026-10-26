@@ -467,6 +467,14 @@ struct Model<'a> {
     /// (D4): that backdrop isn't used for fitting, only an explicit
     /// `::BASEMAP` is.
     base_fitted: bool,
+    /// Review of #595 BLOCKER 1: a flow map's *projected* fit box, built
+    /// from every resolved endpoint (`RawFlows::all_points`) — present
+    /// this frame or not — not just the ones `flows` actually draws.
+    /// `bbox()` reads this instead of re-deriving from `flows` so the
+    /// zoom-to-fit window (not just the projection choice) stays frame-
+    /// stable too: `flows` alone drawing fewer arcs on a quieter frame
+    /// must never zoom the map in around them. `None` outside a flow map.
+    flow_bbox: Option<(f64, f64, f64, f64)>,
 }
 
 /// The `::RANGE 'lo,hi'` of a map (a colour-domain cap).
@@ -517,14 +525,32 @@ fn measure_of(cols: &[Column], geom: Option<&Column>) -> Option<Column> {
 }
 
 impl<'a> Model<'a> {
-    fn new(o: &RenderOptions, cols: &'a [Column]) -> Option<Model<'a>> {
+    /// `present` (M2e-B, D20): on a `::FRAME` map, which view rows (one per
+    /// feature) actually had a row in the frame being built — threaded
+    /// through to [`hexbin::of`] and [`flows::of`] (review of #595,
+    /// BLOCKER 1), the places frame presence needs anything beyond the
+    /// per-row `Value::Na` `view` already leaves behind. `None` outside a
+    /// frame map.
+    ///
+    /// `shared` (review of #595, SHOULD-FIX 6): the quantities a frame map
+    /// decides once over every frame rather than its own subset — a
+    /// flow's fixed-width/has-size choice and vmax, and whether the map is
+    /// `::BIVARIATE` at all. `None` outside a frame map (same reasoning as
+    /// `present`: the only frame there is *is* every value there is).
+    fn new(
+        o: &RenderOptions,
+        cols: &'a [Column],
+        present: Option<&[bool]>,
+        shared: Option<&frames::Shared>,
+    ) -> Option<Model<'a>> {
         let german = o.locale.tag.starts_with("de");
         let is_flow = find_role(cols, Role::Origin)
             .is_some_and(|c| c.values.iter().any(|v| *v != Value::Na))
             && find_role(cols, Role::Dest)
                 .is_some_and(|c| c.values.iter().any(|v| *v != Value::Na));
         if is_flow {
-            let raw = flows::of(cols, german)?;
+            let flow_forced = shared.map(|s| (s.flow_has_size, s.flow_fixed));
+            let raw = flows::of(cols, german, present, flow_forced)?;
             let rows = raw.rows;
             let (mut base, mut base_layer) = backdrop(cols, rows);
             let has_explicit_basemap = find_role(cols, Role::Basemap).is_some();
@@ -559,9 +585,26 @@ impl<'a> Model<'a> {
                 .and_then(|s| Projection::parse(&s))
                 .unwrap_or(Projection::Auto);
             let mut extent = Extent::new();
-            for f in &raw.flows {
-                extent.add(f.o);
-                extent.add(f.d);
+            // Review #595 BLOCKER 1 / re-review R1: on a `::FRAME` map
+            // (`present.is_some()`), every resolved, non-self-flow
+            // endpoint (`all_points`, present this frame or not) — D20's
+            // extent/projection are computed over every frame at once.
+            // Outside a frame map, the *original* rule, unchanged: a
+            // drawn flow's own endpoints (`raw.flows`, already self-flow-
+            // filtered) — not `all_points`, which doesn't additionally
+            // drop a `::SIZE`-invalid or beyond-`FLOW_CAP` flow the way
+            // `raw.flows`/`flows::project` do, so using it unconditionally
+            // zoomed a plain (non-frame) flow map out around a flow that
+            // was never actually drawn.
+            if present.is_some() {
+                for p in &raw.all_points {
+                    extent.add(*p);
+                }
+            } else {
+                for f in &raw.flows {
+                    extent.add(f.o);
+                    extent.add(f.d);
+                }
             }
             if base_fitted {
                 for s in base.iter().flatten() {
@@ -570,11 +613,32 @@ impl<'a> Model<'a> {
             }
             let (projection, proj) = Proj::setup(projection, &extent);
             let lonlat = extent;
+            // Review #595 BLOCKER 1 / re-review R1: the *projected* fit
+            // box from every resolved (non-self-flow) endpoint, before
+            // `raw` moves into `flows::project` (which keeps only this
+            // frame's drawn flows) — frame-map only (`bbox()` falls back
+            // to the drawn `Flows` itself, the original rule, when this is
+            // `None`), for the same reason as the extent above.
+            let flow_bbox = if present.is_some() {
+                let mut e = Extent::new();
+                for p in &raw.all_points {
+                    if let Some(pp) = proj.forward(*p) {
+                        e.add(pp);
+                    }
+                }
+                (!e.is_empty()).then_some((e.x0, e.y0, e.x1, e.y1))
+            } else {
+                None
+            };
             let base: Vec<Vec<Shape>> = base
                 .iter()
                 .map(|f| f.iter().filter_map(|s| project_shape(s, &proj)).collect())
                 .collect();
-            let flows_model = flows::project(raw, &proj);
+            let flows_model = flows::project(
+                raw,
+                &proj,
+                shared.and_then(|s| s.size_limits).map(|(_, hi)| hi),
+            );
             let category = find_role(cols, Role::Category)
                 .filter(|c| c.values.iter().any(|v| *v != Value::Na));
             let measure = measure_of(cols, None);
@@ -604,6 +668,7 @@ impl<'a> Model<'a> {
                 flows: Some(flows_model),
                 hexbin: None,
                 base_fitted,
+                flow_bbox,
             });
         }
         let inp = input(cols, german)?;
@@ -682,7 +747,7 @@ impl<'a> Model<'a> {
             .collect();
         // ::HEXBIN (M2c) takes over the point pass entirely — no graduated
         // symbols alongside it (::SIZE is ignored when both are present).
-        let hexbin = hexbin::of(cols, &proj);
+        let hexbin = hexbin::of(cols, &proj, present);
         let symbols = if hexbin.is_none() {
             symbols::of(cols, &features)
         } else {
@@ -700,12 +765,19 @@ impl<'a> Model<'a> {
         // over areas/points (symbols take the point pass; hexbin takes over
         // entirely); both are checked by `map_diags`, which warns instead of
         // silently drawing a plain/measure map.
+        // Review #595 SHOULD-FIX 6: whether this is a bivariate map at all
+        // is decided once over every frame (`shared.is_bivariate`), not
+        // just whether frame k's own `b` values happen to have a finite
+        // one — otherwise a frame whose `b` is all NA would fall back to
+        // a plain measure ramp (a different legend) instead of the 3×3
+        // grid with every feature "no data".
+        let force_bivariate = shared.is_some_and(|s| s.is_bivariate);
         let bivariate_col = find_role(cols, Role::Bivariate)
-            .filter(|c| c.values.iter().any(|v| cell_num(v).is_some()));
+            .filter(|c| force_bivariate || c.values.iter().any(|v| cell_num(v).is_some()));
         let fill = if let Some(hb) = &hexbin {
             hexbin::fill_of(o, cols, hb)
         } else if let (Some(m), Some(b), true) = (&measure, &bivariate_col, symbols.is_none()) {
-            match bivariate::of(o, cols, m, b, rows) {
+            match bivariate::of(o, cols, m, b, rows, force_bivariate) {
                 Some(biv) => Fill::Bivariate(Box::new(biv)),
                 None => Fill::Measure(Box::new(value_scale(o, cols, m, has_base, rows))),
             }
@@ -736,6 +808,7 @@ impl<'a> Model<'a> {
             flows: None,
             hexbin,
             base_fitted,
+            flow_bbox: None,
         })
     }
 
@@ -744,9 +817,20 @@ impl<'a> Model<'a> {
     fn bbox(&self) -> Option<(f64, f64, f64, f64)> {
         let mut e = Extent::new();
         if let Some(fl) = &self.flows {
-            for f in &fl.flows {
-                e.add(f.o);
-                e.add(f.d);
+            // Review #595 BLOCKER 1 / re-review R1: `flow_bbox` (every
+            // resolved endpoint, present this frame or not) on a `::FRAME`
+            // map — not `fl`'s own drawn-only arcs, which would zoom the
+            // fit in/out per frame. `None` outside a frame map (the
+            // original rule, unaffected by BLOCKER 1's fix): the drawn
+            // flows themselves, same as before `::FRAME` existed.
+            if let Some((x0, y0, x1, y1)) = self.flow_bbox {
+                e.add([x0, y0]);
+                e.add([x1, y1]);
+            } else {
+                for f in &fl.flows {
+                    e.add(f.o);
+                    e.add(f.d);
+                }
             }
         } else {
             let features = self.core.as_ref().unwrap_or(&self.features);
@@ -1240,7 +1324,12 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
         .as_ref()
         .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
     let cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
-    let m = Model::new(o, cols)?;
+    // `None, None`: `present` only changes which points a hexbin cell sums
+    // or which flows draw, never the grid/bbox this function reports (every
+    // feature's geometry/endpoints are already stable across frames,
+    // review of #595 BLOCKER 1); `shared`'s flow width/bivariate decisions
+    // don't affect the bbox either.
+    let m = Model::new(o, cols, None, None)?;
     if w == 0 || h == 0 {
         let (x0, y0, x1, y1) = m.bbox()?;
         return Some([x0, x1, y0, y1]);
@@ -1260,24 +1349,37 @@ pub(crate) fn build(
     width: u32,
     height: u32,
 ) -> Option<plot::Built> {
-    // `::FRAME` (M2e-A, #149): one result holds every frame; reduce it to
-    // one row per feature with frame `k`'s values (D20) and build the
-    // ordinary `Model` from that view, so every map kind renders a frame
-    // unchanged — then force its fill/size scale onto the quantities shared
-    // across every frame (D21, `frames::apply`).
+    // `::FRAME` (M2e-A/M2e-B, #149): one result holds every frame; reduce
+    // it to one row per feature with frame `k`'s values (D20) and build
+    // the ordinary `Model` from that view, so every map kind renders a
+    // frame unchanged — then force its fill/size/width/tertile scales onto
+    // the quantities shared across every frame (D21, `frames::apply`).
+    // Hexbin's own shared cell-colour domain needs `m.proj` (`m` built
+    // already), so it's applied separately just below (M2e-B).
     let fr = frames::of(cols);
-    let shared = fr.as_ref().map(|fr| frames::shared_of(o, cols, fr));
-    let view_cols: Option<Vec<Column>> = fr
-        .as_ref()
-        .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
+    let k = fr.as_ref().map(|fr| fr.resolve_k(o.frame));
+    let mut shared = fr.as_ref().map(|fr| frames::shared_of(o, cols, fr));
+    let present: Option<Vec<bool>> = fr.as_ref().zip(k).map(|(fr, k)| frames::presence(fr, k));
+    let view_cols: Option<Vec<Column>> =
+        fr.as_ref().zip(k).map(|(fr, k)| frames::view(cols, fr, k));
     let use_cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
-    let mut m = Model::new(o, use_cols)?;
+    let mut m = Model::new(o, use_cols, present.as_deref(), shared.as_ref())?;
     if let Some(shared) = &shared {
         frames::apply(&mut m, shared);
     }
+    // review of #595 BLOCKER 2: needs `&mut Shared` (also fills in
+    // `shared.max_count`, U3, from the hexbin-specific distribution
+    // `shared_of` deliberately skips) and `fr` (bins every frame
+    // separately) — both already on hand here.
+    if let (Some(fr), Some(shared)) = (&fr, &mut shared) {
+        if m.hexbin.is_some() {
+            frames::apply_hexbin_shared(&mut m, o, cols, fr, shared);
+        }
+    }
     let frame_ctx = fr
         .as_ref()
-        .map(|fr| frames::FrameCtx::at(fr, fr.resolve_k(o.frame)));
+        .zip(k)
+        .map(|(fr, k)| frames::FrameCtx::at(fr, k));
     let (p, attrs, mut warnings) = plot::build(
         o,
         use_cols,
