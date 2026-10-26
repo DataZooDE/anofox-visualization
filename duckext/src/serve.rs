@@ -4024,12 +4024,18 @@ fn state_trainer_view(
 /// generation always see the same `viewer_state`. `None` for a dashboard
 /// [`state_trainer_view`] says isn't state-enabled (the key is unaffected,
 /// same as before #517 S3).
+///
+/// `Arc<Vec<Record>>`, not `Vec<Record>` (#548 item 2): the trainer branch
+/// is [`anofox_visualization::host::state::Store::snapshot_all`]'s own
+/// cache, shared cheaply across every panel of one page load at the same
+/// `gen` — wrapping the (small, per-viewer) non-trainer branch's rows the
+/// same way keeps one return type for both.
 fn state_snapshot(
     submit: &SubmitRuntime,
     dash_id: &str,
     claims: Option<&Claims>,
     auth_method: Option<&str>,
-) -> Option<(u64, Vec<Record>)> {
+) -> Option<(u64, Arc<Vec<Record>>)> {
     let is_trainer = state_trainer_view(&submit.opts, dash_id, claims, auth_method)?;
     Some(if is_trainer {
         let (gen, rows) = submit
@@ -4046,7 +4052,8 @@ fn state_snapshot(
         (gen, rows)
     } else {
         let user = claims.map(|c| c.user.as_str()).unwrap_or("");
-        submit.store.snapshot_for_user(user)
+        let (gen, rows) = submit.store.snapshot_for_user(user);
+        (gen, Arc::new(rows))
     })
 }
 
@@ -4344,7 +4351,7 @@ fn locked_panel(
     // this viewer simply has no rows in yet) vs `None` (not state-enabled
     // at all, no viewer_state temp created) — run_panel must tell these
     // apart.
-    let state_rows: Option<Vec<Record>> = state_snap.map(|(_, rows)| rows);
+    let state_rows: Option<Arc<Vec<Record>>> = state_snap.map(|(_, rows)| rows);
     let mut key = panel_key(&r, claims, &key_deps);
     if let Some(g) = sgen {
         key = format!("{key}/state{g}");
@@ -4366,7 +4373,7 @@ fn locked_panel(
             &r,
             &viewer_set,
             claims,
-            state_rows.as_deref(),
+            state_rows.as_deref().map(|v| v.as_slice()),
             abort,
             charge,
             warm.as_deref(),
