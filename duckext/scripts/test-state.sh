@@ -89,9 +89,9 @@ STATE="\"state\": {\"path\": \"$W/state.jsonl\", \"dashboards\": [\"quiz\"], \"t
 OPTS="{$AUTH, \"policy\": \"none\", $STATE, \"log\": \"$W/requests.jsonl\", \"audit\": \"$W/audit.jsonl\"}"
 
 mkfifo "$W/in"
-sleep 120 > "$W/in" & PIDS+=($!)
+sleep 120 > "$W/in" & FIFO_PID=$!; PIDS+=("$FIFO_PID")
 echo "LOAD '$EXT'; SELECT anofox_serve_dashboards('$W/dash', $PORT, '$OPTS');" > "$W/serve.sql"
-SEC=$SEC "$DUCKDB" -unsigned -init "$W/serve.sql" < "$W/in" > "$W/stderr.log" 2>&1 & PIDS+=($!)
+SEC=$SEC "$DUCKDB" -unsigned -init "$W/serve.sql" < "$W/in" > "$W/stderr.log" 2>&1 & SERVER_PID=$!; PIDS+=("$SERVER_PID")
 for _ in $(seq 100); do curl -s -m 1 "localhost:$PORT/health" > /dev/null 2>&1 && break; sleep 0.2; done
 if ! grep -q '"status":"ok"' <(curl -s "localhost:$PORT/health"); then
   cat "$W/stderr.log" >&2
@@ -217,5 +217,62 @@ echo "OK: a NULL item inside a recorded list is stored as a real NULL, not ''"
 # answer must see what it always has.
 echo "$Q4_ROW" | grep -q '"value":"\[\\"A\\",null\]"' || fail "value for a list answer must hold the JSON text (here [\"A\",null]), not NULL: $Q4_ROW"
 echo "OK: value for a list (MULTISELECT) answer holds its JSON text, not NULL"
+
+# --- #614: a record with an embedded NUL byte in a value, written by
+# something other than this server. Never reachable through ::SUBMIT —
+# `scalar_literal` (src/host/serving.rs) refuses a NUL byte in any
+# viewer-submitted value before it is ever `SET` as a variable — so this
+# is only reachable via a store file written or edited some other way,
+# same as #611 S2's own non-canonical-`ts` scenario (and the two are
+# combined here: one record below has a canonical `ts`, taking the fast
+# Appender path; the other doesn't, taking the slow SQL fallback path).
+# Before this fix, `Appender::append_varchar`/`append_varchar_list` and
+# the fallback's `Prepared::bind_strs` all refused the whole row
+# (`CString::new` on an embedded NUL, #611 N3) — every panel on this
+# generation errored, not just the one holding this record. Stop the
+# server, hand-edit state.jsonl to add both records directly, then
+# restart on the SAME file and read them back, alongside every row
+# already recorded above (proving the restart and the hand-edit didn't
+# lose or corrupt anything either).
+kill "$SERVER_PID" "$FIFO_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+wait "$FIFO_PID" 2>/dev/null || true
+python3 - "$W/state.jsonl" <<'PY'
+import json, sys
+path = sys.argv[1]
+lines = [l for l in open(path) if l.strip()]
+next_seq = 1
+for l in lines[1:]:
+    next_seq = max(next_seq, json.loads(l)["seq"] + 1)
+recs = [
+    {"v": 1, "seq": next_seq, "ts": "2026-10-01T00:00:00.000Z", "user": "dave",
+     "auth": "oidc", "dashboard": "quiz", "submit": "quiz_1", "id": "d" * 32,
+     "vars": {"q1": "x\u0000y"}},
+    {"v": 1, "seq": next_seq + 1, "ts": "2026-10-01T00:00:00Z", "user": "erin",
+     "auth": "oidc", "dashboard": "quiz", "submit": "quiz_1", "id": "e" * 32,
+     "vars": {"q1": "p\u0000q"}},
+]
+with open(path, "a") as f:
+    for rec in recs:
+        f.write(json.dumps(rec) + "\n")
+PY
+mkfifo "$W/in2"
+sleep 120 > "$W/in2" & FIFO_PID=$!; PIDS+=("$FIFO_PID")
+SEC=$SEC "$DUCKDB" -unsigned -init "$W/serve.sql" < "$W/in2" > "$W/stderr2.log" 2>&1 & SERVER_PID=$!; PIDS+=("$SERVER_PID")
+for _ in $(seq 100); do curl -s -m 1 "localhost:$PORT/health" > /dev/null 2>&1 && break; sleep 0.2; done
+if ! grep -q '"status":"ok"' <(curl -s "localhost:$PORT/health"); then
+  cat "$W/stderr2.log" >&2
+  fail "server did not restart against the hand-edited state file"
+fi
+
+CAROL_AFTER_RESTART=$(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
+  -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: carol" -H "X-Forwarded-Groups: trainers" \
+  -d '{"dashboard":"progress","panel":1,"vars":{}}')
+echo "$CAROL_AFTER_RESTART" | grep -q '"user":"alice"' || fail "#614: a trainer must still see every pre-restart row after the hand-edit, got: $CAROL_AFTER_RESTART"
+echo "$CAROL_AFTER_RESTART" | grep -q '"user":"dave"' || fail "#614: the hand-edited canonical-ts/NUL record (fast Appender path) must seed and read back, got: $CAROL_AFTER_RESTART"
+echo "$CAROL_AFTER_RESTART" | grep -q '"user":"erin"' || fail "#614: the hand-edited non-canonical-ts/NUL record (slow SQL fallback path, #611 S2) must seed and read back, got: $CAROL_AFTER_RESTART"
+echo "$CAROL_AFTER_RESTART" | grep -q '"value":"x\\u0000y"' || fail "#614: dave's embedded-NUL value must round-trip unchanged (fast Appender path), got: $CAROL_AFTER_RESTART"
+echo "$CAROL_AFTER_RESTART" | grep -q '"value":"p\\u0000q"' || fail "#614: erin's embedded-NUL value must round-trip unchanged (slow SQL fallback path), got: $CAROL_AFTER_RESTART"
+echo "OK: a record with an embedded NUL byte in a value seeds and reads back correctly, on both the fast Appender path and the slow SQL fallback path"
 
 echo "PASS: state-live"
