@@ -47,8 +47,9 @@ type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 /// attribution's licence text is still never *lost*: only the visible
 /// label is shortened, the `href` itself (`as_runs` below) always stays
 /// the real link — see the longer comment at the `.fit(..)` call for why
-/// this uses `Ellipsis` (the default) rather than `AttributionOverflow::
-/// Wrap`.
+/// this stays on the default `Ellipsis` rather than `AttributionOverflow::
+/// Wrap` (tried again for ggplot-rs 0.31.3, still broken for this map's
+/// own multi-run BKG source line).
 const ATTRIBUTION_FIT_MIN_PX: f64 = 7.0;
 
 /// Whether `m` (already built from `cols`) is simple enough for the new
@@ -933,27 +934,28 @@ pub(super) fn build(
         // `w` before calling `foot_of` (see the comment above `foot_of`'s
         // call).
         //
-        // `.fit_overflow(AttributionOverflow::Wrap)` was tried instead of
-        // the default `Ellipsis`, so the BKG/VG2500 note's own
-        // licence-required text would never be truncated away — but
-        // `BKG_SOURCES` (`foot_of` in `mod.rs`) is a bare PDF URL with no
-        // spaces to wrap on, and ggplot-rs's `wrap_text` falls back to
-        // slicing it at the character width limit when that happens: on
-        // a narrow symbol-map panel (133px, `delivery-coverage.sql` at
-        // 390px, #510 PR) that produced a 13-line ladder of nonsense
-        // fragments ("https://sgx.g", "eodatenzentr", …) tall enough to
-        // run up into the map/legend above it — confirmed with a PNG
-        // crop, worse than truncation, not better. Kept as the default
-        // `Ellipsis` instead: the *visible* run is what gets a trailing
-        // "…" (one clean line), the `href` itself stays the full URL
-        // regardless (`as_runs` below, unchanged by fitting) — a reader
-        // still reaches the real source; only the on-panel label is
-        // shortened. `foot_of`'s own `ft.h` doesn't know a wrapped line
-        // can add physical lines beyond its `ft.lines.len()` count
-        // either way, which is the other reason not to lean on `Wrap`
-        // here — a real pre-render size/line-count API for this geom
-        // (same gap as `legend_position_inside`'s, sipemu/ggplot-rs#225)
-        // would let `foot_of` reserve for either overflow kind exactly.
+        // `AttributionOverflow::Wrap` was tried again for 0.31.3 (sipemu/
+        // ggplot-rs#264 fixed 0.31.2's char-slicing-a-bare-URL bug — see
+        // git history on this comment for that one's own repro), but
+        // exposed a second, still-open `wrap_text` bug on the *same* BKG
+        // source line: `foot_of` (`mod.rs`) builds that line as one
+        // logical row with two runs — the bare URL (linked) then
+        // `" · geometry modified (simplified)"` (plain) — concatenated
+        // before wrapping. At 342px (`delivery-coverage.sql`'s bivariate
+        // map, #510 PR) `wrap_text` only ever finds the one *inter-run*
+        // space (between the URL run and "geometry") to split on; the
+        // oversized first physical line it produces still contains the
+        // whole unbroken URL and renders past the panel's left edge,
+        // confirmed with a PNG crop — the separator-aware (`/ . _ - ? &
+        // =`) break #264 added never gets a chance to apply *inside*
+        // that first line. Reported, not fixed here (no `[patch.crates-
+        // io]`): kept the default `Ellipsis` instead, which still
+        // measures and truncates the *whole* concatenated row correctly
+        // regardless of how many runs it's built from. Only the visible
+        // label is ever shortened; the BKG/VG2500 note's `href`s
+        // (`as_runs` above) are the real, unshortened links either way,
+        // so the licence attribution itself is never actually lost, just
+        // the on-panel text.
         attribution = attribution.fit(ATTRIBUTION_FIT_MIN_PX);
         plot = plot.annotation_attribution_with(attribution);
     }

@@ -80,10 +80,21 @@ crate-type = ["cdylib", "rlib"]
 # would overflow the panel (sipemu/ggplot-rs#258), replacing `map/plot.rs`'s
 # own fixed 90px legend-width reservation; `GGPlot::bivariate_legend_counts`
 # — a `::BIVARIATE` map's legend swatches with each cell's row count
-# (sipemu/ggplot-rs#259, #506's bivariate choropleths). No API breaks in
-# either release (cargo-semver-checks against the prior version).
+# (sipemu/ggplot-rs#259, #506's bivariate choropleths). 0.31.3: `.fit`'s
+# width estimate gained a safety margin (was a few percent too generous for
+# a URL/date/prose mix, clipping a right-anchored line past the panel's
+# left edge at its floor size — found rendering `map/plot.rs`'s own BKG/
+# VG2500 note at 342px, sipemu/ggplot-rs#264) and `AttributionOverflow::
+# Wrap` on a bare URL (no whitespace) now breaks after `/ . _ - ? & =`
+# instead of char-slicing, capped at 3 lines instead of laddering
+# indefinitely — `map/plot.rs` still stays on the default `Ellipsis`
+# though: `Wrap` still mis-splits that same BKG source line once it's
+# followed by more plain-text runs in the same logical row (only the
+# inter-run space gets used, so the still-too-wide URL run isn't broken up
+# internally) — reported upstream, not yet fixed. No API breaks in any of
+# 0.31.1-0.31.3 (cargo-semver-checks against the prior release each time).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.2", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.31.3", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
