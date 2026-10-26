@@ -2425,15 +2425,9 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
     let mut loads = Vec::new();
     for e in entries.flatten() {
         let p = e.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("sql") {
-            continue;
-        }
-        let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
-            continue;
+        let Some(id) = sv::dashboard_id_from_path(&p) else {
+            continue; // not a .sql file, or not a valid id ([A-Za-z0-9_.-])
         };
-        if !sv::valid_dashboard_id(&id) {
-            continue; // ids end up in URLs: only [A-Za-z0-9_.-]
-        }
         let sql =
             std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
         let meta = sv::parse_dashboard_meta(&id, &sql);
@@ -3664,6 +3658,24 @@ fn rate_limited(req: Request, retry_after_s: u64) -> u16 {
     429
 }
 
+/// `409` with `Retry-After: 1` — a second concurrent submission from the
+/// same viewer found the per-viewer mutex already held (review of #538
+/// round 2): told to retry shortly, never made to park an HTTP worker
+/// thread on a stranger's lock (`try_lock`, not `lock`, in
+/// [`handle_submit`] — this server has far fewer worker threads than
+/// viewers, and one slow submission must never stall everyone else's
+/// unrelated `/api/panel` requests).
+fn submission_in_progress(req: Request) -> u16 {
+    let resp = Response::from_data(b"submission in progress".to_vec())
+        .with_status_code(409)
+        .with_header(header("Content-Type", "text/plain; charset=utf-8"))
+        .with_header(header("X-Content-Type-Options", "nosniff"))
+        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Retry-After", "1"));
+    let _ = req.respond(resp);
+    409
+}
+
 /// `POST /api/submit` (#517 slice S2, plan §4): the one write path on the
 /// locked server — a JSON line Rust appends to [`Store`]; the dashboard's
 /// own SQL never writes anything ([`check_read_only`] is unchanged). Follows
@@ -3827,25 +3839,11 @@ fn handle_submit(
         .to_string()
     };
 
-    // Step 7: per-viewer mutex, held from here to the append — an author's
-    // "only once" SQL gate (zero rows on a second attempt) can't be raced
-    // by two tabs between the gate check (step 8) and the write (step 11).
-    // Taken *before* the rate limit and `max_per_viewer` checks (review of
-    // #538 should-fix 7): a retried idempotent request must never see a
-    // 429 just because its first attempt already spent a token, and
-    // `max_per_viewer` must see the same, mutex-protected row count the
-    // append itself will use.
-    let lock = submit
-        .viewer_locks
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(&claims.user);
-    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-
-    // Step 10, checked here (inside the mutex, ahead of every rate/cap
-    // check) so a retry can never race a fresh submission into a double
-    // append, and never pays a rate-limit token or sees a cap refusal for
-    // a submission the server already accepted.
+    // Step 10: the idempotent-replay check, *before* the viewer mutex and
+    // *before* any rate limit (review of #538 round 2 — a genuine retry
+    // must never pay a rate-limit token, and must never wait on a mutex
+    // either: `submit.recent`'s own lock is held only for this lookup,
+    // never for the length of a ::SUBMIT query).
     if let Some(prior) = submit.recent.lock().unwrap_or_else(|p| p.into_inner()).get(
         &claims.user,
         &dash.id,
@@ -3856,14 +3854,15 @@ fn handle_submit(
         return 201;
     }
 
-    // Step 5 continued: rate limits and caps, now that we know this is a
-    // genuinely new submission. Refusals here (and above) don't consume a
-    // rate-limit token; validation failures (below) do — so a viewer
-    // can't use validation as a free oracle loop. The per-user bucket
-    // runs *before* the global one (review of #538 B3): checking the
-    // global bucket first let one flooding user spend the whole 20/s
-    // budget on requests their own limiter would have refused anyway,
-    // 429-ing every other viewer in the meantime.
+    // Step 5 continued: rate limits, now that we know this is (as far as
+    // we can tell without the viewer mutex) a genuinely new submission.
+    // Refusals here (and above) don't consume a rate-limit token;
+    // validation failures (below) do — so a viewer can't use validation
+    // as a free oracle loop. The per-user bucket runs *before* the global
+    // one (review of #538 B3): checking the global bucket first let one
+    // flooding user spend the whole 20/s budget on requests their own
+    // limiter would have refused anyway, 429-ing every other viewer in
+    // the meantime.
     if let Err(retry_after) = submit.rate.check(&claims.user, now) {
         audit("deny", Some("rate_limited"), Some(&dash.id), None);
         return rate_limited(req, retry_after);
@@ -3876,6 +3875,51 @@ fn handle_submit(
     {
         audit("deny", Some("rate_limited"), Some(&dash.id), None);
         return rate_limited(req, 1);
+    }
+
+    // Step 7: per-viewer mutex, held from here to the append — an author's
+    // "only once" SQL gate (zero rows on a second attempt) can't be raced
+    // by two tabs between the gate check (step 8) and the write (step 11).
+    // `try_lock`, never a blocking `lock` (review of #538 round 2, fixing
+    // a new blocker my own earlier instruction introduced): this endpoint
+    // runs on a small, shared pool of HTTP worker threads, and a worker
+    // parked on a stranger's mutex for as long as one slow ::SUBMIT query
+    // takes stalls every *other* viewer's unrelated `/api/panel` request
+    // too, not just this viewer's own retries (reproduced live: 12
+    // concurrent same-viewer submits against a 5.5s gate made another
+    // user's panel request take 27s). A second concurrent request from
+    // the same viewer is told to retry shortly instead.
+    let lock = submit
+        .viewer_locks
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&claims.user);
+    // `WouldBlock` (someone else genuinely holds it) is told to retry;
+    // `Poisoned` (a panic happened while holding it, elsewhere) is
+    // recovered, same as every other mutex in this module — neither
+    // leaves the lock permanently unusable for this viewer.
+    let _guard = match lock.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            audit("deny", Some("in_progress"), Some(&dash.id), None);
+            return submission_in_progress(req);
+        }
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+    };
+
+    // Re-checked now that the mutex is actually held: the two checks
+    // above ran without it, so a racing duplicate (same id) or a racing
+    // submission that pushed this viewer over `max_per_viewer` may have
+    // completed in between. Both must see the same, mutex-protected state
+    // the append itself is about to use.
+    if let Some(prior) = submit.recent.lock().unwrap_or_else(|p| p.into_inner()).get(
+        &claims.user,
+        &dash.id,
+        &sub.id,
+        now,
+    ) {
+        respond(req, 201, "application/json", prior.into_bytes());
+        return 201;
     }
     if submit.store.user_count(&claims.user) >= submit.opts.max_per_viewer {
         audit("deny", Some("viewer_limit"), Some(&dash.id), None);
@@ -4141,14 +4185,25 @@ fn effective_value(
     // never the viewer's. `Scope::vars` stores it as a typed SQL literal
     // (the same shape `sql_literal` builds for every viewer variable);
     // `literal_to_json` is its exact inverse for the scalar forms a
-    // locked variable can actually take.
+    // locked variable can actually take. `.rev().find(..)`, not `.find(..)`
+    // (review of #538 round 2 nit): two spellings of one case-insensitive
+    // name are a later-wins tie, the same rule `dedup_last_spelling`
+    // applies everywhere else a variable list is built — disagreeing with
+    // it here would record a different spelling's value than the one
+    // `locked_panel` actually `SET`.
     if let Some(s) = scope {
-        if let Some((_, lit)) = s.vars.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        if let Some((_, lit)) = s
+            .vars
+            .iter()
+            .rev()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
             return literal_to_json(lit).map(Some).ok_or(());
         }
     }
     Ok(raw_vars.as_object().and_then(|o| {
         o.iter()
+            .rev()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.clone())
     }))
@@ -6593,5 +6648,35 @@ mod tests {
         let d = dash("d", "");
         let raw = serde_json::json!({});
         assert_eq!(effective_value("q1", &d, None, &raw), Ok(None));
+    }
+
+    #[test]
+    fn effective_value_picks_the_last_spelling_like_dedup_last_spelling_does() {
+        // Review of #538 round 2, nit: DuckDB variables are case-insensitive
+        // and the later `SET` wins (`sv::dedup_last_spelling`'s own rule,
+        // applied to every variable list `locked_panel` actually runs).
+        // `effective_value` must agree, or it can record a value for a
+        // different spelling than the one that was actually set.
+        let d = dash("d", "");
+        // serde_json's Map preserves insertion order (preserve_order):
+        // two distinctly-cased JSON keys for the same DuckDB variable,
+        // last one wins.
+        let raw = serde_json::json!({"Q1": "A", "q1": "B"});
+        assert_eq!(
+            effective_value("q1", &d, None, &raw),
+            Ok(Some(serde_json::json!("B")))
+        );
+        // Same rule for a credential's own locked vars.
+        let scope = Scope {
+            dashboards: None,
+            vars: vec![
+                ("Region".to_string(), "'US'".to_string()),
+                ("region".to_string(), "'EU'".to_string()),
+            ],
+        };
+        assert_eq!(
+            effective_value("region", &d, Some(&scope), &serde_json::json!({})),
+            Ok(Some(serde_json::json!("EU")))
+        );
     }
 }

@@ -722,10 +722,19 @@ fn cmd_check(args: &[String]) {
         for (n, script) in &scripts {
             let mut d = lint_one(script);
             d.extend(extra.iter().filter(|(f, _)| f == n).map(|(_, d)| d.clone()));
-            if let Some((submit_ok, state_ok)) = &state_enablement {
-                let id = n.trim_end_matches(".sql");
+            // The exact id the running server's own loader would derive
+            // for this file (review of #538 round 2: reuse
+            // `dashboard_id_from_path`, not a hand-rolled ".sql" trim —
+            // `str::trim_end_matches` repeats, `Path::file_stem` doesn't,
+            // so they disagree on a name like "d.sql.sql"). `None`: the
+            // server would skip this file outright (not even load it as
+            // a dashboard), so there is no submit/state enablement to
+            // report either way.
+            if let (Some((submit_ok, state_ok)), Some(id)) =
+                (&state_enablement, sv::dashboard_id_from_path(Path::new(n)))
+            {
                 d.extend(lint::state_enablement_diags(
-                    script, id, submit_ok, state_ok,
+                    script, &id, submit_ok, state_ok,
                 ));
             }
             files.push((n.clone(), d));
@@ -733,13 +742,12 @@ fn cmd_check(args: &[String]) {
     } else {
         let script = read(&path);
         let mut d = lint_one(&script);
-        if let Some((submit_ok, state_ok)) = &state_enablement {
-            let id = std::path::Path::new(&path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&path);
+        if let (Some((submit_ok, state_ok)), Some(id)) = (
+            &state_enablement,
+            sv::dashboard_id_from_path(Path::new(&path)),
+        ) {
             d.extend(lint::state_enablement_diags(
-                &script, id, submit_ok, state_ok,
+                &script, &id, submit_ok, state_ok,
             ));
         }
         files.push((path.clone(), d));

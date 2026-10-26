@@ -20,6 +20,15 @@
 #     429 a different user's very next submission, and a 429 carries
 #     Retry-After.
 #
+# ...and per review-530's round 2 re-review of that same push:
+#   * a NEW blocker it found (partly an ambiguous instruction of mine):
+#     the per-viewer mutex must never block an HTTP worker thread — one
+#     viewer's flood against a slow ::SUBMIT must not stall a different
+#     viewer's unrelated /api/panel request.
+#   * a nit: effective_value must pick the SAME spelling dedup_last_spelling
+#     would (the last one, case-insensitively), covered by a unit test
+#     (duckext/src/serve.rs) rather than here.
+#
 # Original coverage (plan §4, still exercised below):
 #   * The CSRF gate: missing Origin, wrong Origin, missing the custom
 #     header, and a non-JSON Content-Type are all 403.
@@ -73,6 +82,17 @@ cat > "$W/dash/d2.sql" <<'EOF'
 SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
 SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
 EOF
+# `slow`: its ::SUBMIT statement carries a deliberately slow extra column
+# (a few seconds of real DuckDB work, not a sleep) — the concurrency
+# check below floods it from one viewer to prove the per-viewer mutex
+# never blocks an HTTP worker thread long enough to stall a different
+# viewer's unrelated /api/panel request (review of #538 round 2, the new
+# blocker).
+cat > "$W/dash/slow.sql" <<'EOF'
+SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
+SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE,
+       (SELECT count(*) FROM range(900000000) a, range(100) b) AS gate;
+EOF
 
 # A server-issued API key (`afx_<id>_<secret>`, file holds only its hash) —
 # used only to prove the endpoint refuses it (shared/server-to-server
@@ -120,7 +140,12 @@ print(m.group(1) if m else "")
 }
 
 AUTH="\"auth\": [{\"mode\": \"proxy\", \"shared_secret_env\": \"SEC\", \"trusted_proxies\": [\"127.0.0.1\"]}, {\"mode\": \"embed\", \"secret_env\": \"EMBED_SECRET\"}, {\"mode\": \"api_keys\", \"file\": \"$W/keys.json\"}]"
-STATE="\"state\": {\"path\": \"$W/state.jsonl\", \"dashboards\": [\"d\"]}"
+# burst raised from the default (3) to 15: the concurrency check below
+# needs >= 12 of one viewer's concurrent requests to all clear the
+# per-user rate check and actually contend for the per-viewer mutex (the
+# thing it's testing); the 429 check further down floods past this
+# larger burst instead.
+STATE="\"state\": {\"path\": \"$W/state.jsonl\", \"dashboards\": [\"d\", \"slow\"], \"rate\": {\"per_minute\": 60, \"burst\": 15}}"
 # The whole OPTS JSON is embedded in a SQL single-quoted string below, so a
 # literal `'self'` (frame_ancestors' own CSP-keyword syntax) needs its
 # quotes SQL-doubled to survive that string.
@@ -276,30 +301,73 @@ CREDS=("${AUTH_H[@]}")
 
 # --- B3 (blocker 3) + the per-user rate limit: a flood from one user must
 # not spend a different user's budget, and once a user's own bucket is
-# spent, further submissions are 429 with Retry-After.
+# spent, further submissions are 429 with Retry-After. BURST matches
+# STATE's rate.burst above (raised from the plan's default of 3, for the
+# concurrency check further down).
+BURST=15
 HDRS=(-H "Origin: $ORIGIN" -H "X-Anofox-Submit: 1" -H "Content-Type: application/json" -H "Sec-Fetch-Site: same-origin")
 CREDS=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: flooder")
 CODES=()
-for id in deadbee1 deadbee2 deadbee3 deadbee4 deadbee5 deadbee6 deadbee7; do
+for i in $(seq 1 $((BURST + 3))); do
+  id="$(printf 'f100d%02x' "$i")"
   CODES+=("$(submit "{\"dashboard\":\"d\",\"panel\":1,\"id\":\"$id\",\"vars\":{\"q1\":\"B\"}}")")
 done
-[ "${CODES[0]}" = "201" ] || fail "flooder's 1st submission should be 201, got ${CODES[0]}"
-[ "${CODES[1]}" = "201" ] || fail "flooder's 2nd submission should be 201, got ${CODES[1]}"
-[ "${CODES[2]}" = "201" ] || fail "flooder's 3rd submission should be 201, got ${CODES[2]}"
+for i in $(seq 0 $((BURST - 1))); do
+  [ "${CODES[$i]}" = "201" ] || fail "flooder's submission #$((i + 1)) (within burst=$BURST) should be 201, got ${CODES[$i]}"
+done
 LATER_429=0
-for c in "${CODES[@]:3}"; do [ "$c" = "429" ] && LATER_429=1; done
-[ "$LATER_429" = "1" ] || fail "expected at least one 429 among 7 rapid submissions, got: ${CODES[*]}"
-echo "OK: 7 rapid submissions from one user run into 429 past its burst (${CODES[*]})"
+for c in "${CODES[@]:$BURST}"; do [ "$c" = "429" ] && LATER_429=1; done
+[ "$LATER_429" = "1" ] || fail "expected at least one 429 past burst=$BURST, got: ${CODES[*]}"
+echo "OK: rapid submissions from one user run into 429 past its burst=$BURST (${CODES[*]})"
 
-HEADERS=$(curl -s -D - -o /dev/null -X POST "localhost:$PORT/api/submit" "${CREDS[@]}" "${HDRS[@]}" -d '{"dashboard":"d","panel":1,"id":"deadbee8","vars":{"q1":"B"}}')
+HEADERS=$(curl -s -D - -o /dev/null -X POST "localhost:$PORT/api/submit" "${CREDS[@]}" "${HDRS[@]}" -d '{"dashboard":"d","panel":1,"id":"f100dff","vars":{"q1":"B"}}')
 echo "$HEADERS" | grep -qi '^HTTP/[0-9.]* 429' || fail "expected a 429 once the burst is spent: $HEADERS"
 echo "$HEADERS" | grep -qi '^Retry-After:' || fail "a 429 must carry Retry-After: $HEADERS"
 echo "OK: a 429 carries Retry-After"
 
+# A fresh global-rate window (B3 is about the *per-user* bucket, not the
+# shared global one — every request so far, including the flood, also
+# spent a global token on its way through, so without this the global
+# window itself could still be near-empty here, for a reason that has
+# nothing to do with the per-user isolation this checks).
+sleep 1.1
 CREDS=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: bob")
 CODE=$(submit '{"dashboard":"d","panel":1,"id":"cafed00d","vars":{"q1":"C"}}')
 [ "$CODE" = "201" ] || fail "B3: bob's submission right after flooder's flood should be 201, got $CODE: $(cat "$W/out")"
 echo "OK: B3 — one user's flood does not rate-limit a different user's next submission"
+CREDS=("${AUTH_H[@]}")
+
+# --- Review-530 round 2's new blocker: the per-viewer mutex must never
+# block an HTTP worker thread. `slow`'s ::SUBMIT carries a column that
+# takes several real seconds of DuckDB work; 12 concurrent submissions
+# from one viewer ("turtle") must not keep a different viewer's
+# unrelated /api/panel request waiting — with a blocking lock() instead
+# of try_lock(), the review's own repro turned a 27s stall. A fresh
+# global-rate window first (12 is a lot of the shared 20/s budget to risk
+# on whatever's left over from the tests above).
+sleep 1.1
+HDRS=(-H "Origin: $ORIGIN" -H "X-Anofox-Submit: 1" -H "Content-Type: application/json" -H "Sec-Fetch-Site: same-origin")
+CREDS=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: turtle")
+FLOOD_PIDS=()
+for id in c0ffee01 c0ffee02 c0ffee03 c0ffee04 c0ffee05 c0ffee06 c0ffee07 c0ffee08 c0ffee09 c0ffee0a c0ffee0b c0ffee0c; do
+  curl -s -o /dev/null -X POST "localhost:$PORT/api/submit" "${CREDS[@]}" "${HDRS[@]}" \
+    -d "{\"dashboard\":\"slow\",\"panel\":1,\"id\":\"$id\",\"vars\":{\"q1\":\"A\"}}" &
+  FLOOD_PIDS+=($!)
+done
+sleep 0.3 # let the flood actually reach the server before probing
+T0=$(date +%s%N)
+# `-m 8` bounds curl itself: a blocked worker thread must fail this check
+# with a clear message below, not hang the whole script or abort it
+# silently under `set -e` on curl's own timeout exit code (28).
+PANEL_CODE=$(curl -s -o "$W/panel_out" -w '%{http_code}' -m 8 -X POST "localhost:$PORT/api/panel" \
+  -H "Origin: $ORIGIN" -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: dana" \
+  -d '{"dashboard":"d","panel":0,"vars":{}}') || PANEL_CODE="curl-timeout"
+T1=$(date +%s%N)
+MS=$(( (T1 - T0) / 1000000 ))
+for p in "${FLOOD_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+[ "$PANEL_CODE" = "200" ] || fail "dana's /api/panel during turtle's flood should be 200, got $PANEL_CODE after ${MS}ms (a worker thread was likely blocked on turtle's mutex): $(cat "$W/panel_out" 2>/dev/null)"
+[ "$MS" -lt 2000 ] || fail "dana's /api/panel took ${MS}ms during turtle's flood of a slow ::SUBMIT — a worker thread was blocked on turtle's mutex"
+echo "OK: concurrency — one viewer's flood of a slow ::SUBMIT never stalls a different viewer's /api/panel (${MS}ms)"
 CREDS=("${AUTH_H[@]}")
 
 echo "PASS: submit-live"

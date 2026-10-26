@@ -396,6 +396,28 @@ pub fn valid_dashboard_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
+/// The dashboard id a `.sql` path yields when the server's own directory
+/// loader scans it (`duckext`'s `load_dashboards`: a `.sql` extension,
+/// [`std::path::Path::file_stem`], then [`valid_dashboard_id`]) — or
+/// `None` when the server would skip this path entirely (not `.sql`, no
+/// stem, or a stem that isn't a valid id). `dashboard --check --options`
+/// must derive a file's id this exact way too (review of #538 round 2):
+/// its submit/not-enabled and state/not-enabled diagnostics name the
+/// dashboard id `options.state.dashboards` is matched against, which must
+/// be the same id the running server actually registers this file under.
+/// Recomputing it differently — e.g. trimming a literal `".sql"` off the
+/// bare filename — disagrees with `file_stem()` on a name with more than
+/// one `.` before the extension (`"d.sql.sql"`: `file_stem()` strips only
+/// the last one, giving `"d.sql"`; repeatedly trimming the suffix `".sql"`
+/// strips both, giving `"d"`).
+pub fn dashboard_id_from_path(path: &std::path::Path) -> Option<String> {
+    if path.extension().and_then(|s| s.to_str()) != Some("sql") {
+        return None;
+    }
+    let id = path.file_stem()?.to_str()?.to_string();
+    valid_dashboard_id(&id).then_some(id)
+}
+
 /// A SQL string literal (`'…'` with `'` doubled). DuckDB string literals have no
 /// backslash escapes, so this is a complete escaping.
 pub fn sql_string_literal(s: &str) -> String {
@@ -1579,6 +1601,39 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn dashboard_id_from_path_matches_file_stem_not_a_repeated_suffix_trim() {
+        // Review of #538 round 2: must agree with `Path::file_stem()`
+        // (what the server's own loader uses), not with trimming a
+        // literal ".sql" suffix (which, unlike file_stem, repeats).
+        assert_eq!(
+            dashboard_id_from_path(Path::new("d.sql")),
+            Some("d".to_string())
+        );
+        // A name with an extra dot before the extension: file_stem()
+        // strips only the final ".sql", leaving the other dot in the id
+        // (".": allowed mid-id by valid_dashboard_id).
+        assert_eq!(
+            dashboard_id_from_path(Path::new("d.sql.sql")),
+            Some("d.sql".to_string())
+        );
+        // Only the last path component matters (the server's own
+        // `read_dir` isn't recursive either, but `file_stem()` itself
+        // only ever looks at the final component).
+        assert_eq!(
+            dashboard_id_from_path(Path::new("nested/dir/my-report_v2.sql")),
+            Some("my-report_v2".to_string())
+        );
+        // Not a .sql file at all (and a dotfile like ".sql" has no
+        // extension at all by `Path`'s own rules — one dot, at the
+        // start — so it is refused the same way).
+        assert_eq!(dashboard_id_from_path(Path::new("d.txt")), None);
+        assert_eq!(dashboard_id_from_path(Path::new(".sql")), None);
+        // A stem the server would never register: a space isn't in
+        // `valid_dashboard_id`'s allowed set.
+        assert_eq!(dashboard_id_from_path(Path::new("odd name.sql")), None);
+    }
 
     #[test]
     fn escaping() {
