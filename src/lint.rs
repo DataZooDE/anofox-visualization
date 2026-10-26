@@ -4413,11 +4413,23 @@ fn map_diags(
         || (has(Role::Lat) && has(Role::Lon))
         || has(Role::Origin)
         || has(Role::Dest);
+    // D25: `::FRAME` only plays on a map — on any other chart the rows of
+    // every frame are drawn together instead, which is almost never what
+    // was meant.
+    if !is_map && has(Role::Frame) {
+        out.push((
+            Severity::Warning,
+            "frame/not-a-map",
+            "::FRAME only plays on maps; this chart draws the rows of every frame together"
+                .to_string(),
+        ));
+    }
     if !is_map {
         return out;
     }
     out.extend(flow_diags(roles, rows));
     out.extend(hexbin_diags(roles, rows));
+    out.extend(frame_diags(roles, rows));
     let first = |want: Role| {
         roles
             .iter()
@@ -4843,6 +4855,113 @@ fn hexbin_diags(
             "::CATEGORY is ignored on a ::HEXBIN map — hexagons are coloured by count or sum"
                 .to_string(),
         ));
+    }
+    out
+}
+
+/// `::FRAME` time maps (M2e-A, #149, plan-maps-m2ef.md D13/D15/D25/D26):
+/// too many distinct frames or features×frames cells, a duplicate
+/// (feature, frame) row, `::STORY`/`::XAXIS` ignored on a frame map, and a
+/// large WKT payload repeated per frame. Only runs for a map panel that
+/// already carries `::FRAME` (`map_diags` calls this after confirming
+/// `is_map`; the `!is_map` case is `frame/not-a-map`, checked by the
+/// caller before that gate).
+fn frame_diags(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let has = |want: Role| roles.iter().any(|(_, r)| *r == want);
+    let Some(fi) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Frame)
+        .map(|(i, _)| *i)
+    else {
+        return out;
+    };
+    let frame_vals = cells(rows, fi);
+    let distinct_frames: std::collections::HashSet<&str> =
+        frame_vals.iter().filter_map(|v| v.as_deref()).collect();
+    let n_frames = distinct_frames.len();
+    if n_frames > 200 {
+        out.push((
+            Severity::Warning,
+            "map/too-many-frames",
+            format!(
+                "{n_frames} ::FRAME values on one map (over 200) — the last 200 are kept; use a coarser period"
+            ),
+        ));
+    }
+    // The feature key: whichever identity column a time map uses, in the
+    // same priority as `src/map/frames.rs::row_key` (D22) — ::REGION else
+    // a WKT ::MAP geometry (::LAT/::LON pairs aren't a single column, so
+    // this count is approximate for that case and skipped rather than
+    // guessed at).
+    let feature_idx = roles
+        .iter()
+        .find(|(_, r)| matches!(r, Role::Region | Role::Geometry))
+        .map(|(i, _)| *i);
+    let feature_vals: Vec<Option<String>> = match feature_idx {
+        Some(i) => cells(rows, i),
+        None => vec![None; rows.len()],
+    };
+    let distinct_features: std::collections::HashSet<&str> =
+        feature_vals.iter().filter_map(|v| v.as_deref()).collect();
+    let n_features = distinct_features.len();
+    if feature_idx.is_some() && n_features > 0 && n_frames > 0 && n_features * n_frames > 100_000 {
+        let max_frames = (100_000 / n_features).max(1).min(n_frames);
+        out.push((
+            Severity::Warning,
+            "map/frame-cells",
+            format!(
+                "{n_features} features × {n_frames} frames is over 100,000 — the last {max_frames} frames are kept; aggregate or use fewer frames"
+            ),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = 0usize;
+    for (f, w) in feature_vals.iter().zip(frame_vals.iter()) {
+        if let (Some(f), Some(w)) = (f, w) {
+            if !seen.insert((f.as_str(), w.as_str())) {
+                duplicates += 1;
+            }
+        }
+    }
+    if duplicates > 0 {
+        out.push((
+            Severity::Warning,
+            "map/frame-duplicate",
+            format!(
+                "{duplicates} rows repeat a feature within one frame — the first row is used; aggregate per feature and frame"
+            ),
+        ));
+    }
+    if has(Role::Story) {
+        out.push((
+            Severity::Warning,
+            "map/frame-story",
+            "::STORY is ignored on a time map (::FRAME) — Play steps through the frames instead"
+                .to_string(),
+        ));
+    }
+    if has(Role::X) {
+        out.push((
+            Severity::Note,
+            "map/frame-xaxis",
+            "::XAXIS is ignored on a time map — features are keyed by their region, point or geometry"
+                .to_string(),
+        ));
+    }
+    if !has(Role::Region) && feature_idx.is_some() {
+        let wkt_bytes: usize = feature_vals.iter().flatten().map(|s| s.len()).sum();
+        if wkt_bytes > 5_000_000 {
+            out.push((
+                Severity::Note,
+                "map/frame-wkt",
+                "WKT repeats per frame and this map's geometry is over 5 MB total — join a ::REGION code or one geometry table instead"
+                    .to_string(),
+            ));
+        }
     }
     out
 }
@@ -7955,6 +8074,65 @@ mod design_tests {
         assert_eq!(
             codes("SELECT lat::LAT, lon::LON FROM t;", pts),
             vec![(Severity::Warning, "map/too-many-marks")]
+        );
+    }
+
+    /// #149 M2e-A: `::FRAME` time maps — too many frames, a duplicate
+    /// (feature, frame) row, `::STORY`/`::XAXIS` ignored, and `::FRAME` off
+    /// a map entirely.
+    #[test]
+    fn frame_lints_cover_too_many_frames_duplicates_and_misuse() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.contains("frame"))
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let sql = "SELECT c::REGION, w::FRAME, v::BARCHART FROM t;";
+        let row = |c: &str, w: &str, v: f64| json!({ "c0": c, "c1": w, "c2": v });
+        assert_eq!(
+            codes(sql, vec![row("DE-BY", "1", 1.0), row("DE-BY", "1", 2.0)]),
+            vec![(Severity::Warning, "map/frame-duplicate")]
+        );
+        assert_eq!(
+            codes(
+                "SELECT w::FRAME, v::BARCHART FROM t;",
+                vec![json!({ "c0": "1", "c1": 1.0 })]
+            ),
+            vec![(Severity::Warning, "frame/not-a-map")]
+        );
+        assert_eq!(
+            codes(
+                "SELECT c::REGION, w::FRAME, v::BARCHART, l::STORY FROM t;",
+                vec![json!({ "c0": "DE-BY", "c1": "1", "c2": 1.0, "c3": "step" })]
+            ),
+            vec![(Severity::Warning, "map/frame-story")]
+        );
+        assert_eq!(
+            codes(
+                "SELECT c::REGION, w::FRAME, v::BARCHART, x::XAXIS FROM t;",
+                vec![json!({ "c0": "DE-BY", "c1": "1", "c2": 1.0, "c3": "x" })]
+            ),
+            vec![(Severity::Note, "map/frame-xaxis")]
+        );
+        let many: Vec<Value> = (0..201)
+            .map(|i| row("DE-BY", &i.to_string(), 1.0))
+            .collect();
+        assert_eq!(
+            codes(sql, many),
+            vec![(Severity::Warning, "map/too-many-frames")]
         );
     }
 

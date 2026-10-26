@@ -40,6 +40,7 @@ pub(crate) mod boundaries;
 pub(crate) mod classes;
 mod fill;
 mod flows;
+mod frames;
 pub(crate) mod hexbin;
 mod labels;
 mod legend;
@@ -1224,6 +1225,15 @@ fn frame_of(
 /// (the browser's zoom starts from it); `w`/`h` 0 = the data's box alone.
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
 pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) -> Option<[f64; 4]> {
+    // A `::FRAME` map's extent never moves between frames (D20: every
+    // feature is in every frame's view, geometry from its first row) — any
+    // resolved frame's view gives the same bbox, so this reuses `build`'s
+    // own view resolution rather than re-deriving which `k` to use.
+    let fr = frames::of(cols);
+    let view_cols: Option<Vec<Column>> = fr
+        .as_ref()
+        .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
+    let cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
     let m = Model::new(o, cols)?;
     if w == 0 || h == 0 {
         let (x0, y0, x1, y1) = m.bbox()?;
@@ -1244,13 +1254,54 @@ pub(crate) fn build(
     width: u32,
     height: u32,
 ) -> Option<plot::Built> {
-    let m = Model::new(o, cols)?;
-    let (p, attrs, mut warnings) = plot::build(o, cols, &m, width, height)?;
+    // `::FRAME` (M2e-A, #149): one result holds every frame; reduce it to
+    // one row per feature with frame `k`'s values (D20) and build the
+    // ordinary `Model` from that view, so every map kind renders a frame
+    // unchanged — then force its fill/size scale onto the quantities shared
+    // across every frame (D21, `frames::apply`).
+    let fr = frames::of(cols);
+    let shared = fr.as_ref().map(|fr| frames::shared_of(o, cols, fr));
+    let view_cols: Option<Vec<Column>> = fr
+        .as_ref()
+        .map(|fr| frames::view(cols, fr, fr.resolve_k(o.frame)));
+    let use_cols: &[Column] = view_cols.as_deref().unwrap_or(cols);
+    let mut m = Model::new(o, use_cols)?;
+    if let Some(shared) = &shared {
+        frames::apply(&mut m, shared);
+    }
+    let frame_ctx = fr
+        .as_ref()
+        .map(|fr| frames::FrameCtx::at(fr, fr.resolve_k(o.frame)));
+    let (p, attrs, mut warnings) = plot::build(
+        o,
+        use_cols,
+        &m,
+        width,
+        height,
+        frame_ctx.as_ref(),
+        shared.as_ref(),
+    )?;
     if m.rows > MARK_WARN {
         warnings.push(format!(
             "map: {} marks drawn (over {MARK_WARN}) — aggregate in SQL (e.g. to H3 cells or regions) to keep the map light",
             m.rows
         ));
+    }
+    if let Some(fr) = &fr {
+        if fr.total_frames > frames::MAX_FRAMES {
+            warnings.push(format!(
+                "map: {} ::FRAME values on one map (over {}) — the last {} are kept; use a coarser period",
+                fr.total_frames,
+                frames::MAX_FRAMES,
+                fr.labels.len()
+            ));
+        }
+        if fr.duplicates > 0 {
+            warnings.push(format!(
+                "map: {} rows repeat a feature within one frame — the first row is used; aggregate per feature and frame",
+                fr.duplicates
+            ));
+        }
     }
     Some((p, attrs, warnings))
 }

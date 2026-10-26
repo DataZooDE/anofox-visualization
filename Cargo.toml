@@ -93,7 +93,7 @@ crate-type = ["cdylib", "rlib"]
 # any of 0.31.1-0.31.3 (cargo-semver-checks against the prior release each
 # time).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.3", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.31.5", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

@@ -27,6 +27,7 @@ use crate::theme::mix;
 use crate::{cell_num, find_role, role_num, Column, RenderOptions, Role};
 
 use super::fill;
+use super::frames::{FrameCtx, Shared};
 use super::legend::legend_of;
 use super::overlay;
 use super::wkt::row_wkt;
@@ -60,6 +61,8 @@ pub(super) fn build(
     m: &Model,
     width: u32,
     height: u32,
+    frame_ctx: Option<&FrameCtx>,
+    shared: Option<&Shared>,
 ) -> Option<Built> {
     let mut warnings: Vec<String> = Vec::new();
     let (w, h) = (width as f64, height as f64);
@@ -213,20 +216,32 @@ pub(super) fn build(
         let label_is_empty = label.is_empty();
         let cat = m.text(m.category, i);
         let series = if cat.is_empty() { label.clone() } else { cat };
-        rows.push(Value::Str(i.to_string()));
+        // `data-row` is the result row `::LINK` follows; on a frame map
+        // that's frame `k`'s own source row for this feature (D22), not
+        // this view's own local index `i`.
+        rows.push(match frame_ctx {
+            Some(fc) => Value::Str(fc.result_row[i].to_string()),
+            None => Value::Str(i.to_string()),
+        });
         seriess.push(na_if_empty(series));
         labels.push(na_if_empty(label));
         // `::XAXIS`/`::STORY` keying (the old writer's `step_x`/`mod.rs`
         // ~1449): an explicit `::XAXIS` value wins; else, a row with no
         // label falls back to its own row index so a story can still
         // step through unlabeled rows (a labeled row with no `::XAXIS`
-        // gets no `data-x` at all — `Value::Na` omits the attribute).
-        let x = step_x
-            .and_then(|c| c.values.get(i))
-            .and_then(crate::mark_key_text)
-            .map(Value::Str)
-            .or_else(|| label_is_empty.then(|| Value::Str(i.to_string())))
-            .unwrap_or(Value::Na);
+        // gets no `data-x` at all — `Value::Na` omits the attribute). A
+        // frame map ignores `::XAXIS` (lint `map/frame-xaxis`) — its own
+        // D22 feature key is `data-x` instead, so the browser's keyed
+        // tween (M2f) joins the same feature across every frame.
+        let x = match frame_ctx {
+            Some(fc) => Value::Str(fc.keys[i].clone()),
+            None => step_x
+                .and_then(|c| c.values.get(i))
+                .and_then(crate::mark_key_text)
+                .map(Value::Str)
+                .or_else(|| label_is_empty.then(|| Value::Str(i.to_string())))
+                .unwrap_or(Value::Na),
+        };
         xs.push(x);
         // `fill` (the scale input) and `value`/`data-value` (the *raw
         // measure* the browser's a11y table shows) are different things
@@ -617,6 +632,13 @@ pub(super) fn build(
         if fixed.is_none() {
             let rmax = symbols::rmax(w, h);
             let mut size_scale = ScaleSizeContinuous::new().area(rmax);
+            // A frame map's symbol sizes are comparable across frames
+            // (D21/U2): the same value gets the same radius whichever
+            // frame is shown, and the size legend's breaks come from this
+            // shared domain rather than this one frame's own data.
+            if let Some((lo, hi)) = shared.and_then(|s| s.size_limits) {
+                size_scale = size_scale.with_limits(lo, hi);
+            }
             size_scale.set_name(
                 m.symbols
                     .as_ref()
@@ -636,7 +658,13 @@ pub(super) fn build(
     // is real too, not just its features'.
     let discrete_fill = matches!(m.fill, Fill::Category { .. })
         || matches!(&m.fill, Fill::Measure(s) if s.classes.is_some());
-    let mut fill_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
+    // A frame map's classed legend never changes shape across frames (D21):
+    // `na_key(Always)` keeps the "no data" key even on a frame with no
+    // missing values, and `count_reserve` lays every key out at the widest
+    // per-class count any frame reaches, so the legend never re-wraps
+    // (U1/U3).
+    let frame_max_count = shared.map(|s| s.max_count);
+    let mut fill_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg, frame_max_count);
     if let Fill::Measure(s) = &m.fill {
         if s.classes.is_some() {
             if let Some(scale) = &mut fill_scale {
@@ -728,7 +756,7 @@ pub(super) fn build(
     }
     if let Some(hb) = &m.hexbin {
         if let Fill::Measure(scale) = &m.fill {
-            let hex_color_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
+            let hex_color_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg, None);
             let (new_plot, _n) = overlay::hexbin_layer(plot, o, hb, scale, card, hex_color_scale);
             plot = new_plot;
             if hb.cells.len() > super::hexbin::HEX_WARN {
@@ -999,13 +1027,38 @@ pub(super) fn build(
     // (`map/mod.rs`'s now-dead path), lost when this geom_sf path took
     // over every map kind (#498) because `GGPlot` had no `<desc>` API
     // yet at the time.
-    let summary_text = super::summary(o, m, extra_self);
+    let mut summary_text = super::summary(o, m, extra_self);
+    // D19: which frame this map shows, drawn by ggplot-rs itself so
+    // `--svg`, PNG, PDF and the export always say so (the static case —
+    // no `frame` in the render context — is the last frame, D12).
+    if let Some(fc) = frame_ctx {
+        plot = plot.subtitle(&format!("{}: {}", fc.name, fc.labels[fc.k]));
+        summary_text.push_str(&format!(
+            ". Showing {} ({} of {} frames, {} to {}); colours and classes are shared across all frames",
+            fc.labels[fc.k],
+            fc.k + 1,
+            fc.labels.len(),
+            fc.labels.first().map(String::as_str).unwrap_or(""),
+            fc.labels.last().map(String::as_str).unwrap_or(""),
+        ));
+    }
     plot = plot.svg_desc(summary_text.clone());
     let mut attrs: Vec<(&'static str, String)> = vec![
         ("data-map", String::new()),
         ("data-proj", m.projection.name().to_string()),
         ("data-summary", summary_text),
     ];
+    // `::FRAME` (D19/M2f): every frame's label, the one on screen, and the
+    // column's own display name — the browser player's bar reads these the
+    // same way `::STORY`'s `dpStorySteps` reads `data-story`.
+    if let Some(fc) = frame_ctx {
+        attrs.push((
+            "data-frames",
+            serde_json::to_string(&fc.labels).unwrap_or_default(),
+        ));
+        attrs.push(("data-frame", fc.k.to_string()));
+        attrs.push(("data-frame-name", fc.name.clone()));
+    }
     // `data-classes`: every class's short-formatted label, low to high, as
     // JSON (`mapTableHtml`'s "k of n: label" a11y row — `app.js:15454`) —
     // same shape as the old writer's own `data-classes` (`mod.rs`).
