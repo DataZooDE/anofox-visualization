@@ -385,20 +385,19 @@ impl Drop for Prepared {
 pub struct Appender(duckdb_appender);
 
 impl Appender {
-    pub fn new(conn: &Conn, table: &str) -> Result<Appender, String> {
-        Self::new_in(conn, None, None, table)
-    }
-
-    /// Like [`Self::new`], naming the catalog/schema explicitly
-    /// (`duckdb_appender_create_ext`) instead of leaving them to whatever
-    /// the connection's own default catalog/`search_path` happens to be —
-    /// for a `TEMP` table (#600: `viewer_state`), that default can land on
-    /// a same-named object in a different, `READ_ONLY`-attached catalog
-    /// instead (unlike ordinary SQL, which already resolves an unqualified
-    /// name to `temp` first — #548 item 1's own pinned test), so leaving
-    /// the connection's own current default in charge here is observed
-    /// (empirically, against a real locked server) to error "Cannot
-    /// append to a readonly database" rather than silently wronging.
+    /// Names the catalog/schema explicitly (`duckdb_appender_create_ext`)
+    /// — pass `None`/`None` to leave them to the connection's own default
+    /// catalog/`search_path`, same as `duckdb_appender_create` would, but
+    /// review of #611 N2: there is no separate, catalog-less constructor
+    /// here, because the one caller this type exists for must never use
+    /// one. For a `TEMP` table (#600: `viewer_state`), the connection's
+    /// own current default can resolve to a different, `READ_ONLY`-
+    /// attached catalog's own idea of the current database instead
+    /// (unlike ordinary SQL, which already resolves an unqualified name
+    /// to `temp` first — #548 item 1's own pinned test) — observed,
+    /// against a real locked server, to error "Cannot append to a
+    /// readonly database" rather than silently resolving to the wrong
+    /// table.
     pub fn new_in(
         conn: &Conn,
         catalog: Option<&str>,
@@ -512,6 +511,20 @@ impl Appender {
                 values.as_mut_ptr(),
                 values.len() as idx_t,
             );
+            // #611 N1: `duckdb_create_list_value` returns NULL on failure
+            // (a NULL element value, or a type mismatch) — unreachable
+            // today (every element above is a valid UTF-8 `&str` turned
+            // into a real `duckdb_value`, and `elem_type` always matches),
+            // but `duckdb_append_value` would otherwise dereference a
+            // NULL `duckdb_value` if that ever stopped holding. Clean up
+            // what was already allocated and refuse instead of calling it.
+            if list_val.is_null() {
+                for v in &mut values {
+                    capi!(duckdb_destroy_value)(v);
+                }
+                capi!(duckdb_destroy_logical_type)(&mut elem_type);
+                return Err("could not build the list value to append".into());
+            }
             let rc = capi!(duckdb_append_value)(self.0, list_val);
             let err = if rc != duckdb_state::DuckDBSuccess {
                 Some(cstr_lossy(

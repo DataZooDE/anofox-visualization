@@ -210,4 +210,12 @@ echo "$Q4_ROW" | grep -q '"name":"q4"' || fail "expected a recorded q4 row: $Q4_
 echo "$Q4_ROW" | grep -q '"value_list":\["A",null\]' || fail "a NULL item in the list must be stored as a real SQL NULL (value_list=[\"A\",null]), not an empty string: $Q4_ROW"
 echo "OK: a NULL item inside a recorded list is stored as a real NULL, not ''"
 
+# #611 B1: `value` for a list (MULTISELECT) answer holds the same JSON
+# text the pre-#600 SQL path bound and the browser's own live preview
+# still writes (web/app.js) — not NULL. The #600 rewrite's Appender path
+# dropped this for one push; a dashboard reading `value` for a list
+# answer must see what it always has.
+echo "$Q4_ROW" | grep -q '"value":"\[\\"A\\",null\]"' || fail "value for a list answer must hold the JSON text (here [\"A\",null]), not NULL: $Q4_ROW"
+echo "OK: value for a list (MULTISELECT) answer holds its JSON text, not NULL"
+
 echo "PASS: state-live"
