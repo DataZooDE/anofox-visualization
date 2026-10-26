@@ -213,6 +213,13 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 /* story steps fade (a re-run re-applies its dimming at once: no flash) */
 .panel svg.dp-emph-fade [data-series],.panel svg.dp-emph-fade [data-x]{transition:opacity .25s,filter .12s}
 @media print{.dp-story{display:none}}
+/* ::FRAME: the time map player bar (M2f-A, #149) — buttons reuse .dp-story-btn */
+.dp-frames{display:flex;align-items:center;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
+.dp-frames input[type=range]{flex:1;min-width:120px;accent-color:var(--ax-accent)}
+.dp-frames-pos,.dp-frames-note{font-size:.74rem;color:var(--ax-muted);font-variant-numeric:tabular-nums}
+.dp-frames-play[aria-pressed="true"]{color:var(--ax-accent);border-color:var(--ax-accent)}
+@media (max-width:480px){.dp-frames input[type=range]{flex-basis:100%;order:3}}
+@media print{.dp-frames{display:none}}
 .panel svg .dp-ghost{pointer-events:none}
 /* A decorative mark (a boxplot's mean dot, ggplot-rs `decorative()`) has no
    tooltip of its own: let the pointer through to the mark it annotates. */

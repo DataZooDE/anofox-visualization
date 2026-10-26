@@ -1567,11 +1567,22 @@ FROM dc_weekly_on_time;
 `::FRAME` turns a choropleth or graduated-symbol map into a time map: one
 result holds **every** frame (a week, a date, …) of every feature, and the
 map shows one frame at a time. Static output (`--svg`, PNG, PDF, a DuckDB
-function, the HTML export) shows the **last** frame, named in the
-subtitle ("Week: 12") so it's always clear which one that is; the browser
-adds a Play bar under the map to step through the rest (arriving with
-M2f) — reduced motion keeps Play available (stepping through time *is*
-the content) with instant, 1.5 s-apart steps, never autoplaying.
+function) shows the **last** frame, named in the subtitle ("Week: 12") so
+it's always clear which one that is. The browser adds a Play bar under the
+map — ‹/› step a frame, Play/Pause auto-advances every second (1.5 s under
+reduced motion), the slider and arrow/Home/End/Page keys jump to any frame,
+and the current frame's position is announced (`aria-live`, muted while
+Play is running so it doesn't flood a screen reader). Re-rendering for
+zoom, resize, a theme switch and `::FIT` all keep the frame shown; "Charts
+as tables" and an open tooltip follow it too. The step itself tweens
+(300 ms): fills/strokes blend in RGB (a "no data" pattern swaps at the end,
+no lerp) and `stroke-width` interpolates, same as `'tween'::TRANSITION`'s
+re-run join elsewhere. Reduced motion keeps Play available (stepping
+through time *is* the content) with instant, 1.5 s-apart steps, and it
+never autoplays on its own. The step persists per statement across a
+re-run, like `::STORY`'s step does. The HTML export has no live player (a
+static note takes its place — "12 frames — Play in the live dashboard");
+embedding every frame for an offline player is a follow-up.
 
 - **Frame order:** ascending when every `::FRAME` value is numeric,
   chronological when every value looks like a date, else first
