@@ -550,7 +550,6 @@ pub struct NewRecord {
 /// signal rather than the brittle `e.contains("was rewritten on disk")`
 /// string match this replaces — the erase is unconditionally applied
 /// (`removed` rows gone) whenever `Store::erase_user` returns `Ok` at all.
-#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EraseOutcome {
     /// How many records were removed. `0` for a user with no rows — not
@@ -1161,13 +1160,11 @@ impl Store {
     /// against. Caught by CI's wasm lib build (`cargo build --lib
     /// --target wasm32-unknown-unknown … --features wasm`): this method
     /// originally had no gate at all, which compiled fine natively but
-    /// broke that build with "unresolved import `libc`". No
-    /// `#[cfg(not(unix))]` fallback is needed, matching [`Self::append`]
-    /// right above — `Store` can never exist on a non-unix target in the
-    /// first place ([`Self::open`]/[`Self::open_read_only`] always
-    /// return `Err` there), and nothing outside this `unix`-gated impl
-    /// block calls `erase_user` (its one caller, `dashboard state
-    /// erase`, is a `[[bin]]`, never part of the `--lib` wasm build).
+    /// broke that build with "unresolved import `libc`". The
+    /// `#[cfg(not(unix))]` stub below exists only so `dashboard state
+    /// erase` compiles on Windows (#591): `Store` can never exist on a
+    /// non-unix target ([`Self::open`]/[`Self::open_read_only`] always
+    /// return `Err` there), so the stub is unreachable.
     #[cfg(unix)]
     pub fn erase_user(&self, user: &str) -> Result<EraseOutcome, String> {
         use std::ffi::CString;
@@ -1403,6 +1400,21 @@ impl Store {
                 }
             }
         }
+    }
+
+    /// Unreachable in practice: [`Store::open`] refuses on non-Unix hosts,
+    /// so no `Store` exists there. Present so callers compile (#591).
+    #[cfg(not(unix))]
+    pub fn append(&self, new: NewRecord) -> Result<Record, String> {
+        let _ = new;
+        Err("the state store needs a Unix host (flock)".into())
+    }
+
+    /// See [`Self::append`]'s non-Unix stub (#591).
+    #[cfg(not(unix))]
+    pub fn erase_user(&self, user: &str) -> Result<EraseOutcome, String> {
+        let _ = user;
+        Err("the state store needs a Unix host (flock)".into())
     }
 
     pub fn is_failed(&self) -> bool {
