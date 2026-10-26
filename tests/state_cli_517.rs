@@ -301,11 +301,15 @@ fn erase_refuses_while_the_store_is_still_open_elsewhere_in_process() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("in use by another server"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("in use by another server"), "{stderr}");
+    // Review of #559, nit: a refused open on an *applied* (`--yes`) erase
+    // is itself worth a line in the audit trail — it's a failed attempt
+    // at exactly the kind of data-subject-request action that trail
+    // exists to record, not a case to silently skip auditing.
+    assert!(stderr.contains("\"audit\":\"state_erase\""), "{stderr}");
+    assert!(stderr.contains("\"outcome\":\"error\""), "{stderr}");
+    assert!(stderr.contains("alice@example.com"), "{stderr}");
     let export_out = dashboard()
         .arg("state")
         .arg("export")
@@ -589,4 +593,100 @@ fn erase_dry_run_on_a_torn_tail_store_leaves_the_file_byte_identical() {
         before, after,
         "a dry run must never truncate a torn tail, even on its read-only open"
     );
+}
+
+/// Review of #555's re-review (#559, nit): the unit tests in
+/// `src/bin/dashboard.rs` cover `csv_safe`'s character rule directly, but
+/// nothing end to end confirmed `state_export_csv` actually routes every
+/// one of its string columns through it. Every field that can carry
+/// attacker/viewer-controlled text — `ts`, `user`, `auth`, `dashboard`,
+/// `submit`, `id`, the variable `name`, and a scalar `value` — gets its
+/// own distinct formula-lead character here (`= + - @` and a literal
+/// tab), so a column accidentally left out of `csv_safe` would show up as
+/// an un-prefixed cell. `value_list` is the one CSV column deliberately
+/// left out: for a scalar variable (used here) it's always the empty
+/// string, and for a `MULTISELECT` it's JSON array text that always
+/// starts with `[`, never a character `csv_safe` would act on either way.
+#[test]
+fn export_csv_neutralises_a_formula_lead_in_every_string_column() {
+    let s = Scratch::new("export-csv-formula");
+    let p = s.0.join("state.jsonl");
+    std::fs::write(
+        &p,
+        "{\"anofox_state\":1,\"created\":\"2026-10-26T00:00:00.000Z\"}\n\
+         {\"v\":1,\"seq\":1,\"ts\":\"=TS_FORMULA\",\"user\":\"+USER_FORMULA\",\"auth\":\"-AUTH_FORMULA\",\"dashboard\":\"@DASH_FORMULA\",\"submit\":\"\\tSUBMIT_FORMULA\",\"id\":\"=ID_FORMULA\",\"vars\":{\"@NAME_FORMULA\":\"=VALUE_FORMULA\"}}\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let out = dashboard()
+        .arg("state")
+        .arg("export")
+        .arg(&p)
+        .arg("--format")
+        .arg("csv")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "seq,ts,user,auth,dashboard,submit,id,name,value,value_list"
+    );
+    let row = lines
+        .next()
+        .unwrap_or_else(|| panic!("no data row in: {stdout}"));
+    let expected =
+        "1,'=TS_FORMULA,'+USER_FORMULA,'-AUTH_FORMULA,'@DASH_FORMULA,'\tSUBMIT_FORMULA,'=ID_FORMULA,'@NAME_FORMULA,'=VALUE_FORMULA,";
+    assert_eq!(row, expected, "{stdout:?}");
+}
+
+/// Review of #559, nit: `--out --force` used to `O_TRUNC` at `open` time,
+/// before this process had a chance to look at what it just opened — a
+/// path that's a hard link to another name got truncated (destroying the
+/// other name's content too) before any check could refuse it. The fix
+/// opens without truncating, `fstat`s the fd, and only then truncates —
+/// so a hard-linked `--out` path must be refused with BOTH names' content
+/// still completely intact.
+#[test]
+fn export_out_force_refuses_a_hard_link_before_truncating_it() {
+    let s = Scratch::new("export-out-hardlink");
+    let p = s.0.join("state.jsonl");
+    write_store(&p);
+    let shared = s.0.join("shared.csv");
+    std::fs::write(&shared, "shared content, do not touch\n").unwrap();
+    let out_path = s.0.join("out.csv");
+    std::fs::hard_link(&shared, &out_path).unwrap();
+
+    let out = dashboard()
+        .arg("state")
+        .arg("export")
+        .arg(&p)
+        .arg("--out")
+        .arg(&out_path)
+        .arg("--force")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("hard link"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for f in [&shared, &out_path] {
+        assert_eq!(
+            std::fs::read_to_string(f).unwrap(),
+            "shared content, do not touch\n",
+            "a refused hard-linked --out must not lose a byte of either name: {f:?}"
+        );
+    }
 }

@@ -779,29 +779,52 @@ locked-down as everywhere else in this document.
   text, lossless even for a `MULTISELECT`'s list); `--out FILE` writes a new
   file instead of stdout — created `0600`, never through a symlink, and
   refused outright if it already exists unless `--force` is also given.
+  Prefer `--out` over stdout: without it, the export's personal data lands
+  wherever the shell's own redirection and the process's umask put it, with
+  no `0600` of its own — wrap it in a subshell that sets a tight umask first,
+  e.g. `(umask 077; dashboard state export … > alice.csv)`, rather than
+  relying on a later `chmod`.
   Both `export` and a dry-run `erase` open the store **read-only**: neither
   ever creates the file, truncates a torn tail, tightens loose permissions,
   or writes a header into an empty file — only an applied `erase --yes`
-  touches the file on disk. `erase` is a **dry run by default** — it only
-  reports how many records would be removed until `--yes` is given — and
-  writes one audit line per applied attempt (`--audit stderr|FILE`, default
-  `stderr`; same target syntax as `options.audit`), outcome `ok`/`error`,
-  the operator's own uid (`$USER`'s, not the erased viewer's), never the
-  values. An applied erase is crash-safe: it writes the kept rows and the
-  original header line, byte for byte, to a fresh temp file in the same
+  touches the file on disk. Like a server at start-up, a running `export` or
+  `erase` (dry run or applied) takes the store's `flock`, so a server start
+  while one is running gets the same "state file '…' is in use by another
+  server" refusal a second server would. `erase` is a **dry run by
+  default** — it only reports how many records would be removed until
+  `--yes` is given — and writes one audit line per applied attempt
+  (`--audit stderr|FILE`, default `stderr`; same target syntax as
+  `options.audit`), outcome `ok`/`error`, the operator's own **numeric**
+  uid (`getuid()` — not `$USER`, and not the erased viewer's `user`), never
+  the values. An applied erase is crash-safe: it writes the kept rows and
+  the original header line, byte for byte, to a fresh temp file in the same
   directory, `fsync`s it, then `rename`s it over the original and `fsync`s
   the directory — the original is never modified in place, so a crash at
   any point before the `rename` leaves it completely untouched, and from
   the instant the `rename` lands the new content is the only content
-  anyone can ever open at that path again. The erased user's `seq` numbers
-  are not reserved — after a restart a later submission may reuse one.
-  That's harmless for every guarantee above (no in-memory cache survives a
-  restart to be confused by it, and `erase` only ever runs while the server
-  is stopped) but means `seq` is not a permanent forensic id: the audit
-  log, when configured, is the durable record of *when* something
-  happened. The raw file is also plain JSON Lines for ad hoc batch analysis
-  without this CLI at all — `duckdb -c "FROM read_json('state.jsonl')"` —
-  offline, same caveat.
+  anyone can ever open at that path again. A crash between the write and
+  the `rename` can leave a `.<store file>.erase-tmp-<pid>-<ns>` file next
+  to the store; it holds only the rows that would have been kept, so it's
+  still personal data in its own right and the operator should delete it
+  by hand. The erased user's `seq` numbers are not reserved — after a
+  restart a later submission may reuse one. That's harmless for every
+  guarantee above (no in-memory cache survives a restart to be confused by
+  it, and `erase` only ever runs while the server is stopped) but means
+  `seq` is not a permanent forensic id: the audit log, when configured, is
+  the durable record of *when* something happened. The raw file is also
+  plain JSON Lines for ad hoc batch analysis without this CLI at all —
+  `duckdb -c "FROM read_json('state.jsonl')"` — offline, same caveat.
+  **`erase` is a logical delete, not a secure wipe.** The `rename` only
+  ever points the directory entry at a new inode holding the kept rows;
+  the old inode's blocks are freed for reuse, never zeroed, so the erased
+  rows can still be recovered from the raw block device until something
+  else overwrites them. On a copy-on-write filesystem (btrfs, ZFS, APFS),
+  in a filesystem snapshot, or in a backup taken before the erase, the old
+  blocks are retained deliberately and `erase` has no way to reach them at
+  all. If an erasure request is a GDPR Article 17 matter, treat `dashboard
+  state erase` as covering the live store file only, and separately check
+  — and expire — any snapshot or backup retention that could otherwise
+  keep the same rows around indefinitely.
 - **Single replica in v1.** One `flock`'d file, one writer. Multiple
   replicas behind a load balancer would need an external store; not planned
   unless asked for.

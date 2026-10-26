@@ -1913,23 +1913,26 @@ fn cmd_state(args: &[String]) {
 /// `flock`, no mutation of the file at all) over the writable
 /// [`anofox_visualization::host::state::Store::open`] (an exclusive
 /// `flock`) — see [`cmd_state`].
-fn cmd_state_open(path: &str, read_only: bool) -> anofox_visualization::host::state::Store {
+///
+/// Returns the refusal as an `Err` instead of printing and exiting itself
+/// (review of #559, nit: `erase --yes`'s own open — the lock held by a
+/// running server, a bad path — used to exit here with no audit line at
+/// all, even though a refused *applied* erase is exactly the kind of
+/// attempt its audit trail exists to record). `export` and a dry-run
+/// `erase` aren't audited either way, so they still just print `{e}` and
+/// exit; only `cmd_state_erase`'s applied path needs to tell this `Err`
+/// apart from one further down the same `--yes` run.
+fn cmd_state_open(
+    path: &str,
+    read_only: bool,
+) -> Result<anofox_visualization::host::state::Store, String> {
     let p = std::path::Path::new(path);
     match std::fs::metadata(p) {
         Ok(m) if m.is_file() => {}
-        Ok(_) => {
-            eprintln!("{path}: not a regular file");
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("{path}: {e}");
-            std::process::exit(1);
-        }
+        Ok(_) => return Err(format!("{path}: not a regular file")),
+        Err(e) => return Err(format!("{path}: {e}")),
     }
-    let abs = std::fs::canonicalize(p).unwrap_or_else(|e| {
-        eprintln!("{path}: {e}");
-        std::process::exit(1);
-    });
+    let abs = std::fs::canonicalize(p).map_err(|e| format!("{path}: {e}"))?;
     const CLI_MAX_MB: u64 = 1 << 20; // 1 TiB — effectively unlimited for this tool.
     let open: fn(
         &std::path::Path,
@@ -1939,10 +1942,7 @@ fn cmd_state_open(path: &str, read_only: bool) -> anofox_visualization::host::st
     } else {
         anofox_visualization::host::state::Store::open
     };
-    open(&abs, CLI_MAX_MB).unwrap_or_else(|e| {
-        eprintln!("{path}: {e}");
-        std::process::exit(1);
-    })
+    open(&abs, CLI_MAX_MB).map_err(|e| format!("{path}: {e}"))
 }
 
 /// `dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]`.
@@ -1989,7 +1989,10 @@ fn cmd_state_export(args: &[String]) {
         eprintln!("state export: --user must not be empty");
         std::process::exit(2);
     }
-    let store = cmd_state_open(&path, true);
+    let store = cmd_state_open(&path, true).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
     let rows = match &user {
         Some(u) => store.rows_for_user(u),
         None => store.all_rows(usize::MAX),
@@ -2179,12 +2182,20 @@ fn state_export_csv(rows: &[anofox_visualization::host::state::Record]) -> Strin
 #[cfg(unix)]
 fn write_export_output(path: &str, body: &[u8], force: bool) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).mode(0o600).custom_flags(libc::O_NOFOLLOW);
     if force {
-        opts.create(true).truncate(true);
+        // No `.truncate(true)` here (review of #559, nit): that sets
+        // `O_TRUNC` at `open` itself, before this process gets a chance to
+        // look at what it just opened — an existing `path` that's a hard
+        // link to some other name (`ln victim.csv out.csv`) would already
+        // be zeroed by the time the hard-link check below could refuse it.
+        // `create(true)` opens (or creates) the file without truncating;
+        // the explicit `set_len(0)` after the check below does the
+        // truncating this used to do at `open` time.
+        opts.create(true);
     } else {
         opts.create_new(true);
     }
@@ -2197,6 +2208,30 @@ fn write_export_output(path: &str, body: &[u8], force: bool) -> Result<(), Strin
             format!("{path}: {e}")
         }
     })?;
+    if force {
+        // `fstat` the fd we just opened, never the path again — the path
+        // could have changed since `open` returned, the fd can't have.
+        // Refuse a hard link (`nlink() > 1`, so truncating this name would
+        // also truncate whatever other name(s) point at the same inode)
+        // and a non-regular file (a FIFO, device, … — nothing `--force`
+        // has any business truncating) BEFORE the `set_len(0)` below, so a
+        // refusal here never loses a byte of whatever was already at
+        // `path`.
+        let meta = f.metadata().map_err(|e| format!("{path}: {e}"))?;
+        if meta.nlink() > 1 {
+            return Err(format!(
+                "{path}: refusing to overwrite — it has {} hard links, so --force would \
+                 truncate another name too (remove it or pick a different --out path)",
+                meta.nlink()
+            ));
+        }
+        if !meta.is_file() {
+            return Err(format!(
+                "{path}: refusing to overwrite — not a regular file"
+            ));
+        }
+        f.set_len(0).map_err(|e| format!("{path}: {e}"))?;
+    }
     // `.mode(0o600)` on `OpenOptions` only takes effect when `open` itself
     // creates the file — the only case `create_new` allows, but `--force`
     // may instead reuse an existing file whose permissions predate this
@@ -2261,7 +2296,22 @@ fn cmd_state_erase(args: &[String]) {
     // mutate the file it's only reporting on); an applied erase needs the
     // writable, exclusively-locked open `Store::erase_user` rewrites
     // through.
-    let store = cmd_state_open(&path, !yes);
+    let store = match cmd_state_open(&path, !yes) {
+        Ok(s) => s,
+        Err(e) => {
+            // Review of #559, nit: a refused open (a server's `flock` still
+            // held, a bad path) is exactly the kind of failed *applied*
+            // erase attempt this audit trail exists for — only when
+            // applying (`--yes`); a dry run that can't even open the file
+            // isn't audited at all, matching the dry run it would have
+            // been otherwise.
+            if yes {
+                state_audit_line(&audit_target, "error", &user, &e, None);
+            }
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
     let n = store.rows_for_user(&user).len();
     if !yes {
         println!(
@@ -2270,17 +2320,22 @@ fn cmd_state_erase(args: &[String]) {
         return; // nothing written; the store's `flock` is released when it drops here.
     }
     match store.erase_user(&user) {
-        Ok(removed) => {
+        Ok(outcome) => {
+            let removed = outcome.removed;
             state_audit_line(
                 &audit_target,
                 "ok",
                 &user,
                 &format!("{removed} record(s) removed from {path}"),
+                outcome.warning.as_deref(),
             );
             println!("erased {removed} record(s) for user '{user}' from {path}");
+            if let Some(w) = &outcome.warning {
+                eprintln!("state erase: warning: {w}");
+            }
         }
         Err(e) => {
-            state_audit_line(&audit_target, "error", &user, &e);
+            state_audit_line(&audit_target, "error", &user, &e, None);
             eprintln!("state erase: {e}");
             std::process::exit(1);
         }
@@ -2301,7 +2356,7 @@ fn cmd_state_erase(args: &[String]) {
 /// data-subject request trail") is this process's real uid — the
 /// operator's own login, not the erased viewer's `user` field above —
 /// since this CLI runs offline with no claims of its own to log instead.
-fn state_audit_line(target: &str, outcome: &str, user: &str, detail: &str) {
+fn state_audit_line(target: &str, outcome: &str, user: &str, detail: &str, warning: Option<&str>) {
     use anofox_visualization::host::access::{open_log, rfc3339};
     use serde_json::json;
     let line = json!({
@@ -2311,6 +2366,14 @@ fn state_audit_line(target: &str, outcome: &str, user: &str, detail: &str) {
         "user": user,
         "operator_uid": operator_uid(),
         "detail": detail,
+        // Review of #559, nit 1: `outcome` stays `"ok"` even when the
+        // erase hit a non-fatal problem after it already landed on disk
+        // (a dir-fsync failure, a re-open/re-lock failure for this same
+        // `Store` handle) — `warning` is how that still shows up in the
+        // trail, rather than silently becoming indistinguishable from a
+        // clean erase. `null` when there isn't one, same as any other
+        // JSON field here that doesn't always apply.
+        "warning": warning,
     })
     .to_string();
     match target.trim() {

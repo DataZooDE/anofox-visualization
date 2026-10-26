@@ -539,6 +539,29 @@ pub struct NewRecord {
     pub vars: serde_json::Map<String, serde_json::Value>,
 }
 
+/// The result of an *applied* [`Store::erase_user`] (review of #559, nit:
+/// a successful rewrite that then hit a non-fatal problem — the directory
+/// `fsync` after the `rename`, or re-opening/re-locking the rewritten file
+/// for this same `Store` handle — used to come back as a plain `Err`, so
+/// `dashboard state erase`'s audit line recorded `outcome: "error"` even
+/// though the erase itself had already landed on disk, durably, by the
+/// time either of those could fail). `warning` carries that non-fatal
+/// detail when there is one; its presence or absence is a real, structured
+/// signal rather than the brittle `e.contains("was rewritten on disk")`
+/// string match this replaces — the erase is unconditionally applied
+/// (`removed` rows gone) whenever `Store::erase_user` returns `Ok` at all.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EraseOutcome {
+    /// How many records were removed. `0` for a user with no rows — not
+    /// an error, just nothing to do.
+    pub removed: usize,
+    /// Set when the erase itself succeeded but a step after it didn't.
+    /// Still `outcome: "ok"` for an audit trail — the data is gone either
+    /// way — but worth surfacing to the operator.
+    pub warning: Option<String>,
+}
+
 impl Record {
     /// The exact on-disk shape, as a `Value` — `pub` so `dashboard state
     /// export` (S5) can print the same encoding the store itself writes,
@@ -1082,9 +1105,13 @@ impl Store {
     /// Remaining `seq` values are untouched: append-only only promises
     /// *strictly increasing*, never contiguous, so a gap left by an erase
     /// changes nothing for any other viewer's `gen` or cache key. Returns
-    /// the number of records removed (`0` leaves the file untouched —
-    /// no-op, not an error, so a caller can erase a user with no rows at
-    /// all without special-casing it).
+    /// an [`EraseOutcome`] — `removed` is the number of records removed
+    /// (`0` leaves the file untouched — no-op, not an error, so a caller
+    /// can erase a user with no rows at all without special-casing it);
+    /// `warning`, when set, means the erase itself still landed, in full,
+    /// on disk, but a step strictly after that (the directory `fsync`, or
+    /// re-opening/re-locking the rewritten file) did not — see the `Err`
+    /// branch below for why that's `Ok` with a warning, never an `Err`.
     ///
     /// Caveat (documented in `docs/secure-serving.md`, not hidden): if the
     /// erased user held the *highest* `seq` in the file, a later restart
@@ -1142,10 +1169,10 @@ impl Store {
     /// block calls `erase_user` (its one caller, `dashboard state
     /// erase`, is a `[[bin]]`, never part of the `--lib` wasm build).
     #[cfg(unix)]
-    pub fn erase_user(&self, user: &str) -> Result<usize, String> {
+    pub fn erase_user(&self, user: &str) -> Result<EraseOutcome, String> {
         use std::ffi::CString;
         use std::io::Write;
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::io::{AsRawFd, FromRawFd};
 
         if self.read_only {
@@ -1163,7 +1190,10 @@ impl Store {
             .collect();
         let removed = st.records.len() - kept.len();
         if removed == 0 {
-            return Ok(0);
+            return Ok(EraseOutcome {
+                removed: 0,
+                warning: None,
+            });
         }
         let mut buf = st.header_line.clone();
         buf.push('\n');
@@ -1178,7 +1208,7 @@ impl Store {
             .metadata()
             .map_err(|e| format!("state store erase failed: {e}"))?;
 
-        let do_it = || -> Result<std::fs::File, String> {
+        let do_it = || -> Result<(std::fs::File, Option<String>), String> {
             let (dirfd, file_name, _euid) = open_checked_parent_dir(&self.path)?;
 
             // A name nothing else should ever guess or race: this
@@ -1225,8 +1255,18 @@ impl Store {
                 unsafe { libc::unlinkat(dirfd.as_raw_fd(), tmp_cstr.as_ptr(), 0) };
                 return Err(format!("state store erase: fchown the temp file: {err}"));
             }
-            if orig_meta.mode() & 0o777 != 0o600 {
-                let _ = tmp_file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            // Always `fchmod`, never conditioned on the original file's own
+            // mode (review of #559, nit): `openat`'s `0o600` argument is
+            // still subject to this process's umask, so an unusual umask
+            // such as `0277` left the temp file at `0400` whenever the
+            // original happened to already read `0600` — unreadable `O_RDWR`
+            // by the very next server start. `fchmod` on the fd, not
+            // `set_permissions` on a path, so this can't be raced onto a
+            // different file between the two.
+            if unsafe { libc::fchmod(tmp_fd, 0o600) } != 0 {
+                let err = std::io::Error::last_os_error();
+                unsafe { libc::unlinkat(dirfd.as_raw_fd(), tmp_cstr.as_ptr(), 0) };
+                return Err(format!("state store erase: chmod the temp file: {err}"));
             }
 
             let wrote = (|| -> std::io::Result<()> {
@@ -1272,12 +1312,26 @@ impl Store {
             // The rename's directory-entry update needs its own fsync to
             // survive a crash — a file's own fsync (above) only makes its
             // *data* durable, not that a directory now points at it there.
-            if unsafe { libc::fsync(dirfd.as_raw_fd()) } != 0 {
-                return Err(format!(
-                    "state store erase: fsync the directory after rename: {}",
+            // Review of #559, nit 1: a failure here is NOT the same as a
+            // failure above the `rename` — the erase already took effect,
+            // on the one and only inode anyone can open at this path from
+            // here on. Losing the directory fsync only means a crash
+            // right now, before some *other* durability event flushes the
+            // directory anyway, could in principle roll the rename back on
+            // some filesystems. That's a warning on an otherwise-successful
+            // erase, never an `Err` that would make the CLI's audit line
+            // say `"error"` for an erase that, on every filesystem anyone
+            // actually runs this on, already happened.
+            let dir_fsync_warning = if unsafe { libc::fsync(dirfd.as_raw_fd()) } != 0 {
+                Some(format!(
+                    "state store erase: the file was rewritten on disk, but fsync-ing the \
+                     directory afterwards failed: {} — the erase took effect; this only \
+                     means that rename may not survive a crash happening right now",
                     std::io::Error::last_os_error()
-                ));
-            }
+                ))
+            } else {
+                None
+            };
 
             // Re-open the file fresh at the same path (now the rewritten
             // one) and take over its `flock`, so this `Store` keeps
@@ -1311,11 +1365,11 @@ impl Store {
                     std::io::Error::last_os_error()
                 ));
             }
-            Ok(new_file)
+            Ok((new_file, dir_fsync_warning))
         };
 
         match do_it() {
-            Ok(new_file) => {
+            Ok((new_file, warning)) => {
                 st.file = new_file;
                 let mut by_user: HashMap<String, Vec<usize>> = HashMap::new();
                 for (i, r) in kept.iter().enumerate() {
@@ -1324,7 +1378,10 @@ impl Store {
                 st.records = kept;
                 st.by_user = by_user;
                 st.size_bytes = new_size;
-                Ok(removed)
+                if let Some(w) = &warning {
+                    eprintln!("[anofox-state] {w}");
+                }
+                Ok(EraseOutcome { removed, warning })
             }
             Err(e) => {
                 // The on-disk file is already erased and durable by the
@@ -1337,7 +1394,10 @@ impl Store {
                 self.failed.store(true, Ordering::SeqCst);
                 if e.contains("was rewritten on disk") {
                     eprintln!("[anofox-state] {e}");
-                    Ok(removed)
+                    Ok(EraseOutcome {
+                        removed,
+                        warning: Some(e),
+                    })
                 } else {
                     Err(e)
                 }
@@ -2274,7 +2334,7 @@ mod tests {
             s.append(new_rec("alice", json!({"q1": "B"}))).unwrap();
             s.append(new_rec("bob", json!({"q1": "A"}))).unwrap();
             s.append(new_rec("alice", json!({"q1": "C"}))).unwrap();
-            assert_eq!(s.erase_user("alice").unwrap(), 2);
+            assert_eq!(s.erase_user("alice").unwrap().removed, 2);
             assert_eq!(s.user_count("alice"), 0);
             assert_eq!(s.rows_for_user("alice").len(), 0);
             // bob's row, and its seq, are untouched.
@@ -2302,7 +2362,7 @@ mod tests {
         let p = store_path("erase-noop");
         let s = Store::open(&p, DEFAULT_MAX_MB).unwrap();
         s.append(new_rec("bob", json!({"q1": "A"}))).unwrap();
-        assert_eq!(s.erase_user("nobody-ever-submitted").unwrap(), 0);
+        assert_eq!(s.erase_user("nobody-ever-submitted").unwrap().removed, 0);
         assert_eq!(s.len(), 1);
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
