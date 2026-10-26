@@ -230,6 +230,10 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .md-box{position:relative;overflow:hidden;background:var(--ax-callout-bg);border-color:var(--ax-callout-border);padding-left:1.4rem}
 .md-box::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--ax-callout-bar)}
 .md-body{font-size:.9rem;line-height:1.6;color:var(--ax-md-ink)}
+/* 'plain'::MARKDOWN_STYLE (#536): text on the page background — no card, no
+   tint, no accent bar; .panel's own padding stays (normal page padding),
+   just its card chrome goes. */
+.md-plain{background:transparent;border-color:transparent;box-shadow:none}
 .dp-callout{padding-left:3rem}
 .dp-callout::after{content:attr(data-icon);position:absolute;left:1.15rem;top:1.05rem;width:1.3rem;height:1.3rem;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.78rem;font-weight:800;color:var(--ax-card);background:var(--ax-callout-bar)}
 .dp-callout-warning{background:var(--ax-badge-warn-bg);border-color:transparent}
@@ -512,6 +516,22 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 }
 @media print{.dp-viewbar{display:none}}
 
+/* ---- ::VIEW_PLACEMENT 'header': the switcher in the card's title row
+   instead of its own row above it (#534). placeViewHeaderBar() moves the
+   same bar (JS) into whichever alternative is shown; this only styles it
+   once it is there — the title text wraps (its anonymous flex item
+   shrinks first; the bar never does) before the buttons do. */
+.panel-title:has(.dp-viewbar){display:flex;flex-wrap:wrap;align-items:baseline;gap:.3rem .6rem}
+.panel-title .dp-viewbar{flex:0 0 auto;align-self:center;margin-left:auto}
+.panel-title .dp-seg{padding:1px;gap:1px}
+.panel-title .dp-seg button{padding:.28rem .55rem;font-size:.76rem}
+/* below a minimum card width: segmented buttons fold into one <select> —
+   a child of the bar itself, so it travels with it when the card swaps. */
+.dp-viewbar-select{display:none;font:inherit;font-size:.78rem;font-weight:600;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:8px;padding:.3rem .5rem;cursor:pointer;max-width:100%}
+.dp-viewbar.dp-viewbar-folded{border:0;background:none;box-shadow:none;padding:0;gap:0}
+.dp-viewbar.dp-viewbar-folded>[role="tab"]{display:none}
+.dp-viewbar.dp-viewbar-folded>.dp-viewbar-select{display:inline-block}
+
 /* ---- ::GUIDE_STEP: guided sequences (onboarding, tutorials) (#516) ---- */
 .dp-steps{grid-column:1/-1;margin:0;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius);padding:1.1rem 1.3rem 1.3rem;box-shadow:var(--ax-shadow);display:flex;flex-direction:column;gap:.9rem}
 .dp-step-head{display:flex;flex-wrap:wrap;align-items:center;gap:.9rem;justify-content:space-between}
@@ -534,6 +554,8 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-step-next{order:3;margin-left:auto}
 .dp-step-next[aria-disabled=true]{cursor:not-allowed;filter:none;background:var(--ax-input-bg);color:var(--ax-muted);border:1px solid var(--ax-line);box-shadow:none}
 .dp-step-next[aria-disabled=true]:hover{filter:none;background:var(--ax-input-bg)}
+/* #523: the ⤓ HTML export's offline note, replacing a dropped ::GATE's message/disabled Next */
+.dp-step-note{order:4;flex-basis:100%;margin:.4rem 0 0;font-size:.78rem;font-weight:500;color:var(--ax-muted)}
 @media(max-width:600px){
   .dp-step-list{display:none}
   .dp-step-foot{flex-wrap:wrap}
