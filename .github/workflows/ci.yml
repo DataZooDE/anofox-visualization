@@ -493,6 +493,18 @@ jobs:
       - name: Dashboard CLI is executable
         run: chmod +x target/debug/dashboard
 
+      # For the served (locked-server) e2e checks further down (#590): they
+      # need a native extension build with the *real* UI embedded, unlike
+      # the `rust` job's SKIP_WASM=1 one. build-native.sh's SKIP_WASM=1 only
+      # skips re-running wasm-pack — include_dir! (duckext/src/serve.rs)
+      # still embeds whatever is already in web/pkg, which the download
+      # above just populated, so this stays a plain cdylib build (no wasm
+      # toolchain needed here).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-e2e-served-ext
+
       - name: Install DuckDB-Wasm (tests/web)
         run: npm install --prefix tests/web --no-audit --no-fund
 
@@ -658,8 +670,8 @@ jobs:
       # narrower, options falls back to the first remaining one. The locked
       # server side (unconditional, not just stale — a fresh connection per
       # request never gets a second chance) is covered separately by
-      # scripts/input-options-order-served-e2e.mjs, which needs a native
-      # extension build and is not run in CI (like scripts/served-e2e.mjs).
+      # scripts/input-options-order-served-e2e.mjs, run further down this
+      # job against the native extension built below (#590).
       # Reuses the :8947 server and Chromium above.
       - name: Input OPTIONS query order e2e (#428)
         timeout-minutes: 10
@@ -761,6 +773,27 @@ jobs:
       - name: Published static site e2e (dashboard --site)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-e2e.mjs --dashboard target/debug/dashboard
+
+      # scripts/served-e2e.mjs / scripts/input-options-order-served-e2e.mjs
+      # (#590): the browser e2e checks that need a real locked server
+      # (anofox_serve_dashboards), not the :8947 static serve_nocache.py
+      # above — a native extension build, with the real UI embedded (the
+      # Rust toolchain + web/pkg from earlier in this job). `SKIP_WASM=1`
+      # here just means "don't re-run wasm-pack", not "no UI": include_dir!
+      # embeds whatever is already in web/pkg. Uses the DuckDB CLI installed
+      # above.
+      - name: Build the native extension with the real UI embedded (#590)
+        run: |
+          touch duckext/src/serve.rs   # force include_dir! to re-embed the downloaded web/pkg
+          SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
+
+      - name: Served dashboards e2e (locked server, real UI, #590)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
   web-explore-starters:
     # Explore data's starter dashboards (#97): every sample table's starter
