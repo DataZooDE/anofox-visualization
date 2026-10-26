@@ -37,6 +37,55 @@ use super::flows::{Flows, FLOW_CAP};
 use super::hexbin::{self, Hexbin};
 use super::{Fill, Frame, Model, Rgb, ValueScale};
 
+/// Wraps a scale so it still maps/renders normally but reports no legend
+/// breaks of its own (`legend_scales_for` skips any aesthetic whose
+/// `breaks()` is empty) — used for the flow linetype scale (#581):
+/// `::LINESTYLE` is a drawing hint per DOCS.md (it dashes/animates the
+/// arc; no legend is ever promised for it), so the mapped `linetype` aes
+/// should still drive the actual dash pattern without surfacing its own
+/// legend entry. Mirrors [`Reaimed`]'s delegate-everything-but-one-thing
+/// shape.
+struct NoLegend(Box<dyn Scale>);
+
+impl Clone for NoLegend {
+    fn clone(&self) -> Self {
+        NoLegend(self.0.clone_box())
+    }
+}
+
+impl Scale for NoLegend {
+    fn aesthetic(&self) -> Aesthetic {
+        self.0.aesthetic()
+    }
+    fn train(&mut self, values: &[Value]) {
+        self.0.train(values)
+    }
+    fn map(&self, value: &Value) -> f64 {
+        self.0.map(value)
+    }
+    fn breaks(&self) -> Vec<(f64, String)> {
+        Vec::new()
+    }
+    fn breaks_for_layout(&self) -> Vec<(f64, String)> {
+        Vec::new()
+    }
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn set_name(&mut self, name: &str) {
+        self.0.set_name(name)
+    }
+    fn is_discrete(&self) -> bool {
+        self.0.is_discrete()
+    }
+    fn map_to_linetype(&self, value: &Value) -> Option<Linetype> {
+        self.0.map_to_linetype(value)
+    }
+    fn clone_box(&self) -> Box<dyn Scale> {
+        Box::new(self.clone())
+    }
+}
+
 /// The curve + endpoint layers (and their colour/linetype/linewidth
 /// scales), appended onto `plot` — [`super::plot::build`] (#420 slice 4)
 /// appends them straight onto the map's own `GGPlot`, so one real
@@ -199,11 +248,15 @@ pub(super) fn flow_layers(
         dests.push(Value::Str(fl_.d_name.clone()));
         raw_sizes.push(fl_.raw.map(Value::Float).unwrap_or(Value::Na));
         fsizes.push(fsize.map(Value::Str).unwrap_or(Value::Na));
-        linestyles.push(if linestyle.is_empty() {
-            Value::Na
+        // "solid" (or NULL/empty) is the documented default (DOCS.md
+        // `::LINESTYLE`) — pushing it as a real value rather than
+        // `Value::Na` keeps the manual linetype scale below fully
+        // covering every row without an `NA` bucket (#581).
+        linestyles.push(Value::Str(if linestyle.is_empty() {
+            "solid".to_string()
         } else {
-            Value::Str(linestyle)
-        });
+            linestyle
+        }));
         nds.push(if nd {
             Value::Str("1".to_string())
         } else {
@@ -325,12 +378,22 @@ pub(super) fn flow_layers(
     if has_linestyle_aes {
         // "flow"/"dashed" ::LINESTYLE rows dash — ggplot-rs's own `Dashed`
         // pattern (6,3), not the old hand-written `stroke-dasharray="6 4"`
-        // (an accepted, documented visual delta).
-        plot = plot.scale_linetype_manual(vec![
-            ("NA", Linetype::Solid),
+        // (an accepted, documented visual delta). "solid" covers the
+        // documented default (empty/NULL rows are normalized to "solid"
+        // above) — feeding this straight to `scale_linetype_manual`
+        // (which only pushes the scale, with no way to hide its legend)
+        // used to leave "solid" out of the manual list, so it auto-grew
+        // in as a spurious extra legend break alongside an "NA" that was
+        // seeded unconditionally and so always showed even with no NA
+        // data (#581). `NoLegend` keeps the mapping (and so the actual
+        // dash pattern) while reporting no breaks, since DOCS.md never
+        // promises a legend for `::LINESTYLE` — it's a drawing hint.
+        let linetype_scale = ScaleLinetypeManual::new(vec![
+            ("solid", Linetype::Solid),
             ("flow", Linetype::Dashed),
             ("dashed", Linetype::Dashed),
         ]);
+        plot = plot.scale_color(NoLegend(Box::new(linetype_scale)));
     }
     if let Some(scale) = color_scale {
         plot = plot.scale_color(Reaimed(Aesthetic::Color, scale));
