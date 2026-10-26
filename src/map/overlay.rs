@@ -37,76 +37,17 @@ use super::flows::{Flows, FLOW_CAP};
 use super::hexbin::{self, Hexbin};
 use super::{Fill, Frame, Model, Rgb, ValueScale};
 
-/// Draw the flow overlay and splice it into the map body (the old writer,
-/// [`super::render_with_model`]): [`flow_layers`] on a throwaway seed plot,
-/// then rendered standalone and spliced in as a transparent fragment.
-/// Returns the rendered SVG fragment (empty when every flow turned out
-/// screen-coincident or there were none to draw), the number of marks drawn
-/// (for the "aggregate in SQL" budget warning), the count of
-/// screen-coincident ("self") flows skipped (pixel distance < 2px, checked
-/// here since the drawn coordinates themselves stay in projected, not
-/// pixel, space), and the over-cap warning text (`fl.total > FLOW_CAP`), if
-/// any.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render(
-    o: &RenderOptions,
-    cols: &[Column],
-    m: &Model,
-    frame: &Frame,
-    fl: &Flows,
-    t: &crate::theme::ResolvedTheme,
-    card: Rgb,
-    hatch_bg: Rgb,
-    hatch_fg: Rgb,
-    w: f64,
-    h: f64,
-) -> (String, usize, usize, Option<String>) {
-    let plain_fill = match &m.fill {
-        Fill::Plain(c) => *c,
-        _ => (97, 156, 255),
-    };
-    let color_scale = super::fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg);
-    let seed = GGPlot::new(Vec::<(String, Vec<Value>)>::new()).aes(Aes::new());
-    let (plot, n, extra_self, cap_warn) = flow_layers(
-        seed,
-        o,
-        cols,
-        m,
-        frame,
-        fl,
-        t,
-        card,
-        color_scale,
-        plain_fill,
-    );
-    // Every flow turned out screen-coincident (or there were none): no
-    // layer was ever added to the seed plot — render nothing, not an
-    // (empty-but-still-wrapped) SVG fragment.
-    if n == 0 {
-        return (String::new(), 0, extra_self, cap_warn);
-    }
-    let [x0, x1, y0, y1] = frame.window(w, h);
-    let frag = plot
-        .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
-        .theme_void()
-        .legend_position(LegendPosition::None)
-        .svg_root_data(false)
-        .render_svg_native_at(0.0, 0.0, w.max(1.0) as u32, h.max(1.0) as u32)
-        .unwrap_or_default();
-    (frag, n, extra_self, cap_warn)
-}
-
 /// The curve + endpoint layers (and their colour/linetype/linewidth
-/// scales), appended onto `plot` — [`render`] (the old writer) appends them
-/// to a throwaway seed and renders the result standalone;
-/// [`super::plot::build`] (#420 slice 4) appends them straight onto the
-/// map's own `GGPlot`, so one real `GGPlot`/legend covers flows alongside
-/// the fill/size scales, instead of a separately-rendered-and-spliced
-/// fragment. Positions are fed through already-projected, pre-pixel
-/// coordinates (see the module doc); `coord_sf`/theme/legend/rendering stay
-/// the caller's job — plot-wide, not per-layer. Returns the number of marks
-/// drawn, the screen-coincident ("self") count and the over-cap warning,
-/// same as [`render`].
+/// scales), appended onto `plot` — [`super::plot::build`] (#420 slice 4)
+/// appends them straight onto the map's own `GGPlot`, so one real
+/// `GGPlot`/legend covers flows alongside the fill/size scales, instead of
+/// a separately-rendered-and-spliced fragment (the old writer's own
+/// approach, dropped in slice 6 once every map routed through `plot::build`
+/// — #505 made it unreachable first). Positions are fed through
+/// already-projected, pre-pixel coordinates (see the module doc);
+/// `coord_sf`/theme/legend/rendering stay the caller's job — plot-wide, not
+/// per-layer. Returns the number of marks drawn, the screen-coincident
+/// ("self") count and the over-cap warning.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flow_layers(
     plot: GGPlot,
@@ -427,54 +368,16 @@ pub(super) fn flow_layers(
     (plot, n, extra_self, cap_warn)
 }
 
-/// Draw the hexbin overlay and splice it into the map body. `hb` is already
-/// binned (`hexbin::of`'s `StatBinHex::compute_group`, data prep only);
-/// this only resolves each cell's colour (`fill_of`'s `Fill::Measure` scale,
-/// the same choropleth colour-class logic — "hexbin colour classes stay in
-/// the consumer for now") and draws. Returns the rendered SVG fragment
-/// (empty when there are no occupied cells) and the number of hexagons
-/// drawn (for the "aggregate in SQL" mark-budget warning in `mod.rs`).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_hexbin(
-    o: &RenderOptions,
-    hb: &Hexbin,
-    scale: &ValueScale,
-    frame: &Frame,
-    card: Rgb,
-    hatch_bg: Rgb,
-    hatch_fg: Rgb,
-    w: f64,
-    h: f64,
-) -> (String, usize) {
-    let fill = Fill::Measure(Box::new(scale.clone()));
-    let color_scale = super::fill::scale_for(&fill, o.locale, hatch_bg, hatch_fg);
-    let seed = GGPlot::new(Vec::<(String, Vec<Value>)>::new()).aes(Aes::new());
-    let (plot, n) = hexbin_layer(seed, o, hb, scale, card, color_scale);
-    if n == 0 {
-        return (String::new(), 0);
-    }
-    let [x0, x1, y0, y1] = frame.window(w, h);
-    let frag = plot
-        .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
-        .theme_void()
-        .legend_position(LegendPosition::None)
-        .svg_root_data(false)
-        .render_svg_native_at(0.0, 0.0, w.max(1.0) as u32, h.max(1.0) as u32)
-        .unwrap_or_default();
-    (frag, n)
-}
-
 /// The hexagon layer (and its `Fill` scale, the plot's own — see
-/// [`render]/`fill::scale_for`), appended onto `plot` — [`render_hexbin`]
-/// (the old writer) appends it to a throwaway seed and renders the result
-/// standalone; [`super::plot::build`] (#420 slice 4) appends it straight
-/// onto the map's own `GGPlot`, reusing the same `Fill` scale the features
-/// layer already registered (hexbin cells colour by the *same* measure a
-/// choropleth would, so one real scale/legend covers both — no more
-/// hand-resolving `scale.color(value)` into a pre-baked hex string).
-/// `coord_sf`/theme/legend/rendering stay the caller's job. Returns the
-/// number of hexagons drawn (for the "aggregate in SQL" mark-budget
-/// warning).
+/// `fill::scale_for`), appended onto `plot` — [`super::plot::build`] (#420
+/// slice 4) appends it straight onto the map's own `GGPlot`, reusing the
+/// same `Fill` scale the features layer already registered (hexbin cells
+/// colour by the *same* measure a choropleth would, so one real
+/// scale/legend covers both — no more hand-resolving `scale.color(value)`
+/// into a pre-baked hex string, the old writer's own approach, dropped in
+/// slice 6). `coord_sf`/theme/legend/rendering stay the caller's job.
+/// Returns the number of hexagons drawn (for the "aggregate in SQL"
+/// mark-budget warning).
 pub(super) fn hexbin_layer(
     plot: GGPlot,
     o: &RenderOptions,
