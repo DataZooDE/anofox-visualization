@@ -4209,25 +4209,87 @@ fn effective_value(
     }))
 }
 
-/// The exact inverse of [`sv::sql_literal`]'s scalar forms (`NULL`,
-/// `TRUE`/`FALSE`, a quoted string with `''`-doubled quotes, a plain
-/// number) — `None` for anything else (a list literal, which a locked
-/// variable's own config never actually produces in practice; fails
-/// closed rather than guess).
+/// The exact inverse of [`sv::sql_literal`] — every form it can build for a
+/// locked variable: a scalar (`NULL`, `TRUE`/`FALSE`, a quoted string with
+/// `''`-doubled quotes, a plain number) *or* its list form (review of #538
+/// round 2 nit: a credential locking a `::MULTISELECT` variable's value —
+/// `embed::Embed::verify_link`'s own `vars` go through this same
+/// `sql_literal`, which lists scalars just as readily as it does one — so
+/// `[]::VARCHAR[]`/`[<item>, <item>, …]` is not some case this never
+/// actually produces; refusing it would wrongly 400 every submission from
+/// a credential that locks a multiselect). `None` for anything else — this
+/// stays an exact inverse, not a guess.
 fn literal_to_json(lit: &str) -> Option<Value> {
-    match lit {
-        "NULL" => Some(Value::Null),
-        "TRUE" => Some(Value::Bool(true)),
-        "FALSE" => Some(Value::Bool(false)),
-        _ if lit.len() >= 2 && lit.starts_with('\'') && lit.ends_with('\'') => {
-            Some(Value::String(lit[1..lit.len() - 1].replace("''", "'")))
-        }
-        _ => lit
-            .parse::<i64>()
-            .map(Value::from)
-            .or_else(|_| lit.parse::<f64>().map(Value::from))
-            .ok(),
+    if lit == "[]::VARCHAR[]" {
+        return Some(Value::Array(Vec::new()));
     }
+    if let Some(inner) = lit.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let mut items = Vec::new();
+        let mut rest = inner;
+        loop {
+            let (v, tail) = take_one_scalar_literal(rest)?;
+            items.push(v);
+            let tail = tail.trim_start();
+            match tail.strip_prefix(',') {
+                Some(t) => rest = t.trim_start(),
+                None if tail.is_empty() => break,
+                None => return None, // trailing garbage: malformed
+            }
+        }
+        return Some(Value::Array(items));
+    }
+    take_one_scalar_literal(lit).and_then(|(v, rest)| rest.is_empty().then_some(v))
+}
+
+/// One scalar literal (`scalar_literal`'s own forms) at the front of `s` —
+/// the parsed value and whatever of `s` comes after it. `s` may hold more
+/// list items past this one; a quoted string is scanned to its own closing
+/// quote (`''`-escaped), so a literal `, ` inside it is never mistaken for
+/// the list's own separator.
+fn take_one_scalar_literal(s: &str) -> Option<(Value, &str)> {
+    if let Some(rest) = s.strip_prefix("NULL") {
+        return Some((Value::Null, rest));
+    }
+    if let Some(rest) = s.strip_prefix("TRUE") {
+        return Some((Value::Bool(true), rest));
+    }
+    if let Some(rest) = s.strip_prefix("FALSE") {
+        return Some((Value::Bool(false), rest));
+    }
+    if s.starts_with('\'') {
+        let mut out = String::new();
+        let mut i = 1;
+        loop {
+            let tail = s.get(i..)?;
+            let c = tail.chars().next()?;
+            if c == '\'' {
+                if tail[1..].starts_with('\'') {
+                    out.push('\'');
+                    i += 2;
+                    continue;
+                }
+                return Some((Value::String(out), &s[i + 1..]));
+            }
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    // A number: the run of characters `scalar_literal` can put in one
+    // (digits, a leading `-`, `.`, `e`/`E` for a float's exponent — never
+    // produced today, but harmless to accept on the read side).
+    let end = s
+        .find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | '.' | 'e' | 'E')))
+        .unwrap_or(s.len());
+    if end == 0 {
+        return None;
+    }
+    let (num, rest) = s.split_at(end);
+    let v = num
+        .parse::<i64>()
+        .map(Value::from)
+        .or_else(|_| num.parse::<f64>().map(Value::from))
+        .ok()?;
+    Some((v, rest))
 }
 
 /// Does `a` (an option's own cell) equal `b` (what the viewer sent)? JSON
@@ -6607,9 +6669,37 @@ mod tests {
             literal_to_json("'O''Brien'"),
             Some(serde_json::json!("O'Brien"))
         );
-        // A list literal (never produced for a *locked* scalar variable in
-        // practice) is refused, not guessed at.
-        assert_eq!(literal_to_json("[1, 2]"), None);
+        // Malformed input (an unterminated string, trailing garbage) is
+        // refused, never guessed at.
+        assert_eq!(literal_to_json("'unterminated"), None);
+        assert_eq!(literal_to_json("42 garbage"), None);
+    }
+
+    #[test]
+    fn literal_to_json_inverts_sql_literal_lists() {
+        // Review of #538 round 2 nit: a credential locking a
+        // ::MULTISELECT variable's value builds exactly this shape
+        // (`sv::sql_literal`'s Array branch) — must round-trip, not be
+        // refused.
+        assert_eq!(
+            literal_to_json("[]::VARCHAR[]"),
+            Some(serde_json::json!([]))
+        );
+        assert_eq!(
+            literal_to_json(&sv::sql_literal(&serde_json::json!(["EU", "US"])).unwrap()),
+            Some(serde_json::json!(["EU", "US"]))
+        );
+        // A comma *inside* a quoted item is never mistaken for the list's
+        // own separator.
+        assert_eq!(
+            literal_to_json(&sv::sql_literal(&serde_json::json!(["a, b", "c"])).unwrap()),
+            Some(serde_json::json!(["a, b", "c"]))
+        );
+        // Mixed scalar types, same as a real ::MULTISELECT could lock.
+        assert_eq!(
+            literal_to_json(&sv::sql_literal(&serde_json::json!([1, "x", true, null])).unwrap()),
+            Some(serde_json::json!([1, "x", true, null]))
+        );
     }
 
     #[test]
@@ -6640,6 +6730,27 @@ mod tests {
         assert_eq!(
             effective_value("q1", &d, Some(&scope), &raw2),
             Ok(Some(serde_json::json!("B")))
+        );
+    }
+
+    #[test]
+    fn effective_value_prefers_a_locked_list_value_too() {
+        // Review of #538 round 2 nit: a credential locking a
+        // ::MULTISELECT variable (a list, not a scalar) must win the same
+        // way a locked scalar does — recorded as the locked list, never
+        // the viewer's own selection.
+        let d = dash("d", "");
+        let scope = Scope {
+            dashboards: None,
+            vars: vec![(
+                "regions".to_string(),
+                sv::sql_literal(&serde_json::json!(["EU", "US"])).unwrap(),
+            )],
+        };
+        let raw = serde_json::json!({"regions": ["APAC"]});
+        assert_eq!(
+            effective_value("regions", &d, Some(&scope), &raw),
+            Ok(Some(serde_json::json!(["EU", "US"])))
         );
     }
 

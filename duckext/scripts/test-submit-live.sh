@@ -69,12 +69,16 @@ mkdir -p "$W/dash"
 # `d`: state-enabled. Panel 0/1 is the original BUTTONS+SUBMIT pair (q1).
 # Panel 2/3 adds a ::DROPDOWN whose own ::OPTION_LABEL column comes FIRST
 # (q2) — the exact shape review-530's blocker 2 (col_idx, not the row's
-# first column) needs to tell apart from the label text.
+# first column) needs to tell apart from the label text. Panel 4/5 adds a
+# ::MULTISELECT (q3) — a locked *list* value (review-530 round 2's last
+# nit: literal_to_json must invert a list literal too, not just a scalar).
 cat > "$W/dash/d.sql" <<'EOF'
 SELECT q1 ::BUTTONS FROM (VALUES ('A'), ('B'), ('C')) t(q1);
 SELECT 'Check my answer' AS quiz_1::SUBMIT, 'q1' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
 SELECT label AS lbl ::OPTION_LABEL, code AS q2 ::DROPDOWN FROM (VALUES ('Alpha', 'A'), ('Beta', 'B')) t(label, code);
 SELECT 'Check q2' AS quiz_2::SUBMIT, 'q2' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
+SELECT val AS q3 ::MULTISELECT FROM (VALUES ('A'), ('B'), ('C'), ('D')) t(val);
+SELECT 'Check q3' AS quiz_3::SUBMIT, 'q3' AS r::SUBMIT_VARS, 'Saved.' AS d::SUBMIT_DONE;
 EOF
 # `d2`: exists, but deliberately left out of options.state.dashboards.
 mkdir -p "$W/dash2"
@@ -299,11 +303,30 @@ if echo "$EVE_LINE" | grep -q '"q1":"B"'; then fail "B1: the viewer's own value 
 echo "OK: B1 — a credential-locked variable records the locked value, not the viewer's own"
 CREDS=("${AUTH_H[@]}")
 
+# --- Review-530 round 2, last nit: a credential-locked *list* value
+# (::MULTISELECT) must win the same way a locked scalar does (B1, above) —
+# literal_to_json has to invert sv::sql_literal's list form too, not just
+# its scalars.
+LINK_ZOE="$(mint_embed '{"dashboard":"d","user":"zoe","vars":{"q3":["A","C"]}}')"
+SESSION_ZOE="$(embed_session "$LINK_ZOE")"
+[ -n "$SESSION_ZOE" ] || fail "could not mint an embed session (zoe, locked q3=[A,C])"
+CREDS=(-H "X-Anofox-Session: $SESSION_ZOE")
+CODE=$(submit '{"dashboard":"d","panel":5,"id":"c0ff0001","vars":{"q3":["B","D"]}}')
+[ "$CODE" = "201" ] || fail "a locked ::MULTISELECT submission should be 201, got $CODE: $(cat "$W/out")"
+ZOE_LINE=$(grep '"user":"zoe"' "$W/state.jsonl") || fail "expected a recorded row for zoe"
+echo "$ZOE_LINE" | grep -q '"q3":\["A","C"\]' || fail "expected the locked list q3=[\"A\",\"C\"] to be recorded, got: $ZOE_LINE"
+if echo "$ZOE_LINE" | grep -q '"q3":\["B","D"\]'; then fail "the viewer's own selection q3=[B,D] must never override the locked list"; fi
+echo "OK: a credential-locked ::MULTISELECT (list) value records the locked list, not the viewer's own"
+CREDS=("${AUTH_H[@]}")
+
 # --- B3 (blocker 3) + the per-user rate limit: a flood from one user must
 # not spend a different user's budget, and once a user's own bucket is
 # spent, further submissions are 429 with Retry-After. BURST matches
 # STATE's rate.burst above (raised from the plan's default of 3, for the
-# concurrency check further down).
+# concurrency check further down). A fresh global-rate window first: the
+# tests above already spent a handful of the shared 20/s budget, which
+# would otherwise 429 flooder before its own (per-user) burst does.
+sleep 1.1
 BURST=15
 HDRS=(-H "Origin: $ORIGIN" -H "X-Anofox-Submit: 1" -H "Content-Type: application/json" -H "Sec-Fetch-Site: same-origin")
 CREDS=(-H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: flooder")
