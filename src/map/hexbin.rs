@@ -128,10 +128,21 @@ pub(super) fn lattice_of(hb: &Hexbin) -> HexLattice {
     HexLattice::new(hb.width, hb.width, hb.origin)
 }
 
+/// What a [`of`] call sizes and anchors its grid from (#608).
+#[derive(Clone, Copy)]
+pub(super) enum Grid<'a> {
+    /// The points it bins (every point of `cols`, present or not).
+    Own,
+    /// These raw points instead: a `::FRAME` map's every frame (D7).
+    Over(&'a [[f64; 2]]),
+    /// An already-resolved grid.
+    Fixed { width: f64, origin: (f64, f64) },
+}
+
 /// Raw (pre-projection) points to bin: `::LAT`/`::LON` pairs, else the
 /// `POINT`/`MULTIPOINT` parts of a `::MAP` WKT column — one `(row, [x, y])`
 /// per point (a `MULTIPOINT` row contributes several).
-fn raw_points(cols: &[Column]) -> Vec<(usize, [f64; 2])> {
+pub(super) fn raw_points(cols: &[Column]) -> Vec<(usize, [f64; 2])> {
     if let (Some(lat), Some(lon)) = (find_role(cols, Role::Lat), find_role(cols, Role::Lon)) {
         let n = lat.values.len().min(lon.values.len());
         return (0..n)
@@ -166,11 +177,15 @@ fn raw_points(cols: &[Column]) -> Vec<(usize, [f64; 2])> {
 /// (indexed the same way `raw_points` returns them) actually belong to the
 /// frame being bound — `None` outside a frame map, where every row counts.
 /// It only gates *which points get binned*: the grid's `width`/`origin`
-/// below are still sized from *every* point `cols` carries (every frame at
-/// once, when called on the frame's own view — `view`'s geometry columns
-/// are always present, D20/D7 — so the grid never moves between frames),
-/// not just the present ones.
-pub(super) fn of(cols: &[Column], proj: &Proj, present: Option<&[bool]>) -> Option<Hexbin> {
+/// come from `grid` — every point `cols` carries ([`Grid::Own`]), every
+/// frame's points on a `::FRAME` map ([`Grid::Over`], #608, so the grid
+/// never moves between frames, D7/D20), or a grid already resolved.
+pub(super) fn of(
+    cols: &[Column],
+    proj: &Proj,
+    present: Option<&[bool]>,
+    grid: Grid,
+) -> Option<Hexbin> {
     find_role(cols, Role::Hexbin)?;
     let pts = raw_points(cols);
     if pts.is_empty() {
@@ -191,14 +206,29 @@ pub(super) fn of(cols: &[Column], proj: &Proj, present: Option<&[bool]>) -> Opti
     let spec = role_str(cols, Role::Hexbin)
         .map(|s| HexSize::parse(&s).unwrap_or(HexSize::Auto))
         .unwrap_or(HexSize::Auto);
-    let width = spec.resolve(planar).unwrap_or_else(|| {
-        // D7: nice_floor of the longer side of the unzoomed projected data
-        // box, over 40 — a lone point (a degenerate box) gets a 1 km default.
-        let span = (extent.x1 - extent.x0).max(extent.y1 - extent.y0);
-        let span = if span > 0.0 { span } else { 1_000.0 };
-        super::legend::nice_floor(span / 40.0).max(f64::MIN_POSITIVE)
-    });
-    let origin = (extent.x0, extent.y0);
+    if let Grid::Over(pts) = grid {
+        let mut all = Extent::new();
+        for p in pts.iter().filter_map(|r| proj.forward(*r)) {
+            all.add(p);
+        }
+        if all.x0 <= all.x1 {
+            extent = all;
+        }
+    }
+    let (width, origin) = match grid {
+        Grid::Fixed { width, origin } => (width, origin),
+        Grid::Own | Grid::Over(_) => (
+            spec.resolve(planar).unwrap_or_else(|| {
+                // D7: nice_floor of the longer side of the unzoomed projected
+                // data box, over 40 — a lone point (a degenerate box) gets a
+                // 1 km default.
+                let span = (extent.x1 - extent.x0).max(extent.y1 - extent.y0);
+                let span = if span > 0.0 { span } else { 1_000.0 };
+                super::legend::nice_floor(span / 40.0).max(f64::MIN_POSITIVE)
+            }),
+            (extent.x0, extent.y0),
+        ),
+    };
 
     // The points actually binned: every one of them outside a frame map,
     // else only those with a row in this frame (D20 — not drawn, rather

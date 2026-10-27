@@ -59,6 +59,11 @@ pub(super) struct Frames {
     pub duplicates: usize,
     /// How many distinct `::FRAME` values there were before the D15 cap.
     pub total_frames: usize,
+    /// A hexbin map's raw points over every kept frame (#608), for the
+    /// frame-stable grid (D7: the projected bbox of all frames' points);
+    /// empty otherwise. A hexbin map's "features" are frame-local slots,
+    /// not points: see [`hexbin_of`].
+    pub hex_points: Vec<[f64; 2]>,
 }
 
 impl Frames {
@@ -137,6 +142,8 @@ fn row_key(cols: &[Column], i: usize) -> Option<String> {
 /// column, or when every `::FRAME` value is empty/no feature key resolves.
 pub(super) fn of(cols: &[Column]) -> Option<Frames> {
     let fcol = find_role(cols, Role::Frame)?;
+    let hexbin_points = find_role(cols, Role::Hexbin).is_some()
+        && !(find_role(cols, Role::Origin).is_some() && find_role(cols, Role::Dest).is_some());
     let n = fcol.values.len();
 
     // Frame order (D11): first appearance, re-sorted ascending when every
@@ -179,6 +186,9 @@ pub(super) fn of(cols: &[Column]) -> Option<Frames> {
         .enumerate()
         .map(|(i, l)| (l.as_str(), i))
         .collect();
+    if hexbin_points {
+        return hexbin_of(cols, fcol, &labels, &label_index, total_frames);
+    }
 
     // Distinct features, first-appearance order (D22).
     let mut keys: Vec<String> = Vec::new();
@@ -234,6 +244,7 @@ pub(super) fn of(cols: &[Column]) -> Option<Frames> {
                 row_in: row_in2,
                 duplicates,
                 total_frames,
+                hex_points: Vec::new(),
             });
         }
     }
@@ -245,6 +256,103 @@ pub(super) fn of(cols: &[Column]) -> Option<Frames> {
         row_in,
         duplicates,
         total_frames,
+        hex_points: Vec::new(),
+    })
+}
+
+/// [`of`] for a `::HEXBIN` map (#608): its cells, not its points, are what
+/// a frame shows (D22's key is the cell's `"q,r"`), and points usually move
+/// from frame to frame — keyed as features, 200 frames x 500 moving points
+/// made 100,000 "features", so the D15 cell cap kept a single frame and
+/// every frame's view carried all 100,000 rows. Here feature `j` is simply
+/// frame k's `j`-th point (`row_in[k][j]`), and [`view`] takes its location
+/// from that row. A few extra non-present "anchor" features at the extreme
+/// longitude/latitude over every frame keep `Model::new`'s extent (and so
+/// projection `'auto'`, D20) the same in every frame; the grid itself comes
+/// from [`Frames::hex_points`] (every frame's points, D7).
+fn hexbin_of(
+    cols: &[Column],
+    fcol: &Column,
+    labels: &[String],
+    label_index: &HashMap<&str, usize>,
+    total_frames: usize,
+) -> Option<Frames> {
+    // (frame, slot, row, point), rows in result order; a MULTIPOINT row
+    // contributes several points but takes one slot.
+    let mut cells: Vec<(usize, usize, usize, [f64; 2])> = Vec::new();
+    let mut slots = vec![0usize; labels.len()];
+    let mut last_row = None;
+    for (row, p) in hexbin::raw_points(cols) {
+        let v = fcol.values.get(row).map(value_str).unwrap_or_default();
+        let Some(&k) = label_index.get(v.as_str()) else {
+            continue; // no frame, or dropped by the D15 frame cap
+        };
+        if last_row == Some(row) {
+            cells.push((k, slots[k] - 1, row, p));
+            continue;
+        }
+        last_row = Some(row);
+        cells.push((k, slots[k], row, p));
+        slots[k] += 1;
+    }
+    let width = slots.iter().copied().max().unwrap_or(0);
+    if width == 0 {
+        return None;
+    }
+    // D15 cell cap, on slots x frames: keep the last frames that fit.
+    let max_frames = (MAX_CELLS / width).max(1);
+    let drop = labels.len().saturating_sub(max_frames);
+    let labels = labels[drop..].to_vec();
+    cells.retain(|c| c.0 >= drop);
+    let mut first_row: Vec<Option<usize>> = vec![None; width];
+    let mut row_in: Vec<Vec<Option<usize>>> = vec![vec![None; width]; labels.len()];
+    let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) = (None, None, None, None);
+    let mut hex_points = Vec::with_capacity(cells.len());
+    for &(k, j, row, p) in &cells {
+        first_row[j].get_or_insert(row);
+        row_in[k - drop][j] = Some(row);
+        hex_points.push(p);
+        let pick = |cur: &mut Option<(f64, usize)>, v: f64, better: fn(f64, f64) -> bool| {
+            if cur.is_none_or(|(c, _)| better(v, c)) {
+                *cur = Some((v, row));
+            }
+        };
+        pick(&mut lo_x, p[0], |a, b| a < b);
+        pick(&mut hi_x, p[0], |a, b| a > b);
+        pick(&mut lo_y, p[1], |a, b| a < b);
+        pick(&mut hi_y, p[1], |a, b| a > b);
+    }
+    // A slot only frames before the cap used: no row left (never shown).
+    let used: Vec<usize> = (0..width).filter(|&j| first_row[j].is_some()).collect();
+    let mut first_row: Vec<usize> = used.iter().map(|&j| first_row[j].unwrap()).collect();
+    let mut row_in: Vec<Vec<Option<usize>>> = row_in
+        .into_iter()
+        .map(|r| used.iter().map(|&j| r[j]).collect())
+        .collect();
+    let mut keys: Vec<String> = (0..first_row.len()).map(|j| j.to_string()).collect();
+    let mut anchors: Vec<usize> = [lo_x, hi_x, lo_y, hi_y]
+        .into_iter()
+        .flatten()
+        .map(|(_, r)| r)
+        .collect();
+    anchors.sort_unstable();
+    anchors.dedup();
+    for (a, row) in anchors.into_iter().enumerate() {
+        first_row.push(row);
+        keys.push(format!("extent-{a}"));
+        for r in &mut row_in {
+            r.push(None);
+        }
+    }
+    Some(Frames {
+        name: fcol.name.clone(),
+        labels,
+        keys,
+        first_row,
+        row_in,
+        duplicates: 0,
+        total_frames,
+        hex_points,
     })
 }
 
@@ -270,7 +378,11 @@ pub(super) fn view(cols: &[Column], fr: &Frames, k: usize) -> Vec<Column> {
             let values: Vec<Value> = (0..fr.first_row.len())
                 .map(|f| {
                     let row = if is_geometry_role(c.role) {
-                        Some(fr.first_row[f])
+                        // #608: a hexbin slot's point is frame k's own row.
+                        let own = (!fr.hex_points.is_empty())
+                            .then(|| fr.row_in[k][f])
+                            .flatten();
+                        Some(own.unwrap_or(fr.first_row[f]))
                     } else {
                         fr.row_in[k][f]
                     };
@@ -346,6 +458,9 @@ pub(super) struct Shared {
     /// would also silently skip `bivariate::apply_shared` since `m.fill`
     /// wouldn't match `Fill::Bivariate`).
     pub is_bivariate: bool,
+    /// [`Frames::hex_points`] (#608): every frame's points, which size and
+    /// anchor a hexbin map's grid (`hexbin::Grid::Over`).
+    pub hex_points: Vec<[f64; 2]>,
 }
 
 /// Build [`Shared`] from every row of `cols` (not a frame view) and `fr`'s
@@ -396,6 +511,7 @@ pub(super) fn shared_of(o: &RenderOptions, cols: &[Column], fr: &Frames) -> Shar
         flow_has_size,
         flow_fixed,
         is_bivariate,
+        hex_points: fr.hex_points.clone(),
     }
 }
 
@@ -428,11 +544,10 @@ fn shared_bivariate(cols: &[Column], fr: &Frames) -> Option<(Classes, Classes)> 
 }
 
 /// Per feature, whether frame `k` had its own row (D20). Hexbin's own
-/// binning pass needs this directly ([`hexbin::of`]'s `present`): its
-/// point coordinates come from `view`'s always-present geometry fill
-/// (every feature's first row, so the grid stays frame-stable, D7/D20),
-/// unlike a value column, which `view` already turns into `Value::Na` when
-/// a feature has no row in frame `k`.
+/// binning pass needs this directly ([`hexbin::of`]'s `present`): `view`
+/// always fills a slot's (or extent anchor's) location, so the extent
+/// stays frame-stable (D20), unlike a value column, which `view` already
+/// turns into `Value::Na` when a feature has no row in frame `k`.
 pub(super) fn presence(fr: &Frames, k: usize) -> Vec<bool> {
     fr.row_in[k].iter().map(Option::is_some).collect()
 }
@@ -548,10 +663,19 @@ pub(super) fn apply_hexbin_shared(
 ) {
     let mut per_frame: Vec<Vec<f64>> = Vec::with_capacity(fr.labels.len());
     let mut has_measure = false;
+    // #608: every frame on frame k's own grid (`Model::new` sized it from
+    // every frame's points), not re-derived per frame.
+    let grid = m
+        .hexbin
+        .as_ref()
+        .map_or(hexbin::Grid::Own, |hb| hexbin::Grid::Fixed {
+            width: hb.width,
+            origin: hb.origin,
+        });
     for k in 0..fr.labels.len() {
         let view_k = view(cols, fr, k);
         let present = presence(fr, k);
-        let values = hexbin::of(&view_k, &m.proj, Some(&present)).map(|hb| {
+        let values = hexbin::of(&view_k, &m.proj, Some(&present), grid).map(|hb| {
             has_measure = has_measure || hb.has_measure;
             hb.cells
                 .iter()

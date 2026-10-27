@@ -3314,6 +3314,109 @@ fn frame_column_keeps_its_display_name_through_the_sql_plan() {
     );
 }
 
+/// `frames` frames of `points` points each, every point moving a little
+/// from frame to frame, plus one fixed point present in every frame.
+fn moving_hexbin(frames: usize, points: usize) -> Vec<Column> {
+    let (mut lat, mut lon, mut wk) = (vec![], vec![], vec![]);
+    for f in 0..frames {
+        for p in 0..points {
+            lat.push(Value::Float(
+                48.0 + (p as f64 * 0.0137 + f as f64 * 0.001) % 6.0,
+            ));
+            lon.push(Value::Float(6.0 + (p as f64 * 0.0291) % 9.0));
+            wk.push(Value::Str(format!("{f:03}")));
+        }
+        lat.push(Value::Float(51.0));
+        lon.push(Value::Float(10.0));
+        wk.push(Value::Str(format!("{f:03}")));
+    }
+    vec![
+        Column::new("lat", Role::Lat, lat),
+        Column::new("lon", Role::Lon, lon),
+        Column::new("week", Role::Frame, wk),
+        Column::new("h", Role::Hexbin, strs(&["auto"])),
+    ]
+}
+
+/// #608: a hexbin time map's points are not features. Keyed as features,
+/// 200 frames x 500 moving points made 100,000 of them, the D15 cell cap
+/// kept a single frame, and every frame's view carried all 100,000 rows.
+#[test]
+fn hexbin_frames_keep_every_frame_when_points_move() {
+    let cols = moving_hexbin(60, 30);
+    let at = |k: usize| {
+        draw(
+            cols.clone(),
+            &RenderOptions {
+                frame: Some(k),
+                ..RenderOptions::default()
+            },
+        )
+    };
+    let (s0, s1) = (at(0), at(59));
+    let labels = attr(root(&s0), "data-frames").unwrap().to_string();
+    assert_eq!(
+        labels.matches("&quot;").count() / 2,
+        60,
+        "every frame kept: {labels}"
+    );
+    let binned = |s: &str| -> usize {
+        hexes(s)
+            .iter()
+            .filter_map(|t| attr(t, "data-count").and_then(|c| c.parse::<usize>().ok()))
+            .sum()
+    };
+    assert_eq!(binned(&s0), 31, "frame 0 bins its own 31 points");
+    assert_eq!(binned(&s1), 31, "frame 59 bins its own 31 points");
+    // The grid, the extent and the fixed point's cell don't move (D7/D20).
+    assert_eq!(
+        attr(root(&s0), "data-hexbin"),
+        attr(root(&s1), "data-hexbin")
+    );
+    let plot = |s: &str| {
+        s[s.find("data-plot=\"").unwrap()..]
+            .split('"')
+            .nth(1)
+            .map(str::to_string)
+    };
+    assert_eq!(plot(&s0), plot(&s1), "the map must not move between frames");
+    let cell_of_fixed = |s: &str| -> Option<String> {
+        hexes(s)
+            .iter()
+            .find(|t| {
+                attr(t, "data-label").is_some_and(|l| l.contains("51.0") && l.contains("10.0"))
+            })
+            .and_then(|t| attr(t, "data-x"))
+            .map(str::to_string)
+    };
+    let fixed0 = cell_of_fixed(&s0);
+    assert!(
+        fixed0.is_some() && fixed0 == cell_of_fixed(&s1),
+        "{fixed0:?}"
+    );
+}
+
+/// #608 budget: one frame of a 200-frame x 500-point hexbin time map used
+/// to take ~0.86 s. `cargo test --release --test maps -- --ignored`.
+#[test]
+#[ignore]
+fn hexbin_frame_render_within_budget() {
+    let cols = moving_hexbin(200, 500);
+    let t = std::time::Instant::now();
+    for k in (0..200).step_by(20) {
+        let o = RenderOptions {
+            frame: Some(k),
+            ..RenderOptions::default()
+        };
+        render_with(&cols, 480, 320, &o).unwrap();
+    }
+    let ms = t.elapsed().as_secs_f64() * 100.0;
+    eprintln!("hexbin_frame_render_within_budget: {ms:.1} ms/frame");
+    if !cfg!(debug_assertions) {
+        assert!(ms < 150.0, "{ms:.1} ms/frame");
+    }
+}
+
 /// #605: a continuous-fill map narrower than ~254px puts its colourbar
 /// under the panel (`Bottom`) instead of ggplot-rs's default `Right`, which
 /// alone took ~89px and squeezed a 163px card's panel to 74px (clipping the
