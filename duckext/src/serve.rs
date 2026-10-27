@@ -4351,6 +4351,22 @@ fn seed_viewer_state(c: &Conn, rows: &[Arc<Record>]) -> Result<(), String> {
         // when this record was loaded or appended — not re-parsed here,
         // and not re-parsed once per variable either.
         let ts_micros = rec.ts_micros;
+        // #619 N2: `ts`/`ts_micros` must always agree — both are `pub`
+        // fields a future edit could set independently (`Record::from_json`/
+        // `Store::append` are the only two constructors today, but nothing
+        // stops a third from forgetting the pairing). Checked here, not
+        // only at the two construction sites, so a desync from *any*
+        // future caller shows up the moment it would actually matter
+        // (choosing the fast Appender path vs. the slow SQL fallback) —
+        // debug-only: `parse_rfc3339_micros` round-trips through
+        // `rfc3339()` internally, not free enough to run again on every
+        // cold-panel read in a release build.
+        debug_assert_eq!(
+            ts_micros,
+            anofox_visualization::host::access::parse_rfc3339_micros(&rec.ts),
+            "Record::ts_micros desynced from Record::ts for seq={}",
+            rec.seq
+        );
         if ts_micros.is_none() {
             seed_viewer_state_row_via_sql(c, rec)?;
             continue;
