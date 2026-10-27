@@ -57,6 +57,20 @@ pub(super) type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 /// sipemu/ggplot-rs#250 — [`foot_of`]'s own line list, reused rather than
 /// duplicated, since "does this map need a footer, and how many lines"
 /// already depends on pack layers *and* the projection/span).
+///
+/// #605: below this render width, a continuous (ungrouped `Fill::Measure`)
+/// map's `LegendPosition::Right` colourbar legend — ggplot-rs's own
+/// default, unchanged above this width — eats too much of the panel.
+/// Measured directly (a 163px card, the real figure the issue's own
+/// hexbin repro renders at, `dashboard --svg … --width 390`): the panel's
+/// own `coord_sf` window went from 74.2px (legend at `Right`) to the full
+/// 163px with the legend removed entirely — ggplot-rs's own `Right`
+/// reservation is ~88.8px, independent of the panel's own total width
+/// (same swatch/tick/label content either way). `88.8 / 0.35 ≈ 253.7`:
+/// below this width the `Right` legend alone would already claim more
+/// than 35% of it.
+const NARROW_CONTINUOUS_LEGEND_WIDTH: f64 = 254.0;
+
 pub(super) fn build(
     o: &RenderOptions,
     cols: &[Column],
@@ -82,6 +96,21 @@ pub(super) fn build(
     } else {
         forced.clone()
     };
+    // #605: a continuous (ungrouped `Fill::Measure`) legend, with no
+    // `::LEGEND` override, never actually gets positioned from `lg.w`/
+    // `lg.h` — it's ggplot-rs's own default (`Right`) or, below
+    // `NARROW_CONTINUOUS_LEGEND_WIDTH`, the explicit `Bottom` set further
+    // down — either way, ggplot-rs reserves its own margin for it in its
+    // own, independent layout pass. `layout()`'s own `lg.w`/`lg.h`-based
+    // space-carving below was dead weight for this fill kind even before
+    // that: confirmed by zeroing it and comparing — the panel's own
+    // `coord_sf` window came out identical, because ggplot-rs's own
+    // reservation was always the sole binding constraint. Zeroed here
+    // instead of computed and discarded.
+    if forced.is_none() && matches!(&m.fill, Fill::Measure(s) if s.classes.is_none()) {
+        lg.w = 0.0;
+        lg.h = 0.0;
+    }
     // `eligible` only allows a footer this path can draw itself (a scale
     // bar and/or any number of attribution lines, via `annotation_scale`/
     // `annotation_attribution` below) — reuse the old writer's own height
@@ -1071,25 +1100,37 @@ pub(super) fn build(
     // a lot on a narrow (390px) panel, which `Top` avoids. Must come
     // *after* `.theme(..)`: that call sets the plot's whole `Theme` (incl.
     // `legend_position`), so setting it earlier would just get
-    // overwritten. A continuous (`Fill::Measure`, no classes) legend stays
-    // on ggplot-rs's default `Right` position for now: `legend_at` above
-    // (`layout()`'s own 4-corner, vertex-density-aware pick, meant to
-    // convert to `legend_position_inside`'s fraction) renders a continuous
-    // legend's tick marks/labels at wildly wrong, off-canvas y positions
-    // under `LegendPosition::Inside` — a real ggplot-rs bug (filed:
-    // sipemu/ggplot-rs#225), not a sign error here — so nothing calls
-    // `.legend_position_inside()` yet for either fill kind.
+    // overwritten.
+    //
+    // #605: a continuous (`Fill::Measure`, no classes) legend — a
+    // colourbar, not swatches — gets the same narrow-width treatment, at
+    // `Bottom` (horizontal) rather than `Top`: ggplot2 users put a
+    // colourbar under the panel, not above it, and nothing here needs it
+    // above the panel the way a discrete legend's row of swatches does.
+    // Below `NARROW_CONTINUOUS_LEGEND_WIDTH` only — ggplot-rs's own
+    // default `Right` stays for a wide-enough map (a vertical colourbar
+    // reads fine there, and moving it only at the width where it
+    // actually crowds the panel keeps every wider existing render
+    // unchanged). `legend_at` above (`layout()`'s own 4-corner, vertex-
+    // density-aware pick, meant to convert to `legend_position_inside`'s
+    // fraction) still goes unused for this fill kind either way — a
+    // continuous legend's tick marks/labels render at wildly wrong,
+    // off-canvas y positions under `LegendPosition::Inside` (a real
+    // ggplot-rs bug, filed: sipemu/ggplot-rs#225) — but `Bottom`/`Right`
+    // need no `Inside` positioning at all, so that gap no longer matters
+    // for this fill kind's own crowding.
     //
     // `::LEGEND none`/`'top'`/`'bottom'`/`'left'`/`'right'`
     // (`forced_position`, derived above from the same `lg`/`forced` that
-    // feed `frame_of`'s own layout math) wins over the discrete-fill
-    // default when given — found missing entirely while widening
-    // `eligible` this slice: neither was ever actually applied to this
-    // `GGPlot`'s own `LegendPosition` before, so `::LEGEND` silently did
-    // nothing for any already-eligible map (every kind slices 1-4
-    // shipped) — untested until this slice's broader eligibility finally
-    // routed a `::LEGEND`-bearing map fixture through here for the first
-    // time.
+    // feed `frame_of`'s own layout math) wins over every default below
+    // when given — found missing entirely while widening `eligible` this
+    // slice: neither was ever actually applied to this `GGPlot`'s own
+    // `LegendPosition` before, so `::LEGEND` silently did nothing for any
+    // already-eligible map (every kind slices 1-4 shipped) — untested
+    // until this slice's broader eligibility finally routed a
+    // `::LEGEND`-bearing map fixture through here for the first time.
+    let narrow_continuous = w < NARROW_CONTINUOUS_LEGEND_WIDTH
+        && matches!(&m.fill, Fill::Measure(s) if s.classes.is_none());
     if let Some(pos) = forced_position {
         plot = plot.legend_position(pos);
     } else if matches!(m.fill, Fill::Bivariate(_)) {
@@ -1099,6 +1140,8 @@ pub(super) fn build(
         plot = plot.legend_position(LegendPosition::None);
     } else if discrete_fill {
         plot = plot.legend_position(LegendPosition::Top);
+    } else if narrow_continuous {
+        plot = plot.legend_position(LegendPosition::Bottom);
     }
 
     // The screen-reader summary (`super::summary`, shared by every map

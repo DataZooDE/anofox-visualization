@@ -2456,8 +2456,12 @@ async function boot() {
     else markActive();
   }
   if (curDash && !servedSql && !hashSql) rememberDash(curDash);
+  // #603: both ship `disabled` in index.html, so a click during boot (before
+  // these handlers exist) can't be silently lost; enabled once wired.
   $("share").onclick = shareLink;
+  $("share").disabled = false;
   $("dlhtml").onclick = downloadHtml;
+  syncDlhtmlDisabled();
   // #401: the "Charts as tables" toggle lives in the toolbar's ⋯ menu so a
   // screen-reader / keyboard viewer can turn it on even on a dashboard whose
   // header never shows the in-page bar (that bar is author/install-opt-in —
@@ -8057,7 +8061,27 @@ function activateView(btn, focus) {
   // #534: a 'header'-placed group's bar lives in whichever card is
   // currently shown — move it into the one just activated.
   if (sec.classList.contains("dp-views-header")) placeViewHeaderBar(sec);
-  if (focus) refocus("view:" + id, btn);
+  // #597: focus `btn` back SYNCHRONOUSLY when it is actually visible right
+  // now, rather than always going through refocus()'s requestAnimationFrame
+  // hop. Hiding the OLD panes above force-blurs `btn` immediately whenever
+  // it was sitting inside one of them (a 'header'-placed group's bar lives
+  // inside whatever card is currently shown — see placeViewHeaderBar) — a
+  // focused descendant of a newly `display: none` ancestor loses focus the
+  // instant that style applies, not on the next frame. Deferring the
+  // restore by even one rAF left a real, observable gap where
+  // document.activeElement was <body> (a Playwright check caught it under
+  // CI's timing variance). `btn.offsetParent` is non-null exactly when
+  // it's actually focusable right now: 'row' placement (never hidden) and
+  // the common 'header' case (its pane's content already loaded, so
+  // placeViewHeaderBar just relocated the bar into the now-visible pane)
+  // both qualify. The one case that doesn't — the activated alternative is
+  // still a lazy-loading skeleton, so placeViewHeaderBar left the bar
+  // exactly where it was (its own comment) — still falls back to
+  // refocus()'s existing deferred attempt, unchanged from before.
+  if (focus) {
+    if (btn.offsetParent !== null) btn.focus();
+    else refocus("view:" + id, btn);
+  }
 }
 // Esc on a drill-through's tab (not inside a chart, which has its own Esc, or
 // a control): back to the tab it came from, focus on the mark or link followed.
@@ -12705,9 +12729,24 @@ let dpRefocus = null;
 function refocus(key, el) {
   if (dpRefocus !== key) return;
   dpRefocus = null;
-  // The new controls are attached once the whole run has rendered.
+  // The new controls are attached once the whole run has rendered. #597:
+  // `el.isConnected` is true almost immediately for most callers (the
+  // element is rarely actually REMOVED, just hidden or relocated while
+  // some async work finishes — e.g. a ::VIEW alternative's own bar, left
+  // exactly where it was by placeViewHeaderBar() while its lazy skeleton
+  // is still loading, #534/#601), so that check alone used to fire
+  // .focus() on the very first frame and silently no-op (a hidden
+  // element can't take focus) with nothing left to retry — looked like a
+  // retry loop but only ever tried once in practice. `el.offsetParent !==
+  // null` is the real "can this actually take focus right now?" check;
+  // keep polling every frame (same 120-frame, ~2s cap) until it's true,
+  // giving whatever async work is still relocating/revealing it a real
+  // chance to finish first.
   let tries = 0;
-  const go = () => (el.isConnected ? el.focus() : ++tries < 120 && requestAnimationFrame(go));
+  const go = () =>
+    el.isConnected && el.offsetParent !== null
+      ? el.focus()
+      : ++tries < 120 && requestAnimationFrame(go);
   requestAnimationFrame(go);
 }
 // A ::BUTTONS input: a segmented radio group (one pressed button). Arrow keys

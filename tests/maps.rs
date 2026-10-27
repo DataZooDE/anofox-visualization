@@ -3416,3 +3416,42 @@ fn hexbin_frame_render_within_budget() {
         assert!(ms < 150.0, "{ms:.1} ms/frame");
     }
 }
+
+/// #605: a continuous-fill map narrower than ~254px puts its colourbar
+/// under the panel (`Bottom`) instead of ggplot-rs's default `Right`, which
+/// alone took ~89px and squeezed a 163px card's panel to 74px (clipping the
+/// hexbin caption). A wider map keeps `Right`.
+#[test]
+fn a_narrow_continuous_legend_goes_below_the_panel() {
+    let cols = || {
+        vec![
+            Column::new(
+                "lat",
+                Role::Lat,
+                nums(&[50.0, 50.01, 50.02, 52.0, 52.01, 52.02, 52.03, 52.04]),
+            ),
+            Column::new(
+                "lon",
+                Role::Lon,
+                nums(&[10.0, 10.01, 10.0, 10.0, 10.01, 10.0, 10.02, 10.01]),
+            ),
+            Column::new("h", Role::Hexbin, strs(&["auto"])),
+        ]
+    };
+    let plot_w = |w: u32| -> f64 {
+        let s = render_with(&cols(), w, 320, &RenderOptions::default()).expect("renders");
+        let k = s.find("data-plot=\"").expect("a data-plot box") + 11;
+        let v: Vec<f64> = s[k..k + s[k..].find('"').unwrap()]
+            .split(' ')
+            .map(|x| x.parse().unwrap())
+            .collect();
+        v[2]
+    };
+    let narrow = plot_w(163);
+    assert!(narrow > 150.0, "163px map: panel only {narrow}px wide");
+    let wide = plot_w(480);
+    assert!(
+        wide < 420.0,
+        "480px map: the colourbar should still sit at Right ({wide}px panel)"
+    );
+}
