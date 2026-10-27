@@ -12703,9 +12703,24 @@ let dpRefocus = null;
 function refocus(key, el) {
   if (dpRefocus !== key) return;
   dpRefocus = null;
-  // The new controls are attached once the whole run has rendered.
+  // The new controls are attached once the whole run has rendered. #597:
+  // `el.isConnected` is true almost immediately for most callers (the
+  // element is rarely actually REMOVED, just hidden or relocated while
+  // some async work finishes — e.g. a ::VIEW alternative's own bar, left
+  // exactly where it was by placeViewHeaderBar() while its lazy skeleton
+  // is still loading, #534/#601), so that check alone used to fire
+  // .focus() on the very first frame and silently no-op (a hidden
+  // element can't take focus) with nothing left to retry — looked like a
+  // retry loop but only ever tried once in practice. `el.offsetParent !==
+  // null` is the real "can this actually take focus right now?" check;
+  // keep polling every frame (same 120-frame, ~2s cap) until it's true,
+  // giving whatever async work is still relocating/revealing it a real
+  // chance to finish first.
   let tries = 0;
-  const go = () => (el.isConnected ? el.focus() : ++tries < 120 && requestAnimationFrame(go));
+  const go = () =>
+    el.isConnected && el.offsetParent !== null
+      ? el.focus()
+      : ++tries < 120 && requestAnimationFrame(go);
   requestAnimationFrame(go);
 }
 // A ::BUTTONS input: a segmented radio group (one pressed button). Arrow keys
