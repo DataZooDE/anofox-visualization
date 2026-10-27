@@ -64,7 +64,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tiny_http::{Header, ListenAddr, Method, Request, Response, Server};
 
 // The browser builder, embedded at compile time (needs web/pkg from wasm-pack —
 // build-native.sh and CI build it first).
@@ -384,22 +384,150 @@ struct Authoring {
     max_body: usize,
     /// `options` of `anofox_serve(port, options)`: the app bar's `<script>`.
     app: String,
+    /// `options.assets` (#522), already [`anofox_visualization::image::
+    /// validated_assets_root`]-checked at start — `None` (the default)
+    /// means exactly today's behaviour: no `/assets/<rest>` route, every
+    /// relative `::IMAGE`/markdown source draws the alt-text placeholder.
+    /// Unlike the locked server's `assets/` subfolder convention, this is
+    /// an explicit opt-in naming the root directly (authoring has no
+    /// dashboards folder to derive one from — plan-514 decision 5, now
+    /// overridden only when this option is given).
+    assets_root: Option<PathBuf>,
+}
+
+/// `options.assets`: pulled out of `options` before [`AppBrand::from_json`]
+/// sees the rest, so an unrecognised key there still refuses loudly (#522)
+/// — `AppBrand`'s own validation is otherwise untouched.
+fn parse_assets_option(options: &str) -> Result<(Option<PathBuf>, String), String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(options).map_err(|e| format!("bad JSON: {e}"))?;
+    let obj = v
+        .as_object_mut()
+        .ok_or_else(|| "options must be a JSON object".to_string())?;
+    let assets = match obj.remove("assets") {
+        None => None,
+        Some(serde_json::Value::String(s)) if !s.is_empty() => Some(
+            anofox_visualization::image::validated_assets_root(Path::new(&s))
+                .map_err(|e| format!("options.assets: {e}"))?,
+        ),
+        Some(_) => return Err("options.assets must be a non-empty string path".into()),
+    };
+    Ok((assets, v.to_string()))
+}
+
+/// Review of #604 S1: `options.assets` reads a file with plain `std::fs`
+/// ([`anofox_visualization::image::read_asset`]), never through the live
+/// session's own DuckDB connection — so, unlike every *SQL* read on that
+/// connection, it was not held to that connection's own
+/// `enable_external_access`/`allowed_directories` lockdown at all. Someone
+/// running untrusted SQL in a session deliberately locked down that way
+/// (`enable_external_access = false`, the posture `docs/secure-serving.md`
+/// recommends before loading this extension at all for that purpose) could
+/// otherwise still get `anofox_serve(port, {"assets": "/anything"})` to
+/// read any image-typed file the process can read, handed to whoever gets
+/// the token back. Refuse the option outright instead:
+/// - `enable_external_access` must be `true` — fails closed: a query
+///   error, a missing setting or anything but the literal string `"true"`
+///   refuses, the same as the setting being off.
+/// - if `allowed_directories` is non-empty, `root` must canonicalize to a
+///   path inside at least one of them.
+///
+/// Checked once at start, on `ctx`'s own live connection (the one `/query`
+/// itself runs on) — never per asset request, same posture as
+/// `validated_assets_root` itself.
+fn assets_option_allowed(conn: &Conn, root: &Path) -> Result<(), String> {
+    let setting_text = |name: &str| -> Option<String> {
+        conn.query(&format!("SELECT current_setting('{name}')::VARCHAR"))
+            .and_then(|mut r| r.string_rows(1))
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .and_then(|row| row.into_iter().next().flatten())
+    };
+    if setting_text("enable_external_access").as_deref() != Some("true") {
+        return Err(
+            "options.assets needs enable_external_access (it reads files with std::fs, \
+             bypassing that setting otherwise) — SET enable_external_access = true on this \
+             session first, or leave options.assets out"
+                .into(),
+        );
+    }
+    let allowed: Vec<String> = conn
+        .query("SELECT unnest(current_setting('allowed_directories')) AS d")
+        .and_then(|mut r| r.string_rows(4096))
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| row.into_iter().next().flatten())
+                .collect()
+        })
+        .unwrap_or_default();
+    if allowed.is_empty() {
+        return Ok(());
+    }
+    let inside = allowed.iter().any(|d| {
+        Path::new(d)
+            .canonicalize()
+            .is_ok_and(|real| root.starts_with(&real))
+    });
+    if !inside {
+        return Err(format!(
+            "options.assets '{}' is outside every directory in allowed_directories ({})",
+            root.display(),
+            allowed.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// `anofox_serve(port[, options])`: start the authoring server on
 /// 127.0.0.1:`port`; `options` sets the builder's app bar (name, tagline,
-/// logo, logo_dark, link, favicon — see `AppBrand`).
+/// logo, logo_dark, link, favicon — see `AppBrand`) and, opt-in,
+/// `options.assets` (#522): a directory the builder also serves relative
+/// `::IMAGE`/markdown image sources from at `GET/HEAD /assets/<rest>`,
+/// under the same token/loopback/origin guard as every other authoring
+/// route. Off (`None`) unless given — authoring otherwise has no
+/// dashboards folder to serve `assets/` from at all (plan-514 decision 5).
 pub fn start_authoring(
     ctx: Arc<DbCtx>,
     port: u16,
     options: Option<&str>,
 ) -> Result<String, String> {
-    let app = match options {
-        Some(json) => AppBrand::from_json(json).map_err(|e| format!("options: {e}"))?,
-        None => AppBrand::default(),
+    let (assets_root, app) = match options {
+        Some(json) => {
+            let (assets, rest) = parse_assets_option(json)?;
+            if let Some(root) = &assets {
+                // #604 S1: before accepting the option at all, not after
+                // the server is already listening.
+                assets_option_allowed(&ctx.conn.lock().unwrap_or_else(|p| p.into_inner()), root)?;
+            }
+            // Review of #604 N3: `assets` is already gone from `rest` by
+            // this point (pulled out above), so `AppBrand::from_json`'s own
+            // "unknown key" hint never names it — append it here rather
+            // than teach `AppBrand` about a key it otherwise has nothing
+            // to do with.
+            let app = AppBrand::from_json(&rest).map_err(|e| {
+                format!(
+                    "options: {e}{}",
+                    if e.contains("unknown key") {
+                        ", or assets"
+                    } else {
+                        ""
+                    }
+                )
+            })?;
+            (assets, app)
+        }
+        None => (None, AppBrand::default()),
     };
     let mut servers = lock_servers();
-    if servers.contains_key(&port) {
+    // #604 S2: `port == 0` asks the OS for any free loopback port instead
+    // of a caller guessing one and racing to bind it independently (the
+    // race a port-reuse-based test helper can lose under heavy parallel
+    // load — #607). The bind just below is the only atomic step; nothing
+    // before it can collide, so the registry check against an explicit,
+    // caller-chosen port is skipped for `0` (there is nothing yet to
+    // collide with) and repeated below against the port the OS actually
+    // handed back.
+    if port != 0 && servers.contains_key(&port) {
         return Err(format!(
             "anofox-visualization is already serving on port {port}"
         ));
@@ -410,11 +538,24 @@ pub fn start_authoring(
         Server::http(&addr)
             .map_err(|e| format!("anofox-visualization: could not bind {addr}: {e}"))?,
     );
+    let port = match server.server_addr() {
+        ListenAddr::IP(a) => a.port(),
+        ListenAddr::Unix(_) => port,
+    };
+    if servers.contains_key(&port) {
+        // Only reachable with `port == 0`, and only if the OS happened to
+        // hand back a port this process already tracks under this exact
+        // mechanism — refuse rather than clobber that entry.
+        return Err(format!(
+            "anofox-visualization is already serving on port {port}"
+        ));
+    }
     let state = Arc::new(Authoring {
         ctx,
         guard: AuthoringGuard::new(port),
         max_body: 4 << 20,
         app: app.script(),
+        assets_root: assets_root.clone(),
     });
     let url = state.guard.login_url("127.0.0.1");
     let stop = Arc::new(AtomicBool::new(false));
@@ -440,8 +581,13 @@ pub fn start_authoring(
     );
     drop(servers);
     let _ = open::that(&url);
+    // #522: logged once, here — the one place a resolved assets root is
+    // reported back to the caller.
+    let assets_note = assets_root
+        .map(|p| format!("; assets served from '{}'", p.display()))
+        .unwrap_or_default();
     Ok(format!(
-        "anofox-visualization serving {url} (authoring: runs SQL on this session; loopback only; the URL carries the session token)"
+        "anofox-visualization serving {url} (authoring: runs SQL on this session; loopback only; the URL carries the session token){assets_note}"
     ))
 }
 
@@ -500,10 +646,79 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
         }
         return;
     }
+    // #522: before the generic GET-only check below — this route also
+    // answers `HEAD`. `st.guard.check` above already gated every route
+    // this function handles, this one included; there is no further
+    // per-dashboard scope to check (unlike the locked server's own
+    // `/d/<id>/assets/<rest>`, authoring has no dashboards).
+    if let Some(root) = &st.assets_root {
+        if let Some(rest) = path.strip_prefix("/assets/") {
+            if req.method() != &Method::Get && req.method() != &Method::Head {
+                return text(req, 405, "GET/HEAD only");
+            }
+            return authoring_asset(root, rest, req);
+        }
+    }
     if req.method() != &Method::Get {
         return text(req, 405, "method not allowed");
     }
     serve_asset(req, &path, &st.app);
+}
+
+/// `GET`/`HEAD /assets/<rest>` (#522, opt-in): one image file from the
+/// authoring builder's own `options.assets` root ([`start_authoring`]) —
+/// reached only when that option was given (`handle_authoring` checks
+/// `st.assets_root` first). Same containment/extension/magic-byte/size
+/// rules and response headers as the locked server's own `/d/<id>/assets/
+/// <rest>` ([`locked_asset`]) — both go through [`anofox_visualization::
+/// image`]'s shared validator, nothing duplicated here. Every refusal is a
+/// plain 404, same reasoning as `locked_asset`'s own doc comment: which
+/// one it was (missing, traversal, wrong extension, not really an image,
+/// too big) is not a caller's business.
+fn authoring_asset(root: &Path, rest: &str, req: Request) {
+    const MAX: u64 = anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES;
+    // Authoring is loopback-only, single-token, no viewer logout to
+    // outlive — still `private`, not the locked server's longer
+    // `max-age=300`, since an asset here can change under an author's feet
+    // mid-session just as easily as the dashboard script itself. Review of
+    // #604 N5: the header list itself (CSP, nosniff, CORP) is `image::
+    // asset_header_values`, shared with `locked_asset` and the CLI's own
+    // `authoring_asset` — only this lifetime and the mime differ by caller.
+    let headers = |mime: &str| {
+        anofox_visualization::image::asset_header_values(mime, "private, max-age=60")
+            .into_iter()
+            .map(|(k, v)| header(k, &v))
+            .collect::<Vec<_>>()
+    };
+    if req.method() == &Method::Head {
+        return match anofox_visualization::image::stat_asset(root, rest, MAX) {
+            Ok((mime, len)) => {
+                let resp = Response::new(
+                    200.into(),
+                    headers(&mime),
+                    std::io::empty(),
+                    Some(len as usize),
+                    None,
+                );
+                let _ = req.respond(resp);
+            }
+            Err(_) => text(req, 404, "not found"),
+        };
+    }
+    match anofox_visualization::image::read_asset(root, rest, MAX) {
+        Ok((mime, bytes)) => {
+            let len = bytes.len();
+            let resp = Response::new(
+                200.into(),
+                headers(&mime),
+                std::io::Cursor::new(bytes),
+                Some(len),
+                None,
+            );
+            let _ = req.respond(resp);
+        }
+        Err(_) => text(req, 404, "not found"),
+    }
 }
 
 /// Authoring `/query`: run the body on the live connection. Statements are
@@ -626,9 +841,10 @@ fn run_check(st: &Authoring, body: &str) -> Result<String, String> {
             design,
             stateful_session: true,
             // The authoring builder has no dashboards folder (#514 PR B,
-            // decision 5: `anofox_serve`/`anofox_serve_dashboards`'s
-            // authoring mode never serves/checks `assets/`) —
-            // `image/missing-file` never fires here.
+            // decision 5), and `options.assets` (#522) is a plain serving
+            // root, not a dashboards folder with its own sibling `.sql`
+            // files to lint against — `image/missing-file` never fires
+            // here, with or without that option set.
             image_root: None,
         },
         Duration::from_millis(timeout_ms),
@@ -3496,35 +3712,25 @@ fn locked_asset(
         busy(req, &e);
         return 503;
     }
+    // Review of #554 nit 9: on an `auth` server an image must not keep
+    // answering from a shared/browser cache for long after a logout or a
+    // revoked credential — a minute, not the plain five-minute default
+    // (still `private`, not `no-store`: the browser's own cache is fine to
+    // use meanwhile, just not for long). Review of #604 N5: the rest of
+    // the header list (CSP — belt-and-braces for a viewer who opens the
+    // asset URL directly, no symlink-out/XSS either way — nosniff, CORP)
+    // is `image::asset_header_values`, shared with both authoring servers'
+    // own `authoring_asset`; only this lifetime and the mime differ here.
+    let cache_control = if st.opts.auth.is_some() {
+        "private, max-age=60"
+    } else {
+        "private, max-age=300"
+    };
     let headers = |mime: &str| {
-        vec![
-            header("Content-Type", mime),
-            header("X-Content-Type-Options", "nosniff"),
-            // Neutralises an SVG opened as a top-level document (no
-            // symlink out, no XSS: it never runs a script, regardless of
-            // this header, when only ever drawn through `<img>` — this is
-            // belt-and-braces for a viewer who opens the asset URL
-            // directly).
-            header(
-                "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-            ),
-            // Review of #554 nit 9: on an `auth` server an image must not
-            // keep answering from a shared/browser cache for long after a
-            // logout or a revoked credential — a minute, not the plain
-            // five-minute default (still `private`, not `no-store`: the
-            // browser's own cache is fine to use meanwhile, just not for
-            // long).
-            header(
-                "Cache-Control",
-                if st.opts.auth.is_some() {
-                    "private, max-age=60"
-                } else {
-                    "private, max-age=300"
-                },
-            ),
-            header("Cross-Origin-Resource-Policy", "same-origin"),
-        ]
+        anofox_visualization::image::asset_header_values(mime, cache_control)
+            .into_iter()
+            .map(|(k, v)| header(k, &v))
+            .collect::<Vec<_>>()
     };
     // Read per request — no snapshot — so an edited/added asset shows
     // without a refresh, as documented.
@@ -4024,12 +4230,30 @@ fn state_trainer_view(
 /// generation always see the same `viewer_state`. `None` for a dashboard
 /// [`state_trainer_view`] says isn't state-enabled (the key is unaffected,
 /// same as before #517 S3).
+///
+/// `Arc<Vec<Arc<Record>>>`, not `Vec<Record>` (#548 item 2; review of #599
+/// SF1/SF2: `Arc<Record>` elements, not owned `Record`s — the trainer
+/// branch is [`anofox_visualization::host::state::Store::snapshot_all`]'s
+/// own cache, and keeping a second deep copy of up to `trainer_max_rows`
+/// records' content alive in it would just move the cost this exists to
+/// avoid). Wrapping the (small, per-viewer) non-trainer branch's rows the
+/// same way keeps one return type for both — that branch pays one fresh
+/// `Arc` alloc per record, never cached, acceptable for a count that's
+/// never more than one viewer's own rows.
+///
+/// Review of #599 N3: the trainer branch's `submit.store.len()` call
+/// below, for the truncation log, takes the store's own lock every call
+/// regardless of whether `snapshot_all` just hit or missed its cache —
+/// cheap (it only reads a length), but real, so "a cache hit takes no
+/// lock on the store at all" ([`anofox_visualization::host::state::Store::
+/// snapshot_all`]'s own doc) is true of `snapshot_all` itself, not of this
+/// function as a whole.
 fn state_snapshot(
     submit: &SubmitRuntime,
     dash_id: &str,
     claims: Option<&Claims>,
     auth_method: Option<&str>,
-) -> Option<(u64, Vec<Record>)> {
+) -> Option<(u64, Arc<Vec<Arc<Record>>>)> {
     let is_trainer = state_trainer_view(&submit.opts, dash_id, claims, auth_method)?;
     Some(if is_trainer {
         let (gen, rows) = submit
@@ -4046,7 +4270,8 @@ fn state_snapshot(
         (gen, rows)
     } else {
         let user = claims.map(|c| c.user.as_str()).unwrap_or("");
-        submit.store.snapshot_for_user(user)
+        let (gen, rows) = submit.store.snapshot_for_user(user);
+        (gen, Arc::new(rows.into_iter().map(Arc::new).collect()))
     })
 }
 
@@ -4072,70 +4297,177 @@ fn state_scalar_text(v: &Value) -> String {
 /// existing viewer_state content, inserted the same way at the same
 /// generation, is still exactly what this would build again).
 ///
-/// Every value goes through [`db::Prepared::bind_strs`] — never spliced
-/// into the SQL text — except a literal `NULL` for a `Null` scalar or list
-/// item and the fixed `?`-placeholder count of a list's own array
-/// constructor, neither of which carries data from the request or the
-/// store.
-fn seed_viewer_state(c: &Conn, rows: &[Record]) -> Result<(), String> {
+/// Every value goes through `db::Appender`'s typed `append_*` calls (#600)
+/// — no SQL text built from `rec`'s own fields at all, so there is
+/// nothing here for a value to be spliced into. Review of #611 S2: one
+/// exception — a record whose `ts` the strict `parse_rfc3339_micros`
+/// refuses (never the server's own output; only a store file written or
+/// edited some other way, #611 S1) falls back to
+/// [`seed_viewer_state_row_via_sql`], a single `INSERT ... VALUES
+/// (?::BIGINT, ?::TIMESTAMPTZ, ...)` per variable for *that one record* —
+/// the exact cast the pre-#600 code relied on for every row — rather than
+/// failing every panel that reads this generation over one odd record.
+/// Review of #614 R2: `rec.ts_micros` is read here, not recomputed —
+/// `Record::from_json`/`Store::append` already ran `parse_rfc3339_micros`
+/// once, when the record was read off disk or newly appended, and cached
+/// the answer. The slow per-variable `INSERT` fallback itself still runs
+/// again on every cold panel that seeds an odd record (a cold panel's
+/// `viewer_state` is a fresh per-connection `TEMP TABLE`, so there is no
+/// way around re-inserting its rows), but this stops re-running the same
+/// parse — and reaching the same `None` — on every one of those panels.
+///
+/// `&[Arc<Record>]`, not `&[Record]` (review of #599 SF1): this only ever
+/// reads fields through the `Arc` (auto-deref), so taking the trainer
+/// cache's own element type directly — rather than requiring its caller
+/// to deep-copy into owned `Record`s first — is free and removes that
+/// copy entirely, the point of the review's fix.
+fn seed_viewer_state(c: &Conn, rows: &[Arc<Record>]) -> Result<(), String> {
     for stmt in anofox_visualization::sql::viewer_state_setup_statements() {
         c.exec(stmt)?;
     }
-    for chunk in rows.chunks(500) {
-        let mut sql_buf = String::from(
-            "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, value, \
-             value_list) VALUES ",
-        );
-        let mut params: Vec<String> = Vec::new();
-        for rec in chunk {
-            for (name, val) in &rec.vars {
-                if !params.is_empty() {
-                    sql_buf.push(',');
+    // #600: an `Appender` (`db::Appender`), not `INSERT ... VALUES (…),
+    // (…), …` built as SQL text — measured at ~22s per cold panel for a
+    // 200k-row trainer store (the whole point of this rewrite; see the
+    // PR for the before/after numbers). No text to build, parse or bind:
+    // every value here is still a bound value in the sense that matters
+    // (never spliced into SQL text), just handed to DuckDB through the
+    // Appender's typed `append_*` calls instead.
+    // `temp`/`main` explicit (`Appender::new_in`): `viewer_state` is
+    // always the per-connection TEMP table `viewer_state_setup_statements`
+    // just (re)created above, never left to the connection's own current
+    // default catalog to resolve.
+    // Review of #611 N4: the more likely reason an appender created
+    // without a catalog/schema would miss it is that it resolves against
+    // the connection's own *current default database* (whatever `USE`
+    // last pointed at, which on a cold panel connection can be one of the
+    // snapshot's own `READ_ONLY`-attached databases) rather than doing
+    // the same `temp`-first unqualified-name resolution ordinary SQL
+    // does — not necessarily a same-named object actually existing
+    // there, just resolving to the wrong database before DuckDB even
+    // gets as far as checking whether `viewer_state` exists in it.
+    let app = crate::db::Appender::new_in(c, Some("temp"), Some("main"), "viewer_state")?;
+    for rec in rows {
+        // #611 N6 / #614 R2: `rec.ts_micros` was already parsed once,
+        // when this record was loaded or appended — not re-parsed here,
+        // and not re-parsed once per variable either.
+        let ts_micros = rec.ts_micros;
+        if ts_micros.is_none() {
+            seed_viewer_state_row_via_sql(c, rec)?;
+            continue;
+        }
+        for (name, val) in &rec.vars {
+            app.begin_row()?;
+            app.append_int64(
+                i64::try_from(rec.seq).map_err(|_| "seq out of range for BIGINT".to_string())?,
+            )?;
+            app.append_timestamp_micros(ts_micros.expect("checked above"))?;
+            app.append_varchar(&rec.user)?;
+            app.append_varchar(&rec.dashboard)?;
+            app.append_varchar(&rec.submit)?;
+            app.append_varchar(name)?;
+            match val {
+                Value::Null => {
+                    app.append_null()?; // value
+                    app.append_null()?; // value_list
                 }
-                params.push(rec.seq.to_string());
-                params.push(rec.ts.clone());
-                params.push(rec.user.clone());
-                params.push(rec.dashboard.clone());
-                params.push(rec.submit.clone());
-                params.push(name.clone());
-                match val {
-                    Value::Null => {
-                        sql_buf.push_str("(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, NULL, NULL)");
-                    }
-                    Value::Array(items) => {
-                        params.push(val.to_string());
-                        // A `Null` item is a literal `NULL` in the array
-                        // constructor, never a bound `''` (#548 item 3
-                        // nit: `state_scalar_text(&Value::Null)` would
-                        // otherwise store an empty string, not SQL NULL).
-                        let tokens: Vec<&str> = items
-                            .iter()
-                            .map(|it| {
-                                if it.is_null() {
-                                    "NULL"
-                                } else {
-                                    params.push(state_scalar_text(it));
-                                    "?"
-                                }
-                            })
-                            .collect();
-                        sql_buf.push_str(&format!(
-                            "(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, [{}])",
-                            tokens.join(", ")
-                        ));
-                    }
-                    other => {
-                        params.push(state_scalar_text(other));
-                        sql_buf.push_str("(?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, NULL)");
-                    }
+                Value::Array(items) => {
+                    // #611 B1: `value` holds the same JSON text of the
+                    // whole array the pre-#600 SQL path bound and the
+                    // browser's own live preview still writes
+                    // (`web/app.js`) — a served dashboard reading
+                    // `value` for a list (`MULTISELECT`) answer must see
+                    // what it always has, not `NULL`.
+                    app.append_varchar(&val.to_string())?; // value
+                                                           // A `Null` item is a real SQL `NULL` inside the list,
+                                                           // never an empty string (#548 item 3 nit). Owned
+                                                           // first (`state_scalar_text` allocates), then
+                                                           // borrowed for the call — `append_varchar_list`'s
+                                                           // `&str`s only need to live for that one call.
+                    let owned: Vec<Option<String>> = items
+                        .iter()
+                        .map(|it| (!it.is_null()).then(|| state_scalar_text(it)))
+                        .collect();
+                    let borrowed: Vec<Option<&str>> = owned.iter().map(|s| s.as_deref()).collect();
+                    app.append_varchar_list(&borrowed)?;
+                }
+                other => {
+                    app.append_varchar(&state_scalar_text(other))?; // value
+                    app.append_null()?; // value_list
                 }
             }
+            app.end_row()?;
         }
-        if params.is_empty() {
-            continue; // every record in this chunk recorded no variables
-        }
+    }
+    app.close()
+}
+
+/// #611 S2: one record whose `ts` [`seed_viewer_state`]'s fast parser
+/// refused, inserted the slow way — one `INSERT ... VALUES (?::BIGINT,
+/// ?::TIMESTAMPTZ, ...)` per variable, the exact SQL cast the pre-#600
+/// code relied on for every row (so a non-canonical but still valid
+/// RFC3339 shape such as a missing `.mmm` or a `+00` offset, which
+/// `?::TIMESTAMPTZ` accepts and `parse_rfc3339_micros` by design does
+/// not, still seeds correctly) — never spliced SQL text, same as the
+/// pre-#600 path. Only reached for a store file written or edited by
+/// something other than this server's own [`Store::append`]
+/// (`anofox_visualization::host::state::Store::append`); the server
+/// never writes a `ts` this falls back for.
+///
+/// `temp.main.viewer_state` qualified (review of #614 R1), same as
+/// `seed_viewer_state`'s own `Appender::new_in(c, Some("temp"),
+/// Some("main"), …)` just above it — ordinary SQL already resolves an
+/// unqualified `viewer_state` to `temp` first (#548 item 1's own pinned
+/// test), so this was never the #611 N4 bug, but naming it explicitly
+/// here too means a reader never has to go check that resolution order
+/// to see that this inserts into the very `TEMP TABLE`
+/// `viewer_state_setup_statements` just (re)created, not some other
+/// same-named object.
+fn seed_viewer_state_row_via_sql(c: &Conn, rec: &Record) -> Result<(), String> {
+    for (name, val) in &rec.vars {
+        let mut params: Vec<String> = vec![
+            rec.seq.to_string(),
+            rec.ts.clone(),
+            rec.user.clone(),
+            rec.dashboard.clone(),
+            rec.submit.clone(),
+            name.clone(),
+        ];
+        let sql = match val {
+            Value::Null => {
+                "INSERT INTO temp.main.viewer_state (seq, ts, \"user\", dashboard, submit, \
+                 name, value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, NULL, \
+                 NULL)"
+                    .to_string()
+            }
+            Value::Array(items) => {
+                params.push(val.to_string()); // value: the JSON text (#611 B1)
+                let tokens: Vec<&str> = items
+                    .iter()
+                    .map(|it| {
+                        if it.is_null() {
+                            "NULL"
+                        } else {
+                            params.push(state_scalar_text(it));
+                            "?"
+                        }
+                    })
+                    .collect();
+                format!(
+                    "INSERT INTO temp.main.viewer_state (seq, ts, \"user\", dashboard, submit, \
+                     name, value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, \
+                     [{}])",
+                    tokens.join(", ")
+                )
+            }
+            other => {
+                params.push(state_scalar_text(other));
+                "INSERT INTO temp.main.viewer_state (seq, ts, \"user\", dashboard, submit, \
+                 name, value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, NULL)"
+                    .to_string()
+            }
+        };
         let refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        c.execute_prepared(&sql_buf, &refs)?;
+        c.execute_prepared(&sql, &refs)?;
     }
     Ok(())
 }
@@ -4344,7 +4676,7 @@ fn locked_panel(
     // this viewer simply has no rows in yet) vs `None` (not state-enabled
     // at all, no viewer_state temp created) — run_panel must tell these
     // apart.
-    let state_rows: Option<Vec<Record>> = state_snap.map(|(_, rows)| rows);
+    let state_rows: Option<Arc<Vec<Arc<Record>>>> = state_snap.map(|(_, rows)| rows);
     let mut key = panel_key(&r, claims, &key_deps);
     if let Some(g) = sgen {
         key = format!("{key}/state{g}");
@@ -4366,7 +4698,7 @@ fn locked_panel(
             &r,
             &viewer_set,
             claims,
-            state_rows.as_deref(),
+            state_rows.as_deref().map(|v| v.as_slice()),
             abort,
             charge,
             warm.as_deref(),
@@ -5282,7 +5614,7 @@ fn run_panel(
     r: &sv::PanelRequest,
     viewer_set: &[String],
     claims: Option<&Claims>,
-    state_rows: Option<&[Record]>,
+    state_rows: Option<&[Arc<Record>]>,
     abort: &crate::panel_cache::Abort,
     charge: &mut Charge,
     warm_key: Option<&str>,

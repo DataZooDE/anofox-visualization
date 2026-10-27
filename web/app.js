@@ -4130,12 +4130,19 @@ function loadDash(name, sql, key) {
 // to "Preview again" once the preview actually ends (Discard, Apply, a new
 // Send, or the viewer navigating away via loadDash/setMode/#sql input).
 const previewExitListeners = new Set();
-// The toolbar buttons a preview disables (nothing may Run/Save/Share/export/
+// The toolbar buttons a preview disables (nothing may Run/Save/Share/
 // Check/start a new dashboard while the grid shows someone else's SQL that
 // isn't in the editor). Each button's own `disabled`/`title` is restored on
 // exit. The dark toggle and the refresh select stay enabled: a re-run of the
 // preview stays in the engine (runSqlInner dispatches to it regardless).
-const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "dlhtml", "lint-run", "side-new"];
+// `dlhtml` is handled separately, below (M2f-B review of #602, N1): it has
+// its *own* independent busy state (an in-flight export, possibly still
+// running when a preview starts or still running after one ends) that a
+// snapshot/restore pair can't track correctly — a preview entered mid-
+// export would restore the button to "disabled" forever once the export
+// (which snapshot never saw finish) completes, or an export finishing mid-
+// preview would wrongly re-enable the button while the preview is still up.
+const PREVIEW_TOOLBAR_IDS = ["run", "save", "share", "lint-run", "side-new"];
 let previewToolbarPrev = null;
 function previewToolbar(on) {
   if (on) {
@@ -4156,6 +4163,21 @@ function previewToolbar(on) {
     }
     previewToolbarPrev = null;
   }
+  syncDlhtmlDisabled();
+}
+// M2f-B (#149) review N1: `dlhtml`'s disabled/title state, computed fresh
+// from the two independent reasons it can be disabled (an export in
+// flight, `dpExporting`; a preview up, `previewToolbarPrev`) — never
+// snapshotted/restored, so the two can start and end in any order without
+// leaving the button stuck.
+let dpExporting = false;
+function syncDlhtmlDisabled() {
+  const btn = document.getElementById("dlhtml");
+  if (!btn) return;
+  if (btn._dpOrigTitle === undefined) btn._dpOrigTitle = btn.title;
+  const previewing = !!previewToolbarPrev;
+  btn.disabled = dpExporting || previewing;
+  btn.title = previewing ? "Apply or discard the preview first" : btn._dpOrigTitle;
 }
 // The grid while a preview was applied without running ("Apply, don't run").
 function notRunCard() {
@@ -16694,7 +16716,34 @@ async function inlineExportedImage(img) {
 // Download the current dashboard as a standalone, self-contained HTML file.
 // It carries the dashboard stylesheet (web/theme-base.css) and the CURRENT
 // theme variant's tokens, so a dark dashboard stays dark when opened alone.
+// M2f-B (#149): a time map's frames are rendered synchronously, one
+// render_panel() wasm call per frame, right in this function — a map near
+// the 3 MB budget can be dozens of frames, which can take long enough to
+// feel unresponsive with no feedback (plan §M2f-B: "shows a progress state
+// while rendering", the export was already async). The button itself is
+// that progress state (disabled + aria-busy + "Preparing…"); the actual
+// work stays in downloadHtmlInner() so a thrown error still restores it.
 async function downloadHtml() {
+  const btn = document.getElementById("dlhtml");
+  const was = btn && btn.textContent;
+  dpExporting = true;
+  syncDlhtmlDisabled();
+  if (btn) {
+    btn.setAttribute("aria-busy", "true");
+    btn.textContent = "Preparing…";
+  }
+  try {
+    await downloadHtmlInner();
+  } finally {
+    dpExporting = false;
+    syncDlhtmlDisabled();
+    if (btn) {
+      btn.removeAttribute("aria-busy");
+      btn.textContent = was;
+    }
+  }
+}
+async function downloadHtmlInner() {
   await lazyFlushAll(); // the snapshot holds every tab
   const sheetText = (sheet) => {
     try {
@@ -16738,11 +16787,69 @@ async function downloadHtml() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
-  // D23 (M2f-A, #149): the live frame player doesn't survive the export
-  // (M2f-B embeds the frames themselves); strip() above already dropped the
-  // bar it stood in — leave one line where it was. Which frame is on screen
-  // is already named in the map's own subtitle (D19), drawn by ggplot-rs.
-  snap.querySelectorAll("svg[data-frames]").forEach((svg) => {
+  // D23/M2f-B (#149): pre-render every frame of each time map here, while
+  // wasm is still available (the author's own browser) — one render_panel
+  // call per frame, same rows/roles/size/zoom/theme `renderChart` already
+  // uses, just with `frame: k` swapped in. Keyed by the *live* panel (not
+  // `snap`'s clone, which has no `_dp`/wasm access of its own); matched to
+  // `snap`'s panels by index below, the same convention the ::FIT block
+  // further down uses for its own `livePanels`.
+  const FRAME_EXPORT_BUDGET = 3 * 1024 * 1024; // 3 MB per map (plan §M2f-B)
+  const liveFramePanels = [...document.querySelectorAll(".dash .panel")];
+  const frameSvgs = new Map(); // live panel -> frame SVG strings, or null (over budget)
+  // A `for...of` with real `await`s, not `.forEach`: a map near the budget
+  // can be dozens of frames, and yielding every few keeps the "Preparing…"
+  // button (above) actually painted and the tab responsive meanwhile.
+  for (const panel of liveFramePanels) {
+    const holder = panel.querySelector(":scope > .panel-svg");
+    const svg = holder && holder.querySelector(":scope > svg[data-frames]");
+    const dp = panel._dp;
+    if (!svg || !dp) continue;
+    let n = 0;
+    try {
+      n = JSON.parse(svg.getAttribute("data-frames") || "[]").length;
+    } catch (_) {}
+    if (!n) continue;
+    // The size already on screen (the last frame, D12) — every other frame
+    // is rendered at the same pixel size, so stepping never resizes.
+    const w = +svg.getAttribute("width") || dp.rw;
+    const h = +svg.getAttribute("height") || dp.ph;
+    const zoom = holder._zoom || "";
+    const roles = JSON.stringify(dp.drawn || dp.roles);
+    const svgs = [];
+    let total = 0;
+    for (let k = 0; k < n && total <= FRAME_EXPORT_BUDGET; k++) {
+      const s = render_panel(dp.rows, roles, w, h, ctxWith({ frame: k }), zoom);
+      svgs.push(s);
+      total += new Blob([s]).size;
+      if (k % 5 === 4) await new Promise((r) => setTimeout(r, 0));
+    }
+    frameSvgs.set(panel, total <= FRAME_EXPORT_BUDGET ? svgs : null);
+  }
+  // D23 (M2f-A/M2f-B, #149): the live frame player doesn't survive the
+  // export as-is (strip() above already dropped the bar it stood in) — a
+  // map within budget gets every frame embedded as a `<template>` next to
+  // its `.panel-svg`, swapped in offline by a small player
+  // (snapshotMotion(), below, reusing anim.js's own `frames()`/`tween()`);
+  // one over budget falls back to a static note. Which frame is on screen
+  // is already named in the map's own subtitle (D19), drawn by ggplot-rs,
+  // either way.
+  [...snap.querySelectorAll(".panel")].forEach((c, k) => {
+    const svg = c.querySelector(":scope > .panel-svg > svg[data-frames]");
+    if (!svg) return;
+    const holder = svg.parentElement;
+    const svgs = frameSvgs.get(liveFramePanels[k]);
+    if (svgs) {
+      const frag = document.createDocumentFragment();
+      svgs.forEach((s, fk) => {
+        const tpl = document.createElement("template");
+        tpl.setAttribute("data-frame", String(fk));
+        tpl.innerHTML = s;
+        frag.appendChild(tpl);
+      });
+      holder.after(frag);
+      return;
+    }
     let n = 0;
     try {
       n = JSON.parse(svg.getAttribute("data-frames") || "[]").length;
@@ -16750,7 +16857,7 @@ async function downloadHtml() {
     const note = document.createElement("p");
     note.className = "dp-frames-note";
     note.textContent = `${n} frames — Play in the live dashboard`;
-    svg.parentElement.after(note);
+    holder.after(note);
   });
   // `::GUIDE_STEP` (#523): unlike the old full flatten, the export keeps the
   // stepper itself — Back/Next, the progress strip, the step list —
@@ -16875,6 +16982,47 @@ function snapshotMotion() {
   return `(function(){var K=(${animKit})(window);
   document.querySelectorAll('.panel svg[data-anim]').forEach(function(s){K.enter(s,s.getAttribute('data-anim'));});
   document.querySelectorAll('.panel-svg > svg[data-story]').forEach(function(s){K.story(s.closest('.panel'),s);});
+  // M2f-B (#149): a time map within the embed budget gets every frame as a
+  // sibling frame-indexed TEMPLATE element (downloadHtml(); review of #602
+  // N5: not spelled out literally here — this comment ships inside the
+  // export's own <script>, where a naive grep for that tag would wrongly
+  // count it as one). The swap-only player reuses anim.js's own frames()/
+  // tween() exactly like the live dashboard does (web/app.js's
+  // mountFrames) — draw(k) just swaps in the pre-rendered markup instead
+  // of calling render_panel (no wasm offline).
+  // A map over budget has no templates here, so this is a no-op for it;
+  // its static note (downloadHtml()) is already in the page.
+  document.querySelectorAll('.panel').forEach(function(panel){
+    var holder=panel.querySelector(':scope > .panel-svg');
+    var svg=holder&&holder.querySelector(':scope > svg[data-frames]');
+    var tpls=[];
+    panel.querySelectorAll(':scope > template[data-frame]').forEach(function(t){tpls[+t.getAttribute('data-frame')]=t;});
+    if(!svg||!tpls.length)return;
+    function draw(k){
+      var t=tpls[k];
+      if(!t)return null;
+      // review of #602 S2: a ::FIT export's scaleSvg() (SNAPSHOT_JS) sized
+      // the *old* svg (height attr, style.height, data-dp-scaled, the
+      // _h0 it stashed for unscale() to restore later) — none of that
+      // survives swapping in the template's own raw markup, so carry it
+      // across when the old svg was actually scaled, or every step snaps
+      // back to the authored (unfitted) height until the next resize.
+      var old=holder.querySelector(':scope > svg');
+      var scaled=old&&old.hasAttribute('data-dp-scaled');
+      var h0=old&&old._h0, h=old&&old.getAttribute('height');
+      holder.innerHTML=t.innerHTML;
+      var fresh=holder.querySelector(':scope > svg');
+      if(fresh&&scaled){
+        fresh._h0=h0;
+        fresh.setAttribute('height',h);
+        fresh.style.height=h+'px';
+        fresh.setAttribute('data-dp-scaled','');
+      }
+      if(fresh&&window.__dpWireHits)window.__dpWireHits(fresh);
+      return fresh;
+    }
+    K.frames(panel,svg,+svg.getAttribute('data-frame')||0,draw);
+  });
 })();`;
 }
 
@@ -16895,15 +17043,41 @@ const SNAPSHOT_JS = `(function(){
   var fitT=0;function refitSoon(){clearTimeout(fitT);fitT=setTimeout(refit,200);}
   window.addEventListener('resize',refitSoon);window.addEventListener('orientationchange',refitSoon);document.addEventListener('fullscreenchange',refitSoon);
   var tip=document.getElementById('dp-tip');
-  document.querySelectorAll('.dp-hit').forEach(function(el){
-    var t=el.getAttribute('data-tip'); if(!t)return;
-    // the formatted value (::YFORMAT, ::LOCALE) in place of the raw one
-    var fv=el.getAttribute('data-fvalue'), x=el.getAttribute('data-fx')||el.getAttribute('data-x'), s=el.getAttribute('data-series');
-    if(fv)t=(x&&x!==s?x+(s?' · '+s:''):(s||x||''))+': '+fv;
-    el.addEventListener('mouseenter',function(){tip.textContent=t;tip.classList.add('show');});
-    el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
-    el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
-  });
+  // M2f-B (#149): factored out (was an inline forEach) so the frame swap
+  // player in snapshotMotion() can re-wire hover on a freshly-swapped
+  // template's marks too — exposed on window since it runs from the other
+  // <script> tag, after this one (no shared scope otherwise).
+  function wireHits(root){
+    var scope=root||document;
+    // A freshly-swapped frame template (M2f-B, #149) is a raw render_panel()
+    // output, never run through the live attachHover() that converted every
+    // other mark's title into data-tip/.dp-hit before this snapshot was
+    // taken — the same minimal conversion (data-tip = the title text,
+    // verbatim, matching attachHover's own el.setAttribute("data-tip", txt)
+    // call), scoped to maps (the only kind that swaps in fresh markup
+    // offline). Not a full attachHover(): no series emphasis/crosshair/a11y.
+    // review of #602 S1: every data-row mark, not just path (areas) — a
+    // point/symbol map's own marks are circle, and attachHover's own
+    // selector (rect/circle/polygon/polyline/path[in data-map]) agrees.
+    scope.querySelectorAll('svg[data-map] [data-row] > title').forEach(function(t){
+      var el=t.parentElement; if(!el)return;
+      el.setAttribute('data-tip',t.textContent);
+      el.removeChild(t);
+      el.classList.add('dp-hit');
+    });
+    scope.querySelectorAll('.dp-hit').forEach(function(el){
+      if(el._dpWired)return; el._dpWired=true;
+      var t=el.getAttribute('data-tip'); if(!t)return;
+      // the formatted value (::YFORMAT, ::LOCALE) in place of the raw one
+      var fv=el.getAttribute('data-fvalue'), x=el.getAttribute('data-fx')||el.getAttribute('data-x'), s=el.getAttribute('data-series');
+      if(fv)t=(x&&x!==s?x+(s?' · '+s:''):(s||x||''))+': '+fv;
+      el.addEventListener('mouseenter',function(){tip.textContent=t;tip.classList.add('show');});
+      el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
+      el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
+    });
+  }
+  wireHits(document);
+  window.__dpWireHits=wireHits;
   // Top-level tabs (.tabbar/.tabwrap/.tabpane) and every nested sub-tab group
   // (.subtabbar/.subtabwrap/.subtabpane, one pair per top tab that has any)
   // each wire up on their own bar+wrap pair — app.js appends a bar right

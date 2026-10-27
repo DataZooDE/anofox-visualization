@@ -175,6 +175,19 @@ jobs:
       - name: Check button on a live (authoring) backend (#199)
         run: duckext/scripts/test-check-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # #611 CI gap: these two ran by hand only until now — the only
+      # end-to-end coverage of ::SUBMIT read-back (plan §5) and the
+      # Appender-based viewer_state seeding (#600) was a developer's own
+      # local run, never CI.
+      - name: Submit/read-back state end to end (plan §5, #517 S3)
+        run: duckext/scripts/test-state.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Submit live e2e (auth, rate limits, credential locks)
+        run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Opt-in assets route on a live (authoring) backend (#522)
+        run: duckext/scripts/test-authoring-assets.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # #357: the access policy's hash-mask key never reaches a panel, an
       # error, the dashboard page, /healthz, stderr or the request log, and
       # SQL that could reveal it is refused at start.
@@ -305,6 +318,15 @@ jobs:
 
       - name: Check button on a live (authoring) backend, against DuckDB 2.0 (#199)
         run: duckext/scripts/test-check-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Submit/read-back state end to end, against DuckDB 2.0
+        run: duckext/scripts/test-state.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Submit live e2e, against DuckDB 2.0
+        run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Opt-in assets route on a live (authoring) backend, against DuckDB 2.0 (#522)
+        run: duckext/scripts/test-authoring-assets.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
       - name: Access policy key e2e, against DuckDB 2.0
         run: duckext/scripts/policy-key-e2e.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
@@ -485,6 +507,38 @@ jobs:
         with:
           node-version: "22"
 
+      # For the served (locked-server) e2e checks further down (#590): they
+      # need a native extension build with the *real* UI embedded, unlike
+      # the `rust` job's SKIP_WASM=1 one. build-native.sh's SKIP_WASM=1 only
+      # skips re-running wasm-pack — include_dir! (duckext/src/serve.rs)
+      # still embeds whatever is already in web/pkg, so this stays a plain
+      # cdylib build (no wasm toolchain needed here).
+      # #616/#618 follow-up: #618 gave this build its own CARGO_TARGET_DIR,
+      # set AFTER the web-build artifact download placed target/debug/
+      # dashboard, to keep Swatinem/rust-cache's restore away from it. That
+      # didn't work — Swatinem/rust-cache's `workspaces` input (what it
+      # actually caches/restores) defaults to "<repo-root> -> target" by
+      # convention; it ignores CARGO_TARGET_DIR entirely and still
+      # restores/saves `<repo>/target` regardless, so its restore still
+      # clobbered target/debug/dashboard on a partial cache hit (#612's
+      # Cargo.lock bump). `workspaces:` can be told a different target dir,
+      # but only a path RELATIVE to the workspace root (the action's own
+      # README), so there is no way to point it at $RUNNER_TEMP from here.
+      # Simpler and actually effective: move the whole toolchain/cache setup
+      # BEFORE the artifact download, so by the time Swatinem/rust-cache
+      # restores anything into `<repo>/target`, target/debug/dashboard does
+      # not exist yet to be clobbered — it lands fresh right after, and
+      # nothing touches `target/` again until Swatinem's own save at job
+      # end, well after site-e2e.mjs is done with it. No separate
+      # CARGO_TARGET_DIR needed any more: this build can share the same
+      # `target/` fine now that the ordering is the other way round. Bumped
+      # shared-key too (not reusing #618's cache entries, saved from the
+      # wrong ordering).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-e2e-served-ext-v2
+
       - name: Download web/pkg, web/localext and the dashboard CLI
         uses: actions/download-artifact@v4
         with:
@@ -492,18 +546,6 @@ jobs:
 
       - name: Dashboard CLI is executable
         run: chmod +x target/debug/dashboard
-
-      # For the served (locked-server) e2e checks further down (#590): they
-      # need a native extension build with the *real* UI embedded, unlike
-      # the `rust` job's SKIP_WASM=1 one. build-native.sh's SKIP_WASM=1 only
-      # skips re-running wasm-pack — include_dir! (duckext/src/serve.rs)
-      # still embeds whatever is already in web/pkg, which the download
-      # above just populated, so this stays a plain cdylib build (no wasm
-      # toolchain needed here).
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: web-e2e-served-ext
 
       - name: Install DuckDB-Wasm (tests/web)
         run: npm install --prefix tests/web --no-audit --no-fund
@@ -742,6 +784,22 @@ jobs:
       - name: ::VIEW_PLACEMENT header e2e (#534)
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-placement-e2e.mjs --url http://127.0.0.1:8947/
+
+      # scripts/frames-e2e.mjs (M2f-A, #149): the live ::FRAME player — step,
+      # slider, Play/Pause, reduced motion, zoom + step, as-table, the
+      # export's note, axe, and the perf budget (p95 draw(k) <= 150ms).
+      - name: ::FRAME player e2e (M2f-A, #149)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frames-e2e.mjs --url http://127.0.0.1:8947/ --out /tmp/frames-e2e-shots
+
+      # scripts/frames-export-e2e.mjs (M2f-B, #149): the HTML export embeds
+      # every frame of a time map within budget and rebuilds a swap-only
+      # player offline (no server, no wasm) — step/slider/Play, hover on
+      # the swapped-in marks, shared legend classes, ::FIT, dark mode, a
+      # non-last starting frame, and the over-budget note fallback.
+      - name: ::FRAME export e2e (M2f-B, #149)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frames-export-e2e.mjs --url http://127.0.0.1:8947/
 
       - name: Stop the web/ server
         if: always()

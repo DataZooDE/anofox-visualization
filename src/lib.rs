@@ -792,6 +792,20 @@ pub(crate) fn paint_theme(th: &mut Theme, o: &RenderOptions) {
     paint(&mut th.legend_title, t.chart_text());
     paint(&mut th.legend_text, t.chart_label());
     paint(&mut th.strip_text, t.colors.heading);
+    // #606: `theme.geom.ink` — every geom's `apply_element_geom` hook for
+    // recolouring its own hardcoded default ink (ggplot-rs's generic
+    // "unmapped mark" colour, distinct from the text elements painted
+    // above) reads this, not `th.text`/`th.axis_text_x` etc. A map's own
+    // geoms (`GeomSf`, symbols, …) never rely on this fallback — every one
+    // of their colours is set explicitly in `map::plot::build` — so this
+    // was never missed there. `GeomBivariateLegend`'s two axis captions
+    // are the one geom this crate attaches that DOES rely on it (its own
+    // `text_color` default, `(80, 80, 80)`, only gets replaced by
+    // `apply_element_geom` when `ink` is `Some`): left unset, they stayed
+    // at that fixed mid-grey regardless of theme, barely visible against
+    // a dark card. Same token as `axis_text_x`/`axis_text_y` above —
+    // reads as "ordinary chart text" either way.
+    th.geom.ink = Some(t.chart_text());
 }
 
 /// `.theme(chart_theme(..))` / `.theme(void_theme(..))` as plot builders.
@@ -6600,17 +6614,56 @@ fn markdown_panel_svg(cols: &[Column], width: u32, height: u32, o: &RenderOption
         theme::hex(t.colors.ink)
     );
     let mut y = 22.0;
+    // #601 review S1: a fresh per-panel budget, same as dashboard.rs's own
+    // render_panel_svg — resolves (reads/decodes, builds the href) only as
+    // many of this panel's own block images as the byte cap and its own
+    // height both allow.
+    let mut img_budget = dashboard::MD_IMAGE_BUDGET_BYTES;
     for line in dashboard::markdown_lines(&md, width as f64) {
         if y > height as f64 - 8.0 {
             break;
         }
-        if !line.is_empty() {
-            body.push_str(&format!(
-                "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
-                dashboard::markdown_line_svg(&line)
-            ));
+        match line {
+            dashboard::MdLine::Text(text) => {
+                if !text.is_empty() {
+                    body.push_str(&format!(
+                        "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                        dashboard::markdown_line_svg(&text)
+                    ));
+                }
+                y += dashboard::MD_LINE;
+            }
+            // #524: mirrors dashboard.rs's own render_panel_svg handling of
+            // a block markdown image — resolved lazily, right here, only
+            // now that it's known to actually need drawing (#601 S1).
+            dashboard::MdLine::Image { src, alt } => {
+                let avail_w = width as f64 - 2.0 * pad;
+                match dashboard::md_image(&src, o.asset_root.as_deref(), &mut img_budget) {
+                    Some((href, aspect)) => {
+                        match dashboard::markdown_image_height(
+                            aspect,
+                            avail_w,
+                            height as f64 - y - 8.0,
+                        ) {
+                            Some(ih) => {
+                                body.push_str(&dashboard::markdown_image_svg(
+                                    &href, &alt, pad, y, avail_w, ih,
+                                ));
+                                y += ih + dashboard::MD_IMAGE_GAP; // #601 N5
+                            }
+                            None => break,
+                        }
+                    }
+                    None => {
+                        body.push_str(&format!(
+                            "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                            dashboard::markdown_line_svg(&format!("[{alt}]"))
+                        ));
+                        y += dashboard::MD_LINE;
+                    }
+                }
+            }
         }
-        y += dashboard::MD_LINE;
     }
     body.push_str("</g>");
     Panel::own(width, height, body)
