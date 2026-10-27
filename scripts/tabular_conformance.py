@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Conformance harness: every anofox-tabular result producer → our plots.
 
-anofox_tabular does not take part in the anofox contract yet: no function
-carries `tags['anofox.contract']`, there is no `anofox_contract_version()`.
-Three producers already match a contract schema as they come — `run_checks`
-and `agg_check` follow the `check` schema, `profile_correlations` the
-`matrix` schema — and every other producer needs an adapter. So the
-producers are every `anofox_tab_*` table function (plus anything tagged
-`anofox.contract = '1'`, should upstream start tagging), each with a curated
+anofox_tabular takes part in the anofox contract for a few producers: it
+tags `run_checks` (`check`), `profile_correlations` (`matrix`) and the
+`*_events` variants of the time-aware checks (`events`) with
+`anofox.contract = '1'`, and registers each of them under an unprefixed
+alias too (`run_checks`, `metric_anomaly_iqr_events`, …). Those, and
+`agg_check` (`check` column names), match a contract schema as they come;
+every other producer needs an adapter. So the producers are every
+`anofox_tab_*` table function plus anything tagged `anofox.contract = '1'`
+(an unprefixed alias of an `anofox_tab_*` function is the same producer and
+is not run twice), each with a curated
 recipe: the call on small deterministic tables (duplicates, NULLs, outliers,
 schema drift) and an adapter that reshapes its output into the nearest
 contract schema (summary / events / terms / prediction / check / matrix) or
@@ -18,8 +21,8 @@ Per producer:
   raw      `anofox_plot(t)` on the output as it comes — expected to match no
            schema (XPASS, and fails the run, otherwise: time to tag it and
            add a contract case, as in decide_conformance.py) — except the
-           `NATIVE` producers (`run_checks`, `agg_check`, `profile_correlations`),
-           whose raw output is expected to match its schema already
+           `NATIVE` producers (`run_checks`, `agg_check`, `profile_correlations`,
+           the `*_events` checks), whose raw output is expected to match its schema already
   auto     `anofox_plot(t)` on the adapted table (contract adapters only)
   specific the schema's macro on the adapted table
   generic  a chart macro (`anofox_bar`, `anofox_xyc`, …) for shapes no
@@ -139,6 +142,11 @@ NATIVE: dict[str, str] = {
     "anofox_tab_run_checks": CHECK,
     "anofox_tab_agg_check": CHECK,
     "anofox_tab_profile_correlations": MATRIX,
+    # Tagged `anofox.output = events` upstream: (ds, kind, label, severity,
+    # value, threshold, series), one row per flagged reference date.
+    "anofox_tab_metric_anomaly_iqr_events": EVENTS,
+    "anofox_tab_rel_count_change_events": EVENTS,
+    "anofox_tab_rolling_values_in_set_events": EVENTS,
 }
 
 # Module configuration / status functions: not analysis results, not plotted.
@@ -212,6 +220,11 @@ _rcc = "anofox_tab_rel_count_change('d', 'day', NULL, 7, -0.5, 0.5, {day})"
 recipe("anofox_tab_rel_count_change", per_day(_rcc), EVENTS, events(per_day(_rcc), "row count change", "rel_change", "upper_threshold"))
 _rvs = "anofox_tab_rolling_values_in_set('d', 'status', ['shipped', 'delivered'], 'day', 7, 0.95, {day})"
 recipe("anofox_tab_rolling_values_in_set", per_day(_rvs), EVENTS, events(per_day(_rvs), "status in set", "in_set_rate", "threshold"))
+# ... and their `*_events` variants, which already follow the `events` schema.
+for _f, _c in (("anofox_tab_metric_anomaly_iqr_events", _mai), ("anofox_tab_rel_count_change_events", _rcc),
+               ("anofox_tab_rolling_values_in_set_events", _rvs)):
+    _c = per_day(_c.replace(_f.removesuffix("_events") + "(", _f + "("))
+    recipe(_f, _c, EVENTS, _c)
 
 # Anomaly scores per row: score against the value; the summary modes as summaries.
 recipe("anofox_tab_isolation_forest", "anofox_tab_isolation_forest('d', 'amount', 100, 64, 0.05, 'scores', 42)", GENERIC,
@@ -380,8 +393,11 @@ def main() -> int:
                 "WHERE function_type = 'table' AND (function_name LIKE 'anofox_tab_%' OR function_name = 'anofox_ner_status' "
                 "OR (tags['anofox.contract'] = '1' AND function_name NOT LIKE 'anofox_plot%')) ORDER BY 1")
     rows = [l.split("|") for l in out.splitlines() if l.count("|") == 1]
-    producers = sorted({n for n, _ in rows})
-    tagged = sorted({n for n, t in rows if t == "true"})
+    names_ = {n for n, _ in rows}
+    # `run_checks` is `anofox_tab_run_checks` under its unprefixed alias.
+    aliases = sorted(n for n in names_ if not n.startswith("anofox_") and f"anofox_tab_{n}" in names_)
+    producers = sorted(names_ - set(aliases))
+    tagged = sorted({n for n, t in rows if t == "true" and n in producers})
     results_ = [p for p in producers if p not in NOT_RESULTS]
     print(f"{len(producers)} table functions ({len(results_)} result producers, "
           f"{len(producers) - len(results_)} config/status), {len(tagged)} tagged anofox.contract")
@@ -408,6 +424,8 @@ def main() -> int:
             print(f"{status:4s} {key:48s} {msg}")
     for m in missing:
         print(f"MISS {m}: no recipe in the harness")
+    for n in aliases:
+        print(f"SKIP {n}: alias of anofox_tab_{n}")
     for n in sorted(NOT_RESULTS & set(producers)):
         print(f"SKIP {n}: module configuration / status, not a result")
 

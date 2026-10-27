@@ -560,6 +560,16 @@ fn text(req: Request, status: u16, msg: &str) {
     );
 }
 
+/// A startup line on stdout that never panics: `println!` panics on EPIPE
+/// (Rust ignores SIGPIPE), so a reader that closed its end after the first
+/// line — `serve … | head -1`, a test harness that only parses the URL —
+/// would take the whole server down while it is already accepting
+/// connections, and every queued request would get tiny_http's empty 500.
+fn say(line: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{line}").and_then(|_| out.flush());
+}
+
 /// Run `n` worker threads pulling requests off one server.
 fn run_workers(server: Server, n: usize, handler: impl Fn(Request) + Send + Sync + 'static) {
     let server = Arc::new(server);
@@ -650,9 +660,9 @@ fn authoring_mode(o: &Opts) {
         .as_ref()
         .map(|p: &PathBuf| format!("\n  assets: {}", p.display()))
         .unwrap_or_default();
-    println!(
+    say(&format!(
         "anofox-visualization serving {url}\n  (authoring — client SQL; loopback only; the URL carries this run's token)\n  database: {db}{assets_note}\n  (Ctrl-C to stop)"
-    );
+    ));
     if o.open_browser {
         let _ = open::that(&url);
     }
@@ -1308,7 +1318,7 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
             eprintln!("error: init failed: {e}");
             std::process::exit(1);
         }
-        println!("  init applied: {init}");
+        say(&format!("  init applied: {init}"));
     }
     let dashboards = load_dashboards(Path::new(dir));
     if let Some(h) = &o.home {
@@ -1326,16 +1336,14 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
     } else {
         format!("{}s", o.cache_secs)
     };
-    println!(
+    say(&format!(
         "anofox-visualization serving {} dashboard(s) at http://{addr}/ (read-only; no client SQL; cache: {cache_note})\n  database: {db}\n  dashboards: {dir}\n  (put TLS + auth in front for public use — docs/secure-serving.md)",
         dashboards.len()
-    );
+    ));
     match (&o.auth, sv::is_loopback_bind(&o.bind)) {
         (Some(a), _) => {
-            println!("  login: {}", a.describe());
-            println!(
-                "  no row/column policies here (only anofox_serve_dashboards has them): every panel must filter on getvariable('__claim_*') itself"
-            );
+            say(&format!("  login: {}", a.describe()));
+            say("  no row/column policies here (only anofox_serve_dashboards has them): every panel must filter on getvariable('__claim_*') itself");
             for w in a.prefetch() {
                 eprintln!("  WARNING: {w} — requests fail closed until it is reachable");
             }
