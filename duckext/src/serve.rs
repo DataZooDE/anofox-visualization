@@ -4307,6 +4307,14 @@ fn state_scalar_text(v: &Value) -> String {
 /// (?::BIGINT, ?::TIMESTAMPTZ, ...)` per variable for *that one record* —
 /// the exact cast the pre-#600 code relied on for every row — rather than
 /// failing every panel that reads this generation over one odd record.
+/// Review of #614 R2: `rec.ts_micros` is read here, not recomputed —
+/// `Record::from_json`/`Store::append` already ran `parse_rfc3339_micros`
+/// once, when the record was read off disk or newly appended, and cached
+/// the answer. The slow per-variable `INSERT` fallback itself still runs
+/// again on every cold panel that seeds an odd record (a cold panel's
+/// `viewer_state` is a fresh per-connection `TEMP TABLE`, so there is no
+/// way around re-inserting its rows), but this stops re-running the same
+/// parse — and reaching the same `None` — on every one of those panels.
 ///
 /// `&[Arc<Record>]`, not `&[Record]` (review of #599 SF1): this only ever
 /// reads fields through the `Arc` (auto-deref), so taking the trainer
@@ -4339,8 +4347,10 @@ fn seed_viewer_state(c: &Conn, rows: &[Arc<Record>]) -> Result<(), String> {
     // gets as far as checking whether `viewer_state` exists in it.
     let app = crate::db::Appender::new_in(c, Some("temp"), Some("main"), "viewer_state")?;
     for rec in rows {
-        // #611 N6: parsed once per record, not once per variable.
-        let ts_micros = anofox_visualization::host::access::parse_rfc3339_micros(&rec.ts);
+        // #611 N6 / #614 R2: `rec.ts_micros` was already parsed once,
+        // when this record was loaded or appended — not re-parsed here,
+        // and not re-parsed once per variable either.
+        let ts_micros = rec.ts_micros;
         if ts_micros.is_none() {
             seed_viewer_state_row_via_sql(c, rec)?;
             continue;
@@ -4402,6 +4412,16 @@ fn seed_viewer_state(c: &Conn, rows: &[Arc<Record>]) -> Result<(), String> {
 /// something other than this server's own [`Store::append`]
 /// (`anofox_visualization::host::state::Store::append`); the server
 /// never writes a `ts` this falls back for.
+///
+/// `temp.main.viewer_state` qualified (review of #614 R1), same as
+/// `seed_viewer_state`'s own `Appender::new_in(c, Some("temp"),
+/// Some("main"), …)` just above it — ordinary SQL already resolves an
+/// unqualified `viewer_state` to `temp` first (#548 item 1's own pinned
+/// test), so this was never the #611 N4 bug, but naming it explicitly
+/// here too means a reader never has to go check that resolution order
+/// to see that this inserts into the very `TEMP TABLE`
+/// `viewer_state_setup_statements` just (re)created, not some other
+/// same-named object.
 fn seed_viewer_state_row_via_sql(c: &Conn, rec: &Record) -> Result<(), String> {
     for (name, val) in &rec.vars {
         let mut params: Vec<String> = vec![
@@ -4414,8 +4434,9 @@ fn seed_viewer_state_row_via_sql(c: &Conn, rec: &Record) -> Result<(), String> {
         ];
         let sql = match val {
             Value::Null => {
-                "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, value, \
-                 value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, NULL, NULL)"
+                "INSERT INTO temp.main.viewer_state (seq, ts, \"user\", dashboard, submit, \
+                 name, value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, NULL, \
+                 NULL)"
                     .to_string()
             }
             Value::Array(items) => {
@@ -4432,15 +4453,16 @@ fn seed_viewer_state_row_via_sql(c: &Conn, rec: &Record) -> Result<(), String> {
                     })
                     .collect();
                 format!(
-                    "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, \
-                     value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, [{}])",
+                    "INSERT INTO temp.main.viewer_state (seq, ts, \"user\", dashboard, submit, \
+                     name, value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, \
+                     [{}])",
                     tokens.join(", ")
                 )
             }
             other => {
                 params.push(state_scalar_text(other));
-                "INSERT INTO viewer_state (seq, ts, \"user\", dashboard, submit, name, value, \
-                 value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, NULL)"
+                "INSERT INTO temp.main.viewer_state (seq, ts, \"user\", dashboard, submit, \
+                 name, value, value_list) VALUES (?::BIGINT, ?::TIMESTAMPTZ, ?, ?, ?, ?, ?, NULL)"
                     .to_string()
             }
         };

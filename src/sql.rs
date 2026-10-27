@@ -1100,6 +1100,31 @@ fn rewrite_list(list: &str) -> Rewritten {
                     }
                     format!("{core} AS c{i}")
                 }
+                // #624: `region ::MAP, sales ::CHOROPLETH` — a second,
+                // numeric `::MAP`/`::GEOMETRY`/`::GEO`/`::CHOROPLETH`
+                // column is the documented shorthand for a map's fill
+                // measure (`measure_of`, `src/map/mod.rs`): at Rust level
+                // it reclassifies that column from `Role::Geometry` to a
+                // real `Role::Value(Kind::Bar)`, keeping `c.name` as-is —
+                // by then the original SQL text is long gone, so the
+                // human name has to be captured here, at rewrite time, or
+                // not at all (a bivariate legend naming both its measures
+                // needs this one the same way it already gets the
+                // `::BIVARIATE` column's own name, `#606`). The *real*
+                // geometry column (`region ::MAP`) gets a captured name
+                // too — the two aren't distinguishable until `measure_of`
+                // looks at the actual values — but nothing reads a
+                // geometry column's own `.name`, so that's inert. Not
+                // cast to DOUBLE, unlike the shared `Role::Value(_)` arm
+                // below: the real geometry column is WKT text, not a
+                // number, and would error on every row if it were.
+                Role::Geometry => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 Role::Value(_)
                 | Role::Metric(_)
                 | Role::Delta
@@ -1285,6 +1310,40 @@ mod alias_tests {
         // Nested CAST(.. AS ..) must not be mistaken for a trailing alias.
         let (s4, _, _) = rewrite("SELECT ds ::XAXIS, CAST(y AS INT) ::LINECHART FROM d");
         assert!(s4.contains("CAST(CAST(y AS INT) AS DOUBLE) AS c1"), "{s4}");
+    }
+
+    // #624: `region ::MAP, sales ::CHOROPLETH` — the documented shorthand
+    // for a map's fill measure (`measure_of`, `src/map/mod.rs`) — keeps
+    // its own human name too, the same as a `::BIVARIATE` column already
+    // does (#606): a bivariate legend naming both its measures needs the
+    // *first* one's real name, not just the second's, and by the time
+    // `measure_of` reclassifies this column from `Role::Geometry` to the
+    // real `Role::Value(Kind::Bar)` the original SQL text is gone, so the
+    // name has to survive the rewrite, not be recovered after it.
+    #[test]
+    fn a_second_geometry_column_used_as_the_fill_measure_keeps_its_name() {
+        let (s, roles, n) =
+            rewrite("SELECT geo ::MAP, sales ::CHOROPLETH, share ::BIVARIATE FROM t");
+        // Neither geometry column is cast to DOUBLE — `sales` may still
+        // resolve to real WKT text at Rust level (`measure_of` is the one
+        // that checks), and the *other* one always is.
+        assert!(s.contains("geo AS c0") && s.contains("sales AS c1"), "{s}");
+        assert_eq!(
+            roles,
+            vec![
+                (0, Role::Geometry),
+                (1, Role::Geometry),
+                (2, Role::Bivariate)
+            ]
+        );
+        assert_eq!(
+            n,
+            vec![
+                (0, "geo".to_string()),
+                (1, "sales".to_string()),
+                (2, "share".to_string())
+            ]
+        );
     }
 }
 
