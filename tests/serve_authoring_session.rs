@@ -101,6 +101,9 @@ fn spawn(scratch: &Scratch, extra: &[&str], envs: &[(&str, &str)]) -> (Kill, u16
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     out.read_line(&mut line).unwrap();
+    // Keep reading: the rest of serve's banner is still on its way, and
+    // closing this end makes those writes fail with EPIPE (#613).
+    std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
     let port: u16 = line
         .split("127.0.0.1:")
         .nth(1)
