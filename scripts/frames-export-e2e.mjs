@@ -109,6 +109,23 @@ async function run() {
   const titleAfter = await subtitleOf(op);
   check(titleBefore !== titleAfter, `export: the subtitle changed on step (before "${titleBefore}", after "${titleAfter}")`);
   const fillAfter = await op.evaluate(() => document.querySelector(".dash svg[data-frames] path[data-x]")?.getAttribute("fill"));
+
+  // #610: no chart in the offline copy announces keyboard navigation it
+  // doesn't have, and the swapped-in frame carries its own summary as the
+  // frame on screen at export time did (attachChartA11y()'s "Map: …; …").
+  const a11y = await op.evaluate(() => {
+    const svg = document.querySelector(".dash svg[data-frames]");
+    const title = svg.closest(".panel").querySelector(".panel-title")?.textContent.trim() || "";
+    return {
+      groups: document.querySelectorAll('.dash svg[role="group"], .dash svg[aria-description], .dash svg[tabindex]').length,
+      role: svg.getAttribute("role"),
+      label: svg.getAttribute("aria-label") || "",
+      want: "Map" + (title ? ": " + title : "") + "; " + svg.getAttribute("data-summary"),
+      desc: svg.querySelector(":scope > desc")?.textContent || "",
+    };
+  });
+  check(a11y.groups === 0, `export: no chart claims arrow-key navigation offline (${a11y.groups} found)`);
+  check(a11y.role === "img" && a11y.label === a11y.want && a11y.desc === a11y.want, `export: the swapped-in frame is labelled with its own summary (${JSON.stringify(a11y)})`);
   check(fillBefore !== fillAfter || titleBefore !== titleAfter, "export: the swap actually replaced the map's own markup, not a no-op");
 
   // The legend's class boundaries (D21) must still be the shared ones
