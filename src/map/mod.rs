@@ -747,7 +747,15 @@ impl<'a> Model<'a> {
             .collect();
         // ::HEXBIN (M2c) takes over the point pass entirely — no graduated
         // symbols alongside it (::SIZE is ignored when both are present).
-        let hexbin = hexbin::of(cols, &proj, present);
+        let hexbin = hexbin::of(
+            cols,
+            &proj,
+            present,
+            match shared {
+                Some(s) if !s.hex_points.is_empty() => hexbin::Grid::Over(&s.hex_points),
+                _ => hexbin::Grid::Own,
+            },
+        );
         let symbols = if hexbin.is_none() {
             symbols::of(cols, &features)
         } else {

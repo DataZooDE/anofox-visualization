@@ -616,6 +616,13 @@ pub(super) fn build(
         }
         p
     } else if !any_feature_geometry {
+        // #608: one row is enough for a base that draws nothing — every
+        // row is `Na` here, and ggplot-rs still trained on all of them: a
+        // 100,000-point hexbin spent ~650 ms of its ~750 ms render on it.
+        let mut features_df = features_df;
+        for (_, v) in features_df.iter_mut() {
+            v.truncate(1);
+        }
         GGPlot::new(features_df).aes(features_aes)
     } else {
         GGPlot::new(features_df)
