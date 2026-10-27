@@ -2456,8 +2456,12 @@ async function boot() {
     else markActive();
   }
   if (curDash && !servedSql && !hashSql) rememberDash(curDash);
+  // #603: both ship `disabled` in index.html, so a click during boot (before
+  // these handlers exist) can't be silently lost; enabled once wired.
   $("share").onclick = shareLink;
+  $("share").disabled = false;
   $("dlhtml").onclick = downloadHtml;
+  syncDlhtmlDisabled();
   // #401: the "Charts as tables" toggle lives in the toolbar's ⋯ menu so a
   // screen-reader / keyboard viewer can turn it on even on a dashboard whose
   // header never shows the in-page bar (that bar is author/install-opt-in —
