@@ -3,7 +3,7 @@
 // example (delivery-coverage → On time → Week by week, 15 states × 12 weeks)
 // through the bar: step, slider, Play/Pause, reduced motion, zoom + step,
 // as-table, the export's note, axe, and the perf budget (p95 draw(k) ≤ 150ms
-// at 1200px, plan §M2f-A).
+// at 1200px, plan §M2f-A); and #663: ::FRAME on a bar chart.
 //
 //   cargo build --lib --target wasm32-unknown-unknown --profile wasm --no-default-features --features wasm
 //   wasm-bindgen --target web --out-dir web/pkg <target>/wasm32-unknown-unknown/wasm/anofox_visualization.wasm
@@ -242,3 +242,39 @@ async function exportNote() {
 for (const [theme, width] of [["light", 1200], ["dark", 1200], ["light", 390]]) await run(theme, width);
 await perfGate();
 await exportNote();
+
+// #663: ::FRAME on a bar chart — the same player, one frame's bars on axes
+// that span every frame
+async function chartFrames() {
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  const errs = [];
+  page.on("pageerror", (e) => errs.push(String(e)));
+  const sql = `SELECT region ::XAXIS, units AS "Units" ::BARCHART, year AS "Year" ::FRAME, 'Units by region'::TITLE
+FROM (VALUES ('North',2020,10),('South',2020,30),('North',2021,25),('East',2021,40),('North',2022,60),('South',2022,20)) t(region,year,units);`;
+  await page.goto(`${base}?embed=1#sql=${b64(sql)}`);
+  await page.waitForSelector(".dash .dp-frames", { timeout: 120000 });
+  const state = () =>
+    page.evaluate(() => {
+      const svg = document.querySelector(".dash .panel-svg > svg");
+      return {
+        pos: document.querySelector(".dash .dp-frames-pos")?.textContent.trim(),
+        dom: svg?.getAttribute("data-ydomain"),
+        levels: svg?.getAttribute("data-xlevels"),
+        values: [...(svg?.querySelectorAll("rect[data-value]") || [])].map((r) => r.getAttribute("data-value")),
+      };
+    });
+  const last = await state();
+  if (!/2022 · 3 of 3/.test(last.pos || "")) fail(`chartFrames: starts on "${last.pos}"`);
+  await page.click(".dash .dp-frames-prev");
+  await page.click(".dash .dp-frames-prev");
+  await page.waitForTimeout(600);
+  const first = await state();
+  if (!/2020 · 1 of 3/.test(first.pos || "")) fail(`chartFrames: after two steps back "${first.pos}"`);
+  else if (JSON.stringify(first.values) !== JSON.stringify(["10", "30"])) fail(`chartFrames: frame 2020 draws ${JSON.stringify(first.values)}`);
+  else if (first.dom !== last.dom || first.levels !== last.levels) fail(`chartFrames: axes moved (${first.dom} vs ${last.dom}, ${first.levels} vs ${last.levels})`);
+  else ok(`chartFrames: a bar chart steps through its frames on fixed axes (${first.dom}; ${first.levels})`);
+  if (errs.length) fail(`chartFrames: page errors: ${errs.join(" | ")}`);
+  await browser.close();
+}
+await chartFrames();

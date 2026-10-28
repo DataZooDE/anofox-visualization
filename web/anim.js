@@ -621,7 +621,7 @@ export function animKit(win) {
     const flush = () => {
       raf = 0;
       if (target === k) return;
-      const old = svg.hasAttribute("data-map") ? geom(svg) : null;
+      const old = geom(svg); // a map's fills, or a chart's bars/points/lines (#663)
       k = target;
       const fresh = draw(k);
       if (fresh) {

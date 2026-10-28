@@ -132,7 +132,7 @@ terminal.
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'… |
-| `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT |
+| `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%a %H:%M' |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::XBREAKS` | `::X_BREAKS` | modifier | explicit x-axis tick positions, in data units — '100,1000,10000'; overrides the automatic ticks (and, under ::XSCALE, their log/sqrt round-number placement) |
@@ -151,7 +151,7 @@ terminal.
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis) |
-| `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes and sizes; static output shows the last frame |
+| `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's (or a bar/line/area/scatter chart's) frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes, sizes and axes; static output shows the last frame |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -578,6 +578,7 @@ Roles for model output — coefficient forests, residual diagnostics, CV curves:
 | straight lines | `'0.5,1'::ABLINE`, `1::IDENTITY` | `y = 0.5x + 1` (one per distinct value); `y = x` dashed grey — both drawn across the data box |
 | small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x) and stacks the panels in one column unless `::FACET_NCOL` is set |
 | axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
+| date tick labels | `'%H:%M'::XFORMAT`, `'%-d %b'::XFORMAT` | on a DATE/TIMESTAMP x, a value with `%` is a strftime pattern (`%Y %y %m %-m %b %B %d %-d %e %a %A %H %M %S`; names follow `::LOCALE`): a time-of-day profile reads `06:00`, not `1 Jan 2000 06:00`; any other `::XFORMAT` stays a number format |
 | axis titles | `'Residual load (GW)'::XTITLE`, `'Price (EUR/MWh)'::YTITLE` | what the axes are; the x title names the `::XAXIS` variable, so on a `::FLIP` chart it's drawn beside the (now vertical) category axis; none on pies, gauges, maps |
 | label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|); overlapping labels are skipped. `::LABEL` is then per-point text, not the chart title |
 | trend method | `y::SMOOTH, 'lm'::SMOOTH_METHOD` | `'loess'` (default), `'lm'`, `'gam'` (penalised spline, λ by GCV), `'glm'` (= Gaussian lm) |
@@ -1649,9 +1650,18 @@ dashboard".
   (`map/too-many-frames`); over 100,000 feature × frame cells, the last
   frames that fit are kept (`map/frame-cells`) — aggregate to a coarser
   period instead.
-- **Maps only:** `::FRAME` on any other chart kind is ignored
-  (`frame/not-a-map`; the generic bar/line frame player is a follow-up).
-  `::STORY` is ignored on a frame map (`map/frame-story`) — Play already
+- **Charts too (#663):** on a bar, stacked bar, line, area or scatter chart
+  with an `::XAXIS`, `::FRAME` plays the same way: one frame's rows at a
+  time, named in the subtitle, on axes that span **every** frame (the y
+  range, a stacked bar's tallest total, and a category axis keeps every
+  frame's levels in order), so bars and lines move instead of the axes.
+  On any other kind it's ignored (`frame/not-a-map`).
+
+  ```sql
+  SELECT region ::XAXIS, units AS "Units" ::BARCHART, year AS "Year" ::FRAME
+  FROM sales_by_region_year;
+  ```
+- `::STORY` is ignored on a frame map (`map/frame-story`) — Play already
   steps through the frames. WKT geometry repeated per frame over 5 MB
   total gets a note (`map/frame-wkt`) to join a `::REGION` code or one
   geometry table instead.
