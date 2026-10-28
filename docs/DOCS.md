@@ -181,6 +181,7 @@ terminal.
 | `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::MARKDOWN_STYLE` | `::MD_STYLE` | kpi | a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style |
+| `::MARKDOWN_TONE` | `::MD_TONE` | kpi | a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; implies 'card' |
 | `::IMAGE` | `::PICTURE`, `::IMG` | kpi | a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption |
 | `::IMAGE_DARK` | `::IMG_DARK` | kpi | the ::IMAGE shown while the dashboard is dark |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
@@ -2093,6 +2094,39 @@ wins, so the callout's tint, bar and icon are dropped. `--check` also warns
 on an unknown value (`markdown_style/unknown`) or a `::MARKDOWN_STYLE` without
 `::MARKDOWN` text (`markdown_style/no-text`). Browser, `--svg` and other
 static/HTML output all draw the same choice.
+
+### Quiet tones on a card (`::MARKDOWN_TONE`)
+
+On a teaching or reference page, explanation, worked example, good practice,
+limits and formulas all look alike as plain cards. `::MARKDOWN_TONE` (#659)
+gives a `'card'` box a thin coloured bar on its left edge and a small label
+above the text — no tint, so it never reads as an alert:
+
+```sql
+SELECT 'A worked example: 120 orders, 9 of them late.'::MARKDOWN,
+       'example'::MARKDOWN_TONE;
+SELECT 'What it cannot tell you: *why* the input moved.'::MARKDOWN,
+       'caution: Grenzen'::MARKDOWN_TONE;   -- your own label after the colon
+```
+
+| Tone | For | Accent |
+|---|---|---|
+| `neutral` | explanation | none (a plain card) |
+| `info` | background, "why" | the theme's info colour (blue) |
+| `example` | a worked example | violet |
+| `tip` | good practice | the theme's positive colour (green) |
+| `caution` | limits, "what it can't tell you" | the theme's warning colour (amber — not an alert's red) |
+| `details` | formulas, technical details | muted grey |
+
+The label is the tone's name (`Info`, `Example`, `Tip`, `Caution`,
+`Details`); `'tone: label'` sets your own (e.g. in German), `'tone:'` drops it.
+A tone implies `'card'`, even over a `-- @markdown_style` default; next to an
+explicit `'plain'`/`'callout'` style or a `::CALLOUT` it is dropped (a lint
+warning, `markdown_tone/ignored`). An unknown tone is an error
+(`markdown_tone/unknown`). The bar is drawn in `--svg` and the other
+static/HTML output too; the label in the browser and the HTML pages. Colours
+are theme tokens (`--ax-tone-info`, `--ax-tone-example`, `--ax-tone-tip`,
+`--ax-tone-caution`, `--ax-tone-details`), light and dark.
 
 ### Images (`::IMAGE`, `![alt](src)`)
 

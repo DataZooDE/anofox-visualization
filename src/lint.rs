@@ -92,6 +92,8 @@ pub struct Diagnostic {
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
     /// `folder/setup-table` (a setup `CREATE TABLE … AS`, rebuilt on every
     /// new server connection when served).
+    /// `::MARKDOWN_TONE` (#659): `markdown_tone/unknown` (an error) |
+    /// `markdown_tone/no-text` | `markdown_tone/ignored` (warnings).
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
@@ -1276,6 +1278,64 @@ where
                         "::CALLOUT together with '{v}'::MARKDOWN_STYLE — the explicit style wins, \
                          so ::CALLOUT's tint, bar and icon are dropped (drop ::CALLOUT, or set \
                          ::MARKDOWN_STYLE to 'callout')"
+                    ),
+                );
+            }
+        }
+
+        // ::MARKDOWN_TONE (#659): an unknown tone is an error (it would draw
+        // no accent at all); it needs a ::MARKDOWN column; and next to an
+        // explicit 'plain'/'callout' style or a ::CALLOUT it is dropped.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::MarkdownTone) {
+            let v = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut push = |severity, code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if crate::roles::markdown_tone_of(&v).is_none() {
+                push(
+                    Severity::Error,
+                    "markdown_tone/unknown",
+                    format!(
+                        "::MARKDOWN_TONE `{v}` — use one of {} (optionally 'tone: label')",
+                        crate::roles::MARKDOWN_TONE_KINDS.join(", ")
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                push(
+                    Severity::Warning,
+                    "markdown_tone/no-text",
+                    "::MARKDOWN_TONE needs a ::MARKDOWN column in the same SELECT".into(),
+                );
+            }
+            let style = p
+                .roles
+                .iter()
+                .find(|(_, r)| *r == Role::MarkdownStyle)
+                .and_then(|(j, _)| rows.first()?.values().nth(*j)?.as_str())
+                .and_then(crate::roles::markdown_style_of);
+            let callout = p.roles.iter().any(|(_, r)| *r == Role::Callout);
+            if matches!(style, Some("plain" | "callout")) || (style.is_none() && callout) {
+                push(
+                    Severity::Warning,
+                    "markdown_tone/ignored",
+                    format!(
+                        "::MARKDOWN_TONE only applies to a 'card' box — here {} wins and the \
+                         tone is dropped (drop it, or use 'card'::MARKDOWN_STYLE)",
+                        style.map_or("::CALLOUT".to_string(), |s| format!(
+                            "'{s}'::MARKDOWN_STYLE"
+                        ))
                     ),
                 );
             }
@@ -9760,6 +9820,51 @@ mod design_tests {
         assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
         let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
         assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    /// #659: an unknown ::MARKDOWN_TONE is an error; a tone beside a
+    /// 'plain'/'callout' style or a ::CALLOUT is dropped (a warning).
+    #[test]
+    fn markdown_tone_is_checked() {
+        let row =
+            |cells: serde_json::Value| move |_q: &str| Ok(vec![cells.as_object().unwrap().clone()]);
+        let codes = |d: &[Diagnostic]| -> Vec<&'static str> {
+            d.iter()
+                .map(|x| x.code)
+                .filter(|c| c.starts_with("markdown_tone/"))
+                .collect()
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'example: Beispiel'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "example: Beispiel" })),
+        );
+        assert!(codes(&d).is_empty(), "{d:?}");
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'warning'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "warning" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/unknown"], "{d:?}");
+        assert!(!passes(&d, false));
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "plain", "c2": "tip" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/ignored"], "{d:?}");
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'note'::CALLOUT, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "note", "c2": "tip" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/ignored"], "{d:?}");
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'card'::MARKDOWN_STYLE, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "card", "c2": "tip" })),
+        );
+        assert!(codes(&d).is_empty(), "{d:?}");
+        let d = check(
+            "SELECT 'x'::TEXT_SMALL, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "tip" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/no-text"], "{d:?}");
     }
 
     #[test]
