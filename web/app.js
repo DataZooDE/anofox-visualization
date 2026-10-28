@@ -12811,14 +12811,15 @@ function refocus(key, el) {
   // element can't take focus) with nothing left to retry — looked like a
   // retry loop but only ever tried once in practice. `el.offsetParent !==
   // null` is the real "can this actually take focus right now?" check;
-  // keep polling every frame (same 120-frame, ~2s cap) until it's true,
-  // giving whatever async work is still relocating/revealing it a real
-  // chance to finish first.
-  let tries = 0;
+  // keep polling every frame until it's true, giving whatever async work is
+  // still relocating/revealing it a real chance to finish first. #671: the
+  // cap is 5 s of wall time, not 120 frames — a slow lazy render on a busy
+  // machine outlasted ~2 s.
+  const until = performance.now() + 5000;
   const go = () =>
     el.isConnected && el.offsetParent !== null
       ? el.focus()
-      : ++tries < 120 && requestAnimationFrame(go);
+      : performance.now() < until && requestAnimationFrame(go);
   requestAnimationFrame(go);
 }
 // A ::BUTTONS input: a segmented radio group (one pressed button). Arrow keys
