@@ -37,6 +37,12 @@ function fakeEl() {
     querySelectorAll() {
       return [];
     },
+    querySelector() {
+      return null;
+    },
+    matches() {
+      return false;
+    },
     addEventListener(type, fn) {
       listeners[type] = fn;
     },

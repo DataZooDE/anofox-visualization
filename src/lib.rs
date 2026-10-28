@@ -23,6 +23,7 @@ pub use ggplot_rs::prelude::Value;
 use ggplot_rs::prelude::*;
 
 mod boxstats;
+mod chart_frames;
 pub mod contract;
 pub mod dashboard;
 pub mod diagram;
@@ -926,6 +927,10 @@ pub struct RenderOptions {
     /// stepped-to index here, like `zoom` passes its window. Ignored by
     /// every other chart kind.
     pub frame: Option<usize>,
+    /// A framed bar/line/area/point chart's axes over every frame (#663),
+    /// set by the render itself (`chart_frames::prepare`), never by a caller.
+    #[doc(hidden)]
+    pub frame_axes: Option<std::sync::Arc<chart_frames::ChartFrameAxes>>,
 }
 
 impl Default for RenderOptions {
@@ -940,6 +945,7 @@ impl Default for RenderOptions {
             record_warnings: true,
             asset_root: None,
             frame: None,
+            frame_axes: None,
         }
     }
 }
@@ -1712,6 +1718,36 @@ impl Panel {
         self
     }
 
+    /// A framed chart (#663): the frame named in the subtitle (static output
+    /// shows the last, D19) and the root attributes the browser's player
+    /// reads — the same `data-frames`/`data-frame`/`data-frame-name` a time
+    /// map carries.
+    pub(crate) fn with_frame(mut self, frame: Option<&chart_frames::ChartFrame>) -> Panel {
+        let Some(f) = frame else {
+            return self;
+        };
+        let extra = [
+            (
+                "data-frames",
+                serde_json::to_string(&f.labels).unwrap_or_default(),
+            ),
+            ("data-frame", f.k.to_string()),
+            ("data-frame-name", f.name.clone()),
+        ];
+        match &mut self {
+            Panel::Plot { plot, attrs, .. } => {
+                let p = std::mem::replace(
+                    plot.as_mut(),
+                    GGPlot::new(Vec::<(String, Vec<Value>)>::new()),
+                );
+                **plot = p.subtitle(&format!("{}: {}", f.name, f.labels[f.k]));
+                attrs.extend(extra);
+            }
+            Panel::Own { attrs, .. } => attrs.extend(extra),
+        }
+        self
+    }
+
     /// Write the panel at `place`: the SVG plus the plotting engine's build
     /// warnings (rows dropped for non-finite values, empty layers, …).
     pub(crate) fn finish(self, place: Place) -> Result<(String, Vec<String>), String> {
@@ -1904,11 +1940,19 @@ fn render_placed(
             let svg = diagram::render(&d, place, w, h, o);
             return Ok((o.theme.finish_svg(o.theme.with_font(svg)), Vec::new()));
         }
+        // `::FRAME` on a bar/line/area/point chart (#663): one frame's rows,
+        // on every frame's axes
+        let framed = chart_frames::prepare(cols, o);
+        let (cols, o, frame) = match &framed {
+            Some((view, o2, f)) => (view.as_slice(), o2, Some(f)),
+            None => (cols, o, None),
+        };
         let cols = downsample::prepare(cols, o);
         let cols = boxstats::prepare(cols).map_err(RenderError::Render)?;
         let (svg, warnings) = render_inner(&cols, w, h, o)
             .map(|p| p.localized(o, &cols))
             .map(|p| p.with_motion_attrs(&cols))
+            .map(|p| p.with_frame(frame))
             .and_then(|p| p.finish(place))
             .map_err(RenderError::Render)?;
         Ok((finish_touches(svg, &cols, o), warnings))
@@ -3878,6 +3922,19 @@ fn cartesian(
     let y_tr = role_str(cols, Role::YScale)
         .map(|s| axis_transform(&s, Role::YScale))
         .transpose()?;
+    // #663: a framed chart's axes span every frame — a layer that draws
+    // nothing, with every frame's extreme points
+    if let Some(ax) = &o.frame_axes {
+        if !ax.x.is_empty() {
+            plot = plot
+                .geom_blank()
+                .layer_data(vec![
+                    ("x".to_string(), ax.x.clone()),
+                    ("y".to_string(), ax.y.clone()),
+                ])
+                .layer_aes(Aes::new().x("x").y("y"));
+        }
+    }
     // `::YBREAKS` is given in the axis's own (pre-transform) data units —
     // e.g. `'100,1000,10000'` under `'log10'::YSCALE` — so it's
     // forward-transformed the same way the scale itself transforms data,
@@ -3909,6 +3966,13 @@ fn cartesian(
     }
     // An x formatter/transform only makes sense on a continuous x (numeric/date),
     // not on the discrete category axis of a bar chart.
+    // #663: a framed chart keeps every frame's levels, in order
+    let x_levels = o
+        .frame_axes
+        .as_ref()
+        .and_then(|a| a.x_levels.clone())
+        .filter(|_| x_discrete)
+        .or(x_levels);
     if let Some(levels) = &x_levels {
         plot = plot.scale_x_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),

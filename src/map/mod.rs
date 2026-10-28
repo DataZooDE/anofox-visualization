@@ -42,6 +42,7 @@ mod facets;
 mod fill;
 mod flows;
 mod frames;
+pub(crate) use frames::frame_order;
 pub(crate) mod hexbin;
 mod labels;
 mod legend;
