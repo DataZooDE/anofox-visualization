@@ -123,6 +123,7 @@ async function record(tabSwitch = false) {
       R.frames.push({
         t: performance.now() - R.t0,
         y: scrollY,
+        maxY: Math.max(0, document.documentElement.scrollHeight - innerHeight),
         skel: document.querySelectorAll(".dash .dp-skel").length,
         pending: document.querySelectorAll(".dash .dp-pending").length,
         vis: vis.length,
@@ -186,7 +187,9 @@ async function stable(label, opts = {}) {
       blankFrames: R.frames.filter((f) => f.vis === 0).length,
       frames: R.frames.length,
       minWatchRatio: R.watchH ? Math.min(...R.frames.map((f) => f.watchH)) / R.watchH : 1,
-      scrollJump: Math.max(0, ...R.frames.map((f) => Math.abs(f.y - R.y0))),
+      // A page that got shorter than the start offset clamps the scroll
+      // (#656: City detail is barely taller than the viewport) — not a jump.
+      scrollJump: Math.max(0, ...R.frames.map((f) => Math.abs(f.y - Math.min(R.y0, f.maxY)))),
       entrance: R.entrance,
       before: R.before.length,
       kept: kept.length,
