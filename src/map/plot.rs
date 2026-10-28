@@ -57,6 +57,7 @@ pub(super) type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 /// sipemu/ggplot-rs#250 — [`foot_of`]'s own line list, reused rather than
 /// duplicated, since "does this map need a footer, and how many lines"
 /// already depends on pack layers *and* the projection/span).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build(
     o: &RenderOptions,
     cols: &[Column],
@@ -1223,10 +1224,10 @@ pub(super) fn build(
         .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
         .theme(theme);
     if let Some(fc) = facet {
-        let ncol = fc
-            .ncol
-            .unwrap_or_else(|| facet_ncol(fc.levels.len(), (y1 - y0) / (x1 - x0), w));
-        plot = plot.facet_wrap("facet", Some(ncol));
+        // `::FACET_NCOL`, else ggplot-rs picks the column count that gives
+        // the largest maps in the area actually drawn (`fit_grid`); the
+        // browser sized the panel by the same maps' natural height.
+        plot = plot.facet_wrap("facet", fc.ncol);
     }
     // A discrete legend (`Fill::Category`, or a classed `Fill::Measure` —
     // `ScaleFillBinned::is_discrete()` is also `true`) goes at

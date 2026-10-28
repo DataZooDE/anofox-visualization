@@ -743,6 +743,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/map-tools-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/map-facets-e2e.mjs (M3a-1, #644): ::FACET on a map — one map
+      # per value in one panel, hover across maps, a shared zoom, charts as
+      # tables naming the map, fewer columns at 390 px.
+      - name: Map small multiples e2e (::FACET on a map, #644)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/map-facets-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/sparkbar-e2e.mjs (#425, 50px-floor follow-up #457): a
       # table's ::SPARKBAR cell draws through the wasm render_cell export
       # (ggplot-rs marks, not hand-written SVG, #453 review) for both the
