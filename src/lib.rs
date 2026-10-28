@@ -3394,6 +3394,7 @@ fn cartesian(
                 .geom_ribbon_with(GeomRibbon {
                     fill: band_color,
                     alpha: fan_alpha(if multi_band { 0.18 } else { 0.25 }),
+                    ..Default::default()
                 })
                 .layer_data(subset(&data, &rows))
                 .layer_aes(aes);
@@ -5677,7 +5678,11 @@ fn render_sparkline(
 
     let plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y"))
-        .geom_ribbon_with(GeomRibbon { fill, alpha: 0.55 })
+        .geom_ribbon_with(GeomRibbon {
+            fill,
+            alpha: 0.55,
+            ..Default::default()
+        })
         .layer_data(band)
         .layer_aes(Aes::new().x("x").ymin("ymin").ymax("ymax"))
         .geom_line_with(GeomLine {
