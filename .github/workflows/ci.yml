@@ -735,6 +735,14 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/map-spark-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/map-tools-e2e.mjs (M3d, #643): wheel zoom about the pointer
+      # (data-viewport), double-click zoom-to-feature / reset, the reset
+      # chip, zoom to selection, find a place, + − 0 keys, zoom limits,
+      # a ::SYNC_ZOOM partner.
+      - name: Map zoom tools e2e (#643)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/map-tools-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/sparkbar-e2e.mjs (#425, 50px-floor follow-up #457): a
       # table's ::SPARKBAR cell draws through the wasm render_cell export
       # (ggplot-rs marks, not hand-written SVG, #453 review) for both the
