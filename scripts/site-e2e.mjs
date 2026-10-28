@@ -246,8 +246,12 @@ try {
   // ── 4. a hard reload of /d/<id>/ lands on the right dashboard ──
   const p2 = await openPage(BASE + "d/by-product/");
   await p2.waitForSelector(".dash .panel", { timeout: 60000 });
-  const title2 = await p2.$eval(".dash", (el) => el.textContent).catch(() => "");
-  check(/Units per product|north|south|east/.test(title2), "a hard reload of /d/by-product/ loads the right dashboard");
+  // #675: the first panel can be there before the table has rendered
+  const loaded = await p2
+    .waitForFunction(() => /Units per product|north|south|east/.test(document.querySelector(".dash")?.textContent || ""), null, { timeout: 30000 })
+    .then(() => true)
+    .catch(() => false);
+  check(loaded, "a hard reload of /d/by-product/ loads the right dashboard");
   check((await p2.$$('.served-nav a[data-nav-id="by-product"].active')).length === 1, "the reloaded page's own nav shows it as active");
 
   // ── 5. S2: a `../x` path_vars value is dropped, never applied ──
