@@ -149,7 +149,7 @@ terminal.
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis) |
-| `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes and sizes; static output shows the last frame |
+| `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's (or a bar/line/area/scatter chart's) frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes, sizes and axes; static output shows the last frame |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
@@ -1647,9 +1647,18 @@ dashboard".
   (`map/too-many-frames`); over 100,000 feature × frame cells, the last
   frames that fit are kept (`map/frame-cells`) — aggregate to a coarser
   period instead.
-- **Maps only:** `::FRAME` on any other chart kind is ignored
-  (`frame/not-a-map`; the generic bar/line frame player is a follow-up).
-  `::STORY` is ignored on a frame map (`map/frame-story`) — Play already
+- **Charts too (#663):** on a bar, stacked bar, line, area or scatter chart
+  with an `::XAXIS`, `::FRAME` plays the same way: one frame's rows at a
+  time, named in the subtitle, on axes that span **every** frame (the y
+  range, a stacked bar's tallest total, and a category axis keeps every
+  frame's levels in order), so bars and lines move instead of the axes.
+  On any other kind it's ignored (`frame/not-a-map`).
+
+  ```sql
+  SELECT region ::XAXIS, units AS "Units" ::BARCHART, year AS "Year" ::FRAME
+  FROM sales_by_region_year;
+  ```
+- `::STORY` is ignored on a frame map (`map/frame-story`) — Play already
   steps through the frames. WKT geometry repeated per frame over 5 MB
   total gets a note (`map/frame-wkt`) to join a `::REGION` code or one
   geometry table instead.
