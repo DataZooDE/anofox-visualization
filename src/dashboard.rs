@@ -317,6 +317,8 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
                     | Role::View
                     | Role::GroupStart
                     | Role::GroupEnd
+                    | Role::FigureStart
+                    | Role::FigureEnd
                     | Role::GuideStep
             )
         });
@@ -504,7 +506,7 @@ fn render_inner(
         // ::GROUP / ::ENDGROUP (#405): kept only so compact_flags can read a
         // box's ::KPI_SIZE; neither draws anything here (no box: the static
         // renderer packs a run of tiles directly into a strip).
-        if has(&|r| matches!(r, Role::GroupStart | Role::GroupEnd)) {
+        if has(&|r| matches!(r, Role::GroupStart | Role::GroupEnd | Role::FigureEnd)) {
             continue;
         }
         // Directives that don't render a box.
@@ -592,6 +594,86 @@ fn render_inner(
                 row_units += span;
                 row_h = row_h.max(ch);
             }
+            continue;
+        }
+
+        // A ::FIGURE (#661): the charts up to its ::ENDFIGURE are composed
+        // into one picture in one card (crate::figure), titled by the
+        // ::FIGURE value.
+        if has(&|r| matches!(r, Role::FigureStart)) {
+            let mut cells = Vec::new();
+            let mut j = si + 1;
+            while let Some(st) = steps.get(j) {
+                consumed.insert(j);
+                j += 1;
+                let r = &st.panel.roles;
+                if r.iter().any(|(_, r)| *r == Role::FigureEnd) {
+                    break;
+                }
+                if r.iter().any(|(_, r)| *r == Role::FigureStart) {
+                    consumed.remove(&(j - 1));
+                    break;
+                }
+                if roles::is_directive_panel(r) {
+                    continue;
+                }
+                cells.push(crate::figure::Cell {
+                    name: st.panel.name.clone(),
+                    cols: st
+                        .rows
+                        .as_ref()
+                        .map(|rows| columns_from_result(rows, r))
+                        .unwrap_or_default(),
+                });
+            }
+            let (spec, _) =
+                crate::figure::FigureSpec::from_columns(&columns_from_result(rows, roles));
+            let span = if next_span == 0 {
+                12
+            } else {
+                next_span.clamp(1, 12)
+            };
+            let ch = if next_height > 0 {
+                next_height as f64
+            } else {
+                opts.panel_height as f64 * 1.5
+            };
+            next_span = 0;
+            next_height = 0;
+            if row_units + span > 12 {
+                new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
+            }
+            let cw = (unit_w * span as f64) - gap;
+            let title_h = if spec.title.is_some() { 26.0 } else { 0.0 };
+            let body_h = (ch - title_h).max(60.0);
+            let body = crate::figure::render(
+                &spec,
+                &cells,
+                cw as u32,
+                body_h as u32,
+                &ropts,
+                Place::At(0.0, 0.0),
+            )
+            .unwrap_or_else(|e| error_svg_at(Place::Doc, &e.to_string(), cw as u32));
+            let inner = format!(
+                "{open}{title}<g transform=\"translate(0,{title_h})\">{body}</g></svg>",
+                open = svg_open(Place::At(x, row_y), format!("{cw:.0}"), format!("{ch:.0}")),
+                title = spec
+                    .title
+                    .as_deref()
+                    .map(|tt| format!(
+                        "<text x=\"14\" y=\"20\" font-family=\"{font}\" font-size=\"14\" \
+                         font-weight=\"700\" fill=\"{ink}\">{tt}</text>",
+                        font = esc(&t.font.family),
+                        ink = hex(t.colors.heading),
+                        tt = esc(tt),
+                    ))
+                    .unwrap_or_default(),
+            );
+            placed.push((x, row_y, cw, ch, inner, PanelChrome::Card));
+            x += unit_w * span as f64;
+            row_units += span;
+            row_h = row_h.max(ch);
             continue;
         }
 

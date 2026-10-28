@@ -28,6 +28,7 @@ pub mod contract;
 pub mod dashboard;
 pub mod diagram;
 mod downsample;
+pub mod figure;
 pub mod format;
 pub mod freshness;
 pub mod host;
@@ -257,6 +258,28 @@ pub enum Role {
     GroupStart,
     /// Layout: `::ENDGROUP` closes the current box.
     GroupEnd,
+    /// Layout: `::FIGURE` opens a figure (#661): the statements up to
+    /// `::ENDFIGURE` become the cells of one patchwork-style picture (a
+    /// ggplot-rs `PlotGrid`); its value is the figure's title. See
+    /// [`figure`].
+    FigureStart,
+    /// Layout: `::ENDFIGURE` closes the current figure.
+    FigureEnd,
+    /// On `::FIGURE`: how the cells are arranged (`::LAYOUT`,
+    /// `'(hist / scatter) | checks'`).
+    FigureLayout,
+    /// On `::FIGURE`: relative column widths (`::WIDTHS`, `'1,2'`).
+    FigureWidths,
+    /// On `::FIGURE`: relative row heights (`::HEIGHTS`, `'1,4'`).
+    FigureHeights,
+    /// On `::FIGURE`: `'x'` / `'align'` / `'none'` (`::AXES_COLLECT`).
+    AxesCollect,
+    /// On `::FIGURE`: draw identical legends once (`::COLLECT_LEGENDS`).
+    CollectLegends,
+    /// On `::FIGURE`: tag the cells `A`, `a`, `1`, `i`, `I` (`::TAG_LEVELS`).
+    TagLevels,
+    /// On `::FIGURE` without `::LAYOUT`: grid columns (`::FIGURE_NCOL`).
+    FigureNcol,
     /// Layout: `::SPAN` makes the *next* panel span N grid columns (the value).
     Span,
     /// Layout: `::HEIGHT` sets the *next* panel's height in pixels (the value).
@@ -1441,7 +1464,7 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
 
 /// Height of the `::TITLE` bar above a single panel (a dashboard card's):
 /// `anofox_render` and the static pages.
-const TITLE_BAR_H: u32 = 26;
+pub(crate) const TITLE_BAR_H: u32 = 26;
 
 /// The longest `::TITLE` a static page draws, in characters: a 460 px bar
 /// shows about 50, and escaping can make a title up to 6× longer
@@ -1450,7 +1473,7 @@ const PAGE_TITLE_MAX_CHARS: usize = 200;
 
 /// `title` cut to [`PAGE_TITLE_MAX_CHARS`] characters (on a `char` boundary,
 /// trailing whitespace dropped) plus `…`; a shorter title is unchanged.
-fn cap_page_title(title: String) -> String {
+pub(crate) fn cap_page_title(title: String) -> String {
     match title.char_indices().nth(PAGE_TITLE_MAX_CHARS) {
         Some((i, _)) => format!("{}…", title[..i].trim_end()),
         None => title,
@@ -1501,7 +1524,7 @@ fn render_titled(
 
 /// The `::TITLE` bar's text as a dashboard card draws it
 /// (`dashboard::render_panel_svg`), the title XML-escaped.
-fn title_bar_text(title: &str, o: &RenderOptions) -> String {
+pub(crate) fn title_bar_text(title: &str, o: &RenderOptions) -> String {
     format!(
         "<text x=\"14\" y=\"20\" font-family=\"{font}\" font-size=\"14\" \
          font-weight=\"700\" fill=\"{ink}\">{title}</text>",

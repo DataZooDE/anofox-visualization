@@ -23,8 +23,9 @@ use wasm_bindgen::prelude::*;
 ///                     "label": string?, "placement": "row"|"header"},
 ///    "show_if": [condStmtIdx, …],
 ///    "step": null | {"group": idx, "index": n, "marker": bool,
-///                     "var": string, "label": string?} }]`
-/// (#214, #515, #516).
+///                     "var": string, "label": string?},
+///    "figure": null | figureStmtIdx }]`
+/// (#214, #515, #516, #661).
 /// The caller runs each `sql` through DuckDB-Wasm (setup statements for effect,
 /// panels with `-json`) and passes the rows back to [`render_panel`] — or, for
 /// a contract plot call (`SELECT anofox_plot_terms(t) FROM … t`, see
@@ -73,6 +74,7 @@ fn plan_json(script: &str) -> String {
                     "placement": v.placement.as_str(),
                 })),
                 "show_if": p.show_if,
+                "figure": p.figure,
                 "step": p.step.as_ref().map(|s| serde_json::json!({
                     "group": s.group,
                     "index": s.index,
@@ -254,6 +256,52 @@ pub fn render_stack_checked(
         let mut opts = RenderOptions::from_primary_arg(primary).map_err(bad)?;
         opts.zoom = parse_zoom(zoom_json);
         crate::track::render_stack(&chart, &tracks, width, height, &opts)
+    })
+}
+
+/// Render a `::FIGURE` (#661, [`crate::figure`]): its cells composed into
+/// one picture. `figure_json` = `{"figure": {"rows", "roles"}, "cells":
+/// [{"rows", "roles", "name"}, …]}` — `figure` the `::FIGURE` statement's
+/// own result (its options), each cell a chart statement's, as for
+/// [`render_stack`]; `name` its `-- @name` (or null). Returns one SVG (an
+/// error SVG on failure).
+#[wasm_bindgen]
+pub fn render_figure(figure_json: &str, width: u32, height: u32, primary: &str) -> String {
+    render_figure_checked(figure_json, width, height, primary)
+        .unwrap_or_else(|e| error_svg(&e.to_string(), width))
+}
+
+/// The `Result` form of [`render_figure`] (native callers / tests).
+pub fn render_figure_checked(
+    figure_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> Result<String, RenderError> {
+    guard(|| {
+        let bad = |e: String| RenderError::BadSpec(e);
+        let v: serde_json::Value =
+            serde_json::from_str(figure_json).map_err(|e| bad(format!("figure JSON: {e}")))?;
+        let part = |p: &serde_json::Value| -> Result<Vec<crate::Column>, RenderError> {
+            let rows = sql::parse_rows_json(p["rows"].as_str().unwrap_or("[]")).map_err(bad)?;
+            let entries = parse_role_entries(&p["roles"]).map_err(bad)?;
+            Ok(columns_from_entries(&rows, &entries))
+        };
+        let (spec, _) = crate::figure::FigureSpec::from_columns(&part(&v["figure"])?);
+        let cells = v["cells"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|c| {
+                Ok(crate::figure::Cell {
+                    name: c["name"].as_str().map(str::to_string),
+                    cols: part(c)?,
+                })
+            })
+            .collect::<Result<Vec<_>, RenderError>>()?;
+        let opts = RenderOptions::from_primary_arg(primary).map_err(bad)?;
+        crate::figure::render(&spec, &cells, width, height, &opts, crate::Place::Doc)
     })
 }
 

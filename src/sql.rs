@@ -106,6 +106,10 @@ pub struct Panel {
     /// one — set on every statement of the group, setup included. See
     /// [`steps::assign_steps`].
     pub step: Option<steps::StepAt>,
+    /// The plan index of the `::FIGURE` this statement is a cell of (#661),
+    /// if it is one — see [`crate::figure::blocks`]: the figure draws it,
+    /// so no host draws it as a panel of its own.
+    pub figure: Option<usize>,
 }
 
 impl Panel {
@@ -236,6 +240,11 @@ pub fn plan(script: &str) -> Vec<Panel> {
     steps::assign_steps(&mut panels);
     section_requires(&mut panels);
     show_if::assign(&mut panels);
+    for b in crate::figure::blocks(&panels) {
+        for c in b.cells {
+            panels[c].figure = Some(b.start);
+        }
+    }
     panels
 }
 
@@ -276,6 +285,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     view: None,
                     show_if: Vec::new(),
                     step: None,
+                    figure: None,
                 }
             } else {
                 Panel {
@@ -293,6 +303,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     view: None,
                     show_if: Vec::new(),
                     step: None,
+                    figure: None,
                 }
             })
         })
