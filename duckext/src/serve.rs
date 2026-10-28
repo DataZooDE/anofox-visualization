@@ -540,6 +540,9 @@ pub fn start_authoring(
     );
     let port = match server.server_addr() {
         ListenAddr::IP(a) => a.port(),
+        // tiny_http has this variant on Unix only (the Windows release
+        // build broke on it, v2026.10.28).
+        #[cfg(unix)]
         ListenAddr::Unix(_) => port,
     };
     if servers.contains_key(&port) {
@@ -1774,6 +1777,7 @@ impl SnapshotDir {
         let base = std::env::temp_dir();
         for _ in 0..8 {
             let p = base.join(format!("anofox-snap-{}", sv::random_token()));
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut b = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {

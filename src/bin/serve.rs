@@ -594,6 +594,7 @@ fn private_dir(prefix: &str) -> PathBuf {
     let base = std::env::temp_dir();
     for _ in 0..8 {
         let p = base.join(format!("{prefix}-{}", sv::random_token()));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut b = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -638,6 +639,8 @@ fn authoring_mode(o: &Opts) {
     // never the literal `o.port` a caller may have passed as `0`.
     let port = match server.server_addr() {
         tiny_http::ListenAddr::IP(a) => a.port(),
+        // Unix-only variant in tiny_http (#649).
+        #[cfg(unix)]
         tiny_http::ListenAddr::Unix(_) => o.port,
     };
     let guard = AuthoringGuard::new(port);
