@@ -10536,6 +10536,7 @@ async function runOnce(fresh = true, pv = preview) {
             kpiSpark(cell("SPARKLINE")) +
             goalHtml;
           container.appendChild(fig);
+          fitKpiSpark(fig.querySelector("svg.metric-spark"), cell("SPARKLINE"));
           panels++;
         } else {
           const fig = mkPanel();
@@ -15315,10 +15316,15 @@ function cellSparkbar(v) {
   return svg.replace(/^<svg /, '<svg class="spark spark-bar" ');
 }
 
-// A KPI tile's ::SPARKLINE (a list): a trend line across the tile under the
-// value, stretched to the tile's width (non-scaling strokes), the last point
-// marked. "" without ≥ 2 numbers.
-function kpiSpark(v) {
+// A KPI tile's ::SPARKLINE (a list): a trend line under the value, the last
+// point marked. "" without ≥ 2 numbers. Drawn by the wasm render_cell
+// (render_sparkline, ggplot-rs — #665, owner rule #318), the same renderer
+// as a table's ::SPARKLINE cell and the native tile (src/kpi.rs). The box is
+// fluid (up to 340px wide, 34px high, theme-base.css): the request is `boxW`
+// (the native strip's 320 until the tile is laid out) × 34 through
+// sparkRequestSize, and the svg scales uniformly into the box, left-aligned,
+// so the end dot stays round.
+function kpiSpark(v, boxW = 320) {
   let arr = Array.isArray(v) ? v : null;
   if (!arr && typeof v === "string") {
     try {
@@ -15328,25 +15334,41 @@ function kpiSpark(v) {
   }
   const nums = (arr || []).filter((x) => x != null && x !== "").map(Number).filter((x) => isFinite(x));
   if (nums.length < 2) return "";
-  const w = 200;
-  const h = 36;
-  const pad = 3;
   const mn = Math.min(...nums);
   const mx = Math.max(...nums);
-  const rng = mx - mn || 1;
-  const xs = (i) => (i * w) / (nums.length - 1);
-  const ys = (y) => h - pad - ((y - mn) / rng) * (h - 2 * pad);
-  const pts = nums.map((y, i) => `${xs(i).toFixed(1)},${ys(y).toFixed(1)}`).join(" ");
-  const lx = xs(nums.length - 1).toFixed(1);
-  const ly = ys(nums[nums.length - 1]).toFixed(1);
   const f = (n) => fmtNum(n, "COMPACT");
   const tip = `${f(nums[0])} → ${f(nums[nums.length - 1])} · min ${f(mn)} · max ${f(mx)} · ${nums.length} points`;
-  return (
-    `<svg class="metric-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(tip)}"><title>${escapeHtml(tip)}</title>` +
-    `<polygon points="0,${h} ${pts} ${w},${h}" fill="var(--ax-spark)" fill-opacity="0.12"/>` +
-    `<polyline points="${pts}" fill="none" stroke="var(--ax-spark)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>` +
-    `<path d="M${lx} ${ly}h0" stroke="var(--ax-spark-dot)" stroke-width="5.5" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`
+  const [rw, rh] = sparkRequestSize(boxW, 34);
+  let svg = "";
+  try {
+    svg = render_cell(JSON.stringify(nums.map((n) => ({ c0: n }))), JSON.stringify([[0, "SPARKLINE"]]), rw, rh, renderCtx());
+  } catch (_) {}
+  if (!svg) return "";
+  svg = svg.replace(
+    /^<svg /,
+    `<svg class="metric-spark" preserveAspectRatio="xMinYMid meet" role="img" aria-label="${escapeHtml(tip)}" `
   );
+  return svg.replace(/^(<svg[^>]*>)/, `$1<title>${escapeHtml(tip)}</title>`);
+}
+
+// A KPI trend in a narrow tile (a phone, many tiles in a row): redraw it at
+// the box's laid-out width (ResizeObserver: after layout, without the
+// entrance transform) so it keeps its full 34px height; in place, so the
+// observer keeps watching the same element.
+function fitKpiSpark(el, v) {
+  if (!el || typeof ResizeObserver === "undefined") return;
+  let drawn = 320;
+  new ResizeObserver((entries) => {
+    const w = Math.round(entries[0].contentRect.width);
+    if (!w || Math.abs(w - drawn) <= 24) return;
+    drawn = w;
+    const t = document.createElement("div");
+    t.innerHTML = kpiSpark(v, w);
+    const n = t.firstElementChild;
+    if (!n) return;
+    el.setAttribute("viewBox", n.getAttribute("viewBox"));
+    el.innerHTML = n.innerHTML;
+  }).observe(el);
 }
 
 // Number formatting locale — pinned (not the viewer's) so a dashboard reads the

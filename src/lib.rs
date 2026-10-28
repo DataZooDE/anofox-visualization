@@ -5545,8 +5545,11 @@ fn render_sparkline(
         })
         .house_void(o);
     // Render at a compact width so strokes stay crisp when the inline
-    // sparkline is scaled down into a narrow panel column.
-    let w = width.min(240);
+    // sparkline is scaled down into a narrow panel column. 480, not the
+    // table cells' 240 (#665): a KPI tile's fluid strip (up to 340×34, and
+    // the native tile's 320) needs a wide, 50px-floored panel to keep its
+    // aspect, so the end dot isn't squashed.
+    let w = width.min(480);
     // #457: never hand ggplot-rs a panel shorter than its own layout floor
     // (`SPARKLINE_MIN_H` — see its doc comment). The nested `<svg viewBox>`
     // this panel renders into is sized to whatever height we pass here, so
