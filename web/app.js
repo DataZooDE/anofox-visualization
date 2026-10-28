@@ -10531,9 +10531,12 @@ async function runOnce(fresh = true, pv = preview) {
             dpMdStyleDefault,
           );
           if (mdStyle === "plain") fig.classList.add("md-plain");
+          // 'details' (#691): the label is a <summary>, the body opens on
+          // click (Enter/Space too); static renders and print show it open.
+          const mdFold = mdTone?.tone === "details";
           if (mdTone) {
             fig.classList.add("md-tone", "md-tone-" + mdTone.tone);
-            if (mdTone.label) fig.dataset.toneLabel = mdTone.label;
+            if (mdTone.label && !mdFold) fig.dataset.toneLabel = mdTone.label;
           }
           if (mdStyle === "callout") {
             fig.classList.add("md-box");
@@ -10548,7 +10551,14 @@ async function runOnce(fresh = true, pv = preview) {
           body.className = "md-body";
           body.innerHTML = markdownWithValues(mdr ? r0["c" + mdr[0]] : firstCell(), r0, mdValue);
           typesetMath(body);
-          fig.appendChild(body);
+          if (mdFold) {
+            const det = document.createElement("details");
+            det.className = "md-details";
+            const sum = document.createElement("summary");
+            sum.textContent = mdTone.label || MD_TONE_LABELS.details;
+            det.append(sum, body);
+            fig.appendChild(det);
+          } else fig.appendChild(body);
           container.appendChild(fig);
           panels++;
         } else if (textSizeOf(s)) {
@@ -14120,6 +14130,17 @@ for (const ev of ["beforeprint", "afterprint"])
   addEventListener(ev, () => {
     for (const h of [...dpPrintHooks]) h(ev === "beforeprint");
   });
+// A folded 'details'::MARKDOWN_TONE box (#691) prints open, then folds back.
+let dpPrintOpened = [];
+dpPrintHooks.add((on) => {
+  if (on) {
+    dpPrintOpened = [...document.querySelectorAll("details.md-details:not([open])")];
+    for (const d of dpPrintOpened) d.open = true;
+  } else {
+    for (const d of dpPrintOpened) d.open = false;
+    dpPrintOpened = [];
+  }
+});
 function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, opts = {}) {
   const unquote = unq;
   if (!rows.length && !server) {

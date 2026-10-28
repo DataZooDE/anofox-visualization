@@ -202,7 +202,7 @@ SELECT 'Dropped beside plain.'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'tip'::MARKDO
   });
   check(t[0].label === "Info" && t[0].labelShown === '"Info"', `(e1) default label shown (${t[0].label} / ${t[0].labelShown})`);
   check(t[1].label === "Beispiel", `(e2) 'example: Beispiel' sets the label (${t[1].label})`);
-  check(t[4].label === null && t[4].labelShown === "none", `(e5) 'details:' drops the label (${t[4].label} / ${t[4].labelShown})`);
+  check(t[4].label === null && t[4].labelShown === "none", `(e5) 'details:' has no ::before label — it folds, see (f) (${t[4].label} / ${t[4].labelShown})`);
   check(t[2].labelColor !== t[3].labelColor, `(e) tip and caution labels differ in colour (${t[2].labelColor} vs ${t[3].labelColor})`);
   check(t[0].bg === t[5].bg, `(e) no tint: a toned card has the plain card background (${t[0].bg} vs ${t[5].bg})`);
   check(t[5].classes === "panel", `(e6) 'neutral': a bare card (${t[5].classes})`);
@@ -213,6 +213,59 @@ SELECT 'Dropped beside plain.'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'tip'::MARKDO
   const d = await tones();
   check(d[1].bar !== t[1].bar, `(e) dark mode repaints the example bar (${t[1].bar} -> ${d[1].bar})`);
   if (shots) await page.screenshot({ path: `${shots}/markdown-tone-1440-dark.png`, fullPage: true });
+  await page.close();
+}
+
+// (f) 'details' folds (#691): a <details> whose <summary> is the label
+// (the tone's own 'Details' when empty), closed at first, opened by a click
+// or by Enter on the focused summary; printing opens every folded box and
+// folds them back afterwards; 390 px: no overflow.
+const FOLD_SQL = `-- @title Markdown details e2e (#691)
+SELECT '$$\\mathrm{MASE} = \\frac{\\mathrm{MAE}}{\\mathrm{MAE}_{naive}}$$ — the scaled error.'::MARKDOWN, 'details: How MASE is computed'::MARKDOWN_TONE;
+SELECT 'Second folded box.'::MARKDOWN, 'details'::MARKDOWN_TONE;
+SELECT 'Not folded.'::MARKDOWN, 'tip'::MARKDOWN_TONE;
+`;
+for (const width of [1440, 390]) {
+  const { page, errs } = await open(FOLD_SQL, { width, height: 900 });
+  check(!errs.length, `(f) ${width}px: no page errors: ` + errs.join(" | "));
+  const st = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".dash .panel")].map((fig) => {
+        const d = fig.querySelector(":scope > details.md-details");
+        const body = fig.querySelector(".md-body");
+        return {
+          folded: !!d,
+          open: d ? d.open : null,
+          summary: d?.querySelector(":scope > summary")?.textContent ?? null,
+          bodyVisible: !!body && body.checkVisibility(),
+          labelAttr: fig.dataset.toneLabel || null,
+          overflow: fig.scrollWidth > fig.clientWidth + 1,
+        };
+      })
+    );
+  let f = await st();
+  check(f.length === 3, `(f) ${width}px: 3 panels (${f.length})`);
+  check(f[0].folded && f[0].open === false && !f[0].bodyVisible, `(f1) ${width}px: folded and closed, body hidden (${JSON.stringify(f[0])})`);
+  check(f[0].summary === "How MASE is computed" && f[0].labelAttr === null, `(f1) the label is the summary, not a ::before label (${f[0].summary} / ${f[0].labelAttr})`);
+  check(f[1].summary === "Details", `(f2) 'details' alone: summary 'Details' (${f[1].summary})`);
+  check(!f[2].folded && f[2].bodyVisible && f[2].labelAttr === "Tip", `(f3) other tones don't fold (${JSON.stringify(f[2])})`);
+  check(f.every((x) => !x.overflow), `(f) ${width}px: no panel overflows`);
+  await page.locator(".dash .panel").nth(0).locator("summary").click();
+  f = await st();
+  check(f[0].open && f[0].bodyVisible, `(f1) ${width}px: a click opens it`);
+  await page.locator(".dash .panel").nth(1).locator("summary").focus();
+  await page.keyboard.press("Enter");
+  f = await st();
+  check(f[1].open, `(f2) ${width}px: Enter on the focused summary opens it`);
+  if (shots) await page.screenshot({ path: `${shots}/markdown-details-${width}-open.png`, fullPage: true });
+  // fold the 2nd again, then print: both open while printing, the 2nd folds back
+  await page.keyboard.press("Enter");
+  await page.evaluate(() => dispatchEvent(new Event("beforeprint")));
+  f = await st();
+  check(f[0].open && f[1].open, `(f) ${width}px: printing opens every folded box`);
+  await page.evaluate(() => dispatchEvent(new Event("afterprint")));
+  f = await st();
+  check(f[0].open && f[1].open === false, `(f) ${width}px: after printing, the box the reader had closed folds back`);
   await page.close();
 }
 
