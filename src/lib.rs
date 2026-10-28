@@ -639,6 +639,11 @@ pub enum Role {
     /// always hides them, `'always'` always draws them (ggplot-rs
     /// `PointVisibility`).
     Points,
+    /// A map's north arrow (`::NORTH_ARROW`, M3e-1 #646): `'print'` draws it
+    /// for print/PNG/PDF/`--svg` only (a `dp-print-only` class the screen
+    /// CSS hides), `'always'` everywhere. Rotated to true north (ggplot-rs
+    /// `GeomNorthArrow`).
+    NorthArrow,
     /// A node/edge diagram (`::DIAGRAM`/`::NODE`): the column is the node id,
     /// one row per node (see [`diagram`]).
     Diagram,
@@ -2017,6 +2022,9 @@ pub const DROPDOWN_STYLES: &[&str] = &["search", "native"];
 
 /// The `::ANIMATE` modes the browser plays.
 pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
+
+/// The `::NORTH_ARROW` values.
+pub const NORTH_ARROW_MODES: &[&str] = &["print", "always"];
 
 /// The `::POINTS` values.
 pub const POINTS_MODES: &[&str] = &["auto", "none", "always"];

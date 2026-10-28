@@ -256,6 +256,52 @@ impl Proj {
         };
         (out[0].is_finite() && out[1].is_finite()).then_some(out)
     }
+
+    /// The lon/lat whose image is `p` — Newton's method from `start` with a
+    /// numeric Jacobian (no closed-form inverse needed). `None` when it
+    /// doesn't converge (a point outside the projection's image).
+    pub(crate) fn inverse_near(&self, p: [f64; 2], start: [f64; 2]) -> Option<[f64; 2]> {
+        let mut ll = start;
+        for _ in 0..30 {
+            let f = self.forward(ll)?;
+            let (ex, ey) = (f[0] - p[0], f[1] - p[1]);
+            let h = 1e-4;
+            let fx = self.forward([ll[0] + h, ll[1]])?;
+            let fy = self.forward([ll[0], ll[1] + h])?;
+            let (a, c) = ((fx[0] - f[0]) / h, (fx[1] - f[1]) / h);
+            let (b, d) = ((fy[0] - f[0]) / h, (fy[1] - f[1]) / h);
+            let det = a * d - b * c;
+            if det.abs() < 1e-18 {
+                return None;
+            }
+            let dlon = (d * ex - b * ey) / det;
+            let dlat = (-c * ex + a * ey) / det;
+            ll = [ll[0] - dlon, (ll[1] - dlat).clamp(-89.9, 89.9)];
+            if dlon.abs() < 1e-9 && dlat.abs() < 1e-9 {
+                return Some(ll);
+            }
+        }
+        let f = self.forward(ll)?;
+        let scale = p[0].abs().max(p[1].abs()).max(1.0);
+        ((f[0] - p[0]).abs() + (f[1] - p[1]).abs() < 1e-6 * scale).then_some(ll)
+    }
+
+    /// True north at `ll`, in degrees clockwise from straight up on the map
+    /// (projected y grows up): 0 for a north-up projection.
+    pub(crate) fn north_deg(&self, ll: [f64; 2]) -> f64 {
+        let lat2 = (ll[1] + 0.01).min(89.99);
+        match (self.forward(ll), self.forward([ll[0], lat2])) {
+            (Some(a), Some(b)) => {
+                let deg = (b[0] - a[0]).atan2(b[1] - a[1]).to_degrees();
+                if deg.abs() < 1e-9 {
+                    0.0
+                } else {
+                    deg
+                }
+            }
+            _ => 0.0,
+        }
+    }
 }
 
 /// Equal Earth on the `R` sphere, `lon` relative to the central meridian.
@@ -351,6 +397,41 @@ mod tests {
         e.add([x0, y0]);
         e.add([x1, y1]);
         e
+    }
+
+    // #646: true north for the north arrow.
+    #[test]
+    fn north_follows_the_meridians() {
+        let de = ext(5.9, 47.3, 15.0, 55.1);
+        let (_, conic) = Proj::setup(Projection::Conic, &de);
+        let cm = (5.9 + 15.0) / 2.0;
+        assert!(conic.north_deg([cm, 51.0]).abs() < 0.01);
+        // east of the central meridian the meridians lean west (to the left)
+        let east = conic.north_deg([15.0, 51.0]);
+        assert!(east < -1.0 && east > -10.0, "{east}");
+        assert!(conic.north_deg([6.0, 51.0]) > 1.0);
+        for p in [Projection::Mercator, Projection::None] {
+            let (_, pr) = Proj::setup(p, &de);
+            assert_eq!(pr.north_deg([14.0, 51.0]), 0.0, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn inverse_near_round_trips() {
+        let de = ext(5.9, 47.3, 15.0, 55.1);
+        for p in [
+            Projection::Conic,
+            Projection::Mercator,
+            Projection::Utm,
+            Projection::EqualEarth,
+        ] {
+            let (_, pr) = Proj::setup(p, &de);
+            for ll in [[13.4, 52.5], [6.1, 47.5], [10.0, 51.0]] {
+                let xy = pr.forward(ll).unwrap();
+                let back = pr.inverse_near(xy, [10.45, 51.2]).unwrap();
+                close(back, ll, 1e-6);
+            }
+        }
     }
 
     // Reference values: DuckDB spatial (PROJ 9) ST_Transform from
