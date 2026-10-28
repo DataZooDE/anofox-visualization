@@ -103,6 +103,8 @@ def producer_sql(name: str) -> str | None:
         return f"{name}('d', grp, {y}, {X}{extra}{names})"
     if name == "quantile_process_by":
         return "quantile_process_by('d', grp, y, [x1, x2])"
+    if name == "ols_anova_table_by":
+        return "ols_anova_table_by('d', grp, y, [x1, x2])"
     if name == "ols_anova_by":
         return "ols_anova_by('d', grp, y, x_reduced := [x1], x_full := [x1, x2])"
     if name == "mediation_by":
@@ -147,6 +149,12 @@ for _f in ("t_test_agg", "mann_whitney_u_agg", "brunner_munzel_agg", "permutatio
 AGG_ARGS["permutation_t_test_agg"] = "y, g2, {'seed': 42}"
 for _f in ("energy_distance_agg", "mmd_agg"):
     AGG_ARGS[_f] = "y, g2::INTEGER, {'seed': 42}"
+# Two-sample distribution comparisons and drift measures (value, group_id).
+for _f in ("ad_test_agg", "cvm_test_agg", "epps_singleton_agg", "ks_test_agg",
+           "wasserstein_agg", "hellinger_agg", "jensen_shannon_agg", "kl_divergence_agg",
+           "psi_agg", "tvd_agg"):
+    AGG_ARGS[_f] = "y, g2"
+AGG_ARGS["ols_anova_table_agg"] = "y, [x1, x2]"
 for _f in ("brown_forsythe_agg", "kruskal_wallis_agg", "one_way_anova_agg"):
     AGG_ARGS[_f] = "y, level3"
 for _f in ("tukey_hsd_agg", "pairwise_t_test_agg", "dunn_test_agg"):
