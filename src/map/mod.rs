@@ -1381,18 +1381,17 @@ pub(crate) fn build(
     // Hexbin's own shared cell-colour domain needs `m.proj` (`m` built
     // already), so it's applied separately just below (M2e-B).
     let fr = frames::of(cols);
-    // Small multiples (M3a-1, #644): `::FACET` on an area/point/symbol map
-    // (not a time map — D-M3-3 — and not yet flows/hexbin/bivariate, M3a-2).
+    // Small multiples (M3a, #644/#645): `::FACET` on any map but a time
+    // map (D-M3-3).
     if fr.is_none() && facet_eligible(cols) {
-        if let Some(ff) = facets::of(cols) {
-            let (st, present, ctx) = facets::stacked(cols, &ff);
-            let m = Model::new(o, &st, Some(&present), None)?;
-            let (p, attrs, mut warnings) =
-                plot::build(o, &st, &m, width, height, None, None, Some(&ctx))?;
-            if ctx.total > facets::MAX_FACETS {
+        if let Some((p, attrs, mut warnings, total)) = with_facet_model(o, cols, |st, m, ctx| {
+            let (p, attrs, warnings) = plot::build(o, st, m, width, height, None, None, Some(ctx))?;
+            Some((p, attrs, warnings, ctx.total))
+        }) {
+            if total > facets::MAX_FACETS {
                 warnings.push(format!(
                     "map: {} ::FACET values on one map (over {}) — the first {} are drawn; filter or use a coarser grouping",
-                    ctx.total,
+                    total,
                     facets::MAX_FACETS,
                     facets::MAX_FACETS
                 ));
@@ -1459,14 +1458,33 @@ pub(crate) fn build(
 }
 
 /// Whether `::FACET`/`::FACET_FREE` draws small multiples on this map
-/// (M3a-1): a facet column, and not a flow, hexbin or bivariate map (those
-/// come in M3a-2 — lint `map/facet-type`).
+/// (M3a): a facet column, and not a time map (D-M3-3).
 pub(crate) fn facet_eligible(cols: &[Column]) -> bool {
     (find_role(cols, Role::Facet).is_some() || find_role(cols, Role::FacetFree).is_some())
         && find_role(cols, Role::Frame).is_none()
-        && find_role(cols, Role::Hexbin).is_none()
-        && find_role(cols, Role::Bivariate).is_none()
-        && !(find_role(cols, Role::Origin).is_some() && find_role(cols, Role::Dest).is_some())
+}
+
+/// Run `f` on a small-multiples map's columns, model and facet context:
+/// the stacked view (one row per facet and feature, [`facets::stacked`])
+/// for areas, points, symbols, flows and bivariate maps, so one `Model`
+/// shares every scale; a hexbin map keeps its rows and bins each facet on
+/// one grid ([`facets::hexbin`], M3a-2).
+fn with_facet_model<R>(
+    o: &RenderOptions,
+    cols: &[Column],
+    f: impl FnOnce(&[Column], &Model, &facets::FacetCtx) -> Option<R>,
+) -> Option<R> {
+    let ff = facets::of(cols)?;
+    if find_role(cols, Role::Hexbin).is_some() {
+        let mut m = Model::new(o, cols, None, None)?;
+        if m.hexbin.is_some() {
+            let ctx = facets::hexbin(o, cols, &ff, &mut m)?;
+            return f(cols, &m, &ctx);
+        }
+    }
+    let (st, present, ctx) = facets::stacked(cols, &ff);
+    let m = Model::new(o, &st, Some(&present), None)?;
+    f(&st, &m, &ctx)
 }
 
 /// A small-multiples map's natural height at `width` (M3a-1): ggplot-rs's
@@ -1478,18 +1496,21 @@ pub(crate) fn facet_natural_height(cols: &[Column], o: &RenderOptions, width: u3
     if !facet_eligible(cols) {
         return None;
     }
-    let ff = facets::of(cols)?;
-    let (st, present, ctx) = facets::stacked(cols, &ff);
-    let m = Model::new(o, &st, Some(&present), None)?;
-    let planar = m.projection == project::Projection::None;
-    let (x0, y0, x1, y1) = padded(m.bbox()?, planar, 0.04);
+    let (bbox, planar, n, ncol) = with_facet_model(o, cols, |_, m, ctx| {
+        Some((
+            m.bbox()?,
+            m.projection == project::Projection::None,
+            ctx.levels.len(),
+            ctx.ncol,
+        ))
+    })?;
+    let (x0, y0, x1, y1) = padded(bbox, planar, 0.04);
     let aspect = (y1 - y0) / (x1 - x0);
     if !(aspect.is_finite() && aspect > 0.0) {
         return None;
     }
     let w = width as f64;
-    let n = ctx.levels.len();
-    let ncol = ctx.ncol.unwrap_or_else(|| plot::facet_ncol(n, aspect, w));
+    let ncol = ncol.unwrap_or_else(|| plot::facet_ncol(n, aspect, w));
     let (_, h) = ggplot_rs::facet::wrap::natural_height(
         n,
         Some(ncol),

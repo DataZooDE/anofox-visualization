@@ -749,6 +749,20 @@ pub(super) fn build(
             .aes(features_aes)
             .geom_sf_with(features_geom())
     };
+    // Small multiples: ggplot-rs takes the panels from the layers' facet
+    // values in first-appearance order, so a layer listing every level in
+    // order comes before any whose rows aren't in facet order (flows are
+    // widest first) or miss a facet (a panel with no hexagons) — until
+    // facet_wrap takes explicit levels upstream (sipemu/ggplot-rs#329).
+    if let Some(fc) = facet {
+        plot = plot
+            .geom_blank()
+            .layer_data(vec![(
+                "facet".to_string(),
+                fc.levels.iter().map(|l| Value::Str(l.clone())).collect(),
+            )])
+            .layer_aes(Aes::new());
+    }
 
     // ---- the symbols layer (on top of everything else), if any — a
     // circle's border is the card colour (matching the old writer's
@@ -882,22 +896,34 @@ pub(super) fn build(
         }
         _ => None,
     };
-    if let Some(geom) = bivariate_legend {
-        // `Bivar::counts[i][j]` (`i` = `a`-level/x, `j` = `b`-level/y,
-        // see `bivariate.rs`) transposed to the `[j][i]` row-major shape
-        // `GeomBivariateLegend::counts`'s own `for j in 0..ny { for i in
-        // 0..nx }` draw loop expects (ggplot-rs 0.31.2, sipemu/
-        // ggplot-rs#259) — each swatch's row count, the old hand-written
-        // bivariate legend's own feature (#506), now drawn by ggplot-rs
-        // itself instead of a second, unused `Bivar::counts` field.
-        if let Fill::Bivariate(b) = &m.fill {
-            let counts: Vec<Vec<usize>> = (0..geom.ny)
-                .map(|j| (0..geom.nx).map(|i| b.counts[i][j]).collect())
-                .collect();
-            plot = plot.bivariate_legend_counts(geom.counts(counts));
-        } else {
-            plot = plot.bivariate_legend(geom);
+    let last_facet = facet.and_then(|fc| fc.levels.last());
+    match (bivariate_legend, last_facet) {
+        // small multiples (M3a-2): no counts (they would sum features over
+        // panels, D-M3-4), once, in the last panel — a one-row layer
+        // carrying that panel's facet value, as the scale bar does
+        (Some(geom), Some(last)) => {
+            plot = plot
+                .bivariate_legend(geom)
+                .layer_data(vec![("facet".to_string(), vec![Value::Str(last.clone())])]);
         }
+        (Some(geom), None) => {
+            // `Bivar::counts[i][j]` (`i` = `a`-level/x, `j` = `b`-level/y,
+            // see `bivariate.rs`) transposed to the `[j][i]` row-major shape
+            // `GeomBivariateLegend::counts`'s own `for j in 0..ny { for i in
+            // 0..nx }` draw loop expects (ggplot-rs 0.31.2, sipemu/
+            // ggplot-rs#259) — each swatch's row count, the old hand-written
+            // bivariate legend's own feature (#506), now drawn by ggplot-rs
+            // itself instead of a second, unused `Bivar::counts` field.
+            if let Fill::Bivariate(b) = &m.fill {
+                let counts: Vec<Vec<usize>> = (0..geom.ny)
+                    .map(|j| (0..geom.nx).map(|i| b.counts[i][j]).collect())
+                    .collect();
+                plot = plot.bivariate_legend_counts(geom.counts(counts));
+            } else {
+                plot = plot.bivariate_legend(geom);
+            }
+        }
+        (None, _) => {}
     }
     let _ = legend_at;
 
@@ -922,6 +948,7 @@ pub(super) fn build(
             flow_color_scale,
             plain_fill_for_flows,
             frame_ctx,
+            facet,
             &trends,
         );
         plot = new_plot;

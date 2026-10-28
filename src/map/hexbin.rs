@@ -113,6 +113,9 @@ pub(crate) struct Hexbin {
     /// Whether the map is planar (`'none'` projection): coordinates are
     /// native units, and `data-label`/the legend note drop the km unit.
     pub planar: bool,
+    /// Small multiples (M3a-2, #645): each cell's facet value, parallel to
+    /// `cells` (every facet binned on the one grid); empty otherwise.
+    pub facet: Vec<String>,
 }
 
 /// Cells above this count get a render warning suggesting a larger
@@ -341,6 +344,7 @@ pub(super) fn of(
         n_points: binned.len(),
         has_measure,
         planar,
+        facet: Vec::new(),
     })
 }
 

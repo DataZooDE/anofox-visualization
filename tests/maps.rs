@@ -3752,3 +3752,169 @@ fn facet_ncol_is_respected_and_frames_win() {
     assert!(!s.contains("data-facet-panel"));
     assert!(root(&s).contains("data-frames="));
 }
+
+// ---- M3a-2 (#645): small multiples of flow, hexbin and bivariate maps ----
+
+/// The facet value of each `<g data-facet-panel=…>` group, in document
+/// order, with the slice of the SVG it spans.
+fn facet_panels(svg: &str) -> Vec<&str> {
+    let mut starts: Vec<usize> = svg
+        .match_indices("<g data-facet-panel=")
+        .map(|(i, _)| i)
+        .collect();
+    starts.push(svg.len());
+    starts.windows(2).map(|w| &svg[w[0]..w[1]]).collect()
+}
+
+#[test]
+fn facet_flows_share_widths() {
+    // A→B in both weeks (10, then 40), B→C only in week 2
+    let s = svg(vec![
+        Column::new(
+            "o",
+            Role::Origin,
+            vec![pt(9.0, 50.0, "A"), pt(9.0, 50.0, "A"), pt(10.0, 51.0, "B")],
+        ),
+        Column::new(
+            "d",
+            Role::Dest,
+            vec![
+                pt(10.0, 51.0, "B"),
+                pt(10.0, 51.0, "B"),
+                pt(11.0, 50.0, "C"),
+            ],
+        ),
+        Column::new("w", Role::Facet, strs(&["1", "2", "2"])),
+        Column::new("s", Role::Size, nums(&[10.0, 40.0, 10.0])),
+    ]);
+    assert_eq!(s.matches("<g data-facet-panel=").count(), 2, "{s}");
+    let arcs = flow_arcs(&s);
+    assert_eq!(arcs.len(), 3, "{s}");
+    let width = |facet: &str, orig: &str| {
+        arcs.iter()
+            .find(|t| attr(t, "data-facet") == Some(facet) && attr(t, "data-orig") == Some(orig))
+            .and_then(|t| attr(t, "stroke-width"))
+            .map(|w| w.parse::<f64>().unwrap())
+            .unwrap_or_else(|| panic!("no {orig} flow in panel {facet}: {s}"))
+    };
+    // one width scale: the same 10 draws equally thick in both panels, 40 thicker
+    assert!((width("1", "A") - width("2", "B")).abs() < 1e-6);
+    assert!(width("2", "A") > width("1", "A") + 0.5);
+    // data-row is the result row
+    assert!(arcs
+        .iter()
+        .any(|t| attr(t, "data-facet") == Some("2") && attr(t, "data-row") == Some("2")));
+    // panels follow the facet order, not the widest-first flow order
+    // (sipemu/ggplot-rs#329), and each panel dots only its own flows' ends
+    let panels = facet_panels(&s);
+    assert_eq!(flow_arcs(panels[0]).len(), 1, "{}", panels[0]);
+    assert!(flow_arcs(panels[0])
+        .iter()
+        .all(|t| attr(t, "data-facet") == Some("1")));
+    assert_eq!(panels[0].matches("data-geom=\"point\"").count(), 2);
+    assert_eq!(panels[1].matches("data-geom=\"point\"").count(), 3);
+    // no render warnings from the facet machinery
+    let r = render_with_warnings(
+        &[
+            Column::new("o", Role::Origin, vec![pt(9.0, 50.0, "A")]),
+            Column::new("d", Role::Dest, vec![pt(10.0, 51.0, "B")]),
+            Column::new("w", Role::Facet, strs(&["1"])),
+        ],
+        480,
+        320,
+        &RenderOptions::default(),
+    )
+    .unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+}
+
+#[test]
+fn facet_hexbin_grid_is_shared() {
+    // the same three points in both facets, plus one more in facet "b"
+    let lat = [50.0, 50.0, 50.5, 50.0, 50.0, 50.5, 51.0];
+    let lon = [10.0, 10.0, 10.5, 10.0, 10.0, 10.5, 11.0];
+    let s = svg(vec![
+        Column::new("lat", Role::Lat, nums(&lat)),
+        Column::new("lon", Role::Lon, nums(&lon)),
+        Column::new("f", Role::Facet, strs(&["a", "a", "a", "b", "b", "b", "b"])),
+        Column::new("h", Role::Hexbin, konst("auto", 7)),
+    ]);
+    assert_eq!(s.matches("<g data-facet-panel=").count(), 2, "{s}");
+    let h = hexes(&s);
+    let keys = |facet: &str| -> std::collections::BTreeSet<String> {
+        h.iter()
+            .filter(|t| attr(t, "data-facet") == Some(facet))
+            .map(|t| attr(t, "data-x").unwrap().to_string())
+            .collect()
+    };
+    let (a, b) = (keys("a"), keys("b"));
+    assert_eq!(a.len(), 2, "{s}");
+    // one grid: facet a's cells are facet b's cells (same q,r keys)
+    assert!(a.is_subset(&b), "{a:?} vs {b:?}");
+    assert_eq!(b.len(), 3);
+    // each facet bins only its own points
+    let count = |facet: &str, key: &str| {
+        h.iter()
+            .find(|t| attr(t, "data-facet") == Some(facet) && attr(t, "data-x") == Some(key))
+            .and_then(|t| attr(t, "data-count"))
+            .unwrap()
+            .to_string()
+    };
+    let first = a.iter().next().unwrap();
+    assert_eq!(count("a", first), count("b", first));
+    // shared colours: the same count draws the same fill in both panels
+    let fill = |facet: &str, key: &str| {
+        h.iter()
+            .find(|t| attr(t, "data-facet") == Some(facet) && attr(t, "data-x") == Some(key))
+            .and_then(|t| attr(t, "fill"))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(fill("a", first), fill("b", first));
+}
+
+#[test]
+fn facet_bivariate_one_legend_no_counts() {
+    let wkt: Vec<Value> = (0..18)
+        .map(|i| {
+            let x = (i % 9) as f64;
+            Value::Str(format!(
+                "POLYGON(({x} 0, {} 0, {} 1, {x} 1, {x} 0))",
+                x + 1.0,
+                x + 1.0
+            ))
+        })
+        .collect();
+    let a: Vec<f64> = (0..18).map(|i| (i % 3) as f64).collect();
+    let b: Vec<f64> = (0..18).map(|i| ((i % 9) / 3) as f64).collect();
+    let f: Vec<&str> = (0..18).map(|i| if i < 9 { "x" } else { "y" }).collect();
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, wkt),
+        Column::new("a", Role::Value(Kind::Bar), nums(&a)),
+        Column::new("b", Role::Bivariate, nums(&b)),
+        Column::new("f", Role::Facet, strs(&f)),
+        Column::new("p", Role::Projection, konst("none", 18)),
+    ]);
+    let panels = facet_panels(&s);
+    assert_eq!(panels.len(), 2, "{s}");
+    // 9 swatches + 2 captions, no counts, in the last panel only
+    assert_eq!(
+        s.matches("data-geom=\"bivariate_legend\"").count(),
+        9 + 2,
+        "{s}"
+    );
+    assert!(!panels[0].contains("bivariate_legend"));
+    // tertiles over every row: the same values get the same class in both panels
+    let feats = features(&s);
+    let bivar = |facet: &str, i: usize| {
+        feats
+            .iter()
+            .filter(|t| attr(t, "data-facet") == Some(facet))
+            .nth(i)
+            .and_then(|t| attr(t, "data-bivar"))
+            .map(str::to_string)
+    };
+    for i in 0..9 {
+        assert_eq!(bivar("x", i), bivar("y", i));
+    }
+}
