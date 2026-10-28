@@ -1582,7 +1582,9 @@ no lerp) and `stroke-width` interpolates, same as `'tween'::TRANSITION`'s
 re-run join elsewhere. Reduced motion keeps Play available (stepping
 through time *is* the content) with instant, 1.5 s-apart steps, and it
 never autoplays on its own. The step persists per statement across a
-re-run, like `::STORY`'s step does. The ⤓ HTML export embeds every frame
+re-run, like `::STORY`'s step does; a map with a `-- @name` also keeps it in
+the URL (`?frame.<name>=<label>`, see *Viewer state in the URL*), so a shared
+link opens on the same week. The ⤓ HTML export embeds every frame
 (pre-rendered, so it still plays with no live query engine) and rebuilds the
 same bar offline, as long as their total stays within 3 MB per map; above
 that, a static note takes its place instead — "12 frames — Play in the live
@@ -3317,6 +3319,7 @@ bookmark or **Share** restores the same view.
 | `?v.selected=web` | the shared click cross-filter |
 | `?v.sku=SKU-A&v.sku=SKU-C` | a named selection (a `::ROWSELECT` table's first column, a chart's `::SELECT_AS`) |
 | `?view.2=Bars` · `?view.yoy=Bars` | a `::VIEW` group's open alternative, by its button label — the group's alias (`AS yoy`) when it has one, else its 1-based position in the script; never a cache key, and ignored on the script-free served page |
+| `?frame.weekly=Week%205` | a time map's (`::FRAME`) shown frame, by its label — only for a panel with a `-- @name` (here `-- @name weekly`), and only when it isn't the last frame (the default); written as you step or play (at most every 0.5 s), ignored when the label no longer exists |
 
 A value that fails its input's check is ignored (the input keeps its default).
 Only variable **values** travel, never SQL: on a locked server

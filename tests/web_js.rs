@@ -166,6 +166,12 @@ fn web_view_switcher_url_state() {
     run_node("views_test.mjs");
 }
 
+/// #647: a named time map's frame in the URL (`?frame.<name>=<label>`).
+#[test]
+fn web_frame_url_state() {
+    run_node("frame_url_test.mjs");
+}
+
 /// The exported standalone HTML's tab/sub-tab switcher (#381): each
 /// `.tabbar`/`.subtabbar` wires up scoped to its own wrap's panes, so a
 /// sub-tab click never indexes into an unrelated bar's panes.
