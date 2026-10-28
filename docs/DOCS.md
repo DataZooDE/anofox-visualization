@@ -143,6 +143,8 @@ terminal.
 | `::HIST_NORM` |  | modifier | a ::HISTOGRAM's per-group normalisation: 'share' draws each ::CATEGORY / ::FACET group's bars as a share of that group's own count (groups of unequal size stay comparable); default: raw counts |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
+| `::XTITLE` | `::X_TITLE`, `::XLAB` | modifier | x-axis title, e.g. 'Residual load (GW)' — names the ::XAXIS variable, drawn under the x ticks (on a ::FLIP chart it moves with the x axis); charts with axes only |
+| `::YTITLE` | `::Y_TITLE`, `::YLAB` | modifier | y-axis title, e.g. 'Day-ahead price (EUR/MWh)' — names the measure, drawn rotated beside the y ticks; charts with axes only |
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
@@ -575,6 +577,7 @@ Roles for model output — coefficient forests, residual diagnostics, CV curves:
 | straight lines | `'0.5,1'::ABLINE`, `1::IDENTITY` | `y = 0.5x + 1` (one per distinct value); `y = x` dashed grey — both drawn across the data box |
 | small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x) and stacks the panels in one column unless `::FACET_NCOL` is set |
 | axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
+| axis titles | `'Residual load (GW)'::XTITLE`, `'Price (EUR/MWh)'::YTITLE` | what the axes are; the x title names the `::XAXIS` variable, so on a `::FLIP` chart it's drawn beside the (now vertical) category axis; none on pies, gauges, maps |
 | label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|); overlapping labels are skipped. `::LABEL` is then per-point text, not the chart title |
 | trend method | `y::SMOOTH, 'lm'::SMOOTH_METHOD` | `'loess'` (default), `'lm'`, `'gam'` (penalised spline, λ by GCV), `'glm'` (= Gaussian lm) |
 
