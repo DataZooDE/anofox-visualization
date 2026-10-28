@@ -16791,6 +16791,16 @@ async function downloadHtmlInner() {
     h.removeAttribute("data-title");
   });
   dpAnim.strip(snap); // never a mid-animation frame
+  // #610: the snapshot has no chart keyboard navigation (SNAPSHOT_JS wires
+  // tabs, ::VIEW and steps, not chartKey), so it must not announce one: a
+  // chart keeps attachChartA11y()'s summary (aria-label + <desc>) as a
+  // plain image, without the tab stop and the "Arrow keys…" hint.
+  snap.querySelectorAll('.panel svg[role="group"]').forEach((svg) => {
+    svg.setAttribute("role", "img");
+    svg.removeAttribute("tabindex");
+    svg.removeAttribute("aria-description");
+    svg.querySelectorAll('[tabindex="-1"]').forEach((el) => el.removeAttribute("tabindex"));
+  });
   // D23/M2f-B (#149): pre-render every frame of each time map here, while
   // wasm is still available (the author's own browser) — one render_panel
   // call per frame, same rows/roles/size/zoom/theme `renderChart` already
@@ -17023,6 +17033,20 @@ function snapshotMotion() {
         fresh.setAttribute('data-dp-scaled','');
       }
       if(fresh&&window.__dpWireHits)window.__dpWireHits(fresh);
+      // #610: a swapped-in frame is raw render_panel() output; give it the
+      // same summary the frame shown at export time got from
+      // attachChartA11y() (built the same way from the renderer's own
+      // data-summary), as a plain image like every chart in this copy.
+      var ds=fresh&&fresh.getAttribute('data-summary');
+      if(ds!=null){
+        var pt=panel.querySelector('.panel-title'), title=pt?pt.textContent.trim():'';
+        var label='Map'+(title?': '+title:'')+'; '+ds;
+        fresh.setAttribute('role','img');
+        fresh.setAttribute('aria-label',label);
+        fresh.setAttribute('aria-roledescription','chart');
+        var od=fresh.querySelector(':scope > desc');if(od)od.remove();
+        var d=document.createElementNS('http://www.w3.org/2000/svg','desc');d.textContent=label;fresh.insertBefore(d,fresh.firstChild);
+      }
       return fresh;
     }
     K.frames(panel,svg,+svg.getAttribute('data-frame')||0,draw);
