@@ -181,6 +181,7 @@ terminal.
 | `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::MARKDOWN_STYLE` | `::MD_STYLE` | kpi | a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style |
+| `::MARKDOWN_TONE` | `::MD_TONE` | kpi | a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; implies 'card' |
 | `::IMAGE` | `::PICTURE`, `::IMG` | kpi | a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption |
 | `::IMAGE_DARK` | `::IMG_DARK` | kpi | the ::IMAGE shown while the dashboard is dark |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
@@ -227,6 +228,15 @@ terminal.
 | `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
+| `::FIGURE` | `::PATCHWORK` | layout | open a figure: the charts up to ::ENDFIGURE become the cells of one patchwork-style picture with aligned axes; the value is its title |
+| `::ENDFIGURE` | `::END_FIGURE` | layout | close the current ::FIGURE |
+| `::LAYOUT` | `::FIGURE_LAYOUT` | layout | on ::FIGURE: '(hist / scatter) \| checks' — \| side by side, / stacked (binds tighter), ( ) groups, _ an empty cell; a cell is its -- @name or its position (1, 2, …) |
+| `::WIDTHS` | `::FIGURE_WIDTHS` | layout | on ::FIGURE: relative widths '1,2' — of every side-by-side group with that many cells |
+| `::HEIGHTS` | `::FIGURE_HEIGHTS` | layout | on ::FIGURE: relative heights '1,4' — of every stacked group with that many cells |
+| `::AXES_COLLECT` | `::COLLECT_AXES` | layout | on ::FIGURE: 'x' (stacked charts share one x axis, drawn once at the bottom), 'align' (line up the plot areas only) or 'none' (default) |
+| `::COLLECT_LEGENDS` | `::COLLECT_GUIDES` | layout | on ::FIGURE: true draws identical legends once, beside the figure |
+| `::TAG_LEVELS` | `::FIGURE_TAGS` | layout | on ::FIGURE: tag the cells 'A' (A, B, …), 'a', '1', 'i' or 'I' |
+| `::FIGURE_NCOL` |  | layout | on ::FIGURE without ::LAYOUT: the cells fill a grid this many columns wide |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
 | `::GUIDE_STEP` | `::TUTORIAL_STEP`, `::WIZARD_STEP` | layout | a step of a guided sequence (onboarding, tutorials): Back / Next, 'Step 2 of 5', ?v.<name>=n; the alias names the step variable (default 'step') |
@@ -2094,6 +2104,39 @@ on an unknown value (`markdown_style/unknown`) or a `::MARKDOWN_STYLE` without
 `::MARKDOWN` text (`markdown_style/no-text`). Browser, `--svg` and other
 static/HTML output all draw the same choice.
 
+### Quiet tones on a card (`::MARKDOWN_TONE`)
+
+On a teaching or reference page, explanation, worked example, good practice,
+limits and formulas all look alike as plain cards. `::MARKDOWN_TONE` (#659)
+gives a `'card'` box a thin coloured bar on its left edge and a small label
+above the text — no tint, so it never reads as an alert:
+
+```sql
+SELECT 'A worked example: 120 orders, 9 of them late.'::MARKDOWN,
+       'example'::MARKDOWN_TONE;
+SELECT 'What it cannot tell you: *why* the input moved.'::MARKDOWN,
+       'caution: Grenzen'::MARKDOWN_TONE;   -- your own label after the colon
+```
+
+| Tone | For | Accent |
+|---|---|---|
+| `neutral` | explanation | none (a plain card) |
+| `info` | background, "why" | the theme's info colour (blue) |
+| `example` | a worked example | violet |
+| `tip` | good practice | the theme's positive colour (green) |
+| `caution` | limits, "what it can't tell you" | the theme's warning colour (amber — not an alert's red) |
+| `details` | formulas, technical details | muted grey |
+
+The label is the tone's name (`Info`, `Example`, `Tip`, `Caution`,
+`Details`); `'tone: label'` sets your own (e.g. in German), `'tone:'` drops it.
+A tone implies `'card'`, even over a `-- @markdown_style` default; next to an
+explicit `'plain'`/`'callout'` style or a `::CALLOUT` it is dropped (a lint
+warning, `markdown_tone/ignored`). An unknown tone is an error
+(`markdown_tone/unknown`). The bar is drawn in `--svg` and the other
+static/HTML output too; the label in the browser and the HTML pages. Colours
+are theme tokens (`--ax-tone-info`, `--ax-tone-example`, `--ax-tone-tip`,
+`--ax-tone-caution`, `--ax-tone-details`), light and dark.
+
 ### Images (`::IMAGE`, `![alt](src)`)
 
 A dashboard panel can show a static picture — a diagram, a logo, a screenshot
@@ -2481,6 +2524,7 @@ with the browser through wasm):
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 | `-- @shared <name>, …` | Directly above one `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement: documents that *this* directive deliberately reuses `<name>` with another one, so `dashboard --check --strict` skips `interaction/rowselect-shared-name` / `interaction/name-clash` for it — every other clash still is flagged. See *Selecting table rows* below. |
+| `-- @lint_allow <code>, …` | Directly above one statement: a deliberate exception to a `design/*` advisory (#639), e.g. `-- @lint_allow design/many-series` on a chart with 12 conventional colour series. `--check` still lists it as a `lint/allowed` note, so it stays visible in review, but `--strict` passes. Only `design/*` codes: anything else is flagged (`lint/allow-not-design`), as is a code the statement doesn't trigger (`lint/allow-unused`). On the first statement it also covers `design/too-many-panels`. |
 | `-- @name <name>` | Directly above any statement that draws something — a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/`::SECTION` heading: tags its element `data-dp-name="<name>"`, a stable anchor for e2e selectors and a guided tour's target (`-- @tour`, below). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`; names must be unique on one dashboard (`name/duplicate`); `page` is reserved (`name/reserved`); a bad name is `name/bad`; one on a statement that draws nothing warns (`name/not-drawn`). See *Interactivity* below. |
 | `-- @tour <id> [title]` + step lines | A guided tour over the dashboard's own panels: see *Guided tours* below. |
 | `-- @tour_autostart <id>` | Start that tour once per browser, on a viewer's first visit: see *Guided tours* below. |
@@ -2518,6 +2562,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT n::COL;` (`::SPAN`, `::WIDTH`) | the **next** panel's width — `n` of 12 (`12`=full, `6`=half, `4`=third); a statement of its own: written inside a chart's SELECT it turns that statement into the directive and the chart isn't drawn (`layout/inline-layout-role`) |
 | `SELECT n::COLUMNS;` | default panels per row (each unspecified panel spans `12/n`) |
 | `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
+| `SELECT 'Title'::FIGURE, '(a / b) \| c'::LAYOUT;` … `SELECT 1::ENDFIGURE;` | compose the enclosed charts into **one** picture — aligned plot areas, a shared x axis, one legend, panel tags; see *Figures* below |
 | `SELECT 'Name'::TAB;` | start a tab — following panels live under it (panels before the first `::TAB` form a fixed header) |
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
@@ -2546,6 +2591,64 @@ on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.
+
+### Figures: several charts as one picture (`::FIGURE`)
+
+An explanatory figure often combines plots with aligned axes — a histogram of
+`x` directly above the scatter of `x` vs `y`, a forecast over its residuals, a
+before/after pair — like R's *patchwork*. As separate panels they fall apart:
+separate cards, no shared axis, legends repeated. `::FIGURE` … `::ENDFIGURE`
+(#661) composes the charts between the markers into one picture
+(ggplot-rs's `PlotGrid`):
+
+```sql
+SELECT 'Data drift: the inputs move, the rule holds' ::FIGURE,
+       '(hist / scatter) | rule' ::LAYOUT,      -- | side by side, / stacked
+       '1,4' ::HEIGHTS, '2,1' ::WIDTHS,
+       'x' ::AXES_COLLECT,                        -- hist and scatter share one x axis
+       true ::COLLECT_LEGENDS,                    -- reference / now once, not per cell
+       'A' ::TAG_LEVELS;                          -- cells tagged A, B, C
+-- @name hist
+SELECT x ::HISTOGRAM, period ::CATEGORY, 'share' ::HIST_NORM FROM drift;
+-- @name scatter
+SELECT x ::XAXIS, y ::SCATTER, period ::CATEGORY FROM drift;
+-- @name rule
+SELECT x ::XAXIS, fitted ::LINECHART FROM rule ORDER BY x;
+SELECT 1 ::ENDFIGURE;
+```
+
+The `::FIGURE` value is the card's title; every other column of that
+statement is an option:
+
+| Option | Effect |
+|---|---|
+| `::LAYOUT` | How the cells are arranged: `\|` side by side, `/` stacked (binds tighter, as in patchwork: `a \| b / c` = `a \| (b / c)`), `( )` groups, `_` an empty cell. A cell is its `-- @name` or its position (`1`, `2`, …). Without `::LAYOUT` the cells fill a grid in order. |
+| `::FIGURE_NCOL` | Without `::LAYOUT`: the grid's column count (default: near-square). |
+| `::WIDTHS` / `::HEIGHTS` | Relative widths / heights, `'1,2'` — applied to every side-by-side (`\|`) / stacked (`/`) group with that many cells. In the example, `'1,4'` makes the scatter four times as tall as the histogram above it. |
+| `::AXES_COLLECT` | `'x'`: charts stacked in a column share one x domain and draw it once, at the bottom (needs a numeric/date x — a `::HISTOGRAM` or a scatter, not categorical bars); `'align'`: line up the plot areas only; `'none'` (default). |
+| `::COLLECT_LEGENDS` | `true`: identical legends are drawn once, beside the figure. |
+| `::TAG_LEVELS` | `'A'`, `'a'`, `'1'`, `'i'` or `'I'`: tag the cells in reading order. |
+
+The figure takes the full row (`::COL` before it narrows it) and is 450 px
+tall (`::HEIGHT` before it changes that). Each cell is an ordinary chart
+statement: its own roles, `::TITLE`, `::CATEGORY`, … — a cell needs no
+`::TITLE` (`design/untitled-chart` skips it). Hovering a mark shows its own
+cell's values; the x-crosshair of a single chart is off on a figure. The
+browser, `--svg` / `--site`, the HTML export and the served page all draw the
+same picture.
+
+`--check` reports: a `::LAYOUT` name that is no cell (`figure/unknown-cell`),
+a cell placed twice (`figure/duplicate-cell`), `::WIDTHS`/`::HEIGHTS` that fit
+no group (`figure/bad-weights`), an unknown option value (`figure/bad-option`),
+a cell that is not a chart — a table, KPI, text, map or `::TRACK`
+(`figure/not-a-chart`), a missing `::ENDFIGURE` (`figure/unclosed`), a
+`::FIGURE` inside another (`figure/nested`) — all errors — and, as warnings, a
+cell `::LAYOUT` leaves out (`figure/unplaced-cell`), an empty figure and a
+stray `::ENDFIGURE`.
+
+Not yet: tables, KPIs or Markdown as cells (patchwork's `wrap_elements`), and
+on a phone-width screen the collected legend still sits to the right
+(sipemu/ggplot-rs#363).
 
 ### Fit to screen (`::FIT`)
 

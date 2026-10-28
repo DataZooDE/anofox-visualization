@@ -97,6 +97,8 @@ pub struct Diagnostic {
     /// `figure/unknown-cell` | `figure/duplicate-cell` | `figure/bad-weights`
     /// (errors) | `figure/empty` | `figure/unplaced-cell` |
     /// `figure/stray-end` (warnings).
+    /// `::MARKDOWN_TONE` (#659): `markdown_tone/unknown` (an error) |
+    /// `markdown_tone/no-text` | `markdown_tone/ignored` (warnings).
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
     /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
@@ -138,6 +140,10 @@ pub struct Diagnostic {
     /// `step/computed-label` (a note) | `step/gate-not-boolean` |
     /// `step/gate-no-row` (warnings, checked once the step closes — see
     /// `finalize_pending_gate`).
+    /// `-- @lint_allow` ([`apply_lint_allow`], #639): `lint/allowed` (a
+    /// note: a `design/*` advisory the statement allows on purpose; the
+    /// message names it) | `lint/allow-not-design` | `lint/allow-unused`
+    /// (warnings).
     pub code: &'static str,
     pub message: String,
     /// The offending statement, trimmed to one line.
@@ -1291,6 +1297,64 @@ where
             }
         }
 
+        // ::MARKDOWN_TONE (#659): an unknown tone is an error (it would draw
+        // no accent at all); it needs a ::MARKDOWN column; and next to an
+        // explicit 'plain'/'callout' style or a ::CALLOUT it is dropped.
+        if let Some((i, _)) = p.roles.iter().find(|(_, r)| *r == Role::MarkdownTone) {
+            let v = rows
+                .first()
+                .and_then(|row| row.values().nth(*i))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut push = |severity, code: &'static str, message: String| {
+                diags.push(Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                })
+            };
+            if crate::roles::markdown_tone_of(&v).is_none() {
+                push(
+                    Severity::Error,
+                    "markdown_tone/unknown",
+                    format!(
+                        "::MARKDOWN_TONE `{v}` — use one of {} (optionally 'tone: label')",
+                        crate::roles::MARKDOWN_TONE_KINDS.join(", ")
+                    ),
+                );
+            }
+            if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
+                push(
+                    Severity::Warning,
+                    "markdown_tone/no-text",
+                    "::MARKDOWN_TONE needs a ::MARKDOWN column in the same SELECT".into(),
+                );
+            }
+            let style = p
+                .roles
+                .iter()
+                .find(|(_, r)| *r == Role::MarkdownStyle)
+                .and_then(|(j, _)| rows.first()?.values().nth(*j)?.as_str())
+                .and_then(crate::roles::markdown_style_of);
+            let callout = p.roles.iter().any(|(_, r)| *r == Role::Callout);
+            if matches!(style, Some("plain" | "callout")) || (style.is_none() && callout) {
+                push(
+                    Severity::Warning,
+                    "markdown_tone/ignored",
+                    format!(
+                        "::MARKDOWN_TONE only applies to a 'card' box — here {} wins and the \
+                         tone is dropped (drop it, or use 'card'::MARKDOWN_STYLE)",
+                        style.map_or("::CALLOUT".to_string(), |s| format!(
+                            "'{s}'::MARKDOWN_STYLE"
+                        ))
+                    ),
+                );
+            }
+        }
+
         // {{col}} / {{col:fmt}} placeholders in a ::MARKDOWN text must name a
         // column of the same SELECT and a known format.
         if let (Some((i, _)), Some(row)) = (
@@ -2297,6 +2361,7 @@ where
     diags.extend(tour_diags(script, &plan));
     diags.extend(step_diags(&plan, script));
     diags.extend(figure_diags(&plan, &figure_cols));
+    apply_lint_allow(&mut diags, &plan, opts.design);
     diags
 }
 
@@ -2396,6 +2461,60 @@ fn figure_diags(
         }
     }
     diags
+}
+
+/// `-- @lint_allow <code>` (#639): turn each matching `design/*` advisory on
+/// that statement into a `lint/allowed` note (still listed, so the exception
+/// stays visible in review, but no longer failing `--strict`). The first
+/// statement's allowances (the header block) also cover the script-wide
+/// `stmt: 0` ones (`design/too-many-panels`). An allowance outside `design/`
+/// (`lint/allow-not-design`) or one nothing on its statement triggers
+/// (`lint/allow-unused`) is a warning, so it never silently does nothing.
+fn apply_lint_allow(diags: &mut Vec<Diagnostic>, plan: &[sql::Panel], design: bool) {
+    let mut used: Vec<(usize, String)> = Vec::new();
+    for d in diags.iter_mut() {
+        if !d.code.starts_with("design/") {
+            continue;
+        }
+        let at = d.stmt.max(1);
+        let Some(p) = plan.get(at - 1) else { continue };
+        if p.lint_allow.iter().any(|c| c == d.code) {
+            used.push((at, d.code.to_string()));
+            d.message = format!("{} allowed by -- @lint_allow: {}", d.code, d.message);
+            d.code = "lint/allowed";
+            d.severity = Severity::Note;
+        }
+    }
+    for (i, p) in plan.iter().enumerate() {
+        for code in &p.lint_allow {
+            let (code_name, message) = if !code.starts_with("design/") {
+                (
+                    "lint/allow-not-design",
+                    format!(
+                        "-- @lint_allow {code}: only design/* advisories can be allowed — \
+                         errors and the other checks always apply"
+                    ),
+                )
+            } else if design && !used.iter().any(|(s, c)| *s == i + 1 && c == code) {
+                (
+                    "lint/allow-unused",
+                    format!(
+                        "-- @lint_allow {code}: this statement doesn't trigger {code} — \
+                         fix the code, or drop the line"
+                    ),
+                )
+            } else {
+                continue;
+            };
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: code_name,
+                message,
+                sql: one_line(p.sql.trim()),
+            });
+        }
+    }
 }
 
 /// `::SHOW_IF` checks (#515) that need the whole plan at once (a condition's
@@ -8256,6 +8375,62 @@ mod design_tests {
         assert!(has(&d, "design/many-series"), "{d:?}");
     }
 
+    /// #639: `-- @lint_allow design/many-series` turns that one advisory into
+    /// a `lint/allowed` note (still listed, passes `--strict`); a non-design
+    /// code or one the statement doesn't trigger is flagged.
+    #[test]
+    fn lint_allow_turns_a_design_advisory_into_a_note() {
+        let data = || {
+            rows(
+                8,
+                |i| json!({ "c0": "w", "c1": format!("series{i}"), "c2": i as f64 }),
+            )
+        };
+        let sql = "SELECT wk::XAXIS, ch::CATEGORY, n::BARCHART, 'T'::TITLE FROM t GROUP BY ALL;";
+        assert!(!passes(&lint_one(sql, data()), true));
+        let d = lint_one(
+            &format!("-- @lint_allow design/many-series (8 on purpose)\n{sql}"),
+            data(),
+        );
+        assert!(!has(&d, "design/many-series"), "{d:?}");
+        let allowed = d.iter().find(|x| x.code == "lint/allowed").expect("listed");
+        assert_eq!(allowed.severity, Severity::Note);
+        assert!(
+            allowed.message.starts_with("design/many-series allowed"),
+            "{d:?}"
+        );
+        assert!(passes(&d, true), "{d:?}");
+        assert!(!has(&d, "lint/allow-unused"), "{d:?}");
+
+        // Not a design lint, and a design lint this statement doesn't trigger.
+        let d = lint_one(
+            &format!("-- @lint_allow sql-error, design/pie-slices\n{sql}"),
+            data(),
+        );
+        assert!(has(&d, "design/many-series"), "{d:?}");
+        assert!(has(&d, "lint/allow-not-design"), "{d:?}");
+        assert!(has(&d, "lint/allow-unused"), "{d:?}");
+
+        // Only the statement right below: a second chart still warns.
+        let d = lint_one(
+            &format!("-- @lint_allow design/many-series\n{sql}\n{sql}"),
+            data(),
+        );
+        assert_eq!(d.iter().filter(|x| x.code == "lint/allowed").count(), 1);
+        assert!(has(&d, "design/many-series"), "{d:?}");
+
+        // With --no-design there is nothing to allow: no unused warning.
+        let d = check_opts(
+            &format!("-- @lint_allow design/many-series\n{sql}"),
+            |_q| Ok(data()),
+            LintOptions {
+                design: false,
+                ..LintOptions::default()
+            },
+        );
+        assert!(!has(&d, "lint/allow-unused"), "{d:?}");
+    }
+
     #[test]
     fn raw_table_dump_warns() {
         let big = rows(250, |i| json!({ "A": format!("row{i}"), "B": i as f64 }));
@@ -9761,6 +9936,51 @@ mod design_tests {
         assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
         let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
         assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    /// #659: an unknown ::MARKDOWN_TONE is an error; a tone beside a
+    /// 'plain'/'callout' style or a ::CALLOUT is dropped (a warning).
+    #[test]
+    fn markdown_tone_is_checked() {
+        let row =
+            |cells: serde_json::Value| move |_q: &str| Ok(vec![cells.as_object().unwrap().clone()]);
+        let codes = |d: &[Diagnostic]| -> Vec<&'static str> {
+            d.iter()
+                .map(|x| x.code)
+                .filter(|c| c.starts_with("markdown_tone/"))
+                .collect()
+        };
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'example: Beispiel'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "example: Beispiel" })),
+        );
+        assert!(codes(&d).is_empty(), "{d:?}");
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'warning'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "warning" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/unknown"], "{d:?}");
+        assert!(!passes(&d, false));
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "plain", "c2": "tip" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/ignored"], "{d:?}");
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'note'::CALLOUT, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "note", "c2": "tip" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/ignored"], "{d:?}");
+        let d = check(
+            "SELECT 'x'::MARKDOWN, 'card'::MARKDOWN_STYLE, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "card", "c2": "tip" })),
+        );
+        assert!(codes(&d).is_empty(), "{d:?}");
+        let d = check(
+            "SELECT 'x'::TEXT_SMALL, 'tip'::MARKDOWN_TONE;",
+            row(json!({ "c0": "x", "c1": "tip" })),
+        );
+        assert_eq!(codes(&d), ["markdown_tone/no-text"], "{d:?}");
     }
 
     #[test]

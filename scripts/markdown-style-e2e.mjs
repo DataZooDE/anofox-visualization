@@ -163,5 +163,58 @@ const panelInfo = (page) =>
   await page.close();
 }
 
+// (e) ::MARKDOWN_TONE (#659): a toned card gets md-tone + md-tone-<tone>, a
+// small label (data-tone-label, drawn by ::before) and a thin accent bar; a tone implies 'card' over the 'callout' header default; 'neutral'
+// and a tone beside 'plain' draw no accent; dark mode repaints the bar.
+const TONE_SQL = `-- @markdown_style callout
+-- @title Markdown tones e2e (#659)
+SELECT 'Why we watch the inputs, not only the error.'::MARKDOWN, 'info'::MARKDOWN_TONE;
+SELECT 'A worked example: 120 orders, 9 late.'::MARKDOWN, 'example: Beispiel'::MARKDOWN_TONE;
+SELECT 'Compare like with like: same weekday, same season.'::MARKDOWN, 'tip'::MARKDOWN_TONE;
+SELECT 'What it cannot tell you: why the input moved.'::MARKDOWN, 'caution'::MARKDOWN_TONE;
+SELECT '$$D = \\max_x |F_1(x) - F_2(x)|$$'::MARKDOWN, 'details:'::MARKDOWN_TONE;
+SELECT 'Plain explanation.'::MARKDOWN, 'neutral'::MARKDOWN_TONE;
+SELECT 'Dropped beside plain.'::MARKDOWN, 'plain'::MARKDOWN_STYLE, 'tip'::MARKDOWN_TONE;
+`;
+{
+  const { page, errs } = await open(TONE_SQL, { width: 1440, height: 1000 });
+  check(!errs.length, "(e) no page errors: " + errs.join(" | "));
+  const tones = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".dash .panel")].map((fig) => {
+        const before = getComputedStyle(fig, "::before");
+        return {
+          classes: [...fig.classList].sort().join(" "),
+          label: fig.dataset.toneLabel || null,
+          labelShown: before.content,
+          labelColor: before.color,
+          bar: getComputedStyle(fig).backgroundImage,
+          bg: getComputedStyle(fig).backgroundColor,
+        };
+      })
+    );
+  const t = await tones();
+  check(t.length === 7, `(e) 7 panels rendered (${t.length})`);
+  const want = ["info", "example", "tip", "caution", "details"];
+  want.forEach((tone, i) => {
+    check(t[i].classes === `md-tone md-tone-${tone} panel`, `(e${i + 1}) '${tone}': md-tone card, not the 'callout' default (${t[i].classes})`);
+    check(/linear-gradient/.test(t[i].bar), `(e${i + 1}) '${tone}': an accent bar (${t[i].bar})`);
+  });
+  check(t[0].label === "Info" && t[0].labelShown === '"Info"', `(e1) default label shown (${t[0].label} / ${t[0].labelShown})`);
+  check(t[1].label === "Beispiel", `(e2) 'example: Beispiel' sets the label (${t[1].label})`);
+  check(t[4].label === null && t[4].labelShown === "none", `(e5) 'details:' drops the label (${t[4].label} / ${t[4].labelShown})`);
+  check(t[2].labelColor !== t[3].labelColor, `(e) tip and caution labels differ in colour (${t[2].labelColor} vs ${t[3].labelColor})`);
+  check(t[0].bg === t[5].bg, `(e) no tint: a toned card has the plain card background (${t[0].bg} vs ${t[5].bg})`);
+  check(t[5].classes === "panel", `(e6) 'neutral': a bare card (${t[5].classes})`);
+  check(t[6].classes === "md-plain panel", `(e7) a tone beside 'plain' is dropped (${t[6].classes})`);
+  if (shots) await page.screenshot({ path: `${shots}/markdown-tone-1440-light.png`, fullPage: true });
+  await page.click("#dark");
+  await page.waitForFunction(() => document.documentElement.dataset.axVariant === "dark", null, { timeout: 15000 });
+  const d = await tones();
+  check(d[1].bar !== t[1].bar, `(e) dark mode repaints the example bar (${t[1].bar} -> ${d[1].bar})`);
+  if (shots) await page.screenshot({ path: `${shots}/markdown-tone-1440-dark.png`, fullPage: true });
+  await page.close();
+}
+
 await browser.close();
 console.log(`markdown-style-e2e: ${process.exitCode ? "failed" : "0 failed"}`);

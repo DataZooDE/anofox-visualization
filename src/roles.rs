@@ -314,6 +314,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
     e("MARKDOWN_STYLE", &["MD_STYLE"], R::MarkdownStyle, "kpi", true,
       "a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style"),
+    e("MARKDOWN_TONE", &["MD_TONE"], R::MarkdownTone, "kpi", true,
+      "a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; implies 'card'"),
     e("IMAGE", &["PICTURE", "IMG"], R::Image, "kpi", true,
       "a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption"),
     e("IMAGE_DARK", &["IMG_DARK"], R::ImageDark, "kpi", true,
@@ -613,6 +615,99 @@ pub fn resolve_markdown_style(
         .unwrap_or("callout")
 }
 
+/// `::MARKDOWN_TONE` values (#659): a quiet accent on a 'card' `::MARKDOWN`
+/// box. The browser's `MD_TONE_KINDS` (web/app.js) lists the same.
+pub const MARKDOWN_TONE_KINDS: &[&str] =
+    &["neutral", "info", "example", "tip", "caution", "details"];
+
+/// A `::MARKDOWN_TONE` value — `'tone'` or `'tone: label'` — as its tone and
+/// label: the tone's own label (`'Example'`; none for `'neutral'`), the
+/// author's after the colon, or none for an empty one (`'example:'`).
+/// `None` for an unknown tone.
+pub fn markdown_tone_of(v: &str) -> Option<(&'static str, Option<String>)> {
+    let (tone, label) = match v.split_once(':') {
+        Some((t, l)) => (t, Some(l.trim())),
+        None => (v, None),
+    };
+    let tone = MARKDOWN_TONE_KINDS
+        .iter()
+        .find(|k| tone.trim().eq_ignore_ascii_case(k))
+        .copied()?;
+    let label = match label {
+        Some("") => None,
+        Some(l) => Some(l.to_string()),
+        None => match tone {
+            "info" => Some("Info".into()),
+            "example" => Some("Example".into()),
+            "tip" => Some("Tip".into()),
+            "caution" => Some("Caution".into()),
+            "details" => Some("Details".into()),
+            _ => None,
+        },
+    };
+    Some((tone, label))
+}
+
+/// The effective chrome of one `::MARKDOWN` panel: its style (as
+/// [`resolve_markdown_style`], except that a valid `::MARKDOWN_TONE` with no
+/// explicit style and no `::CALLOUT` means 'card') and, on a 'card', its tone
+/// and label (see [`markdown_tone_of`]; `None` for 'neutral' or any other
+/// style).
+pub fn resolve_markdown_chrome(
+    explicit: Option<&str>,
+    callout_present: bool,
+    tone: Option<&str>,
+    dashboard_default: Option<&str>,
+) -> (&'static str, Option<(&'static str, Option<String>)>) {
+    let tone = tone.and_then(markdown_tone_of);
+    let style =
+        if explicit.and_then(markdown_style_of).is_none() && !callout_present && tone.is_some() {
+            "card"
+        } else {
+            resolve_markdown_style(explicit, callout_present, dashboard_default)
+        };
+    let tone = tone.filter(|(t, _)| style == "card" && *t != "neutral");
+    (style, tone)
+}
+
+/// The `<figure>` class list and extra attributes for a `::MARKDOWN` panel
+/// in the static / served HTML pages (the browser builds the same in
+/// web/app.js), styled by web/theme-base.css: `md-plain`, `md-box` (+
+/// `dp-callout-<kind>` with its icon) or, on a toned card, `md-tone
+/// md-tone-<tone>` with a `data-tone-label`.
+pub fn markdown_figure_attrs(
+    explicit: Option<&str>,
+    callout: Option<&str>,
+    tone: Option<&str>,
+    dashboard_default: Option<&str>,
+) -> (String, String) {
+    let (style, tone) =
+        resolve_markdown_chrome(explicit, callout.is_some(), tone, dashboard_default);
+    match (style, tone) {
+        ("plain", _) => ("panel md-plain".into(), String::new()),
+        ("callout", _) if callout.is_some() => {
+            let kind = callout_kind(callout.unwrap_or_default());
+            let icon = match kind {
+                "warning" => "⚠",
+                "success" => "✓",
+                _ => "ℹ",
+            };
+            (
+                format!("panel md-box dp-callout dp-callout-{kind}"),
+                format!(" role=\"note\" data-icon=\"{icon}\""),
+            )
+        }
+        ("callout", _) => ("panel md-box".into(), String::new()),
+        (_, Some((t, label))) => (
+            format!("panel md-tone md-tone-{t}"),
+            label
+                .map(|l| format!(" data-tone-label=\"{}\"", crate::format::escape_xml(&l)))
+                .unwrap_or_default(),
+        ),
+        _ => ("panel".into(), String::new()), // 'card'
+    }
+}
+
 /// JSON export of the registry for the browser (wasm `roles_json()`):
 /// `{"roles":[{token, aliases, category, renders, summary}], "sets":{…}}`.
 /// `sets` are the derived token lists `web/app.js` matches on — `inputs`,
@@ -711,6 +806,71 @@ mod tests {
         assert_eq!(markdown_style_of("CALLOUT"), Some("callout"));
         assert_eq!(markdown_style_of(""), None);
         assert_eq!(markdown_style_of("plainish"), None);
+    }
+
+    #[test]
+    fn markdown_tone_values_and_labels() {
+        assert_eq!(
+            markdown_tone_of("example"),
+            Some(("example", Some("Example".into())))
+        );
+        assert_eq!(markdown_tone_of(" Tip "), Some(("tip", Some("Tip".into()))));
+        assert_eq!(markdown_tone_of("neutral"), Some(("neutral", None)));
+        assert_eq!(
+            markdown_tone_of("example: Beispiel"),
+            Some(("example", Some("Beispiel".into())))
+        );
+        assert_eq!(markdown_tone_of("caution:"), Some(("caution", None)));
+        assert_eq!(markdown_tone_of("warning"), None);
+        assert_eq!(markdown_tone_of(""), None);
+    }
+
+    #[test]
+    fn markdown_tone_implies_card_but_not_over_an_explicit_style() {
+        let ex = Some(("example", Some("Example".to_string())));
+        // A tone alone: a card, even over a 'callout' / 'plain' header default.
+        assert_eq!(
+            resolve_markdown_chrome(None, false, Some("example"), None),
+            ("card", ex.clone())
+        );
+        assert_eq!(
+            resolve_markdown_chrome(None, false, Some("example"), Some("plain")),
+            ("card", ex.clone())
+        );
+        assert_eq!(
+            resolve_markdown_chrome(Some("card"), false, Some("example"), None),
+            ("card", ex)
+        );
+        // An explicit other style or ::CALLOUT wins; the tone is dropped.
+        assert_eq!(
+            resolve_markdown_chrome(Some("plain"), false, Some("tip"), None),
+            ("plain", None)
+        );
+        assert_eq!(
+            resolve_markdown_chrome(None, true, Some("tip"), None),
+            ("callout", None)
+        );
+        // 'neutral' and an unknown tone: no accent.
+        assert_eq!(
+            resolve_markdown_chrome(None, false, Some("neutral"), None),
+            ("card", None)
+        );
+        assert_eq!(
+            resolve_markdown_chrome(None, false, Some("weird"), None),
+            ("callout", None)
+        );
+        // The HTML attributes, label escaped.
+        assert_eq!(
+            markdown_figure_attrs(None, None, Some("tip: <b>"), None),
+            (
+                "panel md-tone md-tone-tip".to_string(),
+                " data-tone-label=\"&lt;b&gt;\"".to_string()
+            )
+        );
+        assert_eq!(
+            markdown_figure_attrs(None, Some("warning"), None, None).0,
+            "panel md-box dp-callout dp-callout-warning"
+        );
     }
 
     #[test]
@@ -1061,6 +1221,7 @@ mod tests {
             Role::Info,
             Role::Callout,
             Role::MarkdownStyle,
+            Role::MarkdownTone,
             Role::Section,
             Role::SelectAs,
             Role::Drill,
@@ -1226,6 +1387,7 @@ mod tests {
                 | Role::Info
                 | Role::Callout
                 | Role::MarkdownStyle
+                | Role::MarkdownTone
                 | Role::Section
                 | Role::SelectAs
                 | Role::Drill

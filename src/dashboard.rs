@@ -931,6 +931,20 @@ fn render_inner(
             // `.md-box` — the bar is clipped to the rounded corners the same
             // way (an inner `<rect>` within a `<clipPath>` of the same
             // radius).
+            PanelChrome::Tone { bar } => {
+                let clip = format!("dp-md-clip-{ci}");
+                out.push_str(&format!(
+                    "<clipPath id=\"{clip}\"><rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" \
+                     height=\"{ph:.1}\" rx=\"{radius}\"/></clipPath>\
+                     <rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"{pw:.1}\" height=\"{ph:.1}\" rx=\"{radius}\" \
+                     fill=\"{card}\" stroke=\"{line}\" stroke-width=\"1\"/>\
+                     <rect x=\"{px:.1}\" y=\"{py:.1}\" width=\"3\" height=\"{ph:.1}\" \
+                     fill=\"{bar}\" clip-path=\"url(#{clip})\"/>",
+                    card = hex(t.colors.card),
+                    line = hex(t.colors.line),
+                    bar = hex(*bar),
+                ));
+            }
             PanelChrome::Callout { fill, border, bar } => {
                 let clip = format!("dp-md-clip-{ci}");
                 out.push_str(&format!(
@@ -2096,12 +2110,22 @@ pub(crate) fn markdown_text(
 enum PanelChrome {
     Card,
     Plain,
-    Callout { fill: Rgb, border: Rgb, bar: Rgb },
+    Callout {
+        fill: Rgb,
+        border: Rgb,
+        bar: Rgb,
+    },
+    /// A 'card' with a `::MARKDOWN_TONE` (#659): the card plus a thin left
+    /// accent bar (the browser's `.md-tone`; its small label stays
+    /// browser/HTML-only).
+    Tone {
+        bar: Rgb,
+    },
 }
 
 /// `roles`/`rows`'s [`PanelChrome`]: `Card` for every panel that isn't a
-/// `::MARKDOWN`; otherwise [`crate::roles::resolve_markdown_style`] of its
-/// own `::MARKDOWN_STYLE` cell, `::CALLOUT`'s presence and `md_default`
+/// `::MARKDOWN`; otherwise [`crate::roles::resolve_markdown_chrome`] of its
+/// own `::MARKDOWN_STYLE` cell, `::CALLOUT`'s presence, its `::MARKDOWN_TONE` and `md_default`
 /// (the dashboard's own `-- @markdown_style`). A static render has no
 /// backdrop to alpha-blend a translucent wash against, so the tinted fill
 /// approximates the browser's look by mixing the kind's colour into the
@@ -2124,11 +2148,21 @@ fn panel_chrome(
     };
     let explicit = text_of(Role::MarkdownStyle);
     let callout_present = roles.iter().any(|(_, r)| matches!(r, Role::Callout));
-    let style =
-        crate::roles::resolve_markdown_style(explicit.as_deref(), callout_present, md_default);
+    let tone = text_of(Role::MarkdownTone);
+    let (style, tone) = crate::roles::resolve_markdown_chrome(
+        explicit.as_deref(),
+        callout_present,
+        tone.as_deref(),
+        md_default,
+    );
     match style {
         "plain" => PanelChrome::Plain,
-        "card" => PanelChrome::Card,
+        "card" => match tone {
+            Some((tone, _)) => PanelChrome::Tone {
+                bar: crate::theme::tone_color(&t.colors, tone),
+            },
+            None => PanelChrome::Card,
+        },
         _ => {
             let kind = crate::roles::callout_kind(&text_of(Role::Callout).unwrap_or_default());
             let dark = luminance(t.colors.card) < 0.25;
