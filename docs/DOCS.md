@@ -132,7 +132,7 @@ terminal.
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'… |
-| `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%a %H:%M' |
+| `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%b %Y', '%a %H:%M' |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::XBREAKS` | `::X_BREAKS` | modifier | explicit x-axis tick positions, in data units — '100,1000,10000'; overrides the automatic ticks (and, under ::XSCALE, their log/sqrt round-number placement) |
@@ -657,7 +657,7 @@ Roles for model output — coefficient forests, residual diagnostics, CV curves:
 | straight lines | `'0.5,1'::ABLINE`, `1::IDENTITY` | `y = 0.5x + 1` (one per distinct value); `y = x` dashed grey — both drawn across the data box |
 | small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x) and stacks the panels in one column unless `::FACET_NCOL` is set |
 | axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
-| date tick labels | `'%H:%M'::XFORMAT`, `'%-d %b'::XFORMAT` | on a DATE/TIMESTAMP x, a value with `%` is a strftime pattern (`%Y %y %m %-m %b %B %d %-d %e %a %A %H %M %S`; names follow `::LOCALE`): a time-of-day profile reads `06:00`, not `1 Jan 2000 06:00`; any other `::XFORMAT` stays a number format |
+| date tick labels | `'%H:%M'::XFORMAT`, `'%-d %b'::XFORMAT`, `'%b %Y'::XFORMAT` | on a DATE/TIMESTAMP x, a value with `%` is a strftime pattern (`%Y %y %m %-m %b %B %d %-d %e %a %A %H %M %S`; names follow `::LOCALE`): a time-of-day profile reads `06:00`, not `1 Jan 2000 06:00`; monthly ticks read `Jan 2025`, not `2025-01`; any other `::XFORMAT` stays a number format |
 | axis titles | `'Residual load (GW)'::XTITLE`, `'Price (EUR/MWh)'::YTITLE` | what the axes are; the x title names the `::XAXIS` variable, so on a `::FLIP` chart it's drawn beside the (now vertical) category axis; none on pies, gauges, maps |
 | label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|); overlapping labels are skipped. `::LABEL` is then per-point text, not the chart title |
 | trend method | `y::SMOOTH, 'lm'::SMOOTH_METHOD` | `'loess'` (default), `'lm'`, `'gam'` (penalised spline, λ by GCV), `'glm'` (= Gaussian lm) |

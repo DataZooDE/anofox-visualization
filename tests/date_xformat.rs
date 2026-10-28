@@ -76,3 +76,50 @@ fn number_formats_still_apply_to_numeric_axes() {
     ]);
     assert!(s.contains("kg</text>"), "{s}");
 }
+
+/// Two years of month starts: ggplot-rs picks monthly / yearly breaks.
+fn months(fmt: Option<&str>) -> Vec<Column> {
+    let n = 24;
+    // 2024-01-01 + k months, as epoch seconds (UTC)
+    const DAYS: [i64; 24] = [
+        31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30,
+        31,
+    ];
+    let t: Vec<i64> = (0..n)
+        .map(|k| 1_704_067_200 + DAYS[..k].iter().sum::<i64>() * 86_400)
+        .collect();
+    let mut cols = vec![
+        Column::new(
+            "t",
+            Role::X,
+            t.iter().map(|&s| Value::DateTime(s)).collect(),
+        ),
+        Column::new(
+            "v",
+            Role::Value(Kind::Line),
+            (0..n).map(|k| Value::Float(k as f64)).collect(),
+        ),
+    ];
+    if let Some(f) = fmt {
+        cols.push(Column::new("f", Role::XFormat, konst(f, n)));
+    }
+    cols
+}
+
+#[test]
+fn a_month_pattern_labels_monthly_breaks() {
+    // ggplot-rs 0.34 honours the pattern on automatic month / year breaks
+    // (sipemu/ggplot-rs#352): no "2024-07" ticks.
+    let s = svg(&months(Some("%b %Y")));
+    let ticks: Vec<&str> = s
+        .split("</text>")
+        .filter_map(|t| t.rsplit('>').next())
+        .filter(|t| t.contains("2024") || t.contains("2025"))
+        .collect();
+    assert!(!ticks.is_empty(), "{s}");
+    assert!(ticks.iter().all(|t| !t.contains('-')), "{ticks:?}");
+    assert!(
+        ticks.iter().any(|t| t.starts_with(char::is_alphabetic)),
+        "{ticks:?}"
+    );
+}

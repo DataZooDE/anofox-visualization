@@ -221,7 +221,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("YFORMAT", &["YAXISFORMAT", "YUNIT", "YCURRENCY"], R::YFormat, "modifier", true,
       "value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'…"),
     e("XFORMAT", &["XAXISFORMAT", "XUNIT", "XCURRENCY"], R::XFormat, "modifier", true,
-      "x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%a %H:%M'"),
+      "x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%b %Y', '%a %H:%M'"),
     e("XSCALE", &["XTRANS"], R::XScale, "modifier", true,
       "x-axis transform: 'log10', 'sqrt' or 'reverse'"),
     e("YSCALE", &["YTRANS"], R::YScale, "modifier", true,
