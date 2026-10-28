@@ -126,7 +126,10 @@ writeFileSync(
 writeFileSync(
   path.join(dashDir, "trend.sql"),
   `-- @title Trend\n-- @nav Trend\n-- @order 3\n` +
-    `SELECT 'nothing here but text — proves nav switches between differently-shaped dashboards'::MARKDOWN;\n`
+    `SELECT 'nothing here but text — proves nav switches between differently-shaped dashboards'::MARKDOWN;\n` +
+    // #655: a ::REGION map on the built-in boundaries, which --site must publish.
+    `SELECT iso ::REGION, v AS "Units" ::BARCHART, 'world'::BOUNDARIES, 'Units by country'::TITLE\n` +
+    `  FROM (VALUES ('DEU', 1.0), ('FRA', 2.0), ('BRA', 3.0)) t(iso, v);\n`
 );
 const optionsFile = path.join(work, "locked.json");
 writeFileSync(
@@ -297,6 +300,16 @@ try {
     /95/.test(afterChartLink) && /150/.test(afterChartLink) && !/60/.test(afterChartLink) && !/120/.test(afterChartLink),
     "chart ::LINK click: the target got the clicked mark's value (region='south' filter applied)"
   );
+
+  // ── 6b. #655: the ::REGION map draws from the published boundary layer ──
+  check(existsSync(path.join(outDir, "data/boundaries/world.csv")), "--site published data/boundaries/world.csv");
+  const p6 = await openPage(BASE + "d/trend/");
+  await p6.waitForSelector(".dash .panel svg path", { timeout: 60000 }).catch(() => {});
+  const mapText = await p6.evaluate(() => document.querySelector(".dash")?.textContent || "");
+  check(!/couldn't fetch/.test(mapText), "::REGION map: the boundary layer was fetched (no 404)");
+  const mapPaths = await p6.$$eval(".dash .panel svg path", (ps) => ps.length);
+  check(mapPaths >= 3, `::REGION map: the three countries drawn (${mapPaths} paths)`);
+  if (shots) await p6.screenshot({ path: `${shots}/site-map.png` });
 
   // (#500's locked-server guarantee — siteHref()/servedNavHref() are a
   // no-op when `published` is false, so a locked server's own /d/<id>

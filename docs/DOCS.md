@@ -1748,7 +1748,7 @@ same-origin files in `web/data/boundaries/` (sources, licences and the build
 in [`SOURCES.md`](../web/data/boundaries/SOURCES.md),
 `scripts/build-boundaries.sh`). The browser fetches a layer the first time a
 panel needs it (no outside request; it works offline and on the locked
-server); native renders (`dashboard --svg`, `serve`, the extension) carry the
+server; `dashboard --site` publishes them with the app); native renders (`dashboard --svg`, `serve`, the extension) carry the
 default layers embedded, so they need no file access. The pack is not part of
 the wasm.
 
