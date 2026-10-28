@@ -620,6 +620,14 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/markdown-style-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/figure-e2e.mjs (#661): ::FIGURE … ::ENDFIGURE draws its cells
+      # as one card (one SVG, cells tagged A, B, C), the cells not again as
+      # panels of their own, each mark's tooltip from its own cell, dark mode
+      # and 390 px re-renders.
+      - name: Figure e2e (#661)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/figure-e2e.mjs --url http://127.0.0.1:8947/
+
       # The downloaded HTML's tab/sub-tab switcher (#381, an owner-reported
       # regression): exports a dashboard with tabs and sub-tabs and clicks
       # through every one in the downloaded file, offline.

@@ -2246,10 +2246,15 @@ fn render_dashboard_page(
             queried.push((panel, Rows::new(), false, false, Some(html)));
             continue;
         }
+        // A ::FIGURE (#661) is queried like a panel (its row holds the
+        // figure's options); phase 2 draws its cells — the statements after
+        // it carrying `figure` — as one picture.
+        let figure = panel.roles.iter().any(|(_, r)| *r == Role::FigureStart);
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()
             && !section
             && !step_marker
+            && !figure
             && anofox_visualization::roles::is_directive_panel(&panel.roles)
         {
             continue;
@@ -2358,13 +2363,49 @@ fn render_dashboard_page(
             panels.push_str(&html);
             continue;
         }
+        let figure = panel.roles.iter().any(|(_, r)| *r == Role::FigureStart);
         if na {
             panels.push_str(NOT_AVAILABLE_HTML);
-            // its strips go with it
+            // its strips (a ::FIGURE: its cells) go with it
             while queried
-                .next_if(|(q, _, _, _, _)| track::is_track(&q.roles))
+                .next_if(|(q, _, _, _, _)| {
+                    track::is_track(&q.roles) || (figure && q.figure.is_some())
+                })
                 .is_some()
             {}
+            continue;
+        }
+        // A ::FIGURE (#661): its cells (the entries right after it) composed
+        // into one picture; a cell left out ("Not available") is an empty
+        // cell.
+        if figure {
+            let mut cells = Vec::new();
+            while let Some((q, r, na, _, _)) = queried.next_if(|(q, ..)| q.figure.is_some()) {
+                cells.push(anofox_visualization::figure::Cell {
+                    name: q.name.clone(),
+                    cols: if na {
+                        Vec::new()
+                    } else {
+                        sql::columns_from_rows(&r, &q.roles)
+                    },
+                });
+            }
+            let svg = anofox_visualization::figure::render_with_title(
+                &sql::columns_from_rows(&rows, &panel.roles),
+                &cells,
+                920,
+                460,
+                &opts,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "[anofox-serve] dashboard '{}' figure render failed: {}",
+                    dash.id,
+                    access::diag(&e.to_string())
+                );
+                PANEL_RENDER_ERROR_HTML.to_string()
+            });
+            panels.push_str(&format!("<figure class=\"panel dp-figure\">{svg}</figure>"));
             continue;
         }
         if let Some(cp) = &panel.contract {

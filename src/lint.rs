@@ -92,6 +92,11 @@ pub struct Diagnostic {
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
     /// `folder/setup-table` (a setup `CREATE TABLE … AS`, rebuilt on every
     /// new server connection when served).
+    /// `::FIGURE` blocks ([`figure_diags`], #661): `figure/unclosed` |
+    /// `figure/nested` | `figure/not-a-chart` | `figure/bad-option` |
+    /// `figure/unknown-cell` | `figure/duplicate-cell` | `figure/bad-weights`
+    /// (errors) | `figure/empty` | `figure/unplaced-cell` |
+    /// `figure/stray-end` (warnings).
     /// `::MARKDOWN_TONE` (#659): `markdown_tone/unknown` (an error) |
     /// `markdown_tone/no-text` | `markdown_tone/ignored` (warnings).
     /// Design advisories
@@ -470,6 +475,15 @@ where
         .into_iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .collect();
+    // #661: each ::FIGURE statement's own columns (its options), for
+    // `figure_diags` once the loop is done; and every figure cell, which
+    // needs no ::TITLE of its own (the figure's title covers it).
+    let mut figure_cols: std::collections::HashMap<usize, Vec<crate::Column>> =
+        std::collections::HashMap::new();
+    let figure_cells: std::collections::HashSet<usize> = crate::figure::blocks(&sql::plan(script))
+        .into_iter()
+        .flat_map(|b| b.cells)
         .collect();
     for (i, p) in sql::plan(script).into_iter().enumerate() {
         let stmt = i + 1;
@@ -1937,6 +1951,9 @@ where
         // a ::GROUP's own ::KPI_SIZE (#405: it never reaches the per-panel
         // checks below, since this branch always `continue`s).
         if roles::is_directive_panel(&p.roles) {
+            if p.roles.iter().any(|(_, r)| *r == Role::FigureStart) {
+                figure_cols.insert(i, sql::columns_from_rows(&rows, &p.roles));
+            }
             if p.roles.iter().any(|(_, r)| *r == Role::KpiSize) {
                 diags.extend(kpi_size_checks(&p.roles, &rows).into_iter().map(
                     |(severity, code, message)| Diagnostic {
@@ -2198,7 +2215,7 @@ where
 
             if let Some(k) = chart_kind(&p.roles) {
                 let titled = p.roles.iter().any(|(_, r)| matches!(r, Role::Title));
-                if is_big_chart(k) && !titled {
+                if is_big_chart(k) && !titled && !figure_cells.contains(&i) {
                     diags.push(Diagnostic {
                         severity: Severity::Warning,
                         stmt,
@@ -2343,7 +2360,106 @@ where
     diags.extend(name_diags(&plan));
     diags.extend(tour_diags(script, &plan));
     diags.extend(step_diags(&plan, script));
+    diags.extend(figure_diags(&plan, &figure_cols));
     apply_lint_allow(&mut diags, &plan, opts.design);
+    diags
+}
+
+/// `::FIGURE` … `::ENDFIGURE` checks (#661): see [`Diagnostic::code`] for
+/// the `figure/*` list. `figure_cols` holds each `::FIGURE` statement's own
+/// columns (its options), by plan index — missing when its query failed
+/// (already an `sql-error`), in which case only the block itself is checked.
+fn figure_diags(
+    plan: &[sql::Panel],
+    figure_cols: &std::collections::HashMap<usize, Vec<crate::Column>>,
+) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let short = |i: usize| one_line(plan[i].sql.trim());
+    let mut d = |severity, i: usize, code: &'static str, message: String| {
+        diags.push(Diagnostic {
+            severity,
+            stmt: i + 1,
+            code,
+            message,
+            sql: short(i),
+        })
+    };
+    let blocks = crate::figure::blocks(plan);
+    for (k, b) in blocks.iter().enumerate() {
+        if b.end.is_none() {
+            if blocks.get(k + 1).is_some() {
+                d(
+                    Severity::Error,
+                    blocks[k + 1].start,
+                    "figure/nested",
+                    "a ::FIGURE inside another — figures don't nest; close the first with \
+                     ::ENDFIGURE (use ::LAYOUT's ( ) to group cells)"
+                        .into(),
+                );
+            } else {
+                d(
+                    Severity::Error,
+                    b.start,
+                    "figure/unclosed",
+                    "::FIGURE without ::ENDFIGURE — every chart to the end of the script \
+                     becomes one of its cells"
+                        .into(),
+                );
+            }
+        }
+        if b.cells.is_empty() {
+            d(
+                Severity::Warning,
+                b.start,
+                "figure/empty",
+                "::FIGURE with no chart before its ::ENDFIGURE — it draws nothing".into(),
+            );
+        }
+        for &c in &b.cells {
+            let p = &plan[c];
+            if p.contract.is_some()
+                || chart_kind(&p.roles).is_none()
+                || crate::track::is_track(&p.roles)
+            {
+                d(
+                    Severity::Error,
+                    c,
+                    "figure/not-a-chart",
+                    "a ::FIGURE cell must be a chart (bar, line, area, scatter, histogram, …) — \
+                     a table, KPI, text, map or ::TRACK is drawn as an empty cell; move it \
+                     outside the figure"
+                        .into(),
+                );
+            }
+        }
+        let Some(cols) = figure_cols.get(&b.start) else {
+            continue;
+        };
+        let (spec, issues) = crate::figure::FigureSpec::from_columns(cols);
+        for m in issues {
+            d(Severity::Error, b.start, "figure/bad-option", m);
+        }
+        let names: Vec<Option<String>> = b.cells.iter().map(|&c| plan[c].name.clone()).collect();
+        for (code, m) in spec.check(&names) {
+            let severity = if code == "figure/unplaced-cell" {
+                Severity::Warning
+            } else {
+                Severity::Error
+            };
+            d(severity, b.start, code, m);
+        }
+    }
+    let ends: std::collections::HashSet<usize> = blocks.iter().filter_map(|b| b.end).collect();
+    for (i, p) in plan.iter().enumerate() {
+        if p.roles.iter().any(|(_, r)| *r == Role::FigureEnd) && !ends.contains(&i) {
+            d(
+                Severity::Warning,
+                i,
+                "figure/stray-end",
+                "::ENDFIGURE with no open ::FIGURE — ignored".into(),
+            );
+        }
+    }
     diags
 }
 

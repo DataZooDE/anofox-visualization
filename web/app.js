@@ -8,6 +8,7 @@ import init, {
   render_mini_hist,
   render_mini_overlay,
   render_stack,
+  render_figure,
   render_contract,
   map_bounds,
   map_natural_height,
@@ -6857,7 +6858,7 @@ async function tourAfterSwap() {
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -9940,6 +9941,23 @@ async function runOnce(fresh = true, pv = preview) {
     }
     return true;
   };
+  // ::FIGURE (#661): the plan indices of the cells of the figure opened at
+  // `i` — the statements up to its ::ENDFIGURE (or the next ::FIGURE, or
+  // the end) that draw a panel; setup and directives in between run as
+  // usual. src/figure.rs `blocks` is the same rule.
+  const figureCells = (i) => {
+    const out = [];
+    for (let j = i + 1; j < stmts.length; j++) {
+      const t = stmts[j];
+      if (role(t, "ENDFIGURE") || role(t, "FIGURE")) break;
+      if (!t.setup && !directive(t) && !isInput(t) && !chromeRole(t)) out.push(j);
+    }
+    return out;
+  };
+  const inFigure = new Set();
+  stmts.forEach((t, j) => {
+    if (role(t, "FIGURE")) figureCells(j).forEach((k) => inFigure.add(k));
+  });
   // One panel statement (a contract plot, a ::PAGED table, or a chart / table /
   // KPI / text card…): run its query and append its panel(s) to ctx.container.
   // The render loop calls it in place; a statement inside a hidden ::TAB pane
@@ -9993,6 +10011,48 @@ async function runOnce(fresh = true, pv = preview) {
           container.appendChild(fig);
           panels++;
         }
+        nextSpan = 0;
+        nextHeight = 0;
+        nextRowSelect = "";
+        nextTableOpts = {};
+        nextIa = {};
+        nextEmpty = "";
+      } else if (role(s, "FIGURE")) {
+        // A ::FIGURE (#661): the charts up to its ::ENDFIGURE are its cells
+        // (the render loop skips them), composed into one picture in one
+        // card titled by the ::FIGURE value. Every cell's query runs here.
+        const figRows = await panelSql(s.sql, i, pv);
+        const cells = [];
+        for (const j of figureCells(i)) {
+          const c = stmts[j];
+          let rows = "[]";
+          try {
+            rows = await panelSql(c.sql, j, pv);
+          } catch (e) {
+            console.warn(`::FIGURE cell ${j + 1} failed`, e);
+          }
+          cells.push({ rows, roles: c.roles, name: c.name || null });
+        }
+        const span = Math.min(12, nextSpan || 12);
+        const fig = document.createElement("figure");
+        fig.className = "panel dp-figure";
+        if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+        const fr = s.roles.find((r) => r[1] === "FIGURE");
+        const title = fr ? (JSON.parse(figRows)[0] || {})["c" + fr[0]] : null;
+        if (title != null && !/^(1|true)$/i.test(String(title).trim()) && String(title).trim())
+          fig.appendChild(mkTitle(String(title)));
+        const ph = nextHeight || 450;
+        const holder = document.createElement("div");
+        holder.className = "panel-svg";
+        const rw = Math.max(300, span * 100 * viewScale);
+        holder._figure = { figure: { rows: figRows, roles: s.roles }, cells };
+        renderChart(holder, figRows, s.roles, rw, ph);
+        const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
+        if (warn) console.warn(`::FIGURE: ${warn}`);
+        fig.appendChild(holder);
+        fig._dp = { rows: figRows, roles: s.roles, rw, ph, isMap: false, figure: true };
+        container.appendChild(fig);
+        panels++;
         nextSpan = 0;
         nextHeight = 0;
         nextRowSelect = "";
@@ -10684,6 +10744,8 @@ async function runOnce(fresh = true, pv = preview) {
     if (hiding === "STEP" && d === "GUIDE_STEP") hiding = null;
     if (hiding === "VIEW" && (!s.view || s.view.marker)) hiding = null;
     if (hiding) continue;
+    // A ::FIGURE's cells are drawn by the ::FIGURE itself (panelBody).
+    if (inFigure.has(i)) continue;
     // `::SHOW_IF` (#515): a condition is evaluated eagerly, every run,
     // including for a statement in a hidden tab pane (its lazy job is
     // simply never queued below). The preceding modifiers (and, for a
@@ -10777,6 +10839,8 @@ async function runOnce(fresh = true, pv = preview) {
         container = body;
       } else if (d === "ENDGROUP") {
         container = curGrid;
+      } else if (d === "ENDFIGURE") {
+        // closes a ::FIGURE — its cells were drawn by the ::FIGURE (#661)
       } else if (d === "SPAN") {
         nextSpan = parseInt(await firstValue(s)) || 0;
       } else if (d === "HEIGHT") {
@@ -11522,7 +11586,11 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const t0 = performance.now();
   const ctx = holder._frame != null ? ctxWith({ frame: holder._frame }) : renderCtx();
   const tracks = holder._tracks || [];
-  if (tracks.length) {
+  if (holder._figure) {
+    // A ::FIGURE (#661): its cells composed into one picture by the wasm
+    // renderer (crate::figure — ggplot-rs PlotGrid).
+    holder.innerHTML = render_figure(JSON.stringify(holder._figure), w, ph, ctx);
+  } else if (tracks.length) {
     let svgs = [];
     try {
       svgs = JSON.parse(render_stack(JSON.stringify({ chart: { rows, roles }, tracks }), w, ph, ctx, zoom));
@@ -19296,6 +19364,9 @@ function attachAxisPointer() {
     // Maps aren't cartesian — a vertical x-crosshair grouping marks by longitude
     // is meaningless there. They keep their own per-point (<title>) hover.
     if (panel._dp && panel._dp.isMap) return;
+    // A ::FIGURE (#661) holds several plots in one SVG — a crosshair reads
+    // one plot area only; its marks keep their own per-point hover.
+    if (panel._dp && panel._dp.figure) return;
     // A pure scatter has no shared-x series to group, so an axis crosshair would
     // highlight every point sharing the nearest x (two far-apart dots at once).
     // Skip it — the per-point (<title>) hover shows the individual point instead.

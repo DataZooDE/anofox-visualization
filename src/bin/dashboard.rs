@@ -366,9 +366,12 @@ fn render_dashboard_html(
             queried.push((p, Ok(Vec::new()), false, Some(html)));
             continue;
         }
+        // A ::FIGURE (#661) draws its cells (the statements after it, each
+        // carrying `figure`) as one picture — its own row holds its options.
+        let figure = p.roles.iter().any(|(_, r)| *r == Role::FigureStart);
         // Layout directives are interactive — the browser builder / `serve`
         // handle them; the static CLI output skips them (role registry).
-        if roles::is_directive_panel(&p.roles) && !section && !step_marker {
+        if roles::is_directive_panel(&p.roles) && !section && !step_marker && !figure {
             continue;
         }
         let rows = exec(&format!("{};", p.sql));
@@ -425,6 +428,30 @@ fn render_dashboard_html(
                 continue;
             }
         };
+        // A ::FIGURE (#661): its cells (the entries right after it) composed
+        // into one picture.
+        if p.roles.iter().any(|(_, r)| *r == Role::FigureStart) {
+            let mut cells = Vec::new();
+            while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| q.figure.is_some()) {
+                cells.push(anofox_visualization::figure::Cell {
+                    name: q.name.clone(),
+                    cols: r
+                        .map(|r| sql::columns_from_rows(&r, &q.roles))
+                        .unwrap_or_default(),
+                });
+            }
+            let svg = anofox_visualization::figure::render_with_title(
+                &sql::columns_from_rows(&rows, &p.roles),
+                &cells,
+                920,
+                460,
+                &opts,
+            )
+            .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+            panels.push_str(&format!("<figure class=\"panel dp-figure\">{svg}</figure>"));
+            n += 1;
+            continue;
+        }
         // A contract plot call: one figure per result row (GROUP BY key).
         if let Some(cp) = &p.contract {
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {

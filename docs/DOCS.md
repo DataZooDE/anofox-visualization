@@ -228,6 +228,15 @@ terminal.
 | `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
+| `::FIGURE` | `::PATCHWORK` | layout | open a figure: the charts up to ::ENDFIGURE become the cells of one patchwork-style picture with aligned axes; the value is its title |
+| `::ENDFIGURE` | `::END_FIGURE` | layout | close the current ::FIGURE |
+| `::LAYOUT` | `::FIGURE_LAYOUT` | layout | on ::FIGURE: '(hist / scatter) \| checks' — \| side by side, / stacked (binds tighter), ( ) groups, _ an empty cell; a cell is its -- @name or its position (1, 2, …) |
+| `::WIDTHS` | `::FIGURE_WIDTHS` | layout | on ::FIGURE: relative widths '1,2' — of every side-by-side group with that many cells |
+| `::HEIGHTS` | `::FIGURE_HEIGHTS` | layout | on ::FIGURE: relative heights '1,4' — of every stacked group with that many cells |
+| `::AXES_COLLECT` | `::COLLECT_AXES` | layout | on ::FIGURE: 'x' (stacked charts share one x axis, drawn once at the bottom), 'align' (line up the plot areas only) or 'none' (default) |
+| `::COLLECT_LEGENDS` | `::COLLECT_GUIDES` | layout | on ::FIGURE: true draws identical legends once, beside the figure |
+| `::TAG_LEVELS` | `::FIGURE_TAGS` | layout | on ::FIGURE: tag the cells 'A' (A, B, …), 'a', '1', 'i' or 'I' |
+| `::FIGURE_NCOL` |  | layout | on ::FIGURE without ::LAYOUT: the cells fill a grid this many columns wide |
 | `::TAB` | `::PAGE` | layout | start a tab/page |
 | `::SUBTAB` | `::SUB_TAB` | layout | a nested tab inside a ::TAB |
 | `::GUIDE_STEP` | `::TUTORIAL_STEP`, `::WIZARD_STEP` | layout | a step of a guided sequence (onboarding, tutorials): Back / Next, 'Step 2 of 5', ?v.<name>=n; the alias names the step variable (default 'step') |
@@ -2553,6 +2562,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | `SELECT n::COL;` (`::SPAN`, `::WIDTH`) | the **next** panel's width — `n` of 12 (`12`=full, `6`=half, `4`=third); a statement of its own: written inside a chart's SELECT it turns that statement into the directive and the chart isn't drawn (`layout/inline-layout-role`) |
 | `SELECT n::COLUMNS;` | default panels per row (each unspecified panel spans `12/n`) |
 | `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
+| `SELECT 'Title'::FIGURE, '(a / b) \| c'::LAYOUT;` … `SELECT 1::ENDFIGURE;` | compose the enclosed charts into **one** picture — aligned plot areas, a shared x axis, one legend, panel tags; see *Figures* below |
 | `SELECT 'Name'::TAB;` | start a tab — following panels live under it (panels before the first `::TAB` form a fixed header) |
 | `SELECT 'Name'::SUBTAB;` | start a nested tab inside the current `::TAB` |
 | `SELECT 'Name' AS id ::VIEW;` | start (or continue) a group of alternative views of one panel — a segmented switcher; see *Alternative views of one panel* below |
@@ -2581,6 +2591,64 @@ on narrow screens.
 
 A `::GROUP` box also holds charts, so you can place a dropdown *beside* a graph.
 See the **"Layout & filters"** sample.
+
+### Figures: several charts as one picture (`::FIGURE`)
+
+An explanatory figure often combines plots with aligned axes — a histogram of
+`x` directly above the scatter of `x` vs `y`, a forecast over its residuals, a
+before/after pair — like R's *patchwork*. As separate panels they fall apart:
+separate cards, no shared axis, legends repeated. `::FIGURE` … `::ENDFIGURE`
+(#661) composes the charts between the markers into one picture
+(ggplot-rs's `PlotGrid`):
+
+```sql
+SELECT 'Data drift: the inputs move, the rule holds' ::FIGURE,
+       '(hist / scatter) | rule' ::LAYOUT,      -- | side by side, / stacked
+       '1,4' ::HEIGHTS, '2,1' ::WIDTHS,
+       'x' ::AXES_COLLECT,                        -- hist and scatter share one x axis
+       true ::COLLECT_LEGENDS,                    -- reference / now once, not per cell
+       'A' ::TAG_LEVELS;                          -- cells tagged A, B, C
+-- @name hist
+SELECT x ::HISTOGRAM, period ::CATEGORY, 'share' ::HIST_NORM FROM drift;
+-- @name scatter
+SELECT x ::XAXIS, y ::SCATTER, period ::CATEGORY FROM drift;
+-- @name rule
+SELECT x ::XAXIS, fitted ::LINECHART FROM rule ORDER BY x;
+SELECT 1 ::ENDFIGURE;
+```
+
+The `::FIGURE` value is the card's title; every other column of that
+statement is an option:
+
+| Option | Effect |
+|---|---|
+| `::LAYOUT` | How the cells are arranged: `\|` side by side, `/` stacked (binds tighter, as in patchwork: `a \| b / c` = `a \| (b / c)`), `( )` groups, `_` an empty cell. A cell is its `-- @name` or its position (`1`, `2`, …). Without `::LAYOUT` the cells fill a grid in order. |
+| `::FIGURE_NCOL` | Without `::LAYOUT`: the grid's column count (default: near-square). |
+| `::WIDTHS` / `::HEIGHTS` | Relative widths / heights, `'1,2'` — applied to every side-by-side (`\|`) / stacked (`/`) group with that many cells. In the example, `'1,4'` makes the scatter four times as tall as the histogram above it. |
+| `::AXES_COLLECT` | `'x'`: charts stacked in a column share one x domain and draw it once, at the bottom (needs a numeric/date x — a `::HISTOGRAM` or a scatter, not categorical bars); `'align'`: line up the plot areas only; `'none'` (default). |
+| `::COLLECT_LEGENDS` | `true`: identical legends are drawn once, beside the figure. |
+| `::TAG_LEVELS` | `'A'`, `'a'`, `'1'`, `'i'` or `'I'`: tag the cells in reading order. |
+
+The figure takes the full row (`::COL` before it narrows it) and is 450 px
+tall (`::HEIGHT` before it changes that). Each cell is an ordinary chart
+statement: its own roles, `::TITLE`, `::CATEGORY`, … — a cell needs no
+`::TITLE` (`design/untitled-chart` skips it). Hovering a mark shows its own
+cell's values; the x-crosshair of a single chart is off on a figure. The
+browser, `--svg` / `--site`, the HTML export and the served page all draw the
+same picture.
+
+`--check` reports: a `::LAYOUT` name that is no cell (`figure/unknown-cell`),
+a cell placed twice (`figure/duplicate-cell`), `::WIDTHS`/`::HEIGHTS` that fit
+no group (`figure/bad-weights`), an unknown option value (`figure/bad-option`),
+a cell that is not a chart — a table, KPI, text, map or `::TRACK`
+(`figure/not-a-chart`), a missing `::ENDFIGURE` (`figure/unclosed`), a
+`::FIGURE` inside another (`figure/nested`) — all errors — and, as warnings, a
+cell `::LAYOUT` leaves out (`figure/unplaced-cell`), an empty figure and a
+stray `::ENDFIGURE`.
+
+Not yet: tables, KPIs or Markdown as cells (patchwork's `wrap_elements`), and
+on a phone-width screen the collected legend still sits to the right
+(sipemu/ggplot-rs#363).
 
 ### Fit to screen (`::FIT`)
 

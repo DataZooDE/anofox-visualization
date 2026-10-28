@@ -399,6 +399,23 @@ pub static REGISTRY: &[RoleSpec] = &[
       "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
+    e("FIGURE", &["PATCHWORK"], R::FigureStart, "layout", false,
+      "open a figure: the charts up to ::ENDFIGURE become the cells of one patchwork-style picture with aligned axes; the value is its title"),
+    e("ENDFIGURE", &["END_FIGURE"], R::FigureEnd, "layout", false, "close the current ::FIGURE"),
+    e("LAYOUT", &["FIGURE_LAYOUT"], R::FigureLayout, "layout", false,
+      "on ::FIGURE: '(hist / scatter) | checks' — | side by side, / stacked (binds tighter), ( ) groups, _ an empty cell; a cell is its -- @name or its position (1, 2, …)"),
+    e("WIDTHS", &["FIGURE_WIDTHS"], R::FigureWidths, "layout", false,
+      "on ::FIGURE: relative widths '1,2' — of every side-by-side group with that many cells"),
+    e("HEIGHTS", &["FIGURE_HEIGHTS"], R::FigureHeights, "layout", false,
+      "on ::FIGURE: relative heights '1,4' — of every stacked group with that many cells"),
+    e("AXES_COLLECT", &["COLLECT_AXES"], R::AxesCollect, "layout", false,
+      "on ::FIGURE: 'x' (stacked charts share one x axis, drawn once at the bottom), 'align' (line up the plot areas only) or 'none' (default)"),
+    e("COLLECT_LEGENDS", &["COLLECT_GUIDES"], R::CollectLegends, "layout", false,
+      "on ::FIGURE: true draws identical legends once, beside the figure"),
+    e("TAG_LEVELS", &["FIGURE_TAGS"], R::TagLevels, "layout", false,
+      "on ::FIGURE: tag the cells 'A' (A, B, …), 'a', '1', 'i' or 'I'"),
+    e("FIGURE_NCOL", &[], R::FigureNcol, "layout", false,
+      "on ::FIGURE without ::LAYOUT: the cells fill a grid this many columns wide"),
     e("TAB", &["PAGE"], R::Tab, "layout", false, "start a tab/page"),
     e("SUBTAB", &["SUB_TAB"], R::SubTab, "layout", false, "a nested tab inside a ::TAB"),
     e("GUIDE_STEP", &["TUTORIAL_STEP", "WIZARD_STEP"], R::GuideStep, "layout", false,
@@ -721,7 +738,7 @@ pub fn roles_json() -> String {
         "metrics": tokens(&|r| matches!(r, Role::Metric(_))),
         "directives": tokens(&|r| matches!(
             r,
-            Role::Columns | Role::GroupStart | Role::GroupEnd | Role::Span | Role::Height
+            Role::Columns | Role::GroupStart | Role::GroupEnd | Role::FigureStart | Role::FigureEnd | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
                 | Role::ViewPlacement | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
@@ -1074,6 +1091,15 @@ mod tests {
             Role::Columns,
             Role::GroupStart,
             Role::GroupEnd,
+            Role::FigureStart,
+            Role::FigureEnd,
+            Role::FigureLayout,
+            Role::FigureWidths,
+            Role::FigureHeights,
+            Role::AxesCollect,
+            Role::CollectLegends,
+            Role::TagLevels,
+            Role::FigureNcol,
             Role::Span,
             Role::Height,
             Role::RowSelect,
@@ -1234,6 +1260,15 @@ mod tests {
                 | Role::Columns
                 | Role::GroupStart
                 | Role::GroupEnd
+                | Role::FigureStart
+                | Role::FigureEnd
+                | Role::FigureLayout
+                | Role::FigureWidths
+                | Role::FigureHeights
+                | Role::AxesCollect
+                | Role::CollectLegends
+                | Role::TagLevels
+                | Role::FigureNcol
                 | Role::Span
                 | Role::Height
                 | Role::RowSelect
