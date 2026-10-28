@@ -4655,14 +4655,22 @@ fn map_diags(
         || (has(Role::Lat) && has(Role::Lon))
         || has(Role::Origin)
         || has(Role::Dest);
-    // D25: `::FRAME` only plays on a map — on any other chart the rows of
-    // every frame are drawn together instead, which is almost never what
-    // was meant.
-    if !is_map && has(Role::Frame) {
+    // D25: `::FRAME` plays on a map, and on a bar/line/area/point chart
+    // with an ::XAXIS (#663) — on any other chart the rows of every frame
+    // are drawn together instead, which is almost never what was meant.
+    let chart_plays = has(Role::X)
+        && roles
+            .iter()
+            .find_map(|(_, r)| match r {
+                Role::Value(k) => Some(*k),
+                _ => None,
+            })
+            .is_some_and(crate::chart_frames::kind_plays);
+    if !is_map && has(Role::Frame) && !chart_plays {
         out.push((
             Severity::Warning,
             "frame/not-a-map",
-            "::FRAME only plays on maps; this chart draws the rows of every frame together"
+            "::FRAME plays on maps and on bar, line, area and scatter charts; this chart draws the rows of every frame together"
                 .to_string(),
         ));
     }
@@ -8692,6 +8700,19 @@ mod design_tests {
             codes(
                 "SELECT w::FRAME, v::BARCHART FROM t;",
                 vec![json!({ "c0": "1", "c1": 1.0 })]
+            ),
+            vec![(Severity::Warning, "frame/not-a-map")]
+        );
+        // #663: a bar chart with an ::XAXIS plays its frames; a pie doesn't
+        assert!(codes(
+            "SELECT r::XAXIS, w::FRAME, v::BARCHART FROM t;",
+            vec![json!({ "c0": "N", "c1": "1", "c2": 1.0 })]
+        )
+        .is_empty());
+        assert_eq!(
+            codes(
+                "SELECT r::XAXIS, w::FRAME, v::PIE FROM t;",
+                vec![json!({ "c0": "N", "c1": "1", "c2": 1.0 })]
             ),
             vec![(Severity::Warning, "frame/not-a-map")]
         );

@@ -252,7 +252,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("HEXBIN", &["HEX"], R::Hexbin, "modifier", true,
       "aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis)"),
     e("FRAME", &["PLAY_BY", "TIME_FRAME"], R::Frame, "encoding", true,
-      "a time map's frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes and sizes; static output shows the last frame"),
+      "a time map's (or a bar/line/area/scatter chart's) frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes, sizes and axes; static output shows the last frame"),
     e("THRESHOLDS", &["STATUS_RULES"], R::Thresholds, "modifier", true,
       "status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules | …'"),
     e("RANGE", &[], R::Range, "modifier", true, "gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers)"),

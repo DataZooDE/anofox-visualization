@@ -138,25 +138,14 @@ fn row_key(cols: &[Column], i: usize) -> Option<String> {
     None
 }
 
-/// Build [`Frames`] from a map's columns — `None` without a `::FRAME`
-/// column, or when every `::FRAME` value is empty/no feature key resolves.
-pub(super) fn of(cols: &[Column]) -> Option<Frames> {
-    of_role(cols, Role::Frame)
-}
-
-/// [`of`] over any grouping role — `::FRAME`, or `::FACET`/`::FACET_FREE`
-/// for small multiples (M3a, #644: the same per-feature grouping, D11
-/// order and D22 keys; hexbin slots only for `::FRAME`).
-pub(super) fn of_role(cols: &[Column], role: Role) -> Option<Frames> {
-    let fcol = find_role(cols, role)?;
-    let hexbin_points = role == Role::Frame
-        && find_role(cols, Role::Hexbin).is_some()
-        && !(find_role(cols, Role::Origin).is_some() && find_role(cols, Role::Dest).is_some());
+/// The frame labels of a `::FRAME` (or facet) column in frame order (D11):
+/// first appearance, re-sorted ascending when every label parses as a
+/// number, or chronologically when every label looks like an ISO-ish date
+/// (`YYYY-MM-DD` text already sorts that way); the last [`MAX_FRAMES`]
+/// kept (D15). Also the count before the cap. `None` without a label.
+/// Shared with chart frames (#663).
+pub(crate) fn frame_order(fcol: &Column) -> Option<(Vec<String>, usize)> {
     let n = fcol.values.len();
-
-    // Frame order (D11): first appearance, re-sorted ascending when every
-    // label parses as a number, or chronologically when every label looks
-    // like an ISO-ish date (`YYYY-MM-DD` text already sorts that way).
     let mut order: Vec<String> = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
     for i in 0..n {
@@ -188,6 +177,25 @@ pub(super) fn of_role(cols: &[Column], role: Role) -> Option<Frames> {
     if order.len() > MAX_FRAMES {
         order.drain(0..order.len() - MAX_FRAMES);
     }
+    Some((order, total_frames))
+}
+
+/// Build [`Frames`] from a map's columns — `None` without a `::FRAME`
+/// column, or when every `::FRAME` value is empty/no feature key resolves.
+pub(super) fn of(cols: &[Column]) -> Option<Frames> {
+    of_role(cols, Role::Frame)
+}
+
+/// [`of`] over any grouping role — `::FRAME`, or `::FACET`/`::FACET_FREE`
+/// for small multiples (M3a, #644: the same per-feature grouping, D11
+/// order and D22 keys; hexbin slots only for `::FRAME`).
+pub(super) fn of_role(cols: &[Column], role: Role) -> Option<Frames> {
+    let fcol = find_role(cols, role)?;
+    let hexbin_points = role == Role::Frame
+        && find_role(cols, Role::Hexbin).is_some()
+        && !(find_role(cols, Role::Origin).is_some() && find_role(cols, Role::Dest).is_some());
+    let n = fcol.values.len();
+    let (order, total_frames) = frame_order(fcol)?;
     let labels = order;
     let label_index: HashMap<&str, usize> = labels
         .iter()
