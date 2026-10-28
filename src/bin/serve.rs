@@ -1243,6 +1243,11 @@ struct Dashboard {
     script: String,
     /// The day the file last changed (`YYYY-MM-DD`), for the landing page.
     updated: Option<String>,
+    /// #680: the plan indices of the setup statements that run before the
+    /// panels on every render (`SET VARIABLE …`, `CREATE [OR REPLACE] TEMP
+    /// TABLE|VIEW … AS <query>` — the locked server's data-folder rule,
+    /// [`sv::read_only_statement`]), checked once at startup.
+    setup_ok: std::collections::HashSet<usize>,
 }
 
 fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
@@ -1265,6 +1270,7 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
                         id,
                         script,
                         updated: sv::file_date(&p),
+                        setup_ok: Default::default(),
                     });
                 }
             }
@@ -1273,6 +1279,68 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
     // #301: ascending `-- @order`, unordered dashboards after, then by id.
     out.sort_by(|a, b| a.meta.order_key(&a.id).cmp(&b.meta.order_key(&b.id)));
     out
+}
+
+/// #680: which setup statements of each dashboard run before its panels.
+/// A TEMP VIEW/TABLE lives in one DuckDB session, and every render is a new
+/// read-only session, so they run on every render (after the external-access
+/// and configuration locks, see `render_dashboard_page`) rather than once.
+/// Only the shapes the locked server allows with a data folder
+/// ([`sv::read_only_statement`], by DuckDB's own parser); any other setup
+/// statement is skipped, as before, with a warning here.
+fn check_setup(dashboards: &mut [Dashboard]) {
+    let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
+        let json = run_duckdb(":memory:", &["-json"], sql, Duration::from_secs(30))?;
+        let rows: Vec<serde_json::Map<String, serde_json::Value>> = if json.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str(json.trim()).map_err(|e| format!("duckdb -json: {e}"))?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                r.into_values()
+                    .map(|v| match v {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s),
+                        other => Some(other.to_string()),
+                    })
+                    .collect()
+            })
+            .collect())
+    };
+    for d in dashboards.iter_mut() {
+        for (i, p) in sql::plan(&d.script).into_iter().enumerate() {
+            if !p.setup {
+                continue;
+            }
+            // a claim / `anofox_data` is the server's to set (re-asserted
+            // after each setup statement anyway, see render_dashboard_page)
+            let sets = p.sql.split_whitespace().collect::<Vec<_>>();
+            let reserved = sets.len() > 2
+                && sets[0].eq_ignore_ascii_case("SET")
+                && sets[1].eq_ignore_ascii_case("VARIABLE")
+                && access::is_reserved_var(sets[2].trim_end_matches('='));
+            if reserved {
+                eprintln!(
+                    "  dashboard '{}': setup statement {} is skipped (it sets a reserved variable)",
+                    d.id,
+                    i + 1
+                );
+                continue;
+            }
+            match sv::read_only_statement(&p.sql, true, &mut duck) {
+                Ok(()) => {
+                    d.setup_ok.insert(i);
+                }
+                Err(e) => eprintln!(
+                    "  dashboard '{}': setup statement {} is skipped (only SET VARIABLE and CREATE TEMP VIEW/TABLE … AS <query> run here; do the rest in --init): {e}",
+                    d.id,
+                    i + 1
+                ),
+            }
+        }
+    }
 }
 
 struct ServeState {
@@ -1323,7 +1391,22 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
         }
         say(&format!("  init applied: {init}"));
     }
-    let dashboards = load_dashboards(Path::new(dir));
+    // #680: the panels open the database read-only, so it must exist — the
+    // private default is created here; a named `--db` that's missing is a
+    // typo, not something to create.
+    if !Path::new(&db).exists() {
+        if o.db.is_empty() {
+            if let Err(e) = run_duckdb(&db, &[], "SELECT 1", Duration::ZERO) {
+                eprintln!("error: create {db}: {e}");
+                std::process::exit(1);
+            }
+        } else {
+            eprintln!("error: --db {db}: no such database (create it, or leave out --db)");
+            std::process::exit(1);
+        }
+    }
+    let mut dashboards = load_dashboards(Path::new(dir));
+    check_setup(&mut dashboards);
     if let Some(h) = &o.home {
         if !dashboards.iter().any(|d| &d.id == h) {
             usage(&format!("--home: no dashboard '{h}' in {dir}"));
@@ -1992,7 +2075,21 @@ fn render_dashboard_page(
             requires_unmet(st, &prefix, reqs, &mut req_cache)
         });
         if panel.setup {
-            continue; // read-only mode: setup is done once at --init, not per request
+            // #680: a checked setup statement (TEMP VIEW/TABLE, SET
+            // VARIABLE) runs in this render's session, after the locks
+            if dash.setup_ok.contains(&i) {
+                prefix.push_str(panel.sql.trim().trim_end_matches(';'));
+                // a newline, so a trailing `-- comment` can't swallow what follows
+                prefix.push_str(";\n");
+                // #540 belt and braces: a setup `SET VARIABLE` never
+                // outlasts the credential's locked variables or claims —
+                // the last `SET` for a name wins
+                append_locked_vars(&mut prefix, scope);
+                for (name, lit) in claims.map(Claims::variables).unwrap_or_default() {
+                    prefix.push_str(&format!("SET VARIABLE {name} = {lit}; "));
+                }
+            }
+            continue;
         }
         if hidden.is_some() || view_pick.drop_panel(&panel) {
             continue;
