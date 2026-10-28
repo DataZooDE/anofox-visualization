@@ -593,7 +593,11 @@ fn opt_str(options: &Row, key: &str) -> Option<String> {
 /// Which contract schema the rows follow (`anofox_plot(tbl)`).
 fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
     let has = |k: &str| rows.iter().any(|r| r.contains_key(k));
-    Ok(if has("term") && has("estimate") {
+    let set = |k: &str| rows.iter().any(|r| r.get(k).is_some_and(|v| !v.is_null()));
+    // A test aggregate's struct carries `estimate` too; an ANOVA table
+    // (`ols_anova_table_agg`: term, p_value, estimate NULL) is a test.
+    let terms = has("term") && has("estimate") && (set("estimate") || !has("p_value"));
+    Ok(if terms {
         "terms"
     } else if has("curve_type") {
         "curve"
@@ -1226,6 +1230,17 @@ mod tests {
             d(r#"[{"term":"x1","x":1,"partial_residual":0.2}]"#),
             "partial"
         );
+        // ols_anova_table_agg: a test struct whose estimate is NULL.
+        assert_eq!(
+            d(
+                r#"[{"term":"x1","method":"type I ANOVA","statistic":4057.6,"p_value":0.0,"estimate":null}]"#
+            ),
+            "tests"
+        );
+        assert_eq!(
+            d(r#"[{"term":"x1","estimate":0.5,"p_value":0.01}]"#),
+            "terms"
+        );
         let e = detect(&rows(r#"[{"a":1}]"#)).unwrap_err().to_string();
         assert!(e.contains("contract v1"), "{e}");
     }
@@ -1605,6 +1620,15 @@ mod tests {
                 (v[0], v[1])
             })
             .collect()
+    }
+
+    #[test]
+    fn tests_anova_table_rows_per_term() {
+        // ols_anova_table_agg unnested per group: a row per term, estimate NULL.
+        let anova = r#"[{"grp":"A","term":"x1","method":"type I ANOVA","statistic":4057.6,"p_value":1e-30,"estimate":null},
+            {"grp":"A","term":"x2","method":"type I ANOVA","statistic":18.5,"p_value":0.0002,"estimate":null}]"#;
+        let s = go("auto", anova, "{}").unwrap();
+        assert!(s.contains(">x1<") && s.contains(">x2<"), "term labels");
     }
 
     #[test]

@@ -318,9 +318,12 @@ pub(super) fn tests(
         t.text("group2"),
         t.text("method"),
     );
+    // An ANOVA table (ols_anova_table_*): one test per term.
+    let term = t.text("term");
     let rows: Vec<TestRow> = (0..t.rows.len())
         .map(|i| {
-            let label = pair_label(text_of(&tid[i]), text_of(&g1[i]), text_of(&g2[i]));
+            let id = text_of(&tid[i]).or_else(|| text_of(&term[i]));
+            let label = pair_label(id, text_of(&g1[i]), text_of(&g2[i]));
             TestRow {
                 label,
                 group: gvals.as_ref().and_then(|g| text_of(&g[i])),
