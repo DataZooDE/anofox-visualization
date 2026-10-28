@@ -143,6 +143,7 @@ terminal.
 | `::HIST_NORM` |  | modifier | a ::HISTOGRAM's per-group normalisation: 'share' draws each ::CATEGORY / ::FACET group's bars as a share of that group's own count (groups of unequal size stay comparable); default: raw counts |
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
+| `::SYNC_FRAME` | `::FRAME_GROUP` | modifier | time maps (::FRAME) with the same value (e.g. 'weeks') step and play together in the browser, by frame label |
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
@@ -1594,7 +1595,11 @@ through time *is* the content) with instant, 1.5 s-apart steps, and it
 never autoplays on its own. The step persists per statement across a
 re-run, like `::STORY`'s step does; a map with a `-- @name` also keeps it in
 the URL (`?frame.<name>=<label>`, see *Viewer state in the URL*), so a shared
-link opens on the same week. The ⤓ HTML export embeds every frame
+link opens on the same week. Time maps that carry the same `'weeks'::SYNC_FRAME` value
+step and play together: a step, the slider or Play on one moves every other
+map of the group to the same frame label (a map without that label stays
+where it is), and a map drawn later (a re-run) joins on the group's frame;
+without a `::FRAME` it's a warning (`map/sync-frame-no-frame`). The ⤓ HTML export embeds every frame
 (pre-rendered, so it still plays with no live query engine) and rebuilds the
 same bar offline, as long as their total stays within 3 MB per map; above
 that, a static note takes its place instead — "12 frames — Play in the live

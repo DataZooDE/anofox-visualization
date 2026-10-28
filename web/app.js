@@ -4032,6 +4032,7 @@ function dashStateReset() {
   dpFilter = "";
   dpSelected = null;
   dpZoomGroups = {};
+  dpFrameGroups = {};
   dpXf = {};
   dpUrlSeed = {};
   dpVarDefault = {};
@@ -12036,6 +12037,15 @@ function mountStories() {
 // a panel that already has one is left alone; only a fresh map (or a re-run
 // that dropped ::FRAME) (re)builds it.
 let dpFrameSteps = {}; // statement index → the frame to restore after a re-run
+// ::SYNC_FRAME (#664): group name → {label: the group's current frame label
+// (null until a step), members: Set<panel>}; like dpZoomGroups for zoom.
+let dpFrameGroups = {};
+function frameGroupOf(panel) {
+  const dp = panel._dp;
+  const gr = dp && (dp.drawn || dp.roles).find((r) => r[1] === "SYNC_FRAME");
+  const name = gr ? cellAt(dp.rows, gr[0]).trim() : "";
+  return name ? (dpFrameGroups[name] ||= { label: null, members: new Set() }) : null;
+}
 // #647: a frame step updates the URL — at most every 500 ms while playing.
 let dpFrameUrlTimer = 0;
 function syncFrameUrlSoon() {
@@ -12072,6 +12082,17 @@ function mountFrames() {
       }
       delete dpFrameSeed[named];
     }
+    // ::SYNC_FRAME: a map joining its group later (a re-run) takes the
+    // group's current frame when it has that label.
+    const group = frameGroupOf(panel);
+    if (group && !panel._frames && group.label != null) {
+      let labels = [];
+      try {
+        labels = JSON.parse(svg.dataset.frames || "[]");
+      } catch (_) {}
+      const at = labels.map(String).indexOf(String(group.label));
+      if (at >= 0) start = at;
+    }
     // The step's own re-render + re-wire (the perf budget's "draw(k)"):
     // render through the same path zoom/::FIT use (so it keeps the holder's
     // current zoom window and size), then only what a step actually needs —
@@ -12091,7 +12112,18 @@ function mountFrames() {
       if (panel.dataset.dpName) syncFrameUrlSoon();
       return holder.querySelector(":scope > svg");
     };
-    panel._frames = dpAnim.frames(panel, svg, start, draw);
+    // A step of this map moves every other map of its group to that label.
+    const onStep = group
+      ? (label) => {
+          group.label = label;
+          for (const p of group.members) {
+            if (!p.isConnected) group.members.delete(p);
+            else if (p !== panel && p._frames) p._frames.follow(label);
+          }
+        }
+      : null;
+    panel._frames = dpAnim.frames(panel, svg, start, draw, onStep);
+    if (group) group.members.add(panel);
   });
 }
 // "Charts as tables" (#401): a shown table view was built once from the old

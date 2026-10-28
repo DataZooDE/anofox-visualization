@@ -240,4 +240,38 @@ function fixture(win, labels) {
   assert.equal(win.timerRunning(), false);
 }
 
+// ---- #664 ::SYNC_FRAME: onStep on own steps, follow() by label, quietly ---
+{
+  const win = fakeWin();
+  const { frames } = animKit(win);
+  const a = fixture(win, ["W1", "W2", "W3"]);
+  const b = fixture(win, ["W2", "W3"]); // a map missing W1
+  const told = [];
+  const ctlA = frames(a.panel, a.svg, 2, () => a.svg, (label) => told.push(label));
+  let drawnB = [];
+  const ctlB = frames(b.panel, b.svg, 1, (k) => (drawnB.push(k), b.svg));
+  ctlA.show(1); // a step of A tells the group its label
+  assert.deepEqual(told, ["W2"]);
+  ctlB.follow("W2"); // B follows by label (index 0 in B)
+  win.runRaf();
+  assert.deepEqual(drawnB, [0]);
+  assert.equal(ctlB.label(), "W2");
+  ctlB.follow("W1"); // a label B doesn't have: stays put
+  win.runRaf();
+  assert.deepEqual(drawnB, [0]);
+  told.length = 0;
+  ctlA.follow("W3"); // a follow never re-broadcasts
+  win.runRaf();
+  assert.deepEqual(told, []);
+  assert.equal(ctlA.step(), 2);
+  // a following map stops its own Play
+  const playB = b.bar().byClass("dp-frames-play");
+  ctlB.show(0);
+  win.runRaf();
+  playB.onclick();
+  assert.equal(win.timerRunning(), true);
+  ctlB.follow("W2");
+  assert.equal(playB.getAttribute("aria-pressed"), "false");
+}
+
 console.log("frames_test: ok");

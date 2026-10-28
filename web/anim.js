@@ -557,7 +557,9 @@ export function animKit(win) {
   // between steps is the generic `tween()` above (D24).
   // D14 (reduced motion): Play stays — stepping through time *is* the
   // content — but a step lands instantly, 1.5s apart, and nothing autoplays.
-  function frames(panel, svg, start, draw) {
+  // `onStep(label)` (#664, ::SYNC_FRAME): called on every step this player
+  // makes itself (a button, the slider, Play) — not on a `follow`.
+  function frames(panel, svg, start, draw, onStep) {
     let labels;
     try {
       labels = JSON.parse(svg.getAttribute("data-frames") || "[]");
@@ -627,10 +629,11 @@ export function animKit(win) {
         tween(svg, old, 300);
       }
     };
-    const request = (i) => {
+    const request = (i, quiet) => {
       target = Math.max(0, Math.min(labels.length - 1, i));
       showLabel(target);
       if (!raf) raf = win.requestAnimationFrame(flush);
+      if (!quiet && onStep) onStep(labels[target]);
     };
     const show = (i) => (stop(), request(i)); // a manual step stops any running Play
     prev.onclick = () => show(k - 1 < 0 ? labels.length - 1 : k - 1);
@@ -658,7 +661,16 @@ export function animKit(win) {
       if (fresh) svg = fresh;
     }
     showLabel(k);
-    return { show, step: () => k };
+    // Another map of the group stepped: go to the same label (stopping this
+    // one's own Play), without telling the group again. A label this map
+    // doesn't have leaves it where it is.
+    const follow = (label) => {
+      const i = labels.map(String).indexOf(String(label));
+      if (i < 0 || i === target) return;
+      stop();
+      request(i, true);
+    };
+    return { show, follow, step: () => k, label: () => labels[k] };
   }
 
   // ---- ::TRANSITION 'tween': marks move to their new values on a re-run ---

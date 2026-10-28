@@ -1,7 +1,8 @@
 // Browser e2e for a named time map's frame in the URL (M3e-2, #647): stepping
 // a `-- @name` ::FRAME map writes `?frame.<name>=<label>` (not for the last
 // frame, the default, and never for an unnamed map); reloading that URL opens
-// the map on that frame; an unknown label is ignored.
+// the map on that frame; an unknown label is ignored. Then ::SYNC_FRAME
+// (#664): maps of one group step and play together.
 //
 //   build web/pkg (scripts/build-wasm-pkg.sh)
 //   python3 serve_nocache.py 8813 &
@@ -110,6 +111,48 @@ bogus.searchParams.set("frame.weekly", "Week 99");
 await open(bogus.href);
 if (!/4 of 4|Week 4/.test(await pos("Named"))) fail(`an unknown label moved the map: "${await pos("Named")}"`);
 else ok("an unknown label is ignored");
+
+// #664 ::SYNC_FRAME: two maps of one group step together; a third (no
+// group) stays; Play on one drives the other
+const SYNC = `
+SELECT 4::COL;
+SELECT wkt ::MAP, wk AS "Week" ::FRAME, v AS "On time" ::BARCHART, region ::LABEL, 'weeks'::SYNC_FRAME, 'A'::TITLE
+FROM (VALUES
+    ${rows(10)}
+) t(wkt, region, wk, v) ORDER BY wk, region;
+SELECT 4::COL;
+SELECT wkt ::MAP, wk AS "Week" ::FRAME, v AS "Late" ::BARCHART, region ::LABEL, 'weeks'::SYNC_FRAME, 'B'::TITLE
+FROM (VALUES
+    ${rows(30)}
+) t(wkt, region, wk, v) ORDER BY wk, region;
+SELECT 4::COL;
+SELECT wkt ::MAP, wk AS "Week" ::FRAME, v AS "Other" ::BARCHART, region ::LABEL, 'C'::TITLE
+FROM (VALUES
+    ${rows(50)}
+) t(wkt, region, wk, v) ORDER BY wk, region;
+`;
+await page.goto("about:blank");
+await page.goto(`${base}?embed=1#sql=${b64(SYNC)}`);
+await page.waitForFunction(() => document.querySelectorAll(".dash .dp-frames").length >= 3 && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+await page.waitForTimeout(500);
+await step("A", "dp-frames-prev");
+let [a, b, c] = [await pos("A"), await pos("B"), await pos("C")];
+if (!/3 of 4/.test(a) || !/3 of 4/.test(b)) fail(`::SYNC_FRAME: A "${a}", B "${b}" (both should be 3 of 4)`);
+else ok("a step of one synced map moves the other");
+if (!/4 of 4/.test(c)) fail(`::SYNC_FRAME: the unsynced map moved: "${c}"`);
+else ok("a map outside the group stays");
+// the drawn frame follows too, not just the label: B's svg shows frame 2
+const bFrame = await page.evaluate(() => {
+  const panel = [...document.querySelectorAll(".dash .panel")].find((p) => p.querySelector(".panel-title")?.textContent.trim() === "B");
+  return panel?.querySelector(":scope > .panel-svg > svg")?.querySelector("[data-value]")?.getAttribute("data-value");
+});
+if (bFrame !== String(30 + 3)) fail(`::SYNC_FRAME: B draws value ${bFrame}, expected 33 (Week 3, North)`);
+else ok("the follower draws the same frame");
+await step("B", "dp-frames-play");
+await page.waitForTimeout(1300);
+[a, b] = [await pos("A"), await pos("B")];
+if (a.replace(/ ·.*/, "") !== b.replace(/ ·.*/, "")) fail(`::SYNC_FRAME Play: A "${a}" vs B "${b}"`);
+else ok(`Play on one map drives the other (${a})`);
 
 if (errs.length) fail("page errors: " + errs.join(" | "));
 await browser.close();

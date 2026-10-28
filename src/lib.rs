@@ -364,6 +364,10 @@ pub enum Role {
     /// The zoom group of a `::MAP` (`::SYNC_ZOOM`): maps with the same name
     /// zoom and pan together in the browser. Read from the first value.
     SyncZoom,
+    /// The frame group of a `::FRAME` time map (`::SYNC_FRAME`): maps with
+    /// the same name step and play together in the browser, by frame label.
+    /// Read from the first value.
+    SyncFrame,
     /// A map's projection (`::PROJECTION`): `'auto'` (by the data's extent),
     /// `'equal-earth'`, `'mercator'`, `'albers-europe'`, `'conic'`, `'utm'`
     /// or `'none'` (planar coordinates). Read from the first value.
