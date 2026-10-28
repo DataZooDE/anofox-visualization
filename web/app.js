@@ -10,6 +10,7 @@ import init, {
   render_stack,
   render_contract,
   map_bounds,
+  map_natural_height,
   map_layers,
   register_boundaries,
   roles_json,
@@ -10559,7 +10560,14 @@ async function runOnce(fresh = true, pv = preview) {
             const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM") && !isMap;
             // a map without ::HEIGHT takes the height its shape needs
             const mapAr = isMap && !boxH ? mapAspect(rowsJson, s.roles) : 0;
-            const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300); // ::HEIGHT, else default
+            // small multiples (#644): the grid's own natural height
+            let facetH = 0;
+            if (isMap && !boxH) {
+              try {
+                facetH = map_natural_height(rowsJson, JSON.stringify(s.roles), Math.max(300, span * 100 * viewScale));
+              } catch (_) {}
+            }
+            const ph = boxH || (spark ? 90 : facetH || (mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300)); // ::HEIGHT, else default
             const holder = document.createElement("div");
             holder.className = "panel-svg";
             // Render width proportional to the panel's span, so displayed height

@@ -38,6 +38,7 @@
 mod bivariate;
 pub(crate) mod boundaries;
 pub(crate) mod classes;
+mod facets;
 mod fill;
 mod flows;
 mod frames;
@@ -1380,6 +1381,25 @@ pub(crate) fn build(
     // Hexbin's own shared cell-colour domain needs `m.proj` (`m` built
     // already), so it's applied separately just below (M2e-B).
     let fr = frames::of(cols);
+    // Small multiples (M3a-1, #644): `::FACET` on an area/point/symbol map
+    // (not a time map — D-M3-3 — and not yet flows/hexbin/bivariate, M3a-2).
+    if fr.is_none() && facet_eligible(cols) {
+        if let Some(ff) = facets::of(cols) {
+            let (st, present, ctx) = facets::stacked(cols, &ff);
+            let m = Model::new(o, &st, Some(&present), None)?;
+            let (p, attrs, mut warnings) =
+                plot::build(o, &st, &m, width, height, None, None, Some(&ctx))?;
+            if ctx.total > facets::MAX_FACETS {
+                warnings.push(format!(
+                    "map: {} ::FACET values on one map (over {}) — the first {} are drawn; filter or use a coarser grouping",
+                    ctx.total,
+                    facets::MAX_FACETS,
+                    facets::MAX_FACETS
+                ));
+            }
+            return Some((p, attrs, warnings));
+        }
+    }
     let k = fr.as_ref().map(|fr| fr.resolve_k(o.frame));
     let mut shared = fr.as_ref().map(|fr| frames::shared_of(o, cols, fr));
     let present: Option<Vec<bool>> = fr.as_ref().zip(k).map(|(fr, k)| frames::presence(fr, k));
@@ -1411,6 +1431,7 @@ pub(crate) fn build(
         height,
         frame_ctx.as_ref(),
         shared.as_ref(),
+        None,
     )?;
     if m.rows > MARK_WARN {
         warnings.push(format!(
@@ -1435,6 +1456,52 @@ pub(crate) fn build(
         }
     }
     Some((p, attrs, warnings))
+}
+
+/// Whether `::FACET`/`::FACET_FREE` draws small multiples on this map
+/// (M3a-1): a facet column, and not a flow, hexbin or bivariate map (those
+/// come in M3a-2 — lint `map/facet-type`).
+pub(crate) fn facet_eligible(cols: &[Column]) -> bool {
+    (find_role(cols, Role::Facet).is_some() || find_role(cols, Role::FacetFree).is_some())
+        && find_role(cols, Role::Frame).is_none()
+        && find_role(cols, Role::Hexbin).is_none()
+        && find_role(cols, Role::Bivariate).is_none()
+        && !(find_role(cols, Role::Origin).is_some() && find_role(cols, Role::Dest).is_some())
+}
+
+/// A small-multiples map's natural height at `width` (M3a-1): ggplot-rs's
+/// `natural_height` for its panels (the data box's aspect, the same column
+/// rule the render uses) plus room for the legend and the attribution band.
+/// `None` for any other map.
+#[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+pub(crate) fn facet_natural_height(cols: &[Column], o: &RenderOptions, width: u32) -> Option<u32> {
+    if !facet_eligible(cols) {
+        return None;
+    }
+    let ff = facets::of(cols)?;
+    let (st, present, ctx) = facets::stacked(cols, &ff);
+    let m = Model::new(o, &st, Some(&present), None)?;
+    let planar = m.projection == project::Projection::None;
+    let (x0, y0, x1, y1) = padded(m.bbox()?, planar, 0.04);
+    let aspect = (y1 - y0) / (x1 - x0);
+    if !(aspect.is_finite() && aspect > 0.0) {
+        return None;
+    }
+    let w = width as f64;
+    let n = ctx.levels.len();
+    let ncol = ctx.ncol.unwrap_or_else(|| plot::facet_ncol(n, aspect, w));
+    let (_, h) = ggplot_rs::facet::wrap::natural_height(
+        n,
+        Some(ncol),
+        aspect,
+        w,
+        plot::FACET_STRIP + 8.0,
+        plot::FACET_GAP,
+        plot::FACET_GAP,
+        plot::FACET_MIN_PANEL,
+    );
+    // a Top legend (~44 px) and an attribution band (~36 px)
+    Some((h + 80.0).clamp(220.0, 1400.0).round() as u32)
 }
 
 /// The attribution (and scale bar) strip at the bottom of a map.

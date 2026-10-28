@@ -4710,6 +4710,61 @@ fn map_diags(
             .find(|(_, r)| *r == want)
             .and_then(|(i, _)| column_texts(rows, *i).into_iter().next())
     };
+    // M3a-1 (#644): small multiples on a map.
+    if has(Role::Facet) || has(Role::FacetFree) {
+        let fi = roles
+            .iter()
+            .find(|(_, r)| matches!(r, Role::Facet | Role::FacetFree))
+            .map(|(i, _)| *i);
+        if has(Role::Frame) {
+            out.push((
+                Severity::Warning,
+                "map/facet-frame",
+                "::FACET is ignored on a time map (::FRAME) — use one or the other".to_string(),
+            ));
+        } else if has(Role::Hexbin)
+            || has(Role::Bivariate)
+            || (has(Role::Origin) && has(Role::Dest))
+        {
+            out.push((
+                Severity::Warning,
+                "map/facet-type",
+                "::FACET isn't supported on flow, hexbin or bivariate maps yet — one map is drawn"
+                    .to_string(),
+            ));
+        } else {
+            if let Some(i) = fi {
+                let mut seen = std::collections::HashSet::new();
+                for t in column_texts(rows, i) {
+                    seen.insert(t);
+                }
+                if seen.len() > 12 {
+                    out.push((
+                        Severity::Warning,
+                        "map/too-many-facets",
+                        format!(
+                            "{} ::FACET values on one map (over 12) — the first 12 are drawn; filter or use a coarser grouping",
+                            seen.len()
+                        ),
+                    ));
+                }
+            }
+            if has(Role::FacetFree) {
+                out.push((
+                    Severity::Note,
+                    "map/facet-free",
+                    "::FACET_FREE on a map shares the extent like ::FACET — maps keep one scale so panels compare".to_string(),
+                ));
+            }
+            if has(Role::Story) {
+                out.push((
+                    Severity::Warning,
+                    "map/facet-story",
+                    "::STORY is ignored on small multiples".to_string(),
+                ));
+            }
+        }
+    }
     let projection = first(Role::Projection);
     if let Some(p) = &projection {
         if crate::map::project::Projection::parse(p).is_none() {
@@ -6067,6 +6122,15 @@ fn breaks_diags(
 /// `::HISTOGRAM` and `::QQ` (#423) and `::HEATMAP` (#424), honour it; the
 /// rest still draw one overlapping panel and ignore it.
 fn kind_uses_facet(roles: &[(usize, Role)]) -> bool {
+    // a map draws small multiples (M3a-1) — its own lint is map_diags'
+    if roles.iter().any(|(_, r)| {
+        matches!(
+            r,
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+        )
+    }) {
+        return true;
+    }
     match chart_kind(roles) {
         None => false,
         Some(
@@ -8381,6 +8445,57 @@ mod design_tests {
         assert_eq!(w.len(), 1, "{d:?}");
         assert_eq!(w[0].severity, Severity::Warning);
         assert!(w[0].message.contains("stat_density"), "{}", w[0].message);
+    }
+
+    #[test]
+    fn map_facets_are_checked() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<&'static str> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| {
+                c.starts_with("map/facet")
+                    || c.starts_with("map/too-many")
+                    || c.starts_with("facet/")
+            })
+            .collect()
+        };
+        let row = |w: &str| json!({ "c0": "DE-BY", "c1": w, "c2": 1.0 });
+        let sql = "SELECT r ::REGION, w ::FACET, v ::BARCHART FROM t;";
+        assert!(codes(sql, vec![row("1"), row("2")]).is_empty());
+        let many: Vec<Value> = (0..13).map(|i| row(&i.to_string())).collect();
+        assert_eq!(codes(sql, many), vec!["map/too-many-facets"]);
+        assert_eq!(
+            codes(
+                "SELECT r ::REGION, w ::FACET, f ::FRAME FROM t;",
+                vec![row("1")]
+            ),
+            vec!["map/facet-frame"]
+        );
+        assert_eq!(
+            codes(
+                "SELECT r ::REGION, w ::FACET_FREE, v ::BARCHART FROM t;",
+                vec![row("1")]
+            ),
+            vec!["map/facet-free"]
+        );
+        // a map without a measure is still a facet-able panel (no facet/unsupported-kind)
+        assert!(codes(
+            "SELECT r ::REGION, w ::FACET FROM t;",
+            vec![json!({"c0":"DE-BY","c1":"1"})]
+        )
+        .is_empty());
     }
 
     #[test]
