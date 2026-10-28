@@ -144,13 +144,15 @@ pub fn diagram_graph(rows_json: &str, roles_json: &str) -> String {
 }
 
 /// [`render_panel`] for an edited `::DIAGRAM` (#682): its rows with
-/// `graph_json` applied ([`crate::diagram_edit::apply`]); a graph that
+/// `graph_json` applied ([`crate::diagram_edit::apply`]) and `checks_json`
+/// (from [`diagram_checks`], #699) drawn on its nodes / edges; a graph that
 /// doesn't parse draws the rows as they are.
 #[wasm_bindgen]
 pub fn render_diagram_edit(
     rows_json: &str,
     roles_json: &str,
     graph_json: &str,
+    checks_json: &str,
     width: u32,
     height: u32,
     primary: &str,
@@ -162,13 +164,25 @@ pub fn render_diagram_edit(
         let entries = parse_role_entries(&roles_v).map_err(RenderError::BadSpec)?;
         let cols = columns_from_entries(&rows, &entries);
         let cols = match crate::diagram_edit::Graph::parse(graph_json) {
-            Ok(g) => crate::diagram_edit::apply(&cols, &g),
+            Ok(g) => {
+                let checks = crate::diagram_edit::checks_from_json(checks_json);
+                crate::diagram_edit::apply(&cols, &g, &checks)
+            }
             Err(_) => cols,
         };
         let opts = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
         render_with(&cols, width, height, &opts)
     })
     .unwrap_or_else(|e| error_svg(&e.to_string(), width))
+}
+
+/// A `::DIAGRAM_CHECK` statement's rows as the edited graph's problems
+/// (#699): `[{node, from, to, status, message}]` — `node` for a node,
+/// `from`/`to` for an edge, all three null for the whole graph.
+#[wasm_bindgen]
+pub fn diagram_checks(rows_json: &str, target_col: &str) -> String {
+    let rows = sql::parse_rows_json(rows_json).unwrap_or_default();
+    crate::diagram_edit::checks_json(&crate::diagram_edit::checks(target_col, &rows)).to_string()
 }
 
 /// A `::DIAGRAM_PALETTE` statement's rows as the node types an editable

@@ -270,6 +270,11 @@ pub enum Role {
     /// A statement before an editable `::DIAGRAM`: the node types it may add
     /// (`::DIAGRAM_PALETTE`, #682) — `type`, `label`, `connects_to`.
     DiagramPalette,
+    /// A statement before an editable `::DIAGRAM`: problems with the edited
+    /// graph (`::DIAGRAM_CHECK`, #699) — a node id or `'from -> to'` (NULL:
+    /// the whole graph), `status`, `message`; on the diagram's own rows, a
+    /// per-node status that colours the node.
+    DiagramCheck,
     /// Layout: `::FIGURE` opens a figure (#661): the statements up to
     /// `::ENDFIGURE` become the cells of one patchwork-style picture (a
     /// ggplot-rs `PlotGrid`); its value is the figure's title. See

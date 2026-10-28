@@ -102,6 +102,8 @@ pub struct Diagnostic {
     /// `figure/unknown-cell` | `figure/duplicate-cell` | `figure/bad-weights`
     /// (errors) | `figure/empty` | `figure/unplaced-cell` |
     /// `figure/stray-end` (warnings).
+    /// `::DIAGRAM_CHECK` ([`diagram_check_diags`], #699):
+    /// `diagram_check/no-diagram` (a warning).
     /// `::MARKDOWN_TONE` (#659): `markdown_tone/unknown` (an error) |
     /// `markdown_tone/no-text` | `markdown_tone/ignored` (warnings).
     /// Design advisories
@@ -2418,7 +2420,40 @@ where
     diags.extend(tour_diags(script, &plan));
     diags.extend(step_diags(&plan, script));
     diags.extend(figure_diags(&plan, &figure_cols));
+    diags.extend(diagram_check_diags(&plan));
     apply_lint_allow(&mut diags, &plan, opts.design);
+    diags
+}
+
+/// `::DIAGRAM_CHECK` (#699): it belongs right before an editable
+/// `::DIAGRAM` (only `::DIAGRAM_PALETTE` / `::COL` / `::HEIGHT` in between),
+/// else nothing runs it (`diagram_check/no-diagram`).
+fn diagram_check_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let has = |p: &sql::Panel, r: Role| p.roles.iter().any(|(_, x)| *x == r);
+    let between = |p: &sql::Panel| {
+        p.roles.iter().all(|(_, r)| {
+            matches!(
+                r,
+                Role::DiagramPalette | Role::DiagramCheck | Role::Span | Role::Height
+            )
+        })
+    };
+    let mut diags = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        if p.setup || !has(p, Role::DiagramCheck) {
+            continue;
+        }
+        let next = plan[i + 1..].iter().find(|q| !q.setup && !between(q));
+        if !next.is_some_and(|q| has(q, Role::Diagram) && has(q, Role::DiagramMode)) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "diagram_check/no-diagram",
+                message: "::DIAGRAM_CHECK checks the graph of the editable ::DIAGRAM right after it ('edit'::DIAGRAM_MODE) — there is none, so it never runs".into(),
+                sql: one_line(p.sql.trim()),
+            });
+        }
+    }
     diags
 }
 
@@ -10032,6 +10067,32 @@ mod design_tests {
             |_q| Ok(bad.clone()),
         );
         assert!(d.iter().any(|x| x.code == "diagram_mode/unknown"), "{d:?}");
+    }
+
+    /// #699: a ::DIAGRAM_CHECK needs an editable ::DIAGRAM right after it
+    /// (a ::DIAGRAM_PALETTE may sit in between).
+    #[test]
+    fn diagram_check_needs_an_editable_diagram() {
+        let codes = |sql: &str| -> Vec<&'static str> {
+            check(sql, |_q| Ok(Vec::new()))
+                .iter()
+                .map(|d| d.code)
+                .filter(|c| c.starts_with("diagram_check/"))
+                .collect()
+        };
+        let chk = "SELECT NULL ::DIAGRAM_CHECK, 'warn' AS status, 'm' AS message;\n";
+        let pal = "SELECT 'a' ::DIAGRAM_PALETTE;\n";
+        let dia = "SELECT id ::DIAGRAM, 'edit' AS g ::DIAGRAM_MODE FROM n;";
+        assert!(codes(&format!("{chk}{pal}{dia}")).is_empty());
+        assert!(codes(&format!("{pal}{chk}{dia}")).is_empty());
+        assert_eq!(
+            codes(&format!("{chk}SELECT 1 AS x ::METRIC;\n{dia}")),
+            ["diagram_check/no-diagram"]
+        );
+        assert_eq!(
+            codes(&format!("{chk}SELECT id ::DIAGRAM FROM n;")),
+            ["diagram_check/no-diagram"]
+        );
     }
 
     /// #683: a ::FORM's rows are checked as fields; its default reaches the

@@ -64,6 +64,10 @@ pub fn assert_safe_svg(svg: &str, ctx: &str) {
                     // ::LANE column may literally hold the string "inf")
                     | "data-label"
                     | "data-lane"
+                    // a time map's ::FRAME labels and its column name are
+                    // text — a label may be "inf" too
+                    | "data-frames"
+                    | "data-frame-name"
                     | "class"
                     | "id"
             ) {

@@ -231,6 +231,8 @@ impl Diagram {
             _ => None,
         });
         let badge = col(Role::Badge);
+        // #699: a check's status on the node wins over its thresholds / badge
+        let check = col(Role::DiagramCheck);
         let category = col(Role::Category);
         let upstream = col(Role::Upstream);
         let edges_col = col(Role::Edges);
@@ -284,8 +286,10 @@ impl Diagram {
             let cell = |c: Option<&'a Column>| c.and_then(|c| c.values.get(i));
             let value = metric.and_then(|(c, _)| c.values.get(i)).and_then(num);
             let badge = cell(badge).and_then(text);
-            let status = value
-                .and_then(|v| rules.as_ref().and_then(|r| r.status(v)))
+            let status = cell(check)
+                .and_then(text)
+                .and_then(|w| badge_status(&w))
+                .or_else(|| value.and_then(|v| rules.as_ref().and_then(|r| r.status(v))))
                 .or_else(|| badge.as_deref().and_then(badge_status));
             let category = cell(category).and_then(text).map(|k| {
                 cats.iter().position(|c| *c == k).unwrap_or_else(|| {
@@ -576,7 +580,7 @@ impl Diagram {
 
 /// A badge's status from its words — the lists the browser's table pills
 /// use (`badgeHtml` in `web/app.js`): good words first, then warn, then bad.
-fn badge_status(text: &str) -> Option<Status> {
+pub(crate) fn badge_status(text: &str) -> Option<Status> {
     const GOOD: &[&str] = &[
         "ok",
         "good",

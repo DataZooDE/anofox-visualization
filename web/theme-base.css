@@ -247,6 +247,14 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-edit-btn{padding:.3rem .65rem;font-size:.8rem}
 .dp-edit-btn[aria-pressed=true]{outline:2px solid var(--ax-accent);outline-offset:1px}
 .dp-edit-status{flex:1 1 100%;font-size:.78rem;color:var(--ax-muted);min-height:1.1em}
+.dp-edit-checks{flex:1 1 100%;margin:0;padding:0;list-style:none;font-size:.78rem;display:grid;gap:.15rem}
+.dp-edit-check{padding-left:.9rem;position:relative;overflow-wrap:anywhere}
+.dp-edit-check::before{content:"";position:absolute;left:0;top:.42em;width:.5rem;height:.5rem;border-radius:50%;background:var(--ax-muted)}
+.dp-check-bad::before{background:var(--ax-negative)}
+.dp-check-warn::before{background:var(--ax-warning)}
+.dp-check-good::before{background:var(--ax-positive)}
+.dp-check-at{all:unset;cursor:pointer;font-weight:600;text-decoration:underline dotted}
+.dp-check-at:focus-visible{outline:2px solid var(--ax-accent);outline-offset:1px}
 .panel svg .dp-edit-pick{stroke:var(--ax-accent);stroke-width:3px}
 /* ::FORM (#683): one row per field — label (+ ⓘ), control + unit, provenance. */
 .dp-form-fields{display:grid;gap:.7rem}

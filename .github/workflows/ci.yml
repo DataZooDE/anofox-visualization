@@ -931,6 +931,13 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/form-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/diagram-check-served-e2e.mjs (#699): a ::DIAGRAM_CHECK is one
+      # more declared statement — the locked server runs it on the edited
+      # graph, and again after an edit.
+      - name: Diagram check on a locked server e2e (#699)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/diagram-check-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
