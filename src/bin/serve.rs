@@ -2326,6 +2326,20 @@ fn render_dashboard_page(
             chrome.apply_row(r, cells);
             continue;
         }
+        // #682: an editable ::DIAGRAM binds its graph variable (its rows'
+        // own graph — a viewer's edits never reach this script-free page)
+        // for the panels after it, like an input's default.
+        let cols = sql::columns_from_rows(&rows, &panel.roles);
+        if let Some(set) =
+            anofox_visualization::diagram_edit::default_set(&panel.roles, &panel.names, &cols)
+        {
+            let name = anofox_visualization::diagram_edit::var_name(&panel.roles, &panel.names);
+            if may_bind_default(&name, resolved, scope) {
+                prefix.push_str(&set);
+                prefix.push_str("; ");
+                append_locked_vars(&mut prefix, scope);
+            }
+        }
         let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
         queried.push((panel, rows, false, compact, None));
     }

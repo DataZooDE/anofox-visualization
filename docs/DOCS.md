@@ -228,6 +228,8 @@ terminal.
 | `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
+| `::DIAGRAM_MODE` | `::DIAGRAM_EDIT` | encoding | on a ::DIAGRAM: 'edit' lets the viewer add, connect, rename and remove nodes; the alias names the variable holding the edited graph as JSON {nodes:[{id,type,label}], edges:[{from,to}]} |
+| `::DIAGRAM_PALETTE` | `::NODE_TYPES` | layout | before an editable ::DIAGRAM: the node types it may add — the column is the type (its ::CATEGORY), plus label and connects_to (the types it may feed) |
 | `::FIGURE` | `::PATCHWORK` | layout | open a figure: the charts up to ::ENDFIGURE become the cells of one patchwork-style picture with aligned axes; the value is its title |
 | `::ENDFIGURE` | `::END_FIGURE` | layout | close the current ::FIGURE |
 | `::LAYOUT` | `::FIGURE_LAYOUT` | layout | on ::FIGURE: '(hist / scatter) \| checks' — \| side by side, / stacked (binds tighter), ( ) groups, _ an empty cell; a cell is its -- @name or its position (1, 2, …) |
@@ -1977,6 +1979,61 @@ FROM run_manifest ORDER BY seq;
   `diagram/too-large`, `diagram/bad-pin` (a non-numeric `::XAXIS` /
   `::YAXIS`) and `diagram/partial-pins`. A loop is no problem: it is drawn as an edge running
   back and named in the summary.
+
+### Drawing the graph by hand (`'edit'::DIAGRAM_MODE`)
+
+A model graph — suppliers feeding warehouses feeding stores — can be edited
+in the page (#682): add a node, connect two, rename or remove one. The edit
+produces **rows, not pixels**: one variable holding the whole edited graph,
+which the dashboard's SQL reads like any other variable (the twin re-runs on
+the edited graph).
+
+```sql
+-- optional: the node types, and which types each may feed
+SELECT type ::DIAGRAM_PALETTE, label, connects_to FROM (VALUES
+  ('supplier', 'Supplier',       ['stock']),
+  ('stock',    'Stocking point', ['stock', 'demand']),
+  ('demand',   'Demand',         [])) t(type, label, connects_to);
+
+SELECT id ::DIAGRAM, name ::LABEL, kind ::CATEGORY, upstream ::UPSTREAM, stock ::METRIC,
+       'edit' AS graph ::DIAGRAM_MODE                  -- the alias names the variable
+FROM network_node;
+
+-- the edited graph as rows
+SELECT n->>'id' AS id, n->>'type' AS type, n->>'label' AS label
+FROM (SELECT unnest((getvariable('graph')->'nodes')::JSON[]) AS n);
+SELECT e->>'from' AS src, e->>'to' AS dst
+FROM (SELECT unnest((getvariable('graph')->'edges')::JSON[]) AS e);
+```
+
+The variable (default `graph`) holds `{"nodes": [{"id", "type", "label"}],
+"edges": [{"from", "to"}]}` — the type is the node's `::CATEGORY`. It starts
+as the diagram's own rows; a toolbar above the diagram edits it:
+
+| Control | Does |
+|---|---|
+| type + name + **Add** | a new node of the chosen type (its id from the name: `Supplier 2` → `supplier_2`) |
+| **Connect** | click the source node, then the target; the palette's `connects_to` refuses an edge a type may not draw, with the reason |
+| click a node / edge, then **Rename** / **Remove** (or the Delete key on a focused node) | rename the node (the name field), remove it with its edges, or remove the edge |
+| **Reset** | back to the graph as the data has it |
+
+Clicking a node still selects it, so a `::FORM` filtered by the selection
+shows that node's parameters. The diagram is redrawn from its rows with the
+edits applied: an existing node keeps its row (value, badge, lane,
+sparkline), an existing edge its `::EDGES` value / label / style; a new node
+is a plain box in its type's colour; edges come from the edited list. When
+the diagram's own rows change, the edits start again from them. Edits are
+kept in the URL (`?v.graph=…`) but not saved for other viewers (#684).
+
+Without `::DIAGRAM_PALETTE` the type list is the types the rows use, and any
+node may feed any other. `--check` reports an unknown mode
+(`diagram_mode/unknown`, an error) and a `::DIAGRAM_MODE` without a
+`::DIAGRAM` column (`diagram_mode/no-diagram`); the static outputs draw the
+rows' own graph and bind it to the variable. **On a locked server** the
+graph travels as one string variable — at most 4 KB of JSON (roughly 40
+nodes); a larger edit isn't applied and the toolbar says so. As with any
+viewer input, the dashboard's SQL must treat the graph as untrusted (ids
+and labels are text the viewer typed).
 
 ### Formatted values in Markdown (`{{col}}`, `{{col:fmt}}`)
 

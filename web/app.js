@@ -9,6 +9,9 @@ import init, {
   render_mini_overlay,
   render_stack,
   render_figure,
+  diagram_graph,
+  render_diagram_edit,
+  diagram_palette,
   render_contract,
   map_bounds,
   map_natural_height,
@@ -9784,6 +9787,23 @@ async function runOnce(fresh = true, pv = preview) {
           lit = kind === "NUMBER" ? v || "0" : `'${v.replace(/'/g, "''")}'`; // number unquoted
         }
         await runSql(`SET VARIABLE ${varname} = ${lit}`);
+      } else if (role(s, "DIAGRAM") && role(s, "DIAGRAM_MODE")) {
+        // 'edit'::DIAGRAM_MODE (#682): bind the edited graph's variable before
+        // any panel runs (every panel reading it sees the edits), from the
+        // diagram's own rows the first time.
+        const mr = s.roles.find((r) => r[1] === "DIAGRAM_MODE");
+        const rowsJson = await panelSql(s.sql, i, pv);
+        const r0 = JSON.parse(rowsJson)[0] || {};
+        if (String(r0["c" + mr[0]] ?? "").trim().toLowerCase() === "edit") {
+          const v = mr[2] || "graph";
+          const base = diagram_graph(rowsJson, JSON.stringify(s.roles));
+          dpVarDefault[v] = JSON.stringify(base);
+          const seed = dpUrlSeed[v];
+          delete dpUrlSeed[v];
+          dpVars[v] = diagramEditValue(v, base, seed && seed.length === 1 ? seed[0] : undefined);
+          dpEdit[i] = { varname: v, base, palette: await diagramPaletteFor(stmts, i, pv) };
+          await runSql(`SET VARIABLE ${v} = '${dpVars[v].replace(/'/g, "''")}'`);
+        } else delete dpEdit[i];
       } else if (s.step && s.step.marker && s.step.index === 0) {
         // `::GUIDE_STEP` (#516): the group's first marker seeds its step
         // variable — a seeded/remembered value (`dpVars`), else a URL seed
@@ -10654,6 +10674,11 @@ async function runOnce(fresh = true, pv = preview) {
             // (= panel width × height / render width) is the same for any span at
             // a given ::HEIGHT — a full-width and a 1/3-width chart line up.
             const rw = spark ? 460 : Math.max(300, span * 100 * viewScale);
+            if (dpEdit[i]) {
+              // #682: draw the edited graph; the editing toolbar above it.
+              holder._edit = dpEdit[i];
+              fig.appendChild(diagramToolbar(dpEdit[i], holder));
+            }
             renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
@@ -10839,6 +10864,8 @@ async function runOnce(fresh = true, pv = preview) {
         container = body;
       } else if (d === "ENDGROUP") {
         container = curGrid;
+      } else if (d === "DIAGRAM_PALETTE") {
+        // read by the editable ::DIAGRAM after it (#682, diagramPaletteFor)
       } else if (d === "ENDFIGURE") {
         // closes a ::FIGURE — its cells were drawn by the ::FIGURE (#661)
       } else if (d === "SPAN") {
@@ -11586,7 +11613,10 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const t0 = performance.now();
   const ctx = holder._frame != null ? ctxWith({ frame: holder._frame }) : renderCtx();
   const tracks = holder._tracks || [];
-  if (holder._figure) {
+  if (holder._edit) {
+    holder.innerHTML = render_diagram_edit(rows, JSON.stringify(roles), dpVars[holder._edit.varname] ?? "", w, ph, ctx);
+    diagramMarkPick(holder);
+  } else if (holder._figure) {
     // A ::FIGURE (#661): its cells composed into one picture by the wasm
     // renderer (crate::figure — ggplot-rs PlotGrid).
     holder.innerHTML = render_figure(JSON.stringify(holder._figure), w, ph, ctx);
@@ -12261,6 +12291,270 @@ function markAnim(holder, roles) {
 
 // A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
 // stand-alone control in its own spanning row (grouped ones sit inline).
+// ::DIAGRAM edit mode (#682) ------------------------------------------------
+// #682: the ::DIAGRAM_PALETTE statement right before the diagram at `i`
+// (only directives such as ::COL / ::HEIGHT in between): its node types.
+async function diagramPaletteFor(stmts, i, pv) {
+  for (let j = i - 1; j >= 0; j--) {
+    const t = stmts[j];
+    if (role(t, "DIAGRAM_PALETTE")) {
+      const pr = t.roles.find((r) => r[1] === "DIAGRAM_PALETTE");
+      try {
+        const rows = await panelSql(t.sql, j, pv);
+        const key = Object.keys(JSON.parse(rows)[0] || {})[pr[0]] ?? "c" + pr[0];
+        return JSON.parse(diagram_palette(rows, key));
+      } catch (e) {
+        console.warn("::DIAGRAM_PALETTE failed", e);
+        return [];
+      }
+    }
+    if (t.setup || !directive(t)) break;
+  }
+  return [];
+}
+// Per plan index: {varname, base (the rows' graph, JSON text), palette}.
+let dpEdit = {};
+// Per variable: the rows' graph the edits were made on (a changed base —
+// other rows — starts again from it) and the toolbar's state.
+let dpEditBase = {};
+let dpEditUi = {};
+function diagramEditValue(v, base, seed) {
+  const same = dpEditBase[v] === base;
+  dpEditBase[v] = base;
+  const ok = (t) => {
+    try {
+      const g = JSON.parse(t);
+      return g && Array.isArray(g.nodes) && Array.isArray(g.edges);
+    } catch (_) {
+      return false;
+    }
+  };
+  if (same && dpVars[v] !== undefined && ok(dpVars[v])) return dpVars[v];
+  if (!same) delete dpEditUi[v];
+  return seed !== undefined && ok(seed) ? seed : base;
+}
+function diagramGraph(meta) {
+  try {
+    return JSON.parse(dpVars[meta.varname]);
+  } catch (_) {
+    return JSON.parse(meta.base);
+  }
+}
+// What changed against the rows' own graph, in words.
+function diagramChanges(meta) {
+  const a = JSON.parse(meta.base);
+  const b = diagramGraph(meta);
+  const ids = (g) => new Set(g.nodes.map((n) => n.id));
+  const es = (g) => new Set(g.edges.map((e) => e.from + "\u0000" + e.to));
+  const [ia, ib, ea, eb] = [ids(a), ids(b), es(a), es(b)];
+  const n = (set, other) => [...set].filter((x) => !other.has(x)).length;
+  const renamed = b.nodes.filter((x) => {
+    const o = a.nodes.find((y) => y.id === x.id);
+    return o && (o.label !== x.label || o.type !== x.type);
+  }).length;
+  const parts = [];
+  const add = (k, w) => k && parts.push(`${k} ${w}`);
+  add(n(ib, ia), "node(s) added");
+  add(n(ia, ib), "node(s) removed");
+  add(renamed, "renamed");
+  add(n(eb, ea), "edge(s) added");
+  add(n(ea, eb), "edge(s) removed");
+  return parts.join(", ");
+}
+// A locked server takes a variable of at most 4 KB (src/host/serving.rs
+// MAX_VALUE_LEN): a larger graph stays unsent, with a note why.
+const DIAGRAM_EDIT_MAX = 4096;
+function diagramCommit(meta, g) {
+  const text = JSON.stringify(g);
+  if (window.__served && new TextEncoder().encode(text).length > DIAGRAM_EDIT_MAX) {
+    (dpEditUi[meta.varname] = dpEditUi[meta.varname] || {}).msg =
+      "The edited graph is too large for this server (over 4 KB) — not applied. Remove or shorten nodes first.";
+    run(false);
+    return;
+  }
+  dpVars[meta.varname] = text;
+  run(false);
+}
+// A free node id for `label` (lower-case, `_` for anything else).
+function diagramNewId(g, label) {
+  const stem = String(label).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "node";
+  let id = stem;
+  for (let k = 2; g.nodes.some((n) => n.id === id); k++) id = `${stem}_${k}`;
+  return id;
+}
+// Outline the picked node / edge (and a connect's source) after a render.
+function diagramMarkPick(holder) {
+  const ui = dpEditUi[holder._edit.varname] || {};
+  const svg = holder.querySelector(":scope > svg");
+  if (!svg) return;
+  svg.querySelectorAll(".dp-edit-pick").forEach((el) => el.classList.remove("dp-edit-pick"));
+  const sel = ui.src ? { node: ui.src } : ui.pick;
+  if (!sel) return;
+  const el = sel.node
+    ? svg.querySelector(`rect[data-node="${CSS.escape(sel.node)}"]`)
+    : svg.querySelector(`polyline[data-edge="${CSS.escape(sel.edge)}"]`);
+  el?.classList.add("dp-edit-pick");
+}
+function diagramToolbar(meta, holder) {
+  const v = meta.varname;
+  const ui = (dpEditUi[v] = dpEditUi[v] || {});
+  const g = diagramGraph(meta);
+  const bar = document.createElement("div");
+  bar.className = "dp-edit-bar";
+  bar.setAttribute("role", "toolbar");
+  bar.setAttribute("aria-label", "Edit the diagram");
+  const btn = (text, on, title) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "dp-edit-btn";
+    b.textContent = text;
+    if (title) b.title = title;
+    b.onclick = on;
+    bar.appendChild(b);
+    return b;
+  };
+  // the node types: the palette, else the types the rows use
+  const types = meta.palette.length
+    ? meta.palette.map((p) => ({ type: p.type, label: p.label }))
+    : [...new Set(JSON.parse(meta.base).nodes.map((n) => n.type).filter(Boolean))].map((t) => ({ type: t, label: t }));
+  let typeSel = null;
+  if (types.length) {
+    typeSel = document.createElement("select");
+    typeSel.className = "dp-edit-type";
+    typeSel.setAttribute("aria-label", "Node type");
+    for (const t of types) {
+      const o = document.createElement("option");
+      o.value = t.type;
+      o.textContent = t.label;
+      typeSel.appendChild(o);
+    }
+    if (ui.type && types.some((t) => t.type === ui.type)) typeSel.value = ui.type;
+    typeSel.onchange = () => (ui.type = typeSel.value);
+    bar.appendChild(typeSel);
+  }
+  const name = document.createElement("input");
+  name.type = "text";
+  name.className = "dp-edit-name";
+  name.maxLength = 200;
+  name.placeholder = ui.pick && ui.pick.node ? "New name" : "New node";
+  name.setAttribute("aria-label", "Node name");
+  bar.appendChild(name);
+  const status = document.createElement("span");
+  status.className = "dp-edit-status";
+  status.setAttribute("aria-live", "polite");
+  const say = (t) => (status.textContent = t);
+  btn("Add", () => {
+    const label = name.value.trim();
+    if (!label) return say("Type a name for the new node first.");
+    const id = diagramNewId(g, label);
+    g.nodes.push({ id, type: typeSel ? typeSel.value : null, label });
+    ui.pick = { node: id };
+    diagramCommit(meta, g);
+  }, "Add a node of the chosen type");
+  const connect = btn(ui.connect ? "Cancel connect" : "Connect", () => {
+    ui.connect = !ui.connect;
+    ui.src = null;
+    diagramCommit(meta, g);
+  }, "Click the source node, then the target");
+  connect.setAttribute("aria-pressed", ui.connect ? "true" : "false");
+  const picked = ui.pick && (ui.pick.node ? g.nodes.some((n) => n.id === ui.pick.node) : g.edges.some((e) => e.from + ">" + e.to === ui.pick.edge));
+  if (!picked) ui.pick = null;
+  const rename = btn("Rename", () => {
+    const label = name.value.trim();
+    if (!label) return say("Type the new name first.");
+    g.nodes.find((n) => n.id === ui.pick.node).label = label;
+    diagramCommit(meta, g);
+  }, "Rename the picked node");
+  rename.disabled = !(ui.pick && ui.pick.node);
+  const remove = btn("Remove", () => diagramRemove(meta, g, ui), "Remove the picked node (and its edges) or edge");
+  remove.disabled = !ui.pick;
+  const changes = diagramChanges(meta);
+  const reset = btn("Reset", () => {
+    ui.pick = null;
+    ui.src = null;
+    ui.connect = false;
+    dpVars[v] = meta.base;
+    run(false);
+  }, "Back to the graph as the data has it");
+  reset.disabled = !changes;
+  bar.appendChild(status);
+  say(
+    ui.msg ||
+    (ui.connect
+      ? ui.src
+        ? `From “${(g.nodes.find((n) => n.id === ui.src) || {}).label || ui.src}” — now click the target.`
+        : "Click the source node."
+      : changes)
+  );
+  ui.msg = "";
+  // Clicks on the drawing: connect mode takes them; otherwise they pick
+  // (and still select, for the panels that follow the selection).
+  holder.addEventListener(
+    "click",
+    (e) => {
+      const node = e.target.closest("[data-node]");
+      const edge = e.target.closest("polyline[data-edge]");
+      if (ui.connect) {
+        e.stopPropagation();
+        e.preventDefault();
+        if (!node) return;
+        const id = node.getAttribute("data-node");
+        if (!ui.src) {
+          ui.src = id;
+          return diagramCommit(meta, g);
+        }
+        const why = diagramEdgeRefused(meta, g, ui.src, id);
+        if (why) {
+          ui.msg = why;
+          ui.src = null;
+          return diagramCommit(meta, g);
+        }
+        g.edges.push({ from: ui.src, to: id });
+        ui.pick = { edge: ui.src + ">" + id };
+        ui.src = null;
+        return diagramCommit(meta, g);
+      }
+      if (node) ui.pick = { node: node.getAttribute("data-node") };
+      else if (edge) ui.pick = { edge: edge.getAttribute("data-edge") };
+      else return;
+      diagramMarkPick(holder);
+      rename.disabled = !ui.pick.node;
+      remove.disabled = false;
+      name.placeholder = ui.pick.node ? "New name" : "New node";
+    },
+    true
+  );
+  holder.addEventListener("keydown", (e) => {
+    if ((e.key === "Delete" || e.key === "Backspace") && e.target.closest?.("[data-node]")) {
+      ui.pick = { node: e.target.closest("[data-node]").getAttribute("data-node") };
+      e.preventDefault();
+      diagramRemove(meta, g, ui);
+    }
+  });
+  return bar;
+}
+function diagramRemove(meta, g, ui) {
+  if (!ui.pick) return;
+  if (ui.pick.node) {
+    const id = ui.pick.node;
+    g.nodes = g.nodes.filter((n) => n.id !== id);
+    g.edges = g.edges.filter((e) => e.from !== id && e.to !== id);
+  } else g.edges = g.edges.filter((e) => e.from + ">" + e.to !== ui.pick.edge);
+  ui.pick = null;
+  diagramCommit(meta, g);
+}
+// Why an edge from → to may not be drawn (the palette's connects_to, a
+// self-loop, a duplicate), or "".
+function diagramEdgeRefused(meta, g, from, to) {
+  if (from === to) return "A node can't feed itself.";
+  if (g.edges.some((e) => e.from === from && e.to === to)) return "That edge is already there.";
+  const t = (id) => (g.nodes.find((n) => n.id === id) || {}).type;
+  const p = meta.palette.find((x) => x.type === t(from));
+  if (p && p.connects_to.length && !p.connects_to.includes(t(to)))
+    return `A ${p.label} can only feed ${p.connects_to.map((k) => (meta.palette.find((x) => x.type === k) || {}).label || k).join(" or ")}.`;
+  return "";
+}
+
 function finalizeControl(wrap, bar) {
   if (!bar) return wrap;
   const box = document.createElement("div");

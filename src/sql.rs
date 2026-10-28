@@ -1051,7 +1051,11 @@ fn rewrite_list(list: &str) -> Rewritten {
     let keep_intact = |r: Role| {
         matches!(
             r,
-            Role::Table | Role::PagedTable | Role::Input(InputKind::DateRange) | Role::Download(_)
+            Role::Table
+                | Role::PagedTable
+                | Role::Input(InputKind::DateRange)
+                | Role::DiagramPalette
+                | Role::Download(_)
         )
     };
     let intact = unambiguous.iter().copied().find(|r| keep_intact(*r));
@@ -1237,6 +1241,16 @@ fn rewrite_list(list: &str) -> Rewritten {
                 Role::Submit => {
                     let (core, alias) = trailing_alias(expr);
                     if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
+                // `::DIAGRAM_MODE` (#682): its explicit `AS alias` names the
+                // variable holding the edited graph — kept in `names` so the
+                // browser reads it from the plan.
+                Role::DiagramMode => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias {
                         names.push((i, nm));
                     }
                     format!("{core} AS c{i}")

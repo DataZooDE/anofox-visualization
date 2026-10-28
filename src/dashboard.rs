@@ -326,6 +326,14 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
             continue; // inputs, downloads, tabs, reload, …
         }
         let rows = provider.query(&panel.sql);
+        // #682: an editable ::DIAGRAM binds its graph variable (its rows'
+        // own graph) for the panels after it.
+        if let Ok(r) = &rows {
+            let cols = columns_from_result(r, &panel.roles);
+            if let Some(set) = crate::diagram_edit::default_set(&panel.roles, &panel.names, &cols) {
+                provider.execute(&set).ok();
+            }
+        }
         steps.push(Step { panel, rows });
     }
     (steps, chrome)

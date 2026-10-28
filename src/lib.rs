@@ -27,6 +27,7 @@ mod chart_frames;
 pub mod contract;
 pub mod dashboard;
 pub mod diagram;
+pub mod diagram_edit;
 mod downsample;
 pub mod figure;
 pub mod format;
@@ -258,6 +259,13 @@ pub enum Role {
     GroupStart,
     /// Layout: `::ENDGROUP` closes the current box.
     GroupEnd,
+    /// On a `::DIAGRAM`: `'edit'` lets the viewer draw the graph by hand
+    /// (`::DIAGRAM_MODE`, #682); the column's alias names the variable that
+    /// holds the edited graph ([`diagram_edit`]).
+    DiagramMode,
+    /// A statement before an editable `::DIAGRAM`: the node types it may add
+    /// (`::DIAGRAM_PALETTE`, #682) — `type`, `label`, `connects_to`.
+    DiagramPalette,
     /// Layout: `::FIGURE` opens a figure (#661): the statements up to
     /// `::ENDFIGURE` become the cells of one patchwork-style picture (a
     /// ggplot-rs `PlotGrid`); its value is the figure's title. See

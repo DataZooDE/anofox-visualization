@@ -375,6 +375,16 @@ fn render_dashboard_html(
             continue;
         }
         let rows = exec(&format!("{};", p.sql));
+        // #682: an editable ::DIAGRAM binds its graph variable for the panels
+        // after it.
+        if let Ok(r) = &rows {
+            let cols = sql::columns_from_rows(r, &p.roles);
+            if let Some(set) =
+                anofox_visualization::diagram_edit::default_set(&p.roles, &p.names, &cols)
+            {
+                let _ = exec(&format!("{set};"));
+            }
+        }
         let compact = kpi_size_json(&p.roles, &rows).unwrap_or(group_compact);
         queried.push((p, rows, compact, None));
     }

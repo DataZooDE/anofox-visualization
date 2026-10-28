@@ -129,6 +129,56 @@ pub fn render_panel_checked(
     })
 }
 
+/// `::DIAGRAM` edit mode (#682, [`crate::diagram_edit`]): the graph a
+/// diagram's rows draw, `{"nodes": [{id, type, label}], "edges": [{from,
+/// to}]}` (`rows_json` / `roles_json` as [`render_panel`]).
+#[wasm_bindgen]
+pub fn diagram_graph(rows_json: &str, roles_json: &str) -> String {
+    let cols = (|| -> Result<Vec<crate::Column>, String> {
+        let rows = sql::parse_rows_json(rows_json)?;
+        let v: serde_json::Value = serde_json::from_str(roles_json).map_err(|e| e.to_string())?;
+        Ok(columns_from_entries(&rows, &parse_role_entries(&v)?))
+    })()
+    .unwrap_or_default();
+    crate::diagram_edit::Graph::of(&cols).to_json()
+}
+
+/// [`render_panel`] for an edited `::DIAGRAM` (#682): its rows with
+/// `graph_json` applied ([`crate::diagram_edit::apply`]); a graph that
+/// doesn't parse draws the rows as they are.
+#[wasm_bindgen]
+pub fn render_diagram_edit(
+    rows_json: &str,
+    roles_json: &str,
+    graph_json: &str,
+    width: u32,
+    height: u32,
+    primary: &str,
+) -> String {
+    guard(|| {
+        let rows = sql::parse_rows_json(rows_json).map_err(RenderError::BadSpec)?;
+        let roles_v: serde_json::Value = serde_json::from_str(roles_json)
+            .map_err(|e| RenderError::BadSpec(format!("roles JSON: {e}")))?;
+        let entries = parse_role_entries(&roles_v).map_err(RenderError::BadSpec)?;
+        let cols = columns_from_entries(&rows, &entries);
+        let cols = match crate::diagram_edit::Graph::parse(graph_json) {
+            Ok(g) => crate::diagram_edit::apply(&cols, &g),
+            Err(_) => cols,
+        };
+        let opts = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        render_with(&cols, width, height, &opts)
+    })
+    .unwrap_or_else(|e| error_svg(&e.to_string(), width))
+}
+
+/// A `::DIAGRAM_PALETTE` statement's rows as the node types an editable
+/// diagram may add (#682): `[{type, label, connects_to: […]}]`.
+#[wasm_bindgen]
+pub fn diagram_palette(rows_json: &str, kind_col: &str) -> String {
+    let rows = sql::parse_rows_json(rows_json).unwrap_or_default();
+    crate::diagram_edit::palette_json(&crate::diagram_edit::palette(kind_col, &rows)).to_string()
+}
+
 /// Render one table/KPI cell's inline chart — a `::SPARKLINE`/`::SPARKBAR`
 /// series, cell-sized (no card chrome, no axes, no padding) — through the
 /// same [`render_with_at`] fragment path the native `--svg`/static-HTML
