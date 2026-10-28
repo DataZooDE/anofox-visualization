@@ -814,6 +814,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frames-e2e.mjs --url http://127.0.0.1:8947/ --out /tmp/frames-e2e-shots
 
+      # scripts/frame-url-e2e.mjs (M3e-2, #647): a named time map's frame
+      # in the URL (?frame.<name>=<label>): written on step, restored on
+      # reload, absent for the last frame and for unnamed maps.
+      - name: ::FRAME in the URL e2e (#647)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frame-url-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/frames-export-e2e.mjs (M2f-B, #149): the HTML export embeds
       # every frame of a time map within budget and rebuilds a swap-only
       # player offline (no server, no wasm) — step/slider/Play, hover on
