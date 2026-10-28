@@ -166,6 +166,12 @@ fn web_view_switcher_url_state() {
     run_node("views_test.mjs");
 }
 
+/// #643: map zoom maths (viewport ↔ map units, clamp, zoom-to-box).
+#[test]
+fn web_map_view_maths() {
+    run_node("map_view_test.mjs");
+}
+
 /// The exported standalone HTML's tab/sub-tab switcher (#381): each
 /// `.tabbar`/`.subtabbar` wires up scoped to its own wrap's panes, so a
 /// sub-tab click never indexes into an unrelated bar's panes.

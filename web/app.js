@@ -16771,7 +16771,7 @@ async function downloadHtmlInner() {
   // A snapshot has no live tables or chart tools: drop their search / filter /
   // pager controls and the panel toolboxes.
   const snap = document.querySelector(".dash").cloneNode(true);
-  snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot, .dp-toolbox").forEach((el) => el.remove());
+  snap.querySelectorAll(".tbl-bar-r, .tbl-chip, tr.tbl-frow, .table-foot, .dp-toolbox, .dp-map-reset, .dp-map-find").forEach((el) => el.remove());
   // …nor the builder's header editing (#60).
   snap.querySelectorAll(".dp-hedit, .dp-head-blank").forEach((el) => el.remove());
   // A searchable ::DROPDOWN (#411) is wired entirely by listeners cloneNode
@@ -17277,6 +17277,54 @@ function mapHeight(ar, w) {
   return Math.round(Math.min(Math.max(w * ar * 1.1, 220), Math.max(320, w * 1.1), 640));
 }
 
+// ---- M3d (#643): map zoom tools ----
+// A map svg's exact data viewport: ggplot-rs writes `data-viewport` (the rect,
+// in viewBox units, that coord_sf maps the window onto — legend room and
+// letterboxing excluded) and `data-domain` ("x0 x1 y0 y1", the projected
+// window). null when either is missing (an older render).
+function mapViewOf(vpAttr, domAttr) {
+  const vp = String(vpAttr || "").trim().split(/\s+/).map(Number);
+  const d = String(domAttr || "").trim().split(/\s+/).map(Number);
+  if (vp.length !== 4 || d.length !== 4 || ![...vp, ...d].every(Number.isFinite) || vp[2] <= 0 || vp[3] <= 0) return null;
+  return { vp: { x: vp[0], y: vp[1], w: vp[2], h: vp[3] }, d: { x0: d[0], x1: d[1], y0: d[2], y1: d[3] } };
+}
+// viewBox point → projected map units (y grows up in map units).
+function viewToProj(mv, ux, uy) {
+  const { vp, d } = mv;
+  return [d.x0 + ((ux - vp.x) / vp.w) * (d.x1 - d.x0), d.y1 - ((uy - vp.y) / vp.h) * (d.y1 - d.y0)];
+}
+// A mark's viewBox bbox → a projected box {x0, x1, y0, y1}.
+function bboxToProj(mv, b) {
+  const [ax, ay] = viewToProj(mv, b.x, b.y + b.height);
+  const [bx, by] = viewToProj(mv, b.x + b.width, b.y);
+  return { x0: Math.min(ax, bx), x1: Math.max(ax, bx), y0: Math.min(ay, by), y1: Math.max(ay, by) };
+}
+// Keep a window's width between home/64 and home×2 (D-M3-11), about its centre.
+function clampView(v, home) {
+  if (!home) return v;
+  const hw = home.x1 - home.x0;
+  const w = v.x1 - v.x0,
+    h = v.y1 - v.y0;
+  const nw = Math.min(Math.max(w, hw / 64), hw * 2);
+  if (nw === w) return v;
+  const k = nw / w,
+    cx = (v.x0 + v.x1) / 2,
+    cy = (v.y0 + v.y1) / 2;
+  return { x0: cx - (w * k) / 2, x1: cx + (w * k) / 2, y0: cy - (h * k) / 2, y1: cy + (h * k) / 2 };
+}
+// The window that shows box `b`: 15% padding per side, at least home/8 wide
+// (a point gets a sensible area), the viewport's `aspect` (w/h), clamped.
+function boxView(b, home, aspect) {
+  const hw = home ? home.x1 - home.x0 : b.x1 - b.x0 || 1;
+  let w = Math.max((b.x1 - b.x0) * 1.3, hw / 8);
+  let h = Math.max((b.y1 - b.y0) * 1.3, 0);
+  if (w / Math.max(h, 1e-12) < aspect) w = h * aspect;
+  else h = w / aspect;
+  const cx = (b.x0 + b.x1) / 2,
+    cy = (b.y0 + b.y1) / 2;
+  return clampView({ x0: cx - w / 2, x1: cx + w / 2, y0: cy - h / 2, y1: cy + h / 2 }, home);
+}
+
 function attachMapZoom(holder, rowsJson, roles, ph) {
   const W = () => holder.querySelector("svg")?.viewBox.baseVal.width || 460; // the width the map is drawn at
   const H = () => holder.querySelector("svg")?.viewBox.baseVal.height || ph; // … and its height
@@ -17321,50 +17369,151 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     return { x0, x1, y0, y1 };
   };
 
+  // The rendered map's exact viewport (M3d): pointer ↔ map units without
+  // guessing where the legend and letterboxing put the map.
+  const svgNow = () => holder.querySelector(":scope > svg");
+  const mv = () => {
+    const s = svgNow();
+    return s ? mapViewOf(s.getAttribute("data-viewport"), s.getAttribute("data-domain")) : null;
+  };
+  const toUser = (cx, cy) => {
+    const s = svgNow();
+    const m = s && s.getScreenCTM && s.getScreenCTM();
+    if (!m) return null;
+    const pt = new DOMPoint(cx, cy).matrixTransform(m.inverse());
+    return [pt.x, pt.y];
+  };
+  // The window shown now: the zoom asked for, else what was drawn, else a fit.
+  const shown = () => view || (mv() ? { ...mv().d } : fit());
+  const aspect = () => {
+    const m = mv();
+    return m ? m.vp.w / m.vp.h : W() / H();
+  };
+  if (!holder._dpHome && mv()) holder._dpHome = { ...mv().d };
+  const chip = document.createElement("button");
+  chip.className = "dp-map-reset";
+  chip.type = "button";
+  chip.textContent = "⟳";
+  chip.title = "Reset map view";
+  chip.setAttribute("aria-label", "Reset map view");
+  chip.hidden = true;
+  chip.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setView(null);
+  });
+  chip.addEventListener("mousedown", (e) => e.stopPropagation());
+  holder.appendChild(chip);
+  // In the map's own top-left corner (data-viewport), clear of a Top legend.
+  const placeChip = () => {
+    const m = mv();
+    const s = svgNow();
+    const ctm = s && s.getScreenCTM && s.getScreenCTM();
+    if (!m || !ctm) return;
+    const hr = holder.getBoundingClientRect();
+    const q = new DOMPoint(m.vp.x, m.vp.y).matrixTransform(ctm);
+    chip.style.left = Math.max(0, q.x - hr.left + 6) + "px";
+    chip.style.top = Math.max(0, q.y - hr.top + 6) + "px";
+  };
+
   const draw = () => {
     if (raf) return;
     raf = requestAnimationFrame(() => {
       raf = 0;
       const zoom = view ? JSON.stringify([view.x0, view.x1, view.y0, view.y1]) : "";
+      // the re-render replaces the svg: keep a keyboard user's focus on the map
+      const hadFocus = holder.contains(document.activeElement) && !chip.contains(document.activeElement);
       renderChart(holder, rowsJson, roles, W(), H(), zoom);
+      // the window actually drawn (the renderer may adjust the one asked for)
+      const m = mv();
+      if (m) {
+        if (view) view = { ...m.d };
+        else holder._dpHome = { ...m.d };
+      }
+      if (!chip.isConnected) holder.appendChild(chip);
+      chip.hidden = !view;
+      if (view) placeChip();
       wireCharts(); // re-wire hover + cross-filter clicks on the fresh marks
+      // (after wireCharts: that is what makes the fresh svg focusable)
+      if (hadFocus) svgNow()?.focus?.({ preventScroll: true });
     });
   };
+  // Every zoom change: clamp (D-M3-11), draw, hand to the ::SYNC_ZOOM group.
+  const setView = (v) => {
+    view = v ? clampView(v, holder._dpHome) : null;
+    draw();
+    share();
+  };
+  // Zoom by `k` (< 1 = in) about map point (px, py).
+  const zoomAt = (k, px, py) => {
+    const v = shown();
+    const w = (v.x1 - v.x0) * k;
+    const home = holder._dpHome;
+    if (home && (w < (home.x1 - home.x0) / 64 - 1e-9 || w > (home.x1 - home.x0) * 2 + 1e-9)) return;
+    setView({ x0: px + (v.x0 - px) * k, x1: px + (v.x1 - px) * k, y0: py + (v.y0 - py) * k, y1: py + (v.y1 - py) * k });
+  };
+  const zoomCentre = (k) => {
+    const v = shown();
+    zoomAt(k, (v.x0 + v.x1) / 2, (v.y0 + v.y1) / 2);
+  };
+  // The union box (map units) of these marks.
+  const marksBox = (els) => {
+    const m = mv();
+    if (!m || !els.length) return null;
+    return els.map((el) => bboxToProj(m, el.getBBox())).reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) }));
+  };
+  const zoomToMarks = (els) => {
+    const b = marksBox(els);
+    if (b) setView(boxView(b, holder._dpHome, aspect()));
+    return !!b;
+  };
+  const features = () => [...(svgNow()?.querySelectorAll("[data-row].dp-hit, [data-row][data-label]") || [])].filter((el) => !el.classList.contains("dp-map-pad"));
+  holder._dpZoomSel = () => zoomToMarks(features().filter((el) => dpSelected != null && el.getAttribute("data-series") === dpSelected));
+  holder._dpHasSel = () => features().some((el) => dpSelected != null && el.getAttribute("data-series") === dpSelected);
+  holder._dpReset = () => setView(null);
+  holder._dpFind = () => openMapFind(holder, features, zoomToMarks);
 
   holder.style.cursor = "grab";
   holder.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
+      const k = e.deltaY < 0 ? 0.85 : 1 / 0.85;
+      const m = mv();
+      const u = m && toUser(e.clientX, e.clientY);
+      if (m && u) {
+        // exact: the map point under the pointer stays under it
+        const [px, py] = viewToProj({ vp: m.vp, d: shown() }, u[0], u[1]);
+        zoomAt(k, px, py);
+        return;
+      }
       if (!view) view = fit();
       const r = holder.getBoundingClientRect();
       const px = view.x0 + ((e.clientX - r.left) / r.width) * (view.x1 - view.x0);
       const py = view.y1 - ((e.clientY - r.top) / r.height) * (view.y1 - view.y0);
-      const k = e.deltaY < 0 ? 0.85 : 1 / 0.85;
-      view = {
-        x0: px + (view.x0 - px) * k,
-        x1: px + (view.x1 - px) * k,
-        y0: py + (view.y0 - py) * k,
-        y1: py + (view.y1 - py) * k,
-      };
-      draw();
-      share();
+      zoomAt(k, px, py);
     },
     { passive: false }
   );
 
   let drag = null;
   holder.addEventListener("mousedown", (e) => {
-    if (!view) view = fit();
-    drag = { x: e.clientX, y: e.clientY, v: { ...view }, moved: false };
+    drag = { x: e.clientX, y: e.clientY, v: { ...shown() }, u: toUser(e.clientX, e.clientY), m: mv(), moved: false };
     holder.style.cursor = "grabbing";
   });
   window.addEventListener("mousemove", (e) => {
     if (!drag) return;
     if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) drag.moved = true;
-    const r = holder.getBoundingClientRect();
-    const dx = ((e.clientX - drag.x) / r.width) * (drag.v.x1 - drag.v.x0);
-    const dy = ((e.clientY - drag.y) / r.height) * (drag.v.y1 - drag.v.y0);
+    if (!drag.moved) return;
+    let dx, dy;
+    const u = drag.m && drag.u && toUser(e.clientX, e.clientY);
+    if (u) {
+      dx = ((u[0] - drag.u[0]) / drag.m.vp.w) * (drag.v.x1 - drag.v.x0);
+      dy = ((u[1] - drag.u[1]) / drag.m.vp.h) * (drag.v.y1 - drag.v.y0);
+    } else {
+      const r = holder.getBoundingClientRect();
+      dx = ((e.clientX - drag.x) / r.width) * (drag.v.x1 - drag.v.x0);
+      dy = ((e.clientY - drag.y) / r.height) * (drag.v.y1 - drag.v.y0);
+    }
     view = { x0: drag.v.x0 - dx, x1: drag.v.x1 - dx, y0: drag.v.y0 + dy, y1: drag.v.y1 + dy };
     draw();
     share();
@@ -17375,20 +17524,40 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     drag = null;
   });
   // A drag-pan ends with a click event — swallow it so it doesn't cross-filter.
+  // So is a double-click's second click (D-M3-9): the first one's selection
+  // stays, the double-click zooms.
   holder.addEventListener(
     "click",
     (e) => {
-      if (holder._panned) {
+      if (holder._panned || e.detail >= 2) {
         holder._panned = false;
         e.stopPropagation();
       }
     },
     true
   );
-  holder.addEventListener("dblclick", () => {
-    view = null;
-    draw();
-    share();
+  // Double-click a feature: zoom to it; anywhere else: back to the full map.
+  holder.addEventListener("dblclick", (e) => {
+    let t = e.target && e.target.closest ? e.target.closest("svg[data-map] [data-row]") : null;
+    // the first click's cross-filter may have re-rendered the map: the same row's mark
+    if (t && !t.isConnected) t = features().find((f) => f.getAttribute("data-row") === t.getAttribute("data-row")) || null;
+    if (t && !t.classList.contains("dp-map-pad") && zoomToMarks([t])) return;
+    setView(null);
+  });
+  // Keys on a focused map: + / − zoom about the centre, 0 resets, z zooms to
+  // the focused feature (arrows/Enter/Esc stay the chart's own, chartKey).
+  holder.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    if (k === "+" || k === "=") zoomCentre(0.8);
+    else if (k === "-" || k === "_") zoomCentre(1 / 0.8);
+    else if (k === "0") setView(null);
+    else if (k === "z" || k === "Z") {
+      const f = document.activeElement && document.activeElement.closest && document.activeElement.closest("svg[data-map] [data-row]");
+      if (!f || !holder.contains(f) || !zoomToMarks([f])) return;
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
   });
   if (group) {
     holder._dpZoomTo = (sv) => {
@@ -17398,6 +17567,67 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     group.members.add(holder);
     if (group.view) holder._dpZoomTo(group.view);
   }
+}
+
+// "Find a place" (M3d, D-M3-12): a search box over the map's own drawn
+// feature labels (no geocoding). Enter or a pick zooms to every mark with that
+// label, focuses the first and opens its tooltip; the result is announced.
+function openMapFind(holder, features, zoomToMarks) {
+  const panel = holder.closest(".panel");
+  if (!panel) return;
+  let box = panel.querySelector(":scope > .dp-map-find");
+  if (box) return box.querySelector("input").focus();
+  const labelOf = (el) => (el.getAttribute("data-label") || "").split("\n")[0].trim();
+  const names = [...new Set(features().map(labelOf).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  box = document.createElement("div");
+  box.className = "dp-map-find";
+  const id = "dp-map-find-" + Math.random().toString(36).slice(2, 8);
+  box.innerHTML = `<input type="search" placeholder="Find a place" aria-label="Find a place on this map" list="${id}"><datalist id="${id}">${names.map((n) => `<option value="${escapeHtml(n)}">`).join("")}</datalist>`;
+  const input = box.querySelector("input");
+  const close = () => {
+    box.remove();
+    holder.querySelector("svg")?.focus?.();
+  };
+  const go = () => {
+    const q = input.value.trim().toLowerCase();
+    if (!q) return;
+    const all = features();
+    let hit = all.filter((el) => labelOf(el).toLowerCase() === q);
+    if (!hit.length) hit = all.filter((el) => labelOf(el).toLowerCase().startsWith(q));
+    if (!hit.length || !zoomToMarks(hit)) {
+      announceStep("dp-map-find", `No feature named ${input.value.trim()}`, true);
+      return;
+    }
+    const name = labelOf(hit[0]);
+    announceStep("dp-map-find", `Zoomed to ${name}`, true);
+    close();
+    // after the zoomed re-render: focus the feature and show its tooltip
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const el = features().find((f) => labelOf(f) === name);
+        if (!el) return;
+        el.setAttribute("tabindex", el.getAttribute("tabindex") || "-1");
+        el.focus?.();
+        const r = el.getBoundingClientRect();
+        el.dispatchEvent(new MouseEvent("mouseenter", { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+      })
+    );
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      go();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  });
+  // a datalist pick fires `change` without Enter
+  input.addEventListener("change", () => names.includes(input.value) && go());
+  box.addEventListener("click", (e) => e.stopPropagation());
+  holder.before(box);
+  input.focus();
 }
 
 // A mark's tooltip value for display: ggplot-rs writes `data-value` raw, so
@@ -17915,7 +18145,9 @@ function attachChartA11y() {
       "aria-description",
       svg.hasAttribute("data-diagram")
         ? `Arrow keys follow the connections (${tb ? "down" : "right"} to the next step, ${tb ? "up" : "left"} to the previous), ${tb ? "left and right" : "up and down"} move within a stage, Enter selects, Escape leaves.`
-        : "Arrow keys move between data points, Enter selects, Escape leaves."
+        : svg.hasAttribute("data-map")
+          ? "Arrow keys move between features, Enter selects, Escape leaves. Plus and minus zoom, 0 resets, Z zooms to the focused feature."
+          : "Arrow keys move between data points, Enter selects, Escape leaves."
     );
     marks.forEach((el) => {
       el.setAttribute("tabindex", "-1");
@@ -18259,6 +18491,17 @@ function attachToolbox() {
         const h = panel.querySelector(".panel-svg");
         if (h) h.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
       });
+    }
+    // M3d (#643): a map's zoom tools — reset, zoom to the selection, find.
+    const mh = dp && dp.isMap ? panel.querySelector(".panel-svg") : null;
+    if (mh && mh._dpReset) {
+      mkTool("Reset view", "⟳", () => mh._dpReset());
+      const sel = mkTool("Zoom to selection", "⌖", () => mh._dpZoomSel());
+      const syncSel = () => sel.setAttribute("aria-disabled", String(!mh._dpHasSel()));
+      syncSel();
+      bar.addEventListener("mouseenter", syncSel);
+      bar.addEventListener("focusin", syncSel);
+      mkTool("Find a place", "🔍", () => mh._dpFind());
     }
     mkTool("Full size", "⤢", () => openFullSize(panel));
     mkTool("Save as PNG", "⭳", () => savePanelPng(panel));
