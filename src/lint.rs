@@ -92,6 +92,11 @@ pub struct Diagnostic {
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
     /// `folder/setup-table` (a setup `CREATE TABLE … AS`, rebuilt on every
     /// new server connection when served).
+    /// `::FORM` fields ([`crate::form::fields`], #683): `form/no-value` |
+    /// `form/unknown-type` | `form/no-options` | `form/bad-show-if` (errors)
+    /// | `form/bad-value` | `form/bad-range` | `form/slider-range` |
+    /// `form/duplicate-field` | `form/no-key` | `form/too-many-fields`
+    /// (warnings).
     /// `::FIGURE` blocks ([`figure_diags`], #661): `figure/unclosed` |
     /// `figure/nested` | `figure/not-a-chart` | `figure/bad-option` |
     /// `figure/unknown-cell` | `figure/duplicate-cell` | `figure/bad-weights`
@@ -822,6 +827,24 @@ where
                             sql: short.clone(),
                         });
                     }
+                    // #683: a ::FORM's own rows are its fields.
+                    if kind == InputKind::Form {
+                        let key = names.first().map(String::as_str).unwrap_or("");
+                        for (code, message) in crate::form::fields(key, &rows).1 {
+                            let severity = match code {
+                                "form/no-value" | "form/unknown-type" | "form/no-options"
+                                | "form/bad-show-if" => Severity::Error,
+                                _ => Severity::Warning,
+                            };
+                            diags.push(Diagnostic {
+                                severity,
+                                stmt,
+                                code,
+                                message,
+                                sql: short.clone(),
+                            });
+                        }
+                    }
                     if kind == InputKind::Buttons && rows.len() > 7 {
                         diags.push(Diagnostic {
                             severity: Severity::Warning,
@@ -994,16 +1017,21 @@ where
                                                 sql: short.clone(),
                                             });
                                         } else if entries.iter().any(|(_, k, _)| {
-                                            matches!(k, InputKind::DateRange | InputKind::Period)
+                                            matches!(
+                                                k,
+                                                InputKind::DateRange
+                                                    | InputKind::Period
+                                                    | InputKind::Form
+                                            )
                                         }) {
                                             diags.push(Diagnostic {
                                                 severity: Severity::Error,
                                                 stmt,
                                                 code: "submit/unsupported-input",
                                                 message: format!(
-                                                    "`{n}` comes from a ::DATERANGE/::PERIOD \
+                                                    "`{n}` comes from a ::DATERANGE/::PERIOD/::FORM \
                                                      input — ::SUBMIT can't record those yet \
-                                                     (several variables each)"
+                                                     (several variables or fields each)"
                                                 ),
                                                 sql: short.clone(),
                                             });
@@ -9936,6 +9964,43 @@ mod design_tests {
         assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
         let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
         assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    /// #683: a ::FORM's rows are checked as fields; its default reaches the
+    /// panels reading the variable.
+    #[test]
+    fn form_fields_are_checked() {
+        let codes = |d: &[Diagnostic]| -> Vec<&'static str> {
+            d.iter()
+                .map(|x| x.code)
+                .filter(|c| c.starts_with("form/"))
+                .collect()
+        };
+        let good = vec![
+            json!({"lt": "model", "type": "dropdown", "value": "normal", "options": ["fixed", "normal"]}),
+            json!({"lt": "mean", "type": "number", "value": 12, "min": 0}),
+        ]
+        .into_iter()
+        .map(|v| v.as_object().unwrap().clone())
+        .collect::<Vec<_>>();
+        let d = check(
+            "SELECT field AS lt ::FORM, type, value, options, min FROM p;",
+            |_q| Ok(good.clone()),
+        );
+        assert!(codes(&d).is_empty(), "{d:?}");
+        let bad = vec![
+            json!({"lt": "a", "type": "dial", "value": 1}),
+            json!({"lt": "b", "type": "dropdown", "value": "x"}),
+        ]
+        .into_iter()
+        .map(|v| v.as_object().unwrap().clone())
+        .collect::<Vec<_>>();
+        let d = check("SELECT field AS lt ::FORM, type, value FROM p;", |_q| {
+            Ok(bad.clone())
+        });
+        assert!(codes(&d).contains(&"form/unknown-type"), "{d:?}");
+        assert!(codes(&d).contains(&"form/no-options"), "{d:?}");
+        assert!(!passes(&d, false));
     }
 
     /// #659: an unknown ::MARKDOWN_TONE is an error; a tone beside a

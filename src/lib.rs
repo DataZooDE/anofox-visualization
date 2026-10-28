@@ -29,6 +29,7 @@ pub mod dashboard;
 pub mod diagram;
 mod downsample;
 pub mod figure;
+pub mod form;
 pub mod format;
 pub mod freshness;
 pub mod host;
@@ -190,6 +191,9 @@ pub enum InputKind {
     Buttons,
     /// A boolean switch (`::TOGGLE`): `TRUE` / `FALSE`.
     Toggle,
+    /// A row-driven form (`::FORM`, #683): one row per field; its value is a
+    /// JSON object text ([`form`]).
+    Form,
 }
 
 /// How a KPI value is formatted.

@@ -9,6 +9,7 @@ import init, {
   render_mini_overlay,
   render_stack,
   render_figure,
+  form_fields,
   render_contract,
   map_bounds,
   map_natural_height,
@@ -6856,7 +6857,7 @@ async function tourAfterSwap() {
 // Role sets come from the Rust role registry (wasm `roles_json()`), so the
 // browser never drifts from the planner. The literals are only a fallback for
 // an older wasm build without that export.
-let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
+let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE", "FORM"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
@@ -9749,6 +9750,25 @@ async function runOnce(fresh = true, pv = preview) {
           await runSql(`SET VARIABLE ${tk} = '${String(dpVars[tk]).replace(/'/g, "''")}'`);
           continue;
         }
+        if (kind === "FORM") {
+          // ::FORM (#683): one row per field; the ::FORM column is the key,
+          // its name the variable, which holds a JSON object of the values
+          // (src/form.rs parses the rows: form_fields).
+          const keys = Object.keys(rows[0]);
+          const fr = s.roles.find((r) => r[1] === "FORM");
+          const varname = keys[fr ? fr[0] : 0] ?? keys[0];
+          let parsed = { fields: [], default: "{}" };
+          try {
+            parsed = JSON.parse(form_fields(JSON.stringify(rows), varname));
+          } catch (_) {}
+          dpVarDefault[varname] = JSON.stringify(parsed.default);
+          const seed = dpUrlSeed[varname];
+          delete dpUrlSeed[varname];
+          dpVars[varname] = formValue(varname, parsed, seed && seed.length === 1 ? seed[0] : undefined);
+          dd[i] = { kind, varname, fields: parsed.fields, caption };
+          await runSql(`SET VARIABLE ${varname} = '${dpVars[varname].replace(/'/g, "''")}'`);
+          continue;
+        }
         const varname = Object.keys(rows[0])[0];
         const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
         const io = listed ? inputOptions(s.roles, rows, varname) : null;
@@ -11156,6 +11176,15 @@ async function runOnce(fresh = true, pv = preview) {
         nextTableOpts = {};
         nextIa = {};
         nextEmpty = "";
+      } else if (isInput(s) && dd[i] && dd[i].kind === "FORM") {
+        // ::FORM (#683): a card of its own in the grid, sized like a panel.
+        const card = makeFormPanel(dd[i]);
+        if (container === curGrid) card.style.gridColumn = `span ${Math.min(12, nextSpan || defaultSpan)}`;
+        tagName(card, s);
+        container.appendChild(card);
+        panels++;
+        nextSpan = 0;
+        nextHeight = 0;
       } else if (isInput(s)) {
         if (dd[i]) {
           const ctl = makeControl(dd[i], container === curGrid);
@@ -12261,6 +12290,151 @@ function markAnim(holder, roles) {
 
 // A labelled <select>; changing it re-runs the dashboard. `bar` wraps a
 // stand-alone control in its own spanning row (grouped ones sit inline).
+// ::FORM (#683) ------------------------------------------------------------
+// The form's fields as last run, by variable: a changed field set (another
+// diagram node picked, say) resets the values to the new rows' own.
+let dpFormSig = {};
+// A field value the viewer may keep: the right type, inside min/max, one of
+// a dropdown's options.
+function formFieldOk(f, v) {
+  if (v === null) return true;
+  if (f.type === "number" || f.type === "slider")
+    return typeof v === "number" && Number.isFinite(v) && (f.min == null || v >= f.min) && (f.max == null || v <= f.max);
+  if (f.type === "toggle") return typeof v === "boolean";
+  if (typeof v !== "string" || v.length > 500) return false;
+  if (f.type === "dropdown") return f.options.includes(v);
+  if (f.type === "date") return isIsoDate(v);
+  return true;
+}
+// The form variable's JSON text for this run: the rows' own values, with the
+// viewer's still-valid edits (the last run's, else a `?v.<name>=` seed) on top.
+function formValue(varname, parsed, seed) {
+  const sig = JSON.stringify(parsed.fields.map((f) => [f.key, f.type, f.value, f.options]));
+  const same = dpFormSig[varname] === sig;
+  dpFormSig[varname] = sig;
+  let mine = null;
+  try {
+    const src = same && dpVars[varname] !== undefined ? dpVars[varname] : seed;
+    if (src !== undefined) mine = JSON.parse(src);
+  } catch (_) {}
+  const out = {};
+  for (const f of parsed.fields) {
+    const v = mine && typeof mine === "object" && Object.prototype.hasOwnProperty.call(mine, f.key) ? mine[f.key] : undefined;
+    out[f.key] = v !== undefined && formFieldOk(f, v) ? v : f.value;
+  }
+  return JSON.stringify(out);
+}
+// Is field `f` shown under the current values (its show_if)?
+function formFieldShown(f, vals) {
+  if (!f.show_if) return true;
+  const v = vals[f.show_if.field];
+  return f.show_if.values.includes(v == null ? "" : String(v));
+}
+// The form card: a label, input, unit, ⓘ help and provenance per field.
+function makeFormPanel(meta) {
+  const fig = document.createElement("section");
+  fig.className = "panel dp-form";
+  fig.dataset.varname = meta.varname;
+  // A re-run keeps a panel whose markup is unchanged (patchSlots) — input
+  // values are properties, not markup, so the value goes on the card too.
+  fig.dataset.value = dpVars[meta.varname] ?? "";
+  if (meta.caption) fig.appendChild(mkTitle(meta.caption));
+  let vals = {};
+  try {
+    vals = JSON.parse(dpVars[meta.varname]);
+  } catch (_) {}
+  const commit = (key, v, el) => {
+    vals[key] = v;
+    dpVars[meta.varname] = JSON.stringify(vals);
+    if (document.activeElement === el) dpRefocus = `form:${meta.varname}:${key}`;
+    run(false);
+  };
+  const list = document.createElement("div");
+  list.className = "dp-form-fields";
+  for (const f of meta.fields) {
+    if (!formFieldShown(f, vals)) continue;
+    const row = document.createElement("div");
+    row.className = "dp-form-field";
+    row.dataset.field = f.key;
+    const id = `dp-form-${meta.varname}-${f.key}`.replace(/[^\w-]/g, "_");
+    const lab = document.createElement("label");
+    lab.className = "dp-form-label";
+    lab.htmlFor = id;
+    lab.textContent = f.label || f.key;
+    row.appendChild(lab);
+    const cur = vals[f.key];
+    let input;
+    if (f.type === "dropdown") {
+      input = document.createElement("select");
+      for (const o of f.options) {
+        const opt = document.createElement("option");
+        opt.value = opt.textContent = o;
+        if (o === cur) opt.selected = true;
+        input.appendChild(opt);
+      }
+      input.onchange = () => commit(f.key, input.value, input);
+    } else if (f.type === "toggle") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.setAttribute("role", "switch");
+      input.checked = cur === true;
+      input.onchange = () => commit(f.key, input.checked, input);
+    } else if (f.type === "number" || f.type === "slider") {
+      input = document.createElement("input");
+      input.type = f.type === "slider" ? "range" : "number";
+      if (f.min != null) input.min = f.min;
+      if (f.max != null) input.max = f.max;
+      input.step = f.step != null ? f.step : "any";
+      input.value = cur == null ? "" : String(cur);
+      if (f.type === "slider") {
+        const out = document.createElement("output");
+        out.className = "dp-form-out";
+        out.textContent = input.value;
+        input.oninput = () => (out.textContent = input.value);
+        row.dataset.out = "1";
+        input._out = out;
+      }
+      input.onchange = () => {
+        const n = input.value === "" ? null : Number(input.value);
+        if (n === null || formFieldOk(f, n)) commit(f.key, n, input);
+        else input.value = cur == null ? "" : String(cur);
+      };
+    } else {
+      input = document.createElement("input");
+      input.type = f.type === "date" ? "date" : "text";
+      input.value = cur == null ? "" : String(cur);
+      input.onchange = () => commit(f.key, input.value === "" ? null : input.value, input);
+    }
+    input.id = id;
+    input.className = "dp-form-input";
+    refocus(`form:${meta.varname}:${f.key}`, input);
+    const box = document.createElement("div");
+    box.className = "dp-form-control";
+    box.appendChild(input);
+    if (input._out) box.appendChild(input._out);
+    if (f.unit) {
+      const u = document.createElement("span");
+      u.className = "dp-form-unit";
+      u.textContent = f.unit;
+      box.appendChild(u);
+    }
+    row.appendChild(box);
+    if (f.help) {
+      addInfo(lab, f.help);
+      lab.querySelector(".dp-info")?.classList.remove("corner"); // beside its label
+    }
+    if (f.source) {
+      const src = document.createElement("div");
+      src.className = "dp-form-source";
+      src.textContent = f.source;
+      row.appendChild(src);
+    }
+    list.appendChild(row);
+  }
+  fig.appendChild(list);
+  return fig;
+}
+
 function finalizeControl(wrap, bar) {
   if (!bar) return wrap;
   const box = document.createElement("div");

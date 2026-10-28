@@ -259,6 +259,17 @@ pub fn render_stack_checked(
     })
 }
 
+/// A `::FORM`'s fields (#683, [`crate::form::fields_json`]): `rows_json` =
+/// the form query's rows (a JSON array of objects, as DuckDB-Wasm returns
+/// them), `key_col` = the `::FORM` column's name (the variable). Returns
+/// `{"fields": […], "default": "<json text>", "issues": […]}`.
+#[wasm_bindgen]
+pub fn form_fields(rows_json: &str, key_col: &str) -> String {
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> =
+        sql::parse_rows_json(rows_json).unwrap_or_default();
+    crate::form::fields_json(key_col, &rows)
+}
+
 /// Render a `::FIGURE` (#661, [`crate::figure`]): its cells composed into
 /// one picture. `figure_json` = `{"figure": {"rows", "roles"}, "cells":
 /// [{"rows", "roles", "name"}, …]}` — `figure` the `::FIGURE` statement's
