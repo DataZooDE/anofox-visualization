@@ -8,7 +8,6 @@ use crate::format::ValueFmt;
 use crate::{cell_num, find_role, value_fmt, value_str, Column, Kind, Role};
 
 use super::boundaries;
-use super::legend::legend_title;
 use super::project::Proj;
 use super::symbols::anchors_of;
 
@@ -109,7 +108,6 @@ pub(super) struct RawFlows {
     pub has_size: bool,
     pub fixed: Option<f64>,
     pub fmt: ValueFmt,
-    pub title: Option<String>,
     /// Review of #595 BLOCKER 1: every resolved endpoint (`o`/`d`),
     /// present this frame or not (`flows` only holds the present/drawn
     /// ones). `Model::new`'s flow branch builds the extent/projection
@@ -228,7 +226,6 @@ pub(super) fn of(
     let fmt = size_col
         .map(|c| value_fmt(cols, Kind::Bar, &c.values))
         .unwrap_or(ValueFmt::Plain);
-    let title = size_col.and_then(|c| legend_title(&c.name, &fmt));
 
     let mut flows = Vec::new();
     let mut all_points: Vec<[f64; 2]> = Vec::new();
@@ -293,7 +290,6 @@ pub(super) fn of(
         has_size,
         fixed,
         fmt,
-        title,
     })
 }
 
@@ -324,7 +320,6 @@ pub(super) struct Flows {
     pub fixed: Option<f64>,
     pub has_size: bool,
     pub fmt: ValueFmt,
-    pub title: Option<String>,
     /// The matched boundary layer, if any end was a code (kept for tests;
     /// `Model::new` reads `RawFlows::layer` directly to set up the backdrop).
     #[allow(dead_code)]
@@ -391,7 +386,6 @@ pub(super) fn project(raw: RawFlows, proj: &Proj, forced_vmax: Option<f64>) -> F
         fixed: raw.fixed,
         has_size: raw.has_size,
         fmt: raw.fmt,
-        title: raw.title,
         layer: raw.layer,
     }
 }

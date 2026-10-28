@@ -34,14 +34,6 @@ pub(super) fn rmax(w: f64, h: f64) -> f64 {
     (0.04 * w.min(h)).clamp(6.0, 28.0)
 }
 
-/// The radius of a finite, positive value `v` against `vmax` (area ∝ v).
-pub(super) fn radius(rmax: f64, v: f64, vmax: f64) -> f64 {
-    if vmax <= 0.0 {
-        return rmax;
-    }
-    (rmax * (v / vmax).sqrt()).max(1.5)
-}
-
 /// Converts a shape's ring (`[f64; 2]` vertices) to `labels::Pt` tuples.
 fn as_pts(ring: &[[f64; 2]]) -> Vec<(f64, f64)> {
     ring.iter().map(|c| (c[0], c[1])).collect()
