@@ -289,7 +289,11 @@ fn render_dashboard_html(
             if let Ok(rows) = exec(&format!("{};", p.sql)) {
                 // #435: sent to the session right away instead of a
                 // prelude text to replay before later statements.
-                for set in inputs::input_defaults(kind, inputs::input_index(&p.roles), &rows) {
+                let (idx, def) = (
+                    inputs::input_index(&p.roles),
+                    inputs::default_index(&p.roles),
+                );
+                for set in inputs::input_defaults_with(kind, idx, def, &rows) {
                     let _ = exec(&format!("{set};"));
                 }
             }

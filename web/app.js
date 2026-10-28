@@ -7703,16 +7703,18 @@ function inputsToPreset(stmts, vars, urlSeed) {
   return out;
 }
 // Record an input's default and apply its URL seed (first run only, while the
-// variable is still unset). `names` = [var] or a ::DATERANGE's [from, to].
-function seedInputFromUrl(kind, names, rows) {
+// variable is still unset). `names` = [var] or a ::DATERANGE's [from, to];
+// `defaults` = the ::DEFAULT-marked options of a listed input (#638).
+function seedInputFromUrl(kind, names, rows, defaults) {
   for (const name of names) {
     const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
     const options = listed ? rows.map((r) => String(r[name])) : null;
+    const marked = defaults && defaults.length ? defaults : null;
     dpVarDefault[name] = JSON.stringify(
       kind === "MULTISELECT"
-        ? options
+        ? (marked ?? options)
         : listed
-          ? options[0]
+          ? (marked ? marked[0] : options[0])
           : kind === "TOGGLE"
             ? toggleValue(rows[0][name])
             : String(rows[0][name] ?? "")
@@ -9747,11 +9749,14 @@ async function runOnce(fresh = true, pv = preview) {
           continue;
         }
         const varname = Object.keys(rows[0])[0];
-        seedInputFromUrl(kind, [varname], rows);
+        const listed = kind === "DROPDOWN" || kind === "BUTTONS" || kind === "MULTISELECT";
+        const io = listed ? inputOptions(s.roles, rows, varname) : null;
+        seedInputFromUrl(kind, [varname], rows, io && io.defaults);
         let lit;
         if (kind === "DROPDOWN" || kind === "BUTTONS") {
-          const { options, labels, hints } = inputOptions(s.roles, rows, varname);
-          if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = options[0];
+          const { options, labels, hints, defaults } = io;
+          // the ::DEFAULT-marked option (#638), else the first
+          if (dpVars[varname] === undefined || !options.includes(dpVars[varname])) dpVars[varname] = defaults[0] ?? options[0];
           // ::DROPDOWN_STYLE (#411): 'search' / 'native' overrides the
           // option-count threshold that otherwise picks the widget.
           const dsr = kind === "DROPDOWN" && s.roles.find((r) => r[1] === "DROPDOWN_STYLE");
@@ -9764,8 +9769,9 @@ async function runOnce(fresh = true, pv = preview) {
           dd[i] = { kind, varname, caption };
           lit = dpVars[varname] === "true" ? "TRUE" : "FALSE";
         } else if (kind === "MULTISELECT") {
-          const { options, labels } = inputOptions(s.roles, rows, varname);
-          if (!Array.isArray(dpVars[varname])) dpVars[varname] = options.slice(); // default: all
+          const { options, labels, defaults } = io;
+          // default: the ::DEFAULT-marked options (#638), else all
+          if (!Array.isArray(dpVars[varname])) dpVars[varname] = (defaults.length ? defaults : options).slice();
           dpVars[varname] = dpVars[varname].filter((v) => options.includes(v));
           dd[i] = { kind, varname, options, labels, caption };
           lit = "[" + dpVars[varname].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(",") + "]";
@@ -12328,7 +12334,10 @@ function inputOptions(roles, rows, varname) {
   const hin = col("HINT");
   const labels = lab ? lab.map((v, k) => (v == null || String(v).trim() === "" ? options[k] : String(v))) : null;
   const hints = hin ? hin.map((v) => String(v ?? "")) : null;
-  return { options, labels, hints };
+  // #638: the options a ::DEFAULT column marks true, in option order
+  const def = col("DEFAULT");
+  const defaults = def ? options.filter((_, k) => toggleValue(def[k]) === "true") : [];
+  return { options, labels, hints, defaults };
 }
 // An input's caption (or its variable name, as a fallback), with a
 // trailing ":" — unless it already ends with its own terminal punctuation

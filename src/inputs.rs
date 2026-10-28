@@ -26,6 +26,14 @@ pub fn input_index(roles: &[(usize, Role)]) -> usize {
         .unwrap_or(0)
 }
 
+/// Output position of a panel's `::DEFAULT` column (#638), if any.
+pub fn default_index(roles: &[(usize, Role)]) -> Option<usize> {
+    roles
+        .iter()
+        .find(|(_, r)| *r == Role::InputDefault)
+        .map(|(i, _)| *i)
+}
+
 /// Quote a DuckDB identifier (`"a""b"`).
 fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -38,6 +46,26 @@ fn quote_ident(name: &str) -> String {
 /// output position (rows keep SELECT column order, via serde_json's
 /// `preserve_order`); the variable name is quoted.
 pub fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Json>]) -> Vec<String> {
+    input_defaults_with(kind, idx, None, rows)
+}
+
+/// [`input_defaults`] honouring a `::DEFAULT` column at output position
+/// `default_idx` (#638): a `::DROPDOWN`/`::BUTTONS` defaults to the first
+/// marked row, a `::MULTISELECT` to every marked row; no marked row (or no
+/// column) keeps the first option / all of them.
+pub fn input_defaults_with(
+    kind: InputKind,
+    idx: usize,
+    default_idx: Option<usize>,
+    rows: &[Map<String, Json>],
+) -> Vec<String> {
+    let marked: Vec<&Map<String, Json>> = match default_idx {
+        Some(d) => rows
+            .iter()
+            .filter(|r| r.values().nth(d).is_some_and(truthy))
+            .collect(),
+        None => Vec::new(),
+    };
     let Some(first) = rows.first() else {
         return Vec::new();
     };
@@ -64,7 +92,12 @@ pub fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Json>]) -
             crate::period::default_sets(k, &spec)
         }
         InputKind::Multiselect => {
-            let vals: Vec<String> = rows.iter().filter_map(|r| r.get(k)).map(lit).collect();
+            let picked: Vec<&Map<String, Json>> = if marked.is_empty() {
+                rows.iter().collect()
+            } else {
+                marked
+            };
+            let vals: Vec<String> = picked.iter().filter_map(|r| r.get(k)).map(lit).collect();
             vec![format!(
                 "SET VARIABLE {} = [{}]",
                 quote_ident(k),
@@ -81,6 +114,14 @@ pub fn input_defaults(kind: InputKind, idx: usize, rows: &[Map<String, Json>]) -
                 "FALSE"
             }
         )],
+        InputKind::Dropdown | InputKind::Buttons => {
+            let row = marked.first().copied().unwrap_or(first);
+            vec![format!(
+                "SET VARIABLE {} = {}",
+                quote_ident(k),
+                row.get(k).map(lit).unwrap_or_else(|| "NULL".into())
+            )]
+        }
         _ => vec![format!(
             "SET VARIABLE {} = {}",
             quote_ident(k),
@@ -104,7 +145,7 @@ pub fn panel_defaults(roles: &[(usize, Role)], cols: &[(String, Vec<Value>)]) ->
                 .collect()
         })
         .collect();
-    input_defaults(kind, input_index(roles), &rows)
+    input_defaults_with(kind, input_index(roles), default_index(roles), &rows)
 }
 
 fn cell_json(v: Option<&Value>) -> Json {

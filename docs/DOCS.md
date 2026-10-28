@@ -144,6 +144,8 @@ terminal.
 | `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
 | `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
 | `::SYNC_FRAME` | `::FRAME_GROUP` | modifier | time maps (::FRAME) with the same value (e.g. 'weeks') step and play together in the browser, by frame label |
+| `::XTITLE` | `::X_TITLE`, `::XLAB` | modifier | x-axis title, e.g. 'Residual load (GW)' — names the ::XAXIS variable, drawn under the x ticks (on a ::FLIP chart it moves with the x axis); charts with axes only |
+| `::YTITLE` | `::Y_TITLE`, `::YLAB` | modifier | y-axis title, e.g. 'Day-ahead price (EUR/MWh)' — names the measure, drawn rotated beside the y ticks; charts with axes only |
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
@@ -204,6 +206,7 @@ terminal.
 | `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
+| `::DEFAULT` | `::IS_DEFAULT` | input | true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all |
 | `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
 | `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server) |
 | `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
@@ -303,6 +306,19 @@ SELECT run AS run ::DROPDOWN,
 FROM runs ORDER BY written DESC;
 ```
 
+A `::DEFAULT` column picks the default without reordering the options (#638):
+true on the default row of a `::DROPDOWN` / `::BUTTONS` (the first true row
+wins), on every default pick of a `::MULTISELECT`. No true row keeps the
+first option / every option. A `?v.name=` seed and the viewer's own pick
+still win over it, and the static renders bind it too. On any other input
+it's a warning (`input/default-ignored`): their own value is the default.
+
+```sql
+SELECT w AS ov_window ::BUTTONS, w = '7 days' AS d ::DEFAULT
+FROM (VALUES ('1 day', 1), ('7 days', 2), ('30 days', 3), ('90 days', 4)) t(w, n) ORDER BY n;
+SELECT key AS sources ::MULTISELECT, key IN ('solar', 'wind_onshore') AS d ::DEFAULT FROM series;
+```
+
 An input renders **where it appears in the script**: before the first `::TAB`
 it sits above the tabs, after a `::TAB` (or `::SUBTAB`) inside that tab, shown
 only while the tab is. Put an input in the tab whose panels it changes, and
@@ -342,7 +358,7 @@ SELECT 10 AS min_n ::NUMBER, 'Minimum orders'::LABEL;  -- only on "Detail"
 Inputs work in the **browser builder** and **`serve`** (they re-query on change).
 The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 `serve --dashboards` page) draw no control but bind each input's **default**
-(the first option, every option of a `::MULTISELECT`, both ends of a
+(the first option — or the `::DEFAULT`-marked one(s) — every option of a `::MULTISELECT`, both ends of a
 `::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
 render as on first load in the browser.
 
@@ -577,6 +593,7 @@ Roles for model output — coefficient forests, residual diagnostics, CV curves:
 | small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x) and stacks the panels in one column unless `::FACET_NCOL` is set |
 | axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
 | date tick labels | `'%H:%M'::XFORMAT`, `'%-d %b'::XFORMAT` | on a DATE/TIMESTAMP x, a value with `%` is a strftime pattern (`%Y %y %m %-m %b %B %d %-d %e %a %A %H %M %S`; names follow `::LOCALE`): a time-of-day profile reads `06:00`, not `1 Jan 2000 06:00`; any other `::XFORMAT` stays a number format |
+| axis titles | `'Residual load (GW)'::XTITLE`, `'Price (EUR/MWh)'::YTITLE` | what the axes are; the x title names the `::XAXIS` variable, so on a `::FLIP` chart it's drawn beside the (now vertical) category axis; none on pies, gauges, maps |
 | label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|); overlapping labels are skipped. `::LABEL` is then per-point text, not the chart title |
 | trend method | `y::SMOOTH, 'lm'::SMOOTH_METHOD` | `'loess'` (default), `'lm'`, `'gam'` (penalised spline, λ by GCV), `'glm'` (= Gaussian lm) |
 

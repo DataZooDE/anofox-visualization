@@ -243,6 +243,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "maps with the same value (e.g. 'routes') zoom and pan together in the browser"),
     e("SYNC_FRAME", &["FRAME_GROUP"], R::SyncFrame, "modifier", true,
       "time maps (::FRAME) with the same value (e.g. 'weeks') step and play together in the browser, by frame label"),
+    e("XTITLE", &["X_TITLE", "XLAB"], R::XTitle, "modifier", true,
+      "x-axis title, e.g. 'Residual load (GW)' — names the ::XAXIS variable, drawn under the x ticks (on a ::FLIP chart it moves with the x axis); charts with axes only"),
+    e("YTITLE", &["Y_TITLE", "YLAB"], R::YTitle, "modifier", true,
+      "y-axis title, e.g. 'Day-ahead price (EUR/MWh)' — names the measure, drawn rotated beside the y ticks; charts with axes only"),
     e("PROJECTION", &["PROJ"], R::Projection, "modifier", true,
       "map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y)"),
     e("CLASSES", &["CLASS_BREAKS", "BINS"], R::Classes, "modifier", true,
@@ -356,6 +360,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
+    e("DEFAULT", &["IS_DEFAULT"], R::InputDefault, "input", true, "true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all"),
     e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
       "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
     e("SUBMIT", &[], R::Submit, "input", false,
@@ -936,6 +941,7 @@ mod tests {
             Role::Plain,
             Role::Hint,
             Role::OptionLabel,
+            Role::InputDefault,
             Role::DropdownStyle,
             Role::Submit,
             Role::SubmitVars,
@@ -953,6 +959,8 @@ mod tests {
             Role::Alpha,
             Role::SyncZoom,
             Role::SyncFrame,
+            Role::XTitle,
+            Role::YTitle,
             Role::Projection,
             Role::Classes,
             Role::Midpoint,
@@ -1086,6 +1094,7 @@ mod tests {
                 | Role::Plain
                 | Role::Hint
                 | Role::OptionLabel
+                | Role::InputDefault
                 | Role::DropdownStyle
                 | Role::Submit
                 | Role::SubmitVars
@@ -1106,6 +1115,8 @@ mod tests {
                 | Role::Alpha
                 | Role::SyncZoom
                 | Role::SyncFrame
+                | Role::XTitle
+                | Role::YTitle
                 | Role::Projection
                 | Role::Classes
                 | Role::Midpoint
