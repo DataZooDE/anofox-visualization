@@ -540,6 +540,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 | many points (thousands of customers, events) | `lat::LAT, lon::LON, 'auto'::HEXBIN` (+ a measure to sum) — density in equal-area hexagons |
 | two measures by region (sales vs margin, distance vs coverage) | `code::REGION, a::BARCHART, b::BIVARIATE` — a 3×3 palette |
 | how a map changes over time (on-time share per state by week) | `week::FRAME` next to any map: one result, shared classes; Play steps through it |
+| each region's trend, on hover | `list(v ORDER BY week)::SPARKLINE` next to the map's measure: a mini chart in each feature's tooltip |
 | what moves between places (shipments, migration) | `src::ORIGIN, dst::DEST, volume::SIZE` (codes, WKT POINTs or `{'lon','lat','name'}` structs); `'flow'::LINESTYLE` animates |
 | a process, pipeline or lineage: steps and what flows between them | `::DIAGRAM` (one row per step; edges from `::UPSTREAM` or `::EDGES`) |
 | row-level detail | `::TABLE` (`::PAGED` if large / remote); flag / rank with `::FLAG` / `::HIGHLIGHT`, not colour alone |

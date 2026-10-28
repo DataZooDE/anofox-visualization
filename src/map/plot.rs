@@ -191,6 +191,26 @@ pub(super) fn build(
     // would never draw a mark, only report `StatSf`'s own "removed N
     // rows" warning for every row.
     let mut any_feature_geometry = false;
+    // M3b (#642): a `list(..)::SPARKLINE`/`::SPARKBAR` column → each
+    // feature's one-line trend (`data-trend` + the `<title>`'s last line;
+    // the browser draws the mini chart). On a frame map `cols` is already
+    // frame k's view, so row `i` holds this frame's list. A hexbin cell
+    // aggregates rows, so it gets none (lint `map/sparkline-hexbin`).
+    let trend_fmt = match &m.fill {
+        Fill::Measure(s) => s.fmt.clone(),
+        _ => crate::format::ValueFmt::Plain,
+    };
+    let trends: Vec<Value> = (0..n)
+        .map(|i| {
+            super::spark_col(cols)
+                .filter(|_| !hexbin_takes_over)
+                .and_then(|c| c.values.get(i))
+                .map(crate::kpi::spark_values)
+                .and_then(|v| super::spark::trend_text(&v, &trend_fmt, &o.locale))
+                .map_or(Value::Na, Value::Str)
+        })
+        .collect();
+    let has_trend = trends.iter().any(|t| matches!(t, Value::Str(_)));
     for i in 0..n {
         // A row with a graduated-symbol anchor (slice 3) takes over: its
         // own area/point geometry is suppressed here (`Value::Na` — the
@@ -431,6 +451,10 @@ pub(super) fn build(
                     ));
                 }
             }
+            if let Value::Str(t) = &trends[i] {
+                title.push('\n');
+                title.push_str(t);
+            }
             sym_title.push(na_if_empty(title));
         }
         let select = |src: &[Value]| idx.iter().map(|&i| src[i].clone()).collect::<Vec<_>>();
@@ -446,6 +470,7 @@ pub(super) fn build(
             ("title".into(), sym_title),
             ("size".into(), sym_size),
             ("fsize".into(), sym_fsize),
+            ("trend".into(), select(&trends)),
         ];
         // Only when actually fill-mapped: `GeomSf::draw` (sipemu/ggplot-rs
         // #238) looks up its `data-fvalue` formatter by checking whether a
@@ -468,6 +493,9 @@ pub(super) fn build(
             .data_attr("size", "size")
             .data_attr("fsize", "fsize")
             .tooltip("title");
+        if has_trend {
+            aes = aes.data_attr("trend", "trend");
+        }
         if classes.is_some() {
             aes = aes.data_attr("class", "class");
         }
@@ -480,6 +508,38 @@ pub(super) fn build(
         Some((df, aes))
     });
 
+    // A trend extends the row's tooltip; a row with no tooltip of its own
+    // yet (no classes, not bivariate — `GeomSf`'s automatic "label: value"
+    // otherwise) gets that same "label: value" first.
+    if has_trend {
+        for (i, t) in trends.iter().enumerate() {
+            let Value::Str(t) = t else { continue };
+            let head = match &titles[i] {
+                Value::Str(s) => s.clone(),
+                _ => {
+                    let label = m.label_of(i);
+                    let shown = match &m.fill {
+                        Fill::Measure(s) => match s.values[i] {
+                            Some(v) => s.fmt.full(v, &o.locale),
+                            None => "no data".to_string(),
+                        },
+                        Fill::Category { .. } => m.text(m.category, i),
+                        _ => String::new(),
+                    };
+                    match (label.is_empty(), shown.is_empty()) {
+                        (false, false) => format!("{label}: {shown}"),
+                        (false, true) => label,
+                        (true, _) => shown,
+                    }
+                }
+            };
+            titles[i] = Value::Str(if head.is_empty() {
+                t.clone()
+            } else {
+                format!("{head}\n{t}")
+            });
+        }
+    }
     let mut features_df: Vec<(String, Vec<Value>)> = vec![
         ("geometry".into(), geometry),
         ("label".into(), labels),
@@ -492,6 +552,7 @@ pub(super) fn build(
         ("value2".into(), value2s),
         ("fvalue2".into(), fvalue2s),
         ("bivar".into(), bivars),
+        ("trend".into(), trends.clone()),
     ];
     let mut features_aes = Aes::new()
         .label("label")
@@ -511,6 +572,9 @@ pub(super) fn build(
         .data_attr("x", "xkey");
     if classes.is_some() {
         features_aes = features_aes.data_attr("class", "class").tooltip("title");
+    }
+    if has_trend {
+        features_aes = features_aes.data_attr("trend", "trend").tooltip("title");
     }
     if has_bivariate {
         features_aes = features_aes
@@ -809,6 +873,7 @@ pub(super) fn build(
             flow_color_scale,
             plain_fill_for_flows,
             frame_ctx,
+            &trends,
         );
         plot = new_plot;
         extra_self = extra;

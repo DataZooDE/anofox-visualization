@@ -1073,6 +1073,17 @@ fn rewrite_list(list: &str) -> Rewritten {
     // A KPI statement (a ::METRIC/::MONEY/… column): its ::SPARKLINE column
     // is the tile's trend line, a list.
     let kpi_stmt = unambiguous.iter().any(|r| matches!(r, Role::Metric(_)));
+    // A map statement (#642): its ::SPARKLINE/::SPARKBAR column is a
+    // per-feature tooltip trend, a list — never a DOUBLE measure.
+    // (`::MAP` is also a SQL type, so it isn't in `unambiguous`.)
+    let map_stmt = split.iter().any(|it| {
+        item_role(it.trim(), inputs_ok).is_some_and(|(_, r)| {
+            matches!(
+                r,
+                Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+            )
+        })
+    });
     for (i, item) in split.into_iter().enumerate() {
         let item = item.trim();
         if let Some((expr, role)) = item_role(item, inputs_ok) {
@@ -1082,8 +1093,14 @@ fn rewrite_list(list: &str) -> Rewritten {
                 // A KPI's sparkline is a list (`list(v ORDER BY d)`): cast
                 // to DOUBLE[] (a list of HUGEINT sums would not read as
                 // numbers in DuckDB-Wasm).
-                Role::Value(Kind::Sparkline) if kpi_stmt => {
+                Role::Value(Kind::Sparkline) if kpi_stmt || map_stmt => {
                     format!("CAST({} AS DOUBLE[]) AS c{i}", trailing_alias(expr).0)
+                }
+                // A map's ::SPARKBAR list may hold `{'ref', 'cur'}` structs
+                // (two overlaid series): left as its own type, like a
+                // table cell's.
+                Role::Value(Kind::Sparkbar) if map_stmt => {
+                    format!("{} AS c{i}", trailing_alias(expr).0)
                 }
                 // #332: a ::HEATMAP's measure is left as its own type (not
                 // forced to DOUBLE, like ::CATEGORY/::Input) so a string
@@ -1310,6 +1327,21 @@ mod alias_tests {
         // Nested CAST(.. AS ..) must not be mistaken for a trailing alias.
         let (s4, _, _) = rewrite("SELECT ds ::XAXIS, CAST(y AS INT) ::LINECHART FROM d");
         assert!(s4.contains("CAST(CAST(y AS INT) AS DOUBLE) AS c1"), "{s4}");
+    }
+
+    // #642: a map's ::SPARKLINE is a per-feature list (DOUBLE[]), its
+    // ::SPARKBAR passes through (a list, possibly of structs); off a map a
+    // ::SPARKLINE measure still casts to DOUBLE.
+    #[test]
+    fn a_maps_sparkline_stays_a_list() {
+        let (s, _, _) =
+            rewrite("SELECT st ::REGION, v ::BARCHART, list(w) AS wk ::SPARKLINE FROM t");
+        assert!(s.contains("CAST(v AS DOUBLE) AS c1"), "{s}");
+        assert!(s.contains("CAST(list(w) AS DOUBLE[]) AS c2"), "{s}");
+        let (s, _, _) = rewrite("SELECT g ::MAP, w ::SPARKBAR FROM t");
+        assert!(s.contains("w AS c1") && !s.contains("CAST(w"), "{s}");
+        let (s, _, _) = rewrite("SELECT y ::SPARKLINE FROM t");
+        assert!(s.contains("CAST(y AS DOUBLE) AS c0"), "{s}");
     }
 
     // #624: `region ::MAP, sales ::CHOROPLETH` — the documented shorthand

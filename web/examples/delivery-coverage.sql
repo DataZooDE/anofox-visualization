@@ -175,11 +175,18 @@ SELECT 'On time'::TAB;
 SELECT 6::COL;
 SELECT 'All 12 weeks' AS ontime ::VIEW;
 SELECT 520::HEIGHT;
+-- #642 M3b: the weekly shares as a list → a trend chart in each state's tooltip.
 SELECT state ::REGION, round(100 * sum(on_time * deliveries) / sum(deliveries), 1) AS "On time" ::BARCHART,
        ' %'::YFORMAT, '0,80,85,90,100'::CLASSES, ''::DATALABELS,
+       any_value(w.weekly) AS "Weekly" ::SPARKLINE,
        'Deliveries far from a DC arrive late more often'::TITLE,
-       'Share of deliveries into the state that arrived inside the delivery window, last 12 weeks. Classes: under 80 %, 80–85 %, 85–90 %, 90 % and more.'::INFO
-FROM dc_cover WHERE deliveries > 0 GROUP BY state ORDER BY state;
+       'Share of deliveries into the state that arrived inside the delivery window, last 12 weeks. Classes: under 80 %, 80–85 %, 85–90 %, 90 % and more. Hover a state for its week-by-week trend.'::INFO
+FROM dc_cover
+LEFT JOIN (SELECT state, list(pct ORDER BY week) AS weekly
+           FROM (SELECT d.state, v.week, round(100.0 * sum(v.on_time) / sum(v.deliveries), 1) AS pct
+                 FROM dc_deliveries v JOIN dc_districts d USING (ags) GROUP BY ALL)
+           GROUP BY state) w USING (state)
+WHERE deliveries > 0 GROUP BY state ORDER BY state;
 
 -- #149 M2e-A: a `::FRAME` time map — one result holds every week; shared
 -- classes keep the colours comparable from week to week. Saarland's weekly

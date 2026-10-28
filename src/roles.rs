@@ -164,10 +164,10 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("CANDLESTICK", &["CANDLE", "OHLC"], R::Value(Kind::Candlestick), "chart", true,
       "OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure"),
     e("SPARKLINE", &["SPARK"], R::Value(Kind::Sparkline), "chart", true,
-      "minimal trend line (no axes); a list() column in a table"),
+      "minimal trend line (no axes); a list() column in a table; on a map: a mini chart in each feature's tooltip"),
     e("SPARKBAR", &["SPARK_BAR"], R::Value(Kind::Sparkbar), "chart", true,
       "minimal bar histogram (no axes); a table cell's list(v ORDER BY i), or two overlaid \
-       series sharing one y scale from list({'ref': r, 'cur': c} ORDER BY i)"),
+       series sharing one y scale from list({'ref': r, 'cur': c} ORDER BY i); on a map: a mini chart in each feature's tooltip"),
     e("MAP", &["GEOMETRY", "GEO", "CHOROPLETH"], R::Geometry, "chart", true,
       "WKT-geometry map, coloured by a measure"),
     e("REGION", &["REGION_CODE", "ISO_CODE"], R::Region, "chart", true,

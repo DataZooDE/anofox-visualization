@@ -126,6 +126,9 @@ pub(super) fn flow_layers(
     // `frame_ctx.result_row[i]` for areas/points exactly. `None` outside
     // a frame map.
     frame_ctx: Option<&super::frames::FrameCtx>,
+    // M3b (#642): each feature row's tooltip trend (`Value::Na` when none),
+    // indexed like `fl_.row`.
+    trends: &[Value],
 ) -> (GGPlot, usize, usize, Option<String>) {
     let linestyle_col = find_role(cols, Role::LineStyle);
     let fmt_full = |s: &ValueScale, v: f64| s.fmt.full(v, &o.locale);
@@ -145,6 +148,7 @@ pub(super) fn flow_layers(
     let mut linestyles = Vec::new();
     let mut nds = Vec::new();
     let mut keys = Vec::new();
+    let mut flow_trends = Vec::new();
 
     // `BTreeMap`, not `HashMap`: iteration order below (dots drawn "one per
     // distinct end point") must be deterministic across runs (#488), not
@@ -245,6 +249,12 @@ pub(super) fn flow_layers(
         // The raw, unscaled magnitude — the linewidth *scale* does the sqrt
         // scaling (when one applies, see `width_const` below), not this row.
         sizes.push(Value::Float(fl_.raw.unwrap_or(fl_.w)));
+        let trend = trends.get(i).cloned().unwrap_or(Value::Na);
+        if let Value::Str(t) = &trend {
+            title.push('\n');
+            title.push_str(t);
+        }
+        flow_trends.push(trend);
         tooltips.push(Value::Str(title));
         // review of #595 SHOULD-FIX 5: frame k's own source row for this
         // flow (D22's `::LINK`/data-row contract), not `i` (this view's
@@ -311,6 +321,7 @@ pub(super) fn flow_layers(
         ("linestyle".into(), linestyles),
         ("nd".into(), nds),
         ("key".into(), keys),
+        ("trend".into(), flow_trends),
     ];
 
     let mut aes = Aes::new()
@@ -332,7 +343,8 @@ pub(super) fn flow_layers(
         // `data-x` by default would be the row's `x` aesthetic (a numeric
         // longitude); this replaces it with the flow's "orig→dest" key, as
         // the old hand-written code did (and web/app.js's hover code wants).
-        .data_attr("x", "key");
+        .data_attr("x", "key")
+        .data_attr("trend", "trend");
 
     // Width resolution mirrors `flows::project`'s three cases: a fixed
     // `::SIZE` constant, no `::SIZE` at all (flat 1.5px), or a varying

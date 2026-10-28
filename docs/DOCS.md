@@ -103,8 +103,8 @@ terminal.
 | `::HEATMAP` | `::TILE`, `::TILES` | chart | tiles at XAXIS×YAXIS coloured by the measure (rows in SQL order; diverging around 0); a numeric measure sizes every tile alike regardless of how many x points each row has; a text measure (status words) takes ::COLORS as a level map for a categorical legend, like a ::CATEGORY column's |
 | `::CALENDAR` | `::CALENDAR_HEATMAP`, `::CAL_HEATMAP` | chart | calendar heatmap (date XAXIS, ≤ 50 years) |
 | `::CANDLESTICK` | `::CANDLE`, `::OHLC` | chart | OHLC candlesticks: XAXIS + ::OPEN/::HIGH/::LOW, close as the measure |
-| `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table |
-| `::SPARKBAR` | `::SPARK_BAR` | chart | minimal bar histogram (no axes); a table cell's list(v ORDER BY i), or two overlaid series sharing one y scale from list({'ref': r, 'cur': c} ORDER BY i) |
+| `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table; on a map: a mini chart in each feature's tooltip |
+| `::SPARKBAR` | `::SPARK_BAR` | chart | minimal bar histogram (no axes); a table cell's list(v ORDER BY i), or two overlaid series sharing one y scale from list({'ref': r, 'cur': c} ORDER BY i); on a map: a mini chart in each feature's tooltip |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
 | `::REGION` | `::REGION_CODE`, `::ISO_CODE` | chart | a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name |
 | `::LAT` | `::LATITUDE` | chart | a map point's latitude (degrees, WGS84), with ::LON |
@@ -1639,6 +1639,29 @@ dashboard".
   label, JSON), `data-frame` (the one shown, 0-indexed) and
   `data-frame-name` (the `::FRAME` column's display name); each feature's
   `data-row` follows the frame actually shown, like `::LINK` expects.
+
+#### Trends in the tooltip (`::SPARKLINE` on a map)
+
+```sql
+SELECT state ::REGION,
+       100.0 * sum(on_time) / sum(deliveries) AS "On time" ::BARCHART, ' %'::YFORMAT,
+       list(weekly ORDER BY week)              AS "Weekly"  ::SPARKLINE
+FROM weekly_by_state GROUP BY state;
+```
+
+A `list(..)::SPARKLINE` (or `::SPARKBAR`) column next to a map's input is
+not a measure: hovering a feature shows a small trend chart for it under
+its value, plus a line such as `Trend: 12 → 18 (+50%) · min 9 · max 21 ·
+12 points`. It works on area, point, graduated-symbol and flow maps, and on
+time maps (each frame shows its own row's list).
+
+- **Static output** (`--svg`, PNG/PDF, the HTML export) keeps the trend
+  line in the native tooltip; the chart itself is drawn by the browser
+  only, so the SVG doesn't grow.
+- **Attributes:** each mark with a trend carries `data-trend`.
+- **Scale:** every feature's chart has its own y range, like table cells.
+- **Not on hexbin maps** (`map/sparkline-hexbin`): a cell aggregates rows.
+  A value that isn't a list warns (`map/sparkline-not-list`).
 
 #### Density on a planar scatter (`::HEXBIN` off the map)
 

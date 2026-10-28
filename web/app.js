@@ -10516,8 +10516,9 @@ async function runOnce(fresh = true, pv = preview) {
             fig.appendChild(mkNoData(nextEmpty));
           } else {
             // a lone sparkline is a small strip; a ::DIAGRAM's are in its boxes
-            const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM");
             const isMap = isMapPanel(s.roles);
+            // (a map's ::SPARKLINE is a tooltip trend, #642 — not a strip)
+            const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM") && !isMap;
             // a map without ::HEIGHT takes the height its shape needs
             const mapAr = isMap && !boxH ? mapAspect(rowsJson, s.roles) : 0;
             const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300); // ::HEIGHT, else default
@@ -17443,6 +17444,36 @@ function markInfo(attr, tip) {
 // `data-label` (the ::LABEL text, newlines kept), so the tooltip heads with the
 // label and names the series and value under it — not the raw "label: series"
 // title. `own` when the label is the series (a choropleth's region name).
+// M3b (#642): a map feature's `list(..)::SPARKLINE` / `::SPARKBAR` → a mini
+// chart in its tooltip, drawn by render_cell exactly like a table cell (no
+// hand-drawn SVG), with the Rust-written `data-trend` line under it. The
+// list is read from the panel's own rows at the mark's `data-row` (the
+// result row, so a time map shows the frame actually drawn).
+function mapTipSpark(el) {
+  const trend = el.getAttribute("data-trend");
+  if (!trend) return "";
+  const dp = el.closest(".panel")?._dp;
+  const sr = dp && (dp.roles || []).find((r) => r[1] === "SPARKLINE" || r[1] === "SPARKBAR");
+  let chart = "";
+  if (sr) {
+    if (!dp._parsedRows) {
+      try {
+        dp._parsedRows = typeof dp.rows === "string" ? parseRowsLenient(dp.rows) : dp.rows;
+      } catch (_) {
+        dp._parsedRows = [];
+      }
+    }
+    const row = (dp._parsedRows || [])[+el.getAttribute("data-row")];
+    const v = row ? row["c" + sr[0]] : null;
+    if (v != null) chart = sr[1] === "SPARKBAR" ? cellSparkbar(v) : cellSpark(v);
+    if (chart.startsWith("<span")) chart = "";
+  }
+  return (
+    (chart ? `<div class="tip-spark">${chart.replace(/^<svg class="spark/, '<svg class="tip-spark-svg spark')}</div>` : "") +
+    `<div class="tip-trend">${escapeHtml(trend)}</div>`
+  );
+}
+
 function mapMarkInfo(attr, tip) {
   const series = attr("data-series") || "";
   const label = attr("data-label") || "";
@@ -17677,7 +17708,8 @@ function attachHover() {
       tip.innerHTML =
         (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "") +
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
-        tipRow(info, fill);
+        tipRow(info, fill) +
+        (isMapMark ? mapTipSpark(el) : "");
       tip.classList.add("show");
       if (isMapMark) mapHoverEmph(series);
       // M2f-A (#149): a time map's own value changes under the pointer at
