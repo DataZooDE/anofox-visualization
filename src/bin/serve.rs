@@ -2061,7 +2061,8 @@ fn render_dashboard_page(
             );
             let rows: Rows = page_rows(st, &q)?;
             let idx = anofox_visualization::inputs::input_index(&panel.roles);
-            for set in anofox_visualization::inputs::input_defaults(kind, idx, &rows) {
+            let def = anofox_visualization::inputs::default_index(&panel.roles);
+            for set in anofox_visualization::inputs::input_defaults_with(kind, idx, def, &rows) {
                 let name = set.split('"').nth(1).unwrap_or("");
                 if may_bind_default(name, resolved, scope) {
                     prefix.push_str(&set);

@@ -7,7 +7,7 @@ const grab = (name) => {
   assert.ok(m, `function ${name} not found in app.js`);
   return m[0];
 };
-const { inputOptions, optionLabel } = new Function(`${grab("inputOptions")}\n${grab("optionLabel")}\nreturn { inputOptions, optionLabel };`)();
+const { inputOptions, optionLabel } = new Function(`${grab("toggleValue")}\n${grab("inputOptions")}\n${grab("optionLabel")}\nreturn { inputOptions, optionLabel };`)();
 const rows = [
   { run: "20260928164905", c1: "28 Sep 2026 16:49 — kinaxis_nodynlm (568k series)", c2: "Run" },
   { run: "kinaxis_nodynlm", c1: null, c2: "Run" },
@@ -19,8 +19,11 @@ assert.deepEqual(m.labels, ["28 Sep 2026 16:49 — kinaxis_nodynlm (568k series)
 assert.equal(m.hints, null);
 assert.equal(optionLabel(m, 0), "28 Sep 2026 16:49 — kinaxis_nodynlm (568k series)");
 const h = inputOptions([[0, "BUTTONS"], [1, "HINT"]], [{ z: "EU", c1: 3 }, { z: "US", c1: null }], "z");
-assert.deepEqual(h, { options: ["EU", "US"], labels: null, hints: ["3", ""] });
+assert.deepEqual(h, { options: ["EU", "US"], labels: null, hints: ["3", ""], defaults: [] });
 assert.equal(optionLabel(h, 1), "US");
+// #638: ::DEFAULT marks the default option(s), in option order
+const d = inputOptions([[0, "MULTISELECT"], [1, "DEFAULT"]], [{ s: "a", c1: false }, { s: "b", c1: true }, { s: "c", c1: "true" }], "s");
+assert.deepEqual(d.defaults, ["b", "c"]);
 const mk = grab("makeControl");
 const fso = grab("fillSelectOptions");
 assert.ok(/opt\.value = o;/.test(fso) && /optionLabel\(meta, k\)/.test(fso), "dropdown: value o, shown label");

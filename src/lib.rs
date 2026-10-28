@@ -307,6 +307,10 @@ pub enum Role {
     Hint,
     /// The shown text of a `::DROPDOWN`/`::BUTTONS`/`::MULTISELECT` option (`::OPTION_LABEL`); the variable keeps the value (#170).
     OptionLabel,
+    /// `::DEFAULT` (#638): true on the default option row(s) of a
+    /// `::DROPDOWN` / `::BUTTONS` (the first marked row) or a `::MULTISELECT`
+    /// (every marked row); no marked row keeps the first / all.
+    InputDefault,
     /// Forces a `::DROPDOWN`'s widget (`::DROPDOWN_STYLE`): `'search'` (a
     /// searchable combobox) or `'native'` (a plain `<select>`), overriding
     /// the option-count threshold the browser otherwise switches on (#411).

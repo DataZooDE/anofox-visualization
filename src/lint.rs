@@ -11,7 +11,7 @@
 //! against a **stateful** connection (setup persists for later panels) and
 //! returns the rows, or a DuckDB error string.
 
-use crate::inputs::{input_defaults, input_index, input_kind};
+use crate::inputs::{default_index, input_defaults_with, input_index, input_kind};
 use crate::{render_with_warnings, roles, sql, InputKind, Kind, RenderOptions, Role, TableOpt};
 use serde_json::{Map, Value};
 
@@ -752,6 +752,21 @@ where
                             });
                         }
                     }
+                    // #638: ::DEFAULT picks a listed input's default row(s)
+                    if default_index(&p.roles).is_some()
+                        && !matches!(
+                            kind,
+                            InputKind::Dropdown | InputKind::Buttons | InputKind::Multiselect
+                        )
+                    {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "input/default-ignored",
+                            message: "::DEFAULT only marks the default option of a ::DROPDOWN, ::BUTTONS or ::MULTISELECT — this input's own value is its default".to_string(),
+                            sql: short.clone(),
+                        });
+                    }
                     if kind == InputKind::Buttons && rows.len() > 7 {
                         diags.push(Diagnostic {
                             severity: Severity::Warning,
@@ -797,7 +812,12 @@ where
                     // before it. Fresh-session (the default — a browser
                     // `run_query`): fold it into `prelude` to replay
                     // before every later statement instead.
-                    for setv in input_defaults(kind, input_index(&p.roles), &rows) {
+                    for setv in input_defaults_with(
+                        kind,
+                        input_index(&p.roles),
+                        default_index(&p.roles),
+                        &rows,
+                    ) {
                         if opts.stateful_session {
                             let _ = run_query(&format!("{setv};"));
                         } else {
@@ -6452,6 +6472,7 @@ fn tab_always_hidden(stmt: usize, unknown: &[String], after: &[String], short: &
 #[cfg(test)]
 mod design_tests {
     use super::*;
+    use crate::inputs::input_defaults;
     use serde_json::json;
 
     /// Build `n` rows from a closure producing a JSON object per index.
@@ -9392,6 +9413,23 @@ mod design_tests {
     }
 
     #[test]
+    fn default_on_an_unlisted_input_is_flagged() {
+        let one = rows(1, |_| json!({ "n": 5, "c1": true }));
+        let codes = |sql: &str| -> Vec<&'static str> {
+            check(sql, |_q| Ok(one.clone()))
+                .into_iter()
+                .map(|d| d.code)
+                .filter(|c| c.starts_with("input/"))
+                .collect()
+        };
+        assert_eq!(
+            codes("SELECT 5 AS n ::NUMBER, true ::DEFAULT;"),
+            vec!["input/default-ignored"]
+        );
+        assert!(codes("SELECT 'a' AS n ::DROPDOWN, true ::DEFAULT;").is_empty());
+    }
+
+    #[test]
     fn input_priming_uses_the_input_column_and_quotes_it() {
         // Output order: the input column `zone` first, then the HINT (c1). A
         // sorted map would pick "c1" — the wrong variable.
@@ -9426,6 +9464,28 @@ mod design_tests {
         // Buttons: the first option, like a dropdown.
         let d = input_defaults(InputKind::Buttons, 0, &opts);
         assert_eq!(d, vec!["SET VARIABLE \"zone\" = 'EU'".to_string()]);
+        // #638: a ::DEFAULT column picks the marked row(s) instead.
+        let marked = rows(3, |i| {
+            let w = ["1 day", "7 days", "30 days"][i];
+            json!({ "w": w, "d": i == 1 })
+        });
+        let d = input_defaults_with(InputKind::Buttons, 0, Some(1), &marked);
+        assert_eq!(d, vec!["SET VARIABLE \"w\" = '7 days'".to_string()]);
+        let d = input_defaults_with(InputKind::Dropdown, 0, Some(1), &marked);
+        assert_eq!(d, vec!["SET VARIABLE \"w\" = '7 days'".to_string()]);
+        let multi = rows(3, |i| {
+            let v = ["a", "b", "c"][i];
+            json!({ "s": v, "d": i != 1 })
+        });
+        let d = input_defaults_with(InputKind::Multiselect, 0, Some(1), &multi);
+        assert_eq!(d, vec!["SET VARIABLE \"s\" = ['a', 'c']".to_string()]);
+        // none marked: today's first option / all
+        let none = rows(2, |i| {
+            let v = ["a", "b"][i];
+            json!({ "s": v, "d": false })
+        });
+        let d = input_defaults_with(InputKind::Multiselect, 0, Some(1), &none);
+        assert_eq!(d, vec!["SET VARIABLE \"s\" = ['a', 'b']".to_string()]);
         // Toggle: always a BOOLEAN, whatever the default was written as.
         for (v, want) in [
             (json!(true), "TRUE"),

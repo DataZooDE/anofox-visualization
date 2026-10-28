@@ -356,6 +356,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "on/off switch → a BOOLEAN variable (value = default)"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
+    e("DEFAULT", &["IS_DEFAULT"], R::InputDefault, "input", true, "true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all"),
     e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
       "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
     e("SUBMIT", &[], R::Submit, "input", false,
@@ -936,6 +937,7 @@ mod tests {
             Role::Plain,
             Role::Hint,
             Role::OptionLabel,
+            Role::InputDefault,
             Role::DropdownStyle,
             Role::Submit,
             Role::SubmitVars,
@@ -1086,6 +1088,7 @@ mod tests {
                 | Role::Plain
                 | Role::Hint
                 | Role::OptionLabel
+                | Role::InputDefault
                 | Role::DropdownStyle
                 | Role::Submit
                 | Role::SubmitVars

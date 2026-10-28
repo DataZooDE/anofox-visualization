@@ -6,7 +6,7 @@
 // render loop ran the dashboard's `SET VARIABLE sel = …` before applying
 // the viewer's value (tests/web/setvar_order_test.mjs covers the pure
 // decision logic; this proves the real run loop + DuckDB-Wasm end to end,
-// a Share link included).
+// a Share link included). Also #638: a ::DEFAULT-marked input default.
 //
 //   wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 //   python3 serve_nocache.py 8947 &
@@ -71,9 +71,36 @@ async function run(sql, label) {
   await page.close();
 }
 
+// #638: ::DEFAULT picks a ::BUTTONS / ::MULTISELECT default that isn't the
+// first option / all of them; a URL seed still wins, and the default
+// writes no URL parameter.
+async function inputDefault() {
+  const sql = `SELECT w AS ov_window ::BUTTONS, w = '7 days' AS d ::DEFAULT
+FROM (VALUES ('1 day', 1), ('7 days', 2), ('30 days', 3)) t(w, n) ORDER BY n;
+SELECT k AS src ::MULTISELECT, k IN ('solar', 'wind') AS d ::DEFAULT FROM (VALUES ('coal'), ('solar'), ('wind'), ('gas')) t(k);
+SELECT getvariable('ov_window') AS win ::TABLE, array_to_string(getvariable('src'), ',') AS srcs;`;
+  const page = await browser.newPage();
+  const errs = [];
+  page.on("pageerror", (e) => errs.push(String(e)));
+  const cells = () => page.evaluate(() => [...document.querySelectorAll(".dash table td")].map((e) => e.textContent.trim()));
+  await page.goto(`${base}?embed=1#sql=${b64(sql)}`);
+  await page.waitForSelector(".dash table td", { timeout: 60000 });
+  let c = await cells();
+  check(c[0] === "7 days" && c[1] === "solar,wind", `::DEFAULT: starts on the marked options (${JSON.stringify(c)})`);
+  check(!new URL(page.url()).searchParams.has("v.ov_window"), "::DEFAULT: the default writes no URL parameter");
+  await page.goto("about:blank");
+  await page.goto(`${base}?embed=1&v.ov_window=30%20days#sql=${b64(sql)}`);
+  await page.waitForSelector(".dash table td", { timeout: 60000 });
+  c = await cells();
+  check(c[0] === "30 days", `::DEFAULT: a URL seed still wins (${c[0]})`);
+  check(errs.length === 0, `::DEFAULT: no page errors${errs.length ? ": " + errs.join("; ") : ""}`);
+  await page.close();
+}
+
 try {
   await run(forward, "(a) derived SET VARIABLE after the input");
   await run(reversed, "(b) derived SET VARIABLE before the input (#416)");
+  await inputDefault();
 } finally {
   await browser.close();
 }
