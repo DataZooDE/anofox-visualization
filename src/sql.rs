@@ -1051,7 +1051,11 @@ fn rewrite_list(list: &str) -> Rewritten {
     let keep_intact = |r: Role| {
         matches!(
             r,
-            Role::Table | Role::PagedTable | Role::Input(InputKind::DateRange) | Role::Download(_)
+            Role::Table
+                | Role::PagedTable
+                | Role::Input(InputKind::DateRange)
+                | Role::Input(InputKind::Form)
+                | Role::Download(_)
         )
     };
     let intact = unambiguous.iter().copied().find(|r| keep_intact(*r));

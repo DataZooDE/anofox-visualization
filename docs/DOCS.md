@@ -205,6 +205,7 @@ terminal.
 | `::PERIOD` | `::PERIOD_PICKER`, `::DATE_PERIOD` | input | date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label |
 | `::BUTTONS` | `::BUTTON_GROUP`, `::SEGMENTED` | input | segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher) |
 | `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
+| `::FORM` | `::PARAM_FORM`, `::PARAMETERS` | input | a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/toggle/date/text), value, options, min, max, step, label, unit, help, show_if ('model=normal'), source; the values come back as one JSON object: getvariable('name')->>'field' |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
 | `::DEFAULT` | `::IS_DEFAULT` | input | true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all |
@@ -371,6 +372,58 @@ The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 (the first option — or the `::DEFAULT`-marked one(s) — every option of a `::MULTISELECT`, both ends of a
 `::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
 render as on first load in the browser.
+
+### Forms from rows (`::FORM`)
+
+When every node of a model has its own typed parameters — a supplier's
+lead-time model, a stocking point's policy — one hand-written input per node
+per parameter doesn't scale. `::FORM` (#683) builds a form from a query that
+returns **one row per field**, and returns the values as **one** variable
+holding a JSON object:
+
+```sql
+SELECT field AS lead_time ::FORM,   -- the field key; the alias names the variable
+       type, value, options, min, max, step, label, unit, help, show_if, source
+FROM node_params
+WHERE node_id = getvariable('node_id')        -- e.g. the clicked row / node
+ORDER BY ord;
+
+SELECT (getvariable('lead_time')->>'mean')::DOUBLE AS mean ::METRIC, 'Mean' ::LABEL;
+```
+
+| Column | Meaning |
+|---|---|
+| (the `::FORM` column) | The field's key — its name in the JSON object. |
+| `type` | `number` (default), `slider` (needs `min`/`max`), `dropdown` (needs `options`), `toggle`, `date`, `text`. |
+| `value` | The field's current value — the variable's starting point. |
+| `options` | A dropdown's choices: a list (`['fixed', 'normal']`) or comma-separated text. |
+| `min` / `max` / `step` | A number's / slider's range and step. |
+| `label`, `unit` | Shown left of / right of the control (default label: the key). |
+| `help` | An ⓘ beside the label with this text. |
+| `show_if` | `'model=normal'` or `'model=normal\|fitted'`: the field shows only while that other field has one of those values. |
+| `source` | Provenance under the control: "fitted 2026-10-20 from 214 POs", "manual". |
+
+Only the `::FORM` column and `value` are required; the others are read by
+name (any case). Numbers and toggles are JSON numbers / booleans in the
+variable, everything else text: read them with `->>` and cast,
+`(getvariable('lead_time')->>'mean')::DOUBLE`. An edit re-runs the panels
+that read the variable and is kept in the URL (`?v.lead_time={…}`). When
+the form's own rows change — another node picked — its values start again
+from the new rows.
+
+The form is a card in the grid (`::COL` before it sets its width). `--check`
+reports an unknown `type`, a dropdown without `options`, a `show_if` naming
+no field or written wrongly, a missing `value` column (errors) and a value
+outside its options or min/max, a slider without a range, a repeated key
+(warnings). The static outputs bind the rows' own values, like any input's
+default.
+
+**On a locked server** the variable travels like any other string variable
+(the JSON text, max 4 KB). `min`/`max`/`options` are checked in the page,
+not by the server — as with `::TEXT`, a viewer could send any text, so the
+dashboard's SQL must treat the values as untrusted input (cast them, clamp
+them) — never build SQL text from them. `::SUBMIT` can't record a form yet;
+shared, saved edits are #684.
 
 ### Recording answers (`::SUBMIT`, `viewer_state`, #517)
 

@@ -360,6 +360,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher)"),
     e("TOGGLE", &["SWITCH", "CHECKBOX"], R::Input(InputKind::Toggle), "input", false,
       "on/off switch → a BOOLEAN variable (value = default)"),
+    e("FORM", &["PARAM_FORM", "PARAMETERS"], R::Input(InputKind::Form), "input", false,
+      "a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/toggle/date/text), value, options, min, max, step, label, unit, help, show_if ('model=normal'), source; the values come back as one JSON object: getvariable('name')->>'field'"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
     e("DEFAULT", &["IS_DEFAULT"], R::InputDefault, "input", true, "true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all"),
@@ -1075,6 +1077,7 @@ mod tests {
                 I::Period,
                 I::Buttons,
                 I::Toggle,
+                I::Form,
             ]
             .map(Role::Input),
         );
