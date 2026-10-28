@@ -114,6 +114,15 @@ pub fn input_defaults_with(
                 "FALSE"
             }
         )],
+        // A form (#683): one JSON object of its fields' own values.
+        InputKind::Form => {
+            let (fields, _) = crate::form::fields(k, rows);
+            vec![format!(
+                "SET VARIABLE {} = {}",
+                quote_ident(k),
+                lit(&Json::String(crate::form::default_json(&fields)))
+            )]
+        }
         InputKind::Dropdown | InputKind::Buttons => {
             let row = marked.first().copied().unwrap_or(first);
             vec![format!(

@@ -3026,7 +3026,10 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
         for (i, p) in planned.iter().enumerate() {
             use anofox_visualization::inputs::{input_index, input_kind};
             if let Some(kind) = input_kind(&p.roles) {
-                if !matches!(kind, InputKind::DateRange | InputKind::Period) {
+                if !matches!(
+                    kind,
+                    InputKind::DateRange | InputKind::Period | InputKind::Form
+                ) {
                     let idx = input_index(&p.roles);
                     if let Some(name) = p.names.iter().find(|(j, _)| *j == idx).map(|(_, n)| n) {
                         inputs
@@ -5609,7 +5612,7 @@ fn validate_recorded_value(
         // `load_dashboards`), so `SUBMIT_VARS` naming one already failed
         // the "declared by an input" check above — unreachable in
         // practice, kept fail-closed rather than `unreachable!()`.
-        InputKind::DateRange | InputKind::Period => {
+        InputKind::DateRange | InputKind::Period | InputKind::Form => {
             Err(format!("'{name}' does not support recording"))
         }
     }

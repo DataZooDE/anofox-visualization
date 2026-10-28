@@ -248,6 +248,17 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-edit-btn[aria-pressed=true]{outline:2px solid var(--ax-accent);outline-offset:1px}
 .dp-edit-status{flex:1 1 100%;font-size:.78rem;color:var(--ax-muted);min-height:1.1em}
 .panel svg .dp-edit-pick{stroke:var(--ax-accent);stroke-width:3px}
+/* ::FORM (#683): one row per field — label (+ ⓘ), control + unit, provenance. */
+.dp-form-fields{display:grid;gap:.7rem}
+.dp-form-field{display:grid;grid-template-columns:minmax(7rem,38%) 1fr;align-items:center;column-gap:.8rem;row-gap:.15rem}
+.dp-form-label{font-size:.85rem;font-weight:600;color:var(--ax-ink);display:flex;align-items:center;gap:.3rem}
+.dp-form-control{display:flex;align-items:center;gap:.45rem;min-width:0}
+.dp-form-input{min-width:0;flex:1 1 auto}
+.dp-form-input[type=checkbox]{flex:0 0 auto}
+.dp-form-unit,.dp-form-out{font-size:.8rem;color:var(--ax-muted);white-space:nowrap}
+.dp-form-out{min-width:2.5em;text-align:right;font-variant-numeric:tabular-nums}
+.dp-form-source{grid-column:2;font-size:.72rem;color:var(--ax-muted)}
+@media(max-width:520px){.dp-form-field{grid-template-columns:1fr}.dp-form-source{grid-column:1}}
 /* ::MARKDOWN_TONE (#659) on a 'card': a thin accent bar (a background layer,
    so it follows the rounded corner and leaves the theme's shadow alone) and
    a small label from data-tone-label — quiet, no tint, so it never reads as

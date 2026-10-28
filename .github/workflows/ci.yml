@@ -635,6 +635,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/diagram-edit-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/form-e2e.mjs (#683): a ::FORM's fields (types, show_if, help,
+      # provenance), its one JSON variable read with ->>, edits, URL state,
+      # a ::ROWSELECT-filtered form resetting per node, 390 px.
+      - name: Form e2e (#683)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/form-e2e.mjs --url http://127.0.0.1:8947/
+
       # The downloaded HTML's tab/sub-tab switcher (#381, an owner-reported
       # regression): exports a dashboard with tabs and sub-tabs and clicks
       # through every one in the downloaded file, offline.
@@ -916,6 +923,13 @@ jobs:
       - name: Served dashboards e2e (locked server, real UI, #590)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      # scripts/form-served-e2e.mjs (#683): a ::FORM on a locked server — its
+      # value travels as one string variable; a URL seed; a hostile seed is
+      # just text.
+      - name: Form on a locked server e2e (#683)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/form-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
       - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
         timeout-minutes: 5

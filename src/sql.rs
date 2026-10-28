@@ -1055,6 +1055,7 @@ fn rewrite_list(list: &str) -> Rewritten {
                 | Role::PagedTable
                 | Role::Input(InputKind::DateRange)
                 | Role::DiagramPalette
+                | Role::Input(InputKind::Form)
                 | Role::Download(_)
         )
     };
