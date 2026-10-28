@@ -703,6 +703,7 @@ fn per_term(
                         .geom_ribbon_with(GeomRibbon {
                             fill: ACCENT,
                             alpha: 0.10,
+                            ..Default::default()
                         })
                         .layer_data(vec![
                             ("x".into(), vec![x0, x1]),
@@ -748,6 +749,7 @@ fn per_term(
                     .geom_ribbon_with(GeomRibbon {
                         fill: o.brand(),
                         alpha: 0.18,
+                        ..Default::default()
                     })
                     .layer_data(frame)
                     .layer_aes(a);

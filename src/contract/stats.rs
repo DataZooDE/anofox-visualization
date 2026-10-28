@@ -2226,7 +2226,11 @@ pub(super) fn prediction(
             }
             let alpha = if fan.len() > 1 { 0.12 } else { 0.16 };
             plot = plot
-                .geom_ribbon_with(GeomRibbon { fill, alpha })
+                .geom_ribbon_with(GeomRibbon {
+                    fill,
+                    alpha,
+                    ..Default::default()
+                })
                 .layer_data(frame)
                 .layer_aes(a);
         }
@@ -2974,6 +2978,7 @@ pub(super) fn nested_cv(
                     .geom_ribbon_with(GeomRibbon {
                         fill: GREY,
                         alpha: 0.15,
+                        ..Default::default()
                     })
                     .layer_data(vec![
                         ("x".into(), vec![Value::Float(xmin), Value::Float(xmax)]),
