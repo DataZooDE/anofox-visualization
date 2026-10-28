@@ -469,6 +469,41 @@ where
         let stmt = i + 1;
         let short = one_line(p.sql.trim());
 
+        // #685: a layout role (`n::COL`, `n::HEIGHT`, `n::COLUMNS`) makes its
+        // whole statement a layout directive — written inside a chart's own
+        // SELECT, the chart is never drawn (an error: it's always lost).
+        let is_layout = |r: &Role| matches!(r, Role::Span | Role::Height | Role::Columns);
+        if let Some(lr) = p.roles.iter().map(|(_, r)| *r).find(is_layout) {
+            let others: Vec<Role> = p
+                .roles
+                .iter()
+                .map(|(_, r)| *r)
+                .filter(|r| !is_layout(r))
+                .collect();
+            // name the role that would draw the panel (else any other)
+            let shown = others
+                .iter()
+                .find(|r| matches!(roles::spec_of(**r).category, "chart" | "kpi" | "table"))
+                .or(others.first());
+            if let Some(other) = shown {
+                // `::COL` is how the docs write the width (::SPAN's alias)
+                let layout = match lr {
+                    Role::Span => "::COL".to_string(),
+                    r => format!("::{}", r.token()),
+                };
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "layout/inline-layout-role",
+                    message: format!(
+                        "{layout} makes this whole statement a layout directive, so its ::{} is never drawn — put `SELECT n{layout};` on its own line before the panel",
+                        other.token()
+                    ),
+                    sql: short.clone(),
+                });
+            }
+        }
+
         // This statement closes the open step (the next marker, or having
         // left the group entirely) — see `pending_gate`'s doc comment.
         if p.step.is_none() || p.step.as_ref().is_some_and(|s| s.marker) {
@@ -9389,6 +9424,32 @@ mod design_tests {
             },
         );
         assert!(!d.iter().any(|x| x.code.starts_with("design/")), "{d:?}");
+    }
+
+    #[test]
+    fn an_inline_layout_role_is_flagged() {
+        // #685: `6::COL` inside a chart's SELECT drops the chart
+        let data = rows(
+            3,
+            |i| json!({ "c0": i, "c1": i as f64, "c2": "Line", "c3": 6 }),
+        );
+        let codes = |sql: &str| -> Vec<&'static str> {
+            check(sql, |_q| Ok(data.clone()))
+                .into_iter()
+                .map(|d| d.code)
+                .filter(|c| c.starts_with("layout/"))
+                .collect()
+        };
+        assert_eq!(
+            codes("SELECT x::XAXIS, y ::LINECHART, 'Line'::TITLE, 6::COL FROM t;"),
+            vec!["layout/inline-layout-role"]
+        );
+        assert_eq!(
+            codes("SELECT x::XAXIS, y ::BARCHART, 400::HEIGHT FROM t;"),
+            vec!["layout/inline-layout-role"]
+        );
+        // on its own line: fine
+        assert!(codes("SELECT 6::COL;\nSELECT x::XAXIS, y ::LINECHART FROM t;").is_empty());
     }
 
     #[test]
