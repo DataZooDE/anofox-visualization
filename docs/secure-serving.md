@@ -961,7 +961,16 @@ Consumers pick a dashboard id and whitelisted params
   killed), `--threads` (default 4), `--cache <seconds>` (shared render cache,
   doubles as the freshness knob).
 - `--init setup.sql` runs once, read-write, before serving (attach sources,
-  create views/tables). CLI dot-commands are refused there too.
+  create views/tables). CLI dot-commands are refused there too. Without
+  `--db` the server uses (and creates) a private empty database; a `--db`
+  that doesn't exist is refused at startup.
+- A dashboard's own setup statements run in every page's read-only session,
+  after the locks above (a TEMP VIEW lives in one session, #680) — only
+  `SET VARIABLE` and `CREATE [OR REPLACE] TEMP VIEW|TABLE … AS <query>`, the
+  locked server's data-folder rule, checked with DuckDB's parser at startup.
+  Any other setup statement (and one setting a `__claim_*` or `anofox_data`
+  variable) is skipped with a startup warning: do it in `--init`. The
+  credential's locked variables and claims are set again after each one.
 - `-- @requires` (DOCS, *Not available*): checked per request with the
   request's variables, like `dashboard --check`; the session can open no
   file, so every such input counts as missing here — a gated panel shows
