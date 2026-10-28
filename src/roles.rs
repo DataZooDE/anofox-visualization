@@ -241,6 +241,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
     e("SYNC_ZOOM", &["ZOOM_GROUP"], R::SyncZoom, "modifier", true,
       "maps with the same value (e.g. 'routes') zoom and pan together in the browser"),
+    e("SYNC_FRAME", &["FRAME_GROUP"], R::SyncFrame, "modifier", true,
+      "time maps (::FRAME) with the same value (e.g. 'weeks') step and play together in the browser, by frame label"),
     e("PROJECTION", &["PROJ"], R::Projection, "modifier", true,
       "map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y)"),
     e("CLASSES", &["CLASS_BREAKS", "BINS"], R::Classes, "modifier", true,
@@ -950,6 +952,7 @@ mod tests {
             Role::Flip,
             Role::Alpha,
             Role::SyncZoom,
+            Role::SyncFrame,
             Role::Projection,
             Role::Classes,
             Role::Midpoint,
@@ -1102,6 +1105,7 @@ mod tests {
                 | Role::Flip
                 | Role::Alpha
                 | Role::SyncZoom
+                | Role::SyncFrame
                 | Role::Projection
                 | Role::Classes
                 | Role::Midpoint
