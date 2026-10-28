@@ -675,8 +675,8 @@ start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/navdash"), $PO
   json_object('data', $(q "$T/navruns"), 'path_vars', ['model'],
     'nav_picker', json_object('var', 'model', 'label', 'Model', 'sql', $(q "$PICKER_SQL"))));" || fail "nav_picker server"
 page_html="$(curl -s "http://127.0.0.1:$PORT/d/m1")"
-echo "$page_html" | grep -oq '"pathVars":\["model"\]' || fail "#407: window.__served.pathVars missing: $page_html"
-echo "$page_html" | grep -oq '"navPickers":\[{"type":"dropdown","var":"model","label":"Model","options":\[{"value":"car-price","label":"Car price"},{"value":"van","label":"Van"}\]}\]' \
+grep <<<"$page_html" -oq '"pathVars":\["model"\]' || fail "#407: window.__served.pathVars missing: $page_html"
+grep <<<"$page_html" -oq '"navPickers":\[{"type":"dropdown","var":"model","label":"Model","options":\[{"value":"car-price","label":"Car price"},{"value":"van","label":"Van"}\]}\]' \
   || fail "#556: window.__served.navPickers (the bad row must be dropped): $page_html"
 # An unknown/unused viewer variable on a panel request is accepted (ignored),
 # not rejected — the nav relies on this to carry a path_vars value to a
@@ -725,7 +725,7 @@ start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/drdash"), $POR
     'nav_pickers', [json_object('type','daterange','vars',['view_from','view_to'],'label','Time window','sql',$(q "$DR_SQL"),'presets',['last 7d','all'])]));" \
   || fail "nav_pickers daterange server"
 page_html="$(curl -s "http://127.0.0.1:$PORT/d/w1")"
-echo "$page_html" | grep -oq '"navPickers":\[{"type":"daterange","vars":\["view_from","view_to"\],"label":"Time window","min":"2026-01-01","max":"2026-01-31","presets":\[{"key":"last 7d","label":"Last 7 days","from":"2026-01-25","to":"2026-01-31"},{"key":"all","label":"All","from":"2026-01-01","to":"2026-01-31"}\]}\]' \
+grep <<<"$page_html" -oq '"navPickers":\[{"type":"daterange","vars":\["view_from","view_to"\],"label":"Time window","min":"2026-01-01","max":"2026-01-31","presets":\[{"key":"last 7d","label":"Last 7 days","from":"2026-01-25","to":"2026-01-31"},{"key":"all","label":"All","from":"2026-01-01","to":"2026-01-31"}\]}\]' \
   || fail "#556: window.__served.navPickers (daterange): $page_html"
 [ "$(panel 0 '{"view_from":"2026-01-05","view_to":"2026-01-10"}' w1)" = 200 ] && grep -q '"c0":"2026-01-05/2026-01-10"' "$T/body" \
   || fail "#556: in-range daterange: $(cat "$T/body")"
