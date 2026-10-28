@@ -28,7 +28,7 @@ description: >
   421 / 503 / 413 errors. Login, SSO, row-level security and embedding are
   in the access-control skill. Serving needs the C-API build (release or
   from source; the community build is render-only).
-version: 2026.10.25
+version: 2026.10.28
 user-invocable: false
 ---
 
