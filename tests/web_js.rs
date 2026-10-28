@@ -166,6 +166,12 @@ fn web_view_switcher_url_state() {
     run_node("views_test.mjs");
 }
 
+/// #643: map zoom maths (viewport ↔ map units, clamp, zoom-to-box).
+#[test]
+fn web_map_view_maths() {
+    run_node("map_view_test.mjs");
+}
+
 /// #647: a named time map's frame in the URL (`?frame.<name>=<label>`).
 #[test]
 fn web_frame_url_state() {

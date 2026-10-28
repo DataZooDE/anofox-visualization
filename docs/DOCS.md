@@ -1373,9 +1373,11 @@ flags skipped rows with `map/size-not-positive`.
   `data-x` (its key — the row — when it has no label; else the label is the
   key) and `data-class`; a graduated symbol adds `data-size`/`data-fsize`
   (above); the root carries `data-map`, `data-proj` and `data-classes`.
-  Scroll zooms and drag pans in the browser (double-click resets); the zoom
-  window is in the projected units, and each zoom re-renders, so
-  simplification acts as level of detail.
+  Scroll zooms and drag pans in the browser (double-click a feature zooms to
+  it, elsewhere resets — see *Zoom* below); the zoom window is in the
+  projected units, and each zoom re-renders, so simplification acts as level
+  of detail. The root's `data-viewport` (ggplot-rs) is the rect the window is
+  drawn into, so the point under the pointer stays put while zooming.
 - **Accessibility**: the SVG's `<desc>` (and the chart's aria label) is one
   sentence — "400 regions (equal-area conic). Highest: München 980; lowest:
   Zweibrücken 12. 5 quantile classes: 80 / 80 / 80 / 80 / 80; 3 without
@@ -3269,10 +3271,20 @@ its **`::LABEL`** (a choropleth's region name):
   empty space (or **Esc**) to clear.
 - **Keyboard**: Tab into the map, arrows walk the features (series by series),
   Enter / Space click the focused one.
-- **Zoom**: scroll, drag to pan, double-click resets. Maps that carry the
-  same **`::SYNC_ZOOM`** value zoom and pan together (same centre and scale,
-  each in its own aspect); a map that comes back after a re-run takes the
-  group's view.
+- **Zoom**: scroll (about the pointer) and drag to pan. **Double-click a
+  feature** to zoom to it (a point or a small region gets a sensible area
+  around it; the first click's selection stays), double-click empty space to
+  go back to the whole map. While zoomed, a **⟳ chip** in the corner resets.
+  The chart toolbox adds **Reset view**, **Zoom to selection** (the clicked
+  series' features) and **Find a place** — a search box over the map's own
+  feature labels (no geocoding): Enter or a pick zooms to it, focuses it and
+  opens its tooltip ("Zoomed to …" is announced). Keys on a focused map:
+  **+** / **−** zoom about the centre, **0** resets, **z** zooms to the
+  focused feature. Zoom stops at 1/64 of the whole map's width in and twice
+  it out; each step is instant. The ⤓ HTML export keeps the view on screen,
+  without the chip. Maps that carry the same **`::SYNC_ZOOM`** value zoom and
+  pan together (same centre and scale, each in its own aspect); a map that
+  comes back after a re-run takes the group's view.
 
 ```sql
 -- Two plans side by side: routes and stops coloured by van, hover text per
