@@ -206,6 +206,7 @@ terminal.
 | `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
+| `::DEFAULT` | `::IS_DEFAULT` | input | true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all |
 | `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
 | `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server) |
 | `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
@@ -305,6 +306,19 @@ SELECT run AS run ::DROPDOWN,
 FROM runs ORDER BY written DESC;
 ```
 
+A `::DEFAULT` column picks the default without reordering the options (#638):
+true on the default row of a `::DROPDOWN` / `::BUTTONS` (the first true row
+wins), on every default pick of a `::MULTISELECT`. No true row keeps the
+first option / every option. A `?v.name=` seed and the viewer's own pick
+still win over it, and the static renders bind it too. On any other input
+it's a warning (`input/default-ignored`): their own value is the default.
+
+```sql
+SELECT w AS ov_window ::BUTTONS, w = '7 days' AS d ::DEFAULT
+FROM (VALUES ('1 day', 1), ('7 days', 2), ('30 days', 3), ('90 days', 4)) t(w, n) ORDER BY n;
+SELECT key AS sources ::MULTISELECT, key IN ('solar', 'wind_onshore') AS d ::DEFAULT FROM series;
+```
+
 An input renders **where it appears in the script**: before the first `::TAB`
 it sits above the tabs, after a `::TAB` (or `::SUBTAB`) inside that tab, shown
 only while the tab is. Put an input in the tab whose panels it changes, and
@@ -344,7 +358,7 @@ SELECT 10 AS min_n ::NUMBER, 'Minimum orders'::LABEL;  -- only on "Detail"
 Inputs work in the **browser builder** and **`serve`** (they re-query on change).
 The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 `serve --dashboards` page) draw no control but bind each input's **default**
-(the first option, every option of a `::MULTISELECT`, both ends of a
+(the first option — or the `::DEFAULT`-marked one(s) — every option of a `::MULTISELECT`, both ends of a
 `::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
 render as on first load in the browser.
 
