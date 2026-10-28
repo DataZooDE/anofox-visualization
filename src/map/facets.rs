@@ -9,9 +9,10 @@
 //! Plan: `~/projects/duckdb/plans/plan-maps-m3.md` §5; decisions D-M3-1…6,
 //! 17, 18.
 
-use crate::{find_role, Column, Role};
+use crate::{find_role, value_str, Column, RenderOptions, Role};
 
 use super::frames::{self, Frames};
+use super::{hexbin, Model};
 
 /// Above this many facet values only the first are drawn (D-M3-2).
 pub(super) const MAX_FACETS: usize = 12;
@@ -32,15 +33,15 @@ pub(super) struct FacetCtx {
     pub total: usize,
 }
 
+/// The facet column: `::FACET`, else `::FACET_FREE`.
+fn facet_col(cols: &[Column]) -> Option<&Column> {
+    find_role(cols, Role::Facet).or_else(|| find_role(cols, Role::FacetFree))
+}
+
 /// The facets of a map's columns: `::FACET` (or `::FACET_FREE`, which
 /// shares the extent too, D-M3-6), the first [`MAX_FACETS`] kept.
 pub(super) fn of(cols: &[Column]) -> Option<Frames> {
-    let role = if find_role(cols, Role::Facet).is_some() {
-        Role::Facet
-    } else {
-        Role::FacetFree
-    };
-    let mut fr = frames::of_role(cols, role)?;
+    let mut fr = frames::of_role(cols, facet_col(cols)?.role)?;
     if fr.labels.len() > MAX_FACETS {
         fr.labels.truncate(MAX_FACETS);
         fr.row_in.truncate(MAX_FACETS);
@@ -80,18 +81,89 @@ pub(super) fn stacked(cols: &[Column], fr: &Frames) -> (Vec<Column>, Vec<bool>, 
         present.extend(p);
         result_row.extend(frames::result_rows(fr, k));
     }
-    let ncol = find_role(cols, Role::FacetCols)
-        .and_then(|c| c.values.iter().find_map(crate::cell_num))
-        .map(|n| (n.round() as i64).clamp(1, MAX_FACETS as i64) as usize);
     let ctx = FacetCtx {
         name: fr.name.clone(),
         levels: fr.labels.clone(),
         label_of_row,
         result_row,
-        ncol,
+        ncol: ncol_of(cols),
         total: fr.total_frames,
     };
     (out, present, ctx)
+}
+
+/// `::FACET_NCOL`, clamped to 1..=[`MAX_FACETS`].
+fn ncol_of(cols: &[Column]) -> Option<usize> {
+    find_role(cols, Role::FacetCols)
+        .and_then(|c| c.values.iter().find_map(crate::cell_num))
+        .map(|n| (n.round() as i64).clamp(1, MAX_FACETS as i64) as usize)
+}
+
+/// A hexbin map's small multiples (M3a-2, #645). `m` is built over every
+/// row once, so its grid, extent and projection cover every panel's
+/// points; this bins each facet's own points on that grid, concatenates
+/// the cells in facet order (each with its facet value) and classes the
+/// fill over all of them, so a colour means the same count or sum in every
+/// panel. The context's rows are the result's own rows.
+pub(super) fn hexbin(
+    o: &RenderOptions,
+    cols: &[Column],
+    fr: &Frames,
+    m: &mut Model,
+) -> Option<FacetCtx> {
+    let fcol = facet_col(cols)?;
+    let all = m.hexbin.as_ref()?;
+    let grid = hexbin::Grid::Fixed {
+        width: all.width,
+        origin: all.origin,
+    };
+    // sum or count is decided over every row, not per panel
+    let (width, origin, planar, has_measure) = (all.width, all.origin, all.planar, all.has_measure);
+    let row_facet: Vec<String> = (0..m.rows)
+        .map(|i| fcol.values.get(i).map(value_str).unwrap_or_default())
+        .collect();
+    let (mut cells, mut facet, mut n_points) = (Vec::new(), Vec::new(), 0);
+    for label in &fr.labels {
+        let present: Vec<bool> = row_facet.iter().map(|f| f == label).collect();
+        let Some(hb) = hexbin::of(cols, &m.proj, Some(&present), grid) else {
+            continue;
+        };
+        n_points += hb.n_points;
+        facet.extend(std::iter::repeat_n(label.clone(), hb.cells.len()));
+        cells.extend(hb.cells);
+    }
+    let hb = hexbin::Hexbin {
+        width,
+        origin,
+        cells,
+        n_points,
+        has_measure,
+        planar,
+        facet,
+    };
+    m.fill = hexbin::fill_of(o, cols, &hb);
+    m.hexbin = Some(hb);
+    // the point rows draw nothing (the cells take over); a row past the
+    // facet cap goes with the last panel
+    let last = fr.labels.last()?.clone();
+    let label_of_row = row_facet
+        .into_iter()
+        .map(|f| {
+            if fr.labels.contains(&f) {
+                f
+            } else {
+                last.clone()
+            }
+        })
+        .collect();
+    Some(FacetCtx {
+        name: fr.name.clone(),
+        levels: fr.labels.clone(),
+        label_of_row,
+        result_row: (0..m.rows).collect(),
+        ncol: ncol_of(cols),
+        total: fr.total_frames,
+    })
 }
 
 #[cfg(test)]

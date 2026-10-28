@@ -1677,11 +1677,16 @@ symbol sizes and the one legend**, so the panels compare at a glance.
   would add up features × maps); the attribution is drawn once under the
   grid, the scale bar once in the last map.
 - **Labels:** `n::LABEL_TOP` labels the top n regions of **each** map.
+- **Flows, hexbin, bivariate:** flows share one width scale (the same
+  volume draws equally thick in every map). Hexagons share one grid over
+  every map's points, so a cell is the same place in each, and one colour
+  scale; each map bins only its own points. A bivariate map's tertiles come
+  from all rows, and its 3×3 legend is drawn once, in the last map, without
+  counts.
 - **Interaction:** hovering a region lights it up in every map; the zoom
   tools act on all maps at once (they share one window).
 - **Limits:** at most 12 maps — the first 12 are drawn (`map/too-many-facets`).
-  Not with `::FRAME` (`map/facet-frame`: use one or the other), not yet on
-  flow, hexbin or bivariate maps (`map/facet-type`). `::FACET_FREE` behaves
+  Not with `::FRAME` (`map/facet-frame`: use one or the other). `::FACET_FREE` behaves
   like `::FACET` on a map (`map/facet-free`); `::STORY` is ignored
   (`map/facet-story`).
 - **Attributes:** the root carries `data-facets` (the values, JSON),

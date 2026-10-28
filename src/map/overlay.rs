@@ -126,6 +126,9 @@ pub(super) fn flow_layers(
     // `frame_ctx.result_row[i]` for areas/points exactly. `None` outside
     // a frame map.
     frame_ctx: Option<&super::frames::FrameCtx>,
+    // Small multiples (M3a-2, #645): `cols`/`m` are the stacked view; each
+    // flow row's facet value and result row come from here.
+    facet: Option<&super::facets::FacetCtx>,
     // M3b (#642): each feature row's tooltip trend (`Value::Na` when none),
     // indexed like `fl_.row`.
     trends: &[Value],
@@ -149,11 +152,14 @@ pub(super) fn flow_layers(
     let mut nds = Vec::new();
     let mut keys = Vec::new();
     let mut flow_trends = Vec::new();
+    let mut facets = Vec::new();
 
     // `BTreeMap`, not `HashMap`: iteration order below (dots drawn "one per
     // distinct end point") must be deterministic across runs (#488), not
-    // just dedup-by-key.
-    let mut end_pts: std::collections::BTreeMap<&str, [f64; 2]> = std::collections::BTreeMap::new();
+    // just dedup-by-key. Keyed by (facet, end) — "" without facets — so a
+    // small-multiples panel only dots its own flows' ends.
+    let mut end_pts: std::collections::BTreeMap<(&str, &str), [f64; 2]> =
+        std::collections::BTreeMap::new();
     let mut extra_self = 0usize;
 
     for fl_ in &fl.flows {
@@ -260,10 +266,13 @@ pub(super) fn flow_layers(
         // flow (D22's `::LINK`/data-row contract), not `i` (this view's
         // own local feature index) — same `frame_ctx.result_row[i]`
         // `plot.rs` already uses for areas/points.
-        rows.push(Value::Integer(match frame_ctx {
-            Some(fc) => fc.result_row[i] as i64,
-            None => i as i64,
+        rows.push(Value::Integer(match (facet, frame_ctx) {
+            (Some(fc), _) => fc.result_row[i] as i64,
+            (None, Some(fc)) => fc.result_row[i] as i64,
+            (None, None) => i as i64,
         }));
+        let panel = facet.map_or("", |fc| fc.label_of_row[i].as_str());
+        facets.push(Value::Str(panel.to_string()));
         seriess.push(Value::Str(series));
         values.push(Value::Float(data_value));
         labels.push(Value::Str(flow_label));
@@ -287,8 +296,8 @@ pub(super) fn flow_layers(
         });
         keys.push(Value::Str(key));
 
-        end_pts.entry(fl_.ok.as_str()).or_insert(fl_.o);
-        end_pts.entry(fl_.dk.as_str()).or_insert(fl_.d);
+        end_pts.entry((panel, fl_.ok.as_str())).or_insert(fl_.o);
+        end_pts.entry((panel, fl_.dk.as_str())).or_insert(fl_.d);
     }
 
     let cap_warn = (fl.total > FLOW_CAP).then(|| {
@@ -302,7 +311,7 @@ pub(super) fn flow_layers(
     }
     let n = xs.len();
 
-    let df: Vec<(String, Vec<Value>)> = vec![
+    let mut df: Vec<(String, Vec<Value>)> = vec![
         ("x".into(), xs),
         ("y".into(), ys),
         ("xend".into(), xends),
@@ -323,6 +332,9 @@ pub(super) fn flow_layers(
         ("key".into(), keys),
         ("trend".into(), flow_trends),
     ];
+    if facet.is_some() {
+        df.push(("facet".into(), facets));
+    }
 
     let mut aes = Aes::new()
         .x("x")
@@ -345,6 +357,9 @@ pub(super) fn flow_layers(
         // the old hand-written code did (and web/app.js's hover code wants).
         .data_attr("x", "key")
         .data_attr("trend", "trend");
+    if facet.is_some() {
+        aes = aes.data_attr("facet", "facet");
+    }
 
     // Width resolution mirrors `flows::project`'s three cases: a fixed
     // `::SIZE` constant, no `::SIZE` at all (flat 1.5px), or a varying
@@ -435,14 +450,18 @@ pub(super) fn flow_layers(
     // Ends: one dot per distinct end point, deduplicated by key — plain
     // filled dots, no stroke (GeomPoint has no stroke parameter at all) and
     // no hover title of their own (an all-NA `tip` column resets it).
-    let (mut ex, mut ey, mut etip) = (Vec::new(), Vec::new(), Vec::new());
-    for [x, y] in end_pts.values() {
+    let (mut ex, mut ey, mut etip, mut efacet) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for ((panel, _), [x, y]) in &end_pts {
         ex.push(Value::Float(*x));
         ey.push(Value::Float(*y));
         etip.push(Value::Na);
+        efacet.push(Value::Str(panel.to_string()));
     }
-    let ends_df: Vec<(String, Vec<Value>)> =
+    let mut ends_df: Vec<(String, Vec<Value>)> =
         vec![("x".into(), ex), ("y".into(), ey), ("tip".into(), etip)];
+    if facet.is_some() {
+        ends_df.push(("facet".into(), efacet));
+    }
     let end_color = mix(t.colors.ink, card, 0.25);
     plot = plot
         .geom_point_with(GeomPoint {
@@ -547,7 +566,7 @@ pub(super) fn hexbin_layer(
         tooltips.push(Value::Str(title));
     }
 
-    let df: Vec<(String, Vec<Value>)> = vec![
+    let mut df: Vec<(String, Vec<Value>)> = vec![
         ("x".into(), xs),
         ("y".into(), ys),
         ("width".into(), widths),
@@ -562,8 +581,17 @@ pub(super) fn hexbin_layer(
         ("fvalue".into(), fvalues),
         ("tooltip_col".into(), tooltips),
     ];
+    // small multiples (M3a-2): each cell's panel; the same "q,r" key in
+    // every panel links one cell across them on hover
+    let faceted = !hb.facet.is_empty();
+    if faceted {
+        df.push((
+            "facet".into(),
+            hb.facet.iter().map(|f| Value::Str(f.clone())).collect(),
+        ));
+    }
 
-    let aes = Aes::new()
+    let mut aes = Aes::new()
         .x("x")
         .y("y")
         .fill("fill")
@@ -582,6 +610,9 @@ pub(super) fn hexbin_layer(
         // `data-fvalue` from the whole-map `with_formatted_values` pass.
         .data_attr("vtext", "fvalue")
         .data_attr("x", "key");
+    if faceted {
+        aes = aes.data_attr("facet", "facet");
+    }
 
     let mut plot = plot
         .geom_hex_with(GeomHex {

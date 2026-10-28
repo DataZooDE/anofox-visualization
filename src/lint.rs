@@ -4732,16 +4732,6 @@ fn map_diags(
                 "map/facet-frame",
                 "::FACET is ignored on a time map (::FRAME) — use one or the other".to_string(),
             ));
-        } else if has(Role::Hexbin)
-            || has(Role::Bivariate)
-            || (has(Role::Origin) && has(Role::Dest))
-        {
-            out.push((
-                Severity::Warning,
-                "map/facet-type",
-                "::FACET isn't supported on flow, hexbin or bivariate maps yet — one map is drawn"
-                    .to_string(),
-            ));
         } else {
             if let Some(i) = fi {
                 let mut seen = std::collections::HashSet::new();
@@ -8526,6 +8516,19 @@ mod design_tests {
         assert!(codes(
             "SELECT r ::REGION, w ::FACET FROM t;",
             vec![json!({"c0":"DE-BY","c1":"1"})]
+        )
+        .is_empty());
+        // M3a-2 (#645): flow, hexbin and bivariate maps facet too
+        let hex = json!({ "c0": 50.0, "c1": 10.0, "c2": "auto", "c3": "a" });
+        assert!(codes(
+            "SELECT lat ::LAT, lon ::LON, 'auto'::HEXBIN, f ::FACET FROM t;",
+            vec![hex]
+        )
+        .is_empty());
+        let biv = json!({ "c0": "DE-BY", "c1": 1.0, "c2": 2.0, "c3": "a" });
+        assert!(codes(
+            "SELECT r ::REGION, a ::BARCHART, b ::BIVARIATE, f ::FACET FROM t;",
+            vec![biv]
         )
         .is_empty());
     }
