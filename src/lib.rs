@@ -369,6 +369,13 @@ pub enum Role {
     /// the same name step and play together in the browser, by frame label.
     /// Read from the first value.
     SyncFrame,
+    /// An x-axis title (`::XTITLE`, #651): names the `::XAXIS` variable,
+    /// drawn under the x ticks (beside them on a `::FLIP` chart). Read from
+    /// the first value.
+    XTitle,
+    /// A y-axis title (`::YTITLE`, #651): names the measure, drawn rotated
+    /// beside the y ticks. Read from the first value.
+    YTitle,
     /// A map's projection (`::PROJECTION`): `'auto'` (by the data's extent),
     /// `'equal-earth'`, `'mercator'`, `'albers-europe'`, `'conic'`, `'utm'`
     /// or `'none'` (planar coordinates). Read from the first value.
@@ -1748,6 +1755,50 @@ impl Panel {
         self
     }
 
+    /// `::XTITLE` / `::YTITLE` (#651) as the plot's axis titles — ggplot-rs's
+    /// own `xlab`/`ylab`, so they follow `::FLIP` (the x title names the
+    /// `::XAXIS` variable wherever its axis is drawn) and sit once beside a
+    /// faceted grid. Charts with axes only: a pie, gauge, radar, sparkline,
+    /// calendar, funnel, bullet or map keeps none.
+    pub(crate) fn with_axis_titles(mut self, cols: &[Column]) -> Panel {
+        let (x, y) = (role_str(cols, Role::XTitle), role_str(cols, Role::YTitle));
+        if x.is_none() && y.is_none() || map::is_map(cols) {
+            return self;
+        }
+        let kind = cols.iter().find_map(|c| match c.role {
+            Role::Value(k) => Some(k),
+            _ => None,
+        });
+        let axes = kind.is_some_and(|k| {
+            !matches!(
+                k,
+                Kind::Pie
+                    | Kind::Donut
+                    | Kind::Gauge
+                    | Kind::Radar
+                    | Kind::Sparkline
+                    | Kind::Sparkbar
+                    | Kind::Calendar
+                    | Kind::Funnel
+                    | Kind::Bullet
+            )
+        });
+        if let (true, Panel::Plot { plot, .. }) = (axes, &mut self) {
+            let mut p = std::mem::replace(
+                plot.as_mut(),
+                GGPlot::new(Vec::<(String, Vec<Value>)>::new()),
+            );
+            if let Some(t) = x.filter(|t| !t.trim().is_empty()) {
+                p = p.xlab(t.trim());
+            }
+            if let Some(t) = y.filter(|t| !t.trim().is_empty()) {
+                p = p.ylab(t.trim());
+            }
+            **plot = p;
+        }
+        self
+    }
+
     /// Write the panel at `place`: the SVG plus the plotting engine's build
     /// warnings (rows dropped for non-finite values, empty layers, …).
     pub(crate) fn finish(self, place: Place) -> Result<(String, Vec<String>), String> {
@@ -1953,6 +2004,7 @@ fn render_placed(
             .map(|p| p.localized(o, &cols))
             .map(|p| p.with_motion_attrs(&cols))
             .map(|p| p.with_frame(frame))
+            .map(|p| p.with_axis_titles(&cols))
             .and_then(|p| p.finish(place))
             .map_err(RenderError::Render)?;
         Ok((finish_touches(svg, &cols, o), warnings))
