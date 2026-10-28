@@ -1054,6 +1054,7 @@ fn rewrite_list(list: &str) -> Rewritten {
             Role::Table
                 | Role::PagedTable
                 | Role::Input(InputKind::DateRange)
+                | Role::DiagramPalette
                 | Role::Input(InputKind::Form)
                 | Role::Download(_)
         )
@@ -1241,6 +1242,16 @@ fn rewrite_list(list: &str) -> Rewritten {
                 Role::Submit => {
                     let (core, alias) = trailing_alias(expr);
                     if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
+                // `::DIAGRAM_MODE` (#682): its explicit `AS alias` names the
+                // variable holding the edited graph — kept in `names` so the
+                // browser reads it from the plan.
+                Role::DiagramMode => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias {
                         names.push((i, nm));
                     }
                     format!("{core} AS c{i}")

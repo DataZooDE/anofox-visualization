@@ -2119,6 +2119,35 @@ where
         // Let the render engine validate the role/column combination (this
         // catches missing required aesthetics, e.g. a bar chart with no x).
         let cols = sql::columns_from_rows(&rows, &p.roles);
+        // #682: an editable ::DIAGRAM binds its graph variable (its rows' own
+        // graph) for the statements after it, like an input's default.
+        if let Some(setv) = crate::diagram_edit::default_set(&p.roles, &p.names, &cols) {
+            if opts.stateful_session {
+                let _ = run_query(&format!("{setv};"));
+            } else {
+                prelude.push_str(&setv);
+                prelude.push_str(";\n");
+            }
+        }
+        if let Some(m) = crate::diagram_edit::mode(&cols) {
+            if !matches!(m.as_str(), "edit" | "view") {
+                diags.push(Diagnostic {
+                    severity: Severity::Error,
+                    stmt,
+                    code: "diagram_mode/unknown",
+                    message: format!("::DIAGRAM_MODE `{m}` — use 'edit' (draw by hand) or 'view'"),
+                    sql: short.clone(),
+                });
+            } else if !cols.iter().any(|c| c.role == Role::Diagram) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "diagram_mode/no-diagram",
+                    message: "::DIAGRAM_MODE needs a ::DIAGRAM column in the same SELECT".into(),
+                    sql: short.clone(),
+                });
+            }
+        }
         // A box plot from statistics: its roles (else it cannot render),
         // then its numbers.
         let box_roles = crate::boxstats::prepare(cols.clone());
@@ -9964,6 +9993,45 @@ mod design_tests {
         assert!(d.iter().any(|x| x.code == "callout/unknown"), "{d:?}");
         let d = check("SELECT 'x'::TEXT_SMALL, 'note'::CALLOUT;", one("note"));
         assert!(d.iter().any(|x| x.code == "callout/no-text"), "{d:?}");
+    }
+
+    /// #682: an unknown ::DIAGRAM_MODE is an error; 'edit' binds the graph
+    /// variable for the statements after it.
+    #[test]
+    fn diagram_mode_is_checked_and_binds_the_graph() {
+        let diagram = vec![
+            json!({"c0": "a", "c1": "edit"}),
+            json!({"c0": "b", "c1": "edit"}),
+        ]
+        .into_iter()
+        .map(|v| v.as_object().unwrap().clone())
+        .collect::<Vec<_>>();
+        let mut sent = Vec::new();
+        let d = check(
+            "SELECT id ::DIAGRAM, 'edit' AS g ::DIAGRAM_MODE FROM n;\nSELECT getvariable('g') AS x ::TEXT_SMALL;",
+            |q| {
+                sent.push(q.to_string());
+                Ok(diagram.clone())
+            },
+        );
+        assert!(
+            !d.iter().any(|x| x.code.starts_with("diagram_mode/")),
+            "{d:?}"
+        );
+        assert!(
+            sent.iter()
+                .any(|q| q.contains(r#"SET VARIABLE "g" = '{"nodes":[{"id":"a""#)),
+            "{sent:?}"
+        );
+        let bad = vec![json!({"c0": "a", "c1": "draw"})]
+            .into_iter()
+            .map(|v| v.as_object().unwrap().clone())
+            .collect::<Vec<_>>();
+        let d = check(
+            "SELECT id ::DIAGRAM, 'draw' AS g ::DIAGRAM_MODE FROM n;",
+            |_q| Ok(bad.clone()),
+        );
+        assert!(d.iter().any(|x| x.code == "diagram_mode/unknown"), "{d:?}");
     }
 
     /// #683: a ::FORM's rows are checked as fields; its default reaches the

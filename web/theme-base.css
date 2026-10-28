@@ -241,6 +241,13 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
    tint, no accent bar; .panel's own padding stays (normal page padding),
    just its card chrome goes. */
 .md-plain{background:transparent;border-color:transparent;box-shadow:none}
+/* ::DIAGRAM edit mode (#682): the toolbar above the drawing; the picked mark. */
+.dp-edit-bar{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:0 0 .6rem}
+.dp-edit-bar .dp-edit-name{flex:1 1 9rem;min-width:7rem}
+.dp-edit-btn{padding:.3rem .65rem;font-size:.8rem}
+.dp-edit-btn[aria-pressed=true]{outline:2px solid var(--ax-accent);outline-offset:1px}
+.dp-edit-status{flex:1 1 100%;font-size:.78rem;color:var(--ax-muted);min-height:1.1em}
+.panel svg .dp-edit-pick{stroke:var(--ax-accent);stroke-width:3px}
 /* ::FORM (#683): one row per field — label (+ ⓘ), control + unit, provenance. */
 .dp-form-fields{display:grid;gap:.7rem}
 .dp-form-field{display:grid;grid-template-columns:minmax(7rem,38%) 1fr;align-items:center;column-gap:.8rem;row-gap:.15rem}

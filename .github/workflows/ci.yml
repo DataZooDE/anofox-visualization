@@ -628,6 +628,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/figure-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/diagram-edit-e2e.mjs (#682): 'edit'::DIAGRAM_MODE — Add,
+      # Connect (and a palette refusal), Rename, Remove, Reset; the edited
+      # graph as one JSON variable the SQL panels read; the URL.
+      - name: Diagram edit e2e (#682)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/diagram-edit-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/form-e2e.mjs (#683): a ::FORM's fields (types, show_if, help,
       # provenance), its one JSON variable read with ->>, edits, URL state,
       # a ::ROWSELECT-filtered form resetting per node, 390 px.

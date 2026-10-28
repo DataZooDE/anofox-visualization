@@ -401,6 +401,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
+    e("DIAGRAM_MODE", &["DIAGRAM_EDIT"], R::DiagramMode, "encoding", true,
+      "on a ::DIAGRAM: 'edit' lets the viewer add, connect, rename and remove nodes; the alias names the variable holding the edited graph as JSON {nodes:[{id,type,label}], edges:[{from,to}]}"),
+    e("DIAGRAM_PALETTE", &["NODE_TYPES"], R::DiagramPalette, "layout", false,
+      "before an editable ::DIAGRAM: the node types it may add — the column is the type (its ::CATEGORY), plus label and connects_to (the types it may feed)"),
     e("FIGURE", &["PATCHWORK"], R::FigureStart, "layout", false,
       "open a figure: the charts up to ::ENDFIGURE become the cells of one patchwork-style picture with aligned axes; the value is its title"),
     e("ENDFIGURE", &["END_FIGURE"], R::FigureEnd, "layout", false, "close the current ::FIGURE"),
@@ -740,7 +744,7 @@ pub fn roles_json() -> String {
         "metrics": tokens(&|r| matches!(r, Role::Metric(_))),
         "directives": tokens(&|r| matches!(
             r,
-            Role::Columns | Role::GroupStart | Role::GroupEnd | Role::FigureStart | Role::FigureEnd | Role::Span | Role::Height
+            Role::Columns | Role::GroupStart | Role::GroupEnd | Role::FigureStart | Role::FigureEnd | Role::DiagramPalette | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
                 | Role::ViewPlacement | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
@@ -1094,6 +1098,8 @@ mod tests {
             Role::Columns,
             Role::GroupStart,
             Role::GroupEnd,
+            Role::DiagramMode,
+            Role::DiagramPalette,
             Role::FigureStart,
             Role::FigureEnd,
             Role::FigureLayout,
@@ -1263,6 +1269,8 @@ mod tests {
                 | Role::Columns
                 | Role::GroupStart
                 | Role::GroupEnd
+                | Role::DiagramMode
+                | Role::DiagramPalette
                 | Role::FigureStart
                 | Role::FigureEnd
                 | Role::FigureLayout
