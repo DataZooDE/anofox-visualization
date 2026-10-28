@@ -1934,6 +1934,15 @@ fn cmd_site(args: &[String]) {
                     abs.display()
                 ));
             }
+            // #655: --data lands in `<out>/data/`, next to the built-in
+            // boundary layers (`<out>/data/boundaries/`).
+            if abs.join("boundaries").exists() {
+                fail(format!(
+                    "--data '{d}': a top-level 'boundaries' entry would collide with the built-in \
+                     boundary layers this command publishes at '<out>/data/boundaries/' — rename it \
+                     or move it under a subfolder"
+                ));
+            }
             Some(abs.to_string_lossy().into_owned())
         }
         None => None,
@@ -2056,6 +2065,7 @@ fn cmd_site(args: &[String]) {
     // library's sample dashboards/data, never read in published mode) is
     // skipped: a published site never needs it, and `data/` would otherwise
     // collide with this command's own `out/data/` (the site's `--data`).
+    // The one exception, `data/boundaries/`, is copied below (#655).
     const APP_SKIP: [&str; 3] = ["data", "examples", "m5_monthly.parquet"];
     std::fs::create_dir_all(out).unwrap_or_else(|e| fail(format!("mkdir {}: {e}", out.display())));
     for entry in std::fs::read_dir(&app_src)
@@ -2142,6 +2152,20 @@ fn cmd_site(args: &[String]) {
         }
         _ => None,
     };
+
+    // #655: the built-in boundary layers (all of them: which ones a map
+    // needs depends on its data). `ensureBoundaries` (web/app.js) fetches
+    // `data/boundaries/<layer>.csv` relative to app.js, i.e. the out root.
+    let boundaries_src = app_src.join("data").join("boundaries");
+    if boundaries_src.is_dir() {
+        copy_dir_recursive(&boundaries_src, &out.join("data").join("boundaries"))
+            .unwrap_or_else(|e| fail(format!("copy boundaries: {e}")));
+    } else {
+        eprintln!(
+            "--site: warning: '{}' has no data/boundaries — ::REGION / named ::BASEMAP maps won't draw on this site",
+            app_src.display()
+        );
+    }
 
     let nav: Vec<serde_json::Value> = dashboards.iter().map(|d| d.meta.nav_json(&d.id)).collect();
     let mut site_json = serde_json::json!({

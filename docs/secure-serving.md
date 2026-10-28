@@ -1043,6 +1043,9 @@ dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [
   generated pages `SET VARIABLE anofox_data = '<url>'` before every
   dashboard, exactly like a locked server's `getvariable('anofox_data')` —
   dashboard SQL doesn't need to know it's no longer talking to a server.
+- The built-in map boundaries (`::REGION`, a named `::BASEMAP`) are copied
+  from `--app` into `out/data/boundaries/` (#655), so a local `--data`
+  folder must not have its own top-level `boundaries` entry (refused).
 - `nav_picker`'s options are computed **now**, by running
   `options.nav_picker.sql` against `--data` with the `duckdb` CLI (the same
   read-only check, and the same "a value isn't a plain name → dropped" rule,
