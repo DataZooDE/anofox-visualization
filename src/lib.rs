@@ -3977,6 +3977,14 @@ fn cartesian(
         plot = plot.scale_x_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
         );
+    } else if let Some(pattern) = role_fmt(cols, Role::XFormat).filter(|s| {
+        // #640: a strftime pattern ('%H:%M', '%b %Y') on a date/timestamp x
+        // labels its ticks; any other ::XFORMAT is a number format, as before
+        !x_discrete && s.contains('%') && x.values.iter().any(|v| matches!(v, Value::DateTime(_)))
+    }) {
+        plot = plot.scale_x_datetime(
+            ggplot_rs::scale::datetime::ScaleDateTime::new().with_date_labels(&pattern),
+        );
     } else if !x_discrete {
         let x_fmt = role_fmt(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale));
         let x_tr = role_str(cols, Role::XScale)
