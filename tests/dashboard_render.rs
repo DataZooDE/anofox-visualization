@@ -1003,6 +1003,17 @@ fn markdown_style_chrome_in_headless_svg() {
         vec![("c0", s(&["hello"]))],
     );
     assert!(!svg.contains("stroke="), "{svg}");
+
+    // #659 ::MARKDOWN_TONE: the bordered card plus a 3 px clipped bar in the
+    // tone's colour (the default theme's violet for 'example'), even over a
+    // 'callout' header default.
+    let svg = render(
+        "-- @markdown_style callout\nSELECT 'hello'::MARKDOWN, 'example'::MARKDOWN_TONE;",
+        vec![("c0", s(&["hello"])), ("c1", s(&["example"]))],
+    );
+    assert!(svg.contains("dp-md-clip-"), "{svg}");
+    assert!(svg.contains("width=\"3\""), "{svg}");
+    assert!(svg.contains("#7c3aed"), "{svg}");
 }
 
 // #427: a `::TABLE`'s `list(v ORDER BY i)::SPARKLINE` column was dropped

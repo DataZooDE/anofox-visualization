@@ -241,6 +241,17 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
    tint, no accent bar; .panel's own padding stays (normal page padding),
    just its card chrome goes. */
 .md-plain{background:transparent;border-color:transparent;box-shadow:none}
+/* ::MARKDOWN_TONE (#659) on a 'card': a thin accent bar (a background layer,
+   so it follows the rounded corner and leaves the theme's shadow alone) and
+   a small label from data-tone-label — quiet, no tint, so it never reads as
+   an alert. */
+.md-tone{--md-tone:var(--ax-line);background:linear-gradient(var(--md-tone),var(--md-tone)) 0 0/3px 100% no-repeat,var(--ax-card)}
+.md-tone-info{--md-tone:var(--ax-tone-info)}
+.md-tone-example{--md-tone:var(--ax-tone-example)}
+.md-tone-tip{--md-tone:var(--ax-tone-tip)}
+.md-tone-caution{--md-tone:var(--ax-tone-caution)}
+.md-tone-details{--md-tone:var(--ax-tone-details)}
+.md-tone[data-tone-label]::before{content:attr(data-tone-label);display:block;margin:-.15rem 0 .4rem;font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--md-tone)}
 .dp-callout{padding-left:3rem}
 .dp-callout::after{content:attr(data-icon);position:absolute;left:1.15rem;top:1.05rem;width:1.3rem;height:1.3rem;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.78rem;font-weight:800;color:var(--ax-card);background:var(--ax-callout-bar)}
 .dp-callout-warning{background:var(--ax-badge-warn-bg);border-color:transparent}

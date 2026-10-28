@@ -10419,10 +10419,22 @@ async function runOnce(fresh = true, pv = preview) {
           // default. An explicit ::MARKDOWN_STYLE wins even over ::CALLOUT
           // (resolveMdStyle(); --check warns: markdown_style/conflicts-
           // with-callout), so the icon only ever shows with 'callout'.
+          // ::MARKDOWN_TONE (#659): a quiet accent bar + small label on a
+          // 'card' (a tone alone implies 'card'; resolveMdChrome()).
           const sr = s.roles.find((r) => r[1] === "MARKDOWN_STYLE");
           const cr = s.roles.find((r) => r[1] === "CALLOUT");
-          const mdStyle = resolveMdStyle(sr ? r0["c" + sr[0]] : null, !!cr, dpMdStyleDefault);
+          const tnr = s.roles.find((r) => r[1] === "MARKDOWN_TONE");
+          const { style: mdStyle, tone: mdTone } = resolveMdChrome(
+            sr ? r0["c" + sr[0]] : null,
+            !!cr,
+            tnr ? r0["c" + tnr[0]] : null,
+            dpMdStyleDefault,
+          );
           if (mdStyle === "plain") fig.classList.add("md-plain");
+          if (mdTone) {
+            fig.classList.add("md-tone", "md-tone-" + mdTone.tone);
+            if (mdTone.label) fig.dataset.toneLabel = mdTone.label;
+          }
           if (mdStyle === "callout") {
             fig.classList.add("md-box");
             if (cr) {
@@ -13038,6 +13050,31 @@ function mdStyleOf(v) {
 // 'callout' (today's look).
 function resolveMdStyle(explicit, calloutPresent, dashboardDefault) {
   return mdStyleOf(explicit) ?? (calloutPresent ? "callout" : mdStyleOf(dashboardDefault) ?? "callout");
+}
+// ::MARKDOWN_TONE value → {tone, label} or null (src/roles.rs
+// markdown_tone_of): 'tone' or 'tone: label'; the tone's own label, the
+// author's after the colon, none for an empty one ('example:') or 'neutral'.
+const MD_TONE_KINDS = ["neutral", "info", "example", "tip", "caution", "details"];
+const MD_TONE_LABELS = { info: "Info", example: "Example", tip: "Tip", caution: "Caution", details: "Details" };
+function mdToneOf(v) {
+  const str = String(v ?? "");
+  const at = str.indexOf(":");
+  const tone = (at < 0 ? str : str.slice(0, at)).trim().toLowerCase();
+  if (!MD_TONE_KINDS.includes(tone)) return null;
+  const label = at < 0 ? MD_TONE_LABELS[tone] || null : str.slice(at + 1).trim() || null;
+  return { tone, label };
+}
+// The effective chrome of one ::MARKDOWN panel (src/roles.rs
+// resolve_markdown_chrome): resolveMdStyle(), except that a valid
+// ::MARKDOWN_TONE with no explicit style and no ::CALLOUT means 'card'; the
+// tone only applies on a 'card', and 'neutral' draws no accent.
+function resolveMdChrome(explicit, calloutPresent, toneValue, dashboardDefault) {
+  const tone = mdToneOf(toneValue);
+  const style =
+    !mdStyleOf(explicit) && !calloutPresent && tone
+      ? "card"
+      : resolveMdStyle(explicit, calloutPresent, dashboardDefault);
+  return { style, tone: style === "card" && tone && tone.tone !== "neutral" ? tone : null };
 }
 // This dashboard's own `-- @markdown_style` default, or null without the
 // header / with an unrecognized value — see astablesBarOn() for the pattern.

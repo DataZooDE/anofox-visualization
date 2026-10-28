@@ -834,6 +834,23 @@ fn rgba(c: Rgb, a: f64) -> String {
 }
 
 /// `a` → `b` by `t` (0..1), per channel in sRGB.
+/// A `::MARKDOWN_TONE`'s accent colour (#659) — the `--ax-tone-<tone>`
+/// token, and the static renderer's bar: 'info' the theme's info colour,
+/// 'tip' its positive, 'caution' its warning (amber, not an alert's red),
+/// 'details' its muted ink, 'example' a violet the themes don't carry
+/// (lighter on a dark card); anything else the hairline colour.
+pub fn tone_color(c: &Colors, tone: &str) -> Rgb {
+    match tone {
+        "info" => c.info,
+        "tip" => c.positive,
+        "caution" => c.warning,
+        "details" => c.muted,
+        "example" if luminance(c.card) < 0.25 => (167, 139, 250),
+        "example" => (124, 58, 237),
+        _ => c.line,
+    }
+}
+
 pub fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
     let l = |x: u8, y: u8| {
         (x as f64 + (y as f64 - x as f64) * t)
@@ -1520,6 +1537,11 @@ impl ResolvedTheme {
             ),
             t("callout-border", acc_a(0.22)),
             t("callout-bar", grad(c.accent, c.accent2)),
+            t("tone-info", hex(tone_color(c, "info"))),
+            t("tone-example", hex(tone_color(c, "example"))),
+            t("tone-tip", hex(tone_color(c, "tip"))),
+            t("tone-caution", hex(tone_color(c, "caution"))),
+            t("tone-details", hex(tone_color(c, "details"))),
             t("md-ink", hex(mix(c.ink, c.muted, 0.35))),
             t("md-heading", hex(c.heading)),
             t("link", hex(c.link)),

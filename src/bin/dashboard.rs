@@ -527,7 +527,7 @@ fn render_dashboard_html(
                 .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
         };
         // #536: a ::MARKDOWN panel's chrome — same resolution as the
-        // browser's resolveMdStyle(), drawn through the same CSS classes
+        // browser's resolveMdChrome(), drawn through the same CSS classes
         // (web/theme-base.css, embedded in this page by `page::render`).
         let text_of = |role: Role| -> Option<String> {
             let (i, _) = p.roles.iter().find(|(_, r)| *r == role)?;
@@ -537,30 +537,17 @@ fn render_dashboard_html(
                 .map(str::to_string)
         };
         let (class, icon_attrs) = if p.roles.iter().any(|(_, r)| matches!(r, Role::Markdown)) {
-            let explicit = text_of(Role::MarkdownStyle);
-            let callout_present = p.roles.iter().any(|(_, r)| matches!(r, Role::Callout));
-            let style = roles::resolve_markdown_style(
-                explicit.as_deref(),
-                callout_present,
+            let callout = p
+                .roles
+                .iter()
+                .any(|(_, r)| matches!(r, Role::Callout))
+                .then(|| text_of(Role::Callout).unwrap_or_default());
+            roles::markdown_figure_attrs(
+                text_of(Role::MarkdownStyle).as_deref(),
+                callout.as_deref(),
+                text_of(Role::MarkdownTone).as_deref(),
                 md_default.as_deref(),
-            );
-            match style {
-                "plain" => ("panel md-plain".to_string(), String::new()),
-                "callout" if callout_present => {
-                    let kind = roles::callout_kind(&text_of(Role::Callout).unwrap_or_default());
-                    let icon = match kind {
-                        "warning" => "⚠",
-                        "success" => "✓",
-                        _ => "ℹ",
-                    };
-                    (
-                        format!("panel md-box dp-callout dp-callout-{kind}"),
-                        format!(" role=\"note\" data-icon=\"{icon}\""),
-                    )
-                }
-                "callout" => ("panel md-box".to_string(), String::new()),
-                _ => ("panel".to_string(), String::new()), // 'card'
-            }
+            )
         } else {
             ("panel".to_string(), String::new())
         };

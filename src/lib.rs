@@ -504,6 +504,10 @@ pub enum Role {
     /// tinted box — the default, and what `::CALLOUT` implies). A
     /// `-- @markdown_style` header sets the dashboard's own default.
     MarkdownStyle,
+    /// A quiet accent on a 'card' `::MARKDOWN` box (`::MARKDOWN_TONE`, #659):
+    /// `'info'`, `'example'`, `'tip'`, `'caution'`, `'details'` or
+    /// `'neutral'`, optionally `'tone: label'`. Implies 'card'.
+    MarkdownTone,
     /// Candlestick open price (`::OPEN`).
     Open,
     /// Candlestick high price (`::HIGH`).
