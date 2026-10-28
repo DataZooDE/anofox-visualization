@@ -785,6 +785,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-placement-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/points-e2e.mjs (#631): a dense line's markers are uninked
+      # hover targets (crosshair tooltip, ::LINK click still work); a short
+      # series keeps its dots; ::POINTS overrides both ways.
+      - name: Dense line markers e2e (::POINTS, #631)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/points-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/frames-e2e.mjs (M2f-A, #149): the live ::FRAME player — step,
       # slider, Play/Pause, reduced motion, zoom + step, as-table, the
       # export's note, axe, and the perf budget (p95 draw(k) <= 150ms).

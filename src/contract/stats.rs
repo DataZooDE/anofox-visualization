@@ -748,6 +748,7 @@ fn test_panel(
             size: 3.2,
             color: INK,
             alpha: 1.0,
+            ..Default::default()
         });
     }
     // The p-value (and stars) beside each row, right of everything.
@@ -928,6 +929,7 @@ pub(super) fn compare(
                 size: 4.5,
                 color: ACCENT,
                 alpha: 1.0,
+                ..Default::default()
             })
             .layer_data(vec![("x".into(), mx), ("v".into(), mv)])
             .layer_aes(Aes::new().x("x").y("v"));
@@ -1224,6 +1226,7 @@ pub(super) fn partial(
                 size: 1.8,
                 color: brand,
                 alpha: 0.7,
+                ..Default::default()
             })
         };
         if few && series.is_none() {
@@ -1243,6 +1246,7 @@ pub(super) fn partial(
                     size: 5.0,
                     color: ACCENT,
                     alpha: 1.0,
+                    ..Default::default()
                 })
                 .layer_data(vec![
                     (
@@ -1818,6 +1822,7 @@ pub(super) fn summary(
             size: 3.0,
             color: o.brand(),
             alpha: 1.0,
+            ..Default::default()
         });
         // The best model of a known-direction metric, over its dot.
         let winners: Vec<usize> = idx.iter().copied().filter(|&i| is_best(i)).collect();
@@ -1827,6 +1832,7 @@ pub(super) fn summary(
                     size: 3.6,
                     color: ACCENT,
                     alpha: 1.0,
+                    ..Default::default()
                 })
                 .layer_data(vec![
                     (
@@ -2238,6 +2244,7 @@ pub(super) fn prediction(
                     size: 1.9,
                     color: (88, 94, 106),
                     alpha: 0.6,
+                    ..Default::default()
                 })
                 .layer_data(frame)
                 .layer_aes(Aes::new().x("x").y("yhat"));
@@ -2313,6 +2320,7 @@ pub(super) fn prediction(
                         size: 2.2,
                         color: ACCENT,
                         alpha: 0.8,
+                        ..Default::default()
                     })
                     .layer_data(frame)
                     .layer_aes(Aes::new().x("x").y("yhat"));
@@ -2517,6 +2525,7 @@ pub(super) fn km(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, pl
             size: 1.2,
             color: brand,
             alpha: 0.0,
+            ..Default::default()
         })
         .geom_censor_marks_with(
             GeomCensorMarks {
@@ -2746,6 +2755,7 @@ pub(super) fn lambda_cv(
             size: 2.2,
             color: brand,
             alpha: 1.0,
+            ..Default::default()
         });
         // λ.min / λ.1se markers.
         let label_y = top + (top - bottom).abs().max(1e-9) * 0.06;
@@ -3002,6 +3012,7 @@ pub(super) fn nested_cv(
             size: 2.2,
             color: brand,
             alpha: 1.0,
+            ..Default::default()
         });
         plot = plot.scale_x_continuous(ScaleContinuous::new().with_breaks(ticks));
         plot = plot

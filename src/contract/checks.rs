@@ -361,6 +361,7 @@ fn band(
             size: 3.6,
             color: o.brand(),
             alpha: 1.0,
+            ..Default::default()
         });
         plot = plot
             .geom_text_with(GeomText {
@@ -467,6 +468,7 @@ fn strip(
             size: 4.0,
             color: o.brand(),
             alpha: 1.0,
+            ..Default::default()
         })
         .scale_color(
             ScaleColorDiscrete::new(Aesthetic::Color)

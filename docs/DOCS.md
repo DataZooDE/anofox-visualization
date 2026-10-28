@@ -159,6 +159,7 @@ terminal.
 | `::STORY_BY` | `::STORYBY` | modifier | what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY) |
 | `::TRANSITION` | `::TWEEN` | modifier | on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart |
 | `::HOVER_FOCUS` | `::HOVERFOCUS` | modifier | hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts) |
+| `::POINTS` | `::MARKERS` | modifier | line/area point markers: 'auto' (default) hides them on a dense series (x positions under 3 px apart) and keeps them as hover/click targets, 'none' always hides them, 'always' always draws them |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::LEGEND` |  | modifier | a chart's legend / colourbar: 'none' hides it, or 'top'/'right'/'bottom'/'left' moves it; without it, unchanged |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
@@ -3029,6 +3030,8 @@ point markers and dim as whole lines). **Linked highlighting**: click any
 series/bar to highlight it across all panels and dim the rest — click empty
 space (or the mark again) to clear. Series colours are **consistent across
 charts**.
+
+> **Point markers** (`::POINTS`, #631): line, step and area charts put a marker on every data point; it carries the point's tooltip and the click target for `::LINK`. On a dense series (its x positions closer than 3 px apart on average, e.g. 7 days at 15-minute resolution) the markers are drawn without ink, so the line reads as a line, but they stay in the chart: hovering, the crosshair tooltip, keyboard focus and `::LINK` clicks work as before, and the point under the pointer shows. A short series (12 monthly points) keeps its dots. `'none'::POINTS` always hides the markers, `'always'::POINTS` always draws them, `'auto'` is the default. The rule is decided per facet panel. `--check` warns on another value (`points/unknown`).
 
 > **Hover focus**: hovering a bar, point, line or area of a chart with several series (a `::CATEGORY`, or several measures) emphasises that whole series and fades the others, as hovering its legend entry does; moving off clears it. Focusing a mark from the keyboard does the same. A click still sets the sticky linked highlighting: while it (or a brush, a named selection or a `::STORY` step) is on, hovering changes nothing. It is off where each series is a single mark (a pie, a single-series bar), on maps (hovering a map feature emphasises its series on every map instead), diagrams, heatmaps, calendars and `::TRACK` strips, above 2,000 marks, on a touch tap (a tap is a click), and with `'none'::HOVER_FOCUS`. The change is instant (no animation). Static output (the HTML export, `dashboard file.sql out.html`, the script-free served page) has no hover focus. `--check` warns on a value other than `'series'` / `'none'` (`hover-focus/unknown`).
 

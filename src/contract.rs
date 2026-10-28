@@ -510,6 +510,7 @@ fn tweak(
                 color: look::REF,
                 size: 4.0,
                 alpha: 1.0,
+                ..Default::default()
             })
             .layer_data(vec![
                 (

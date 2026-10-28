@@ -375,6 +375,7 @@ pub(super) fn calibration(
             size: 3.0,
             color: o.brand(),
             alpha: 0.95,
+            ..Default::default()
         })
         .layer_data(frame)
         .layer_aes(aes);
@@ -488,6 +489,7 @@ pub(super) fn acf(
                 size: 2.4,
                 color: o.brand(),
                 alpha: 1.0,
+                ..Default::default()
             });
         let mut plot = look::styled(plot, o, small)
             .xlab(&labels.x_or("lag"))
