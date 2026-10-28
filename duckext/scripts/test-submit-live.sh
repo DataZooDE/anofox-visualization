@@ -298,8 +298,8 @@ CREDS=(-H "X-Anofox-Session: $SESSION_EVE")
 CODE=$(submit '{"dashboard":"d","panel":1,"id":"b8b8b8b8","vars":{"q1":"B"}}')
 [ "$CODE" = "201" ] || fail "B1: a locked-var submission should still be 201, got $CODE: $(cat "$W/out")"
 EVE_LINE=$(grep '"user":"eve"' "$W/state.jsonl") || fail "B1: expected a recorded row for eve"
-echo "$EVE_LINE" | grep -q '"q1":"A"' || fail "B1: expected the locked value q1=A to be recorded, got: $EVE_LINE"
-if echo "$EVE_LINE" | grep -q '"q1":"B"'; then fail "B1: the viewer's own value q1=B must never override the locked value"; fi
+grep <<<"$EVE_LINE" -q '"q1":"A"' || fail "B1: expected the locked value q1=A to be recorded, got: $EVE_LINE"
+if grep <<<"$EVE_LINE" -q '"q1":"B"'; then fail "B1: the viewer's own value q1=B must never override the locked value"; fi
 echo "OK: B1 — a credential-locked variable records the locked value, not the viewer's own"
 CREDS=("${AUTH_H[@]}")
 
@@ -314,8 +314,8 @@ CREDS=(-H "X-Anofox-Session: $SESSION_ZOE")
 CODE=$(submit '{"dashboard":"d","panel":5,"id":"c0ff0001","vars":{"q3":["B","D"]}}')
 [ "$CODE" = "201" ] || fail "a locked ::MULTISELECT submission should be 201, got $CODE: $(cat "$W/out")"
 ZOE_LINE=$(grep '"user":"zoe"' "$W/state.jsonl") || fail "expected a recorded row for zoe"
-echo "$ZOE_LINE" | grep -q '"q3":\["A","C"\]' || fail "expected the locked list q3=[\"A\",\"C\"] to be recorded, got: $ZOE_LINE"
-if echo "$ZOE_LINE" | grep -q '"q3":\["B","D"\]'; then fail "the viewer's own selection q3=[B,D] must never override the locked list"; fi
+grep <<<"$ZOE_LINE" -q '"q3":\["A","C"\]' || fail "expected the locked list q3=[\"A\",\"C\"] to be recorded, got: $ZOE_LINE"
+if grep <<<"$ZOE_LINE" -q '"q3":\["B","D"\]'; then fail "the viewer's own selection q3=[B,D] must never override the locked list"; fi
 echo "OK: a credential-locked ::MULTISELECT (list) value records the locked list, not the viewer's own"
 CREDS=("${AUTH_H[@]}")
 
@@ -344,8 +344,8 @@ for c in "${CODES[@]:$BURST}"; do [ "$c" = "429" ] && LATER_429=1; done
 echo "OK: rapid submissions from one user run into 429 past its burst=$BURST (${CODES[*]})"
 
 HEADERS=$(curl -s -D - -o /dev/null -X POST "localhost:$PORT/api/submit" "${CREDS[@]}" "${HDRS[@]}" -d '{"dashboard":"d","panel":1,"id":"f100dff","vars":{"q1":"B"}}')
-echo "$HEADERS" | grep -qi '^HTTP/[0-9.]* 429' || fail "expected a 429 once the burst is spent: $HEADERS"
-echo "$HEADERS" | grep -qi '^Retry-After:' || fail "a 429 must carry Retry-After: $HEADERS"
+grep <<<"$HEADERS" -qi '^HTTP/[0-9.]* 429' || fail "expected a 429 once the burst is spent: $HEADERS"
+grep <<<"$HEADERS" -qi '^Retry-After:' || fail "a 429 must carry Retry-After: $HEADERS"
 echo "OK: a 429 carries Retry-After"
 
 # A fresh global-rate window (B3 is about the *per-user* bucket, not the

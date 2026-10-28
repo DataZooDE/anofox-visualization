@@ -125,8 +125,8 @@ CODE=$(submit alice a0a0a0a0 B)
 [ "$CODE" = "201" ] || fail "alice's submission should be 201, got $CODE: $(cat "$W/sub_out")"
 
 ALICE_ROWS=$(panel alice quiz 3)
-echo "$ALICE_ROWS" | grep -q '"user":"alice"' || fail "alice should see her own row: $ALICE_ROWS"
-echo "$ALICE_ROWS" | grep -q '"value":"B"' || fail "alice's row should carry her answer: $ALICE_ROWS"
+grep <<<"$ALICE_ROWS" -q '"user":"alice"' || fail "alice should see her own row: $ALICE_ROWS"
+grep <<<"$ALICE_ROWS" -q '"value":"B"' || fail "alice's row should carry her answer: $ALICE_ROWS"
 ALICE_N=$(n_of <(panel alice quiz 2))
 [ "$ALICE_N" = "1" ] || fail "alice's own viewer_state count should be 1, got $ALICE_N"
 echo "OK: alice reads her own submitted row back"
@@ -162,13 +162,13 @@ echo "OK: each viewer's own row count is independent of the other's submissions"
 CAROL_ALL=$(panel carol-x progress 1 '{}')
 # carol-x isn't in the trainers group yet — prove the group check actually
 # runs (not just presence of ANY claims), then retry as a real trainer.
-echo "$CAROL_ALL" | grep -q '"user":"alice"' && fail "a non-trainer must not see alice's rows on the trainer dashboard: $CAROL_ALL"
+grep <<<"$CAROL_ALL" -q '"user":"alice"' && fail "a non-trainer must not see alice's rows on the trainer dashboard: $CAROL_ALL"
 
 CAROL_TRAINER_ROWS=$(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
   -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: carol" -H "X-Forwarded-Groups: trainers" \
   -d '{"dashboard":"progress","panel":1,"vars":{}}')
-echo "$CAROL_TRAINER_ROWS" | grep -q '"user":"alice"' || fail "carol (trainers group) should see alice's rows: $CAROL_TRAINER_ROWS"
-echo "$CAROL_TRAINER_ROWS" | grep -q '"user":"bob"' || fail "carol (trainers group) should see bob's rows too: $CAROL_TRAINER_ROWS"
+grep <<<"$CAROL_TRAINER_ROWS" -q '"user":"alice"' || fail "carol (trainers group) should see alice's rows: $CAROL_TRAINER_ROWS"
+grep <<<"$CAROL_TRAINER_ROWS" -q '"user":"bob"' || fail "carol (trainers group) should see bob's rows too: $CAROL_TRAINER_ROWS"
 CAROL_N=$(n_of <(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
   -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: carol" -H "X-Forwarded-Groups: trainers" \
   -d '{"dashboard":"progress","panel":0,"vars":{}}'))
@@ -176,7 +176,7 @@ CAROL_N=$(n_of <(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN
 echo "OK: a named trainer sees every viewer's rows on their dashboard"
 
 BOB_PROGRESS_ROWS=$(panel bob progress 1 '{}')
-echo "$BOB_PROGRESS_ROWS" | grep -q '"user":"alice"' && fail "bob (not a trainer) on the trainer dashboard must not see alice's rows: $BOB_PROGRESS_ROWS"
+grep <<<"$BOB_PROGRESS_ROWS" -q '"user":"alice"' && fail "bob (not a trainer) on the trainer dashboard must not see alice's rows: $BOB_PROGRESS_ROWS"
 BOB_PROGRESS_N=$(n_of <(panel bob progress 0 '{}'))
 [ "$BOB_PROGRESS_N" = "1" ] || fail "bob (not a trainer) must see only his own row on the trainer dashboard, got $BOB_PROGRESS_N"
 echo "OK: a non-trainer on the SAME trainer dashboard still sees only their own rows (fails safe)"
@@ -191,7 +191,7 @@ echo "OK: a dashboard statement cannot read the state file directly (enable_exte
 # the same group a real trainer has.
 CAROL_KEY_ROWS=$(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
   -H "Authorization: Bearer $APIKEY" -d '{"dashboard":"progress","panel":1,"vars":{}}')
-echo "$CAROL_KEY_ROWS" | grep -q '"user":"alice"' && fail "an api_key identity (carol's, group trainers) must not see alice's rows: $CAROL_KEY_ROWS"
+grep <<<"$CAROL_KEY_ROWS" -q '"user":"alice"' && fail "an api_key identity (carol's, group trainers) must not see alice's rows: $CAROL_KEY_ROWS"
 CAROL_KEY_N=$(n_of <(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
   -H "Authorization: Bearer $APIKEY" -d '{"dashboard":"progress","panel":0,"vars":{}}'))
 [ "$CAROL_KEY_N" = "0" ] || fail "an api_key identity must fall back to its own (here: zero) rows, got $CAROL_KEY_N: $CAROL_KEY_ROWS"
@@ -206,8 +206,8 @@ CODE=$(curl -s -o "$W/sub_out" -w '%{http_code}' -X POST "localhost:$PORT/api/su
   -d '{"dashboard":"quiz","panel":5,"id":"c0ffee01","vars":{"q4":["A",null]}}')
 [ "$CODE" = "201" ] || fail "a MULTISELECT with a NULL option should be 201, got $CODE: $(cat "$W/sub_out")"
 Q4_ROW=$(panel alice quiz 3)
-echo "$Q4_ROW" | grep -q '"name":"q4"' || fail "expected a recorded q4 row: $Q4_ROW"
-echo "$Q4_ROW" | grep -q '"value_list":\["A",null\]' || fail "a NULL item in the list must be stored as a real SQL NULL (value_list=[\"A\",null]), not an empty string: $Q4_ROW"
+grep <<<"$Q4_ROW" -q '"name":"q4"' || fail "expected a recorded q4 row: $Q4_ROW"
+grep <<<"$Q4_ROW" -q '"value_list":\["A",null\]' || fail "a NULL item in the list must be stored as a real SQL NULL (value_list=[\"A\",null]), not an empty string: $Q4_ROW"
 echo "OK: a NULL item inside a recorded list is stored as a real NULL, not ''"
 
 # #611 B1: `value` for a list (MULTISELECT) answer holds the same JSON
@@ -215,7 +215,7 @@ echo "OK: a NULL item inside a recorded list is stored as a real NULL, not ''"
 # still writes (web/app.js) — not NULL. The #600 rewrite's Appender path
 # dropped this for one push; a dashboard reading `value` for a list
 # answer must see what it always has.
-echo "$Q4_ROW" | grep -q '"value":"\[\\"A\\",null\]"' || fail "value for a list answer must hold the JSON text (here [\"A\",null]), not NULL: $Q4_ROW"
+grep <<<"$Q4_ROW" -q '"value":"\[\\"A\\",null\]"' || fail "value for a list answer must hold the JSON text (here [\"A\",null]), not NULL: $Q4_ROW"
 echo "OK: value for a list (MULTISELECT) answer holds its JSON text, not NULL"
 
 # --- #614: a record with an embedded NUL byte in a value, written by
@@ -273,13 +273,13 @@ fi
 CAROL_AFTER_RESTART=$(curl -s -X POST "localhost:$PORT/api/panel" -H "Origin: $ORIGIN" \
   -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: carol" -H "X-Forwarded-Groups: trainers" \
   -d '{"dashboard":"progress","panel":1,"vars":{}}')
-echo "$CAROL_AFTER_RESTART" | grep -q '"user":"alice"' || fail "#614: a trainer must still see every pre-restart row after the hand-edit, got: $CAROL_AFTER_RESTART"
-echo "$CAROL_AFTER_RESTART" | grep -q '"user":"dave"' || fail "#614: the hand-edited canonical-ts/NUL record (fast Appender path) must seed and read back, got: $CAROL_AFTER_RESTART"
-echo "$CAROL_AFTER_RESTART" | grep -q '"user":"erin"' || fail "#614: the hand-edited non-canonical-ts/NUL record (slow SQL fallback path, #611 S2) must seed and read back, got: $CAROL_AFTER_RESTART"
-echo "$CAROL_AFTER_RESTART" | grep -q '"user":"frank"' || fail "#614: the hand-edited MULTISELECT/NUL record (append_varchar_list path) must seed and read back, got: $CAROL_AFTER_RESTART"
-echo "$CAROL_AFTER_RESTART" | grep -q '"value":"x\\u0000y"' || fail "#614: dave's embedded-NUL value must round-trip unchanged (fast Appender path), got: $CAROL_AFTER_RESTART"
-echo "$CAROL_AFTER_RESTART" | grep -q '"value":"p\\u0000q"' || fail "#614: erin's embedded-NUL value must round-trip unchanged (slow SQL fallback path), got: $CAROL_AFTER_RESTART"
-echo "$CAROL_AFTER_RESTART" | grep -q '"value_list":\["x\\u0000y",null\]' || fail "#614: frank's embedded-NUL list item must round-trip unchanged (append_varchar_list path), got: $CAROL_AFTER_RESTART"
+grep <<<"$CAROL_AFTER_RESTART" -q '"user":"alice"' || fail "#614: a trainer must still see every pre-restart row after the hand-edit, got: $CAROL_AFTER_RESTART"
+grep <<<"$CAROL_AFTER_RESTART" -q '"user":"dave"' || fail "#614: the hand-edited canonical-ts/NUL record (fast Appender path) must seed and read back, got: $CAROL_AFTER_RESTART"
+grep <<<"$CAROL_AFTER_RESTART" -q '"user":"erin"' || fail "#614: the hand-edited non-canonical-ts/NUL record (slow SQL fallback path, #611 S2) must seed and read back, got: $CAROL_AFTER_RESTART"
+grep <<<"$CAROL_AFTER_RESTART" -q '"user":"frank"' || fail "#614: the hand-edited MULTISELECT/NUL record (append_varchar_list path) must seed and read back, got: $CAROL_AFTER_RESTART"
+grep <<<"$CAROL_AFTER_RESTART" -q '"value":"x\\u0000y"' || fail "#614: dave's embedded-NUL value must round-trip unchanged (fast Appender path), got: $CAROL_AFTER_RESTART"
+grep <<<"$CAROL_AFTER_RESTART" -q '"value":"p\\u0000q"' || fail "#614: erin's embedded-NUL value must round-trip unchanged (slow SQL fallback path), got: $CAROL_AFTER_RESTART"
+grep <<<"$CAROL_AFTER_RESTART" -q '"value_list":\["x\\u0000y",null\]' || fail "#614: frank's embedded-NUL list item must round-trip unchanged (append_varchar_list path), got: $CAROL_AFTER_RESTART"
 echo "OK: a record with an embedded NUL byte in a value seeds and reads back correctly, on the fast Appender path, the slow SQL fallback path and the MULTISELECT (list) path"
 
 # --- #614 output check (security review): a NUL-containing value is now

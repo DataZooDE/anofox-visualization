@@ -784,5 +784,12 @@ body.dp-fit-measuring,body.dp-fit-measuring *{transition:none !important}
 .panel.dp-fit-scroll{overflow:auto}
 .dp-fit-note{position:fixed;right:16px;bottom:16px;z-index:70;display:flex;gap:.5rem;align-items:center;max-width:min(360px,calc(100vw - 32px));padding:.45rem .5rem .45rem .8rem;border-radius:10px;background:var(--ax-card);color:var(--ax-muted);border:1px solid var(--ax-line);box-shadow:var(--ax-shadow);font-size:.8rem;line-height:1.35}
 .dp-fit-note-x{background:none;border:0;box-shadow:none;color:inherit;font-size:1.05rem;line-height:1;padding:.1rem .3rem;cursor:pointer}
+/* M3d (#643): map zoom tools */
+.panel-svg .dp-map-reset{position:absolute;top:6px;left:6px;z-index:2;min-width:28px;height:28px;padding:0 .4rem;border-radius:999px;border:1px solid var(--ax-line);background:var(--ax-card);color:var(--ax-ink);font-size:.9rem;cursor:pointer;box-shadow:var(--ax-shadow)}
+.panel-svg .dp-map-reset:hover{background:var(--ax-bg)}
+.panel-svg .dp-map-reset:focus-visible{outline:2px solid var(--ax-accent);outline-offset:2px}
+.dp-map-find{margin:.2rem 0 .4rem}
+.dp-map-find input{width:100%;max-width:280px;padding:.3rem .5rem;border:1px solid var(--ax-line);border-radius:6px;background:var(--ax-card);color:var(--ax-ink);font:inherit;font-size:.85rem}
+.dp-map-find input:focus-visible{outline:2px solid var(--ax-accent);outline-offset:1px}
 /* M3e-1 (#646): 'print'::NORTH_ARROW — drawn for print / PNG / --svg, not on screen */
 @media screen{.panel svg .dp-print-only{display:none}}

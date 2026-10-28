@@ -1381,9 +1381,11 @@ flags skipped rows with `map/size-not-positive`.
   `data-x` (its key — the row — when it has no label; else the label is the
   key) and `data-class`; a graduated symbol adds `data-size`/`data-fsize`
   (above); the root carries `data-map`, `data-proj` and `data-classes`.
-  Scroll zooms and drag pans in the browser (double-click resets); the zoom
-  window is in the projected units, and each zoom re-renders, so
-  simplification acts as level of detail.
+  Scroll zooms and drag pans in the browser (double-click a feature zooms to
+  it, elsewhere resets — see *Zoom* below); the zoom window is in the
+  projected units, and each zoom re-renders, so simplification acts as level
+  of detail. The root's `data-viewport` (ggplot-rs) is the rect the window is
+  drawn into, so the point under the pointer stays put while zooming.
 - **Accessibility**: the SVG's `<desc>` (and the chart's aria label) is one
   sentence — "400 regions (equal-area conic). Highest: München 980; lowest:
   Zweibrücken 12. 5 quantile classes: 80 / 80 / 80 / 80 / 80; 3 without
@@ -1590,7 +1592,9 @@ no lerp) and `stroke-width` interpolates, same as `'tween'::TRANSITION`'s
 re-run join elsewhere. Reduced motion keeps Play available (stepping
 through time *is* the content) with instant, 1.5 s-apart steps, and it
 never autoplays on its own. The step persists per statement across a
-re-run, like `::STORY`'s step does. The ⤓ HTML export embeds every frame
+re-run, like `::STORY`'s step does; a map with a `-- @name` also keeps it in
+the URL (`?frame.<name>=<label>`, see *Viewer state in the URL*), so a shared
+link opens on the same week. The ⤓ HTML export embeds every frame
 (pre-rendered, so it still plays with no live query engine) and rebuilds the
 same bar offline, as long as their total stays within 3 MB per map; above
 that, a static note takes its place instead — "12 frames — Play in the live
@@ -3275,10 +3279,20 @@ its **`::LABEL`** (a choropleth's region name):
   empty space (or **Esc**) to clear.
 - **Keyboard**: Tab into the map, arrows walk the features (series by series),
   Enter / Space click the focused one.
-- **Zoom**: scroll, drag to pan, double-click resets. Maps that carry the
-  same **`::SYNC_ZOOM`** value zoom and pan together (same centre and scale,
-  each in its own aspect); a map that comes back after a re-run takes the
-  group's view.
+- **Zoom**: scroll (about the pointer) and drag to pan. **Double-click a
+  feature** to zoom to it (a point or a small region gets a sensible area
+  around it; the first click's selection stays), double-click empty space to
+  go back to the whole map. While zoomed, a **⟳ chip** in the corner resets.
+  The chart toolbox adds **Reset view**, **Zoom to selection** (the clicked
+  series' features) and **Find a place** — a search box over the map's own
+  feature labels (no geocoding): Enter or a pick zooms to it, focuses it and
+  opens its tooltip ("Zoomed to …" is announced). Keys on a focused map:
+  **+** / **−** zoom about the centre, **0** resets, **z** zooms to the
+  focused feature. Zoom stops at 1/64 of the whole map's width in and twice
+  it out; each step is instant. The ⤓ HTML export keeps the view on screen,
+  without the chip. Maps that carry the same **`::SYNC_ZOOM`** value zoom and
+  pan together (same centre and scale, each in its own aspect); a map that
+  comes back after a re-run takes the group's view.
 
 ```sql
 -- Two plans side by side: routes and stops coloured by van, hover text per
@@ -3325,6 +3339,7 @@ bookmark or **Share** restores the same view.
 | `?v.selected=web` | the shared click cross-filter |
 | `?v.sku=SKU-A&v.sku=SKU-C` | a named selection (a `::ROWSELECT` table's first column, a chart's `::SELECT_AS`) |
 | `?view.2=Bars` · `?view.yoy=Bars` | a `::VIEW` group's open alternative, by its button label — the group's alias (`AS yoy`) when it has one, else its 1-based position in the script; never a cache key, and ignored on the script-free served page |
+| `?frame.weekly=Week%205` | a time map's (`::FRAME`) shown frame, by its label — only for a panel with a `-- @name` (here `-- @name weekly`), and only when it isn't the last frame (the default); written as you step or play (at most every 0.5 s), ignored when the label no longer exists |
 
 A value that fails its input's check is ignored (the input keeps its default).
 Only variable **values** travel, never SQL: on a locked server

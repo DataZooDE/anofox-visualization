@@ -506,7 +506,7 @@ for i in 1 2 3 4 5; do
   t1=$(date +%s)
   line="$(tail -n +"$((before + 1))" "$T/out_caphost")"
   echo "cap attempt $i: $((t1 - t0))s, output: $line" >&2
-  echo "$line" | grep -qi "already running or abandoned" && cap_hit=1
+  grep <<<"$line" -qi "already running or abandoned" && cap_hit=1
   if [ "$i" -eq 2 ]; then
     t_after_2=$(threads_of)
   fi

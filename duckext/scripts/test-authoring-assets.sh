@@ -80,17 +80,17 @@ run_serve() {
 
 # --- startup refusals (never bind, never serve) -----------------------
 OUT="$(run_serve "{\"assets\": \"$T/no-such-dir\"}" "$((PORT+1))" || true)"
-echo "$OUT" | grep -qi "options.assets" || fail "missing --assets dir should refuse to start: $OUT"
+grep <<<"$OUT" -qi "options.assets" || fail "missing --assets dir should refuse to start: $OUT"
 echo "OK: options.assets refuses a missing directory at start"
 
 OUT="$(run_serve "{\"assets\": \"$ASSETS/pic.svg\"}" "$((PORT+2))" || true)"
-echo "$OUT" | grep -qi "not a directory" || fail "a non-directory options.assets should refuse to start: $OUT"
+grep <<<"$OUT" -qi "not a directory" || fail "a non-directory options.assets should refuse to start: $OUT"
 echo "OK: options.assets refuses a non-directory at start"
 
 LINK="$T/assets-link"
 ln -s "$ASSETS" "$LINK"
 OUT="$(run_serve "{\"assets\": \"$LINK\"}" "$((PORT+3))" || true)"
-echo "$OUT" | grep -qi "symlink" || fail "a symlinked options.assets root should refuse to start: $OUT"
+grep <<<"$OUT" -qi "symlink" || fail "a symlinked options.assets root should refuse to start: $OUT"
 echo "OK: options.assets refuses a symlinked root at start"
 
 # #604 S5: the same symlinked root, but named with a trailing slash — the
@@ -98,7 +98,7 @@ echo "OK: options.assets refuses a symlinked root at start"
 # path a trailing slash forces to resolve as a directory used to follow
 # the link instead of stat-ing it, letting this one through.
 OUT="$(run_serve "{\"assets\": \"$LINK/\"}" "$((PORT+6))" || true)"
-echo "$OUT" | grep -qi "symlink" || fail "a symlinked options.assets root with a trailing slash should refuse to start: $OUT"
+grep <<<"$OUT" -qi "symlink" || fail "a symlinked options.assets root with a trailing slash should refuse to start: $OUT"
 echo "OK: options.assets refuses a symlinked root at start even with a trailing slash"
 
 # #604 R4: `rootlink/sub/..` — not the symlinked root named with a
@@ -110,12 +110,12 @@ echo "OK: options.assets refuses a symlinked root at start even with a trailing 
 # lexically first.
 mkdir -p "$LINK/sub"
 OUT="$(run_serve "{\"assets\": \"$LINK/sub/..\"}" "$((PORT+10))" || true)"
-echo "$OUT" | grep -qi "symlink" || fail "a symlinked options.assets root reached via sub/.. should refuse to start: $OUT"
+grep <<<"$OUT" -qi "symlink" || fail "a symlinked options.assets root reached via sub/.. should refuse to start: $OUT"
 echo "OK: options.assets refuses a symlinked root at start even via a cd-and-back-out path"
 rm -f "$LINK"
 
 OUT="$(run_serve '{"nope_key": "x"}' "$((PORT+4))" || true)"
-echo "$OUT" | grep -qi "unknown key" || fail "an unrecognised options key should still be refused: $OUT"
+grep <<<"$OUT" -qi "unknown key" || fail "an unrecognised options key should still be refused: $OUT"
 echo "OK: an unrecognised options key is still refused (AppBrand's own validation is untouched)"
 
 # #604 S1: options.assets reads files with plain std::fs, bypassing the
@@ -123,17 +123,17 @@ echo "OK: an unrecognised options key is still refused (AppBrand's own validatio
 # unless this is checked — refuse the option outright instead.
 OUT="$(printf "LOAD %s;\nSET enable_external_access=false;\nSELECT anofox_serve(%s, %s);\n" \
   "$(q "$EXT")" "$((PORT+7))" "$(q "{\"assets\": \"$ASSETS\"}")" | "$DUCKDB" -unsigned ":memory:" 2>&1 || true)"
-echo "$OUT" | grep -qi "enable_external_access" || fail "options.assets should refuse to start with enable_external_access=false: $OUT"
+grep <<<"$OUT" -qi "enable_external_access" || fail "options.assets should refuse to start with enable_external_access=false: $OUT"
 echo "OK: options.assets refuses to start when enable_external_access is false"
 
 OUT="$(printf "LOAD %s;\nSET allowed_directories=['%s'];\nSELECT anofox_serve(%s, %s);\n" \
   "$(q "$EXT")" "$OUTSIDE" "$((PORT+8))" "$(q "{\"assets\": \"$ASSETS\"}")" | "$DUCKDB" -unsigned ":memory:" 2>&1 || true)"
-echo "$OUT" | grep -qi "allowed_directories" || fail "options.assets outside every allowed_directories entry should refuse to start: $OUT"
+grep <<<"$OUT" -qi "allowed_directories" || fail "options.assets outside every allowed_directories entry should refuse to start: $OUT"
 echo "OK: options.assets refuses a root outside every allowed_directories entry"
 
 OUT="$(printf "LOAD %s;\nSET allowed_directories=['%s'];\nSELECT anofox_serve(%s, %s);\n" \
   "$(q "$EXT")" "$ASSETS" "$((PORT+9))" "$(q "{\"assets\": \"$ASSETS\"}")" | "$DUCKDB" -unsigned ":memory:" 2>&1 || true)"
-echo "$OUT" | grep -qi "anofox-visualization serving" || fail "options.assets inside an allowed_directories entry should start: $OUT"
+grep <<<"$OUT" -qi "anofox-visualization serving" || fail "options.assets inside an allowed_directories entry should start: $OUT"
 echo "OK: options.assets starts when the root is inside an allowed_directories entry"
 
 # --- a real, running server with the option on -------------------------
@@ -163,18 +163,18 @@ hdr() { curl -s -D - -o /dev/null -H "X-Anofox-Token: $TOKEN" "http://127.0.0.1:
 code() { curl -s --path-as-is -o /dev/null -w '%{http_code}' -H "X-Anofox-Token: $TOKEN" "http://127.0.0.1:$PORT$1"; }
 
 H="$(hdr /assets/pic.svg)"
-echo "$H" | grep -qi '^HTTP/1.1 200' || fail "GET /assets/pic.svg should be 200: $H"
-echo "$H" | grep -qi 'content-type: image/svg+xml' || fail "wrong Content-Type: $H"
-echo "$H" | grep -qi 'x-content-type-options: nosniff' || fail "missing nosniff: $H"
-echo "$H" | grep -qi "content-security-policy: default-src 'none'; style-src 'unsafe-inline'; sandbox" || fail "missing/wrong CSP: $H"
-echo "$H" | grep -qi 'cache-control: private, max-age=60' || fail "missing/wrong Cache-Control: $H"
-echo "$H" | grep -qi 'cross-origin-resource-policy: same-origin' || fail "missing CORP: $H"
+grep <<<"$H" -qi '^HTTP/1.1 200' || fail "GET /assets/pic.svg should be 200: $H"
+grep <<<"$H" -qi 'content-type: image/svg+xml' || fail "wrong Content-Type: $H"
+grep <<<"$H" -qi 'x-content-type-options: nosniff' || fail "missing nosniff: $H"
+grep <<<"$H" -qi "content-security-policy: default-src 'none'; style-src 'unsafe-inline'; sandbox" || fail "missing/wrong CSP: $H"
+grep <<<"$H" -qi 'cache-control: private, max-age=60' || fail "missing/wrong Cache-Control: $H"
+grep <<<"$H" -qi 'cross-origin-resource-policy: same-origin' || fail "missing CORP: $H"
 echo "OK: a valid image is served with the locked route's own headers"
 
-GET_LEN="$(echo "$H" | grep -oiE '^content-length: [0-9]+' | grep -oE '[0-9]+')"
+GET_LEN="$(grep <<<"$H" -oiE '^content-length: [0-9]+' | grep -oE '[0-9]+')"
 HEAD_H="$(curl -sI -H "X-Anofox-Token: $TOKEN" "http://127.0.0.1:$PORT/assets/pic.svg")"
-echo "$HEAD_H" | grep -qi '^HTTP/1.1 200' || fail "HEAD should be 200: $HEAD_H"
-HEAD_LEN="$(echo "$HEAD_H" | grep -oiE '^content-length: [0-9]+' | grep -oE '[0-9]+')"
+grep <<<"$HEAD_H" -qi '^HTTP/1.1 200' || fail "HEAD should be 200: $HEAD_H"
+HEAD_LEN="$(grep <<<"$HEAD_H" -oiE '^content-length: [0-9]+' | grep -oE '[0-9]+')"
 [ "$GET_LEN" = "$HEAD_LEN" ] || fail "HEAD Content-Length ($HEAD_LEN) disagrees with GET's ($GET_LEN)"
 echo "OK: HEAD agrees with GET's Content-Length without reading the body"
 
