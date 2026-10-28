@@ -619,3 +619,36 @@ This replaces the §9 "M2: types" and "M3" rows:
 | **M2f: time maps (player)** | `web/anim.js` frame bar (play/pause/step/slider), reduced-motion behaviour (D14), export keeps the last frame | **M**: ~450 JS, ≈ 1.5–2 days | Keyed tween, reduced motion, export snapshot |
 
 **Total:** about 9.5–10 working days across six PRs, sequential (D18). M3 (facets, tooltip sparklines, opt-in tiles with a security review, zoom tools) gets its own issues once M2f merges.
+
+## 16. M3 decisions (2026-10-28)
+
+The owner approved the M3 plan (`plan-maps-m3.md`, outside the repo) and every recommended decision:
+
+| # | Decision |
+|---|---|
+| D-M3-1 | Small multiples are one GGPlot with ggplot-rs `facet_wrap` (not N plots in a grid). |
+| D-M3-2 | At most 12 maps; the first 12 are drawn, `map/too-many-facets` warns. |
+| D-M3-3 | `::FACET` with `::FRAME`: the time map wins, `map/facet-frame`. |
+| D-M3-4 | A faceted legend shows no per-class counts. |
+| D-M3-5 | Attribution once under the grid; scale bar once, in the last map. |
+| D-M3-6 | `::FACET_FREE` on a map behaves like `::FACET` (shared extent), with a note. |
+| D-M3-7 | Tooltip charts reuse `list(..)::SPARKLINE` / `::SPARKBAR`; no new role. |
+| D-M3-8 | Each feature's tooltip chart has its own y range. |
+| D-M3-9 | Double-click a feature: zoom to it, keeping the first click's selection; elsewhere: reset. |
+| D-M3-10 | Zoom steps are instant. |
+| D-M3-11 | Zoom between 1/64 and 2× the whole map's width. |
+| D-M3-12 | "Find a place" searches the drawn features' labels only; no geocoding. |
+| D-M3-13 | `::NORTH_ARROW 'print'\|'always'`, off by default, true north. |
+| D-M3-14 | A frame in the URL only for `-- @name` panels, keyed by its label (`?frame.<name>=<label>`). |
+| D-M3-15 | The generic bar/line frame player is its own issue (#663). |
+| D-M3-16 | `anofox_boundaries(layer)` (§14.6) stays deferred. |
+| D-M3-17 | Facet order follows D11 (numbers/dates ascending, else SQL order). |
+| D-M3-18 | Small multiples ship in two steps: areas/points/symbols (#644), then flows/hexbin/bivariate (#645). |
+
+Shipped: M3b tooltip trends (#642), M3d zoom tools (#643), M3a-1 small multiples (#644), M3e-1 north arrow (#646), M3e-2 frame in the URL (#647). ggplot-rs 0.32/0.33 carry the upstream parts (`GeomPoint::visibility`; fixed-aspect facets, `data-viewport`/`data-panels`, `GeomAttribution::figure`, `show_counts`, `GeomNorthArrow`).
+
+Loose ends recorded here:
+- **Level of detail:** covered by ggplot-rs `GeomSf::simplify_px` (render-resolution simplification); reopen only if a real map is slow.
+- **NUTS terms:** `scripts/fetch-nuts.sh` stays undocumented until someone reads the EuroGeographics/GISCO terms page and records the URL, date and outcome here.
+- **M3c (opt-in tiles):** not scheduled; it needs an adversarial security review before any plan.
+- **Follow-ups filed:** #663 (generic frame player), #664 (`::SYNC_FRAME`), #665 (KPI sparkline through `render_cell`), #666 (map legend layout upstream).
