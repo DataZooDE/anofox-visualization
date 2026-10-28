@@ -16,7 +16,7 @@
 //! anchor needs `geom_text`'s own offset/overlap support, not audited
 //! this slice).
 use ggplot_rs::geom::annotation_scale::{
-    AttributionOverflow, GeomAnnotationScale, GeomAttribution, MapCorner,
+    AttributionOverflow, GeomAnnotationScale, GeomAttribution, GeomNorthArrow, MapCorner,
 };
 use ggplot_rs::geom::sf::GeomSf;
 use ggplot_rs::geom::sf_text::{GeomSfText, SfLabelAnchor};
@@ -1139,6 +1139,39 @@ pub(super) fn build(
         // layer carrying that panel's facet value
         if let Some(last) = facet.and_then(|fc| fc.levels.last()) {
             plot = plot.layer_data(vec![("facet".to_string(), vec![Value::Str(last.clone())])]);
+        }
+    }
+    // `::NORTH_ARROW` (M3e-1, #646): ggplot-rs's `GeomNorthArrow` in the
+    // top-right corner, turned to true north at the window's centre (the
+    // centre's lon/lat found by inverting the projection numerically,
+    // starting from the data's own lon/lat centre). `'print'` marks it
+    // `dp-print-only`, which the screen CSS hides.
+    let north = crate::find_role(cols, crate::Role::NorthArrow)
+        .and_then(|c| {
+            c.values.iter().find_map(|v| match v {
+                Value::Str(s) if !s.trim().is_empty() => Some(s.trim().to_ascii_lowercase()),
+                _ => None,
+            })
+        })
+        .filter(|m| crate::NORTH_ARROW_MODES.contains(&m.as_str()));
+    if let Some(mode) = north {
+        let start = if m.lonlat.is_empty() {
+            [0.0, 0.0]
+        } else {
+            [
+                (m.lonlat.x0 + m.lonlat.x1) / 2.0,
+                (m.lonlat.y0 + m.lonlat.y1) / 2.0,
+            ]
+        };
+        let centre = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+        let deg = m
+            .proj
+            .inverse_near(centre, start)
+            .map(|ll| m.proj.north_deg(ll))
+            .unwrap_or(0.0);
+        plot = plot.annotation_north_arrow_with(GeomNorthArrow::default().rotation_deg(deg));
+        if mode == "print" {
+            plot = plot.layer_svg_attr("class", "dp-print-only");
         }
     }
     // `ft.lines` holds every attribution line this map needs, already in

@@ -791,3 +791,5 @@ body.dp-fit-measuring,body.dp-fit-measuring *{transition:none !important}
 .dp-map-find{margin:.2rem 0 .4rem}
 .dp-map-find input{width:100%;max-width:280px;padding:.3rem .5rem;border:1px solid var(--ax-line);border-radius:6px;background:var(--ax-card);color:var(--ax-ink);font:inherit;font-size:.85rem}
 .dp-map-find input:focus-visible{outline:2px solid var(--ax-accent);outline-offset:1px}
+/* M3e-1 (#646): 'print'::NORTH_ARROW — drawn for print / PNG / --svg, not on screen */
+@media screen{.panel svg .dp-print-only{display:none}}

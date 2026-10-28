@@ -3576,6 +3576,81 @@ fn no_trend_attr_without_a_spark_column() {
     assert!(!s.contains("Trend:"));
 }
 
+// ---- M3e-1 (#646): ::NORTH_ARROW ----
+
+/// A wide lon/lat block (35°E–165°E, 20°N–60°N) under Equal Earth with its
+/// central meridian at 0°: at the window's centre (100°E, 40°N) the
+/// meridians lean, so true north is not straight up.
+fn north_cols(mode: Option<&str>) -> Vec<Column> {
+    let mut cols = vec![
+        Column::new(
+            "g",
+            Role::Geometry,
+            strs(&[
+                "POLYGON((35 20, 100 20, 100 60, 35 60, 35 20))",
+                "POLYGON((100 20, 165 20, 165 60, 100 60, 100 20))",
+            ]),
+        ),
+        Column::new("p", Role::Projection, konst("equal-earth", 2)),
+    ];
+    if let Some(m) = mode {
+        cols.push(Column::new("n", Role::NorthArrow, konst(m, 2)));
+    }
+    cols
+}
+
+/// The north arrow's polygon points.
+fn arrow_points(svg: &str) -> Option<Vec<(f64, f64)>> {
+    let at = svg.find("data-geom=\"annotation_north_arrow\"")?;
+    let tag_start = svg[..at].rfind('<')?;
+    let tag = &svg[tag_start..at];
+    let pts = attr(tag, "points")?;
+    Some(
+        pts.split(' ')
+            .map(|p| {
+                let mut it = p.split(',').map(|s| s.parse::<f64>().unwrap());
+                (it.next().unwrap(), it.next().unwrap())
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn north_arrow_is_off_by_default() {
+    let s = svg(north_cols(None));
+    assert!(!s.contains("annotation_north_arrow"));
+    let s = svg(north_cols(Some("yes please")));
+    assert!(
+        !s.contains("annotation_north_arrow"),
+        "an unknown value draws nothing"
+    );
+}
+
+#[test]
+fn north_arrow_points_to_true_north() {
+    let s = svg(north_cols(Some("always")));
+    let pts = arrow_points(&s).expect("an arrow polygon");
+    let cx = pts.iter().map(|p| p.0).sum::<f64>() / pts.len() as f64;
+    let cy = pts.iter().map(|p| p.1).sum::<f64>() / pts.len() as f64;
+    let (tx, ty) = pts[0];
+    // tip above the centre, but turned: Equal Earth's meridians east of 0°
+    // lean in towards the central meridian as they go north (to the left)
+    assert!(ty < cy, "{pts:?}");
+    assert!(tx < cx - 0.5, "tip not turned west: {pts:?}");
+    assert!(s.contains(">N</text>"));
+    // 'always': no print-only class
+    assert!(!s.contains("dp-print-only"));
+}
+
+#[test]
+fn print_north_arrow_carries_the_print_only_class() {
+    let s = svg(north_cols(Some("Print")));
+    assert!(s.contains("annotation_north_arrow"));
+    let at = s.find("data-geom=\"annotation_north_arrow\"").unwrap();
+    let tag = &s[s[..at].rfind('<').unwrap()..at];
+    assert!(tag.contains("dp-print-only"), "{tag}");
+}
+
 // ---- M3a-1 (#644): small multiples (::FACET on a map) ----
 
 fn facet_cols(extra: Vec<Column>) -> Vec<Column> {

@@ -4710,6 +4710,16 @@ fn map_diags(
             .find(|(_, r)| *r == want)
             .and_then(|(i, _)| column_texts(rows, *i).into_iter().next())
     };
+    // M3e-1 (#646): `::NORTH_ARROW` takes 'print' or 'always'.
+    if let Some(v) = first(Role::NorthArrow) {
+        if !crate::NORTH_ARROW_MODES.contains(&v.to_ascii_lowercase().as_str()) {
+            out.push((
+                Severity::Warning,
+                "map/north-arrow-value",
+                format!("::NORTH_ARROW `{v}` is not 'print' or 'always' — no north arrow is drawn"),
+            ));
+        }
+    }
     // M3a-1 (#644): small multiples on a map.
     if has(Role::Facet) || has(Role::FacetFree) {
         let fi = roles
@@ -8445,6 +8455,28 @@ mod design_tests {
         assert_eq!(w.len(), 1, "{d:?}");
         assert_eq!(w[0].severity, Severity::Warning);
         assert!(w[0].message.contains("stat_density"), "{}", w[0].message);
+    }
+
+    #[test]
+    fn map_north_arrow_value_is_checked() {
+        let codes = |v: &str| -> Vec<&'static str> {
+            let row = json!({ "c0": "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", "c1": v });
+            check_opts(
+                "SELECT g ::MAP, n ::NORTH_ARROW FROM t;",
+                |_q| Ok(vec![row.as_object().unwrap().clone()]),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| c.starts_with("map/north"))
+            .collect()
+        };
+        assert!(codes("print").is_empty());
+        assert!(codes("Always").is_empty());
+        assert_eq!(codes("yes"), vec!["map/north-arrow-value"]);
     }
 
     #[test]
