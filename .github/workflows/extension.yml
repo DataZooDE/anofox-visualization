@@ -20,12 +20,15 @@ name: Release full toolkit
 # locally); this file only wires runners to it.
 #
 # On a `v*` tag (pushed when a GitHub release is published) the assets are
-# uploaded to that release; workflow_dispatch builds the same assets as
-# workflow artifacts only. pages.yml republishes the extensions as a DuckDB
+# uploaded to that release; workflow_dispatch and a push to a release/*
+# branch build the same assets as workflow artifacts only — the branch push
+# so every platform's toolkit (Windows' serve paths, #653) builds before the
+# release PR merges. pages.yml republishes the extensions as a DuckDB
 # custom extension repository after a successful run here.
 on:
   push:
     tags: ["v*"]
+    branches: ["release/**"]
   workflow_dispatch:
 
 concurrency:

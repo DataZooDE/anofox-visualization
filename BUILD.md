@@ -134,8 +134,10 @@ platform (linux_amd64 / linux_arm64 on Ubuntu 22.04, osx_arm64, osx_amd64,
 windows_amd64) builds and smoke-tests on its own runner, then one job writes
 `SHA256SUMS` and uploads everything to the release (`gh release upload
 --clobber`, so re-runs replace assets; if only the tag exists the release is
-created). `workflow_dispatch` builds the same files as workflow artifacts
-without touching any release. After a successful tag run, `pages.yml`
+created). `workflow_dispatch` and every push to a `release/*` branch build
+the same files as workflow artifacts without touching any release, so a
+platform-only break (the v2026.10.28 Windows toolkit, #653) shows on the
+release PR before the tag. After a successful tag run, `pages.yml`
 republishes the latest release's extensions as a DuckDB extension repository
 under `https://datazoode.github.io/anofox-visualization/extensions`.
 

@@ -31,10 +31,11 @@ env:
 jobs:
   build:
     # After a release run: only when it succeeded on a v* tag (a manual run
-    # uploads no release assets).
+    # or a release/* branch push uploads no release assets, #653).
     if: >-
       github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
