@@ -4672,6 +4672,14 @@ fn map_diags(
     out.extend(flow_diags(roles, rows));
     out.extend(hexbin_diags(roles, rows));
     out.extend(frame_diags(roles, rows));
+    // #664: a frame group only means something on a time map
+    if has(Role::SyncFrame) && !has(Role::Frame) {
+        out.push((
+            Severity::Warning,
+            "map/sync-frame-no-frame",
+            "::SYNC_FRAME only links time maps — add a ::FRAME column, or drop it".to_string(),
+        ));
+    }
     // M3b (#642): a tooltip trend column.
     if let Some((i, _)) = roles
         .iter()
@@ -8702,6 +8710,19 @@ mod design_tests {
             ),
             vec![(Severity::Warning, "map/frame-story")]
         );
+        // #664: ::SYNC_FRAME needs a ::FRAME; with one it's quiet
+        assert_eq!(
+            codes(
+                "SELECT c::REGION, v::BARCHART, 'weeks'::SYNC_FRAME FROM t;",
+                vec![json!({ "c0": "DE-BY", "c1": 1.0, "c2": "weeks" })]
+            ),
+            vec![(Severity::Warning, "map/sync-frame-no-frame")]
+        );
+        assert!(codes(
+            "SELECT c::REGION, w::FRAME, v::BARCHART, 'weeks'::SYNC_FRAME FROM t;",
+            vec![json!({ "c0": "DE-BY", "c1": "1", "c2": 1.0, "c3": "weeks" })]
+        )
+        .is_empty());
         assert_eq!(
             codes(
                 "SELECT c::REGION, w::FRAME, v::BARCHART, x::XAXIS FROM t;",

@@ -241,6 +241,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ALPHA", &["OPACITY"], R::Alpha, "modifier", true, "map layer opacity 0..1"),
     e("SYNC_ZOOM", &["ZOOM_GROUP"], R::SyncZoom, "modifier", true,
       "maps with the same value (e.g. 'routes') zoom and pan together in the browser"),
+    e("SYNC_FRAME", &["FRAME_GROUP"], R::SyncFrame, "modifier", true,
+      "time maps (::FRAME) with the same value (e.g. 'weeks') step and play together in the browser, by frame label"),
     e("XTITLE", &["X_TITLE", "XLAB"], R::XTitle, "modifier", true,
       "x-axis title, e.g. 'Residual load (GW)' — names the ::XAXIS variable, drawn under the x ticks (on a ::FLIP chart it moves with the x axis); charts with axes only"),
     e("YTITLE", &["Y_TITLE", "YLAB"], R::YTitle, "modifier", true,
@@ -954,6 +956,7 @@ mod tests {
             Role::Flip,
             Role::Alpha,
             Role::SyncZoom,
+            Role::SyncFrame,
             Role::XTitle,
             Role::YTitle,
             Role::Projection,
@@ -1108,6 +1111,7 @@ mod tests {
                 | Role::Flip
                 | Role::Alpha
                 | Role::SyncZoom
+                | Role::SyncFrame
                 | Role::XTitle
                 | Role::YTitle
                 | Role::Projection
