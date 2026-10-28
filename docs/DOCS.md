@@ -181,7 +181,7 @@ terminal.
 | `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::MARKDOWN_STYLE` | `::MD_STYLE` | kpi | a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style |
-| `::MARKDOWN_TONE` | `::MD_TONE` | kpi | a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; implies 'card' |
+| `::MARKDOWN_TONE` | `::MD_TONE` | kpi | a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; 'details' folds (the label opens it, in the browser); implies 'card' |
 | `::IMAGE` | `::PICTURE`, `::IMG` | kpi | a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption |
 | `::IMAGE_DARK` | `::IMG_DARK` | kpi | the ::IMAGE shown while the dashboard is dark |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
@@ -2235,7 +2235,7 @@ SELECT 'What it cannot tell you: *why* the input moved.'::MARKDOWN,
 | `example` | a worked example | violet |
 | `tip` | good practice | the theme's positive colour (green) |
 | `caution` | limits, "what it can't tell you" | the theme's warning colour (amber — not an alert's red) |
-| `details` | formulas, technical details | muted grey |
+| `details` | formulas, technical details — folded | muted grey |
 
 The label is the tone's name (`Info`, `Example`, `Tip`, `Caution`,
 `Details`); `'tone: label'` sets your own (e.g. in German), `'tone:'` drops it.
@@ -2246,6 +2246,18 @@ warning, `markdown_tone/ignored`). An unknown tone is an error
 static/HTML output too; the label in the browser and the HTML pages. Colours
 are theme tokens (`--ax-tone-info`, `--ax-tone-example`, `--ax-tone-tip`,
 `--ax-tone-caution`, `--ax-tone-details`), light and dark.
+
+`details` folds (#691): in the browser its label is a click-to-open line
+(`<details>`/`<summary>`: Enter or Space opens it too) and the text stays
+hidden until then, so a one-screen page keeps long formula blocks out of the
+way. `'details: How MASE is computed'` makes that line say what is inside.
+Printing opens every folded box; `--svg`, the HTML pages and the served
+static pages always show the text.
+
+```sql
+SELECT '$$\mathrm{MASE} = \frac{\mathrm{MAE}}{\mathrm{MAE}_{\text{naive}}}$$'::MARKDOWN,
+       'details: How MASE is computed'::MARKDOWN_TONE;
+```
 
 ### Images (`::IMAGE`, `![alt](src)`)
 
