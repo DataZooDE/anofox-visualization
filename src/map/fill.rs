@@ -41,6 +41,9 @@ pub(super) fn scale_for(
     // size never changes as frames step. `None` (every non-frame map):
     // unchanged, byte-identical output.
     frame_max_count: Option<usize>,
+    // Small multiples (M3a-1, D-M3-4): one scale over every panel, so a
+    // class's count would sum feature × panel — the legend shows none.
+    facet: bool,
 ) -> Option<Box<dyn Scale>> {
     match fill {
         Fill::Measure(s) if s.classes.is_some() => {
@@ -52,7 +55,8 @@ pub(super) fn scale_for(
             let mut scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
                 .na_color(hatch_bg)
                 .na_pattern(FillPattern::stripe(hatch_fg, hatch_bg))
-                .na_label("No data");
+                .na_label("No data")
+                .show_counts(!facet);
             if let Some(max_count) = frame_max_count {
                 scale = scale.na_key(NaKey::Always).count_reserve(max_count);
             }

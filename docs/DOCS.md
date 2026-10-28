@@ -68,7 +68,7 @@ terminal.
 | `::YMAX` | `::Y_MAX` | encoding | upper end of a y interval (see ::YMIN) |
 | `::XMIN` | `::X_MIN` | encoding | lower end of a horizontal interval through each point |
 | `::XMAX` | `::X_MAX` | encoding | upper end of a horizontal interval (see ::XMIN) |
-| `::FACET` | `::FACET_WRAP`, `::PANEL_BY` | encoding | small multiples: one panel per distinct value, shared axes |
+| `::FACET` | `::FACET_WRAP`, `::PANEL_BY` | encoding | small multiples: one panel per distinct value, shared axes; on a map: one map per value, sharing projection, extent, classes and one legend |
 | `::FACET_FREE` | `::FACET_WRAP_FREE` | encoding | small multiples with independent axes per panel (y only on a discrete x) |
 | `::RANK` | `::LABEL_RANK` | encoding | score ranking points for ::LABEL_TOP (higher = labelled first) |
 | `::CENSOR` | `::CENSORED`, `::N_CENSOR` | encoding | censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier) |
@@ -1651,6 +1651,42 @@ dashboard".
   label, JSON), `data-frame` (the one shown, 0-indexed) and
   `data-frame-name` (the `::FRAME` column's display name); each feature's
   `data-row` follows the frame actually shown, like `::LINK` expects.
+
+#### Small multiples (`::FACET` on a map)
+
+```sql
+SELECT d.state ::REGION, v.week AS "Week" ::FACET,
+       round(100 * sum(v.on_time) / sum(v.deliveries), 1) AS "On time" ::BARCHART, ' %'::YFORMAT,
+       '0,80,85,90,100'::CLASSES
+FROM deliveries v JOIN districts d USING (ags)
+WHERE v.week IN (3, 6, 9, 12) GROUP BY ALL ORDER BY v.week, d.state;
+```
+
+`<col>::FACET` next to a map's input draws one map per value, side by side
+in one panel. Every map shares the **projection, extent, classes, colours,
+symbol sizes and the one legend**, so the panels compare at a glance.
+
+- **Layout:** each map takes the data's shape; the column count is the one
+  that keeps every map at least 160 px wide (fewer on a phone), or
+  `n::FACET_NCOL`. In the browser the panel takes the grid's natural height;
+  for `--svg`/static output give it a `::HEIGHT`.
+- **Order:** numbers and dates ascending, else the SQL order (as `::FRAME`).
+- **Missing rows:** a feature with no row in one facet is drawn grey with no
+  value there, still named in its tooltip.
+- **Legend and furniture:** the legend shows no per-class counts (they
+  would add up features × maps); the attribution is drawn once under the
+  grid, the scale bar once in the last map.
+- **Labels:** `n::LABEL_TOP` labels the top n regions of **each** map.
+- **Interaction:** hovering a region lights it up in every map; the zoom
+  tools act on all maps at once (they share one window).
+- **Limits:** at most 12 maps — the first 12 are drawn (`map/too-many-facets`).
+  Not with `::FRAME` (`map/facet-frame`: use one or the other), not yet on
+  flow, hexbin or bivariate maps (`map/facet-type`). `::FACET_FREE` behaves
+  like `::FACET` on a map (`map/facet-free`); `::STORY` is ignored
+  (`map/facet-story`).
+- **Attributes:** the root carries `data-facets` (the values, JSON),
+  `data-facet-name` and ggplot-rs's `data-panels`; each feature
+  `data-facet`.
 
 #### Trends in the tooltip (`::SPARKLINE` on a map)
 

@@ -10,6 +10,7 @@ import init, {
   render_stack,
   render_contract,
   map_bounds,
+  map_natural_height,
   map_layers,
   register_boundaries,
   roles_json,
@@ -10559,7 +10560,14 @@ async function runOnce(fresh = true, pv = preview) {
             const spark = role(s, "SPARKLINE") && !role(s, "DIAGRAM") && !isMap;
             // a map without ::HEIGHT takes the height its shape needs
             const mapAr = isMap && !boxH ? mapAspect(rowsJson, s.roles) : 0;
-            const ph = boxH || (spark ? 90 : mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300); // ::HEIGHT, else default
+            // small multiples (#644): the grid's own natural height
+            let facetH = 0;
+            if (isMap && !boxH) {
+              try {
+                facetH = map_natural_height(rowsJson, JSON.stringify(s.roles), Math.max(300, span * 100 * viewScale));
+              } catch (_) {}
+            }
+            const ph = boxH || (spark ? 90 : facetH || (mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300)); // ::HEIGHT, else default
             const holder = document.createElement("div");
             holder.className = "panel-svg";
             // Render width proportional to the panel's span, so displayed height
@@ -17435,9 +17443,37 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   // The rendered map's exact viewport (M3d): pointer ↔ map units without
   // guessing where the legend and letterboxing put the map.
   const svgNow = () => holder.querySelector(":scope > svg");
-  const mv = () => {
+  // Every drawn map's viewport: one, or (small multiples, #644) one per
+  // facet panel (`data-panels`, in `data-facet-panel` order) — all showing
+  // the same window (`data-domain`), so one zoom drives every panel.
+  const views = () => {
     const s = svgNow();
-    return s ? mapViewOf(s.getAttribute("data-viewport"), s.getAttribute("data-domain")) : null;
+    if (!s) return [];
+    const d = s.getAttribute("data-domain");
+    const one = mapViewOf(s.getAttribute("data-viewport"), d);
+    if (one) return [one];
+    try {
+      return JSON.parse(s.getAttribute("data-panels") || "[]")
+        .map((p) => mapViewOf(`${p.x} ${p.y} ${p.w} ${p.h}`, d))
+        .filter(Boolean);
+    } catch (_) {
+      return [];
+    }
+  };
+  const mv = () => views()[0] || null;
+  // The panel under viewBox point `u` (else the nearest one).
+  const mvAt = (u) => {
+    const vs = views();
+    if (vs.length < 2 || !u) return vs[0] || null;
+    const inside = vs.find((v) => u[0] >= v.vp.x && u[0] <= v.vp.x + v.vp.w && u[1] >= v.vp.y && u[1] <= v.vp.y + v.vp.h);
+    const dist = (v) => Math.hypot(u[0] - (v.vp.x + v.vp.w / 2), u[1] - (v.vp.y + v.vp.h / 2));
+    return inside || vs.reduce((a, b) => (dist(a) <= dist(b) ? a : b));
+  };
+  // A mark's own panel.
+  const mvOf = (el) => {
+    const vs = views();
+    const g = el.closest && el.closest("[data-facet-panel]");
+    return (g && vs[+g.getAttribute("data-facet-panel")]) || vs[0] || null;
   };
   const toUser = (cx, cy) => {
     const s = svgNow();
@@ -17520,9 +17556,8 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
   };
   // The union box (map units) of these marks.
   const marksBox = (els) => {
-    const m = mv();
-    if (!m || !els.length) return null;
-    return els.map((el) => bboxToProj(m, el.getBBox())).reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) }));
+    if (!mv() || !els.length) return null;
+    return els.map((el) => bboxToProj(mvOf(el), el.getBBox())).reduce((a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) }));
   };
   const zoomToMarks = (els) => {
     const b = marksBox(els);
@@ -17541,8 +17576,8 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
     (e) => {
       e.preventDefault();
       const k = e.deltaY < 0 ? 0.85 : 1 / 0.85;
-      const m = mv();
-      const u = m && toUser(e.clientX, e.clientY);
+      const u = toUser(e.clientX, e.clientY);
+      const m = mvAt(u);
       if (m && u) {
         // exact: the map point under the pointer stays under it
         const [px, py] = viewToProj({ vp: m.vp, d: shown() }, u[0], u[1]);
@@ -17560,7 +17595,8 @@ function attachMapZoom(holder, rowsJson, roles, ph) {
 
   let drag = null;
   holder.addEventListener("mousedown", (e) => {
-    drag = { x: e.clientX, y: e.clientY, v: { ...shown() }, u: toUser(e.clientX, e.clientY), m: mv(), moved: false };
+    const du = toUser(e.clientX, e.clientY);
+    drag = { x: e.clientX, y: e.clientY, v: { ...shown() }, u: du, m: mvAt(du), moved: false };
     holder.style.cursor = "grabbing";
   });
   window.addEventListener("mousemove", (e) => {
@@ -18668,13 +18704,15 @@ function mapTableHtml(svg, limit, caption) {
   const rows = [];
   for (const el of svg.querySelectorAll("[data-row]")) {
     const r = el.getAttribute("data-row");
-    if (seen.has(r)) continue;
-    seen.add(r);
+    // small multiples (#644): one row per map and feature, named "facet · name"
+    const facet = el.getAttribute("data-facet") || "";
+    if (seen.has(facet + "\u0000" + r)) continue;
+    seen.add(facet + "\u0000" + r);
     const label = el.getAttribute("data-label") || "";
     const series = el.getAttribute("data-series") || "";
     const raw = el.getAttribute("data-value");
     const k = +el.getAttribute("data-class");
-    const name = (label || series || `row ${+r + 1}`).split("\n")[0];
+    const name = (facet ? `${facet} · ` : "") + (label || series || `row ${+r + 1}`).split("\n")[0];
     const size = el.getAttribute("data-size");
     const bivar = el.getAttribute("data-bivar");
     rows.push({

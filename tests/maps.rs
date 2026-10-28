@@ -3650,3 +3650,105 @@ fn print_north_arrow_carries_the_print_only_class() {
     let tag = &s[s[..at].rfind('<').unwrap()..at];
     assert!(tag.contains("dp-print-only"), "{tag}");
 }
+
+// ---- M3a-1 (#644): small multiples (::FACET on a map) ----
+
+fn facet_cols(extra: Vec<Column>) -> Vec<Column> {
+    // two regions × three weeks; South misses week 3
+    let mut cols = vec![
+        Column::new(
+            "g",
+            Role::Geometry,
+            strs(&[
+                "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))",
+                "POLYGON((10 0, 10 10, 20 10, 20 0, 10 0))",
+                "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))",
+                "POLYGON((10 0, 10 10, 20 10, 20 0, 10 0))",
+                "POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))",
+            ]),
+        ),
+        Column::new(
+            "l",
+            Role::Label,
+            strs(&["North", "South", "North", "South", "North"]),
+        ),
+        Column::new("w", Role::Facet, strs(&["1", "1", "2", "2", "3"])),
+        Column::new(
+            "v",
+            Role::Value(Kind::Bar),
+            nums(&[10.0, 90.0, 10.0, 50.0, 90.0]),
+        ),
+        Column::new("c", Role::Classes, konst("0,50,100", 5)),
+        Column::new("p", Role::Projection, konst("none", 5)),
+    ];
+    cols.extend(extra);
+    cols
+}
+
+#[test]
+fn facet_map_has_one_panel_per_value_and_one_legend() {
+    let s = svg(facet_cols(vec![]));
+    assert_eq!(s.matches("<g data-facet-panel=").count(), 3, "{s}");
+    assert_eq!(
+        attr(root(&s), "data-facets"),
+        Some("[&quot;1&quot;,&quot;2&quot;,&quot;3&quot;]")
+    );
+    assert_eq!(attr(root(&s), "data-facet-name"), Some("w"));
+    assert!(root(&s).contains("data-panels="));
+    // one legend, without per-class counts (D-M3-4)
+    assert!(s.contains(">0–50<"), "{s}");
+    assert!(!s.contains("0–50 ("), "{s}");
+}
+
+#[test]
+fn facets_share_classes_and_mark_absent_features() {
+    let s = svg(facet_cols(vec![]));
+    let f = features(&s);
+    // the same value gets the same fill in two panels
+    let fill_of = |label: &str, facet: &str| {
+        f.iter()
+            .find(|t| attr(t, "data-label") == Some(label) && attr(t, "data-facet") == Some(facet))
+            .and_then(|t| attr(t, "fill"))
+            .map(str::to_string)
+    };
+    assert_eq!(fill_of("North", "1"), fill_of("North", "2"));
+    assert_eq!(fill_of("North", "3"), fill_of("South", "1"));
+    // South has no week-3 row: still drawn (named, so hover reads it), with
+    // no value and no class — the time maps' "not in this frame" look (D20)
+    let south3 = f
+        .iter()
+        .find(|t| attr(t, "data-label") == Some("South") && attr(t, "data-facet") == Some("3"))
+        .expect("an absent feature still draws");
+    assert_eq!(attr(south3, "data-value"), None, "{south3}");
+    assert_eq!(attr(south3, "data-class"), None, "{south3}");
+    // data-row is the result row
+    assert!(f
+        .iter()
+        .any(|t| attr(t, "data-facet") == Some("3") && attr(t, "data-row") == Some("4")));
+}
+
+#[test]
+fn facet_ncol_is_respected_and_frames_win() {
+    let s = svg(facet_cols(vec![Column::new(
+        "n",
+        Role::FacetCols,
+        nums(&[1.0; 5]),
+    )]));
+    let panels = attr(root(&s), "data-panels")
+        .unwrap()
+        .replace("&quot;", "\"");
+    let xs: std::collections::BTreeSet<String> = panels
+        .split("\"x\":")
+        .skip(1)
+        .map(|t| t.split(',').next().unwrap().to_string())
+        .collect();
+    assert_eq!(xs.len(), 1, "one column: {panels}");
+    // ::FACET with ::FRAME: a time map, no small multiples (D-M3-3)
+    let s = svg(facet_cols(vec![Column::new(
+        "f",
+        Role::Frame,
+        strs(&["a", "a", "b", "b", "b"]),
+    )]));
+    assert!(!s.contains("data-facet-panel"));
+    assert!(root(&s).contains("data-frames="));
+}

@@ -289,6 +289,21 @@ pub fn map_bounds(rows_json: &str, roles_json: &str, width: u32, height: u32) ->
         .unwrap_or_else(|_| "[]".into())
 }
 
+/// A small-multiples map's natural height at `width` (M3a-1, #644): its
+/// panels at the data's aspect in the render's own column count, plus legend
+/// and attribution room. 0 for any other panel (the UI then sizes it from
+/// [`map_bounds`] as before).
+#[wasm_bindgen]
+pub fn map_natural_height(rows_json: &str, roles_json: &str, width: u32) -> u32 {
+    guard(|| {
+        let rows = sql::parse_rows_json(rows_json).unwrap_or_default();
+        let cols = columns_from_entries(&rows, &entries_of(roles_json));
+        let w = crate::clamp_dim(width as u64);
+        Ok(crate::map::facet_natural_height(&cols, &RenderOptions::default(), w).unwrap_or(0))
+    })
+    .unwrap_or(0)
+}
+
 /// The built-in boundary layers a panel needs that aren't registered yet,
 /// as a JSON array (`["de-districts"]`): the UI fetches each from
 /// `data/boundaries/<layer>.csv` and hands it to [`register_boundaries`]

@@ -141,8 +141,16 @@ fn row_key(cols: &[Column], i: usize) -> Option<String> {
 /// Build [`Frames`] from a map's columns — `None` without a `::FRAME`
 /// column, or when every `::FRAME` value is empty/no feature key resolves.
 pub(super) fn of(cols: &[Column]) -> Option<Frames> {
-    let fcol = find_role(cols, Role::Frame)?;
-    let hexbin_points = find_role(cols, Role::Hexbin).is_some()
+    of_role(cols, Role::Frame)
+}
+
+/// [`of`] over any grouping role — `::FRAME`, or `::FACET`/`::FACET_FREE`
+/// for small multiples (M3a, #644: the same per-feature grouping, D11
+/// order and D22 keys; hexbin slots only for `::FRAME`).
+pub(super) fn of_role(cols: &[Column], role: Role) -> Option<Frames> {
+    let fcol = find_role(cols, role)?;
+    let hexbin_points = role == Role::Frame
+        && find_role(cols, Role::Hexbin).is_some()
         && !(find_role(cols, Role::Origin).is_some() && find_role(cols, Role::Dest).is_some());
     let n = fcol.values.len();
 

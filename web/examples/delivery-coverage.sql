@@ -201,6 +201,18 @@ SELECT d.state ::REGION, v.week AS "Week" ::FRAME,
        'Saarland swings week to week; Hamburg stays steady near 97 %'::TITLE,
        'On-time share per state and week; the classes are the same in every week.'::INFO
 FROM dc_deliveries v JOIN dc_districts d USING (ags) GROUP BY ALL ORDER BY v.week, d.state;
+-- #644 M3a-1: small multiples — the same weekly shares as four maps side by
+-- side (shared classes and one legend). Checked in DuckDB: Saarland 50.0 /
+-- 42.9 / 41.2 / 40.0 %, Brandenburg 60–64 %, Saxony 55–71 %, Hamburg 97–99 %.
+SELECT 'Four weeks side by side' AS ontime ::VIEW;
+SELECT 520::HEIGHT;
+SELECT d.state ::REGION, v.week AS "Week" ::FACET,
+       round(100 * sum(v.on_time) / sum(v.deliveries), 1) AS "On time" ::BARCHART, ' %'::YFORMAT,
+       '0,80,85,90,100'::CLASSES,
+       'Saarland, Brandenburg and Saxony stay far behind in every week shown'::TITLE,
+       'On-time share per state in weeks 3, 6, 9 and 12; the classes are the same in every map.'::INFO
+FROM dc_deliveries v JOIN dc_districts d USING (ags) WHERE v.week IN (3, 6, 9, 12)
+GROUP BY ALL ORDER BY v.week, d.state;
 SELECT 1::ENDVIEW;
 
 SELECT 6::COL;

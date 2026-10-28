@@ -95,7 +95,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "lower end of a horizontal interval through each point"),
     e("XMAX", &["X_MAX"], R::XMax, "encoding", true, "upper end of a horizontal interval (see ::XMIN)"),
     e("FACET", &["FACET_WRAP", "PANEL_BY"], R::Facet, "encoding", true,
-      "small multiples: one panel per distinct value, shared axes"),
+      "small multiples: one panel per distinct value, shared axes; on a map: one map per value, sharing projection, extent, classes and one legend"),
     e("FACET_FREE", &["FACET_WRAP_FREE"], R::FacetFree, "encoding", true,
       "small multiples with independent axes per panel (y only on a discrete x)"),
     e("RANK", &["LABEL_RANK"], R::Rank, "encoding", true,

@@ -57,6 +57,7 @@ pub(super) type Built = (GGPlot, Vec<(&'static str, String)>, Vec<String>);
 /// sipemu/ggplot-rs#250 — [`foot_of`]'s own line list, reused rather than
 /// duplicated, since "does this map need a footer, and how many lines"
 /// already depends on pack layers *and* the projection/span).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build(
     o: &RenderOptions,
     cols: &[Column],
@@ -65,6 +66,9 @@ pub(super) fn build(
     height: u32,
     frame_ctx: Option<&FrameCtx>,
     shared: Option<&Shared>,
+    // M3a-1 (#644): small multiples — `cols`/`m` are the stacked view
+    // (`facets::stacked`), one row per (facet, feature).
+    facet: Option<&super::facets::FacetCtx>,
 ) -> Option<Built> {
     let mut warnings: Vec<String> = Vec::new();
     let (w, h) = (width as f64, height as f64);
@@ -129,7 +133,23 @@ pub(super) fn build(
     // symbol maps) plus `supply-chain.sql`: no overflow without it.
     let ft = foot_of(o, m, w);
     let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced.clone())?;
-    let [x0, x1, y0, y1] = frame.window(w, h);
+    let [mut x0, mut x1, mut y0, mut y1] = frame.window(w, h);
+    // Small multiples (M3a-1): every panel shows the same window — the
+    // browser's zoom, else the data's own padded box. ggplot-rs lays the
+    // panels out at the window's aspect (`facet_wrap` under `coord_sf`), so
+    // no legend/footer reservation from `frame_of` applies.
+    if facet.is_some() {
+        let zoomed = o.zoom.filter(|((a, b), (c, d))| {
+            [*a, *b, *c, *d].iter().all(|f| f.is_finite()) && b > a && d > c
+        });
+        if let Some(((a, b), (c, d))) = zoomed {
+            (x0, x1, y0, y1) = (a, b, c, d);
+        } else if let Some(bb) = m.bbox() {
+            let planar = m.projection == super::project::Projection::None;
+            let (a, c, b, d) = super::padded(bb, planar, 0.04);
+            (x0, x1, y0, y1) = (a, b, c, d);
+        }
+    }
 
     let t = &o.theme;
     let card = t.colors.card;
@@ -160,6 +180,15 @@ pub(super) fn build(
 
     // ---- the features layer: one row per `m.features`.
     let n = m.rows;
+    // M3a-1: each stacked row's facet value (the `facet_wrap` variable).
+    let facet_vals: Vec<Value> = match facet {
+        Some(fc) => fc
+            .label_of_row
+            .iter()
+            .map(|l| Value::Str(l.clone()))
+            .collect(),
+        None => Vec::new(),
+    };
     let step_x = crate::find_role(cols, crate::Role::X);
     let mut geometry = Vec::with_capacity(n);
     let mut fill_vals = Vec::with_capacity(n);
@@ -241,9 +270,10 @@ pub(super) fn build(
         // `data-row` is the result row `::LINK` follows; on a frame map
         // that's frame `k`'s own source row for this feature (D22), not
         // this view's own local index `i`.
-        rows.push(match frame_ctx {
-            Some(fc) => Value::Str(fc.result_row[i].to_string()),
-            None => Value::Str(i.to_string()),
+        rows.push(match (facet, frame_ctx) {
+            (Some(fc), _) => Value::Str(fc.result_row[i].to_string()),
+            (None, Some(fc)) => Value::Str(fc.result_row[i].to_string()),
+            (None, None) => Value::Str(i.to_string()),
         });
         seriess.push(na_if_empty(series));
         labels.push(na_if_empty(label));
@@ -472,6 +502,9 @@ pub(super) fn build(
             ("fsize".into(), sym_fsize),
             ("trend".into(), select(&trends)),
         ];
+        if facet.is_some() {
+            df.push(("facet".into(), select(&facet_vals)));
+        }
         // Only when actually fill-mapped: `GeomSf::draw` (sipemu/ggplot-rs
         // #238) looks up its `data-fvalue` formatter by checking whether a
         // column literally named "fill" exists at all — not whether `fill`
@@ -495,6 +528,9 @@ pub(super) fn build(
             .tooltip("title");
         if has_trend {
             aes = aes.data_attr("trend", "trend");
+        }
+        if facet.is_some() {
+            aes = aes.data_attr("facet", "facet");
         }
         if classes.is_some() {
             aes = aes.data_attr("class", "class");
@@ -554,6 +590,9 @@ pub(super) fn build(
         ("bivar".into(), bivars),
         ("trend".into(), trends.clone()),
     ];
+    if facet.is_some() {
+        features_df.push(("facet".into(), facet_vals.clone()));
+    }
     let mut features_aes = Aes::new()
         .label("label")
         // A `fill`/`color` aesthetic makes ggplot-rs's stat/group pipeline
@@ -575,6 +614,9 @@ pub(super) fn build(
     }
     if has_trend {
         features_aes = features_aes.data_attr("trend", "trend").tooltip("title");
+    }
+    if facet.is_some() {
+        features_aes = features_aes.data_attr("facet", "facet");
     }
     if has_bivariate {
         features_aes = features_aes
@@ -763,7 +805,14 @@ pub(super) fn build(
     // per-class count any frame reaches, so the legend never re-wraps
     // (U1/U3).
     let frame_max_count = shared.map(|s| s.max_count);
-    let mut fill_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg, frame_max_count);
+    let mut fill_scale = fill::scale_for(
+        &m.fill,
+        o.locale,
+        hatch_bg,
+        hatch_fg,
+        frame_max_count,
+        facet.is_some(),
+    );
     if let Fill::Measure(s) = &m.fill {
         if s.classes.is_some() {
             if let Some(scale) = &mut fill_scale {
@@ -883,7 +932,8 @@ pub(super) fn build(
     }
     if let Some(hb) = &m.hexbin {
         if let Fill::Measure(scale) = &m.fill {
-            let hex_color_scale = fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg, None);
+            let hex_color_scale =
+                fill::scale_for(&m.fill, o.locale, hatch_bg, hatch_fg, None, false);
             let (new_plot, _n) = overlay::hexbin_layer(plot, o, hb, scale, card, hex_color_scale);
             plot = new_plot;
             if hb.cells.len() > super::hexbin::HEX_WARN {
@@ -969,9 +1019,22 @@ pub(super) fn build(
             order.push((i, priority));
         }
         order.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let keep: std::collections::HashSet<usize> = match top_n {
-            Some(k) => order.iter().take(k).map(|(i, _)| *i).collect(),
-            None => order.iter().map(|(i, _)| *i).collect(),
+        let keep: std::collections::HashSet<usize> = match (top_n, facet) {
+            // small multiples: the top k of each panel (M3a-1)
+            (Some(k), Some(fc)) => fc
+                .levels
+                .iter()
+                .flat_map(|lv| {
+                    order
+                        .iter()
+                        .filter(|(i, _)| &fc.label_of_row[*i] == lv)
+                        .take(k)
+                        .map(|(i, _)| *i)
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            (Some(k), None) => order.iter().take(k).map(|(i, _)| *i).collect(),
+            (None, _) => order.iter().map(|(i, _)| *i).collect(),
         };
         if !keep.is_empty() {
             // Only the kept rows go into this layer's own data (`layer_data`
@@ -1009,7 +1072,14 @@ pub(super) fn build(
                     )
                 })
                 .collect();
-            let label_df: Df = vec![("geometry".into(), label_geo), ("label".into(), label_text)];
+            let mut label_df: Df =
+                vec![("geometry".into(), label_geo), ("label".into(), label_text)];
+            if facet.is_some() {
+                label_df.push((
+                    "facet".into(),
+                    kept.iter().map(|&i| facet_vals[i].clone()).collect(),
+                ));
+            }
             let label_aes = Aes::new().label("label");
             plot = plot
                 .geom_sf_text_with(GeomSfText {
@@ -1065,6 +1135,11 @@ pub(super) fn build(
     // crate picking a corner for it.
     if ft.scale {
         plot = plot.annotation_scale_with(GeomAnnotationScale::default().max_width_px(90.0));
+        // small multiples: once, in the last panel (D-M3-5) — a one-row
+        // layer carrying that panel's facet value
+        if let Some(last) = facet.and_then(|fc| fc.levels.last()) {
+            plot = plot.layer_data(vec![("facet".to_string(), vec![Value::Str(last.clone())])]);
+        }
     }
     // `::NORTH_ARROW` (M3e-1, #646): ggplot-rs's `GeomNorthArrow` in the
     // top-right corner, turned to true north at the window's centre (the
@@ -1158,6 +1233,8 @@ pub(super) fn build(
         attribution = attribution
             .fit(super::ATTRIBUTION_FIT_FLOOR)
             .fit_overflow(AttributionOverflow::Wrap);
+        // small multiples: once, in a band under the grid (D-M3-5)
+        let attribution = attribution.figure(facet.is_some());
         plot = plot.annotation_attribution_with(attribution);
     }
 
@@ -1171,9 +1248,20 @@ pub(super) fn build(
     // post-process.
     let mut theme = crate::void_theme(o);
     theme.legend_margin = ggplot_rs::theme::Margin::default();
+    if facet.is_some() {
+        // small multiples: room between the maps, readable strip labels
+        theme.panel_spacing = FACET_GAP;
+        theme.strip_text.size = FACET_STRIP;
+    }
     plot = plot
         .coord_sf_with(CoordSf::new().xlim(x0, x1).ylim(y0, y1).expand(false))
         .theme(theme);
+    if let Some(fc) = facet {
+        // `::FACET_NCOL`, else ggplot-rs picks the column count that gives
+        // the largest maps in the area actually drawn (`fit_grid`); the
+        // browser sized the panel by the same maps' natural height.
+        plot = plot.facet_wrap("facet", fc.ncol);
+    }
     // A discrete legend (`Fill::Category`, or a classed `Fill::Measure` —
     // `ScaleFillBinned::is_discrete()` is also `true`) goes at
     // `LegendPosition::Top` (plain ggplot-rs API, `is_horizontal` for
@@ -1239,6 +1327,15 @@ pub(super) fn build(
             fc.labels.last().map(String::as_str).unwrap_or(""),
         ));
     }
+    if let Some(fc) = facet {
+        summary_text.push_str(&format!(
+            ". Small multiples by {}: {} maps ({} … {}); colours and classes are shared",
+            fc.name,
+            fc.levels.len(),
+            fc.levels.first().map(String::as_str).unwrap_or(""),
+            fc.levels.last().map(String::as_str).unwrap_or(""),
+        ));
+    }
     plot = plot.svg_desc(summary_text.clone());
     let mut attrs: Vec<(&'static str, String)> = vec![
         ("data-map", String::new()),
@@ -1255,6 +1352,13 @@ pub(super) fn build(
         ));
         attrs.push(("data-frame", fc.k.to_string()));
         attrs.push(("data-frame-name", fc.name.clone()));
+    }
+    if let Some(fc) = facet {
+        attrs.push((
+            "data-facets",
+            serde_json::to_string(&fc.levels).unwrap_or_default(),
+        ));
+        attrs.push(("data-facet-name", fc.name.clone()));
     }
     // `data-classes`: every class's short-formatted label, low to high, as
     // JSON (`mapTableHtml`'s "k of n: label" a11y row — `app.js:15454`) —
@@ -1291,6 +1395,30 @@ pub(super) fn build(
         attrs.push(("data-hexbin", super::hexbin::fmt_num(hb.width)));
     }
     Some((plot, attrs, warnings))
+}
+
+/// Gap between small-multiple maps, px (M3a-1).
+pub(super) const FACET_GAP: f64 = 12.0;
+/// Strip (facet label) text size on small multiples, px.
+pub(super) const FACET_STRIP: f64 = 11.0;
+/// The narrowest a small-multiple map gets before it wraps to a new row.
+pub(super) const FACET_MIN_PANEL: f64 = 160.0;
+
+/// Small multiples' column count at width `w` for maps of `aspect` (h/w):
+/// ggplot-rs's own `natural_height` rule — as many columns as keep each map
+/// at least [`FACET_MIN_PANEL`] wide.
+pub(super) fn facet_ncol(n: usize, aspect: f64, w: f64) -> usize {
+    ggplot_rs::facet::wrap::natural_height(
+        n,
+        None,
+        aspect,
+        w,
+        FACET_STRIP + 8.0,
+        FACET_GAP,
+        FACET_GAP,
+        FACET_MIN_PANEL,
+    )
+    .0
 }
 
 /// `Value::Na` for an empty string (our own "no label/series" convention),
