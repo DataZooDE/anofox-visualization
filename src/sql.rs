@@ -34,6 +34,7 @@ pub mod condition;
 pub mod contract_call;
 pub mod deps;
 pub mod lex;
+pub mod lint_allow;
 pub mod name;
 pub mod requires;
 pub mod shared;
@@ -78,6 +79,11 @@ pub struct Panel {
     /// every other clash still is. A listed name this statement doesn't
     /// itself set (a typo) is flagged on its own (`interaction/shared-unused`).
     pub shared: Vec<String>,
+    /// Lint codes a `-- @lint_allow <code>, …` comment above the statement
+    /// allows for it (#639): a matching `design/*` advisory on this statement
+    /// becomes an "allowed" note that doesn't fail `--strict`. See
+    /// [`lint_allow`].
+    pub lint_allow: Vec<String>,
     /// The first `-- @name <name>` line directly above the statement (#518):
     /// a stable, author-given name for what it draws, carried through to
     /// wasm `plan()` and tagged on the element as `data-dp-name` in the
@@ -246,6 +252,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
             let requires = requires::parse(&raw);
             let requires_issues = requires::issues(&raw);
             let shared = shared::parse(&raw);
+            let lint_allow = lint_allow::parse(&raw);
             let name = name::parse(&raw);
             let clean = strip_comments(&raw);
             let stmt = clean.trim();
@@ -256,6 +263,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                 panel.requires = requires;
                 panel.requires_issues = requires_issues;
                 panel.shared = shared;
+                panel.lint_allow = lint_allow;
                 panel.name = name;
                 return Some(panel);
             }
@@ -270,6 +278,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     shared,
+                    lint_allow,
                     name,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
@@ -287,6 +296,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     requires,
                     requires_issues,
                     shared,
+                    lint_allow,
                     name,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),

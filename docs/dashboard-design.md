@@ -108,7 +108,10 @@ Pick the chart from the *question*, grounded in the column's cardinality
 | 100s of rows in one `::TABLE` | top-N or aggregate (`::PAGED` for remote) | `design/raw-table` |
 
 Run `dashboard --check <file.sql>` to see these on your own dashboard; add
-`--strict` to make them fail CI, `--no-design` to silence them. A clean,
+`--strict` to make them fail CI, `--no-design` to silence them. When one chart
+breaks a rule on purpose (a generation mix with 12 conventional source colours),
+put `-- @lint_allow design/many-series` directly above that statement: `--check`
+still lists it as an allowed note, but `--strict` passes. A clean,
 well-composed reference dashboard lives at `examples/dashboards/sales-overview.sql`.
 
 ## 7. Layout & placement — do / don't (framework recipes)
