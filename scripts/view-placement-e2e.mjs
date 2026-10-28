@@ -184,7 +184,11 @@ const measureGroup = (page, id) =>
   check(url1.searchParams.get("view.layout") === "Bars", "(d) the URL reflects the new alternative (?view.layout=Bars)");
 
   // (e) focus stays sensible when the card swaps (the clicked tab inside
-  // the NOW-visible card still has focus, not lost to <body>).
+  // the NOW-visible card still has focus, not lost to <body>). refocus()
+  // restores it once the card can take focus (#597), so wait for it (#671).
+  await page
+    .waitForFunction(() => document.activeElement?.getAttribute("role") === "tab", null, { timeout: 6000 })
+    .catch(() => {});
   const focusTag = await page.evaluate(() => document.activeElement?.getAttribute("role"));
   check(focusTag === "tab", `(e) focus stays on a tab button after the card swap (was ${focusTag})`);
   const focusInVisiblePane = await page.evaluate(() => {
