@@ -7460,6 +7460,43 @@ function readViewSeed(search = location.search) {
   return seed;
 }
 
+// M3e-2 (#647): a named time map's frame in the URL — `?frame.<name>=<label>`
+// (the panel's `-- @name`, the frame's own label, so the link survives new
+// data), written only when the shown frame isn't the last (the default).
+// Same parse rules as readViewSeed: the name must be a valid `-- @name`
+// (`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`), at most 32 keys, each value ≤ 200
+// chars, a null-prototype object; "frame." never collides with `v.`.
+function readFrameSeed(search = location.search) {
+  const seed = Object.create(null);
+  try {
+    for (const [k, v] of new URLSearchParams(search)) {
+      if (!k.startsWith("frame.")) continue;
+      const name = k.slice(6);
+      if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(name)) continue;
+      if (!Object.hasOwn(seed, name) && Object.keys(seed).length >= 32) continue;
+      if (String(v).length > 200) continue;
+      seed[name] = String(v);
+    }
+  } catch (_) {}
+  return seed;
+}
+let dpFrameSeed = readFrameSeed(); // panel name → frame label, consumed when its player mounts
+// Each named time map's shown frame, when it isn't the last: [name, label].
+function frameUrlParams() {
+  const out = [];
+  document.querySelectorAll(".dash .panel[data-dp-name]").forEach((panel) => {
+    const svg = panel._frames && panel.querySelector(":scope > .panel-svg > svg[data-frames]");
+    if (!svg) return;
+    let labels = [];
+    try {
+      labels = JSON.parse(svg.dataset.frames || "[]");
+    } catch (_) {}
+    const k = panel._frames.step();
+    if (labels.length && k >= 0 && k < labels.length - 1) out.push([panel.dataset.dpName, String(labels[k])]);
+  });
+  return out;
+}
+
 // Viewer state in the URL: `?v.<name>=<value>` seeds a variable on load — an
 // input's value (checked against the input's own options / type first), the
 // shared `selected`, or a named selection. A list repeats the key
@@ -7775,8 +7812,9 @@ function syncUrlState() {
   if (preview) return; // #244: the URL never carries the preview's state
   try {
     const u = new URL(location.href);
-    for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.")) u.searchParams.delete(k);
+    for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.") || k.startsWith("frame.")) u.searchParams.delete(k);
     for (const [k, v] of urlStateParams()) u.searchParams.append(k, v);
+    for (const [name, label] of frameUrlParams()) u.searchParams.append("frame." + name, label);
     if (u.href !== location.href) history.replaceState(null, "", u);
   } catch (_) {}
 }
@@ -11989,6 +12027,15 @@ function mountStories() {
 // a panel that already has one is left alone; only a fresh map (or a re-run
 // that dropped ::FRAME) (re)builds it.
 let dpFrameSteps = {}; // statement index → the frame to restore after a re-run
+// #647: a frame step updates the URL — at most every 500 ms while playing.
+let dpFrameUrlTimer = 0;
+function syncFrameUrlSoon() {
+  if (dpFrameUrlTimer) return;
+  dpFrameUrlTimer = setTimeout(() => {
+    dpFrameUrlTimer = 0;
+    syncUrlState();
+  }, 500);
+}
 function mountFrames() {
   document.querySelectorAll(".dash .panel").forEach((panel) => {
     const holder = panel.querySelector(":scope > .panel-svg");
@@ -12000,7 +12047,22 @@ function mountFrames() {
     }
     if (panel._frames && panel.querySelector(":scope > .dp-frames")) return;
     const dp = panel._dp;
-    const start = panel._frames ? panel._frames.step() : dpFrameSteps[panel.dataset.stmt] ?? +svg.dataset.frame;
+    let start = panel._frames ? panel._frames.step() : dpFrameSteps[panel.dataset.stmt] ?? +svg.dataset.frame;
+    // #647: `?frame.<name>=<label>` picks a named map's first frame (once;
+    // an unknown label is ignored).
+    const named = panel.dataset.dpName;
+    if (!panel._frames && named && Object.hasOwn(dpFrameSeed, named)) {
+      let labels = [];
+      try {
+        labels = JSON.parse(svg.dataset.frames || "[]");
+      } catch (_) {}
+      const at = labels.map(String).indexOf(dpFrameSeed[named]);
+      if (at >= 0) {
+        start = at;
+        syncFrameUrlSoon(); // a run's own URL sync ran before this player existed
+      }
+      delete dpFrameSeed[named];
+    }
     // The step's own re-render + re-wire (the perf budget's "draw(k)"):
     // render through the same path zoom/::FIT use (so it keeps the holder's
     // current zoom window and size), then only what a step actually needs —
@@ -12017,6 +12079,7 @@ function mountFrames() {
       attachHover();
       refreshAsTableView(panel);
       reopenMapTip(panel);
+      if (panel.dataset.dpName) syncFrameUrlSoon();
       return holder.querySelector(":scope > svg");
     };
     panel._frames = dpAnim.frames(panel, svg, start, draw);
