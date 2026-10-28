@@ -160,6 +160,7 @@ terminal.
 | `::TRANSITION` | `::TWEEN` | modifier | on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart |
 | `::HOVER_FOCUS` | `::HOVERFOCUS` | modifier | hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts) |
 | `::POINTS` | `::MARKERS` | modifier | line/area point markers: 'auto' (default) hides them on a dense series (x positions under 3 px apart) and keeps them as hover/click targets, 'none' always hides them, 'always' always draws them |
+| `::NORTH_ARROW` | `::NORTH`, `::NORTHARROW` | modifier | a map's north arrow, pointing to true north: 'print' (only in print, PNG, PDF and --svg output; hidden on screen) or 'always' |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
 | `::LEGEND` |  | modifier | a chart's legend / colourbar: 'none' hides it, or 'top'/'right'/'bottom'/'left' moves it; without it, unchanged |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
@@ -1368,6 +1369,13 @@ flags skipped rows with `map/size-not-positive`.
   region, is left out.
 - **Scale bar**: on a map of lon/lat data less than about 3,000 km wide, a
   "nice" length (1/2/5 × 10ⁿ km) at the map's centre, bottom left.
+- **North arrow** (`::NORTH_ARROW`): off by default. `'print'` draws it
+  only in print, PNG, PDF and `--svg` output (the screen hides it with the
+  `dp-print-only` class); `'always'` shows it on screen too. It sits top
+  right and points to **true north** at the centre of the window shown —
+  under a conic or Equal Earth projection, away from the central meridian,
+  that is not straight up. `--check` warns on another value
+  (`map/north-arrow-value`).
 - **Hover / click / zoom**: each feature carries `data-row`, `data-series`
   (its `::CATEGORY`, else its `::LABEL`), `data-value`, `data-label`,
   `data-x` (its key — the row — when it has no label; else the label is the

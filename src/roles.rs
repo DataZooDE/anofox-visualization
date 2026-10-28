@@ -274,6 +274,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts)"),
     e("POINTS", &["MARKERS"], R::Points, "modifier", true,
       "line/area point markers: 'auto' (default) hides them on a dense series (x positions under 3 px apart) and keeps them as hover/click targets, 'none' always hides them, 'always' always draws them"),
+    e("NORTH_ARROW", &["NORTH", "NORTHARROW"], R::NorthArrow, "modifier", true,
+      "a map's north arrow, pointing to true north: 'print' (only in print, PNG, PDF and --svg output; hidden on screen) or 'always'"),
     e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
       "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
     e("LEGEND", &[], R::Legend, "modifier", true,
@@ -1035,6 +1037,7 @@ mod tests {
             Role::Transition,
             Role::HoverFocus,
             Role::Points,
+            Role::NorthArrow,
             Role::Track,
             Role::Diagram,
             Role::Upstream,
@@ -1186,6 +1189,7 @@ mod tests {
                 | Role::Transition
                 | Role::HoverFocus
                 | Role::Points
+                | Role::NorthArrow
                 | Role::Track
                 | Role::Diagram
                 | Role::Upstream
