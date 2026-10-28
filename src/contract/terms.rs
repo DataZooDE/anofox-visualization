@@ -393,6 +393,7 @@ fn forest_panel(
                 size: 3.2,
                 color: paint(neg),
                 alpha: if faded { FADED } else { 1.0 },
+                ..Default::default()
             })
             .layer_data(points(&set));
     }
@@ -409,6 +410,7 @@ fn forest_panel(
                     size: 1.7,
                     color: o.theme.colors.card,
                     alpha: 1.0,
+                    ..Default::default()
                 })
                 .layer_data(vec![
                     (
@@ -761,6 +763,7 @@ fn per_term(
                     size: 1.6,
                     color: o.brand(),
                     alpha: 1.0,
+                    ..Default::default()
                 });
             }
             if several {

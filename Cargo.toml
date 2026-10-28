@@ -135,8 +135,13 @@ crate-type = ["cdylib", "rlib"]
 # fill, Top legend, the frame label in `.subtitle()`, no title) no longer
 # overlap the subtitle with the legend. Confirmed with PNG crops. No API
 # breaks (cargo-semver-checks against 0.31.6).
+# 0.31.8 (sipemu/ggplot-rs#287): `legend_bottom_when_narrow` (#635).
+# 0.32.0 (sipemu/ggplot-rs#290, this crate's own #631): `GeomPoint::
+# visibility` — line/area markers on a dense series are drawn uninked but
+# stay hover/click targets (`::POINTS`). Breaking only for `GeomPoint`
+# struct literals without `..Default::default()` (all fixed here).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.31.8", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.32.0", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

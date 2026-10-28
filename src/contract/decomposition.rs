@@ -632,6 +632,7 @@ pub(super) fn decomposition(
                 size: 1.6,
                 color: brand,
                 alpha: 0.85,
+                ..Default::default()
             })
             .layer_data(point)
             .layer_aes(aes);

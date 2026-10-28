@@ -18874,11 +18874,13 @@ function attachAxisPointer() {
       const tb = panel.querySelector(".panel-tracks");
       cross.style.height = (tb && tb.offsetHeight ? tb.getBoundingClientRect().bottom - r.top : r.height) + "px";
       cross.style.display = "";
-      pts.forEach((p) => (p.el.style.transform = ""));
+      pts.forEach((p) => (p.el.style.transform = p.el.style.fillOpacity = ""));
       colPts.forEach((p) => {
         p.el.style.transformBox = "fill-box";
         p.el.style.transformOrigin = "center";
         p.el.style.transform = "scale(1.7)";
+        // #631: an uninked marker (dense series) shows while it is the crosshair's
+        if (p.el.getAttribute("fill-opacity") === "0.000") p.el.style.fillOpacity = "1";
       });
       // Reference rules (geom_vline/geom_hline) are no column value, but the crosshair names
       // them: a vertical one (an ::XLINE, "Today") at the column nearest to it,
@@ -18898,7 +18900,7 @@ function attachAxisPointer() {
     const leave = () => {
       cross.style.display = "none";
       tip.classList.remove("show");
-      area.querySelectorAll("circle.dp-hit").forEach((el) => (el.style.transform = ""));
+      area.querySelectorAll("circle.dp-hit").forEach((el) => (el.style.transform = el.style.fillOpacity = ""));
     };
     area.addEventListener("mousemove", move);
     area.addEventListener("mouseleave", leave);

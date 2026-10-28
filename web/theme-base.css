@@ -657,6 +657,8 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-tip .tip-row b{font-variant-numeric:tabular-nums;color:var(--ax-tip-head);font-weight:700}
 .dp-cross{position:fixed;width:0;border-left:1px dashed var(--ax-cross);pointer-events:none;z-index:49;display:none}
 .dp-hit{transition:filter .12s}.dp-hit:hover{filter:brightness(1.1) saturate(1.06)}
+/* #631: a dense line's markers are uninked hover targets (ggplot-rs PointVisibility); ink the one under the pointer */
+circle.dp-hit[fill-opacity="0.000"]:hover,circle.dp-hit[fill-opacity="0.000"]:focus-visible{fill-opacity:1}
 svg[data-map] path.dp-hit:not([fill="none"]):hover,svg[data-map] polygon.dp-hit:hover,svg[data-map] circle.dp-hit:hover{stroke:var(--ax-ink);stroke-width:1.5px}svg[data-map] path.dp-hit[fill="none"]:hover{stroke-width:2.5px}
 /* heatmap cell labels: hover and click reach the cell underneath */
 svg[data-kind="heatmap"] text{pointer-events:none}

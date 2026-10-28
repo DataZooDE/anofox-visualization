@@ -634,6 +634,11 @@ pub enum Role {
     /// mark's whole series and fades the others, as hovering its legend entry
     /// does; `'none'` keeps the plain hover (dense charts). Browser only.
     HoverFocus,
+    /// Line/area point markers (`::POINTS`): `'auto'` (default) hides them
+    /// on a dense series but keeps them as hover/click targets, `'none'`
+    /// always hides them, `'always'` always draws them (ggplot-rs
+    /// `PointVisibility`).
+    Points,
     /// A node/edge diagram (`::DIAGRAM`/`::NODE`): the column is the node id,
     /// one row per node (see [`diagram`]).
     Diagram,
@@ -2013,6 +2018,9 @@ pub const DROPDOWN_STYLES: &[&str] = &["search", "native"];
 /// The `::ANIMATE` modes the browser plays.
 pub const ANIMATE_MODES: &[&str] = &["auto", "draw", "grow", "reveal", "none"];
 
+/// The `::POINTS` values.
+pub const POINTS_MODES: &[&str] = &["auto", "none", "always"];
+
 /// The `::HOVER_FOCUS` values the browser knows.
 pub const HOVER_FOCUS_MODES: &[&str] = &["series", "none"];
 
@@ -3242,9 +3250,20 @@ fn cartesian(
         width: 1.0,
         ..Default::default()
     };
+    // `::POINTS`: on a dense series the markers swamp the line, so by
+    // default ggplot-rs leaves them uninked (still hover/click targets).
+    let visibility = match role_str(cols, Role::Points)
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("none") => PointVisibility::Hidden,
+        Some("always") => PointVisibility::Visible,
+        _ => PointVisibility::AUTO,
+    };
     let small_point = || GeomPoint {
         color: brand,
         size: 1.8,
+        visibility,
         ..Default::default()
     };
     // A light brand wash for box/violin bodies (unless a CATEGORY fills them).
@@ -3447,6 +3466,7 @@ fn cartesian(
                         size: 2.6,
                         color: o.theme.chart_label(),
                         alpha: 1.0,
+                        ..Default::default()
                     })
                     .layer_data(vec![
                         ("x".to_string(), x.values.clone()),
@@ -5385,6 +5405,7 @@ fn render_radar(
             size: 2.6,
             color: brand,
             alpha: 1.0,
+            ..Default::default()
         })
         .scale_x_discrete(
             ggplot_rs::scale::discrete::ScaleDiscrete::new()
@@ -5485,6 +5506,7 @@ fn render_sparkline(
             size: 4.2,
             color: o.theme.color(2),
             alpha: 1.0,
+            ..Default::default()
         })
         .layer_data(end) // restrict the point layer to just the endpoint
         .scale_y_continuous({

@@ -295,6 +295,7 @@ pub(super) fn events(
             size: 3.2,
             color: o.brand(),
             alpha: 0.9,
+            ..Default::default()
         })
         .scale_color(
             ScaleColorDiscrete::new(Aesthetic::Color)

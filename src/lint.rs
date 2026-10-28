@@ -47,7 +47,7 @@ pub struct Diagnostic {
     /// `kpi/bad-delta-format` | `kpi/no-delta` (warning) |
     /// `kpi/sparkline-not-list` (warning) | `animate/unknown` |
     /// `animate/reveal-no-xline` | `linestyle/unknown` | `story/bad-by` |
-    /// `transition/unknown` | `hover-focus/unknown` (warnings) | `diagram/null-id` |
+    /// `transition/unknown` | `hover-focus/unknown` | `points/unknown` (warnings) | `diagram/null-id` |
     /// `diagram/duplicate-node` | `diagram/unknown-node` | `diagram/bad-edges` |
     /// `diagram/bad-style` | `diagram/bad-direction` | `diagram/too-large`
     /// (warnings) | `box/missing` (error: a box from statistics without
@@ -4531,7 +4531,8 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 /// Motion directives the browser would ignore: an unknown `::ANIMATE` mode, a
 /// `'reveal'` with no `::XLINE` to start from, an unknown `::LINESTYLE`, a
 /// `::STORY_BY` that is not `'x'` / `'series'` (or `'series'` with no
-/// `::CATEGORY`), an unknown `::TRANSITION`, an unknown `::HOVER_FOCUS`.
+/// `::CATEGORY`), an unknown `::TRANSITION`, an unknown `::HOVER_FOCUS`, an unknown
+/// `::POINTS`.
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -4563,6 +4564,12 @@ fn motion_diags(
             out.push((
                 "transition/unknown",
                 format!("::TRANSITION `{v}` is not 'tween' or 'none' — the chart is swapped"),
+            ));
+        }
+        if *r == Role::Points && !crate::POINTS_MODES.contains(&v.as_str()) {
+            out.push((
+                "points/unknown",
+                format!("::POINTS `{v}` is not 'auto', 'none' or 'always' — markers follow 'auto'"),
             ));
         }
         if *r == Role::HoverFocus && !crate::HOVER_FOCUS_MODES.contains(&v.as_str()) {
@@ -8976,6 +8983,7 @@ mod design_tests {
                     "linestyle/",
                     "story/",
                     "transition/",
+                    "points/",
                     "hover-focus/",
                 ]
                 .iter()
@@ -9037,6 +9045,22 @@ mod design_tests {
             row
         )
         .is_empty());
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "hidden" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::LINECHART, 'hidden'::POINTS FROM t;",
+                row
+            ),
+            vec!["points/unknown"]
+        );
+        for ok in ["auto", "None", "always"] {
+            let row = json!({ "c0": "a", "c1": 1.0, "c2": ok });
+            assert!(codes(
+                &format!("SELECT x::XAXIS, y::LINECHART, '{ok}'::POINTS FROM t;"),
+                row
+            )
+            .is_empty());
+        }
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "grow" });
         assert!(codes("SELECT x::XAXIS, y::BARCHART, 'grow'::ANIMATE FROM t;", row).is_empty());
     }

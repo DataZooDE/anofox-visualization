@@ -437,6 +437,7 @@ pub(super) fn flow_layers(
             size: 2.5,
             color: end_color,
             alpha: 1.0,
+            ..Default::default()
         })
         .layer_data(ends_df)
         .layer_aes(Aes::new().x("x").y("y").tooltip("tip"));
