@@ -2180,7 +2180,12 @@ fn story_steps(cols: &[Column]) -> Option<String> {
 /// recomputes the identical string and replaces it, which costs a little
 /// work but changes nothing.
 fn with_formatted_values(svg: String, cols: &[Column], o: &RenderOptions) -> String {
-    let Some(value) = cols.iter().find(|c| matches!(c.role, Role::Value(_))) else {
+    let value = if map::is_map(cols) {
+        map::measure_col(cols)
+    } else {
+        cols.iter().find(|c| matches!(c.role, Role::Value(_)))
+    };
+    let Some(value) = value else {
         return svg;
     };
     let Role::Value(kind) = value.role else {

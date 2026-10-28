@@ -3455,3 +3455,123 @@ fn a_narrow_continuous_legend_goes_below_the_panel() {
         "480px map: the colourbar should still sit at Right ({wide}px panel)"
     );
 }
+
+// ---- M3b (#642): tooltip trends from a list ::SPARKLINE on a map ----
+
+fn spark_rows(lists: &[&str]) -> Vec<Value> {
+    lists.iter().map(|s| Value::Str(s.to_string())).collect()
+}
+
+#[test]
+fn sparkline_does_not_replace_the_measure() {
+    // the spark column comes *first*: the classed measure still drives the fill
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, regions()),
+        Column::new(
+            "w",
+            Role::Value(Kind::Sparkline),
+            spark_rows(&["[1,2,3]", "[3,2,1]", "[5,5,6]", "[0,1,1]"]),
+        ),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 2.0, 3.0, 4.0])),
+        Column::new("l", Role::Label, names()),
+        Column::new("c", Role::Classes, konst("equal 2", 4)),
+    ]);
+    let f = features(&s);
+    assert_eq!(attr(f[1], "data-value"), Some("2"), "{}", f[1]);
+    assert!(f.iter().all(|t| attr(t, "data-class").is_some()), "{s}");
+}
+
+#[test]
+fn trend_is_in_the_title_and_data_trend() {
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, regions()),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 2.5, 3.0, 4.0])),
+        Column::new("l", Role::Label, names()),
+        Column::new(
+            "w",
+            Role::Value(Kind::Sparkline),
+            spark_rows(&["[12,9,21,18]", "[1]", "[]", "[2,4]"]),
+        ),
+    ]);
+    let f = features(&s);
+    let trend = "Trend: 12 → 18 (+50%) · min 9 · max 21 · 4 points";
+    assert_eq!(attr(f[0], "data-trend"), Some(trend), "{}", f[0]);
+    let name0 = match &names()[0] {
+        Value::Str(s) => s.clone(),
+        _ => unreachable!(),
+    };
+    assert!(
+        s.contains(&format!("<title>{name0}: 1\n{trend}</title>")),
+        "{s}"
+    );
+    // too short a list: no trend, the plain "label: value" tooltip
+    assert_eq!(attr(f[1], "data-trend"), None);
+    assert_eq!(attr(f[2], "data-trend"), None);
+    assert!(attr(f[3], "data-trend").is_some());
+}
+
+#[test]
+fn trend_follows_the_frame_row() {
+    let mut cols = frame_fixture_rows();
+    cols.push(Column::new(
+        "w",
+        Role::Value(Kind::Sparkline),
+        spark_rows(&["[1,2]", "[10,20]", "[3,4]", "[30,40]"]),
+    ));
+    // the last frame ("2") shows rows 1 and 3's lists
+    let s = svg(cols);
+    let f = features(&s);
+    let trends: Vec<_> = f.iter().filter_map(|t| attr(t, "data-trend")).collect();
+    assert!(
+        trends.iter().any(|t| t.starts_with("Trend: 10 → 20")),
+        "{trends:?}"
+    );
+    assert!(
+        trends.iter().any(|t| t.starts_with("Trend: 30 → 40")),
+        "{trends:?}"
+    );
+    assert!(
+        !trends.iter().any(|t| t.starts_with("Trend: 1 → 2")),
+        "{trends:?}"
+    );
+}
+
+#[test]
+fn sparkline_on_symbols_and_flows() {
+    let s = svg(vec![
+        Column::new("g", Role::Geometry, strs(&["POINT(9 50)", "POINT(10 51)"])),
+        Column::new("n", Role::Size, nums(&[100.0, 400.0])),
+        Column::new(
+            "w",
+            Role::Value(Kind::Sparkbar),
+            spark_rows(&["[1,2,3]", "[4,5,6]"]),
+        ),
+    ]);
+    assert_eq!(s.matches("data-trend=\"Trend: ").count(), 2, "{s}");
+    let s = svg(vec![
+        Column::new("o", Role::Origin, vec![pt(9.0, 50.0, "A")]),
+        Column::new("d", Role::Dest, vec![pt(11.0, 52.0, "B")]),
+        Column::new("w", Role::Value(Kind::Sparkline), spark_rows(&["[5,10]"])),
+    ]);
+    let f = flow_arcs(&s);
+    assert!(
+        f.iter()
+            .any(|t| attr(t, "data-trend")
+                == Some("Trend: 5 → 10 (+100%) · min 5 · max 10 · 2 points")),
+        "{s}"
+    );
+}
+
+#[test]
+fn no_trend_attr_without_a_spark_column() {
+    let cols = || {
+        vec![
+            Column::new("g", Role::Geometry, regions()),
+            Column::new("v", Role::Value(Kind::Bar), nums(&[1.0, 2.5, 3.0, 4.0])),
+            Column::new("l", Role::Label, names()),
+        ]
+    };
+    let s = svg(cols());
+    assert!(!s.contains("data-trend"));
+    assert!(!s.contains("Trend:"));
+}

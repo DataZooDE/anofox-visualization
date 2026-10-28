@@ -47,6 +47,7 @@ mod legend;
 mod overlay;
 mod plot;
 pub(crate) mod project;
+mod spark;
 mod symbols;
 mod wkt;
 
@@ -496,6 +497,21 @@ fn range_of(cols: &[Column]) -> Option<(f64, f64)> {
     }
 }
 
+/// A map's measure column: the first chart-kind column that isn't a
+/// per-feature `::SPARKLINE`/`::SPARKBAR` list (M3b, #642 — those draw in
+/// the tooltip, never colour the map).
+pub(crate) fn measure_col(cols: &[Column]) -> Option<&Column> {
+    cols.iter().find(
+        |c| matches!(c.role, Role::Value(k) if !matches!(k, Kind::Sparkline | Kind::Sparkbar)),
+    )
+}
+
+/// A map's tooltip trend column (`list(..)::SPARKLINE` / `::SPARKBAR`, M3b).
+pub(crate) fn spark_col(cols: &[Column]) -> Option<&Column> {
+    cols.iter()
+        .find(|c| matches!(c.role, Role::Value(k) if matches!(k, Kind::Sparkline | Kind::Sparkbar)))
+}
+
 /// The measure column of a map: a chart-kind column, or a numeric second
 /// `::MAP`/`::CHOROPLETH` column (`region::MAP, sales::CHOROPLETH`).
 fn measure_of(cols: &[Column], geom: Option<&Column>) -> Option<Column> {
@@ -517,8 +533,7 @@ fn measure_of(cols: &[Column], geom: Option<&Column>) -> Option<Column> {
                 .collect();
             Column::new(c.name.clone(), Role::Value(Kind::Bar), vals)
         });
-    cols.iter()
-        .find(|c| matches!(c.role, Role::Value(_)))
+    measure_col(cols)
         .cloned()
         .or(numeric_geometry)
         .filter(|c| c.values.iter().any(|v| v.as_f64().is_some()))

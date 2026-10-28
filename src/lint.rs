@@ -4672,6 +4672,38 @@ fn map_diags(
     out.extend(flow_diags(roles, rows));
     out.extend(hexbin_diags(roles, rows));
     out.extend(frame_diags(roles, rows));
+    // M3b (#642): a tooltip trend column.
+    if let Some((i, _)) = roles
+        .iter()
+        .find(|(_, r)| matches!(r, Role::Value(Kind::Sparkline | Kind::Sparkbar)))
+    {
+        let first = rows
+            .iter()
+            .filter_map(|r| r.get(&format!("c{i}")).or_else(|| r.values().nth(*i)))
+            .find(|v| !v.is_null());
+        let list = match first {
+            None => true,
+            Some(Value::Array(_)) => true,
+            Some(Value::String(s)) => serde_json::from_str::<Vec<Value>>(s).is_ok(),
+            Some(_) => false,
+        };
+        if !list {
+            out.push((
+                Severity::Warning,
+                "map/sparkline-not-list",
+                "a map's ::SPARKLINE must be a list of numbers per feature — e.g. \
+                 list(v ORDER BY week)::SPARKLINE"
+                    .to_string(),
+            ));
+        }
+        if has(Role::Hexbin) {
+            out.push((
+                Severity::Note,
+                "map/sparkline-hexbin",
+                "::SPARKLINE is ignored on a ::HEXBIN map — cells aggregate rows".to_string(),
+            ));
+        }
+    }
     let first = |want: Role| {
         roles
             .iter()
@@ -5663,8 +5695,16 @@ fn kpi_size_checks(
 
 /// The panel's chart kind, if it's a chart (`count()::BARCHART` → `Kind::Bar`).
 fn chart_kind(roles: &[(usize, Role)]) -> Option<Kind> {
+    // On a map a `list(..)::SPARKLINE`/`::SPARKBAR` is a tooltip trend
+    // (M3b, #642), never the panel's kind — skip it there.
+    let is_map = roles.iter().any(|(_, r)| {
+        matches!(
+            r,
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+        )
+    });
     roles.iter().find_map(|(_, r)| match r {
-        Role::Value(k) => Some(*k),
+        Role::Value(k) if !(is_map && matches!(k, Kind::Sparkline | Kind::Sparkbar)) => Some(*k),
         _ => None,
     })
 }
@@ -8341,6 +8381,43 @@ mod design_tests {
         assert_eq!(w.len(), 1, "{d:?}");
         assert_eq!(w[0].severity, Severity::Warning);
         assert!(w[0].message.contains("stat_density"), "{}", w[0].message);
+    }
+
+    #[test]
+    fn map_sparkline_is_checked() {
+        let codes = |sql: &str, rows: Vec<Value>| -> Vec<(Severity, &'static str)> {
+            let data: Vec<_> = rows
+                .iter()
+                .map(|r| r.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("map/sparkline"))
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let poly = "POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))";
+        let sql = "SELECT g::MAP, v::BARCHART, w::SPARKLINE FROM t;";
+        let row = |w: Value| json!({ "c0": poly, "c1": 1.0, "c2": w });
+        assert!(codes(sql, vec![row(json!([1, 2, 3]))]).is_empty());
+        assert!(codes(sql, vec![row(json!("[1, 2, 3]"))]).is_empty());
+        assert_eq!(
+            codes(sql, vec![row(json!(7))]),
+            vec![(Severity::Warning, "map/sparkline-not-list")]
+        );
+        let sql = "SELECT g::MAP, w::SPARKBAR, true::HEXBIN FROM t;";
+        let row = json!({ "c0": "POINT(1 1)", "c1": [1, 2], "c2": true });
+        assert_eq!(
+            codes(sql, vec![row]),
+            vec![(Severity::Note, "map/sparkline-hexbin")]
+        );
     }
 
     #[test]

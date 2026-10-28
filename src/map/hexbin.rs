@@ -247,7 +247,7 @@ pub(super) fn of(
     // Outside a frame map `present` is `None`, so `binned == projected`
     // (every point passes the filter above) and `projected.is_empty()`
     // already returned `None` if there was truly nothing to bin.
-    let measure = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
+    let measure = super::measure_col(cols);
     // Review #595 NIT: a non-frame map's `has_measure` stays the original
     // "any row of `cols` at all" rule (byte-identical) — only a frame map
     // (which can have a point with no row this frame, D20) narrows it to
@@ -371,15 +371,14 @@ pub(super) fn fill_of_values(
 ) -> Fill {
     let vals: Vec<Value> = values.iter().map(|v| Value::Float(*v)).collect();
     let name = if has_measure {
-        cols.iter()
-            .find(|c| matches!(c.role, Role::Value(_)))
+        super::measure_col(cols)
             .map(|c| c.name.clone())
             .unwrap_or_default()
     } else {
         String::new()
     };
     let kind = if has_measure {
-        match cols.iter().find_map(|c| match c.role {
+        match super::measure_col(cols).and_then(|c| match c.role {
             Role::Value(k) => Some(k),
             _ => None,
         }) {
