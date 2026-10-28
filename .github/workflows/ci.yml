@@ -696,6 +696,15 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/image-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/drill-e2e.mjs (#656): drill-down, breadcrumb back-up,
+      # drill-through and Esc-return each move as one continuous step (no
+      # layout shift, scroll jump, skeleton or lost focus). --settle is
+      # looser than the local default (900 ms): a shared runner is slower.
+      # Reuses the :8947 server and Chromium above.
+      - name: Drill motion e2e (#656)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/drill-e2e.mjs --url http://127.0.0.1:8947/ --settle 1500
+
       # scripts/compact-kpi-e2e.mjs (#405): 'compact'::KPI_SIZE on a ::GROUP
       # packs its tiles onto one line each, well under the normal ~96px
       # floor, a tile's own ::KPI_SIZE overriding the box's; ::THRESHOLDS
