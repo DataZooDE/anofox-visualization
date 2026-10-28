@@ -81,9 +81,9 @@ APIKEY="$(cat apikey.txt)"
 # case). Checking the redirect target, not just "not 200", is what tells
 # this apart from some other reason a 302 might come back.
 asset_redirect=$(curl -s -o /dev/null -D - "http://127.0.0.1:$PORT/d/rls/assets/rls-logo.svg")
-echo "$asset_redirect" | grep -q "^HTTP/1.1 302" \
+grep <<<"$asset_redirect" -q "^HTTP/1.1 302" \
   || fail "anonymous asset request should need login, like the page: $asset_redirect"
-echo "$asset_redirect" | grep -qi "^location: /auth/login" \
+grep <<<"$asset_redirect" -qi "^location: /auth/login" \
   || fail "anonymous asset request's redirect should be to /auth/login, like the page: $asset_redirect"
 [ "$(code -H "Authorization: Bearer $APIKEY" "http://127.0.0.1:$PORT/d/rls/assets/rls-logo.svg")" = 200 ] \
   || fail "rls-scoped key should read rls's own asset"

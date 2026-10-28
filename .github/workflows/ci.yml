@@ -483,7 +483,7 @@ jobs:
               echo "== $t"
               out=$(node "$t" 2>&1) || { echo "$out"; echo "::error file=$t::failed"; status=1; i=$((i+1)); continue; }
               echo "$out"
-              if echo "$out" | grep -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
+              if grep <<<"$out" -qi 'skip'; then echo "::error file=$t::skipped a part"; status=1; fi
             fi
             i=$((i+1))
           done
