@@ -634,6 +634,26 @@ FROM (VALUES (1, 'a', 3), (NULL, 'b', 4), (1, NULL, 2)) b(bin, item, size);
 ----
 true
 
+# ── selection (#499) ─────────────────────────────────────────────────────────
+# Knapsack: picked items first (good colour), capacity use as the default
+# title; anofox_plot detects the schema.
+query II
+SELECT anofox_plot_selection(s) LIKE '%Selected weight 9 of capacity 10 (90%', anofox_plot(s) LIKE '%data-series="selected"%data-series="not selected"%'
+FROM (VALUES ('a', 10, 5, true, 10), ('b', 40, 4, true, 10), ('c', 30, 6, false, 10)) s(item, value, weight, selected, capacity);
+----
+true	true
+
+# Assortment: `listed`, the bar is margin × demand.
+query I
+SELECT anofox_plot(s) LIKE '%data-series="listed"%' FROM (VALUES ('x', 2.0, 10, 1), ('y', 5.0, 1, 0)) s(item, margin, demand, listed);
+----
+true
+
+statement error
+SELECT anofox_plot_selection(s) FROM (VALUES ('a', true)) s(item, selected);
+----
+needs a measure
+
 # ── distribution (#181) ──────────────────────────────────────────────────────
 # One id: a plain bar per option.
 query II

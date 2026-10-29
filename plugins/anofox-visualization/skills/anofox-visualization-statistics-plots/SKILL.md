@@ -93,6 +93,7 @@ SELECT grp, anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t GROUP
 | `anofox_plot_matrix(m, …)` | **row, col, value** — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`); value also from `pearson` \| `spearman` \| `kendall` \| `correlation` \| `corr` \| `count` \| `n` | `domain := [lo, hi]` (fill scale; default −1..1 for a correlation measure, else the data range), `mirror := false` (keep a pair list as given; default: mirror to the full matrix with a diagonal of 1), `labels := false` \| `true` (cell values; default: on up to 144 cells), `value := 'spearman'` (another measure). One tile per cell, a diverging scale around 0 (default 520 × 440) |
 | `anofox_plot_diagram(n, …)` | **id** (or `stage`), title \| label, mainstat, status, group, lane, story, x, y, sparkline, seq | `edges :=` a LIST of **source, target** (or `from_stage` / `to_stage`), value \| count, label, style, status; `mainstat := '<col>'`, `format := 'compact'`, `direction := 'LR'` \| `'TB'`, `style :=` (default edge style). The `::DIAGRAM` panel from two tables (dashboards skill → *Diagrams*); 800 × 400 |
 | `anofox_plot_assignment(a, …)` | one row per item: **bin \| wave, item, size**, capacity, model_id | `x := '<col>'` (names the bin/wave column when both are present); items stacked per bin/wave (`::CATEGORY` = item, `::BARCHART_STACKED` = size), the capacity as a quiet reference line so the fill level is visible; several `model_id`s faceted to compare algorithms; a `group_col` (anofox-optimize `pack_by`/`wave_by`'s own instance split) facets too — alone, or combined into one `"group · model_id"` title when both vary — so two groups' bin 1 never stack into one over-capacity bar (anofox-optimize `pack_*` / `wave_*`) |
+| `anofox_plot_selection(s, …)` | one row per item: **item, selected \| listed**, value, weight, capacity, margin, demand, model_id | a bar per item, picked first (good colour) then the rest (neutral); bar = `value`, else margin × demand, else margin, else weight; weight + capacity → the default title says how much capacity the picked items use; model_id / a group column facet |
 | `anofox_plot_distribution(d, …)` | one row per option: **id, option, probability**, model_id | one `id`: a plain bar per option; several `id`s: a 100% stacked bar per id (`::CATEGORY` = option); several `model_id`s faceted to compare models (anofox-decide's `decide_choice_distribution` MAP / `decide_table.distribution`, unnested — see *Without anofox_statistics* below) |
 | `anofox_plot(t, …)` | any of the above | picks the chart from the columns: term+estimate → terms, curve_type → curve, yhat → prediction, fitted+residual → diagnostics, metric+value → summary, check_name \| lower_threshold \| upper_threshold + status+value → checks, partial_residual → partial, fold_id + (split \| test_start \| train_end) → cv, resource+start+end → schedule, component+value \| trend → decomposition, p_value / test_id → tests, row+col \| column_a+column_b → matrix, kind \| severity + ds \| period → events, (bin \| wave)+item+size → assignment, option+probability → distribution. Only the common options |
 
@@ -181,6 +182,14 @@ SELECT anofox_plot_assignment(a) FROM (VALUES
   ('site_a', 1, 'c01', 4, 10), ('site_a', 1, 'c02', 5, 10),
   ('site_b', 1, 'c03', 5, 10), ('site_b', 1, 'c04', 4, 10))
      a(site, bin, item, size, capacity);
+```
+
+**Which items an optimizer picked** (`selection` schema, #499; anofox-optimize knapsack `selected`, assortment `listed`): picked items first, in the theme's good colour:
+
+```sql
+SELECT anofox_plot_selection(s) FROM (VALUES
+  ('a', 10, 5, true, 10), ('b', 40, 4, true, 10), ('c', 30, 6, false, 10))
+     s(item, value, weight, selected, capacity);
 ```
 
 **A categorical distribution** (`distribution` schema; anofox-decide's `decide_choice_distribution` MAP and `decide_table.distribution`): `unnest(map_entries(…))` needs the unnested STRUCT named one level in (`AS u(e)`, then `u.e.key` / `u.e.value` — a bare `u.key` does not parse) to reach `option` / `probability`; `question_id` and `model` (decide's own spellings) are read as `id` / `model_id`, so the bridge can skip renaming those:
