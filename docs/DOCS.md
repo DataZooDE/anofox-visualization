@@ -2812,8 +2812,10 @@ statement: its own roles, `::TITLE`, `::CATEGORY`, … — a cell needs no
 cell's values, and the x-crosshair works per cell: over a line or area cell
 it reads that cell's column (#695); a scatter, histogram or bar cell keeps its
 marks' own tooltips. Each cell's `<svg>` content carries `data-cell` (its
-statement order) and `data-dp-name` (its `-- @name`). Selection, drill, link,
-zoom and the toolbox stay off on a figure for now. The
+statement order) and `data-dp-name` (its `-- @name`). A cell's own `::LINK`
+column follows from its marks, as on a single chart; a click on a cell without
+one cross-filters as usual. `::SELECT_AS` / `::DRILL`, zoom and the toolbox
+stay off on a figure for now. The
 browser, `--svg` / `--site`, the HTML export and the served page all draw the
 same picture.
 

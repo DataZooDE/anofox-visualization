@@ -128,5 +128,34 @@ check(!overflow, "no horizontal overflow at 390px");
 if (shots) await page.screenshot({ path: `${shots}/figure-390-dark.png`, fullPage: true });
 check(!errs.length, "still no page errors: " + errs.join(" | "));
 
+// #695: a cell's own ::LINK follows from its marks (the cell's rows); a
+// cell without one keeps the default click.
+const LINK_SQL = `-- @title Figure link e2e (#695)
+SELECT 'Main' ::TAB;
+SELECT 'Linked cells' ::FIGURE;
+SELECT x ::XAXIS, y ::LINECHART, '#Detail' AS go ::LINK FROM (VALUES (1, 2), (2, 3), (3, 5)) v(x, y);
+SELECT x ::XAXIS, y ::LINECHART FROM (VALUES (1, 4), (2, 1), (3, 2)) v(x, y);
+SELECT 1 ::ENDFIGURE;
+SELECT 'Detail' ::TAB;
+SELECT 'The detail page.' ::MARKDOWN;
+`;
+{
+  const p2 = await browser.newPage({ viewport: { width: 1200, height: 900 }, reducedMotion: "reduce" });
+  const e2 = [];
+  p2.on("pageerror", (e) => e2.push(String(e)));
+  await p2.goto(`${base}?mode=view#sql=${b64(LINK_SQL)}`);
+  await ready(p2);
+  const active = () => p2.evaluate(() => document.querySelector(".tabbar .tab-btn.active, .tabbar .tab-btn[aria-selected='true']")?.textContent?.trim());
+  const cellMark = (k) => p2.locator(`.dash .dp-figure g[data-cell="${k}"] circle.dp-hit`).first();
+  await cellMark(1).click({ force: true });
+  await p2.waitForTimeout(600);
+  check((await active()) === "Main", `a cell without ::LINK doesn't navigate (${await active()})`);
+  await cellMark(0).click({ force: true });
+  await p2.waitForFunction(() => /Detail/.test(document.querySelector(".tabbar .tab-btn.active, .tabbar .tab-btn[aria-selected='true']")?.textContent || ""), null, { timeout: 15000 }).catch(() => {});
+  check((await active()) === "Detail", `a cell's ::LINK follows from its mark (${await active()})`);
+  check(!e2.length, "link figure: no page errors: " + e2.join(" | "));
+  await p2.close();
+}
+
 await browser.close();
 console.log(`figure-e2e: ${process.exitCode ? "failed" : "0 failed"}`);
