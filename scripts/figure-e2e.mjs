@@ -235,6 +235,32 @@ SELECT coalesce(getvariable('region'), 'none') AS picked ::TEXT_SMALL;
   await zp.waitForTimeout(300);
   const reset = await cellsNow();
   check(reset[1].x === before[1].x && reset[0].x === before[0].x, `double-click resets the figure (${reset[1].x})`);
+  // the toolbox's Restore does the same
+  await zp.mouse.move(box.x, box.y);
+  await zp.mouse.wheel(0, -300);
+  await zp.waitForTimeout(400);
+  const zoomedAgain = await cellsNow();
+  await zp.evaluate(() => document.querySelector('.dp-figure .dp-tool[title="Restore"]')?.click());
+  await zp.waitForTimeout(400);
+  const restored = await cellsNow();
+  check(zoomedAgain[1].x !== before[1].x && restored[1].x === before[1].x, `the toolbox's Restore resets a zoomed figure (${zoomedAgain[1].x} → ${restored[1].x})`);
+  // #695: Line / bar swaps the figure's line cell (the rule) to bars and back
+  const ruleBars = () => zp.evaluate(() => {
+    const s = [...document.querySelectorAll(".dp-figure svg[data-panel]")].find((s) => s.querySelector(':scope > g[data-cell="2"]'));
+    return { rects: s.querySelectorAll("rect.dp-hit, rect[data-tip]").length, lines: s.querySelectorAll("path, polyline").length };
+  });
+  const r0 = await ruleBars();
+  const sw = await zp.evaluate(() => {
+    const t = document.querySelector('.dp-figure .dp-tool[title^="Line / bar"]');
+    t?.click();
+    return t?.title || null;
+  });
+  await zp.waitForTimeout(400);
+  const r1 = await ruleBars();
+  check(sw === "Line / bar (every line or bar cell)" && r1.rects > r0.rects, `Line / bar turns the figure's line cell into bars (${sw}; marks ${JSON.stringify(r0)} → ${JSON.stringify(r1)})`);
+  await zp.evaluate(() => document.querySelector('.dp-figure .dp-tool[title^="Line / bar"]').click());
+  await zp.waitForTimeout(400);
+  check(JSON.stringify(await ruleBars()) === JSON.stringify(r0), "…and back");
   check(!zerrs.length, "zoom: no page errors: " + zerrs.join(" | "));
   await zp.close();
 }

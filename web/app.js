@@ -19654,8 +19654,10 @@ function attachToolbox() {
     });
     const dp = panel._dp;
     // magicType: swap a line chart to bars and back (only for line/bar charts).
-    if (dp && !dp.isMap && magicSwap(dp.roles)) {
-      mkTool("Line / bar", "⇄", () => toggleMagicType(panel));
+    // #695: on a ::FIGURE, every line/bar cell at once (one toolbox per card).
+    const figCells = dp && dp.figure ? panel.querySelector(".panel-svg")?._figure?.cells || [] : null;
+    if (dp && !dp.isMap && (figCells ? figCells.some((c) => magicSwap(c.roles)) : magicSwap(dp.roles))) {
+      mkTool(figCells ? "Line / bar (every line or bar cell)" : "Line / bar", "⇄", () => toggleMagicType(panel));
     }
     // dataView: show the panel's underlying rows as a table.
     if (dp) mkTool("Data view", "▤", () => showDataView(panel));
@@ -19673,8 +19675,9 @@ function attachToolbox() {
         t.classList.toggle("dp-tool-on", on);
       });
     }
-    // restore: reset any zoom/pan (a double-click on the chart does the same).
-    if (zoombar) {
+    // restore: reset any zoom/pan (a double-click on the chart does the same;
+    // #695: a figure's cells too, when zoom is on).
+    if (zoombar || (figCells && document.body.classList.contains("dp-zoom"))) {
       mkTool("Restore", "⟳", () => {
         const h = panel.querySelector(".panel-svg");
         if (h) h.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
@@ -19724,12 +19727,27 @@ function magicSwap(roles) {
   return v ? map[v[1]] : null;
 }
 
+// The line/bar roles swapped (the first line/bar value role), else `roles`.
+function magicRoles(roles) {
+  const vi = roles.findIndex((r) => magicSwap([r]));
+  return vi < 0 ? roles : roles.map((r, i) => (i === vi ? [r[0], magicSwap([r]), r[2] || ""] : r));
+}
 function toggleMagicType(panel) {
   const dp = panel._dp;
   const holder = panel.querySelector(".panel-svg");
   if (!dp || !holder) return;
   const next = panel._magic ? 0 : 1;
   panel._magic = next;
+  if (dp.figure && holder._figure) {
+    // #695: every line/bar cell; the original roles kept to swap back
+    for (const c of holder._figure.cells) {
+      c.roles0 = c.roles0 || c.roles;
+      c.roles = next ? magicRoles(c.roles0) : c.roles0;
+    }
+    renderChart(holder, dp.rows, dp.roles, ...chartSize(holder, dp));
+    wireCharts();
+    return;
+  }
   let use = dp.roles;
   if (next) {
     const vi = dp.roles.findIndex((r) => magicSwap([r])); // first line/bar value role
