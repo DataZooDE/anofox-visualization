@@ -749,20 +749,6 @@ pub(super) fn build(
             .aes(features_aes)
             .geom_sf_with(features_geom())
     };
-    // Small multiples: ggplot-rs takes the panels from the layers' facet
-    // values in first-appearance order, so a layer listing every level in
-    // order comes before any whose rows aren't in facet order (flows are
-    // widest first) or miss a facet (a panel with no hexagons) — until
-    // facet_wrap takes explicit levels upstream (sipemu/ggplot-rs#329).
-    if let Some(fc) = facet {
-        plot = plot
-            .geom_blank()
-            .layer_data(vec![(
-                "facet".to_string(),
-                fc.levels.iter().map(|l| Value::Str(l.clone())).collect(),
-            )])
-            .layer_aes(Aes::new());
-    }
 
     // ---- the symbols layer (on top of everything else), if any — a
     // circle's border is the card colour (matching the old writer's
@@ -1287,7 +1273,9 @@ pub(super) fn build(
         // `::FACET_NCOL`, else ggplot-rs picks the column count that gives
         // the largest maps in the area actually drawn (`fit_grid`); the
         // browser sized the panel by the same maps' natural height.
-        plot = plot.facet_wrap("facet", fc.ncol);
+        // the panels in the facet's own order, empty ones kept (a facet with
+        // no hexagons, flows drawn widest first) — sipemu/ggplot-rs#329
+        plot = plot.facet_wrap("facet", fc.ncol).facet_levels(&fc.levels);
     }
     // A discrete legend (`Fill::Category`, or a classed `Fill::Measure` —
     // `ScaleFillBinned::is_discrete()` is also `true`) goes at
