@@ -18902,7 +18902,7 @@ function attachHover() {
       // just because they share a `.panel`).
       const ia = trackSvg
         ? trackLr && { link: { idx: trackLr[0], rows: track.rows, roles: track.roles } }
-        : el.closest(".panel")?._ia;
+        : figureCellIa(el) ?? el.closest(".panel")?._ia;
       // The mark's own value — its x (a drill level is the x), else its series.
       const dx = el.getAttribute("data-x");
       const key = dx ? String(dx) : series;
@@ -20032,6 +20032,16 @@ function figureCellCrosses(s, figure) {
   const k = +s.querySelector(":scope > g[data-cell]")?.getAttribute("data-cell");
   const cell = Number.isInteger(k) ? figure.cells[k] : null;
   return !!cell && crosshairKind(cell.roles) && [...s.querySelectorAll("circle.dp-hit")].filter((el) => !isRuleMark(el)).length >= 3;
+}
+// #695: a ::FIGURE cell's own ::LINK, for a click on one of its marks (the
+// cell's rows and roles, as the panel's `_ia.link` of a single chart).
+function figureCellIa(el) {
+  const s = el.closest(".dp-figure svg[data-panel]");
+  const fig = s && el.closest(".panel-svg")?._figure;
+  const k = +s?.querySelector(":scope > g[data-cell]")?.getAttribute("data-cell");
+  const cell = fig && Number.isInteger(k) ? fig.cells[k] : null;
+  const lr = cell && cell.roles.find((r) => r[1] === "LINK");
+  return lr ? { link: { idx: lr[0], rows: cell.rows, roles: cell.roles } } : null;
 }
 // The figure cell <svg> under a client point, if it takes the crosshair.
 function figureCellAt(root, figure, cx, cy) {
