@@ -744,6 +744,14 @@ impl std::fmt::Debug for Store {
     }
 }
 
+/// What a store file holds (#684): `options.state`'s per-viewer rows, or a
+/// write-back change log — told apart by the header's `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreKind {
+    State,
+    Writeback,
+}
+
 /// Bytes accounted per line beyond its own length (the `\n`).
 const LINE_OVERHEAD: u64 = 1;
 
@@ -873,7 +881,7 @@ impl Store {
     /// between `validate_start` and `open`).
     #[cfg(unix)]
     pub fn open(path: &Path, max_mb: u64) -> Result<Store, String> {
-        Self::open_impl(path, max_mb, false)
+        Self::open_impl(path, max_mb, false, StoreKind::State)
     }
 
     /// Open an *existing* file for reading only (`dashboard state
@@ -888,11 +896,28 @@ impl Store {
     /// way: something else has it open for writing).
     #[cfg(unix)]
     pub fn open_read_only(path: &Path, max_mb: u64) -> Result<Store, String> {
-        Self::open_impl(path, max_mb, true)
+        Self::open_impl(path, max_mb, true, StoreKind::State)
+    }
+
+    /// Open (creating if absent) a write-back change log (#684,
+    /// `options.writeback.path`): the same file discipline as [`Self::open`],
+    /// its header marked `"kind":"writeback"` so a state file and a change
+    /// log can never be opened as each other. Each record is one save:
+    /// `submit` holds the `::SAVE` statement's name, `vars` the change set
+    /// (`crate::host::writeback`).
+    #[cfg(unix)]
+    pub fn open_writeback(path: &Path, max_mb: u64) -> Result<Store, String> {
+        Self::open_impl(path, max_mb, false, StoreKind::Writeback)
+            .map_err(|e| e.replace("options.state.path", "options.writeback.path"))
     }
 
     #[cfg(unix)]
-    fn open_impl(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
+    fn open_impl(
+        path: &Path,
+        max_mb: u64,
+        read_only: bool,
+        kind: StoreKind,
+    ) -> Result<Store, String> {
         use std::ffi::CString;
         use std::io::{Read, Write};
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -999,7 +1024,7 @@ impl Store {
                 path.display()
             ));
         }
-        let index = validate_lines(clean, max_bytes)
+        let index = validate_lines(clean, max_bytes, kind)
             .map_err(|e| format!("options.state.path: '{}': {e}", path.display()))?;
 
         // Only now, having confirmed `clean` is a valid (possibly empty)
@@ -1045,10 +1070,15 @@ impl Store {
             size_bytes: index.size_bytes,
         };
         if !read_only && clean.is_empty() {
-            let header_body = format!(
-                "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{}\"}}",
-                crate::host::access::rfc3339(std::time::SystemTime::now())
-            );
+            let created = crate::host::access::rfc3339(std::time::SystemTime::now());
+            let header_body = match kind {
+                StoreKind::State => {
+                    format!("{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\"}}")
+                }
+                StoreKind::Writeback => format!(
+                    "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\",\"kind\":\"writeback\"}}"
+                ),
+            };
             let mut header = header_body.clone();
             header.push('\n');
             state
@@ -1086,6 +1116,12 @@ impl Store {
     pub fn open_read_only(path: &Path, max_mb: u64) -> Result<Store, String> {
         let _ = (path, max_mb);
         Err("the state store needs a Unix host (flock)".into())
+    }
+
+    #[cfg(not(unix))]
+    pub fn open_writeback(path: &Path, max_mb: u64) -> Result<Store, String> {
+        let _ = (path, max_mb);
+        Err("the write-back change log needs a Unix host (flock)".into())
     }
 
     /// Append one submission, assigning its `seq`/`ts`. `fdatasync`s before
@@ -1695,7 +1731,7 @@ struct Index {
 /// #530, nits: that under-accounted a CRLF file's size and tolerated
 /// line-ending corruption no writer here ever produces); a bare `\r`
 /// inside a line is refused outright rather than silently dropped.
-fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
+fn validate_lines(clean: &str, max_bytes: u64, kind: StoreKind) -> Result<Index, String> {
     let body = clean.strip_suffix('\n').unwrap_or(clean);
     let mut lines = if body.is_empty() {
         Vec::new().into_iter()
@@ -1733,6 +1769,19 @@ fn validate_lines(clean: &str, max_bytes: u64) -> Result<Index, String> {
     }
     if header.get("created").and_then(|v| v.as_str()).is_none() {
         return Err("state file: header line is missing 'created'".into());
+    }
+    // #684: a change log's header says so; a state file's never has `kind`.
+    let file_kind = match header.get("kind") {
+        None => StoreKind::State,
+        Some(k) if k.as_str() == Some("writeback") => StoreKind::Writeback,
+        Some(_) => return Err("state file: header line has an unknown 'kind'".into()),
+    };
+    if file_kind != kind {
+        return Err(match file_kind {
+            StoreKind::State => "this is an options.state file, not a write-back change log",
+            StoreKind::Writeback => "this is a write-back change log, not an options.state file",
+        }
+        .into());
     }
 
     for (i, line) in lines.enumerate() {
@@ -3028,6 +3077,61 @@ mod tests {
         let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(e.contains("created"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_change_log_and_a_state_file_never_open_as_each_other() {
+        // #684: same file discipline, a `kind` in the header tells them apart.
+        let p = store_path("kind");
+        mkdir(p.parent().unwrap());
+        {
+            let wb = Store::open_writeback(&p, DEFAULT_MAX_MB).unwrap();
+            wb.append(NewRecord {
+                user: "alice".into(),
+                auth: "oidc".into(),
+                dashboard: "twin".into(),
+                submit: "save_plan".into(),
+                id: "ab".into(),
+                vars: serde_json::Map::new(),
+            })
+            .unwrap();
+        }
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            raw.lines()
+                .next()
+                .unwrap()
+                .contains("\"kind\":\"writeback\""),
+            "{raw}"
+        );
+        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(
+            e.contains("write-back change log, not an options.state file"),
+            "{e}"
+        );
+        assert_eq!(Store::open_writeback(&p, DEFAULT_MAX_MB).unwrap().len(), 1);
+
+        let q = store_path("kind-state");
+        mkdir(q.parent().unwrap());
+        drop(Store::open(&q, DEFAULT_MAX_MB).unwrap());
+        let e = Store::open_writeback(&q, DEFAULT_MAX_MB).unwrap_err();
+        assert!(e.contains("options.writeback.path"), "{e}");
+        assert!(
+            e.contains("an options.state file, not a write-back change log"),
+            "{e}"
+        );
+
+        std::fs::write(
+            &q,
+            b"{\"anofox_state\":1,\"created\":\"x\",\"kind\":\"other\"}\n",
+        )
+        .unwrap();
+        assert!(Store::open(&q, DEFAULT_MAX_MB)
+            .unwrap_err()
+            .contains("unknown 'kind'"));
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+        std::fs::remove_dir_all(q.parent().unwrap()).ok();
     }
 
     #[cfg(unix)]

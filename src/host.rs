@@ -19,6 +19,8 @@
 //! * [`serve_options`] — the locked server's `options` key list
 //!   (`duckext/src/serve.rs`'s `LockedOptions::parse`), shared with
 //!   `dashboard --site`'s own options parser so the two can't drift (#501).
+//! * [`writeback`] — `options.writeback` (#684): shared write-back of an
+//!   edited model into declared tables, `POST /api/save`'s change set.
 
 pub mod access;
 pub mod app_brand;
@@ -30,6 +32,7 @@ pub mod serve_options;
 pub mod serving;
 pub mod state;
 pub mod telemetry;
+pub mod writeback;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 

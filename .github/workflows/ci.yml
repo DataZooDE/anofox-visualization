@@ -944,6 +944,13 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/diagram-check-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/save-served-e2e.mjs (#684 slice 2): ::SAVE on a locked server
+      # with options.writeback — a writer's save lands in the change log, a
+      # non-writer and an undeclared table are refused, retries save once.
+      - name: Save on a locked server e2e (#684)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/save-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"

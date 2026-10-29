@@ -949,6 +949,63 @@ server availability and disk (A5); the audit trail (A6).
 | Answers leaking into logs | The audit log never carries values; the request log only with `log_vars: values` (documented, opt-in) |
 | Erasure/export rewriting the live file, or a crash tearing it | Both refuse outright while a server holds the file's `flock`; `export`/dry-run `erase` open read-only and never mutate the file; an applied `erase` writes to a temp file and `rename`s it over the original, so a crash leaves either the untouched original or the complete new file, never a torn mix |
 
+### Shared write-back (`options.writeback`, #684)
+
+The second write path: a **writer** saves an edited model — a `::DIAGRAM`
+graph or a `::FORM`'s values (`::SAVE`, see `docs/DOCS.md` → "Saving
+edits") — into tables the server **declares**. Like `options.state`, Rust
+appends each save to a file no SQL reaches; the snapshot stays read-only.
+
+```json
+"writeback": {
+  "path": "/var/lib/anofox/plan-changes.jsonl",
+  "dashboards": ["twin"],
+  "writers": {"groups": ["planners"], "users": ["lead@example.com"]},
+  "tables": {
+    "plan_nodes":  {"key": ["id"], "columns": {"id": "VARCHAR", "type": "VARCHAR", "label": "VARCHAR", "stage": "INTEGER"}},
+    "plan_edges":  {"key": ["from", "to"], "columns": {"from": "VARCHAR", "to": "VARCHAR"}},
+    "plan_params": {"key": ["id"], "columns": {"id": "VARCHAR", "lead_time": "DOUBLE"}}
+  },
+  "max_rows": 2000,
+  "text_max_chars": 1000,
+  "rate": {"per_minute": 12, "burst": 5},
+  "max_mb": 256
+}
+```
+
+- **What may be written.** Only the declared tables, only their declared
+  columns, each value coerced to its declared type (`VARCHAR`, `INTEGER`,
+  `BIGINT`, `DOUBLE`, `BOOLEAN`, `DATE`; text capped at `text_max_chars`),
+  every key column non-null. A graph save replaces both of its tables
+  (nodes: `id, type, label, stage` — the ones the table declares; edges:
+  `from, to`), at most `max_rows` rows, no duplicate keys; a form save
+  upserts one row of a table keyed by `id`. Never client SQL.
+- **Who.** `auth` is required; the viewer must be a personal sign-in (no API
+  key, no shared embed identity) listed in `writers` by user or group, and
+  the dashboard must be in `dashboards` and in the credential's scope.
+  Everyone else gets the button disabled with the reason, and `403` from the
+  endpoint. With an `embed` login, `frame_ancestors` is required.
+- **The endpoint**, `POST /api/save` — `{"dashboard", "panel", "id", "vars",
+  "graph" | "form" + "key", "base"}`: the same CSRF gate as `/api/submit`
+  (`Origin` required and matching, `Sec-Fetch-Site: same-origin`, JSON,
+  `X-Anofox-Submit: 1`), a 1 MiB body cap, the per-writer rate limit plus the
+  global 20/s, one save at a time per writer (`409` + `Retry-After: 1`), a
+  retry with the same `id` within 10 minutes answered from memory instead of
+  saved twice. The server re-runs the dashboard's `::SAVE` statement with the
+  viewer's variables (it names the tables); a table the config doesn't
+  declare is refused (`400`, saying which).
+- **Storage.** The change log is the `options.state` store design (`flock`,
+  `O_NOFOLLOW`, `0600`, `fdatasync` before the `201`, torn-tail recovery, the
+  same path rules, never the `options.state.path`), its header marked
+  `"kind":"writeback"` so the two files can't be swapped. One line per save:
+  `{"seq", "ts", "user", "auth", "dashboard", "submit": <the ::SAVE column>,
+  "id", "vars": {"changes": [{"table", "op": "replace"|"upsert", "rows"}],
+  "base"}}`. `/healthz` reports `writeback: {ok, full}`; with `options.audit`
+  every save and refusal is a `save` event.
+- **Not yet.** Panels don't read the saved rows yet (materialised per
+  connection, base ⊕ changes, next); `base` is recorded but a stale save
+  isn't refused yet (conflicts, `409`, after that).
+
 ## B. Static render — `serve --dashboards <dir>`
 
 The most locked-down option: **no client data API at all**, server-side SVG only.
