@@ -2871,7 +2871,8 @@ single chart) scrolling or dragging in a line, area, bar or scatter cell zooms
 and pans it, and under `'x' ::AXES_COLLECT` every cell sharing its x axis (the
 charts stacked with it — a `::HISTOGRAM` or density too) takes the same x
 window while fitting its own y; a cell beside them keeps its own;
-double-click resets the figure. The
+double-click (or the toolbox's Restore) resets the figure. The toolbox's
+Line / bar switches every line or bar cell of the figure at once. The
 browser, `--svg` / `--site`, the HTML export and the served page all draw the
 same picture.
 
