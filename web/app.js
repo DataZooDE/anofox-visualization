@@ -9362,13 +9362,15 @@ async function lazyRunJob(job, inline = false) {
     const ts = L.stmts[t.i];
     if (out.lastChart) {
       try {
-        addTrack(out.lastChart, { rows: await panelSql(ts.sql, t.i, L.pv), roles: ts.roles, height: t.height });
+        const rows = await panelSql(ts.sql, t.i, L.pv);
+        if (t.caption) addCaption(out.lastChart, rows, ts.roles);
+        else addTrack(out.lastChart, { rows, roles: ts.roles, height: t.height });
       } catch (e) {
         // A strip whose optional input is missing is left out (#162).
         if (isOptionalMissing(ts, e)) console.info(`track skipped (optional input missing): ${requiresText(reqsOf(ts))}`);
         else frag.appendChild(mkErrorCard(e, ts.sql));
       }
-    } else await L.panelBody(t.i, ts, { ...base, nextSpan: 0, nextHeight: t.height, nextRowSelect: "", nextTableOpts: {}, nextIa: {}, nextEmpty: "" });
+    } else await L.panelBody(t.i, ts, { ...base, nextSpan: 0, nextHeight: t.height || 0, nextRowSelect: "", nextTableOpts: {}, nextIa: {}, nextEmpty: "" });
     tag(t.i);
   }
   if (L.gen !== dpLazy.gen) return;
@@ -10834,7 +10836,9 @@ async function runOnce(fresh = true, pv = preview) {
     }
     // A ::TRACK (optionally after a ::HEIGHT) follows its chart directly.
     const trackHost = role(s, "TRACK") ? lastChart : null;
-    if (d !== "HEIGHT" && !role(s, "TRACK")) lastChart = null;
+    // #692: so does a 'caption'::MARKDOWN_STYLE text — the chart card's footer.
+    const captionHost = lastChart && (await mdIsCaption(s, i, pv)) ? lastChart : null;
+    if (d !== "HEIGHT" && !role(s, "TRACK") && !captionHost) lastChart = null;
     // Close an open auto-strip the moment a non-KPI statement appears; open one
     // when a fresh top-level run of >=2 KPI tiles begins.
     if (autoGroup && !isKpi(s)) {
@@ -11236,6 +11240,11 @@ async function runOnce(fresh = true, pv = preview) {
         // a ::TRACK under a chart that renders later: it renders with it
         trackHost.lazy.tracks.push({ i, height: nextHeight || 0 });
         nextHeight = 0;
+        continue;
+      } else if (captionHost) {
+        // #692: the chart's caption — with the chart when that renders later
+        if (captionHost.lazy) captionHost.lazy.tracks.push({ i, caption: true });
+        else addCaption(captionHost, await panelSql(s.sql, i, pv), s.roles);
         continue;
       } else if (
         lazy &&
@@ -11702,6 +11711,31 @@ function widenDiagram(holder, w, draw) {
 }
 
 // ::TRACK: add a strip under the chart in `holder` and redraw the stack.
+// #692: is statement `s` a ::MARKDOWN whose ::MARKDOWN_STYLE is 'caption'?
+// (Only asked right after a chart — its one-row query is cheap.)
+async function mdIsCaption(s, i, pv) {
+  if (!role(s, "MARKDOWN") || !role(s, "MARKDOWN_STYLE")) return false;
+  const sr = s.roles.find((r) => r[1] === "MARKDOWN_STYLE");
+  try {
+    const r0 = JSON.parse(await panelSql(s.sql, i, pv))[0] || {};
+    return String(r0["c" + sr[0]] ?? "").trim().toLowerCase() === "caption";
+  } catch (_) {
+    return false; // it fails again as its own panel, with its error card
+  }
+}
+// A caption under a chart, in its card (#692): the Markdown with its row's
+// {{values}} and formulas, like a ::MARKDOWN box's text.
+function addCaption(holder, rowsJson, roles) {
+  const fig = holder.closest?.(".panel");
+  if (!fig) return;
+  const r0 = JSON.parse(rowsJson)[0] || {};
+  const mdr = roles.find((r) => r[1] === "MARKDOWN");
+  const cap = document.createElement("div");
+  cap.className = "dp-caption md-body";
+  cap.innerHTML = markdownWithValues(mdr ? r0["c" + mdr[0]] : "", r0, mdValue);
+  typesetMath(cap);
+  fig.appendChild(cap);
+}
 function addTrack(holder, track) {
   (holder._tracks = holder._tracks || []).push(track);
   const dp = holder.closest(".panel")?._dp;
@@ -13660,6 +13694,8 @@ function mdStyleOf(v) {
 // always draws 'callout'; else `dashboardDefault` (-- @markdown_style); else
 // 'callout' (today's look).
 function resolveMdStyle(explicit, calloutPresent, dashboardDefault) {
+  // #692: a 'caption' with no chart right before it reads as plain text
+  if (String(explicit ?? "").trim().toLowerCase() === "caption" && !mdStyleOf(explicit)) return "plain";
   return mdStyleOf(explicit) ?? (calloutPresent ? "callout" : mdStyleOf(dashboardDefault) ?? "callout");
 }
 // ::MARKDOWN_TONE value → {tone, label} or null (src/roles.rs

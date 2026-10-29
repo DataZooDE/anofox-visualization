@@ -829,8 +829,10 @@ fn render_inner(
         };
         next_height = 0;
         // ::TRACKs right after a chart (each optionally after a ::HEIGHT) go
-        // under it in its card, which grows by their heights.
+        // under it in its card, which grows by their heights; so do
+        // 'caption'::MARKDOWN_STYLE texts after them (#692).
         let mut tracks: Vec<(Vec<Column>, u32)> = Vec::new();
+        let mut captions: Vec<String> = Vec::new();
         if is_chart(rows, roles, &ropts) {
             let mut j = si + 1;
             let mut h = 0;
@@ -845,13 +847,20 @@ fn render_inner(
                 };
                 if r.iter().any(|(_, r)| *r == Role::Height) {
                     h = first().unwrap_or(0.0).clamp(0.0, 2000.0) as u32;
-                } else if crate::track::is_track(r) {
+                } else if crate::track::is_track(r) && captions.is_empty() {
                     // A track that failed (its optional input is missing) is
                     // left out.
                     let h = std::mem::take(&mut h);
                     if let Ok(rows) = &st.rows {
                         tracks.push((columns_from_result(rows, r), h));
                     }
+                } else if let Some((text, rows)) = st
+                    .rows
+                    .as_ref()
+                    .ok()
+                    .and_then(|rows| Some((caption_text(rows, r)?, rows)))
+                {
+                    captions.push(markdown_fill(&text, rows, &ropts.locale));
                 } else {
                     break;
                 }
@@ -864,6 +873,12 @@ fn render_inner(
             }
         }
         let ch = ch + crate::track::heights(&tracks).iter().sum::<u32>() as f64;
+        let cap_w = if span == 0 {
+            content_w
+        } else {
+            unit_w * span as f64 - gap
+        };
+        let cap_h = captions_height(&captions, cap_w);
         // The strip's last tile closes its row.
         let strip_ends = match &mut strip {
             Some((left, _, _, _)) => {
@@ -899,6 +914,12 @@ fn render_inner(
             totals_spec.as_deref(),
             compact[si],
         );
+        let inner = if captions.is_empty() {
+            inner
+        } else {
+            inner + &captions_svg(&captions, Place::At(x, row_y + ch), cw, cap_h, t)
+        };
+        let ch = ch + cap_h;
         let chrome = panel_chrome(roles, rows, md_default.as_deref(), t);
         placed.push((x, row_y, cw, ch, inner, chrome));
 
@@ -2107,6 +2128,106 @@ pub(crate) fn markdown_text(
     column_at(rows, *i)
         .and_then(|(_, v)| v.first())
         .map(value_str)
+}
+
+/// A `'caption'::MARKDOWN_STYLE` statement's text (#692), if it is one.
+fn caption_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<String> {
+    let (i, _) = roles.iter().find(|(_, r)| *r == Role::MarkdownStyle)?;
+    let style = column_at(rows, *i)?.1.first().map(value_str)?;
+    if !crate::roles::is_caption_style(&style) {
+        return None;
+    }
+    markdown_text(rows, roles)
+}
+
+/// The static HTML pages' captions (#692: `dashboard <file>.sql`'s export,
+/// a served dashboard's no-script page): when `prev_rows` / `prev_roles` (a
+/// panel, as queried) is a chart and `rows` / `roles` a
+/// `'caption'::MARKDOWN_STYLE` statement, its text — `{{values}}` filled,
+/// HTML-escaped, a paragraph per blank-line block — for the chart's figure.
+pub fn caption_html(
+    prev_rows: &[serde_json::Map<String, serde_json::Value>],
+    prev_roles: &[(usize, Role)],
+    rows: &[serde_json::Map<String, serde_json::Value>],
+    roles: &[(usize, Role)],
+    o: &RenderOptions,
+) -> Option<String> {
+    if !is_chart(&crate::sql::result_columns(prev_rows), prev_roles, o) {
+        return None;
+    }
+    let cols = crate::sql::result_columns(rows);
+    let text = markdown_fill(&caption_text(&cols, roles)?, &cols, &o.locale);
+    // plain text, as the static ::MARKDOWN boxes draw it (no wrapping here:
+    // the page's CSS wraps); an empty line ends a paragraph
+    let mut paras = String::new();
+    let mut cur: Vec<String> = Vec::new();
+    let flush = |cur: &mut Vec<String>, paras: &mut String| {
+        if !cur.is_empty() {
+            paras.push_str(&format!("<p>{}</p>", cur.join(" ")));
+            cur.clear();
+        }
+    };
+    for line in markdown_lines(&text, 1e9) {
+        match line {
+            MdLine::Text(t) if t.is_empty() => flush(&mut cur, &mut paras),
+            MdLine::Text(t) => cur.push(esc(&t)),
+            MdLine::Image { .. } => {}
+        }
+    }
+    flush(&mut cur, &mut paras);
+    Some(format!("<div class=\"dp-caption\">{paras}</div>"))
+}
+
+/// Caption text size and line height (smaller than a ::MARKDOWN box's 13 px
+/// text, which [`markdown_lines`] wraps for: it wraps a caption at the width
+/// that many more characters take).
+const MD_FONT: f64 = 13.0;
+const CAPTION_FONT: f64 = 11.5;
+const CAPTION_LINE: f64 = 16.0;
+
+/// The height of a chart card's captions at card width `w` (0 with none):
+/// a rule, then each caption's wrapped lines.
+fn captions_height(captions: &[String], w: f64) -> f64 {
+    if captions.is_empty() {
+        return 0.0;
+    }
+    let lines: usize = captions
+        .iter()
+        .map(|c| markdown_lines(c, w * MD_FONT / CAPTION_FONT).len())
+        .sum();
+    14.0 + lines as f64 * CAPTION_LINE
+}
+
+/// A chart card's captions (#692) under the chart: a thin rule, then the
+/// text in the muted ink — wrapped, no rich formatting (as a ::MARKDOWN
+/// box's static text).
+fn captions_svg(captions: &[String], place: Place, w: f64, h: f64, t: &ResolvedTheme) -> String {
+    let pad = 14.0;
+    let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
+    svg.push_str(&format!(
+        "<line x1=\"{pad}\" y1=\"2\" x2=\"{:.1}\" y2=\"2\" stroke=\"{}\" stroke-width=\"1\"/>\
+         <g class=\"dp-caption\" font-family=\"{}\" font-size=\"{CAPTION_FONT}\" fill=\"{}\">",
+        w - pad,
+        hex(t.colors.line),
+        esc(&t.font.family),
+        hex(t.colors.muted),
+    ));
+    let mut y = 2.0 + CAPTION_LINE;
+    for c in captions {
+        for line in markdown_lines(c, w * MD_FONT / CAPTION_FONT) {
+            if let MdLine::Text(text) = line {
+                if !text.is_empty() {
+                    svg.push_str(&format!(
+                        "<text x=\"{pad}\" y=\"{y:.0}\">{}</text>",
+                        markdown_line_svg(&text)
+                    ));
+                }
+            }
+            y += CAPTION_LINE;
+        }
+    }
+    svg.push_str("</g></svg>");
+    svg
 }
 
 /// How a panel's outer SVG `<rect>` is drawn (#536): today's bordered card

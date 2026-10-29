@@ -1477,3 +1477,55 @@ fn render_does_not_seed_viewer_state_when_not_needed() {
         db.executed
     );
 }
+
+/// #692: a 'caption'::MARKDOWN_STYLE right after a chart is drawn in the
+/// chart's card (a rule, then the text in the muted ink), not as a box of its
+/// own; one with no chart before it is a plain text box.
+#[test]
+fn headless_caption_goes_under_its_chart() {
+    struct Caps;
+    impl DataProvider for Caps {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("'caption'") {
+                let text = if sql.contains("Lone") {
+                    "Lone caption."
+                } else {
+                    "Source: ERP."
+                };
+                return Ok(vec![
+                    ("c0".into(), s(&[text])),
+                    ("c1".into(), s(&["caption"])),
+                ]);
+            }
+            Ok(vec![
+                ("c0".into(), s(&["W1", "W2"])),
+                ("c1".into(), f(&[3.0, 4.0])),
+            ])
+        }
+    }
+    let one = "SELECT week::XAXIS, n::BARCHART FROM t;";
+    let cap = "SELECT 'Source: ERP.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;";
+    let svg = |script: &str| {
+        render_dashboard_svg(script, &mut Caps, &DashboardOptions::default()).unwrap()
+    };
+    let with = svg(&format!("{one}\n{cap}"));
+    let without = svg(one);
+    assert!(
+        with.contains("class=\"dp-caption\"") && with.contains(">Source: ERP.</text>"),
+        "{with}"
+    );
+    // the same one card, taller by the caption — no second card
+    assert_eq!(
+        with.matches("<rect x=").count(),
+        without.matches("<rect x=").count(),
+        "{with}"
+    );
+    let lone = svg("SELECT 'Lone caption.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;");
+    assert!(
+        !lone.contains("class=\"dp-caption\"") && lone.contains("Lone caption."),
+        "{lone}"
+    );
+}

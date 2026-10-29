@@ -269,5 +269,54 @@ for (const width of [1440, 390]) {
   await page.close();
 }
 
+// (g) 'caption'::MARKDOWN_STYLE (#692): the text right after a chart is
+// that chart card's footer (no box of its own), with its {{values}}; two
+// captions stack; a caption with no chart before it is plain text; a chart
+// on a hidden tab (rendered lazily) gets its caption when shown.
+const CAP_SQL = `-- @title Captions e2e (#692)
+SELECT 'Overview'::TAB;
+SELECT 'Lead-in text.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;
+SELECT d::XAXIS, v::LINECHART, 'Orders per day'::TITLE FROM (SELECT range AS d, (range * 7) % 11 AS v FROM range(10));
+SELECT 'Source: ERP; values below **{{t}}** are good.'::MARKDOWN, 'caption'::MARKDOWN_STYLE, 1 AS t;
+SELECT 'MASE = $\\frac{a}{b}$.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;
+SELECT 'A separate box.'::MARKDOWN;
+SELECT 'Detail'::TAB;
+SELECT d::XAXIS, v::BARCHART, 'Later chart'::TITLE FROM (SELECT range AS d, (range * 3) % 7 AS v FROM range(6));
+SELECT 'Caption of a lazily drawn chart.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;
+`;
+for (const width of [1440, 390]) {
+  const { page, errs } = await open(CAP_SQL, { width, height: 900 });
+  check(!errs.length, `(g) ${width}px: no page errors: ` + errs.join(" | "));
+  const st = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".tabpane:not([hidden]) .panel")].filter((p) => p.checkVisibility()).map((p) => ({
+        chart: !!p.querySelector(".panel-svg svg"),
+        caps: [...p.querySelectorAll(":scope > .dp-caption")].map((c) => c.textContent.trim()),
+        math: !!p.querySelector(".dp-caption .katex"),
+        rules: [...p.querySelectorAll(":scope > .dp-caption")].map((c) => getComputedStyle(c).borderTopWidth),
+        cls: [...p.classList].sort().join(" "),
+        overflow: p.scrollWidth > p.clientWidth + 1,
+      }))
+    );
+  let f = await st();
+  check(f.length === 3, `(g) ${width}px: 3 panels — the captions have no box of their own (${f.length})`);
+  check(f[0].cls === "md-plain panel" && !f[0].chart, `(g1) no chart before: plain text (${f[0].cls})`);
+  check(f[1].chart && f[1].caps.length === 2 && f[1].caps[0] === "Source: ERP; values below 1 are good.", `(g2) the chart's footer, {{values}} filled (${JSON.stringify(f[1].caps)})`);
+  if (!f[1].math) {
+    await page.waitForSelector(".dp-caption .katex", { timeout: 15000 }).catch(() => {});
+    f = await st();
+  }
+  check(f[1].math, "(g2) a formula in a caption is typeset");
+  check(f[1].rules.join() === "1px,0px", `(g2) one rule above the captions, not one each (${f[1].rules})`);
+  check(!f[2].chart && f[2].caps.length === 0, "(g3) the next ::MARKDOWN is its own box");
+  check(f.every((x) => !x.overflow), `(g) ${width}px: no panel overflows`);
+  if (shots) await page.screenshot({ path: `${shots}/markdown-caption-${width}.png`, fullPage: true });
+  await page.click('.tabbar > .tab-btn:text-is("Detail")');
+  await page.waitForFunction(() => [...document.querySelectorAll(".tabpane:not([hidden]) .panel .dp-caption")].length === 1, null, { timeout: 30000 }).catch(() => {});
+  f = await st();
+  check(f.length === 1 && f[0].chart && f[0].caps[0] === "Caption of a lazily drawn chart.", `(g4) ${width}px: a lazily drawn chart gets its caption (${JSON.stringify(f)})`);
+  await page.close();
+}
+
 await browser.close();
 console.log(`markdown-style-e2e: ${process.exitCode ? "failed" : "0 failed"}`);

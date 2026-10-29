@@ -313,7 +313,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("CALLOUT", &["ADMONITION"], R::Callout, "kpi", true,
       "draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success'"),
     e("MARKDOWN_STYLE", &["MD_STYLE"], R::MarkdownStyle, "kpi", true,
-      "a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style"),
+      "a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); 'caption' puts the text under the chart right before it, in its card; a dashboard-wide default comes from -- @markdown_style"),
     e("MARKDOWN_TONE", &["MD_TONE"], R::MarkdownTone, "kpi", true,
       "a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; 'details' folds (the label opens it, in the browser); implies 'card'"),
     e("IMAGE", &["PICTURE", "IMG"], R::Image, "kpi", true,
@@ -593,6 +593,13 @@ pub fn callout_kind(v: &str) -> &'static str {
 /// `MD_STYLE_KINDS` (web/app.js) all list the same three.
 pub const MARKDOWN_STYLE_KINDS: &[&str] = &["plain", "card", "callout"];
 
+/// `'caption'::MARKDOWN_STYLE` (#692): the text goes under the chart right
+/// before it, in its card — not a style of its own box, so not one of
+/// [`MARKDOWN_STYLE_KINDS`] (nor a `-- @markdown_style` default).
+pub fn is_caption_style(v: &str) -> bool {
+    v.trim().eq_ignore_ascii_case("caption")
+}
+
 /// `v`, trimmed and lower-cased, if it names one of [`MARKDOWN_STYLE_KINDS`].
 pub fn markdown_style_of(v: &str) -> Option<&'static str> {
     MARKDOWN_STYLE_KINDS
@@ -614,6 +621,11 @@ pub fn resolve_markdown_style(
 ) -> &'static str {
     if let Some(v) = explicit.and_then(markdown_style_of) {
         return v;
+    }
+    // #692: a 'caption' with no chart right before it (else it is drawn in
+    // the chart's card) reads as plain text
+    if explicit.is_some_and(is_caption_style) {
+        return "plain";
     }
     if callout_present {
         return "callout";
@@ -883,6 +895,11 @@ mod tests {
 
     #[test]
     fn resolve_markdown_style_precedence() {
+        // #692: a 'caption' with no chart before it is plain text.
+        assert_eq!(
+            resolve_markdown_style(Some(" Caption "), true, Some("callout")),
+            "plain"
+        );
         // nothing set at all: 'callout', today's look.
         assert_eq!(resolve_markdown_style(None, false, None), "callout");
         // the dashboard's own default, with no panel-level override.

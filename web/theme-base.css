@@ -242,6 +242,9 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
    just its card chrome goes. */
 .md-plain{background:transparent;border-color:transparent;box-shadow:none}
 /* ::DIAGRAM edit mode (#682): the toolbar above the drawing; the picked mark. */
+.dp-caption{margin:.55rem 0 0;padding-top:.5rem;border-top:1px solid var(--ax-line);font-size:.8rem;line-height:1.45;color:var(--ax-muted)}
+.dp-caption>:first-child{margin-top:0}.dp-caption>:last-child{margin-bottom:0}
+.dp-caption+.dp-caption{margin-top:.3rem;padding-top:0;border-top:0}
 .dp-edit-bar{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin:0 0 .6rem}
 .dp-edit-bar .dp-edit-name{flex:1 1 9rem;min-width:7rem}
 .dp-edit-btn{padding:.3rem .65rem;font-size:.8rem}

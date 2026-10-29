@@ -2496,6 +2496,23 @@ fn render_dashboard_page(
         {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
+        // #692: 'caption'::MARKDOWN_STYLE texts right after a chart go under
+        // it, in its figure.
+        let mut captions = String::new();
+        while let Some(c) = queried.peek().and_then(|(q, r, na, _, _)| {
+            (!na).then(|| {
+                anofox_visualization::dashboard::caption_html(
+                    &rows,
+                    &panel.roles,
+                    r,
+                    &q.roles,
+                    &opts,
+                )
+            })?
+        }) {
+            queried.next();
+            captions.push_str(&c);
+        }
         // Its ::TITLE bar, as on a dashboard card (#232).
         let svg = anofox_visualization::host::catch_panic(|| {
             render_with_title(&cols, &tracks, 460, 300, &opts).map_err(|e| e.to_string())
@@ -2534,7 +2551,7 @@ fn render_dashboard_page(
             ("panel".to_string(), String::new())
         };
         panels.push_str(&format!(
-            "<figure class=\"{class}\"{icon_attrs}>{svg}</figure>"
+            "<figure class=\"{class}\"{icon_attrs}>{svg}{captions}</figure>"
         ));
     }
 

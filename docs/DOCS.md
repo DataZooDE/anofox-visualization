@@ -180,7 +180,7 @@ terminal.
 | `::TEXT_LARGE` |  | kpi | large text card |
 | `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
-| `::MARKDOWN_STYLE` | `::MD_STYLE` | kpi | a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); a dashboard-wide default comes from -- @markdown_style |
+| `::MARKDOWN_STYLE` | `::MD_STYLE` | kpi | a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); 'caption' puts the text under the chart right before it, in its card; a dashboard-wide default comes from -- @markdown_style |
 | `::MARKDOWN_TONE` | `::MD_TONE` | kpi | a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; 'details' folds (the label opens it, in the browser); implies 'card' |
 | `::IMAGE` | `::PICTURE`, `::IMG` | kpi | a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption |
 | `::IMAGE_DARK` | `::IMG_DARK` | kpi | the ::IMAGE shown while the dashboard is dark |
@@ -2235,6 +2235,7 @@ world it predicts moved on?'::MARKDOWN, 'plain'::MARKDOWN_STYLE;
 | `plain` | Text on the page background: no card, no tint, no accent bar, normal page padding. |
 | `card` | A plain white card, like a chart or KPI panel — no tint, no bar. |
 | `callout` | Today's tinted box (the default). `::CALLOUT` implies this. |
+| `caption` | No box: the text goes under the chart right before it, in that chart's card (#692). |
 
 A dashboard-wide default comes from a `-- @markdown_style <plain\|card\|callout>`
 header (see *Dashboard header comments*); a panel's own `::MARKDOWN_STYLE`
@@ -2245,6 +2246,26 @@ wins, so the callout's tint, bar and icon are dropped. `--check` also warns
 on an unknown value (`markdown_style/unknown`) or a `::MARKDOWN_STYLE` without
 `::MARKDOWN` text (`markdown_style/no-text`). Browser, `--svg` and other
 static/HTML output all draw the same choice.
+
+**A chart's caption** (`'caption'`, #692): a source note, a definition or a
+"how to read this" right after a chart becomes that chart card's footer — a
+thin rule, then the text in a smaller, muted ink — so chart and caption read
+as one unit and share the chart's column and width:
+
+```sql
+SELECT day::XAXIS, orders::LINECHART, 'Orders per day'::TITLE FROM daily;
+SELECT 'Source: ERP, returns netted. Below **{{target}}** is on plan.'::MARKDOWN,
+       'caption'::MARKDOWN_STYLE, 120 AS target;
+```
+
+Its `{{values}}` and formulas work as in any `::MARKDOWN`. Several captions in
+a row stack under the same chart; its `::TRACK`s and a `::HEIGHT` may sit
+between the chart and the caption. With no chart right before it the text is
+drawn as `'plain'`, and `--check` warns (`markdown_style/caption-no-chart`).
+`'caption'` is a panel's own value only, not a `-- @markdown_style` default.
+`--svg` draws the caption as plain wrapped text in the card; the HTML pages
+(the `dashboard` export, a served dashboard without scripts) put it in the
+chart's figure.
 
 ### Quiet tones on a card (`::MARKDOWN_TONE`)
 
