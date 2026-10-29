@@ -166,11 +166,14 @@ try {
     check(status.includes("Saved — thanks!"), "(b) the ::SUBMIT_DONE text is appended");
     check(!(await page.locator(".submit-btn").isDisabled()), "(b) the button is enabled again");
     check((await page.locator(".submit-btn").getAttribute("aria-busy")) === null, "(b) aria-busy is cleared");
-    const focused = await page.evaluate(() => document.activeElement?.classList.contains("submit-btn"));
-    check(focused, "(b) focus stays on the button");
     await page.waitForFunction((n0) => document.querySelector(".metric-value")?.textContent !== n0, n0, { timeout: 15000 });
     const n1 = await metricN(page);
     check(n0 !== n1, `(b) the viewer_state count panel re-ran (was ${n0}, now ${n1})`);
+    // after the re-run settles (checked earlier, a slow runner could catch
+    // the re-render mid-way): focus is back on — or still on — the button
+    await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 15000 });
+    const focused = await page.evaluate(() => document.activeElement?.classList.contains("submit-btn"));
+    check(focused, "(b) focus stays on the button");
     check(!errs.length, `(b) no page errors: ${errs.join(" | ")}`);
     await ctx.close();
   }
