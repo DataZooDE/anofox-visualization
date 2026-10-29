@@ -10406,6 +10406,14 @@ async function runOnce(fresh = true, pv = preview) {
             container.appendChild(fig);
             panels++;
           }
+        } else if (role(s, "SAVE")) {
+          // #684: saves the page's edits (a graph / a form) into tables
+          const fig = mkSave(s, i, rowsJson);
+          if (fig) {
+            if (container === curGrid) fig.style.gridColumn = `span ${span}`;
+            container.appendChild(fig);
+            panels++;
+          }
         } else if (role(s, "IMAGE")) {
           // A static picture panel (#514): one <img> per row (::IMAGE_DARK
           // shown instead while body.dark — CSS, not a reload), stacked in
@@ -17428,6 +17436,121 @@ async function doSubmitPreview(s, i, names, doneText, btn, statusEl, errEl) {
   } finally {
     btn.disabled = false;
     btn.removeAttribute("aria-busy");
+  }
+}
+
+// ::SAVE (#684) -------------------------------------------------------------
+// Slice 1: the builder applies a save to this tab only — TEMP tables named
+// like the declared ones shadow the base tables (the server's "base ⊕
+// changes" shape), so the author writes the SQL that reads them and sees
+// the model recompute. Nothing reaches a server; everywhere else the button
+// is disabled with the reason.
+const SAVE_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+let saveStatus = {}; // per plan index: the last save's message
+let saveForms = {}; // per table: {key → form values}, this tab's saved rows
+function saveDisabledReason() {
+  if (servedMode) return "Saving is not enabled on this server yet";
+  if (published) return "Saving needs the dashboard server";
+  if (backend === "live") return "Saving isn't available in live-authoring preview";
+  return null;
+}
+function mkSave(s, i, rowsJson) {
+  const row = JSON.parse(rowsJson)[0];
+  if (!row) return null;
+  const cell = (r) => {
+    const x = s.roles.find((y) => y[1] === r);
+    return x ? String(row["c" + x[0]] ?? "").replace(/^"|"$/g, "").trim() : "";
+  };
+  const spec = {
+    graph: cell("SAVE_GRAPH"),
+    form: cell("SAVE_FORM"),
+    key: cell("SAVE_KEY") || "selected",
+    tables: cell("SAVE_TABLES")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean),
+  };
+  const fig = document.createElement("figure");
+  fig.className = "panel submit-panel save-panel";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "submit-btn";
+  btn.textContent = cell("SAVE") || "Save";
+  const statusEl = document.createElement("div");
+  statusEl.className = "submit-status";
+  statusEl.setAttribute("role", "status");
+  statusEl.setAttribute("aria-live", "polite");
+  const errEl = document.createElement("div");
+  errEl.className = "submit-error";
+  errEl.setAttribute("role", "alert");
+  fig.append(btn, statusEl, errEl);
+  const reason = saveDisabledReason();
+  if (reason) return mkSubmitDisabled(fig, btn, errEl, "save-" + i, reason);
+  const note = document.createElement("p");
+  note.className = "submit-preview-note";
+  note.textContent = "Preview: a save stays in this tab (its tables shadow the base ones) and is not stored.";
+  fig.insertBefore(note, btn);
+  const st = saveStatus[i];
+  if (st) requestAnimationFrame(() => ((st.err ? errEl : statusEl).textContent = st.text));
+  btn.onclick = () => doSavePreview(i, spec, btn, statusEl, errEl);
+  return fig;
+}
+async function doSavePreview(i, spec, btn, statusEl, errEl) {
+  btn.disabled = true;
+  // shown at once in this panel (a re-run may keep its DOM), and again on a re-render
+  const say = () => {
+    const st = saveStatus[i];
+    statusEl.textContent = st && !st.err ? st.text : "";
+    errEl.textContent = st && st.err ? st.text : "";
+  };
+  try {
+    const bad = spec.tables.find((t) => !SAVE_IDENT.test(t));
+    if (bad) throw new Error(`'${bad}' is not a plain table name`);
+    const conn = pageConn();
+    const q = async (sql) => JSON.parse(rowsJson(await conn.query(sql)));
+    const lit = (v) => "'" + String(v).replace(/'/g, "''") + "'";
+    const base = async (t) => (await q(`SELECT count(*) AS n FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = ${lit(t)}`))[0]?.n > 0;
+    if (spec.graph) {
+      if (spec.tables.length !== 2) throw new Error("a graph saves into two tables: nodes, edges");
+      const g = JSON.parse(dpVars[spec.graph] ?? "null");
+      if (!g || !Array.isArray(g.nodes)) throw new Error(`'${spec.graph}' holds no edited graph`);
+      const [nt, et] = spec.tables;
+      await conn.query(`SET VARIABLE __save_graph = ${lit(JSON.stringify(g))}`);
+      const gv = `CAST(getvariable('__save_graph') AS JSON)`;
+      await conn.query(
+        `CREATE OR REPLACE TEMP TABLE "${nt}" AS SELECT n->>'id' AS id, n->>'type' AS type, n->>'label' AS label, TRY_CAST(n->>'stage' AS INTEGER) AS stage FROM (SELECT unnest(CAST(${gv}->'nodes' AS JSON[])) AS n)`
+      );
+      await conn.query(`CREATE OR REPLACE TEMP TABLE "${et}" AS SELECT e->>'from' AS "from", e->>'to' AS "to" FROM (SELECT unnest(CAST(${gv}->'edges' AS JSON[])) AS e)`);
+      saveStatus[i] = { text: `Saved ${g.nodes.length} nodes and ${g.edges.length} edges into ${nt}, ${et} (this tab only).` };
+    } else if (spec.form) {
+      if (spec.tables.length !== 1) throw new Error("a form saves into one table");
+      const t = spec.tables[0];
+      // the default key: the clicked diagram node (the cross-filter `selected`)
+      const key = dpVarCI(spec.key) ?? (spec.key.toLowerCase() === "selected" ? dpFilter : undefined);
+      if (key === undefined || key === null || key === "") throw new Error(`pick the row to save first ('${spec.key}' is empty)`);
+      const vals = JSON.parse(dpVars[spec.form] ?? "null");
+      if (!vals || typeof vals !== "object") throw new Error(`'${spec.form}' holds no form values`);
+      const rows = (saveForms[t] = saveForms[t] || {});
+      rows[String(key)] = { id: String(key), ...vals };
+      const json = JSON.stringify(Object.values(rows));
+      await conn.query(`SET VARIABLE __save_rows = ${lit(json)}`);
+      const shape = (await q(`SELECT json_structure(CAST(getvariable('__save_rows') AS JSON)) AS s`))[0].s;
+      const saved = `SELECT unnest(json_transform(CAST(getvariable('__save_rows') AS JSON), ${lit(shape)}), recursive := true)`;
+      // the base rows of the keys not saved here, then the saved ones
+      const sql = (await base(t))
+        ? `SELECT * FROM main."${t}" WHERE CAST(id AS VARCHAR) NOT IN (SELECT id FROM (${saved})) UNION ALL BY NAME ${saved}`
+        : saved;
+      await conn.query(`CREATE OR REPLACE TEMP TABLE "${t}" AS ${sql}`);
+      saveStatus[i] = { text: `Saved '${key}' into ${t} (this tab only).` };
+    }
+    say();
+    dpResults.clear();
+    run(true);
+  } catch (e) {
+    saveStatus[i] = { text: "Couldn't save: " + (e && e.message ? e.message : String(e)), err: true };
+    say();
+  } finally {
+    btn.disabled = false;
   }
 }
 

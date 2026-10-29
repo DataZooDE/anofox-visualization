@@ -371,6 +371,14 @@ pub enum Role {
     /// Optional confirmation text shown after a successful `::SUBMIT`
     /// (`::SUBMIT_DONE`, #517).
     SubmitDone,
+    /// `::SAVE` (#684): a button (value = its label) that saves the page's
+    /// edits into declared tables — an edited graph (`::SAVE_GRAPH`) or a
+    /// form (`::SAVE_FORM`) into `::SAVE_TABLES`, keyed by `::SAVE_KEY`.
+    Save,
+    SaveGraph,
+    SaveForm,
+    SaveTables,
+    SaveKey,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
     Text(TextSize),
     /// A KPI tile's density (`::KPI_SIZE`): `'compact'` (single-line

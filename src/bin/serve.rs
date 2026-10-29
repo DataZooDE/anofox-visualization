@@ -2219,7 +2219,9 @@ fn render_dashboard_page(
         // `web/app.js`'s `mkSubmit` already follows in the browser. Gated
         // (its own `-- @requires` unmet): left out entirely, like an
         // `::INPUT` above — not shown-but-disabled.
-        if panel.roles.iter().any(|(_, r)| *r == Role::Submit) {
+        // #684: a ::SAVE likewise (slice 1: no write-back on any server yet).
+        let save = panel.roles.iter().any(|(_, r)| *r == Role::Save);
+        if save || panel.roles.iter().any(|(_, r)| *r == Role::Submit) {
             if gated {
                 continue;
             }
@@ -2230,7 +2232,7 @@ fn render_dashboard_page(
             let idx = panel
                 .roles
                 .iter()
-                .find(|(_, r)| *r == Role::Submit)
+                .find(|(_, r)| *r == Role::Submit || *r == Role::Save)
                 .map(|(j, _)| *j);
             let label = page_rows(st, &q)
                 .ok()
@@ -2241,8 +2243,13 @@ fn render_dashboard_page(
                         .as_str()
                         .map(str::to_string)
                 })
-                .unwrap_or_else(|| "Submit".to_string());
-            let html = sv::submit_disabled_html(&label, i, "Submitting is not enabled here");
+                .unwrap_or_else(|| if save { "Save" } else { "Submit" }.to_string());
+            let reason = if save {
+                "Saving is not enabled here"
+            } else {
+                "Submitting is not enabled here"
+            };
+            let html = sv::submit_disabled_html(&label, i, reason);
             queried.push((panel, Rows::new(), false, false, Some(html)));
             continue;
         }

@@ -373,6 +373,16 @@ pub static REGISTRY: &[RoleSpec] = &[
       "comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements"),
     e("SUBMIT_DONE", &[], R::SubmitDone, "input", false,
       "optional confirmation text shown after a successful ::SUBMIT"),
+    e("SAVE", &[], R::Save, "input", false,
+      "a button (value = its label) that saves the page's edits into the ::SAVE_TABLES — an edited graph (::SAVE_GRAPH) or a ::FORM's values (::SAVE_FORM); in the builder the save stays in the tab (TEMP tables over the base ones), on a locked server it needs options.writeback (#684)"),
+    e("SAVE_GRAPH", &[], R::SaveGraph, "input", false,
+      "the variable of an editable ::DIAGRAM whose graph the ::SAVE writes: nodes into the first ::SAVE_TABLES table (id, type, label, stage), edges into the second (from, to)"),
+    e("SAVE_FORM", &[], R::SaveForm, "input", false,
+      "the variable of a ::FORM whose values the ::SAVE writes: one row per key (column id, default the selected diagram node), a column per field"),
+    e("SAVE_TABLES", &[], R::SaveTables, "input", false,
+      "the table(s) a ::SAVE writes: 'nodes, edges' for a graph, one table for a form — plain names"),
+    e("SAVE_KEY", &[], R::SaveKey, "input", false,
+      "the variable holding a ::SAVE_FORM row's key (default 'selected', the clicked diagram node)"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
@@ -1161,6 +1171,11 @@ mod tests {
             Role::Submit,
             Role::SubmitVars,
             Role::SubmitDone,
+            Role::Save,
+            Role::SaveGraph,
+            Role::SaveForm,
+            Role::SaveTables,
+            Role::SaveKey,
             Role::Placeholder,
             Role::HeaderImage,
             Role::FooterLink,
@@ -1327,6 +1342,11 @@ mod tests {
                 | Role::Submit
                 | Role::SubmitVars
                 | Role::SubmitDone
+                | Role::Save
+                | Role::SaveGraph
+                | Role::SaveForm
+                | Role::SaveTables
+                | Role::SaveKey
                 | Role::Text(_)
                 | Role::KpiSize
                 | Role::Placeholder
