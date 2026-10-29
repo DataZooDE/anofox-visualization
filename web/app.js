@@ -17449,7 +17449,12 @@ const SAVE_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 let saveStatus = {}; // per plan index: the last save's message
 let saveForms = {}; // per table: {key → form values}, this tab's saved rows
 function saveDisabledReason() {
-  if (servedMode) return "Saving is not enabled on this server yet";
+  if (servedMode) {
+    // #684 slice 2: the server says whether this dashboard saves, and whether this viewer is a writer
+    const w = (window.__served && window.__served.writeback) || {};
+    if (!w.enabled) return "Saving is not enabled on this server";
+    return w.writer ? null : "Only this dashboard's writers can save";
+  }
   if (published) return "Saving needs the dashboard server";
   if (backend === "live") return "Saving isn't available in live-authoring preview";
   return null;
@@ -17486,14 +17491,89 @@ function mkSave(s, i, rowsJson) {
   fig.append(btn, statusEl, errEl);
   const reason = saveDisabledReason();
   if (reason) return mkSubmitDisabled(fig, btn, errEl, "save-" + i, reason);
+  const st = saveStatus[i];
+  if (st) requestAnimationFrame(() => ((st.err ? errEl : statusEl).textContent = st.text));
+  if (servedMode) {
+    btn.onclick = () => doSave(i, spec, btn, statusEl, errEl);
+    return fig;
+  }
   const note = document.createElement("p");
   note.className = "submit-preview-note";
   note.textContent = "Preview: a save stays in this tab (its tables shadow the base ones) and is not stored.";
   fig.insertBefore(note, btn);
-  const st = saveStatus[i];
-  if (st) requestAnimationFrame(() => ((st.err ? errEl : statusEl).textContent = st.text));
   btn.onclick = () => doSavePreview(i, spec, btn, statusEl, errEl);
   return fig;
+}
+// The form row's key: the ::SAVE_KEY variable, by default the clicked diagram node.
+function saveKey(spec) {
+  return dpVarCI(spec.key) ?? (spec.key.toLowerCase() === "selected" ? dpFilter : undefined);
+}
+// #684 slice 2, a locked server: POST /api/save. The server re-runs this
+// ::SAVE as the viewer (it names the tables) and checks every value against
+// the declared tables; it never takes SQL. A retry after a lost answer reuses
+// the id while the edit is unchanged, so it can't save twice.
+async function doSave(i, spec, btn, statusEl, errEl) {
+  const fail = (text) => {
+    saveStatus[i] = { text, err: true };
+    errEl.textContent = text;
+    statusEl.textContent = "";
+  };
+  const body = { dashboard: window.__served.id, panel: i, vars: { ...servedVars } };
+  try {
+    if (spec.graph) body.graph = JSON.parse(dpVars[spec.graph] ?? "null");
+    else if (spec.form) {
+      body.form = JSON.parse(dpVars[spec.form] ?? "null");
+      const key = saveKey(spec);
+      if (key !== undefined && key !== null) body.key = String(key);
+    }
+  } catch {
+    return fail("Couldn't save: the edit isn't readable");
+  }
+  if (spec.graph && !body.graph) return fail("Nothing to save yet — edit the graph first");
+  if (spec.form && !body.form) return fail("Nothing to save yet — fill in the form first");
+  if (spec.form && body.key === undefined) return fail(`Pick the row to save first ('${spec.key}' is empty)`);
+  const sent = JSON.stringify(body);
+  const prev = saveStatus[i];
+  body.id = prev && prev.retryId && prev.retrySent === sent ? prev.retryId : newSubmitId();
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  errEl.textContent = "";
+  statusEl.textContent = "";
+  const done = () => {
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+  };
+  const headers = { "Content-Type": "application/json", "X-Anofox-Submit": "1" };
+  if (window.__served.session) headers["X-Anofox-Session"] = window.__served.session;
+  let r;
+  try {
+    r = await fetch("/api/save", { method: "POST", headers, body: JSON.stringify(body) });
+  } catch {
+    done();
+    fail("Couldn't save — your edits are still here.");
+    Object.assign(saveStatus[i], { retryId: body.id, retrySent: sent });
+    return;
+  }
+  done();
+  if (r.status === 201) {
+    const hhmm = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    saveStatus[i] = { text: "Saved at " + hhmm + "." };
+    statusEl.textContent = saveStatus[i].text;
+    servedCache.clear();
+    run(true);
+    return;
+  }
+  const msg = await r.text().catch(() => "");
+  if (r.status === 429) {
+    const wait = Math.min(3600, Math.max(1, Number(r.headers.get("Retry-After")) || 1));
+    return fail(`Too many saves — try again in ${wait}s`);
+  }
+  if (r.status === 503 || r.status === 507) {
+    fail("Couldn't save — your edits are still here.");
+    Object.assign(saveStatus[i], { retryId: body.id, retrySent: sent });
+    return;
+  }
+  fail(r.status === 409 ? "This can't be saved right now" + (msg ? ": " + msg : "") : msg || `Saving failed (${r.status})`);
 }
 async function doSavePreview(i, spec, btn, statusEl, errEl) {
   btn.disabled = true;
@@ -17525,8 +17605,7 @@ async function doSavePreview(i, spec, btn, statusEl, errEl) {
     } else if (spec.form) {
       if (spec.tables.length !== 1) throw new Error("a form saves into one table");
       const t = spec.tables[0];
-      // the default key: the clicked diagram node (the cross-filter `selected`)
-      const key = dpVarCI(spec.key) ?? (spec.key.toLowerCase() === "selected" ? dpFilter : undefined);
+      const key = saveKey(spec);
       if (key === undefined || key === null || key === "") throw new Error(`pick the row to save first ('${spec.key}' is empty)`);
       const vals = JSON.parse(dpVars[spec.form] ?? "null");
       if (!vals || typeof vals !== "object") throw new Error(`'${spec.form}' holds no form values`);

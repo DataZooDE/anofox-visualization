@@ -2151,10 +2151,18 @@ variable — with a column per field, over the base table's other rows.
 **In the builder** a save stays in the tab: TEMP tables with the declared
 names shadow the base tables, so every panel reading `plan_nodes` sees the
 saved rows and recomputes — write the SQL against them and try it. Nothing
-reaches a server. On a locked server, a published site, the static outputs
-and the live-authoring preview the button is shown disabled with the reason;
-saving for every viewer (declared tables in `options.writeback`, an audited
-change log, conflicts) follows. `--check`: `save/no-source`,
+reaches a server.
+
+**On a locked server** the button saves for everyone when the server's
+`options.writeback` declares the tables and lists this dashboard and the
+viewer as a writer (`docs/secure-serving.md` → "Shared write-back"): the
+server re-runs the `::SAVE` statement, checks every value against the
+declared columns and types, and appends the save to its change log. Panels
+reading the saved tables recompute from it in the next step (#684); today
+the save is recorded. Anywhere else — a server without `options.writeback`,
+a viewer who isn't a writer, a published site, the static outputs, the
+live-authoring preview — the button is shown disabled with the reason.
+`--check`: `save/no-source`,
 `save/two-sources`, `save/no-tables`, `save/bad-table`, `save/table-count`.
 
 ### Formatted values in Markdown (`{{col}}`, `{{col:fmt}}`)

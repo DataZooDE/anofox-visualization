@@ -52,6 +52,7 @@ use anofox_visualization::host::state::{
     NewRecord, RateLimiter, Record, StartContext, StateOptions, Store,
 };
 use anofox_visualization::host::telemetry;
+use anofox_visualization::host::writeback::{self as wb, WritebackOptions};
 use anofox_visualization::sql::deps::{self, Deps};
 use anofox_visualization::sql::requires::{self as rq, Requirement};
 use anofox_visualization::{InputKind, Role};
@@ -1095,6 +1096,10 @@ pub struct LockedOptions {
     /// then opens the store and builds the live [`SubmitRuntime`] this
     /// only describes.
     pub state_opts: Option<StateOptions>,
+    /// `writeback` (#684 slice 2): shared write-back into declared tables,
+    /// structurally parsed here; [`start_locked`] runs its start checks and
+    /// opens the change log ([`WritebackRuntime`]).
+    pub writeback_opts: Option<WritebackOptions>,
     /// `max_asset_bytes` (#514 PR B): the cap on one file served from
     /// `<dashboards dir>/assets/` (`GET /d/<id>/assets/<rest>`, [`locked_asset`]).
     pub max_asset_bytes: usize,
@@ -1337,6 +1342,7 @@ impl Default for LockedOptions {
             home: None,
             source: None,
             state_opts: None,
+            writeback_opts: None,
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
         }
     }
@@ -1585,6 +1591,9 @@ impl LockedOptions {
                     // "options.state…" — not re-wrapped.
                     o.state_opts = Some(StateOptions::parse(val)?);
                 }
+                "writeback" => {
+                    o.writeback_opts = Some(WritebackOptions::parse(val)?);
+                }
                 // The key list is generated, not copied by hand, so it can't
                 // drift from `--site`'s own `SERVER_OPTION_KEYS` (#501).
                 other => {
@@ -1757,6 +1766,19 @@ struct Dash {
     /// #517 S2: every `::SUBMIT` statement's own output columns, by plan
     /// index — `/api/submit`'s `panel` must name one of these.
     submits: HashMap<usize, SubmitSpec>,
+    /// #684: every `::SAVE` statement's own output columns, by plan index —
+    /// `/api/save`'s `panel` must name one of these.
+    saves: HashMap<usize, SaveSpec>,
+}
+
+/// One `::SAVE` statement's shape (#684): the button's own column name (for
+/// the audit log and the change log's record) and the columns naming what
+/// it saves — read from the re-run statement, never from the request.
+struct SaveSpec {
+    name: String,
+    graph_col: Option<usize>,
+    form_col: Option<usize>,
+    tables_col: usize,
 }
 
 /// One `::SUBMIT` statement's shape (#517 S2, plan §3/§4): the button's own
@@ -2207,6 +2229,8 @@ struct Locked {
     source_build: Arc<SourceBuildState>,
     /// `options.state`'s live runtime (#517 S2) — `None` unless configured.
     submit: Option<Arc<SubmitRuntime>>,
+    /// `options.writeback`'s live runtime (#684) — `None` unless configured.
+    writeback: Option<Arc<WritebackRuntime>>,
     /// `<dir>/assets`, canonicalized once at startup (#514 PR B) — `None`
     /// when there is no such folder next to the dashboards, so every
     /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
@@ -2229,6 +2253,19 @@ struct SubmitRuntime {
     /// Set once `store.append` has ever refused with "full" (review of
     /// #538 should-fix 8: `/healthz`'s `state.full`). Append-only, so
     /// once full it never un-fulls itself in this process's lifetime.
+    full: AtomicBool,
+}
+
+/// Live runtime for `options.writeback` (#684 slice 2): the change log (a
+/// [`Store`] opened as one), and the same per-user rate limit, global cap,
+/// per-writer mutex and recent-nonce map `/api/submit` uses.
+struct WritebackRuntime {
+    opts: WritebackOptions,
+    store: Store,
+    rate: RateLimiter,
+    global: Mutex<GlobalBucket>,
+    writer_locks: Mutex<ViewerLocks>,
+    recent: Mutex<RecentIds>,
     full: AtomicBool,
 }
 
@@ -2640,6 +2677,40 @@ pub fn start_locked(
             }))
         }
     };
+    // #684 slice 2: `options.writeback`'s start checks need the dashboards
+    // (and `options.state`'s path, which it must not share).
+    let writeback = match &opts.writeback_opts {
+        None => None,
+        Some(wb_opts) => {
+            let known_dashboards: Vec<String> = dashboards.iter().map(|d| d.id.clone()).collect();
+            wb_opts.validate_start(&wb::StartContext {
+                has_auth: opts.auth.is_some(),
+                embed_without_frame_ancestors: opts
+                    .auth
+                    .as_ref()
+                    .is_some_and(|a| a.embed.is_some())
+                    && opts.frame_ancestors.is_none(),
+                data_dir: opts.data.as_deref(),
+                dashboard_dir: Path::new(dir),
+                known_dashboards: &known_dashboards,
+                state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
+            })?;
+            let store = Store::open_writeback(&wb_opts.path, wb_opts.max_mb)?;
+            Some(Arc::new(WritebackRuntime {
+                opts: wb_opts.clone(),
+                store,
+                rate: RateLimiter::new(
+                    wb_opts.rate_per_minute,
+                    wb_opts.rate_burst,
+                    SUBMIT_BOUNDED_USERS,
+                ),
+                global: Mutex::new(GlobalBucket::new()),
+                writer_locks: Mutex::new(ViewerLocks::new()),
+                recent: Mutex::new(RecentIds::new()),
+                full: AtomicBool::new(false),
+            }))
+        }
+    };
     let addr = std::net::SocketAddr::new(opts.bind, port);
     if !opts.bind.is_unspecified() && !opts.bind.is_loopback() {
         // Requests addressed to the bound IP itself (health checks) pass the
@@ -2679,6 +2750,7 @@ pub fn start_locked(
         stop: stop.clone(),
         source_build: SourceBuildState::new(),
         submit,
+        writeback,
         assets_root,
     });
     let auth_note = match &state.opts.auth {
@@ -3023,7 +3095,26 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
         // variable" refusal, fail-closed either way.
         let mut inputs: HashMap<String, Vec<(usize, InputKind, usize)>> = HashMap::new();
         let mut submits: HashMap<usize, SubmitSpec> = HashMap::new();
+        let mut saves: HashMap<usize, SaveSpec> = HashMap::new();
         for (i, p) in planned.iter().enumerate() {
+            let col = |role: Role| p.roles.iter().find(|(_, r)| *r == role).map(|(j, _)| *j);
+            if let (Some(save_idx), Some(tables_col)) = (col(Role::Save), col(Role::SaveTables)) {
+                let name = p
+                    .names
+                    .iter()
+                    .find(|(j, _)| *j == save_idx)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| format!("save_{i}"));
+                saves.insert(
+                    i,
+                    SaveSpec {
+                        name,
+                        graph_col: col(Role::SaveGraph),
+                        form_col: col(Role::SaveForm),
+                        tables_col,
+                    },
+                );
+            }
             use anofox_visualization::inputs::{input_index, input_kind};
             if let Some(kind) = input_kind(&p.roles) {
                 if !matches!(
@@ -3089,6 +3180,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             tabs,
             inputs,
             submits,
+            saves,
         });
     }
     if out.is_empty() {
@@ -3623,6 +3715,7 @@ fn handle_locked(st: &Locked, req: Request) {
         // #517 S2, plan §4.6: "/api/submit always logged".
         if path == "/api/panel"
             || path == "/api/submit"
+            || path == "/api/save"
             || path == "/"
             || path.starts_with("/d/")
             || status >= 400
@@ -3898,6 +3991,18 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     );
                 }
             }
+            // #684: the change log, same meaning as `state` above.
+            if let Some(w) = &st.writeback {
+                if let Some(map) = body.as_object_mut() {
+                    map.insert(
+                        "writeback".into(),
+                        serde_json::json!({
+                            "ok": !w.store.is_failed(),
+                            "full": w.full.load(Ordering::Relaxed),
+                        }),
+                    );
+                }
+            }
             // #352: only with a Quack source configured — numbers/booleans
             // only, never the source's URI, its token env/file name or any
             // error text (those stay in the server's own stderr).
@@ -3926,6 +4031,19 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         (&Method::Post, "/api/submit") => {
             let (origin, host) = (m.origin.map(str::to_string), m.host.map(str::to_string));
             handle_submit(
+                st,
+                req,
+                origin.as_deref(),
+                host.as_deref(),
+                claims.as_ref(),
+                scope,
+                ident.as_ref().map(|i| i.method),
+                info,
+            )
+        }
+        (&Method::Post, "/api/save") => {
+            let (origin, host) = (m.origin.map(str::to_string), m.host.map(str::to_string));
+            handle_save(
                 st,
                 req,
                 origin.as_deref(),
@@ -4011,8 +4129,16 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 Some(d) => {
                     info.dashboard = Some(d.id.clone());
                     let page = ident.as_ref().and_then(|i| i.page_session.as_deref());
-                    let html =
-                        String::from_utf8_lossy(&served_index(st, d, scope, page)).into_owned();
+                    // #684: may this viewer save here (the button says why not)?
+                    let writer = st.writeback.as_ref().is_some_and(|w| {
+                        ident.as_ref().map(|i| i.method) != Some("api_key")
+                            && claims.as_ref().is_some_and(|c| {
+                                !access::is_reserved_user(&c.user)
+                                    && w.opts.is_writer(&c.user, &c.groups)
+                            })
+                    });
+                    let html = String::from_utf8_lossy(&served_index(st, d, scope, page, writer))
+                        .into_owned();
                     // A page holding a session is never sent to another
                     // site as a Referer (the link is in the URL).
                     let extra: &[(&str, &str)] = if page.is_some() {
@@ -5316,6 +5442,307 @@ fn handle_submit(
     201
 }
 
+/// `POST /api/save` (#684 slice 2): the shared write-back path — a change
+/// set Rust validates against `options.writeback`'s declared tables and
+/// appends to the change log. Like `/api/submit`: the CSRF gate, a personal
+/// sign-in, scope, the dashboard's own `::SAVE` statement re-run as the
+/// viewer (it names *what* is saved), the rate limits, a per-writer mutex,
+/// idempotent retries. Unlike it: the viewer must be a writer, and the
+/// values come from the request's `graph`/`form`, each coerced to its
+/// declared column type ([`wb::build_changes`]) — never SQL.
+#[allow(clippy::too_many_arguments)]
+fn handle_save(
+    st: &Locked,
+    mut req: Request,
+    origin: Option<&str>,
+    host: Option<&str>,
+    claims: Option<&Claims>,
+    scope: Option<&Scope>,
+    auth_method: Option<&'static str>,
+    info: &mut LogInfo,
+) -> u16 {
+    let peer = req.remote_addr().map(|a| a.ip());
+    let audit = |outcome: &'static str,
+                 reason: Option<&'static str>,
+                 dashboard: Option<&str>,
+                 detail: Option<&str>| {
+        if let Some(a) = st.opts.auth.as_ref().and_then(|a| a.audit.as_ref()) {
+            a.write(&auth::audit::Event {
+                event: "save",
+                outcome,
+                method: auth_method,
+                user: claims.map(|c| c.user.as_str()),
+                reason,
+                peer,
+                path: Some("/api/save"),
+                dashboard,
+                key_id: None,
+                sid: None,
+                detail,
+            });
+        }
+    };
+
+    let Some(w) = &st.writeback else {
+        info.deny = Some("not_enabled");
+        audit("deny", Some("not_enabled"), None, None);
+        return reply(
+            req,
+            403,
+            "forbidden: this server does not accept saves (no options.writeback)",
+        );
+    };
+
+    // The same CSRF gate as `/api/submit` (plan-517 §4.3), the same header.
+    if !sv::origin_required_and_matches_host(origin, host) {
+        info.deny = Some("csrf");
+        audit("deny", Some("csrf"), None, None);
+        return reply(
+            req,
+            403,
+            "forbidden: Origin is required on this endpoint and must match this server",
+        );
+    }
+    if req_header(&req, "Sec-Fetch-Site").is_some_and(|v| !v.eq_ignore_ascii_case("same-origin")) {
+        info.deny = Some("csrf");
+        audit("deny", Some("csrf"), None, None);
+        return reply(req, 403, "forbidden: Sec-Fetch-Site must be same-origin");
+    }
+    if !req_header(&req, "Content-Type").is_some_and(|v| v.eq_ignore_ascii_case("application/json"))
+    {
+        info.deny = Some("csrf");
+        audit("deny", Some("csrf"), None, None);
+        return reply(req, 403, "forbidden: Content-Type must be application/json");
+    }
+    if req_header(&req, "X-Anofox-Submit") != Some("1") {
+        info.deny = Some("csrf");
+        audit("deny", Some("csrf"), None, None);
+        return reply(req, 403, "forbidden: missing X-Anofox-Submit header");
+    }
+
+    // A personal sign-in that is one of the writers.
+    let Some(claims) = claims else {
+        return reply(req, 401, access::UNAUTHORIZED);
+    };
+    if auth_method == Some("api_key") || access::is_reserved_user(&claims.user) {
+        info.deny = Some("shared_identity");
+        audit("deny", Some("shared_identity"), None, None);
+        return reply(req, 403, "forbidden: saving needs a personal sign-in");
+    }
+    info.user = Some(claims.user.clone());
+    if !w.opts.is_writer(&claims.user, &claims.groups) {
+        info.deny = Some("not_writer");
+        audit("deny", Some("not_writer"), None, None);
+        return reply(req, 403, "forbidden: you may not save on this server");
+    }
+
+    let body = match read_body(&mut req, wb::SAVE_MAX_BODY) {
+        Ok(b) => b,
+        Err((code, e)) => return reply(req, code, &e),
+    };
+    let sub = match wb::parse_save_request(&body) {
+        Ok(s) => s,
+        Err(e) => return reply(req, 400, &e),
+    };
+    info.dashboard = Some(sub.dashboard.clone());
+    info.panel = Some(sub.panel);
+
+    // Scope before enablement, as in `/api/submit`.
+    let Some(dash) = st.dashboards.iter().find(|d| d.id == sub.dashboard) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    if let Some(s) = scope {
+        if !s.allows(&dash.id) {
+            info.deny = Some("scope");
+            audit("deny", Some("scope"), Some(&dash.id), None);
+            return reply(req, 403, "forbidden: not in this credential's scope");
+        }
+    }
+    if !w.opts.enabled_for(&dash.id) {
+        info.deny = Some("not_enabled");
+        audit("deny", Some("not_enabled"), Some(&dash.id), None);
+        return reply(req, 403, "forbidden: this dashboard does not accept saves");
+    }
+    let Some(spec) = dash.saves.get(&sub.panel) else {
+        return reply(req, 400, "'panel' does not name a ::SAVE statement");
+    };
+    if w.store.is_failed() {
+        audit("error", Some("store_error"), Some(&dash.id), None);
+        return reply(
+            req,
+            503,
+            "service unavailable: the change log is unavailable",
+        );
+    }
+    let now = Instant::now();
+
+    // A retry of a save that already landed: its own answer, no new token.
+    let replay = |w: &WritebackRuntime| {
+        w.recent
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&claims.user, &dash.id, &sub.id, now)
+    };
+    if let Some(prior) = replay(w) {
+        respond(req, 201, "application/json", prior.into_bytes());
+        return 201;
+    }
+    if let Err(retry_after) = w.rate.check(&claims.user, now) {
+        audit("deny", Some("rate_limited"), Some(&dash.id), None);
+        return rate_limited(req, retry_after);
+    }
+    if !w
+        .global
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take(GLOBAL_SUBMITS_PER_SEC, now)
+    {
+        audit("deny", Some("rate_limited"), Some(&dash.id), None);
+        return rate_limited(req, 1);
+    }
+    // Per writer, `try_lock` (never park a worker thread — see handle_submit).
+    let lock = w
+        .writer_locks
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&claims.user);
+    let _guard = match lock.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            audit("deny", Some("in_progress"), Some(&dash.id), None);
+            return submission_in_progress(req);
+        }
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+    };
+    if let Some(prior) = replay(w) {
+        respond(req, 201, "application/json", prior.into_bytes());
+        return 201;
+    }
+
+    // The ::SAVE statement itself, through the normal panel path (cache,
+    // policy views, tab/requires gates) with the viewer's variables: it
+    // names the tables and which edit is saved.
+    let raw_vars: Value = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("vars").cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let panel_body = serde_json::json!({
+        "dashboard": sub.dashboard,
+        "panel": sub.panel,
+        "vars": raw_vars,
+    })
+    .to_string();
+    let mut scratch = LogInfo::default();
+    let mut charge = st.inflight.charge();
+    let rows_json = match locked_panel(
+        st,
+        &panel_body,
+        None,
+        Some(claims),
+        scope,
+        auth_method,
+        &mut scratch,
+        &mut charge,
+    ) {
+        Ok((json, _etag, _deps)) => json,
+        Err((code, _)) => {
+            audit(
+                "deny",
+                Some("not_available"),
+                Some(&dash.id),
+                Some(&spec.name),
+            );
+            return reply(req, if code == 404 { 400 } else { 409 }, "not available");
+        }
+    };
+    let rows: Vec<Map<String, Value>> = serde_json::from_str(&rows_json).unwrap_or_default();
+    let [row] = rows.as_slice() else {
+        audit(
+            "deny",
+            Some("not_available"),
+            Some(&dash.id),
+            Some(&spec.name),
+        );
+        return reply(req, 409, "not available");
+    };
+    let cell = |c: Option<usize>| -> &str {
+        c.and_then(|c| row.values().nth(c))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    let changes = wb::save_target(
+        &w.opts,
+        cell(spec.graph_col),
+        cell(spec.form_col),
+        cell(Some(spec.tables_col)),
+    )
+    .and_then(|target| wb::build_changes(&w.opts, &target, &sub));
+    let changes = match changes {
+        Ok(c) => c,
+        Err(e) => {
+            audit(
+                "deny",
+                Some("invalid_value"),
+                Some(&dash.id),
+                Some(&spec.name),
+            );
+            return reply(req, 400, &e);
+        }
+    };
+
+    // Append — fdatasync'd before the 201.
+    let rec = match w.store.append(NewRecord {
+        user: claims.user.clone(),
+        auth: auth_method.unwrap_or("").to_string(),
+        dashboard: dash.id.clone(),
+        submit: spec.name.clone(),
+        id: sub.id.clone(),
+        vars: changes,
+    }) {
+        Ok(r) => r,
+        Err(e) if e.contains("full") => {
+            w.full.store(true, Ordering::Relaxed);
+            audit(
+                "error",
+                Some("store_full"),
+                Some(&dash.id),
+                Some(&spec.name),
+            );
+            return reply(req, 507, "insufficient storage: the change log is full");
+        }
+        Err(e) => {
+            audit(
+                "error",
+                Some("store_error"),
+                Some(&dash.id),
+                Some(&spec.name),
+            );
+            eprintln!(
+                "[anofox-serve] write-back append failed: {}",
+                access::diag(&e)
+            );
+            return reply(req, 503, "service unavailable: could not record the save");
+        }
+    };
+    let body_json = serde_json::json!({"seq": rec.seq, "ts": rec.ts, "gen": rec.seq}).to_string();
+    w.recent.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        &claims.user,
+        &dash.id,
+        &sub.id,
+        body_json.clone(),
+        now,
+    );
+    audit(
+        "ok",
+        None,
+        Some(&dash.id),
+        Some(&format!("{} seq={}", spec.name, rec.seq)),
+    );
+    info.bytes = Some(body_json.len());
+    respond(req, 201, "application/json", body_json.into_bytes());
+    201
+}
+
 /// A recorded variable's *effective* value — after the same `-- @vars`
 /// allow-list and credential-lock rules `locked_panel` applies before it
 /// ever runs SQL (review of #538, blocker 1; plan §4.2 step 9: "the value
@@ -6024,7 +6451,13 @@ const POLICY_PANEL_ERROR: &str = "this panel could not be shown (the server log 
 /// The served page of `dash`. `scope` limits the navigation to the
 /// dashboards the viewer may read; `session` is an embed link's page session
 /// (the page sends it with each request, see `auth::SESSION_HEADER`).
-fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option<&str>) -> Vec<u8> {
+fn served_index(
+    st: &Locked,
+    dash: &Dash,
+    scope: Option<&Scope>,
+    session: Option<&str>,
+    writer: bool,
+) -> Vec<u8> {
     let html = WEB
         .get_file("index.html")
         .map(|f| String::from_utf8_lossy(f.contents()).into_owned())
@@ -6090,6 +6523,13 @@ fn served_index(st: &Locked, dash: &Dash, scope: Option<&Scope>, session: Option
             .submit
             .as_ref()
             .is_some_and(|s| s.opts.dashboards.iter().any(|d| d == &dash.id)),
+    });
+    // #684: whether this dashboard saves on this server, and whether this
+    // viewer is one of its writers — the ::SAVE button reads both to render
+    // disabled-with-reason instead of posting to an endpoint that refuses.
+    cfg["writeback"] = serde_json::json!({
+        "enabled": st.writeback.as_ref().is_some_and(|w| w.opts.enabled_for(&dash.id)),
+        "writer": writer,
     });
     let cfg = json_for_script(&cfg);
     // #403: a served dashboard page has no app bar of its own (it's always
@@ -6282,6 +6722,7 @@ mod tests {
             updated: None,
             inputs: HashMap::new(),
             submits: HashMap::new(),
+            saves: HashMap::new(),
         }
     }
 
