@@ -452,6 +452,7 @@ fn render_dashboard_html(
             while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| q.figure.is_some()) {
                 cells.push(anofox_visualization::figure::Cell {
                     name: q.name.clone(),
+                    zoom: None,
                     cols: r
                         .map(|r| sql::columns_from_rows(&r, &q.roles))
                         .unwrap_or_default(),

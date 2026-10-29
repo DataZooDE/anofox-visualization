@@ -2863,7 +2863,12 @@ one cross-filters as usual. A `::SELECT_AS` / `::DRILL` statement right before a
 cell inside the block is that cell's (it is no cell itself): a click on the
 cell's marks sets the selection or drills, and a drilled cell's breadcrumb sits
 on the figure card. The toolbox's data view (and "Charts as tables") shows a
-table per cell, captioned by its `-- @name`. Zoom stays off on a figure for now. The
+table per cell, captioned by its `-- @name`. With zoom on (`?zoom=1`, as for a
+single chart) scrolling or dragging in a line, area, bar or scatter cell zooms
+and pans it, and under `'x' ::AXES_COLLECT` every cell sharing its x axis (the
+charts stacked with it — a `::HISTOGRAM` or density too) takes the same x
+window while fitting its own y; a cell beside them keeps its own;
+double-click resets the figure. The
 browser, `--svg` / `--site`, the HTML export and the served page all draw the
 same picture.
 

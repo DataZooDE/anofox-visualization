@@ -372,6 +372,7 @@ pub fn render_figure_checked(
                 Ok(crate::figure::Cell {
                     name: c["name"].as_str().map(str::to_string),
                     cols: part(c)?,
+                    zoom: cell_zoom(&c["zoom"]),
                 })
             })
             .collect::<Result<Vec<_>, RenderError>>()?;
@@ -790,6 +791,24 @@ fn theme_json(spec: &str, chrome_json: &str) -> String {
         }
         Ok(Err(e)) => serde_json::json!({"ok": false, "error": e}).to_string(),
         Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}).to_string(),
+    }
+}
+
+/// A `::FIGURE` cell's zoom (#695): `[x0, x1, y0, y1]`, or `[x0, x1]` for a
+/// cell that only shares the x window (anything else → `None`, auto-fit).
+fn cell_zoom(v: &serde_json::Value) -> Option<crate::figure::CellZoom> {
+    let f: Vec<f64> = v
+        .as_array()?
+        .iter()
+        .map(|x| x.as_f64())
+        .collect::<Option<_>>()?;
+    if !f.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    match f.as_slice() {
+        [x0, x1] => Some(((*x0, *x1), None)),
+        [x0, x1, y0, y1] => Some(((*x0, *x1), Some((*y0, *y1)))),
+        _ => None,
     }
 }
 
