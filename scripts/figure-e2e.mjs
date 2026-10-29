@@ -167,5 +167,32 @@ SELECT 'The detail page.' ::MARKDOWN;
   await p2.close();
 }
 
+// #695: a ::SELECT_AS right before a cell inside the block is that cell's:
+// a click on its mark sets the named selection (read by the KPI after the
+// figure); it is not drawn as a cell, nor applied to the next panel.
+const SEL_SQL = `-- @title Figure select e2e (#695)
+SELECT 'Picked' ::FIGURE;
+SELECT 'region' ::SELECT_AS;
+SELECT r ::XAXIS, n ::BARCHART FROM (VALUES ('north', 3), ('south', 5)) v(r, n);
+SELECT x ::XAXIS, y ::LINECHART FROM (VALUES (1, 2), (2, 3), (3, 1)) v(x, y);
+SELECT 1 ::ENDFIGURE;
+SELECT coalesce(getvariable('region'), 'none') AS picked ::TEXT_SMALL;
+`;
+{
+  const p3 = await browser.newPage({ viewport: { width: 1200, height: 900 }, reducedMotion: "reduce" });
+  const e3 = [];
+  p3.on("pageerror", (e) => e3.push(String(e)));
+  await p3.goto(`${base}?mode=view#sql=${b64(SEL_SQL)}`);
+  await ready(p3);
+  const cells = await p3.evaluate(() => document.querySelectorAll(".dash .dp-figure g[data-cell]").length);
+  check(cells === 2, `the ::SELECT_AS is no cell (${cells} cells)`);
+  await p3.locator('.dash .dp-figure g[data-cell="0"] .dp-hit').first().click({ force: true });
+  await p3.waitForFunction(() => /north|south/.test(document.querySelector(".dash .textcard .text-value")?.textContent || ""), null, { timeout: 15000 }).catch(() => {});
+  const picked = await p3.evaluate(() => document.querySelector(".dash .textcard .text-value")?.textContent);
+  check(/north|south/.test(picked || ""), `a click on the cell sets its named selection (${picked})`);
+  check(!e3.length, "select figure: no page errors: " + e3.join(" | "));
+  await p3.close();
+}
+
 await browser.close();
 console.log(`figure-e2e: ${process.exitCode ? "failed" : "0 failed"}`);
