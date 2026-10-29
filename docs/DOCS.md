@@ -2160,7 +2160,10 @@ server re-runs the `::SAVE` statement, checks every value against the
 declared columns and types, and appends the save to its change log. From
 then on every panel that reads one of those tables — on this page, for
 every other viewer, on every dashboard of the server — reads the base table
-with the saves applied, exactly like the builder's preview. Anywhere else — a server without `options.writeback`,
+with the saves applied, exactly like the builder's preview. If someone
+saved the same row (or the same graph) after this page loaded, the save is
+refused with who saved what; the page then shows theirs, keeps your edits,
+and Save again keeps yours. Anywhere else — a server without `options.writeback`,
 a viewer who isn't a writer, a published site, the static outputs, the
 live-authoring preview — the button is shown disabled with the reason.
 `--check`: `save/no-source`,

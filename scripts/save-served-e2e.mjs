@@ -10,6 +10,11 @@
 // writer's own page right after the save, another viewer's, and another
 // dashboard's (one change log for the server); a restart reads the change
 // log back; a base column the declaration doesn't name refuses the start.
+// Slice 4, two writers: a save made on an older generation over someone
+// else's newer save of the same row (or a replaced graph) is refused,
+// naming who saved what; the panels then show theirs, the edits stay, and
+// saving again keeps this one; a different row doesn't clash; the audit
+// log names each save's tables, ops and keys.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/save-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8963] [--duckdb duckdb]
@@ -59,10 +64,11 @@ const logPath = path.join(W, "changes.jsonl");
 const opts = {
   auth: { mode: "proxy", shared_secret: sec, trusted_proxies: ["127.0.0.1"] },
   policy: "none",
+  audit: path.join(W, "audit.jsonl"),
   writeback: {
     path: logPath,
     dashboards: ["plan"],
-    writers: { users: ["alice"] },
+    writers: { users: ["alice", "carol"] },
     // (d)'s refusals each cost a token (no free validation oracle); room for them here
     rate: { per_minute: 600, burst: 50 },
     tables: {
@@ -186,7 +192,7 @@ try {
       },
       [body, headers]
     );
-  const formSave = { dashboard: "plan", panel: 3, vars: {}, form: { lead_time: 4 }, key: "sup" };
+  const formSave = { dashboard: "plan", panel: 3, vars: {}, form: { lead_time: 4 }, key: "sup", base: 0 };
   let res = await post({ ...formSave, id: "aa01" }, {});
   check(res.status === 403 && /X-Anofox-Submit/.test(res.text), `(d) no X-Anofox-Submit header: 403 (${res.status} ${res.text})`);
   res = await post({ ...formSave, id: "aa02", form: { cost: 1 } });
@@ -228,6 +234,63 @@ try {
     check(/Saving is not enabled on this server/.test(await panelText(page, "Save plan")), "(f) …saying why");
     await ctx.close();
   }
+  // (i) two writers. Each page loads at the current generation.
+  {
+    const a = await openAs("alice", "plan");
+    const c = await openAs("carol", "plan");
+    const saveLt = async (page, node, v) => {
+      await page.click(`.dash rect[data-node="${node}"]`, { force: true });
+      await settle(page);
+      await page.fill('.dp-form-field[data-field="lead_time"] input', String(v));
+      await page.keyboard.press("Enter");
+      await settle(page);
+      await btn(page, "Save parameters").click();
+      await page.waitForFunction(
+        () => /Saved at|Changed meanwhile|failed|Couldn/.test([...document.querySelectorAll(".save-panel")].map((f) => f.textContent).join(" ")),
+        null,
+        { timeout: 15000 }
+      );
+      await settle(page);
+      return panelText(page, "Save parameters");
+    };
+    const n0 = records().length;
+    let t = await saveLt(a.page, "wh", 11);
+    check(/Saved at/.test(t) && records().length === n0 + 1, `(i) alice saves wh (${t})`);
+    t = await saveLt(c.page, "wh", 12);
+    check(/Changed meanwhile: alice saved plan_params \(wh\)/.test(t) && records().length === n0 + 1, `(i) carol's stale save of wh is refused, naming alice's (${t})`);
+    check((await until(c.page, params, "sup=4.0,wh=11.0")) === "sup=4.0,wh=11.0", `(i) …and carol's panels now show alice's value (${await params(c.page)})`);
+    await btn(c.page, "Save parameters").click();
+    await c.page.waitForFunction(() => /Saved at/.test(document.querySelectorAll(".save-panel")[1]?.textContent || ""), null, { timeout: 15000 }).catch(() => {});
+    check(records().length === n0 + 2 && (await until(c.page, params, "sup=4.0,wh=12.0")) === "sup=4.0,wh=12.0", `(i) saving again keeps carol's (${await params(c.page)}; ${records().length - n0} new; ${await panelText(c.page, "Save parameters")}; last ${JSON.stringify(records().at(-1)?.vars)})`);
+    // A different row on a stale page: no clash.
+    const c2 = await openAs("carol", "plan");
+    const a2 = await openAs("alice", "plan");
+    t = await saveLt(a2.page, "wh", 13);
+    check(/Saved at/.test(t), `(i) alice, on a fresh page, saves wh again (${t})`);
+    await a2.ctx.close();
+    t = await saveLt(c2.page, "sup", 6);
+    check(/Saved at/.test(t), `(i) a stale page saving another row doesn't clash (${t})`);
+    // A graph: replaced whole, so any newer change to its tables clashes.
+    const g1 = await openAs("alice", "plan");
+    const g2 = await openAs("carol", "plan");
+    for (const p of [g1.page, g2.page]) {
+      await p.selectOption(".dp-edit-type", "stock");
+      await p.fill(".dp-edit-name", "DC " + (p === g1.page ? "East" : "West"));
+      await p.click(".dp-edit-bar >> text=Add");
+      await settle(p);
+    }
+    await btn(g1.page, "Save plan").click();
+    await g1.page.waitForFunction(() => /Saved at/.test(document.querySelector(".save-panel")?.textContent || ""), null, { timeout: 15000 });
+    await btn(g2.page, "Save plan").click();
+    await g2.page.waitForFunction(() => /Changed meanwhile/.test(document.querySelector(".save-panel")?.textContent || ""), null, { timeout: 15000 }).catch(() => {});
+    t = await panelText(g2.page, "Save plan");
+    check(/Changed meanwhile: alice saved plan_nodes/.test(t), `(i) a stale graph save is refused (${t})`);
+    for (const x of [a, c, c2, g1, g2]) await x.ctx.close();
+    const audit = readFileSync(path.join(W, "audit.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.audit === "save");
+    check(audit.some((l) => l.outcome === "ok" && l.user === "carol" && /plan_params:upsert\(wh\)/.test(l.detail || "")), `(i) the audit log names carol's save of plan_params (wh)`);
+    check(audit.some((l) => l.outcome === "deny" && l.reason === "conflict" && l.user === "carol"), "(i) …and the refused one, as a conflict");
+  }
+
   const health = await (
     await fetch(`http://127.0.0.1:${port}/healthz`, { headers: { "X-Anofox-Proxy-Secret": sec, "X-Forwarded-User": "alice" } })
   ).json();
@@ -240,7 +303,7 @@ try {
   srv = await serve();
   {
     const { page, ctx } = await openAs("bob", "plan");
-    check((await kpi(page)) === "3" && (await params(page)) === "sup=4.0,wh=9.0", `(g) after a restart the saves still show (${await kpi(page)}, ${await params(page)})`);
+    check((await params(page)) === "sup=6.0,wh=13.0", `(g) after a restart the saves still show (${await params(page)})`);
     await ctx.close();
   }
   stop(srv);

@@ -1014,8 +1014,23 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   table would hide it), an access policy (`"policy": "none"` only, for now:
   its per-viewer views would claim the same names), more than one
   `search_path` entry.
-- **Not yet.** `base` is recorded but a stale save isn't refused yet
-  (conflicts, `409`, next).
+- **Conflicts (optimistic).** A save carries `base`, the change log
+  generation its page loaded at (moved on only by that page's own saves).
+  If a newer save would be silently overwritten — any later change to a
+  graph's tables, or a later save of the same form row / a replace of its
+  table — the server answers `409` `{"error": "changed", "gen", "changes":
+  [{user, ts, table, op, keys}]}`, the page says who saved what and when,
+  re-runs its panels on theirs, keeps the viewer's edits, and a second Save
+  (now on the newer generation) keeps this one. A different row never
+  clashes. The check and the append run under one short lock (no SQL, no
+  response written while it is held), so two writers can't both pass it.
+- **Audit.** With `options.audit`, every save is a `save` event: `ok` with
+  `detail` naming the `::SAVE`, the record's `seq` and its tables, ops and
+  keys (`plan_params:upsert(wh)`, `plan_nodes:replace(3)`); refusals with
+  their reason (`not_writer`, `conflict`, `invalid_value`, `rate_limited`,
+  `csrf`, …). The change log keeps every saved row, so a change's before
+  and after are both on record; undoing one is a new save of the earlier
+  values.
 
 ## B. Static render — `serve --dashboards <dir>`
 
