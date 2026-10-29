@@ -951,6 +951,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/save-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/submit-e2e.mjs (#517 S4, #525): ::SUBMIT on a locked server
+      # with options.state, the builder's preview submit, and a tour whose
+      # "seen" comes from viewer_state. One more step in this job (no new
+      # job slot); went stale while it wasn't run here (#721).
+      - name: Submit on a locked server e2e (#517/#525)
+        timeout-minutes: 8
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/submit-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"

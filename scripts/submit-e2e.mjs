@@ -402,13 +402,23 @@ try {
     await page.waitForSelector(".dp-tour-pop", { timeout: 15000 });
     check(true, "(i) the tour autostarts on a signed-in viewer's first visit");
     await page.locator(".submit-btn").click();
-    await page.waitForFunction(() => document.querySelector(".submit-status")?.textContent?.includes("Submitted at"), null, { timeout: 15000 });
+    // #721: the ::SUBMIT is gated "record once" (zero rows once a row for it
+    // exists), so the re-run after the 201 removes its panel — that's the
+    // confirmation here, not a "Submitted at" status (there is no panel
+    // left to show one in).
+    await page.waitForFunction(() => !document.querySelector(".submit-btn"), null, { timeout: 15000 });
+    check(true, "(i) the submit's own panel is gone once the row is recorded");
 
     // Clear localStorage too, to prove the second visit's skip comes from
     // viewer_state (#525), not the ordinary per-browser "seen" flag.
     await page.evaluate(() => localStorage.clear());
-    await page.reload();
-    await page.waitForSelector(".submit-btn");
+    // a second visit opens the dashboard afresh — not a reload: the running
+    // tour put `?tour=progress_tour` (its shareable link) in the URL, and
+    // that starts it on purpose
+    await page.goto(`http://127.0.0.1:${port}/d/progress`);
+    // (no .submit-btn to wait for: recorded once, its panel stays gone)
+    await page.waitForSelector(".dp-toggle", { timeout: 15000 }); // the page's other statement
+    check(!(await page.locator(".submit-btn").count()), "(i) on a second visit the recorded submit stays gone");
     await page.waitForTimeout(1500); // autostart, if any, fires right after the first swap
     check(!(await page.locator(".dp-tour-pop").isVisible()), "(i) no autostart on a second visit: viewer_state already records it done");
     await ctx.close();
