@@ -40,6 +40,7 @@ mod look;
 mod matrix;
 mod names;
 mod schedule;
+mod selection;
 mod stats;
 mod terms;
 
@@ -68,6 +69,7 @@ pub const PLOTS: &[&str] = &[
     "matrix",
     "diagram",
     "assignment",
+    "selection",
     "distribution",
     "auto",
 ];
@@ -175,7 +177,7 @@ fn render_plot(
     );
     // Plots drawn directly with ggplot-rs (see `stats`).
     let direct = |f: &dyn Fn() -> stats::Out| crate::guard(|| f().map_err(fail));
-    let labels = look::Labels::from(options);
+    let mut labels = look::Labels::from(options);
     // `extra_warnings`: text the column-building step wants on `data-warnings`
     // (dropped rows, a chart shape adapted to the data) alongside whatever
     // the plotting engine itself reports (empty for every plot but
@@ -184,7 +186,7 @@ fn render_plot(
     // today, see `assignment::Marks`) — never inferred from a `RefLine`
     // column's value count, which keeps meaning "shared line(s)" for every
     // other schema.
-    let (cols, extra_warnings, marks) = match name {
+    let (mut cols, extra_warnings, marks) = match name {
         "terms" => return direct(&|| terms::terms(&t, options, w, h, o, place)),
         "prediction" => return direct(&|| stats::prediction(&t, options, w, h, o, place)),
         "curve" => match curve_type(&t).map_err(fail)?.as_str() {
@@ -216,6 +218,7 @@ fn render_plot(
         "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),
         "matrix" => return direct(&|| matrix::matrix(&t, options, w, h, o, place)),
         "assignment" => assignment::columns(&t, options),
+        "selection" => selection::columns(&t, options).map(|(c, w)| (c, w, None)),
         "distribution" => distribution::columns(&t).map(|(c, w)| (c, w, None)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
@@ -229,6 +232,17 @@ fn render_plot(
         _ => unreachable!("checked above"),
     }
     .map_err(fail)?;
+    // A schema's own default title (a `::TITLE` column, e.g. #499's
+    // capacity use) — `title :=` wins.
+    if let Some(i) = cols.iter().position(|c| c.role == Role::Title) {
+        let c = cols.remove(i);
+        if labels.title.is_none() {
+            labels.title = c.values.first().and_then(|v| match v {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            });
+        }
+    }
     // Role-rendered panels (obs, the remaining curves): house look, default
     // axis labels, quiet reference lines.
     let (xl, yl) = match name {
@@ -630,6 +644,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "matrix"
     } else if has("item") && has("size") && (has("bin") || has("wave")) {
         "assignment"
+    } else if has("item") && (has("selected") || has("listed")) {
+        "selection"
     } else if has("option") && has("probability") {
         "distribution"
     } else {
@@ -645,7 +661,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
              ds), schedule (resource, task, start, end), decomposition (ds | period, component, \
              value), matrix (row, col, value), events (ds | period, kind), \
-             assignment (bin | wave, item, size) or distribution (id, option, probability){}",
+             assignment (bin | wave, item, size), selection (item, selected | listed) or \
+             distribution (id, option, probability){}",
             keys.join(", "),
             closest(&keys)
         )));
@@ -704,6 +721,7 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         // the one column no other schema or everyday table carries.
         &["bin"],
     ),
+    ("selection", &["item", "selected"], &["selected"]),
     (
         "distribution",
         &["id", "option", "probability"],

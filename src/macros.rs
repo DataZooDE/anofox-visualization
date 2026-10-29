@@ -410,6 +410,20 @@ a(bin, item, size, capacity)",
         tags: &[("anofox.consumes", "assignment"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_selection",
+        params: &["tbl"],
+        named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("selection", "'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "Which items an optimizer picked, from a `selection` table (#499; anofox-optimize's knapsack and \
+assortment): one row per item (model_id, item, selected | listed, value, weight, capacity, margin, demand). A bar per \
+item, picked ones first and in the theme's good colour, the rest neutral; the bar is `value`, else margin × demand, \
+else margin, else weight. With weight and capacity the default title says how much capacity the picked items use. \
+Several model_id's, or a producer group column, facet.",
+        example: "SELECT anofox_plot_selection(s) FROM (VALUES ('a', 10, 5, true, 10), ('b', 40, 4, true, 10), \
+('c', 30, 6, false, 10)) s(item, value, weight, selected, capacity)",
+        tags: &[("anofox.consumes", "selection"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot_distribution",
         params: &["tbl"],
         named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
