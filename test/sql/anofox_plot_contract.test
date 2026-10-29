@@ -654,6 +654,17 @@ SELECT anofox_plot_selection(s) FROM (VALUES ('a', true)) s(item, selected);
 ----
 needs a measure
 
+# ── sequence, weights (#499) ─────────────────────────────────────────────────
+query II
+SELECT anofox_plot_sequence(s) LIKE '<svg%', anofox_plot(s) LIKE '<svg%' FROM (VALUES (1, 'a', 0), (2, 'b', 3), (3, 'c', 5)) s(position, item, setup);
+----
+true	true
+
+query II
+SELECT anofox_plot_weights(w) LIKE '%Expected return 0.05%', anofox_plot(w) LIKE '<svg%' FROM (VALUES ('x', 0.25, 0.08), ('y', 0.75, 0.04)) w(item, weight, expected_return);
+----
+true	true
+
 # ── distribution (#181) ──────────────────────────────────────────────────────
 # One id: a plain bar per option.
 query II
