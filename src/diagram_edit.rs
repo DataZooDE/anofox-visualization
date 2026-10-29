@@ -23,6 +23,7 @@
 
 use crate::diagram::{Diagram, EdgeStyle};
 use crate::format::Locale;
+use crate::thresholds::Status;
 use crate::{Column, Role};
 use ggplot_rs::prelude::Value;
 use serde_json::{json, Map, Value as J};
@@ -163,8 +164,9 @@ impl Graph {
 /// (an existing node keeps its own row's cells; a new one gets its id,
 /// label and type), its label / type from the graph, and every edge in one
 /// `::EDGES` list (an existing edge keeps its value, label, style, status;
-/// `::UPSTREAM` is dropped — the list replaces it).
-pub fn apply(cols: &[Column], graph: &Graph) -> Vec<Column> {
+/// `::UPSTREAM` is dropped — the list replaces it). `checks`
+/// (`::DIAGRAM_CHECK`, #699) colour the nodes and edges they name.
+pub fn apply(cols: &[Column], graph: &Graph, checks: &[Check]) -> Vec<Column> {
     let Some(idc) = cols.iter().find(|c| c.role == Role::Diagram) else {
         return cols.to_vec();
     };
@@ -227,6 +229,32 @@ pub fn apply(cols: &[Column], graph: &Graph) -> Vec<Column> {
                 .collect(),
         ));
     }
+    // the worst check per node / edge
+    let worst = |target: &Target| -> Option<&'static str> {
+        checks
+            .iter()
+            .filter(|c| c.target == *target)
+            .max_by_key(|c| c.severity())
+            .map(|c| c.status.as_str())
+    };
+    if graph
+        .nodes
+        .iter()
+        .any(|n| worst(&Target::Node(n.id.clone())).is_some())
+    {
+        out.retain(|c| c.role != Role::DiagramCheck);
+        out.push(col(
+            "_check",
+            Role::DiagramCheck,
+            graph
+                .nodes
+                .iter()
+                .map(|n| {
+                    worst(&Target::Node(n.id.clone())).map_or(Value::Na, |s| Value::Str(s.into()))
+                })
+                .collect(),
+        ));
+    }
     let attrs = |f: &str, t: &str| -> Map<String, J> {
         let mut m = Map::new();
         m.insert("from".into(), J::String(f.into()));
@@ -244,13 +272,13 @@ pub fn apply(cols: &[Column], graph: &Graph) -> Vec<Column> {
                     m.insert("label".into(), J::String(l.clone()));
                 }
                 m.insert("style".into(), J::String(style_word(e.style).into()));
-                if let Some(s) = e
-                    .status
-                    .filter(|s| *s != crate::thresholds::Status::Neutral)
-                {
+                if let Some(s) = e.status.filter(|s| *s != Status::Neutral) {
                     m.insert("status".into(), J::String(s.as_str().into()));
                 }
             }
+        }
+        if let Some(s) = worst(&Target::Edge(f.into(), t.into())) {
+            m.insert("status".into(), J::String(s.into()));
         }
         m
     };
@@ -325,6 +353,119 @@ fn per_node(r: Role) -> bool {
             | Role::Link
             | Role::Info
             | Role::Title
+    )
+}
+
+/// What a `::DIAGRAM_CHECK` row is about.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    Node(String),
+    Edge(String, String),
+    Graph,
+}
+
+/// One problem with the edited graph (`::DIAGRAM_CHECK`, #699).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Check {
+    pub target: Target,
+    pub status: Status,
+    pub message: String,
+}
+
+impl Check {
+    fn severity(&self) -> u8 {
+        match self.status {
+            Status::Bad => 3,
+            Status::Warn => 2,
+            Status::Good => 1,
+            Status::Neutral => 0,
+        }
+    }
+}
+
+/// Most check rows read (the toolbar lists them; the rest are counted).
+pub const MAX_CHECKS: usize = 200;
+
+/// The checks from their statement's rows (`target_col` = the
+/// `::DIAGRAM_CHECK` column's name: a node id, `'from -> to'` for an edge,
+/// NULL for the whole graph; `status` and `message` read by name, any
+/// case). A row whose status is no status word (`bad`, `warn`, `error`,
+/// `ok`, … — the `::BADGE` words) counts as `warn`; a row with neither a
+/// status nor a message is skipped.
+pub fn checks(target_col: &str, rows: &[Map<String, J>]) -> Vec<Check> {
+    let col = |r: &Map<String, J>, n: &str| {
+        r.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(n))
+            .and_then(|(_, v)| match v {
+                J::String(s) => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
+                J::Null => None,
+                v => Some(v.to_string()),
+            })
+    };
+    rows.iter()
+        .filter_map(|r| {
+            let status = col(r, "status");
+            let message = col(r, "message").unwrap_or_default();
+            if status.is_none() && message.is_empty() {
+                return None;
+            }
+            let target = match r.get(target_col) {
+                Some(J::String(s)) if !s.trim().is_empty() => match s.split_once("->") {
+                    Some((f, t)) => Target::Edge(f.trim().into(), t.trim().into()),
+                    None => Target::Node(s.trim().into()),
+                },
+                Some(J::Null) | None => Target::Graph,
+                Some(v) => Target::Node(v.to_string()),
+            };
+            Some(Check {
+                target,
+                status: status
+                    .as_deref()
+                    .and_then(crate::diagram::badge_status)
+                    .unwrap_or(Status::Warn),
+                message: message.chars().take(300).collect(),
+            })
+        })
+        .take(MAX_CHECKS)
+        .collect()
+}
+
+/// [`checks_json`]'s list read back (the browser hands it to the renderer);
+/// anything else is no checks.
+pub fn checks_from_json(text: &str) -> Vec<Check> {
+    let Ok(J::Array(a)) = serde_json::from_str::<J>(text) else {
+        return Vec::new();
+    };
+    let s = |o: &J, k: &str| o.get(k).and_then(J::as_str).map(str::to_string);
+    a.iter()
+        .take(MAX_CHECKS)
+        .map(|o| Check {
+            target: match (s(o, "node"), s(o, "from"), s(o, "to")) {
+                (Some(n), _, _) => Target::Node(n),
+                (None, Some(f), Some(t)) => Target::Edge(f, t),
+                _ => Target::Graph,
+            },
+            status: s(o, "status")
+                .as_deref()
+                .and_then(crate::diagram::badge_status)
+                .unwrap_or(Status::Warn),
+            message: s(o, "message").unwrap_or_default(),
+        })
+        .collect()
+}
+
+pub fn checks_json(c: &[Check]) -> J {
+    J::Array(
+        c.iter()
+            .map(|c| {
+                let (node, from, to) = match &c.target {
+                    Target::Node(n) => (Some(n.as_str()), None, None),
+                    Target::Edge(f, t) => (None, Some(f.as_str()), Some(t.as_str())),
+                    Target::Graph => (None, None, None),
+                };
+                json!({"node": node, "from": from, "to": to, "status": c.status.as_str(), "message": c.message})
+            })
+            .collect(),
     )
 }
 
@@ -460,7 +601,7 @@ mod tests {
             label: "Supplier 2".into(),
         });
         g.edges.push(("sup2".into(), "wh".into()));
-        let cols = apply(&base(), &g);
+        let cols = apply(&base(), &g, &[]);
         let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
         assert_eq!(
             d.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
@@ -478,6 +619,43 @@ mod tests {
         assert_eq!(kept.value, Some(5.0));
         assert_eq!(kept.style, EdgeStyle::Flow(false));
         assert!(d.problems.is_empty(), "{:?}", d.problems);
+    }
+
+    #[test]
+    fn check_rows_and_their_colours() {
+        let rows: Vec<Map<String, J>> = serde_json::from_str(
+            r#"[{"id":"wh","Status":"error","message":"no supplier"},
+                {"id":"wh","status":"warn","message":"low"},
+                {"id":"sup -> wh","status":"warning","message":"single lane"},
+                {"id":null,"status":"bad","message":"no demand"},
+                {"id":"store","status":"odd","message":"unknown word"},
+                {"id":"x","status":null,"message":null}]"#,
+        )
+        .unwrap();
+        let c = checks("id", &rows);
+        assert_eq!(c.len(), 5, "the empty row is skipped");
+        assert_eq!(c[0].target, Target::Node("wh".into()));
+        assert_eq!(c[0].status, Status::Bad);
+        assert_eq!(c[2].target, Target::Edge("sup".into(), "wh".into()));
+        assert_eq!(c[3].target, Target::Graph);
+        assert_eq!(c[4].status, Status::Warn, "no status word: warn");
+        let cols = apply(&base(), &Graph::of(&base()), &c);
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        let st = |id: &str| d.nodes.iter().find(|n| n.id == id).unwrap().status;
+        assert_eq!(st("wh"), Some(Status::Bad), "the worst check wins");
+        assert_eq!(st("store"), Some(Status::Warn));
+        assert_eq!(st("sup"), None);
+        let e = d
+            .edges
+            .iter()
+            .find(|e| d.nodes[e.from].id == "sup")
+            .unwrap();
+        assert_eq!(e.status, Some(Status::Warn));
+        let j = checks_json(&c);
+        assert_eq!(j[2]["from"], "sup");
+        assert!(j[3]["node"].is_null() && j[3]["from"].is_null());
+        assert_eq!(checks_from_json(&j.to_string()), c);
+        assert!(checks_from_json("nope").is_empty());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 // connects_to forbids, saying why), a picked node is renamed / removed, Reset
 // goes back to the data; the drawn diagram keeps each existing node's value;
 // the edited graph is ONE JSON variable the other panels read with SQL; the
-// URL carries it; no page errors.
+// URL carries it; no page errors. #699: ::DIAGRAM_CHECK (see below).
 //
 //   scripts/build-wasm-pkg.sh
 //   python3 serve_nocache.py 8947 &
@@ -119,6 +119,76 @@ await bar("Reset");
 await settle();
 s = await st();
 check(s.nodes.join(",") === "store,sup,wh" && s.kpi === "2", `Reset: back to the data (${s.nodes}; ${s.kpi})`);
+
+// #699 ::DIAGRAM_CHECK: a query over the edited graph flags an unconnected
+// node (bad), a single supplier (warn, the whole graph) and an edge; the
+// node / edge carry the status, the toolbar lists them worst first, an
+// entry picks its node, and the checks re-run after every edit; a failing
+// check query says so.
+const CHECK_SQL = `-- @title Diagram check e2e (#699)
+CREATE OR REPLACE TEMP TABLE network_node AS SELECT * FROM (VALUES
+ ('sup', 'Supplier', 'supplier', NULL), ('wh', 'Warehouse', 'stock', ['sup']),
+ ('store', 'Store', 'demand', ['wh']), ('orphan', 'Orphan', 'stock', NULL)) v(id, name, kind, upstream);
+SELECT id ::DIAGRAM_CHECK, status, message FROM (
+  SELECT n->>'id' AS id, 'bad' AS status, 'not connected to anything' AS message
+  FROM (SELECT unnest((getvariable('graph')->'nodes')::JSON[]) AS n)
+  WHERE n->>'id' NOT IN (SELECT e->>'from' FROM (SELECT unnest((getvariable('graph')->'edges')::JSON[]) AS e)
+                         UNION SELECT e->>'to' FROM (SELECT unnest((getvariable('graph')->'edges')::JSON[]) AS e))
+  UNION ALL
+  SELECT NULL, 'warn', 'only one supplier — no fallback'
+  WHERE (SELECT count(*) FROM (SELECT unnest((getvariable('graph')->'nodes')::JSON[]) AS n) WHERE n->>'type' = 'supplier') < 2
+  UNION ALL
+  SELECT 'wh -> store', 'warning', 'single lane');
+SELECT id ::DIAGRAM, name ::LABEL, kind ::CATEGORY, upstream ::UPSTREAM, 'edit' AS graph ::DIAGRAM_MODE, 'Network' ::TITLE FROM network_node;
+`;
+const cst = () =>
+  page.evaluate(() => ({
+    items: [...document.querySelectorAll(".dp-edit-checks li")].map((li) => [li.className.replace("dp-edit-check ", ""), li.textContent]),
+    orphan: document.querySelector('.dash [data-node="orphan"][data-status]')?.getAttribute("data-status") ?? null,
+    sup: document.querySelector('.dash [data-node="sup"][data-status]')?.getAttribute("data-status") ?? null,
+    edge: document.querySelector('.dash polyline[data-edge="wh>store"]')?.getAttribute("data-status") ?? null,
+    rename: [...document.querySelectorAll(".dp-edit-bar > button")].find((b) => b.textContent === "Rename")?.disabled,
+    dots: [...document.querySelectorAll(".dp-edit-checks li")].map((li) => getComputedStyle(li, "::before").backgroundColor),
+  }));
+await page.goto("about:blank");
+await page.goto(`${base}?mode=view#sql=${b64(CHECK_SQL)}`);
+await ready();
+let c = await cst();
+check(c.orphan === "bad" && c.sup === null, `a bad node carries its status (orphan=${c.orphan}, sup=${c.sup})`);
+check(c.edge === "warn", `a flagged edge carries its status (${c.edge})`);
+check(
+  c.items.length === 3 && c.items[0][0] === "dp-check-bad" && /Orphan: not connected/.test(c.items[0][1]) && c.items.slice(1).every((i) => i[0] === "dp-check-warn"),
+  `listed worst first (${JSON.stringify(c.items)})`
+);
+check(c.dots.length === 3 && c.dots[0] !== c.dots[1] && !c.dots.includes("rgba(0, 0, 0, 0)"), `each entry has its status dot (${c.dots})`);
+check(c.items.some((i) => i[1] === "only one supplier — no fallback") && c.items.some((i) => /Warehouse → Store: single lane/.test(i[1])), "a whole-graph and an edge entry");
+if (shots) await page.screenshot({ path: `${shots}/diagram-check.png`, fullPage: true });
+await page.click(".dp-edit-checks .dp-check-at >> text=Orphan");
+c = await cst();
+check(c.rename === false, "an entry picks its node (Rename enabled)");
+await bar("Remove");
+await settle();
+c = await cst();
+check(c.orphan === null && c.items.length === 2 && !c.items.some((i) => /Orphan/.test(i[1])), `the checks re-run after the edit (${JSON.stringify(c.items)})`);
+await page.selectOption(".dp-edit-type", "supplier");
+await page.fill(".dp-edit-name", "Supplier 2");
+await bar("Add");
+await settle();
+await bar("Connect");
+await settle();
+await node("supplier_2");
+await settle();
+await node("wh");
+await settle();
+c = await cst();
+check(c.items.length === 1 && /single lane/.test(c.items[0][1]), `a second supplier clears the warning (${JSON.stringify(c.items)})`);
+
+await page.goto("about:blank");
+await page.goto(`${base}?mode=view#sql=${b64(CHECK_SQL.replace("SELECT id ::DIAGRAM_CHECK, status, message FROM (", "SELECT id ::DIAGRAM_CHECK, status, message, error('boom') AS x FROM ("))}`);
+await ready();
+c = await cst();
+check(c.items.length === 1 && /The graph check failed: .*boom/.test(c.items[0][1]), `a failing check query says so (${JSON.stringify(c.items)})`);
+
 check(!errs.length, "no page errors: " + errs.join(" | "));
 await browser.close();
 console.log(`diagram-edit-e2e: ${process.exitCode ? "failed" : "0 failed"}`);

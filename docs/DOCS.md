@@ -231,6 +231,7 @@ terminal.
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::DIAGRAM_MODE` | `::DIAGRAM_EDIT` | encoding | on a ::DIAGRAM: 'edit' lets the viewer add, connect, rename and remove nodes; the alias names the variable holding the edited graph as JSON {nodes:[{id,type,label}], edges:[{from,to}]} |
 | `::DIAGRAM_PALETTE` | `::NODE_TYPES` | layout | before an editable ::DIAGRAM: the node types it may add — the column is the type (its ::CATEGORY), plus label and connects_to (the types it may feed) |
+| `::DIAGRAM_CHECK` | `::GRAPH_CHECK` | layout | before an editable ::DIAGRAM: a query over the edited graph returning its problems — the column is a node id, 'from -> to' for an edge or NULL for the whole graph, plus status ('bad', 'warn', …) and message; drawn on the nodes / edges and listed in the toolbar |
 | `::FIGURE` | `::PATCHWORK` | layout | open a figure: the charts up to ::ENDFIGURE become the cells of one patchwork-style picture with aligned axes; the value is its title |
 | `::ENDFIGURE` | `::END_FIGURE` | layout | close the current ::FIGURE |
 | `::LAYOUT` | `::FIGURE_LAYOUT` | layout | on ::FIGURE: '(hist / scatter) \| checks' — \| side by side, / stacked (binds tighter), ( ) groups, _ an empty cell; a cell is its -- @name or its position (1, 2, …) |
@@ -2079,7 +2080,38 @@ the diagram's own rows change, the edits start again from them. Edits are
 kept in the URL (`?v.graph=…`) but not saved for other viewers (#684).
 
 Without `::DIAGRAM_PALETTE` the type list is the types the rows use, and any
-node may feed any other. `--check` reports an unknown mode
+node may feed any other.
+
+**Checking the edited graph** (`::DIAGRAM_CHECK`, #699). A statement right
+before the diagram (next to the palette, either order) reads the edited graph
+and returns its problems, one row each: the `::DIAGRAM_CHECK` column names a
+node id, `'from -> to'` for an edge, or NULL for the graph as a whole;
+`status` is a status word (`bad` / `error`, `warn` / `warning`, `ok`, … — the
+`::BADGE` words; anything else counts as `warn`) and `message` says what is
+wrong. It runs again after every edit:
+
+```sql
+SELECT id ::DIAGRAM_CHECK, status, message FROM (
+  -- a node nothing connects to
+  SELECT n->>'id' AS id, 'bad' AS status, 'not connected to anything' AS message
+  FROM (SELECT unnest((getvariable('graph')->'nodes')::JSON[]) AS n)
+  WHERE n->>'id' NOT IN (SELECT e->>'from' FROM (SELECT unnest((getvariable('graph')->'edges')::JSON[]) AS e)
+                         UNION SELECT e->>'to' FROM (SELECT unnest((getvariable('graph')->'edges')::JSON[]) AS e))
+  UNION ALL
+  -- the whole graph
+  SELECT NULL, 'warn', 'only one supplier — no fallback'
+  WHERE (SELECT count(*) FROM (SELECT unnest((getvariable('graph')->'nodes')::JSON[]) AS n)
+         WHERE n->>'type' = 'supplier') < 2);
+```
+
+A flagged node gets the status colour (its dot, over its `::THRESHOLDS` /
+`::BADGE` status), a flagged edge its colour; under the toolbar the problems
+are listed worst first (at most 12, then "… n more"), and a node's or edge's
+entry picks it for Rename / Remove. A check query that fails says so in the
+list. On a locked server it is one more declared statement — the server runs
+it, the viewer only sends the graph. `--check` warns when a `::DIAGRAM_CHECK`
+has no editable `::DIAGRAM` right after it (`diagram_check/no-diagram`); the
+static outputs draw the rows' own graph without checks. `--check` reports an unknown mode
 (`diagram_mode/unknown`, an error) and a `::DIAGRAM_MODE` without a
 `::DIAGRAM` column (`diagram_mode/no-diagram`); the static outputs draw the
 rows' own graph and bind it to the variable. **On a locked server** the

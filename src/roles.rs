@@ -405,6 +405,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "on a ::DIAGRAM: 'edit' lets the viewer add, connect, rename and remove nodes; the alias names the variable holding the edited graph as JSON {nodes:[{id,type,label}], edges:[{from,to}]}"),
     e("DIAGRAM_PALETTE", &["NODE_TYPES"], R::DiagramPalette, "layout", false,
       "before an editable ::DIAGRAM: the node types it may add — the column is the type (its ::CATEGORY), plus label and connects_to (the types it may feed)"),
+    e("DIAGRAM_CHECK", &["GRAPH_CHECK"], R::DiagramCheck, "layout", false,
+      "before an editable ::DIAGRAM: a query over the edited graph returning its problems — the column is a node id, 'from -> to' for an edge or NULL for the whole graph, plus status ('bad', 'warn', …) and message; drawn on the nodes / edges and listed in the toolbar"),
     e("FIGURE", &["PATCHWORK"], R::FigureStart, "layout", false,
       "open a figure: the charts up to ::ENDFIGURE become the cells of one patchwork-style picture with aligned axes; the value is its title"),
     e("ENDFIGURE", &["END_FIGURE"], R::FigureEnd, "layout", false, "close the current ::FIGURE"),
@@ -744,7 +746,7 @@ pub fn roles_json() -> String {
         "metrics": tokens(&|r| matches!(r, Role::Metric(_))),
         "directives": tokens(&|r| matches!(
             r,
-            Role::Columns | Role::GroupStart | Role::GroupEnd | Role::FigureStart | Role::FigureEnd | Role::DiagramPalette | Role::Span | Role::Height
+            Role::Columns | Role::GroupStart | Role::GroupEnd | Role::FigureStart | Role::FigureEnd | Role::DiagramPalette | Role::DiagramCheck | Role::Span | Role::Height
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
                 | Role::ViewPlacement | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
@@ -1100,6 +1102,7 @@ mod tests {
             Role::GroupEnd,
             Role::DiagramMode,
             Role::DiagramPalette,
+            Role::DiagramCheck,
             Role::FigureStart,
             Role::FigureEnd,
             Role::FigureLayout,
@@ -1271,6 +1274,7 @@ mod tests {
                 | Role::GroupEnd
                 | Role::DiagramMode
                 | Role::DiagramPalette
+                | Role::DiagramCheck
                 | Role::FigureStart
                 | Role::FigureEnd
                 | Role::FigureLayout

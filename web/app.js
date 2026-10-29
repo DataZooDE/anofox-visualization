@@ -12,6 +12,7 @@ import init, {
   diagram_graph,
   render_diagram_edit,
   diagram_palette,
+  diagram_checks,
   form_fields,
   render_contract,
   map_bounds,
@@ -10706,7 +10707,9 @@ async function runOnce(fresh = true, pv = preview) {
             const rw = spark ? 460 : Math.max(300, span * 100 * viewScale);
             if (dpEdit[i]) {
               // #682: draw the edited graph; the editing toolbar above it.
+              // #699: its ::DIAGRAM_CHECK runs on the edited graph first.
               holder._edit = dpEdit[i];
+              Object.assign(dpEdit[i], await diagramChecksFor(stmts, i, pv));
               fig.appendChild(diagramToolbar(dpEdit[i], holder));
             }
             renderChart(holder, rowsJson, s.roles, rw, ph);
@@ -10894,8 +10897,9 @@ async function runOnce(fresh = true, pv = preview) {
         container = body;
       } else if (d === "ENDGROUP") {
         container = curGrid;
-      } else if (d === "DIAGRAM_PALETTE") {
-        // read by the editable ::DIAGRAM after it (#682, diagramPaletteFor)
+      } else if (d === "DIAGRAM_PALETTE" || d === "DIAGRAM_CHECK") {
+        // read by the editable ::DIAGRAM after it (#682 diagramPaletteFor,
+        // #699 diagramChecksFor)
       } else if (d === "ENDFIGURE") {
         // closes a ::FIGURE — its cells were drawn by the ::FIGURE (#661)
       } else if (d === "SPAN") {
@@ -11653,7 +11657,8 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const ctx = holder._frame != null ? ctxWith({ frame: holder._frame }) : renderCtx();
   const tracks = holder._tracks || [];
   if (holder._edit) {
-    holder.innerHTML = render_diagram_edit(rows, JSON.stringify(roles), dpVars[holder._edit.varname] ?? "", w, ph, ctx);
+    const ed = holder._edit;
+    holder.innerHTML = render_diagram_edit(rows, JSON.stringify(roles), dpVars[ed.varname] ?? "", JSON.stringify(ed.checks || []), w, ph, ctx);
     diagramMarkPick(holder);
   } else if (holder._figure) {
     // A ::FIGURE (#661): its cells composed into one picture by the wasm
@@ -12351,7 +12356,29 @@ async function diagramPaletteFor(stmts, i, pv) {
   }
   return [];
 }
-// Per plan index: {varname, base (the rows' graph, JSON text), palette}.
+// #699: the ::DIAGRAM_CHECK statement right before the diagram at `i` (only
+// directives such as ::DIAGRAM_PALETTE / ::COL in between), run on the edited
+// graph: {checks ([{node, from, to, status, message}], also what the
+// renderer colours), checkError}.
+async function diagramChecksFor(stmts, i, pv) {
+  for (let j = i - 1; j >= 0; j--) {
+    const t = stmts[j];
+    if (role(t, "DIAGRAM_CHECK")) {
+      const cr = t.roles.find((r) => r[1] === "DIAGRAM_CHECK");
+      try {
+        const rows = await panelSql(t.sql, j, pv);
+        const key = Object.keys(JSON.parse(rows)[0] || {})[cr[0]] ?? "c" + cr[0];
+        return { checks: JSON.parse(diagram_checks(rows, key)), checkError: "" };
+      } catch (e) {
+        return { checks: [], checkError: String(e?.message || e) };
+      }
+    }
+    if (t.setup || !directive(t)) break;
+  }
+  return { checks: [], checkError: "" };
+}
+// Per plan index: {varname, base (the rows' graph, JSON text), palette,
+// and #699's check fields above}.
 let dpEdit = {};
 // Per variable: the rows' graph the edits were made on (a changed base —
 // other rows — starts again from it) and the toolbar's state.
@@ -12433,6 +12460,40 @@ function diagramMarkPick(holder) {
     ? svg.querySelector(`rect[data-node="${CSS.escape(sel.node)}"]`)
     : svg.querySelector(`polyline[data-edge="${CSS.escape(sel.edge)}"]`);
   el?.classList.add("dp-edit-pick");
+}
+// #699: the ::DIAGRAM_CHECK problems under the toolbar, worst first; a
+// node's / edge's entry picks it. A failed check query says so (its SQL is
+// the author's; the graph is the viewer's).
+function diagramCheckList(meta, g, onPick) {
+  const list = document.createElement("ul");
+  list.className = "dp-edit-checks";
+  list.setAttribute("aria-label", "Problems with the graph");
+  const rank = { bad: 0, warn: 1, neutral: 2, good: 3 };
+  const label = (id) => (g.nodes.find((n) => n.id === id) || {}).label || id;
+  const items = (meta.checks || []).slice().sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2));
+  if (meta.checkError) items.unshift({ status: "warn", message: "The graph check failed: " + meta.checkError });
+  for (const c of items.slice(0, 12)) {
+    const li = document.createElement("li");
+    li.className = "dp-edit-check dp-check-" + (c.status || "warn");
+    const where = c.node ? label(c.node) : c.from ? `${label(c.from)} → ${label(c.to)}` : "";
+    if (where && (c.node ? g.nodes.some((n) => n.id === c.node) : g.edges.some((e) => e.from === c.from && e.to === c.to))) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "dp-check-at";
+      b.textContent = where;
+      b.title = "Pick it in the diagram";
+      b.onclick = () => onPick(c.node ? { node: c.node } : { edge: c.from + ">" + c.to });
+      li.append(b, document.createTextNode(c.message ? ": " + c.message : ""));
+    } else li.textContent = (where ? where + ": " : "") + (c.message || c.status);
+    list.appendChild(li);
+  }
+  if (items.length > 12) {
+    const li = document.createElement("li");
+    li.className = "dp-edit-check";
+    li.textContent = `… ${items.length - 12} more`;
+    list.appendChild(li);
+  }
+  return list.childElementCount ? list : null;
 }
 function diagramToolbar(meta, holder) {
   const v = meta.varname;
@@ -12526,6 +12587,15 @@ function diagramToolbar(meta, holder) {
       : changes)
   );
   ui.msg = "";
+  const pick = (p) => {
+    ui.pick = p;
+    diagramMarkPick(holder);
+    rename.disabled = !p.node;
+    remove.disabled = false;
+    name.placeholder = p.node ? "New name" : "New node";
+  };
+  const checks = diagramCheckList(meta, g, pick);
+  if (checks) bar.appendChild(checks);
   // Clicks on the drawing: connect mode takes them; otherwise they pick
   // (and still select, for the panels that follow the selection).
   holder.addEventListener(
@@ -12553,13 +12623,8 @@ function diagramToolbar(meta, holder) {
         ui.src = null;
         return diagramCommit(meta, g);
       }
-      if (node) ui.pick = { node: node.getAttribute("data-node") };
-      else if (edge) ui.pick = { edge: edge.getAttribute("data-edge") };
-      else return;
-      diagramMarkPick(holder);
-      rename.disabled = !ui.pick.node;
-      remove.disabled = false;
-      name.placeholder = ui.pick.node ? "New name" : "New node";
+      if (node) pick({ node: node.getAttribute("data-node") });
+      else if (edge) pick({ edge: edge.getAttribute("data-edge") });
     },
     true
   );
