@@ -534,6 +534,15 @@ fn render_dashboard_html(
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
         }
+        // #692: 'caption'::MARKDOWN_STYLE texts right after a chart go under
+        // it, in its figure.
+        let mut captions = String::new();
+        while let Some(c) = queried.peek().and_then(|(q, r, _, _)| {
+            dashboard::caption_html(&rows, &p.roles, r.as_ref().ok()?, &q.roles, &opts)
+        }) {
+            queried.next();
+            captions.push_str(&c);
+        }
         // A ::TABLE / ::PAGED panel (#427): its rewrite keeps each column's
         // own name rather than aliasing it to `cN` (`sql::rewrite_list`'s
         // `keep_intact`), so the `cols` built above (indexed by `cN`) can't
@@ -589,7 +598,7 @@ fn render_dashboard_html(
             ("panel".to_string(), String::new())
         };
         panels.push_str(&format!(
-            "<figure class=\"{class}\"{icon_attrs}>{svg}</figure>"
+            "<figure class=\"{class}\"{icon_attrs}>{svg}{captions}</figure>"
         ));
         n += 1;
     }

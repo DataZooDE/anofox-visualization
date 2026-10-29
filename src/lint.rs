@@ -492,6 +492,8 @@ where
         .into_iter()
         .flat_map(|b| b.cells)
         .collect();
+    // #692: a 'caption'::MARKDOWN_STYLE looks back at the statement before it
+    let plan_all = sql::plan(script);
     for (i, p) in sql::plan(script).into_iter().enumerate() {
         let stmt = i + 1;
         let short = one_line(p.sql.trim());
@@ -1300,13 +1302,23 @@ where
                     sql: short.clone(),
                 })
             };
-            if !crate::roles::MARKDOWN_STYLE_KINDS.contains(&v.as_str()) {
+            let caption = crate::roles::is_caption_style(&v);
+            if !caption && !crate::roles::MARKDOWN_STYLE_KINDS.contains(&v.as_str()) {
                 warn(
                     "markdown_style/unknown",
                     format!(
-                        "::MARKDOWN_STYLE `{v}` — use 'plain', 'card' or 'callout' (drawn as \
-                         'callout')"
+                        "::MARKDOWN_STYLE `{v}` — use 'plain', 'card', 'callout' or 'caption' \
+                         (drawn as 'callout')"
                     ),
+                );
+            }
+            if caption && !follows_chart(&plan_all[..stmt - 1]) {
+                warn(
+                    "markdown_style/caption-no-chart",
+                    "'caption'::MARKDOWN_STYLE goes under the chart right before it (its \
+                     ::TRACKs and a ::HEIGHT may sit in between) — there is none, so it is \
+                     drawn as plain text"
+                        .into(),
                 );
             }
             if !p.roles.iter().any(|(_, r)| *r == Role::Markdown) {
@@ -2455,6 +2467,27 @@ fn diagram_check_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
         }
     }
     diags
+}
+
+/// #692: does the statement after `before` follow a chart — the last
+/// statement that isn't setup, a ::HEIGHT, a ::TRACK or another caption
+/// draws one (a chart role, not a table / text / image)?
+fn follows_chart(before: &[sql::Panel]) -> bool {
+    let has = |p: &sql::Panel, f: &dyn Fn(&Role) -> bool| p.roles.iter().any(|(_, r)| f(r));
+    let skip = |p: &sql::Panel| {
+        p.setup
+            || has(p, &|r| matches!(r, Role::Height | Role::Track))
+            || (has(p, &|r| *r == Role::Markdown) && has(p, &|r| *r == Role::MarkdownStyle))
+    };
+    before.iter().rev().find(|p| !skip(p)).is_some_and(|p| {
+        has(p, &|r| matches!(r, Role::Value(_)))
+            && !has(p, &|r| {
+                matches!(
+                    r,
+                    Role::Table | Role::PagedTable | Role::Markdown | Role::Image | Role::ImageDark
+                )
+            })
+    })
 }
 
 /// `::FIGURE` … `::ENDFIGURE` checks (#661): see [`Diagnostic::code`] for
@@ -10092,6 +10125,38 @@ mod design_tests {
         assert_eq!(
             codes(&format!("{chk}SELECT id ::DIAGRAM FROM n;")),
             ["diagram_check/no-diagram"]
+        );
+    }
+
+    /// #692: a 'caption'::MARKDOWN_STYLE needs a chart right before it (its
+    /// ::TRACKs, a ::HEIGHT or another caption may sit in between).
+    #[test]
+    fn caption_needs_a_chart_before_it() {
+        let cap = vec![json!({"c0": "Source.", "c1": "caption"})]
+            .into_iter()
+            .map(|v| v.as_object().unwrap().clone())
+            .collect::<Vec<_>>();
+        let codes = |sql: &str| -> Vec<&'static str> {
+            check(sql, |q| {
+                Ok(if q.contains("'caption'") {
+                    cap.clone()
+                } else {
+                    Vec::new()
+                })
+            })
+            .iter()
+            .map(|d| d.code)
+            .filter(|c| c.starts_with("markdown_style/"))
+            .collect()
+        };
+        let c = "SELECT 'Source.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;";
+        let chart = "SELECT x::XAXIS, y::BARCHART FROM t;";
+        assert!(codes(&format!("{chart}\n{c}\n{c}")).is_empty());
+        assert!(codes(&format!("{chart}\nSELECT 80::HEIGHT;\n{c}")).is_empty());
+        assert_eq!(codes(c), ["markdown_style/caption-no-chart"]);
+        assert_eq!(
+            codes(&format!("SELECT 'Intro'::MARKDOWN;\n{c}")),
+            ["markdown_style/caption-no-chart"]
         );
     }
 
