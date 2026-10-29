@@ -502,11 +502,19 @@ pub(crate) fn render(
             sizes.fill((width as f64 / ncol as f64, height as f64 / nrow as f64));
         }
         let mut plots: Vec<Option<ggplot_rs::prelude::GGPlot>> = Vec::with_capacity(cells.len());
-        for (c, (w, h)) in cells.iter().zip(&sizes) {
-            plots.push(
-                crate::panel_plot(&c.cols, w.max(1.0) as u32, h.max(1.0) as u32, o)
-                    .map_err(RenderError::Render)?,
-            );
+        for (i, (c, (w, h))) in cells.iter().zip(&sizes).enumerate() {
+            // #695: each cell's <svg> says which cell it is (statement order)
+            // and its `-- @name`, so the browser finds its rows and roles
+            let p = crate::panel_plot(&c.cols, w.max(1.0) as u32, h.max(1.0) as u32, o)
+                .map_err(RenderError::Render)?
+                .map(|p| {
+                    let p = p.svg_attr("data-cell", i.to_string());
+                    match &c.name {
+                        Some(n) => p.svg_attr("data-dp-name", n.clone()),
+                        None => p,
+                    }
+                });
+            plots.push(p);
         }
         let mut grid = if spec.layout.is_some() {
             match build(&layout, spec, &names, &mut plots) {

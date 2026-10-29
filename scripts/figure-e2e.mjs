@@ -1,8 +1,9 @@
 // ::FIGURE … ::ENDFIGURE (#661) in a real browser: the cells render as ONE
 // card (one SVG with a nested <svg data-panel> per cell, tagged A, B, C),
 // titled by the ::FIGURE value; the cells are not drawn again as panels of
-// their own; a mark's tooltip reads its own cell's data (no figure-wide
-// crosshair); dark mode and a narrow window re-render it; no page errors.
+// their own; a mark's tooltip reads its own cell's data, and the
+// x-crosshair works per cell (#695); dark mode and a narrow window
+// re-render it; no page errors.
 //
 //   scripts/build-wasm-pkg.sh
 //   python3 serve_nocache.py 8947 &
@@ -77,13 +78,36 @@ const tipOver = async (sel) => {
   const box = await el.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.waitForTimeout(250);
-  return page.evaluate(() => document.querySelector(".dp-tip")?.textContent || "");
+  return page.evaluate(() => document.querySelector(".dp-tip.show")?.textContent || "");
 };
 const lineTip = await tipOver('svg[data-panel="C"] circle');
 check(/10[0-9]/.test(lineTip || ""), `a line point's tooltip reads its own cell (${lineTip})`);
 const scatterTip = await tipOver('svg[data-panel="B"] circle');
 check(scatterTip && !/10[0-9]\./.test(scatterTip), `a scatter point's tooltip reads its own cell (${scatterTip})`);
-check(!(await page.$(".dash .dp-figure.has-axis-pointer")), "no figure-wide crosshair");
+// #695: the x-crosshair works per cell — over the line cell it shows that
+// cell's column; over the scatter cell (no shared-x series) it stays off.
+const crossShown = () => page.evaluate(() => getComputedStyle(document.getElementById("dp-cross")).display !== "none");
+const lineCell = await page.$('.dash .dp-figure svg[data-panel="C"]');
+const lb = await lineCell.boundingBox();
+await page.mouse.move(lb.x + lb.width * 0.55, lb.y + lb.height * 0.5);
+await page.waitForTimeout(250);
+const crossTip = await page.evaluate(() => document.querySelector(".dp-tip.show")?.textContent || "");
+check((await crossShown()) && /10[0-9]/.test(crossTip), `the crosshair works in the line cell (${crossTip})`);
+const crossX = await page.evaluate(() => parseFloat(document.getElementById("dp-cross").style.left));
+check(crossX >= lb.x && crossX <= lb.x + lb.width, `…inside that cell (${crossX} in ${lb.x}–${lb.x + lb.width})`);
+const scatterTip2 = await tipOver('svg[data-panel="B"] circle');
+check(!(await crossShown()) && scatterTip2 && !/10[0-9]\./.test(scatterTip2), `no crosshair over the scatter cell, its point keeps its tooltip (${scatterTip2})`);
+// …and on a plain chart the dashed line is actually drawn (it stayed hidden
+// by the stylesheet's .dp-cross{display:none} since 10-15)
+const plain = await (await page.$(".dash .panel:not(.dp-figure) .panel-svg svg")).boundingBox();
+await page.mouse.move(plain.x + plain.width / 2, plain.y + plain.height / 2);
+await page.waitForTimeout(250);
+check(await crossShown(), "the crosshair line shows on a plain line chart");
+await page.mouse.move(5, 5);
+check(
+  (await page.evaluate(() => [...document.querySelectorAll('.dash .dp-figure g[data-cell]')].map((g) => g.getAttribute("data-dp-name")).join(","))) === "hist,scatter,rule",
+  "each cell carries its -- @name (data-dp-name)"
+);
 if (shots) await page.screenshot({ path: `${shots}/figure-1440-light.png`, fullPage: true });
 
 // Dark mode re-renders the figure (same cells).
