@@ -1964,7 +1964,10 @@ FROM run_manifest ORDER BY seq;
   `::COMPACT`, in the dashboard locale) and a `::BADGE` status pill.
   `::THRESHOLDS` gives a node its status from its value (else the badge's
   word does, as in a table's pills: `ok`, `at risk`, `failed`, `alarm`, …): a status bar on the box, a `warn` /
-  `bad` border. `::CATEGORY` gives nodes a palette accent.
+  `bad` border. `::CATEGORY` gives nodes a palette accent; a `::COLORS` level
+  map pins a type's colour (`'supplier:#2a9d8f; stock:good; demand:#e76f51'`,
+  status words or `#rrggbb`, #699) — so a type keeps its colour whatever order
+  the rows (or an edit) bring the types in.
 - **Edges.** `::UPSTREAM` (alias `::PARENTS`) holds the node(s) feeding the
   row's node: one id or a list. `::EDGES` (the first non-NULL cell) is a list
   of structs `{from, to [, value, label, style, status]}` — `source` / `target`
@@ -2076,7 +2079,7 @@ Clicking a node still selects it, so a `::FORM` filtered by the selection
 shows that node's parameters. The diagram is redrawn from its rows with the
 edits applied: an existing node keeps its row (value, badge, lane,
 sparkline), an existing edge its `::EDGES` value / label / style; a new node
-is a plain box in its type's colour; edges come from the edited list. When
+is a plain box in its type's colour (pin it with a `::COLORS` level map); edges come from the edited list. When
 the diagram's own rows change, the edits start again from them. Edits are
 kept in the URL (`?v.graph=…`) but not saved for other viewers (#684).
 

@@ -145,6 +145,10 @@ pub struct Diagram {
     pub total_nodes: usize,
     pub total_edges: usize,
     pub problems: Vec<Problem>,
+    /// A `::COLORS` level map's colour per `::CATEGORY` slot (#699:
+    /// `'supplier:#2a9d8f; stock:good'`) — a type keeps its colour however
+    /// the rows (or an edit) order the types; `None` = the theme palette.
+    pub category_colors: Vec<Option<crate::thresholds::LevelColor>>,
 }
 
 /// A cell as an id: text, or a number written without a trailing `.0`.
@@ -549,6 +553,14 @@ impl Diagram {
             .map(|a| a.to_ascii_lowercase())
             .filter(|a| crate::ANIMATE_MODES.contains(&a.as_str()));
         let tween = first_text(Role::Transition).is_some_and(|t| t.eq_ignore_ascii_case("tween"));
+        let level_map = first_text(Role::GaugeColors)
+            .filter(|s| crate::thresholds::is_level_map(s))
+            .and_then(|s| crate::thresholds::parse_level_colors(&s).ok())
+            .unwrap_or_default();
+        let category_colors = cats
+            .iter()
+            .map(|c| level_map.iter().find(|(l, _)| l == c).map(|(_, lc)| *lc))
+            .collect();
         Some(Diagram {
             nodes,
             edges,
@@ -560,6 +572,7 @@ impl Diagram {
             total_nodes,
             total_edges,
             problems,
+            category_colors,
         })
     }
 
@@ -2122,7 +2135,13 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             .status
             .filter(|s| *s != Status::Neutral)
             .map(|s| s.color(t))
-            .or_else(|| nd.category.map(|c| t.color(c)));
+            .or_else(|| {
+                nd.category
+                    .map(|c| match d.category_colors.get(c).copied().flatten() {
+                        Some(lc) => lc.rgb(t),
+                        None => t.color(c),
+                    })
+            });
         if let Some(a) = accent_c {
             accent.num("x0", x + 1.5).num("x1", x + 4.5);
             accent
@@ -2741,6 +2760,34 @@ mod tests {
         let svg = render_with(&cols, 900, 320, &RenderOptions::default()).unwrap();
         assert!(!svg.contains("<script>"));
         roxmltree::Document::parse(&svg).expect("well-formed");
+    }
+
+    /// #699: a ::COLORS level map pins a type's colour, whatever slot the
+    /// rows give it; an unnamed type keeps the theme palette.
+    #[test]
+    fn colors_map_pins_category_colours() {
+        let col =
+            |n: &str, r: Role, v: &[&str]| Column::new(n, r, v.iter().map(|x| s(x)).collect());
+        let cols = vec![
+            col("id", Role::Diagram, &["a", "b", "c"]),
+            col("k", Role::Category, &["stock", "supplier", "demand"]),
+            col(
+                "m",
+                Role::GaugeColors,
+                &["supplier:#123456; stock:bad", "", ""],
+            ),
+        ];
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert!(d.category_colors[0].is_some() && d.category_colors[1].is_some());
+        assert!(d.category_colors[2].is_none());
+        let svg = render_with(&cols, 600, 240, &RenderOptions::default()).unwrap();
+        assert!(svg.contains("#123456"), "{svg}");
+        let o = RenderOptions::default();
+        let bad = crate::theme::hex(Status::Bad.color(&o.theme));
+        assert!(
+            svg.to_lowercase().contains(&bad.to_lowercase()),
+            "stock → {bad}: {svg}"
+        );
     }
 
     #[test]
