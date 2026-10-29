@@ -2157,9 +2157,10 @@ reaches a server.
 `options.writeback` declares the tables and lists this dashboard and the
 viewer as a writer (`docs/secure-serving.md` → "Shared write-back"): the
 server re-runs the `::SAVE` statement, checks every value against the
-declared columns and types, and appends the save to its change log. Panels
-reading the saved tables recompute from it in the next step (#684); today
-the save is recorded. Anywhere else — a server without `options.writeback`,
+declared columns and types, and appends the save to its change log. From
+then on every panel that reads one of those tables — on this page, for
+every other viewer, on every dashboard of the server — reads the base table
+with the saves applied, exactly like the builder's preview. Anywhere else — a server without `options.writeback`,
 a viewer who isn't a writer, a published site, the static outputs, the
 live-authoring preview — the button is shown disabled with the reason.
 `--check`: `save/no-source`,

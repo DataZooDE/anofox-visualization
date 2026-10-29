@@ -1002,9 +1002,20 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   "id", "vars": {"changes": [{"table", "op": "replace"|"upsert", "rows"}],
   "base"}}`. `/healthz` reports `writeback: {ok, full}`; with `options.audit`
   every save and refusal is a `save` event.
-- **Not yet.** Panels don't read the saved rows yet (materialised per
-  connection, base ⊕ changes, next); `base` is recorded but a stale save
-  isn't refused yet (conflicts, `409`, after that).
+- **Reading the saves.** Every dashboard whose SQL names a declared table
+  reads it as a per-connection `TEMP` table built from the change log: after
+  a graph save, exactly the saved rows; otherwise the base table (the one an
+  unqualified name resolves to) cast to the declared types, with the saved
+  rows merged over it by key (a form save changes only the fields it saved).
+  Rows go in through an Appender, never as SQL text. Those dashboards key
+  their cache and warm connections on the change log's generation, so a save
+  re-runs exactly the panels that read it — for every viewer. Start-time
+  refusals: a base table with a column the declaration doesn't name (a saved
+  table would hide it), an access policy (`"policy": "none"` only, for now:
+  its per-viewer views would claim the same names), more than one
+  `search_path` entry.
+- **Not yet.** `base` is recorded but a stale save isn't refused yet
+  (conflicts, `409`, next).
 
 ## B. Static render — `serve --dashboards <dir>`
 

@@ -6,7 +6,10 @@
 // same id doesn't save twice; a viewer who isn't a writer, and a dashboard
 // the server doesn't save for, get the button disabled with the reason; the
 // endpoint's CSRF header and declared-columns checks hold for a direct POST.
-// Saves don't show in panels yet (slice 3 materialises them).
+// Slice 3: every panel reading a saved table reads base ⊕ saves — the
+// writer's own page right after the save, another viewer's, and another
+// dashboard's (one change log for the server); a restart reads the change
+// log back; a base column the declaration doesn't name refuses the start.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/save-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8963] [--duckdb duckdb]
@@ -46,6 +49,8 @@ SELECT 'Save plan' ::SAVE, 'graph' ::SAVE_GRAPH, 'plan_nodes, plan_edges' ::SAVE
 SELECT field AS lt ::FORM, type, value FROM (VALUES ('lead_time', 'number', '5')) v(field, type, value);
 SELECT 'Save parameters' ::SAVE, 'lt' ::SAVE_FORM, 'plan_params' ::SAVE_TABLES;
 SELECT 'Bad' ::SAVE, 'graph' ::SAVE_GRAPH, 'x; DROP TABLE plan_nodes, y' ::SAVE_TABLES;
+SELECT count(*) AS n ::METRIC, 'Nodes' ::LABEL FROM plan_nodes;
+SELECT string_agg(id || '=' || lead_time, ',' ORDER BY id) AS p ::TEXT_SMALL FROM plan_params;
 `;
 writeFileSync(path.join(dashDir, "plan.sql"), PLAN);
 writeFileSync(path.join(dashDir, "other.sql"), PLAN.replace("-- @title Plan", "-- @title Other"));
@@ -71,12 +76,12 @@ const SETUP = `CREATE TABLE plan_nodes AS SELECT * FROM (VALUES ('sup', 'supplie
 CREATE TABLE plan_edges AS SELECT * FROM (VALUES ('sup', 'wh')) v("from", "to");
 CREATE TABLE plan_params AS SELECT * FROM (VALUES ('sup', 7.0), ('wh', 3.0)) v(id, lead_time);`;
 
-async function serve() {
+async function serve(setup = SETUP) {
   const p = spawn(duckdb, ["-unsigned", "-batch", ":memory:"], { stdio: ["pipe", "pipe", "pipe"], env });
   let log = "";
   p.stdout.on("data", (d) => (log += d));
   p.stderr.on("data", (d) => (log += d));
-  p.stdin.write(`LOAD ${sqlStr(ext)};\n${SETUP}\nSELECT anofox_serve_dashboards(${sqlStr(dashDir)}, ${port}, ${sqlStr(JSON.stringify(opts))});\n`);
+  p.stdin.write(`LOAD ${sqlStr(ext)};\n${setup}\nSELECT anofox_serve_dashboards(${sqlStr(dashDir)}, ${port}, ${sqlStr(JSON.stringify(opts))});\n`);
   for (let i = 0; i < 100; i++) {
     try {
       if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return { proc: p, log: () => log };
@@ -122,10 +127,17 @@ try {
     await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 15000 });
   };
   const btn = (page, label) => page.locator(`.save-panel .submit-btn:text-is("${label}")`);
+  const kpi = (page) => page.evaluate(() => document.querySelector(".metric-value")?.textContent);
+  const params = (page) => page.evaluate(() => [...document.querySelectorAll(".textcard .text-value")].map((e) => e.textContent).join("|"));
+  const until = async (page, f, want) => {
+    for (let k = 0; k < 50 && (await f(page)) !== want; k++) await sleep(100);
+    return f(page);
+  };
   const panelText = (page, label) => page.locator(".save-panel", { has: page.locator(`.submit-btn:text-is("${label}")`) }).innerText();
 
   // (a) a writer saves an edited graph: one record replacing both tables.
   const { page, errs, ctx } = await openAs("alice", "plan");
+  check((await kpi(page)) === "2" && (await params(page)) === "sup=7.0,wh=3.0", `(a) before any save, panels read the base tables (${await kpi(page)}, ${await params(page)})`);
   check(await btn(page, "Save plan").isEnabled(), "(a) a writer's Save is enabled");
   check(!(await page.locator(".save-panel .submit-preview-note").count()), "(a) no preview note on a server");
   await page.selectOption(".dp-edit-type", "stock");
@@ -141,6 +153,7 @@ try {
     `(a) one change-log line: both tables replaced (${JSON.stringify(r[0])})`
   );
   check(g?.[0]?.rows.some((n) => n.label === "DC South" && n.type === "stock"), "(a) the added node is in the saved rows");
+  check((await until(page, kpi, "3")) === "3", `(a) the page re-runs on the saved plan_nodes (${await kpi(page)})`);
 
   // (b) a form save: one typed row keyed by the clicked node.
   await page.click('.dash rect[data-node="wh"]', { force: true });
@@ -156,6 +169,7 @@ try {
     r.length === 2 && c1.length === 1 && c1[0].table === "plan_params" && c1[0].op === "upsert" && c1[0].rows.length === 1 && c1[0].rows[0].id === "wh" && c1[0].rows[0].lead_time === 9,
     `(b) a form save upserts one typed row (${JSON.stringify(r[1]?.vars)})`
   );
+  check((await until(page, params, "sup=7.0,wh=9.0")) === "sup=7.0,wh=9.0", `(b) the saved row is merged over the base by key (${await params(page)})`);
 
   // (c) a table the server doesn't declare: refused, saying why; nothing written.
   await btn(page, "Bad").click();
@@ -192,6 +206,7 @@ try {
   // (e) a viewer who isn't a writer: disabled with the reason; a direct POST is 403.
   {
     const { page, ctx } = await openAs("bob", "plan");
+    check((await kpi(page)) === "3" && (await params(page)) === "sup=4.0,wh=9.0", `(e) another viewer reads the saves (${await kpi(page)}, ${await params(page)})`);
     check(await btn(page, "Save plan").isDisabled(), "(e) a non-writer's Save is disabled");
     check(/Only this dashboard's writers can save/.test(await panelText(page, "Save plan")), "(e) …saying why");
     const res = await page.evaluate(async () => {
@@ -208,6 +223,7 @@ try {
   // (f) a dashboard the server doesn't save for.
   {
     const { page, ctx } = await openAs("alice", "other");
+    check((await kpi(page)) === "3", `(f) another dashboard reading plan_nodes reads the saves too (${await kpi(page)})`);
     check(await btn(page, "Save plan").isDisabled(), "(f) a dashboard outside options.writeback: Save disabled");
     check(/Saving is not enabled on this server/.test(await panelText(page, "Save plan")), "(f) …saying why");
     await ctx.close();
@@ -216,6 +232,28 @@ try {
     await fetch(`http://127.0.0.1:${port}/healthz`, { headers: { "X-Anofox-Proxy-Secret": sec, "X-Forwarded-User": "alice" } })
   ).json();
   check(health.writeback && health.writeback.ok === true && health.writeback.full === false, `/healthz reports the change log (${JSON.stringify(health.writeback)})`);
+
+  // (g) a restart reads the change log back: the saves are still there.
+  stop(srv);
+  srv = null;
+  await sleep(300);
+  srv = await serve();
+  {
+    const { page, ctx } = await openAs("bob", "plan");
+    check((await kpi(page)) === "3" && (await params(page)) === "sup=4.0,wh=9.0", `(g) after a restart the saves still show (${await kpi(page)}, ${await params(page)})`);
+    await ctx.close();
+  }
+  stop(srv);
+  srv = null;
+  await sleep(300);
+  // (h) a base column the declaration doesn't name: refused at start.
+  let refused = "";
+  try {
+    srv = await serve(SETUP.replace("SELECT * FROM (VALUES ('sup', 7.0), ('wh', 3.0)) v(id, lead_time)", "SELECT *, 1 AS cost FROM (VALUES ('sup', 7.0), ('wh', 3.0)) v(id, lead_time)"));
+  } catch (e) {
+    refused = String(e.message);
+  }
+  check(/plan_params: the table has columns the declaration doesn't name \(cost\)/.test(refused), `(h) an undeclared base column refuses the start (${refused.split("\n").find((l) => /writeback/.test(l)) || refused.slice(0, 200)})`);
 } finally {
   if (srv) stop(srv);
   if (browser) await browser.close();

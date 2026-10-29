@@ -673,6 +673,206 @@ fn valid_date(s: &str) -> bool {
     (1..=days).contains(&d) && s[..4].bytes().all(|c| c.is_ascii_digit())
 }
 
+// ─────────────────────────────────────────────────────────── materialise ──
+
+/// One declared table as the change log leaves it (#684 slice 3).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TableNow {
+    /// A graph save replaced the table: `rows` is all of it, the base is
+    /// not read. Otherwise `rows` are merged over the base by key.
+    pub replaced: bool,
+    /// Replaced: every row. Merged: one row per key, only the fields saved
+    /// (later saves win per field).
+    pub rows: Vec<Map<String, Value>>,
+}
+
+/// The change log folded into each declared table's current state, oldest
+/// save first. A change naming a table the config no longer declares is
+/// skipped (the config is the authority, not old records).
+pub fn fold(
+    opts: &WritebackOptions,
+    records: &[std::sync::Arc<crate::host::state::Record>],
+) -> BTreeMap<String, TableNow> {
+    let mut out: BTreeMap<String, TableNow> = BTreeMap::new();
+    for rec in records {
+        let Some(changes) = rec.vars.get("changes").and_then(Value::as_array) else {
+            continue;
+        };
+        for ch in changes {
+            let (Some(t), Some(op), Some(rows)) = (
+                ch.get("table").and_then(Value::as_str),
+                ch.get("op").and_then(Value::as_str),
+                ch.get("rows").and_then(Value::as_array),
+            ) else {
+                continue;
+            };
+            let Some(decl) = opts.tables.get(t) else {
+                continue;
+            };
+            let rows = rows.iter().filter_map(|r| r.as_object().cloned());
+            let now = out.entry(t.to_string()).or_default();
+            match op {
+                "replace" => {
+                    now.replaced = true;
+                    now.rows = rows.collect();
+                }
+                "upsert" => {
+                    for row in rows {
+                        let k = row_key(decl, &row);
+                        match now.rows.iter_mut().find(|r| row_key(decl, r) == k) {
+                            Some(have) => have.extend(row),
+                            None => now.rows.push(row),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn row_key(decl: &TableDecl, row: &Map<String, Value>) -> Vec<String> {
+    decl.key
+        .iter()
+        .map(|k| row.get(k).map_or_else(|| "null".into(), Value::to_string))
+        .collect()
+}
+
+/// Does `sql` name `table` as a word (any case)? Decides which dashboards
+/// get the saved tables — a false positive only costs a materialisation.
+pub fn references(sql: &str, table: &str) -> bool {
+    let (hay, needle) = (sql.to_ascii_lowercase(), table.to_ascii_lowercase());
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+    hay.match_indices(&needle).any(|(i, _)| {
+        !word(hay[..i].chars().next_back()) && !word(hay[i + needle.len()..].chars().next())
+    })
+}
+
+/// The staging table [`materialise_statements`] reads the saved rows from:
+/// `(t VARCHAR, row VARCHAR)`, filled through an Appender (never SQL text).
+pub const STAGE: &str = "__anofox_writeback";
+
+/// The statements that build `table`'s TEMP table on a fresh connection,
+/// after [`STAGE`] holds its rows: from the saved rows alone (replaced),
+/// or the base table (`base_cols`: its columns, `None` when there is no
+/// base) cast to the declared types with the saved rows merged by key.
+/// Names are validated identifiers, types come from [`ColType`]; no value
+/// appears in the SQL.
+pub fn materialise_statements(
+    table: &str,
+    decl: &TableDecl,
+    now: &TableNow,
+    base_cols: Option<&[String]>,
+) -> Vec<String> {
+    let q = |c: &str| format!("\"{c}\"");
+    let from_row = |c: &str, ty: ColType| {
+        format!(
+            "CAST(json_extract_string(r.\"row\", '$.{c}') AS {})",
+            ty.sql()
+        )
+    };
+    let staged = format!(
+        "(SELECT CAST(\"row\" AS JSON) AS \"row\" FROM temp.main.{STAGE} WHERE t = '{table}') r"
+    );
+    let all = decl
+        .columns
+        .iter()
+        .map(|(c, _)| q(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let typed = decl
+        .columns
+        .iter()
+        .map(|(c, ty)| format!("{} AS {}", from_row(c, *ty), q(c)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if now.replaced {
+        return vec![format!(
+            "CREATE TEMP TABLE {} AS SELECT {typed} FROM {staged}",
+            q(table)
+        )];
+    }
+    let mut out = vec![match base_cols {
+        // Bound before the TEMP table exists, so the inner name is the base.
+        Some(have) => {
+            let cols = decl
+                .columns
+                .iter()
+                .map(|(c, ty)| {
+                    if have.iter().any(|h| h.eq_ignore_ascii_case(c)) {
+                        format!("CAST({} AS {}) AS {}", q(c), ty.sql(), q(c))
+                    } else {
+                        format!("CAST(NULL AS {}) AS {}", ty.sql(), q(c))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "CREATE TEMP TABLE {} AS SELECT {cols} FROM {}",
+                q(table),
+                q(table)
+            )
+        }
+        None => {
+            let cols = decl
+                .columns
+                .iter()
+                .map(|(c, ty)| format!("{} {}", q(c), ty.sql()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("CREATE TEMP TABLE {} ({cols})", q(table))
+        }
+    }];
+    if now.rows.is_empty() {
+        return out;
+    }
+    let dest = format!("temp.main.{}", q(table));
+    let key_match = decl
+        .key
+        .iter()
+        .map(|k| {
+            let ty = decl.col(k).expect("a key is a declared column");
+            format!("d.{} = {}", q(k), from_row(k, ty))
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let sets = decl
+        .columns
+        .iter()
+        .filter(|(c, _)| !decl.key.contains(c))
+        .map(|(c, ty)| {
+            format!(
+                "{} = CASE WHEN json_exists(r.\"row\", '$.{c}') THEN {} ELSE d.{} END",
+                q(c),
+                from_row(c, *ty),
+                q(c)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !sets.is_empty() {
+        out.push(format!(
+            "UPDATE {dest} AS d SET {sets} FROM {staged} WHERE {key_match}"
+        ));
+    }
+    out.push(format!(
+        "INSERT INTO {dest} ({all}) SELECT {typed} FROM {staged} \
+         WHERE NOT EXISTS (SELECT 1 FROM {dest} d WHERE {key_match})"
+    ));
+    out
+}
+
+/// Base columns a save would hide: every column of the base table must be
+/// declared, or a panel reading the saved table would lose it.
+pub fn undeclared_base_columns(decl: &TableDecl, base_cols: &[String]) -> Vec<String> {
+    base_cols
+        .iter()
+        .filter(|b| !decl.columns.iter().any(|(c, _)| c.eq_ignore_ascii_case(b)))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,5 +1064,117 @@ mod tests {
         assert!(coerce(ColType::Integer, &json!(2.5), 10).is_err());
         assert!(coerce(ColType::Boolean, &json!(1), 10).is_err());
         assert!(valid_date("2024-02-29") && !valid_date("2023-02-29") && !valid_date("2024-13-01"));
+    }
+
+    fn rec(changes: Value) -> std::sync::Arc<crate::host::state::Record> {
+        std::sync::Arc::new(crate::host::state::Record {
+            v: 1,
+            seq: 1,
+            ts: String::new(),
+            ts_micros: None,
+            user: "u".into(),
+            auth: String::new(),
+            dashboard: "twin".into(),
+            submit: "s".into(),
+            id: "a".into(),
+            vars: json!({"changes": changes, "base": null})
+                .as_object()
+                .unwrap()
+                .clone(),
+        })
+    }
+
+    #[test]
+    fn fold_replaces_then_merges_per_key_and_field() {
+        let o = opts();
+        let log = [
+            rec(
+                json!([{"table": "plan_params", "op": "upsert", "rows": [{"id": "a", "lt": 1.0}]}]),
+            ),
+            rec(
+                json!([{"table": "plan_params", "op": "upsert", "rows": [{"id": "a", "active": true}]}]),
+            ),
+            rec(
+                json!([{"table": "plan_params", "op": "upsert", "rows": [{"id": "b", "lt": 2.0}]}]),
+            ),
+            rec(
+                json!([{"table": "plan_nodes", "op": "replace", "rows": [{"id": "x"}]},
+                       {"table": "gone", "op": "replace", "rows": [{"id": "y"}]}]),
+            ),
+            rec(
+                json!([{"table": "plan_nodes", "op": "upsert", "rows": [{"id": "x", "label": "X"}, {"id": "z"}]}]),
+            ),
+        ];
+        let f = fold(&o, &log);
+        let p = &f["plan_params"];
+        assert!(!p.replaced);
+        assert_eq!(
+            Value::from(p.rows.clone()),
+            json!([{"id": "a", "lt": 1.0, "active": true}, {"id": "b", "lt": 2.0}])
+        );
+        let n = &f["plan_nodes"];
+        assert!(n.replaced);
+        assert_eq!(
+            Value::from(n.rows.clone()),
+            json!([{"id": "x", "label": "X"}, {"id": "z"}])
+        );
+        assert!(
+            !f.contains_key("gone"),
+            "a table no longer declared is skipped"
+        );
+    }
+
+    #[test]
+    fn references_matches_whole_words_only() {
+        assert!(references("SELECT * FROM Plan_Nodes WHERE x", "plan_nodes"));
+        assert!(references("FROM \"plan_nodes\";", "plan_nodes"));
+        assert!(!references("SELECT * FROM plan_nodes_old", "plan_nodes"));
+        assert!(!references("SELECT my_plan_nodes", "plan_nodes"));
+    }
+
+    #[test]
+    fn materialise_sql_casts_to_declared_types_and_never_carries_values() {
+        let o = opts();
+        let d = &o.tables["plan_params"];
+        let merged = TableNow {
+            replaced: false,
+            rows: vec![json!({"id": "a'; DROP", "lt": 1})
+                .as_object()
+                .unwrap()
+                .clone()],
+        };
+        let s =
+            materialise_statements("plan_params", d, &merged, Some(&["id".into(), "lt".into()]));
+        assert_eq!(s.len(), 3);
+        assert!(s[0].starts_with("CREATE TEMP TABLE \"plan_params\" AS SELECT CAST(\"id\" AS VARCHAR) AS \"id\", CAST(\"lt\" AS DOUBLE) AS \"lt\", CAST(NULL AS BOOLEAN) AS \"active\""), "{}", s[0]);
+        assert!(
+            s[1].starts_with(
+                "UPDATE temp.main.\"plan_params\" AS d SET \"lt\" = CASE WHEN json_exists"
+            ),
+            "{}",
+            s[1]
+        );
+        assert!(s[2].contains("WHERE NOT EXISTS"), "{}", s[2]);
+        assert!(
+            s.iter().all(|x| !x.contains("DROP")),
+            "values never reach the SQL"
+        );
+        let none = materialise_statements("plan_params", d, &TableNow::default(), None);
+        assert_eq!(none, vec!["CREATE TEMP TABLE \"plan_params\" (\"id\" VARCHAR, \"lt\" DOUBLE, \"active\" BOOLEAN, \"start\" DATE)".to_string()]);
+        let rep = materialise_statements(
+            "plan_params",
+            d,
+            &TableNow {
+                replaced: true,
+                rows: vec![],
+            },
+            Some(&[]),
+        );
+        assert_eq!(rep.len(), 1);
+        assert!(rep[0].contains("FROM (SELECT CAST(\"row\" AS JSON) AS \"row\" FROM temp.main.__anofox_writeback WHERE t = 'plan_params') r"), "{}", rep[0]);
+        assert_eq!(
+            undeclared_base_columns(d, &["ID".into(), "cost".into()]),
+            vec!["cost".to_string()]
+        );
     }
 }

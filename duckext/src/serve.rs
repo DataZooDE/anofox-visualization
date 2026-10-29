@@ -2267,6 +2267,109 @@ struct WritebackRuntime {
     writer_locks: Mutex<ViewerLocks>,
     recent: Mutex<RecentIds>,
     full: AtomicBool,
+    /// #684 slice 3: per dashboard id, the declared tables its SQL names —
+    /// those dashboards get them materialised (base ⊕ saves) and fold the
+    /// change log's generation into their cache/warm keys.
+    dash_tables: HashMap<String, Vec<String>>,
+    /// The change log folded at one generation, rebuilt after a save.
+    folded: Mutex<Option<(u64, Arc<Folded>)>>,
+}
+
+/// Each declared table as the change log leaves it ([`wb::fold`]).
+type Folded = BTreeMap<String, wb::TableNow>;
+
+impl WritebackRuntime {
+    /// The change log's generation and its folded tables, read together
+    /// (one `snapshot_all`, so the rows always match the generation a key
+    /// folds in); folded once per generation.
+    fn snapshot(&self) -> (u64, Arc<Folded>) {
+        let (gen, records) = self.store.snapshot_all(usize::MAX);
+        let mut cache = self.folded.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((g, f)) = cache.as_ref() {
+            if *g == gen {
+                return (gen, f.clone());
+            }
+        }
+        let f = Arc::new(wb::fold(&self.opts, &records));
+        if cache.as_ref().is_none_or(|(g, _)| *g <= gen) {
+            *cache = Some((gen, f.clone()));
+        }
+        (gen, f)
+    }
+}
+
+/// The columns of the table or view an unqualified `table` resolves to on
+/// `c` (after the snapshot's `enter`: its current database and schema), or
+/// `None` when there is no such base — then a saved table starts empty.
+fn writeback_base_columns(c: &Conn, table: &str) -> Result<Option<Vec<String>>, String> {
+    // `table` is a validated identifier (WritebackOptions::parse).
+    let n: usize = c
+        .query(&format!(
+            "SELECT CAST(count(*) AS VARCHAR) FROM (SELECT table_name AS n, database_name AS d, \
+             schema_name AS s \
+             FROM duckdb_tables() WHERE NOT temporary UNION ALL SELECT view_name, database_name, \
+             schema_name FROM duckdb_views() WHERE NOT temporary AND NOT internal) \
+             WHERE lower(n) = lower('{table}') AND d = current_database() AND s = current_schema()"
+        ))?
+        .string_rows(1)?
+        .first()
+        .and_then(|r| r.first().cloned().flatten())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if n == 0 {
+        return Ok(None);
+    }
+    let cols = c
+        .query(&format!("SELECT column_name FROM (DESCRIBE \"{table}\")"))?
+        .string_rows(10_000)?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+    Ok(Some(cols))
+}
+
+/// #684 slice 3: on a fresh connection, every declared table `tables` names
+/// becomes a TEMP table with what the change log says it is now — the base
+/// table cast to the declared types with the saved rows merged by key, or
+/// the saved rows alone after a graph replaced it. The rows go through an
+/// Appender into a staging table (never SQL text), and the statements are
+/// [`wb::materialise_statements`]'s. Cold path only, like `viewer_state`.
+fn seed_writeback(
+    c: &Conn,
+    opts: &WritebackOptions,
+    folded: &Folded,
+    tables: &[String],
+) -> Result<(), String> {
+    c.exec(&format!(
+        "CREATE TEMP TABLE {} (t VARCHAR, \"row\" VARCHAR)",
+        wb::STAGE
+    ))?;
+    {
+        let app = crate::db::Appender::new_in(c, Some("temp"), Some("main"), wb::STAGE)?;
+        for t in tables {
+            for row in folded.get(t).map_or(&[][..], |n| &n.rows[..]) {
+                app.begin_row()?;
+                app.append_varchar(t)?;
+                app.append_varchar(&Value::Object(row.clone()).to_string())?;
+                app.end_row()?;
+            }
+        }
+        app.close()?;
+    }
+    let empty = wb::TableNow::default();
+    for t in tables {
+        let decl = &opts.tables[t];
+        let now = folded.get(t).unwrap_or(&empty);
+        let base = if now.replaced {
+            None
+        } else {
+            writeback_base_columns(c, t)?
+        };
+        for sql in wb::materialise_statements(t, decl, now, base.as_deref()) {
+            c.exec(&sql)?;
+        }
+    }
+    c.exec(&format!("DROP TABLE temp.main.{}", wb::STAGE))
 }
 
 /// Plan §4.4's bound for the rate limiter's, the mutex map's and the
@@ -2695,8 +2798,61 @@ pub fn start_locked(
                 known_dashboards: &known_dashboards,
                 state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
             })?;
+            // #684 slice 3: the saved tables are TEMP tables named like the
+            // declared ones; a policy's per-viewer views would claim the same
+            // names, and more than one search_path entry makes "the base an
+            // unqualified name means" ambiguous (as for viewer_state).
+            if opts.policy.is_some() {
+                return Err(
+                    "options.writeback can't be combined with an access policy yet \
+                            (\"policy\": \"none\"): the policy's per-viewer views and the \
+                            saved tables would both claim the table names"
+                        .into(),
+                );
+            }
+            if opts.search_path.len() > 1 {
+                return Err(
+                    "options.writeback needs options.search_path to name at most one database"
+                        .into(),
+                );
+            }
+            let dash_tables: HashMap<String, Vec<String>> = dashboards
+                .iter()
+                .map(|d| {
+                    let ts = wb_opts
+                        .tables
+                        .keys()
+                        .filter(|t| wb::references(&d.sql, t))
+                        .cloned()
+                        .collect();
+                    (d.id.clone(), ts)
+                })
+                .collect();
+            {
+                // Every column of a base table must be declared, or a panel
+                // reading the saved table would silently lose it.
+                let c = snap.db.connect()?;
+                c.exec(&snap.enter)?;
+                for (t, decl) in &wb_opts.tables {
+                    if let Some(cols) = writeback_base_columns(&c, t)
+                        .map_err(|e| format!("options.writeback.tables.{t}: {e}"))?
+                    {
+                        let missing = wb::undeclared_base_columns(decl, &cols);
+                        if !missing.is_empty() {
+                            return Err(format!(
+                                "options.writeback.tables.{t}: the table has columns the \
+                                 declaration doesn't name ({}) — declare every column, or \
+                                 a saved {t} would hide them",
+                                missing.join(", ")
+                            ));
+                        }
+                    }
+                }
+            }
             let store = Store::open_writeback(&wb_opts.path, wb_opts.max_mb)?;
             Some(Arc::new(WritebackRuntime {
+                dash_tables,
+                folded: Mutex::new(None),
                 opts: wb_opts.clone(),
                 store,
                 rate: RateLimiter::new(
@@ -4826,14 +4982,28 @@ fn locked_panel(
     // at all, no viewer_state temp created) — run_panel must tell these
     // apart.
     let state_rows: Option<Arc<Vec<Arc<Record>>>> = state_snap.map(|(_, rows)| rows);
+    // #684 slice 3: a dashboard reading saved tables keys on the change
+    // log's generation too (a save misses the cache and warm connections),
+    // and the folded tables it carries into run_panel are that generation's.
+    let wb_snap = st.writeback.as_deref().and_then(|w| {
+        let tables = w.dash_tables.get(&dash.id).filter(|t| !t.is_empty())?;
+        let (g, folded) = w.snapshot();
+        Some((g, folded, &w.opts, tables.as_slice()))
+    });
     let mut key = panel_key(&r, claims, &key_deps);
     if let Some(g) = sgen {
         key = format!("{key}/state{g}");
+    }
+    if let Some((g, ..)) = &wb_snap {
+        key = format!("{key}/wb{g}");
     }
     let t0 = std::time::Instant::now();
     let mut warm = warm_key(dash, gen.snap.warm_deps.get(di), stmts, &r, claims, scope);
     if let Some(g) = sgen {
         warm = warm.map(|w| format!("{w}/state{g}"));
+    }
+    if let Some((g, ..)) = &wb_snap {
+        warm = warm.map(|w| format!("{w}/wb{g}"));
     }
     let warmed = AtomicBool::new(false);
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
@@ -4848,6 +5018,7 @@ fn locked_panel(
             &viewer_set,
             claims,
             state_rows.as_deref().map(|v| v.as_slice()),
+            wb_snap.as_ref().map(|(_, f, o, t)| (*o, &**f, *t)),
             abort,
             charge,
             warm.as_deref(),
@@ -6065,6 +6236,7 @@ fn run_panel(
     viewer_set: &[String],
     claims: Option<&Claims>,
     state_rows: Option<&[Arc<Record>]>,
+    wb_tables: Option<(&WritebackOptions, &Folded, &[String])>,
     abort: &crate::panel_cache::Abort,
     charge: &mut Charge,
     warm_key: Option<&str>,
@@ -6152,6 +6324,11 @@ fn run_panel(
         // separately-locked read of the store here.
         if let Some(rows) = state_rows {
             seed_viewer_state(c, rows)?;
+        }
+        // #684 slice 3: the saved tables, the same way (cold path only; the
+        // change log's generation is part of this request's keys).
+        if let Some((opts, folded, tables)) = wb_tables {
+            seed_writeback(c, opts, folded, tables)?;
         }
         // The policy's views, for this viewer (before any dashboard SQL). The
         // row filters read the claims set above; the column rules are decided
