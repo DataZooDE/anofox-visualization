@@ -12457,6 +12457,10 @@ function diagramChanges(meta) {
   add(n(ib, ia), "node(s) added");
   add(n(ia, ib), "node(s) removed");
   add(renamed, "renamed");
+  add(b.nodes.filter((x) => {
+    const o = a.nodes.find((y) => y.id === x.id);
+    return o && (o.stage ?? null) !== (x.stage ?? null);
+  }).length, "moved");
   add(n(eb, ea), "edge(s) added");
   add(n(ea, eb), "edge(s) removed");
   return parts.join(", ");
@@ -12725,7 +12729,17 @@ function diagramDragConnect(meta, g, ui, holder) {
     holder._dragged = true;
     const node = document.elementFromPoint(e.clientX, e.clientY)?.closest?.("[data-node]");
     const to = node && holder.contains(node) ? node.getAttribute("data-node") : null;
-    if (!to || to === d.from) return;
+    if (!to) {
+      // dropped on empty space: move the node to the stage there (#699)
+      const stage = diagramStageAt(holder, e.clientX, e.clientY);
+      const n = g.nodes.find((x) => x.id === d.from);
+      if (stage == null || !n) return;
+      n.stage = stage;
+      ui.pick = { node: n.id };
+      ui.msg = `Moved “${n.label || n.id}” to stage ${stage + 1}.`;
+      return diagramCommit(meta, g);
+    }
+    if (to === d.from) return;
     const why = diagramEdgeRefused(meta, g, d.from, to);
     if (why) ui.msg = why;
     else {
@@ -12734,6 +12748,31 @@ function diagramDragConnect(meta, g, ui, holder) {
     }
     diagramCommit(meta, g);
   });
+}
+// #699: the stage (layer) nearest a client point — along the diagram's
+// flow (x for LR, y for TB) — from its nodes' `data-layer`; one past the
+// last stage when the point lies beyond it by more than half a step.
+function diagramStageAt(holder, cx, cy) {
+  const svg = holder.querySelector(":scope > svg");
+  if (!svg) return null;
+  const tb = /^(TB|BT)$/.test(svg.getAttribute("data-diagram") || "");
+  const at = new Map(); // layer → mean centre along the flow
+  for (const r of holder.querySelectorAll("rect[data-node][data-layer]")) {
+    const b = r.getBoundingClientRect();
+    const c = tb ? b.top + b.height / 2 : b.left + b.width / 2;
+    const k = +r.getAttribute("data-layer");
+    const m = at.get(k) || [0, 0];
+    at.set(k, [m[0] + c, m[1] + 1]);
+  }
+  const layers = [...at.entries()].map(([k, [s, n]]) => [k, s / n]).sort((a, b) => a[0] - b[0]);
+  if (!layers.length) return null;
+  const p = tb ? cy : cx;
+  let best = layers[0];
+  for (const l of layers) if (Math.abs(l[1] - p) < Math.abs(best[1] - p)) best = l;
+  const last = layers[layers.length - 1];
+  const step = layers.length > 1 ? (last[1] - layers[0][1]) / (layers.length - 1) : 120;
+  if (best === last && p > last[1] + step / 2) return last[0] + 1;
+  return best[0];
 }
 function diagramRemove(meta, g, ui) {
   if (!ui.pick) return;

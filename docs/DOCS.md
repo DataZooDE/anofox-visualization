@@ -2063,7 +2063,7 @@ SELECT e->>'from' AS src, e->>'to' AS dst
 FROM (SELECT unnest((getvariable('graph')->'edges')::JSON[]) AS e);
 ```
 
-The variable (default `graph`) holds `{"nodes": [{"id", "type", "label"}],
+The variable (default `graph`) holds `{"nodes": [{"id", "type", "label", "stage"?}],
 "edges": [{"from", "to"}]}` — the type is the node's `::CATEGORY`. It starts
 as the diagram's own rows; a toolbar above the diagram edits it:
 
@@ -2072,6 +2072,7 @@ as the diagram's own rows; a toolbar above the diagram edits it:
 | type + name + **Add** | a new node of the chosen type (its id from the name: `Supplier 2` → `supplier_2`) |
 | **Connect** | click the source node, then the target; the palette's `connects_to` refuses an edge a type may not draw, with the reason |
 | drag a node onto another | the same as Connect, in one gesture (#699); a press that doesn't move still picks the node |
+| drag a node onto empty space | moves it to the stage there: a `"stage"` (0, 1, …) in the graph, applied as the node's `::XAXIS` pin (#699) |
 | click a node / edge, then **Rename** / **Remove** (or the Delete key on a focused node) | rename the node (the name field), remove it with its edges, or remove the edge |
 | **Reset** | back to the graph as the data has it |
 

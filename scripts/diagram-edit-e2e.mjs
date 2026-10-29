@@ -154,6 +154,25 @@ await node("store");
 await settle();
 check(!(await page.locator('.dp-edit-bar > button:text-is("Rename")').isDisabled()), "a press without moving still picks the node");
 
+// #699: drop a node on empty space → it moves to the stage there (an
+// ::XAXIS pin in the graph). The new DC sits after wh; drag it back to the
+// supplier's stage.
+const layerOf = (id) => page.evaluate((i) => +document.querySelector(`.dash rect[data-node="${i}"]`)?.getAttribute("data-layer"), id);
+const before = await layerOf("dc_south");
+const [sx, sy] = await center("sup");
+const [dx0, dy0] = await center("dc_south");
+const svgBox = await page.locator(".dash .panel-svg > svg").first().boundingBox();
+const emptyY = svgBox.y + svgBox.height - 6;
+await page.mouse.move(dx0, dy0);
+await page.mouse.down();
+await page.mouse.move(sx, emptyY, { steps: 6 });
+await page.mouse.up();
+await settle();
+s = await st();
+const after = await layerOf("dc_south");
+check(after === (await layerOf("sup")) && after !== before, `drop on empty space: dc_south moves to the supplier's stage (${before} → ${after})`);
+check(/"stage":0/.test(s.url) && /Moved/.test(s.status), `the graph carries the stage, the bar says so (${s.status})`);
+
 // #699 ::DIAGRAM_CHECK: a query over the edited graph flags an unconnected
 // node (bad), a single supplier (warn, the whole graph) and an edge; the
 // node / edge carry the status, the toolbar lists them worst first, an

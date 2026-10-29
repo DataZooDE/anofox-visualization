@@ -40,7 +40,13 @@ pub struct GNode {
     pub id: String,
     pub kind: Option<String>,
     pub label: String,
+    /// A pinned stage (#699: dropped there by the viewer, or the row's
+    /// `::XAXIS`) — the layer the layout keeps the node in.
+    pub stage: Option<i64>,
 }
+
+/// The highest stage a node may be pinned to.
+pub const MAX_STAGE: i64 = 200;
 
 /// Most nodes / edges an edited graph may have (the diagram draws at most
 /// [`crate::diagram::MAX_NODES`] / [`crate::diagram::MAX_EDGES`]).
@@ -91,6 +97,7 @@ impl Graph {
                         .find(|(i, _)| *i == n.id)
                         .map(|(_, k)| k.clone()),
                     label: n.label.clone(),
+                    stage: n.pin.0.filter(|s| s.is_finite()).map(|s| s.round() as i64),
                 })
                 .collect(),
             edges: d
@@ -103,7 +110,13 @@ impl Graph {
 
     pub fn to_json(&self) -> String {
         json!({
-            "nodes": self.nodes.iter().map(|n| json!({"id": n.id, "type": n.kind, "label": n.label})).collect::<Vec<_>>(),
+            "nodes": self.nodes.iter().map(|n| {
+                let mut o = json!({"id": n.id, "type": n.kind, "label": n.label});
+                if let Some(s) = n.stage {
+                    o["stage"] = json!(s);
+                }
+                o
+            }).collect::<Vec<_>>(),
             "edges": self.edges.iter().map(|(f, t)| json!({"from": f, "to": t})).collect::<Vec<_>>(),
         })
         .to_string()
@@ -138,9 +151,20 @@ impl Graph {
             if g.nodes.iter().any(|x| x.id == id) {
                 return Err(format!("node `{id}` twice"));
             }
+            let stage = match m.get("stage") {
+                None | Some(J::Null) => None,
+                Some(v) => Some(
+                    v.as_i64()
+                        .filter(|s| (0..=MAX_STAGE).contains(s))
+                        .ok_or_else(|| {
+                            format!("node `{id}`: stage is not a whole number 0–{MAX_STAGE}")
+                        })?,
+                ),
+            };
             g.nodes.push(GNode {
                 label: s(m, "label").unwrap_or_else(|| id.clone()),
                 kind: s(m, "type"),
+                stage,
                 id,
             });
         }
@@ -192,6 +216,8 @@ pub fn apply(cols: &[Column], graph: &Graph, checks: &[Check]) -> Vec<Column> {
                 Role::Diagram => Value::Str(n.id.clone()),
                 Role::Label => Value::Str(n.label.clone()),
                 Role::Category => n.kind.clone().map_or(Value::Na, Value::Str),
+                // a dropped node's stage wins over its row's ::XAXIS (#699)
+                Role::X if n.stage.is_some() => Value::Float(n.stage.unwrap_or(0) as f64),
                 // panel-wide settings (::DIRECTION, ::THRESHOLDS, …) read the
                 // first non-NULL cell: keep the first row's on every row
                 _ if row.is_none() && !per_node(c.role) => {
@@ -215,6 +241,17 @@ pub fn apply(cols: &[Column], graph: &Graph, checks: &[Check]) -> Vec<Column> {
                 .nodes
                 .iter()
                 .map(|n| Value::Str(n.label.clone()))
+                .collect(),
+        ));
+    }
+    if !cols.iter().any(|c| c.role == Role::X) && graph.nodes.iter().any(|n| n.stage.is_some()) {
+        out.push(col(
+            "_stage",
+            Role::X,
+            graph
+                .nodes
+                .iter()
+                .map(|n| n.stage.map_or(Value::Na, |s| Value::Float(s as f64)))
                 .collect(),
         ));
     }
@@ -599,6 +636,7 @@ mod tests {
             id: "sup2".into(),
             kind: Some("supplier".into()),
             label: "Supplier 2".into(),
+            stage: None,
         });
         g.edges.push(("sup2".into(), "wh".into()));
         let cols = apply(&base(), &g, &[]);
@@ -656,6 +694,21 @@ mod tests {
         assert!(j[3]["node"].is_null() && j[3]["from"].is_null());
         assert_eq!(checks_from_json(&j.to_string()), c);
         assert!(checks_from_json("nope").is_empty());
+    }
+
+    /// #699: a dropped node's stage travels in the graph and pins its
+    /// layer (an `::XAXIS` cell); a stage out of range is refused.
+    #[test]
+    fn a_stage_pins_the_node_layer() {
+        let mut g = Graph::of(&base());
+        g.nodes[2].stage = Some(0);
+        let back = Graph::parse(&g.to_json()).unwrap();
+        assert_eq!(back.nodes[2].stage, Some(0));
+        let d = Diagram::from_columns(&apply(&base(), &back, &[]), &Locale::default()).unwrap();
+        assert_eq!(d.nodes[2].pin.0, Some(0.0));
+        assert_eq!(d.nodes[0].pin.0, None);
+        assert!(Graph::parse(r#"{"nodes":[{"id":"a","stage":-1}],"edges":[]}"#).is_err());
+        assert!(Graph::parse(r#"{"nodes":[{"id":"a","stage":"x"}],"edges":[]}"#).is_err());
     }
 
     #[test]
