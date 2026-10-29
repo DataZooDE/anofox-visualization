@@ -129,6 +129,8 @@ pub struct Diagnostic {
     /// another statement) | `name/not-drawn` (warning: the statement is
     /// setup, or a layout directive with no element of its own, so the name
     /// never reaches the page).
+    /// `-- @materialize` ([`materialize_diags`], #727): `materialize/not-table`
+    /// (warning: not a setup `CREATE TEMP TABLE … AS <query>`).
     /// `-- @tour` guided tours ([`tour_diags`], #518 PR B): `tour/bad-id` |
     /// `tour/duplicate-id` | `tour/unknown-panel` (errors: not a plain
     /// identifier, reused by another tour, or a step target that is
@@ -2492,6 +2494,7 @@ where
     diags.extend(fit_diags(&plan));
     diags.extend(show_if_diags(&plan));
     diags.extend(name_diags(&plan));
+    diags.extend(materialize_diags(&plan));
     diags.extend(tour_diags(script, &plan));
     diags.extend(step_diags(&plan, script));
     diags.extend(figure_diags(&plan, &figure_cols));
@@ -2875,6 +2878,26 @@ fn name_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
         }
     }
     diags
+}
+
+/// `-- @materialize` (#727): only on a setup statement of the form
+/// `CREATE [OR REPLACE] TEMP TABLE t AS <query>` (`materialize/not-table`,
+/// warning: anywhere else a locked server ignores the line).
+fn materialize_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    plan.iter()
+        .enumerate()
+        .filter(|(_, p)| p.materialize && !(p.setup && sql::materialize::split(&p.sql).is_some()))
+        .map(|(i, p)| Diagnostic {
+            severity: Severity::Warning,
+            stmt: i + 1,
+            code: "materialize/not-table",
+            message: "-- @materialize only applies to a setup statement \
+                      `CREATE [OR REPLACE] TEMP TABLE <name> AS <query>` — a locked server \
+                      ignores it here"
+                .into(),
+            sql: one_line(p.sql.trim()),
+        })
+        .collect()
 }
 
 /// Is `l` (trimmed at its outer edges, like [`crate::host::serving::parse_dashboard_meta`]
@@ -4404,8 +4427,9 @@ pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
         // connection or a changed variable the setup reads), so a setup
         // statement that materialises a table is rebuilt there and held in
         // memory per kept connection; a view costs only what each panel reads.
+        // A `-- @materialize` one (#727) runs once per input instead.
         for (i, p) in sql::plan(script).iter().enumerate() {
-            if p.setup && materialises_table(&p.sql) {
+            if p.setup && materialises_table(&p.sql) && !p.materialize {
                 out.push((
                     file.clone(),
                     Diagnostic {
@@ -4415,8 +4439,9 @@ pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
                         message: "served, this setup `CREATE TABLE … AS` is rebuilt on every \
                                   new server connection (each kept connection, and whenever a \
                                   variable it reads changes) and held in memory by each; use \
-                                  `CREATE VIEW` instead, or build the table into the database \
-                                  the server opens"
+                                  `CREATE VIEW` instead, build the table into the database \
+                                  the server opens, or — for a heavy run — mark it \
+                                  `-- @materialize` (built once per input, then copied)"
                             .to_string(),
                         sql: p.sql.clone(),
                     },
@@ -7265,6 +7290,8 @@ mod design_tests {
         // #387: served, a materialising setup is rebuilt per panel request.
         let script = "CREATE OR REPLACE TEMP TABLE sx AS SELECT 1 AS a;\n\
                       CREATE TEMP VIEW v AS SELECT 1 AS a;\n\
+                      -- @materialize\n\
+                      CREATE TEMP TABLE heavy AS SELECT 1 AS a;\n\
                       SELECT a::BARCHART, 'x'::XAXIS FROM sx;";
         let d = folder_diags(&[("a.sql".to_string(), script.to_string())]);
         let hits: Vec<_> = d
@@ -10481,6 +10508,26 @@ mod design_tests {
         assert_eq!(
             codes("-- @name 1bad\nSELECT 6::SPAN;\nSELECT 1::METRIC;"),
             [(1, "name/bad"), (1, "name/not-drawn")]
+        );
+    }
+
+    #[test]
+    fn materialize_diags_flags_anything_but_a_temp_table() {
+        let codes = |script: &str| -> Vec<(usize, &'static str)> {
+            materialize_diags(&sql::plan(script))
+                .iter()
+                .map(|d| (d.stmt, d.code))
+                .collect()
+        };
+        assert!(codes("-- @materialize\nCREATE TEMP TABLE t AS SELECT 1 AS a;").is_empty());
+        assert!(codes("CREATE TEMP VIEW v AS SELECT 1 AS a;").is_empty());
+        assert_eq!(
+            codes("-- @materialize\nCREATE TEMP VIEW v AS SELECT 1 AS a;"),
+            [(1, "materialize/not-table")]
+        );
+        assert_eq!(
+            codes("-- @materialize\nSELECT 1::METRIC;"),
+            [(1, "materialize/not-table")]
         );
     }
 

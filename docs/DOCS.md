@@ -2750,6 +2750,7 @@ with the browser through wasm):
 | `-- @shared <name>, …` | Directly above one `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement: documents that *this* directive deliberately reuses `<name>` with another one, so `dashboard --check --strict` skips `interaction/rowselect-shared-name` / `interaction/name-clash` for it — every other clash still is flagged. See *Selecting table rows* below. |
 | `-- @lint_allow <code>, …` | Directly above one statement: a deliberate exception to a `design/*` advisory (#639), e.g. `-- @lint_allow design/many-series` on a chart with 12 conventional colour series. `--check` still lists it as a `lint/allowed` note, so it stays visible in review, but `--strict` passes. Only `design/*` codes: anything else is flagged (`lint/allow-not-design`), as is a code the statement doesn't trigger (`lint/allow-unused`). On the first statement it also covers `design/too-many-panels`. |
 | `-- @name <name>` | Directly above any statement that draws something — a panel, an input, a `::GROUP` box, a `::TAB`/`::SUBTAB` button, a `::VIEW` switcher, or a `::LABEL`/`::SECTION` heading: tags its element `data-dp-name="<name>"`, a stable anchor for e2e selectors and a guided tour's target (`-- @tour`, below). `name` matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`; names must be unique on one dashboard (`name/duplicate`); `page` is reserved (`name/reserved`); a bad name is `name/bad`; one on a statement that draws nothing warns (`name/not-drawn`). See *Interactivity* below. |
+| `-- @materialize` | Directly above one setup statement `CREATE [OR REPLACE] TEMP TABLE <name> AS <query>` — a heavy engine run, a simulation: the locked server runs `<query>` once per input (the variables it reads, the saved tables' generation) and every connection copies that result, instead of each panel request running it (#727). See [`secure-serving.md`](secure-serving.md). Anywhere else the line is ignored (`materialize/not-table`); the browser runs the statement as written. |
 | `-- @tour <id> [title]` + step lines | A guided tour over the dashboard's own panels: see *Guided tours* below. |
 | `-- @tour_autostart <id>` | Start that tour once per browser, on a viewer's first visit: see *Guided tours* below. |
 
@@ -2774,7 +2775,9 @@ connections (`warm`, #388) once per kept connection and again whenever a
 variable the setup reads changes, without them for every panel request
 (#387: 17.6 s against 0.76 s per click with a view, on a 30-panel, 20M-row
 dashboard). Each kept connection also holds the table in memory; a
-`CREATE VIEW` costs only what each panel reads.
+`CREATE VIEW` costs only what each panel reads. A heavy run that must be a
+table goes under `-- @materialize` (#727): built once per input, then
+copied (no `folder/setup-table` warning).
 
 ### Layout (from SQL)
 
