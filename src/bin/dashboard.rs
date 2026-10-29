@@ -450,12 +450,20 @@ fn render_dashboard_html(
         if p.roles.iter().any(|(_, r)| *r == Role::FigureStart) {
             let mut cells = Vec::new();
             while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| q.figure.is_some()) {
+                let r = r.ok();
                 cells.push(anofox_visualization::figure::Cell {
                     name: q.name.clone(),
                     zoom: None,
                     cols: r
-                        .map(|r| sql::columns_from_rows(&r, &q.roles))
+                        .as_ref()
+                        .map(|r| sql::columns_from_rows(r, &q.roles))
                         .unwrap_or_default(),
+                    // #694: a non-chart cell is drawn from the whole result
+                    raw: r.map(|r| anofox_visualization::figure::CellRows {
+                        rows: sql::result_columns(&r),
+                        roles: q.roles.clone(),
+                        names: q.names.clone(),
+                    }),
                 });
             }
             let svg = anofox_visualization::figure::render_with_title(

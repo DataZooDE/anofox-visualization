@@ -633,6 +633,11 @@ fn render_inner(
                         .as_ref()
                         .map(|rows| columns_from_result(rows, r))
                         .unwrap_or_default(),
+                    raw: st.rows.as_ref().ok().map(|rows| crate::figure::CellRows {
+                        rows: rows.clone(),
+                        roles: r.clone(),
+                        names: st.panel.names.clone(),
+                    }),
                 });
             }
             let (spec, _) =
@@ -1113,6 +1118,31 @@ pub fn render_panel_doc_svg(
         tracks,
         totals,
         compact,
+    )
+}
+
+/// A figure's non-chart cell (#694): the panel as [`render_panel_svg`]
+/// draws it, a nested `<svg>` at (0, 0) sized (w, h).
+pub(crate) fn panel_svg_at_origin(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+    w: f64,
+    h: f64,
+    ropts: &RenderOptions,
+) -> String {
+    render_panel_svg(
+        rows,
+        roles,
+        names,
+        Place::At(0.0, 0.0),
+        w,
+        h,
+        ropts,
+        false,
+        &[],
+        None,
+        false,
     )
 }
 

@@ -369,10 +369,22 @@ pub fn render_figure_checked(
             .unwrap_or_default()
             .iter()
             .map(|c| {
+                let rows = sql::parse_rows_json(c["rows"].as_str().unwrap_or("[]")).map_err(bad)?;
+                let entries = parse_role_entries(&c["roles"]).map_err(bad)?;
                 Ok(crate::figure::Cell {
                     name: c["name"].as_str().map(str::to_string),
-                    cols: part(c)?,
+                    cols: columns_from_entries(&rows, &entries),
                     zoom: cell_zoom(&c["zoom"]),
+                    // #694: a non-chart cell is drawn from the whole result
+                    raw: Some(crate::figure::CellRows {
+                        rows: sql::result_columns(&rows),
+                        roles: entries.iter().map(|(i, r, _)| (*i, *r)).collect(),
+                        names: entries
+                            .iter()
+                            .filter(|(_, _, n)| !n.is_empty())
+                            .map(|(i, _, n)| (*i, n.clone()))
+                            .collect(),
+                    }),
                 })
             })
             .collect::<Result<Vec<_>, RenderError>>()?;

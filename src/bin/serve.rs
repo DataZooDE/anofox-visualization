@@ -2410,6 +2410,12 @@ fn render_dashboard_page(
                     } else {
                         sql::columns_from_rows(&r, &q.roles)
                     },
+                    // #694: a non-chart cell is drawn from the whole result
+                    raw: (!na).then(|| anofox_visualization::figure::CellRows {
+                        rows: sql::result_columns(&r),
+                        roles: q.roles.clone(),
+                        names: q.names.clone(),
+                    }),
                 });
             }
             let svg = anofox_visualization::figure::render_with_title(

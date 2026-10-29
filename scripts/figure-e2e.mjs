@@ -265,5 +265,47 @@ SELECT coalesce(getvariable('region'), 'none') AS picked ::TEXT_SMALL;
   await zp.close();
 }
 
+// #694: a table, a KPI and Markdown as cells beside a chart.
+{
+  const ep = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+  const eerrs = [];
+  ep.on("pageerror", (e) => eerrs.push(String(e)));
+  const ESQL = `-- @title Figure cells e2e (#694)
+SELECT 'Checks beside the chart' ::FIGURE, 'chart | (checks / kpi / note)' ::LAYOUT, '2,1' ::WIDTHS, 'A' ::TAG_LEVELS;
+-- @name chart
+SELECT x ::XAXIS, y ::LINECHART FROM (VALUES (1, 2), (2, 3), (3, 5)) v(x, y);
+-- @name checks
+SELECT c AS "Check", s AS "Status" ::TABLE FROM (VALUES ('PSI x', 'PASS'), ('KS y', 'FAIL')) t(c, s);
+-- @name kpi
+SELECT 42 ::METRIC, 'Rows checked' ::LABEL;
+-- @name note
+SELECT 'Retrain when a check fails.' ::MARKDOWN;
+SELECT 1 ::ENDFIGURE;
+`;
+  await ep.goto(`${base}?mode=view#sql=${b64(ESQL)}`);
+  await ready(ep);
+  const cellsOf = await ep.evaluate(() => {
+    const f = document.querySelector(".dp-figure .panel-svg");
+    const named = (n) => f?.querySelector(`g[data-dp-name="${n}"]`)?.textContent || "";
+    return {
+      panels: document.querySelectorAll(".dash .panel").length,
+      chart: !!f?.querySelector('svg[data-panel] g[data-dp-name="chart"]'),
+      checks: named("checks"),
+      kpi: named("kpi"),
+      note: named("note"),
+      tags: [...(f?.querySelectorAll("text") || [])].map((t) => t.textContent).filter((t) => /^[A-D]$/.test(t)).join(""),
+    };
+  });
+  check(cellsOf.panels === 1, `one figure card (${cellsOf.panels} panels)`);
+  check(cellsOf.chart, "the chart is a plot cell");
+  check(/PSI x/.test(cellsOf.checks) && /FAIL/.test(cellsOf.checks), `the table is a cell with its rows (${cellsOf.checks.slice(0, 80)})`);
+  check(/42/.test(cellsOf.kpi) && /Rows checked/.test(cellsOf.kpi), `the KPI is a cell (${cellsOf.kpi})`);
+  check(/Retrain when a check fails/.test(cellsOf.note), `the Markdown is a cell (${cellsOf.note})`);
+  check(cellsOf.tags === "ABCD", `every cell is tagged (${cellsOf.tags})`);
+  check(!eerrs.length, "cells: no page errors: " + eerrs.join(" | "));
+  if (shots) await ep.screenshot({ path: `${shots}/figure-cells.png` });
+  await ep.close();
+}
+
 await browser.close();
 console.log(`figure-e2e: ${process.exitCode ? "failed" : "0 failed"}`);
