@@ -913,6 +913,69 @@ where
             continue;
         }
 
+        // `::SAVE` (#684): one source (a graph or a form), plain table
+        // names, two tables for a graph (nodes, edges) and one for a form.
+        if p.roles.iter().any(|(_, r)| *r == Role::Save) {
+            match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
+                Ok(rows) => {
+                    let cell = |role: Role| -> Option<String> {
+                        let (i, _) = p.roles.iter().find(|(_, r)| *r == role)?;
+                        rows.first()?
+                            .get(&format!("c{i}"))
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.trim().to_string())
+                    };
+                    let (graph, form) = (cell(Role::SaveGraph), cell(Role::SaveForm));
+                    let tables: Vec<String> = cell(Role::SaveTables)
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect();
+                    let mut err = |code: &'static str, message: String| {
+                        diags.push(Diagnostic {
+                            severity: Severity::Error,
+                            stmt,
+                            code,
+                            message,
+                            sql: short.clone(),
+                        })
+                    };
+                    match (&graph, &form) {
+                        (None, None) => err(
+                            "save/no-source",
+                            "::SAVE needs what it saves: 'graph'::SAVE_GRAPH (an editable ::DIAGRAM's variable) or 'lt'::SAVE_FORM (a ::FORM's)".into(),
+                        ),
+                        (Some(_), Some(_)) => err(
+                            "save/two-sources",
+                            "::SAVE takes one source — ::SAVE_GRAPH or ::SAVE_FORM, not both (use two ::SAVE statements)".into(),
+                        ),
+                        _ => {}
+                    }
+                    let ident = |t: &str| {
+                        t.chars()
+                            .next()
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                            && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    };
+                    if tables.is_empty() {
+                        err(
+                            "save/no-tables",
+                            "::SAVE needs ::SAVE_TABLES: the table(s) it writes".into(),
+                        );
+                    } else if let Some(bad) = tables.iter().find(|t| !ident(t)) {
+                        err("save/bad-table", format!("::SAVE_TABLES `{bad}` is not a plain table name (letters, digits, _)"));
+                    } else if graph.is_some() && tables.len() != 2 {
+                        err("save/table-count", "a graph saves into two tables: 'nodes_table, edges_table'::SAVE_TABLES".into());
+                    } else if form.is_some() && tables.len() != 1 {
+                        err("save/table-count", "a form saves into one table".into());
+                    }
+                }
+                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
+            }
+            continue;
+        }
+
         // `::SUBMIT` panel (#517 S1): run it as the viewer and check it's
         // self-consistent — a real server isn't wired to any of this yet
         // (no endpoint, no `options.state`), so this only checks that the
@@ -10125,6 +10188,34 @@ mod design_tests {
         assert_eq!(
             codes(&format!("{chk}SELECT id ::DIAGRAM FROM n;")),
             ["diagram_check/no-diagram"]
+        );
+    }
+
+    /// #684: a ::SAVE names one source and plain tables (two for a graph).
+    #[test]
+    fn save_is_checked() {
+        let codes = |row: serde_json::Value, sql: &str| -> Vec<&'static str> {
+            let rows = vec![row.as_object().unwrap().clone()];
+            check(sql, |_q| Ok(rows.clone()))
+                .iter()
+                .map(|d| d.code)
+                .filter(|c| c.starts_with("save/"))
+                .collect()
+        };
+        let g = "SELECT 'Save' ::SAVE, 'graph' ::SAVE_GRAPH, 'a, b' ::SAVE_TABLES;";
+        assert!(codes(json!({"c0": "Save", "c1": "graph", "c2": "a, b"}), g).is_empty());
+        assert_eq!(
+            codes(json!({"c0": "Save", "c1": "graph", "c2": "a"}), g),
+            ["save/table-count"]
+        );
+        assert_eq!(
+            codes(json!({"c0": "Save", "c1": "graph", "c2": "a;b, c"}), g),
+            ["save/bad-table"]
+        );
+        let none = "SELECT 'Save' ::SAVE, 'a' ::SAVE_TABLES;";
+        assert_eq!(
+            codes(json!({"c0": "Save", "c1": "a"}), none),
+            ["save/no-source"]
         );
     }
 

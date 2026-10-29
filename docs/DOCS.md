@@ -213,6 +213,11 @@ terminal.
 | `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server) |
 | `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
 | `::SUBMIT_DONE` |  | input | optional confirmation text shown after a successful ::SUBMIT |
+| `::SAVE` |  | input | a button (value = its label) that saves the page's edits into the ::SAVE_TABLES — an edited graph (::SAVE_GRAPH) or a ::FORM's values (::SAVE_FORM); in the builder the save stays in the tab (TEMP tables over the base ones), on a locked server it needs options.writeback (#684) |
+| `::SAVE_GRAPH` |  | input | the variable of an editable ::DIAGRAM whose graph the ::SAVE writes: nodes into the first ::SAVE_TABLES table (id, type, label, stage), edges into the second (from, to) |
+| `::SAVE_FORM` |  | input | the variable of a ::FORM whose values the ::SAVE writes: one row per key (column id, default the selected diagram node), a column per field |
+| `::SAVE_TABLES` |  | input | the table(s) a ::SAVE writes: 'nodes, edges' for a graph, one table for a form — plain names |
+| `::SAVE_KEY` |  | input | the variable holding a ::SAVE_FORM row's key (default 'selected', the clicked diagram node) |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height in px |
@@ -2127,6 +2132,30 @@ graph travels as one string variable — at most 4 KB of JSON (roughly 40
 nodes); a larger edit isn't applied and the toolbar says so. As with any
 viewer input, the dashboard's SQL must treat the graph as untrusted (ids
 and labels are text the viewer typed).
+
+### Saving edits (`::SAVE`)
+
+An edited graph (`'edit'::DIAGRAM_MODE`) or a `::FORM`'s values can be saved
+into tables the dashboard declares (#684):
+
+```sql
+SELECT 'Save plan' ::SAVE, 'graph' ::SAVE_GRAPH, 'plan_nodes, plan_edges' ::SAVE_TABLES;
+SELECT 'Save parameters' ::SAVE, 'lt' ::SAVE_FORM, 'plan_params' ::SAVE_TABLES;
+```
+
+A graph writes its nodes (`id, type, label, stage`) into the first table and
+its edges (`from, to`) into the second; a form writes one row per key —
+column `id`, the clicked diagram node unless `::SAVE_KEY` names another
+variable — with a column per field, over the base table's other rows.
+
+**In the builder** a save stays in the tab: TEMP tables with the declared
+names shadow the base tables, so every panel reading `plan_nodes` sees the
+saved rows and recomputes — write the SQL against them and try it. Nothing
+reaches a server. On a locked server, a published site, the static outputs
+and the live-authoring preview the button is shown disabled with the reason;
+saving for every viewer (declared tables in `options.writeback`, an audited
+change log, conflicts) follows. `--check`: `save/no-source`,
+`save/two-sources`, `save/no-tables`, `save/bad-table`, `save/table-count`.
 
 ### Formatted values in Markdown (`{{col}}`, `{{col:fmt}}`)
 

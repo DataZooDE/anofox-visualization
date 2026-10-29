@@ -351,18 +351,25 @@ fn render_dashboard_html(
         // (no script runs it), so this renders a disabled button naming
         // why instead of nothing — the plan §6 "never a silent no-op" rule
         // `web/app.js`'s `mkSubmit` already follows in the browser.
-        if p.roles.iter().any(|(_, r)| *r == Role::Submit) {
+        // #684: a ::SAVE likewise.
+        let save = p.roles.iter().any(|(_, r)| *r == Role::Save);
+        if save || p.roles.iter().any(|(_, r)| *r == Role::Submit) {
             let rows = exec(&format!("{};", p.sql)).unwrap_or_default();
             let idx = p
                 .roles
                 .iter()
-                .find(|(_, r)| *r == Role::Submit)
+                .find(|(_, r)| *r == Role::Submit || *r == Role::Save)
                 .map(|(i, _)| *i);
             let label = idx
                 .and_then(|i| rows.first().and_then(|r| r.get(&format!("c{i}"))))
                 .and_then(|v| v.as_str())
-                .unwrap_or("Submit");
-            let html = sv::submit_disabled_html(label, i, "Submitting needs the dashboard server");
+                .unwrap_or(if save { "Save" } else { "Submit" });
+            let reason = if save {
+                "Saving needs the dashboard server"
+            } else {
+                "Submitting needs the dashboard server"
+            };
+            let html = sv::submit_disabled_html(label, i, reason);
             queried.push((p, Ok(Vec::new()), false, Some(html)));
             continue;
         }
