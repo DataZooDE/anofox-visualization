@@ -2068,6 +2068,7 @@ as the diagram's own rows; a toolbar above the diagram edits it:
 |---|---|
 | type + name + **Add** | a new node of the chosen type (its id from the name: `Supplier 2` → `supplier_2`) |
 | **Connect** | click the source node, then the target; the palette's `connects_to` refuses an edge a type may not draw, with the reason |
+| drag a node onto another | the same as Connect, in one gesture (#699); a press that doesn't move still picks the node |
 | click a node / edge, then **Rename** / **Remove** (or the Delete key on a focused node) | rename the node (the name field), remove it with its edges, or remove the edge |
 | **Reset** | back to the graph as the data has it |
 

@@ -259,6 +259,8 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-check-at{all:unset;cursor:pointer;font-weight:600;text-decoration:underline dotted}
 .dp-check-at:focus-visible{outline:2px solid var(--ax-accent);outline-offset:1px}
 .panel svg .dp-edit-pick{stroke:var(--ax-accent);stroke-width:3px}
+.dp-editing svg rect[data-node]{cursor:grab;touch-action:none}
+.panel svg .dp-edit-drag{stroke:var(--ax-accent);stroke-width:2px;stroke-dasharray:5 4}
 /* ::FORM (#683): one row per field — label (+ ⓘ), control + unit, provenance. */
 .dp-form-fields{display:grid;gap:.7rem}
 .dp-form-field{display:grid;grid-template-columns:minmax(7rem,38%) 1fr;align-items:center;column-gap:.8rem;row-gap:.15rem}
