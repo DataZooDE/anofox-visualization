@@ -2814,8 +2814,9 @@ it reads that cell's column (#695); a scatter, histogram or bar cell keeps its
 marks' own tooltips. Each cell's `<svg>` content carries `data-cell` (its
 statement order) and `data-dp-name` (its `-- @name`). A cell's own `::LINK`
 column follows from its marks, as on a single chart; a click on a cell without
-one cross-filters as usual. `::SELECT_AS` / `::DRILL`, zoom and the toolbox
-stay off on a figure for now. The
+one cross-filters as usual. The toolbox's data view (and "Charts as tables")
+shows a table per cell, captioned by its `-- @name`. `::SELECT_AS` / `::DRILL`
+and zoom stay off on a figure for now. The
 browser, `--svg` / `--site`, the HTML export and the served page all draw the
 same picture.
 
