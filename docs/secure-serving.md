@@ -616,6 +616,29 @@ of the authoring servers carries a
   `memory_limit`. Like a cache hit, a reused connection answers faster. Since
   the key includes the login, that tells a viewer only about their own earlier
   requests (or, without `auth`, that someone asked with the same values).
+- **Materialized setup** (`-- @materialize`, #727). A setup statement
+  `CREATE [OR REPLACE] TEMP TABLE t AS <query>` with a `-- @materialize` line
+  above it runs `<query>` once into a table of the server's own in-memory
+  catalog (`__anofox_mat`, attached before the lockdown; the dashboards are
+  the server's, viewers send no SQL), and each connection that needs it gets
+  `t` as a copy. Panel requests needing a result that is being built wait for
+  it (within their `timeout_ms`), so a page's panels — after a save, all of
+  them at once — run the query once, not once each. The key: the dashboard,
+  the statement, every credential-locked variable and the values of the
+  request variables the setup up to it reads; a state-enabled dashboard's
+  generation and the saved tables' change-log generation; the viewer's login
+  only for a state-enabled dashboard or setup that reads a claim (or can't be
+  analysed) — otherwise one result serves every viewer, as the same SQL with
+  the same values would compute anyway. Off under an access policy (its views
+  differ per viewer) and past a `-- @requires`. At most 16 results are kept per
+  snapshot (least recently used out, dropped with it on a refresh); count them
+  against `memory_limit` beside the warm connections' copies. A failed build
+  or copy falls back to running the statement as written. A `random()` in the
+  query is drawn once per result, so every panel sees the same draw. Unlike
+  the panel cache and warm connections, a result shared between logins
+  answers one viewer faster because another asked with the same values: with
+  `auth` that tells a viewer *that* someone did (not who, nor any row they
+  couldn't compute themselves).
 - Options (third argument, JSON): `max_rows` (default 100,000 — exceeding it is
   an error, not a silent truncation), `timeout_ms` (default 30,000 — enforced
   with `duckdb_interrupt` from a watchdog), `max_body_bytes` (default 64 KiB),

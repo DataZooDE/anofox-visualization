@@ -236,6 +236,7 @@ pub(crate) fn plan_contract(stmt: &str) -> Option<(super::Panel, ContractCall)> 
         show_if: Vec::new(),
         step: None,
         figure: None,
+        materialize: false,
     };
     Some((panel, call))
 }

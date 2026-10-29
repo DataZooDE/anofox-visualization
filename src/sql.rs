@@ -35,6 +35,7 @@ pub mod contract_call;
 pub mod deps;
 pub mod lex;
 pub mod lint_allow;
+pub mod materialize;
 pub mod name;
 pub mod requires;
 pub mod shared;
@@ -89,6 +90,10 @@ pub struct Panel {
     /// wasm `plan()` and tagged on the element as `data-dp-name` in the
     /// browser. See [`name`].
     pub name: Option<String>,
+    /// A `-- @materialize` line directly above the statement (#727): a
+    /// locked server runs this setup statement once per input and shares the
+    /// result. See [`materialize`].
+    pub materialize: bool,
     /// The `-- @requires` of the `::TAB` / `::SUBTAB` whose section the
     /// statement is in (a `::SUBTAB` statement: its `::TAB`'s), see
     /// [`section_requires`]. A tab whose own requirements are not met is
@@ -263,6 +268,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
             let shared = shared::parse(&raw);
             let lint_allow = lint_allow::parse(&raw);
             let name = name::parse(&raw);
+            let materialize = materialize::parse(&raw);
             let clean = strip_comments(&raw);
             let stmt = clean.trim();
             if stmt.is_empty() {
@@ -274,6 +280,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                 panel.shared = shared;
                 panel.lint_allow = lint_allow;
                 panel.name = name;
+                panel.materialize = materialize;
                 return Some(panel);
             }
             let (sql, roles, names) = rewrite(stmt);
@@ -289,6 +296,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     shared,
                     lint_allow,
                     name,
+                    materialize,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,
@@ -308,6 +316,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                     shared,
                     lint_allow,
                     name,
+                    materialize,
                     tab_requires: Vec::new(),
                     tabs: Vec::new(),
                     view: None,

@@ -54,6 +54,7 @@ use anofox_visualization::host::state::{
 use anofox_visualization::host::telemetry;
 use anofox_visualization::host::writeback::{self as wb, WritebackOptions};
 use anofox_visualization::sql::deps::{self, Deps};
+use anofox_visualization::sql::materialize;
 use anofox_visualization::sql::requires::{self as rq, Requirement};
 use anofox_visualization::{InputKind, Role};
 use include_dir::{include_dir, Dir};
@@ -1748,6 +1749,9 @@ struct Dash {
     updated: Option<String>,
     /// Each statement's own `-- @requires` (indexed like `stmts`).
     requires: Vec<Vec<Requirement>>,
+    /// Per statement: a `-- @materialize` setup statement (#727), shared
+    /// between requests through [`MatStore`].
+    materialize: Vec<bool>,
     /// Per statement other than setup: the `::TAB` / `::SUBTAB` statements
     /// whose section it is in ([`anofox_visualization::sql::Panel::tabs`]).
     /// Their `-- @requires` gate it too, decided where each tab stands — as
@@ -1833,6 +1837,8 @@ struct Snapshot {
     // database, then delete its files.
     /// Idle connections with a dashboard's setup already run (#388).
     warm: WarmPool,
+    /// `-- @materialize` results (#727), in [`MAT_DB`].
+    mats: MatStore,
     db: Database,
     /// The database unqualified names resolve in (the source session's
     /// default database, or the first of `options.search_path`).
@@ -1909,6 +1915,137 @@ impl WarmPool {
             q.pop_front();
         }
     }
+}
+
+/// The server's own catalog for `-- @materialize` results (#727): an
+/// in-memory database attached to the snapshot before its lockdown. Only the
+/// server names it (reserved `__anofox` prefix).
+const MAT_DB: &str = "__anofox_mat";
+
+/// At most this many `-- @materialize` results per snapshot (least recently
+/// used out; a refresh drops them all with the snapshot).
+const MAT_CAP: usize = 16;
+
+/// The `-- @materialize` results of one snapshot (#727): a heavy setup
+/// statement's query runs once per [`mat_key`] into a table of [`MAT_DB`],
+/// and every request connection that needs it gets its TEMP table as a copy
+/// of that — instead of each cold panel request running the query again
+/// (after a save, every panel of the page at once). Requests that need a
+/// result being built wait for it.
+/// One `-- @materialize` result: its table once built (locked while building).
+type MatSlot = Arc<Mutex<Option<String>>>;
+
+#[derive(Default)]
+struct MatStore {
+    /// Most recently used last.
+    entries: Mutex<VecDeque<(String, MatSlot)>>,
+    next: AtomicU64,
+}
+
+impl MatStore {
+    /// The slot for `key` (created empty when new), and the table of an
+    /// evicted entry to drop. An entry being built is never evicted.
+    fn slot(&self, key: &str) -> (MatSlot, Option<String>) {
+        let mut q = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = q.iter().position(|(k, _)| k == key) {
+            let e = q.remove(i).expect("position is in range");
+            let slot = e.1.clone();
+            q.push_back(e);
+            return (slot, None);
+        }
+        let slot = Arc::new(Mutex::new(None));
+        q.push_back((key.to_string(), slot.clone()));
+        let mut evicted = None;
+        if q.len() > MAT_CAP {
+            let free = q.iter().position(|(_, s)| s.try_lock().is_ok());
+            if let Some(i) = free {
+                let (_, s) = q.remove(i).expect("position is in range");
+                evicted = s.lock().unwrap_or_else(|e| e.into_inner()).take();
+            }
+        }
+        (slot, evicted)
+    }
+
+    /// Is `slot` still one of the entries (not evicted)?
+    fn holds(&self, slot: &MatSlot) -> bool {
+        let q = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        q.iter().any(|(_, s)| Arc::ptr_eq(s, slot))
+    }
+}
+
+/// Run `-- @materialize` setup statement `sql` on `c` from the shared result
+/// for `key` (#727), building it on `c` first when no request has. `Ok(false)`:
+/// not done (not the `CREATE TEMP TABLE … AS <query>` form, or the build or
+/// the copy failed) — the caller runs the statement as written. `Err` when
+/// the request was abandoned or ran out of time waiting for another
+/// request's build.
+fn run_materialized(
+    c: &Conn,
+    mats: &MatStore,
+    (dash_id, i): (&str, usize),
+    key: &str,
+    sql: &str,
+    until: Instant,
+    abort: &crate::panel_cache::Abort,
+) -> Result<bool, String> {
+    let Some((head, query)) = materialize::split(sql) else {
+        return Ok(false);
+    };
+    let (slot, evicted) = mats.slot(key);
+    if let Some(t) = evicted {
+        // Best effort: a request still copying from it falls back to the
+        // statement as written.
+        let _ = c.exec(&format!("DROP TABLE IF EXISTS {t}"));
+    }
+    let mut built = loop {
+        match slot.try_lock() {
+            Ok(g) => break g,
+            Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if abort.abandoned() {
+                    return Err(SUPERSEDED.1.to_string());
+                }
+                if Instant::now() >= until {
+                    return Err("query timed out waiting for a materialized setup statement".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    };
+    if built.is_none() {
+        let t = format!(
+            "{MAT_DB}.main.m{}",
+            mats.next.fetch_add(1, Ordering::Relaxed)
+        );
+        let t0 = Instant::now();
+        if let Err(e) = c.exec(&format!("CREATE TABLE {t} AS {query}")) {
+            // Interrupted (superseded, or out of time): don't run it again.
+            if abort.abandoned() {
+                return Err(SUPERSEDED.1.to_string());
+            }
+            if Instant::now() >= until {
+                return Err(e);
+            }
+            eprintln!(
+                "[anofox-serve] materializing statement {i} of '{dash_id}' failed: {}",
+                access::diag(&e)
+            );
+            return Ok(false);
+        }
+        eprintln!(
+            "[anofox-serve] materialized statement {i} of '{dash_id}' in {} ms",
+            t0.elapsed().as_millis()
+        );
+        *built = Some(t);
+    }
+    let t = built.clone().expect("built above");
+    drop(built);
+    let copied = c.exec(&format!("{head} FROM {t}")).is_ok();
+    if !mats.holds(&slot) {
+        // Evicted meanwhile: nobody else finds it any more.
+        let _ = c.exec(&format!("DROP TABLE IF EXISTS {t}"));
+    }
+    Ok(copied)
 }
 
 /// Check the access policy against a new snapshot and rewrite every dashboard
@@ -3327,6 +3464,10 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
                 }
             }
         }
+        let materialize = planned
+            .iter()
+            .map(|p| p.materialize && p.setup && materialize::split(&p.sql).is_some())
+            .collect();
         let (stmts, requires) = planned
             .into_iter()
             .map(|p| ((p.setup, p.sql.trim().to_string()), p.requires))
@@ -3339,6 +3480,7 @@ fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
             meta,
             updated: sv::file_date(&p),
             requires,
+            materialize,
             tabs,
             inputs,
             submits,
@@ -3791,6 +3933,9 @@ fn build_snapshot(
             let first = err.lines().next().unwrap_or("").to_string();
             warnings.push(format!("parquet_metadata_cache: {first}"));
         }
+        // #727: where `-- @materialize` results are kept (no ATTACH after
+        // the lockdown below).
+        c.exec(&format!("ATTACH ':memory:' AS {MAT_DB}"))?;
         c.exec("SET enable_external_access = false")?;
         c.exec("SET lock_configuration = true")?;
         // Fail now, not on every request (e.g. a schema that doesn't exist).
@@ -3805,6 +3950,7 @@ fn build_snapshot(
     Ok((
         Snapshot {
             warm: WarmPool::new(opts.warm.unwrap_or(opts.threads)),
+            mats: MatStore::default(),
             db,
             default_db,
             enter,
@@ -5011,6 +5157,30 @@ fn locked_panel(
     if let Some((g, ..)) = &wb_snap {
         warm = warm.map(|w| format!("{w}/wb{g}"));
     }
+    // #727: the `-- @materialize` statements before the panel, with their keys.
+    let mats: Vec<(usize, String)> = (0..r.panel)
+        .filter(|&i| dash.materialize.get(i) == Some(&true))
+        .filter_map(|i| {
+            let k = mat_key(
+                dash,
+                gen.snap.warm_deps.get(di),
+                i,
+                &r,
+                claims,
+                scope,
+                gen.snap.policy.is_some(),
+                sgen.is_some(),
+            )?;
+            let k = match sgen {
+                Some(g) => format!("{k}/state{g}"),
+                None => k,
+            };
+            Some(match &wb_snap {
+                Some((g, ..)) => (i, format!("{k}/wb{g}")),
+                None => (i, k),
+            })
+        })
+        .collect();
     let warmed = AtomicBool::new(false);
     let (out, how) = gen.cache.run(&key, ticket, |abort| {
         run_panel(
@@ -5029,6 +5199,7 @@ fn locked_panel(
             charge,
             warm.as_deref(),
             &warmed,
+            &mats,
         )
     });
     info.cache = Some(match how {
@@ -6278,6 +6449,7 @@ fn run_panel(
     charge: &mut Charge,
     warm_key: Option<&str>,
     warmed: &AtomicBool,
+    mats: &[(usize, String)],
 ) -> Result<String, (u16, String)> {
     let dash_id = dash.id.as_str();
     let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
@@ -6348,6 +6520,7 @@ fn run_panel(
             }
             return run_panel_query(c, st, panel_sql, r, &mut grow);
         }
+        let until = Instant::now() + st.opts.timeout;
         c.exec(&gen.snap.enter)?;
         for (_, set) in &sets {
             c.exec(set)?;
@@ -6398,6 +6571,12 @@ fn run_panel(
             if *setup {
                 if !met(c, i) {
                     continue;
+                }
+                // #727: a `-- @materialize` statement from its shared result.
+                if let Some((_, key)) = mats.iter().find(|(j, _)| *j == i) {
+                    if run_materialized(c, &gen.snap.mats, (dash_id, i), key, sql, until, abort)? {
+                        continue;
+                    }
                 }
                 // Best effort, like the browser: a failing setup statement is
                 // reported in the log, the panel still runs.
@@ -6541,6 +6720,47 @@ fn warm_key(
     Some(format!(
         "{:?}",
         (claims.map(Claims::key), &r.dashboard, last, vars)
+    ))
+}
+
+/// The key of `-- @materialize` statement `i`'s shared result (#727) for
+/// this request, or `None` when it isn't shared: under an access policy (its
+/// views differ per viewer), or with a `-- @requires` up to it. Like
+/// [`warm_key`]: the dashboard, the statement, and the request variables the
+/// setup up to and including it reads (plus every credential-locked one).
+/// The login only when the result can depend on it — a state-enabled
+/// dashboard (`viewer_state` is the viewer's own), or setup that reads a
+/// claim or can't be analysed — so one run serves every viewer otherwise.
+/// The caller appends the state and change-log generations.
+#[allow(clippy::too_many_arguments)]
+fn mat_key(
+    dash: &Dash,
+    setup_deps: Option<&Vec<Deps>>,
+    i: usize,
+    r: &sv::PanelRequest,
+    claims: Option<&Claims>,
+    scope: Option<&Scope>,
+    policy: bool,
+    state: bool,
+) -> Option<String> {
+    if policy || dash.requires.iter().take(i + 1).any(|q| !q.is_empty()) {
+        return None;
+    }
+    let read = setup_deps.and_then(|d| d.get(i + 1)).unwrap_or(&Deps::All);
+    let locked =
+        |n: &str| scope.is_some_and(|s| s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(n)));
+    let mut vars: Vec<(String, &String)> = r
+        .vars
+        .iter()
+        .filter(|(n, _)| read.contains(n) || locked(n))
+        .map(|(n, lit)| (n.to_ascii_lowercase(), lit))
+        .collect();
+    vars.sort();
+    let login = claims
+        .filter(|c| state || read.is_all() || c.variables().iter().any(|(n, _)| read.contains(n)));
+    Some(format!(
+        "{:?}",
+        (login.map(Claims::key), &r.dashboard, i, vars)
     ))
 }
 
@@ -6934,6 +7154,7 @@ mod tests {
             stmts: vec![],
             info: vec![],
             requires: vec![],
+            materialize: vec![],
             tabs: vec![],
             meta: sv::parse_dashboard_meta(id, script),
             updated: None,
@@ -8619,6 +8840,123 @@ mod tests {
             warm_key(&gated, None, &stmts, &warm_req(1, "{}"), None, None),
             None
         );
+    }
+
+    // #727: a `-- @materialize` result's key.
+    #[test]
+    fn mat_key_tracks_what_shapes_the_result() {
+        let d = warm_dash(3);
+        let deps = |v: &[&str]| Deps::Vars(v.iter().map(|s| s.to_string()).collect());
+        // Statement 0 reads `n`; the setup up to statement 1 is what the key needs.
+        let setup = vec![deps(&[]), deps(&["n"]), deps(&["n"])];
+        let alice = Claims {
+            user: "alice".into(),
+            groups: vec![],
+            attrs: vec![],
+        };
+        let bob = Claims {
+            user: "bob".into(),
+            ..alice.clone()
+        };
+        let key = |r: &str, c: Option<&Claims>, policy: bool, state: bool| {
+            mat_key(&d, Some(&setup), 0, &warm_req(2, r), c, None, policy, state)
+        };
+        let k = key(r#"{"n":3,"m":1}"#, None, false, false);
+        assert!(k.is_some());
+        // A variable only the panels read doesn't change it; one it reads does.
+        assert_eq!(k, key(r#"{"n":3,"m":2}"#, None, false, false));
+        assert_ne!(k, key(r#"{"n":4,"m":1}"#, None, false, false));
+        // One result for every viewer, unless it can depend on who they are.
+        assert_eq!(
+            key("{}", Some(&alice), false, false),
+            key("{}", Some(&bob), false, false)
+        );
+        assert_ne!(
+            key("{}", Some(&alice), false, true),
+            key("{}", Some(&bob), false, true)
+        );
+        let reads_claim = vec![deps(&[]), deps(&["__claim_user"]), deps(&[])];
+        assert_ne!(
+            mat_key(
+                &d,
+                Some(&reads_claim),
+                0,
+                &warm_req(2, "{}"),
+                Some(&alice),
+                None,
+                false,
+                false
+            ),
+            mat_key(
+                &d,
+                Some(&reads_claim),
+                0,
+                &warm_req(2, "{}"),
+                Some(&bob),
+                None,
+                false,
+                false
+            )
+        );
+        assert_ne!(
+            mat_key(
+                &d,
+                None,
+                0,
+                &warm_req(2, "{}"),
+                Some(&alice),
+                None,
+                false,
+                false
+            ),
+            mat_key(
+                &d,
+                None,
+                0,
+                &warm_req(2, "{}"),
+                Some(&bob),
+                None,
+                false,
+                false
+            )
+        );
+        // Never under a policy, nor past a `-- @requires`.
+        assert_eq!(key("{}", None, true, false), None);
+        let mut gated = warm_dash(3);
+        gated.requires[0] =
+            anofox_visualization::sql::requires::parse("-- @requires x.parquet\nSELECT 1");
+        assert_eq!(
+            mat_key(
+                &gated,
+                Some(&setup),
+                0,
+                &warm_req(2, "{}"),
+                None,
+                None,
+                false,
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mat_store_evicts_the_least_recently_used_free_entry() {
+        let m = MatStore::default();
+        let slots: Vec<_> = (0..MAT_CAP).map(|i| m.slot(&format!("k{i}")).0).collect();
+        *slots[0].lock().unwrap() = Some("t0".into());
+        *slots[2].lock().unwrap() = Some("t2".into());
+        // k0 used again: k1 is now the oldest, and goes first (no table).
+        m.slot("k0");
+        assert_eq!(m.slot("new").1, None);
+        assert!(!m.holds(&slots[1]) && m.holds(&slots[0]));
+        // k2, the oldest now, is being built (locked): k3 goes instead.
+        let building = slots[2].lock().unwrap();
+        assert_eq!(m.slot("newer").1, None);
+        assert!(m.holds(&slots[2]) && !m.holds(&slots[3]));
+        drop(building);
+        // Free again: evicted with its table, for the caller to drop.
+        assert_eq!(m.slot("newest").1.as_deref(), Some("t2"));
     }
 
     #[test]

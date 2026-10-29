@@ -959,6 +959,12 @@ jobs:
         timeout-minutes: 8
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/submit-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/materialize-served-e2e.mjs (#727): a `-- @materialize` setup
+      # statement runs once per input; panels fired at once read one result.
+      - name: Materialized setup on a locked server e2e (#727)
+        timeout-minutes: 3
+        run: node scripts/materialize-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
