@@ -17449,6 +17449,14 @@ async function doSubmitPreview(s, i, names, doneText, btn, statusEl, errEl) {
 // is disabled with the reason.
 const SAVE_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 let saveStatus = {}; // per plan index: the last save's message
+// #684 slice 4: a save's `base` — the change log generation the page loaded
+// at, moved on only by its own saves and a 409's answer (never by a panel
+// that happened to re-run: the edit may still show older rows), so a save
+// over someone else's newer one is refused rather than silently lost.
+let saveGen = null;
+function saveSawGen(g) {
+  if (Number.isFinite(g) && (saveGen === null || g > saveGen)) saveGen = g;
+}
 let saveForms = {}; // per table: {key → form values}, this tab's saved rows
 function saveDisabledReason() {
   if (servedMode) {
@@ -17479,6 +17487,8 @@ function mkSave(s, i, rowsJson) {
   };
   const fig = document.createElement("figure");
   fig.className = "panel submit-panel save-panel";
+  // a click here is not "empty space": it must not clear the picked row it saves
+  fig.addEventListener("click", (e) => e.stopPropagation());
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "submit-btn";
@@ -17520,7 +17530,8 @@ async function doSave(i, spec, btn, statusEl, errEl) {
     errEl.textContent = text;
     statusEl.textContent = "";
   };
-  const body = { dashboard: window.__served.id, panel: i, vars: { ...servedVars } };
+  saveSawGen(Number(window.__served.writeback?.gen ?? 0));
+  const body = { dashboard: window.__served.id, panel: i, vars: { ...servedVars }, base: saveGen };
   try {
     if (spec.graph) body.graph = JSON.parse(dpVars[spec.graph] ?? "null");
     else if (spec.form) {
@@ -17558,6 +17569,7 @@ async function doSave(i, spec, btn, statusEl, errEl) {
   }
   done();
   if (r.status === 201) {
+    saveSawGen(Number((await r.json().catch(() => ({}))).gen));
     const hhmm = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     saveStatus[i] = { text: "Saved at " + hhmm + "." };
     statusEl.textContent = saveStatus[i].text;
@@ -17566,6 +17578,34 @@ async function doSave(i, spec, btn, statusEl, errEl) {
     return;
   }
   const msg = await r.text().catch(() => "");
+  // #684 slice 4: someone saved the same rows since this page loaded them —
+  // say who and what; the panels re-run on theirs, the edits stay, and a
+  // second Save (now on the newer generation) keeps this one.
+  const changed = r.status === 409 && (() => {
+    try {
+      const j = JSON.parse(msg);
+      return j && j.error === "changed" ? j : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (changed) {
+    saveSawGen(Number(changed.gen));
+    const at = (ts) => {
+      const d = new Date(ts);
+      return isNaN(d) ? "" : " at " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    };
+    const who = (changed.changes || [])
+      .slice(0, 3)
+      .map((c) => `${c.user} saved ${c.table}${c.keys && c.keys.length ? " (" + c.keys.join("; ") + ")" : ""}${at(c.ts)}`)
+      .join("; ");
+    fail(`Changed meanwhile: ${who || "someone saved these rows"}. Your edits are still here — Save again to keep yours.`);
+    // re-fetch (theirs shows), but not a fresh run: the picked row stays picked
+    servedCache.clear();
+    dpResults.clear();
+    run(false);
+    return;
+  }
   if (r.status === 429) {
     const wait = Math.min(3600, Math.max(1, Number(r.headers.get("Retry-After")) || 1));
     return fail(`Too many saves — try again in ${wait}s`);

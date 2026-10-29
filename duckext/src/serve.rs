@@ -2273,6 +2273,11 @@ struct WritebackRuntime {
     dash_tables: HashMap<String, Vec<String>>,
     /// The change log folded at one generation, rebuilt after a save.
     folded: Mutex<Option<(u64, Arc<Folded>)>>,
+    /// Held across a save's conflict check and its append (#684 slice 4),
+    /// so two writers can't both pass the check against the same base.
+    /// Never held across SQL or while a response is written: the check is
+    /// in memory, the append one fdatasync.
+    commit: Mutex<()>,
 }
 
 /// Each declared table as the change log leaves it ([`wb::fold`]).
@@ -2853,6 +2858,7 @@ pub fn start_locked(
             Some(Arc::new(WritebackRuntime {
                 dash_tables,
                 folded: Mutex::new(None),
+                commit: Mutex::new(()),
                 opts: wb_opts.clone(),
                 store,
                 rate: RateLimiter::new(
@@ -5861,15 +5867,46 @@ fn handle_save(
         }
     };
 
+    // #684 slice 4: optimistic concurrency — a save made on an older
+    // generation that would overwrite someone else's newer save is refused
+    // (409, saying who saved what); saving again with the newer `base` the
+    // 409 returns overwrites knowingly.
+    let Some(base) = sub.base else {
+        return reply(
+            req,
+            400,
+            "'base' is required: the change log generation the page shows",
+        );
+    };
+    let summary = wb::summary(&w.opts, &changes);
+    let commit = w.commit.lock().unwrap_or_else(|p| p.into_inner());
+    let (gen_now, records) = w.store.snapshot_all(usize::MAX);
+    let since: Vec<Arc<Record>> = records.iter().filter(|r| r.seq > base).cloned().collect();
+    let clashes = wb::conflicts(&w.opts, &changes, &since);
+    if !clashes.is_empty() {
+        drop(commit);
+        info.deny = Some("conflict");
+        audit("deny", Some("conflict"), Some(&dash.id), Some(&spec.name));
+        let body = serde_json::json!({"error": "changed", "gen": gen_now, "changes": clashes});
+        let resp = Response::from_data(body.to_string().into_bytes())
+            .with_status_code(409)
+            .with_header(header("Content-Type", "application/json"))
+            .with_header(header("X-Content-Type-Options", "nosniff"))
+            .with_header(header("Cache-Control", "no-store"));
+        let _ = req.respond(resp);
+        return 409;
+    }
     // Append — fdatasync'd before the 201.
-    let rec = match w.store.append(NewRecord {
+    let appended = w.store.append(NewRecord {
         user: claims.user.clone(),
         auth: auth_method.unwrap_or("").to_string(),
         dashboard: dash.id.clone(),
         submit: spec.name.clone(),
         id: sub.id.clone(),
         vars: changes,
-    }) {
+    });
+    drop(commit);
+    let rec = match appended {
         Ok(r) => r,
         Err(e) if e.contains("full") => {
             w.full.store(true, Ordering::Relaxed);
@@ -5907,7 +5944,7 @@ fn handle_save(
         "ok",
         None,
         Some(&dash.id),
-        Some(&format!("{} seq={}", spec.name, rec.seq)),
+        Some(&format!("{} seq={} {summary}", spec.name, rec.seq)),
     );
     info.bytes = Some(body_json.len());
     respond(req, 201, "application/json", body_json.into_bytes());
@@ -6707,6 +6744,9 @@ fn served_index(
     cfg["writeback"] = serde_json::json!({
         "enabled": st.writeback.as_ref().is_some_and(|w| w.opts.enabled_for(&dash.id)),
         "writer": writer,
+        // #684 slice 4: the generation the page loads at — its saves'
+        // `base`, moved on only by its own saves and a 409's answer.
+        "gen": st.writeback.as_ref().map(|w| w.store.global_seq()),
     });
     let cfg = json_for_script(&cfg);
     // #403: a served dashboard page has no app bar of its own (it's always

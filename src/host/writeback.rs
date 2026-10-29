@@ -673,6 +673,120 @@ fn valid_date(s: &str) -> bool {
     (1..=days).contains(&d) && s[..4].bytes().all(|c| c.is_ascii_digit())
 }
 
+// ───────────────────────────────────────────────────────────── conflicts ──
+
+/// The keys a change touches (`None`: the whole table — a replace).
+fn touched(decl: &TableDecl, ch: &Value) -> Option<Vec<Vec<String>>> {
+    if ch.get("op").and_then(Value::as_str) == Some("replace") {
+        return None;
+    }
+    Some(
+        ch.get("rows")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_object)
+                    .map(|r| row_key(decl, r))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+/// The saves since the page's `base` that this change set would silently
+/// overwrite (#684 slice 4, optimistic concurrency): a graph replace
+/// conflicts with any later change to its tables, a form row with a later
+/// replace of its table or a later save of the same key. Each entry says
+/// who saved what and when — the page shows it; saving again (with the
+/// newer `base` the 409 returns) overwrites knowingly. At most 10.
+pub fn conflicts(
+    opts: &WritebackOptions,
+    changes: &Map<String, Value>,
+    since: &[std::sync::Arc<crate::host::state::Record>],
+) -> Vec<Value> {
+    let mine = changes
+        .get("changes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for rec in since {
+        let Some(theirs) = rec.vars.get("changes").and_then(Value::as_array) else {
+            continue;
+        };
+        for th in theirs {
+            let Some(t) = th.get("table").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(decl) = opts.tables.get(t) else {
+                continue;
+            };
+            let clash = mine.iter().any(|m| {
+                m.get("table").and_then(Value::as_str) == Some(t)
+                    && match (touched(decl, m), touched(decl, th)) {
+                        (None, _) | (_, None) => true,
+                        (Some(a), Some(b)) => a.iter().any(|k| b.contains(k)),
+                    }
+            });
+            if clash && out.len() < 10 {
+                let keys: Vec<String> = touched(decl, th)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(5)
+                    .map(|k| {
+                        k.iter()
+                            .map(|v| v.trim_matches('"').to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .collect();
+                out.push(serde_json::json!({
+                    "user": rec.user, "ts": rec.ts, "table": t,
+                    "op": th.get("op").cloned().unwrap_or(Value::Null), "keys": keys,
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// A change set in a few words for the audit log: `plan_nodes:replace(3)
+/// plan_params:upsert(wh)` — tables, ops, row counts or keys; at most 300
+/// characters.
+pub fn summary(opts: &WritebackOptions, changes: &Map<String, Value>) -> String {
+    let mut parts = Vec::new();
+    for ch in changes
+        .get("changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let t = ch.get("table").and_then(Value::as_str).unwrap_or("?");
+        let op = ch.get("op").and_then(Value::as_str).unwrap_or("?");
+        let n = ch.get("rows").and_then(Value::as_array).map_or(0, Vec::len);
+        let what = match opts.tables.get(t).and_then(|d| touched(d, ch)) {
+            Some(keys) if op == "upsert" => keys
+                .iter()
+                .map(|k| {
+                    k.iter()
+                        .map(|v| v.trim_matches('"').to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .collect::<Vec<_>>()
+                .join(";"),
+            _ => n.to_string(),
+        };
+        parts.push(format!("{t}:{op}({what})"));
+    }
+    let s = parts.join(" ");
+    if s.chars().count() > 300 {
+        s.chars().take(299).collect::<String>() + "…"
+    } else {
+        s
+    }
+}
+
 // ─────────────────────────────────────────────────────────── materialise ──
 
 /// One declared table as the change log leaves it (#684 slice 3).
@@ -1175,6 +1289,51 @@ mod tests {
         assert_eq!(
             undeclared_base_columns(d, &["ID".into(), "cost".into()]),
             vec!["cost".to_string()]
+        );
+    }
+
+    #[test]
+    fn conflicts_by_table_for_a_graph_and_by_key_for_a_form() {
+        let o = opts();
+        let form = |k: &str| {
+            json!({"changes": [{"table": "plan_params", "op": "upsert", "rows": [{"id": k, "lt": 1.0}]}]}).as_object().unwrap().clone()
+        };
+        let graph = json!({"changes": [{"table": "plan_nodes", "op": "replace", "rows": []}, {"table": "plan_edges", "op": "replace", "rows": []}]}).as_object().unwrap().clone();
+        let since = [rec(
+            json!([{"table": "plan_params", "op": "upsert", "rows": [{"id": "wh", "lt": 2.0}]}]),
+        )];
+        let c = conflicts(&o, &form("wh"), &since);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0]["keys"], json!(["wh"]));
+        assert_eq!(c[0]["user"], "u");
+        assert!(
+            conflicts(&o, &form("sup"), &since).is_empty(),
+            "another key: no conflict"
+        );
+        assert!(
+            conflicts(&o, &graph, &since).is_empty(),
+            "another table: no conflict"
+        );
+        let since_graph = [rec(
+            json!([{"table": "plan_nodes", "op": "upsert", "rows": [{"id": "x"}]}]),
+        )];
+        assert_eq!(
+            conflicts(&o, &graph, &since_graph).len(),
+            1,
+            "a replace clashes with any change to its table"
+        );
+        let since_replace = [rec(
+            json!([{"table": "plan_params", "op": "replace", "rows": []}]),
+        )];
+        assert_eq!(
+            conflicts(&o, &form("sup"), &since_replace).len(),
+            1,
+            "a replace since clashes with any key"
+        );
+        assert_eq!(summary(&o, &form("wh")), "plan_params:upsert(wh)");
+        assert_eq!(
+            summary(&o, &graph),
+            "plan_nodes:replace(0) plan_edges:replace(0)"
         );
     }
 }
