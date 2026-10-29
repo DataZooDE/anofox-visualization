@@ -766,6 +766,7 @@ svg[data-kind="heatmap"] text{pointer-events:none}
 .dp-modal-full .dp-modal-body{display:flex;align-items:center;justify-content:center;padding:1rem 1.2rem}
 .dp-modal-full .dp-modal-body svg{width:100%;height:auto;max-height:82vh}
 table.dp-dv{border-collapse:collapse;width:100%;font-size:.8rem;font-variant-numeric:tabular-nums}
+.dp-dv-cap{margin:.8rem 0 .3rem;font-size:.78rem;font-weight:700;color:var(--ax-muted)}.dp-dv-cap:first-child{margin-top:0}
 table.dp-dv th,table.dp-dv td{text-align:left;padding:.4rem .8rem;border-bottom:1px solid var(--ax-line);white-space:nowrap}
 table.dp-dv th{position:sticky;top:0;background:var(--ax-card);font-weight:700;color:var(--ax-tip-ink)}
 

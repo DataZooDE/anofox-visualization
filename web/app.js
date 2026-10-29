@@ -19289,7 +19289,7 @@ function applyAsTables() {
         ? diagramTextHtml(dsvg, title)
         : msvg
         ? mapTableHtml(msvg, 200, title)
-        : dataTableHtml(fig._dp, 200, title) +
+        : panelDataHtml(fig, 200, title) +
           (holder._tracks || []).map((t) => dataTableHtml(t, 200, trackName(t) || "Strip data")).join("");
       holder.after(view);
     }
@@ -19621,6 +19621,19 @@ function mapTableHtml(svg, limit, caption) {
   );
 }
 
+// A panel's data as tables: its rows — or, for a ::FIGURE (#695), one table
+// per cell (its `-- @name` or "Cell n" as the caption), since the figure
+// statement's own row is only its title and options.
+function panelDataHtml(panel, limit, title) {
+  const fig = panel._dp && panel._dp.figure ? panel.querySelector(".panel-svg")?._figure : null;
+  if (!fig) return dataTableHtml(panel._dp, limit, title);
+  return fig.cells
+    .map((c, k) => {
+      const name = c.name || "Cell " + (k + 1);
+      return `<div class="dp-dv-cap">${escapeHtml(name)}</div>` + dataTableHtml(c, limit, `${title} · ${name}`);
+    })
+    .join("");
+}
 function dataTableHtml(dp, limit, caption) {
   let rows;
   try {
@@ -19677,7 +19690,7 @@ function showDataView(panel) {
   back.innerHTML =
     `<div class="dp-modal"><div class="dp-modal-head"><b>${esc(title)}</b>` +
     `<button class="dp-modal-x" title="Close">✕</button></div>` +
-    `<div class="dp-modal-body">${dataTableHtml(dp, 500, title)}</div></div>`;
+    `<div class="dp-modal-body">${panelDataHtml(panel, 500, title)}</div></div>`;
   const close = () => back.remove();
   back.addEventListener("click", (e) => {
     if (e.target === back || e.target.classList.contains("dp-modal-x")) close();

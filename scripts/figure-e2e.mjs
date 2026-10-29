@@ -110,6 +110,16 @@ check(
 );
 if (shots) await page.screenshot({ path: `${shots}/figure-1440-light.png`, fullPage: true });
 
+// #695: the data view / charts-as-tables show each cell's rows, not the
+// figure statement's own (title-only) row.
+await page.mouse.move(5, 5);
+await page.locator(".dash .dp-figure").hover();
+await page.locator('.dash .dp-figure .dp-tool[title="Data view"]').click({ force: true });
+const dv = await page.evaluate(() => [...document.querySelectorAll(".dp-modal .dp-dv-cap")].map((c) => c.textContent).join(","));
+const dvRows = await page.evaluate(() => [...document.querySelectorAll(".dp-modal table.dp-dv")].map((t) => t.querySelectorAll("tbody tr").length));
+check(dv === "hist,scatter,rule" && dvRows.every((n) => n > 0), `data view: a table per cell (${dv}; ${dvRows})`);
+await page.click(".dp-modal-x");
+
 // Dark mode re-renders the figure (same cells).
 const before = await page.evaluate(() => document.querySelector(".dash .dp-figure .panel-svg").innerHTML.length);
 await page.click("#dark");
