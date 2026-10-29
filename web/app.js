@@ -17506,8 +17506,8 @@ async function doSavePreview(i, spec, btn, statusEl, errEl) {
   try {
     const bad = spec.tables.find((t) => !SAVE_IDENT.test(t));
     if (bad) throw new Error(`'${bad}' is not a plain table name`);
-    const conn = pageConn();
-    const q = async (sql) => JSON.parse(rowsJson(await conn.query(sql)));
+    const pconn = pageConn();
+    const q = async (sql) => JSON.parse(rowsJson(await pconn.query(sql)));
     const lit = (v) => "'" + String(v).replace(/'/g, "''") + "'";
     const base = async (t) => (await q(`SELECT count(*) AS n FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = ${lit(t)}`))[0]?.n > 0;
     if (spec.graph) {
@@ -17515,12 +17515,12 @@ async function doSavePreview(i, spec, btn, statusEl, errEl) {
       const g = JSON.parse(dpVars[spec.graph] ?? "null");
       if (!g || !Array.isArray(g.nodes)) throw new Error(`'${spec.graph}' holds no edited graph`);
       const [nt, et] = spec.tables;
-      await conn.query(`SET VARIABLE __save_graph = ${lit(JSON.stringify(g))}`);
+      await pconn.query(`SET VARIABLE __save_graph = ${lit(JSON.stringify(g))}`);
       const gv = `CAST(getvariable('__save_graph') AS JSON)`;
-      await conn.query(
+      await pconn.query(
         `CREATE OR REPLACE TEMP TABLE "${nt}" AS SELECT n->>'id' AS id, n->>'type' AS type, n->>'label' AS label, TRY_CAST(n->>'stage' AS INTEGER) AS stage FROM (SELECT unnest(CAST(${gv}->'nodes' AS JSON[])) AS n)`
       );
-      await conn.query(`CREATE OR REPLACE TEMP TABLE "${et}" AS SELECT e->>'from' AS "from", e->>'to' AS "to" FROM (SELECT unnest(CAST(${gv}->'edges' AS JSON[])) AS e)`);
+      await pconn.query(`CREATE OR REPLACE TEMP TABLE "${et}" AS SELECT e->>'from' AS "from", e->>'to' AS "to" FROM (SELECT unnest(CAST(${gv}->'edges' AS JSON[])) AS e)`);
       saveStatus[i] = { text: `Saved ${g.nodes.length} nodes and ${g.edges.length} edges into ${nt}, ${et} (this tab only).` };
     } else if (spec.form) {
       if (spec.tables.length !== 1) throw new Error("a form saves into one table");
@@ -17533,14 +17533,14 @@ async function doSavePreview(i, spec, btn, statusEl, errEl) {
       const rows = (saveForms[t] = saveForms[t] || {});
       rows[String(key)] = { id: String(key), ...vals };
       const json = JSON.stringify(Object.values(rows));
-      await conn.query(`SET VARIABLE __save_rows = ${lit(json)}`);
+      await pconn.query(`SET VARIABLE __save_rows = ${lit(json)}`);
       const shape = (await q(`SELECT json_structure(CAST(getvariable('__save_rows') AS JSON)) AS s`))[0].s;
       const saved = `SELECT unnest(json_transform(CAST(getvariable('__save_rows') AS JSON), ${lit(shape)}), recursive := true)`;
       // the base rows of the keys not saved here, then the saved ones
       const sql = (await base(t))
         ? `SELECT * FROM main."${t}" WHERE CAST(id AS VARCHAR) NOT IN (SELECT id FROM (${saved})) UNION ALL BY NAME ${saved}`
         : saved;
-      await conn.query(`CREATE OR REPLACE TEMP TABLE "${t}" AS ${sql}`);
+      await pconn.query(`CREATE OR REPLACE TEMP TABLE "${t}" AS ${sql}`);
       saveStatus[i] = { text: `Saved '${key}' into ${t} (this tab only).` };
     }
     say();
