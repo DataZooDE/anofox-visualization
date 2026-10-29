@@ -9998,9 +9998,23 @@ async function runOnce(fresh = true, pv = preview) {
     return out;
   };
   const inFigure = new Set();
+  // #695: a ::SELECT_AS / ::DRILL right before a cell inside the block is
+  // that cell's (figureCellIas), never the next panel's after the figure.
+  const cellDirective = (t) => directive(t) && (role(t, "SELECT_AS") || role(t, "DRILL"));
   stmts.forEach((t, j) => {
-    if (role(t, "FIGURE")) figureCells(j).forEach((k) => inFigure.add(k));
+    if (!role(t, "FIGURE")) return;
+    figureCells(j).forEach((k) => inFigure.add(k));
+    for (let k = j + 1; k < stmts.length && !role(stmts[k], "ENDFIGURE") && !role(stmts[k], "FIGURE"); k++)
+      if (cellDirective(stmts[k])) inFigure.add(k);
   });
+  // Each cell's interactions: the ::SELECT_AS / ::DRILL statements between
+  // the previous cell (or the ::FIGURE) and it.
+  const figureCellIas = (i) =>
+    figureCells(i).map((j) => {
+      const ia = {};
+      for (let k = j - 1; k > i && !figureCells(i).includes(k); k--) if (cellDirective(stmts[k])) Object.assign(ia, dpIa[k] || {});
+      return ia;
+    });
   // One panel statement (a contract plot, a ::PAGED table, or a chart / table /
   // KPI / text card…): run its query and append its panel(s) to ctx.container.
   // The render loop calls it in place; a statement inside a hidden ::TAB pane
@@ -10089,6 +10103,9 @@ async function runOnce(fresh = true, pv = preview) {
         holder.className = "panel-svg";
         const rw = Math.max(300, span * 100 * viewScale);
         holder._figure = { figure: { rows: figRows, roles: s.roles }, cells };
+        holder._figureIa = figureCellIas(i);
+        // a drilled cell's breadcrumb, as on a single chart
+        for (const ia of holder._figureIa) if (ia.drill) fig.appendChild(drillCrumbs(ia.drill));
         renderChart(holder, figRows, s.roles, rw, ph);
         const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
         if (warn) console.warn(`::FIGURE: ${warn}`);
@@ -20092,8 +20109,12 @@ function figureCellIa(el) {
   const fig = s && el.closest(".panel-svg")?._figure;
   const k = +s?.querySelector(":scope > g[data-cell]")?.getAttribute("data-cell");
   const cell = fig && Number.isInteger(k) ? fig.cells[k] : null;
-  const lr = cell && cell.roles.find((r) => r[1] === "LINK");
-  return lr ? { link: { idx: lr[0], rows: cell.rows, roles: cell.roles } } : null;
+  if (!cell) return null;
+  // its ::SELECT_AS / ::DRILL (the statements before it in the block) and its ::LINK
+  const ia = { ...(el.closest(".panel-svg")._figureIa?.[k] || {}) };
+  const lr = cell.roles.find((r) => r[1] === "LINK");
+  if (lr) ia.link = { idx: lr[0], rows: cell.rows, roles: cell.roles };
+  return Object.keys(ia).length ? ia : null;
 }
 // The figure cell <svg> under a client point, if it takes the crosshair.
 function figureCellAt(root, figure, cx, cy) {
