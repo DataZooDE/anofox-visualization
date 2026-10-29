@@ -39,6 +39,7 @@ mod graph;
 mod look;
 mod matrix;
 mod names;
+mod plan;
 mod schedule;
 mod selection;
 mod stats;
@@ -70,6 +71,8 @@ pub const PLOTS: &[&str] = &[
     "diagram",
     "assignment",
     "selection",
+    "sequence",
+    "weights",
     "distribution",
     "auto",
 ];
@@ -219,6 +222,8 @@ fn render_plot(
         "matrix" => return direct(&|| matrix::matrix(&t, options, w, h, o, place)),
         "assignment" => assignment::columns(&t, options),
         "selection" => selection::columns(&t, options).map(|(c, w)| (c, w, None)),
+        "sequence" => plan::sequence(&t).map(|(c, w)| (c, w, None)),
+        "weights" => plan::weights(&t, options).map(|(c, w)| (c, w, None)),
         "distribution" => distribution::columns(&t).map(|(c, w)| (c, w, None)),
         "obs" => {
             let kind = opt_str(options, "kind").unwrap_or_else(|| "resid_fitted".into());
@@ -646,6 +651,10 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
         "assignment"
     } else if has("item") && (has("selected") || has("listed")) {
         "selection"
+    } else if has("position") && has("item") && (has("setup") || has("cumulative_setup")) {
+        "sequence"
+    } else if has("item") && has("weight") {
+        "weights"
     } else if has("option") && has("probability") {
         "distribution"
     } else {
@@ -661,7 +670,8 @@ fn detect(rows: &[Row]) -> Result<&'static str, RenderError> {
              partial_residual), checks (check_name, status, value), cv folds (fold_id, split, \
              ds), schedule (resource, task, start, end), decomposition (ds | period, component, \
              value), matrix (row, col, value), events (ds | period, kind), \
-             assignment (bin | wave, item, size), selection (item, selected | listed) or \
+             assignment (bin | wave, item, size), selection (item, selected | listed), sequence \
+             (position, item, setup), weights (item, weight) or \
              distribution (id, option, probability){}",
             keys.join(", "),
             closest(&keys)
@@ -722,6 +732,8 @@ const SCHEMAS: &[(&str, &[&str], &[&str])] = &[
         &["bin"],
     ),
     ("selection", &["item", "selected"], &["selected"]),
+    ("sequence", &["position", "item"], &["cumulative_setup"]),
+    ("weights", &["item", "weight"], &["expected_return"]),
     (
         "distribution",
         &["id", "option", "probability"],

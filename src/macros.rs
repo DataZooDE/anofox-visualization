@@ -424,6 +424,30 @@ Several model_id's, or a producer group column, facet.",
         tags: &[("anofox.consumes", "selection"), CONTRACT_TAG],
     },
     MacroSpec {
+        name: "anofox_plot_sequence",
+        params: &["tbl"],
+        named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("sequence", "'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "An optimizer's order from a `sequence` table (#499; anofox-optimize's opt_sequence_by): one row per \
+position (model_id, position, item, setup, cumulative_setup). A step line of the cumulative setup over the position \
+(the running sum of setup when cumulative_setup is absent), each step labelled position · item; several model_id's, or a \
+producer group column, facet.",
+        example: "SELECT anofox_plot_sequence(s) FROM (VALUES (1, 'a', 0), (2, 'b', 3), (3, 'c', 5)) s(position, item, setup)",
+        tags: &[("anofox.consumes", "sequence"), CONTRACT_TAG],
+    },
+    MacroSpec {
+        name: "anofox_plot_weights",
+        params: &["tbl"],
+        named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
+        body: contract_body!("weights", "'title', title, 'x_label', x_label, 'y_label', y_label"),
+        description: "An allocation from a `weights` table (#499; anofox-optimize's opt_portfolio_by): one row per item \
+(model_id, item, weight, expected_return). A bar per item, largest first; several model_id's compare as one 100 % \
+stacked bar each. With expected_return the default title is the allocation's expected return (weight-weighted); a \
+producer group column facets.",
+        example: "SELECT anofox_plot_weights(w) FROM (VALUES ('x', 0.25, 0.08), ('y', 0.75, 0.04)) w(item, weight, expected_return)",
+        tags: &[("anofox.consumes", "weights"), CONTRACT_TAG],
+    },
+    MacroSpec {
         name: "anofox_plot_distribution",
         params: &["tbl"],
         named: &[("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
