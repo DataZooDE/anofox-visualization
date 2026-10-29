@@ -2784,7 +2784,10 @@ mod tests {
         assert!(svg.contains("#123456"), "{svg}");
         let o = RenderOptions::default();
         let bad = crate::theme::hex(Status::Bad.color(&o.theme));
-        assert!(svg.to_lowercase().contains(&bad.to_lowercase()), "stock → {bad}: {svg}");
+        assert!(
+            svg.to_lowercase().contains(&bad.to_lowercase()),
+            "stock → {bad}: {svg}"
+        );
     }
 
     #[test]
