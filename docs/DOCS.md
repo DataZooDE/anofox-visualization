@@ -2787,7 +2787,11 @@ The figure takes the full row (`::COL` before it narrows it) and is 450 px
 tall (`::HEIGHT` before it changes that). Each cell is an ordinary chart
 statement: its own roles, `::TITLE`, `::CATEGORY`, … — a cell needs no
 `::TITLE` (`design/untitled-chart` skips it). Hovering a mark shows its own
-cell's values; the x-crosshair of a single chart is off on a figure. The
+cell's values, and the x-crosshair works per cell: over a line or area cell
+it reads that cell's column (#695); a scatter, histogram or bar cell keeps its
+marks' own tooltips. Each cell's `<svg>` content carries `data-cell` (its
+statement order) and `data-dp-name` (its `-- @name`). Selection, drill, link,
+zoom and the toolbox stay off on a figure for now. The
 browser, `--svg` / `--site`, the HTML export and the served page all draw the
 same picture.
 

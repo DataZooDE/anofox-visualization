@@ -121,6 +121,13 @@ fn dashboard_svg_draws_one_figure() {
     }
     // One legend for the three cells (collected): each series once.
     assert_eq!(svg.matches(">reference</text>").count(), 1, "{svg}");
+    // #695: each cell says which statement it is and its -- @name.
+    for (i, name) in ["hist", "scatter", "rule"].iter().enumerate() {
+        assert!(
+            svg.contains(&format!("data-cell=\"{i}\" data-dp-name=\"{name}\"")),
+            "{name}"
+        );
+    }
 }
 
 #[test]

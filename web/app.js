@@ -18740,7 +18740,13 @@ function attachHover() {
     }
     // The panel-level crosshair shows the tooltips of the chart's own marks;
     // a ::TRACK strip's marks show their own.
-    const pointered = () => !!el.closest(".has-axis-pointer") && !el.closest(".panel-tracks");
+    // In a ::FIGURE only the cells that take a crosshair do (#695).
+    const pointered = () => {
+      if (!el.closest(".has-axis-pointer") || el.closest(".panel-tracks")) return false;
+      const cell = el.closest(".dp-figure svg[data-panel]");
+      const fig = cell && el.closest(".panel-svg")?._figure;
+      return !cell || (!!fig && figureCellCrosses(cell, fig));
+    };
     el.addEventListener("mouseenter", () => {
       // A tap's mousedown also gives the mark native DOM focus, which the a11y
       // code below answers with its own (untrusted) synthetic mouseenter —
@@ -19908,6 +19914,34 @@ function attachLegendToggle() {
 // ECharts-style axis pointer: hovering a cartesian chart draws a vertical
 // crosshair at the nearest x and shows one tooltip listing every series' value
 // there (colour swatch + name + value), instead of a per-point tooltip.
+// Whether a chart of these roles takes the x-crosshair. Radar is polar,
+// bullet/funnel are horizontal and jitter/scatter has no shared-x series (a
+// crosshair would highlight every point sharing the nearest x) — their
+// per-point (<title>) hover takes over.
+function crosshairKind(roles) {
+  if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK|BULLET|BULLETCHART|FUNNEL|FUNNELCHART|DIAGRAM)$/.test(r[1]))) return false;
+  const scatterOnly =
+    roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|JITTER|STRIP)$/.test(r[1])) &&
+    !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));
+  return !scatterOnly;
+}
+// #695: does a ::FIGURE's cell <svg> take the x-crosshair? Its content
+// carries `data-cell` (the cell's statement order): the cell's kind must take
+// one and it needs line/point marks to read.
+function figureCellCrosses(s, figure) {
+  const k = +s.querySelector(":scope > g[data-cell]")?.getAttribute("data-cell");
+  const cell = Number.isInteger(k) ? figure.cells[k] : null;
+  return !!cell && crosshairKind(cell.roles) && [...s.querySelectorAll("circle.dp-hit")].filter((el) => !isRuleMark(el)).length >= 3;
+}
+// The figure cell <svg> under a client point, if it takes the crosshair.
+function figureCellAt(root, figure, cx, cy) {
+  for (const s of root.querySelectorAll("svg[data-panel]")) {
+    const b = s.getBoundingClientRect();
+    if (cx < b.left || cx > b.right || cy < b.top || cy > b.bottom) continue;
+    return figureCellCrosses(s, figure) ? s : null;
+  }
+  return null;
+}
 function attachAxisPointer() {
   const tip = $("dp-tip");
   const cross = $("dp-cross");
@@ -19918,21 +19952,10 @@ function attachAxisPointer() {
     // Maps aren't cartesian — a vertical x-crosshair grouping marks by longitude
     // is meaningless there. They keep their own per-point (<title>) hover.
     if (panel._dp && panel._dp.isMap) return;
-    // A ::FIGURE (#661) holds several plots in one SVG — a crosshair reads
-    // one plot area only; its marks keep their own per-point hover.
-    if (panel._dp && panel._dp.figure) return;
-    // A pure scatter has no shared-x series to group, so an axis crosshair would
-    // highlight every point sharing the nearest x (two far-apart dots at once).
-    // Skip it — the per-point (<title>) hover shows the individual point instead.
-    const roles = (panel._dp && panel._dp.roles) || [];
-    // Radar is polar, bullet/funnel are horizontal and jitter/scatter has no
-    // shared-x series — a vertical x-crosshair is wrong for all of them; their
-    // per-point (<title>) hover takes over.
-    if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK|BULLET|BULLETCHART|FUNNEL|FUNNELCHART|DIAGRAM)$/.test(r[1]))) return;
-    const scatterOnly =
-      roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|JITTER|STRIP)$/.test(r[1])) &&
-      !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));
-    if (scatterOnly) return;
+    // A ::FIGURE (#661) holds several plots in one SVG: the crosshair works
+    // in the cell under the pointer (#695), if that cell's kind takes one.
+    const figure = panel._dp && panel._dp.figure ? panel.querySelector(".panel-svg")?._figure : null;
+    if (!figure && !crosshairKind((panel._dp && panel._dp.roles) || [])) return;
     const svg0 = panel.querySelector("svg");
     if (!svg0 || !svg0.viewBox || !svg0.viewBox.baseVal || !svg0.viewBox.baseVal.width) return;
     // Decorative marks (e.g. a boxplot's mean dot: its own real GeomPoint
@@ -19945,10 +19968,13 @@ function attachAxisPointer() {
     const area = panel.querySelector(".panel-svg") || svg0;
 
     const move = (e) => {
-      const svg = area.querySelector ? area.querySelector("svg") : svg0;
-      if (!svg || !svg.viewBox.baseVal.width) return;
+      let svg = area.querySelector ? area.querySelector("svg") : svg0;
+      // a figure cell without a crosshair keeps its marks' own tooltips
+      const away = figure ? off : leave;
+      if (figure && svg) svg = figureCellAt(svg, figure, e.clientX, e.clientY);
+      if (!svg || !svg.viewBox.baseVal.width) return away();
       const circles = dataCircles(svg);
-      if (circles.length < 3) return leave();
+      if (circles.length < 3) return away();
       const pts = circles.map((el) => ({
         el,
         cx: +el.getAttribute("cx"),
@@ -19975,7 +20001,8 @@ function attachAxisPointer() {
       // …down through the chart's ::TRACK strips (same x)
       const tb = panel.querySelector(".panel-tracks");
       cross.style.height = (tb && tb.offsetHeight ? tb.getBoundingClientRect().bottom - r.top : r.height) + "px";
-      cross.style.display = "";
+      // the stylesheet hides it (.dp-cross): show it explicitly
+      cross.style.display = "block";
       pts.forEach((p) => (p.el.style.transform = p.el.style.fillOpacity = ""));
       colPts.forEach((p) => {
         p.el.style.transformBox = "fill-box";
@@ -19996,13 +20023,21 @@ function attachAxisPointer() {
       const head = colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "";
       tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("") + rules.map(ruleRow).join("");
       tip.classList.add("show");
+      ours = tip.innerHTML;
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
       tip.style.top = e.clientY + 8 + "px";
     };
-    const leave = () => {
+    let ours = ""; // what this crosshair last wrote into the shared tip
+    const off = () => {
       cross.style.display = "none";
-      tip.classList.remove("show");
       area.querySelectorAll("circle.dp-hit").forEach((el) => (el.style.transform = el.style.fillOpacity = ""));
+      // hide the tip only while it still shows our column, not a mark's own
+      if (ours && tip.innerHTML === ours) tip.classList.remove("show");
+      ours = "";
+    };
+    const leave = () => {
+      off();
+      tip.classList.remove("show");
     };
     area.addEventListener("mousemove", move);
     area.addEventListener("mouseleave", leave);
