@@ -3,7 +3,8 @@
 // connects_to forbids, saying why), a picked node is renamed / removed, Reset
 // goes back to the data; the drawn diagram keeps each existing node's value;
 // the edited graph is ONE JSON variable the other panels read with SQL; the
-// URL carries it; no page errors. #699: ::DIAGRAM_CHECK (see below).
+// URL carries it; drag a node onto another to connect; no page errors.
+// #699: ::DIAGRAM_CHECK (see below).
 //
 //   scripts/build-wasm-pkg.sh
 //   python3 serve_nocache.py 8947 &
@@ -119,6 +120,39 @@ await bar("Reset");
 await settle();
 s = await st();
 check(s.nodes.join(",") === "store,sup,wh" && s.kpi === "2", `Reset: back to the data (${s.nodes}; ${s.kpi})`);
+
+// #699: drag from one node onto another connects them (a press that doesn't
+// move stays a pick); the palette still refuses an edge it forbids.
+const center = async (id) => {
+  const b = await page.locator(`.dash rect[data-node="${id}"]`).boundingBox();
+  return [b.x + b.width / 2, b.y + b.height / 2];
+};
+const dragNodes = async (a, b) => {
+  const [x0, y0] = await center(a);
+  const [x1, y1] = await center(b);
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move((x0 + x1) / 2, (y0 + y1) / 2, { steps: 4 });
+  const band = await page.evaluate(() => !!document.querySelector(".dash .dp-edit-drag"));
+  await page.mouse.move(x1, y1, { steps: 4 });
+  await page.mouse.up();
+  await settle();
+  return band;
+};
+const band = await dragNodes("sup", "store");
+s = await st();
+check(band, "dragging draws a rubber band");
+check(!s.edges.includes("sup>store") && /can only feed Stocking point/.test(s.status), `drag: the palette refuses supplier → demand (${s.status})`);
+await page.selectOption(".dp-edit-type", "stock");
+await page.fill(".dp-edit-name", "DC South");
+await bar("Add");
+await settle();
+await dragNodes("wh", "dc_south");
+s = await st();
+check(s.edges.includes("wh>dc_south") && s.kpi === "3" && !(await page.$(".dash .dp-edit-drag")), `drag: wh → dc_south connects, the band is gone (${s.edges})`);
+await node("store");
+await settle();
+check(!(await page.locator('.dp-edit-bar > button:text-is("Rename")').isDisabled()), "a press without moving still picks the node");
 
 // #699 ::DIAGRAM_CHECK: a query over the edited graph flags an unconnected
 // node (bad), a single supplier (warn, the whole graph) and an edge; the

@@ -12635,6 +12635,13 @@ function diagramToolbar(meta, holder) {
   holder.addEventListener(
     "click",
     (e) => {
+      // the click that ends a drag-to-connect is no pick
+      if (holder._dragged) {
+        holder._dragged = false;
+        e.stopPropagation();
+        e.preventDefault();
+        return;
+      }
       const node = e.target.closest("[data-node]");
       const edge = e.target.closest("polyline[data-edge]");
       if (ui.connect) {
@@ -12662,6 +12669,7 @@ function diagramToolbar(meta, holder) {
     },
     true
   );
+  diagramDragConnect(meta, g, ui, holder);
   holder.addEventListener("keydown", (e) => {
     if ((e.key === "Delete" || e.key === "Backspace") && e.target.closest?.("[data-node]")) {
       ui.pick = { node: e.target.closest("[data-node]").getAttribute("data-node") };
@@ -12670,6 +12678,62 @@ function diagramToolbar(meta, holder) {
     }
   });
   return bar;
+}
+// #699: drag from one node onto another to connect them — the same rules as
+// Connect (diagramEdgeRefused says why not); a rubber band follows the
+// pointer. A press that doesn't move stays a click (pick / select).
+function diagramDragConnect(meta, g, ui, holder) {
+  holder.classList.add("dp-editing");
+  let drag = null;
+  holder.addEventListener("pointerdown", (e) => {
+    const node = !ui.connect && e.button === 0 && e.target.closest?.("[data-node]");
+    if (node) drag = { from: node.getAttribute("data-node"), x: e.clientX, y: e.clientY, line: null };
+  });
+  holder.addEventListener("pointermove", (e) => {
+    if (!drag || (!drag.line && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6)) return;
+    const svg = holder.querySelector(":scope > svg");
+    const m = svg && svg.getScreenCTM();
+    if (!m) return;
+    const at = (x, y) => new DOMPoint(x, y).matrixTransform(m.inverse());
+    if (!drag.line) {
+      const r = holder.querySelector(`rect[data-node="${CSS.escape(drag.from)}"]`)?.getBoundingClientRect();
+      if (!r) return;
+      const c = at(r.left + r.width / 2, r.top + r.height / 2);
+      drag.line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      drag.line.setAttribute("class", "dp-edit-drag");
+      drag.line.setAttribute("pointer-events", "none");
+      drag.line.setAttribute("x1", c.x);
+      drag.line.setAttribute("y1", c.y);
+      svg.appendChild(drag.line);
+      // a release anywhere ends the drag (only now: a plain click keeps its target)
+      holder.setPointerCapture?.(e.pointerId);
+    }
+    const p = at(e.clientX, e.clientY);
+    drag.line.setAttribute("x2", p.x);
+    drag.line.setAttribute("y2", p.y);
+  });
+  const stop = () => {
+    const d = drag;
+    drag = null;
+    d?.line?.remove();
+    return d && d.line ? d : null;
+  };
+  holder.addEventListener("pointercancel", stop);
+  holder.addEventListener("pointerup", (e) => {
+    const d = stop();
+    if (!d) return;
+    holder._dragged = true;
+    const node = document.elementFromPoint(e.clientX, e.clientY)?.closest?.("[data-node]");
+    const to = node && holder.contains(node) ? node.getAttribute("data-node") : null;
+    if (!to || to === d.from) return;
+    const why = diagramEdgeRefused(meta, g, d.from, to);
+    if (why) ui.msg = why;
+    else {
+      g.edges.push({ from: d.from, to });
+      ui.pick = { edge: d.from + ">" + to };
+    }
+    diagramCommit(meta, g);
+  });
 }
 function diagramRemove(meta, g, ui) {
   if (!ui.pick) return;
