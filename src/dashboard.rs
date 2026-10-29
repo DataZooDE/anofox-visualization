@@ -627,6 +627,7 @@ fn render_inner(
                 }
                 cells.push(crate::figure::Cell {
                     name: st.panel.name.clone(),
+                    zoom: None,
                     cols: st
                         .rows
                         .as_ref()

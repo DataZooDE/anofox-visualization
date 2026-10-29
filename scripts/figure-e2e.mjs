@@ -194,5 +194,50 @@ SELECT coalesce(getvariable('region'), 'none') AS picked ::TEXT_SMALL;
   await p3.close();
 }
 
+// #695: zoom (?zoom=1) follows ::AXES_COLLECT 'x' — scrolling in the
+// scatter zooms it and the histogram stacked above it (one shared x); the
+// rule beside them keeps its own x; double-click resets.
+{
+  const zp = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
+  const zerrs = [];
+  zp.on("pageerror", (e) => zerrs.push(String(e)));
+  await zp.goto(`${base}?mode=view&zoom=1#sql=${b64(SQL)}`);
+  await zp.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && document.querySelector(".dp-figure svg[data-panel]"), null, { timeout: 120000 });
+  const cellsNow = () =>
+    zp.evaluate(() =>
+      [...document.querySelectorAll(".dp-figure svg[data-panel]")].map((s) => {
+        const g = s.querySelector(":scope > g[data-cell]");
+        return { k: +g.getAttribute("data-cell"), share: g.getAttribute("data-xshare"), x: s.getAttribute("data-xdomain") };
+      }).sort((a, b) => a.k - b.k)
+    );
+  const before = await cellsNow();
+  check(before[0].share === "0" && before[1].share === "0" && before[2].share === null, `the stacked hist and scatter share x, the rule doesn't (${JSON.stringify(before.map((c) => c.share))})`);
+  const box = await zp.evaluate(() => {
+    const s = [...document.querySelectorAll(".dp-figure svg[data-panel]")].find((s) => s.querySelector(':scope > g[data-cell="1"]'));
+    const b = s.getBoundingClientRect();
+    return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
+  });
+  await zp.mouse.move(box.x, box.y);
+  for (let i = 0; i < 3; i++) {
+    await zp.mouse.wheel(0, -200);
+    await zp.waitForTimeout(150);
+  }
+  await zp.waitForTimeout(300);
+  const after = await cellsNow();
+  const width = (x) => {
+    const [a, b] = x.split(" ").map(Number);
+    return b - a;
+  };
+  check(width(after[1].x) < width(before[1].x) * 0.8, `scrolling zooms the scatter's x (${before[1].x} → ${after[1].x})`);
+  check(after[0].x === after[1].x, `the histogram above it takes the same x (${after[0].x} vs ${after[1].x})`);
+  check(after[2].x === before[2].x, `the rule beside them keeps its own (${after[2].x})`);
+  await zp.mouse.dblclick(box.x, box.y);
+  await zp.waitForTimeout(300);
+  const reset = await cellsNow();
+  check(reset[1].x === before[1].x && reset[0].x === before[0].x, `double-click resets the figure (${reset[1].x})`);
+  check(!zerrs.length, "zoom: no page errors: " + zerrs.join(" | "));
+  await zp.close();
+}
+
 await browser.close();
 console.log(`figure-e2e: ${process.exitCode ? "failed" : "0 failed"}`);

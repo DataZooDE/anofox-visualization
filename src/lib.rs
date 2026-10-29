@@ -955,6 +955,10 @@ pub struct RenderOptions {
     pub brand: Option<(u8, u8, u8)>,
     /// Zoom window for a `::MAP` / continuous cartesian panel (`None` = auto-fit).
     pub zoom: Option<ZoomWindow>,
+    /// An x-only zoom window (y auto-fits), used when [`Self::zoom`] is
+    /// `None`: a `::FIGURE` cell that shares its x axis with a zoomed one
+    /// (`::AXES_COLLECT 'x'`, #695).
+    pub zoom_x: Option<(f64, f64)>,
     /// Max distinct levels on a discrete x axis or `::CATEGORY` before the
     /// smallest (by total |measure|) fold into "Other". `0` disables the cap.
     pub max_categories: usize,
@@ -1001,6 +1005,7 @@ impl Default for RenderOptions {
         RenderOptions {
             brand: None,
             zoom: None,
+            zoom_x: None,
             max_categories: DEFAULT_MAX_CATEGORIES,
             max_line_points: DEFAULT_MAX_LINE_POINTS,
             theme: theme::default_light(),
@@ -4156,6 +4161,8 @@ fn cartesian(
     if !flipped && facet.is_none() {
         if let Some((xlim, ylim)) = o.zoom {
             plot = plot.coord_cartesian_zoom(Some(xlim), Some(ylim));
+        } else if let Some(xlim) = o.zoom_x {
+            plot = plot.coord_cartesian_zoom(Some(xlim), None);
         }
     }
     plot = plot.house_theme(o);
@@ -4310,7 +4317,7 @@ fn render_histogram(
         if let Some(t) = title {
             plot = plot.title(t);
         }
-        return Ok(Panel::plot(plot, width, height));
+        return Ok(Panel::plot(shared_x_zoom(plot, o), width, height));
     }
 
     let edges = hist_edges(&value.values, bins_spec.as_deref());
@@ -4426,7 +4433,22 @@ fn render_histogram(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height))
+    if facet.is_some() {
+        return Ok(Panel::plot(plot, width, height));
+    }
+    Ok(Panel::plot(shared_x_zoom(plot, o), width, height))
+}
+
+/// A histogram's / density's x under a shared zoom (#695): a `::FIGURE`
+/// cell stacked with a zoomed one under `::AXES_COLLECT 'x'` gets its x
+/// window ([`RenderOptions::zoom_x`]) — binned over all the data, cropped to
+/// the window, so the column's shared x follows the zoom. Not zoomable on
+/// its own ([`Kind::zoomable`]).
+fn shared_x_zoom(plot: GGPlot, o: &RenderOptions) -> GGPlot {
+    match o.zoom_x {
+        Some(x) => plot.coord_cartesian_zoom(Some(x), None),
+        None => plot,
+    }
 }
 
 /// A kernel-density curve of the measure column. An optional `CATEGORY` splits
@@ -4468,7 +4490,7 @@ fn render_density(
     if let Some(t) = title {
         plot = plot.title(t);
     }
-    Ok(Panel::plot(plot, width, height))
+    Ok(Panel::plot(shared_x_zoom(plot, o), width, height))
 }
 
 /// Build an axis tick formatter from a short spec — a keyword or a currency

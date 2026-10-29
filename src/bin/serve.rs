@@ -2404,6 +2404,7 @@ fn render_dashboard_page(
             while let Some((q, r, na, _, _)) = queried.next_if(|(q, ..)| q.figure.is_some()) {
                 cells.push(anofox_visualization::figure::Cell {
                     name: q.name.clone(),
+                    zoom: None,
                     cols: if na {
                         Vec::new()
                     } else {

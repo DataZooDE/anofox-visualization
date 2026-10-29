@@ -460,6 +460,75 @@ fn cell_list(names: &[Option<String>]) -> String {
 pub struct Cell {
     pub name: Option<String>,
     pub cols: Vec<Column>,
+    /// The browser's zoom window (#695, `?zoom=1`): x and y for the cell
+    /// zoomed, x only for a cell that shares its x axis with it (its y
+    /// auto-fits). `None`: auto-fit.
+    pub zoom: Option<CellZoom>,
+}
+
+/// A figure cell's zoom window: `(x0, x1)` and, unless only shared, `(y0, y1)`.
+pub type CellZoom = ((f64, f64), Option<(f64, f64)>);
+
+/// Which cells share one x axis (#695: zooming one moves them all) — the
+/// plot cells `AxisCollect::CollectX` puts in one column of a grid, under
+/// `::AXES_COLLECT 'x'`: in a plain grid a column (cell `k` is in column
+/// `k % ncol`, row-major), in a `::LAYOUT` the direct cells of one `/`
+/// stack; a group only with two charts or more. `None`: the cell zooms alone.
+fn x_share(
+    spec: &FigureSpec,
+    names: &[Option<String>],
+    is_plot: &[bool],
+    ncol: usize,
+) -> Vec<Option<usize>> {
+    let mut out = vec![None; is_plot.len()];
+    if spec.axes != AxesMode::X {
+        return out;
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    match &spec.layout {
+        None => {
+            for c in 0..ncol {
+                groups.push(
+                    (c..is_plot.len())
+                        .step_by(ncol)
+                        .filter(|&k| is_plot[k])
+                        .collect(),
+                );
+            }
+        }
+        Some(layout) => {
+            fn walk(
+                n: &Node,
+                names: &[Option<String>],
+                is_plot: &[bool],
+                groups: &mut Vec<Vec<usize>>,
+            ) {
+                if let Node::Row(items) | Node::Col(items) = n {
+                    if matches!(n, Node::Col(_)) {
+                        groups.push(
+                            items
+                                .iter()
+                                .filter_map(|it| match it {
+                                    Node::Cell(r) => resolve(r, names).filter(|&i| is_plot[i]),
+                                    _ => None,
+                                })
+                                .collect(),
+                        );
+                    }
+                    for it in items {
+                        walk(it, names, is_plot, groups);
+                    }
+                }
+            }
+            walk(layout, names, is_plot, &mut groups);
+        }
+    }
+    for (g, members) in groups.into_iter().filter(|m| m.len() >= 2).enumerate() {
+        for k in members {
+            out[k] = Some(g);
+        }
+    }
+    out
 }
 
 /// Render a figure: every cell's plot composed into one `PlotGrid`, as one
@@ -503,9 +572,15 @@ pub(crate) fn render(
         }
         let mut plots: Vec<Option<ggplot_rs::prelude::GGPlot>> = Vec::with_capacity(cells.len());
         for (i, (c, (w, h))) in cells.iter().zip(&sizes).enumerate() {
+            let mut co = o.clone();
+            match c.zoom {
+                Some((x, Some(y))) => co.zoom = Some((x, y)),
+                Some((x, None)) => co.zoom_x = Some(x),
+                None => {}
+            }
             // #695: each cell's <svg> says which cell it is (statement order)
             // and its `-- @name`, so the browser finds its rows and roles
-            let p = crate::panel_plot(&c.cols, w.max(1.0) as u32, h.max(1.0) as u32, o)
+            let p = crate::panel_plot(&c.cols, w.max(1.0) as u32, h.max(1.0) as u32, &co)
                 .map_err(RenderError::Render)?
                 .map(|p| {
                     let p = p.svg_attr("data-cell", i.to_string());
@@ -515,6 +590,17 @@ pub(crate) fn render(
                     }
                 });
             plots.push(p);
+        }
+        // #695: the cells a zoom moves together carry their group
+        let ncol = spec
+            .ncol
+            .unwrap_or_else(|| default_ncol(cells.len()))
+            .max(1);
+        let is_plot: Vec<bool> = plots.iter().map(Option::is_some).collect();
+        for (p, g) in plots.iter_mut().zip(x_share(spec, &names, &is_plot, ncol)) {
+            if let Some(g) = g {
+                *p = p.take().map(|p| p.svg_attr("data-xshare", g.to_string()));
+            }
         }
         let mut grid = if spec.layout.is_some() {
             match build(&layout, spec, &names, &mut plots) {
@@ -778,5 +864,177 @@ mod tests {
             ..Default::default()
         };
         assert!(codes(&grid).is_empty());
+    }
+
+    fn line(k: f64) -> Vec<Column> {
+        use crate::{Kind, Value};
+        vec![
+            Column::new(
+                "x",
+                Role::X,
+                (0..10).map(|i| Value::Float(i as f64)).collect(),
+            ),
+            Column::new(
+                "y",
+                Role::Value(Kind::Line),
+                (0..10).map(|i| Value::Float(k * i as f64)).collect(),
+            ),
+        ]
+    }
+
+    fn attr(svg: &str, cell: usize, a: &str) -> Option<String> {
+        // the cell's own <svg data-panel> (its x/y domain) holds `<g data-cell="i" …>`
+        let at = svg.find(&format!("data-cell=\"{cell}\""))?;
+        let open = svg[..at].rfind("<svg")?;
+        let tag = &svg[open..svg[open..].find('>')? + open];
+        let g = &svg[at..svg[at..].find('>')? + at];
+        [tag, g].iter().find_map(|t| {
+            let i = t.find(&format!(" {a}=\""))? + a.len() + 3;
+            Some(t[i..i + t[i..].find('"')?].to_string())
+        })
+    }
+
+    #[test]
+    fn x_share_groups_follow_axes_collect() {
+        let names = vec![
+            Some("hist".to_string()),
+            Some("scatter".into()),
+            Some("rule".into()),
+        ];
+        let mut spec = FigureSpec {
+            layout: Some(parse_layout("(hist / scatter) | rule").unwrap()),
+            axes: AxesMode::X,
+            ..Default::default()
+        };
+        let all = [true, true, true];
+        assert_eq!(
+            x_share(&spec, &names, &all, 2),
+            vec![Some(0), Some(0), None]
+        );
+        assert_eq!(
+            x_share(&spec, &names, &[true, false, true], 2),
+            vec![None; 3],
+            "one chart in the stack shares nothing"
+        );
+        spec.axes = AxesMode::Align;
+        assert_eq!(
+            x_share(&spec, &names, &all, 2),
+            vec![None; 3],
+            "'align' keeps each x its own"
+        );
+        let grid = FigureSpec {
+            axes: AxesMode::X,
+            ..Default::default()
+        };
+        let four = [true; 4];
+        assert_eq!(
+            x_share(&grid, &[None, None, None, None], &four, 2),
+            vec![Some(0), Some(1), Some(0), Some(1)]
+        );
+        assert_eq!(
+            x_share(&grid, &[None, None], &[true; 2], 2),
+            vec![None; 2],
+            "one row: no column of two"
+        );
+    }
+
+    #[test]
+    fn a_zoom_moves_the_cells_sharing_x_and_their_y_still_fits() {
+        let spec = FigureSpec {
+            axes: AxesMode::X,
+            ncol: Some(1),
+            ..Default::default()
+        };
+        let cell = |k: f64, zoom| Cell {
+            name: None,
+            cols: line(k),
+            zoom,
+        };
+        let o = RenderOptions::default();
+        let base = render(
+            &spec,
+            &[cell(1.0, None), cell(10.0, None)],
+            600,
+            400,
+            &o,
+            Place::Doc,
+        )
+        .unwrap();
+        assert_eq!(attr(&base, 0, "data-xshare").as_deref(), Some("0"));
+        assert_eq!(attr(&base, 1, "data-xshare").as_deref(), Some("0"));
+        let zoomed = render(
+            &spec,
+            &[
+                cell(1.0, Some(((2.0, 4.0), Some((2.0, 4.0))))),
+                cell(10.0, Some(((2.0, 4.0), None))),
+            ],
+            600,
+            400,
+            &o,
+            Place::Doc,
+        )
+        .unwrap();
+        let xd = |svg: &str, i| attr(svg, i, "data-xdomain").unwrap();
+        assert_ne!(xd(&base, 0), xd(&zoomed, 0), "the zoomed cell's x changed");
+        assert_eq!(
+            xd(&zoomed, 0),
+            xd(&zoomed, 1),
+            "the sharing cell's x moved with it"
+        );
+        assert_eq!(
+            attr(&base, 1, "data-ydomain"),
+            attr(&zoomed, 1, "data-ydomain"),
+            "its y auto-fits as before"
+        );
+    }
+
+    #[test]
+    fn a_histogram_stacked_with_a_zoomed_chart_follows_its_x() {
+        use crate::{Kind, Value};
+        let spec = FigureSpec {
+            axes: AxesMode::X,
+            ncol: Some(1),
+            ..Default::default()
+        };
+        let hist = vec![Column::new(
+            "v",
+            Role::Value(Kind::Histogram),
+            (0..50).map(|i| Value::Float((i % 10) as f64)).collect(),
+        )];
+        let cells = |z: Option<CellZoom>, zx: Option<CellZoom>| {
+            vec![
+                Cell {
+                    name: None,
+                    cols: hist.clone(),
+                    zoom: zx,
+                },
+                Cell {
+                    name: None,
+                    cols: line(1.0),
+                    zoom: z,
+                },
+            ]
+        };
+        let o = RenderOptions::default();
+        let base = render(&spec, &cells(None, None), 600, 400, &o, Place::Doc).unwrap();
+        let z = render(
+            &spec,
+            &cells(
+                Some(((2.0, 4.0), Some((2.0, 4.0)))),
+                Some(((2.0, 4.0), None)),
+            ),
+            600,
+            400,
+            &o,
+            Place::Doc,
+        )
+        .unwrap();
+        let xd = |svg: &str, i| attr(svg, i, "data-xdomain").unwrap();
+        assert_ne!(xd(&base, 1), xd(&z, 1));
+        assert_eq!(
+            xd(&z, 0),
+            xd(&z, 1),
+            "the histogram's x follows the zoom, so the shared column does"
+        );
     }
 }

@@ -10109,6 +10109,8 @@ async function runOnce(fresh = true, pv = preview) {
         renderChart(holder, figRows, s.roles, rw, ph);
         const warn = holder.querySelector("svg") && holder.querySelector("svg").getAttribute("data-warnings");
         if (warn) console.warn(`::FIGURE: ${warn}`);
+        // zoom/pan per cell, opt-in like a single chart's (#695)
+        if (document.body.classList.contains("dp-zoom")) attachFigureZoom(holder, figRows, s.roles, ph);
         fig.appendChild(holder);
         fig._dp = { rows: figRows, roles: s.roles, rw, ph, isMap: false, figure: true };
         container.appendChild(fig);
@@ -20357,6 +20359,109 @@ function svgDomain(svg) {
   const d = ((svg && svg.getAttribute("data-domain")) || "").trim().split(/\s+/).map(Number);
   if (d.length !== 4 || !d.every(Number.isFinite) || !(d[1] > d[0]) || !(d[3] > d[2])) return null;
   return { x0: d[0], x1: d[1], y0: d[2], y1: d[3] };
+}
+
+// #695: zoom a ::FIGURE's cells (`?zoom=1`, as a single chart): scroll or
+// drag in a continuous cartesian cell zooms / pans it; the cells sharing its
+// x axis (::AXES_COLLECT 'x' — their `data-xshare`, set where the figure is
+// built) take the same x window and keep fitting their own y. Double-click
+// resets the figure. The windows live on the figure (`_figure.cells[k].zoom`),
+// so a re-render (a resize, a theme switch) keeps them.
+function attachFigureZoom(holder, figRows, roles, ph) {
+  if (holder._zoomWired) return;
+  holder._zoomWired = true;
+  const cells = () => holder._figure.cells;
+  // the zoomable cell under a client point: its <svg>, index, share group,
+  // plot rect (its own viewBox units), drawn domain and screen scale
+  const cellAt = (e) => {
+    for (const s of holder.querySelectorAll("svg[data-panel]")) {
+      const b = s.getBoundingClientRect();
+      if (e.clientX < b.left || e.clientX > b.right || e.clientY < b.top || e.clientY > b.bottom) continue;
+      const g = s.querySelector(":scope > g[data-cell]");
+      const k = +g?.getAttribute("data-cell");
+      const cell = Number.isInteger(k) ? cells()[k] : null;
+      if (!cell || !cell.roles.some((r) => ZOOMABLE.includes(r[1])) || s.getAttribute("data-flip") === "true") return null;
+      const dom = svgDomain(s);
+      const pa = (s.dataset.plot || "").split(" ").map(Number);
+      if (!dom || pa.length !== 4 || !pa[2] || !pa[3]) return null;
+      return { k, share: g.getAttribute("data-xshare"), dom, pa, b, scale: b.width / (s.viewBox.baseVal.width || b.width) };
+    }
+    return null;
+  };
+  const viewOf = (c) => {
+    const z = cells()[c.k].zoom;
+    return z && z.length === 4 ? { x0: z[0], x1: z[1], y0: z[2], y1: z[3] } : { ...c.dom };
+  };
+  let raf = 0;
+  const draw = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const W = holder.querySelector("svg")?.viewBox.baseVal.width || 460;
+      const H = holder.closest(".panel")?._dpFit?.h || ph;
+      renderChart(holder, figRows, roles, W, H);
+      wireCharts();
+    });
+  };
+  const setView = (c, v) => {
+    cells()[c.k].zoom = [v.x0, v.x1, v.y0, v.y1];
+    if (c.share === null) return;
+    // the same x window for the cells sharing it; each keeps its own y
+    for (const g of holder.querySelectorAll(`g[data-xshare="${c.share}"]`)) {
+      const j = +g.getAttribute("data-cell");
+      if (j === c.k || !cells()[j]) continue;
+      const z = cells()[j].zoom;
+      cells()[j].zoom = z && z.length === 4 ? [v.x0, v.x1, z[2], z[3]] : [v.x0, v.x1];
+    }
+    draw();
+  };
+  holder.addEventListener(
+    "wheel",
+    (e) => {
+      const c = cellAt(e);
+      if (!c) return;
+      e.preventDefault();
+      const v = viewOf(c);
+      const fx = ((e.clientX - c.b.left) / c.scale - c.pa[0]) / c.pa[2];
+      const fy = ((e.clientY - c.b.top) / c.scale - c.pa[1]) / c.pa[3];
+      const d = { x: c.dom.x0 + fx * (c.dom.x1 - c.dom.x0), y: c.dom.y1 - fy * (c.dom.y1 - c.dom.y0) };
+      const k = e.deltaY < 0 ? 0.82 : 1 / 0.82;
+      setView(c, { x0: d.x + (v.x0 - d.x) * k, x1: d.x + (v.x1 - d.x) * k, y0: d.y + (v.y0 - d.y) * k, y1: d.y + (v.y1 - d.y) * k });
+    },
+    { passive: false }
+  );
+  let drag = null;
+  holder.addEventListener("mousedown", (e) => {
+    const c = cellAt(e);
+    drag = c ? { c, x: e.clientX, y: e.clientY, v: viewOf(c), moved: false } : null;
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.x) + Math.abs(e.clientY - drag.y) > 4) drag.moved = true;
+    const { c, v } = drag;
+    const dx = ((e.clientX - drag.x) / c.scale / c.pa[2]) * (v.x1 - v.x0);
+    const dy = ((e.clientY - drag.y) / c.scale / c.pa[3]) * (v.y1 - v.y0);
+    setView(c, { x0: v.x0 - dx, x1: v.x1 - dx, y0: v.y0 + dy, y1: v.y1 + dy });
+  });
+  window.addEventListener("mouseup", () => {
+    if (drag && drag.moved) holder._panned = true;
+    drag = null;
+  });
+  // a pan's release is no click on a mark (no drill / link)
+  holder.addEventListener(
+    "click",
+    (e) => {
+      if (holder._panned) {
+        holder._panned = false;
+        e.stopPropagation();
+      }
+    },
+    true
+  );
+  holder.addEventListener("dblclick", () => {
+    for (const c of cells()) delete c.zoom;
+    draw();
+  });
 }
 
 // Scroll-to-zoom / drag-to-pan for a continuous cartesian chart (double-click
