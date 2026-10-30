@@ -931,7 +931,7 @@ dark toggle, Esc) — all adapted from the reviewer's own `probe12.mjs`
 after. Full suites green: `tests/web/*.mjs` (38 files), `scripts/
 assist-e2e.mjs` 217 ok / 0 FAIL (all tags, including every earlier
 round's cases), `cargo fmt --all --check` clean.
-| **M2-0. Security review of the design (a gate, not a PR)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
+| **M2-0. Security review of the design (a gate, not a PR)** — **done 2026-10-18 (§12.14); delta review 2026-10-30 (§12.15)** | an independent review of §12 and §2.3 against `docs/secure-serving.md`; its findings are folded into this note before M2-3 starts (§12.12) | this note | — | 0.5 d |
 | **M2-1. `/assist` on serve** | `src/host/assist.rs` (validation, key, streaming relay, budget, log); routes in both authoring servers; `--assist-*` flags and `anofox_serve` options; transport (b) | `src/host/assist.rs`, `src/bin/serve.rs`, `duckext/src/serve.rs`, `docs/DOCS.md`, the serving skill | Rust: the guard is applied (no token → 403, foreign Origin → 403), the model allowlist, `max_tokens` cap, server tools refused, the key never in a response or log, budget → 429, SSE relayed against a local fake upstream; **locked server: `/assist/*` → 404** (both servers) | 2 d + review |
 | **M2-2. Edits and Explore** | *Change this panel* from the toolbox; follow-ups in one conversation; `edits: [{stmt, sql}]` for long scripts; the stale-proposal check; *Build with the assistant* in Explore | `web/assist.js`, `web/assist-ui.js`, `web/app.js` (toolbox, explore) | node tests: edit merging and statement numbering; e2e: change panel 2 to a table; Explore entry with the scope | 2 d |
 | **M2-3. Ask core (server)** | `src/host/ask.rs`: the server-side loop over the Messages API (raw HTTPS through the existing `ureq`, because there is no official Rust SDK; non-streaming model calls, with progress sent to the client as server-sent events), the `list_panels` / `get_panel` / `answer` tools behind a panel-runner trait, the catalog builder, the citation check, masking and its reverse, the conversation store, the limits, the log lines; `-- @ask on` / `-- @ask skip` in `parse_dashboard_meta` and `dashboard_meta`; the lint checks `header/bad-ask` and `ask/raw-detail`; `web/assist/ask-instructions.md` (shared with the builder) | `src/host/ask.rs`, `src/host/serving.rs`, `src/lint.rs`, `src/wasm.rs`, `web/assist/ask-instructions.md` | Rust with a fake upstream: the loop, the turn and size caps, citation pass / fail, the masking round trip, history never taken from the client, the limits → 429, the key never in output or logs | 3 d + review |
@@ -1638,6 +1638,26 @@ the index, and each change has a test in §12.9 or in the PR that builds it.
 
 **Implementation of M2-3 and later starts only now that these are in the
 note.** Each serving PR still gets its own review (§12.12).
+
+### 12.15 Delta review (2026-10-30)
+
+The design review (M2-0, §12.14) predates several locked-server features.
+This delta review checks §12 and §2.3 against `docs/secure-serving.md` as of
+2026-10-30. It was done by the implementing session (the owner's rule since
+2026-10-28: no sub-agents), not by an independent reviewer — each serving PR
+still gets its own review (§12.12). Verdict: **the design holds, with two
+required changes before M2-3 (D1, D2)**; the rest go into the PR that builds
+the part they touch.
+
+| # | Feature since 10-18 | Finding | Required change | When |
+|---|---|---|---|---|
+| **D1** (Medium) | Per-viewer state, `viewer_state` (#517) | A panel can read recorded answers: the viewer's own, or every viewer's on a trainer's panel. Ask's `get_panel` would send them to the model provider — other people's answers, personal data under §12.7. | A statement that reads `viewer_state` / `viewer_state_latest` is on Ask's exclusion list (I2) by default; `-- @ask include` on that statement opts it in, and the lint flags a trainer (all-rows) panel opted in. Masking (§12.7) applies to it like any panel. | before M2-3 |
+| **D2** (Medium) | `-- @materialize` (#727) and warm connections (#388) | An Ask question runs panels like a viewer does, so it can build materialized results (shared across logins, LRU 16 per snapshot) and evict others' — a burst of questions with many variable values degrades every viewer, and the build time can exceed the per-question deadline. | Ask's `get_panel` counts a materialized build against the question's own slot budget and deadline (H2); the variables Ask may set stay limited to the input panels' options (M3), which bounds the builds per dashboard; the load test (§12.9 test 8) includes a `@materialize` dashboard. | before M2-3 |
+| D3 (Low) | Shared write-back (#684, #726, #736) | Saved tables are read like other tables (a policy's rules apply to the ones it names). Ask's tools are read-only, but `::SAVE` / `::FORM` statements must not be callable through `get_panel` as if they were panels, and the save endpoint's 409 body (names of writers) never reaches Ask. | `::SAVE`, `::SUBMIT` and `::FORM` statements are on the exclusion list; no tool posts to `/api/save` or `/api/submit` (already true: no side-effect tools) — a test asserts the tool list. | M2-3 |
+| D4 (Low) | `::SHOW_IF`, `::GUIDE_STEP` / `::GATE` (#515, #516) | These hide panels but are not access control (docs say so); Ask may read a panel the page doesn't show right now. | Citation chips to a panel hidden by a condition say so ("not shown right now"); the notice (L6) wording covers "panels on this dashboard", not "panels on screen". | M2-4 |
+| D5 (Low) | Nav pickers, `path_vars` (#556) | A variable Ask sets that is a `path_vars` variable reaches file paths. | Ask may set a `path_vars` variable only to a value its nav picker offers, through the same `valid_path_value` check a request gets. | M2-4 |
+| D6 (Low) | `::IMAGE` / Markdown images, `/d/<id>/assets` (#514) | `get_panel` on an image panel would hand the model asset paths (internal file names). | Image panels' URLs are not part of a panel's rows for Ask; the alt text is. | M2-3 |
+| D7 (Info) | Snapshot refresh, Quack source (#352) | A conversation can span a refresh: earlier answers cite data that changed. | Citations are verified against the snapshot of the answer they belong to; a chip opened after a refresh says the data was refreshed. | M2-5 |
 
 ### 12.13 The follow-up Ask must not block: a dashboard published as an agent (#194)
 
