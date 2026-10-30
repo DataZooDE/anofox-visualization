@@ -42,6 +42,7 @@ use crate::limits::{Charge, Inflight, Queries};
 use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
 use anofox_visualization::host::app_brand::{self, AppBrand};
+use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
@@ -395,17 +396,24 @@ struct Authoring {
     /// dashboards folder to derive one from — plan-514 decision 5, now
     /// overridden only when this option is given).
     assets_root: Option<PathBuf>,
+    /// #740: the `/assist` proxy, when a key is configured ([`start_assist`]).
+    proxy: Option<assist::Proxy>,
 }
 
 /// `options.assets`: pulled out of `options` before [`AppBrand::from_json`]
 /// sees the rest, so an unrecognised key there still refuses loudly (#522)
 /// — `AppBrand`'s own validation is otherwise untouched.
-fn parse_assets_option(options: &str) -> Result<(Option<PathBuf>, String), String> {
+fn parse_assets_option(
+    options: &str,
+) -> Result<(Option<PathBuf>, assist::AssistOptions, bool, String), String> {
     let mut v: serde_json::Value =
         serde_json::from_str(options).map_err(|e| format!("bad JSON: {e}"))?;
     let obj = v
         .as_object_mut()
         .ok_or_else(|| "options must be a JSON object".to_string())?;
+    // #740: the `assist` / `assist_*` keys, same as `assets` below.
+    let asked = obj.keys().any(|k| k.starts_with("assist_"));
+    let assist = assist::AssistOptions::take(obj)?;
     let assets = match obj.remove("assets") {
         None => None,
         Some(serde_json::Value::String(s)) if !s.is_empty() => Some(
@@ -414,7 +422,7 @@ fn parse_assets_option(options: &str) -> Result<(Option<PathBuf>, String), Strin
         ),
         Some(_) => return Err("options.assets must be a non-empty string path".into()),
     };
-    Ok((assets, v.to_string()))
+    Ok((assets, assist, asked, v.to_string()))
 }
 
 /// Review of #604 S1: `options.assets` reads a file with plain `std::fs`
@@ -438,14 +446,7 @@ fn parse_assets_option(options: &str) -> Result<(Option<PathBuf>, String), Strin
 /// itself runs on) — never per asset request, same posture as
 /// `validated_assets_root` itself.
 fn assets_option_allowed(conn: &Conn, root: &Path) -> Result<(), String> {
-    let setting_text = |name: &str| -> Option<String> {
-        conn.query(&format!("SELECT current_setting('{name}')::VARCHAR"))
-            .and_then(|mut r| r.string_rows(1))
-            .ok()
-            .and_then(|rows| rows.into_iter().next())
-            .and_then(|row| row.into_iter().next().flatten())
-    };
-    if setting_text("enable_external_access").as_deref() != Some("true") {
+    if !external_access_on(conn) {
         return Err(
             "options.assets needs enable_external_access (it reads files with std::fs, \
              bypassing that setting otherwise) — SET enable_external_access = true on this \
@@ -453,6 +454,23 @@ fn assets_option_allowed(conn: &Conn, root: &Path) -> Result<(), String> {
                 .into(),
         );
     }
+    inside_allowed_directories(conn, "options.assets", root)
+}
+
+/// `enable_external_access` is the literal `true` (fails closed).
+fn external_access_on(conn: &Conn) -> bool {
+    conn.query("SELECT current_setting('enable_external_access')::VARCHAR")
+        .and_then(|mut r| r.string_rows(1))
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+        .and_then(|row| row.into_iter().next().flatten())
+        .as_deref()
+        == Some("true")
+}
+
+/// With a non-empty `allowed_directories`, `path` (canonical) must be inside
+/// one of them.
+fn inside_allowed_directories(conn: &Conn, what: &str, path: &Path) -> Result<(), String> {
     let allowed: Vec<String> = conn
         .query("SELECT unnest(current_setting('allowed_directories')) AS d")
         .and_then(|mut r| r.string_rows(4096))
@@ -468,16 +486,75 @@ fn assets_option_allowed(conn: &Conn, root: &Path) -> Result<(), String> {
     let inside = allowed.iter().any(|d| {
         Path::new(d)
             .canonicalize()
-            .is_ok_and(|real| root.starts_with(&real))
+            .is_ok_and(|real| path.starts_with(&real))
     });
     if !inside {
         return Err(format!(
-            "options.assets '{}' is outside every directory in allowed_directories ({})",
-            root.display(),
+            "{what} '{}' is outside every directory in allowed_directories ({})",
+            path.display(),
             allowed.join(", ")
         ));
     }
     Ok(())
+}
+
+/// #740: the `/assist` proxy of an authoring server, from `options`'
+/// `assist_*` keys and the key (`ANTHROPIC_API_KEY` or
+/// `options.assist_key_file`). The proxy calls out of the process and its
+/// key file and log are plain `std::fs`, all past DuckDB's own lockdown, so
+/// on a session with `enable_external_access = false` it stays off: an
+/// error when an `assist_*` option asked for it, a note otherwise (a key in
+/// the environment alone). The key file and the log must be inside
+/// `allowed_directories` when that is set.
+fn start_assist(
+    conn: &Conn,
+    a: assist::AssistOptions,
+    asked: bool,
+) -> Result<(Option<assist::Proxy>, String), String> {
+    let has_key =
+        a.key_file.is_some() || std::env::var(assist::KEY_ENV).is_ok_and(|k| !k.trim().is_empty());
+    if a.off || !has_key {
+        return Ok((None, String::new()));
+    }
+    if !external_access_on(conn) {
+        if asked {
+            return Err(
+                "options.assist_* needs enable_external_access (the assistant's proxy calls the \
+                 model API and reads its key file outside DuckDB) — SET enable_external_access = \
+                 true on this session first, or leave the assist options out"
+                    .into(),
+            );
+        }
+        return Ok((
+            None,
+            "; assistant proxy off: enable_external_access is false on this session".into(),
+        ));
+    }
+    if let Some(f) = &a.key_file {
+        let real = f
+            .canonicalize()
+            .map_err(|e| format!("options.assist_key_file {}: {e}", f.display()))?;
+        inside_allowed_directories(conn, "options.assist_key_file", &real)?;
+    }
+    if let Some(l) = a
+        .log
+        .as_deref()
+        .filter(|l| !matches!(l.trim(), "stderr" | "-"))
+    {
+        let p = Path::new(l);
+        let dir = p
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let real = dir
+            .canonicalize()
+            .map_err(|e| format!("options.assist_log {l}: {e}"))?;
+        inside_allowed_directories(conn, "options.assist_log", &real)?;
+    }
+    match assist::build(false, a.cfg, a.key_file.as_deref(), a.log.as_deref())? {
+        Some((p, note)) => Ok((Some(p), format!("; {note}"))),
+        None => Ok((None, String::new())),
+    }
 }
 
 /// `anofox_serve(port[, options])`: start the authoring server on
@@ -493,9 +570,9 @@ pub fn start_authoring(
     port: u16,
     options: Option<&str>,
 ) -> Result<String, String> {
-    let (assets_root, app) = match options {
+    let (assets_root, assist_opts, assist_asked, app) = match options {
         Some(json) => {
-            let (assets, rest) = parse_assets_option(json)?;
+            let (assets, assist_opts, asked, rest) = parse_assets_option(json)?;
             if let Some(root) = &assets {
                 // #604 S1: before accepting the option at all, not after
                 // the server is already listening.
@@ -510,16 +587,27 @@ pub fn start_authoring(
                 format!(
                     "options: {e}{}",
                     if e.contains("unknown key") {
-                        ", or assets"
+                        ", or assets, or assist / assist_*"
                     } else {
                         ""
                     }
                 )
             })?;
-            (assets, app)
+            (assets, assist_opts, asked, app)
         }
-        None => (None, AppBrand::default()),
+        None => (
+            None,
+            assist::AssistOptions::default(),
+            false,
+            AppBrand::default(),
+        ),
     };
+    // #740: before binding, like the assets check.
+    let (proxy, assist_note) = start_assist(
+        &ctx.conn.lock().unwrap_or_else(|p| p.into_inner()),
+        assist_opts,
+        assist_asked,
+    )?;
     let mut servers = lock_servers();
     // #604 S2: `port == 0` asks the OS for any free loopback port instead
     // of a caller guessing one and racing to bind it independently (the
@@ -561,6 +649,7 @@ pub fn start_authoring(
         max_body: 4 << 20,
         app: app.script(),
         assets_root: assets_root.clone(),
+        proxy,
     });
     let url = state.guard.login_url("127.0.0.1");
     let stop = Arc::new(AtomicBool::new(false));
@@ -592,7 +681,7 @@ pub fn start_authoring(
         .map(|p| format!("; assets served from '{}'", p.display()))
         .unwrap_or_default();
     Ok(format!(
-        "anofox-visualization serving {url} (authoring: runs SQL on this session; loopback only; the URL carries the session token){assets_note}"
+        "anofox-visualization serving {url} (authoring: runs SQL on this session; loopback only; the URL carries the session token){assets_note}{assist_note}"
     ))
 }
 
@@ -613,6 +702,12 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
     }
     if let Err(d) = st.guard.check(&m) {
         return text(req, d.status(), d.message());
+    }
+    // #740: after the guard, like /query. 404 when the proxy is off.
+    // Only `/assist/v1/…`: `/assist/<file>` is the builder's own code
+    // (web/assist/).
+    if assist::is_api_path(&path) {
+        return assist_route(st.proxy.as_ref(), &path, req);
     }
     if path == "/query" {
         if req.method() != &Method::Post {
@@ -668,6 +763,35 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
         return text(req, 405, "method not allowed");
     }
     serve_asset(req, &path, &st.app);
+}
+
+/// `POST /assist/v1/messages[/count_tokens]` (#740): on a thread of its own
+/// (bounded by the proxy's pool), so a minute-long stream never holds the
+/// one authoring worker `/query` runs on. The reply goes out on the raw
+/// connection ([`assist::write_http`]: a stream is flushed per read).
+fn assist_route(proxy: Option<&assist::Proxy>, path: &str, mut req: Request) {
+    let (Some(p), Some(ep)) = (proxy, assist::Endpoint::from_path(path)) else {
+        return text(req, 404, "not found");
+    };
+    if req.method() != &Method::Post {
+        return text(req, 405, "POST only");
+    }
+    let Some(slot) = p.try_slot() else {
+        let mut w = req.into_writer();
+        let _ = assist::write_http(&mut *w, assist::Proxy::busy());
+        return;
+    };
+    let p = p.clone();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = req
+            .as_reader()
+            .take(assist::MAX_REQUEST as u64 + 1)
+            .read_to_end(&mut buf);
+        let reply = p.handle(slot, ep, &buf);
+        let mut w = req.into_writer();
+        let _ = assist::write_http(&mut *w, reply);
+    });
 }
 
 /// `GET`/`HEAD /assets/<rest>` (#522, opt-in): one image file from the
@@ -4494,6 +4618,12 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             421,
             "misdirected request: unknown Host — add it to options.hosts (e.g. {\"hosts\": [\"dash.example.com\"]})",
         );
+    }
+    // #740: the assistant's proxy is an authoring route only; a locked
+    // server never has it, whatever the method or the login. (Only
+    // `/assist/v1/…`: `/assist/<file>` is the UI's own code, web/assist/.)
+    if assist::is_api_path(path) {
+        return reply(req, 404, "not found");
     }
     // CSRF: a browser request from another origin is refused outright.
     if !sv::origin_matches_host(m.origin, m.host) {

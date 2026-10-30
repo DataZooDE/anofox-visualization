@@ -965,6 +965,13 @@ jobs:
         timeout-minutes: 3
         run: node scripts/materialize-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/assist-served-e2e.mjs (#740): anofox_serve's /assist proxy
+      # relays to a local fake API with the server's key; locked → 404; no
+      # proxy on a session with enable_external_access = false.
+      - name: Assistant proxy on the extension e2e (#740)
+        timeout-minutes: 3
+        run: node scripts/assist-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"

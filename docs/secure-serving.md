@@ -140,6 +140,64 @@ so the protection is about making sure *only you* can send it:
   headers (identical to mode A's own `/d/<id>/assets/<rest>` below) are in
   "`GET`/`HEAD` `/assets/<rest>` — authoring, opt-in (#522)", next to mode
   A's own assets route further down this document.
+- **`POST /assist/v1/messages` and `…/count_tokens` (#740): the builder
+  assistant's proxy to the model API.** The API key stays on the server and
+  never reaches the browser. On when the server has a key:
+  `ANTHROPIC_API_KEY` in its environment, or `--assist-key-file FILE` /
+  `options.assist_key_file` (a regular file, not a symlink, not readable by
+  group or others, at most 4 KiB). `--no-assist` / `"assist": false` turns it
+  off even when a key is set. Without a key the route is a 404.
+  - *Auth:* the same token / loopback `Host` / same-origin guard as `/query`.
+    The proxy adds no auth of its own.
+  - *Not an open relay:* a request may carry only the fields the assistant
+    sends (`model`, `max_tokens`, `system`, `messages`, `tools`,
+    `tool_choice`, `thinking`, `stream`, `metadata`, `output_config`,
+    `cache_control`). Tools may only be the assistant's own (`list_tables`,
+    `profile_table`, `run_sql`, `check_dashboard`, `propose_dashboard`), with
+    no `type` (so no server tools) and no field besides `name`,
+    `description`, `input_schema`, `strict`, `cache_control` and
+    `eager_input_streaming`. Content blocks may be text, tool use / result
+    and thinking only: no image or document blocks, which can name a URL or
+    a file id. `metadata.user_id` must be an opaque id. The model must be on
+    `--assist-models` (default `claude-sonnet-5,claude-opus-5-5`), and
+    `max_tokens` at most `--assist-max-tokens` (default 32 000). Anything
+    else is a 400, and nothing is sent upstream.
+  - *Headers:* no client header is forwarded. The server sends its own
+    `x-api-key`, a pinned `anthropic-version`, `content-type` and a generic
+    `User-Agent`, so a client's `anthropic-beta` never passes.
+  - *Upstream:* `--assist-base-url` / `options.assist_base_url` (default
+    `https://api.anthropic.com`; a company gateway that speaks the same API)
+    must be `https://`, or `http://` to a loopback address. The proxy follows
+    no redirects and never uses a proxy from the environment (`HTTPS_PROXY`
+    would see the key). Upstream error bodies are never relayed (they can
+    echo the request); the client gets the status and the error type only.
+  - *Cost:* an hourly budget of tokens of every kind per server
+    (`--assist-budget-tokens-per-hour`, default 2 000 000) answers 429 once
+    it is used up. `count_tokens` is free and not counted. At most two calls
+    run at once (503 beyond that), each on its own thread, so a minute-long
+    stream never holds the authoring worker `/query` runs on.
+  - *Log:* `--assist-log PATH|stderr` / `options.assist_log` writes one JSON
+    line per call: `ts`, `endpoint`, `model`, `status`, the four token
+    counts, `request_id`, `ms`, `complete`. No prompt, SQL or key, unless
+    `--assist-log-content` / `options.assist_log_content` adds the request
+    body for an audit.
+  - *The extension:* the proxy calls out of the process and reads its key
+    file and writes its log with plain `std::fs`, past DuckDB's own
+    lockdown. On a session with `enable_external_access = false` it stays
+    off: `anofox_serve` refuses `assist_*` options there, and a key in the
+    environment alone only gets a note in the result. With
+    `allowed_directories` set, the key file and the log must be inside one
+    of them.
+    Whoever can call `anofox_serve` can also set `assist_base_url` to their
+    own `https://` host and so receive the key. A session with external
+    access can read the process environment anyway (`getenv`,
+    `/proc/self/environ`), so this is no new exposure. Still: never put
+    `ANTHROPIC_API_KEY` in the environment of a process that runs SQL you
+    don't trust.
+  - A locked server (`anofox_serve_dashboards`, `serve --dashboards`) never
+    routes `/assist/v1/*` (always 404), and `serve --dashboards` refuses the
+    `--assist-*` flags. (`/assist/<file>` outside `v1/` is the UI's own code,
+    `web/assist/`, served as before.)
 
 `SELECT anofox_serve_stop(port)` stops an extension server.
 
