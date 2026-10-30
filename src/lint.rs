@@ -153,6 +153,8 @@ pub struct Diagnostic {
     /// note: a `design/*` advisory the statement allows on purpose; the
     /// message names it) | `lint/allow-not-design` | `lint/allow-unused`
     /// (warnings).
+    /// `-- @ask` marks ([`ask_diags`], #745): `ask/unknown-mark` |
+    /// `ask/include-state` | `ask/mark-unused` (warnings).
     pub code: &'static str,
     pub message: String,
     /// The offending statement, trimmed to one line.
@@ -2508,6 +2510,7 @@ where
     diags.extend(step_diags(&plan, script));
     diags.extend(figure_diags(&plan, &figure_cols));
     diags.extend(diagram_check_diags(&plan));
+    diags.extend(ask_diags(script, &plan));
     apply_lint_allow(&mut diags, &plan, opts.design);
     diags
 }
@@ -2716,6 +2719,86 @@ fn apply_lint_allow(diags: &mut Vec<Diagnostic>, plan: &[sql::Panel], design: bo
             });
         }
     }
+}
+
+/// `-- @ask` marks (#745, plan-ai-assistant.md §12.15 D1): see
+/// [`sql::ask`]. `ask/unknown-mark` (a word other than `skip` / `include` /
+/// `mask`, or `on` / `off` outside the header) · `ask/include-state` (an
+/// opted-in `viewer_state` panel: on a trainer's dashboard its rows are
+/// every viewer's answers — whether this dashboard has trainers is a
+/// server option, checked when Ask starts) · `ask/mark-unused` (`skip` /
+/// `include` on a setup statement, `include` on one that reads no
+/// `viewer_state` or is excluded anyway) — all warnings.
+fn ask_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let raws = sql::ask::raw_statements(script);
+    let state = sql::ask::reads_viewer_state(plan);
+    for (i, p) in plan.iter().enumerate() {
+        let Some(raw) = raws.get(i) else { break };
+        let marks = sql::ask::marks(raw);
+        let has = |w: &str| marks.iter().any(|(m, _)| m == w);
+        let mut push = |code: &'static str, message: String| {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code,
+                message,
+                sql: one_line(p.sql.trim()),
+            })
+        };
+        for (m, _) in &marks {
+            let header = i == 0 && matches!(m.as_str(), "on" | "off");
+            if !header && !sql::ask::MARKS.contains(&m.as_str()) {
+                push(
+                    "ask/unknown-mark",
+                    format!(
+                        "-- @ask {m}: not a mark — `-- @ask skip` keeps the panel below out of \
+                         Ask, `-- @ask include` opts a viewer_state panel in, `-- @ask on` \
+                         (in the header) turns Ask on for the dashboard"
+                    ),
+                );
+            }
+        }
+        for m in ["skip", "include"] {
+            if has(m) && p.setup {
+                push(
+                    "ask/mark-unused",
+                    format!(
+                        "-- @ask {m} on a setup statement: Ask only reads panels — put it \
+                         directly above the panel"
+                    ),
+                );
+            }
+        }
+        if p.setup || !has("include") {
+            continue;
+        }
+        if has("skip") || sql::ask::is_write_back(p) {
+            push(
+                "ask/mark-unused",
+                "-- @ask include: this statement stays out of Ask anyway (-- @ask skip, or \
+                 ::SAVE / ::SUBMIT / ::FORM) — drop the line"
+                    .into(),
+            );
+        } else if !state[i] {
+            push(
+                "ask/mark-unused",
+                "-- @ask include: this panel reads no viewer_state, so Ask reads it already \
+                 — drop the line"
+                    .into(),
+            );
+        } else {
+            push(
+                "ask/include-state",
+                "-- @ask include: Ask sends this viewer_state panel's rows to the model \
+                 provider — on a trainer's dashboard (options.state.trainers) those are every \
+                 viewer's answers, personal data; opt in only for aggregates, and mask names \
+                 (-- @ask mask col,…)"
+                    .into(),
+            );
+        }
+    }
+    diags
 }
 
 /// `::SHOW_IF` checks (#515) that need the whole plan at once (a condition's
@@ -11349,5 +11432,63 @@ mod step_tests {
         });
         assert!(!has(&d, "step/gate-not-boolean"), "{d:?}");
         assert!(!has(&d, "step/gate-no-row"), "{d:?}");
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::*;
+
+    fn codes(script: &str) -> Vec<(usize, &'static str)> {
+        ask_diags(script, &sql::plan(script))
+            .iter()
+            .map(|d| (d.stmt, d.code))
+            .collect()
+    }
+
+    #[test]
+    fn unknown_marks() {
+        assert_eq!(
+            codes("-- @ask on\nSELECT 1::METRIC;\n-- @ask off\nSELECT 2::METRIC;\n-- @ask skp\nSELECT 3::METRIC;"),
+            [(2, "ask/unknown-mark"), (3, "ask/unknown-mark")]
+        );
+        assert!(codes(
+            "-- @ask skip\nSELECT 1::METRIC;\n-- @ask mask name\nSELECT name::TABLE FROM t;"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn include_on_viewer_state() {
+        let s = "CREATE TEMP VIEW a AS SELECT * FROM viewer_state;\n\
+                 -- @ask include\nSELECT count(*)::METRIC FROM a;";
+        assert_eq!(codes(s), [(2, "ask/include-state")]);
+        let d = ask_diags(s, &sql::plan(s));
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(d[0].message.contains("trainer"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn unused_marks() {
+        assert_eq!(
+            codes(
+                "-- @ask skip\nCREATE TEMP VIEW v AS SELECT 1;\n\
+                 -- @ask include\nSELECT 1::METRIC FROM sales;\n\
+                 -- @ask include\nSELECT 'Save'::SAVE;\n\
+                 -- @ask include\n-- @ask skip\nSELECT 1::METRIC FROM viewer_state;"
+            ),
+            [
+                (1, "ask/mark-unused"),
+                (2, "ask/mark-unused"),
+                (3, "ask/mark-unused"),
+                (4, "ask/mark-unused")
+            ]
+        );
+    }
+
+    #[test]
+    fn full_check_runs_it() {
+        let d = check("-- @ask skp\nSELECT 1::METRIC;", |_| Ok(vec![]));
+        assert!(d.iter().any(|x| x.code == "ask/unknown-mark"), "{d:?}");
     }
 }
