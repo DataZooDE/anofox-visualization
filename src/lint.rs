@@ -9967,10 +9967,10 @@ mod design_tests {
             ),
             vec!["tooltip/unknown-placeholder", "tooltip/bad-format"]
         );
-        let row = json!({ "c0": "a", "c1": 1.0, "c2": "split" });
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "spread" });
         assert_eq!(
             codes(
-                "SELECT x::XAXIS, y::BARCHART, 'split'::TOOLTIP_MODE FROM t;",
+                "SELECT x::XAXIS, y::BARCHART, 'spread'::TOOLTIP_MODE FROM t;",
                 row
             ),
             vec!["tooltip/unknown-mode"]

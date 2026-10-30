@@ -19798,7 +19798,33 @@ function tipSpec(panel) {
   panel._tipSpec = spec;
   return spec;
 }
-// #751: a panel's ::TOOLTIP_MODE ('shared' | 'single' | 'none'), "" when unset.
+// #751 'split': one floating label per series, beside its point (`items`:
+// [{el, html}], html already escaped); [] clears them.
+function splitLabels(items) {
+  let box = document.getElementById("dp-tip-split");
+  if (!items.length) {
+    box?.replaceChildren();
+    return;
+  }
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "dp-tip-split";
+    box.setAttribute("aria-hidden", "true");
+    document.body.appendChild(box);
+  }
+  box.replaceChildren();
+  for (const it of items) {
+    if (!it.el) continue;
+    const r = it.el.getBoundingClientRect();
+    const d = document.createElement("div");
+    d.className = "dp-tip-split";
+    d.innerHTML = it.html;
+    d.style.left = Math.min(r.right + 8, window.innerWidth - 200) + "px";
+    d.style.top = r.top - 10 + "px";
+    box.appendChild(d);
+  }
+}
+// #751: a panel's ::TOOLTIP_MODE ('shared' | 'single' | 'split' | 'none'), "" when unset.
 function tipMode(panel) {
   const dp = panel?._dp;
   const r = dp && Array.isArray(dp.roles) ? dp.roles.find((x) => x[1] === "TOOLTIP_MODE") : null;
@@ -19815,7 +19841,8 @@ function tipMode(panel) {
 function customTip(el, info, fill) {
   const spec = tipSpec(el.closest(".panel"));
   if (!spec) return null;
-  const ri = Number(el.getAttribute("data-row"));
+  // A line's own path carries its first row's data-row; it names no point.
+  const ri = el.tagName === "polyline" || el.classList.contains("gg-line") ? NaN : Number(el.getAttribute("data-row"));
   const row = Number.isInteger(ri) ? spec.rows[ri] : null;
   const dv = parseFloat(el.getAttribute("data-value"));
   const fields = { series: info.series, y: Number.isFinite(dv) ? dv : info.value, x: row && spec.x ? row[spec.x] : info.x };
@@ -20614,6 +20641,7 @@ function attachAxisPointer() {
     if (dataCircles(svg0).length < 3) return; // needs a line/scatter chart
     // #751: 'single' lists only the hovered mark, 'none' shows nothing.
     if (["single", "none"].includes(tipMode(panel))) return;
+    const splitMode = tipMode(panel) === "split";
     panel.dataset.axisWired = "1";
     panel.classList.add("has-axis-pointer");
     const area = panel.querySelector(".panel-svg") || svg0;
@@ -20674,7 +20702,11 @@ function attachAxisPointer() {
       // #751: a panel's tooltip templates apply to the crosshair's rows too.
       const cts = colPts.map((p) => (p.el ? customTip(p.el, p.info, p.fill) : null));
       const head = cts[0]?.head ?? (colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "");
-      tip.innerHTML = head + colPts.map((p, i) => (cts[i] ? cts[i].body : tipRow(p.info, p.fill))).join("") + rules.map(ruleRow).join("");
+      // #751 'split': the header in the tip, one label per series beside its point
+      if (splitMode) {
+        tip.innerHTML = head;
+        splitLabels(colPts.map((p, i) => ({ el: p.el, html: cts[i] ? cts[i].body : tipRow(p.info, p.fill) })));
+      } else tip.innerHTML = head + colPts.map((p, i) => (cts[i] ? cts[i].body : tipRow(p.info, p.fill))).join("") + rules.map(ruleRow).join("");
       tip.classList.add("show");
       ours = tip.innerHTML;
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
@@ -20687,6 +20719,7 @@ function attachAxisPointer() {
       // hide the tip only while it still shows our column, not a mark's own
       if (ours && tip.innerHTML === ours) tip.classList.remove("show");
       ours = "";
+      splitLabels([]);
     };
     const leave = () => {
       off();

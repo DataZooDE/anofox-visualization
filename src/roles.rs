@@ -283,7 +283,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TOOLTIP_HEADER", &["TOOLTIPHEADER"], R::TooltipHeader, "modifier", true,
       "the tooltip's header, same placeholders: '{x:%d %b %Y}'"),
     e("TOOLTIP_MODE", &["TOOLTIPMODE"], R::TooltipMode, "modifier", true,
-      "which marks the tooltip lists: 'shared' (every series at the x, a line chart's crosshair — the default there), 'single' (only the hovered mark), 'none' (no tooltip)"),
+      "which marks the tooltip lists: 'shared' (every series at the x, a line chart's crosshair — the default there), 'single' (only the hovered mark), 'split' (a label per series beside its point, on a line chart's crosshair), 'none' (no tooltip)"),
     e("HOVER_FOCUS", &["HOVERFOCUS"], R::HoverFocus, "modifier", true,
       "hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts)"),
     e("POINTS", &["MARKERS"], R::Points, "modifier", true,

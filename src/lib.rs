@@ -2239,7 +2239,7 @@ pub const POINTS_MODES: &[&str] = &["auto", "none", "always"];
 
 /// The `::HOVER_FOCUS` values the browser knows.
 /// #751: the `::TOOLTIP_MODE` values (browser: `tipMode`, web/app.js).
-pub const TOOLTIP_MODES: [&str; 3] = ["shared", "single", "none"];
+pub const TOOLTIP_MODES: [&str; 4] = ["shared", "single", "split", "none"];
 pub const HOVER_FOCUS_MODES: &[&str] = &["series", "none"];
 
 /// The `::LEGEND` values — `'none'` plus every [`ggplot_rs::theme::LegendPosition`]
