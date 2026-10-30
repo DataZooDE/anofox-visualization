@@ -441,7 +441,10 @@ const prefix = A.buildPrefix({ instructions: read("web/assist/instructions.md"),
   assert.equal(prefix.tools.map((t) => t.name).join(), "list_tables,profile_table,run_sql,check_dashboard,propose_dashboard", "fixed tool order");
   for (const t of prefix.tools) {
     assert.equal(t.input_schema.additionalProperties, false, t.name);
-    assert.deepEqual(t.input_schema.required, Object.keys(t.input_schema.properties), t.name);
+    // #744: propose_dashboard (not strict) takes sql or edits; every other
+    // tool requires all of its fields (strict tools must).
+    if (t.name === "propose_dashboard") assert.deepEqual(t.input_schema.required, ["summary", "panels", "open_issues"]);
+    else assert.deepEqual(t.input_schema.required, Object.keys(t.input_schema.properties), t.name);
   }
   assert.equal(prefix.system.length, 2);
   assert.deepEqual(prefix.system[1].cache_control, { type: "ephemeral" });
@@ -866,7 +869,86 @@ try {
 } catch (_) {}
 if (!wasm || !duckdb) {
   console.log("assist_test: DuckDB-Wasm part skipped (needs web/pkg and npm install --prefix tests/web)");
-  console.log("assist_test: ok");
+  // ---- #744: edits, follow-ups, change panel, Explore scope ----
+{
+  const { statementSpans, scopeTables } = await import("../../web/assist-ui.js");
+  const S0 = "-- @title X\nCREATE TEMP TABLE t AS SELECT 1 AS x;\n\n-- the kpi\nSELECT x ::METRIC FROM t;\nSELECT 2 AS y ::METRIC";
+  const sp = statementSpans(S0);
+  assert.equal(sp.length, 3);
+  // replace keeps the separators and the other statements' text
+  assert.equal(A.mergeEdits(S0, sp, [{ stmt: 2, sql: "SELECT x ::TABLE FROM t;" }]), "-- @title X\nCREATE TEMP TABLE t AS SELECT 1 AS x;\n\nSELECT x ::TABLE FROM t;\nSELECT 2 AS y ::METRIC");
+  // delete the last; insert after the last (a terminator is added); insert at the top
+  assert.equal(A.mergeEdits(S0, sp, [{ stmt: 3, sql: "" }]), "-- @title X\nCREATE TEMP TABLE t AS SELECT 1 AS x;\n\n-- the kpi\nSELECT x ::METRIC FROM t;\n");
+  const appended = A.mergeEdits(S0, sp, [{ after: 3, sql: "SELECT 3 AS z ::METRIC" }]);
+  assert.match(appended, /SELECT 2 AS y ::METRIC;\n\nSELECT 3 AS z ::METRIC;/);
+  assert.equal(statementSpans(appended).length, 4);
+  assert.match(A.mergeEdits(S0, sp, [{ after: 0, sql: "SET VARIABLE a = 1" }]), /^SET VARIABLE a = 1;\n\n-- @title X/);
+  // numbers always refer to the original script (two edits, either order)
+  const two = A.mergeEdits(S0, sp, [{ stmt: 3, sql: "SELECT 'c' AS c ::METRIC" }, { stmt: 1, sql: "CREATE TEMP TABLE t AS SELECT 5 AS x" }]);
+  assert.equal(statementSpans(two).length, 3);
+  assert.match(two, /SELECT 5 AS x;[\s\S]*the kpi[\s\S]*SELECT 'c' AS c ::METRIC$/);
+  for (const [bad, re] of [
+    [[{ stmt: 9, sql: "x" }], /no statement 9 \(the script has 3\)/],
+    [[{ stmt: 2, after: 1, sql: "x" }], /either stmt .* or after/],
+    [[{ sql: "x" }], /neither/],
+    [[{ stmt: 2, sql: "a" }, { stmt: 2, sql: "b" }], /edited twice/],
+    [[{ after: 1, sql: "" }], /insert needs sql/],
+    [[], /empty/],
+  ])
+    assert.throws(() => A.mergeEdits(S0, sp, bad), re);
+  // proposalInput: exactly one of sql / edits; edits need a base
+  assert.match(A.proposalInput({ sql: "x", edits: [{ stmt: 1, sql: "y" }] }, null).error, /not both/);
+  assert.match(A.proposalInput({ summary: "s" }, null).error, /not neither/);
+  assert.match(A.proposalInput({ edits: [{ stmt: 1, sql: "y" }] }, { sql: "", spans: [] }).error, /need an existing script/);
+  assert.match(A.proposalInput({ edits: [{ stmt: 7, sql: "y" }] }, { sql: S0, spans: sp }).error, /don't fit[\s\S]*no statement 7/);
+  const ok = A.proposalInput({ edits: [{ stmt: 2, sql: "SELECT x ::TABLE FROM t" }], summary: "s", panels: [], open_issues: [] }, { sql: S0, spans: sp });
+  assert.ok(ok.input.sql.includes("SELECT x ::TABLE FROM t") && ok.input.edits === undefined);
+  // schema: sql and edits optional, each edit needs sql
+  const pd = prefix.tools.find((t) => t.name === "propose_dashboard").input_schema;
+  assert.equal(A.validate(pd, { edits: [{ stmt: 1, sql: "x" }], summary: "s", panels: [], open_issues: [] }), null);
+  assert.match(A.validate(pd, { edits: [{ stmt: 1 }], summary: "s", panels: [], open_issues: [] }), /sql is missing/);
+
+  // the loop merges edits over `base` before the check, and a bad edit goes
+  // back as an error result (not a round)
+  const tr = scripted([
+    turn([use("propose_dashboard", { edits: [{ stmt: 9, sql: "x" }], summary: "s", panels: [], open_issues: [] })]),
+    turn([use("propose_dashboard", { edits: [{ stmt: 2, sql: "SELECT x ::TABLE FROM t" }], summary: "Panel 2 as a table.", panels: [], open_issues: [] })]),
+  ]);
+  const tools = fakeTools();
+  const ctxCp = A.buildContext({ mode: "change_panel", panel: 2, panelTitle: "The KPI", editing: "editor", tables: [{ name: "t", rows: 1 }], sql: S0, spans: sp });
+  assert.equal(ctxCp.panel, 2);
+  assert.equal(ctxCp.panel_title, "The KPI");
+  assert.equal(ctxCp.editing, "editor");
+  assert.equal(ctxCp.statements.length, 3);
+  assert.equal(A.buildContext({ mode: "new", panel: 2, editing: "proposal" }).panel, undefined, "panel only in change_panel");
+  const r = await A.runAssistant({ transport: tr, prefix, ctx: ctxCp, request: "Make it a table", base: { sql: S0, spans: sp }, tools });
+  assert.equal(r.kind, "proposal");
+  assert.equal(r.rounds, 0, "a bad edit is not a check round");
+  assert.match(tr.sent[1].messages.at(-1).content[0].content, /don't fit/);
+  assert.ok(r.proposal.sql.includes("SELECT x ::TABLE FROM t") && r.proposal.sql.includes("SELECT 2 AS y ::METRIC"));
+  assert.ok(tools.log.some(([k, v]) => k === "check" && v === r.proposal.sql), "the merged script is what was checked");
+  assert.deepEqual(tr.sent[0].output_config, { effort: "medium" }, "a panel change is not a new dashboard");
+
+  // a follow-up: the history ends with the proposal's tool result; the new
+  // context and request join that user turn (the turns keep alternating)
+  const tr2 = scripted([turn([text("Done.")], "end_turn")]);
+  const r2 = await A.runAssistant({ transport: tr2, prefix, ctx: { ...ctxCp, mode: "edit", editing: "proposal" }, request: "Now sort it", history: r.messages, tools: fakeTools() });
+  assert.equal(r2.kind, "reply");
+  const msgs = tr2.sent[0].messages;
+  for (let i = 1; i < msgs.length; i++) assert.notEqual(msgs[i].role, msgs[i - 1].role, `turns alternate at ${i}`);
+  const lastUser = msgs.at(-1);
+  assert.equal(lastUser.content[0].type, "tool_result", "tool results first");
+  assert.match(lastUser.content.at(-2).text, /"editing":"proposal"/);
+  assert.equal(lastUser.content.at(-1).text, "Now sort it");
+  assert.equal(msgs.length, r.messages.length, "joined, not appended");
+
+  // Explore's scope wins over the editor's tables
+  const engineTables = [{ fq: '"memory"."main"."sales"', rows: 3 }, { fq: '"memory"."main"."stock"', rows: 2 }];
+  assert.deepEqual(scopeTables(engineTables, "SELECT * FROM sales", ['"memory"."main"."stock"']).inScope.map((t) => t.fq), ['"memory"."main"."stock"']);
+  assert.deepEqual(scopeTables(engineTables, "", ["memory.main.nothere"]).inScope.length, 2, "an unknown scope falls back");
+}
+
+console.log("assist_test: ok");
   process.exit(0);
 }
 const dist = path.dirname(require.resolve("@duckdb/duckdb-wasm/dist/duckdb-node-blocking.cjs"));

@@ -10,7 +10,7 @@
 //   scripts/fetch-wasm-extensions.sh
 //   NODE_PATH=<dir with playwright>/node_modules TMPDIR=<scratch>/tmp \
 //     node scripts/assist-e2e.mjs --pkg <pkg dir> [--port 8793] [--rec-port 8794] \
-//     [--axe axe.min.js] [--shots DIR] [--only main,phone,a11y,never,csp]
+//     [--axe axe.min.js] [--shots DIR] [--only main,edits,phone,a11y,never,csp]
 import { createRequire } from "module";
 import { createServer } from "http";
 import { readFileSync, existsSync, mkdirSync } from "fs";
@@ -1701,6 +1701,106 @@ if (run("main")) {
     for (let i = 0; i < 100 && mock.requests.length <= reqCountBefore; i++) await page.waitForTimeout(200);
     const lastReq = mock.requests[mock.requests.length - 1];
     record("M14: the follow-up carries history (>=3 messages)", (lastReq?.body?.messages || []).length >= 3, JSON.stringify((lastReq?.body?.messages || []).length));
+    await context.close();
+  }
+}
+
+// ---- #744 (M2-2): change a panel, follow-ups on a proposal, Explore's entry ----
+if (run("edits")) {
+  const TABLE_SQL = "SELECT region AS \"Region\" ::TABLE, sum(units) AS \"Units\" FROM sales GROUP BY region ORDER BY region";
+  // The dashboard the panel change works on: two panels over the table the
+  // setup made (its CREATE TABLE stays out — the write gate refuses it).
+  const TWO = "-- @title Units\nSELECT sum(units) AS n ::METRIC, 'Units'::LABEL FROM sales;\nSELECT region ::XAXIS, sum(units) ::BARCHART, 'EU sells the most units'::TITLE FROM sales GROUP BY 1 ORDER BY 2 DESC;\n";
+  const ctxOf = (req) => {
+    const t = (req?.body?.messages || []).flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((c) => c.type === "text" && c.text.startsWith("<context>")).at(-1)?.text || "";
+    try {
+      return JSON.parse(t.split("<data>\n")[1].split("\n</data>")[0]);
+    } catch (_) {
+      return {};
+    }
+  };
+  // E1–E3: ✦ on the KPI panel → "Changing panel n"; the model's edits turn
+  // it into a table; then a follow-up refines the unapplied proposal.
+  {
+    let target = 0;
+    let n = 0;
+    const handler = async () => {
+      n++;
+      if (n === 1) return sse({ content: [toolUse("toolu_e1", "propose_dashboard", { edits: [{ stmt: target, sql: TABLE_SQL }], summary: "The KPI as a table by region.", panels: [{ stmt: target, title: "Units by region", why: "the detail" }], open_issues: [] })], stop_reason: "tool_use" });
+      return sse({ content: [text("I would sort it by units next.")] });
+    };
+    const { context, page, mock } = await mainCtx(handler);
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.fill("#sql", TWO);
+    await page.click("#run");
+    await page.waitForFunction(() => document.querySelectorAll(".dash .panel[data-stmt] .dp-ai-change").length >= 2, null, { timeout: 60000 });
+    target = Number(await page.evaluate(() => document.querySelector(".dash .panel.metric[data-stmt]")?.dataset.stmt)) + 1;
+    record("E1: every panel has ✦ Change this panel in Edit mode", (await page.locator(".dash .panel[data-stmt]").count()) === (await page.locator(".dash .panel[data-stmt] .dp-ai-change").count()));
+    await page.hover(".dash .panel.metric[data-stmt]");
+    await page.click(".dash .panel.metric[data-stmt] .dp-ai-change");
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    await page.waitForSelector("#ai-target:not([hidden])", { timeout: 15000 });
+    const tgt = await page.textContent("#ai-target");
+    record("E1: the panel shows what it changes", new RegExp(`Changing panel ${target}`).test(tgt), tgt);
+    await page.fill("#ai-q", "Make this a table by region");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+    await page.check(".dp-dialog .ai-opt input[type=checkbox]");
+    await page.click('.dp-dialog button:has-text("Send")');
+    await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 }).catch(async (e) => {
+      console.log("[E2 debug]", mock.requests.length, await page.evaluate(() => document.getElementById("ai-log")?.textContent), JSON.stringify(mock.requests[1]?.body?.messages?.at(-1)?.content || "").slice(0, 800));
+      throw e;
+    });
+    const c1 = ctxOf(mock.requests[0]);
+    record("E2: the request is a panel change of that statement", c1.mode === "change_panel" && c1.panel === target && c1.editing === "editor", JSON.stringify({ mode: c1.mode, panel: c1.panel, editing: c1.editing }));
+    record("E2: the target is for one Send only", await page.evaluate(() => document.getElementById("ai-target").hidden));
+    await page.waitForFunction(() => document.querySelector(".dash .dp-table") && document.getElementById("preview-bar")?.hidden === false, null, { timeout: 60000 });
+    record("E2: the merged edits preview a table", true);
+    record("E2: the editor is unchanged until Apply", (await page.inputValue("#sql")) === TWO);
+    // E3: a follow-up while the proposal is unapplied: its script is the base
+    await page.fill("#ai-q", "Now sort it by units");
+    await page.keyboard.press("Enter");
+    for (let i = 0; i < 100 && mock.requests.length < 2; i++) await page.waitForTimeout(200);
+    const r2 = mock.requests[1];
+    const c2 = ctxOf(r2);
+    record("E3: the follow-up works on the unapplied proposal", c2.mode === "edit" && c2.editing === "proposal" && (c2.statements || []).some((s) => s.sql.includes("::TABLE")), JSON.stringify({ mode: c2.mode, editing: c2.editing }));
+    const msgs = r2?.body?.messages || [];
+    record("E3: it carries the conversation, turns alternating", msgs.length >= 3 && msgs.every((m, i) => !i || m.role !== msgs[i - 1].role), String(msgs.length));
+    await page.waitForFunction(() => /sort it by units next/.test(document.getElementById("ai-log")?.textContent || ""), null, { timeout: 60000 });
+    record("E3: the reply arrives", true);
+    await context.close();
+  }
+  // E4: Explore → ✦ Build with the assistant: an empty new dashboard, the
+  // table in scope.
+  {
+    const { context, page, mock } = await mainCtx(async () => sse({ content: [text("Which measure matters most?")] }));
+    await gotoEdit(page, SETUP_AND_METRIC);
+    await page.click("#side-explore");
+    await page.waitForSelector('.cat-table[data-fq$=\'"sales"\']', { timeout: 30000 });
+    await page.click('.cat-table[data-fq$=\'"sales"\']');
+    await page.waitForSelector('button:has-text("Build with the assistant")', { timeout: 60000 });
+    await page.click('button:has-text("Build with the assistant")');
+    await page.waitForSelector(".dp-dialog", { timeout: 15000 });
+    await addKey(page);
+    record("E4: Edit mode, an empty editor", (await page.evaluate(() => !document.body.classList.contains("mode-explore"))) && (await page.inputValue("#sql")) === "");
+    await page.fill("#ai-q", "A dashboard about this table");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+    await page.click('.dp-dialog button:has-text("Send")');
+    for (let i = 0; i < 100 && !mock.requests.length; i++) await page.waitForTimeout(200);
+    const c = ctxOf(mock.requests[0]);
+    const names = (c.tables || []).map((t) => t.name);
+    record("E4: a new dashboard with the sales table in scope", c.mode === "new" && names.length >= 1 && names[0].endsWith("sales") && !!c.tables[0].columns, JSON.stringify(names));
+    await context.close();
+  }
+  // E5: View mode hides ✦.
+  {
+    const { context, page } = await mainCtx(defaultHandler());
+    await page.goto(`${BASE}?mode=view#sql=${b64(SETUP_AND_METRIC)}`);
+    await settled(page);
+    await page.waitForTimeout(500);
+    record("E5: no visible ✦ in View mode", !(await page.locator(".dp-ai-change:visible").count()));
     await context.close();
   }
 }

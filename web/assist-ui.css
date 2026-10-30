@@ -9,6 +9,9 @@
 .ai-chips{all:unset;cursor:pointer;font-size:.76rem;color:var(--ui-ink);padding:.2rem .45rem;border:1px solid var(--ui-line);border-radius:999px}
 .ai-chips:focus-visible{outline:2px solid var(--ui-accent)}
 .ai-ctx{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.4rem .7rem;border-bottom:1px solid var(--ui-line)}
+.ai-target{display:flex;align-items:center;gap:.5rem;padding:.3rem .7rem;font-size:.8rem;color:var(--ui-ink);background:var(--ui-soft,transparent);border-bottom:1px solid var(--ui-line)}
+.ai-target[hidden]{display:none}
+.ai-target span{flex:1}
 /* --ui-ink, not --ui-muted: axe flagged these three at this small size over
    the panel's glass backgrounds (color-contrast) — they carry real
    information (a consent checkbox, a log entry, the status line), so full
