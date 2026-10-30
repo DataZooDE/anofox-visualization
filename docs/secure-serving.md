@@ -195,8 +195,9 @@ so the protection is about making sure *only you* can send it:
     `ANTHROPIC_API_KEY` in the environment of a process that runs SQL you
     don't trust.
   - A locked server (`anofox_serve_dashboards`, `serve --dashboards`) never
-    routes `/assist/*` (always 404), and `serve --dashboards` refuses the
-    `--assist-*` flags.
+    routes `/assist/v1/*` (always 404), and `serve --dashboards` refuses the
+    `--assist-*` flags. (`/assist/<file>` outside `v1/` is the UI's own code,
+    `web/assist/`, served as before.)
 
 `SELECT anofox_serve_stop(port)` stops an extension server.
 

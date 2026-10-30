@@ -98,6 +98,7 @@ try {
 
   const haiku = request.replace("claude-sonnet-5", "claude-opus-5-5");
   check((await post(port, "/assist/v1/messages", { "X-Anofox-Token": tok }, haiku)).status === 400, "a model off assist_models → 400");
+  check((await fetch(`http://127.0.0.1:${port}/assist/functions.js`, { headers: { "X-Anofox-Token": tok } })).status === 200, "authoring: the builder's /assist/functions.js is still served");
   check(seen.length === 1, "…not sent upstream");
 
   // A locked server never has /assist.
@@ -113,6 +114,7 @@ try {
   check(up2, "the locked server started");
   check((await post(lport, "/assist/v1/messages")).status === 404, "locked: POST /assist → 404");
   check((await fetch(`http://127.0.0.1:${lport}/assist/v1/messages`)).status === 404, "locked: GET /assist → 404");
+  check((await fetch(`http://127.0.0.1:${lport}/assist/functions.js`)).status === 200, "locked: the UI's own /assist/functions.js is still served");
 
   // enable_external_access = false: no proxy.
   const off = await session(`SET enable_external_access = false;\nSELECT anofox_serve(${port + 2}, ${sqlStr(JSON.stringify({ assist_base_url: apiBase }))});`, /enable_external_access/);

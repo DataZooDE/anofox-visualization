@@ -298,6 +298,12 @@ impl Endpoint {
     }
 }
 
+/// The proxy's own path space, `/assist/v1/…` — never `/assist/<file>`,
+/// which is the builder's code (`web/assist/functions.js`, …) on every server.
+pub fn is_api_path(path: &str) -> bool {
+    path == "/assist/v1" || path.starts_with("/assist/v1/")
+}
+
 /// A validated request: the body to send and what the log needs.
 #[derive(Debug)]
 pub struct Checked {

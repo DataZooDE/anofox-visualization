@@ -121,6 +121,13 @@ fn error_messages_never_echo_values() {
 }
 
 #[test]
+fn api_paths_leave_the_builders_files_alone() {
+    assert!(is_api_path("/assist/v1/messages") && is_api_path("/assist/v1"));
+    assert!(!is_api_path("/assist/functions.js") && !is_api_path("/assist/guide.md"));
+    assert!(!is_api_path("/assist") && !is_api_path("/assist/v10"));
+}
+
+#[test]
 fn base_url_rules() {
     for ok in [
         "https://api.anthropic.com",

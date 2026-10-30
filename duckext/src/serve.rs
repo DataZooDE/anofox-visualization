@@ -704,7 +704,9 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
         return text(req, d.status(), d.message());
     }
     // #740: after the guard, like /query. 404 when the proxy is off.
-    if path == "/assist" || path.starts_with("/assist/") {
+    // Only `/assist/v1/…`: `/assist/<file>` is the builder's own code
+    // (web/assist/).
+    if assist::is_api_path(&path) {
         return assist_route(st.proxy.as_ref(), &path, req);
     }
     if path == "/query" {
@@ -4618,8 +4620,9 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         );
     }
     // #740: the assistant's proxy is an authoring route only; a locked
-    // server never has it, whatever the method or the login.
-    if path == "/assist" || path.starts_with("/assist/") {
+    // server never has it, whatever the method or the login. (Only
+    // `/assist/v1/…`: `/assist/<file>` is the UI's own code, web/assist/.)
+    if assist::is_api_path(path) {
         return reply(req, 404, "not found");
     }
     // CSRF: a browser request from another origin is refused outright.

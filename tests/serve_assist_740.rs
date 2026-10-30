@@ -322,6 +322,10 @@ fn proxy_relays_with_the_servers_key_behind_the_authoring_guard() {
     assert_eq!(seen.lock().unwrap().len(), calls);
     assert_eq!(send(port, "GET", path, &[auth], "").0, 405);
     assert_eq!(send(port, "POST", "/assist/v1/files", &[auth], "{}").0, 404);
+    // `/assist/<file>` is the builder's own code, not the proxy's.
+    let (status, _, js) = send(port, "GET", "/assist/functions.js", &[auth], "");
+    assert_eq!(status, 200);
+    assert!(js.contains("export"), "{js}");
 
     // The log: one line per call, counts, no prompt text, no key.
     let text = std::fs::read_to_string(&log).unwrap();
