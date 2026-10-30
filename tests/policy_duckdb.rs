@@ -835,3 +835,48 @@ fn plan_stats_and_settings_functions_are_refused() {
     .unwrap_err();
     assert!(e.contains("not allowed"), "{e}");
 }
+
+#[test]
+fn a_redirected_table_s_view_reads_the_server_s_temp_table() {
+    // #736: a saved table the policy names — its view reads base ⊕ saved
+    // rows (a TEMP table the server builds), with the same row filter.
+    if !have_duckdb() {
+        return;
+    }
+    let db = db();
+    let p = Policy::parse(POLICY).unwrap();
+    let file = db.file.clone();
+    let redirect: std::collections::HashMap<String, String> =
+        [("main.sales".to_string(), "__anofox_wb_sales".to_string())].into();
+    let enf = Enforcer::compile_with(
+        &p,
+        &mut |sql: &str| rows_as_text(&file, sql),
+        "snap",
+        &redirect,
+    )
+    .unwrap();
+    let i = p.find("main", "sales").unwrap();
+    let v = enf.view_statements(&[i], &viewer("alice", &[])).join("\n");
+    assert!(
+        v.contains("FROM \"temp\".main.__anofox_wb_sales WHERE"),
+        "the view reads the server's TEMP table: {v}"
+    );
+    assert!(
+        !v.contains("snap.main.sales"),
+        "not the snapshot's sales: {v}"
+    );
+    assert!(v.contains("user_regions"), "the row filter stays: {v}");
+    // the other tables still read the snapshot
+    let j = p.find("main", "emp").unwrap();
+    assert!(enf
+        .view_statements(&[j], &viewer("alice", &[]))
+        .join("")
+        .contains("snap"));
+    // only a server (reserved) name may be a target
+    let bad: std::collections::HashMap<String, String> =
+        [("main.sales".to_string(), "sales_copy".to_string())].into();
+    assert!(
+        Enforcer::compile_with(&p, &mut |sql: &str| rows_as_text(&file, sql), "snap", &bad)
+            .is_err()
+    );
+}

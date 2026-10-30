@@ -1034,17 +1034,27 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   their cache and warm connections on the change log's generation, so a save
   re-runs exactly the panels that read it — for every viewer. Start-time
   refusals: a base table with a column the declaration doesn't name (a saved
-  table would hide it), a saved table the access policy also names (its
-  row and column rules don't apply to saved rows yet), more than one
+  table would hide it), a saved table the access policy names only in
+  another schema than saved tables live in (ambiguous), more than one
   `search_path` entry.
-- **With an access policy** (#726). Write-back works next to a policy as
-  long as the policy doesn't name a saved table. Such a table is outside the
-  policy: every viewer of a dashboard that reads it sees all of its rows and
-  columns (the declaration names every column; the start line lists these
-  tables), exactly as the server builds it per connection — base ⊕ changes,
-  a TEMP table the policy's rewrite accepts like `viewer_state`. Keep
-  anything per-viewer out of saved tables, or wait for the slice that
-  applies a policy's rules to saved rows.
+- **With an access policy** (#726, #736). A saved table the policy
+  **names** stays a policy table: its per-viewer view reads base ⊕ saved
+  rows (built per connection under a server name, `__anofox_wb_<t>`, never
+  under the table's own), so its row filter and column rules apply to saved
+  rows exactly as to the base's. Saves into it are checked as the writer
+  before they are appended (`403`, saying why): a column the policy
+  restricts for the writer can't be written; a graph save, which replaces
+  every row, is refused when the table has a row filter; and a form save may
+  only touch rows the writer can see — the row as it is, and as the save
+  leaves it (so no editing, or creating, a row outside your access). The
+  check builds the table as panels see it on a fresh connection with the
+  writer's claims and compares the touched rows counted directly and
+  through the writer's view; if it can't run, the save gets a generic
+  `500` (details in the log only). A saved table the policy **doesn't name**
+  is outside it: every viewer of a dashboard that reads it sees all of its
+  rows and columns (the declaration names every column; the start line
+  lists these tables) — a TEMP table the policy's rewrite accepts like
+  `viewer_state`. Keep anything per-viewer in tables the policy names.
 - **Conflicts (optimistic).** A save carries `base`, the change log
   generation its page loaded at (moved on only by that page's own saves).
   If a newer save would be silently overwritten — any later change to a

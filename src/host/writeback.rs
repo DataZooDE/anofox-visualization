@@ -66,7 +66,7 @@ pub struct TableDecl {
 }
 
 impl TableDecl {
-    fn col(&self, name: &str) -> Option<ColType> {
+    pub fn col(&self, name: &str) -> Option<ColType> {
         self.columns
             .iter()
             .find(|(c, _)| c == name)
@@ -824,26 +824,37 @@ pub fn fold(
                 continue;
             };
             let rows = rows.iter().filter_map(|r| r.as_object().cloned());
-            let now = out.entry(t.to_string()).or_default();
-            match op {
-                "replace" => {
-                    now.replaced = true;
-                    now.rows = rows.collect();
-                }
-                "upsert" => {
-                    for row in rows {
-                        let k = row_key(decl, &row);
-                        match now.rows.iter_mut().find(|r| row_key(decl, r) == k) {
-                            Some(have) => have.extend(row),
-                            None => now.rows.push(row),
-                        }
-                    }
-                }
-                _ => {}
-            }
+            apply_change(out.entry(t.to_string()).or_default(), decl, op, rows);
         }
     }
     out
+}
+
+/// Fold one change (`op` = `replace` / `upsert`) into a table's state, as
+/// [`fold`] does for every record — also used to see a save's result before
+/// it is appended (#736).
+pub fn apply_change(
+    now: &mut TableNow,
+    decl: &TableDecl,
+    op: &str,
+    rows: impl Iterator<Item = Map<String, Value>>,
+) {
+    match op {
+        "replace" => {
+            now.replaced = true;
+            now.rows = rows.collect();
+        }
+        "upsert" => {
+            for row in rows {
+                let k = row_key(decl, &row);
+                match now.rows.iter_mut().find(|r| row_key(decl, r) == k) {
+                    Some(have) => have.extend(row),
+                    None => now.rows.push(row),
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn row_key(decl: &TableDecl, row: &Map<String, Value>) -> Vec<String> {

@@ -1870,6 +1870,9 @@ struct Snapshot {
 struct Enforced {
     enf: Enforcer,
     scripts: Vec<Script>,
+    /// #736: saved tables the policy names → the TEMP table (base ⊕ saved
+    /// rows) their policy view reads; `seed_writeback` builds them there.
+    saved: BTreeMap<String, String>,
 }
 
 /// Idle request connections on which a dashboard's setup already ran
@@ -2060,18 +2063,36 @@ fn enforce(
     policy: &Policy,
     key: &PolicyKey,
     state_opts: Option<&StateOptions>,
-    wb_opts: Option<&WritebackOptions>,
+    wb: Option<(&WritebackOptions, &str)>,
 ) -> Result<(), String> {
     let c = snap.db.connect()?;
     crate::register_policy_hash(&c, key.0.clone())?;
     let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
-    let enf = Enforcer::compile(policy, &mut duck, &snap.default_db).map_err(|e| {
-        if e.contains("json_serialize_sql") {
-            format!("{e} (the access policy needs the json extension: INSTALL json)")
-        } else {
-            e
-        }
-    })?;
+    // #736: the saved tables the policy names, and their TEMP stand-ins.
+    let cover = match wb {
+        Some((w, schema)) => writeback_policy_cover(w, policy, schema)?,
+        None => BTreeMap::new(),
+    };
+    let redirect: HashMap<String, String> = match wb {
+        Some((_, schema)) => cover
+            .iter()
+            .map(|(t, internal)| {
+                (
+                    format!("{schema}.{t}").to_ascii_lowercase(),
+                    internal.clone(),
+                )
+            })
+            .collect(),
+        None => HashMap::new(),
+    };
+    let enf =
+        Enforcer::compile_with(policy, &mut duck, &snap.default_db, &redirect).map_err(|e| {
+            if e.contains("json_serialize_sql") {
+                format!("{e} (the access policy needs the json extension: INSTALL json)")
+            } else {
+                e
+            }
+        })?;
     let mut scripts = Vec::new();
     for d in dashboards {
         let mut server_temps: Vec<&str> =
@@ -2080,15 +2101,16 @@ fn enforce(
             } else {
                 Vec::new()
             };
-        // #726: the saved tables this dashboard reads are TEMP tables the
-        // server builds per connection (base ⊕ change log, `seed_writeback`)
-        // — only tables the policy doesn't name (`writeback_policy_overlap`
-        // refuses the start otherwise).
-        if let Some(w) = wb_opts {
+        // #726: the saved tables this dashboard reads that the policy
+        // doesn't name are TEMP tables the server builds per connection
+        // (base ⊕ change log, `seed_writeback`); the ones it names are
+        // policy tables like any other, whose view reads the saved rows
+        // (#736).
+        if let Some((w, _)) = wb {
             server_temps.extend(
                 w.tables
                     .keys()
-                    .filter(|t| wb::references(&d.sql, t))
+                    .filter(|t| !cover.contains_key(*t) && wb::references(&d.sql, t))
                     .map(String::as_str),
             );
         }
@@ -2102,7 +2124,11 @@ fn enforce(
                 })?,
         );
     }
-    snap.policy = Some(Enforced { enf, scripts });
+    snap.policy = Some(Enforced {
+        enf,
+        scripts,
+        saved: cover,
+    });
     Ok(())
 }
 
@@ -2453,22 +2479,45 @@ impl WritebackRuntime {
     }
 }
 
-/// The declared write-back tables the access policy also names (#726; by
-/// table name, any schema, ignoring case — conservative).
-fn writeback_policy_overlap(wb_opts: &WritebackOptions, policy: &Policy) -> Vec<String> {
-    let mut out: Vec<String> = wb_opts
-        .tables
-        .keys()
-        .filter(|t| {
-            policy
-                .tables
-                .iter()
-                .any(|p| p.table.eq_ignore_ascii_case(t))
-        })
-        .cloned()
-        .collect();
-    out.sort();
-    out
+/// How an access policy covers the saved tables (#736): each saved table
+/// the policy names in the schema saved tables resolve in (`schema`) →
+/// the per-connection TEMP table its policy view reads instead of the base
+/// (`__anofox_wb_<t>`: base ⊕ saved rows, so its row filter and column
+/// rules apply to saved rows too). A saved table the policy names only in
+/// another schema is refused: which one the policy means is ambiguous.
+fn writeback_policy_cover(
+    wb_opts: &WritebackOptions,
+    policy: &Policy,
+    schema: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    for t in wb_opts.tables.keys() {
+        let named: Vec<&str> = policy
+            .tables
+            .iter()
+            .filter(|p| p.table.eq_ignore_ascii_case(t))
+            .map(|p| p.schema.as_str())
+            .collect();
+        if named.iter().any(|s| s.eq_ignore_ascii_case(schema)) {
+            out.insert(t.clone(), format!("__anofox_wb_{}", t.to_ascii_lowercase()));
+        } else if !named.is_empty() {
+            return Err(format!(
+                "options.writeback.tables.{t}: the access policy names '{t}' in schema \
+                 '{}', but saved tables live in '{schema}' — name it there or rename one",
+                named.join("', '")
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// The schema unqualified (and so saved) table names resolve in: the
+/// `search_path`'s first entry's, else `main`.
+fn writeback_schema(opts: &LockedOptions) -> &str {
+    opts.search_path
+        .first()
+        .and_then(|(_, s)| s.as_deref())
+        .unwrap_or("main")
 }
 
 /// The columns of the table or view an unqualified `table` resolves to on
@@ -2512,6 +2561,7 @@ fn seed_writeback(
     opts: &WritebackOptions,
     folded: &Folded,
     tables: &[String],
+    under_policy: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     c.exec(&format!(
         "CREATE TEMP TABLE {} (t VARCHAR, \"row\" VARCHAR)",
@@ -2541,8 +2591,183 @@ fn seed_writeback(
         for sql in wb::materialise_statements(t, decl, now, base.as_deref()) {
             c.exec(&sql)?;
         }
+        // #736: a table the policy names is read only through the policy's
+        // view, which reads this name (never the declared one).
+        if let Some(internal) = under_policy.get(t) {
+            c.exec(&format!(
+                "ALTER TABLE temp.main.\"{t}\" RENAME TO \"{internal}\""
+            ))?;
+        }
     }
     c.exec(&format!("DROP TABLE temp.main.{}", wb::STAGE))
+}
+
+/// Why [`check_save_under_policy`] refused a save.
+enum PolicyRefusal {
+    /// The access policy forbids it (403, this text).
+    Denied(String),
+    /// The check itself failed (500; the details go to the log only — a
+    /// DuckDB error could quote a row the writer may not see).
+    Failed(String),
+}
+
+/// #736: may this writer save these changes into saved tables the access
+/// policy names? A column the policy restricts for the writer may not be
+/// written; a graph save (replacing every row) of a row-restricted table is
+/// refused; and an upsert into one may only touch rows the writer can see,
+/// before and after the save — checked as the writer, on a fresh
+/// connection: the table built as panels see it (base ⊕ saved rows, then
+/// with this save), counted directly and through the writer's own policy
+/// view. Tables the policy doesn't name are not checked here (#726: read in
+/// full).
+fn check_save_under_policy(
+    gen: &Generation<Snapshot>,
+    w: &WritebackRuntime,
+    claims: &Claims,
+    changes: &Map<String, Value>,
+    schema: &str,
+) -> Result<(), PolicyRefusal> {
+    let Some(p) = &gen.snap.policy else {
+        return Ok(());
+    };
+    let viewer = Viewer {
+        user: Some(claims.user.clone()),
+        groups: claims.groups.clone(),
+    };
+    let mut row_checks = Vec::new();
+    for ch in changes
+        .get("changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(t), Some(op)) = (
+            ch.get("table").and_then(Value::as_str),
+            ch.get("op").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if !p.saved.contains_key(t) {
+            continue;
+        }
+        let Some(i) = p.enf.policy.find(schema, t) else {
+            return Err(PolicyRefusal::Failed(format!(
+                "policy table '{t}' not found"
+            )));
+        };
+        let tp = &p.enf.policy.tables[i];
+        let decl = &w.opts.tables[t];
+        let rows: Vec<Map<String, Value>> = ch
+            .get("rows")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|r| r.as_object().cloned()).collect())
+            .unwrap_or_default();
+        let written: std::collections::BTreeSet<&str> = if op == "replace" {
+            decl.columns.iter().map(|(c, _)| c.as_str()).collect()
+        } else {
+            rows.iter()
+                .flat_map(|r| r.keys().map(String::as_str))
+                .collect()
+        };
+        for c in written {
+            let restricted = tp
+                .columns
+                .iter()
+                .any(|r| r.column.eq_ignore_ascii_case(c) && !r.allows(&viewer));
+            if restricted {
+                return Err(PolicyRefusal::Denied(format!(
+                    "you may not save '{t}.{c}': the access policy restricts that column for you"
+                )));
+            }
+        }
+        if tp.rows.is_some() {
+            if op == "replace" {
+                return Err(PolicyRefusal::Denied(format!(
+                    "a graph save replaces every row of '{t}', whose rows the access policy \
+                     restricts — that isn't allowed"
+                )));
+            }
+            row_checks.push((t.to_string(), i, op.to_string(), rows));
+        }
+    }
+    if row_checks.is_empty() {
+        return Ok(());
+    }
+    let failed = PolicyRefusal::Failed;
+    let c = gen.snap.db.connect().map_err(failed)?;
+    c.exec(&gen.snap.enter).map_err(failed)?;
+    for (name, lit) in claims.variables() {
+        c.exec(&format!("SET VARIABLE {name} = {lit}"))
+            .map_err(failed)?;
+    }
+    let (_, folded) = w.snapshot();
+    for (t, i, op, rows) in row_checks {
+        let decl = &w.opts.tables[&t];
+        let internal = &p.saved[&t];
+        // The keys this save touches, staged through an Appender (never SQL text).
+        c.exec("CREATE OR REPLACE TEMP TABLE __anofox_wb_keys (\"row\" VARCHAR)")
+            .map_err(failed)?;
+        {
+            let app =
+                crate::db::Appender::new_in(&c, Some("temp"), Some("main"), "__anofox_wb_keys")
+                    .map_err(failed)?;
+            for r in &rows {
+                app.begin_row().map_err(failed)?;
+                app.append_varchar(&Value::Object(r.clone()).to_string())
+                    .map_err(failed)?;
+                app.end_row().map_err(failed)?;
+            }
+            app.close().map_err(failed)?;
+        }
+        let key_match = decl
+            .key
+            .iter()
+            .map(|k| {
+                let ty = decl.col(k).expect("a key is a declared column");
+                format!(
+                    "d.\"{k}\" = CAST(json_extract_string(CAST(k.\"row\" AS JSON), '$.{k}') AS {})",
+                    ty.sql()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let touched =
+            format!("EXISTS (SELECT 1 FROM temp.main.__anofox_wb_keys k WHERE {key_match})");
+        let before = folded.get(&t).cloned().unwrap_or_default();
+        let mut after = before.clone();
+        wb::apply_change(&mut after, decl, &op, rows.into_iter());
+        for now in [before, after] {
+            c.exec(&format!("DROP TABLE IF EXISTS temp.main.\"{internal}\""))
+                .map_err(failed)?;
+            let mut one = Folded::new();
+            one.insert(t.clone(), now);
+            seed_writeback(&c, &w.opts, &one, std::slice::from_ref(&t), &p.saved)
+                .map_err(failed)?;
+            for v in p.enf.view_statements(&[i], &viewer) {
+                c.exec(&v).map_err(failed)?;
+            }
+            let count = |from: &str| -> Result<u64, PolicyRefusal> {
+                c.query(&format!(
+                    "SELECT CAST(count(*) AS VARCHAR) FROM {from} AS d WHERE {touched}"
+                ))
+                .and_then(|mut r| r.string_rows(1))
+                .map_err(failed)?
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| failed("no count".into()))
+            };
+            let total = count(&format!("temp.main.\"{internal}\""))?;
+            let seen = count(&format!("temp.main.{}{i}", policy::VIEW_PREFIX))?;
+            if seen < total {
+                return Err(PolicyRefusal::Denied(format!(
+                    "you may only save rows of '{t}' you can see: this save touches a row \
+                     the access policy hides from you, or makes one"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Plan §4.4's bound for the rate limiter's, the mutex map's and the
@@ -2737,7 +2962,10 @@ impl Locked {
                 p,
                 k,
                 self.submit.as_deref().map(|s| &s.opts),
-                self.opts.writeback_opts.as_ref(),
+                self.opts
+                    .writeback_opts
+                    .as_ref()
+                    .map(|w| (w, writeback_schema(&self.opts))),
             )?;
         }
         analyze_deps(&mut snap, &self.dashboards)?;
@@ -2872,7 +3100,9 @@ pub fn start_locked(
             p,
             k,
             opts.state_opts.as_ref(),
-            opts.writeback_opts.as_ref(),
+            opts.writeback_opts
+                .as_ref()
+                .map(|w| (w, writeback_schema(&opts))),
         )?;
     }
     analyze_deps(&mut snap, &dashboards)?;
@@ -2888,11 +3118,25 @@ pub fn start_locked(
         (None, Some(_)) => "; no access policy (\"policy\": \"none\") — panels must filter on the claims themselves".into(),
         (None, None) => String::new(),
     };
-    // #726: saved tables are outside the policy — say so at start.
-    let policy_note = match (&opts.policy, &opts.writeback_opts) {
-        (Some(_), Some(w)) if !w.tables.is_empty() => {
-            let mut ts: Vec<&str> = w.tables.keys().map(String::as_str).collect();
+    // #726: saved tables the policy doesn't name are outside it — say so
+    // at start (#736: the ones it names are read through its views).
+    let unpoliced: Vec<&str> = match (&opts.policy, &opts.writeback_opts) {
+        (Some(p), Some(w)) => {
+            let cover = writeback_policy_cover(w, p, writeback_schema(&opts)).unwrap_or_default();
+            let mut ts: Vec<&str> = w
+                .tables
+                .keys()
+                .filter(|t| !cover.contains_key(*t))
+                .map(String::as_str)
+                .collect();
             ts.sort();
+            ts
+        }
+        _ => Vec::new(),
+    };
+    let policy_note = match (&opts.policy, &opts.writeback_opts) {
+        (Some(_), Some(_)) if !unpoliced.is_empty() => {
+            let ts = &unpoliced;
             format!(
                 "{policy_note}; saved table(s) {} are not under the policy — every viewer \
                  of a dashboard that reads one sees all of its rows",
@@ -2992,24 +3236,12 @@ pub fn start_locked(
                 known_dashboards: &known_dashboards,
                 state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
             })?;
-            // #726 (owner, 2026-10-30): with an access policy, only saved
-            // tables the policy doesn't name — a saved TEMP table built from
-            // the base would bypass a policy table's row/column rules. A
-            // saved table the policy doesn't name is read in full by every
-            // viewer of the dashboards that read it (its declaration names
-            // every column; said at start). More than one search_path entry
-            // makes "the base an unqualified name means" ambiguous (as for
-            // viewer_state).
+            // #726/#736: with an access policy, a saved table the policy
+            // names is read through the policy's view of base ⊕ saved rows
+            // (and saves into it are checked as the writer, `handle_save`);
+            // one it doesn't name is read in full (said at start).
             if let Some(p) = &opts.policy {
-                let overlap = writeback_policy_overlap(wb_opts, p);
-                if !overlap.is_empty() {
-                    return Err(format!(
-                        "options.writeback can't save a table the access policy restricts \
-                         ({}): the policy's row and column rules don't apply to saved rows \
-                         yet — declare only tables the policy doesn't name",
-                        overlap.join(", ")
-                    ));
-                }
+                writeback_policy_cover(wb_opts, p, writeback_schema(&opts))?;
             }
             if opts.search_path.len() > 1 {
                 return Err(
@@ -6097,6 +6329,38 @@ fn handle_save(
         }
     };
 
+    // #736: under an access policy, a save into a table it names is
+    // checked as the writer (columns, graph replace, rows seen).
+    if st.opts.policy.is_some() {
+        let gen = st.current.get();
+        match check_save_under_policy(&gen, w, claims, &changes, writeback_schema(&st.opts)) {
+            Ok(()) => {}
+            Err(PolicyRefusal::Denied(e)) => {
+                info.deny = Some("policy");
+                audit("deny", Some("policy"), Some(&dash.id), Some(&spec.name));
+                return reply(req, 403, &format!("forbidden: {e}"));
+            }
+            Err(PolicyRefusal::Failed(e)) => {
+                eprintln!(
+                    "[anofox-serve] save policy check failed in '{}': {}",
+                    dash.id,
+                    access::diag(&e)
+                );
+                audit(
+                    "error",
+                    Some("policy_check"),
+                    Some(&dash.id),
+                    Some(&spec.name),
+                );
+                return reply(
+                    req,
+                    500,
+                    "the save couldn't be checked against the access policy",
+                );
+            }
+        }
+    }
+
     // #684 slice 4: optimistic concurrency — a save made on an older
     // generation that would overwrite someone else's newer save is refused
     // (409, saying who saved what); saving again with the newer `base` the
@@ -6597,7 +6861,9 @@ fn run_panel(
         // #684 slice 3: the saved tables, the same way (cold path only; the
         // change log's generation is part of this request's keys).
         if let Some((opts, folded, tables)) = wb_tables {
-            seed_writeback(c, opts, folded, tables)?;
+            let none = BTreeMap::new();
+            let under_policy = gen.snap.policy.as_ref().map_or(&none, |p| &p.saved);
+            seed_writeback(c, opts, folded, tables, under_policy)?;
         }
         // The policy's views, for this viewer (before any dashboard SQL). The
         // row filters read the claims set above; the column rules are decided
@@ -8901,9 +9167,9 @@ mod tests {
         );
     }
 
-    // #726: write-back next to an access policy — only the overlap refuses.
+    // #726/#736: which saved tables an access policy covers.
     #[test]
-    fn writeback_policy_overlap_names_saved_tables_the_policy_restricts() {
+    fn writeback_policy_cover_maps_saved_tables_the_policy_names() {
         let wb_opts = WritebackOptions::parse(&serde_json::json!({
             "path": "/x/changes.jsonl",
             "dashboards": ["plan"],
@@ -8917,15 +9183,20 @@ mod tests {
         let policy = |t: &str| {
             Policy::parse(&format!(r#"{{"tables": {{"{t}": {{"rows": true}}}}}}"#)).unwrap()
         };
-        assert!(writeback_policy_overlap(&wb_opts, &policy("orders")).is_empty());
+        assert!(writeback_policy_cover(&wb_opts, &policy("orders"), "main")
+            .unwrap()
+            .is_empty());
+        let c = writeback_policy_cover(&wb_opts, &policy("plan_params"), "main").unwrap();
         assert_eq!(
-            writeback_policy_overlap(&wb_opts, &policy("plan_params")),
-            vec!["Plan_Params".to_string()]
+            c.into_iter().collect::<Vec<_>>(),
+            vec![(
+                "Plan_Params".to_string(),
+                "__anofox_wb_plan_params".to_string()
+            )]
         );
-        assert_eq!(
-            writeback_policy_overlap(&wb_opts, &policy("other.plan_nodes")),
-            vec!["plan_nodes".to_string()]
-        );
+        // named in another schema than saved tables live in: ambiguous
+        let e = writeback_policy_cover(&wb_opts, &policy("other.plan_nodes"), "main").unwrap_err();
+        assert!(e.contains("schema 'other'"), "{e}");
     }
 
     // #727: a `-- @materialize` result's key.
