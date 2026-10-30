@@ -48,6 +48,7 @@ pub mod sql;
 pub mod table;
 pub mod theme;
 pub mod thresholds;
+pub mod tooltip;
 pub mod track;
 mod variance;
 #[cfg(feature = "wasm")]
@@ -543,6 +544,17 @@ pub enum Role {
     ImageDark,
     /// A panel's definition (`::INFO`): an ⓘ on its title bar shows the text.
     Info,
+    /// #751: a column shown in a chart's hover tooltip only (`::TOOLTIP`,
+    /// repeatable), named by its alias; never plotted.
+    Tooltip,
+    /// #751: a chart tooltip's line per point (`'{series}: {y:€}'::TOOLTIP_FORMAT`):
+    /// `{x}`, `{y}`, `{series}` and `{<::TOOLTIP column>}`, each with an
+    /// optional `:format` (a `::YFORMAT` keyword, `.Nf` decimals, or a
+    /// strftime pattern for a date).
+    TooltipFormat,
+    /// #751: a chart tooltip's header (`'{x:%d %b %Y}'::TOOLTIP_HEADER`),
+    /// the same placeholders.
+    TooltipHeader,
     /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
     /// `'warning'` or `'success'` (the value).
     Callout,
@@ -2036,6 +2048,33 @@ pub fn render_with_at(
     render_placed(cols, Place::At(x, y), width, height, o).map(|(svg, _)| svg)
 }
 
+/// #751: the name of the renderer's own row-index column (a
+/// [`Role::Tooltip`] column; a NUL never appears in a SQL alias).
+pub(crate) const ROW_INDEX: &str = "\u{0}row";
+
+/// #751: `cols` plus the row index (0..n, [`ROW_INDEX`]) when the panel uses
+/// a tooltip role; unchanged otherwise (every other chart renders exactly as
+/// before).
+pub(crate) fn with_row_index(cols: &[Column]) -> std::borrow::Cow<'_, [Column]> {
+    let wants = cols.iter().any(|c| {
+        matches!(
+            c.role,
+            Role::Tooltip | Role::TooltipFormat | Role::TooltipHeader
+        )
+    });
+    let n = cols.iter().map(|c| c.values.len()).max().unwrap_or(0);
+    if !wants || n == 0 || cols.iter().any(|c| c.name == ROW_INDEX) {
+        return std::borrow::Cow::Borrowed(cols);
+    }
+    let mut v = cols.to_vec();
+    v.push(Column::new(
+        ROW_INDEX,
+        Role::Tooltip,
+        (0..n).map(|i| Value::Integer(i as i64)).collect(),
+    ));
+    std::borrow::Cow::Owned(v)
+}
+
 fn render_placed(
     cols: &[Column],
     place: Place,
@@ -2043,6 +2082,8 @@ fn render_placed(
     height: u32,
     o: &RenderOptions,
 ) -> Result<(String, Vec<String>), RenderError> {
+    let indexed = with_row_index(cols);
+    let cols: &[Column] = &indexed;
     guard(|| {
         let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
         // A diagram draws its own SVG: none of the chart post-passes apply,
@@ -2137,6 +2178,8 @@ pub(crate) fn chart_plot_for_track(
     height: u32,
     o: &RenderOptions,
 ) -> Result<Option<(GGPlot, Vec<Column>)>, RenderError> {
+    let indexed = with_row_index(cols);
+    let cols: &[Column] = &indexed;
     guard(|| {
         if diagram::Diagram::from_columns(cols, &o.locale).is_some() {
             return Ok(None);
@@ -2456,7 +2499,8 @@ pub(crate) fn panel_plot(
     o: &RenderOptions,
 ) -> Result<Option<GGPlot>, String> {
     let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
-    let cols = boxstats::prepare(downsample::prepare(cols, o))?;
+    let indexed = with_row_index(cols);
+    let cols = boxstats::prepare(downsample::prepare(&indexed, o))?;
     Ok(match render_inner(&cols, w, h, o)?.localized(o, &cols) {
         Panel::Plot { plot, .. } => Some(*plot),
         Panel::Own { .. } => None,
@@ -3304,6 +3348,18 @@ fn cartesian(
             ("dashed", Linetype::Dashed),
         ])
         .show_legend(false)
+    };
+    // #751: with a tooltip role, every mark names its result row
+    // (`data-row`), so the browser fills the tooltip from that row.
+    let aes = match cols
+        .iter()
+        .find(|c| c.role == Role::Tooltip && c.name == ROW_INDEX)
+    {
+        Some(ri) if ri.values.len() == data[0].1.len() => {
+            data.push(("__row".to_string(), ri.values.clone()));
+            aes.data_attr("row", "__row")
+        }
+        _ => aes,
     };
     let mut plot = GGPlot::new(data.clone()).aes(aes).primary_color(brand);
 

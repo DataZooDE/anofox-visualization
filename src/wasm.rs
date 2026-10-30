@@ -756,6 +756,27 @@ pub fn format_number_locale(value: f64, fmt: &str, locale: &str) -> String {
     crate::format::format_number_l(value, crate::format::metric_fmt_of(fmt), &l)
 }
 
+/// #751: fill a chart tooltip template (`::TOOLTIP_FORMAT` /
+/// `::TOOLTIP_HEADER`) — `fields_json` `{name: value}` from the hovered
+/// mark's row, `defaults_json` `{name: format}` (the panel's `::YFORMAT` for
+/// `y`, `::XFORMAT` for `x`). Plain text; the caller sets it as textContent.
+#[wasm_bindgen]
+pub fn tooltip_fill(
+    template: &str,
+    fields_json: &str,
+    defaults_json: &str,
+    locale: &str,
+) -> String {
+    let obj = |j: &str| -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(j)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default()
+    };
+    let l = crate::format::Locale::from_tag(locale).unwrap_or_default();
+    crate::tooltip::fill(template, &obj(fields_json), &obj(defaults_json), &l)
+}
+
 /// Format an ISO date (`2026-10-15[ 12:00:00]`) in a dashboard locale;
 /// other text is returned unchanged.
 #[wasm_bindgen]

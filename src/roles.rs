@@ -276,6 +276,12 @@ pub static REGISTRY: &[RoleSpec] = &[
       "what a ::STORY step lights up: 'x' (default) or 'series' (the row's ::CATEGORY)"),
     e("TRANSITION", &["TWEEN"], R::Transition, "modifier", true,
       "on an input / cross-filter re-run: 'tween' moves the marks to their new values (≤ 300 ms), 'none' (default) swaps the chart"),
+    e("TOOLTIP", &["TIP"], R::Tooltip, "modifier", true,
+      "a column shown in the chart's hover tooltip only, by its alias (repeatable): units AS \"Units\" ::TOOLTIP"),
+    e("TOOLTIP_FORMAT", &["TOOLTIPFORMAT", "POINT_FORMAT"], R::TooltipFormat, "modifier", true,
+      "the tooltip's line per point: '{series}: {y:€} ({Units} units)' — {x}, {y}, {series}, {<::TOOLTIP alias>}, each with an optional :format (a ::YFORMAT keyword, .2f, or a strftime pattern for dates)"),
+    e("TOOLTIP_HEADER", &["TOOLTIPHEADER"], R::TooltipHeader, "modifier", true,
+      "the tooltip's header, same placeholders: '{x:%d %b %Y}'"),
     e("HOVER_FOCUS", &["HOVERFOCUS"], R::HoverFocus, "modifier", true,
       "hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts)"),
     e("POINTS", &["MARKERS"], R::Points, "modifier", true,
@@ -1263,6 +1269,9 @@ mod tests {
             Role::Favicon,
             Role::AsOf,
             Role::Info,
+            Role::Tooltip,
+            Role::TooltipFormat,
+            Role::TooltipHeader,
             Role::Callout,
             Role::MarkdownStyle,
             Role::MarkdownTone,
@@ -1437,6 +1446,9 @@ mod tests {
                 | Role::Favicon
                 | Role::AsOf
                 | Role::Info
+                | Role::Tooltip
+                | Role::TooltipFormat
+                | Role::TooltipHeader
                 | Role::Callout
                 | Role::MarkdownStyle
                 | Role::MarkdownTone

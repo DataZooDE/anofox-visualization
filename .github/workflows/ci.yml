@@ -628,6 +628,12 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/figure-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/tooltip-e2e.mjs (#751): ::TOOLTIP columns and the
+      # ::TOOLTIP_FORMAT / ::TOOLTIP_HEADER templates on hover and crosshair.
+      - name: Chart tooltips from SQL e2e (#751)
+        timeout-minutes: 3
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/tooltip-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/diagram-edit-e2e.mjs (#682): 'edit'::DIAGRAM_MODE — Add,
       # Connect (and a palette refusal), Rename, Remove, Reset; the edited
       # graph as one JSON variable the SQL panels read; the URL.
