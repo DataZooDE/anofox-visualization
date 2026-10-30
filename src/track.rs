@@ -100,7 +100,15 @@ fn plot_for(
     height: u32,
     step: Option<f64>,
 ) -> Result<GGPlot, String> {
-    let x = find_role(cols, Role::X).ok_or(TRACK_X)?;
+    // A track with no rows (nothing happened in the window: no orders, no
+    // alarms) is an empty lane — the static pages get no columns at all
+    // for an empty result, the browser columns without values.
+    let none = Column::new("x", Role::X, Vec::new());
+    let x = match find_role(cols, Role::X) {
+        Some(x) => x,
+        None if cols.iter().all(|c| c.values.is_empty()) => &none,
+        None => return Err(TRACK_X.into()),
+    };
     if x.values.iter().any(|v| matches!(v, Value::Str(_))) {
         return Err(TRACK_X.into());
     }

@@ -68,7 +68,8 @@ CREATE OR REPLACE MACRO it_param(p) AS
     CASE p WHEN 'supplier.lead_time_mean' THEN 'Lead time (days)'
            WHEN 'supplier.lead_time_std_dev' THEN 'Lead-time spread (days)'
            WHEN 'demand_calibration.sigma_multiplier' THEN 'Demand spread (× model)'
-           WHEN 'demand_calibration.bias' THEN 'Demand bias' ELSE p END;
+           WHEN 'demand_calibration.bias' THEN 'Demand bias'
+           WHEN 'demand_calibration.family' THEN 'Demand model' ELSE p END;
 
 -- Per item over the run, and its risk over the projection at the plan level.
 CREATE OR REPLACE MACRO it_runs() AS TABLE
@@ -180,7 +181,7 @@ SELECT ('**The replenishment planner** of a wholesaler runs a digital twin for e
 
 SELECT 'Inputs'::GROUP;
 SELECT i.sku AS sku ::DROPDOWN, 'Item'::LABEL,
-       'class ' || i.cohort || ', ' || i.shape || ' demand' ::HINT
+       'class ' || i.cohort || coalesce(', ' || i.shape || ' demand', '') ::HINT
 FROM it_items i ORDER BY i.sku = 'SKU-004' DESC, i.sku;
 SELECT plan_level ::BUTTONS, 'Plan for'::LABEL,
        hint ::HINT
@@ -261,7 +262,7 @@ SELECT c.sku AS "Item" ::TABLE, c.status AS "Status" ::BADGE,
        round(c.cover_days) AS "Days of cover",
        c.on_hand_now || ' + ' || c.on_order_now AS "On hand + on order",
        (SELECT list(yhat ORDER BY ds) FROM it_projection p WHERE p.model_id = c.sku AND p.level = it_level()) AS "Projected stock (median)" ::SPARKLINE,
-       c.cohort || ' · ' || c.shape AS "Class · demand",
+       c.cohort || coalesce(' · ' || c.shape, '') AS "Class · demand",
        ('Watch list: every item, most critical first (' || it_level_txt() || ' plan)')::TITLE,
        'Days of cover: units on hand / average daily demand of the last 28 days. Can run out by: the first day the plan band''s lower edge reaches zero. Expected units short: demand the simulated futures could not serve, on average, over the next 28 days. Plan trust: alarm = a drift detector is latched in alarm now; review = a recalibration needs the planner (n waiting: escalated, or any for a class A / B item; class C proposals always wait and count as routine), or stock counts did not match the twin (missed / counted).'::INFO
 FROM it_crit() c ORDER BY c.rnk;
@@ -270,9 +271,9 @@ FROM it_crit() c ORDER BY c.rnk;
 SELECT 'Stock & pipeline'::TAB;
 
 SELECT 12::COL;
-SELECT ('**How did ' || r.sku || ' do?** Class ' || i.cohort || ', ' || i.shape || ' demand. Over the last 120 days the twin served **' ||
+SELECT ('**How did ' || r.sku || ' do?** Class ' || i.cohort || coalesce(', ' || i.shape || ' demand', '') || '. Over the last 120 days the twin served **' ||
         round(100 * r.served / r.demand, 1) || ' %** of demand from stock; it was out of stock on **' || r.days_out || '** days and **' ||
-        r.lost || '** units of demand were lost. Today **' || r.on_hand_now || '** units are on hand and **' || r.on_order_now || '** on order. ' ||
+        round(r.lost)::BIGINT || '** units of demand were lost. Today **' || round(r.on_hand_now)::BIGINT || '** units are on hand and **' || round(r.on_order_now)::BIGINT || '** on order. ' ||
         CASE WHEN EXISTS (SELECT 1 FROM it_story()) THEN 'Step through the chart (‹ / Play / ›) to follow what happened.' ELSE '' END)::MARKDOWN
 FROM it_runs() r JOIN it_items i USING (sku) WHERE r.sku = it_sku();
 
@@ -393,7 +394,7 @@ SELECT ('**Does the twin still describe reality?** Every twin runs drift detecto
 
 SELECT 5::COL;
 SELECT 300::HEIGHT;
-SELECT a.cohort || ' · ' || a.shape ::XAXIS, it_detector(a.name) ::YAXIS, count(*) ::HEATMAP, 12 ::DATALABELS,
+SELECT a.cohort || coalesce(' · ' || a.shape, '') ::XAXIS, it_detector(a.name) ::YAXIS, count(*) ::HEATMAP, 12 ::DATALABELS,
        'Alarms and warnings by detector and item group'::TITLE,
        'Columns: the items'' value class (A = top sellers) and demand shape; rows: the detector that fired. CUSUM and Page-Hinkley watch the forecast error, PSI and KS compare the demand distribution with the baseline, MAE is the forecast''s running error, Occurrence CUSUM the share of days with any demand.'::INFO
 FROM it_alarms a GROUP BY ALL ORDER BY 2, 1;
@@ -464,12 +465,12 @@ FROM it_trajectory t WHERE t.sku = it_sku() ORDER BY t.ds;
 
 SELECT 12::COL;
 SELECT 'status = escalated'::FLAG;
+SELECT 'Evidence: Independent, Twin-influenced'::COLGROUP;
 SELECT strftime(it_ds(period), '%-d %b') AS "Day" ::TABLE, it_param(parameter) AS "Parameter",
        old_num AS "Before", new_num AS "After", expected_rop_delta AS "Reorder point change (units)" ::COLORSCALE_DIVERGING,
        sample_size AS "Evidence (n)", confidence AS "Confidence",
        lineage_independent AS "Independent", lineage_twin_influenced AS "Twin-influenced",
        status AS "Status" ::BADGE, reason AS "Why",
-       'Evidence: independent, twin-influenced'::COLGROUP,
        (it_sku() || ': every proposal, before and after')::TITLE,
        'Independent evidence was observed without the twin''s own decisions in play (e.g. deliveries of orders placed before the twin went live); twin-influenced evidence was shaped by them (orders the twin placed, days its own stockouts cut demand short). A proposal resting mostly on twin-influenced evidence can feed back on itself.'::INFO
 FROM it_proposals WHERE sku = it_sku() ORDER BY period, parameter;
