@@ -10,6 +10,8 @@
 // writer's own page right after the save, another viewer's, and another
 // dashboard's (one change log for the server); a restart reads the change
 // log back; a base column the declaration doesn't name refuses the start.
+// #726: under an access policy on another table the saved rows still show;
+// a policy naming a saved table refuses the start.
 // Slice 4, two writers: a save made on an older generation over someone
 // else's newer save of the same row (or a replaced graph) is refused,
 // naming who saved what; the panels then show theirs, the edits stay, and
@@ -82,12 +84,12 @@ const SETUP = `CREATE TABLE plan_nodes AS SELECT * FROM (VALUES ('sup', 'supplie
 CREATE TABLE plan_edges AS SELECT * FROM (VALUES ('sup', 'wh')) v("from", "to");
 CREATE TABLE plan_params AS SELECT * FROM (VALUES ('sup', 7.0), ('wh', 3.0)) v(id, lead_time);`;
 
-async function serve(setup = SETUP) {
+async function serve(setup = SETUP, o = opts) {
   const p = spawn(duckdb, ["-unsigned", "-batch", ":memory:"], { stdio: ["pipe", "pipe", "pipe"], env });
   let log = "";
   p.stdout.on("data", (d) => (log += d));
   p.stderr.on("data", (d) => (log += d));
-  p.stdin.write(`LOAD ${sqlStr(ext)};\n${setup}\nSELECT anofox_serve_dashboards(${sqlStr(dashDir)}, ${port}, ${sqlStr(JSON.stringify(opts))});\n`);
+  p.stdin.write(`LOAD ${sqlStr(ext)};\n${setup}\nSELECT anofox_serve_dashboards(${sqlStr(dashDir)}, ${port}, ${sqlStr(JSON.stringify(o))});\n`);
   for (let i = 0; i < 100; i++) {
     try {
       if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return { proc: p, log: () => log };
@@ -317,6 +319,50 @@ try {
     refused = String(e.message);
   }
   check(/plan_params: the table has columns the declaration doesn't name \(cost\)/.test(refused), `(h) an undeclared base column refuses the start (${refused.split("\n").find((l) => /writeback/.test(l)) || refused.slice(0, 200)})`);
+
+  // (k) #726: with an access policy that doesn't name the saved tables, the
+  // server starts and every viewer of the dashboards reads them in full —
+  // the start line says so.
+  const policyFile = (tables) => {
+    const f = path.join(W, `policy-${Object.keys(tables).join("-")}.json`);
+    writeFileSync(f, JSON.stringify({ tables }));
+    return f;
+  };
+  const ORDERS = SETUP + "\nCREATE TABLE orders AS SELECT * FROM (VALUES ('alice', 1), ('bob', 2)) v(owner, n);";
+  srv = await serve(ORDERS, { ...opts, policy: policyFile({ orders: { rows: "owner = getvariable('__claim_user')" } }) });
+  {
+    check(/saved table\(s\) plan_edges, plan_nodes, plan_params are not under the policy/.test(srv.log()), "(k) the start line says the saved tables are outside the policy");
+    const { page, ctx } = await openAs("bob", "plan");
+    check((await params(page)) === "sup=6.0,wh=13.0", `(k) under a policy on another table the saved rows still show (${await params(page)})`);
+    await ctx.close();
+    // a writer's save works under the policy too, and the panels read it
+    const w = await openAs("alice", "plan");
+    const gen = await w.page.evaluate(() => window.__served?.writeback?.gen);
+    const r = await w.page.evaluate(async (base) => {
+      const res = await fetch("/api/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Anofox-Submit": "1" },
+        body: JSON.stringify({ dashboard: "plan", panel: 3, id: "dd01", vars: {}, form: { lead_time: 2 }, key: "sup", base }),
+      });
+      return { status: res.status, text: await res.text() };
+    }, gen ?? 0);
+    check(r.status === 201, `(k) a writer's save under the policy is accepted (${r.status} ${r.text})`);
+    const b2 = await openAs("bob", "plan");
+    check((await until(b2.page, params, "sup=2.0,wh=13.0")) === "sup=2.0,wh=13.0", `(k) …and another viewer reads it (${await params(b2.page)})`);
+    await w.ctx.close();
+    await b2.ctx.close();
+  }
+  stop(srv);
+  srv = null;
+  await sleep(300);
+  // (l) a policy naming a saved table refuses the start, saying which.
+  refused = "";
+  try {
+    srv = await serve(ORDERS, { ...opts, policy: policyFile({ plan_params: { rows: "true" } }) });
+  } catch (e) {
+    refused = String(e.message);
+  }
+  check(/can't save a table the access policy restricts \(plan_params\)/.test(refused), `(l) a policy on a saved table refuses the start (${refused.split("\n").find((l) => /writeback/.test(l)) || refused.slice(0, 200)})`);
 } finally {
   if (srv) stop(srv);
   if (browser) await browser.close();

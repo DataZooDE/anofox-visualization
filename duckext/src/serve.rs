@@ -2060,6 +2060,7 @@ fn enforce(
     policy: &Policy,
     key: &PolicyKey,
     state_opts: Option<&StateOptions>,
+    wb_opts: Option<&WritebackOptions>,
 ) -> Result<(), String> {
     let c = snap.db.connect()?;
     crate::register_policy_hash(&c, key.0.clone())?;
@@ -2073,14 +2074,26 @@ fn enforce(
     })?;
     let mut scripts = Vec::new();
     for d in dashboards {
-        let server_temps: &[&str] =
+        let mut server_temps: Vec<&str> =
             if state_opts.is_some_and(|o| state_trainer_view(o, &d.id, None, None).is_some()) {
-                &["viewer_state", "viewer_state_latest"]
+                vec!["viewer_state", "viewer_state_latest"]
             } else {
-                &[]
+                Vec::new()
             };
+        // #726: the saved tables this dashboard reads are TEMP tables the
+        // server builds per connection (base ⊕ change log, `seed_writeback`)
+        // — only tables the policy doesn't name (`writeback_policy_overlap`
+        // refuses the start otherwise).
+        if let Some(w) = wb_opts {
+            server_temps.extend(
+                w.tables
+                    .keys()
+                    .filter(|t| wb::references(&d.sql, t))
+                    .map(String::as_str),
+            );
+        }
         scripts.push(
-            enf.rewrite_script(&mut duck, &d.stmts, server_temps)
+            enf.rewrite_script(&mut duck, &d.stmts, &server_temps)
                 .map_err(|(i, e)| {
                     format!(
                         "dashboard '{}' statement {i}: {e} (refused by the access policy)",
@@ -2440,6 +2453,24 @@ impl WritebackRuntime {
     }
 }
 
+/// The declared write-back tables the access policy also names (#726; by
+/// table name, any schema, ignoring case — conservative).
+fn writeback_policy_overlap(wb_opts: &WritebackOptions, policy: &Policy) -> Vec<String> {
+    let mut out: Vec<String> = wb_opts
+        .tables
+        .keys()
+        .filter(|t| {
+            policy
+                .tables
+                .iter()
+                .any(|p| p.table.eq_ignore_ascii_case(t))
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out
+}
+
 /// The columns of the table or view an unqualified `table` resolves to on
 /// `c` (after the snapshot's `enter`: its current database and schema), or
 /// `None` when there is no such base — then a saved table starts empty.
@@ -2706,6 +2737,7 @@ impl Locked {
                 p,
                 k,
                 self.submit.as_deref().map(|s| &s.opts),
+                self.opts.writeback_opts.as_ref(),
             )?;
         }
         analyze_deps(&mut snap, &self.dashboards)?;
@@ -2834,7 +2866,14 @@ pub fn start_locked(
         build_snapshot(&conn, &opts, &loads, startup_dir, source_result)?
     };
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
-        enforce(&mut snap, &dashboards, p, k, opts.state_opts.as_ref())?;
+        enforce(
+            &mut snap,
+            &dashboards,
+            p,
+            k,
+            opts.state_opts.as_ref(),
+            opts.writeback_opts.as_ref(),
+        )?;
     }
     analyze_deps(&mut snap, &dashboards)?;
     let policy_note = match (&opts.policy, &opts.auth) {
@@ -2848,6 +2887,19 @@ pub fn start_locked(
         ),
         (None, Some(_)) => "; no access policy (\"policy\": \"none\") — panels must filter on the claims themselves".into(),
         (None, None) => String::new(),
+    };
+    // #726: saved tables are outside the policy — say so at start.
+    let policy_note = match (&opts.policy, &opts.writeback_opts) {
+        (Some(_), Some(w)) if !w.tables.is_empty() => {
+            let mut ts: Vec<&str> = w.tables.keys().map(String::as_str).collect();
+            ts.sort();
+            format!(
+                "{policy_note}; saved table(s) {} are not under the policy — every viewer \
+                 of a dashboard that reads one sees all of its rows",
+                ts.join(", ")
+            )
+        }
+        _ => policy_note,
     };
     // Validate every statement with DuckDB's parser: exactly one each.
     {
@@ -2940,17 +2992,24 @@ pub fn start_locked(
                 known_dashboards: &known_dashboards,
                 state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
             })?;
-            // #684 slice 3: the saved tables are TEMP tables named like the
-            // declared ones; a policy's per-viewer views would claim the same
-            // names, and more than one search_path entry makes "the base an
-            // unqualified name means" ambiguous (as for viewer_state).
-            if opts.policy.is_some() {
-                return Err(
-                    "options.writeback can't be combined with an access policy yet \
-                            (\"policy\": \"none\"): the policy's per-viewer views and the \
-                            saved tables would both claim the table names"
-                        .into(),
-                );
+            // #726 (owner, 2026-10-30): with an access policy, only saved
+            // tables the policy doesn't name — a saved TEMP table built from
+            // the base would bypass a policy table's row/column rules. A
+            // saved table the policy doesn't name is read in full by every
+            // viewer of the dashboards that read it (its declaration names
+            // every column; said at start). More than one search_path entry
+            // makes "the base an unqualified name means" ambiguous (as for
+            // viewer_state).
+            if let Some(p) = &opts.policy {
+                let overlap = writeback_policy_overlap(wb_opts, p);
+                if !overlap.is_empty() {
+                    return Err(format!(
+                        "options.writeback can't save a table the access policy restricts \
+                         ({}): the policy's row and column rules don't apply to saved rows \
+                         yet — declare only tables the policy doesn't name",
+                        overlap.join(", ")
+                    ));
+                }
             }
             if opts.search_path.len() > 1 {
                 return Err(
@@ -8839,6 +8898,33 @@ mod tests {
         assert_eq!(
             warm_key(&gated, None, &stmts, &warm_req(1, "{}"), None, None),
             None
+        );
+    }
+
+    // #726: write-back next to an access policy — only the overlap refuses.
+    #[test]
+    fn writeback_policy_overlap_names_saved_tables_the_policy_restricts() {
+        let wb_opts = WritebackOptions::parse(&serde_json::json!({
+            "path": "/x/changes.jsonl",
+            "dashboards": ["plan"],
+            "writers": {"users": ["alice"]},
+            "tables": {
+                "plan_nodes": {"key": ["id"], "columns": {"id": "VARCHAR"}},
+                "Plan_Params": {"key": ["id"], "columns": {"id": "VARCHAR"}}
+            }
+        }))
+        .unwrap();
+        let policy = |t: &str| {
+            Policy::parse(&format!(r#"{{"tables": {{"{t}": {{"rows": true}}}}}}"#)).unwrap()
+        };
+        assert!(writeback_policy_overlap(&wb_opts, &policy("orders")).is_empty());
+        assert_eq!(
+            writeback_policy_overlap(&wb_opts, &policy("plan_params")),
+            vec!["Plan_Params".to_string()]
+        );
+        assert_eq!(
+            writeback_policy_overlap(&wb_opts, &policy("other.plan_nodes")),
+            vec!["plan_nodes".to_string()]
         );
     }
 

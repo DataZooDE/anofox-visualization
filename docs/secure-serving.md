@@ -1034,9 +1034,17 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   their cache and warm connections on the change log's generation, so a save
   re-runs exactly the panels that read it — for every viewer. Start-time
   refusals: a base table with a column the declaration doesn't name (a saved
-  table would hide it), an access policy (`"policy": "none"` only, for now:
-  its per-viewer views would claim the same names), more than one
+  table would hide it), a saved table the access policy also names (its
+  row and column rules don't apply to saved rows yet), more than one
   `search_path` entry.
+- **With an access policy** (#726). Write-back works next to a policy as
+  long as the policy doesn't name a saved table. Such a table is outside the
+  policy: every viewer of a dashboard that reads it sees all of its rows and
+  columns (the declaration names every column; the start line lists these
+  tables), exactly as the server builds it per connection — base ⊕ changes,
+  a TEMP table the policy's rewrite accepts like `viewer_state`. Keep
+  anything per-viewer out of saved tables, or wait for the slice that
+  applies a policy's rules to saved rows.
 - **Conflicts (optimistic).** A save carries `base`, the change log
   generation its page loaded at (moved on only by that page's own saves).
   If a newer save would be silently overwritten — any later change to a
