@@ -352,6 +352,76 @@ export function pageAdapter(db, opts = {}) {
   };
 }
 
+// #740: the page of an authoring server (`serve <db>`, `anofox_serve`),
+// whose tables live in the server's session, not in the browser. Owner
+// 2026-10-30: the snapshot is copied *from* the live session into the locked
+// engine, so model-influenced SQL still runs only in the engine. `query(sql,
+// ms)` is the builder's `/query` (the JSON rows as text); this adapter sends
+// it the same closed set of fixed statements `pageAdapter` runs, `fq`
+// always rebuilt from catalog rows by `buildEngine`. Rows come back as the
+// server's JSON text, which DuckDB in the engine parses (`from_json`
+// against the described types), so no number goes through a JS double.
+// No files: the server's files are not the browser's to copy.
+export const LIVE_LIMITS = { ...SNAPSHOT_LIMITS, tableRows: 100_000, totalRows: 500_000, totalBytes: 128 << 20 };
+export function livePageAdapter(opts = {}) {
+  const { query } = ownOpts(opts);
+  if (typeof query !== "function") throw new Error("livePageAdapter needs query(sql, ms)");
+  const rows = async (sql, ms) => JSON.parse((await query(sql, ms)) || "[]");
+  return {
+    async databases(ms = 0) {
+      return rows("SELECT database_name, path, type FROM duckdb_databases()", ms);
+    },
+    async catalog(ms = 0) {
+      return rows(CATALOG_SQL, ms);
+    },
+    async viewSql(dbName, schema, name, ms = 0) {
+      const r = await rows(`SELECT sql FROM duckdb_views() WHERE database_name=${sqlStr(dbName)} AND schema_name=${sqlStr(schema)} AND view_name=${sqlStr(name)}`, ms);
+      return r[0]?.sql || "";
+    },
+    async describe(fq, ms = 0) {
+      return rows(`DESCRIBE SELECT * FROM ${fq}`, ms);
+    },
+    // Tables: all rows up to `n`, else a reservoir sample of `n`. Views:
+    // `LIMIT n`, never sampled (as pageAdapter), `truncated` when it hit n.
+    async rows(fq, kind, n, ms = 0) {
+      if (kind === "view") {
+        const json = (await query(`SELECT * FROM ${fq} LIMIT ${n}`, ms)) || "[]";
+        const got = JSON.parse(json).length;
+        return { json, rows: got, sampled: false, truncated: got >= n };
+      }
+      const total = Number((await rows(`SELECT count(*) AS n FROM ${fq}`, ms))[0]?.n ?? 0);
+      const sampled = total > n;
+      const json = (await query(sampled ? `SELECT * FROM ${fq} USING SAMPLE reservoir(${n} ROWS) REPEATABLE (42)` : `SELECT * FROM ${fq}`, ms)) || "[]";
+      return { json, rows: Math.min(total, n), sampled, truncated: false };
+    },
+    async files() {
+      return [];
+    },
+    handle() {
+      return undefined;
+    },
+    async copyFile() {
+      throw new Error("a live page has no files to copy");
+    },
+  };
+}
+
+// #740: JSON rows (an authoring server's `/query` text) into the engine's
+// table, typed by the server's DESCRIBE: one fixed, prepared statement; the
+// rows are its parameter and the structure a string literal, so neither
+// can add SQL.
+async function insertJson(c, schema, name, cols, json) {
+  const names = cols.map((d) => d.column_name);
+  if (new Set(names).size !== names.length) throw new Error("duplicate column names");
+  const structure = JSON.stringify([Object.fromEntries(cols.map((d) => [d.column_name, d.column_type]))]);
+  const st = await c.prepare(`INSERT INTO ${qid(schema)}.${qid(name)} SELECT r.* FROM (SELECT unnest(from_json($1::JSON, ${sqlStr(structure)})) AS r)`);
+  try {
+    await st.query(json);
+  } finally {
+    await st.close();
+  }
+}
+
 // A database the snapshot must never touch: a scheme or `md:` path, a
 // non-`duckdb` type (MotherDuck, sqlite, …), or one of DuckDB-Wasm's/the
 // lint's own housekeeping databases (not reported — they aren't the user's).
@@ -440,14 +510,20 @@ export async function snapshotTables(c, page, limits = SNAPSHOT_LIMITS, opts = {
       }
       const n = Math.min(limits.tableRows, totalRows);
       const r = await page.rows(fq, kind, n, limits.queryMs);
-      const bytes = arrowBytes(r.table);
+      // #740: a live page hands JSON text (its length stands in for bytes).
+      const isJson = typeof r.json === "string";
+      const bytes = isJson ? r.json.length : arrowBytes(r.table);
       if (bytes > totalBytes) {
         out.push({ fq, kind, rows: 0, excluded: "too large" });
         await c.query("USE memory");
         continue;
       }
-      await c.insertArrowTable(r.table, { schema, name, create: createFlag });
-      const got = r.table.numRows ?? r.table.toArray().length;
+      if (isJson) {
+        // The described types must exist in the engine too.
+        if (createFlag) throw new Error("a column type the assistant's engine doesn't have");
+        await insertJson(c, schema, name, descRows, r.json);
+      } else await c.insertArrowTable(r.table, { schema, name, create: createFlag });
+      const got = isJson ? r.rows : (r.table.numRows ?? r.table.toArray().length);
       totalRows -= got;
       totalBytes -= bytes;
       await c.query("USE memory");

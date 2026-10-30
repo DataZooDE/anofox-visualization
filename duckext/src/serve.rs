@@ -216,11 +216,18 @@ fn meta(req: &Request) -> RequestMeta<'_> {
 }
 
 fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
+    respond_csp(req, status, ctype, body, false)
+}
+
+/// [`respond`]; `duckdb_esm`: the page may import DuckDB-Wasm's `+esm`
+/// build ([`sv::page_csp_with`]) — the authoring builder with the `/assist`
+/// proxy on (#740).
+fn respond_csp(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>, duckdb_esm: bool) {
     let mut body = body.into();
     // An HTML page (the authoring builder's index.html) gets its CSP header
     // and nonces (#252): authoring is loopback-only and never framed.
     let csp = ctype.starts_with("text/html").then(|| {
-        let (html, csp) = sv::csp_page(&String::from_utf8_lossy(&body), "'none'");
+        let (html, csp) = sv::csp_page_with(&String::from_utf8_lossy(&body), "'none'", duckdb_esm);
         body = html.into_bytes();
         csp
     });
@@ -357,7 +364,7 @@ fn read_body(req: &mut Request, limit: usize) -> Result<String, (u16, String)> {
 }
 
 /// `head`: markup put before `</head>` of index.html (the authoring app bar).
-fn serve_asset(req: Request, path: &str, head: &str) {
+fn serve_asset(req: Request, path: &str, head: &str, duckdb_esm: bool) {
     let asset = path.trim_start_matches('/');
     let asset = if asset.is_empty() {
         "index.html"
@@ -372,7 +379,7 @@ fn serve_asset(req: Request, path: &str, head: &str) {
         Some(f) if asset == "index.html" && !head.is_empty() => {
             let html = String::from_utf8_lossy(f.contents());
             let html = html.replacen("</head>", &format!("{head}</head>"), 1);
-            respond(req, 200, content_type(asset), html.into_bytes())
+            respond_csp(req, 200, content_type(asset), html.into_bytes(), duckdb_esm)
         }
         Some(f) => respond(req, 200, content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),
@@ -647,7 +654,12 @@ pub fn start_authoring(
         ctx,
         guard: AuthoringGuard::new(port),
         max_body: 4 << 20,
-        app: app.script(),
+        // #740: the builder's `assistant` block after the app bar's script.
+        app: app.script()
+            + &proxy
+                .as_ref()
+                .map(assist::Proxy::page_script)
+                .unwrap_or_default(),
         assets_root: assets_root.clone(),
         proxy,
     });
@@ -762,7 +774,7 @@ fn handle_authoring(st: &Authoring, mut req: Request) {
     if req.method() != &Method::Get {
         return text(req, 405, "method not allowed");
     }
-    serve_asset(req, &path, &st.app);
+    serve_asset(req, &path, &st.app, st.proxy.is_some());
 }
 
 /// `POST /assist/v1/messages[/count_tokens]` (#740): on a thread of its own
@@ -4653,7 +4665,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 return send(req, rep);
             }
             if auth.public_asset(&method, path) {
-                serve_asset(req, path, "");
+                serve_asset(req, path, "", false);
                 return 200;
             }
             match auth.authenticate(&r) {
@@ -4883,7 +4895,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         }
         (&Method::Get, p) => {
             let found = WEB.get_file(p.trim_start_matches('/')).is_some() || p == "/";
-            serve_asset(req, p, "");
+            serve_asset(req, p, "", false);
             if found {
                 200
             } else {

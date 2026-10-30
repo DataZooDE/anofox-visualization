@@ -322,6 +322,23 @@ fn proxy_relays_with_the_servers_key_behind_the_authoring_guard() {
     assert_eq!(seen.lock().unwrap().len(), calls);
     assert_eq!(send(port, "GET", path, &[auth], "").0, 405);
     assert_eq!(send(port, "POST", "/assist/v1/files", &[auth], "{}").0, 404);
+    // The builder is told the proxy is on, and its CSP lets DuckDB-Wasm's
+    // `+esm` modules load (the assistant's engine).
+    let (status, head, page) = send(port, "GET", "/", &[auth], "");
+    assert_eq!(status, 200);
+    assert!(
+        page.contains(r#""transport":"serve""#),
+        "no assistant block in the page"
+    );
+    assert!(!page.contains(KEY));
+    let csp = head
+        .lines()
+        .find(|l| l.starts_with("content-security-policy:"))
+        .unwrap_or("");
+    assert!(
+        csp.contains("apache-arrow@") && csp.contains("flatbuffers@"),
+        "{csp}"
+    );
     // `/assist/<file>` is the builder's own code, not the proxy's.
     let (status, _, js) = send(port, "GET", "/assist/functions.js", &[auth], "");
     assert_eq!(status, 200);
@@ -364,6 +381,8 @@ fn no_key_no_proxy() {
         .0,
         404
     );
+    let (_, head, page) = send(port, "GET", "/", &[auth], "");
+    assert!(!page.contains(r#""transport":"serve""#) && !head.contains("apache-arrow@"));
     // --no-assist wins over a key.
     let key = s.key_file();
     let (_c2, port, tok) = spawn_authoring(

@@ -99,6 +99,11 @@ for the browser, an editor undo, and any model client.
  └──────────────────────────────────────────────────┘
 ```
 
+**Update (#740, owner 2026-10-30):** since #204 the tools run in the locked
+assistant engine, not on `/query`. On an authoring server the engine is
+filled from the live session through `/query` (fixed read statements, live
+limits), so model SQL never runs on the live session.
+
 The loop stays in the browser in all three cases because that is where the
 tools must run. The browser holds the DuckDB-Wasm session, and on an
 authoring server `/query` is already the author's own session. Moving the

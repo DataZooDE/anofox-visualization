@@ -41,7 +41,7 @@ import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnos
 // groundwork for the assistant's own locked DuckDB-Wasm instance
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
 import { applyAssistCsp } from "./assist-csp.js";
-import { engineExtensions, pageAdapter } from "./assist-engine.js";
+import { LIVE_LIMITS, engineExtensions, livePageAdapter, pageAdapter } from "./assist-engine.js";
 import { KEY_SLOT, assistConfig, keyStore, rememberAllowed } from "./assist.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
@@ -1428,6 +1428,7 @@ let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 // script-src path, which is only safe at boot.
 let duckdbMod = null,
   duckdbBundle = null;
+const DUCKDB_ESM = "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm";
 let appBrandReady = null; // #204: the Promise boot() keeps from appBrandLoad(), for assistDeps()'s imgOrigins
 // sec-review-256 L-2: the installation's own opt-in (app-config.json's/
 // window.__anofoxApp's `assistant.remember: true`), read alongside the
@@ -2042,6 +2043,13 @@ function guardPage(adapter) {
   }
   return out;
 }
+// #740: one of livePageAdapter's fixed statements on the live session — the
+// rows as /query's JSON text, cut off after `ms` (0: no limit).
+async function liveRowsText(sql, ms = 0) {
+  const r = await fetch("/query", { method: "POST", body: sql, signal: ms ? AbortSignal.timeout(ms) : undefined });
+  if (!r.ok) throw new Error((await r.text()).slice(0, 300));
+  return (await r.text()) || "[]";
+}
 // The 'data/<x>/<y>.(csv|parquet)' literals an editor script names, plus
 // m5_monthly.parquet when it is named (ensureForecast's own file) — editor
 // text only, never the model's SQL (M-1): assistDeps().files() fixes the
@@ -2065,15 +2073,30 @@ function assistEditorBasis() {
   return applyHold ? heldBasisSql : $("sql").value;
 }
 function assistDeps() {
-  if (backend === "live" || servedMode || !duckdbMod) return null;
+  if (servedMode || !duckdbMod) return null;
+  const makeDb = async () => {
+    const url = URL.createObjectURL(new Blob([`importScripts("${duckdbBundle.mainWorker}");`], { type: "text/javascript" }));
+    const d = new duckdbMod.AsyncDuckDB(new duckdbMod.VoidLogger(), new Worker(url)); // created after the ratchet → inherits it
+    await d.instantiate(duckdbBundle.mainModule, duckdbBundle.pthreadWorker);
+    URL.revokeObjectURL(url);
+    return d;
+  };
+  // #740 (owner 2026-10-30): on an authoring server the engine is filled
+  // from the live session through /query (livePageAdapter's fixed
+  // statements); model SQL still runs only in the engine. No files (the
+  // server's files are not the browser's), the live limits.
+  if (backend === "live")
+    return {
+      makeDb,
+      page: guardPage(livePageAdapter({ query: liveRowsText })),
+      extensions: () => engineExtensions({ editorNeeds: neededExtensions(assistEditorBasis()) }),
+      files: () => [],
+      prepareFiles: async () => {},
+      imgOrigins: async () => brandImgOrigins(await appBrandReady),
+      limits: LIVE_LIMITS,
+    };
   return {
-    makeDb: async () => {
-      const url = URL.createObjectURL(new Blob([`importScripts("${duckdbBundle.mainWorker}");`], { type: "text/javascript" }));
-      const d = new duckdbMod.AsyncDuckDB(new duckdbMod.VoidLogger(), new Worker(url)); // created after the ratchet → inherits it
-      await d.instantiate(duckdbBundle.mainModule, duckdbBundle.pthreadWorker);
-      URL.revokeObjectURL(url);
-      return d;
-    },
+    makeDb,
     page: guardPage(pageAdapter(db, { handles: xpHandles })),
     extensions: () => engineExtensions({ pageLoaded: [...Object.keys(extReady), ...(geoReady ? ["spatial"] : [])], editorNeeds: neededExtensions(assistEditorBasis()) }),
     files: () => [...new Set([...editorFileNames(assistEditorBasis()), ...xpHandles.keys()])],
@@ -2270,8 +2293,20 @@ async function boot() {
       if (r.ok) backend = "live";
     } catch (_) {}
 
+  // #740: an authoring server whose /assist proxy is on (it says so in
+  // window.__anofoxApp) needs DuckDB-Wasm for the assistant's locked engine
+  // only — the module and bundle, no page database. Here, before the CSP
+  // ratchet below, like every DuckDB-Wasm import (I-4).
+  if (backend === "live" && !window.__served && ownAppBool(window.__anofoxApp, ["assistant", "transport"]) === "serve") {
+    try {
+      duckdbMod = await import(DUCKDB_ESM);
+      duckdbBundle = await duckdbMod.selectBundle(duckdbMod.getJsDelivrBundles());
+    } catch (_) {
+      duckdbMod = duckdbBundle = null; // the assistant then stays off (finishAssistBoot: no engine)
+    }
+  }
   if (backend !== "live") {
-    duckdbMod = await import("https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm");
+    duckdbMod = await import(DUCKDB_ESM);
     duckdbBundle = await duckdbMod.selectBundle(duckdbMod.getJsDelivrBundles());
     const workerUrl = URL.createObjectURL(
       new Blob([`importScripts("${duckdbBundle.mainWorker}");`], { type: "text/javascript" })
@@ -2616,6 +2651,9 @@ async function boot() {
 async function finishAssistBoot() {
   await appBrandReady;
   assistCfg = assistConfig(appAssistBlock, assistFlags());
+  // #740: no engine (DuckDB-Wasm failed to load on an authoring server), no
+  // assistant — every tool runs in the engine.
+  if (assistCfg.enabled && !assistDeps()) assistCfg = { enabled: false, reason: "no-engine" };
   wireAssist();
   assistUiSync();
   applyChartsAsTablesInstallDefault(); // #403: after appBrandReady — see its own comment

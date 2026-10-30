@@ -4323,7 +4323,7 @@ this section is the panel itself.
 | Key | What it does |
 |-----|--------------|
 | `enabled` | Turns the panel on. Never on a locked server, an embed, a frame, or from a URL parameter or a dashboard's own SQL/comment — only this config. |
-| `transport` | `"browser-key"` is the only one the panel uses in this release (your own key, direct to `api.anthropic.com`). The authoring servers already have the server-side proxy for `"serve"` (the key stays on the server, see below); the panel's use of it comes next (#740). |
+| `transport` | `"browser-key"`: your own key, direct to `api.anthropic.com` (static hosting). `"serve"`: the authoring server's proxy (below), set by the server itself; never on static hosting, and an authoring server uses nothing else. |
 | `models` | The two model choices the panel's *Model* select offers ("Standard" / "Try harder"); a malformed id is ignored. |
 | `sample_rows_allowed` | Whether the conversation's "Include common values" toggle may be on (it still defaults to the viewer's own choice). |
 | `max_rounds` | How many times the assistant may fix and re-check its own proposal before showing it with open issues (1-3). |
@@ -4344,6 +4344,14 @@ server has a key (`ANTHROPIC_API_KEY`, or `--assist-key-file` /
 | `--assist-log PATH\|stderr` | `assist_log` | no log |
 | `--assist-log-content` | `assist_log_content` | off |
 | `--no-assist` | `"assist": false` | on when a key is set |
+
+With the proxy on, the builder's ✦ panel uses it: no key dialog, nothing
+stored in the browser, *What will be sent* names this server. The
+assistant's queries still run only in its locked copy of your data (§4.5):
+on an authoring server that copy is filled from the live session through
+`/query` (the in-scope tables and views; at most 100 000 rows per table,
+sampled above that, 500 000 rows and 128 MB in all; the server's files are
+not copied). Its checks then run on that copy, never on the live session.
 
 What the proxy accepts and refuses is in docs/secure-serving.md (Authoring).
 
