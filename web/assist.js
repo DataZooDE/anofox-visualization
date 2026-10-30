@@ -28,6 +28,9 @@ export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
 // the user's key and the page's data, so what runs is what was reviewed.
 export const SDK_URL = new URL("./vendor/anthropic-sdk-0.135.0.mjs", import.meta.url).href;
 export const API_HOST = "https://api.anthropic.com";
+// #744: from about this many lines, an edit of an existing script may come
+// as propose_dashboard `edits` instead of the whole script (saves output).
+export const EDITS_FROM_LINES = 300;
 export const LIMITS = {
   turns: 12, // model calls per request
   rounds: 3, // rejected proposals before the best one is shown with its issues
@@ -753,27 +756,91 @@ export const TOOLS = [
   },
   {
     name: "propose_dashboard",
-    description: "Propose the finished dashboard to the user. It is checked first: if it has errors or strict warnings you get them back to fix (a limited number of times). The user sees the proposal, the summary and the panels, and decides whether to apply it. Ends your turn.",
-    input_schema: obj({
-      sql: str("The complete dashboard script"),
-      summary: str("One or two plain sentences: what the dashboard shows"),
-      panels: {
-        type: "array",
-        description: "The panels, in order",
-        items: obj({ stmt: { type: "integer", description: "The statement number (1-based)" }, title: str("The panel's title"), why: str("Why this panel, in a few words") }),
+    description: `Propose the finished dashboard to the user. Give either \`sql\`, the complete script, or — when you change an existing script of more than about ${EDITS_FROM_LINES} lines — \`edits\`, the statements to change by their numbers in the context. It is checked first: if it has errors or strict warnings you get them back to fix (a limited number of times). The user sees the proposal, the summary and the panels, and decides whether to apply it. Ends your turn.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        sql: str("The complete dashboard script (or give edits instead)"),
+        edits: {
+          type: "array",
+          description: "Instead of sql: changes to the script in the context, by statement number. {stmt, sql} replaces statement stmt (an empty sql deletes it); {after, sql} inserts new statements after statement after (0: at the top). The numbers always refer to the script as the context shows it.",
+          items: {
+            type: "object",
+            properties: { stmt: { type: "integer", description: "The statement to replace or delete" }, after: { type: "integer", description: "Insert after this statement (0: at the top)" }, sql: str("The new statement(s), or an empty string to delete") },
+            required: ["sql"],
+            additionalProperties: false,
+          },
+        },
+        summary: str("One or two plain sentences: what the dashboard shows"),
+        panels: {
+          type: "array",
+          description: "The panels, in order",
+          items: obj({ stmt: { type: "integer", description: "The statement number (1-based)" }, title: str("The panel's title"), why: str("Why this panel, in a few words") }),
+        },
+        open_issues: { type: "array", description: "What you could not do or are unsure about (empty if none)", items: { type: "string" } },
       },
-      open_issues: { type: "array", description: "What you could not do or are unsure about (empty if none)", items: { type: "string" } },
-    }),
+      required: ["summary", "panels", "open_issues"],
+      additionalProperties: false,
+    },
     eager_input_streaming: true,
   },
 ];
+
+// #744: `edits` of propose_dashboard into the full script. `spans` are the
+// statement spans of `sql` (the script the context numbered). Each edit
+// replaces ({stmt, sql}; "" deletes) or inserts after ({after, sql}; 0 = at
+// the top). Numbers refer to the original script; a statement is edited at
+// most once. Throws a message for the model when an edit doesn't fit.
+export function mergeEdits(sql, spans, edits) {
+  const src = String(sql ?? "");
+  const n = spans.length;
+  if (!Array.isArray(edits) || !edits.length) throw new Error("edits is empty");
+  const replaced = new Map();
+  const inserted = new Map(); // after → [sql…]
+  for (const [i, e] of edits.entries()) {
+    const has = (k) => Object.hasOwn(e, k) && e[k] !== undefined && e[k] !== null;
+    if (has("stmt") === has("after")) throw new Error(`edits[${i}]: give either stmt (replace) or after (insert), not ${has("stmt") ? "both" : "neither"}`);
+    const text = String(e.sql ?? "").trim();
+    if (has("stmt")) {
+      if (!Number.isInteger(e.stmt) || e.stmt < 1 || e.stmt > n) throw new Error(`edits[${i}]: there is no statement ${e.stmt} (the script has ${n})`);
+      if (replaced.has(e.stmt)) throw new Error(`edits[${i}]: statement ${e.stmt} is edited twice`);
+      replaced.set(e.stmt, text);
+    } else {
+      if (!Number.isInteger(e.after) || e.after < 0 || e.after > n) throw new Error(`edits[${i}]: after must be 0..${n}`);
+      if (!text) throw new Error(`edits[${i}]: an insert needs sql`);
+      if (!inserted.has(e.after)) inserted.set(e.after, []);
+      inserted.get(e.after).push(text);
+    }
+  }
+  // The script as (statement, what follows it) pairs: a statement's text is
+  // its span (leading comments included, no terminator), the rest (";",
+  // blank lines) stays as it was. A replacement keeps its slot's separator;
+  // a deletion drops it with the statement.
+  const strip = (t) => t.replace(/;\s*$/, "").trim();
+  const items = spans.map(([a, b], k) => ({ text: src.slice(a, b), sep: src.slice(b, k + 1 < n ? spans[k + 1][0] : src.length) }));
+  const res = [];
+  const ins = (k) => {
+    for (const t of inserted.get(k) || []) res.push({ text: strip(t), sep: ";\n\n" });
+  };
+  ins(0);
+  for (let k = 0; k < n; k++) {
+    const r = replaced.get(k + 1);
+    if (r === undefined) res.push(items[k]);
+    else if (r) res.push({ text: strip(r), sep: items[k].sep });
+    ins(k + 1);
+  }
+  // Every statement but the last ends with its ";".
+  for (let k = 0; k < res.length - 1; k++) if (!res[k].sep.includes(";")) res[k] = { ...res[k], sep: ";\n\n" + res[k].sep.trimStart() };
+  const head = n ? src.slice(0, spans[0][0]) : src;
+  return (head + res.map((x) => x.text + x.sep).join("")).replace(/\n{3,}/g, "\n\n");
+}
 
 // A tool input against its (simple) schema: null if valid, else the problem.
 export function validate(schema, v, at = "input") {
   switch (schema.type) {
     case "object": {
       if (!v || typeof v !== "object" || Array.isArray(v)) return `${at} is not an object`;
-      for (const k of schema.required || []) if (!(k in v)) return `${at}.${k} is missing`;
+      for (const k of schema.required || []) if (!Object.hasOwn(v, k)) return `${at}.${k} is missing`;
       for (const k of Object.keys(v)) {
         if (!schema.properties[k]) return `${at}.${k} is not allowed`;
         const e = validate(schema.properties[k], v[k], `${at}.${k}`);
@@ -867,9 +934,17 @@ export function modelCard(c, opts = {}) {
 // by name), the current SQL with its statements numbered, theme and locale.
 // `tables` = [{name, rows, cards?}]; `spans` = lint_step's statement spans.
 // sec-review-256 last check: ownOpts first (same reason as buildPrefix).
+// #744: `mode` "change_panel" carries `panel` (the statement number) and its
+// `panel_title`; `editing` says whose script the statements are ("editor",
+// or "proposal" while an unapplied proposal is on screen).
 export function buildContext(opts = {}) {
-  const { mode = "new", tables = [], sql = "", spans = [], theme, locale, commonValues = true } = ownOpts(opts);
+  const { mode = "new", tables = [], sql = "", spans = [], theme, locale, commonValues = true, panel, panelTitle, editing } = ownOpts(opts);
   const ctx = { mode };
+  if (mode === "change_panel") {
+    ctx.panel = panel;
+    if (panelTitle) ctx.panel_title = String(panelTitle).slice(0, 200);
+  }
+  if (editing && mode !== "new") ctx.editing = editing;
   ctx.tables = tables.slice(0, LIMITS.tables).map((t) => ({
     name: t.name,
     rows: t.rows ?? undefined,
@@ -1000,6 +1075,7 @@ export async function runAssistant(opts) {
     effort,
     ctx,
     request,
+    base,
     history = [],
     tools,
     limits = {},
@@ -1010,7 +1086,14 @@ export async function runAssistant(opts) {
     onToolResult,
   } = ownOpts(opts);
   const L = { ...LIMITS, ...ownOpts(limits) };
-  const messages = [...history, firstMessage(ctx, request)];
+  // #744: a follow-up carries the conversation; its new context and request
+  // join the last user turn when the history ends with one (the previous
+  // proposal's tool result), so the turns keep alternating.
+  const messages = [...history];
+  const first = firstMessage(ctx, request);
+  const last = messages[messages.length - 1];
+  if (last?.role === "user") messages[messages.length - 1] = { role: "user", content: [...(Array.isArray(last.content) ? last.content : [{ type: "text", text: String(last.content) }]), ...first.content] };
+  else messages.push(first);
   const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, spent: 0 };
   let rounds = 0;
   let best = null; // the best rejected proposal (fewest issues)
@@ -1080,8 +1163,13 @@ export async function runAssistant(opts) {
         continue;
       }
       if (u.name === "propose_dashboard") {
+        const full = proposalInput(u.input, base);
+        if (full.error) {
+          results.push({ type: "tool_result", tool_use_id: u.id, is_error: true, content: full.error });
+          continue;
+        }
         onStatus({ phase: "checking", turn: turns, round: rounds + 1, maxRounds: L.rounds });
-        const r = await checkProposal(u.input, tools, signal);
+        const r = await checkProposal(full.input, tools, signal);
         if (signal?.aborted) return done("cancelled");
         if (r.passed) {
           finished = { ...r.proposal, passed: true, issues: [] };
@@ -1119,6 +1207,21 @@ export async function runAssistant(opts) {
     if (usage.spent > L.tokens) return done("stopped", { reason: "The request reached its token budget.", proposal: best });
   }
   return done("stopped", { reason: `The request reached its limit of ${L.turns} model calls.`, proposal: best });
+}
+
+// #744: propose_dashboard's input with a full `sql`: as given, or merged
+// from `edits` over the script the context numbered (`base` = {sql, spans}).
+export function proposalInput(input, base) {
+  const hasSql = typeof input.sql === "string" && input.sql.trim() !== "";
+  const hasEdits = Array.isArray(input.edits) && input.edits.length > 0;
+  if (hasSql === hasEdits) return { error: "Give either sql (the complete script) or edits, not " + (hasSql ? "both." : "neither.") };
+  if (hasSql) return { input };
+  if (!base || !String(base.sql || "").trim()) return { error: "edits need an existing script: give the complete script in sql." };
+  try {
+    return { input: { ...input, sql: mergeEdits(base.sql, base.spans, input.edits), edits: undefined } };
+  } catch (e) {
+    return { error: `The edits don't fit the script: ${e.message}. Fix them, or give the complete script in sql.` };
+  }
 }
 
 // check_dashboard: the write gate, then the strict check.

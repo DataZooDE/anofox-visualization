@@ -2655,6 +2655,7 @@ async function finishAssistBoot() {
   // assistant — every tool runs in the engine.
   if (assistCfg.enabled && !assistDeps()) assistCfg = { enabled: false, reason: "no-engine" };
   wireAssist();
+  attachAssistChange(); // #744: the first render may have run before the config was known
   assistUiSync();
   applyChartsAsTablesInstallDefault(); // #403: after appBrandReady — see its own comment
 }
@@ -5215,6 +5216,12 @@ async function previewTable(e) {
   cmpBtn.disabled = true;
   cmpBtn.title = "Compare with another table, or two time ranges of this one";
   acts.append(cmpBtn, mk);
+  // #744: Explore's assistant entry — a new dashboard with this table in scope.
+  if (assistCfg.enabled && e.kind !== "file" && !servedMode) {
+    const ai = xpBtn("✦ Build with the assistant", "btn2", () => buildWithAssistant(e, ai));
+    ai.title = "Describe a dashboard about this table; the assistant starts from its profile";
+    acts.insertBefore(ai, mk);
+  }
   head.append(left, acts);
   const chartSlot = xpEl("div", "xp-chart-slot");
   const cmpSlot = xpEl("div", "xp-chart-slot");
@@ -6299,6 +6306,15 @@ function xqTools(sql, rows) {
 }
 
 // Explore → build: a starter dashboard from the table's profile (web/explore.js).
+// #744: Explore → the assistant: an empty new dashboard, then the panel with
+// this table as its scope (its profile is computed again in the assistant's
+// own engine, never handed over from the page).
+function buildWithAssistant(e, opener) {
+  if (!assistCfg.enabled) return;
+  loadDash("", "");
+  setMode("edit");
+  openAssistant({ opener, scope: [e.fq] });
+}
 function openTableAsDashboard(e, cards) {
   const sql = cards.length ? xp.starterDashboard({ name: e.t, fq: e.fq, cards }) : `SELECT * FROM ${e.fq} LIMIT 100 ::TABLE;\n`;
   setMode("edit");
@@ -19297,7 +19313,39 @@ function attachHover() {
   attachAxisPointer();
   attachLegendToggle();
   attachToolbox();
+  attachAssistChange();
   attachChartA11y();
+}
+
+// #744: *✦ Change this panel* on every panel in Edit mode with the
+// assistant on — in the chart toolbox where there is one, else in a toolbox
+// of its own (exports strip every .dp-toolbox). Statement n = data-stmt + 1
+// (the assistant numbers statements as plan() does).
+function attachAssistChange() {
+  if (!assistCfg.enabled || servedMode || document.body.classList.contains("embed")) return;
+  document.querySelectorAll(".dash .panel[data-stmt]").forEach((panel) => {
+    if (panel.querySelector(":scope > .dp-toolbox .dp-ai-change")) return;
+    let bar = panel.querySelector(":scope > .dp-toolbox");
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.className = "dp-toolbox dp-toolbox-ai";
+      panel.appendChild(bar);
+    }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "dp-tool dp-ai-change";
+    b.title = "Change this panel with the assistant";
+    b.setAttribute("aria-label", "Change this panel with the assistant");
+    b.textContent = "✦";
+    b.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (bodyMode() !== "edit") return;
+      const n = Number(panel.dataset.stmt) + 1;
+      const title = (panel.querySelector(".panel-title")?.textContent || "").trim();
+      openAssistant({ opener: b, changePanel: { n, title } });
+    });
+    bar.insertBefore(b, bar.firstChild);
+  });
 }
 
 // ---- accessible charts (#37) ----

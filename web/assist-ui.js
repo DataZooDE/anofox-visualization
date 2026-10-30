@@ -241,8 +241,14 @@ function diffSummary(groups) {
 // The tables in scope for a request: those the editor's own text names
 // (literal, outside comments/strings), else all of them; the first 15 (in
 // catalog order) go with their profiles, the rest by name only.
-export function scopeTables(tables, editorSql) {
+// #744: `scope` (the fq names Explore came from) wins over the editor.
+export function scopeTables(tables, editorSql, scope) {
   const avail = (tables || []).filter((t) => !t.excluded);
+  if (Array.isArray(scope) && scope.length) {
+    const want = new Set(scope.map((x) => String(x).replace(/"/g, "").toLowerCase()));
+    const picked = avail.filter((t) => want.has(String(t.fq ?? t.name).replace(/"/g, "").toLowerCase()));
+    if (picked.length) return { inScope: picked.slice(0, 15), rest: avail.filter((t) => !picked.includes(t)).slice(0, 200) };
+  }
   const code = sqlCodeLite(editorSql).toLowerCase();
   const named = avail.filter((t) => new RegExp(`\\b${escapeRe(String(t.name).toLowerCase())}\\b`).test(code));
   const chosen = named.length ? named : avail;
@@ -330,6 +336,8 @@ export function makeHistory() {
 // ---- the panel (DOM) ----
 
 const CONSOLE_KEYS_URL = "https://console.anthropic.com/settings/keys";
+// #744: a conversation carried into the next Send up to this size (its JSON).
+const HISTORY_CHARS = 600_000;
 const SIDE_DRAWER = "(max-width: 820px)";
 const PHONE_INERT = "header, #sidebar, .toolbar, #ed-sql, .splitter, .dash, #explore";
 
@@ -354,6 +362,10 @@ export function mountAssistant(hostArg) {
     prefix: null,
     Anthropic: null,
     conv: { id: 0, log: [], skipConsent: false, history: null },
+    // #744: the panel a *Change this panel* send is about ({n, title}, the
+    // next Send only), and the tables Explore's entry put in scope.
+    target: null,
+    scope: null,
     commonValues: true,
     model: "default",
     proposal: null,
@@ -406,6 +418,14 @@ export function mountAssistant(hostArg) {
     commonInput.checked = true;
     commonLbl.append(commonInput, " Include common values");
     ctx.append(chips, commonLbl);
+    // #744: "Changing panel 3: Revenue by region ✕" for the next Send.
+    const target = mk("div", "ai-target");
+    target.id = "ai-target";
+    target.hidden = true;
+    const targetText = mk("span");
+    const targetClear = mk("button", "btn2 icon", { type: "button", "aria-label": "Don't limit the request to this panel" });
+    targetClear.textContent = "✕";
+    target.append(targetText, targetClear);
 
     const notice = mk("div", "ai-notice");
     notice.id = "ai-notice";
@@ -488,7 +508,7 @@ export function mountAssistant(hostArg) {
     formRow.append(modelLbl, sendBtn);
     form.append(qLabel, q, formRow);
 
-    pane.append(head, ctx, notice, log, stream, card, statusline, debugLine, form);
+    pane.append(head, ctx, target, notice, log, stream, card, statusline, debugLine, form);
 
     Object.assign(el, {
       title,
@@ -497,6 +517,9 @@ export function mountAssistant(hostArg) {
       closeBtn,
       chips,
       commonInput,
+      target,
+      targetText,
+      targetClear,
       notice,
       noticeBtn,
       log,
@@ -924,8 +947,12 @@ export function mountAssistant(hostArg) {
       extensions: engine.extensions,
     });
   }
-  async function buildCtx(tools, engine, editorSql) {
-    const { inScope, rest } = scopeTables(engine.tables, editorSql);
+  // `baseSql`: the script the request works on (the editor, or the
+  // unapplied proposal on screen); `o`: {mode, target, editing}.
+  async function buildCtx(tools, engine, baseSql, opts = {}) {
+    const o = ownOpts(opts);
+    const editorSql = baseSql;
+    const { inScope, rest } = scopeTables(engine.tables, editorSql, S.scope);
     const cardsOf = new Map();
     let i = 0;
     for (const t of inScope) {
@@ -941,7 +968,7 @@ export function mountAssistant(hostArg) {
       el.chips.textContent = chipsText({ scope: scopeNames, cols, commonValues: S.commonValues });
       el.chips.setAttribute("aria-label", chipsLabel({ scope: scopeNames, cols, commonValues: S.commonValues }));
     }
-    return buildContext({ mode: editorSql.trim() ? "edit" : "new", tables, sql: editorSql, spans: statementSpans(editorSql), commonValues: S.commonValues });
+    return buildContext({ mode: o.mode || (editorSql.trim() ? "edit" : "new"), panel: o.target?.n, panelTitle: o.target?.title, editing: o.editing, tables, sql: editorSql, spans: statementSpans(editorSql), commonValues: S.commonValues });
   }
 
   // ---- status / log / stream ----
@@ -1021,9 +1048,17 @@ export function mountAssistant(hostArg) {
     // source was found, but the read itself should be safe regardless).
     // `send` is renamed on the way out: the outer send() function below
     // must not be shadowed by the option of the same name.
-    const { request, send: wantSend } = ownOpts(opts);
+    const { request, send: wantSend, changePanel, scope } = ownOpts(opts);
     await ensureCss();
     if (!el.title) build();
+    // #744: *Change this panel* (a panel's ✦ in Edit mode) and Explore's
+    // *Build with the assistant* (the table in scope, a fresh conversation).
+    if (Array.isArray(scope) && scope.length) {
+      newConversation();
+      S.scope = scope.filter((x) => typeof x === "string").slice(0, 15);
+    }
+    const cp = ownOpts(changePanel);
+    if (Number.isInteger(cp.n) && cp.n >= 1 && cp.n <= 100000) setTarget({ n: cp.n, title: typeof cp.title === "string" ? cp.title.slice(0, 200) : "" });
     S.open = true;
     pane.hidden = false;
     document.getElementById("assist-btn")?.setAttribute("aria-expanded", "true");
@@ -1088,8 +1123,17 @@ export function mountAssistant(hostArg) {
       const engine = await ensureEngine(S.ctl.signal);
       const editor = host.editor.get();
       S.requestEditor = editor;
+      // The tools' trusted basis stays the editor (its files), never the
+      // model's text (M-1).
       const tools = makeTools(engine, editor);
-      const ctx = await buildCtx(tools, engine, editor);
+      // #744: a follow-up on an unapplied proposal refines the proposal.
+      const pending = S.proposal && !S.proposal.applied ? S.proposal.sql.replace(/\r\n?/g, "\n") : null;
+      const baseSql = pending ?? editor;
+      const target = S.target;
+      setTarget(null);
+      const mode = target ? "change_panel" : baseSql.trim() ? "edit" : "new";
+      const ctx = await buildCtx(tools, engine, baseSql, { mode, target, editing: pending != null ? "proposal" : "editor" });
+      const base = { sql: baseSql, spans: statementSpans(baseSql) };
       const prefix = await ensurePrefix();
       S.model = el.modelSel.value === "harder" ? "harder" : "default";
       S.lastPayload = payloadPreview({ prefix, ctx, request, destination: usesKey ? "https://api.anthropic.com" : `${location.origin}/assist (this server, which sends it on to the model API)`, toolLog: S.toolLog });
@@ -1111,6 +1155,7 @@ export function mountAssistant(hostArg) {
         model: host.config.models[S.model],
         ctx,
         request,
+        base,
         history: S.conv.history || [],
         tools,
         limits: { rounds: host.config.maxRounds },
@@ -1137,10 +1182,11 @@ export function mountAssistant(hostArg) {
       if (r.kind === "proposal" || (r.kind === "stopped" && r.proposal)) {
         if (r.text) logEntry("ai-bot", r.text);
         await showProposal(r.proposal, tools);
-        S.conv.history = null;
+        // #744: the conversation goes on (follow-ups refine the proposal).
+        keepHistory(r);
       } else if (r.kind === "reply") {
         logEntry("ai-bot", r.text);
-        S.conv.history = r.messages;
+        keepHistory(r);
       } else if (r.kind === "refusal") {
         logEntry("ai-note", "The model declined this request. " + (r.reason || ""));
         S.conv.history = null;
@@ -1168,6 +1214,26 @@ export function mountAssistant(hostArg) {
       el.cancelBtn.hidden = true;
       if (!el.statusEl.textContent) setStatus(null);
     }
+  }
+
+  // #744: carry the conversation into the next Send, unless it has grown
+  // past HISTORY_CHARS (then the next Send starts afresh from the current
+  // script; the context always carries that anyway).
+  function keepHistory(r) {
+    let size = 0;
+    try {
+      size = JSON.stringify(r.messages).length;
+    } catch (_) {}
+    if (size > HISTORY_CHARS) {
+      S.conv.history = null;
+      logEntry("ai-note", "This conversation is long: the next request starts afresh from the current dashboard.");
+    } else S.conv.history = r.messages;
+  }
+  function setTarget(t) {
+    S.target = t || null;
+    if (!el.target) return;
+    el.target.hidden = !S.target;
+    el.targetText.textContent = S.target ? `Changing panel ${S.target.n}${S.target.title ? `: ${S.target.title}` : ""}` : "";
   }
 
   // L-1 (sec-review-272): the one place a session is ever closed — called
@@ -1312,6 +1378,8 @@ export function mountAssistant(hostArg) {
     S.conv = { id: S.conv.id + 1, log: [], skipConsent: false, history: null };
     S.toolLog = [];
     S.proposal = null;
+    S.scope = null;
+    setTarget(null);
     el.log.replaceChildren();
     renderCard();
   }
@@ -1324,6 +1392,10 @@ export function mountAssistant(hostArg) {
   }
 
   function wirePanel() {
+    el.targetClear.onclick = () => {
+      setTarget(null);
+      el.q.focus();
+    };
     el.closeBtn.onclick = () => close();
     el.newBtn.onclick = () => newConversation();
     el.forgetBtn.onclick = () => forgetKey();

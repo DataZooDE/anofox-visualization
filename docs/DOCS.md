@@ -4387,13 +4387,26 @@ already use, or runs a statement the assistant may not run by itself (an
 *Apply and run*, *Apply, don't run* (the SQL goes in, nothing executes until
 you press Run), or *Cancel*.
 
+**Where to start (#744).** Besides ✦ / Ctrl+I and the empty editor's
+"Describe the dashboard you want…":
+- *✦ Change this panel*, on every panel in Edit mode (in its toolbox): the
+  panel shows "Changing panel 3: Revenue by region", and the next request
+  is about that panel (✕ lifts it).
+- *✦ Build with the assistant*, in Explore next to *＋ New dashboard from
+  this table*: an empty new dashboard with that table in scope.
+
+**Follow-ups.** A conversation goes on after a proposal: "now sort it by
+units" refines the proposal on screen (if you haven't applied it) or your
+applied dashboard. *New conversation* starts over; a very long one starts
+afresh by itself (the current dashboard always goes along). For a long
+script the assistant may send only the statements it changes; the panel
+merges them into the full script before checking and previewing it.
+
 **Phone.** The panel opens as a full-height sheet; once a proposal arrives
 it closes and the dashboard (with the fixed preview bar) takes over, with
 focus on the preview's heading.
 
-**Limits.** One request at a time (Cancel stops it); a clarifying question
-and your answer continue the same exchange, but a fresh Send after a
-proposal starts a new one; the sandbox's table snapshot can be sampled or
+**Limits.** One request at a time (Cancel stops it); the sandbox's table snapshot can be sampled or
 truncated for a very large table (noted in the profile); links in a preview
 don't navigate, and the model's own text is always shown as plain text,
 never links, images or HTML.
