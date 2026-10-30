@@ -202,7 +202,9 @@ so the protection is about making sure *only you* can send it:
     assistant's locked engine only. The engine is filled from the live
     session through `/query` with a fixed set of read statements (the
     catalog, `DESCRIBE`, `count(*)`, `SELECT *` with `LIMIT` or a reservoir
-    sample), never model SQL. Rows arrive as the server's JSON text and are
+    sample), never model SQL. Views are copied only when the editor's SQL
+    names them (or Explore's entry came from one): a view runs its whole
+    body on the server's single authoring worker (#742). Rows arrive as the server's JSON text and are
     typed by DuckDB in the engine (`from_json` against the described
     types, one prepared statement), so they can't add SQL.
   - A locked server (`anofox_serve_dashboards`, `serve --dashboards`) never

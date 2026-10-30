@@ -363,8 +363,12 @@ export function pageAdapter(db, opts = {}) {
 // against the described types), so no number goes through a JS double.
 // No files: the server's files are not the browser's to copy.
 export const LIVE_LIMITS = { ...SNAPSHOT_LIMITS, tableRows: 100_000, totalRows: 500_000, totalBytes: 128 << 20 };
+// #742: `wantView(fq)` — which views are copied. A view runs its whole body
+// on the server's one authoring worker, and a slow one holds the builder's
+// own /query meanwhile; app.js copies only the views the editor's SQL names
+// (tables are always copied: a count(*) and a bounded read).
 export function livePageAdapter(opts = {}) {
-  const { query } = ownOpts(opts);
+  const { query, wantView } = ownOpts(opts);
   if (typeof query !== "function") throw new Error("livePageAdapter needs query(sql, ms)");
   const rows = async (sql, ms) => JSON.parse((await query(sql, ms)) || "[]");
   return {
@@ -403,6 +407,7 @@ export function livePageAdapter(opts = {}) {
     async copyFile() {
       throw new Error("a live page has no files to copy");
     },
+    wantView: typeof wantView === "function" ? wantView : undefined,
   };
 }
 
@@ -476,6 +481,10 @@ export async function snapshotTables(c, page, limits = SNAPSHOT_LIMITS, opts = {
       continue;
     }
     if (!includedDbs.has(dbName)) continue; // a housekeeping database: not part of the snapshot at all
+    if (kind === "view" && typeof page.wantView === "function" && !page.wantView(fq)) {
+      out.push({ fq, kind, rows: 0, excluded: "a view of the live server the dashboard doesn't name: not copied (the user can name it in the dashboard, or open it in Explore and use Build with the assistant)" });
+      continue;
+    }
     if (kind === "view" && excludedNameRe.length) {
       const sql = await page.viewSql(dbName, schema, name, limits.catalogMs).catch(() => "");
       if (excludedNameRe.some((re) => re.test(sql))) {
@@ -552,8 +561,12 @@ export async function pageFingerprint(page, opts = {}) {
   // columns; JSON.stringify doesn't know BigInt, so numbers are normalised
   // the same way web/lint.js's rowsJson does.
   const bigJson = (v) => JSON.stringify(v, (_, x) => (typeof x === "bigint" ? Number(x) : x));
+  // #742: on a live page, which views are copied is part of what the engine
+  // was built from (naming another view in the editor rebuilds it).
+  const wanted = typeof page.wantView === "function" ? cat.filter((r) => r.kind === "view" && page.wantView(`${qid(r.database_name)}.${qid(r.schema_name)}.${qid(r.table_name)}`)).map((r) => [r.database_name, r.schema_name, r.table_name]) : [];
   const parts = [
     bigJson(cat.map((r) => [r.database_name, r.schema_name, r.table_name, r.kind, r.n ?? null, r.cols ?? null])),
+    bigJson(wanted),
     bigJson(dbs.map((r) => [r.database_name, r.path, r.type])),
     bigJson([...files].sort()),
     bigJson([...extensions].sort()),

@@ -4349,9 +4349,12 @@ With the proxy on, the builder's ✦ panel uses it: no key dialog, nothing
 stored in the browser, *What will be sent* names this server. The
 assistant's queries still run only in its locked copy of your data (§4.5):
 on an authoring server that copy is filled from the live session through
-`/query` (the in-scope tables and views; at most 100 000 rows per table,
-sampled above that, 500 000 rows and 128 MB in all; the server's files are
-not copied). Its checks then run on that copy, never on the live session.
+`/query` (every table, and only the views your SQL names or Explore's
+*Build with the assistant* came from — a view runs its whole query on the
+server, and a slow one would hold the builder meanwhile; at most 100 000
+rows per table, sampled above that, 500 000 rows and 128 MB in all; the
+server's files are not copied). A view that isn't copied is still listed to
+the assistant by name. Its checks then run on that copy, never on the live session.
 
 What the proxy accepts and refuses is in docs/secure-serving.md (Authoring).
 

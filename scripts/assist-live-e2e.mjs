@@ -69,6 +69,8 @@ proc.stderr.on("data", (d) => (log += d));
 const opts = { assist_base_url: apiBase };
 proc.stdin.write(
   `LOAD ${sqlStr(ext)};\nCREATE TABLE sales AS SELECT i AS id, ['EU','US','APAC'][1 + i % 3] AS region, (i * 1.5)::DOUBLE AS amount FROM range(0, 600) t(i);\n` +
+    // #742: a view the (empty) editor doesn't name: listed, never copied, never run.
+    `CREATE VIEW v_unnamed AS SELECT region, count(*) AS n FROM sales GROUP BY region;\n` +
     `SELECT anofox_serve(${port}, ${sqlStr(JSON.stringify(opts))}) AS r;\n`
 );
 let browser = null;
@@ -118,6 +120,7 @@ try {
   const second = seen[1] ? JSON.parse(seen[1].body) : {};
   const result = JSON.stringify(second.messages?.at(-1)?.content || "");
   check(/sales/.test(result) && /600/.test(result), "list_tables ran in the engine on the live table (600 rows)");
+  check(/not copied[^}]*v_unnamed/.test(result), "a view the dashboard doesn't name is listed as not copied (#742)");
   check(!seen.some((r) => r.body.includes(KEY)), "the key is never in a request body");
   check(!browserRequests.some((u) => /api\.anthropic\.com/.test(u)), "the browser never called api.anthropic.com");
   check(browserRequests.some((u) => u === `${base}/assist/v1/messages`), "the browser called the server's /assist");
