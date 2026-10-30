@@ -1395,7 +1395,11 @@ and `<circle>`s for points. Features are drawn in row order.
 - **Legend**: in the theme's legend typography, titled with the measure's
   name and unit (`sales AS "Revenue"` with `'€'::YFORMAT` → "Revenue (€)"),
   ticks at nice values in the panel's format (`€500K`, `1.4B`). It sits over
-  a corner of the map that covers no data, else beside or above the map.
+  a corner of the map that covers no data (no shape, point, flow, scale bar
+  or attribution under it), else above or beside the map, whichever leaves
+  the map larger (ggplot-rs's `legend_inside_auto`; the SVG's
+  `data-legend-at` says where). `::LEGEND` places it yourself; small
+  multiples keep it on top.
 - **Size**: the map fills its panel at its own aspect; without `::HEIGHT` a
   map panel takes the height its shape needs (a world map is wide and low, a
   country tall).
