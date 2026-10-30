@@ -21,6 +21,7 @@
 use anofox_visualization::format::Locale;
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
 use anofox_visualization::host::app_brand::{self, AppBrand};
+use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, apikey, audit::AuditLog, Auth, Identity, Scope};
 use anofox_visualization::host::serving::{
     self as sv, html_escape as esc, sql_string_literal, AuthoringGuard, RequestMeta,
@@ -92,6 +93,10 @@ struct Opts {
     /// ([`anofox_visualization::image::validated_assets_root`]), not
     /// derived from a dashboards folder — authoring has none.
     assets_dir: Option<String>,
+    /// `--assist-*` / `--no-assist` (authoring only, #740): the `/assist`
+    /// proxy to the model API. On when a key is set (`ANTHROPIC_API_KEY` or
+    /// `--assist-key-file`), unless `--no-assist`.
+    assist: assist::AssistOptions,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -106,7 +111,7 @@ static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist-key-file FILE] [--no-assist]   (the builder assistant's /assist proxy: on when ANTHROPIC_API_KEY\n                                       or a 0600 key file holds a key; the key never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -142,7 +147,9 @@ fn parse_args() -> Opts {
         home: None,
         authoring_timeout: Duration::from_secs(120),
         assets_dir: None,
+        assist: assist::AssistOptions::default(),
     };
+    let mut assist_given = false;
     let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut query_timeout_given = false;
     let mut args = std::env::args().skip(1);
@@ -269,6 +276,49 @@ fn parse_args() -> Opts {
                         .unwrap_or_else(|| usage("--log-vars needs none|names|values")),
                 )
             }
+            "--no-assist" => {
+                o.assist.off = true;
+                assist_given = true;
+            }
+            "--assist-log-content" => {
+                o.assist.cfg.log_content = true;
+                assist_given = true;
+            }
+            "--assist-models"
+            | "--assist-base-url"
+            | "--assist-key-file"
+            | "--assist-budget-tokens-per-hour"
+            | "--assist-max-tokens"
+            | "--assist-log" => {
+                assist_given = true;
+                let v = args
+                    .next()
+                    .unwrap_or_else(|| usage(&format!("{a} needs a value")));
+                let r = match a.as_str() {
+                    "--assist-models" => o.assist.cfg.set_models(&v),
+                    "--assist-base-url" => o.assist.cfg.set_base_url(&v),
+                    "--assist-key-file" => {
+                        o.assist.key_file = Some(PathBuf::from(v));
+                        Ok(())
+                    }
+                    "--assist-log" => {
+                        o.assist.log = Some(v);
+                        Ok(())
+                    }
+                    _ => match v.parse::<u64>() {
+                        Ok(n) if n > 0 => {
+                            if a == "--assist-max-tokens" {
+                                o.assist.cfg.max_tokens = n;
+                            } else {
+                                o.assist.cfg.budget_tokens_per_hour = n;
+                            }
+                            Ok(())
+                        }
+                        _ => Err(format!("{a} needs a positive number")),
+                    },
+                };
+                r.unwrap_or_else(|e| usage(&e));
+            }
             s if s.starts_with('-') => usage(&format!("unknown option {s}")),
             _ => o.db = a,
         }
@@ -296,6 +346,9 @@ fn parse_args() -> Opts {
     // #522: `--dashboards` serving already resolves relative assets from
     // its own folder's `assets/` subfolder (no option needed); `--assets`
     // names authoring's otherwise-nonexistent root directly.
+    if o.dashboards_dir.is_some() && assist_given {
+        usage("--assist-* and --no-assist apply to authoring mode only (serve <db>): a locked server has no /assist");
+    }
     if o.dashboards_dir.is_some() && o.assets_dir.is_some() {
         usage("--assets applies to authoring mode only (serve <db>); --dashboards already serves <dir>/assets");
     }
@@ -663,8 +716,22 @@ fn authoring_mode(o: &Opts) {
         .as_ref()
         .map(|p: &PathBuf| format!("\n  assets: {}", p.display()))
         .unwrap_or_default();
+    let a = &o.assist;
+    let (proxy, assist_note) = match assist::build(
+        a.off,
+        a.cfg.clone(),
+        a.key_file.as_deref(),
+        a.log.as_deref(),
+    ) {
+        Ok(Some((p, note))) => (Some(p), format!("\n  {note}")),
+        Ok(None) => (None, String::new()),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2)
+        }
+    };
     say(&format!(
-        "anofox-visualization serving {url}\n  (authoring — client SQL; loopback only; the URL carries this run's token)\n  database: {db}{assets_note}\n  (Ctrl-C to stop)"
+        "anofox-visualization serving {url}\n  (authoring — client SQL; loopback only; the URL carries this run's token)\n  database: {db}{assets_note}{assist_note}\n  (Ctrl-C to stop)"
     ));
     if o.open_browser {
         let _ = open::that(&url);
@@ -674,7 +741,13 @@ fn authoring_mode(o: &Opts) {
     install_cleanup_on_signal();
     let session = Mutex::new(AuthoringSession::new(db.clone(), o.authoring_timeout));
     run_workers(server, 1, move |req| {
-        handle_authoring(&guard, &session, assets_root.as_deref(), req)
+        handle_authoring(
+            &guard,
+            &session,
+            assets_root.as_deref(),
+            proxy.as_ref(),
+            req,
+        )
     });
 }
 
@@ -682,6 +755,7 @@ fn handle_authoring(
     guard: &AuthoringGuard,
     session: &Mutex<AuthoringSession>,
     assets_root: Option<&Path>,
+    proxy: Option<&assist::Proxy>,
     mut req: Request,
 ) {
     let url = req.url().to_string();
@@ -699,6 +773,10 @@ fn handle_authoring(
     }
     if let Err(d) = guard.check(&m) {
         return text(req, d.status(), d.message());
+    }
+    // #740: after the guard, like /query. 404 when the proxy is off.
+    if path == "/assist" || path.starts_with("/assist/") {
+        return assist_route(proxy, &path, req);
     }
     if path == "/query" {
         if req.method() != &Method::Post {
@@ -790,6 +868,35 @@ fn handle_authoring(
         Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),
     }
+}
+
+/// `POST /assist/v1/messages[/count_tokens]` (#740): on a thread of its own
+/// (bounded by the proxy's pool), so a minute-long stream never holds the
+/// one authoring worker `/query` runs on. The reply goes out on the raw
+/// connection ([`assist::write_http`]: a stream is flushed per read).
+fn assist_route(proxy: Option<&assist::Proxy>, path: &str, mut req: Request) {
+    let (Some(p), Some(ep)) = (proxy, assist::Endpoint::from_path(path)) else {
+        return text(req, 404, "not found");
+    };
+    if req.method() != &Method::Post {
+        return text(req, 405, "POST only");
+    }
+    let Some(slot) = p.try_slot() else {
+        let mut w = req.into_writer();
+        let _ = assist::write_http(&mut *w, assist::Proxy::busy());
+        return;
+    };
+    let p = p.clone();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = req
+            .as_reader()
+            .take(assist::MAX_REQUEST as u64 + 1)
+            .read_to_end(&mut buf);
+        let reply = p.handle(slot, ep, &buf);
+        let mut w = req.into_writer();
+        let _ = assist::write_http(&mut *w, reply);
+    });
 }
 
 /// `GET`/`HEAD /assets/<rest>` (#522, opt-in): one image file from
@@ -1588,6 +1695,11 @@ fn route_serve(
             421,
             "misdirected request: unknown Host — start the server with --allow-host <name>",
         );
+    }
+    // #740: the assistant's proxy is an authoring route only; a locked
+    // server never has it, whatever the method or the login.
+    if path == "/assist" || path.starts_with("/assist/") {
+        return reply(req, 404, "not found");
     }
     // CSRF: the only non-GET request (the OIDC logout) must be same-origin.
     if req.method() != &Method::Get
