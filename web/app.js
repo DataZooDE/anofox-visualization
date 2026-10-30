@@ -17204,6 +17204,37 @@ function renderSubmitError(errEl, text, varName) {
 // statement's own query result, run the same way any other panel's is —
 // the author's gate (zero rows = not available yet) already decided
 // whether this renders at all.
+// #721: a "record once" ::SUBMIT (gated in SQL on viewer_state) hides its
+// own panel on the re-run after a successful submit, so its "Submitted at"
+// line would never show. Once that run (and any run queued behind it) is
+// done, a status still marked `toast` was never rendered: say it in a
+// toast instead — role=status, no focus taken (it stays where it was).
+async function toastIfHidden(i, p) {
+  while (p) {
+    await p.catch(() => {});
+    p = runActive;
+  }
+  const st = submitStatus[i];
+  if (!st || !st.toast) return;
+  delete st.toast;
+  submitToast(st.text);
+}
+let submitToastTimer = 0;
+function submitToast(text) {
+  document.getElementById("submit-toast")?.remove();
+  clearTimeout(submitToastTimer);
+  const t = document.createElement("div");
+  t.id = "submit-toast";
+  t.className = "side-toast submit-toast";
+  t.setAttribute("role", "status");
+  t.setAttribute("aria-live", "polite");
+  document.body.appendChild(t);
+  // set after insertion: a live region's initial content isn't reliably announced
+  requestAnimationFrame(() => (t.textContent = text));
+  t.addEventListener("click", () => t.remove());
+  submitToastTimer = setTimeout(() => t.remove(), 6000);
+}
+
 function mkSubmit(s, i, rowsJson) {
   const rows = JSON.parse(rowsJson);
   if (rows.length !== 1) return null; // 0: the author's gate; >1: the lint already refuses this at the source
@@ -17248,6 +17279,7 @@ function mkSubmit(s, i, rowsJson) {
   // click that just set it; focus stays on the button, same timing.
   const saved = submitStatus[i];
   if (saved) {
+    delete saved.toast; // shown right here, no toast needed (#721)
     const text = saved.text;
     const focusAfter = saved.focusBtn;
     delete saved.focusBtn;
@@ -17323,10 +17355,10 @@ async function doSubmit(s, i, names, doneText, btn, statusEl, errEl) {
     const text = "Submitted at " + hhmm + "." + (doneText ? " " + doneText : "");
     // Re-submitting appends a new row (the author gates "once" in SQL);
     // the button is enabled again right away.
-    submitStatus[i] = { text, kind: "ok", focusBtn: true };
+    submitStatus[i] = { text, kind: "ok", focusBtn: true, toast: true };
     reenable();
     servedCache.clear();
-    run(true);
+    toastIfHidden(i, run(true));
     return;
   }
   const msg = await r.text().catch(() => "");
@@ -17430,8 +17462,8 @@ async function doSubmitPreview(s, i, names, doneText, btn, statusEl, errEl) {
       await stmt.close();
     }
     const hhmm = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    submitStatus[i] = { text: "Submitted at " + hhmm + "." + (doneText ? " " + doneText : ""), kind: "ok", focusBtn: true };
-    run(true);
+    submitStatus[i] = { text: "Submitted at " + hhmm + "." + (doneText ? " " + doneText : ""), kind: "ok", focusBtn: true, toast: true };
+    toastIfHidden(i, run(true));
   } catch (e) {
     submitStatus[i] = { text: "Couldn't save in preview: " + (e && e.message ? e.message : String(e)), kind: "err" };
     errEl.textContent = submitStatus[i].text;

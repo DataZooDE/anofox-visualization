@@ -174,6 +174,7 @@ try {
     await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 15000 });
     const focused = await page.evaluate(() => document.activeElement?.classList.contains("submit-btn"));
     check(focused, "(b) focus stays on the button");
+    check(!(await page.locator("#submit-toast").count()), "(b) no toast when the panel itself shows the status (#721)");
     check(!errs.length, `(b) no page errors: ${errs.join(" | ")}`);
     await ctx.close();
   }
@@ -406,11 +407,17 @@ try {
     check(true, "(i) the tour autostarts on a signed-in viewer's first visit");
     await page.locator(".submit-btn").click();
     // #721: the ::SUBMIT is gated "record once" (zero rows once a row for it
-    // exists), so the re-run after the 201 removes its panel — that's the
-    // confirmation here, not a "Submitted at" status (there is no panel
-    // left to show one in).
+    // exists), so the re-run after the 201 removes its panel — the
+    // "Submitted at" confirmation comes as a toast instead.
     await page.waitForFunction(() => !document.querySelector(".submit-btn"), null, { timeout: 15000 });
     check(true, "(i) the submit's own panel is gone once the row is recorded");
+    await page.waitForFunction(() => /^Submitted at \d{1,2}:\d{2}/.test(document.getElementById("submit-toast")?.textContent || ""), null, { timeout: 10000 }).catch(() => {});
+    const toast = await page.evaluate(() => {
+      const t = document.getElementById("submit-toast");
+      return t ? { text: t.textContent, role: t.getAttribute("role"), focused: t.contains(document.activeElement) } : null;
+    });
+    check(!!toast && /^Submitted at \d{1,2}:\d{2}/.test(toast.text), `(i) a toast confirms it instead (${toast && toast.text})`);
+    check(!!toast && toast.role === "status" && !toast.focused, "(i) …as a status message that doesn't take the focus");
 
     // Clear localStorage too, to prove the second visit's skip comes from
     // viewer_state (#525), not the ordinary per-browser "seen" flag.
