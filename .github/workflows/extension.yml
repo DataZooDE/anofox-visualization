@@ -55,7 +55,7 @@ jobs:
           # Linux: Ubuntu 22.04 runners so the binaries need only glibc >= 2.35.
           - { os: ubuntu-22.04,     platform: linux_amd64 }
           - { os: ubuntu-22.04-arm, platform: linux_arm64 }
-          - { os: macos-14,         platform: osx_arm64 }
+          - { os: macos-15,         platform: osx_arm64 }
           - { os: macos-15-intel,   platform: osx_amd64 }
           - { os: windows-latest,   platform: windows_amd64 }
     defaults:
