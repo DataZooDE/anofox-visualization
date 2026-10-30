@@ -121,6 +121,7 @@ fn row_aligned(r: Role) -> bool {
             | Role::FacetFree
             | Role::Rank
             | Role::Censor
+            | Role::Tooltip
     )
 }
 
@@ -330,6 +331,9 @@ fn aggregate(cols: Vec<Column>) -> Vec<Column> {
                         } else {
                             Value::Float(nums.iter().sum())
                         }
+                    } else if c.name == crate::ROW_INDEX && rows.len() > 1 {
+                        // #751: a merged point is no one row of the result.
+                        Value::Na
                     } else {
                         c.values[rows[0]].clone()
                     }

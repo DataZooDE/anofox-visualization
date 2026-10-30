@@ -3,6 +3,7 @@
 //   renders each panel to SVG. No server, no DuckDB extension.
 import init, {
   plan,
+  tooltip_fill,
   render_panel,
   render_cell,
   render_mini_hist,
@@ -19260,10 +19261,11 @@ function attachHover() {
       // A map feature's ::LABEL may run over several lines: the first is the
       // heading, the rest follow as they are.
       const [head, ...lines] = isMapMark ? info.x.split("\n") : [info.x];
+      const ct = isMapMark ? null : customTip(el, info, fill); // #751
       tip.innerHTML =
-        (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "") +
+        (ct?.head ?? (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "")) +
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
-        tipRow(info, fill) +
+        (ct ? ct.body : tipRow(info, fill)) +
         (isMapMark ? mapTipSpark(el) : "");
       tip.classList.add("show");
       if (isMapMark) mapHoverEmph(series);
@@ -19760,6 +19762,67 @@ function applyChartsAsTablesInstallDefault() {
 // One tooltip row: colour swatch + series + value (+ the full tooltip text
 // when it carries more, e.g. box-plot stats or OHLC). A single-series bar's
 // series is its x, already the tooltip's header: the row then shows the value.
+// #751: a chart panel's ::TOOLTIP_FORMAT / ::TOOLTIP_HEADER / ::TOOLTIP
+// columns (null when it has none): the templates (the first row's text),
+// the extra columns by alias, the panel's ::YFORMAT / ::XFORMAT defaults and
+// its rows. Cached on the panel.
+function tipSpec(panel) {
+  if (!panel) return null;
+  if (panel._tipSpec !== undefined) return panel._tipSpec;
+  const dp = panel._dp;
+  let spec = null;
+  if (dp && Array.isArray(dp.roles)) {
+    const by = (n) => dp.roles.filter((r) => r[1] === n);
+    const fmt = by("TOOLTIP_FORMAT")[0],
+      head = by("TOOLTIP_HEADER")[0],
+      extra = by("TOOLTIP");
+    if (fmt || head || extra.length) {
+      let rows = [];
+      try {
+        rows = typeof dp.rows === "string" ? JSON.parse(dp.rows) : dp.rows || [];
+      } catch (_) {}
+      const key = (r) => `c${r[0]}`;
+      const first = (r) => (r && rows[0] ? rows[0][key(r)] : null);
+      const x = dp.roles.find((r) => r[1] === "XAXIS");
+      spec = {
+        rows,
+        fmt: first(fmt),
+        head: first(head),
+        x: x ? key(x) : null,
+        extra: extra.map((r) => ({ key: key(r), name: r[2] || key(r) })),
+        defaults: JSON.stringify({ y: first(by("YFORMAT")[0]) || "", x: first(by("XFORMAT")[0]) || "" }),
+      };
+    }
+  }
+  panel._tipSpec = spec;
+  return spec;
+}
+// #751: the tooltip of a mark from its panel's spec — {head, body} HTML, or
+// null for the default tooltip. Every value is wasm-filled plain text,
+// escaped here.
+function customTip(el, info, fill) {
+  const spec = tipSpec(el.closest(".panel"));
+  if (!spec) return null;
+  const ri = Number(el.getAttribute("data-row"));
+  const row = Number.isInteger(ri) ? spec.rows[ri] : null;
+  const dv = parseFloat(el.getAttribute("data-value"));
+  const fields = { series: info.series, y: Number.isFinite(dv) ? dv : info.value, x: row && spec.x ? row[spec.x] : info.x };
+  for (const e of spec.extra) fields[e.name] = row ? row[e.key] : null;
+  const loc = dashLocale() || "";
+  const fillT = (t) => tooltip_fill(String(t), JSON.stringify(fields), spec.defaults, loc);
+  const dot = `<span class="tip-dot" style="background:${escapeHtml(fill)}"></span>`;
+  const head = spec.head != null ? `<div class="tip-head">${escapeHtml(fillT(spec.head))}</div>` : null;
+  let body;
+  if (spec.fmt != null) body = `<div class="tip-row"><span>${dot}${escapeHtml(fillT(spec.fmt))}</span></div>`;
+  else body = tipRow(info, fill);
+  // ::TOOLTIP columns no template names are listed under it.
+  const named = spec.fmt != null ? String(spec.fmt) + String(spec.head ?? "") : String(spec.head ?? "");
+  for (const e of spec.extra) {
+    if (named.includes(`{${e.name}`) || !row) continue;
+    body += `<div class="tip-row"><span>${escapeHtml(e.name)}</span><b>${escapeHtml(fillT(`{${e.name.replace(/[{}:]/g, "")}}`))}</b></div>`;
+  }
+  return { head, body };
+}
 function tipRow(info, fill) {
   const name = info.own || (info.x && info.series === info.x) ? "" : info.series;
   return (
@@ -20594,8 +20657,10 @@ function attachAxisPointer() {
         const [x, y] = (el.getAttribute("points") || "").trim().split(/[\s,]+/).map(Number);
         return el.getAttribute("data-geom") === "vline" ? Math.round(nearest(x)) === best : Math.abs(y - uy) * scale <= 8;
       });
-      const head = colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "";
-      tip.innerHTML = head + colPts.map((p) => tipRow(p.info, p.fill)).join("") + rules.map(ruleRow).join("");
+      // #751: a panel's tooltip templates apply to the crosshair's rows too.
+      const cts = colPts.map((p) => (p.el ? customTip(p.el, p.info, p.fill) : null));
+      const head = cts[0]?.head ?? (colPts[0] && colPts[0].info.x ? `<div class="tip-head">${escapeHtml(colPts[0].info.x)}</div>` : "");
+      tip.innerHTML = head + colPts.map((p, i) => (cts[i] ? cts[i].body : tipRow(p.info, p.fill))).join("") + rules.map(ruleRow).join("");
       tip.classList.add("show");
       ours = tip.innerHTML;
       tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";

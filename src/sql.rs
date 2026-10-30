@@ -1171,6 +1171,16 @@ fn rewrite_list(list: &str) -> Rewritten {
                 // cast to DOUBLE, unlike the shared `Role::Value(_)` arm
                 // below: the real geometry column is WKT text, not a
                 // number, and would error on every row if it were.
+                // #751: a ::TOOLTIP column keeps its alias (or bare column
+                // name): templates name it, and an unnamed one is listed
+                // under it.
+                Role::Tooltip => {
+                    let (core, alias) = trailing_alias(expr);
+                    if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
+                        names.push((i, nm));
+                    }
+                    format!("{core} AS c{i}")
+                }
                 Role::Geometry => {
                     let (core, alias) = trailing_alias(expr);
                     if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
