@@ -555,6 +555,10 @@ pub enum Role {
     /// #751: a chart tooltip's header (`'{x:%d %b %Y}'::TOOLTIP_HEADER`),
     /// the same placeholders.
     TooltipHeader,
+    /// #751: which marks the tooltip lists (`::TOOLTIP_MODE`, one of
+    /// [`TOOLTIP_MODES`]): `'shared'` (every series at the x — a line
+    /// chart's crosshair), `'single'` (only the hovered mark), `'none'`.
+    TooltipMode,
     /// A `::MARKDOWN` box drawn as a callout (`::CALLOUT`): `'note'`,
     /// `'warning'` or `'success'` (the value).
     Callout,
@@ -2234,6 +2238,8 @@ pub const NORTH_ARROW_MODES: &[&str] = &["print", "always"];
 pub const POINTS_MODES: &[&str] = &["auto", "none", "always"];
 
 /// The `::HOVER_FOCUS` values the browser knows.
+/// #751: the `::TOOLTIP_MODE` values (browser: `tipMode`, web/app.js).
+pub const TOOLTIP_MODES: [&str; 3] = ["shared", "single", "none"];
 pub const HOVER_FOCUS_MODES: &[&str] = &["series", "none"];
 
 /// The `::LEGEND` values — `'none'` plus every [`ggplot_rs::theme::LegendPosition`]

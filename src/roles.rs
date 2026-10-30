@@ -282,6 +282,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "the tooltip's line per point: '{series}: {y:€} ({Units} units)' — {x}, {y}, {series}, {<::TOOLTIP alias>}, each with an optional :format (a ::YFORMAT keyword, .2f, or a strftime pattern for dates)"),
     e("TOOLTIP_HEADER", &["TOOLTIPHEADER"], R::TooltipHeader, "modifier", true,
       "the tooltip's header, same placeholders: '{x:%d %b %Y}'"),
+    e("TOOLTIP_MODE", &["TOOLTIPMODE"], R::TooltipMode, "modifier", true,
+      "which marks the tooltip lists: 'shared' (every series at the x, a line chart's crosshair — the default there), 'single' (only the hovered mark), 'none' (no tooltip)"),
     e("HOVER_FOCUS", &["HOVERFOCUS"], R::HoverFocus, "modifier", true,
       "hovering a mark: 'series' (default) emphasises its whole series and fades the others, as hovering its legend entry does; 'none' keeps the plain hover (dense charts)"),
     e("POINTS", &["MARKERS"], R::Points, "modifier", true,
@@ -1272,6 +1274,7 @@ mod tests {
             Role::Tooltip,
             Role::TooltipFormat,
             Role::TooltipHeader,
+            Role::TooltipMode,
             Role::Callout,
             Role::MarkdownStyle,
             Role::MarkdownTone,
@@ -1449,6 +1452,7 @@ mod tests {
                 | Role::Tooltip
                 | Role::TooltipFormat
                 | Role::TooltipHeader
+                | Role::TooltipMode
                 | Role::Callout
                 | Role::MarkdownStyle
                 | Role::MarkdownTone
