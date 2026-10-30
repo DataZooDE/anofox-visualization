@@ -107,6 +107,9 @@ fn theme_default() -> Option<&'static str> {
 
 /// The `--app-*` settings as the builder's `<script>` ("" = none; set once in `main`).
 static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// #740: the builder's `assistant` block when the `/assist` proxy is on (set
+/// once in `authoring_mode`; after `APP` in the page).
+static ASSIST_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// The pages' CSP `frame-ancestors` (#252): `'none'`, or empty (no directive)
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -566,11 +569,18 @@ fn meta(req: &Request) -> RequestMeta<'_> {
 }
 
 fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
+    respond_csp(req, status, ctype, body, false)
+}
+
+/// [`respond`]; `duckdb_esm`: the page may import DuckDB-Wasm's `+esm`
+/// build ([`sv::page_csp_with`]) — the authoring builder with the `/assist`
+/// proxy on (#740).
+fn respond_csp(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>, duckdb_esm: bool) {
     let mut body = body.into();
     // An HTML page gets its CSP header and nonces (#252).
     let csp = ctype.starts_with("text/html").then(|| {
         let frame = FRAME.get().map_or("'none'", String::as_str);
-        let (html, csp) = sv::csp_page(&String::from_utf8_lossy(&body), frame);
+        let (html, csp) = sv::csp_page_with(&String::from_utf8_lossy(&body), frame, duckdb_esm);
         body = html.into_bytes();
         csp
     });
@@ -723,7 +733,10 @@ fn authoring_mode(o: &Opts) {
         a.key_file.as_deref(),
         a.log.as_deref(),
     ) {
-        Ok(Some((p, note))) => (Some(p), format!("\n  {note}")),
+        Ok(Some((p, note))) => {
+            let _ = ASSIST_PAGE.set(p.page_script());
+            (Some(p), format!("\n  {note}"))
+        }
         Ok(None) => (None, String::new()),
         Err(e) => {
             eprintln!("error: {e}");
@@ -854,10 +867,15 @@ fn handle_authoring(
         // index.html carries the --theme default and the --app-* bar for the builder.
         Some(f)
             if asset == "index.html"
-                && (theme_default().is_some() || APP.get().is_some_and(|a| !a.is_empty())) =>
+                && (theme_default().is_some()
+                    || APP.get().is_some_and(|a| !a.is_empty())
+                    || ASSIST_PAGE.get().is_some()) =>
         {
             let html = String::from_utf8_lossy(f.contents()).into_owned();
             let mut head = APP.get().cloned().unwrap_or_default();
+            if let Some(a) = ASSIST_PAGE.get() {
+                head.push_str(a);
+            }
             if let Some(t) = theme_default() {
                 let spec = serde_json::to_string(t)
                     .unwrap_or_default()
@@ -865,7 +883,8 @@ fn handle_authoring(
                 head.push_str(&format!("<script>window.__anofoxTheme={spec};</script>"));
             }
             let html = html.replacen("</head>", &format!("{head}</head>"), 1);
-            respond(req, 200, sv::content_type(asset), html.into_bytes())
+            let esm = ASSIST_PAGE.get().is_some();
+            respond_csp(req, 200, sv::content_type(asset), html.into_bytes(), esm)
         }
         Some(f) => respond(req, 200, sv::content_type(asset), f.contents().to_vec()),
         None => text(req, 404, "not found"),

@@ -194,6 +194,17 @@ so the protection is about making sure *only you* can send it:
     `/proc/self/environ`), so this is no new exposure. Still: never put
     `ANTHROPIC_API_KEY` in the environment of a process that runs SQL you
     don't trust.
+  - *The builder:* with the proxy on, `index.html` carries
+    `window.__anofoxApp.assistant = {"enabled": true, "transport": "serve",
+    …}` (no key), and its CSP also allows the three modules DuckDB-Wasm's
+    `+esm` build imports (`apache-arrow`, `tslib`, `flatbuffers`, pinned on
+    jsDelivr, as `dashboard --site`'s): the page loads DuckDB-Wasm for the
+    assistant's locked engine only. The engine is filled from the live
+    session through `/query` with a fixed set of read statements (the
+    catalog, `DESCRIBE`, `count(*)`, `SELECT *` with `LIMIT` or a reservoir
+    sample), never model SQL. Rows arrive as the server's JSON text and are
+    typed by DuckDB in the engine (`from_json` against the described
+    types, one prepared statement), so they can't add SQL.
   - A locked server (`anofox_serve_dashboards`, `serve --dashboards`) never
     routes `/assist/v1/*` (always 404), and `serve --dashboards` refuses the
     `--assist-*` flags. (`/assist/<file>` outside `v1/` is the UI's own code,

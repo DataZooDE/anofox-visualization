@@ -17,7 +17,7 @@
 // this module at all (no innerHTML/outerHTML/insertAdjacentHTML/
 // document.write, no `.src =`/`setAttribute("src"` — a static grep test,
 // G5/G6).
-import { browserKeyTransport, buildContext, buildPrefix, describeError, isAbort, loadSdk, pathsOf, payloadPreview, proposalReaders, runAssistant, wasmTools } from "./assist.js";
+import { browserKeyTransport, serveTransport, buildContext, buildPrefix, describeError, isAbort, loadSdk, pathsOf, payloadPreview, proposalReaders, runAssistant, wasmTools } from "./assist.js";
 import { buildEngine, pageFingerprint } from "./assist-engine.js";
 import { ownOpts, splitStatements } from "./lint.js";
 
@@ -340,6 +340,9 @@ export function mountAssistant(hostArg) {
   const host = hostArg;
   const doc = document;
   const pane = doc.getElementById("assist-pane");
+  // #740: an authoring server's proxy holds the key (no key dialog, nothing
+  // stored here); static hosting uses the viewer's own key.
+  const usesKey = host.config.transport !== "serve";
 
   const S = {
     open: false,
@@ -385,6 +388,8 @@ export function mountAssistant(hostArg) {
     const forgetBtn = mk("button", "btn2", { type: "button" });
     forgetBtn.id = "ai-forget";
     forgetBtn.textContent = "Forget key";
+    // #740: the server's proxy holds the key; there is none here to forget.
+    forgetBtn.hidden = !usesKey;
     const closeBtn = mk("button", "btn2 icon", { type: "button", "aria-label": "Close the assistant" });
     closeBtn.id = "ai-close";
     closeBtn.textContent = "✕";
@@ -862,6 +867,7 @@ export function mountAssistant(hostArg) {
   }
   async function ensureTransport() {
     S.Anthropic ||= await loadSdk();
+    if (!usesKey) return serveTransport({ Anthropic: S.Anthropic });
     return browserKeyTransport({ Anthropic: S.Anthropic, apiKey: host.keyStore().get() });
   }
 
@@ -888,7 +894,7 @@ export function mountAssistant(hostArg) {
       S.engine?.close();
       S.profiles = new Map();
       try {
-        S.engine = await buildEngine({ makeDb: host.deps.makeDb, page: host.deps.page, extensions: ext, files, signal, onProgress: ({ fq }) => setStatus({ phase: "engine", fq }) });
+        S.engine = await buildEngine({ makeDb: host.deps.makeDb, page: host.deps.page, extensions: ext, files, limits: host.deps.limits, signal, onProgress: ({ fq }) => setStatus({ phase: "engine", fq }) });
       } catch (e) {
         S.engine = null;
         S.engineFp = null;
@@ -1024,7 +1030,7 @@ export function mountAssistant(hostArg) {
     document.getElementById("tab-assist")?.setAttribute("aria-selected", "true");
     syncPhone(true);
     const ks = host.keyStore();
-    if (!ks.get()) {
+    if (usesKey && !ks.get()) {
       const saved = await keyDialog();
       if (!saved) {
         el.notice.hidden = false;
@@ -1086,7 +1092,7 @@ export function mountAssistant(hostArg) {
       const ctx = await buildCtx(tools, engine, editor);
       const prefix = await ensurePrefix();
       S.model = el.modelSel.value === "harder" ? "harder" : "default";
-      S.lastPayload = payloadPreview({ prefix, ctx, request, destination: "https://api.anthropic.com", toolLog: S.toolLog });
+      S.lastPayload = payloadPreview({ prefix, ctx, request, destination: usesKey ? "https://api.anthropic.com" : `${location.origin}/assist (this server, which sends it on to the model API)`, toolLog: S.toolLog });
       if (!S.conv.skipConsent) {
         const r = await sentDialog(S.lastPayload, engine, { send: true });
         if (r.checked) S.conv.skipConsent = true;
@@ -1143,7 +1149,7 @@ export function mountAssistant(hostArg) {
       } else if (r.kind === "cancelled") {
         logEntry("ai-note", "Cancelled.");
       } else if (r.kind === "error") {
-        const btn = r.status === 401 ? mk("button", "btn2", { type: "button" }) : null;
+        const btn = r.status === 401 && usesKey ? mk("button", "btn2", { type: "button" }) : null;
         if (btn) {
           btn.textContent = "Change key";
           btn.onclick = () => keyDialog();
@@ -1154,7 +1160,7 @@ export function mountAssistant(hostArg) {
         el.debugLine.textContent = `in ${r.usage.input_tokens} · cache read ${r.usage.cache_read_input_tokens} · write ${r.usage.cache_creation_input_tokens} · out ${r.usage.output_tokens} · ${r.turns} calls · ${r.rounds} rounds`;
       }
     } catch (e) {
-      if (!isAbort(e, S.ctl?.signal)) logEntry("ai-note", describeError(e));
+      if (!isAbort(e, S.ctl?.signal)) logEntry("ai-note", describeError(e, host.config.transport));
       else logEntry("ai-note", "Cancelled.");
     } finally {
       S.busy = false;

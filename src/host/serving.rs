@@ -92,9 +92,22 @@ pub fn json_for_script(v: &serde_json::Value) -> String {
 /// https:`: a dashboard's images and the app logo are the author's (unlike
 /// the assistant's preview, whose CSP stays exact).
 pub fn page_csp(nonce: &str, frame_ancestors: &str) -> String {
+    page_csp_with(nonce, frame_ancestors, false)
+}
+
+/// [`page_csp`], plus (`duckdb_esm`) the three modules DuckDB-Wasm's `+esm`
+/// build imports ([`CDN_APACHE_ARROW`], [`CDN_TSLIB`], [`CDN_FLATBUFFERS`]):
+/// only for the authoring builder whose `/assist` proxy is on (#740), the
+/// one served page that imports DuckDB-Wasm (for the assistant's engine).
+pub fn page_csp_with(nonce: &str, frame_ancestors: &str, duckdb_esm: bool) -> String {
+    let esm = if duckdb_esm {
+        format!(" {CDN_APACHE_ARROW} {CDN_TSLIB} {CDN_FLATBUFFERS}")
+    } else {
+        String::new()
+    };
     let mut p = format!(
-        "default-src 'none'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval' {CDN_DUCKDB_WASM} {CDN_KATEX}; \
-         worker-src blob:; connect-src 'self' {CDN_DUCKDB_WASM} {DUCKDB_EXT} {USGS}; img-src 'self' data: blob: https:; \
+        "default-src 'none'; script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval' {CDN_DUCKDB_WASM} {CDN_KATEX}{esm}; \
+         worker-src blob:; connect-src 'self' {CDN_DUCKDB_WASM}{esm} {DUCKDB_EXT} {USGS}; img-src 'self' data: blob: https:; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com {CDN_KATEX}; \
          font-src 'self' data: https://fonts.gstatic.com {CDN_KATEX}; manifest-src 'self'; media-src 'none'; \
          object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'"
@@ -113,6 +126,23 @@ pub const CDN_DUCKDB_WASM: &str =
 pub const CDN_KATEX: &str = "https://cdn.jsdelivr.net/npm/katex@0.19.0/";
 pub const DUCKDB_EXT: &str = "https://extensions.duckdb.org/v1.5.6/";
 pub const USGS: &str = "https://earthquake.usgs.gov/earthquakes/feed/";
+
+/// `@duckdb/duckdb-wasm`'s own `+esm` build (jsdelivr) pulls in apache-arrow,
+/// which pulls in tslib and flatbuffers, each its own
+/// `cdn.jsdelivr.net/npm/<pkg>@<version>/+esm` script — found by actually
+/// running a published site (#417) and watching the CSP reports name one
+/// transitive dependency after another, then confirmed clean (no further
+/// ones) the same way. A locked server's page never needs them (it fetches
+/// `/api/panel`); a published site (`dashboard --site`) and the authoring
+/// builder with the assistant's proxy on (#740) do. Each is pinned exact,
+/// same as [`CDN_DUCKDB_WASM`]/[`CDN_KATEX`] — jsdelivr's `+esm` resolves a
+/// *specific* source package version's imports once and serves that
+/// resolution long-term; re-pin these three (and re-run the end-to-end
+/// check watching for a *new* "violates ... script-src" console error)
+/// whenever `@duckdb/duckdb-wasm`'s pinned version changes.
+pub const CDN_APACHE_ARROW: &str = "https://cdn.jsdelivr.net/npm/apache-arrow@17.0.0/";
+pub const CDN_TSLIB: &str = "https://cdn.jsdelivr.net/npm/tslib@2.6.3/";
+pub const CDN_FLATBUFFERS: &str = "https://cdn.jsdelivr.net/npm/flatbuffers@24.3.25/";
 
 /// `https://host[:port]`, `'self'` or `'none'`.
 pub fn valid_frame_ancestor(o: &str) -> bool {
@@ -133,9 +163,15 @@ pub fn valid_frame_ancestor(o: &str) -> bool {
 /// ([`json_for_script`], XML escaping), external scripts carry `src`.
 #[cfg(feature = "auth")]
 pub fn csp_page(html: &str, frame_ancestors: &str) -> (String, String) {
+    csp_page_with(html, frame_ancestors, false)
+}
+
+/// [`csp_page`] with [`page_csp_with`]'s `duckdb_esm`.
+#[cfg(feature = "auth")]
+pub fn csp_page_with(html: &str, frame_ancestors: &str, duckdb_esm: bool) -> (String, String) {
     let nonce = super::auth::session::random_b64(18);
     let body = html.replace("<script>", &format!("<script nonce=\"{nonce}\">"));
-    (body, page_csp(&nonce, frame_ancestors))
+    (body, page_csp_with(&nonce, frame_ancestors, duckdb_esm))
 }
 
 /// dependency is needed. On unix `/dev/urandom` is preferred when readable.
@@ -1483,7 +1519,10 @@ pub fn url_decode(s: &str) -> String {
 pub fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next() {
         Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript",
+        // #740: `.mjs` too (the vendored SDK, web/vendor/): a module script
+        // with another type is refused by the browser.
+        Some("js" | "mjs") => "text/javascript",
+        Some("md") => "text/markdown; charset=utf-8",
         Some("wasm") => "application/wasm",
         Some("css") => "text/css",
         Some("json") => "application/json",
@@ -1897,6 +1936,23 @@ pub fn daterange_preset_bounds(preset: &str, min: i64, max: i64) -> Option<(i64,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn content_types_of_the_builders_files() {
+        assert_eq!(super::content_type("vendor/anthropic-sdk-0.135.0.mjs"), "text/javascript");
+        assert_eq!(super::content_type("assist/functions.js"), "text/javascript");
+        assert!(super::content_type("assist/guide.md").starts_with("text/markdown"));
+        assert_eq!(super::content_type("x.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn duckdb_esm_modules_only_when_asked() {
+        let plain = super::page_csp("n", "'none'");
+        let esm = super::page_csp_with("n", "'none'", true);
+        for m in [super::CDN_APACHE_ARROW, super::CDN_TSLIB, super::CDN_FLATBUFFERS] {
+            assert!(!plain.contains(m) && esm.contains(m), "{m}");
+        }
+    }
+
     #[test]
     fn csp_origins_match_assist_csp() {
         let js = include_str!("../../web/assist-csp.js");

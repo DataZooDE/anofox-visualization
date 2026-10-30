@@ -19,6 +19,7 @@ use anofox_visualization::{
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use sv::{CDN_APACHE_ARROW, CDN_FLATBUFFERS, CDN_TSLIB};
 
 /// A statement's own `::KPI_SIZE` cell, read from its already-queried JSON
 /// rows (#405) — `Some(true)` 'compact', `Some(false)` 'normal', `None` with
@@ -2359,25 +2360,6 @@ fn cmd_site(args: &[String]) {
         if dashboards.len() == 1 { "" } else { "s" }
     );
 }
-
-/// `@duckdb/duckdb-wasm`'s own `+esm` build (jsdelivr) pulls in apache-arrow,
-/// which pulls in tslib and flatbuffers, each its own
-/// `cdn.jsdelivr.net/npm/<pkg>@<version>/+esm` script — found by actually
-/// running a published site (#417) and watching the CSP reports name one
-/// transitive dependency after another, then confirmed clean (no further
-/// ones) the same way. A locked server's own `page_csp` (`host::serving`)
-/// never needed any of these: a locked/served page never calls local
-/// `conn.query()` at all (it fetches `/api/panel` instead). Each is pinned
-/// exact, same as `sv::CDN_DUCKDB_WASM`/`sv::CDN_KATEX` — jsdelivr's `+esm`
-/// resolves a *specific* source package version's imports once and serves
-/// that resolution long-term (the same property that already makes pinning
-/// `CDN_DUCKDB_WASM`'s own exact version meaningful); re-pin these three
-/// (and re-run the end-to-end check in the PR this const was added by,
-/// watching for a *new* "violates ... script-src" console error) whenever
-/// `@duckdb/duckdb-wasm`'s pinned version in tests/web/package.json changes.
-const CDN_APACHE_ARROW: &str = "https://cdn.jsdelivr.net/npm/apache-arrow@17.0.0/";
-const CDN_TSLIB: &str = "https://cdn.jsdelivr.net/npm/tslib@2.6.3/";
-const CDN_FLATBUFFERS: &str = "https://cdn.jsdelivr.net/npm/flatbuffers@24.3.25/";
 
 /// The published site's `<meta http-equiv="Content-Security-Policy">`: the
 /// locked server's own header ([`sv::page_csp`]) minus `frame-ancestors` (a

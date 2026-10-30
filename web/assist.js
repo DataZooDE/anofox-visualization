@@ -50,9 +50,11 @@ export const LIMITS = {
 
 // The assistant for this page, from app-config.json's `assistant` block (or
 // window.__anofoxApp's). Static hosting, the demo included, has it only when
-// the block says `"enabled": true`; a locked server and an embed never do. In
-// this release only the browser-key transport exists: an authoring server's
-// proxy (`serve`) and an OpenAI-compatible endpoint come later.
+// the block says `"enabled": true`; a locked server and an embed never do.
+// Transports: the user's own key (`browser-key`, static hosting) and, #740,
+// an authoring server's `/assist` proxy (`serve`: the server holds the key
+// and says so in window.__anofoxApp; only there, never on static hosting).
+// An OpenAI-compatible endpoint comes later.
 // T11: a dashboard embedded in someone else's page (an <iframe>) never gets
 // the assistant — the meta CSP it depends on (assist-csp.js) can't carry
 // `frame-ancestors`, so clickjacking the panel into a confirming click is
@@ -71,15 +73,19 @@ export function assistConfig(block, opts) {
   if (served || embed) return off("locked");
   if (framed) return off("framed");
   const a = ownOpts(block);
-  if (live) return off("serve-not-yet");
   if (a.enabled !== true) return off("disabled");
   const transport = a.transport || "browser-key";
-  if (transport !== "browser-key") return off(`${transport}-not-yet`);
+  // An authoring server's page uses its proxy or nothing (a browser key
+  // there would bypass the server's model list, budget and log); static
+  // hosting has no proxy to use.
+  if (live && transport !== "serve") return off("live-needs-serve");
+  if (!live && transport === "serve") return off("serve-needs-a-server");
+  if (transport !== "browser-key" && transport !== "serve") return off(`${transport}-not-yet`);
   const models = { ...MODELS };
   const aModels = ownOpts(a.models); // sec-review-256 final check: a.models[k] read own-only too
   for (const k of ["default", "harder"]) if (typeof aModels[k] === "string" && /^claude-[a-z0-9-]+$/.test(aModels[k])) models[k] = aModels[k];
   const rounds = Number.isInteger(a.max_rounds) ? Math.min(LIMITS.rounds, Math.max(1, a.max_rounds)) : LIMITS.rounds;
-  return { enabled: true, transport, models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false, remember: rememberAllowed(host, a.remember === true) };
+  return { enabled: true, transport, models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false, remember: transport === "browser-key" && rememberAllowed(host, a.remember === true) };
 }
 
 // T13: a shared static host (every project under the same account/org
@@ -202,13 +208,42 @@ export function browserKeyTransport(opts) {
   };
 }
 
+// (b) #740: the authoring server's `/assist` proxy. The server holds the
+// key and replaces every header but content-type; the page sends a
+// placeholder key (the SDK needs one) and the authoring cookie. Same origin
+// only: `origin` must be this page's own (the CSP's connect-src is too).
+export function serveTransport(opts) {
+  const { Anthropic, origin = globalThis.location?.origin } = ownOpts(opts);
+  if (typeof origin !== "string" || !/^https?:\/\/[^/]+$/i.test(origin) || origin !== globalThis.location?.origin) throw new Error("the assistant's proxy must be this page's own server");
+  const base = origin + "/assist";
+  const client = new Anthropic({ apiKey: "held-by-the-server", baseURL: base, dangerouslyAllowBrowser: true, maxRetries: 1 });
+  return {
+    name: "serve",
+    destination: base,
+    async send(request, opts = {}) {
+      const { signal, onText, onToolInput } = ownOpts(opts);
+      const stream = client.messages.stream(request, { signal });
+      if (onText) stream.on("text", (delta) => onText(delta));
+      if (onToolInput) stream.on("inputJson", (_, snapshot) => onToolInput(snapshot));
+      return stream.finalMessage();
+    },
+  };
+}
+
 // A stopped request: the user's Cancel (the SDK's APIUserAbortError, or a
 // plain AbortError).
 export const isAbort = (e, signal) => !!signal?.aborted || e?.name === "APIUserAbortError" || e?.name === "AbortError";
 
-// A failed model call in plain words (the key never appears in it).
-export function describeError(e) {
+// A failed model call in plain words (the key never appears in it). Through
+// the server's proxy (`transport` "serve") the error text is the proxy's own
+// (it never relays the API's), so it is shown as it is.
+export function describeError(e, transport = "browser-key") {
   const status = Number(e?.status) || 0;
+  if (transport === "serve" && status) {
+    if (status === 401) return "The server's API key was not accepted. Check ANTHROPIC_API_KEY (or --assist-key-file) where the server runs.";
+    const m = String(e?.error?.error?.message || "").slice(0, 300);
+    return m ? `The assistant's server: ${m}.` : `The assistant's server answered HTTP ${status}.`;
+  }
   if (status === 401) return "The API key was not accepted. Check it in the assistant's settings.";
   if (status === 403) return "This API key may not use this model.";
   if (status === 404) return "The model is not available for this key.";
@@ -1017,7 +1052,7 @@ export async function runAssistant(opts) {
       );
     } catch (e) {
       if (isAbort(e, signal)) return done("cancelled");
-      return done("error", { reason: describeError(e), status: Number(e?.status) || 0 });
+      return done("error", { reason: describeError(e, transport?.name), status: Number(e?.status) || 0 });
     }
     for (const k of ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]) usage[k] += msg.usage?.[k] || 0;
     usage.spent += spent(msg.usage);

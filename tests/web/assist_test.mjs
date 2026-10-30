@@ -31,7 +31,17 @@ assert.deepEqual(A.assistConfig(undefined), { enabled: false, reason: "disabled"
 assert.deepEqual(A.assistConfig({ enabled: false }), { enabled: false, reason: "disabled" });
 assert.equal(A.assistConfig({ enabled: true }, { served: true }).enabled, false, "never on a locked server");
 assert.equal(A.assistConfig({ enabled: true }, { embed: true }).enabled, false, "never in an embed");
-assert.equal(A.assistConfig({ enabled: true }, { live: true }).reason, "serve-not-yet");
+// #740: an authoring server's page uses its /assist proxy or nothing; static
+// hosting never takes "serve".
+assert.equal(A.assistConfig({ enabled: true }, { live: true }).reason, "live-needs-serve", "no browser key on an authoring server");
+assert.equal(A.assistConfig({ enabled: true, transport: "serve" }).reason, "serve-needs-a-server");
+{
+  const c = A.assistConfig({ enabled: true, transport: "serve", remember: true }, { live: true, host: "127.0.0.1" });
+  assert.equal(c.enabled, true);
+  assert.equal(c.transport, "serve");
+  assert.equal(c.remember, false, "nothing to remember: the server holds the key");
+  assert.equal(A.assistConfig({ enabled: true, transport: "serve" }, { live: true, served: true }).enabled, false, "never on a locked server");
+}
 assert.equal(A.assistConfig({ enabled: true, transport: "openai" }).reason, "openai-not-yet");
 {
   const c = A.assistConfig({ enabled: true });
@@ -808,6 +818,29 @@ const Anthropic = await A.loadSdk(A.SDK_URL);
     ac3.abort();
     await assert.rejects(p, (e) => A.isAbort(e, ac3.signal));
     assert.throws(() => A.browserKeyTransport({ Anthropic, apiKey: "" }), /no API key/);
+    // #740 (b): the server's proxy. Same origin only; a placeholder key (the
+    // server replaces it); the proxy's own error text is shown as it is.
+    {
+      const had = Object.getOwnPropertyDescriptor(globalThis, "location");
+      Object.defineProperty(globalThis, "location", { value: { origin: baseURL }, configurable: true });
+      try {
+        assert.throws(() => A.serveTransport({ Anthropic, origin: "https://evil.example" }), /own server/);
+        const st = A.serveTransport({ Anthropic });
+        assert.equal(st.destination, baseURL + "/assist");
+        const n0 = requests.length;
+        const r = await run(st, fakeTools());
+        const sent = requests[n0];
+        assert.equal(sent.url, "/assist/v1/messages");
+        assert.equal(sent.headers["x-api-key"], "held-by-the-server", "no real key in the page");
+        assert.equal(r.kind, "error", "the fake answers 401 to the placeholder");
+        assert.match(r.reason, /server's API key was not accepted/);
+        assert.match(A.describeError({ status: 429, error: { error: { message: "this server's hourly token budget for the assistant is used up; try again later" } } }, "serve"), /^The assistant's server: this server's hourly token budget/);
+        assert.match(A.describeError({ status: 503 }, "serve"), /HTTP 503/);
+      } finally {
+        if (had) Object.defineProperty(globalThis, "location", had);
+        else delete globalThis.location;
+      }
+    }
   } finally {
     server.closeAllConnections();
     server.close();

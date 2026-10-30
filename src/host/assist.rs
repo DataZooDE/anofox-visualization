@@ -765,6 +765,23 @@ impl Proxy {
         }
     }
 
+    /// The builder's `assistant` block (`window.__anofoxApp.assistant`,
+    /// read by `web/assist.js`'s `assistConfig`): on, through this proxy,
+    /// with the first two allowed models as *Standard* / *Try harder*. Goes
+    /// after the app bar's own script, which assigns `window.__anofoxApp`.
+    pub fn page_script(&self) -> String {
+        let m = &self.inner.cfg.models;
+        let block = json!({
+            "enabled": true,
+            "transport": "serve",
+            "models": {"default": m[0], "harder": m.get(1).unwrap_or(&m[0])},
+        });
+        format!(
+            "<script>(window.__anofoxApp=window.__anofoxApp||{{}}).assistant={};</script>",
+            crate::host::serving::json_for_script(&block)
+        )
+    }
+
     /// The reply for a pool that is full.
     pub fn busy() -> Reply {
         Reply::error(

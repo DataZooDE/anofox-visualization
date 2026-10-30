@@ -972,6 +972,13 @@ jobs:
         timeout-minutes: 3
         run: node scripts/assist-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/assist-live-e2e.mjs (#740 part 2): the builder's assistant on
+      # anofox_serve through /assist — no key in the page, the engine filled
+      # from the live session, the reply from a local fake API.
+      - name: Assistant on an authoring server e2e (#740)
+        timeout-minutes: 4
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/assist-live-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Input OPTIONS query order e2e, served (locked server, #428/#590)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-options-order-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
