@@ -8281,6 +8281,9 @@ function chartLink(link, el, key, series) {
   // Object.prototype property.
   const vars = Object.create(null);
   for (const r of link.roles) if (r[2] && row["c" + r[0]] !== undefined) vars[r[2]] = str(row["c" + r[0]]);
+  // #752: {label} = the row's ::LABEL (a scatter point's name)
+  const lr = col("LABEL");
+  if (lr && !("label" in vars)) vars.label = str(row["c" + lr[0]]);
   Object.assign(vars, { value: key, x: xr ? str(row["c" + xr[0]]) : x, series });
   for (const ia of Object.values(dpIa)) {
     if (ia.drill) (dpDrill[ia.drill.prefix] || []).forEach((v, j) => (vars[ia.drill.levels[j]] = v));
@@ -19262,7 +19265,7 @@ function attachHover() {
       // A map feature's ::LABEL may run over several lines: the first is the
       // heading, the rest follow as they are.
       const [head, ...lines] = isMapMark ? info.x.split("\n") : [info.x];
-      const ct = isMapMark ? null : customTip(el, info, fill); // #751
+      const ct = isMapMark ? null : customTip(el, info, fill) || pointTip(el, info, fill); // #751, #752
       tip.innerHTML =
         (ct?.head ?? (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "")) +
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
@@ -19861,6 +19864,26 @@ function customTip(el, info, fill) {
     body += `<div class="tip-row"><span>${escapeHtml(e.name)}</span><b>${escapeHtml(fillT(`{${e.name.replace(/[{}:]/g, "")}}`))}</b></div>`;
   }
   return { head, body };
+}
+// #752: a scatter point's tooltip — its ::LABEL (`data-label`) as the
+// heading, then the x and y column with their values (x in data units, also
+// under a log scale) and its series; null when the point has no label.
+function pointTip(el, info, fill) {
+  const label = el.getAttribute("data-label");
+  if (!label) return null;
+  const roles = el.closest(".panel")?._dp?.roles || [];
+  const name = (re) => roles.find((r) => re.test(r[1]))?.[2] || "";
+  const xName = name(/^(XAXIS|X)$/);
+  const yName = name(/^(SCATTER|POINT|SCATTERCHART|BUBBLE|BUBBLECHART|JITTER|JITTERCHART|STRIP)$/);
+  const row = (k, v) => (v ? `<div class="tip-row"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>` : "");
+  const series = info.series && info.series !== label && info.series !== yName ? info.series : "";
+  return {
+    head: `<div class="tip-head">${escapeHtml(label)}</div>`,
+    body:
+      row(xName, info.x) +
+      row(yName, info.value) +
+      (series ? `<div class="tip-row"><span><span class="tip-dot" style="background:${escapeHtml(fill)}"></span>${escapeHtml(series)}</span></div>` : ""),
+  };
 }
 function tipRow(info, fill) {
   const name = info.own || (info.x && info.series === info.x) ? "" : info.series;
@@ -20582,9 +20605,13 @@ function attachLegendToggle() {
 // per-point (<title>) hover takes over.
 function crosshairKind(roles) {
   if (roles.some((r) => /^(RADAR|SPIDER|CANDLESTICK|BULLET|BULLETCHART|FUNNEL|FUNNELCHART|DIAGRAM)$/.test(r[1]))) return false;
+  // #752: a line/area kind by name — not /LINE/, which also matched a
+  // scatter's ::ABLINE / ::REFLINE / ::XLINE and gave it the crosshair.
   const scatterOnly =
-    roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|JITTER|STRIP)$/.test(r[1])) &&
-    !roles.some((r) => /LINE|AREA|STEP|SMOOTH|BAND/.test(r[1]));
+    roles.some((r) => /^(SCATTER|POINT|SCATTERCHART|BUBBLE|BUBBLECHART|JITTER|JITTERCHART|STRIP)$/.test(r[1])) &&
+    !roles.some((r) =>
+      /^(LINECHART|LINE|LINECHART_PERCENT|LINE_PERCENT|STEP|STEPLINE|STEP_LINE|SMOOTH|TRENDLINE|TREND_LINE|AREACHART|AREA|AREACHART_STACKED|AREA_STACKED|STACKED_AREA|BAND_LOWER|BANDLOWER|BAND_UPPER|BANDUPPER)$/.test(r[1])
+    );
   return !scatterOnly;
 }
 // #695: does a ::FIGURE's cell <svg> take the x-crosshair? Its content
@@ -20631,7 +20658,9 @@ function attachAxisPointer() {
     // A ::FIGURE (#661) holds several plots in one SVG: the crosshair works
     // in the cell under the pointer (#695), if that cell's kind takes one.
     const figure = panel._dp && panel._dp.figure ? panel.querySelector(".panel-svg")?._figure : null;
-    if (!figure && !crosshairKind((panel._dp && panel._dp.roles) || [])) return;
+    // A scatter lists only the hovered point (#752) unless its
+    // ::TOOLTIP_MODE asks for the crosshair ('shared' / 'split', #751).
+    if (!figure && !crosshairKind((panel._dp && panel._dp.roles) || []) && !["shared", "split"].includes(tipMode(panel))) return;
     const svg0 = panel.querySelector("svg");
     if (!svg0 || !svg0.viewBox || !svg0.viewBox.baseVal || !svg0.viewBox.baseVal.width) return;
     // Decorative marks (e.g. a boxplot's mean dot: its own real GeomPoint

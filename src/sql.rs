@@ -1294,7 +1294,10 @@ fn rewrite_list(list: &str) -> Rewritten {
                 // measure's own name — but keeps the value's own type
                 // (unlike a measure, a frame key is often text or a date,
                 // not cast to DOUBLE).
-                Role::Frame => {
+                // #752: the x and ::LABEL columns' names too — a scatter
+                // point's tooltip names its x (`stars 350`), and its ::LINK
+                // fills `{extension}` from a ::LABEL column of that name.
+                Role::Frame | Role::X | Role::Label => {
                     let (core, alias) = trailing_alias(expr);
                     if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
                         names.push((i, nm));
@@ -1367,19 +1370,27 @@ mod alias_tests {
         );
         assert_eq!(
             n,
-            vec![(1, "sales".to_string()), (2, "changepoint".to_string())]
+            vec![
+                (0, "ds".to_string()),
+                (1, "sales".to_string()),
+                (2, "changepoint".to_string())
+            ]
         );
         // Bare column name becomes the series name.
         let (_, _, n2) =
             rewrite("SELECT ds ::XAXIS, observed ::LINECHART, trend ::LINECHART FROM d");
         assert_eq!(
             n2,
-            vec![(1, "observed".to_string()), (2, "trend".to_string())]
+            vec![
+                (0, "ds".to_string()),
+                (1, "observed".to_string()),
+                (2, "trend".to_string())
+            ]
         );
         // A computed expr with no alias has no name (legend falls back to c{i}).
         let (s3, _, n3) = rewrite("SELECT ds ::XAXIS, sum(y) ::BARCHART FROM d");
         assert!(s3.contains("CAST(sum(y) AS DOUBLE) AS c1"), "{s3}");
-        assert!(n3.is_empty(), "{n3:?}");
+        assert!(!n3.iter().any(|(i, _)| *i == 1), "{n3:?}");
         // Nested CAST(.. AS ..) must not be mistaken for a trailing alias.
         let (s4, _, _) = rewrite("SELECT ds ::XAXIS, CAST(y AS INT) ::LINECHART FROM d");
         assert!(s4.contains("CAST(CAST(y AS INT) AS DOUBLE) AS c1"), "{s4}");
@@ -1686,7 +1697,7 @@ mod union_tests {
                 (2, Role::Value(Kind::Line))
             ]
         );
-        assert_eq!(names, vec![(2, "n".to_string())]);
+        assert_eq!(names, vec![(0, "week".to_string()), (2, "n".to_string())]);
         // Both branches keep the same positional aliases and DOUBLE cast on
         // the measure column, so DuckDB can union them without a type error.
         assert_eq!(s.matches("week AS c0").count(), 2, "{s}");
@@ -1746,6 +1757,6 @@ mod union_tests {
         let (s, roles, names) = rewrite("SELECT d ::XAXIS, v ::LINECHART FROM t");
         assert!(s.contains("CAST(v AS DOUBLE) AS c1"), "{s}");
         assert_eq!(roles, vec![(0, Role::X), (1, Role::Value(Kind::Line))]);
-        assert_eq!(names, vec![(1, "v".to_string())]);
+        assert_eq!(names, vec![(0, "d".to_string()), (1, "v".to_string())]);
     }
 }
