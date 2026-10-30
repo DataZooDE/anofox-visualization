@@ -2043,6 +2043,16 @@ function guardPage(adapter) {
   }
   return out;
 }
+// #742: a live page copies a view into the assistant's engine only when the
+// editor's own SQL names it (or Explore's entry put it in scope): a view runs
+// its whole body on the server's one authoring worker.
+let assistScopeFq = new Set();
+function liveWantView(fq) {
+  if (assistScopeFq.has(fq)) return true;
+  const name = String(fq).split(".").pop().replace(/^"|"$/g, "").replace(/""/g, '"');
+  const re = new RegExp(`(^|[^\\w$])"?${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"?([^\\w$]|$)`, "i");
+  return re.test(assistEditorBasis());
+}
 // #740: one of livePageAdapter's fixed statements on the live session — the
 // rows as /query's JSON text, cut off after `ms` (0: no limit).
 async function liveRowsText(sql, ms = 0) {
@@ -2088,7 +2098,7 @@ function assistDeps() {
   if (backend === "live")
     return {
       makeDb,
-      page: guardPage(livePageAdapter({ query: liveRowsText })),
+      page: guardPage(livePageAdapter({ query: liveRowsText, wantView: liveWantView })),
       extensions: () => engineExtensions({ editorNeeds: neededExtensions(assistEditorBasis()) }),
       files: () => [],
       prepareFiles: async () => {},
@@ -6313,6 +6323,7 @@ function buildWithAssistant(e, opener) {
   if (!assistCfg.enabled) return;
   loadDash("", "");
   setMode("edit");
+  assistScopeFq = new Set([e.fq]); // #742: a view from Explore is copied too
   openAssistant({ opener, scope: [e.fq] });
 }
 function openTableAsDashboard(e, cards) {

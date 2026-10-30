@@ -105,6 +105,25 @@ assert.ok(!seen.some((s) => /INSERT|CREATE|DROP|ATTACH|COPY|SET /i.test(s.replac
   e2.close();
 }
 
+// ---- #742: only the views the page wants are copied (a view runs its whole
+// body on the server's one authoring worker) ----
+{
+  seen.length = 0;
+  let want = false;
+  const page = E.livePageAdapter({ query, wantView: () => want });
+  const e3 = await E.buildEngine({ makeDb: rawDb, page, extensions: ["json"], limits: { ...E.LIVE_LIMITS, tableRows: 100 }, doc: undefined });
+  const v = e3.tables.find((t) => t.fq.endsWith('"v"'));
+  assert.match(v.excluded, /doesn't name: not copied/);
+  assert.ok(!seen.some((s) => /"v"/.test(s) && /^SELECT \* FROM/.test(s)), "the view never ran on the server");
+  assert.ok(e3.tables.find((t) => t.fq.endsWith('"big"')).rows > 0, "tables still come along");
+  const fp1 = await E.pageFingerprint(page);
+  want = true;
+  const fp2 = await E.pageFingerprint(page);
+  assert.notEqual(fp1, fp2, "naming the view changes the fingerprint (the engine rebuilds)");
+  assert.equal(await E.pageFingerprint(page), fp2, "…and only then");
+  e3.close();
+}
+
 // ---- an adapter without a query function is refused ----
 assert.throws(() => E.livePageAdapter({}), /needs query/);
 assert.equal((await E.livePageAdapter({ query }).files()).length, 0, "a live page has no files");
