@@ -33,6 +33,8 @@ FROM (SELECT day, revenue FROM s UNION ALL SELECT DATE '2026-03-03', 1500.0) ORD
 SELECT region ::XAXIS, units ::BARCHART, 'Units by region'::TITLE FROM s ORDER BY region;
 SELECT d ::XAXIS, v ::LINECHART, 'none'::TOOLTIP_MODE, 'No tooltip'::TITLE FROM (VALUES (1, 1.0), (2, 3.0), (3, 2.0)) t(d, v);
 SELECT d ::XAXIS, v ::LINECHART, 'single'::TOOLTIP_MODE, 'Single'::TITLE FROM (VALUES (1, 1.0), (2, 3.0), (3, 2.0)) t(d, v);
+SELECT d ::XAXIS, v ::LINECHART, g ::CATEGORY, 'split'::TOOLTIP_MODE, '{series} {y:.1f}'::TOOLTIP_FORMAT, 'Split'::TITLE
+FROM (VALUES (1, 1.0, 'a'), (2, 3.0, 'a'), (3, 2.0, 'a'), (1, 2.0, 'b'), (2, 4.0, 'b'), (3, 1.0, 'b')) t(d, v, g);
 `;
 
 const browser = await chromium.launch();
@@ -77,6 +79,15 @@ try {
   check(!(await page.evaluate(() => document.getElementById("dp-tip")?.classList.contains("show"))), "'none': no tooltip on hover");
   check(!(await panels.nth(4).evaluate((p) => p.classList.contains("has-axis-pointer"))), "'single': no crosshair (only the hovered mark)");
   check(await panels.nth(1).evaluate((p) => p.classList.contains("has-axis-pointer")), "a line chart without a mode keeps its crosshair");
+  // 'split': one label per series beside its point
+  const sp = await panels.nth(5).locator("circle.dp-hit").nth(1).boundingBox();
+  for (const dy of [40, 20, 0]) await page.mouse.move(sp.x + sp.width / 2, sp.y + sp.height / 2 + dy, { steps: 2 });
+  await page.waitForTimeout(300);
+  const labels = await page.evaluate(() => [...document.querySelectorAll("#dp-tip-split .dp-tip-split")].map((d) => d.textContent));
+  check(labels.length === 2 && labels.some((t) => /^a 3\.0$/.test(t.trim())) && labels.some((t) => /^b 4\.0$/.test(t.trim())), `'split': a label per series (${JSON.stringify(labels)})`);
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(200);
+  check(!(await page.evaluate(() => document.querySelectorAll("#dp-tip-split .dp-tip-split").length)), "'split': the labels go with the pointer");
   check(errs.length === 0, `no page errors (${errs.join(" | ")})`);
 } catch (e) {
   bad++;

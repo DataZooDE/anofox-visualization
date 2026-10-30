@@ -695,6 +695,9 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-tip{position:fixed;pointer-events:none;background:var(--ax-tip-bg);backdrop-filter:blur(6px);color:var(--ax-tip-ink);padding:.55rem .7rem;border-radius:8px;font-size:.8rem;font-weight:500;border:1px solid var(--ax-tip-border);box-shadow:var(--ax-tip-shadow);opacity:0;transform:translateY(3px) scale(.98);transition:opacity .11s,transform .11s;z-index:50;white-space:nowrap;min-width:96px}
 .dp-tip.show{opacity:1;transform:none}
 .dp-tip .tip-dot{display:inline-block;width:.55rem;height:.55rem;border-radius:50%;margin-right:.45rem;vertical-align:middle}
+.dp-tip-split{position:fixed;pointer-events:none;background:var(--ax-tip-bg);color:var(--ax-tip-ink);padding:.25rem .45rem;border-radius:6px;font-size:.75rem;border:1px solid var(--ax-tip-border);box-shadow:var(--ax-tip-shadow);z-index:50;white-space:nowrap}
+.dp-tip-split .tip-dot{display:inline-block;width:.5rem;height:.5rem;border-radius:50%;margin-right:.35rem;vertical-align:middle}
+.dp-tip-split .tip-row{display:flex;gap:.5rem;justify-content:space-between}
 .dp-tip .tip-rule{display:inline-block;width:.75rem;border-top:2px dashed currentColor;margin-right:.45rem;vertical-align:middle}
 .dp-tip .tip-head{font-weight:700;margin-bottom:.35rem;color:var(--ax-tip-head);font-size:.78rem}
 .dp-tip .tip-lines{white-space:pre-line;line-height:1.4;margin:-.2rem 0 .4rem}

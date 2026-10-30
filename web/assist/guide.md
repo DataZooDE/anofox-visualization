@@ -379,6 +379,23 @@ FROM sales GROUP BY region ORDER BY "Revenue" DESC;
 
 Keep a fitted tab small: if a panel would get under ~120 px the tab scrolls instead (with a notice). `dashboard --check` warns ahead of time — `layout/fit-too-many` (more rows than a 1366×768 screen holds — for a sub-tab / view, only its own panels count; aim for ≤ ~4 rows: a KPI strip and two rows of charts) and `layout/fit-ambiguous` (a `::FIT` before the first `::TAB` of a tabbed dashboard, twice for one tab, or cast beside a panel's columns instead of its own statement).
 
+### Tooltips (`::TOOLTIP`, `::TOOLTIP_FORMAT`, `::TOOLTIP_HEADER`, `::TOOLTIP_MODE`)
+
+Extra fields and your own wording in a chart's hover tooltip (bar, column, line, area, scatter):
+
+```sql dashboard
+CREATE OR REPLACE TEMP TABLE sales AS
+SELECT * FROM (VALUES ('EU', 1200.0, 30), ('US', 1800.0, 41), ('APAC', 900.0, 22)) v(region, revenue, units);
+SELECT region ::XAXIS, revenue ::BARCHART, '€'::YFORMAT,
+       units AS "Units" ::TOOLTIP,                      -- shown on hover only, never plotted
+       '{x}: {y} for {Units} units'::TOOLTIP_FORMAT,    -- the line per point
+       'Region {x}'::TOOLTIP_HEADER,                    -- the header
+       'US sells the most'::TITLE
+FROM sales ORDER BY revenue DESC;
+```
+
+Placeholders: `{x}`, `{y}`, `{series}` and a `::TOOLTIP` alias, each with an optional format after `:` — a `::YFORMAT` keyword (`{y:€}`, `{share:percent}`), decimals (`{y:.1f}`) or a strftime pattern for a date (`{x:%d %b %Y}`). `'single'::TOOLTIP_MODE` lists only the hovered mark, `'split'` puts a label beside each series' point on a line chart's crosshair, `'none'` turns the tooltip off (`'shared'`, the default, lists every series at the x). `--check` flags an unknown placeholder (`tooltip/unknown-placeholder`), a bad decimals format and an unknown mode.
+
 ### Show a panel only when … (`::SHOW_IF`)
 
 `SELECT cond::SHOW_IF;` is its own preceding statement (like `::COL`/`::EMPTY`): the **next** panel — or whole `::GROUP` box, to its matching `::ENDGROUP` — shows only while `cond` is the BOOLEAN `TRUE` (`FALSE`/`NULL`/no row/a non-boolean/an error all hide it, re-checked on every run). A quiz pattern: give a `::DROPDOWN` an empty first option (it defaults to its first option, so check `<> ''`, not `IS NOT NULL`):
