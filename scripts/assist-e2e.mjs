@@ -1875,11 +1875,14 @@ if (run("phone")) {
     if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `phone-${scheme}-sent-dialog.png`) });
     await page.click('.dp-dialog button:has-text("Send")');
     await page.waitForFunction(() => document.getElementById("preview-bar")?.hidden === false, null, { timeout: 30000 });
+    // #747: the bar shows before the preview has rendered; the focus moves to
+    // its heading once it has.
+    await page.waitForFunction(() => document.activeElement?.id === "preview-title", null, { timeout: 10000 }).catch(() => {});
     record(`P2 ${scheme}: the sheet is hidden, preview-bar fixed+visible, focus on #preview-title`, await page.evaluate(() => {
       const pane = document.getElementById("assist-pane");
       const bar = document.getElementById("preview-bar");
       return pane.hidden === true && bar.hidden === false && getComputedStyle(bar).position === "fixed" && document.activeElement?.id === "preview-title";
-    }));
+    }), JSON.stringify(await page.evaluate(() => ({ pane: document.getElementById("assist-pane").hidden, bar: document.getElementById("preview-bar").hidden, pos: getComputedStyle(document.getElementById("preview-bar")).position, focus: document.activeElement?.id || document.activeElement?.tagName }))));
     if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `phone-${scheme}-preview.png`) });
 
     await page.click("#assist-btn");
