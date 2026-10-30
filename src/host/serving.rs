@@ -1938,8 +1938,14 @@ pub fn daterange_preset_bounds(preset: &str, min: i64, max: i64) -> Option<(i64,
 mod tests {
     #[test]
     fn content_types_of_the_builders_files() {
-        assert_eq!(super::content_type("vendor/anthropic-sdk-0.135.0.mjs"), "text/javascript");
-        assert_eq!(super::content_type("assist/functions.js"), "text/javascript");
+        assert_eq!(
+            super::content_type("vendor/anthropic-sdk-0.135.0.mjs"),
+            "text/javascript"
+        );
+        assert_eq!(
+            super::content_type("assist/functions.js"),
+            "text/javascript"
+        );
         assert!(super::content_type("assist/guide.md").starts_with("text/markdown"));
         assert_eq!(super::content_type("x.bin"), "application/octet-stream");
     }
@@ -1948,7 +1954,11 @@ mod tests {
     fn duckdb_esm_modules_only_when_asked() {
         let plain = super::page_csp("n", "'none'");
         let esm = super::page_csp_with("n", "'none'", true);
-        for m in [super::CDN_APACHE_ARROW, super::CDN_TSLIB, super::CDN_FLATBUFFERS] {
+        for m in [
+            super::CDN_APACHE_ARROW,
+            super::CDN_TSLIB,
+            super::CDN_FLATBUFFERS,
+        ] {
             assert!(!plain.contains(m) && esm.contains(m), "{m}");
         }
     }
