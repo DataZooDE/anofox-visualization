@@ -2060,12 +2060,12 @@ pub(crate) const ROW_INDEX: &str = "\u{0}row";
 /// a tooltip role; unchanged otherwise (every other chart renders exactly as
 /// before).
 pub(crate) fn with_row_index(cols: &[Column]) -> std::borrow::Cow<'_, [Column]> {
-    let wants = cols.iter().any(|c| {
-        matches!(
-            c.role,
-            Role::Tooltip | Role::TooltipFormat | Role::TooltipHeader
-        )
-    });
+    let has = |f: &dyn Fn(Role) -> bool| cols.iter().any(|c| f(c.role));
+    // #752: a scatter's point names its row too, so its ::LINK and its
+    // tooltip read that row (its x is no key under a log scale).
+    let wants = has(&|r| matches!(r, Role::Tooltip | Role::TooltipFormat | Role::TooltipHeader))
+        || (has(&|r| matches!(r, Role::Value(Kind::Point | Kind::Bubble | Kind::Jitter)))
+            && has(&|r| matches!(r, Role::Label | Role::Link)));
     let n = cols.iter().map(|c| c.values.len()).max().unwrap_or(0);
     if !wants || n == 0 || cols.iter().any(|c| c.name == ROW_INDEX) {
         return std::borrow::Cow::Borrowed(cols);
@@ -3004,6 +3004,9 @@ fn cartesian(
         Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
     );
     let point_kind = matches!(kind, Kind::Point | Kind::Bubble);
+    let point_alpha = role_num(cols, Role::Alpha)
+        .filter(|a| a.is_finite())
+        .map(|a| a.clamp(0.0, 1.0));
     // `::HEXBIN` on a planar scatter (#426): a 2D count density, in place of
     // the individual points — the predicted-vs-actual-at-5,000-rows case a
     // sampled scatter loses. `'auto'` sizes the lattice from the panel's own
@@ -3367,6 +3370,27 @@ fn cartesian(
         }
         _ => aes,
     };
+    // #752: a scatter point carries its ::LABEL (`data-label`), so the
+    // browser heads its tooltip with it, as a map feature does.
+    let aes = match find_role(cols, Role::Label) {
+        Some(l)
+            if matches!(kind, Kind::Point | Kind::Bubble | Kind::Jitter)
+                && l.values.len() == data[0].1.len() =>
+        {
+            data.push((
+                "__label".to_string(),
+                l.values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Na => Value::Na,
+                        v => Value::Str(value_str(v)),
+                    })
+                    .collect(),
+            ));
+            aes.data_attr("label", "__label")
+        }
+        _ => aes,
+    };
     let mut plot = GGPlot::new(data.clone()).aes(aes).primary_color(brand);
 
     // Shaded x-regions (`::MARKAREA`, one or more columns): a light band behind
@@ -3669,15 +3693,29 @@ fn cartesian(
         }
         // With a y interval a point becomes a pointrange (drawn below).
         Kind::Point | Kind::Bubble if y_interval.is_some() => plot,
-        Kind::Point | Kind::Bubble => match fixed_size {
-            Some(size) => plot.geom_point_with(GeomPoint {
+        // #752: `::ALPHA` sets the points' opacity (dense scatters).
+        Kind::Point | Kind::Bubble => match (fixed_size, point_alpha) {
+            (Some(size), _) => plot.geom_point_with(GeomPoint {
                 size,
+                color: brand,
+                alpha: point_alpha.unwrap_or(GeomPoint::default().alpha),
+                ..Default::default()
+            }),
+            (None, Some(alpha)) => plot.geom_point_with(GeomPoint {
+                alpha,
                 color: brand,
                 ..Default::default()
             }),
-            None => plot.geom_point(),
+            (None, None) => plot.geom_point(),
         },
-        Kind::Jitter => plot.geom_jitter(),
+        Kind::Jitter => match point_alpha {
+            Some(alpha) => plot.geom_jitter_with(GeomJitter {
+                alpha,
+                color: brand,
+                ..Default::default()
+            }),
+            None => plot.geom_jitter(),
+        },
         // Box plots and violins: a light brand body with a dark outline (a
         // CATEGORY fill still wins).
         Kind::Boxplot if box_stats => {
@@ -3861,52 +3899,6 @@ fn cartesian(
             .layer_aes(lay);
         }
     }
-    // Top-k point labels (`::LABEL_TOP k` + `::LABEL`, ranked by `::RANK` or
-    // |y|), repelled from each other and from their points.
-    if let Some(k) = label_top {
-        let xs = col_of(&data, "x");
-        let ys = col_of(&data, "y");
-        let rank = find_role(cols, Role::Rank);
-        let score = |i: usize| -> f64 {
-            match rank {
-                Some(r) => r.values.get(i).and_then(|v| v.as_f64()),
-                None => ys[i].as_f64().map(f64::abs),
-            }
-            .filter(|f| f.is_finite())
-            .unwrap_or(f64::NEG_INFINITY)
-        };
-        let mut idx: Vec<usize> = (0..n_rows)
-            .filter(|&i| xs[i] != Value::Na && ys[i].as_f64().is_some_and(f64::is_finite))
-            .collect();
-        idx.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
-        idx.truncate(k);
-        if !idx.is_empty() {
-            let text = find_role(cols, Role::Label);
-            let mut frame = subset(&data, &idx);
-            frame.retain(|(n, _)| matches!(n.as_str(), "x" | "y" | "facet"));
-            frame.push((
-                "txt".to_string(),
-                idx.iter()
-                    .map(|&i| match text.and_then(|t| t.values.get(i)) {
-                        Some(v) if *v != Value::Na => Value::Str(value_str(v)),
-                        _ => Value::Str(fmt_label(&ys[i])),
-                    })
-                    .collect(),
-            ));
-            plot = plot
-                .geom_text_repel_with(GeomTextRepel {
-                    size: 10.0,
-                    color: o.theme.chart_label(),
-                    repel: RepelParams {
-                        segment_color: Some((150, 156, 168)),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-                .layer_data(frame)
-                .layer_aes(Aes::new().x("x").y("y").label("txt"));
-        }
-    }
     // Reference lines, one per distinct value of the column: horizontal
     // (`::REFLINE`/`::YLINE` — an average line, min/max bands, thresholds…)
     // and vertical (`::XLINE`, a continuous x). Data-mapped hlines/vlines:
@@ -3999,6 +3991,7 @@ fn cartesian(
     // Straight lines in data units, across the panel: `::ABLINE
     // 'slope,intercept'` and `::IDENTITY` (y = x, dashed).
     let mut lines: Vec<(f64, f64)> = Vec::new();
+    let mut ablines: Vec<(f64, f64)> = Vec::new();
     if let Some(ab) = find_role(cols, Role::AbLine) {
         let mut seen = std::collections::HashSet::new();
         for v in ab.values.iter().filter(|v| **v != Value::Na) {
@@ -4031,6 +4024,7 @@ fn cartesian(
                     .map(|&(b, a)| (b, a, (90, 98, 112), Linetype::Solid)),
             );
         for (slope, intercept, color, linetype) in styled {
+            ablines.push((slope, intercept));
             plot = plot.geom_abline_with(GeomAbline {
                 slope,
                 intercept,
@@ -4039,6 +4033,66 @@ fn cartesian(
                 linetype,
                 alpha: 0.9,
             });
+        }
+    }
+    // Top-k point labels (`::LABEL_TOP k` + `::LABEL`, ranked by `::RANK` or
+    // |y|), repelled from each other, from every point and from the
+    // straight lines; drawn after those lines so a label paints over them.
+    if let Some(k) = label_top {
+        let xs = col_of(&data, "x");
+        let ys = col_of(&data, "y");
+        let rank = find_role(cols, Role::Rank);
+        let score = |i: usize| -> f64 {
+            match rank {
+                Some(r) => r.values.get(i).and_then(|v| v.as_f64()),
+                None => ys[i].as_f64().map(f64::abs),
+            }
+            .filter(|f| f.is_finite())
+            .unwrap_or(f64::NEG_INFINITY)
+        };
+        let mut idx: Vec<usize> = (0..n_rows)
+            .filter(|&i| xs[i] != Value::Na && ys[i].as_f64().is_some_and(f64::is_finite))
+            .collect();
+        idx.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+        idx.truncate(k);
+        if !idx.is_empty() {
+            let text = find_role(cols, Role::Label);
+            // #753: every point goes in, unlabelled ones with an NA label, so
+            // the labels keep clear of all the dots (as in ggrepel), not
+            // only of their own.
+            let all: Vec<usize> = (0..n_rows)
+                .filter(|&i| xs[i] != Value::Na && ys[i].as_f64().is_some_and(f64::is_finite))
+                .collect();
+            let mut frame = subset(&data, &all);
+            frame.retain(|(n, _)| matches!(n.as_str(), "x" | "y" | "facet"));
+            frame.push((
+                "txt".to_string(),
+                all.iter()
+                    .map(|&i| {
+                        if !idx.contains(&i) {
+                            return Value::Na;
+                        }
+                        match text.and_then(|t| t.values.get(i)) {
+                            Some(v) if *v != Value::Na => Value::Str(value_str(v)),
+                            _ => Value::Str(fmt_label(&ys[i])),
+                        }
+                    })
+                    .collect(),
+            ));
+            plot = plot
+                .geom_text_repel_with(GeomTextRepel {
+                    size: 10.0,
+                    color: o.theme.chart_label(),
+                    // #753: clear of the ::ABLINE / ::IDENTITY lines too.
+                    repel: RepelParams {
+                        segment_color: Some((150, 156, 168)),
+                        avoid_ablines: ablines.clone(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .layer_data(frame)
+                .layer_aes(Aes::new().x("x").y("y").label("txt"));
         }
     }
     // `::HEXBIN` drops `::CATEGORY` (above): no colour column survives onto

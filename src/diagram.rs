@@ -713,7 +713,7 @@ const LINE_H: f64 = 16.0;
 const BOX_PAD_X: f64 = 12.0;
 const BOX_PAD_Y: f64 = 9.0;
 const BOX_MIN_W: f64 = 92.0;
-const BOX_MAX_W: f64 = 176.0;
+const BOX_MAX_W: f64 = 208.0;
 const MARGIN: f64 = 10.0;
 const ARROW: f64 = 7.0;
 const LOOP: f64 = 16.0;
@@ -729,29 +729,46 @@ fn text_w(s: &str, px: f64, bold: bool) -> f64 {
     s.chars().count() as f64 * px * per
 }
 
-/// `s` wrapped into at most two lines of `max` px (the second cut with "…").
+/// A node label's line limit; only beyond it is the last line cut with "…".
+const MAX_LINES: usize = 3;
+
+/// `s` wrapped into at most [`MAX_LINES`] lines of `max` px (the last cut
+/// with "…" when the label doesn't fit). Breaks at spaces; a word longer
+/// than a line breaks after a `/`, `-`, `_`, `.` or `,` in it (#753:
+/// `duckdb/community-` + `extensions`, not `community-ex` + `tensions`), and
+/// only mid-word when it has none.
 fn wrap(s: &str, max: f64) -> Vec<String> {
     let cap = ((max / (LABEL_PX * 0.6)).floor() as usize).max(4);
+    // (piece, glued to the previous one) — a long word's pieces are glued
+    let mut pieces: Vec<(String, bool)> = Vec::new();
+    for word in s.split_whitespace() {
+        let chars: Vec<char> = word.chars().collect();
+        let mut start = 0;
+        let mut first = true;
+        while chars.len() - start > cap {
+            let window = &chars[start..start + cap];
+            let cut = window
+                .iter()
+                .rposition(|c| matches!(c, '/' | '-' | '_' | '.' | ','))
+                .filter(|&i| i + 1 >= cap / 3)
+                .map(|i| i + 1)
+                .unwrap_or(cap);
+            pieces.push((chars[start..start + cut].iter().collect(), !first));
+            first = false;
+            start += cut;
+        }
+        pieces.push((chars[start..].iter().collect(), !first));
+    }
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
-    for word in s.split_whitespace() {
-        let mut word = word.to_string();
-        while word.chars().count() > cap {
-            let head: String = word.chars().take(cap).collect();
-            if !cur.is_empty() {
-                lines.push(std::mem::take(&mut cur));
-            }
-            lines.push(head);
-            word = word.chars().skip(cap).collect();
-        }
-        if cur.is_empty() {
-            cur = word;
-        } else if cur.chars().count() + 1 + word.chars().count() <= cap {
+    for (piece, glued) in pieces {
+        let sep = if glued || cur.is_empty() { 0 } else { 1 };
+        if !cur.is_empty() && cur.chars().count() + sep + piece.chars().count() > cap {
+            lines.push(std::mem::take(&mut cur));
+        } else if sep == 1 {
             cur.push(' ');
-            cur.push_str(&word);
-        } else {
-            lines.push(std::mem::replace(&mut cur, word));
         }
+        cur.push_str(&piece);
     }
     if !cur.is_empty() {
         lines.push(cur);
@@ -759,12 +776,13 @@ fn wrap(s: &str, max: f64) -> Vec<String> {
     if lines.is_empty() {
         lines.push(String::new());
     }
-    if lines.len() > 2 {
-        let rest = lines[1..].join(" ");
-        let mut second: String = rest.chars().take(cap.saturating_sub(1)).collect();
-        second.push('…');
-        lines.truncate(1);
-        lines.push(second);
+    if lines.len() > MAX_LINES {
+        let rest = lines[MAX_LINES - 1..].join(" ");
+        let mut last: String = rest.chars().take(cap.saturating_sub(1)).collect();
+        last = last.trim_end().to_string();
+        last.push('…');
+        lines.truncate(MAX_LINES - 1);
+        lines.push(last);
     }
     lines
 }
@@ -1427,9 +1445,28 @@ fn layout(d: &Diagram) -> Placed {
     for v in 0..n {
         thick[rank[v]] = thick[rank[v]].max(along(&boxes[v]));
     }
+    // #753: left to right, a gap is at least as wide as the edge labels
+    // that cross it (plus the arrow and some air), so a node box never
+    // covers one.
+    let mut gap: Vec<f64> = vec![rank_gap; nl];
+    if lr {
+        for e in &d.edges {
+            let (a, b) = (rank[e.from].min(rank[e.to]), rank[e.from].max(rank[e.to]));
+            if b != a + 1 {
+                continue;
+            }
+            if let Some(l) = e.label.as_deref() {
+                let w = l
+                    .split('\n')
+                    .map(|x| text_w(x, 11.0, false))
+                    .fold(0.0, f64::max);
+                gap[a] = gap[a].max(w + 2.0 * ARROW + 18.0);
+            }
+        }
+    }
     let mut start_at = vec![0.0f64; nl];
     for r in 1..nl {
-        start_at[r] = start_at[r - 1] + thick[r - 1] + rank_gap;
+        start_at[r] = start_at[r - 1] + thick[r - 1] + gap[r - 1];
     }
     let centre = |r: usize| start_at[r] + thick[r] / 2.0;
     let xy = |rk: f64, o: f64| if lr { (rk, o) } else { (o, rk) };
@@ -1802,14 +1839,14 @@ fn by_colour(v: &mut Vec<(Rgb, Frame)>, c: Rgb) -> &mut Frame {
     &mut v[i].1
 }
 
-/// The point halfway along a polyline.
-fn midpoint(pts: &[(f64, f64)]) -> (f64, f64) {
+/// The point a fraction `t` (0..1) of the way along a polyline.
+fn point_at(pts: &[(f64, f64)], t: f64) -> (f64, f64) {
     let seg = |i: usize| {
         let (a, b) = (pts[i], pts[i + 1]);
         ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
     };
     let total: f64 = (0..pts.len().saturating_sub(1)).map(seg).sum();
-    let mut left = total / 2.0;
+    let mut left = total * t;
     for i in 0..pts.len().saturating_sub(1) {
         let l = seg(i);
         if l >= left && l > 0.0 {
@@ -1820,6 +1857,32 @@ fn midpoint(pts: &[(f64, f64)]) -> (f64, f64) {
         left -= l;
     }
     pts.first().copied().unwrap_or((0.0, 0.0))
+}
+
+/// Where an edge's label goes (#753): the midpoint of the edge, else the
+/// nearest point along it where the label's box (`label`, 11 px lines drawn
+/// around `y - 4`) touches no node box — so a node doesn't cover it.
+fn edge_label_at(pts: &[(f64, f64)], label: &str, nodes: &[PNode]) -> (f64, f64) {
+    let lines: Vec<&str> = label.split('\n').collect();
+    let hw = lines
+        .iter()
+        .map(|l| text_w(l, 11.0, false))
+        .fold(0.0, f64::max)
+        / 2.0
+        + 3.0;
+    let hh = lines.len() as f64 * 6.6 + 3.0;
+    let clear = |(x, y): (f64, f64)| {
+        let cy = y - 4.0 - 0.36 * 11.0;
+        nodes
+            .iter()
+            .all(|n| (x - n.cx).abs() >= hw + n.w / 2.0 || (cy - n.cy).abs() >= hh + n.h / 2.0)
+    };
+    let mid = point_at(pts, 0.5);
+    [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.18, 0.82]
+        .into_iter()
+        .map(|t| point_at(pts, t))
+        .find(|&p| clear(p))
+        .unwrap_or(mid)
 }
 
 /// ggplot-rs centres text on its y (`dominant-baseline="middle"`); the
@@ -2005,7 +2068,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             ef.opt("back", p.back[k].then(|| "1".to_string()));
         }
         if let Some(l) = &e.label {
-            let (mx, my) = midpoint(&p.edges[k]);
+            let (mx, my) = edge_label_at(&p.edges[k], l, &p.nodes);
             // #519: ggplot-rs 0.31.0's geom_text honours an embedded "\n"
             // natively (sipemu/ggplot-rs#249) — one halo-backed text row for
             // the whole label, centred around the midpoint, instead of
@@ -3130,14 +3193,51 @@ mod tests {
     }
 
     #[test]
-    fn wraps_long_labels_in_two_lines() {
+    fn wraps_long_labels_in_three_lines() {
         let l = wrap(
-            "Recommend replenishment orders for every store and every week",
+            "Recommend replenishment orders for every store and every week of the coming year",
             152.0,
         );
-        assert_eq!(l.len(), 2);
-        assert!(l[1].ends_with('…'));
+        assert_eq!(l.len(), 3);
+        assert!(l[2].ends_with('…'));
         assert_eq!(wrap("Ingest", 152.0), ["Ingest"]);
+    }
+
+    /// #753: no ellipsis while the label fits, breaks at word boundaries
+    /// and after `/` / `-`, never mid-word when there is a separator.
+    #[test]
+    fn wraps_at_word_boundaries() {
+        let max = BOX_MAX_W - 2.0 * BOX_PAD_X;
+        for label in [
+            "duckdb/community-extensions (descriptions)",
+            "Locked DuckDB server (anofox-visualization)",
+            "Parquet snapshot (downloads, extensions)",
+            "fetch.sh: download, file by ISO week, merge",
+        ] {
+            let l = wrap(label, max);
+            assert!(l.len() <= MAX_LINES, "{l:?}");
+            assert!(!l.iter().any(|x| x.contains('…')), "{label}: {l:?}");
+            // every line ends at a space or after a separator
+            let joined: String = l.concat();
+            assert_eq!(joined.replace(' ', ""), label.replace(' ', ""), "{l:?}");
+            for w in l.windows(2) {
+                let end = w[0].chars().last().unwrap();
+                let next = w[1].chars().next().unwrap();
+                let at_space = label.contains(&format!(
+                    "{} {}",
+                    w[0].split(' ').next_back().unwrap(),
+                    w[1].split(' ').next().unwrap()
+                ));
+                assert!(
+                    at_space || matches!(end, '/' | '-' | '_' | '.' | ','),
+                    "{l:?} breaks at {end}{next}"
+                );
+            }
+        }
+        assert_eq!(
+            wrap("duckdb/community-extensions (descriptions)", max),
+            ["duckdb/community-", "extensions", "(descriptions)"]
+        );
     }
 
     #[test]
@@ -3146,5 +3246,28 @@ mod tests {
         assert!(y[1] - y[0] >= 10.0 - 1e-9 && y[2] - y[1] >= 10.0 - 1e-9);
         let y = place(&[0.0, 50.0], &[1.0, 1.0], &[0.0, 10.0]);
         assert_eq!(y, [0.0, 50.0]);
+    }
+
+    /// #753: an edge label a node box would cover moves along the edge.
+    #[test]
+    fn edge_label_keeps_clear_of_nodes() {
+        let node = |cx: f64, w: f64| PNode {
+            cx,
+            cy: 0.0,
+            w,
+            h: 40.0,
+            lines: Vec::new(),
+            layer: 0,
+            order: 0,
+        };
+        let pts = [(0.0, 0.0), (300.0, 0.0)];
+        // nothing in the way: the midpoint
+        assert_eq!(edge_label_at(&pts, "spikes flagged", &[]), (150.0, 0.0));
+        // a box over the middle: somewhere else along the edge, clear of it
+        let nodes = [node(150.0, 60.0)];
+        let (x, _) = edge_label_at(&pts, "spikes flagged", &nodes);
+        let hw = text_w("spikes flagged", 11.0, false) / 2.0 + 3.0;
+        assert!((x - 150.0).abs() >= hw + 30.0, "{x}");
+        assert_eq!(point_at(&pts, 0.25), (75.0, 0.0));
     }
 }

@@ -141,7 +141,7 @@ terminal.
 | `::SMOOTH_METHOD` | `::METHOD` | modifier | trend line method of a ::SMOOTH: 'loess' (default), 'lm', 'gam' ('glm' = Gaussian lm) |
 | `::HIST_BINS` |  | modifier | a ::HISTOGRAM's bin count ('20') or explicit edges ('0,10,20,30'), shared by every ::CATEGORY / ::FACET group — distinct from ::BINS, which aliases ::CLASSES (a map's colour-class breaks) |
 | `::HIST_NORM` |  | modifier | a ::HISTOGRAM's per-group normalisation: 'share' draws each ::CATEGORY / ::FACET group's bars as a share of that group's own count (groups of unequal size stay comparable); default: raw counts |
-| `::ALPHA` | `::OPACITY` | modifier | map layer opacity 0..1 |
+| `::ALPHA` | `::OPACITY` | modifier | opacity 0..1: a map layer, or a scatter's / bubble's / jitter's points (dense scatters) |
 | `::SYNC_ZOOM` | `::ZOOM_GROUP` | modifier | maps with the same value (e.g. 'routes') zoom and pan together in the browser |
 | `::SYNC_FRAME` | `::FRAME_GROUP` | modifier | time maps (::FRAME) with the same value (e.g. 'weeks') step and play together in the browser, by frame label |
 | `::XTITLE` | `::X_TITLE`, `::XLAB` | modifier | x-axis title, e.g. 'Residual load (GW)' — names the ::XAXIS variable, drawn under the x ticks (on a ::FLIP chart it moves with the x axis); charts with axes only |
@@ -669,7 +669,7 @@ Roles for model output — coefficient forests, residual diagnostics, CV curves:
 | axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
 | date tick labels | `'%H:%M'::XFORMAT`, `'%-d %b'::XFORMAT`, `'%b %Y'::XFORMAT` | on a DATE/TIMESTAMP x, a value with `%` is a strftime pattern (`%Y %y %m %-m %b %B %d %-d %e %a %A %H %M %S`; names follow `::LOCALE`): a time-of-day profile reads `06:00`, not `1 Jan 2000 06:00`; monthly ticks read `Jan 2025`, not `2025-01`; any other `::XFORMAT` stays a number format |
 | axis titles | `'Residual load (GW)'::XTITLE`, `'Price (EUR/MWh)'::YTITLE` | what the axes are; the x title names the `::XAXIS` variable, so on a `::FLIP` chart it's drawn beside the (now vertical) category axis; none on pies, gauges, maps |
-| label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|); overlapping labels are skipped. `::LABEL` is then per-point text, not the chart title |
+| label outliers | `name::LABEL, 5::LABEL_TOP [, cooks_d::RANK]` | labels the 5 points with the largest `::RANK` (else \|y\|), placed clear of every point, of each other and of `::ABLINE` / `::IDENTITY` lines, with a thin leader line when a label moves away from its point; a label that can't be placed is skipped. `::LABEL` is then per-point text, not the chart title. On a scatter every point's `::LABEL` also heads its hover tooltip (#752) |
 | trend method | `y::SMOOTH, 'lm'::SMOOTH_METHOD` | `'loess'` (default), `'lm'`, `'gam'` (penalised spline, λ by GCV), `'glm'` (= Gaussian lm) |
 
 ```sql
@@ -3674,7 +3674,9 @@ GROUP BY 1 ORDER BY 2 DESC;
 A **`::LINK`** column is a **drill-through** target. Its value is a template;
 `{value}` is the clicked mark's key (its x, else its series) or a table row's
 first column, `{x}` / `{series}` a chart mark's x and series, `{column}` any
-column of a table row, `{region}` … the drill path — each URL-encoded:
+column of the row (a table row, or the row a chart mark was drawn from — a
+scatter point's own row), `{label}` that row's `::LABEL`, `{region}` … the
+drill path — each URL-encoded:
 
 | Template | A click… |
 |---|---|

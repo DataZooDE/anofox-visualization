@@ -2,7 +2,9 @@
 // ::TOOLTIP_HEADER templates — in a real browser. Hover a bar and a line
 // point: the tooltip shows the filled, formatted template and the extra
 // column; a value with markup stays text; a chart without these roles keeps
-// its default tooltip.
+// its default tooltip. #752: a log-log scatter with ::LABEL lists only the
+// hovered point, headed by its label, x in data units; ::ALPHA fades the
+// points; a point's ::LINK fills {column} / {label} from its own row.
 //
 //   NODE_PATH=tests/web/node_modules node scripts/tooltip-e2e.mjs --url http://127.0.0.1:8947/
 import { createRequire } from "module";
@@ -35,6 +37,10 @@ SELECT d ::XAXIS, v ::LINECHART, 'none'::TOOLTIP_MODE, 'No tooltip'::TITLE FROM 
 SELECT d ::XAXIS, v ::LINECHART, 'single'::TOOLTIP_MODE, 'Single'::TITLE FROM (VALUES (1, 1.0), (2, 3.0), (3, 2.0)) t(d, v);
 SELECT d ::XAXIS, v ::LINECHART, g ::CATEGORY, 'split'::TOOLTIP_MODE, '{series} {y:.1f}'::TOOLTIP_FORMAT, 'Split'::TITLE
 FROM (VALUES (1, 1.0, 'a'), (2, 3.0, 'a'), (3, 2.0, 'a'), (1, 2.0, 'b'), (2, 4.0, 'b'), (3, 1.0, 'b')) t(d, v, g);
+SELECT stars ::XAXIS, downloads ::SCATTER, 'log10'::XSCALE, 'log10'::YSCALE, kind ::CATEGORY,
+       extension ::LABEL, 2::LABEL_TOP, '1,0'::ABLINE, 0.6::ALPHA,
+       'https://example.com/x/{extension}?l={label}'::LINK, 'Stars'::TITLE
+FROM (VALUES ('airport', 350, 1464, 'Near'), ('a2', 350, 877, 'Near'), ('bq', 1200, 90000, 'Above'), ('x3', 20, 50, 'Below')) t(extension, stars, downloads, kind);
 `;
 
 const browser = await chromium.launch();
@@ -88,6 +94,21 @@ try {
   await page.mouse.move(2, 2);
   await page.waitForTimeout(200);
   check(!(await page.evaluate(() => document.querySelectorAll("#dp-tip-split .dp-tip-split").length)), "'split': the labels go with the pointer");
+  // #752: the scatter
+  await page.mouse.move(2, 2);
+  const sc = panels.nth(6);
+  check(!(await sc.evaluate((p) => p.classList.contains("has-axis-pointer"))), "a scatter (with an ::ABLINE) has no crosshair");
+  const ap = sc.locator('circle.dp-hit[data-label="airport"]');
+  check((await ap.getAttribute("fill-opacity")) === "0.600", "::ALPHA on the points");
+  const st = await tipText(ap);
+  check(!!st && /^airport/.test(st.text) && /stars\s*350/.test(st.text) && /downloads\s*1,464/.test(st.text) && /Near/.test(st.text), `headed by its ::LABEL, x in data units (${st?.text})`);
+  check(!!st && !/877/.test(st.text) && !/a2/.test(st.text), "only the hovered point, not its x column");
+  let url = "";
+  await page.context().route("https://example.com/**", (r) => ((url = r.request().url()), r.abort()));
+  const [pop] = await Promise.all([page.waitForEvent("popup", { timeout: 5000 }).catch(() => null), ap.click({ force: true })]);
+  await page.waitForTimeout(300);
+  check(/\/x\/airport\?l=airport/.test(url), `a point's ::LINK fills {column} and {label} from its row (${url})`);
+  if (pop) await pop.close();
   check(errs.length === 0, `no page errors (${errs.join(" | ")})`);
 } catch (e) {
   bad++;
