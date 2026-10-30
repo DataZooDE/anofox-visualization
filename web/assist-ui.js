@@ -1295,6 +1295,10 @@ export function mountAssistant(hostArg) {
     }
     await entered;
     renderCard();
+    // #747: the focus above is lost when the preview bar is still hidden at
+    // that moment (a hidden element can't take it); once the preview is
+    // there, the phone's focus belongs on its heading.
+    if (host.ui.isPhone() && host.preview.active() && !document.getElementById("preview-bar")?.contains(document.activeElement)) document.getElementById("preview-title")?.focus();
   }
   function discardPreview() {
     closeSession();
