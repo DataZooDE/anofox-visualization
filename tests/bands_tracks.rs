@@ -501,3 +501,22 @@ fn the_headless_dashboard_leaves_out_hidden_tabs_and_missing_strips() {
     assert_eq!(cards(&svg), cards(&three));
     assert!(cards(&three) > cards(&render_dashboard_svg(one, &mut Files, &opts).unwrap()));
 }
+
+#[test]
+fn an_empty_track_is_an_empty_lane_not_an_error() {
+    // DataZooDE/anofox-visualization#65: an item with no orders in the
+    // window — the static pages get no columns at all for an empty result,
+    // the browser columns without values. Neither may take the chart down.
+    let empty_browser = vec![
+        Column::new("x", Role::X, vec![]),
+        Column::new("t", Role::Track, vec![]),
+    ];
+    for empty in [Vec::new(), empty_browser] {
+        let svgs =
+            track::render_stack(&chart(), &[(empty, 0)], 600, 300, &RenderOptions::default())
+                .unwrap();
+        assert_eq!(svgs.len(), 2);
+        assert!(!svgs.iter().any(|s| s.contains("needs a")), "{}", svgs[1]);
+        assert!(svgs[1].contains("data-track"), "{}", svgs[1]);
+    }
+}

@@ -1,2 +1,2 @@
-source,crate_version,git_sha,schema_version,export_version,seed,generator
-synthetic,,,,draft (inventory-rs#22 #23 #26 #28),42,examples/inventory-twin/synthetic.py
+source,crate_version,git_sha,schema_version,export_version,seed,generator,float_decimals,per_period_skus
+inventory-rs,0.2.0,,1,1,42,end_to_end_demo,3,SKU-004;SKU-008;SKU-012;SKU-016;SKU-020;SKU-024;SKU-028;SKU-032;SKU-036;SKU-040;SKU-044;SKU-048

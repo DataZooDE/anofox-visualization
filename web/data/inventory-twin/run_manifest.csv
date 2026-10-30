@@ -1,7 +1,7 @@
 run_id,stage,seq,started_period,ended_period,records_in,records_accepted,records_rejected,twins,alarms,proposals,proposals_applied,artefact
-demo-42,ingest,1,0,59,9133,9128,5,0,0,0,0,"demand, stock, purchase orders"
-demo-42,build_twin,2,60,60,12,12,0,12,0,0,0,twins
-demo-42,calibrate,3,60,179,1440,1440,0,12,0,120,78,proposals
-demo-42,stream,4,60,179,1440,1440,0,12,28,0,0,"trajectory, alarms"
-demo-42,replay_history,5,60,179,206,206,0,12,0,0,0,replay_deviation
+demo-42,ingest,1,0,59,8908,8905,2,0,0,0,0,data-quality report
+demo-42,build_twin,2,60,60,3635,3635,0,50,0,0,0,twins
+demo-42,calibrate,3,60,60,106,12,94,50,0,12,7,"proposals, parameter_changes"
+demo-42,stream,4,60,179,0,0,0,50,42,826,314,"trajectory, alarms, observations, detector_trace"
+demo-42,replay_history,5,60,179,858,858,0,50,0,0,0,replay_deviation
 demo-42,project,6,180,207,12,12,0,12,0,0,0,projection

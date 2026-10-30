@@ -11,16 +11,19 @@ trust the plan?" example of the
 anofox extensions → Inventory).
 
 **Who asks:** the replenishment planner of a wholesaler on the evening of
-28 Jun 2024, with twins for 12 items (classes A / B / C; smooth, erratic,
-intermittent and lumpy demand; two suppliers). Which items will run out in the
-next four weeks, and is the twin behind that answer still right?
+28 Jun 2024. inventory-rs's demo run keeps a twin for each of 50 items (value
+classes A / B / C) and exports the day-by-day detail —
+trajectory, projection, detector trace — for 12 of them (SKU-004, SKU-008, …
+SKU-048); fleet tables (alarms, detectors, calibration, replay) cover all 50.
+Which items will run out in the next four weeks, and is the twin behind that
+answer still right?
 
-**The story (item SKU-004):** demand rises by a third in mid-May; the order
-placed then arrives five days late. Page-Hinkley and CUSUM on the forecast
-error warn and alarm, the stock runs out for 7 days, the alarm-triggered
-calibration proposes a +32 % demand bias, which is too large for guarded
-auto and is escalated; the planner approves it and the raised reorder point
-keeps the item in stock from then on. The stock chart steps through it
+**The story (item SKU-004, class A):** demand steps up in May; from 5 May the
+MAE, CUSUM and Page-Hinkley detectors on the forecast error and KS / PSI on the
+demand warn and then alarm (10 in all); the item is out of stock on 6 days.
+Calibration re-estimates the twin every 30 days and after alarms: 7 changes
+are in effect, and the large demand-bias and spread updates are escalated to
+the planner instead of applied on their own. The stock chart steps through it
 (`::STORY`).
 
 ## How critical is an item?
@@ -42,8 +45,9 @@ any waiting for a class A / B item), else *ok*. Class C proposals always wait
 for the planner by design; they are listed as routine and do not make an item
 *review*. The risk map colours each item by status with
 `'Critical:bad; Watch:warn; OK:good'::COLORS` (the theme's status colours). In this run
-SKU-033, SKU-021, SKU-019, SKU-003 and SKU-002 are Critical (SKU-033's twin is
-in alarm), six items are on Watch and SKU-004 is OK.
+SKU-040, SKU-044, SKU-032, SKU-028, SKU-048, SKU-008, SKU-036 and SKU-020 are
+Critical, four items (SKU-024, SKU-004, SKU-016, SKU-012) are on Watch, and 2
+twins are in alarm.
 
 ## Tabs and source tables
 
@@ -67,28 +71,24 @@ mean_on_hand, mean_backlog, stockout_probability,
 cumulative_stockout_probability, expected_unmet, order_probability, split,
 measure`). `detector_status.state` is the latched `Level` of `TestStatus`.
 
-## Provenance: synthetic until the export lands
+## Provenance
 
-`end_to_end_demo --export-dir` ([inventory-rs#27](https://github.com/DataZooDE/inventory-rs/issues/27))
-does not exist yet. Until it does, the tables are **synthetic**:
-`synthetic.py` (Python standard library, seed 42) writes them in exactly the
-specified schemas — 12 made-up items, periods 60–179 of a daily calendar
-anchored at 2024-01-01 (as the demo's), a min/max lost-sales twin, CUSUM /
-Page-Hinkley / occurrence-CUSUM / PSI / KS / MAE detectors with the demo's
-thresholds, calibration every 30 periods and after alarms (guarded auto for
-classes A and B, propose only for C), weekly stock counts and a 400-path
-Monte-Carlo projection. Nothing in it is inventory-rs output.
-
-`web/data/inventory-twin/provenance.csv` records the source: `source,
-crate_version, git_sha, schema_version, export_version, seed, generator` —
-today `synthetic`, seed 42; from the real export, the inventory-rs version,
-git sha, `SCHEMA_VERSION`, `export_version` and seed. The dashboard page does
-not show it.
+The tables are the real export of one inventory-rs run:
+`end_to_end_demo --export-dir` (inventory-rs 0.2.0, export version 1, seed 42;
+[inventory-rs#22–#28](https://github.com/DataZooDE/inventory-rs/issues/27)),
+periods 60–179 of a daily calendar anchored at 2024-01-01.
+`web/data/inventory-twin/provenance.csv` records it (`source, crate_version,
+git_sha, schema_version, export_version, seed, generator, float_decimals,
+per_period_skus`); the dashboard page does not show it. The export has no
+demand shape (smooth / erratic / …) yet, so the dashboard shows the value
+class alone. Without an inventory-rs checkout the script falls back to
+`synthetic.py`, a documented stand-in with the same schemas (seed 42; its
+provenance says `synthetic`).
 
 | File | Role |
 |---|---|
-| `../../scripts/gen-inventory-cases.sh` | Runs inventory-rs's `end_to_end_demo --export-dir` when the checkout (`INVENTORY_RS`, default `../../rust/inventory-rs` next to this repo) has it, else `synthetic.py`; writes the CSVs and `provenance.csv` to `web/data/inventory-twin/` (≈ 470 KB). |
-| `synthetic.py` | The documented synthetic stand-in. |
+| `../../scripts/gen-inventory-cases.sh` | Runs inventory-rs's `end_to_end_demo --export-dir` when the checkout (`INVENTORY_RS`, default `../../rust/inventory-rs` next to this repo) has it, else `synthetic.py`; writes the CSVs and `provenance.csv` to `web/data/inventory-twin/` (≈ 1.5 MB). |
+| `synthetic.py` | The documented synthetic stand-in (no checkout). |
 | `showcase.sql` | A link to `web/examples/inventory-twin.sql`, the dashboard. |
 
 ```sh
@@ -96,5 +96,5 @@ scripts/gen-inventory-cases.sh
 cd web && ../target/release/dashboard --check --strict examples/inventory-twin.sql
 ```
 
-When the real export replaces the synthetic tables, the SQL stays the same;
-only the numbers in this README's story may change.
+A new inventory-rs run changes the numbers in this README's story; the SQL
+reads every one of them from the tables.

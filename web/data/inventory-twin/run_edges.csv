@@ -1,8 +1,7 @@
 from_stage,to_stage,count
-ingest,build_twin,9128
-build_twin,calibrate,12
-build_twin,stream,12
-stream,calibrate,3
-calibrate,stream,78
-stream,replay_history,1440
+ingest,build_twin,8905
+build_twin,calibrate,50
+calibrate,stream,50
+stream,calibrate,826
+stream,replay_history,858
 stream,project,12
