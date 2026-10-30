@@ -3449,10 +3449,17 @@ fn a_narrow_continuous_legend_goes_below_the_panel() {
     };
     let narrow = plot_w(163);
     assert!(narrow > 150.0, "163px map: panel only {narrow}px wide");
-    let wide = plot_w(480);
+    // #666: wide, the colourbar is not pushed under the panel — it sits in
+    // a free corner of the map (ggplot-rs's legend_inside_auto) or at Right
+    let s = render_with(&cols(), 480, 320, &RenderOptions::default()).expect("renders");
+    let at = s
+        .split("data-legend-at=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .unwrap_or("");
     assert!(
-        wide < 420.0,
-        "480px map: the colourbar should still sit at Right ({wide}px panel)"
+        at.starts_with("inside-") || at == "right",
+        "480px map: the colourbar should sit inside or at Right, got {at:?}"
     );
 }
 

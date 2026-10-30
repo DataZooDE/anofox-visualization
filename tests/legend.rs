@@ -159,30 +159,29 @@ fn plot_rect(svg: &str) -> Option<[f64; 4]> {
 fn none_removes_a_maps_legend() {
     let with = choropleth(None);
     let without = choropleth(Some("none"));
-    // no legend swatch slices (the continuous bar's own thin `<rect>`s)
-    // and the panel widens to use the room they left.
+    // no legend swatch slices (the continuous bar's own thin `<rect>`s);
+    // by default ggplot-rs places it (`legend_inside_auto`, #666)
     assert!(with.matches("<rect ").count() > 10, "{with}");
+    assert!(with.contains("data-legend-at=\""), "{with}");
     assert_eq!(without.matches("<rect ").count(), 0, "{without}");
+    assert!(!without.contains("data-legend-at="), "{without}");
     let [_, _, with_x1, _] = plot_rect(&with).unwrap();
     let [_, _, without_x1, _] = plot_rect(&without).unwrap();
-    assert!(without_x1 > with_x1, "{with}\n{without}");
+    assert!(without_x1 >= with_x1, "{with}\n{without}");
 }
 
 #[test]
 fn bottom_and_right_move_a_maps_legend() {
-    let default = choropleth(None);
+    let none = choropleth(Some("none"));
     let bottom = choropleth(Some("bottom"));
     let right = choropleth(Some("right"));
-    let [_, _, d_x1, d_y1] = plot_rect(&default).unwrap();
+    let [_, _, n_x1, n_y1] = plot_rect(&none).unwrap();
     let [_, _, b_x1, b_y1] = plot_rect(&bottom).unwrap();
     let [_, _, r_x1, r_y1] = plot_rect(&right).unwrap();
-    // a continuous fill's default legend position is already ggplot-rs's
-    // own `Right` (slice 5's own `plot::build` comment on why — #225), so
-    // `'right'` changes nothing; `'bottom'` moves the legend under the
-    // panel instead, widening it and shortening it.
-    assert_eq!((r_x1, r_y1), (d_x1, d_y1), "{default}\n{right}");
-    assert!(b_x1 > d_x1, "{default}\n{bottom}");
-    assert!(b_y1 < d_y1, "{default}\n{bottom}");
+    // `'right'` narrows the panel, `'bottom'` shortens it — the legend goes
+    // outside on that side instead of ggplot-rs's own pick
+    assert!(r_x1 < n_x1 && r_y1 == n_y1, "{none}\n{right}");
+    assert!(b_y1 < n_y1 && b_x1 == n_x1, "{none}\n{bottom}");
 }
 
 #[test]

@@ -26,14 +26,13 @@ use ggplot_rs::scale::Scale;
 use ggplot_rs::theme::LegendPosition;
 
 use crate::theme::mix;
-use crate::{cell_num, find_role, role_num, Column, RenderOptions, Role};
+use crate::{cell_num, find_role, legend_position_of, role_num, Column, RenderOptions, Role};
 
 use super::fill;
 use super::frames::{FrameCtx, Shared};
-use super::legend::legend_of;
 use super::overlay;
 use super::wkt::row_wkt;
-use super::{foot_of, frame_of, legend_override, symbols, Fill, Model, Shape};
+use super::{foot_of, frame_of, symbols, Fill, Model, Shape};
 
 /// A `GGPlot::new`/`layer_data` DataFrame: `(column name, column values)`
 /// pairs.
@@ -72,34 +71,9 @@ pub(super) fn build(
 ) -> Option<Built> {
     let mut warnings: Vec<String> = Vec::new();
     let (w, h) = (width as f64, height as f64);
-    let mut lg = legend_of(o, m, w, h);
-    let forced = legend_override(cols, &mut lg);
-    // `legend_override` zeroes `lg` for `::LEGEND 'none'` and returns
-    // `None` — the same `None` it returns for "no override, pick a
-    // default" (`lg` is also what `frame_of`'s own layout math reads).
-    // `forced_position` below is the ggplot-rs-facing signal: `Some(...)`
-    // wins over the discrete-fill default, with its own `None` variant
-    // standing for "hide the legend" specifically, distinct from "no
-    // override" (`Option::None` on this line).
-    let forced_position = if lg.w <= 0.0 && lg.h <= 0.0 {
-        Some(ggplot_rs::theme::LegendPosition::None)
-    } else {
-        forced.clone()
-    };
-    // #605: a continuous (ungrouped `Fill::Measure`) legend, with no
-    // `::LEGEND` override, never actually gets positioned from `lg.w`/
-    // `lg.h` — it's ggplot-rs's own default (`Right`), or `Bottom` on a
-    // narrow map (ggplot-rs's `legend_bottom_when_narrow`, below) — either way, ggplot-rs reserves its own margin for it in its
-    // own, independent layout pass. `layout()`'s own `lg.w`/`lg.h`-based
-    // space-carving below was dead weight for this fill kind even before
-    // that: confirmed by zeroing it and comparing — the panel's own
-    // `coord_sf` window came out identical, because ggplot-rs's own
-    // reservation was always the sole binding constraint. Zeroed here
-    // instead of computed and discarded.
-    if forced.is_none() && matches!(&m.fill, Fill::Measure(s) if s.classes.is_none()) {
-        lg.w = 0.0;
-        lg.h = 0.0;
-    }
+    // `::LEGEND` 'none' / 'top' / 'right' / 'bottom' / 'left' wins over every
+    // default placement below.
+    let forced_position = legend_position_of(cols);
     // `eligible` only allows a footer this path can draw itself (a scale
     // bar and/or any number of attribution lines, via `annotation_scale`/
     // `annotation_attribution` below) — reuse the old writer's own height
@@ -132,7 +106,7 @@ pub(super) fn build(
     // reservation was added for (`delivery-coverage.sql`'s bivariate +
     // symbol maps) plus `supply-chain.sql`: no overflow without it.
     let ft = foot_of(o, m, w);
-    let (frame, legend_at) = frame_of(m, o, &lg, w, h, ft.h, forced.clone())?;
+    let frame = frame_of(m, o, w, h, ft.h)?;
     let [mut x0, mut x1, mut y0, mut y1] = frame.window(w, h);
     // Small multiples (M3a-1): every panel shows the same window — the
     // browser's zoom, else the data's own padded box. ggplot-rs lays the
@@ -911,7 +885,6 @@ pub(super) fn build(
         }
         (None, _) => {}
     }
-    let _ = legend_at;
 
     // ---- flows (::ORIGIN/::DEST, M2b) and hexbin (::HEXBIN, M2c), slice
     // 4: extra layers on this same plot (overlay.rs's `flow_layers`/
@@ -1277,45 +1250,31 @@ pub(super) fn build(
         // no hexagons, flows drawn widest first) — sipemu/ggplot-rs#329
         plot = plot.facet_wrap("facet", fc.ncol).facet_levels(&fc.levels);
     }
-    // A discrete legend (`Fill::Category`, or a classed `Fill::Measure` —
-    // `ScaleFillBinned::is_discrete()` is also `true`) goes at
-    // `LegendPosition::Top` (plain ggplot-rs API, `is_horizontal` for
-    // `Top`/`Bottom` is just the one swatch row the old writer also drew)
-    // — the old writer put its legend above the map at full width;
-    // ggplot-rs's own default (`Right`, a vertical column) narrows the map
-    // a lot on a narrow (390px) panel, which `Top` avoids. Must come
-    // *after* `.theme(..)`: that call sets the plot's whole `Theme` (incl.
-    // `legend_position`), so setting it earlier would just get
-    // overwritten.
-    //
-    // #605/#635: a continuous (`Fill::Measure`, no classes) legend — a
-    // colourbar — stays at ggplot-rs's default `Right`, except where that
-    // band would take more than 35% of the map's width: ggplot-rs itself
-    // then puts it under the panel (`legend_bottom_when_narrow`,
-    // sipemu/ggplot-rs#287), measured on its own layout. `legend_at`
-    // (`Inside`) stays unused for this fill kind (sipemu/ggplot-rs#225).
-    //
-    // `::LEGEND none`/`'top'`/`'bottom'`/`'left'`/`'right'`
-    // (`forced_position`, derived above from the same `lg`/`forced` that
-    // feed `frame_of`'s own layout math) wins over every default below
-    // when given — found missing entirely while widening `eligible` this
-    // slice: neither was ever actually applied to this `GGPlot`'s own
-    // `LegendPosition` before, so `::LEGEND` silently did nothing for any
-    // already-eligible map (every kind slices 1-4 shipped) — untested
-    // until this slice's broader eligibility finally routed a
-    // `::LEGEND`-bearing map fixture through here for the first time.
+    // Where the legend goes (after `.theme(..)`, which sets the whole
+    // `Theme` incl. `legend_position`):
+    // - `::LEGEND` (`forced_position`) wins;
+    // - a bivariate map's legend is the `GeomBivariateLegend` furniture
+    //   layer above (the per-aesthetic one would list 9 composite classes);
+    // - small multiples: discrete at `Top` (one swatch row; `Right` would
+    //   narrow every map), a colourbar at `Right` unless that takes over 35%
+    //   of the width (`legend_bottom_when_narrow`, sipemu/ggplot-rs#287) —
+    //   `legend_inside_auto` is single-panel only;
+    // - otherwise ggplot-rs tests each corner's real legend box against the
+    //   drawn marks (and the scale bar / attribution) and puts it in the
+    //   first free one, else outside, `Top` or `Right`, whichever leaves the
+    //   map larger (`legend_inside_auto`, sipemu/ggplot-rs#332, #666). The
+    //   choice is the root `data-legend-at`.
     let continuous = matches!(&m.fill, Fill::Measure(s) if s.classes.is_none());
     if let Some(pos) = forced_position {
         plot = plot.legend_position(pos);
     } else if matches!(m.fill, Fill::Bivariate(_)) {
-        // The dedicated `GeomBivariateLegend` furniture layer above is the
-        // real legend; the ordinary per-aesthetic one would just list the
-        // 9 composite classes as a vertical bar list.
         plot = plot.legend_position(LegendPosition::None);
-    } else if discrete_fill {
+    } else if facet.is_some() && discrete_fill {
         plot = plot.legend_position(LegendPosition::Top);
-    } else if continuous {
+    } else if facet.is_some() && continuous {
         plot = plot.legend_bottom_when_narrow(0.35);
+    } else {
+        plot = plot.legend_inside_auto();
     }
 
     // The screen-reader summary (`super::summary`, shared by every map

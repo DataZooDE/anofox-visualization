@@ -15,10 +15,9 @@
 //!    `ggplot_rs::spatial::parse_wkt`, a pack region, or a point),
 //! 2. resolves the projection (`'auto'` by the data's extent) and projects
 //!    every vertex, densifying long edges where the projection curves them,
-//! 3. picks the legend's sized footprint and the layout corner it goes in
-//!    (the data box fitted around it, or around the browser's zoom window —
-//!    [`layout`]/[`frame_of`], still this module's own job: [`plot::build`]
-//!    only draws the window these hand it),
+//! 3. fits the data box (or the browser's zoom window) to the panel
+//!    ([`layout`]/[`frame_of`]); ggplot-rs places the legend
+//!    (`legend_inside_auto`, #666) and letterboxes the window around it,
 //! 4. resolves the fill (a themed sequential/diverging ramp, continuous or
 //!    classed, or the theme palette) and the graduated-symbol/flow/hexbin
 //!    models `plot::build` turns into `GeomSf`/`geom_curve`/`geom_hex`
@@ -56,8 +55,8 @@ mod wkt;
 use crate::format::ValueFmt;
 use crate::theme::{contrast, mix};
 use crate::{
-    cell_num, find_role, legend_position_of, role_num, role_str, value_fmt, value_str, Column,
-    Kind, Ramp, RenderOptions, Role,
+    cell_num, find_role, role_num, role_str, value_fmt, value_str, Column, Kind, Ramp,
+    RenderOptions, Role,
 };
 use bivariate::Bivar;
 use classes::{Classes, Method};
@@ -65,7 +64,7 @@ use flows::Flows;
 use ggplot_rs::prelude::Value;
 use ggplot_rs::spatial::{parse_wkt, Geometry};
 use hexbin::Hexbin;
-use legend::{legend_of, legend_title, LegendBox};
+use legend::legend_title;
 use project::{Extent, Proj, Projection};
 use symbols::Symbols;
 
@@ -1204,136 +1203,30 @@ fn padded(
     (x0 - mx, y0 - my, x1 + mx, y1 + my)
 }
 
-/// `::LEGEND` on a map: `'none'` hides it outright (`lg` zeroed so
-/// [`layout`] reserves it no room); `'top'`/`'right'`/`'bottom'`/`'left'` is
-/// instead returned for [`layout`] to place it on that side.
-fn legend_override(
-    cols: &[Column],
-    lg: &mut LegendBox,
-) -> Option<ggplot_rs::theme::LegendPosition> {
-    match legend_position_of(cols) {
-        Some(ggplot_rs::theme::LegendPosition::None) => {
-            lg.w = 0.0;
-            lg.h = 0.0;
-            None
-        }
-        other => other,
-    }
-}
-
-/// Where the map and its legend go when not zoomed: the data's box (with
-/// its margin) fitted to the whole panel, the legend over the corner that
-/// covers the fewest vertices — or, when every corner would cover some,
-/// beside or above the map (whichever keeps it larger). `forced` (`::LEGEND`
-/// `'top'`/`'right'`/`'bottom'`/`'left'`) skips that auto corner-pick and
-/// puts the legend on the given side instead (`'none'` is handled by the
-/// caller zeroing `lg` before this runs).
-fn layout(
-    m: &Model,
-    lg: &LegendBox,
-    w: f64,
-    h: f64,
-    forced: Option<ggplot_rs::theme::LegendPosition>,
-) -> Option<(Frame, (f64, f64))> {
+/// The map's frame when not zoomed: the data's box (with its margin) fitted
+/// to the whole panel. The legend is ggplot-rs's: an empty corner inside the
+/// map, else outside, `Top` or `Right` (`legend_inside_auto`, #666) — and
+/// `coord_sf` letterboxes this window into whatever panel that leaves.
+fn layout(m: &Model, w: f64, h: f64) -> Option<Frame> {
     let margin = if m.flows.is_some() || m.hexbin.is_some() {
         0.08
     } else {
         0.04
     };
     let b = padded(m.bbox()?, matches!(m.proj, Proj::Identity), margin);
-    let full = Frame::fit(b, (2.0, 2.0, w - 4.0, h - 4.0));
-    if lg.w <= 0.0 {
-        return Some((full, (0.0, 0.0)));
-    }
-    let (lw, lh) = (lg.w, lg.h);
-    use ggplot_rs::theme::LegendPosition as L;
-    match forced {
-        Some(L::Top) => {
-            let top = Frame::fit(b, (2.0, lh + 8.0, w - 4.0, (h - lh - 10.0).max(1.0)));
-            return Some((top, (4.0, 4.0)));
-        }
-        Some(L::Bottom) => {
-            let bottom = Frame::fit(b, (2.0, 2.0, w - 4.0, (h - lh - 10.0).max(1.0)));
-            return Some((bottom, (4.0, h - 4.0 - lh)));
-        }
-        Some(L::Left) => {
-            let side = Frame::fit(b, (lw + 8.0, 2.0, (w - lw - 10.0).max(1.0), h - 4.0));
-            return Some((side, (4.0, 4.0)));
-        }
-        Some(L::Right) => {
-            let side = Frame::fit(b, (2.0, 2.0, (w - lw - 10.0).max(1.0), h - 4.0));
-            return Some((side, (w - 4.0 - lw, 4.0)));
-        }
-        // `None` (no role) or `L::None`/`L::Inside` (not a map side): auto-pick.
-        _ => {}
-    }
-    let corners = [
-        (4.0, 4.0),
-        (w - 4.0 - lw, 4.0),
-        (4.0, h - 4.0 - lh),
-        (w - 4.0 - lw, h - 4.0 - lh),
-    ];
-    // vertices under each corner (an even sample of at most ~20k)
-    let total: usize = m
-        .features
-        .iter()
-        .chain(&m.base)
-        .flatten()
-        .map(|s| match s {
-            Shape::Area(r) => r.iter().map(Vec::len).sum(),
-            Shape::Line(c) => c.len(),
-            Shape::Point(_) => 1,
-        })
-        .sum();
-    let stride = (total / 20_000).max(1);
-    let mut hits = [0usize; 4];
-    let mut k = 0usize;
-    for s in m.features.iter().chain(&m.base).flatten() {
-        for_coords(s, &mut |c| {
-            k += 1;
-            if !k.is_multiple_of(stride) {
-                return;
-            }
-            let (x, y) = full.at(c);
-            for (i, (cx, cy)) in corners.iter().enumerate() {
-                if x >= cx - 2.0 && x <= cx + lw + 2.0 && y >= cy - 2.0 && y <= cy + lh + 2.0 {
-                    hits[i] += 1;
-                }
-            }
-        });
-    }
-    let best = (0..4).min_by_key(|i| hits[*i]).unwrap_or(0);
-    if hits[best] == 0 {
-        return Some((full, corners[best]));
-    }
-    let top = Frame::fit(b, (2.0, lh + 8.0, w - 4.0, (h - lh - 10.0).max(1.0)));
-    let side = Frame::fit(b, (lw + 8.0, 2.0, (w - lw - 10.0).max(1.0), h - 4.0));
-    Some(if side.s > top.s {
-        (side, (4.0, 4.0))
-    } else {
-        (top, (4.0, 4.0))
-    })
+    Some(Frame::fit(b, (2.0, 2.0, w - 4.0, h - 4.0)))
 }
 
 /// The map's frame: the zoom window over the whole panel, else the
-/// [`layout`]'s; and where the legend goes (the same either way, so it
-/// doesn't jump on the first zoom step).
-fn frame_of(
-    m: &Model,
-    o: &RenderOptions,
-    lg: &LegendBox,
-    w: f64,
-    h: f64,
-    foot: f64,
-    forced: Option<ggplot_rs::theme::LegendPosition>,
-) -> Option<(Frame, (f64, f64))> {
-    let (auto, at) = layout(m, lg, w, h - foot, forced)?;
+/// [`layout`]'s above a footer band `foot` px high.
+fn frame_of(m: &Model, o: &RenderOptions, w: f64, h: f64, foot: f64) -> Option<Frame> {
+    let auto = layout(m, w, h - foot)?;
     if let Some(((x0, x1), (y0, y1))) = o.zoom {
         if [x0, x1, y0, y1].iter().all(|f| f.is_finite()) && x1 > x0 && y1 > y0 {
-            return Some((Frame::fit((x0, y0, x1, y1), (0.0, 0.0, w, h)), at));
+            return Some(Frame::fit((x0, y0, x1, y1), (0.0, 0.0, w, h)));
         }
     }
-    Some((auto, at))
+    Some(auto)
 }
 
 /// The projected window `[x0, x1, y0, y1]` the panel shows when not zoomed
@@ -1360,10 +1253,8 @@ pub(crate) fn view_bounds(cols: &[Column], o: &RenderOptions, w: u32, h: u32) ->
         return Some([x0, x1, y0, y1]);
     }
     let (w, h) = (w as f64, h as f64);
-    let mut lg = legend_of(o, &m, w, h);
-    let forced = legend_override(cols, &mut lg);
     let ft = foot_of(o, &m, w);
-    layout(&m, &lg, w, h - ft.h, forced).map(|(f, _)| f.window(w, h))
+    layout(&m, w, h - ft.h).map(|f| f.window(w, h))
 }
 
 /// Build a map panel's `GGPlot` and its extra root attributes
