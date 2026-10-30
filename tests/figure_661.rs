@@ -151,7 +151,7 @@ fn check_passes_a_good_figure_and_flags_a_bad_one() {
         "SELECT 'F' ::FIGURE, 'a | nope' ::LAYOUT, '1,2,3' ::WIDTHS;\n\
          -- @name a\n\
          SELECT i ::XAXIS, i AS y ::LINECHART FROM range(3) t(i);\n\
-         SELECT i AS v ::TABLE FROM range(3) t(i);\n",
+         SELECT i AS v ::PAGED FROM range(3) t(i);\n",
     )
     .unwrap();
     let run = dashboard(&["--check".as_ref(), "--json".as_ref(), bad.as_os_str()]);

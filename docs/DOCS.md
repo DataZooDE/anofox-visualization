@@ -2882,14 +2882,20 @@ same picture.
 `--check` reports: a `::LAYOUT` name that is no cell (`figure/unknown-cell`),
 a cell placed twice (`figure/duplicate-cell`), `::WIDTHS`/`::HEIGHTS` that fit
 no group (`figure/bad-weights`), an unknown option value (`figure/bad-option`),
-a cell that is not a chart — a table, KPI, text, map or `::TRACK`
-(`figure/not-a-chart`), a missing `::ENDFIGURE` (`figure/unclosed`), a
+a cell the figure can't draw — a `::PAGED` table, a map, a contract plot or a
+`::TRACK` (`figure/not-a-chart`), a missing `::ENDFIGURE` (`figure/unclosed`), a
 `::FIGURE` inside another (`figure/nested`) — all errors — and, as warnings, a
 cell `::LAYOUT` leaves out (`figure/unplaced-cell`), an empty figure and a
 stray `::ENDFIGURE`.
 
-Not yet: tables, KPIs or Markdown as cells (patchwork's `wrap_elements`), and
-on a phone-width screen the collected legend still sits to the right
+A cell may also be a table (`::TABLE`), a KPI or text card, `::MARKDOWN` or an
+`::IMAGE` (#694, patchwork's `wrap_elements`): it is drawn at the cell's size
+the way the static dashboard draws that panel (a table shows the rows that fit,
+then "… n more rows") and takes part in `::LAYOUT`, `::WIDTHS`/`::HEIGHTS` and
+`::TAG_LEVELS`, not in collected axes or legends. It is a picture: no paging,
+sorting or row selection inside a figure — keep an interactive table outside.
+
+Not yet: on a phone-width screen the collected legend still sits to the right
 (sipemu/ggplot-rs#363).
 
 ### Fit to screen (`::FIT`)

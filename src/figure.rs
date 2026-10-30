@@ -25,7 +25,7 @@
 //! and legends, tags) is ggplot-rs's, not ours.
 
 use crate::{sql, Column, Place, RenderError, RenderOptions, Role};
-use ggplot_rs::compose::{AxisCollect, GridCell, PlotGrid, TagLevels};
+use ggplot_rs::compose::{AxisCollect, GridCell, GridElement, PlotGrid, TagLevels};
 
 /// A `::LAYOUT` expression: `|` puts cells side by side, `/` stacks them
 /// (`/` binds tighter, as in patchwork), parentheses group, `_` is an
@@ -457,6 +457,7 @@ fn cell_list(names: &[Option<String>]) -> String {
 }
 
 /// One cell: its `-- @name` and its columns (the query result, by role).
+#[derive(Clone)]
 pub struct Cell {
     pub name: Option<String>,
     pub cols: Vec<Column>,
@@ -464,6 +465,18 @@ pub struct Cell {
     /// zoomed, x only for a cell that shares its x axis with it (its y
     /// auto-fits). `None`: auto-fit.
     pub zoom: Option<CellZoom>,
+    /// The cell's whole result, its roles and display names (#694): a cell
+    /// that isn't a chart — a table, a KPI, a note, Markdown — is drawn from
+    /// these, as the static dashboard draws that panel. `None`: an empty cell.
+    pub raw: Option<CellRows>,
+}
+
+/// A figure cell's result as the headless dashboard renders a panel from it.
+#[derive(Debug, Clone, Default)]
+pub struct CellRows {
+    pub rows: Vec<(String, Vec<ggplot_rs::prelude::Value>)>,
+    pub roles: Vec<(usize, Role)>,
+    pub names: Vec<(usize, String)>,
 }
 
 /// A figure cell's zoom window: `(x0, x1)` and, unless only shared, `(y0, y1)`.
@@ -533,8 +546,9 @@ fn x_share(
 
 /// Render a figure: every cell's plot composed into one `PlotGrid`, as one
 /// SVG `width`×`height` at `place`. A cell that isn't a chart (a table, a
-/// KPI, a note) is drawn as an empty cell; `dashboard --check` flags it
-/// (`figure/not-a-chart`).
+/// KPI, a note, Markdown) is a non-plot cell drawn at its real size from its
+/// [`Cell::raw`] rows, the way the static dashboard draws that panel (#694,
+/// patchwork's `wrap_elements`); without them it is empty.
 pub(crate) fn render(
     spec: &FigureSpec,
     cells: &[Cell],
@@ -571,6 +585,7 @@ pub(crate) fn render(
             sizes.fill((width as f64 / ncol as f64, height as f64 / nrow as f64));
         }
         let mut plots: Vec<Option<ggplot_rs::prelude::GGPlot>> = Vec::with_capacity(cells.len());
+        let mut elements: Vec<Option<GridElement>> = Vec::with_capacity(cells.len());
         for (i, (c, (w, h))) in cells.iter().zip(&sizes).enumerate() {
             let mut co = o.clone();
             match c.zoom {
@@ -589,6 +604,10 @@ pub(crate) fn render(
                         None => p,
                     }
                 });
+            elements.push(match (&p, &c.raw) {
+                (None, Some(raw)) => Some(element(i, c.name.as_deref(), raw, &co)),
+                _ => None,
+            });
             plots.push(p);
         }
         // #695: the cells a zoom moves together carry their group
@@ -603,7 +622,7 @@ pub(crate) fn render(
             }
         }
         let mut grid = if spec.layout.is_some() {
-            match build(&layout, spec, &names, &mut plots) {
+            match build(&layout, spec, &names, &mut plots, &mut elements) {
                 GridCell::Grid(g) => *g,
                 cell => PlotGrid::new().add(cell),
             }
@@ -621,10 +640,11 @@ pub(crate) fn render(
             if spec.heights.len() == nrow {
                 g = g.heights(&spec.heights);
             }
-            for p in plots.iter_mut() {
-                g = match p.take() {
-                    Some(p) => g.add(p),
-                    None => g.add_spacer(),
+            for (p, e) in plots.iter_mut().zip(elements.iter_mut()) {
+                g = match (p.take(), e.take()) {
+                    (Some(p), _) => g.add(p),
+                    (None, Some(e)) => g.add(e),
+                    (None, None) => g.add_spacer(),
                 };
             }
             g
@@ -669,18 +689,43 @@ pub fn render_with_title(
     })
 }
 
-/// The `PlotGrid` cell for `node`, taking each referenced cell's plot out
-/// of `plots` (a missing, repeated or non-chart reference is a spacer).
+/// A non-chart cell (#694): drawn by the headless dashboard's panel renderer
+/// at the cell's real size, wrapped like a plot cell's content (`data-cell`
+/// = its statement order, and its `-- @name`).
+fn element(i: usize, name: Option<&str>, raw: &CellRows, o: &RenderOptions) -> GridElement {
+    let (raw, o) = (raw.clone(), o.clone());
+    let open = match name {
+        Some(n) => format!(
+            "<g data-cell=\"{i}\" data-dp-name=\"{}\">",
+            crate::format::escape_xml(n)
+        ),
+        None => format!("<g data-cell=\"{i}\">"),
+    };
+    GridElement::fill(move |w, h| {
+        let svg =
+            crate::dashboard::panel_svg_at_origin(&raw.rows, &raw.roles, &raw.names, w, h, &o);
+        format!("{open}{svg}</g>")
+    })
+}
+
+/// The `PlotGrid` cell for `node`, taking each referenced cell's plot (or
+/// non-chart element) out of `plots` / `elements` (a missing or repeated
+/// reference is a spacer).
 fn build(
     node: &Node,
     spec: &FigureSpec,
     names: &[Option<String>],
     plots: &mut [Option<ggplot_rs::prelude::GGPlot>],
+    elements: &mut [Option<GridElement>],
 ) -> GridCell {
     match node {
         Node::Spacer => GridCell::Spacer,
-        Node::Cell(r) => match resolve(r, names).and_then(|i| plots[i].take()) {
-            Some(p) => GridCell::Plot(Box::new(p)),
+        Node::Cell(r) => match resolve(r, names) {
+            Some(i) => match (plots[i].take(), elements[i].take()) {
+                (Some(p), _) => GridCell::Plot(Box::new(p)),
+                (None, Some(e)) => GridCell::Element(Box::new(e)),
+                (None, None) => GridCell::Spacer,
+            },
             None => GridCell::Spacer,
         },
         Node::Row(items) | Node::Col(items) => {
@@ -698,7 +743,7 @@ fn build(
                 g = g.heights(&spec.heights);
             }
             for it in items {
-                g = g.add(build(it, spec, names, plots));
+                g = g.add(build(it, spec, names, plots, elements));
             }
             GridCell::Grid(Box::new(g))
         }
@@ -895,6 +940,94 @@ mod tests {
     }
 
     #[test]
+    fn tables_and_kpis_are_cells_too() {
+        use crate::{MetricFmt, Value};
+        // #694: a chart, a table and a KPI composed into one figure
+        let spec = FigureSpec {
+            layout: Some(parse_layout("chart | (verdicts / kpi)").unwrap()),
+            ..Default::default()
+        };
+        let table = CellRows {
+            rows: vec![
+                (
+                    "check".into(),
+                    vec![Value::Str("drift".into()), Value::Str("nulls".into())],
+                ),
+                (
+                    "c1".into(),
+                    vec![Value::Str("FAIL".into()), Value::Str("PASS".into())],
+                ),
+            ],
+            roles: vec![(1, Role::Table)],
+            names: vec![],
+        };
+        let kpi = CellRows {
+            rows: vec![("c0".into(), vec![Value::Float(1234.0)])],
+            roles: vec![(0, Role::Metric(MetricFmt::Plain))],
+            names: vec![],
+        };
+        let cells = [
+            Cell {
+                name: Some("chart".into()),
+                cols: line(1.0),
+                zoom: None,
+                raw: None,
+            },
+            Cell {
+                name: Some("verdicts".into()),
+                cols: vec![],
+                zoom: None,
+                raw: Some(table),
+            },
+            Cell {
+                name: Some("kpi".into()),
+                cols: vec![Column::new(
+                    "c0",
+                    Role::Metric(MetricFmt::Plain),
+                    vec![Value::Float(1234.0)],
+                )],
+                zoom: None,
+                raw: Some(kpi),
+            },
+        ];
+        let svg = render(
+            &spec,
+            &cells,
+            800,
+            400,
+            &RenderOptions::default(),
+            Place::Doc,
+        )
+        .unwrap();
+        assert!(
+            svg.contains("drift") && svg.contains("nulls") && svg.contains("FAIL"),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("1,234") || svg.contains("1.2K") || svg.contains("1234"),
+            "{svg}"
+        );
+        assert!(svg.contains(r#"<g data-cell="1" data-dp-name="verdicts">"#));
+        assert!(svg.contains(r#"<g data-cell="2" data-dp-name="kpi">"#));
+        // the chart is still a plot cell
+        assert!(svg.contains(r#"data-dp-name="chart""#));
+        // without its rows a non-chart cell is empty (no error)
+        let empty = [Cell {
+            raw: None,
+            ..cells[1].clone()
+        }];
+        assert!(render(
+            &FigureSpec::default(),
+            &empty,
+            400,
+            300,
+            &RenderOptions::default(),
+            Place::Doc
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn x_share_groups_follow_axes_collect() {
         let names = vec![
             Some("hist".to_string()),
@@ -949,6 +1082,7 @@ mod tests {
             name: None,
             cols: line(k),
             zoom,
+            raw: None,
         };
         let o = RenderOptions::default();
         let base = render(
@@ -1007,11 +1141,13 @@ mod tests {
                     name: None,
                     cols: hist.clone(),
                     zoom: zx,
+                    raw: None,
                 },
                 Cell {
                     name: None,
                     cols: line(1.0),
                     zoom: z,
+                    raw: None,
                 },
             ]
         };

@@ -2609,15 +2609,16 @@ fn figure_diags(
         for &c in &b.cells {
             let p = &plan[c];
             if p.contract.is_some()
-                || chart_kind(&p.roles).is_none()
+                || (chart_kind(&p.roles).is_none() && !figure_element(&p.roles))
                 || crate::track::is_track(&p.roles)
             {
                 d(
                     Severity::Error,
                     c,
                     "figure/not-a-chart",
-                    "a ::FIGURE cell must be a chart (bar, line, area, scatter, histogram, …) — \
-                     a table, KPI, text, map or ::TRACK is drawn as an empty cell; move it \
+                    "a ::FIGURE cell must be a chart (bar, line, area, scatter, histogram, …), \
+                     a table, a KPI or text card, Markdown or an image — a ::PAGED table, a \
+                     map, a contract plot or a ::TRACK is drawn as an empty cell; move it \
                      outside the figure"
                         .into(),
                 );
@@ -6144,6 +6145,20 @@ fn is_kpi(roles: &[(usize, Role)]) -> bool {
         && !roles
             .iter()
             .any(|(_, r)| matches!(r, Role::Diagram | Role::Table | Role::PagedTable))
+}
+
+/// A panel a `::FIGURE` draws as a non-chart cell (#694): a table, a KPI or
+/// text card, Markdown, an image (a static picture of it: no paging, sorting
+/// or row selection inside a figure).
+fn figure_element(roles: &[(usize, Role)]) -> bool {
+    !roles.iter().any(|(_, r)| *r == Role::PagedTable)
+        && (is_kpi(roles)
+            || roles.iter().any(|(_, r)| {
+                matches!(
+                    r,
+                    Role::Table | Role::Markdown | Role::Image | Role::ImageDark | Role::Text(_)
+                )
+            }))
 }
 
 /// A statement that shows a content panel or KPI tile: not an input, a layout
