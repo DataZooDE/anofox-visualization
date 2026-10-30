@@ -702,7 +702,8 @@ fn element(i: usize, name: Option<&str>, raw: &CellRows, o: &RenderOptions) -> G
         None => format!("<g data-cell=\"{i}\">"),
     };
     GridElement::fill(move |w, h| {
-        let svg = crate::dashboard::panel_svg_at_origin(&raw.rows, &raw.roles, &raw.names, w, h, &o);
+        let svg =
+            crate::dashboard::panel_svg_at_origin(&raw.rows, &raw.roles, &raw.names, w, h, &o);
         format!("{open}{svg}</g>")
     })
 }
@@ -989,9 +990,23 @@ mod tests {
                 raw: Some(kpi),
             },
         ];
-        let svg = render(&spec, &cells, 800, 400, &RenderOptions::default(), Place::Doc).unwrap();
-        assert!(svg.contains("drift") && svg.contains("nulls") && svg.contains("FAIL"), "{svg}");
-        assert!(svg.contains("1,234") || svg.contains("1.2K") || svg.contains("1234"), "{svg}");
+        let svg = render(
+            &spec,
+            &cells,
+            800,
+            400,
+            &RenderOptions::default(),
+            Place::Doc,
+        )
+        .unwrap();
+        assert!(
+            svg.contains("drift") && svg.contains("nulls") && svg.contains("FAIL"),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("1,234") || svg.contains("1.2K") || svg.contains("1234"),
+            "{svg}"
+        );
         assert!(svg.contains(r#"<g data-cell="1" data-dp-name="verdicts">"#));
         assert!(svg.contains(r#"<g data-cell="2" data-dp-name="kpi">"#));
         // the chart is still a plot cell
@@ -1001,7 +1016,15 @@ mod tests {
             raw: None,
             ..cells[1].clone()
         }];
-        assert!(render(&FigureSpec::default(), &empty, 400, 300, &RenderOptions::default(), Place::Doc).is_ok());
+        assert!(render(
+            &FigureSpec::default(),
+            &empty,
+            400,
+            300,
+            &RenderOptions::default(),
+            Place::Doc
+        )
+        .is_ok());
     }
 
     #[test]
