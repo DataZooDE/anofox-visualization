@@ -19257,6 +19257,7 @@ function attachHover() {
       // The crosshair shows the tooltip — except for a mark focused from the
       // keyboard (a11y), which has no pointer to drive the crosshair.
       if (pointered() && document.activeElement !== el) return;
+      if (!isMapMark && tipMode(el.closest(".panel")) === "none") return; // #751
       const fill = el.getAttribute("fill") || getComputedStyle(el).fill || "#619cff";
       // A map feature's ::LABEL may run over several lines: the first is the
       // heading, the rest follow as they are.
@@ -19796,6 +19797,17 @@ function tipSpec(panel) {
   }
   panel._tipSpec = spec;
   return spec;
+}
+// #751: a panel's ::TOOLTIP_MODE ('shared' | 'single' | 'none'), "" when unset.
+function tipMode(panel) {
+  const dp = panel?._dp;
+  const r = dp && Array.isArray(dp.roles) ? dp.roles.find((x) => x[1] === "TOOLTIP_MODE") : null;
+  if (!r) return "";
+  let rows = [];
+  try {
+    rows = typeof dp.rows === "string" ? JSON.parse(dp.rows) : dp.rows || [];
+  } catch (_) {}
+  return String(rows[0]?.[`c${r[0]}`] ?? "").trim().toLowerCase();
 }
 // #751: the tooltip of a mark from its panel's spec — {head, body} HTML, or
 // null for the default tooltip. Every value is wasm-filled plain text,
@@ -20600,6 +20612,8 @@ function attachAxisPointer() {
     // crosshair data point — same exclusion as a reference rule.
     const dataCircles = (root) => [...root.querySelectorAll("circle.dp-hit")].filter((el) => !isRuleMark(el));
     if (dataCircles(svg0).length < 3) return; // needs a line/scatter chart
+    // #751: 'single' lists only the hovered mark, 'none' shows nothing.
+    if (["single", "none"].includes(tipMode(panel))) return;
     panel.dataset.axisWired = "1";
     panel.classList.add("has-axis-pointer");
     const area = panel.querySelector(".panel-svg") || svg0;

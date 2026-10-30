@@ -1970,6 +1970,15 @@ where
             });
         }
 
+        diags.extend(tooltip_diags(&p.roles, &p.names, &rows).into_iter().map(
+            |(code, message)| Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code,
+                message,
+                sql: short.clone(),
+            },
+        ));
         diags.extend(
             motion_diags(&p.roles, &rows)
                 .into_iter()
@@ -5037,6 +5046,71 @@ fn column_texts(rows: &[Map<String, Value>], idx: usize) -> Vec<String> {
 /// `::STORY_BY` that is not `'x'` / `'series'` (or `'series'` with no
 /// `::CATEGORY`), an unknown `::TRANSITION`, an unknown `::HOVER_FOCUS`, an unknown
 /// `::POINTS`.
+/// #751: a `::TOOLTIP_FORMAT` / `::TOOLTIP_HEADER` names only `{x}`, `{y}`,
+/// `{series}` or a `::TOOLTIP` column's alias; a `.Nf` format needs a digit;
+/// a `::TOOLTIP_MODE` is one of [`crate::TOOLTIP_MODES`].
+fn tooltip_diags(
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+    rows: &[Map<String, Value>],
+) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let tips: Vec<String> = roles
+        .iter()
+        .filter(|(_, r)| *r == Role::Tooltip)
+        .filter_map(|(i, _)| names.iter().find(|(j, _)| j == i).map(|(_, n)| n.clone()))
+        .collect();
+    for (idx, r) in roles {
+        if *r == Role::TooltipMode {
+            if let Some(v) = column_texts(rows, *idx)
+                .first()
+                .map(|t| t.to_ascii_lowercase())
+            {
+                if !crate::TOOLTIP_MODES.contains(&v.as_str()) {
+                    out.push((
+                        "tooltip/unknown-mode",
+                        format!(
+                            "::TOOLTIP_MODE `{v}` is not one of {} — the tooltip stays as it is",
+                            crate::TOOLTIP_MODES.join(", ")
+                        ),
+                    ));
+                }
+            }
+            continue;
+        }
+        if !matches!(r, Role::TooltipFormat | Role::TooltipHeader) {
+            continue;
+        }
+        let Some(t) = column_texts(rows, *idx).first().cloned() else {
+            continue;
+        };
+        for (name, spec) in crate::tooltip::placeholders(&t) {
+            if !["x", "y", "series"].contains(&name.as_str()) && !tips.contains(&name) {
+                out.push((
+                    "tooltip/unknown-placeholder",
+                    format!(
+                        "::{} names `{{{name}}}`, which is not x, y, series or a ::TOOLTIP column's alias{} — it stays empty",
+                        r.token(),
+                        if tips.is_empty() { String::new() } else { format!(" ({})", tips.join(", ")) }
+                    ),
+                ));
+            }
+            if let Some(f) = spec.as_deref().and_then(|f| f.strip_prefix('.')) {
+                let ok = f
+                    .strip_suffix('f')
+                    .is_some_and(|d| d.parse::<u8>().is_ok_and(|d| d <= 10));
+                if !ok {
+                    out.push((
+                        "tooltip/bad-format",
+                        format!("`{{{name}:.{f}}}`: a decimals format is `.0f` … `.10f`"),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn motion_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
@@ -9831,6 +9905,7 @@ mod design_tests {
                     "transition/",
                     "points/",
                     "hover-focus/",
+                    "tooltip/",
                 ]
                 .iter()
                 .any(|p| c.starts_with(p))
@@ -9876,6 +9951,29 @@ mod design_tests {
                 row
             ),
             vec!["transition/unknown"]
+        );
+        // #751: tooltip templates and mode
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": 3, "c3": "{x}: {y:.2f} ({Units})" });
+        assert!(codes(
+            "SELECT x::XAXIS, y::BARCHART, u AS \"Units\" ::TOOLTIP, '{x}: {y:.2f} ({Units})'::TOOLTIP_FORMAT FROM t;",
+            row
+        )
+        .is_empty());
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": 3, "c3": "{Price} {y:.x}" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::BARCHART, u AS \"Units\" ::TOOLTIP, '{Price} {y:.x}'::TOOLTIP_FORMAT FROM t;",
+                row
+            ),
+            vec!["tooltip/unknown-placeholder", "tooltip/bad-format"]
+        );
+        let row = json!({ "c0": "a", "c1": 1.0, "c2": "split" });
+        assert_eq!(
+            codes(
+                "SELECT x::XAXIS, y::BARCHART, 'split'::TOOLTIP_MODE FROM t;",
+                row
+            ),
+            vec!["tooltip/unknown-mode"]
         );
         let row = json!({ "c0": "a", "c1": 1.0, "c2": "dim" });
         assert_eq!(

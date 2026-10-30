@@ -31,6 +31,8 @@ SELECT day ::XAXIS, revenue ::LINECHART, 'always'::POINTS,
        'Revenue per day'::TITLE
 FROM (SELECT day, revenue FROM s UNION ALL SELECT DATE '2026-03-03', 1500.0) ORDER BY day;
 SELECT region ::XAXIS, units ::BARCHART, 'Units by region'::TITLE FROM s ORDER BY region;
+SELECT d ::XAXIS, v ::LINECHART, 'none'::TOOLTIP_MODE, 'No tooltip'::TITLE FROM (VALUES (1, 1.0), (2, 3.0), (3, 2.0)) t(d, v);
+SELECT d ::XAXIS, v ::LINECHART, 'single'::TOOLTIP_MODE, 'Single'::TITLE FROM (VALUES (1, 1.0), (2, 3.0), (3, 2.0)) t(d, v);
 `;
 
 const browser = await chromium.launch();
@@ -64,6 +66,17 @@ try {
   const plain = await tipText(panels.nth(2).locator("svg .dp-hit").first());
   check(!!plain && !(await panels.nth(2).locator("[data-row]").count()), "a chart without tooltip roles has no data-row");
   check(!!plain && /12|20/.test(plain.text), `…and its default tooltip (${plain?.text})`);
+  // ::TOOLTIP_MODE: 'none' shows no tooltip and has no crosshair; 'single' has no crosshair
+  await page.mouse.move(5, 5);
+  await page.evaluate(() => document.getElementById("dp-tip")?.classList.remove("show"));
+  check(!(await panels.nth(3).evaluate((p) => p.classList.contains("has-axis-pointer"))), "'none': no crosshair");
+  const box = await panels.nth(3).locator("svg").first().boundingBox();
+  for (const fx of [0.3, 0.5, 0.7]) await page.mouse.move(box.x + box.width * fx, box.y + box.height * 0.5, { steps: 2 });
+  await panels.nth(3).locator("circle.dp-hit").nth(1).hover({ force: true });
+  await page.waitForTimeout(400);
+  check(!(await page.evaluate(() => document.getElementById("dp-tip")?.classList.contains("show"))), "'none': no tooltip on hover");
+  check(!(await panels.nth(4).evaluate((p) => p.classList.contains("has-axis-pointer"))), "'single': no crosshair (only the hovered mark)");
+  check(await panels.nth(1).evaluate((p) => p.classList.contains("has-axis-pointer")), "a line chart without a mode keeps its crosshair");
   check(errs.length === 0, `no page errors (${errs.join(" | ")})`);
 } catch (e) {
   bad++;
