@@ -38,7 +38,7 @@
 use crate::host::serving::{quote_ident, sql_string_literal, valid_ident};
 use crate::sql::lex::{self, TokKind};
 use serde_json::{Map, Value};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub use crate::host::access::CLAIM_PREFIX;
 /// Names starting with this are reserved for the server (views, CTEs).
@@ -1058,6 +1058,21 @@ impl Enforcer {
         duck: &mut dyn Duck,
         default_db: &str,
     ) -> Result<Enforcer, String> {
+        Self::compile_with(policy, duck, default_db, &HashMap::new())
+    }
+
+    /// [`compile`](Self::compile), with policy tables whose rows the server
+    /// builds per connection (#736, write-back): `redirect` maps a policy
+    /// table (lower-case `schema.table`) to the TEMP table its view reads
+    /// instead of the snapshot's (`temp.main.<name>`, base ⊕ saved rows),
+    /// so its row filter and column rules apply to those rows. The filter is
+    /// checked against the snapshot's table (the TEMP one has its columns).
+    pub fn compile_with(
+        policy: &Policy,
+        duck: &mut dyn Duck,
+        default_db: &str,
+        redirect: &HashMap<String, String>,
+    ) -> Result<Enforcer, String> {
         let mut enf = Enforcer {
             policy: policy.clone(),
             default_db: default_db.to_string(),
@@ -1103,39 +1118,54 @@ impl Enforcer {
                     ));
                 }
             }
-            let target = format!(
+            let base = format!(
                 "{}.{}.{}",
                 quote_ident(default_db),
                 quote_ident(&t.schema),
                 quote_ident(&t.table)
             );
-            let body = match &t.rows {
-                None => format!("SELECT * FROM {target}"),
-                Some(cond) => {
-                    let sql = format!("SELECT * FROM {target} WHERE ({cond})");
-                    let none = HashSet::new();
-                    let mut ast = serialize(duck, &sql)
-                        .map_err(|e| format!("policy: rows of '{}': {e}", t.name()))?;
-                    if !only_a_filter(&ast["statements"][0]["node"]) {
-                        return Err(format!(
-                            "policy: rows of '{}' must be one condition (it ends the WHERE clause)",
-                            t.name()
-                        ));
-                    }
-                    // The target is already qualified, so only the condition
-                    // can change.
-                    let mut w = Walker::new(Mode::Rows, &enf, &none);
-                    w.walk(&mut ast["statements"])
-                        .map_err(|e| format!("policy: rows of '{}': {e}", t.name()))?;
-                    deserialize(duck, &ast)?
+            let key = format!("{}.{}", t.schema, t.table).to_ascii_lowercase();
+            let internal = redirect.get(&key);
+            if let Some(n) = internal {
+                if !n.starts_with(RESERVED_PREFIX) {
+                    return Err(format!("policy: '{n}' is not a server name"));
                 }
+            }
+            let body_for = |duck: &mut dyn Duck, target: &str| -> Result<String, String> {
+                Ok(match &t.rows {
+                    None => format!("SELECT * FROM {target}"),
+                    Some(cond) => {
+                        let sql = format!("SELECT * FROM {target} WHERE ({cond})");
+                        let none = HashSet::new();
+                        let mut ast = serialize(duck, &sql)
+                            .map_err(|e| format!("policy: rows of '{}': {e}", t.name()))?;
+                        if !only_a_filter(&ast["statements"][0]["node"]) {
+                            return Err(format!(
+                                "policy: rows of '{}' must be one condition (it ends the WHERE clause)",
+                                t.name()
+                            ));
+                        }
+                        // The target is already qualified, so only the
+                        // condition can change.
+                        let mut w = Walker::new(Mode::Rows, &enf, &none);
+                        w.walk(&mut ast["statements"])
+                            .map_err(|e| format!("policy: rows of '{}': {e}", t.name()))?;
+                        deserialize(duck, &ast)?
+                    }
+                })
             };
-            // Binds? (Claims are unset here: getvariable() is NULL.)
+            // Binds? Against the snapshot's table (claims are unset here:
+            // getvariable() is NULL); a redirected table has its columns.
+            let checked = body_for(duck, &base)?;
             duck.rows(&format!(
-                "SELECT count(*)::VARCHAR FROM ({body}) AS {} LIMIT 0",
+                "SELECT count(*)::VARCHAR FROM ({checked}) AS {} LIMIT 0",
                 quote_ident(&t.table)
             ))
             .map_err(|e| format!("policy: rows of '{}': {e}", t.name()))?;
+            let body = match internal {
+                Some(n) => body_for(duck, &format!("temp.main.{}", quote_ident(n)))?,
+                None => checked,
+            };
             enf.bodies.push(body);
         }
         Ok(enf)

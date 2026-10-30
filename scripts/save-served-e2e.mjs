@@ -10,8 +10,9 @@
 // writer's own page right after the save, another viewer's, and another
 // dashboard's (one change log for the server); a restart reads the change
 // log back; a base column the declaration doesn't name refuses the start.
-// #726: under an access policy on another table the saved rows still show;
-// a policy naming a saved table refuses the start.
+// #726: under an access policy on another table the saved rows still show.
+// #736: a policy naming a saved table filters its saved rows per viewer, a
+// writer may only save rows (and columns) the policy lets them see.
 // Slice 4, two writers: a save made on an older generation over someone
 // else's newer save of the same row (or a replaced graph) is refused,
 // naming who saved what; the panels then show theirs, the edits stay, and
@@ -355,14 +356,67 @@ try {
   stop(srv);
   srv = null;
   await sleep(300);
-  // (l) a policy naming a saved table refuses the start, saying which.
+  // (l) #736: a policy naming a saved table applies to its saved rows — a
+  // viewer sees only the rows its rule lets through, and a writer may only
+  // save rows they can see (before and after the save).
+  const saveAs = async (user, form, key, id) => {
+    const w = await openAs(user, "plan");
+    const gen = await w.page.evaluate(() => window.__served?.writeback?.gen);
+    const r = await w.page.evaluate(
+      async ([b]) => {
+        const res = await fetch("/api/save", { method: "POST", headers: { "Content-Type": "application/json", "X-Anofox-Submit": "1" }, body: JSON.stringify(b) });
+        return { status: res.status, text: await res.text() };
+      },
+      [{ dashboard: "plan", panel: 3, id, vars: {}, form, key, base: gen ?? 0 }]
+    );
+    await w.ctx.close();
+    return r;
+  };
+  const seen = async (user) => {
+    const v = await openAs(user, "plan");
+    const p = await params(v.page);
+    await v.ctx.close();
+    return p;
+  };
+  srv = await serve(ORDERS, { ...opts, policy: policyFile({ plan_params: { rows: "id = 'sup' OR getvariable('__claim_user') = 'carol'" } }) });
+  {
+    check(/saved table\(s\) plan_edges, plan_nodes are not under the policy/.test(srv.log()), "(l) the start line no longer lists the policy's own saved table");
+    check((await seen("bob")) === "sup=2.0", `(l) bob sees only the rows the rule lets through (${await seen("bob")})`);
+    check((await seen("carol")) === "sup=2.0,wh=13.0", `(l) carol sees every row (${await seen("carol")})`);
+    let r = await saveAs("alice", { lead_time: 3 }, "sup", "ee01");
+    check(r.status === 201, `(l) alice saves a row she can see (${r.status} ${r.text})`);
+    check((await seen("bob")) === "sup=3.0", `(l) …and bob reads it through the policy (${await seen("bob")})`);
+    r = await saveAs("alice", { lead_time: 1 }, "wh", "ee02");
+    check(r.status === 403 && /rows of 'plan_params' you can see/.test(r.text), `(l) alice can't save a row the policy hides from her (${r.status} ${r.text})`);
+    r = await saveAs("alice", { lead_time: 1 }, "zz", "ee03");
+    check(r.status === 403 && /rows of 'plan_params' you can see/.test(r.text), `(l) …nor make one she couldn't see (${r.status} ${r.text})`);
+    r = await saveAs("carol", { lead_time: 12 }, "wh", "ee04");
+    check(r.status === 201, `(l) carol may save it (${r.status} ${r.text})`);
+    check((await seen("carol")) === "sup=3.0,wh=12.0", `(l) …and sees it (${await seen("carol")})`);
+  }
+  stop(srv);
+  srv = null;
+  await sleep(300);
+  // (m) a column the policy restricts for the writer may not be saved.
+  srv = await serve(ORDERS, { ...opts, policy: policyFile({ plan_params: { rows: true, columns: { lead_time: { allow_users: ["carol"], else: "null" } } } }) });
+  {
+    const r = await saveAs("alice", { lead_time: 5 }, "sup", "ff01");
+    check(r.status === 403 && /'plan_params.lead_time'/.test(r.text), `(m) alice can't save a column the policy restricts for her (${r.status} ${r.text})`);
+    const r2 = await saveAs("carol", { lead_time: 5 }, "sup", "ff02");
+    check(r2.status === 201, `(m) carol, allowed the column, can (${r2.status} ${r2.text})`);
+    check(/sup=5\.0/.test(await seen("carol")) && !/5\.0/.test(await seen("bob")), `(m) the column rule applies to saved values too: carol sees 5.0, bob doesn't (${await seen("carol")} / ${await seen("bob")})`);
+  }
+  stop(srv);
+  srv = null;
+  await sleep(300);
+  // (n) a policy naming the saved table in another schema: ambiguous, refused.
   refused = "";
   try {
-    srv = await serve(ORDERS, { ...opts, policy: policyFile({ plan_params: { rows: "true" } }) });
+    srv = await serve(ORDERS + "\nCREATE SCHEMA other; CREATE TABLE other.plan_params AS SELECT * FROM plan_params;", { ...opts, policy: policyFile({ "other.plan_params": { rows: "true" } }) });
   } catch (e) {
     refused = String(e.message);
   }
-  check(/can't save a table the access policy restricts \(plan_params\)/.test(refused), `(l) a policy on a saved table refuses the start (${refused.split("\n").find((l) => /writeback/.test(l)) || refused.slice(0, 200)})`);
+  check(/names 'plan_params' in schema 'other'/.test(refused), `(n) a policy on the saved table's name in another schema refuses the start (${refused.split("\n").find((l) => /writeback/.test(l)) || refused.slice(0, 200)})`);
 } finally {
   if (srv) stop(srv);
   if (browser) await browser.close();
