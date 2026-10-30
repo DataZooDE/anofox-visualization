@@ -3306,7 +3306,9 @@ WHERE NOT EXISTS (SELECT 1 FROM viewer_state WHERE submit = 'cockpit_intro');
 ```
 
 Once the viewer clicks that button, the statement returns zero rows and its
-panel disappears — exactly like any other empty-gated input. The browser
+panel disappears — exactly like any other empty-gated input. Its "Submitted
+at HH:MM" confirmation (and `::SUBMIT_DONE` text) then shows as a short toast
+instead, a status message that doesn't move the focus (#721). The browser
 reads that absence (no extra request: the `::SUBMIT` is already a
 statement in the page's own plan) to skip `-- @tour_autostart` on this
 viewer's next visit, from any browser, as long as they're signed in and
