@@ -230,7 +230,15 @@ grep -qi "^content-type: text/csv" "$T/xh" || fail "export csv content type"
 [ "$(xget "$X/ex/evil.csv")" = 200 ] && grep -qF "\"'=cmd()\"" "$T/x" || fail "export csv: a formula cell is neutralised: $(cat "$T/x")"
 [ "$(xget "$X/ex/nope.csv")" = 404 ] || fail "export: an unknown panel name should 404"
 [ "$(xget "$X/ex.csv")" = 404 ] || fail "export: a dashboard is not a csv"
-[ "$(xget "$X/ex.png")" = 404 ] || fail "export: no png yet"
+[ "$(xget "$X/ex.png?scale=1")" = 200 ] && grep -qi "^content-type: image/png" "$T/xh" \
+  && [ "$(head -c 8 "$T/x" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ] || fail "export png: $(head -c 200 "$T/x")"
+# 1200 px wide at scale 1 (IHDR width)
+[ "$(dd if="$T/x" bs=1 skip=16 count=4 2>/dev/null | od -An -tu1 | awk '{print $1*16777216+$2*65536+$3*256+$4}')" = 1200 ] || fail "export png width"
+[ "$(xget "$X/ex.pdf?tab=details")" = 200 ] && grep -qi "^content-type: application/pdf" "$T/xh" && head -c 5 "$T/x" | grep -q "%PDF-" \
+  || fail "export pdf: $(head -c 200 "$T/x")"
+[ "$(xget "$X/ex.pdf?scale=2")" = 400 ] || fail "export: scale is for png only"
+[ "$(xget "$X/ex.png?scale=9")" = 400 ] || fail "export: scale out of range"
+[ "$(xget "$X/ex/totals.png")" = 404 ] || fail "export: a panel is not a png"
 [ "$(xget "$X/ex.svg?x=1")" = 400 ] || fail "export: an unknown parameter should 400"
 [ "$(xget "$X/ex.svg?v.__claim_user=admin")" = 400 ] || fail "export: a reserved variable should 400"
 [ "$(xget "$X/ex.svg?width=10")" = 400 ] || fail "export: a bad width should 400"
@@ -247,7 +255,7 @@ sess=$(curl -s "http://127.0.0.1:$PORT/d/ex" | grep -o '"session":"[^"]*"' | hea
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/other.svg")" = 403 ] || fail "export of another dashboard should 403"
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/ex/totals.csv")" = 200 ] || fail "export csv with the page session"
 stop
-echo "OK: exports — SVG (dashboard, one tab, variables, inputs' defaults), CSV/JSON of a named panel, formula cells neutralised, scope and login"
+echo "OK: exports — SVG/PNG/PDF (dashboard, one tab, variables, inputs' defaults), CSV/JSON of a named panel, formula cells neutralised, scope and login"
 
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting

@@ -5170,22 +5170,22 @@ fn handle_export(
 ) -> u16 {
     let rest = &path["/api/export/".len()..];
     let (target, ext) = match rest.rsplit_once('.') {
-        Some((t, e)) if matches!(e, "svg" | "csv" | "json") => (t, e),
+        Some((t, e)) if matches!(e, "svg" | "png" | "pdf" | "csv" | "json") => (t, e),
         _ => return reply(
             req,
             404,
-            "not found: /api/export/<dashboard>.svg or /api/export/<dashboard>/<panel>.csv|json",
+            "not found: /api/export/<dashboard>.svg|png|pdf or /api/export/<dashboard>/<panel>.csv|json",
         ),
     };
     let (id, panel_name) = match target.split_once('/') {
         Some((d, p)) => (d, Some(p)),
         None => (target, None),
     };
-    if (ext == "svg") != panel_name.is_none() {
+    if matches!(ext, "svg" | "png" | "pdf") != panel_name.is_none() {
         return reply(
             req,
             404,
-            "not found: a dashboard exports as .svg, a named panel as .csv or .json",
+            "not found: a dashboard exports as .svg, .png or .pdf, a named panel as .csv or .json",
         );
     }
     let Some(dash) = st.dashboards.iter().find(|d| d.id == id) else {
@@ -5201,7 +5201,7 @@ fn handle_export(
     for (k, v) in &q {
         if let Some(name) = k.strip_prefix("v.") {
             given.insert(name.to_string(), serde_json::Value::String(v.clone()));
-        } else if !matches!(k.as_str(), "tab" | "width" | "dark") {
+        } else if !matches!(k.as_str(), "tab" | "width" | "dark" | "scale") {
             return reply(
                 req,
                 400,
@@ -5386,12 +5386,28 @@ fn handle_export(
         only,
         ..Default::default()
     };
+    let scale = match q.get("scale").map(|v| v.parse::<f32>()) {
+        None => 2.0,
+        Some(Ok(v)) if ext == "png" && (1.0..=4.0).contains(&v) => v,
+        _ => return reply(req, 400, "scale (png only) must be 1..=4"),
+    };
     match dashboard::render_dashboard_svg(&dash.sql, &mut data, &opts) {
         _ if data.fatal.is_some() => {
             let (code, e) = data.fatal.take().unwrap_or_default();
             reply(req, code, &e)
         }
-        Ok(svg) => send(req, "image/svg+xml", svg.into_bytes(), file("svg")),
+        // #764: PNG / PDF from the same SVG, with the bundled font.
+        Ok(svg) => match ext {
+            "png" => match crate::raster::png(&svg, scale) {
+                Ok(b) => send(req, "image/png", b, file("png")),
+                Err(e) => reply(req, 413, &e),
+            },
+            "pdf" => match crate::raster::pdf(&svg) {
+                Ok(b) => send(req, "application/pdf", b, file("pdf")),
+                Err(e) => reply(req, 400, &e),
+            },
+            _ => send(req, "image/svg+xml", svg.into_bytes(), file("svg")),
+        },
         Err(e) => reply(req, 400, &e),
     }
 }
