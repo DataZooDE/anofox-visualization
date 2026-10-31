@@ -161,7 +161,7 @@ jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_r
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"], optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 
 # The request log opens its file with O_NOFOLLOW (src/host/access.rs).
 [target.'cfg(unix)'.dependencies]

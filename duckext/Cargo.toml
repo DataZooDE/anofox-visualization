@@ -25,11 +25,11 @@ include_dir = "0.7"
 serde_json = "1"
 open = "5"
 # The access policy's `hash` mask: HMAC-SHA256 with the server's key (#49).
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 
 [build-dependencies]
-bindgen = "0.72"
+bindgen = "0.73"
 
 # NOTE: no `panic = "abort"` — every `extern "C"` entry point wraps its body in
 # `catch_unwind` and turns a panic into a SQL error, which requires unwinding.
