@@ -53,6 +53,7 @@ terminal.
 | `::TITLE` | `::HEADING` | encoding | a title bar above one panel |
 | `::ALT` | `::ALT_TEXT` | encoding | an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL |
 | `::SUBTITLE` | `::SUBHEADING` | encoding | a line under the panel's title (smaller, muted) |
+| `::CLASS` |  | encoding | a class of the operator's stylesheet on the panel (a name of a-z, 0-9 and -; the page adds ax-c-) |
 | `::INFO` | `::DESCRIPTION`, `::DEFINITION` | encoding | a definition behind an ⓘ on the panel's title bar (hover, focus or click) |
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
@@ -301,6 +302,12 @@ SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly orders'::TITLE,
        'Cancelled orders excluded · ISO weeks'::SUBTITLE
 FROM orders GROUP BY ALL ORDER BY 1;
 ```
+
+**`::CLASS`** gives the panel a class of the locked server's operator
+stylesheet, as `ax-c-<name>` (a name of `a-z`, `0-9` and `-`; several
+separated by spaces). The value may come from the data (`CASE … END::CLASS`).
+It is never a table column and has no effect without a stylesheet that
+styles the class. See [secure-serving.md](secure-serving.md#your-own-look-optionscss_file-class-773).
 
 **Percent units.** `::PERCENT` (KPI tiles and table columns),
 `'percent'::YFORMAT` / `::XFORMAT` (axes, tooltips, data labels) and

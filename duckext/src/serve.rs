@@ -52,6 +52,7 @@ use anofox_visualization::host::serving::{
     self as sv, content_type, json_for_script, quote_ident, sql_string_literal, AuthoringGuard,
     RequestMeta,
 };
+use anofox_visualization::host::site_css;
 use anofox_visualization::host::state::{
     NewRecord, RateLimiter, Record, StartContext, StateOptions, Store,
 };
@@ -276,6 +277,22 @@ fn frame_ancestors(opts: &LockedOptions) -> String {
 /// they are a bare `<script>`: viewer and dashboard text is escaped,
 /// external scripts carry `src`) get this response's nonce.
 fn with_csp(html: &str, opts: &LockedOptions) -> (Vec<u8>, String) {
+    // #773: the operator's stylesheet, last in <head> so it wins over the
+    // theme at equal specificity.
+    let linked;
+    let html = if opts.site_css.is_some() {
+        linked = html.replacen(
+            "</head>",
+            &format!(
+                "<link rel=\"stylesheet\" href=\"{}\"></head>",
+                site_css::PATH
+            ),
+            1,
+        );
+        linked.as_str()
+    } else {
+        html
+    };
     let (body, csp) = sv::csp_page(html, &frame_ancestors(opts));
     (body.into_bytes(), csp)
 }
@@ -1236,6 +1253,9 @@ pub struct LockedOptions {
     /// `app`: the installation's name, tagline, logo and favicon — the header
     /// of the `/` landing page (the app-bar settings of `anofox_serve`).
     pub app: Option<AppBrand>,
+    /// `css_file` (#773): the operator's stylesheet, read and checked at
+    /// start ([`site_css::check`]), served at [`site_css::PATH`].
+    pub site_css: Option<Arc<str>>,
     /// `home`: a dashboard id `/` redirects to instead of the landing page
     /// (when the viewer may read it).
     pub home: Option<String>,
@@ -1626,6 +1646,7 @@ impl Default for LockedOptions {
             max_queries: 4,
             search_path: Vec::new(),
             app: None,
+            site_css: None,
             home: None,
             source: None,
             state_opts: None,
@@ -1873,6 +1894,25 @@ impl LockedOptions {
                         .map_err(|e| format!("options.app: {e}"))?;
                     a.check().map_err(|e| format!("options.app: {e}"))?;
                     o.app = Some(a);
+                }
+                "css_file" => {
+                    let f = val
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|f| !f.is_empty())
+                        .ok_or("options.css_file must be the path of a .css file")?;
+                    let meta =
+                        std::fs::metadata(f).map_err(|e| format!("options.css_file {f}: {e}"))?;
+                    if !meta.is_file() || meta.len() > site_css::MAX_BYTES as u64 {
+                        return Err(format!(
+                            "options.css_file {f}: must be a file of at most {} KiB",
+                            site_css::MAX_BYTES / 1024
+                        ));
+                    }
+                    let css = std::fs::read_to_string(f)
+                        .map_err(|e| format!("options.css_file {f}: {e}"))?;
+                    site_css::check(&css).map_err(|e| format!("options.css_file {f}: {e}"))?;
+                    o.site_css = Some(Arc::from(css));
                 }
                 "home" => {
                     let h = val
@@ -5858,6 +5898,20 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             .with_status_code(200)
             .with_header(header("Content-Type", metrics::CONTENT_TYPE))
             .with_header(header("Cache-Control", "no-store"));
+        let _ = req.respond(resp);
+        return 200;
+    }
+    // #773: the operator's stylesheet answers without a login, like the
+    // UI's own files — an embedded page's <link> can't send its session
+    // header, and the file holds no data.
+    if let (Some(css), &Method::Get | &Method::Head, site_css::PATH) =
+        (&st.opts.site_css, req.method(), path)
+    {
+        let resp = Response::from_data(css.as_bytes().to_vec())
+            .with_status_code(200)
+            .with_header(header("Content-Type", "text/css; charset=utf-8"))
+            .with_header(header("X-Content-Type-Options", "nosniff"))
+            .with_header(header("Cache-Control", "public, max-age=300"));
         let _ = req.respond(resp);
         return 200;
     }
@@ -11333,6 +11387,41 @@ mod tests {
         assert!(!sets_variables("CREATE TEMP TABLE t AS SELECT 1"));
         assert!(!sets_variables("SELECT 'SET'"));
         assert!(!sets_variables("SETTINGS_TABLE"));
+    }
+
+    // #773: options.css_file — checked at start, linked last in <head>.
+    #[test]
+    fn css_file_is_checked_and_linked() {
+        let dir = std::env::temp_dir().join(format!("afx-css-{}", sv::random_token()));
+        std::fs::create_dir(&dir).unwrap();
+        let ok = dir.join("site.css");
+        std::fs::write(&ok, ".ax-c-kpi-hero{font-size:1.4em}").unwrap();
+        let opts = |f: &std::path::Path| {
+            LockedOptions::parse(Some(&serde_json::json!({ "css_file": f }).to_string()))
+        };
+        let o = opts(&ok).unwrap();
+        assert_eq!(
+            o.site_css.as_deref(),
+            Some(".ax-c-kpi-hero{font-size:1.4em}")
+        );
+        let (body, _) = with_csp("<head><title>x</title></head><body></body>", &o);
+        let body = String::from_utf8(body).unwrap();
+        assert!(
+            body.contains("<link rel=\"stylesheet\" href=\"/static/site.css\"></head>"),
+            "{body}"
+        );
+        // without the option, no link
+        let (plain, _) = with_csp("<head></head>", &LockedOptions::default());
+        assert!(!String::from_utf8(plain).unwrap().contains("site.css"));
+        // a remote url(), a missing file, a directory: the server doesn't start
+        let bad = dir.join("bad.css");
+        std::fs::write(&bad, "a{background:url(https://x.example/p.png)}").unwrap();
+        let e = opts(&bad).unwrap_err();
+        assert!(e.contains("options.css_file") && e.contains("data:"), "{e}");
+        assert!(opts(&dir.join("missing.css")).is_err());
+        assert!(opts(&dir).is_err());
+        assert!(LockedOptions::parse(Some(r#"{"css_file": ""}"#)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // #252: the pages' CSP header.

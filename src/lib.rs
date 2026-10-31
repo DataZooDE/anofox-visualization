@@ -254,6 +254,9 @@ pub enum Role {
     Title,
     /// #774: a line under the panel's title (`::SUBTITLE`), smaller and muted.
     Subtitle,
+    /// #773: a class of the operator's stylesheet on the panel (`::CLASS`);
+    /// the page adds it as `ax-c-<name>`. Never a table column.
+    Class,
     /// An image's text alternative (`::ALT`); `''` means decorative
     /// (`alt=""`, no lint warning).
     Alt,

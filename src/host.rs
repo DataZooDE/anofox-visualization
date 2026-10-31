@@ -19,6 +19,7 @@
 //! * [`serve_options`] — the locked server's `options` key list
 //!   (`duckext/src/serve.rs`'s `LockedOptions::parse`), shared with
 //!   `dashboard --site`'s own options parser so the two can't drift (#501).
+//! * [`site_css`] — `options.css_file` (#773): the operator stylesheet's check.
 //! * [`writeback`] — `options.writeback` (#684): shared write-back of an
 //!   edited model into declared tables, `POST /api/save`'s change set.
 
@@ -35,6 +36,7 @@ pub mod notify;
 pub mod policy;
 pub mod serve_options;
 pub mod serving;
+pub mod site_css;
 pub mod state;
 pub mod tasks;
 pub mod telemetry;

@@ -10215,6 +10215,8 @@ async function runOnce(fresh = true, pv = preview) {
         const titleIdx = titleRole ? titleRole[0] : -1;
         const subRole = proles.find((r) => r[1] === "SUBTITLE"); // #774
         const subIdx = subRole ? subRole[0] : -1;
+        const clsRole = proles.find((r) => r[1] === "CLASS"); // #773
+        const clsIdx = clsRole ? clsRole[0] : -1;
         const base = s.sql;
         const idx = i;
         const rowSelect = nextRowSelect;
@@ -10330,6 +10332,7 @@ async function runOnce(fresh = true, pv = preview) {
             const sv = Object.values(rows[0])[subIdx];
             if (sv != null && String(sv).trim()) titleHolder.appendChild(mkSubtitle(String(sv).replace(/^"|"$/g, "")));
           }
+          if (clsIdx >= 0 && rows.length) addPanelClass(fig, Object.values(rows[0])[clsIdx]);
           if (infoText && !fig.querySelector(".dp-info")) addInfo(fig, infoText); // (a new title drops it)
           const reload = () => {
             stats = null;
@@ -10377,7 +10380,7 @@ async function runOnce(fresh = true, pv = preview) {
             profile: (col) => ((stats._prof ||= {})[col] ||= pageReq({ profile: [col] })),
             fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }, true, "rows"),
           };
-          holder.appendChild(renderTable(rows, subIdx >= 0 ? [sk, subIdx] : sk, fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
+          holder.appendChild(renderTable(rows, [sk, subIdx, clsIdx].filter((x) => x >= 0), fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
           const lost = !document.activeElement || document.activeElement === document.body;
           if (Date.now() - lastTyped < 4000 && lost) {
             filterInput.focus();
@@ -10715,8 +10718,9 @@ async function runOnce(fresh = true, pv = preview) {
           for (const [idx, r] of troles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
           if (!rows.length && nextEmpty) fig.appendChild(mkNoData(nextEmpty));
           else {
-            const subR = troles.find((r) => r[1] === "SUBTITLE"); // #774: the line under the title, not a cell
-            fig.appendChild(renderTable(rows, subR ? [skip, subR[0]] : skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
+            // #774 / #773: the line under the title and the panel's class, not cells
+            const chromeIdx = troles.filter((r) => r[1] === "SUBTITLE" || r[1] === "CLASS").map((r) => r[0]);
+            fig.appendChild(renderTable(rows, [skip, ...chromeIdx], fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
           }
           container.appendChild(fig);
           panels++;
@@ -10857,6 +10861,10 @@ async function runOnce(fresh = true, pv = preview) {
         // own, under the title it fills in when its rows arrive).
         const subr = s.roles.find((r) => r[1] === "SUBTITLE");
         if (subr && made.length && !role(s, "PAGED")) addSubtitle(made[0], cellAt(rowsJson, subr[0]));
+        // #773: ::CLASS, a class of the operator's stylesheet (a ::PAGED
+        // table adds it when its rows arrive).
+        const clr = s.roles.find((r) => r[1] === "CLASS");
+        if (clr && made.length && !role(s, "PAGED")) addPanelClass(made[0], cellAt(rowsJson, clr[0]));
         nextSpan = 0;
         nextHeight = 0;
         nextRowSelect = "";
@@ -14043,7 +14051,7 @@ function addInfo(fig, text) {
 // ::TITLE / ::SUBTITLE / ::INFO columns aren't data; a nested value shows as
 // JSON, NULL as empty. src/dashboard.rs record_pairs is the same rule (SVG).
 function recordPairs(rows, roles) {
-  const chrome = new Set(roles.filter((r) => ["TITLE", "SUBTITLE", "INFO"].includes(r[1])).map((r) => r[0]));
+  const chrome = new Set(roles.filter((r) => ["TITLE", "SUBTITLE", "CLASS", "INFO"].includes(r[1])).map((r) => r[0]));
   const r0 = rows[0] || {};
   const data = Object.keys(r0).filter((_, i) => !chrome.has(i));
   const text = (v) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
@@ -14081,6 +14089,18 @@ function mkRecord(rows, roles) {
     wrap.appendChild(note);
   }
   return wrap;
+}
+
+// #773: ::CLASS — the panel gets `ax-c-<name>`, a class only the operator's
+// stylesheet (options.css_file) styles. The prefix keeps a dashboard from
+// reaching the app's own classes (hiding a notice, faking a dialog); a name
+// outside [a-z0-9-] (1–40 characters) is ignored. Space-separated names give
+// several classes.
+function addPanelClass(fig, value) {
+  if (value == null) return;
+  for (const n of String(value).replace(/^"|"$/g, "").trim().split(/\s+/).slice(0, 4)) {
+    if (/^[a-z0-9][a-z0-9-]{0,39}$/.test(n)) fig.classList.add("ax-c-" + n);
+  }
 }
 
 // #774: the ::SUBTITLE line (muted, under the title).
@@ -20336,7 +20356,7 @@ function dataTableHtml(dp, limit, caption) {
   }
   const roleFor = (k) => dp.roles.find((x) => x[0] === +String(k).replace(/^c/, ""));
   // Drop non-data columns (the panel title, tooltips, hints) from the view.
-  const SKIP = new Set(["TITLE", "SUBTITLE", "HINT", "OPTION_LABEL", "LABEL", "TRACK"]);
+  const SKIP = new Set(["TITLE", "SUBTITLE", "CLASS", "HINT", "OPTION_LABEL", "LABEL", "TRACK"]);
   const keys = (rows.length ? Object.keys(rows[0]) : []).filter((k) => {
     const r = roleFor(k);
     return !r || !SKIP.has(r[1]);

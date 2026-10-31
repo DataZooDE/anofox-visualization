@@ -2317,6 +2317,19 @@ where
             },
         ));
 
+        // `::CLASS` (#773): a literal name the page would drop.
+        if let Some(bad) = class_name_problem(&p) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "class/name",
+                message: format!(
+                    "::CLASS '{bad}' is ignored: a class name is 1–40 characters of a-z, 0-9 and - (starting with a letter or digit), at most 4 names separated by spaces."
+                ),
+                sql: short.clone(),
+            });
+        }
+
         // Waterfall / bullet / funnel rows are named by their ::XAXIS (step,
         // category, stage); without it the panel only shows a note.
         if let Some(k @ (Kind::Waterfall | Kind::Bullet | Kind::Funnel)) = chart_kind(&p.roles) {
@@ -3306,6 +3319,24 @@ fn literal_text_col(sql: &str, idx: usize) -> Option<String> {
             .and_then(|s| s.strip_suffix('\''))
             .map(|s| s.replace("''", "'"))
     })
+}
+
+/// #773: the first name of a literal `::CLASS` value that `addPanelClass`
+/// (web/app.js) would drop; `None` for a valid or non-literal value.
+fn class_name_problem(p: &sql::Panel) -> Option<String> {
+    let idx = p.roles.iter().find(|(_, r)| *r == Role::Class)?.0;
+    let v = literal_text_col(&p.sql, idx)?;
+    let names: Vec<&str> = v.split_whitespace().collect();
+    if names.len() > 4 {
+        return Some(names[4].to_string());
+    }
+    let ok = |n: &str| {
+        n.len() <= 40
+            && n.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && n.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    names.into_iter().find(|n| !ok(n)).map(str::to_string)
 }
 
 /// A statement's `::KPI_SIZE` ('compact' = `true`), read from its literal
@@ -6064,9 +6095,9 @@ fn summed_rate_diag(
     }
     let first = rows.first()?;
     let skip = |i: usize| {
-        roles
-            .iter()
-            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Info))
+        roles.iter().any(|(j, r)| {
+            *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info)
+        })
     };
     let fmt_of = |i: usize| {
         roles
@@ -6135,9 +6166,9 @@ fn totals_unknown_column_diag(
     let t = parse_totals(spec);
     let first = rows.first()?;
     let skip = |i: usize| {
-        roles
-            .iter()
-            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Info))
+        roles.iter().any(|(j, r)| {
+            *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info)
+        })
     };
     let cols: Vec<&String> = first
         .keys()
@@ -6545,7 +6576,7 @@ fn role_index(roles: &[(usize, Role)], want: Role) -> Option<usize> {
 /// the table ever renders) column, the same "first column" the browser
 /// (`web/app.js` `k0 = cols[0]`) picks.
 fn rowselect_key_column(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Option<String> {
-    let skip = [Role::Title, Role::Subtitle, Role::Info].map(|r| role_index(roles, r));
+    let skip = [Role::Title, Role::Subtitle, Role::Class, Role::Info].map(|r| role_index(roles, r));
     rows.first()?
         .keys()
         .enumerate()

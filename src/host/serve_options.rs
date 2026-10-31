@@ -79,6 +79,9 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("max_asset_bytes", SiteOptionKind::Site),
     ("search_path", SiteOptionKind::ServerOnly),
     ("app", SiteOptionKind::Site),
+    // #773: linked into the server's pages only; a static site doesn't
+    // carry it (yet).
+    ("css_file", SiteOptionKind::ServerOnly),
     ("home", SiteOptionKind::Site),
     ("source", SiteOptionKind::ServerOnly),
     // #517 S2: per-viewer append-only state needs a real server behind it
