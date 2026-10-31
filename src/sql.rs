@@ -285,6 +285,13 @@ fn plan_statements(script: &str) -> Vec<Panel> {
                 return Some(panel);
             }
             let (sql, roles, names) = rewrite(stmt);
+            // #774: a bare DESCRIBE / SUMMARIZE / SHOW is a table of what it
+            // returns (they are queries to DuckDB; under an access policy a
+            // bare name is refused there, `DESCRIBE SELECT …` is rewritten).
+            let (sql, roles) = match (roles.is_empty(), describe_table(stmt)) {
+                (true, Some(q)) => (q, vec![(0, Role::Table)]),
+                _ => (sql, roles),
+            };
             Some(if roles.is_empty() {
                 Panel {
                     setup: true,
@@ -328,6 +335,18 @@ fn plan_statements(script: &str) -> Vec<Panel> {
             })
         })
         .collect()
+}
+
+/// #774: `DESCRIBE t`, `SUMMARIZE t`, `SHOW TABLES`, … as the query that
+/// shows their result as a table (`SELECT * FROM (…)`), else `None`.
+pub fn describe_table(stmt: &str) -> Option<String> {
+    let kw = lex::first_keyword(stmt)?.to_ascii_uppercase();
+    matches!(kw.as_str(), "DESCRIBE" | "SUMMARIZE" | "SHOW").then(|| {
+        format!(
+            "SELECT * FROM ({})",
+            stmt.trim().trim_end_matches(';').trim_end()
+        )
+    })
 }
 
 /// Does a query error say an input file / table is missing? (The class of
@@ -1067,6 +1086,7 @@ fn rewrite_list(list: &str) -> Rewritten {
         matches!(
             r,
             Role::Table
+                | Role::Record
                 | Role::PagedTable
                 | Role::Input(InputKind::DateRange)
                 | Role::DiagramPalette
@@ -1764,5 +1784,30 @@ mod union_tests {
         assert!(s.contains("CAST(v AS DOUBLE) AS c1"), "{s}");
         assert_eq!(roles, vec![(0, Role::X), (1, Role::Value(Kind::Line))]);
         assert_eq!(names, vec![(0, "d".to_string()), (1, "v".to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use super::*;
+
+    #[test]
+    fn describe_summarize_show_are_tables() {
+        for (src, q) in [
+            ("DESCRIBE sales", "SELECT * FROM (DESCRIBE sales)"),
+            (
+                "summarize SELECT * FROM t;",
+                "SELECT * FROM (summarize SELECT * FROM t)",
+            ),
+            ("SHOW TABLES", "SELECT * FROM (SHOW TABLES)"),
+        ] {
+            let p = &plan(src)[0];
+            assert!(!p.setup, "{src}");
+            assert_eq!(p.sql, q);
+            assert_eq!(p.roles, vec![(0, Role::Table)]);
+        }
+        // anything else without a role stays setup
+        assert!(plan("CREATE TEMP VIEW v AS SELECT 1")[0].setup);
+        assert!(plan("SET VARIABLE x = 1")[0].setup);
     }
 }

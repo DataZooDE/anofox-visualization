@@ -2562,7 +2562,12 @@ fn follows_chart(before: &[sql::Panel]) -> bool {
             && !has(p, &|r| {
                 matches!(
                     r,
-                    Role::Table | Role::PagedTable | Role::Markdown | Role::Image | Role::ImageDark
+                    Role::Table
+                        | Role::Record
+                        | Role::PagedTable
+                        | Role::Markdown
+                        | Role::Image
+                        | Role::ImageDark
                 )
             })
     })
@@ -6299,9 +6304,12 @@ fn one_line(s: &str) -> String {
 /// In a `::TABLE` / `::PAGED` statement those are column formats, not tiles.
 fn is_kpi(roles: &[(usize, Role)]) -> bool {
     roles.iter().any(|(_, r)| matches!(r, Role::Metric(_)))
-        && !roles
-            .iter()
-            .any(|(_, r)| matches!(r, Role::Diagram | Role::Table | Role::PagedTable))
+        && !roles.iter().any(|(_, r)| {
+            matches!(
+                r,
+                Role::Diagram | Role::Table | Role::Record | Role::PagedTable
+            )
+        })
 }
 
 /// A panel a `::FIGURE` draws as a non-chart cell (#694): a table, a KPI or
@@ -6558,7 +6566,12 @@ fn value_index(roles: &[(usize, Role)]) -> Option<usize> {
 fn track_host_of(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Option<bool> {
     let has = |f: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, r)| f(r));
     if !has(&|r| matches!(r, Role::Value(_)))
-        || has(&|r| matches!(r, Role::Table | Role::PagedTable | Role::Markdown))
+        || has(&|r| {
+            matches!(
+                r,
+                Role::Table | Role::Record | Role::PagedTable | Role::Markdown
+            )
+        })
         || is_kpi(roles)
     {
         return None;

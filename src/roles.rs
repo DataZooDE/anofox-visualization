@@ -333,6 +333,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     // ── tables ─────────────────────────────────────────────────────────────
     e("TABLE", &["GRID"], R::Table, "table", true,
       "the whole result as a table (one marker per panel)"),
+    e("RECORD", &["KEY_VALUE"], R::Record, "table", true,
+      "one record as key/value pairs: a STRUCT / MAP / JSON object's fields, or the first row's columns"),
     e("PAGED", &["TABLE_PAGED", "PAGINATED"], R::PagedTable, "table", true,
       "SQL-paginated table for large/remote data"),
     e("TREND", &[], R::Trend, "table", true, "▲/▼ arrow in a table cell"),
@@ -1162,6 +1164,7 @@ mod tests {
             Role::TableOpt(TableOpt::Subtotal),
             Role::TableOpt(TableOpt::Toolbar),
             Role::Table,
+            Role::Record,
             Role::PagedTable,
             Role::Delta,
             Role::DeltaLowerGood,
@@ -1339,6 +1342,7 @@ mod tests {
                 | Role::RowSelect
                 | Role::TableOpt(_)
                 | Role::Table
+                | Role::Record
                 | Role::PagedTable
                 | Role::Metric(_)
                 | Role::Delta
