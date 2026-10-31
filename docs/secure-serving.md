@@ -884,6 +884,45 @@ curl -H "Authorization: Bearer $KEY" -o totals.csv \
 - Setup statements run per panel as always; a `-- @requires` input that is
   missing shows its panel as not available.
 
+### Scheduled tasks (`options.tasks`, #767)
+
+SQL that runs on a schedule next to the dashboards, e.g. to load the inbox
+into a staging database, and then refreshes the snapshot
+([plan](plans/plan-tasks-reports.md) §1):
+
+```sql
+-- <dashboards dir>/tasks/load.task.sql
+SELECT INTERVAL '1 hour' ::SCHEDULE;          -- or a TIMESTAMP (the next run), or 'init'
+CREATE OR REPLACE TABLE stage.downloads AS SELECT * FROM read_parquet('/data/inbox/*.parquet');
+SELECT 1 ::REFRESH;                            -- rebuild the snapshot after a successful run
+```
+
+```json
+{"tasks": {"run": true, "write": ["stage"], "timeout_s": 900, "log": "/var/log/anofox/tasks.jsonl"}}
+```
+
+- Tasks are files in `tasks/` next to the dashboards: author code, reviewed
+  like the dashboards. No request can start, change or see one.
+- They run on the serving session's own connection, one after another, never
+  in the locked snapshot. With `::REFRESH`, the snapshot is rebuilt after a
+  successful run.
+- **Where they can write** (`write`): only the databases listed. The task
+  runner starts only when every other database of the session is attached
+  `READ_ONLY`, so DuckDB itself refuses any other write, whatever the task's
+  SQL. Note that the DuckDB CLI's `-readonly` makes every later `ATTACH`
+  read-only too.
+- Refused in a task: `SET`, `RESET`, `PRAGMA`, `USE`, `ATTACH`, `DETACH`,
+  `INSTALL`, `LOAD`, `EXPORT`, `IMPORT`, `CHECKPOINT`, `VACUUM`,
+  `CREATE TEMP …`, `CREATE SECRET`, `COPY … TO`. These would change the
+  server's own session or write a file.
+- `run: true` on one replica only; the others read the task files (a task
+  that doesn't parse stops the start everywhere) but don't run them.
+- Each run is one JSON line in `log` (`task`, `start`, `ms`, `ok`, `error`,
+  with paths in the data folder redacted). `/metrics` (#765) has
+  `anofox_task_last_success_timestamp_seconds`, `_runs`, `_failures` and
+  `_consecutive_failures` per task. A failed run is tried again at the next
+  tick; one run's time limit is `timeout_s` (default 900).
+
 ### Per-viewer state (`options.state`, #517)
 
 **This is the one write path on a server that is otherwise read-only by
@@ -1985,6 +2024,7 @@ signed the request in.
 | A viewer sets `__claim_user` / `__claim_groups` / `anofox_data` (`vars`, `?v.*`, a `@param`) | Rejected (`400`) / ignored, in any case and in every configuration; claims and `anofox_data` are set by the server after the viewer's variables (a unit test pins this order) |
 | Snapshot refresh (`refresh_s`) mixing users or snapshots | Each snapshot generation has its own cache; keys include the claims, supersession tickets the user (tested with two users under constant refreshes) |
 | `/healthz` leaks snapshot state | With `auth`, only `status` without a login |
+| A scheduled task (#767) writing where it shouldn't, or changing the serving session | Writes are refused by DuckDB outside `tasks.write` (the runner starts only when every other database is attached `READ_ONLY`); session-changing statements and file writes are refused when the task is read; tasks are files, never request input |
 | An export (#764) reading more than the page could | Each panel goes through the page's own panel path (scope, claims, policy, `-- @vars`, locked variables, limits); an input default the export binds must be a plain literal for an identifier that is not reserved; the SVG is sandboxed, CSV formula cells are neutralised |
 | `/metrics` (#765) leaks server internals or other viewers' activity | Off unless `options.metrics`; its own bearer token (≥ 32 characters, constant-time compare), `401` without it; counts and timings only, with label values fixed by the server (a route name, a status class, a static reason), never a path, dashboard id, user or variable |
 | A panel filters on a viewer-settable variable | Documented rule: filter only on `__claim_*`; `-- @vars` limits what viewers can set |

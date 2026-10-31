@@ -257,6 +257,60 @@ sess=$(curl -s "http://127.0.0.1:$PORT/d/ex" | grep -o '"session":"[^"]*"' | hea
 stop
 echo "OK: exports — SVG/PNG/PDF (dashboard, one tab, variables, inputs' defaults), CSV/JSON of a named panel, formula cells neutralised, scope and login"
 
+# 3d. Tasks (#767): tasks/*.task.sql on a schedule, writing only the
+# databases in tasks.write (all others must be attached READ_ONLY), then a
+# refresh; the run log and /metrics.
+mkdir -p "$T/tkdash/tasks"
+cat > "$T/tkdash/t.sql" <<'SQL'
+SELECT count(*)::BIGINT AS n ::METRIC FROM stage.loaded;
+SQL
+cat > "$T/tkdash/tasks/load.task.sql" <<'SQL'
+SELECT INTERVAL '2 seconds' ::SCHEDULE;
+CREATE OR REPLACE TABLE stage.loaded AS SELECT * FROM range(5);
+SELECT 1 ::REFRESH;
+SQL
+# runs first: fails inside a transaction, which must not stay open on the
+# shared connection (load and the refresh would fail on it)
+cat > "$T/tkdash/tasks/a_txn.task.sql" <<'SQL'
+SELECT 'init' ::SCHEDULE;
+BEGIN TRANSACTION;
+INSERT INTO stage.loaded VALUES (99);
+SELECT error('boom');
+COMMIT;
+SQL
+cat > "$T/tkdash/tasks/bad.task.sql" <<'SQL'
+SELECT 'init' ::SCHEDULE;
+CREATE TABLE warehouse.sneaky AS SELECT 1 AS x;
+SQL
+"$DUCKDB" "$T/tk.duckdb" -c "SELECT 1;" >/dev/null
+"$DUCKDB" "$T/stage.duckdb" -c "CREATE TABLE loaded AS SELECT 1 AS range;" >/dev/null
+"$DUCKDB" "$T/wh.duckdb" -c "CREATE TABLE t AS SELECT 1 AS x;" >/dev/null
+tkattach="ATTACH $(q "$T/stage.duckdb") AS stage; ATTACH $(q "$T/wh.duckdb") AS warehouse (READ_ONLY);"
+tkserve() { echo "$tkattach SELECT anofox_serve_dashboards($(q "$T/tkdash"), $PORT, $(q "$1"));"; }
+# (no -readonly: the CLI flag makes every later ATTACH read-only too; the
+# session's own database "tk" is writable, so it goes in tasks.write.)
+if QUIET=1 start "$T/tk.duckdb" "" "$(tkserve '{"tasks": {"run": true, "write": ["tk"]}}')"; then
+  fail "tasks: stage is read-write but not in tasks.write — the start should be refused"
+fi
+grep -q "'stage' is attached read-write but not in tasks.write" "$T/out" || fail "tasks: no reason given: $(cat "$T/out")"
+exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
+MTOKEN="$(printf 'm%.0s' $(seq 40))"
+start "$T/tk.duckdb" "" "$(tkserve "{\"tasks\": {\"run\": true, \"write\": [\"tk\", \"stage\"], \"log\": \"$T/tasks.jsonl\"}, \"metrics\": {\"token\": \"$MTOKEN\"}}")" \
+  || fail "tasks server"
+for _ in $(seq 60); do [ "$(panel 0 '{}' t)" = 200 ] && grep -q '"c0":5' "$T/body" && break; sleep 0.25; done
+grep -q '"c0":5' "$T/body" || fail "tasks: the panel should see the task's 5 rows after its refresh: $(cat "$T/body") $(tail -5 "$T/out")"
+for _ in $(seq 20); do grep -q '"task":"bad"' "$T/tasks.jsonl" 2>/dev/null && break; sleep 0.25; done
+grep '"task":"bad"' "$T/tasks.jsonl" | grep -q '"ok":false' || fail "tasks: a write to a READ_ONLY database should fail: $(cat "$T/tasks.jsonl")"
+grep '"task":"a_txn"' "$T/tasks.jsonl" | grep -q '"ok":false' || fail "tasks: a_txn should fail: $(cat "$T/tasks.jsonl")"
+grep '"task":"load"' "$T/tasks.jsonl" | grep -q '"ok":true' || fail "tasks: load should succeed: $(cat "$T/tasks.jsonl")"
+curl -s -H "Authorization: Bearer $MTOKEN" "http://127.0.0.1:$PORT/metrics" > "$T/met"
+grep -qF 'anofox_task_failures{task="bad"} 1' "$T/met" && grep -qF 'anofox_task_consecutive_failures{task="load"} 0' "$T/met" \
+  || fail "tasks: /metrics: $(grep anofox_task "$T/met")"
+stop
+"$DUCKDB" "$T/wh.duckdb" -c "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'sneaky';" | grep -q " 0 " \
+  || fail "tasks: the READ_ONLY database was written"
+echo "OK: tasks — ::SCHEDULE, write only to tasks.write (READ_ONLY check at start), ::REFRESH, run log, /metrics"
+
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting
 # coalesce(getvariable(…), …) keeps the viewer's value.
