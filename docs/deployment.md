@@ -394,6 +394,9 @@ running dashboards keep serving, and the SQL call returns the reason:
 anofox-visualization: reload failed, still serving the previous dashboards: dashboard 'sales' statement 3: …
 ```
 
+- `-- @id sales-weekly` in a file keeps its id (and every link to it) when
+  the file is renamed or moved. With `"folders": true`, subfolders are
+  served and become groups, so a repository can be organised by team.
 - A symlinked folder is followed on each reload, including its `assets/`.
   Copying files into the live folder works too, but a reload during the
   copy can see half of it, so the symlink swap is safer.

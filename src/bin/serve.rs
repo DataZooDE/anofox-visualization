@@ -1445,31 +1445,22 @@ struct Dashboard {
 }
 
 fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
-    let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("sql") {
-                let id = p
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !sv::valid_dashboard_id(&id) {
-                    continue;
-                }
-                if let Ok(script) = std::fs::read_to_string(&p) {
-                    out.push(Dashboard {
-                        meta: sv::parse_dashboard_meta(&id, &script),
-                        id,
-                        script,
-                        updated: sv::file_date(&p),
-                        setup_ok: Default::default(),
-                    });
-                }
-            }
-        }
-    }
+    // The same files and ids as the locked server (`-- @id`, #772); this
+    // static render serves the folder itself only.
+    let files = sv::dashboard_files(dir, false).unwrap_or_else(|e| {
+        eprintln!("error: {e}");
+        std::process::exit(2)
+    });
+    let mut out: Vec<Dashboard> = files
+        .into_iter()
+        .map(|f| Dashboard {
+            updated: sv::file_date(&f.path),
+            meta: f.meta,
+            id: f.id,
+            script: f.sql,
+            setup_ok: Default::default(),
+        })
+        .collect();
     // #301: ascending `-- @order`, unordered dashboards after, then by id.
     out.sort_by(|a, b| a.meta.order_key(&a.id).cmp(&b.meta.order_key(&b.id)));
     out

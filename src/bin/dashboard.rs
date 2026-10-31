@@ -862,6 +862,8 @@ fn cmd_check(args: &[String]) {
     // `--options`'s `options.state`, or `None` when `--options` wasn't
     // given — submit/not-enabled and state/not-enabled are skipped
     // entirely then (plan §3: "With --options locked.json").
+    // #772: `options.folders` — the server serves the subfolders too.
+    let mut folders = false;
     let state_enablement: Option<(Vec<String>, Vec<String>)> = options.as_deref().map(|p| {
         let json = read(p);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_else(|e| {
@@ -872,6 +874,7 @@ fn cmd_check(args: &[String]) {
             eprintln!("--options must be a JSON object");
             std::process::exit(2);
         });
+        folders = m.get("folders").and_then(serde_json::Value::as_bool) == Some(true);
         match m.get("state") {
             Some(state_val) => {
                 let parsed = anofox_visualization::host::state::StateOptions::parse(state_val)
@@ -930,15 +933,33 @@ fn cmd_check(args: &[String]) {
     // (file, its diagnostics): one entry for a file, one per .sql for a folder
     let mut files: Vec<(String, Vec<lint::Diagnostic>)> = Vec::new();
     if folder {
-        let mut names: Vec<String> = std::fs::read_dir(&path)
-            .unwrap_or_else(|e| {
-                eprintln!("read {path}: {e}");
-                std::process::exit(2);
-            })
-            .flatten()
-            .filter_map(|e| e.file_name().to_str().map(str::to_string))
-            .filter(|n| n.ends_with(".sql"))
-            .collect();
+        // The folder's `.sql` files (relative names), and with `folders`
+        // those one level down, as the server reads them (#772).
+        let list = |dir: &str| -> Vec<std::fs::DirEntry> {
+            std::fs::read_dir(dir)
+                .unwrap_or_else(|e| {
+                    eprintln!("read {dir}: {e}");
+                    std::process::exit(2);
+                })
+                .flatten()
+                .collect()
+        };
+        let mut names: Vec<String> = Vec::new();
+        for e in list(&path) {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() {
+                if folders && sv::is_dashboard_subfolder(&n) {
+                    for f in list(&e.path().to_string_lossy()) {
+                        let m = f.file_name().to_string_lossy().into_owned();
+                        if m.ends_with(".sql") && f.path().is_file() {
+                            names.push(format!("{n}/{m}"));
+                        }
+                    }
+                }
+            } else if n.ends_with(".sql") {
+                names.push(n);
+            }
+        }
         names.sort();
         if names.is_empty() {
             eprintln!("no .sql dashboards in {path}");
@@ -965,9 +986,8 @@ fn cmd_check(args: &[String]) {
             // server would skip this file outright (not even load it as
             // a dashboard), so there is no submit/state enablement to
             // report either way.
-            if let (Some((submit_ok, state_ok)), Some(id)) =
-                (&state_enablement, sv::dashboard_id_from_path(Path::new(n)))
-            {
+            let id = sv::dashboard_id(Path::new(n), &sv::parse_dashboard_meta("", script));
+            if let (Some((submit_ok, state_ok)), Some(id)) = (&state_enablement, id) {
                 d.extend(lint::state_enablement_diags(
                     script, &id, submit_ok, state_ok,
                 ));
@@ -979,7 +999,7 @@ fn cmd_check(args: &[String]) {
         let mut d = lint_one(&script);
         if let (Some((submit_ok, state_ok)), Some(id)) = (
             &state_enablement,
-            sv::dashboard_id_from_path(Path::new(&path)),
+            sv::dashboard_id(Path::new(&path), &sv::parse_dashboard_meta("", &script)),
         ) {
             d.extend(lint::state_enablement_diags(
                 &script, &id, submit_ok, state_ok,
@@ -1140,32 +1160,17 @@ struct SiteDash {
 /// Load every `*.sql` of `dir`, sorted the same way the locked server does
 /// (`-- @order`, then id — [`sv::DashboardMeta::order_key`]), so `site.json`'s
 /// `dashboards` array is already in nav order.
-fn load_site_dashboards(dir: &Path) -> Result<Vec<SiteDash>, String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("cannot read dashboard folder '{}': {e}", dir.display()))?;
+fn load_site_dashboards(dir: &Path, folders: bool) -> Result<Vec<SiteDash>, String> {
     let mut out = Vec::new();
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("sql") {
-            continue;
-        }
-        let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
-            continue;
-        };
-        if !sv::valid_dashboard_id(&id) {
-            continue; // ids end up in URLs: only [A-Za-z0-9_.-], as the server requires
-        }
-        let sql =
-            std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
-        let meta = sv::parse_dashboard_meta(&id, &sql);
-        let stmts = sql::plan(&sql)
+    for f in sv::dashboard_files(dir, folders)? {
+        let stmts = sql::plan(&f.sql)
             .into_iter()
             .map(|p| (p.setup, p.sql.trim().to_string()))
             .collect();
         out.push(SiteDash {
-            id,
-            meta,
-            sql,
+            id: f.id,
+            meta: f.meta,
+            sql: f.sql,
             stmts,
         });
     }
@@ -1208,6 +1213,8 @@ struct SiteOptions {
     /// [`anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES`] exactly as
     /// `LockedOptions::parse`'s own default does.
     max_asset_bytes: Option<u64>,
+    /// `folders` (#772): the subfolders' dashboards too, as on the server.
+    folders: bool,
     /// Server-only keys this file had, that `--site` skipped — named once
     /// on stderr by the caller ([`cmd_site`]), sorted for a stable message.
     ignored: Vec<String>,
@@ -1342,6 +1349,11 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
             // apply to its own asset route, not a fixed `--site`-only
             // value — clamped the same way `LockedOptions::parse`
             // (`duckext/src/serve.rs`) clamps it, its own 64 MiB ceiling.
+            "folders" => {
+                o.folders = val
+                    .as_bool()
+                    .ok_or("options.folders must be true or false")?;
+            }
             "max_asset_bytes" => {
                 let n = val
                     .as_u64()
@@ -1958,11 +1970,11 @@ fn cmd_site(args: &[String]) {
     // 1. The folder, as the locked server would open it: the dashboards
     //    load and parse, every statement is read-only ([`site_check_read_only`]),
     //    and `--check`'s own lint (broken/empty panels, header issues) passes.
-    let dashboards = load_site_dashboards(folder).unwrap_or_else(|e| fail(e));
     let options_json = options.as_deref().map(|p| {
         std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("--options '{p}': {e}")))
     });
     let opts = parse_site_options(options_json.as_deref()).unwrap_or_else(|e| fail(e));
+    let dashboards = load_site_dashboards(folder, opts.folders).unwrap_or_else(|e| fail(e));
     if !opts.ignored.is_empty() {
         // #501: a locked server's own `options` file handed to `--site`
         // unedited carries server-only limits that have no effect here —

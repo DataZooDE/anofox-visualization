@@ -2779,6 +2779,7 @@ with the browser through wasm):
 | Line | Meaning |
 |---|---|
 | `-- @title <name>` | The dashboard's name: the sidebar entry of an example, the page title and nav entry on a server (without it, the file id). Name it as a plain business question. |
+| `-- @id <id>` | The dashboard's id on a server (`/d/<id>`, embed links, reports, `options.home`, `state` / `writeback` lists) instead of its file name, so renaming or moving the file keeps every link working (#772). Letters, digits, `_`, `-` and `.`; a bad one, or two dashboards with one id, stop the server from starting (`dashboard --check`: `folder/bad-id-header`, `folder/duplicate-id`). |
 | `-- @nav <short label>` | A compact nav bar / start-page card label, shown in place of `@title` there when set (`@title` still stays the page's own heading); without it, the nav bar and cards show `@title`. Use it when the business-question title would wrap in a nav bar. |
 | `-- @group <name>` | Where it sits: one group per dashboard, a ` / ` adds one level (`Sales / EMEA`, drawn as a sub-heading; deeper paths are kept as written and drawn flat). No `@group`, or an empty one, means ungrouped. |
 | `-- @tags a, b` | Free labels for finding it: trimmed, lower-cased, without duplicates, at most 10 (several `@tags` lines add up). |
