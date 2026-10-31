@@ -4336,7 +4336,8 @@ fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
 }
 
 /// Send `msg` with `files` to `to` (#768): one e-mail (every address in
-/// Bcc) and one POST per webhook, within `notify.max_per_hour` — over it,
+/// Bcc), one POST per webhook and Teams webhook, one message (with its
+/// files) per Slack channel, within `notify.max_per_hour` — over it,
 /// nothing is sent. The number of recipients reached, or every failure.
 fn deliver_all(
     st: &Locked,
@@ -4350,17 +4351,31 @@ fn deliver_all(
         .iter()
         .filter_map(|t| match t {
             Recipient::Email(a) => Some(a.clone()),
-            Recipient::Webhook(_) => None,
+            _ => None,
         })
         .collect();
     let hooks: Vec<(&str, &notify::Webhook)> = to
         .iter()
         .filter_map(|t| match t {
             Recipient::Webhook(w) => n.webhooks.get(w).map(|h| (w.as_str(), h)),
-            Recipient::Email(_) => None,
+            _ => None,
         })
         .collect();
-    let count = usize::from(!emails.is_empty()) + hooks.len();
+    let channels: Vec<&str> = to
+        .iter()
+        .filter_map(|t| match t {
+            Recipient::Slack(c) => Some(c.as_str()),
+            _ => None,
+        })
+        .collect();
+    let teams: Vec<(&str, &notify::Teams)> = to
+        .iter()
+        .filter_map(|t| match t {
+            Recipient::Teams(w) => n.teams.get(w).map(|h| (w.as_str(), h)),
+            _ => None,
+        })
+        .collect();
+    let count = usize::from(!emails.is_empty()) + hooks.len() + channels.len() + teams.len();
     if !st
         .report_rate
         .lock()
@@ -4386,6 +4401,24 @@ fn deliver_all(
         let body = notify::webhook_body(msg, files);
         for (name, h) in hooks {
             match notify::send_webhook(h, &body, msg.time) {
+                Ok(()) => sent += 1,
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        }
+    }
+    if !channels.is_empty() {
+        let slack = n.slack.as_ref().ok_or("options.notify.slack is not set")?;
+        for c in channels {
+            match notify::send_slack(slack, c, msg, files) {
+                Ok(()) => sent += 1,
+                Err(e) => errors.push(e),
+            }
+        }
+    }
+    if !teams.is_empty() {
+        let card = notify::teams_card(msg, files);
+        for (name, t) in teams {
+            match notify::send_teams(t, &card) {
                 Ok(()) => sent += 1,
                 Err(e) => errors.push(format!("{name}: {e}")),
             }

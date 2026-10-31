@@ -967,6 +967,29 @@ e-mail or to a webhook ([plan](plans/plan-tasks-reports.md) §2, §4):
   `anofox_report_last_success_timestamp_seconds`, `_runs`, `_failures` and
   `_consecutive_failures` per report.
 
+**Slack and Teams** (R3) are two more channels, for reports, alerts and
+`tasks.on_failure` alike:
+
+```json
+{"notify": {"slack": {"token_env": "SLACK_BOT_TOKEN"},
+            "teams": {"sales": {"url_env": "TEAMS_SALES_WORKFLOW_URL"}}},
+ "reports": [{…, "to": [{"slack": "C0123ABCD"}, {"teams": "sales"}]}]}
+```
+
+- **Slack:** a bot token (`xoxb-…`, scopes `chat:write`, `files:write`,
+  `channels:read`/`groups:read`). Channels are given by id, never by name. Files
+  are uploaded as bytes (`files.getUploadURLExternal`, the upload,
+  `files.completeUploadExternal`), never as a URL Slack would fetch, and only
+  to an upload address on `slack.com`. Before sending, `conversations.info`
+  is checked: a channel shared with another organisation (Slack Connect) is
+  refused unless `allow_external: true`. Text is `mrkdwn`-escaped (`&`, `<`,
+  `>`), so nothing in it becomes a link, a mention or `@channel`.
+- **Teams:** a Workflows (Power Automate) webhook URL from the environment
+  (its signature is in the URL; never logged). It gets an Adaptive Card with
+  the text, the PNG inline (up to 750 KB, else a note) and an "Open the
+  dashboard" button. Other files go by e-mail only. Text is defused for the
+  card's Markdown (no link can form from it).
+
 **Alerts** (`options.alerts`, R2) use the same channels and principals.
 An alert fires when a `-- @name`d panel returns rows (the condition is
 ordinary, reviewed dashboard SQL, e.g. `WHERE qty < safety`):
@@ -999,7 +1022,7 @@ ordinary, reviewed dashboard SQL, e.g. `WHERE qty < safety`):
 |---|---|
 | A viewer gets a report's data or identity | The `report:` user prefix is refused by every login method; reports run only from the schedule or the owning SQL session. |
 | A report shows more than its recipients may see | One least-privilege principal per report, through the viewer's policy path; the operator attests the audience (D4). |
-| Credentials leak | SMTP and webhook secrets and webhook URLs come only from the environment; they never appear in the options, logs, errors or `Debug` output. |
+| Credentials leak | SMTP, webhook, Slack and Teams secrets and URLs come only from the environment; they never appear in the options, logs, errors or `Debug` output. |
 | Mail sent in clear, or downgraded | `STARTTLS` is required (a server without it is an error), or implicit TLS; certificates checked against the Mozilla roots. `tls: "none"` only to a loopback relay. |
 | SSRF / exfiltration | Endpoints are fixed in the configuration, never built from data; `https://` only (`http://` to loopback), no redirects, no proxy, 30 s timeout. |
 | Header or markup injection | Recipients are plain addresses (checked at start) and go only into the envelope (Bcc); the subject has no line breaks (RFC 2047); the HTML is escaped; file names are fixed; CSV formula cells are neutralised as in exports. |

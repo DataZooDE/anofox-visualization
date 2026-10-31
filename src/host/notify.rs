@@ -44,6 +44,8 @@ pub struct NotifyOptions {
     pub run: bool,
     pub smtp: Option<Smtp>,
     pub webhooks: BTreeMap<String, Webhook>,
+    pub slack: Option<Slack>,
+    pub teams: BTreeMap<String, Teams>,
     /// The page's public base URL, for a link in the message.
     pub link: Option<String>,
     /// Messages per hour, for all reports together (default 60).
@@ -100,6 +102,38 @@ impl std::fmt::Debug for Webhook {
     }
 }
 
+/// `notify.slack` (R3): a bot token; messages to channel ids.
+#[derive(Clone)]
+pub struct Slack {
+    pub token: String,
+    /// The Web API's base (`https://slack.com/api`; a loopback fake in tests).
+    pub api: String,
+    /// Send to channels shared with another organisation (Slack Connect).
+    pub allow_external: bool,
+}
+
+impl std::fmt::Debug for Slack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Slack")
+            .field("api", &self.api)
+            .field("allow_external", &self.allow_external)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One `notify.teams` entry (R3): a Teams Workflows webhook URL.
+#[derive(Clone)]
+pub struct Teams {
+    pub url: String,
+}
+
+impl std::fmt::Debug for Teams {
+    // The URL carries its signature: never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Teams { .. }")
+    }
+}
+
 /// One report.
 #[derive(Debug, Clone)]
 pub struct Report {
@@ -130,6 +164,10 @@ pub enum Format {
 pub enum Recipient {
     Email(String),
     Webhook(String),
+    /// A Slack channel id (`C…`/`G…`).
+    Slack(String),
+    /// A `notify.teams` name.
+    Teams(String),
 }
 
 type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -237,6 +275,8 @@ pub fn parse_notify(val: &Value, env: Env) -> Result<NotifyOptions, String> {
             "run",
             "smtp",
             "webhooks",
+            "slack",
+            "teams",
             "link",
             "max_per_hour",
             "log",
@@ -247,6 +287,8 @@ pub fn parse_notify(val: &Value, env: Env) -> Result<NotifyOptions, String> {
         run: false,
         smtp: None,
         webhooks: BTreeMap::new(),
+        slack: None,
+        teams: BTreeMap::new(),
         link: None,
         max_per_hour: 60,
         log: None,
@@ -286,6 +328,53 @@ pub fn parse_notify(val: &Value, env: Env) -> Result<NotifyOptions, String> {
                     secret: secret.into_bytes(),
                 },
             );
+        }
+    }
+    if let Some(v) = o.get("slack") {
+        let what = "options.notify.slack";
+        let m = v.as_object().ok_or(format!("{what} must be an object"))?;
+        check_keys(m, what, &["token_env", "allow_external", "api_url"])?;
+        let token = env_secret(env, m, "token_env", what)?;
+        if !token.starts_with("xoxb-") || !token.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(format!("{what}.token_env: a bot token (xoxb-…)"));
+        }
+        let api = match m.get("api_url") {
+            None => "https://slack.com/api".to_string(),
+            Some(u) => {
+                let u = u.as_str().unwrap_or("").trim_end_matches('/').to_string();
+                check_webhook_url(&u).map_err(|e| format!("{what}.api_url: {e}"))?;
+                if u.contains('?') {
+                    return Err(format!("{what}.api_url: no query"));
+                }
+                u
+            }
+        };
+        let allow_external = match m.get("allow_external") {
+            None => false,
+            Some(b) => b
+                .as_bool()
+                .ok_or(format!("{what}.allow_external must be true or false"))?,
+        };
+        n.slack = Some(Slack {
+            token,
+            api,
+            allow_external,
+        });
+    }
+    if let Some(v) = o.get("teams") {
+        let m = v
+            .as_object()
+            .ok_or("options.notify.teams must be an object of named Teams webhooks")?;
+        for (name, t) in m {
+            let what = format!("options.notify.teams.{name}");
+            if !valid_name(name) {
+                return Err(format!("{what}: a name is a-z, 0-9, - and _"));
+            }
+            let t = t.as_object().ok_or(format!("{what} must be an object"))?;
+            check_keys(t, &what, &["url_env"])?;
+            let url = env_secret(env, t, "url_env", &what)?;
+            check_webhook_url(&url).map_err(|e| format!("{what}: {e}"))?;
+            n.teams.insert(name.clone(), Teams { url });
         }
     }
     if let Some(v) = o.get("link") {
@@ -515,8 +604,11 @@ pub fn parse_recipients(
     if to.len() > MAX_RECIPIENTS {
         return Err(format!("{what}: more than {MAX_RECIPIENTS} recipients"));
     }
-    let shape =
-        || format!("{what}: a recipient is {{\"email\": \"…\"}} or {{\"webhook\": \"<name>\"}}");
+    let shape = || {
+        format!(
+            "{what}: a recipient is {{\"email\": \"…\"}}, {{\"webhook\": \"<name>\"}}, {{\"slack\": \"<channel id>\"}} or {{\"teams\": \"<name>\"}}"
+        )
+    };
     let mut rcpts = Vec::new();
     for t in to {
         let t = t.as_object().filter(|t| t.len() == 1).ok_or_else(shape)?;
@@ -539,6 +631,27 @@ pub fn parse_recipients(
                     ));
                 }
                 Recipient::Webhook(w.clone())
+            }
+            Some((k, Value::String(c))) if k == "slack" => {
+                if !valid_slack_channel(c) {
+                    return Err(format!(
+                        "{what}: '{c}' is not a Slack channel id (C… or G…, not a name)"
+                    ));
+                }
+                if notify.is_none_or(|n| n.slack.is_none()) {
+                    return Err(format!(
+                        "{what}: a Slack recipient needs options.notify.slack"
+                    ));
+                }
+                Recipient::Slack(c.clone())
+            }
+            Some((k, Value::String(t))) if k == "teams" => {
+                if notify.is_none_or(|n| !n.teams.contains_key(t)) {
+                    return Err(format!(
+                        "{what}: no Teams webhook '{t}' in options.notify.teams"
+                    ));
+                }
+                Recipient::Teams(t.clone())
             }
             _ => return Err(shape()),
         };
@@ -1448,25 +1561,32 @@ pub fn webhook_signature(secret: &[u8], ts: u64, body: &[u8]) -> String {
     )
 }
 
-/// POST the signed body; a 2xx is success. No proxy, no redirects.
-pub fn send_webhook(w: &Webhook, body: &[u8], now: SystemTime) -> Result<(), String> {
+/// The outbound HTTP client: rustls with the Mozilla roots, `https` only
+/// unless `url` is `http://` (loopback, checked with the options), no
+/// proxy, no redirects, a 30 s limit per request.
+fn agent(url: &str) -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
     let tls = TlsConfig::builder()
         .provider(TlsProvider::Rustls)
         .root_certs(RootCerts::WebPki)
         .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
         .build();
-    let agent = ureq::Agent::new_with_config(
+    ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .tls_config(tls)
-            .https_only(w.url.starts_with("https://"))
+            .https_only(url.starts_with("https://"))
             .proxy(None)
             .max_redirects(0)
             .http_status_as_error(false)
             .user_agent("anofox-visualization")
             .timeout_global(Some(NET_TIMEOUT))
             .build(),
-    );
+    )
+}
+
+/// POST the signed body; a 2xx is success. No proxy, no redirects.
+pub fn send_webhook(w: &Webhook, body: &[u8], now: SystemTime) -> Result<(), String> {
+    let agent = agent(&w.url);
     let ts = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1488,6 +1608,225 @@ pub fn send_webhook(w: &Webhook, body: &[u8], now: SystemTime) -> Result<(), Str
         Ok(())
     } else {
         Err(format!("webhook: HTTP {code}"))
+    }
+}
+
+// ---- Slack and Teams (R3) -------------------------------------------------
+
+/// A channel id as Slack shows it (`C0123ABCD`, `G…` for an old private
+/// channel). Names (`#sales`) are refused: they can be renamed or reused.
+pub fn valid_slack_channel(c: &str) -> bool {
+    (8..=20).contains(&c.len())
+        && matches!(c.as_bytes()[0], b'C' | b'G')
+        && c.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Text for Slack's `mrkdwn`: `&`, `<` and `>` escaped, so nothing in it
+/// becomes a link, a mention or a channel reference.
+pub fn slack_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Text for an Adaptive Card's Markdown: no link (`[x](y)`, `<url>`) can
+/// form from it; the rest stays readable.
+pub fn teams_escape(s: &str) -> String {
+    one_line(s)
+        .replace('[', "⟦")
+        .replace(']', "⟧")
+        .replace('<', "‹")
+        .replace('>', "›")
+        .replace('*', "∗")
+}
+
+/// Is `upload` an address Slack itself handed out for an upload: `https`
+/// on `slack.com` (or a subdomain), or the configured API's own origin (a
+/// test fake)?
+fn slack_upload_ok(upload: &str, api: &str) -> bool {
+    let origin = |u: &str| -> Option<String> {
+        let (scheme, rest) = u.split_once("://")?;
+        Some(format!("{scheme}://{}", rest.split(['/', '?']).next()?))
+    };
+    let Some(o) = origin(upload) else {
+        return false;
+    };
+    if upload.contains(['@', '#', '\\']) || !upload.bytes().all(|b| b.is_ascii_graphic()) {
+        return false;
+    }
+    let host = o.trim_start_matches("https://");
+    (o.starts_with("https://")
+        && !host.contains(':')
+        && (host == "slack.com" || host.ends_with(".slack.com")))
+        || origin(api).is_some_and(|a| a == o)
+}
+
+/// A Slack Web API answer: `{"ok": true, …}`, else its `error` code.
+fn slack_answer(
+    method: &str,
+    r: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<Value, String> {
+    let mut r = r.map_err(|e| format!("slack {method}: {}", error_kind(&e)))?;
+    let code = r.status().as_u16();
+    if !(200..300).contains(&code) {
+        return Err(format!("slack {method}: HTTP {code}"));
+    }
+    let text = r
+        .body_mut()
+        .with_config()
+        .limit(1 << 20)
+        .read_to_string()
+        .map_err(|e| format!("slack {method}: {}", error_kind(&e)))?;
+    let v: Value = serde_json::from_str(&text).map_err(|_| format!("slack {method}: not JSON"))?;
+    if v.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(v)
+    } else {
+        let e = v.get("error").and_then(Value::as_str).unwrap_or("unknown");
+        Err(format!(
+            "slack {method}: {}",
+            one_line(e).chars().take(80).collect::<String>()
+        ))
+    }
+}
+
+/// Post `msg` to Slack channel `channel`, its files uploaded as bytes
+/// (`files.getUploadURLExternal` → the upload → `files.completeUploadExternal`),
+/// never as a URL Slack would fetch. A channel shared with another
+/// organisation is refused unless `allow_external`.
+pub fn send_slack(s: &Slack, channel: &str, msg: &Message, files: &[File]) -> Result<(), String> {
+    let api = agent(&s.api);
+    let auth = format!("Bearer {}", s.token);
+    let url = |m: &str| format!("{}/{m}", s.api);
+    let info = slack_answer(
+        "conversations.info",
+        api.get(url("conversations.info"))
+            .query("channel", channel)
+            .header("Authorization", &auth)
+            .call(),
+    )?;
+    let ch = info.get("channel").cloned().unwrap_or(Value::Null);
+    let flag = |k: &str| ch.get(k).and_then(Value::as_bool).unwrap_or(false);
+    if !s.allow_external && (flag("is_ext_shared") || flag("is_pending_ext_shared")) {
+        return Err(format!(
+            "slack: channel {channel} is shared with another organisation (Slack Connect); not sent (notify.slack.allow_external)"
+        ));
+    }
+    let text = slack_escape(&msg.text());
+    if files.is_empty() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "channel": channel, "text": text, "unfurl_links": false, "unfurl_media": false,
+        }))
+        .unwrap_or_default();
+        slack_answer(
+            "chat.postMessage",
+            api.post(url("chat.postMessage"))
+                .header("Authorization", &auth)
+                .header("Content-Type", "application/json; charset=utf-8")
+                .send(&body[..]),
+        )?;
+        return Ok(());
+    }
+    let mut ids = Vec::new();
+    for f in files {
+        let name = safe_filename(&f.name);
+        let v = slack_answer(
+            "files.getUploadURLExternal",
+            api.post(url("files.getUploadURLExternal"))
+                .header("Authorization", &auth)
+                .send_form([
+                    ("filename", name.as_str()),
+                    ("length", &f.bytes.len().to_string()),
+                ]),
+        )?;
+        let (Some(upload), Some(id)) = (
+            v.get("upload_url").and_then(Value::as_str),
+            v.get("file_id").and_then(Value::as_str),
+        ) else {
+            return Err("slack files.getUploadURLExternal: no upload_url".into());
+        };
+        if !slack_upload_ok(upload, &s.api) {
+            return Err("slack: the upload address is not Slack's; not sent".into());
+        }
+        let r = agent(upload)
+            .post(upload)
+            .header("Content-Type", "application/octet-stream")
+            .send(&f.bytes[..])
+            .map_err(|e| format!("slack upload: {}", error_kind(&e)))?;
+        if !(200..300).contains(&r.status().as_u16()) {
+            return Err(format!("slack upload: HTTP {}", r.status().as_u16()));
+        }
+        ids.push(serde_json::json!({"id": id, "title": name}));
+    }
+    slack_answer(
+        "files.completeUploadExternal",
+        api.post(url("files.completeUploadExternal"))
+            .header("Authorization", &auth)
+            .send_form([
+                (
+                    "files",
+                    serde_json::to_string(&ids).unwrap_or_default().as_str(),
+                ),
+                ("channel_id", channel),
+                ("initial_comment", text.as_str()),
+            ]),
+    )?;
+    Ok(())
+}
+
+/// Most bytes of a PNG put into a Teams card (as a data URI); a larger one
+/// is left out (the card says so).
+pub const TEAMS_MAX_IMAGE: usize = 750 * 1024;
+
+/// The Adaptive Card a Teams Workflows webhook gets: the text, the PNG
+/// (inline, when small enough) and a link. Other files go by e-mail only.
+pub fn teams_card(msg: &Message, files: &[File]) -> Vec<u8> {
+    use base64::Engine as _;
+    let mut lines = msg.lines().into_iter();
+    let mut body = vec![serde_json::json!({
+        "type": "TextBlock", "text": teams_escape(&lines.next().unwrap_or_default()),
+        "weight": "Bolder", "size": "Medium", "wrap": true,
+    })];
+    for l in lines {
+        body.push(serde_json::json!({"type": "TextBlock", "text": teams_escape(&l), "wrap": true}));
+    }
+    if let Some(png) = files.iter().find(|f| f.content_type == "image/png") {
+        if png.bytes.len() <= TEAMS_MAX_IMAGE {
+            body.push(serde_json::json!({
+                "type": "Image",
+                "url": format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png.bytes)),
+                "altText": one_line(&msg.title),
+            }));
+        } else {
+            body.push(serde_json::json!({"type": "TextBlock", "text": "(The image is too large for Teams.)", "wrap": true, "isSubtle": true}));
+        }
+    }
+    let mut card = serde_json::json!({
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard", "version": "1.4", "body": body,
+    });
+    if let Some(u) = &msg.link {
+        card["actions"] = serde_json::json!([{"type": "Action.OpenUrl", "title": "Open the dashboard", "url": u}]);
+    }
+    serde_json::to_vec(&serde_json::json!({
+        "type": "message",
+        "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": card}],
+    }))
+    .unwrap_or_default()
+}
+
+/// POST the card to a Teams Workflows webhook; a 2xx is success.
+pub fn send_teams(t: &Teams, body: &[u8]) -> Result<(), String> {
+    let r = agent(&t.url)
+        .post(&t.url)
+        .header("Content-Type", "application/json")
+        .send(body)
+        .map_err(|e| format!("teams: {}", error_kind(&e)))?;
+    let code = r.status().as_u16();
+    if (200..300).contains(&code) {
+        Ok(())
+    } else {
+        Err(format!("teams: HTTP {code}"))
     }
 }
 
@@ -1953,6 +2292,126 @@ mod tests {
         std::fs::write(&p, "nope").unwrap();
         assert!(load_states(&p).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slack_and_teams() {
+        let env2 = |k: &str| match k {
+            "SLACK" => Some("xoxb-123-abc".to_string()),
+            "USERTOKEN" => Some("xoxp-123".to_string()),
+            "TEAMS" => {
+                Some("https://prod.westeurope.logic.azure.com/workflows/x?sig=s3cret".to_string())
+            }
+            _ => None,
+        };
+        let n = parse_notify(
+            &json!({"slack": {"token_env": "SLACK"}, "teams": {"sales": {"url_env": "TEAMS"}}}),
+            &env2,
+        )
+        .unwrap();
+        let s = n.slack.as_ref().unwrap();
+        assert_eq!(
+            (s.api.as_str(), s.allow_external),
+            ("https://slack.com/api", false)
+        );
+        let d = format!("{n:?}");
+        assert!(!d.contains("xoxb") && !d.contains("s3cret"), "{d}");
+        assert!(
+            parse_notify(&json!({"slack": {"token_env": "USERTOKEN"}}), &env2)
+                .unwrap_err()
+                .contains("bot token")
+        );
+        assert!(parse_notify(
+            &json!({"slack": {"token_env": "SLACK", "api_url": "http://slack.example.com/api"}}),
+            &env2
+        )
+        .is_err());
+        let to = parse_recipients(
+            Some(&json!([{"slack": "C0123ABCD"}, {"teams": "sales"}])),
+            Some(&n),
+            "r",
+        )
+        .unwrap();
+        assert_eq!(
+            to,
+            vec![
+                Recipient::Slack("C0123ABCD".into()),
+                Recipient::Teams("sales".into())
+            ]
+        );
+        for (bad, why) in [
+            (json!([{"slack": "#sales"}]), "not a Slack channel id"),
+            (json!([{"slack": "U0123ABCD"}]), "not a Slack channel id"),
+            (json!([{"teams": "nope"}]), "no Teams webhook 'nope'"),
+        ] {
+            let e = parse_recipients(Some(&bad), Some(&n), "r").unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        assert!(
+            parse_recipients(Some(&json!([{"slack": "C0123ABCD"}])), Some(&notify()), "r")
+                .unwrap_err()
+                .contains("needs options.notify.slack")
+        );
+        // escaping
+        assert_eq!(
+            slack_escape("<!channel> & <http://x|y>"),
+            "&lt;!channel&gt; &amp; &lt;http://x|y&gt;"
+        );
+        let t = teams_escape("[click](http://evil) <http://x> **b**");
+        assert!(
+            !t.contains("](") && !t.contains('<') && !t.contains("**"),
+            "{t}"
+        );
+        // upload addresses: Slack's own, or the configured fake's origin
+        let api = "https://slack.com/api";
+        assert!(slack_upload_ok(
+            "https://files.slack.com/upload/v1/abc",
+            api
+        ));
+        for bad in [
+            "http://files.slack.com/x",
+            "https://files.slack.com.evil.com/x",
+            "https://evil.com/x",
+            "https://u@files.slack.com/x",
+            "https://files.slack.com:8443/x",
+        ] {
+            assert!(!slack_upload_ok(bad, api), "{bad}");
+        }
+        assert!(slack_upload_ok(
+            "http://127.0.0.1:9/upload/F1",
+            "http://127.0.0.1:9/api"
+        ));
+        assert!(!slack_upload_ok(
+            "http://127.0.0.1:10/upload/F1",
+            "http://127.0.0.1:9/api"
+        ));
+        // the card: text, the image (small), the link
+        let files = [File {
+            name: "d.png".into(),
+            content_type: "image/png",
+            bytes: vec![1, 2, 3],
+        }];
+        let c: Value = serde_json::from_slice(&teams_card(&msg(), &files)).unwrap();
+        let card = &c["attachments"][0]["content"];
+        assert_eq!(card["type"], "AdaptiveCard");
+        assert_eq!(
+            card["body"].as_array().unwrap().last().unwrap()["url"],
+            "data:image/png;base64,AQID"
+        );
+        assert_eq!(
+            card["actions"][0]["url"],
+            "https://dash.example.com/d/sales"
+        );
+        assert!(!card["body"][0]["text"].as_str().unwrap().contains('<'));
+        let big = [File {
+            name: "d.png".into(),
+            content_type: "image/png",
+            bytes: vec![0; TEAMS_MAX_IMAGE + 1],
+        }];
+        let c: Value = serde_json::from_slice(&teams_card(&msg(), &big)).unwrap();
+        assert!(
+            c.to_string().contains("too large for Teams") && !c.to_string().contains("data:image")
+        );
     }
 
     #[test]

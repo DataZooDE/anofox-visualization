@@ -359,9 +359,47 @@ class Smtp(socketserver.StreamRequestHandler):
                 w("221 bye"); return
             else:
                 w("500 what")
+def save(name, obj):
+    with open(os.path.join(out, name), "a") as f:
+        f.write(json.dumps(obj) + "\n")
 class Hook(http.server.BaseHTTPRequestHandler):
+    # A fake Slack Web API (/api/…, uploads at /upload/…) and Teams (/teams…)
+    # next to the signed webhook receiver.
+    def answer(self, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        import urllib.parse
+        u = urllib.parse.urlparse(self.path)
+        q = dict(urllib.parse.parse_qsl(u.query))
+        if self.headers.get("Authorization") != "Bearer xoxb-test-token":
+            return self.answer({"ok": False, "error": "invalid_auth"})
+        if u.path == "/api/conversations.info":
+            return self.answer({"ok": True, "channel": {"id": q["channel"], "is_ext_shared": q["channel"] == "CEXTERNAL1"}})
+        self.answer({"ok": False, "error": "unknown_method"})
     def do_POST(self):
+        import urllib.parse
         body = self.rfile.read(int(self.headers["Content-Length"]))
+        if self.path.startswith("/upload/"):
+            save("uploads.json", {"path": self.path, "len": len(body), "head": body[:4].hex()})
+            self.send_response(200); self.end_headers(); return
+        if self.path.startswith("/teams"):
+            save("teams.json", {"path": self.path, "body": json.loads(body)})
+            self.send_response(202); self.end_headers(); return
+        if self.path.startswith("/api/"):
+            if self.headers.get("Authorization") != "Bearer xoxb-test-token":
+                return self.answer({"ok": False, "error": "invalid_auth"})
+            m = self.path[5:]
+            if self.headers.get("Content-Type", "").startswith("application/json"):
+                args = json.loads(body)
+            else:
+                args = dict(urllib.parse.parse_qsl(body.decode()))
+            save("slack.json", {"method": m, "args": args})
+            if m == "files.getUploadURLExternal":
+                n = sum(1 for _ in open(os.path.join(out, "slack.json")))
+                return self.answer({"ok": True, "upload_url": f"http://127.0.0.1:{self.server.server_address[1]}/upload/F{n}", "file_id": f"F{n}"})
+            return self.answer({"ok": True})
         ts = self.headers.get("X-Anofox-Timestamp", "")
         want = "sha256=" + hmac.new(b"0123456789abcdef-secret", ts.encode() + b"." + body, hashlib.sha256).hexdigest()
         ok = hmac.compare_digest(want, self.headers.get("X-Anofox-Signature", ""))
@@ -528,6 +566,69 @@ stop
 kill "$SINK_PID" 2>/dev/null; wait "$SINK_PID" 2>/dev/null || true
 unset R_HOOK_URL R_HOOK_SECRET
 echo "OK: alerts — FIRING once, no repeat on an unchanged check or a restart (state file), RESOLVED once; a failing task's message (on_failure)"
+
+# 3g. Slack and Teams (#768 R3), against local fakes: a report's files
+# uploaded to a Slack channel as bytes, an Adaptive Card to Teams, a Slack
+# Connect channel refused, a failing task's text message to Slack.
+mkdir -p "$T/sldash/tasks" "$T/sink3"
+cp "$T/rpdash/r.sql" "$T/sldash/r.sql"
+cat > "$T/sldash/tasks/broken.task.sql" <<'SQL'
+SELECT 'init' ::SCHEDULE;
+SELECT error('no <!channel> here');
+SQL
+python3 "$T/sinks.py" "$T/sink3" & SINK_PID=$!
+for _ in $(seq 50); do [ -s "$T/sink3/ports" ] && break; sleep 0.1; done
+read -r _ HOOK_PORT < "$T/sink3/ports"
+export R_SLACK=xoxb-test-token R_TEAMS="http://127.0.0.1:$HOOK_PORT/teams?sig=t0ps3cret"
+slopts="{\"notify\": {\"run\": true, \"log\": \"$T/slack-runs.jsonl\", \"link\": \"https://dash.example.com\",
+          \"slack\": {\"token_env\": \"R_SLACK\", \"api_url\": \"http://127.0.0.1:$HOOK_PORT/api\"},
+          \"teams\": {\"sales\": {\"url_env\": \"R_TEAMS\"}}},
+ \"tasks\": {\"run\": true, \"write\": [\"tk\"], \"on_failure\": {\"to\": [{\"slack\": \"C0123ABCD\"}]}},
+ \"reports\": [{\"name\": \"sl\", \"dashboard\": \"r\", \"formats\": [\"png\", \"csv:who\"], \"schedule\": \"every day 06:30\",
+               \"as\": {\"user\": \"report:sl\", \"claims\": {\"region\": \"EU\"}},
+               \"to\": [{\"slack\": \"C0123ABCD\"}, {\"teams\": \"sales\"}]},
+              {\"name\": \"ext\", \"dashboard\": \"r\", \"formats\": [\"png\"], \"schedule\": \"every day 06:30\",
+               \"as\": {\"user\": \"report:ext\"}, \"to\": [{\"slack\": \"CEXTERNAL1\"}]}]}"
+start "$T/tk.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/sldash"), $PORT, $(q "$slopts"));" || fail "slack/teams server"
+# the failing task's text message (chat.postMessage, escaped)
+for _ in $(seq 50); do grep -q chat.postMessage "$T/sink3/slack.json" 2>/dev/null && break; sleep 0.2; done
+echo "SELECT anofox_serve_report($PORT, 'sl');" >&3
+echo "SELECT anofox_serve_report($PORT, 'ext');" >&3
+for _ in $(seq 50); do
+  n="$(grep -c '"report"' "$T/slack-runs.jsonl" 2>/dev/null || true)"
+  [ "${n:-0}" -ge 2 ] && break
+  sleep 0.2
+done
+grep -q "report 'sl' sent to 2 recipient(s)" "$T/out" || fail "slack/teams: sl: $(tail -5 "$T/out")"
+grep '"report":"ext"' "$T/slack-runs.jsonl" | grep -q 'Slack Connect' || fail "slack: a shared channel should be refused: $(cat "$T/slack-runs.jsonl")"
+python3 - "$T/sink3" <<'PY' || fail "slack/teams: the messages are wrong"
+import json, sys
+d = sys.argv[1]
+s = [json.loads(l) for l in open(f"{d}/slack.json")]
+post = [x for x in s if x["method"] == "chat.postMessage"]
+assert len(post) == 1 and post[0]["args"]["channel"] == "C0123ABCD", post
+t = post[0]["args"]["text"]
+assert "FAILED" in t and "&lt;!channel&gt;" in t and "<!channel>" not in t, t
+done = [x for x in s if x["method"] == "files.completeUploadExternal"]
+assert len(done) == 1, s
+a = done[0]["args"]
+assert a["channel_id"] == "C0123ABCD" and [f["title"] for f in json.loads(a["files"])] == ["r.png", "r-who.csv"], a
+assert "EU sales" in a["initial_comment"], a
+up = [json.loads(l) for l in open(f"{d}/uploads.json")]
+assert len(up) == 2 and up[0]["head"] == "89504e47", up   # bytes, a PNG first
+# nothing went to the shared channel
+assert not any(x["args"].get("channel_id") == "CEXTERNAL1" for x in s), s
+tm = [json.loads(l) for l in open(f"{d}/teams.json")]
+assert len(tm) == 1 and tm[0]["path"] == "/teams?sig=t0ps3cret", tm
+card = tm[0]["body"]["attachments"][0]["content"]
+assert card["type"] == "AdaptiveCard" and card["actions"][0]["url"] == "https://dash.example.com/d/r", card
+assert any(b.get("type") == "Image" and b["url"].startswith("data:image/png;base64,") for b in card["body"]), card
+PY
+! grep -q "t0ps3cret\|xoxb-test-token" "$T/out" "$T/slack-runs.jsonl" || fail "slack/teams: a secret was logged"
+stop
+kill "$SINK_PID" 2>/dev/null; wait "$SINK_PID" 2>/dev/null || true
+unset R_SLACK R_TEAMS
+echo "OK: Slack and Teams — files uploaded as bytes, Slack Connect refused, escaped text, an Adaptive Card with the PNG, no secret in a log"
 
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting
