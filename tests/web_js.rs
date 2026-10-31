@@ -193,3 +193,10 @@ fn web_export_wires_each_tab_group_independently() {
 fn web_panel_names() {
     run_node("names_test.mjs");
 }
+
+/// #759: GFM tables in ::MARKDOWN / ::INFO, ::INFO's line breaks, and no
+/// HTML from data in either.
+#[test]
+fn web_markdown_tables_and_info_breaks() {
+    run_node("md_table_test.mjs");
+}

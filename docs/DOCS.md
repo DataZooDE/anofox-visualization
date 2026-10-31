@@ -182,7 +182,7 @@ terminal.
 | `::TEXT_SMALL` |  | kpi | small text card |
 | `::TEXT_MEDIUM` |  | kpi | medium text card |
 | `::TEXT_LARGE` |  | kpi | large text card |
-| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
+| `::MARKDOWN` | `::MD`, `::TEXTBOX`, `::RICHTEXT` | kpi | a Markdown box (browser; lists, links, GFM tables); {{col}} / {{col:fmt}} fill in values from its own row; $…$ / $$…$$ TeX formulas; ![alt](src) images use the same source rules as ::IMAGE |
 | `::CALLOUT` | `::ADMONITION` | kpi | draw the ::MARKDOWN box as a callout: 'note', 'warning' or 'success' |
 | `::MARKDOWN_STYLE` | `::MD_STYLE` | kpi | a ::MARKDOWN box's chrome: 'plain' (page background, no card/tint/bar), 'card' (plain white card) or 'callout' (today's tinted box, the default; ::CALLOUT implies it); 'caption' puts the text under the chart right before it, in its card; a dashboard-wide default comes from -- @markdown_style |
 | `::MARKDOWN_TONE` | `::MD_TONE` | kpi | a quiet accent on a 'card' ::MARKDOWN box: 'info', 'example', 'tip', 'caution', 'details' or 'neutral' (none) — a thin coloured bar plus a small label; 'example: Beispiel' sets the label, 'example:' drops it; 'details' folds (the label opens it, in the browser); implies 'card' |
@@ -2258,6 +2258,20 @@ FROM orders GROUP BY ALL ORDER BY 1;
 It works on charts, KPIs, `::TABLE`s (the column is not shown as a cell) and
 Markdown boxes; in headless SVG the ⓘ follows the title and carries the text as
 its tooltip (`<title>`).
+
+The text is Markdown, like a `::MARKDOWN` box's (escaped, never HTML from the
+data), and a line break in it stays a line break, so a column glossary reads
+as one definition per line, or as a list or a table:
+
+```sql
+SELECT * ::TABLE,
+       'Columns:' || chr(10) ||
+       '- **Rank**: position by places' || chr(10) ||
+       '- **Trend %**: change against the previous week' ::INFO
+FROM rankings;
+```
+
+A long text gets a wider box that scrolls inside (it never runs off the screen).
 
 `::CALLOUT` turns a `::MARKDOWN` box into a highlighted **note**, **warning**
 or **success** box (tinted, with an icon; theme tokens, so dark mode follows):

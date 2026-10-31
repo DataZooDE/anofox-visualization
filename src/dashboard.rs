@@ -2753,8 +2753,9 @@ pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<MdLine> {
                 continue;
             }
         }
+        let flat = flatten_blocks(trimmed);
         let mut words: Vec<String> = Vec::new();
-        for seg in crate::math::spans(trimmed) {
+        for seg in crate::math::spans(&flat) {
             match seg {
                 crate::math::Seg::Text(t) => {
                     let mut plain = String::new();
@@ -2804,7 +2805,13 @@ pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<MdLine> {
                         plain
                             .split_whitespace()
                             .filter(|w| !w.chars().all(|c| c == '#'))
-                            .map(str::to_string),
+                            .map(|w| {
+                                if w == LINE_MARK {
+                                    MD_BREAK.to_string()
+                                } else {
+                                    w.to_string()
+                                }
+                            }),
                     );
                 }
                 crate::math::Seg::Math { tex, display } => {
@@ -2856,6 +2863,58 @@ pub(crate) fn markdown_lines(md: &str, w: f64) -> Vec<MdLine> {
     out
 }
 
+/// Marks a line that must start a new line in [`markdown_lines`]' wrapped
+/// text (a private-use character, never in a dashboard's text).
+const LINE_MARK: &str = "\u{E010}";
+
+/// #759: within one paragraph, a list item or a GFM table row starts its
+/// own line (the browser shows a list or a table; a static export at least
+/// keeps one item per line). A table's separator row is dropped and its
+/// cells are joined with " · ".
+fn flatten_blocks(para: &str) -> String {
+    let para = para.replace(LINE_MARK, "");
+    let lines: Vec<&str> = para.lines().collect();
+    let is_sep = |l: &str| {
+        let t = l.trim().trim_matches('|');
+        l.contains('|')
+            && !t.is_empty()
+            && t.split('|').all(|c| {
+                let c = c.trim().trim_start_matches(':').trim_end_matches(':');
+                !c.is_empty() && c.chars().all(|ch| ch == '-')
+            })
+    };
+    let has_table = lines.iter().any(|l| is_sep(l));
+    let is_item = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("- ")
+            || t.starts_with("* ")
+            || t.starts_with("+ ")
+            || t.split_once(". ")
+                .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    let mut out: Vec<String> = Vec::new();
+    for l in lines {
+        if has_table && is_sep(l) {
+            continue;
+        }
+        let row = has_table && l.contains('|');
+        let text = if row {
+            let t = l.trim();
+            let t = t.strip_prefix('|').unwrap_or(t);
+            let t = t.strip_suffix('|').unwrap_or(t);
+            t.split('|').map(str::trim).collect::<Vec<_>>().join(" · ")
+        } else {
+            l.to_string()
+        };
+        if !out.is_empty() && (row || is_item(l)) {
+            out.push(format!("{LINE_MARK} {text}"));
+        } else {
+            out.push(text);
+        }
+    }
+    out.join("\n")
+}
+
 /// One [`markdown_lines`] line as SVG text content (escaped). Formula words
 /// are now already plain text ([`crate::math::tex_to_text`], #351), so this
 /// is no longer anything more than that.
@@ -2876,6 +2935,36 @@ mod md_tests {
             MdLine::Text(t) => t,
             MdLine::Image { .. } => panic!("expected MdLine::Text, got {l:?}"),
         }
+    }
+
+    #[test]
+    fn lists_and_tables_keep_one_item_per_line() {
+        let lines: Vec<String> = super::markdown_lines(
+            "Columns:\n- **Rank**: position\n- Trend: change\n\n| Column | Meaning |\n|---|:--:|\n| Rank | position |\n| Places | count |",
+            900.0,
+        )
+        .iter()
+        .map(|l| text_of(l).to_string())
+        .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Columns:",
+                "- Rank: position",
+                "- Trend: change",
+                "",
+                "Column · Meaning",
+                "Rank · position",
+                "Places · count",
+            ],
+            "{lines:?}"
+        );
+        // a plain paragraph's lines still flow together
+        let p: Vec<String> = super::markdown_lines("one\ntwo", 900.0)
+            .iter()
+            .map(|l| text_of(l).to_string())
+            .collect();
+        assert_eq!(p, vec!["one two"]);
     }
 
     #[test]
