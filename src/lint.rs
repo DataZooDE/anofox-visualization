@@ -4511,11 +4511,18 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
 pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
     use crate::host::serving::{parse_dashboard_meta, valid_dashboard_id};
     let mut out = Vec::new();
-    let id_of = |f: &str| f.strip_suffix(".sql").unwrap_or(f).to_string();
+    // A file may sit in a subfolder (`sales/weekly.sql`, #772): its id is
+    // its own name's.
+    let id_of = |f: &str| {
+        let base = f.rsplit('/').next().unwrap_or(f);
+        base.strip_suffix(".sql").unwrap_or(base).to_string()
+    };
     let mut labels: Vec<(String, String)> = Vec::new(); // (nav label, file)
+    let mut ids: Vec<(String, String)> = Vec::new(); // (id, file)
     for (file, script) in files {
-        let id = id_of(file);
-        if !valid_dashboard_id(&id) {
+        let stem = id_of(file);
+        // A file whose name isn't an id is skipped, `-- @id` or not.
+        if !valid_dashboard_id(&stem) {
             out.push((
                 file.clone(),
                 Diagnostic {
@@ -4531,7 +4538,43 @@ pub fn folder_diags(files: &[(String, String)]) -> Vec<(String, Diagnostic)> {
             ));
             continue;
         }
-        let meta = parse_dashboard_meta(&id, script);
+        let header = parse_dashboard_meta(&stem, script).id;
+        // #772: `-- @id` names the dashboard instead of its file.
+        if let Some(h) = header.as_deref().filter(|h| !valid_dashboard_id(h)) {
+            out.push((
+                file.clone(),
+                Diagnostic {
+                    severity: Severity::Error,
+                    stmt: 0,
+                    code: "folder/bad-id-header",
+                    message: format!(
+                        "`-- @id {h}` is not a dashboard id (letters, digits, `_`, `-` and `.`, \
+                         not starting with `.`): the server refuses to start"
+                    ),
+                    sql: String::new(),
+                },
+            ));
+            continue;
+        }
+        let id = header.unwrap_or_else(|| stem.clone());
+        if let Some((_, first)) = ids.iter().find(|(i, _)| *i == id) {
+            out.push((
+                file.clone(),
+                Diagnostic {
+                    severity: Severity::Error,
+                    stmt: 0,
+                    code: "folder/duplicate-id",
+                    message: format!(
+                        "`{first}` has the id `{id}` too: the server refuses to start — rename \
+                         one, or give it its own `-- @id`"
+                    ),
+                    sql: String::new(),
+                },
+            ));
+            continue;
+        }
+        ids.push((id, file.clone()));
+        let meta = parse_dashboard_meta(&stem, script);
         let label = meta.nav_label().to_string();
         if let Some((_, first)) = labels.iter().find(|(l, _)| l.eq_ignore_ascii_case(&label)) {
             out.push((
@@ -7588,6 +7631,26 @@ mod design_tests {
             ]
         );
         assert!(d[0].1.message.contains("a.sql"), "{}", d[0].1.message);
+        // #772: ids from `-- @id` and subfolder files (`sales/w.sql` → `w`)
+        let d = folder_diags(&[
+            f("w.sql", "-- @title A\nSELECT 1;"),
+            f("sales/w.sql", "-- @title B\nSELECT 1;"),
+            f("sales/x.sql", "-- @id w\n-- @title C\nSELECT 1;"),
+            f("sales/y.sql", "-- @id ../y\n-- @title D\nSELECT 1;"),
+            f("sales/z.sql", "-- @id renamed\n-- @title E\nSELECT 1;"),
+            f("sales/bad name.sql", "-- @id fine\n-- @title F\nSELECT 1;"),
+        ]);
+        let got: Vec<(&str, &str)> = d.iter().map(|(f, d)| (f.as_str(), d.code)).collect();
+        assert_eq!(
+            got,
+            [
+                ("sales/w.sql", "folder/duplicate-id"),
+                ("sales/x.sql", "folder/duplicate-id"),
+                ("sales/y.sql", "folder/bad-id-header"),
+                ("sales/bad name.sql", "folder/bad-id"),
+            ]
+        );
+        assert!(d[0].1.message.contains("`w.sql`"), "{}", d[0].1.message);
         // #355: the folder check is on nav_label() (nav, else title), not
         // the raw title — so an @nav tells two same-titled dashboards
         // apart, and a colliding @nav still catches them even with

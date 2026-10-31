@@ -82,6 +82,8 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     // #773: linked into the server's pages only; a static site doesn't
     // carry it (yet).
     ("css_file", SiteOptionKind::ServerOnly),
+    // #772: a published site reads the same subfolders.
+    ("folders", SiteOptionKind::Site),
     ("home", SiteOptionKind::Site),
     ("source", SiteOptionKind::ServerOnly),
     // #517 S2: per-viewer append-only state needs a real server behind it

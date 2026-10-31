@@ -478,6 +478,103 @@ pub fn dashboard_id_from_path(path: &std::path::Path) -> Option<String> {
     valid_dashboard_id(&id).then_some(id)
 }
 
+/// One dashboard file of a served folder ([`dashboard_files`]).
+#[derive(Debug, Clone)]
+pub struct DashFile {
+    pub path: std::path::PathBuf,
+    /// `-- @id`, else the file name without `.sql`.
+    pub id: String,
+    pub sql: String,
+    /// Its headers; a file in a subfolder without `-- @group` gets the
+    /// folder's name as its group.
+    pub meta: DashboardMeta,
+}
+
+/// Folder names inside a dashboards folder that never hold dashboards.
+const NOT_DASHBOARD_FOLDERS: [&str; 3] = ["assets", "tasks", "data"];
+
+/// May a subfolder of a dashboards folder hold dashboards (with
+/// `options.folders`, #772)? Not `assets/`, `tasks/`, `data/` or a hidden
+/// one, and its name is a valid id (it becomes the group).
+pub fn is_dashboard_subfolder(name: &str) -> bool {
+    !name.starts_with('.') && !NOT_DASHBOARD_FOLDERS.contains(&name) && valid_dashboard_id(name)
+}
+
+/// A dashboard's id: its valid `-- @id`, else its file name without `.sql`
+/// (`None`: the file isn't served).
+pub fn dashboard_id(path: &std::path::Path, meta: &DashboardMeta) -> Option<String> {
+    match &meta.id {
+        Some(h) => valid_dashboard_id(h).then(|| h.clone()),
+        None => dashboard_id_from_path(path),
+    }
+}
+
+/// The dashboards of a served folder, sorted by path: every `*.sql` in
+/// `dir`, and with `folders` (#772, `options.folders`) every `*.sql` one
+/// level down (not in `assets/`, `tasks/`, `data/` or a hidden folder). A
+/// file whose name isn't a valid id is skipped (`dashboard --check` says
+/// so). Errors: a file that can't be read, an invalid `-- @id`, and two
+/// files with the same id.
+pub fn dashboard_files(dir: &std::path::Path, folders: bool) -> Result<Vec<DashFile>, String> {
+    let read_dir = |d: &std::path::Path| {
+        std::fs::read_dir(d)
+            .map_err(|e| format!("cannot read dashboard dir '{}': {e}", d.display()))
+    };
+    let mut paths: Vec<(std::path::PathBuf, Option<String>)> = Vec::new();
+    for e in read_dir(dir)?.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if p.is_dir() {
+            if folders && is_dashboard_subfolder(&name) {
+                for f in read_dir(&p)?.flatten() {
+                    if f.path().is_file() {
+                        paths.push((f.path(), Some(name.clone())));
+                    }
+                }
+            }
+        } else {
+            paths.push((p, None));
+        }
+    }
+    paths.sort();
+    let mut out: Vec<DashFile> = Vec::new();
+    for (path, folder) in paths {
+        let Some(stem) = dashboard_id_from_path(&path) else {
+            continue; // not a .sql file, or not a valid id ([A-Za-z0-9_.-])
+        };
+        let sql = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut meta = parse_dashboard_meta(&stem, &sql);
+        let id = match &meta.id {
+            None => stem,
+            Some(h) if valid_dashboard_id(h) => h.clone(),
+            Some(h) => {
+                return Err(format!(
+                    "{}: -- @id '{h}' is not a dashboard id (letters, digits, _, - and ., not starting with .)",
+                    path.display()
+                ))
+            }
+        };
+        if let Some(first) = out.iter().find(|d| d.id == id) {
+            return Err(format!(
+                "dashboard id '{id}' is used by both {} and {} — rename one, or give it its own -- @id",
+                first.path.display(),
+                path.display()
+            ));
+        }
+        if meta.group.is_none() {
+            meta.group = folder.as_deref().and_then(normalize_group);
+        }
+        out.push(DashFile {
+            path,
+            id,
+            sql,
+            meta,
+        });
+    }
+    Ok(out)
+}
+
 /// A SQL string literal (`'…'` with `'` doubled). DuckDB string literals have no
 /// backslash escapes, so this is a complete escaping.
 pub fn sql_string_literal(s: &str) -> String {
@@ -1125,6 +1222,11 @@ pub struct DashboardMeta {
     /// `-- @certified <YYYY-MM-DD>`: the day it was last checked; `None` when
     /// missing or not a valid date.
     pub certified: Option<String>,
+    /// `-- @id <id>` (#772): the dashboard's id instead of its file name, so
+    /// links, embed links, reports and options keep working when the file
+    /// is renamed or moved. As written (trimmed); [`dashboard_files`]
+    /// refuses one that isn't a valid id.
+    pub id: Option<String>,
     /// `-- @order N`: where it sits in the served nav bar and the start
     /// page's card grid, ascending, among its siblings (same group, or
     /// ungrouped); `None` when missing or not a plain integer — such
@@ -1412,6 +1514,8 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             m.title = r.trim().to_string();
         } else if let Some(r) = header_value(l, "nav") {
             m.nav = Some(r.to_string()).filter(|s| !s.is_empty());
+        } else if let Some(r) = header_value(l, "id") {
+            m.id = Some(r.to_string());
         } else if let Some(r) = header_value(l, "group") {
             m.group = normalize_group(r);
         } else if let Some(r) = header_value(l, "description") {
@@ -2101,6 +2205,58 @@ mod tests {
             assert!(valid_daterange_preset(p));
         }
         assert!(!valid_daterange_preset("last week"));
+    }
+
+    // #772: `-- @id`, subfolders with `options.folders`, duplicate ids.
+    #[test]
+    fn dashboard_files_read_ids_and_folders() {
+        let d = std::env::temp_dir().join(format!("afx-dashfiles-{}", random_token()));
+        for sub in ["sales", "assets", "tasks", ".git", "bad name"] {
+            std::fs::create_dir_all(d.join(sub)).unwrap();
+        }
+        let w = |p: &str, s: &str| std::fs::write(d.join(p), s).unwrap();
+        w("overview.sql", "SELECT 1::METRIC;");
+        w("sales/weekly.sql", "-- @id sales-weekly\nSELECT 2::METRIC;");
+        w("sales/eu.sql", "-- @group Regions\nSELECT 3::METRIC;");
+        w("assets/x.sql", "SELECT 4::METRIC;");
+        w("tasks/t.sql", "SELECT 5::METRIC;");
+        w(".git/h.sql", "SELECT 6::METRIC;");
+        w("bad name/b.sql", "SELECT 7::METRIC;");
+        w("notes.txt", "x");
+        let ids = |folders| -> Vec<(String, Option<String>)> {
+            dashboard_files(&d, folders)
+                .unwrap()
+                .into_iter()
+                .map(|f| (f.id, f.meta.group))
+                .collect()
+        };
+        // without `folders`: the folder itself only
+        assert_eq!(ids(false), vec![("overview".to_string(), None)]);
+        // with it: one level down, the folder as the default group
+        assert_eq!(
+            ids(true),
+            vec![
+                ("overview".to_string(), None),
+                ("eu".to_string(), Some("Regions".to_string())),
+                ("sales-weekly".to_string(), Some("sales".to_string())),
+            ]
+        );
+        // two files with one id, or a bad -- @id: an error naming the files
+        w("sales/overview.sql", "SELECT 8::METRIC;");
+        let e = dashboard_files(&d, true).unwrap_err();
+        assert!(
+            e.contains("'overview'") && e.contains("sales/overview.sql"),
+            "{e}"
+        );
+        assert!(
+            dashboard_files(&d, false).is_ok(),
+            "not read without folders"
+        );
+        std::fs::remove_file(d.join("sales/overview.sql")).unwrap();
+        w("overview.sql", "-- @id ../x\nSELECT 1::METRIC;");
+        let e = dashboard_files(&d, false).unwrap_err();
+        assert!(e.contains("-- @id '../x'"), "{e}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

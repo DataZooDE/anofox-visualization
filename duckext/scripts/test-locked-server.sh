@@ -1340,3 +1340,29 @@ grep -q "reloaded 1 dashboard(s)" "$T/out" || fail "reload after the swap: $(cat
 [ "$(rget /d/b/assets/one.svg)" = 404 ] || fail "reload: the old folder's assets are gone"
 stop
 echo "OK: #772: anofox_serve_reload — new files, a broken set keeps the old one, a swapped symlink is followed"
+
+# #772 part 2: `-- @id` names a dashboard instead of its file; with
+# `"folders": true` the subfolders' dashboards are served too, each folder a
+# group; two files with one id refuse the start.
+mkdir -p "$T/fd/sales" "$T/fd/tasks"
+printf -- '-- @title Overview\nSELECT 1 AS n ::METRIC;\n' > "$T/fd/overview.sql"
+printf -- '-- @id sales-weekly\n-- @title Weekly sales\nSELECT 2 AS n ::METRIC;\n' > "$T/fd/sales/weekly-v2.sql"
+printf 'SELECT 1;\n' > "$T/fd/tasks/nightly.task.sql"
+fserve() { echo "SELECT anofox_serve_dashboards($(q "$T/fd"), $PORT, $(q "$1"));"; }
+start "$T/main.duckdb" "" "$(fserve '{}')" || fail "folders off: the server should start"
+[ "$(rget /d/overview)" = 200 ] || fail "folders off: /d/overview"
+[ "$(rget /d/sales-weekly)" = 404 ] || fail "folders off: a subfolder's dashboard must not be served"
+stop
+start "$T/main.duckdb" "" "$(fserve '{"folders": true}')" || fail "folders on: the server should start"
+[ "$(rget /d/sales-weekly)" = 200 ] || fail "folders on: /d/sales-weekly (its -- @id)"
+[ "$(rget /d/weekly-v2)" = 404 ] || fail "folders on: the file name is not the id when -- @id is set"
+[ "$(rget /)" = 200 ] && grep -qE 'class="lp-group-h"[^>]*>sales ' "$T/rbody" || fail "folders on: the folder is a group on the / list: $(grep -o 'lp-group-h[^<]*' "$T/rbody" | head -3)"
+[ "$(rget /d/nightly.task)" = 404 ] || fail "folders on: tasks/ is not a dashboards folder"
+stop
+printf 'SELECT 3 AS n ::METRIC;\n' > "$T/fd/sales/overview.sql"
+if QUIET=1 start "$T/main.duckdb" "" "$(fserve '{"folders": true}')"; then
+  fail "two dashboards with the id 'overview' should refuse the start"
+fi
+grep -q "dashboard id 'overview' is used by both" "$T/out" || fail "duplicate id: no reason given: $(cat "$T/out")"
+exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
+echo "OK: #772: -- @id, options.folders (a folder is a group), duplicate ids refuse the start"

@@ -1258,6 +1258,9 @@ pub struct LockedOptions {
     /// `css_file` (#773): the operator's stylesheet, read and checked at
     /// start ([`site_css::check`]), served at [`site_css::PATH`].
     pub site_css: Option<Arc<str>>,
+    /// `folders` (#772): serve the `*.sql` files one level down too, each
+    /// folder a group of the nav and the `/` list.
+    pub folders: bool,
     /// `home`: a dashboard id `/` redirects to instead of the landing page
     /// (when the viewer may read it).
     pub home: Option<String>,
@@ -1649,6 +1652,7 @@ impl Default for LockedOptions {
             search_path: Vec::new(),
             app: None,
             site_css: None,
+            folders: false,
             home: None,
             source: None,
             state_opts: None,
@@ -1896,6 +1900,11 @@ impl LockedOptions {
                         .map_err(|e| format!("options.app: {e}"))?;
                     a.check().map_err(|e| format!("options.app: {e}"))?;
                     o.app = Some(a);
+                }
+                "folders" => {
+                    o.folders = val
+                        .as_bool()
+                        .ok_or("options.folders must be true or false")?;
                 }
                 "css_file" => {
                     let f = val
@@ -2217,7 +2226,7 @@ impl DashSet {
 /// Read the dashboards folder into a [`DashSet`]: the same reads and
 /// refusals at start and on `anofox_serve_reload`.
 fn load_dash_set(dir: &Path, opts: &LockedOptions) -> Result<DashSet, String> {
-    let (list, mut loads) = load_dashboards(dir)?;
+    let (list, mut loads) = load_dashboards(dir, opts.folders)?;
     // Review of #554 nit 8: a symlinked `assets` (e.g. `assets -> /`)
     // refuses to start, loudly — `canonical_assets_dir` itself already
     // treats it as `None` (no assets served), but silently starting with
@@ -5121,19 +5130,18 @@ fn build_nav_picker(
 
 /// Load `*.sql` dashboards from `dir`. Returns them plus the union of their
 /// `-- @load` extensions.
-fn load_dashboards(dir: &Path) -> Result<(Vec<Dash>, Vec<String>), String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("cannot read dashboard dir '{}': {e}", dir.display()))?;
+/// The dashboards of `dir` (and, with `folders`, its subfolders — #772),
+/// planned for serving: [`sv::dashboard_files`] reads them.
+fn load_dashboards(dir: &Path, folders: bool) -> Result<(Vec<Dash>, Vec<String>), String> {
     let mut out = Vec::new();
     let mut loads = Vec::new();
-    for e in entries.flatten() {
-        let p = e.path();
-        let Some(id) = sv::dashboard_id_from_path(&p) else {
-            continue; // not a .sql file, or not a valid id ([A-Za-z0-9_.-])
-        };
-        let sql =
-            std::fs::read_to_string(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
-        let meta = sv::parse_dashboard_meta(&id, &sql);
+    for f in sv::dashboard_files(dir, folders)? {
+        let sv::DashFile {
+            path: p,
+            id,
+            sql,
+            meta,
+        } = f;
         loads.extend(meta.loads.iter().cloned());
         let planned = anofox_visualization::sql::plan(&sql);
         let info = planned
@@ -9741,7 +9749,7 @@ mod tests {
         std::fs::write(dir.join("aaa_second.sql"), "-- @order 2\nSELECT 1;").unwrap();
         std::fs::write(dir.join("mmm_third.sql"), "-- @order 3\nSELECT 1;").unwrap();
         std::fs::write(dir.join("zzz_unordered.sql"), "SELECT 1;").unwrap();
-        let (dashboards, _) = load_dashboards(&dir).unwrap();
+        let (dashboards, _) = load_dashboards(&dir, false).unwrap();
         let ids: Vec<&str> = dashboards.iter().map(|d| d.id.as_str()).collect();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(

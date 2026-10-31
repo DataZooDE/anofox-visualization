@@ -766,6 +766,14 @@ of the authoring servers carries a
     seed — there is no client script there — so `charts_as_tables` only
     ever has an effect on `anofox_serve_dashboards`'s own dashboard pages
     and the authoring builder (`anofox_serve`/`serve <db>`, `--app-charts-as-tables`).
+  - `folders` — `true`: the `*.sql` files one level down are served too,
+    each folder a group of the nav and the `/` list (unless the file sets its
+    own `-- @group`) (#772). Not `assets/`, `tasks/`, `data/` or a hidden
+    folder. Off by default, so an `archive/` folder already sitting next to
+    the dashboards doesn't go live with an upgrade. A dashboard's id stays
+    its file name (or its `-- @id`), so two files with one id across folders
+    stop the start. `dashboard --check <folder> --options <file>` and
+    `--site` read the same files.
   - `home` — a dashboard id: `/` redirects (`302`) to `/d/<home>` instead of
     showing the landing page, when the viewer may read that dashboard (else
     the landing page). The server refuses to start if no such dashboard
