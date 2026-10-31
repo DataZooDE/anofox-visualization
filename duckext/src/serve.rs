@@ -1265,6 +1265,8 @@ pub struct LockedOptions {
     pub notify: Option<notify::NotifyOptions>,
     /// `reports` (#768): scheduled reports.
     pub reports: Vec<notify::Report>,
+    /// `alerts` (#768 R2): a panel's rows, sent when they change.
+    pub alerts: Vec<notify::Alert>,
 }
 
 /// `options.tasks` (#767, docs/plans/plan-tasks-reports.md §1).
@@ -1279,6 +1281,9 @@ pub struct TasksOptions {
     pub timeout: Duration,
     /// Where each run is recorded (`log`: a file or `"stderr"`; default stderr).
     pub log: Option<String>,
+    /// #768 R2: told when a task starts failing and when it recovers
+    /// (`on_failure: {"to": […]}`, channels from `options.notify`).
+    pub on_failure: Vec<notify::Recipient>,
 }
 
 /// One entry of `options.nav_pickers` (or the single-element list
@@ -1503,7 +1508,10 @@ fn parse_metrics(val: &serde_json::Value) -> Result<String, String> {
 
 /// `options.tasks` (#767): `{"run": true, "write": ["stage"], "timeout_s":
 /// 900, "log": "/var/log/anofox/tasks.jsonl"}`.
-fn parse_tasks(val: &serde_json::Value) -> Result<TasksOptions, String> {
+fn parse_tasks(
+    val: &serde_json::Value,
+    notify: Option<&notify::NotifyOptions>,
+) -> Result<TasksOptions, String> {
     let m = val
         .as_object()
         .ok_or("options.tasks must be an object like {\"run\": true, \"write\": [\"stage\"]}")?;
@@ -1512,6 +1520,7 @@ fn parse_tasks(val: &serde_json::Value) -> Result<TasksOptions, String> {
         write: Vec::new(),
         timeout: Duration::from_secs(900),
         log: None,
+        on_failure: Vec::new(),
     };
     for (k, v) in m {
         match k.as_str() {
@@ -1539,6 +1548,14 @@ fn parse_tasks(val: &serde_json::Value) -> Result<TasksOptions, String> {
                         .ok_or("options.tasks.timeout_s must be 1..=86400")?,
                 )
             }
+            "on_failure" => {
+                let m = v
+                    .as_object()
+                    .filter(|m| m.keys().all(|k| k == "to"))
+                    .ok_or("options.tasks.on_failure must be {\"to\": [recipients]}")?;
+                t.on_failure =
+                    notify::parse_recipients(m.get("to"), notify, "options.tasks.on_failure")?;
+            }
             "log" => {
                 t.log = Some(
                     v.as_str()
@@ -1548,7 +1565,7 @@ fn parse_tasks(val: &serde_json::Value) -> Result<TasksOptions, String> {
             }
             other => {
                 return Err(format!(
-                    "options.tasks: unknown key '{other}' (run, write, timeout_s, log)"
+                    "options.tasks: unknown key '{other}' (run, write, timeout_s, log, on_failure)"
                 ))
             }
         }
@@ -1618,6 +1635,7 @@ impl Default for LockedOptions {
             tasks: None,
             notify: None,
             reports: Vec::new(),
+            alerts: Vec::new(),
         }
     }
 }
@@ -1634,7 +1652,8 @@ impl LockedOptions {
         let (mut log, mut log_vars) = (None, None);
         let (mut auth_cfg, mut audit) = (None, None);
         let (mut saw_nav_picker, mut saw_nav_pickers) = (false, false);
-        let (mut notify_cfg, mut reports_cfg) = (None, None);
+        let (mut notify_cfg, mut reports_cfg, mut alerts_cfg, mut tasks_cfg) =
+            (None, None, None, None);
         for (k, val) in m {
             let num = || {
                 val.as_u64()
@@ -1793,11 +1812,10 @@ impl LockedOptions {
                 "metrics" => {
                     o.metrics_token = Some(parse_metrics(val)?);
                 }
-                "tasks" => {
-                    o.tasks = Some(parse_tasks(val)?);
-                }
+                "tasks" => tasks_cfg = Some(val),
                 "notify" => notify_cfg = Some(val),
                 "reports" => reports_cfg = Some(val),
+                "alerts" => alerts_cfg = Some(val),
                 "bind" => {
                     o.bind = val
                         .as_str()
@@ -1948,6 +1966,12 @@ impl LockedOptions {
         }
         if let Some(v) = reports_cfg {
             o.reports = notify::parse_reports(v, o.notify.as_ref())?;
+        }
+        if let Some(v) = alerts_cfg {
+            o.alerts = notify::parse_alerts(v, o.notify.as_ref())?;
+        }
+        if let Some(v) = tasks_cfg {
+            o.tasks = Some(parse_tasks(v, o.notify.as_ref())?);
         }
         match (log, log_vars) {
             (Some(l), v) => {
@@ -2705,6 +2729,10 @@ struct Locked {
     report_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// #768: the messages sent in the last hour (`notify.max_per_hour`).
     report_rate: Mutex<notify::Rate>,
+    /// #768 R2: per alert, its checks (for `/metrics`).
+    alert_stats: Mutex<BTreeMap<String, TaskStat>>,
+    /// #768 R2: per alert, what it last sent (`notify.state` on disk).
+    alert_states: Mutex<BTreeMap<String, notify::AlertState>>,
     /// `<dir>/assets`, canonicalized once at startup (#514 PR B) — `None`
     /// when there is no such folder next to the dashboards, so every
     /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
@@ -3362,6 +3390,33 @@ pub fn start_locked(
                 .map_err(|e| format!("report '{}': schedule: {e}", r.name))?;
         }
     }
+    // #768 R2: an alert names a dashboard here and a `-- @name`d panel of
+    // it; its check must evaluate on the sending replica. Its state is read
+    // now (a broken file stops the start rather than send everything again).
+    for a in &opts.alerts {
+        let d = dashboards
+            .iter()
+            .find(|d| d.id == a.dashboard)
+            .ok_or_else(|| format!("alert '{}': no dashboard '{}'", a.name, a.dashboard))?;
+        if !anofox_visualization::sql::plan(&d.sql)
+            .iter()
+            .any(|x| !x.setup && x.name.as_deref() == Some(a.panel.as_str()))
+        {
+            return Err(format!(
+                "alert '{}': dashboard '{}' has no panel named '{}' (`-- @name {}`)",
+                a.name, a.dashboard, a.panel, a.panel
+            ));
+        }
+        if opts.notify.as_ref().is_some_and(|n| n.run) {
+            let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+            eval_schedule(&conn, &a.schedule)
+                .map_err(|e| format!("alert '{}': check: {e}", a.name))?;
+        }
+    }
+    let alert_states = match opts.notify.as_ref().and_then(|n| n.state.as_deref()) {
+        Some(p) if !opts.alerts.is_empty() => notify::load_states(p)?,
+        _ => BTreeMap::new(),
+    };
     // #514 PR B: computed once at startup, like every other path-derived
     // limit here (`options.data`) — an asset request never canonicalizes
     // `dir` itself per request. Review of #554 nit 8: a symlinked `assets`
@@ -3688,6 +3743,8 @@ pub fn start_locked(
         task_stats: Mutex::new(BTreeMap::new()),
         report_stats: Mutex::new(BTreeMap::new()),
         report_rate: Mutex::new(notify::Rate::default()),
+        alert_stats: Mutex::new(BTreeMap::new()),
+        alert_states: Mutex::new(alert_states),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -3731,8 +3788,8 @@ pub fn start_locked(
         std::thread::spawn(move || task_runner(&st, &stop, task_list))
     });
     // #768: the report runner, on this replica only when `notify.run`.
-    let reports_running =
-        !state.opts.reports.is_empty() && state.opts.notify.as_ref().is_some_and(|n| n.run);
+    let reports_running = !(state.opts.reports.is_empty() && state.opts.alerts.is_empty())
+        && state.opts.notify.as_ref().is_some_and(|n| n.run);
     // #768 D4: each report's principal, for the operator to attest.
     let report_note: String = state
         .opts
@@ -3759,6 +3816,19 @@ pub fn start_locked(
                 }
             )
         })
+        .chain(state.opts.alerts.iter().map(|a| {
+            format!(
+                "; alert '{}' runs as {} to {} recipient(s){}",
+                a.name,
+                a.principal.user,
+                a.to.len(),
+                if reports_running {
+                    ""
+                } else {
+                    ", not sent from this replica"
+                }
+            )
+        }))
         .collect();
     let reports_handle = reports_running.then(|| {
         let (st, stop) = (state.clone(), stop.clone());
@@ -4034,9 +4104,11 @@ fn run_task(st: &Locked, opts: &TasksOptions, t: &tasks::Task) -> bool {
         }
     };
     let ok = res.is_ok();
-    {
+    let res = res.map_err(|e| redact(e, st.opts.data.as_deref()));
+    let was_failing = {
         let mut m = st.task_stats.lock().unwrap_or_else(|p| p.into_inner());
         let s = m.entry(t.name.clone()).or_default();
+        let was = s.failing_in_row > 0;
         s.runs += 1;
         if ok {
             s.last_ok = Some(started as u64);
@@ -4045,16 +4117,26 @@ fn run_task(st: &Locked, opts: &TasksOptions, t: &tasks::Task) -> bool {
             s.failures += 1;
             s.failing_in_row += 1;
         }
-    }
+        was
+    };
     let line = serde_json::json!({
         "task": t.name,
         "start": started as u64,
         "ms": t0.elapsed().as_millis() as u64,
         "ok": ok,
-        "error": res.err().map(|e| redact(e, st.opts.data.as_deref())),
+        "error": res.as_ref().err(),
     })
     .to_string();
     run_log(opts.log.as_deref(), "task", &line);
+    // #768 R2: the first failure in a row, and the recovery after one.
+    if !opts.on_failure.is_empty() && was_failing != !ok {
+        task_notify(
+            st,
+            &opts.on_failure,
+            t,
+            res.as_ref().err().map(String::as_str),
+        );
+    }
     ok
 }
 
@@ -4115,15 +4197,25 @@ fn task_gauges(st: &Locked) -> Vec<metrics::Gauge> {
 
 // ---- #768: reports ---------------------------------------------------------
 
-/// The report thread: sends each report when it is due (`options.notify.run`).
+/// The notify thread: sends each report and checks each alert when it is due
+/// (`options.notify.run`).
 fn report_runner(st: &Locked, stop: &AtomicBool) {
-    let list = &st.opts.reports;
-    let jobs: Vec<(&str, &str)> = list
+    let (reports, alerts) = (&st.opts.reports, &st.opts.alerts);
+    let jobs: Vec<(&str, &str)> = reports
         .iter()
         .map(|r| (r.name.as_str(), r.schedule.as_str()))
+        .chain(
+            alerts
+                .iter()
+                .map(|a| (a.name.as_str(), a.schedule.as_str())),
+        )
         .collect();
-    run_on_schedule(st, stop, "report", &jobs, false, |i| {
-        let _ = record_report(st, &list[i], false);
+    run_on_schedule(st, stop, "report/alert", &jobs, false, |i| {
+        if i < reports.len() {
+            let _ = record_report(st, &reports[i], false);
+        } else {
+            let _ = record_alert(st, &alerts[i - reports.len()], false);
+        }
     });
 }
 
@@ -4166,7 +4258,7 @@ fn record_report(st: &Locked, r: &notify::Report, manual: bool) -> Result<usize,
 /// Render a report's files through the export path as its principal (D4),
 /// then send them to every recipient. Over a limit nothing is sent.
 fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
-    use notify::{Format, Recipient};
+    use notify::Format;
     let n = st.opts.notify.as_ref().ok_or("options.notify is not set")?;
     let dash = st
         .dashboards
@@ -4231,27 +4323,43 @@ fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
         ));
     }
     let msg = notify::Message {
-        report: r.name.clone(),
+        kind: "report",
+        name: r.name.clone(),
         title: dash.meta.title.clone(),
+        status: None,
+        detail: None,
         as_of,
         link: n.link.as_ref().map(|l| format!("{l}/d/{}", dash.id)),
         time: std::time::SystemTime::now(),
     };
-    let emails: Vec<String> =
-        r.to.iter()
-            .filter_map(|t| match t {
-                Recipient::Email(a) => Some(a.clone()),
-                Recipient::Webhook(_) => None,
-            })
-            .collect();
-    let hooks: Vec<(&str, &notify::Webhook)> =
-        r.to.iter()
-            .filter_map(|t| match t {
-                Recipient::Webhook(w) => n.webhooks.get(w).map(|h| (w.as_str(), h)),
-                Recipient::Email(_) => None,
-            })
-            .collect();
-    // One message per e-mail (all recipients in Bcc) and per webhook.
+    deliver_all(st, &r.to, &msg, &files)
+}
+
+/// Send `msg` with `files` to `to` (#768): one e-mail (every address in
+/// Bcc) and one POST per webhook, within `notify.max_per_hour` — over it,
+/// nothing is sent. The number of recipients reached, or every failure.
+fn deliver_all(
+    st: &Locked,
+    to: &[notify::Recipient],
+    msg: &notify::Message,
+    files: &[notify::File],
+) -> Result<usize, String> {
+    use notify::Recipient;
+    let n = st.opts.notify.as_ref().ok_or("options.notify is not set")?;
+    let emails: Vec<String> = to
+        .iter()
+        .filter_map(|t| match t {
+            Recipient::Email(a) => Some(a.clone()),
+            Recipient::Webhook(_) => None,
+        })
+        .collect();
+    let hooks: Vec<(&str, &notify::Webhook)> = to
+        .iter()
+        .filter_map(|t| match t {
+            Recipient::Webhook(w) => n.webhooks.get(w).map(|h| (w.as_str(), h)),
+            Recipient::Email(_) => None,
+        })
+        .collect();
     let count = usize::from(!emails.is_empty()) + hooks.len();
     if !st
         .report_rate
@@ -4268,14 +4376,14 @@ fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
     let mut errors = Vec::new();
     if !emails.is_empty() {
         let smtp = n.smtp.as_ref().ok_or("options.notify.smtp is not set")?;
-        let mail = notify::email(&smtp.from, &msg, &files);
+        let mail = notify::email(&smtp.from, msg, files);
         match notify::send_email(smtp, &emails, &mail) {
             Ok(()) => sent += emails.len(),
             Err(e) => errors.push(format!("e-mail: {e}")),
         }
     }
     if !hooks.is_empty() {
-        let body = notify::webhook_body(&msg, &files);
+        let body = notify::webhook_body(msg, files);
         for (name, h) in hooks {
             match notify::send_webhook(h, &body, msg.time) {
                 Ok(()) => sent += 1,
@@ -4290,9 +4398,179 @@ fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
     }
 }
 
-/// `anofox_serve_report(port, name)`: send report `name` of the locked
-/// server on `port` now (for testing a report; recorded like a scheduled
-/// run). Only the session that started the server can call it.
+// ---- #768 R2: alerts -------------------------------------------------------
+
+/// What one alert check did.
+struct AlertRun {
+    /// The message it sent (`None`: nothing changed).
+    action: Option<notify::AlertAction>,
+    rows: usize,
+    sent: usize,
+}
+
+/// Check one alert: run its panel as its principal; on a change (D5), send
+/// and remember. A failed send keeps the old state, so the next check tries
+/// again.
+fn run_alert(st: &Locked, a: &notify::Alert) -> Result<AlertRun, String> {
+    use notify::Format;
+    let n = st.opts.notify.as_ref().ok_or("options.notify is not set")?;
+    let dash = st
+        .dashboards
+        .iter()
+        .find(|d| d.id == a.dashboard)
+        .ok_or("no such dashboard")?;
+    let scope = Scope {
+        dashboards: Some(vec![dash.id.clone()]),
+        vars: Vec::new(),
+    };
+    let vars = sv::parse_vars_object(Some(&Value::Object(a.vars.clone())))?;
+    let who = ExportAs {
+        claims: Some(&a.principal),
+        scope: Some(&scope),
+        method: Some("report"),
+        vars,
+    };
+    let mut info = LogInfo::default();
+    let json = export_panel(st, dash, &who, &a.panel, "json", &mut info)
+        .map_err(|(_, e)| format!("panel '{}': {e}", a.panel))?;
+    let rows = serde_json::from_slice::<Vec<Value>>(&json)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let hash = (rows > 0).then(|| {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(&json)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    });
+    let now = unix_now() as u64;
+    let prev = st
+        .alert_states
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&a.name)
+        .cloned();
+    let Some((action, next)) = notify::decide(prev.as_ref(), hash.as_deref(), now, a.repeat_after)
+    else {
+        return Ok(AlertRun {
+            action: None,
+            rows,
+            sent: 0,
+        });
+    };
+    let mut files = Vec::new();
+    if action != notify::AlertAction::Resolved {
+        for f in &a.attach {
+            let (ext, ctype, bytes) = match f {
+                Format::Json(_) => ("json", "application/json", json.clone()),
+                _ => (
+                    "csv",
+                    "text/csv; charset=utf-8",
+                    export_panel(st, dash, &who, &a.panel, "csv", &mut info)
+                        .map_err(|(_, e)| format!("panel '{}': {e}", a.panel))?,
+                ),
+            };
+            files.push(notify::File {
+                name: format!("{}-{}.{ext}", dash.id, a.panel),
+                content_type: ctype,
+                bytes,
+            });
+        }
+    }
+    let size: usize = files.iter().map(|f| f.bytes.len()).sum();
+    if size > notify::MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "its rows are {size} bytes, over the limit of {} — not sent",
+            notify::MAX_ATTACHMENT_BYTES
+        ));
+    }
+    let msg = notify::Message {
+        kind: "alert",
+        name: a.name.clone(),
+        title: dash.meta.title.clone(),
+        status: Some(action.status()),
+        detail: (action != notify::AlertAction::Resolved)
+            .then(|| format!("{rows} row(s) in '{}'", a.panel)),
+        as_of: None,
+        link: n.link.as_ref().map(|l| format!("{l}/d/{}", dash.id)),
+        time: std::time::SystemTime::now(),
+    };
+    let sent = deliver_all(st, &a.to, &msg, &files)?;
+    // Sent: remember it (and on disk, so a restart doesn't send it again).
+    let mut states = st.alert_states.lock().unwrap_or_else(|p| p.into_inner());
+    states.insert(a.name.clone(), next);
+    if let Some(path) = &n.state {
+        notify::save_states(path, &states)?;
+    }
+    Ok(AlertRun {
+        action: Some(action),
+        rows,
+        sent,
+    })
+}
+
+/// Check one alert and record it (run log, `/metrics`).
+fn record_alert(st: &Locked, a: &notify::Alert, manual: bool) -> Result<AlertRun, String> {
+    let started = unix_now();
+    let t0 = Instant::now();
+    let res = run_alert(st, a).map_err(|e| redact(e, st.opts.data.as_deref()));
+    {
+        let mut m = st.alert_stats.lock().unwrap_or_else(|p| p.into_inner());
+        let s = m.entry(a.name.clone()).or_default();
+        s.runs += 1;
+        if res.is_ok() {
+            s.last_ok = Some(started as u64);
+            s.failing_in_row = 0;
+        } else {
+            s.failures += 1;
+            s.failing_in_row += 1;
+        }
+    }
+    let line = serde_json::json!({
+        "alert": a.name,
+        "start": started as u64,
+        "ms": t0.elapsed().as_millis() as u64,
+        "ok": res.is_ok(),
+        "rows": res.as_ref().ok().map(|r| r.rows),
+        "status": res.as_ref().ok().and_then(|r| r.action.map(|a| a.status())),
+        "sent": res.as_ref().ok().map(|r| r.sent),
+        "manual": manual,
+        "error": res.as_ref().err(),
+    })
+    .to_string();
+    run_log(
+        st.opts.notify.as_ref().and_then(|n| n.log.as_deref()),
+        "alert",
+        &line,
+    );
+    res
+}
+
+/// #767 + R2: a task's failure (the first in a row) or its recovery, to
+/// `tasks.on_failure`.
+fn task_notify(st: &Locked, to: &[notify::Recipient], t: &tasks::Task, err: Option<&str>) {
+    let msg = notify::Message {
+        kind: "task",
+        name: t.name.clone(),
+        title: format!("Task '{}'", t.name),
+        status: Some(if err.is_some() { "FAILED" } else { "RECOVERED" }),
+        detail: err.map(str::to_string),
+        as_of: None,
+        link: None,
+        time: std::time::SystemTime::now(),
+    };
+    if let Err(e) = deliver_all(st, to, &msg, &[]) {
+        eprintln!(
+            "[anofox-serve] task '{}': on_failure: {}",
+            t.name,
+            access::diag(&e)
+        );
+    }
+}
+
+/// `anofox_serve_report(port, name)`: send report `name` (or check alert
+/// `name`) of the locked server on `port` now (for testing; recorded like a
+/// scheduled run). Only the session that started the server can call it.
 pub fn send_report(port: u16, name: &str) -> Result<String, String> {
     let locked = match lock_servers().get(&port) {
         Some(r) => r.locked.clone().ok_or_else(|| {
@@ -4306,15 +4584,70 @@ pub fn send_report(port: u16, name: &str) -> Result<String, String> {
             ))
         }
     };
+    if let Some(a) = locked.opts.alerts.iter().find(|a| a.name == name) {
+        let r = record_alert(&locked, a, true)
+            .map_err(|e| format!("anofox-visualization: alert '{name}': {e}"))?;
+        return Ok(match r.action {
+            Some(x) => format!(
+                "alert '{name}': {} ({} row(s)), sent to {} recipient(s)",
+                x.status(),
+                r.rows,
+                r.sent
+            ),
+            None => format!("alert '{name}': no change ({} row(s))", r.rows),
+        });
+    }
     let r = locked
         .opts
         .reports
         .iter()
         .find(|r| r.name == name)
-        .ok_or_else(|| format!("anofox-visualization: no report '{name}' (options.reports)"))?;
+        .ok_or_else(|| {
+            format!("anofox-visualization: no report or alert '{name}' (options.reports, options.alerts)")
+        })?;
     let n = record_report(&locked, r, true)
         .map_err(|e| format!("anofox-visualization: report '{name}': {e}"))?;
     Ok(format!("report '{name}' sent to {n} recipient(s)"))
+}
+
+/// #768 R2: the alerts' gauges for `/metrics`.
+fn alert_gauges(st: &Locked) -> Vec<metrics::Gauge> {
+    let m = st.alert_stats.lock().unwrap_or_else(|p| p.into_inner());
+    let states = st.alert_states.lock().unwrap_or_else(|p| p.into_inner());
+    if st.opts.alerts.is_empty() {
+        return Vec::new();
+    }
+    type Values = Vec<(Vec<(&'static str, String)>, f64)>;
+    let per = |f: &dyn Fn(&TaskStat) -> Option<f64>| -> Values {
+        m.iter()
+            .filter_map(|(k, s)| f(s).map(|v| (vec![("alert", k.clone())], v)))
+            .collect()
+    };
+    let g = |name, help, values| metrics::Gauge { name, help, values };
+    vec![
+        g(
+            "anofox_alert_firing",
+            "1 while an alert's panel returns rows (as last sent), else 0.",
+            st.opts
+                .alerts
+                .iter()
+                .map(|a| {
+                    let f = states.get(&a.name).is_some_and(|s| s.firing);
+                    (vec![("alert", a.name.clone())], f64::from(u8::from(f)))
+                })
+                .collect(),
+        ),
+        g(
+            "anofox_alert_checks",
+            "Checks of each alert since the start.",
+            per(&|s| Some(s.runs as f64)),
+        ),
+        g(
+            "anofox_alert_check_failures",
+            "Failed checks of each alert (its panel failed, or not sent) since the start.",
+            per(&|s| Some(s.failures as f64)),
+        ),
+    ]
 }
 
 /// #768: the reports' gauges for `/metrics`.
@@ -6331,6 +6664,7 @@ fn metric_gauges(st: &Locked) -> Vec<metrics::Gauge> {
     }
     g.extend(task_gauges(st));
     g.extend(report_gauges(st));
+    g.extend(alert_gauges(st));
     if st.opts.source.is_some() {
         g.push(Gauge::one(
             "anofox_source_consecutive_failures",

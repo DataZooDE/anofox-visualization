@@ -178,6 +178,12 @@ sends, as D3 does for tasks). A recipient is `{"email": …}` or
 `anofox_serve_report(port, name)` on the session that started the server,
 not an HTTP admin endpoint, so there is no new route or API-key scope.
 
+**As built (R2, #768):** `options.alerts` (`panel`, `check`, `attach`,
+`repeat_after`), state in `options.notify.state`; statuses `FIRING`,
+`CHANGED`, `RESOLVED`. `tasks.on_failure` sends `FAILED` on the first failure
+in a row and `RECOVERED` after it. `anofox_serve_report(port, name)` also
+checks an alert.
+
 ## 7. Not in scope
 
 - A browser UI for tasks or reports (they're files and options, edited in git).

@@ -50,6 +50,8 @@ pub struct NotifyOptions {
     pub max_per_hour: usize,
     /// Where each run is recorded (a file or `"stderr"`; default stderr).
     pub log: Option<String>,
+    /// The alerts' state (a JSON file), so a restart doesn't send again.
+    pub state: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,7 +233,15 @@ pub fn parse_notify(val: &Value, env: Env) -> Result<NotifyOptions, String> {
     check_keys(
         o,
         "options.notify",
-        &["run", "smtp", "webhooks", "link", "max_per_hour", "log"],
+        &[
+            "run",
+            "smtp",
+            "webhooks",
+            "link",
+            "max_per_hour",
+            "log",
+            "state",
+        ],
     )?;
     let mut n = NotifyOptions {
         run: false,
@@ -240,6 +250,7 @@ pub fn parse_notify(val: &Value, env: Env) -> Result<NotifyOptions, String> {
         link: None,
         max_per_hour: 60,
         log: None,
+        state: None,
     };
     if let Some(v) = o.get("run") {
         n.run = v
@@ -300,6 +311,14 @@ pub fn parse_notify(val: &Value, env: Env) -> Result<NotifyOptions, String> {
             v.as_str()
                 .ok_or("options.notify.log must be \"stderr\" or a file path")?
                 .to_string(),
+        );
+    }
+    if let Some(v) = o.get("state") {
+        n.state = Some(
+            v.as_str()
+                .filter(|p| !p.is_empty())
+                .ok_or("options.notify.state must be a file path")?
+                .into(),
         );
     }
     Ok(n)
@@ -466,49 +485,7 @@ pub fn parse_reports(val: &Value, notify: Option<&NotifyOptions>) -> Result<Vec<
         ))?)
         .map_err(|e| format!("{what}: {e}"))?;
         let principal = parse_principal(o.get("as"), &what)?;
-        let to = o
-            .get("to")
-            .and_then(Value::as_array)
-            .filter(|t| !t.is_empty())
-            .ok_or(format!("{what}: to is required (a list of recipients)"))?;
-        if to.len() > MAX_RECIPIENTS {
-            return Err(format!("{what}: more than {MAX_RECIPIENTS} recipients"));
-        }
-        let mut rcpts = Vec::new();
-        for t in to {
-            let t = t.as_object().filter(|t| t.len() == 1).ok_or(format!(
-                "{what}: a recipient is {{\"email\": \"…\"}} or {{\"webhook\": \"<name>\"}}"
-            ))?;
-            let r = match t.iter().next() {
-                Some((k, Value::String(a))) if k == "email" => {
-                    if !valid_email(a) {
-                        return Err(format!("{what}: '{a}' is not a plain e-mail address"));
-                    }
-                    if notify.is_none_or(|n| n.smtp.is_none()) {
-                        return Err(format!(
-                            "{what}: an e-mail recipient needs options.notify.smtp"
-                        ));
-                    }
-                    Recipient::Email(a.to_ascii_lowercase())
-                }
-                Some((k, Value::String(w))) if k == "webhook" => {
-                    if notify.is_none_or(|n| !n.webhooks.contains_key(w)) {
-                        return Err(format!(
-                            "{what}: no webhook '{w}' in options.notify.webhooks"
-                        ));
-                    }
-                    Recipient::Webhook(w.clone())
-                }
-                _ => {
-                    return Err(format!(
-                        "{what}: a recipient is {{\"email\": \"…\"}} or {{\"webhook\": \"<name>\"}}"
-                    ))
-                }
-            };
-            if !rcpts.contains(&r) {
-                rcpts.push(r);
-            }
-        }
+        let to = parse_recipients(o.get("to"), notify, &what)?;
         out.push(Report {
             name,
             dashboard,
@@ -517,10 +494,331 @@ pub fn parse_reports(val: &Value, notify: Option<&NotifyOptions>) -> Result<Vec<
             formats,
             schedule,
             principal,
-            to: rcpts,
+            to,
         });
     }
     Ok(out)
+}
+
+/// A list of recipients (`to`): `{"email": "…"}` or `{"webhook": "<name>"}`,
+/// each naming a channel `options.notify` configures; at most
+/// [`MAX_RECIPIENTS`], duplicates dropped.
+pub fn parse_recipients(
+    to: Option<&Value>,
+    notify: Option<&NotifyOptions>,
+    what: &str,
+) -> Result<Vec<Recipient>, String> {
+    let to = to
+        .and_then(Value::as_array)
+        .filter(|t| !t.is_empty())
+        .ok_or(format!("{what}: to is required (a list of recipients)"))?;
+    if to.len() > MAX_RECIPIENTS {
+        return Err(format!("{what}: more than {MAX_RECIPIENTS} recipients"));
+    }
+    let shape =
+        || format!("{what}: a recipient is {{\"email\": \"…\"}} or {{\"webhook\": \"<name>\"}}");
+    let mut rcpts = Vec::new();
+    for t in to {
+        let t = t.as_object().filter(|t| t.len() == 1).ok_or_else(shape)?;
+        let r = match t.iter().next() {
+            Some((k, Value::String(a))) if k == "email" => {
+                if !valid_email(a) {
+                    return Err(format!("{what}: '{a}' is not a plain e-mail address"));
+                }
+                if notify.is_none_or(|n| n.smtp.is_none()) {
+                    return Err(format!(
+                        "{what}: an e-mail recipient needs options.notify.smtp"
+                    ));
+                }
+                Recipient::Email(a.to_ascii_lowercase())
+            }
+            Some((k, Value::String(w))) if k == "webhook" => {
+                if notify.is_none_or(|n| !n.webhooks.contains_key(w)) {
+                    return Err(format!(
+                        "{what}: no webhook '{w}' in options.notify.webhooks"
+                    ));
+                }
+                Recipient::Webhook(w.clone())
+            }
+            _ => return Err(shape()),
+        };
+        if !rcpts.contains(&r) {
+            rcpts.push(r);
+        }
+    }
+    Ok(rcpts)
+}
+
+/// An alert (#768 R2, plan §3): it fires when its panel returns rows.
+#[derive(Debug, Clone)]
+pub struct Alert {
+    pub name: String,
+    pub dashboard: String,
+    /// The `-- @name`d panel whose rows are the alert.
+    pub panel: String,
+    pub vars: Map<String, Value>,
+    /// When to check (schedule SQL, like a report's).
+    pub schedule: String,
+    pub principal: Claims,
+    /// The rows, attached: `Format::Csv` / `Format::Json` of `panel`.
+    pub attach: Vec<Format>,
+    pub to: Vec<Recipient>,
+    /// Send again while it keeps firing, this long after the last message.
+    pub repeat_after: Option<Duration>,
+}
+
+/// `30 minutes`, `24 hours`, `2 days` (at least a minute).
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
+    let bad = || format!("'{s}': a duration like \"30 minutes\", \"24 hours\" or \"2 days\"");
+    let mut w = s.split_whitespace();
+    let (Some(n), Some(unit), None) = (w.next(), w.next(), w.next()) else {
+        return Err(bad());
+    };
+    let n: u64 = n.parse().map_err(|_| bad())?;
+    let secs = match unit.to_ascii_lowercase().trim_end_matches('s') {
+        "minute" => 60,
+        "hour" => 3600,
+        "day" => 86_400,
+        _ => return Err(bad()),
+    };
+    if n == 0 || n > 366 * 86_400 / secs {
+        return Err(bad());
+    }
+    Ok(Duration::from_secs(n * secs))
+}
+
+/// `options.alerts` (after `options.notify`, which must name a `state`
+/// file: an alert's state survives a restart).
+pub fn parse_alerts(val: &Value, notify: Option<&NotifyOptions>) -> Result<Vec<Alert>, String> {
+    let list = val
+        .as_array()
+        .ok_or("options.alerts must be a list of alerts")?;
+    if !list.is_empty() && notify.is_none_or(|n| n.state.is_none()) {
+        return Err(
+            "options.alerts needs options.notify.state (a file for the alerts' state)".into(),
+        );
+    }
+    let mut out: Vec<Alert> = Vec::new();
+    for (i, a) in list.iter().enumerate() {
+        let o = a
+            .as_object()
+            .ok_or(format!("options.alerts[{i}] must be an object"))?;
+        let name = o
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|n| valid_name(n))
+            .ok_or(format!(
+                "options.alerts[{i}].name is required (a-z, 0-9, - and _)"
+            ))?
+            .to_string();
+        let what = format!("alert '{name}'");
+        if out.iter().any(|x| x.name == name) {
+            return Err(format!("{what}: a second alert of that name"));
+        }
+        check_keys(
+            o,
+            &what,
+            &[
+                "name",
+                "dashboard",
+                "panel",
+                "vars",
+                "check",
+                "as",
+                "attach",
+                "to",
+                "repeat_after",
+            ],
+        )?;
+        let dashboard = o
+            .get("dashboard")
+            .and_then(Value::as_str)
+            .filter(|d| crate::host::serving::valid_dashboard_id(d))
+            .ok_or(format!("{what}: dashboard is required (its id)"))?
+            .to_string();
+        let panel = o
+            .get("panel")
+            .and_then(Value::as_str)
+            .filter(|p| valid_name_panel(p))
+            .ok_or(format!("{what}: panel is required (a `-- @name`d panel)"))?
+            .to_string();
+        let vars = match o.get("vars") {
+            None => Map::new(),
+            Some(v) => v
+                .as_object()
+                .filter(|m| m.values().all(Value::is_string))
+                .ok_or(format!("{what}: vars must be an object of strings"))?
+                .clone(),
+        };
+        let schedule = schedule_sql(o.get("check").and_then(Value::as_str).ok_or(format!(
+            "{what}: check is required, e.g. \"every 15 minutes\""
+        ))?)
+        .map_err(|e| format!("{what}: {e}"))?;
+        let principal = parse_principal(o.get("as"), &what)?;
+        let mut attach = Vec::new();
+        if let Some(v) = o.get("attach") {
+            for f in v.as_array().ok_or(format!(
+                "{what}: attach must be a list, [\"csv\"] or [\"json\"]"
+            ))? {
+                let f = match f.as_str() {
+                    Some("csv") => Format::Csv(panel.clone()),
+                    Some("json") => Format::Json(panel.clone()),
+                    _ => return Err(format!("{what}: attach takes \"csv\" and \"json\"")),
+                };
+                if !attach.contains(&f) {
+                    attach.push(f);
+                }
+            }
+        }
+        let to = parse_recipients(o.get("to"), notify, &what)?;
+        let repeat_after = match o.get("repeat_after") {
+            None => None,
+            Some(v) => Some(
+                parse_duration(v.as_str().unwrap_or(""))
+                    .map_err(|e| format!("{what}: repeat_after {e}"))?,
+            ),
+        };
+        out.push(Alert {
+            name,
+            dashboard,
+            panel,
+            vars,
+            schedule,
+            principal,
+            attach,
+            to,
+            repeat_after,
+        });
+    }
+    Ok(out)
+}
+
+/// What an alert remembers (D5): firing or not, the hash of the rows it last
+/// told about, and when it last sent (Unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AlertState {
+    pub firing: bool,
+    pub hash: String,
+    pub last_sent: u64,
+}
+
+/// What a check sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertAction {
+    /// It had no rows and now has some.
+    Fire,
+    /// Still firing, with different rows.
+    Changed,
+    /// Still firing, the same rows, `repeat_after` since the last message.
+    Repeat,
+    /// It had rows and now has none.
+    Resolved,
+}
+
+impl AlertAction {
+    pub fn status(self) -> &'static str {
+        match self {
+            AlertAction::Fire | AlertAction::Repeat => "FIRING",
+            AlertAction::Changed => "CHANGED",
+            AlertAction::Resolved => "RESOLVED",
+        }
+    }
+}
+
+/// One check: `rows` is the hash of the panel's rows, `None` when it has
+/// none. The message to send (if any) and the state once it is sent.
+pub fn decide(
+    prev: Option<&AlertState>,
+    rows: Option<&str>,
+    now: u64,
+    repeat_after: Option<Duration>,
+) -> Option<(AlertAction, AlertState)> {
+    let firing = prev.is_some_and(|p| p.firing);
+    let sent = |hash: &str| AlertState {
+        firing: true,
+        hash: hash.to_string(),
+        last_sent: now,
+    };
+    match rows {
+        Some(h) if !firing => Some((AlertAction::Fire, sent(h))),
+        Some(h) => {
+            let p = prev?;
+            if p.hash != h {
+                Some((AlertAction::Changed, sent(h)))
+            } else if repeat_after.is_some_and(|r| now >= p.last_sent + r.as_secs()) {
+                Some((AlertAction::Repeat, sent(h)))
+            } else {
+                None
+            }
+        }
+        None if firing => Some((
+            AlertAction::Resolved,
+            AlertState {
+                firing: false,
+                hash: String::new(),
+                last_sent: now,
+            },
+        )),
+        None => None,
+    }
+}
+
+/// Read the alerts' state file (missing: empty).
+pub fn load_states(path: &std::path::Path) -> Result<BTreeMap<String, AlertState>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(format!("options.notify.state: {e}")),
+    };
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("options.notify.state: not the alerts' state file: {e}"))?;
+    let mut out = BTreeMap::new();
+    for (k, a) in v
+        .get("alerts")
+        .and_then(Value::as_object)
+        .ok_or("options.notify.state: not the alerts' state file")?
+    {
+        out.insert(
+            k.clone(),
+            AlertState {
+                firing: a.get("firing").and_then(Value::as_bool).unwrap_or(false),
+                hash: a
+                    .get("hash")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                last_sent: a.get("last_sent").and_then(Value::as_u64).unwrap_or(0),
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Write the alerts' state file (a temp file renamed over it, `0600`).
+pub fn save_states(
+    path: &std::path::Path,
+    states: &BTreeMap<String, AlertState>,
+) -> Result<(), String> {
+    let mut m = Map::new();
+    for (k, s) in states {
+        m.insert(
+            k.clone(),
+            serde_json::json!({"firing": s.firing, "hash": s.hash, "last_sent": s.last_sent}),
+        );
+    }
+    let body = serde_json::to_vec_pretty(&serde_json::json!({"alerts": m})).unwrap_or_default();
+    let tmp = path.with_extension("tmp");
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(&tmp)
+        .and_then(|mut f| f.write_all(&body).and_then(|_| f.sync_all()))
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("options.notify.state: {e}"))
 }
 
 /// A `-- @name` (as the export's URL takes it).
@@ -686,8 +984,16 @@ pub struct File {
 /// What a report says, besides its files.
 #[derive(Debug, Clone)]
 pub struct Message {
-    pub report: String,
+    /// `report`, `alert` or `task`.
+    pub kind: &'static str,
+    /// The report's, alert's or task's name.
+    pub name: String,
     pub title: String,
+    /// An alert's or task's state: `FIRING`, `CHANGED`, `RESOLVED`,
+    /// `FAILED`, `RECOVERED`.
+    pub status: Option<&'static str>,
+    /// One more line: an alert's row count, a task's error.
+    pub detail: Option<String>,
     /// The dashboard's `::ASOF` text, if it has one.
     pub as_of: Option<String>,
     /// A link to the dashboard (`notify.link` + `/d/<id>`).
@@ -697,17 +1003,31 @@ pub struct Message {
 
 impl Message {
     pub fn subject(&self) -> String {
-        format!("{} — {}", self.title, self.report)
+        match self.status {
+            Some(s) => format!("[{s}] {} — {}", self.title, self.name),
+            None => format!("{} — {}", self.title, self.name),
+        }
     }
 
     fn lines(&self) -> Vec<String> {
         let mut l = vec![self.title.clone()];
+        match (self.status, &self.detail) {
+            (Some(s), Some(d)) => l.push(format!("{s}: {d}")),
+            (Some(s), None) => l.push(s.to_string()),
+            (None, Some(d)) => l.push(d.clone()),
+            (None, None) => {}
+        }
         if let Some(a) = &self.as_of {
             l.push(a.clone());
         }
+        let kind = match self.kind {
+            "alert" => "Alert",
+            "task" => "Task",
+            _ => "Report",
+        };
         l.push(format!(
-            "Report '{}', made {}.",
-            self.report,
+            "{kind} '{}', {}.",
+            self.name,
             crate::host::access::rfc3339(self.time)
         ));
         l
@@ -1091,7 +1411,10 @@ pub fn send_email(cfg: &Smtp, rcpts: &[String], msg: &[u8]) -> Result<(), String
 pub fn webhook_body(msg: &Message, files: &[File]) -> Vec<u8> {
     use base64::Engine as _;
     serde_json::to_vec(&serde_json::json!({
-        "report": msg.report,
+        "kind": msg.kind,
+        "name": msg.name,
+        "status": msg.status,
+        "detail": msg.detail,
         "title": msg.title,
         "time": crate::host::access::rfc3339(msg.time),
         "as_of": msg.as_of,
@@ -1433,7 +1756,10 @@ mod tests {
 
     fn msg() -> Message {
         Message {
-            report: "weekly".into(),
+            kind: "report",
+            name: "weekly".into(),
+            status: None,
+            detail: None,
             title: "Sales <EU>\r\nBcc: evil@example.com".into(),
             as_of: Some("Data as of 2026-10-30".into()),
             link: Some("https://dash.example.com/d/sales".into()),
@@ -1557,6 +1883,79 @@ mod tests {
     }
 
     #[test]
+    fn alerts() {
+        let mut n = notify();
+        let base = json!({"name": "low", "dashboard": "stock", "panel": "below_safety", "check": "every 15 minutes",
+                          "as": {"user": "report:ops"}, "attach": ["csv"], "to": [{"webhook": "ops"}], "repeat_after": "24 hours"});
+        let e = parse_alerts(&json!([base.clone()]), Some(&n)).unwrap_err();
+        assert!(e.contains("needs options.notify.state"), "{e}");
+        n.state = Some("/tmp/x.json".into());
+        let a = &parse_alerts(&json!([base.clone()]), Some(&n)).unwrap()[0];
+        assert_eq!(a.attach, vec![Format::Csv("below_safety".into())]);
+        assert_eq!(a.repeat_after, Some(Duration::from_secs(86_400)));
+        assert_eq!(a.schedule, "INTERVAL 15 MINUTE");
+        let with = |k: &str, v: Value| {
+            let mut b = base.clone();
+            b[k] = v;
+            json!([b])
+        };
+        for (bad, why) in [
+            (with("panel", json!("../x")), "panel is required"),
+            (with("attach", json!(["png"])), "attach takes"),
+            (with("repeat_after", json!("soon")), "repeat_after"),
+            (with("repeat_after", json!("0 hours")), "repeat_after"),
+            (with("as", json!({"user": "ops"})), "report:<name>"),
+            (with("check", Value::Null), "check is required"),
+            (json!([base.clone(), base.clone()]), "second alert"),
+        ] {
+            let e = parse_alerts(&bad, Some(&n)).unwrap_err();
+            assert!(e.contains(why), "{bad}: {e}");
+        }
+        assert_eq!(
+            parse_duration("30 minutes").unwrap(),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            parse_duration("1 Day").unwrap(),
+            Duration::from_secs(86_400)
+        );
+    }
+
+    #[test]
+    fn alert_transitions() {
+        use AlertAction::*;
+        let day = Some(Duration::from_secs(86_400));
+        // nothing → rows: fire
+        let (a, s) = decide(None, Some("h1"), 100, day).unwrap();
+        assert_eq!((a, s.firing, s.last_sent), (Fire, true, 100));
+        // same rows: nothing, until repeat_after
+        assert_eq!(decide(Some(&s), Some("h1"), 200, day), None);
+        assert_eq!(decide(Some(&s), Some("h1"), 200, None), None);
+        let (a, s2) = decide(Some(&s), Some("h1"), 100 + 86_400, day).unwrap();
+        assert_eq!((a, s2.last_sent), (Repeat, 100 + 86_400));
+        // other rows: changed
+        assert_eq!(decide(Some(&s), Some("h2"), 300, None).unwrap().0, Changed);
+        // no rows: resolved once, then quiet
+        let (a, s3) = decide(Some(&s), None, 400, day).unwrap();
+        assert_eq!((a, s3.firing), (Resolved, false));
+        assert_eq!(decide(Some(&s3), None, 500, day), None);
+        assert_eq!(decide(None, None, 500, day), None);
+        assert_eq!(Fire.status(), "FIRING");
+        // the state file round-trips
+        let dir = std::env::temp_dir().join(format!("anofox-alert-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("state.json");
+        assert!(load_states(&p).unwrap().is_empty());
+        let mut m = BTreeMap::new();
+        m.insert("low".to_string(), s.clone());
+        save_states(&p, &m).unwrap();
+        assert_eq!(load_states(&p).unwrap(), m);
+        std::fs::write(&p, "nope").unwrap();
+        assert!(load_states(&p).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn signature_and_rate() {
         // HMAC-SHA256("key", "1.body")
         let s = webhook_signature(b"key", 1, b"body");
@@ -1572,7 +1971,10 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(body["files"][0]["base64"], "eCx5");
-        assert_eq!(body["report"], "weekly");
+        assert_eq!(
+            (&body["kind"], &body["name"]),
+            (&json!("report"), &json!("weekly"))
+        );
         let mut r = Rate::default();
         let t = Instant::now();
         assert!(r.take(2, 3, t));

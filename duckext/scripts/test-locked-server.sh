@@ -433,7 +433,7 @@ assert "Data as of 2026-10-30" in text and "https://dash.example.com/d/r" in tex
 h = [json.loads(l) for l in open(f"{d}/hook.json")]
 assert len(h) == 1 and h[0]["sig_ok"] and h[0]["path"] == "/hook?token=t0ps3cret", h
 b = h[0]["body"]
-assert b["report"] == "eu" and b["as_of"] == "Data as of 2026-10-30", b
+assert b["kind"] == "report" and b["name"] == "eu" and b["status"] is None and b["as_of"] == "Data as of 2026-10-30", b
 assert [f["name"] for f in b["files"]] == ["r.png", "r.pdf", "r-who.csv"], b["files"]
 PY
 # the manual trigger (the session that started the server)
@@ -453,6 +453,81 @@ stop
 kill "$SINK_PID" 2>/dev/null; wait "$SINK_PID" 2>/dev/null || true
 unset R_SMTP_USER R_SMTP_PASS R_HOOK_URL R_HOOK_SECRET
 echo "OK: reports — e-mail (Bcc, inline PNG, PDF + CSV attached) and a signed webhook as the report's principal, ::ASOF + link, manual run, run log, /metrics"
+
+# 3f. Alerts (#768 R2): a panel's rows, sent when they appear, change or go
+# (D5), its state in a file across restarts; a failing task to on_failure.
+mkdir -p "$T/aldash/tasks" "$T/sink2"
+cat > "$T/aldash/stock.sql" <<'SQL'
+-- @title Stock
+-- @name below_safety
+SELECT item, qty ::TABLE FROM stock WHERE qty < 5 ORDER BY item;
+SQL
+cat > "$T/aldash/tasks/broken.task.sql" <<'SQL'
+SELECT 'init' ::SCHEDULE;
+SELECT error('the inbox is empty');
+SQL
+"$DUCKDB" "$T/al.duckdb" -c "CREATE TABLE stock AS SELECT * FROM (VALUES ('bolt', 2), ('nut', 9)) t(item, qty);" >/dev/null
+python3 "$T/sinks.py" "$T/sink2" & SINK_PID=$!
+for _ in $(seq 50); do [ -s "$T/sink2/ports" ] && break; sleep 0.1; done
+read -r _ HOOK_PORT < "$T/sink2/ports"
+export R_HOOK_URL="http://127.0.0.1:$HOOK_PORT/hook" R_HOOK_SECRET=0123456789abcdef-secret
+alopts="{\"notify\": {\"run\": true, \"log\": \"$T/alerts.jsonl\", \"state\": \"$T/alert-state.json\",
+          \"webhooks\": {\"ops\": {\"url_env\": \"R_HOOK_URL\", \"secret_env\": \"R_HOOK_SECRET\"}}},
+ \"tasks\": {\"run\": true, \"write\": [\"al\"], \"log\": \"$T/altasks.jsonl\", \"on_failure\": {\"to\": [{\"webhook\": \"ops\"}]}},
+ \"metrics\": {\"token\": \"$MTOKEN\"},
+ \"alerts\": [{\"name\": \"low\", \"dashboard\": \"stock\", \"panel\": \"below_safety\", \"check\": \"every 1 hours\",
+              \"as\": {\"user\": \"report:ops\"}, \"attach\": [\"csv\"], \"to\": [{\"webhook\": \"ops\"}]}]}"
+hooks() { [ -s "$T/sink2/hook.json" ] && wc -l < "$T/sink2/hook.json" || echo 0; }
+check() {
+  echo "SELECT anofox_serve_report($PORT, 'low');" >&3
+  for _ in $(seq 50); do
+    n="$(grep -c '"alert":"low"' "$T/alerts.jsonl" 2>/dev/null || true)"
+    [ "${n:-0}" -ge "$1" ] && return
+    sleep 0.2
+  done
+}
+start "$T/al.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/aldash"), $PORT, $(q "$alopts"));" || fail "alerts server"
+grep -q "alert 'low' runs as report:ops to 1 recipient(s)" "$T/out" || fail "alerts: start message: $(cat "$T/out")"
+# the failing task's message (FAILED, the error)
+for _ in $(seq 50); do [ "$(hooks)" -ge 1 ] && break; sleep 0.2; done
+python3 - "$T/sink2/hook.json" <<'PY' || fail "alerts: the task's failure message"
+import json, sys
+h = [json.loads(l) for l in open(sys.argv[1])]
+b = h[0]["body"]
+assert h[0]["sig_ok"] and b["kind"] == "task" and b["name"] == "broken" and b["status"] == "FAILED", b
+assert "the inbox is empty" in b["detail"], b
+PY
+check 1
+grep -q "alert 'low': FIRING (1 row(s)), sent to 1 recipient(s)" "$T/out" || fail "alerts: first check: $(tail -3 "$T/out")"
+check 2
+grep -q "alert 'low': no change (1 row(s))" "$T/out" || fail "alerts: an unchanged check sends nothing: $(tail -3 "$T/out")"
+[ "$(hooks)" = 2 ] || fail "alerts: two messages so far (task, FIRING): $(cat "$T/sink2/hook.json")"
+python3 - "$T/sink2/hook.json" <<'PY' || fail "alerts: the FIRING message"
+import base64, json, sys
+b = [json.loads(l) for l in open(sys.argv[1])][1]["body"]
+assert b["kind"] == "alert" and b["status"] == "FIRING" and b["detail"] == "1 row(s) in 'below_safety'", b
+assert [f["name"] for f in b["files"]] == ["stock-below_safety.csv"], b["files"]
+assert base64.b64decode(b["files"][0]["base64"]).decode().splitlines() == ['"item","qty"', '"bolt","2"'], b["files"]
+PY
+curl -s -H "Authorization: Bearer $MTOKEN" "http://127.0.0.1:$PORT/metrics" | grep -qF 'anofox_alert_firing{alert="low"} 1' \
+  || fail "alerts: /metrics firing"
+stop
+# a restart doesn't send it again (the state file)
+start "$T/al.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/aldash"), $PORT, $(q "$alopts"));" || fail "alerts server (restart)"
+check 3
+grep -q "alert 'low': no change (1 row(s))" "$T/out" || fail "alerts: after a restart: $(tail -3 "$T/out")"
+# the rows go: RESOLVED, once
+echo "UPDATE stock SET qty = 7; SELECT anofox_serve_refresh($PORT);" >&3
+check 4
+grep -q "alert 'low': RESOLVED (0 row(s)), sent to 1 recipient(s)" "$T/out" || fail "alerts: resolved: $(tail -3 "$T/out")"
+check 5
+[ "$(grep -c "alert 'low': no change (0 row(s))" "$T/out")" = 1 ] || fail "alerts: resolved only once: $(tail -3 "$T/out")"
+# (the restart ran the 'init' task again: a new process tells its first failure again)
+tail -1 "$T/sink2/hook.json" | grep -q '"status": "RESOLVED"' || fail "alerts: the last message is RESOLVED: $(tail -1 "$T/sink2/hook.json")"
+stop
+kill "$SINK_PID" 2>/dev/null; wait "$SINK_PID" 2>/dev/null || true
+unset R_HOOK_URL R_HOOK_SECRET
+echo "OK: alerts — FIRING once, no repeat on an unchanged check or a restart (state file), RESOLVED once; a failing task's message (on_failure)"
 
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting
