@@ -269,6 +269,15 @@ SELECT INTERVAL '2 seconds' ::SCHEDULE;
 CREATE OR REPLACE TABLE stage.loaded AS SELECT * FROM range(5);
 SELECT 1 ::REFRESH;
 SQL
+# runs first: fails inside a transaction, which must not stay open on the
+# shared connection (load and the refresh would fail on it)
+cat > "$T/tkdash/tasks/a_txn.task.sql" <<'SQL'
+SELECT 'init' ::SCHEDULE;
+BEGIN TRANSACTION;
+INSERT INTO stage.loaded VALUES (99);
+SELECT error('boom');
+COMMIT;
+SQL
 cat > "$T/tkdash/tasks/bad.task.sql" <<'SQL'
 SELECT 'init' ::SCHEDULE;
 CREATE TABLE warehouse.sneaky AS SELECT 1 AS x;
@@ -292,6 +301,7 @@ for _ in $(seq 60); do [ "$(panel 0 '{}' t)" = 200 ] && grep -q '"c0":5' "$T/bod
 grep -q '"c0":5' "$T/body" || fail "tasks: the panel should see the task's 5 rows after its refresh: $(cat "$T/body") $(tail -5 "$T/out")"
 for _ in $(seq 20); do grep -q '"task":"bad"' "$T/tasks.jsonl" 2>/dev/null && break; sleep 0.25; done
 grep '"task":"bad"' "$T/tasks.jsonl" | grep -q '"ok":false' || fail "tasks: a write to a READ_ONLY database should fail: $(cat "$T/tasks.jsonl")"
+grep '"task":"a_txn"' "$T/tasks.jsonl" | grep -q '"ok":false' || fail "tasks: a_txn should fail: $(cat "$T/tasks.jsonl")"
 grep '"task":"load"' "$T/tasks.jsonl" | grep -q '"ok":true' || fail "tasks: load should succeed: $(cat "$T/tasks.jsonl")"
 curl -s -H "Authorization: Bearer $MTOKEN" "http://127.0.0.1:$PORT/metrics" > "$T/met"
 grep -qF 'anofox_task_failures{task="bad"} 1' "$T/met" && grep -qF 'anofox_task_consecutive_failures{task="load"} 0' "$T/met" \

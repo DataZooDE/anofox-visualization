@@ -3897,10 +3897,20 @@ fn run_task(st: &Locked, opts: &TasksOptions, t: &tasks::Task) -> bool {
             }
             Ok(())
         });
-        if fired {
+        let r = if fired {
             Err(format!("timed out after {} s", opts.timeout.as_secs()))
         } else {
             r
+        };
+        // A task that stopped (or ended) inside BEGIN … COMMIT would leave
+        // the shared connection in a transaction, and every later task and
+        // snapshot build would fail on it: roll it back. ROLLBACK succeeds
+        // only when one was open.
+        match (c.exec("ROLLBACK"), r) {
+            (Ok(_), Ok(())) => {
+                Err("it left a transaction open (BEGIN without COMMIT); rolled back".into())
+            }
+            (_, r) => r,
         }
     };
     let ok = res.is_ok();
