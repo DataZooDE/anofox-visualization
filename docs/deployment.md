@@ -344,6 +344,65 @@ ones. Without an in-place refresh, the alternative is a rolling restart
 (`docker compose restart dash1`, wait until it is healthy, then `dash2`). The
 health check keeps traffic off a replica until its snapshot is ready.
 
+## 5a. Deploying dashboard changes (#772)
+
+Dashboards live in git. A pull request is checked in CI, and a merge is
+deployed by the operator's own pipeline. The server has no upload route.
+
+**Check every pull request** with the composite action in this repository.
+It downloads the released `dashboard` CLI and the DuckDB CLI and runs
+`dashboard --check --strict` over the folder:
+
+```yaml
+name: Check dashboards
+on: pull_request
+permissions: { contents: read }
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DataZooDE/anofox-visualization/.github/actions/check-dashboards@v2026.10.30
+        with:
+          folder: dashboards
+          version: v2026.10.30     # the release the server runs
+          # db: test/sample.duckdb # optional: tables the panels query
+          # options: locked.json   # optional: the server's options file
+```
+
+Pin `version` to the release your servers run, so the check and the server
+agree. `strict: "false"` lets design advisories pass.
+
+**Deploy on merge**, then reload:
+
+```sh
+# 1. Put the new files next to the old ones, then swap a symlink (atomic):
+rsync -a --delete dashboards/ /srv/anofox/releases/$SHA/
+ln -sfn /srv/anofox/releases/$SHA /srv/anofox/dashboards
+# 2. Reload (the server was started on /srv/anofox/dashboards):
+echo "SELECT anofox_serve_reload(8080);" > /run/anofox/control
+```
+
+`anofox_serve_reload(port)` reads the folder again and checks it like a
+start: the file headers, one statement per panel, the dashboards and panels
+that `home`, reports and alerts name, and the `state` / `writeback` checks.
+It then builds a new snapshot and swaps both in together, so a request
+always sees dashboards that match its snapshot. If any check fails, the
+running dashboards keep serving, and the SQL call returns the reason:
+
+```
+anofox-visualization: reload failed, still serving the previous dashboards: dashboard 'sales' statement 3: …
+```
+
+- A symlinked folder is followed on each reload, including its `assets/`.
+  Copying files into the live folder works too, but a reload during the
+  copy can see half of it, so the symlink swap is safer.
+- The server options, the access policy and `tasks/*.task.sql` are read at
+  start only; changing them takes a restart.
+- With several replicas, reload each one (they swap independently, as with
+  a refresh, §5). A container deployment can instead ship the dashboards in
+  the image and roll the replicas.
+
 ## 5b. A Quack source (prototype, #352)
 
 `options.source` builds (part of) the snapshot from a live DuckDB 2.0 Quack

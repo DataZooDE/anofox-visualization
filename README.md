@@ -164,6 +164,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095);
 -- http://127.0.0.1:8095/           a list of the folder's dashboards
 -- http://127.0.0.1:8095/d/<name>   one dashboard — full UI, editor removed
 SELECT anofox_serve_refresh(8095);      -- re-snapshot now (or options.refresh_s)
+SELECT anofox_serve_reload(8095);       -- re-read the dashboards folder after a deploy
 SELECT anofox_serve_report(8095, 'weekly');  -- send a scheduled report (or check an alert) now
 SELECT anofox_serve_stop(8095);         -- stop a server (and delete its snapshot)
 ```
@@ -202,7 +203,7 @@ macros (SQL → SVG). Serving and the builder are not included (see below).
 
 Every [GitHub release](https://github.com/DataZooDE/anofox-visualization/releases)
 carries the **full toolkit** — rendering **plus** `anofox_serve`,
-`anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_report`, `anofox_serve_stop` with the browser builder
+`anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_reload`, `anofox_serve_report`, `anofox_serve_stop` with the browser builder
 embedded — prebuilt for each platform, together with the `dashboard` / `serve`
 CLIs and a `SHA256SUMS` file:
 

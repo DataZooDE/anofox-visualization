@@ -30,6 +30,8 @@
 //!   alongside) the local session, through a dedicated staging instance —
 //!   `quack` is never loaded into this serving instance.
 //! * `anofox_serve_refresh(port)` — rebuild a locked server's snapshot now.
+//! * `anofox_serve_reload(port)` — read the dashboards folder again and swap
+//!   it in with a new snapshot (#772); on an error the old set keeps serving.
 //! * `anofox_serve_stop(port)` — stop a server and delete its snapshot.
 //!
 //! Each server's state is owned by the server (no process-wide "last load
@@ -69,7 +71,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, ListenAddr, Method, Request, Response, Server};
@@ -2186,6 +2188,76 @@ impl Drop for SnapshotDir {
 }
 
 /// The read-only snapshot a locked server queries.
+/// The dashboards folder as last loaded (#772): what a snapshot is built
+/// from. A snapshot keeps the set it was built from ([`Snapshot::dashes`]),
+/// so a request always sees dashboards that match its snapshot's `deps`;
+/// `anofox_serve_reload` loads a new set and swaps both together.
+struct DashSet {
+    list: Vec<Dash>,
+    /// Extensions the snapshot loads: the dashboards' own `-- @load`s,
+    /// `options.load`, and `json` under an access policy.
+    loads: Vec<String>,
+    /// `<dir>/assets`, canonicalized when the set was loaded (#514 PR B) —
+    /// `None` when there is no such folder, so every
+    /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
+    assets_root: Option<PathBuf>,
+    /// #684 slice 3: per dashboard id, the declared tables its SQL names —
+    /// those dashboards get them materialised (base ⊕ saves) and fold the
+    /// change log's generation into their cache/warm keys (empty without
+    /// `options.writeback`).
+    dash_tables: HashMap<String, Vec<String>>,
+}
+
+impl DashSet {
+    fn find(&self, id: &str) -> Option<&Dash> {
+        self.list.iter().find(|d| d.id == id)
+    }
+}
+
+/// Read the dashboards folder into a [`DashSet`]: the same reads and
+/// refusals at start and on `anofox_serve_reload`.
+fn load_dash_set(dir: &Path, opts: &LockedOptions) -> Result<DashSet, String> {
+    let (list, mut loads) = load_dashboards(dir)?;
+    // Review of #554 nit 8: a symlinked `assets` (e.g. `assets -> /`)
+    // refuses to start, loudly — `canonical_assets_dir` itself already
+    // treats it as `None` (no assets served), but silently starting with
+    // assets "just off" would look identical to "there's no assets/ folder
+    // here" to the operator; the mistake is worth surfacing.
+    if anofox_visualization::image::assets_dir_is_symlink(dir) {
+        return Err(format!(
+            "anofox-visualization: '{}/assets' is a symlink — refusing to serve it (it may point outside the dashboards folder); replace it with a plain directory",
+            dir.display()
+        ));
+    }
+    let assets_root = anofox_visualization::image::canonical_assets_dir(dir);
+    loads.extend(opts.load.iter().cloned());
+    if opts.policy.is_some() {
+        // json_serialize_sql: the policy rewrite parses with DuckDB.
+        loads.push("json".into());
+    }
+    let dash_tables = match &opts.writeback_opts {
+        None => HashMap::new(),
+        Some(wb_opts) => list
+            .iter()
+            .map(|d| {
+                let ts = wb_opts
+                    .tables
+                    .keys()
+                    .filter(|t| wb::references(&d.sql, t))
+                    .cloned()
+                    .collect();
+                (d.id.clone(), ts)
+            })
+            .collect(),
+    };
+    Ok(DashSet {
+        list,
+        loads,
+        assets_root,
+        dash_tables,
+    })
+}
+
 struct Snapshot {
     // Field order = drop order: disconnect the warm connections, close the
     // database, then delete its files.
@@ -2218,6 +2290,8 @@ struct Snapshot {
     /// and value-validated ([`build_nav_picker`]). Recomputed on every
     /// refresh; empty without any pickers.
     nav_picker_snapshots: Vec<PickerSnapshot>,
+    /// The dashboards this snapshot was built from (#772).
+    dashes: Arc<DashSet>,
     _dir: SnapshotDir,
 }
 
@@ -2735,12 +2809,16 @@ fn join_bounded(handles: Vec<JoinHandle<()>>, budget: Duration) {
 
 struct Locked {
     port: u16,
-    dashboards: Vec<Dash>,
+    /// The dashboards folder (as given: a symlink swapped by a deploy is
+    /// followed on the next `anofox_serve_reload`, #772).
+    dir: PathBuf,
+    /// The dashboards as last loaded: what the next (re)build snapshots.
+    /// Requests read the set of the snapshot they run on
+    /// (`gen.snap.dashes`), never this.
+    dashes: RwLock<Arc<DashSet>>,
     opts: LockedOptions,
-    /// What a (re)build snapshots: the serving database's context and the
-    /// extensions to load into the snapshot.
+    /// What a (re)build snapshots: the serving database's context.
     ctx: Arc<DbCtx>,
-    loads: Vec<String>,
     /// The snapshot (+ its result cache and epoch) new requests run on.
     current: Current<Snapshot>,
     /// Random per server; qualifies the ETags (with the epoch).
@@ -2773,10 +2851,6 @@ struct Locked {
     alert_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// #768 R2: per alert, what it last sent (`notify.state` on disk).
     alert_states: Mutex<BTreeMap<String, notify::AlertState>>,
-    /// `<dir>/assets`, canonicalized once at startup (#514 PR B) — `None`
-    /// when there is no such folder next to the dashboards, so every
-    /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
-    assets_root: Option<PathBuf>,
 }
 
 /// Live runtime for `options.state` (#517 S2, plan §1/§4): the open
@@ -2809,10 +2883,6 @@ struct WritebackRuntime {
     writer_locks: Mutex<ViewerLocks>,
     recent: Mutex<RecentIds>,
     full: AtomicBool,
-    /// #684 slice 3: per dashboard id, the declared tables its SQL names —
-    /// those dashboards get them materialised (base ⊕ saves) and fold the
-    /// change log's generation into their cache/warm keys.
-    dash_tables: HashMap<String, Vec<String>>,
     /// The change log folded at one generation, rebuilt after a save.
     folded: Mutex<Option<(u64, Arc<Folded>)>>,
     /// Held across a save's conflict check and its append (#684 slice 4),
@@ -3301,7 +3371,15 @@ impl RecentIds {
 use anofox_visualization::host::access::DATA_VAR;
 
 impl Locked {
-    fn build(&self) -> Result<(Snapshot, Vec<String>), String> {
+    /// The dashboards the next build snapshots.
+    fn latest(&self) -> Arc<DashSet> {
+        self.dashes
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn build(&self, dashes: &Arc<DashSet>) -> Result<(Snapshot, Vec<String>), String> {
         // #352 M1: the Quack copy runs BEFORE ctx.conn is taken (it never
         // touches it) and is bounded, so a source that stops answering can
         // no longer stall every other locked server, the authoring
@@ -3319,12 +3397,12 @@ impl Locked {
         };
         let (mut snap, warnings) = {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-            build_snapshot(&conn, &self.opts, &self.loads, dir, source_result)?
+            build_snapshot(&conn, &self.opts, dashes, dir, source_result)?
         };
         if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
             enforce(
                 &mut snap,
-                &self.dashboards,
+                &dashes.list,
                 p,
                 k,
                 self.submit.as_deref().map(|s| &s.opts),
@@ -3334,7 +3412,7 @@ impl Locked {
                     .map(|w| (w, writeback_schema(&self.opts))),
             )?;
         }
-        analyze_deps(&mut snap, &self.dashboards)?;
+        analyze_deps(&mut snap, &dashes.list)?;
         Ok((snap, warnings))
     }
 
@@ -3345,7 +3423,9 @@ impl Locked {
         let gen = self
             .current
             .rebuild(wait, || {
-                let (snap, w) = self.build()?;
+                // Read inside the rebuild lock: a reload's new set is in
+                // place before any later refresh builds.
+                let (snap, w) = self.build(&self.latest())?;
                 warnings = w;
                 Ok(snap)
             })
@@ -3370,6 +3450,170 @@ impl Locked {
         eprintln!("[anofox-serve] {msg}");
         Ok(Some(msg))
     }
+
+    /// `anofox_serve_reload(port)` (#772): read the dashboards folder again,
+    /// check it like a start, build a snapshot from it and swap both in. On
+    /// any error the running set and snapshot stay in service. Task files and
+    /// the server options are not re-read (that takes a restart).
+    fn reload(&self) -> Result<String, String> {
+        let t0 = Instant::now();
+        let fail = |e: String| {
+            eprintln!("[anofox-serve] reload failed (still serving the previous dashboards): {e}");
+            format!(
+                "anofox-visualization: reload failed, still serving the previous dashboards: {e}"
+            )
+        };
+        let mut warnings = Vec::new();
+        let mut count = 0;
+        let gen = self
+            .current
+            .rebuild(true, || {
+                let set = Arc::new(load_dash_set(&self.dir, &self.opts)?);
+                let (snap, w) = self.build(&set)?;
+                check_dash_set(&set, &snap, &self.opts, &self.dir)?;
+                warnings = w;
+                count = set.list.len();
+                *self.dashes.write().unwrap_or_else(|p| p.into_inner()) = set;
+                Ok(snap)
+            })
+            .map_err(fail)?
+            .ok_or_else(|| fail("a rebuild was skipped".into()))?;
+        let warn = if warnings.is_empty() {
+            String::new()
+        } else {
+            format!(" (warnings: {})", warnings.join("; "))
+        };
+        let msg = format!(
+            "anofox-visualization: port {} reloaded {count} dashboard(s), snapshot epoch {} (built in {} ms){warn}",
+            self.port,
+            gen.epoch,
+            t0.elapsed().as_millis()
+        );
+        eprintln!("[anofox-serve] {msg}");
+        Ok(msg)
+    }
+}
+
+/// What a dashboard set must pass against its snapshot, at start and on
+/// `anofox_serve_reload` (#772): the dashboards and panels the options name,
+/// one statement each, the data folder's read-only rule, and
+/// `options.state` / `options.writeback`'s start checks.
+fn check_dash_set(
+    set: &DashSet,
+    snap: &Snapshot,
+    opts: &LockedOptions,
+    dir: &Path,
+) -> Result<(), String> {
+    // #768: a report names a dashboard here (and its csv/json formats a
+    // `-- @name`d panel of it).
+    for r in &opts.reports {
+        let d = set
+            .find(&r.dashboard)
+            .ok_or_else(|| format!("report '{}': no dashboard '{}'", r.name, r.dashboard))?;
+        let plan = anofox_visualization::sql::plan(&d.sql);
+        for f in &r.formats {
+            if let notify::Format::Csv(p) | notify::Format::Json(p) = f {
+                if !plan
+                    .iter()
+                    .any(|x| !x.setup && x.name.as_deref() == Some(p.as_str()))
+                {
+                    return Err(format!(
+                        "report '{}': dashboard '{}' has no panel named '{p}' (`-- @name {p}`)",
+                        r.name, r.dashboard
+                    ));
+                }
+            }
+        }
+    }
+    // #768 R2: an alert names a dashboard here and a `-- @name`d panel of it.
+    for a in &opts.alerts {
+        let d = set
+            .find(&a.dashboard)
+            .ok_or_else(|| format!("alert '{}': no dashboard '{}'", a.name, a.dashboard))?;
+        if !anofox_visualization::sql::plan(&d.sql)
+            .iter()
+            .any(|x| !x.setup && x.name.as_deref() == Some(a.panel.as_str()))
+        {
+            return Err(format!(
+                "alert '{}': dashboard '{}' has no panel named '{}' (`-- @name {}`)",
+                a.name, a.dashboard, a.panel, a.panel
+            ));
+        }
+    }
+    if let Some(h) = &opts.home {
+        if set.find(h).is_none() {
+            return Err(format!(
+                "anofox-visualization: options.home: no dashboard '{h}' in '{}'",
+                dir.display()
+            ));
+        }
+    }
+    // Validate every statement with DuckDB's parser: exactly one each.
+    {
+        let c = snap.db.connect()?;
+        for d in &set.list {
+            for (i, (_, sql)) in d.stmts.iter().enumerate() {
+                match c.count_statements(sql) {
+                    Ok(1) => {}
+                    Ok(n) => {
+                        return Err(format!(
+                            "dashboard '{}' statement {i}: expected 1 statement, found {n}",
+                            d.id
+                        ))
+                    }
+                    Err(e) => return Err(format!("dashboard '{}' statement {i}: {e}", d.id)),
+                }
+            }
+        }
+        if opts.data.is_some() {
+            check_read_only(&c, &set.list)?;
+        }
+    }
+    // #517 S2: `options.state`'s start-time refusals (plan §2) need the
+    // dashboards and the snapshot.
+    if let Some(state_opts) = &opts.state_opts {
+        let known_dashboards: Vec<String> = set.list.iter().map(|d| d.id.clone()).collect();
+        let reserved_names: Vec<String> = {
+            let c = snap.db.connect()?;
+            c.query(
+                "SELECT table_name FROM duckdb_tables() UNION ALL \
+                     SELECT view_name FROM duckdb_views()",
+            )
+            .map_err(|e| format!("options.state: {e}"))?
+            .string_rows(1_000_000)
+            .map_err(|e| format!("options.state: {e}"))?
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect()
+        };
+        let ctx = StartContext {
+            has_auth: opts.auth.is_some(),
+            embed_without_frame_ancestors: opts.auth.as_ref().is_some_and(|a| a.embed.is_some())
+                && opts.frame_ancestors.is_none(),
+            data_dir: opts.data.as_deref(),
+            dashboard_dir: dir,
+            known_dashboards: &known_dashboards,
+            reserved_names: &reserved_names,
+            search_path_entries: opts.search_path.len(),
+        };
+        state_opts.validate_start(&ctx)?;
+    }
+    // #684 slice 2: `options.writeback`'s (and `options.state`'s path, which
+    // it must not share).
+    if let Some(wb_opts) = &opts.writeback_opts {
+        let known_dashboards: Vec<String> = set.list.iter().map(|d| d.id.clone()).collect();
+        wb_opts.validate_start(&wb::StartContext {
+            has_auth: opts.auth.is_some(),
+            embed_without_frame_ancestors: opts.auth.as_ref().is_some_and(|a| a.embed.is_some())
+                && opts.frame_ancestors.is_none(),
+            data_dir: opts.data.as_deref(),
+            dashboard_dir: dir,
+            known_dashboards: &known_dashboards,
+            state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
+        })?;
+    }
+    Ok(())
 }
 
 /// `anofox_serve_dashboards(dir, port[, options])`.
@@ -3385,7 +3629,6 @@ pub fn start_locked(
             "anofox-visualization is already serving on port {port}"
         ));
     }
-    let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
     // #767: tasks/*.task.sql — read (and checked) whenever `options.tasks` is
     // set; run only on the replica with `tasks.run`, after its attachments
     // passed the READ_ONLY check (D2).
@@ -3402,51 +3645,20 @@ pub fn start_locked(
             }
         }
     };
-    // #768: a report names a dashboard here (and its csv/json formats a
-    // `-- @name`d panel of it); on the sending replica its schedule must
-    // evaluate now, so a typo fails the start, not the first send.
+    // #768: on the sending replica a report's schedule must evaluate now,
+    // so a typo fails the start, not the first send (the dashboard and panel
+    // it names: `check_dash_set`).
     for r in &opts.reports {
-        let d = dashboards
-            .iter()
-            .find(|d| d.id == r.dashboard)
-            .ok_or_else(|| format!("report '{}': no dashboard '{}'", r.name, r.dashboard))?;
-        let plan = anofox_visualization::sql::plan(&d.sql);
-        for f in &r.formats {
-            if let notify::Format::Csv(p) | notify::Format::Json(p) = f {
-                if !plan
-                    .iter()
-                    .any(|x| !x.setup && x.name.as_deref() == Some(p.as_str()))
-                {
-                    return Err(format!(
-                        "report '{}': dashboard '{}' has no panel named '{p}' (`-- @name {p}`)",
-                        r.name, r.dashboard
-                    ));
-                }
-            }
-        }
         if opts.notify.as_ref().is_some_and(|n| n.run) {
             let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
             eval_schedule(&conn, &r.schedule)
                 .map_err(|e| format!("report '{}': schedule: {e}", r.name))?;
         }
     }
-    // #768 R2: an alert names a dashboard here and a `-- @name`d panel of
-    // it; its check must evaluate on the sending replica. Its state is read
-    // now (a broken file stops the start rather than send everything again).
+    // #768 R2: an alert's check must evaluate on the sending replica. Its
+    // state is read now (a broken file stops the start rather than send
+    // everything again).
     for a in &opts.alerts {
-        let d = dashboards
-            .iter()
-            .find(|d| d.id == a.dashboard)
-            .ok_or_else(|| format!("alert '{}': no dashboard '{}'", a.name, a.dashboard))?;
-        if !anofox_visualization::sql::plan(&d.sql)
-            .iter()
-            .any(|x| !x.setup && x.name.as_deref() == Some(a.panel.as_str()))
-        {
-            return Err(format!(
-                "alert '{}': dashboard '{}' has no panel named '{}' (`-- @name {}`)",
-                a.name, a.dashboard, a.panel, a.panel
-            ));
-        }
         if opts.notify.as_ref().is_some_and(|n| n.run) {
             let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
             eval_schedule(&conn, &a.schedule)
@@ -3457,27 +3669,6 @@ pub fn start_locked(
         Some(p) if !opts.alerts.is_empty() => notify::load_states(p)?,
         _ => BTreeMap::new(),
     };
-    // #514 PR B: computed once at startup, like every other path-derived
-    // limit here (`options.data`) — an asset request never canonicalizes
-    // `dir` itself per request. Review of #554 nit 8: a symlinked `assets`
-    // (e.g. `assets -> /`) refuses to start, loudly — `canonical_assets_dir`
-    // itself already treats it as `None` (no assets served), but silently
-    // starting with assets "just off" would look identical to "there's no
-    // assets/ folder here" to the operator; the mistake is worth surfacing.
-    if anofox_visualization::image::assets_dir_is_symlink(Path::new(dir)) {
-        return Err(format!(
-            "anofox-visualization: '{dir}/assets' is a symlink — refusing to serve it (it may point outside the dashboards folder); replace it with a plain directory"
-        ));
-    }
-    let assets_root = anofox_visualization::image::canonical_assets_dir(Path::new(dir));
-    if let Some(h) = &opts.home {
-        if !dashboards.iter().any(|d| &d.id == h) {
-            return Err(format!(
-                "anofox-visualization: options.home: no dashboard '{h}' in '{dir}'"
-            ));
-        }
-    }
-    loads.extend(opts.load.iter().cloned());
     // A policy file next to the dashboards is enforced even without the
     // option: forgetting the option must not serve every row.
     if opts.policy.is_none() {
@@ -3497,8 +3688,6 @@ pub fn start_locked(
         {
             return Err("anofox-visualization: with an access policy, options.search_path must name one database (its main schema)".into());
         }
-        // json_serialize_sql: the policy rewrite parses with DuckDB.
-        loads.push("json".into());
         if opts.policy_key.is_none() {
             let k = format!("{}{}", sv::random_token(), sv::random_token());
             opts.policy_key = Some(PolicyKey(Arc::new(k.into_bytes())));
@@ -3514,6 +3703,7 @@ pub fn start_locked(
     // nothing can call `anofox_serve_stop` on it; a throwaway stop flag
     // (never set) is enough here, the Quack copy's own `timeout_s` still
     // applies.
+    let dashes = Arc::new(load_dash_set(Path::new(dir), &opts)?);
     let startup_dir = SnapshotDir::create()?;
     let startup_stop = Arc::new(AtomicBool::new(false));
     let startup_build_state = SourceBuildState::new();
@@ -3528,12 +3718,12 @@ pub fn start_locked(
     };
     let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        build_snapshot(&conn, &opts, &loads, startup_dir, source_result)?
+        build_snapshot(&conn, &opts, &dashes, startup_dir, source_result)?
     };
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
         enforce(
             &mut snap,
-            &dashboards,
+            &dashes.list,
             p,
             k,
             opts.state_opts.as_ref(),
@@ -3542,7 +3732,8 @@ pub fn start_locked(
                 .map(|w| (w, writeback_schema(&opts))),
         )?;
     }
-    analyze_deps(&mut snap, &dashboards)?;
+    analyze_deps(&mut snap, &dashes.list)?;
+    check_dash_set(&dashes, &snap, &opts, Path::new(dir))?;
     let policy_note = match (&opts.policy, &opts.auth) {
         (Some(p), Some(_)) => format!(
             "; access policy on {} table(s) — every other table is refused",
@@ -3582,62 +3773,12 @@ pub fn start_locked(
         }
         _ => policy_note,
     };
-    // Validate every statement with DuckDB's parser: exactly one each.
-    {
-        let c = snap.db.connect()?;
-        for d in &dashboards {
-            for (i, (_, sql)) in d.stmts.iter().enumerate() {
-                match c.count_statements(sql) {
-                    Ok(1) => {}
-                    Ok(n) => {
-                        return Err(format!(
-                            "dashboard '{}' statement {i}: expected 1 statement, found {n}",
-                            d.id
-                        ))
-                    }
-                    Err(e) => return Err(format!("dashboard '{}' statement {i}: {e}", d.id)),
-                }
-            }
-        }
-        if opts.data.is_some() {
-            check_read_only(&c, &dashboards)?;
-        }
-    }
     // #517 S2: `options.state`'s start-time refusals (plan §2) need the
     // dashboards and the snapshot, both only available from here on — not
     // inside `LockedOptions::parse`, which runs before either exists.
     let submit = match &opts.state_opts {
         None => None,
         Some(state_opts) => {
-            let known_dashboards: Vec<String> = dashboards.iter().map(|d| d.id.clone()).collect();
-            let reserved_names: Vec<String> = {
-                let c = snap.db.connect()?;
-                c.query(
-                    "SELECT table_name FROM duckdb_tables() UNION ALL \
-                     SELECT view_name FROM duckdb_views()",
-                )
-                .map_err(|e| format!("options.state: {e}"))?
-                .string_rows(1_000_000)
-                .map_err(|e| format!("options.state: {e}"))?
-                .into_iter()
-                .flatten()
-                .flatten()
-                .collect()
-            };
-            let ctx = StartContext {
-                has_auth: opts.auth.is_some(),
-                embed_without_frame_ancestors: opts
-                    .auth
-                    .as_ref()
-                    .is_some_and(|a| a.embed.is_some())
-                    && opts.frame_ancestors.is_none(),
-                data_dir: opts.data.as_deref(),
-                dashboard_dir: Path::new(dir),
-                known_dashboards: &known_dashboards,
-                reserved_names: &reserved_names,
-                search_path_entries: opts.search_path.len(),
-            };
-            state_opts.validate_start(&ctx)?;
             let store = Store::open(&state_opts.path, state_opts.max_mb)?;
             let rate = RateLimiter::new(
                 state_opts.rate_per_minute,
@@ -3660,19 +3801,6 @@ pub fn start_locked(
     let writeback = match &opts.writeback_opts {
         None => None,
         Some(wb_opts) => {
-            let known_dashboards: Vec<String> = dashboards.iter().map(|d| d.id.clone()).collect();
-            wb_opts.validate_start(&wb::StartContext {
-                has_auth: opts.auth.is_some(),
-                embed_without_frame_ancestors: opts
-                    .auth
-                    .as_ref()
-                    .is_some_and(|a| a.embed.is_some())
-                    && opts.frame_ancestors.is_none(),
-                data_dir: opts.data.as_deref(),
-                dashboard_dir: Path::new(dir),
-                known_dashboards: &known_dashboards,
-                state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
-            })?;
             // #726/#736: with an access policy, a saved table the policy
             // names is read through the policy's view of base ⊕ saved rows
             // (and saves into it are checked as the writer, `handle_save`);
@@ -3686,18 +3814,6 @@ pub fn start_locked(
                         .into(),
                 );
             }
-            let dash_tables: HashMap<String, Vec<String>> = dashboards
-                .iter()
-                .map(|d| {
-                    let ts = wb_opts
-                        .tables
-                        .keys()
-                        .filter(|t| wb::references(&d.sql, t))
-                        .cloned()
-                        .collect();
-                    (d.id.clone(), ts)
-                })
-                .collect();
             {
                 // Every column of a base table must be declared, or a panel
                 // reading the saved table would silently lose it.
@@ -3721,7 +3837,6 @@ pub fn start_locked(
             }
             let store = Store::open_writeback(&wb_opts.path, wb_opts.max_mb)?;
             Some(Arc::new(WritebackRuntime {
-                dash_tables,
                 folded: Mutex::new(None),
                 commit: Mutex::new(()),
                 opts: wb_opts.clone(),
@@ -3751,7 +3866,7 @@ pub fn start_locked(
         Server::http(addr)
             .map_err(|e| format!("anofox-visualization: could not bind {addr}: {e}"))?,
     );
-    let n = dashboards.len();
+    let n = dashes.list.len();
     let threads = opts.threads;
     let refresh = opts.refresh;
     let (inflight, queries) = (
@@ -3764,11 +3879,11 @@ pub fn start_locked(
     let stop = Arc::new(AtomicBool::new(false));
     let state = Arc::new(Locked {
         port,
-        dashboards,
+        dir: PathBuf::from(dir),
+        dashes: RwLock::new(dashes),
         current: Current::new(snap, opts.cache_bytes),
         opts,
         ctx,
-        loads,
         server_id: sv::random_token()[..8].to_string(),
         inflight,
         queries,
@@ -3778,7 +3893,6 @@ pub fn start_locked(
         source_build: SourceBuildState::new(),
         submit,
         writeback,
-        assets_root,
         metrics: Default::default(),
         task_stats: Mutex::new(BTreeMap::new()),
         report_stats: Mutex::new(BTreeMap::new()),
@@ -4300,10 +4414,11 @@ fn record_report(st: &Locked, r: &notify::Report, manual: bool) -> Result<usize,
 fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
     use notify::Format;
     let n = st.opts.notify.as_ref().ok_or("options.notify is not set")?;
-    let dash = st
-        .dashboards
-        .iter()
-        .find(|d| d.id == r.dashboard)
+    let gen = st.current.get();
+    let dash = gen
+        .snap
+        .dashes
+        .find(&r.dashboard)
         .ok_or("no such dashboard")?;
     // Its own dashboard only, and its principal's claims.
     let scope = Scope {
@@ -4487,10 +4602,11 @@ struct AlertRun {
 fn run_alert(st: &Locked, a: &notify::Alert) -> Result<AlertRun, String> {
     use notify::Format;
     let n = st.opts.notify.as_ref().ok_or("options.notify is not set")?;
-    let dash = st
-        .dashboards
-        .iter()
-        .find(|d| d.id == a.dashboard)
+    let gen = st.current.get();
+    let dash = gen
+        .snap
+        .dashes
+        .find(&a.dashboard)
         .ok_or("no such dashboard")?;
     let scope = Scope {
         dashboards: Some(vec![dash.id.clone()]),
@@ -4777,6 +4893,23 @@ pub fn refresh(port: u16) -> Result<String, String> {
         }
     };
     Ok(locked.refresh(true)?.unwrap_or_default())
+}
+
+/// `anofox_serve_reload(port)` (#772): see [`Locked::reload`].
+pub fn reload(port: u16) -> Result<String, String> {
+    let locked = match lock_servers().get(&port) {
+        Some(r) => r.locked.clone().ok_or_else(|| {
+            format!(
+                "anofox-visualization: the server on port {port} is not a locked dashboard server"
+            )
+        })?,
+        None => {
+            return Err(format!(
+                "anofox-visualization: nothing is serving on port {port}"
+            ))
+        }
+    };
+    locked.reload()
 }
 
 // #417: `too_broad` moved to `anofox_visualization::host::serving` (`sv`) so
@@ -5338,7 +5471,7 @@ pub(crate) fn fk_order(
 fn build_snapshot(
     live: &Conn,
     opts: &LockedOptions,
-    extra_loads: &[String],
+    dashes: &Arc<DashSet>,
     dir: SnapshotDir,
     source_result: Option<(String, PathBuf, Vec<String>)>,
 ) -> Result<(Snapshot, Vec<String>), String> {
@@ -5510,7 +5643,7 @@ fn build_snapshot(
         // With a data folder the statements are checked with json_serialize_sql
         // (`check_read_only`), which lives in the json extension.
         let json = "json".to_string();
-        let mut exts: Vec<&String> = loaded.iter().chain(extra_loads.iter()).collect();
+        let mut exts: Vec<&String> = loaded.iter().chain(dashes.loads.iter()).collect();
         if opts.data.is_some() {
             exts.push(&json);
         }
@@ -5593,6 +5726,7 @@ fn build_snapshot(
             deps_tags: Vec::new(),
             warm_deps: Vec::new(),
             nav_picker_snapshots,
+            dashes: dashes.clone(),
             _dir: dir,
         },
         warnings,
@@ -5730,7 +5864,8 @@ fn locked_asset(
     scope: Option<&Scope>,
     info: &mut LogInfo,
 ) -> u16 {
-    let Some(d) = st.dashboards.iter().find(|d| d.id == id) else {
+    let gen = st.current.get();
+    let Some(d) = gen.snap.dashes.find(id) else {
         return reply(req, 404, "no such dashboard");
     };
     if !scope.is_none_or(|s| s.allows(&d.id)) {
@@ -5738,7 +5873,7 @@ fn locked_asset(
         return reply(req, 403, "forbidden: not in this credential's scope");
     }
     info.dashboard = Some(d.id.clone());
-    let Some(root) = &st.assets_root else {
+    let Some(root) = &gen.snap.dashes.assets_root else {
         return reply(req, 404, "not found");
     };
     let max = st.opts.max_asset_bytes as u64;
@@ -5982,7 +6117,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             let mut body = serde_json::json!({
                 "status": "ok",
                 "version": anofox_visualization::BUILD_VERSION,
-                "dashboards": st.dashboards.len(),
+                "dashboards": gen.snap.dashes.list.len(),
                 "epoch": gen.epoch,
                 "snapshot_age_s": gen.built.elapsed().as_secs(),
                 "refresh_s": st.opts.refresh.map(|d| d.as_secs()),
@@ -6146,7 +6281,8 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         }
         (&Method::Get, p) if p.starts_with("/d/") => {
             let id = p["/d/".len()..].trim_end_matches('/');
-            match st.dashboards.iter().find(|d| d.id == id) {
+            let gen = st.current.get();
+            match gen.snap.dashes.find(id) {
                 // A scoped credential (embed link, API key) reads its own
                 // dashboards only.
                 Some(d) if !scope.is_none_or(|s| s.allows(&d.id)) => {
@@ -6503,7 +6639,7 @@ fn export_dashboard(
         } else {
             anofox_visualization::theme::Variant::Light
         },
-        asset_root: st.assets_root.clone(),
+        asset_root: st.current.get().snap.dashes.assets_root.clone(),
         only,
         ..Default::default()
     };
@@ -6564,7 +6700,8 @@ fn handle_export(
             "not found: a dashboard exports as .svg, .png or .pdf, a named panel as .csv or .json",
         );
     }
-    let Some(dash) = st.dashboards.iter().find(|d| d.id == id) else {
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(id) else {
         return reply(req, 404, "no such dashboard");
     };
     info.dashboard = Some(dash.id.clone());
@@ -6672,7 +6809,7 @@ fn metric_gauges(st: &Locked) -> Vec<metrics::Gauge> {
         Gauge::one(
             "anofox_dashboards",
             "Dashboards served.",
-            st.dashboards.len() as f64,
+            st.current.get().snap.dashes.list.len() as f64,
         ),
         Gauge::one(
             "anofox_snapshot_epoch",
@@ -7314,12 +7451,14 @@ fn locked_panel_req(
     // The snapshot this request runs on, start to end (a refresh only changes
     // what later requests get).
     let gen = st.current.get();
-    let di = st
-        .dashboards
+    let di = gen
+        .snap
+        .dashes
+        .list
         .iter()
         .position(|d| d.id == r.dashboard)
         .ok_or((404, "no such dashboard".to_string()))?;
-    let dash = &st.dashboards[di];
+    let dash = &gen.snap.dashes.list[di];
     let deps_tag = gen.snap.deps_tags.get(di).cloned().unwrap_or_default();
     // `-- @vars`: a variable the dashboard doesn't let viewers set is never set.
     if let Some(allowed) = &dash.meta.vars {
@@ -7448,7 +7587,12 @@ fn locked_panel_req(
     // log's generation too (a save misses the cache and warm connections),
     // and the folded tables it carries into run_panel are that generation's.
     let wb_snap = st.writeback.as_deref().and_then(|w| {
-        let tables = w.dash_tables.get(&dash.id).filter(|t| !t.is_empty())?;
+        let tables = gen
+            .snap
+            .dashes
+            .dash_tables
+            .get(&dash.id)
+            .filter(|t| !t.is_empty())?;
         let (g, folded) = w.snapshot();
         Some((g, folded, &w.opts, tables.as_slice()))
     });
@@ -7727,7 +7871,8 @@ fn handle_submit(
     // scoped credential outside its scope must see the same "forbidden"
     // either way, not learn whether a dashboard outside its scope happens
     // to be submit-enabled or not.
-    let Some(dash) = st.dashboards.iter().find(|d| d.id == sub.dashboard) else {
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&sub.dashboard) else {
         return reply(req, 404, "no such dashboard");
     };
     if let Some(s) = scope {
@@ -8206,7 +8351,8 @@ fn handle_save(
     info.panel = Some(sub.panel);
 
     // Scope before enablement, as in `/api/submit`.
-    let Some(dash) = st.dashboards.iter().find(|d| d.id == sub.dashboard) else {
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&sub.dashboard) else {
         return reply(req, 404, "no such dashboard");
     };
     if let Some(s) = scope {
@@ -9236,13 +9382,16 @@ fn served_index(
     session: Option<&str>,
     writer: bool,
 ) -> Vec<u8> {
+    // The nav and what each statement depends on (#210) come from one
+    // snapshot (and its dashboards, #772).
+    let gen = st.current.get();
     let html = WEB
         .get_file("index.html")
         .map(|f| String::from_utf8_lossy(f.contents()).into_owned())
         .unwrap_or_default();
     let mut cfg = serde_json::json!({
         "id": dash.id, "title": dash.meta.title, "sql": dash.sql,
-        "nav": nav_json(&st.dashboards, scope), "locked": true,
+        "nav": nav_json(&gen.snap.dashes.list, scope), "locked": true,
         "theme": st.opts.theme,
     });
     if let Some(s) = session {
@@ -9274,7 +9423,6 @@ fn served_index(
     }
     // What each statement depends on (#210): the page re-requests a panel
     // only when one of its variables changed.
-    let gen = st.current.get();
     let nav_pickers: Vec<serde_json::Value> = st
         .opts
         .nav_pickers
@@ -9286,7 +9434,7 @@ fn served_index(
     if !nav_pickers.is_empty() {
         cfg["navPickers"] = serde_json::json!(nav_pickers);
     }
-    if let Some(di) = st.dashboards.iter().position(|d| d.id == dash.id) {
+    if let Some(di) = gen.snap.dashes.list.iter().position(|d| d.id == dash.id) {
         if let (Some(ds), Some(tag)) = (gen.snap.deps.get(di), gen.snap.deps_tags.get(di)) {
             cfg["deps"] = serde_json::json!(ds.iter().map(Deps::to_json).collect::<Vec<_>>());
             cfg["depsTag"] = serde_json::json!(tag);
@@ -9353,13 +9501,16 @@ fn nav_json(dashboards: &[Dash], scope: Option<&Scope>) -> Vec<serde_json::Value
 /// scope filter as the nav), as cards in groups, in the server's theme, with
 /// `options.app` as its header (see `page::landing`).
 fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
+    let gen = st.current.get();
     let set = anofox_visualization::theme::resolve(st.opts.theme.as_deref().unwrap_or(""))
         .unwrap_or_else(|_| anofox_visualization::theme::resolve("").expect("the default theme"));
     anofox_visualization::page::landing(&anofox_visualization::page::Landing {
         theme: &set,
         app: st.opts.app.as_ref(),
-        items: st
-            .dashboards
+        items: gen
+            .snap
+            .dashes
+            .list
             .iter()
             .filter(|d| scope.is_none_or(|s| s.allows(&d.id)))
             .map(|d| anofox_visualization::page::LandingItem {
