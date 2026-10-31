@@ -353,8 +353,8 @@ mod serve_fns {
     }
 
     pub(super) fn policy_hmac(key: &[u8], domain: &str, value: &str) -> String {
-        use hmac::{Hmac, Mac};
-        let mut m = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key)
+        use hmac::{Hmac, KeyInit, Mac};
+        let mut m = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key)
             .expect("HMAC takes a key of any length");
         m.update(domain.as_bytes());
         m.update(&[0]);
@@ -731,8 +731,8 @@ mod policy_hash_tests {
         // HMAC-SHA256 (RFC 4231 test case 2), first 8 bytes.
         assert_eq!(
             {
-                use hmac::{Hmac, Mac};
-                let mut m = <Hmac<sha2::Sha256> as Mac>::new_from_slice(b"Jefe").unwrap();
+                use hmac::{Hmac, KeyInit, Mac};
+                let mut m = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(b"Jefe").unwrap();
                 m.update(b"what do ya want for nothing?");
                 m.finalize().into_bytes()[..8]
                     .iter()

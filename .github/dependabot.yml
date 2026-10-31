@@ -22,6 +22,15 @@ updates:
     groups:
       crates:
         patterns: ["*"]
+    # #784: held. bindgen 0.73 doesn't build here (its syn requirement);
+    # resvg/usvg must stay on the usvg that svg2pdf uses (0.13 → usvg 0.45).
+    ignore:
+      - dependency-name: bindgen
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: resvg
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: usvg
+        update-types: ["version-update:semver-minor"]
     open-pull-requests-limit: 2
   - package-ecosystem: npm
     directory: /tests/web
@@ -32,4 +41,9 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+    # #784: held. DuckDB-Wasm's version is pinned in web/app.js,
+    # web/assist-csp.js and src/host/serving.rs and decides the DuckDB the
+    # wasm extension is built for — it moves by hand, with them.
+    ignore:
+      - dependency-name: "@duckdb/duckdb-wasm"
     open-pull-requests-limit: 2
