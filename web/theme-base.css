@@ -329,6 +329,17 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-info-btn:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
 .dp-info-pop{position:absolute;z-index:1000;max-width:min(320px,calc(100vw - 16px));width:max-content;padding:.55rem .7rem;font-family:var(--ax-font-body);font-size:.8rem;font-weight:500;line-height:1.45;letter-spacing:0;text-transform:none;white-space:normal;color:var(--ax-tip-ink);background:var(--ax-tip-bg);border:1px solid var(--ax-tip-border);border-radius:var(--ax-radius-sm);box-shadow:var(--ax-tip-shadow)}
 .dp-info-pop[hidden]{display:none}
+/* #759: ::INFO is Markdown now — compact blocks; long texts get a wider box that scrolls inside (never off screen) */
+.dp-info-pop{max-height:min(60vh,420px);overflow:auto;overscroll-behavior:contain}
+.dp-info-pop.wide{max-width:min(480px,calc(100vw - 16px))}
+.dp-info-pop>:first-child{margin-top:0}.dp-info-pop>:last-child{margin-bottom:0}
+.dp-info-pop p,.dp-info-pop ul,.dp-info-pop ol,.dp-info-pop table{margin:.35rem 0}
+.dp-info-pop ul,.dp-info-pop ol{padding-left:1.1rem}
+.dp-info-pop a{color:inherit;text-decoration:underline}
+.dp-info-pop code{font-size:.92em}
+.md-table{border-collapse:collapse;font-size:.92em;max-width:100%;display:block;overflow-x:auto}
+.md-table th,.md-table td{padding:.25rem .55rem;border-bottom:1px solid var(--ax-line);text-align:left;vertical-align:top}
+.md-table th{font-weight:600}
 .md-body h1,.md-body h2,.md-body h3,.md-body h4{margin:.4em 0 .3em;line-height:1.25;color:var(--ax-md-heading)}
 .md-body h1{font-size:1.5rem}.md-body h2{font-size:1.25rem}.md-body h3{font-size:1.08rem}.md-body h4{font-size:.98rem}
 .md-body p{margin:.5em 0}

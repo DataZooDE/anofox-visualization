@@ -13963,7 +13963,11 @@ function addInfo(fig, text) {
   pop.className = "dp-info-pop";
   pop.id = id;
   pop.setAttribute("role", "tooltip");
-  pop.textContent = text;
+  // #759: the same escaped Markdown subset as ::MARKDOWN (lists, **bold**,
+  // tables, links), with a newline as a line break; a long text gets a
+  // wider box that scrolls inside a maximum height.
+  pop.innerHTML = renderMarkdown(text, { breaks: true });
+  if (text.length > 280 || text.split("\n").length > 4 || /\n\s*\|/.test(text)) pop.classList.add("wide");
   pop.hidden = true;
   wrap.append(btn, pop);
   let pinned = false;
@@ -16774,9 +16778,11 @@ async function typesetMath(root) {
 }
 
 // Minimal, dependency-free Markdown → HTML (headings, bold/italic, inline +
-// fenced code, links, blockquotes, ordered/unordered lists, rules, paragraphs).
-// Raw HTML in the source is escaped, so it's safe to inject.
-function renderMarkdown(src) {
+// fenced code, links, blockquotes, ordered/unordered lists, rules, GFM
+// tables, paragraphs). Raw HTML in the source is escaped, so it's safe to
+// inject. `opts.breaks`: a single newline inside a paragraph is a line break
+// (an ::INFO text, #759), not a space.
+function renderMarkdown(src, opts) {
   const esc = escapeHtml;
   // $…$ / $$…$$ formulas (mathSpans) pass the Markdown pass as inert tokens,
   // then become a .md-math span showing their TeX source until typesetMath
@@ -16856,8 +16862,35 @@ function renderMarkdown(src) {
     }
   };
   const special = /^(#{1,6}\s|```|>\s?|\s*[-*+]\s|\s*\d+\.\s)/;
+  // #759: a GFM table — a header row with pipes, then a separator row
+  // (`|---|:--:|`), then rows until a line without a pipe. `\|` is a pipe
+  // inside a cell. Each cell is inline Markdown (escaped like the rest).
+  const tableSep = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  const tableAt = (k) => k + 1 < lines.length && lines[k].includes("|") && lines[k + 1].includes("|") && tableSep.test(lines[k + 1]);
+  const cells = (l) => {
+    let t = l.trim();
+    if (t.startsWith("|")) t = t.slice(1);
+    if (t.endsWith("|") && !t.endsWith("\\|")) t = t.slice(0, -1);
+    return t.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
+  };
   while (i < lines.length) {
     const line = lines[i];
+    if (tableAt(i)) {
+      closeList();
+      const head = cells(line);
+      const align = cells(lines[i + 1]).map((c) =>
+        c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : ""
+      );
+      const cell = (tag, c, k) => `<${tag}${align[k] ? ` style="text-align:${align[k]}"` : ""}>${inline(c ?? "")}</${tag}>`;
+      html += `<table class="md-table"><thead><tr>${head.map((c, k) => cell("th", c, k)).join("")}</tr></thead><tbody>`;
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && !/^\s*$/.test(lines[i])) {
+        const row = cells(lines[i++]);
+        html += `<tr>${head.map((_, k) => cell("td", row[k], k)).join("")}</tr>`;
+      }
+      html += "</tbody></table>";
+      continue;
+    }
     if (/^```/.test(line)) {
       closeList();
       i++;
@@ -16914,8 +16947,9 @@ function renderMarkdown(src) {
     closeList();
     let para = line;
     i++;
-    while (i < lines.length && !/^\s*$/.test(lines[i]) && !special.test(lines[i])) para += " " + lines[i++];
-    html += `<p>${inline(para)}</p>`;
+    const sep = opts?.breaks ? "\n" : " ";
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !special.test(lines[i]) && !tableAt(i)) para += sep + lines[i++];
+    html += `<p>${opts?.breaks ? inline(para).replace(/\n/g, "<br>") : inline(para)}</p>`;
   }
   closeList();
   return html;
