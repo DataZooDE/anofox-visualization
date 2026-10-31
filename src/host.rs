@@ -30,6 +30,8 @@ pub mod assist;
 pub mod auth;
 pub mod duckdb_cli;
 pub mod metrics;
+#[cfg(feature = "auth")]
+pub mod notify;
 pub mod policy;
 pub mod serve_options;
 pub mod serving;

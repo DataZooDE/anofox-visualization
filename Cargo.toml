@@ -161,6 +161,8 @@ jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_r
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"], optional = true }
+# #768: the Mozilla roots for the reports' SMTP client (the same crate ureq uses).
+webpki-roots = { version = "1", optional = true }
 base64 = { version = "0.23", optional = true }
 
 # The request log opens its file with O_NOFOLLOW (src/host/access.rs).
@@ -192,7 +194,7 @@ wasm = ["dep:wasm-bindgen"]
 # `anofox-visualization serve <db>` — serve the builder UI wired to a live DuckDB.
 serve = ["dep:tiny_http", "dep:include_dir", "dep:open", "auth"]
 # Built-in authentication for the dashboard servers (no HTTP server of its own).
-auth = ["dep:jsonwebtoken", "dep:aws-lc-rs", "dep:rustls", "dep:ureq", "dep:base64"]
+auth = ["dep:jsonwebtoken", "dep:aws-lc-rs", "dep:rustls", "dep:ureq", "dep:base64", "dep:webpki-roots"]
 
 [[bin]]
 name = "serve"

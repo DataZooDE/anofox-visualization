@@ -1,7 +1,7 @@
 //! anofox-visualization — a DuckDB C-API extension: `SELECT anofox_render()` →
 //! an SVG rendered by ggplot-rs (via the anofox-visualization core), plus the
 //! serving functions (`anofox_serve`, `anofox_serve_dashboards`,
-//! `anofox_serve_refresh`, `anofox_serve_stop`; native only). Uses the C
+//! `anofox_serve_refresh`, `anofox_serve_report`, `anofox_serve_stop`; native only). Uses the C
 //! Extension API — the DuckDB functions are resolved at load time through the
 //! `access` struct, so nothing links against libduckdb. That's what lets the
 //! same crate become a DuckDB-Wasm side-module.
@@ -331,6 +331,20 @@ mod serve_fns {
         })
     }
 
+    /// `anofox_serve_report(port, name)` → send a locked server's report now
+    /// (#768; for testing a report).
+    pub(super) unsafe extern "C" fn anofox_serve_report_fn(
+        info: duckdb_function_info,
+        input: duckdb_data_chunk,
+        output: duckdb_vector,
+    ) {
+        guarded(info, || {
+            per_row(input, output, 2, |d, i| {
+                serve::send_report(port_at(d[0], i)?, &str_at(d[1], i)?)
+            })
+        })
+    }
+
     /// `__anofox_policy_hash(column id, value)` — the access policy's `hash`
     /// mask: the first 8 bytes of HMAC-SHA256(key, column id ‖ 0 ‖ value), as
     /// hex. The key is the function's extra_info: it never appears in SQL,
@@ -655,6 +669,14 @@ unsafe fn init(
             c"anofox_serve_refresh",
             &[&[DUCKDB_TYPE_INTEGER]],
             serve_fns::anofox_serve_refresh_fn,
+            true,
+            None,
+            None,
+        ) && register_scalar(
+            raw,
+            c"anofox_serve_report",
+            &[&[DUCKDB_TYPE_INTEGER, DUCKDB_TYPE_VARCHAR]],
+            serve_fns::anofox_serve_report_fn,
             true,
             None,
             None,

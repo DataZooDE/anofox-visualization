@@ -46,6 +46,7 @@ use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::metrics;
+use anofox_visualization::host::notify;
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
     self as sv, content_type, json_for_script, quote_ident, sql_string_literal, AuthoringGuard,
@@ -114,6 +115,8 @@ struct Running {
     refresher: Option<JoinHandle<()>>,
     /// #767: the task runner (`options.tasks.run`), joined like the refresher.
     tasks: Option<JoinHandle<()>>,
+    /// #768: the report runner (`options.notify.run`), joined like the refresher.
+    reports: Option<JoinHandle<()>>,
     /// A locked server's state (for `anofox_serve_refresh`).
     locked: Option<Arc<Locked>>,
     /// Dropped after the workers have exited (closes the snapshot DB and
@@ -163,6 +166,9 @@ pub fn stop(port: u16) -> Result<String, String> {
         join_bounded(vec![h], STOP_JOIN_BUDGET);
     }
     if let Some(h) = r.tasks.take() {
+        join_bounded(vec![h], STOP_JOIN_BUDGET);
+    }
+    if let Some(h) = r.reports.take() {
         join_bounded(vec![h], STOP_JOIN_BUDGET);
     }
     Ok(format!(
@@ -690,6 +696,7 @@ pub fn start_authoring(
             workers,
             refresher: None,
             tasks: None,
+            reports: None,
             locked: None,
             _state: Box::new(state),
         },
@@ -1254,6 +1261,10 @@ pub struct LockedOptions {
     pub metrics_token: Option<String>,
     /// `tasks` (#767): scheduled `tasks/*.task.sql`.
     pub tasks: Option<TasksOptions>,
+    /// `notify` (#768): the reports' channels, and whether this replica sends.
+    pub notify: Option<notify::NotifyOptions>,
+    /// `reports` (#768): scheduled reports.
+    pub reports: Vec<notify::Report>,
 }
 
 /// `options.tasks` (#767, docs/plans/plan-tasks-reports.md §1).
@@ -1605,6 +1616,8 @@ impl Default for LockedOptions {
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
             metrics_token: None,
             tasks: None,
+            notify: None,
+            reports: Vec::new(),
         }
     }
 }
@@ -1621,6 +1634,7 @@ impl LockedOptions {
         let (mut log, mut log_vars) = (None, None);
         let (mut auth_cfg, mut audit) = (None, None);
         let (mut saw_nav_picker, mut saw_nav_pickers) = (false, false);
+        let (mut notify_cfg, mut reports_cfg) = (None, None);
         for (k, val) in m {
             let num = || {
                 val.as_u64()
@@ -1782,6 +1796,8 @@ impl LockedOptions {
                 "tasks" => {
                     o.tasks = Some(parse_tasks(val)?);
                 }
+                "notify" => notify_cfg = Some(val),
+                "reports" => reports_cfg = Some(val),
                 "bind" => {
                     o.bind = val
                         .as_str()
@@ -1924,6 +1940,14 @@ impl LockedOptions {
             o.auth = Some(Arc::new(a));
         } else if audit.is_some() {
             return Err("options.audit needs options.auth".into());
+        }
+        // #768: the channels first (a report's recipient names one); the
+        // secrets come from the environment.
+        if let Some(v) = notify_cfg {
+            o.notify = Some(notify::parse_notify(v, &|k| std::env::var(k).ok())?);
+        }
+        if let Some(v) = reports_cfg {
+            o.reports = notify::parse_reports(v, o.notify.as_ref())?;
         }
         match (log, log_vars) {
             (Some(l), v) => {
@@ -2677,6 +2701,10 @@ struct Locked {
     metrics: anofox_visualization::host::metrics::Metrics,
     /// #767: per task, its last run (for `/metrics`).
     task_stats: Mutex<BTreeMap<String, TaskStat>>,
+    /// #768: per report, its last run (for `/metrics`).
+    report_stats: Mutex<BTreeMap<String, TaskStat>>,
+    /// #768: the messages sent in the last hour (`notify.max_per_hour`).
+    report_rate: Mutex<notify::Rate>,
     /// `<dir>/assets`, canonicalized once at startup (#514 PR B) — `None`
     /// when there is no such folder next to the dashboards, so every
     /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
@@ -3306,6 +3334,34 @@ pub fn start_locked(
             }
         }
     };
+    // #768: a report names a dashboard here (and its csv/json formats a
+    // `-- @name`d panel of it); on the sending replica its schedule must
+    // evaluate now, so a typo fails the start, not the first send.
+    for r in &opts.reports {
+        let d = dashboards
+            .iter()
+            .find(|d| d.id == r.dashboard)
+            .ok_or_else(|| format!("report '{}': no dashboard '{}'", r.name, r.dashboard))?;
+        let plan = anofox_visualization::sql::plan(&d.sql);
+        for f in &r.formats {
+            if let notify::Format::Csv(p) | notify::Format::Json(p) = f {
+                if !plan
+                    .iter()
+                    .any(|x| !x.setup && x.name.as_deref() == Some(p.as_str()))
+                {
+                    return Err(format!(
+                        "report '{}': dashboard '{}' has no panel named '{p}' (`-- @name {p}`)",
+                        r.name, r.dashboard
+                    ));
+                }
+            }
+        }
+        if opts.notify.as_ref().is_some_and(|n| n.run) {
+            let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+            eval_schedule(&conn, &r.schedule)
+                .map_err(|e| format!("report '{}': schedule: {e}", r.name))?;
+        }
+    }
     // #514 PR B: computed once at startup, like every other path-derived
     // limit here (`options.data`) — an asset request never canonicalizes
     // `dir` itself per request. Review of #554 nit 8: a symlinked `assets`
@@ -3630,6 +3686,8 @@ pub fn start_locked(
         assets_root,
         metrics: Default::default(),
         task_stats: Mutex::new(BTreeMap::new()),
+        report_stats: Mutex::new(BTreeMap::new()),
+        report_rate: Mutex::new(notify::Rate::default()),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -3672,6 +3730,40 @@ pub fn start_locked(
         let (st, stop) = (state.clone(), stop.clone());
         std::thread::spawn(move || task_runner(&st, &stop, task_list))
     });
+    // #768: the report runner, on this replica only when `notify.run`.
+    let reports_running =
+        !state.opts.reports.is_empty() && state.opts.notify.as_ref().is_some_and(|n| n.run);
+    // #768 D4: each report's principal, for the operator to attest.
+    let report_note: String = state
+        .opts
+        .reports
+        .iter()
+        .map(|r| {
+            let p = &r.principal;
+            let attrs: Vec<String> = p
+                .attrs
+                .iter()
+                .map(|(k, v)| format!("{k}={}", v.as_deref().unwrap_or("NULL")))
+                .collect();
+            format!(
+                "; report '{}' runs as {} (groups: [{}], claims: [{}]) to {} recipient(s){}",
+                r.name,
+                p.user,
+                p.groups.join(", "),
+                attrs.join(", "),
+                r.to.len(),
+                if reports_running {
+                    ""
+                } else {
+                    ", not sent from this replica"
+                }
+            )
+        })
+        .collect();
+    let reports_handle = reports_running.then(|| {
+        let (st, stop) = (state.clone(), stop.clone());
+        std::thread::spawn(move || report_runner(&st, &stop))
+    });
     servers.insert(
         port,
         Running {
@@ -3681,6 +3773,7 @@ pub fn start_locked(
             workers,
             refresher: refresher_handle,
             tasks: tasks_handle,
+            reports: reports_handle,
             locked: Some(state.clone()),
             _state: Box::new(state),
         },
@@ -3691,7 +3784,7 @@ pub fn start_locked(
         format!(" (warnings: {})", warnings.join("; "))
     };
     Ok(format!(
-        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{auth_note}{policy_note}{warn}"
+        "anofox-visualization serving {n} locked, read-only dashboard(s) at http://{addr}/ — server owns the SQL{auth_note}{policy_note}{report_note}{warn}"
     ))
 }
 
@@ -3831,51 +3924,78 @@ fn task_runner(st: &Locked, stop: &AtomicBool, list: Vec<tasks::Task>) {
     let Some(opts) = st.opts.tasks.clone() else {
         return;
     };
-    let schedule = |t: &tasks::Task| -> Result<Next, String> {
-        let c = st.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
-        eval_schedule(&c, &t.schedule)
-    };
-    let warn = |t: &tasks::Task, e: &str| {
-        eprintln!("[anofox-serve] task '{}': {}", t.name, access::diag(e));
-    };
-    // When each task is due next (`None`: never again).
-    let mut due: Vec<Option<f64>> = list
+    let jobs: Vec<(&str, &str)> = list
         .iter()
-        .map(|t| match schedule(t) {
-            Ok(Next::Init | Next::Every(_)) => Some(unix_now()),
+        .map(|t| (t.name.as_str(), t.schedule.as_str()))
+        .collect();
+    run_on_schedule(st, stop, "task", &jobs, true, |i| {
+        let t = &list[i];
+        if run_task(st, &opts, t) && t.refresh {
+            if let Err(e) = st.refresh(false) {
+                eprintln!(
+                    "[anofox-serve] task '{}': refresh failed: {}",
+                    t.name,
+                    access::diag(&e)
+                );
+            }
+        }
+    });
+}
+
+/// Run each job (`(name, schedule SQL)`) when it is due, one at a time,
+/// until the server stops (#767 tasks, #768 reports). An INTERVAL runs
+/// first at the start when `interval_now` (tasks), else one interval later
+/// (reports: a restart doesn't send again).
+fn run_on_schedule(
+    st: &Locked,
+    stop: &AtomicBool,
+    what: &str,
+    jobs: &[(&str, &str)],
+    interval_now: bool,
+    mut run: impl FnMut(usize),
+) {
+    let schedule = |sql: &str| -> Result<Next, String> {
+        let c = st.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+        eval_schedule(&c, sql)
+    };
+    let warn = |name: &str, e: &str| {
+        eprintln!("[anofox-serve] {what} '{name}': {}", access::diag(e));
+    };
+    // When each job is due next (`None`: never again).
+    let mut due: Vec<Option<f64>> = jobs
+        .iter()
+        .map(|(name, sql)| match schedule(sql) {
+            Ok(Next::Init) => Some(unix_now()),
+            Ok(Next::Every(s)) => Some(unix_now() + if interval_now { 0.0 } else { s }),
             Ok(Next::At(at)) => Some(at),
             Err(e) => {
-                warn(t, &e);
+                warn(name, &e);
                 Some(unix_now() + 60.0)
             }
         })
         .collect();
     while !stop.load(Ordering::SeqCst) {
-        for (i, t) in list.iter().enumerate() {
+        for (i, (name, sql)) in jobs.iter().enumerate() {
             if stop.load(Ordering::SeqCst) {
                 return;
             }
             if !due[i].is_some_and(|d| unix_now() >= d) {
                 continue;
             }
-            if run_task(st, &opts, t) && t.refresh {
-                if let Err(e) = st.refresh(false) {
-                    warn(t, &format!("refresh failed: {e}"));
-                }
-            }
-            due[i] = match schedule(t) {
+            run(i);
+            due[i] = match schedule(sql) {
                 Ok(Next::Init) => None,
                 Ok(Next::Every(s)) => Some(unix_now() + s),
                 Ok(Next::At(at)) if at > unix_now() + 1.0 => Some(at),
                 Ok(Next::At(_)) => {
                     warn(
-                        t,
-                        "its ::SCHEDULE gave a time that has passed; tried again in 60 s",
+                        name,
+                        "its schedule gave a time that has passed; tried again in 60 s",
                     );
                     Some(unix_now() + 60.0)
                 }
                 Err(e) => {
-                    warn(t, &e);
+                    warn(name, &e);
                     Some(unix_now() + 60.0)
                 }
             };
@@ -3934,8 +4054,14 @@ fn run_task(st: &Locked, opts: &TasksOptions, t: &tasks::Task) -> bool {
         "error": res.err().map(|e| redact(e, st.opts.data.as_deref())),
     })
     .to_string();
-    match opts.log.as_deref() {
-        None | Some("stderr") => eprintln!("[anofox-serve] task {line}"),
+    run_log(opts.log.as_deref(), "task", &line);
+    ok
+}
+
+/// One JSON line of a task's or report's run log (a file, or stderr).
+fn run_log(dest: Option<&str>, what: &str, line: &str) {
+    match dest {
+        None | Some("stderr") => eprintln!("[anofox-serve] {what} {line}"),
         Some(path) => {
             use std::io::Write as _;
             let w = std::fs::OpenOptions::new()
@@ -3944,11 +4070,10 @@ fn run_task(st: &Locked, opts: &TasksOptions, t: &tasks::Task) -> bool {
                 .open(path)
                 .and_then(|mut f| writeln!(f, "{line}"));
             if let Err(e) = w {
-                eprintln!("[anofox-serve] task log {}: {e}", access::diag(path));
+                eprintln!("[anofox-serve] {what} log {}: {e}", access::diag(path));
             }
         }
     }
-    ok
 }
 
 /// #767: the tasks' gauges for `/metrics`.
@@ -3983,6 +4108,247 @@ fn task_gauges(st: &Locked) -> Vec<metrics::Gauge> {
         g(
             "anofox_task_consecutive_failures",
             "Failed runs of each task in a row (0 after a success).",
+            per(&|s| Some(s.failing_in_row as f64)),
+        ),
+    ]
+}
+
+// ---- #768: reports ---------------------------------------------------------
+
+/// The report thread: sends each report when it is due (`options.notify.run`).
+fn report_runner(st: &Locked, stop: &AtomicBool) {
+    let list = &st.opts.reports;
+    let jobs: Vec<(&str, &str)> = list
+        .iter()
+        .map(|r| (r.name.as_str(), r.schedule.as_str()))
+        .collect();
+    run_on_schedule(st, stop, "report", &jobs, false, |i| {
+        let _ = record_report(st, &list[i], false);
+    });
+}
+
+/// Run one report and record it (run log, `/metrics`): the number of
+/// recipients it reached, or why it failed.
+fn record_report(st: &Locked, r: &notify::Report, manual: bool) -> Result<usize, String> {
+    let started = unix_now();
+    let t0 = Instant::now();
+    let res = run_report(st, r).map_err(|e| redact(e, st.opts.data.as_deref()));
+    {
+        let mut m = st.report_stats.lock().unwrap_or_else(|p| p.into_inner());
+        let s = m.entry(r.name.clone()).or_default();
+        s.runs += 1;
+        if res.is_ok() {
+            s.last_ok = Some(started as u64);
+            s.failing_in_row = 0;
+        } else {
+            s.failures += 1;
+            s.failing_in_row += 1;
+        }
+    }
+    let line = serde_json::json!({
+        "report": r.name,
+        "start": started as u64,
+        "ms": t0.elapsed().as_millis() as u64,
+        "ok": res.is_ok(),
+        "sent": res.as_ref().ok(),
+        "manual": manual,
+        "error": res.as_ref().err(),
+    })
+    .to_string();
+    run_log(
+        st.opts.notify.as_ref().and_then(|n| n.log.as_deref()),
+        "report",
+        &line,
+    );
+    res
+}
+
+/// Render a report's files through the export path as its principal (D4),
+/// then send them to every recipient. Over a limit nothing is sent.
+fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
+    use notify::{Format, Recipient};
+    let n = st.opts.notify.as_ref().ok_or("options.notify is not set")?;
+    let dash = st
+        .dashboards
+        .iter()
+        .find(|d| d.id == r.dashboard)
+        .ok_or("no such dashboard")?;
+    // Its own dashboard only, and its principal's claims.
+    let scope = Scope {
+        dashboards: Some(vec![dash.id.clone()]),
+        vars: Vec::new(),
+    };
+    let vars = sv::parse_vars_object(Some(&Value::Object(r.vars.clone())))?;
+    let who = ExportAs {
+        claims: Some(&r.principal),
+        scope: Some(&scope),
+        method: Some("report"),
+        vars,
+    };
+    let look = ExportLook {
+        tab: r.tab.as_deref(),
+        width: 1200,
+        dark: false,
+        scale: 2.0,
+    };
+    let mut files = Vec::new();
+    let mut as_of = None;
+    let mut info = LogInfo::default();
+    let failed = |what: &str, (_, e): (u16, String)| format!("{what}: {e}");
+    for f in &r.formats {
+        let (name, ctype, bytes) = match f {
+            Format::Png | Format::Pdf => {
+                let (ext, ctype) = match f {
+                    Format::Png => ("png", "image/png"),
+                    _ => ("pdf", "application/pdf"),
+                };
+                let (b, a) =
+                    export_dashboard(st, dash, &who, &look, ext).map_err(|e| failed(ext, e))?;
+                as_of = as_of.or(a);
+                (format!("{}.{ext}", dash.id), ctype, b)
+            }
+            Format::Csv(p) | Format::Json(p) => {
+                let (ext, ctype) = match f {
+                    Format::Csv(_) => ("csv", "text/csv; charset=utf-8"),
+                    _ => ("json", "application/json"),
+                };
+                let b = export_panel(st, dash, &who, p, ext, &mut info)
+                    .map_err(|e| failed(&format!("{ext}:{p}"), e))?;
+                (format!("{}-{p}.{ext}", dash.id), ctype, b)
+            }
+        };
+        files.push(notify::File {
+            name,
+            content_type: ctype,
+            bytes,
+        });
+    }
+    let size: usize = files.iter().map(|f| f.bytes.len()).sum();
+    if size > notify::MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "its files are {size} bytes, over the limit of {} — not sent",
+            notify::MAX_ATTACHMENT_BYTES
+        ));
+    }
+    let msg = notify::Message {
+        report: r.name.clone(),
+        title: dash.meta.title.clone(),
+        as_of,
+        link: n.link.as_ref().map(|l| format!("{l}/d/{}", dash.id)),
+        time: std::time::SystemTime::now(),
+    };
+    let emails: Vec<String> =
+        r.to.iter()
+            .filter_map(|t| match t {
+                Recipient::Email(a) => Some(a.clone()),
+                Recipient::Webhook(_) => None,
+            })
+            .collect();
+    let hooks: Vec<(&str, &notify::Webhook)> =
+        r.to.iter()
+            .filter_map(|t| match t {
+                Recipient::Webhook(w) => n.webhooks.get(w).map(|h| (w.as_str(), h)),
+                Recipient::Email(_) => None,
+            })
+            .collect();
+    // One message per e-mail (all recipients in Bcc) and per webhook.
+    let count = usize::from(!emails.is_empty()) + hooks.len();
+    if !st
+        .report_rate
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take(count, n.max_per_hour, Instant::now())
+    {
+        return Err(format!(
+            "over options.notify.max_per_hour ({}) — not sent",
+            n.max_per_hour
+        ));
+    }
+    let mut sent = 0;
+    let mut errors = Vec::new();
+    if !emails.is_empty() {
+        let smtp = n.smtp.as_ref().ok_or("options.notify.smtp is not set")?;
+        let mail = notify::email(&smtp.from, &msg, &files);
+        match notify::send_email(smtp, &emails, &mail) {
+            Ok(()) => sent += emails.len(),
+            Err(e) => errors.push(format!("e-mail: {e}")),
+        }
+    }
+    if !hooks.is_empty() {
+        let body = notify::webhook_body(&msg, &files);
+        for (name, h) in hooks {
+            match notify::send_webhook(h, &body, msg.time) {
+                Ok(()) => sent += 1,
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(sent)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// `anofox_serve_report(port, name)`: send report `name` of the locked
+/// server on `port` now (for testing a report; recorded like a scheduled
+/// run). Only the session that started the server can call it.
+pub fn send_report(port: u16, name: &str) -> Result<String, String> {
+    let locked = match lock_servers().get(&port) {
+        Some(r) => r.locked.clone().ok_or_else(|| {
+            format!(
+                "anofox-visualization: the server on port {port} is not a locked dashboard server"
+            )
+        })?,
+        None => {
+            return Err(format!(
+                "anofox-visualization: nothing is serving on port {port}"
+            ))
+        }
+    };
+    let r = locked
+        .opts
+        .reports
+        .iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| format!("anofox-visualization: no report '{name}' (options.reports)"))?;
+    let n = record_report(&locked, r, true)
+        .map_err(|e| format!("anofox-visualization: report '{name}': {e}"))?;
+    Ok(format!("report '{name}' sent to {n} recipient(s)"))
+}
+
+/// #768: the reports' gauges for `/metrics`.
+fn report_gauges(st: &Locked) -> Vec<metrics::Gauge> {
+    let m = st.report_stats.lock().unwrap_or_else(|p| p.into_inner());
+    if m.is_empty() {
+        return Vec::new();
+    }
+    type Values = Vec<(Vec<(&'static str, String)>, f64)>;
+    let per = |f: &dyn Fn(&TaskStat) -> Option<f64>| -> Values {
+        m.iter()
+            .filter_map(|(k, s)| f(s).map(|v| (vec![("report", k.clone())], v)))
+            .collect()
+    };
+    let g = |name, help, values| metrics::Gauge { name, help, values };
+    vec![
+        g(
+            "anofox_report_last_success_timestamp_seconds",
+            "When each report was last sent without an error (Unix seconds).",
+            per(&|s| s.last_ok.map(|v| v as f64)),
+        ),
+        g(
+            "anofox_report_runs",
+            "Runs of each report since the start.",
+            per(&|s| Some(s.runs as f64)),
+        ),
+        g(
+            "anofox_report_failures",
+            "Failed runs of each report since the start (not sent, or not to everyone).",
+            per(&|s| Some(s.failures as f64)),
+        ),
+        g(
+            "anofox_report_consecutive_failures",
+            "Failed runs of each report in a row (0 after a success).",
             per(&|s| Some(s.failing_in_row as f64)),
         ),
     ]
@@ -5539,6 +5905,212 @@ impl dashboard::DataProvider for ExportData<'_> {
     }
 }
 
+/// Who an export runs as and how it renders (#764) — a request's caller, or
+/// a report's principal (#768).
+struct ExportAs<'a> {
+    claims: Option<&'a Claims>,
+    scope: Option<&'a Scope>,
+    method: Option<&'static str>,
+    /// The caller's variables (`?v.name=value`, a report's `vars`).
+    vars: Vec<(String, String)>,
+}
+
+impl<'a> ExportAs<'a> {
+    fn data(&self, st: &'a Locked, dash: &'a Dash) -> ExportData<'a> {
+        ExportData {
+            st,
+            dash,
+            claims: self.claims,
+            scope: self.scope,
+            method: self.method,
+            viewer: self.vars.iter().map(|(n, _)| n.clone()).collect(),
+            vars: self.vars.clone(),
+            deadline: Instant::now() + st.opts.timeout * 4,
+            panels: 0,
+            fatal: None,
+        }
+    }
+}
+
+/// One `-- @name`d panel's rows as CSV or JSON (#764), the inputs before it
+/// bound to their defaults first, as on the page.
+fn export_panel(
+    st: &Locked,
+    dash: &Dash,
+    who: &ExportAs,
+    name: &str,
+    ext: &str,
+    info: &mut LogInfo,
+) -> Result<Vec<u8>, (u16, String)> {
+    let mut data = who.data(st, dash);
+    let plan = anofox_visualization::sql::plan(&dash.sql);
+    let Some(i) = plan
+        .iter()
+        .position(|p| !p.setup && p.name.as_deref() == Some(name))
+    else {
+        return Err((
+            404,
+            "no such panel: name it with `-- @name <name>` in the dashboard".into(),
+        ));
+    };
+    info.panel = Some(i);
+    for (j, p) in plan.iter().enumerate().take(i) {
+        if p.setup || anofox_visualization::inputs::input_kind(&p.roles).is_none() {
+            continue;
+        }
+        if let Ok(rows) = data.run(j) {
+            for set in anofox_visualization::inputs::panel_defaults(&p.roles, &rows) {
+                let _ = dashboard::DataProvider::execute(&mut data, &set);
+            }
+        }
+    }
+    let cols = match data.run(i) {
+        Ok(c) => c,
+        Err(e) => return Err(data.fatal.take().unwrap_or((400, e))),
+    };
+    // Column headers: the query's own names where it has them.
+    let headers: Vec<String> = cols
+        .iter()
+        .map(|(k, _)| {
+            k.strip_prefix('c')
+                .and_then(|n| n.parse::<usize>().ok())
+                .and_then(|n| {
+                    plan[i]
+                        .names
+                        .iter()
+                        .find(|(j, _)| *j == n)
+                        .map(|(_, s)| s.clone())
+                })
+                .unwrap_or_else(|| k.clone())
+        })
+        .collect();
+    let n = cols.first().map_or(0, |(_, v)| v.len());
+    let cell = |v: &anofox_visualization::Value| match v {
+        anofox_visualization::Value::Na => String::new(),
+        v => anofox_visualization::value_text(v),
+    };
+    Ok(if ext == "csv" {
+        let mut out = String::new();
+        let row = |cells: Vec<String>| -> String {
+            cells
+                .iter()
+                .map(|c| sv::csv_cell(c))
+                .collect::<Vec<_>>()
+                .join(",")
+                + "\r\n"
+        };
+        out.push_str(&row(headers.clone()));
+        for r in 0..n {
+            out.push_str(&row(cols.iter().map(|(_, v)| cell(&v[r])).collect()));
+        }
+        out.into_bytes()
+    } else {
+        let rows: Vec<serde_json::Value> = (0..n)
+            .map(|r| {
+                let mut m = serde_json::Map::new();
+                for (h, (_, v)) in headers.iter().zip(&cols) {
+                    m.insert(h.clone(), anofox_visualization::value_json(&v[r]));
+                }
+                serde_json::Value::Object(m)
+            })
+            .collect();
+        serde_json::to_vec(&rows).unwrap_or_default()
+    })
+}
+
+/// How a dashboard export looks.
+struct ExportLook<'a> {
+    /// One tab, by its label.
+    tab: Option<&'a str>,
+    width: u32,
+    dark: bool,
+    /// PNG pixels per SVG pixel.
+    scale: f32,
+}
+
+/// The dashboard (or one tab) as SVG, PNG or PDF (#764), and its `::ASOF`
+/// text when it has one (for a report's message).
+fn export_dashboard(
+    st: &Locked,
+    dash: &Dash,
+    who: &ExportAs,
+    look: &ExportLook,
+    ext: &str,
+) -> Result<(Vec<u8>, Option<String>), (u16, String)> {
+    let mut data = who.data(st, dash);
+    let plan = anofox_visualization::sql::plan(&dash.sql);
+    let first_text = |c: Vec<(String, Vec<anofox_visualization::Value>)>| {
+        c.first()
+            .and_then(|(_, v)| v.first().map(anofox_visualization::value_text))
+    };
+    // One tab: its marker and the statements in it.
+    let only = match look.tab {
+        None => None,
+        Some(label) => {
+            let mut found = None;
+            for (j, p) in plan.iter().enumerate() {
+                if !p
+                    .roles
+                    .iter()
+                    .any(|(_, r)| matches!(r, anofox_visualization::Role::Tab))
+                {
+                    continue;
+                }
+                let name = data.run(j).ok().and_then(first_text);
+                if name.is_some_and(|n| n.trim().eq_ignore_ascii_case(label.trim())) {
+                    found = Some(j);
+                    break;
+                }
+            }
+            let Some(j) = found else {
+                return Err((404, "no such tab".into()));
+            };
+            Some(
+                std::iter::once(j)
+                    .chain(
+                        (0..dash.stmts.len())
+                            .filter(|i| dash.tabs.get(*i).is_some_and(|t| t.contains(&j))),
+                    )
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    let opts = dashboard::DashboardOptions {
+        width: look.width,
+        theme: st.opts.theme.clone(),
+        variant: if look.dark {
+            anofox_visualization::theme::Variant::Dark
+        } else {
+            anofox_visualization::theme::Variant::Light
+        },
+        asset_root: st.assets_root.clone(),
+        only,
+        ..Default::default()
+    };
+    let svg = dashboard::render_dashboard_svg(&dash.sql, &mut data, &opts);
+    if let Some(f) = data.fatal.take() {
+        return Err(f);
+    }
+    let svg = svg.map_err(|e| (400, e))?;
+    // The ::ASOF text (the page's "data as of" line).
+    let as_of = plan
+        .iter()
+        .position(|p| {
+            !p.setup
+                && p.roles
+                    .iter()
+                    .any(|(_, r)| matches!(r, anofox_visualization::Role::AsOf))
+        })
+        .and_then(|j| data.run(j).ok().and_then(first_text));
+    // #764: PNG / PDF from the same SVG, with the bundled font.
+    let bytes = match ext {
+        "png" => crate::raster::png(&svg, look.scale).map_err(|e| (413, e))?,
+        "pdf" => crate::raster::pdf(&svg).map_err(|e| (400, e))?,
+        _ => svg.into_bytes(),
+    };
+    Ok((bytes, as_of))
+}
+
 /// `GET /api/export/<id>.svg` (the whole dashboard, or `?tab=<label>`) and
 /// `GET /api/export/<id>/<panel name>.csv|.json` (one `-- @name`d panel's
 /// rows), with `?v.<name>=<value>` for the variables (#764).
@@ -5597,19 +6169,12 @@ fn handle_export(
         Ok(v) => v,
         Err(e) => return reply(req, 400, &e),
     };
-    let mut data = ExportData {
-        st,
-        dash,
+    let who = ExportAs {
         claims,
         scope,
         method,
-        viewer: vars.iter().map(|(n, _)| n.clone()).collect(),
         vars,
-        deadline: Instant::now() + st.opts.timeout * 4,
-        panels: 0,
-        fatal: None,
     };
-    let plan = anofox_visualization::sql::plan(&dash.sql);
     let file = |e: &str| match panel_name {
         Some(p) => format!("{}-{p}.{e}", dash.id),
         None => format!("{}.{e}", dash.id),
@@ -5634,165 +6199,38 @@ fn handle_export(
         200
     };
     if let Some(name) = panel_name {
-        let Some(i) = plan
-            .iter()
-            .position(|p| !p.setup && p.name.as_deref() == Some(name))
-        else {
-            return reply(
-                req,
-                404,
-                "no such panel: name it with `-- @name <name>` in the dashboard",
-            );
-        };
-        info.panel = Some(i);
-        // The inputs before it bind their defaults first, as on the page.
-        for (j, p) in plan.iter().enumerate().take(i) {
-            if p.setup || anofox_visualization::inputs::input_kind(&p.roles).is_none() {
-                continue;
-            }
-            if let Ok(rows) = data.run(j) {
-                for set in anofox_visualization::inputs::panel_defaults(&p.roles, &rows) {
-                    let _ = dashboard::DataProvider::execute(&mut data, &set);
-                }
-            }
-        }
-        let cols = match data.run(i) {
-            Ok(c) => c,
-            Err(e) => {
-                let (code, e) = data.fatal.take().unwrap_or((400, e));
-                return reply(req, code, &e);
-            }
-        };
-        // Column headers: the query's own names where it has them.
-        let headers: Vec<String> = cols
-            .iter()
-            .map(|(k, _)| {
-                k.strip_prefix('c')
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .and_then(|n| {
-                        plan[i]
-                            .names
-                            .iter()
-                            .find(|(j, _)| *j == n)
-                            .map(|(_, s)| s.clone())
-                    })
-                    .unwrap_or_else(|| k.clone())
-            })
-            .collect();
-        let n = cols.first().map_or(0, |(_, v)| v.len());
-        let cell = |v: &anofox_visualization::Value| match v {
-            anofox_visualization::Value::Na => String::new(),
-            v => anofox_visualization::value_text(v),
-        };
-        return if ext == "csv" {
-            let mut out = String::new();
-            let row = |cells: Vec<String>| -> String {
-                cells
-                    .iter()
-                    .map(|c| sv::csv_cell(c))
-                    .collect::<Vec<_>>()
-                    .join(",")
-                    + "\r\n"
-            };
-            out.push_str(&row(headers.clone()));
-            for r in 0..n {
-                out.push_str(&row(cols.iter().map(|(_, v)| cell(&v[r])).collect()));
-            }
-            send(
-                req,
-                "text/csv; charset=utf-8",
-                out.into_bytes(),
-                file("csv"),
-            )
-        } else {
-            let rows: Vec<serde_json::Value> = (0..n)
-                .map(|r| {
-                    let mut m = serde_json::Map::new();
-                    for (h, (_, v)) in headers.iter().zip(&cols) {
-                        m.insert(h.clone(), anofox_visualization::value_json(&v[r]));
-                    }
-                    serde_json::Value::Object(m)
-                })
-                .collect();
-            let body = serde_json::to_vec(&rows).unwrap_or_default();
-            send(req, "application/json", body, file("json"))
+        return match export_panel(st, dash, &who, name, ext, info) {
+            Ok(b) if ext == "csv" => send(req, "text/csv; charset=utf-8", b, file("csv")),
+            Ok(b) => send(req, "application/json", b, file("json")),
+            Err((code, e)) => reply(req, code, &e),
         };
     }
-    // One tab: its marker and the statements in it.
-    let only = match q.get("tab") {
-        None => None,
-        Some(label) => {
-            let mut found = None;
-            for (j, p) in plan.iter().enumerate() {
-                if !p
-                    .roles
-                    .iter()
-                    .any(|(_, r)| matches!(r, anofox_visualization::Role::Tab))
-                {
-                    continue;
-                }
-                let name = data.run(j).ok().and_then(|c| {
-                    c.first()
-                        .and_then(|(_, v)| v.first().map(anofox_visualization::value_text))
-                });
-                if name.is_some_and(|n| n.trim().eq_ignore_ascii_case(label.trim())) {
-                    found = Some(j);
-                    break;
-                }
-            }
-            let Some(j) = found else {
-                return reply(req, 404, "no such tab");
-            };
-            Some(
-                std::iter::once(j)
-                    .chain(
-                        (0..dash.stmts.len())
-                            .filter(|i| dash.tabs.get(*i).is_some_and(|t| t.contains(&j))),
-                    )
-                    .collect::<Vec<_>>(),
-            )
-        }
-    };
     let width = match q.get("width").map(|w| w.parse::<u32>()) {
         None => 1200,
         Some(Ok(w)) if (480..=4000).contains(&w) => w,
         _ => return reply(req, 400, "width must be 480..=4000"),
-    };
-    let opts = dashboard::DashboardOptions {
-        width,
-        theme: st.opts.theme.clone(),
-        variant: if q.get("dark").is_some_and(|d| d == "1") {
-            anofox_visualization::theme::Variant::Dark
-        } else {
-            anofox_visualization::theme::Variant::Light
-        },
-        asset_root: st.assets_root.clone(),
-        only,
-        ..Default::default()
     };
     let scale = match q.get("scale").map(|v| v.parse::<f32>()) {
         None => 2.0,
         Some(Ok(v)) if ext == "png" && (1.0..=4.0).contains(&v) => v,
         _ => return reply(req, 400, "scale (png only) must be 1..=4"),
     };
-    match dashboard::render_dashboard_svg(&dash.sql, &mut data, &opts) {
-        _ if data.fatal.is_some() => {
-            let (code, e) = data.fatal.take().unwrap_or_default();
-            reply(req, code, &e)
+    let look = ExportLook {
+        tab: q.get("tab").map(String::as_str),
+        width,
+        dark: q.get("dark").is_some_and(|d| d == "1"),
+        scale,
+    };
+    match export_dashboard(st, dash, &who, &look, ext) {
+        Ok((b, _)) => {
+            let ctype = match ext {
+                "png" => "image/png",
+                "pdf" => "application/pdf",
+                _ => "image/svg+xml",
+            };
+            send(req, ctype, b, file(ext))
         }
-        // #764: PNG / PDF from the same SVG, with the bundled font.
-        Ok(svg) => match ext {
-            "png" => match crate::raster::png(&svg, scale) {
-                Ok(b) => send(req, "image/png", b, file("png")),
-                Err(e) => reply(req, 413, &e),
-            },
-            "pdf" => match crate::raster::pdf(&svg) {
-                Ok(b) => send(req, "application/pdf", b, file("pdf")),
-                Err(e) => reply(req, 400, &e),
-            },
-            _ => send(req, "image/svg+xml", svg.into_bytes(), file("svg")),
-        },
-        Err(e) => reply(req, 400, &e),
+        Err((code, e)) => reply(req, code, &e),
     }
 }
 
@@ -5892,6 +6330,7 @@ fn metric_gauges(st: &Locked) -> Vec<metrics::Gauge> {
         ));
     }
     g.extend(task_gauges(st));
+    g.extend(report_gauges(st));
     if st.opts.source.is_some() {
         g.push(Gauge::one(
             "anofox_source_consecutive_failures",

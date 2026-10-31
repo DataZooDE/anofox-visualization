@@ -171,6 +171,13 @@ Each slice ships with its docs, lint, metrics and an end-to-end test against
 local fakes (an SMTP sink, a webhook receiver, a fake Slack API). No test
 sends real mail or posts to real Slack.
 
+**As built (R1, #768):** the channels are `options.notify` (`smtp`,
+`webhooks`, `link`, `max_per_hour`, `log`, and `run`: only that replica
+sends, as D3 does for tasks). A recipient is `{"email": …}` or
+`{"webhook": "<name>"}`. The manual trigger is the SQL function
+`anofox_serve_report(port, name)` on the session that started the server,
+not an HTTP admin endpoint, so there is no new route or API-key scope.
+
 ## 7. Not in scope
 
 - A browser UI for tasks or reports (they're files and options, edited in git).

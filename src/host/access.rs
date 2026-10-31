@@ -438,13 +438,17 @@ impl ProxyAuth {
 pub const RESERVED_USER_PREFIX: &str = "embed:";
 /// The same for share links (`share:<dashboard>`, #763).
 pub const SHARE_USER_PREFIX: &str = "share:";
+/// The same for scheduled reports' principals (`report:<name>`, #768 D4).
+pub const REPORT_USER_PREFIX: &str = "report:";
 
 /// Is `user` in one of the server's reserved forms (an embed link's or a
 /// share link's shared identity)?
 pub fn is_reserved_user(user: &str) -> bool {
-    [RESERVED_USER_PREFIX, SHARE_USER_PREFIX].iter().any(|p| {
-        user.len() >= p.len() && user.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
-    })
+    [RESERVED_USER_PREFIX, SHARE_USER_PREFIX, REPORT_USER_PREFIX]
+        .iter()
+        .any(|p| {
+            user.len() >= p.len() && user.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+        })
 }
 
 /// One claim value as the server accepts it from any login method: trimmed,

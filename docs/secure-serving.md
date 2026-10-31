@@ -923,6 +923,61 @@ SELECT 1 ::REFRESH;                            -- rebuild the snapshot after a s
   `_consecutive_failures` per task. A failed run is tried again at the next
   tick; one run's time limit is `timeout_s` (default 900).
 
+### Scheduled reports (`options.reports`, #768)
+
+The server renders a dashboard (or one tab) on a schedule and sends it by
+e-mail or to a webhook ([plan](plans/plan-tasks-reports.md) §2, §4):
+
+```json
+{"notify": {"run": true, "link": "https://dash.example.com", "max_per_hour": 60,
+            "log": "/var/log/anofox/reports.jsonl",
+            "smtp": {"host": "smtp.example.com", "port": 587, "from": "reports@example.com",
+                     "user_env": "SMTP_USER", "password_env": "SMTP_PASSWORD"},
+            "webhooks": {"ops": {"url_env": "OPS_HOOK_URL", "secret_env": "OPS_HOOK_SECRET"}}},
+ "reports": [{"name": "weekly-sales", "dashboard": "sales", "tab": "Overview",
+              "vars": {"region": "EU"}, "formats": ["png", "pdf", "csv:totals"],
+              "schedule": "every monday 07:00 Europe/Berlin",
+              "as": {"user": "report:sales-eu", "groups": ["sales"], "claims": {"region": "EU"}},
+              "to": [{"email": "sales-eu@example.com"}, {"webhook": "ops"}]}]}
+```
+
+- **Who it runs as.** Every report has one fixed principal (`as`), and every
+  panel runs through the export path (#764) as that principal, under the same
+  policy, claims and limits as a viewer's page, limited to the report's own
+  dashboard. The operator attests that every recipient may see what the
+  principal sees; the start message lists each report's principal.
+  `report:*` users are reserved: no login method (proxy header, JWT, OIDC,
+  embed link, API key) can claim one, and they never submit or save.
+- **What it sends.** `png` (inline in the e-mail), `pdf`, and
+  `csv:<panel>` / `json:<panel>` for a `-- @name`d panel. The text is the
+  dashboard's title, its `::ASOF` line, the time and, with `notify.link`,
+  a link to `/d/<id>` (which needs a login like any other).
+- **When.** `schedule` is `init` (once, at the start), a readable form
+  (`every 15 minutes`, `every 2 hours`, `every hour`, `every day 06:30`,
+  `every monday 07:00 Europe/Berlin`; without a zone, DuckDB's `TimeZone`),
+  or SQL (an INTERVAL or a TIMESTAMP). An interval's first run is one
+  interval after the start, so a restart doesn't send again. A schedule that
+  doesn't evaluate stops the start.
+- **Who sends.** `notify.run: true` on one replica only; the others check
+  the reports but don't send. `SELECT anofox_serve_report(<port>, '<name>')`
+  sends one now, from the session that started the server (for testing).
+  No HTTP request can trigger, change or redirect a report.
+- **Run log and metrics.** Each run is one JSON line in `notify.log`
+  (`report`, `start`, `ms`, `ok`, `sent`, `manual`, `error`). `/metrics` has
+  `anofox_report_last_success_timestamp_seconds`, `_runs`, `_failures` and
+  `_consecutive_failures` per report.
+
+| Threat | Mitigation |
+|---|---|
+| A viewer gets a report's data or identity | The `report:` user prefix is refused by every login method; reports run only from the schedule or the owning SQL session. |
+| A report shows more than its recipients may see | One least-privilege principal per report, through the viewer's policy path; the operator attests the audience (D4). |
+| Credentials leak | SMTP and webhook secrets and webhook URLs come only from the environment; they never appear in the options, logs, errors or `Debug` output. |
+| Mail sent in clear, or downgraded | `STARTTLS` is required (a server without it is an error), or implicit TLS; certificates checked against the Mozilla roots. `tls: "none"` only to a loopback relay. |
+| SSRF / exfiltration | Endpoints are fixed in the configuration, never built from data; `https://` only (`http://` to loopback), no redirects, no proxy, 30 s timeout. |
+| Header or markup injection | Recipients are plain addresses (checked at start) and go only into the envelope (Bcc); the subject has no line breaks (RFC 2047); the HTML is escaped; file names are fixed; CSV formula cells are neutralised as in exports. |
+| Spoofed or replayed webhooks | `X-Anofox-Signature: sha256=<HMAC-SHA256(secret, "<X-Anofox-Timestamp>.<body>")>`; the receiver checks it and the age of the timestamp. |
+| Flooding | At most 50 recipients per report, 10 MB of files, and `max_per_hour` messages (default 60) for all reports together. Over a limit nothing is sent, the run is logged as failed and the metrics show it. |
+
 ### Per-viewer state (`options.state`, #517)
 
 **This is the one write path on a server that is otherwise read-only by

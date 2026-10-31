@@ -311,6 +311,149 @@ stop
   || fail "tasks: the READ_ONLY database was written"
 echo "OK: tasks — ::SCHEDULE, write only to tasks.write (READ_ONLY check at start), ::REFRESH, run log, /metrics"
 
+# 3e. Reports (#768 R1): options.notify + options.reports, rendered through
+# the export path as the report's principal, sent to a local SMTP sink and a
+# local webhook receiver (both fakes on 127.0.0.1; nothing leaves the host).
+mkdir -p "$T/rpdash"
+cat > "$T/rpdash/r.sql" <<'SQL'
+-- @title EU sales
+SELECT 'Data as of 2026-10-30' ::ASOF;
+SELECT 42::BIGINT AS n ::METRIC;
+-- @name who
+SELECT getvariable('__claim_user') AS u, getvariable('__claim_region') AS region, 'a,b' AS c ::TABLE;
+SQL
+cat > "$T/sinks.py" <<'PY'
+import hashlib, hmac, json, os, socketserver, sys, threading, http.server
+out = sys.argv[1]
+class Smtp(socketserver.StreamRequestHandler):
+    def handle(self):
+        w = lambda s: (self.wfile.write((s + "\r\n").encode()), self.wfile.flush())
+        w("220 sink")
+        rcpts, auth = [], None
+        while True:
+            line = self.rfile.readline()
+            if not line:
+                return
+            cmd = line.decode().rstrip("\r\n")
+            u = cmd.upper()
+            if u.startswith("EHLO"):
+                w("250-sink"); w("250 AUTH PLAIN LOGIN")
+            elif u.startswith("AUTH PLAIN"):
+                auth = cmd.split(" ", 2)[2]; w("235 ok")
+            elif u.startswith("MAIL FROM"):
+                w("250 ok")
+            elif u.startswith("RCPT TO"):
+                rcpts.append(cmd[8:].strip()); w("250 ok")
+            elif u == "DATA":
+                w("354 go")
+                data = b""
+                while True:
+                    l = self.rfile.readline()
+                    if l in (b".\r\n", b""):
+                        break
+                    data += l[1:] if l.startswith(b"..") else l
+                with open(os.path.join(out, "mail.json"), "a") as f:
+                    f.write(json.dumps({"rcpts": rcpts, "auth": auth, "data": data.decode()}) + "\n")
+                w("250 queued")
+            elif u == "QUIT":
+                w("221 bye"); return
+            else:
+                w("500 what")
+class Hook(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        ts = self.headers.get("X-Anofox-Timestamp", "")
+        want = "sha256=" + hmac.new(b"0123456789abcdef-secret", ts.encode() + b"." + body, hashlib.sha256).hexdigest()
+        ok = hmac.compare_digest(want, self.headers.get("X-Anofox-Signature", ""))
+        with open(os.path.join(out, "hook.json"), "a") as f:
+            f.write(json.dumps({"sig_ok": ok, "path": self.path, "body": json.loads(body)}) + "\n")
+        self.send_response(204); self.end_headers()
+    def log_message(self, *a):
+        pass
+socketserver.ThreadingTCPServer.allow_reuse_address = True
+s = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Smtp)
+h = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hook)
+for srv in (s, h):
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+with open(os.path.join(out, "ports"), "w") as f:
+    f.write(f"{s.server_address[1]} {h.server_address[1]}\n")
+threading.Event().wait()
+PY
+mkdir -p "$T/sink"
+python3 "$T/sinks.py" "$T/sink" & SINK_PID=$!
+for _ in $(seq 50); do [ -s "$T/sink/ports" ] && break; sleep 0.1; done
+read -r SMTP_PORT HOOK_PORT < "$T/sink/ports"
+export R_SMTP_USER=mailer R_SMTP_PASS=hunter2 R_HOOK_URL="http://127.0.0.1:$HOOK_PORT/hook?token=t0ps3cret" R_HOOK_SECRET=0123456789abcdef-secret
+rpopts() {
+  cat <<JSON
+{"notify": {"run": true, "log": "$T/reports.jsonl", "link": "https://dash.example.com",
+            "smtp": {"host": "127.0.0.1", "port": $SMTP_PORT, "tls": "none", "from": "reports@example.com",
+                     "user_env": "R_SMTP_USER", "password_env": "R_SMTP_PASS"},
+            "webhooks": {"ops": {"url_env": "R_HOOK_URL", "secret_env": "R_HOOK_SECRET"}}},
+ "metrics": {"token": "$MTOKEN"},
+ "reports": [{"name": "eu", "dashboard": "r", "formats": ["png", "pdf", "csv:who"], "schedule": "init",
+              "as": {"user": "report:eu", "groups": ["sales"], "claims": {"region": "EU"}},
+              "to": [{"email": "a@example.com"}, {"email": "b@example.com"}, {"webhook": "ops"}]},
+             {"name": "later", "dashboard": "r", "formats": ["json:who"], "schedule": "every monday 07:00 UTC",
+              "as": {"user": "report:later"}, "to": [{"webhook": "ops"}]}$1]}
+JSON
+}
+# a report naming a panel the dashboard doesn't have refuses the start
+if QUIET=1 start "$T/tk.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/rpdash"), $PORT, $(q "$(rpopts ', {"name": "bad", "dashboard": "r", "formats": ["csv:nope"], "schedule": "init", "as": {"user": "report:x"}, "to": [{"webhook": "ops"}]}')"));"; then
+  fail "reports: a csv format naming no panel should refuse the start"
+fi
+grep -q "has no panel named 'nope'" "$T/out" || fail "reports: no reason given: $(cat "$T/out")"
+exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
+start "$T/tk.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/rpdash"), $PORT, $(q "$(rpopts '')"));" || fail "reports server"
+grep -q "report 'eu' runs as report:eu (groups: \[sales\], claims: \[region=EU\]) to 3 recipient(s)" "$T/out" \
+  || fail "reports: the start message names each report's principal: $(cat "$T/out")"
+for _ in $(seq 100); do grep -q '"report":"eu"' "$T/reports.jsonl" 2>/dev/null && break; sleep 0.2; done
+grep '"report":"eu"' "$T/reports.jsonl" | grep -q '"ok":true.*"sent":3' \
+  || fail "reports: eu should reach 3 recipients: $(cat "$T/reports.jsonl" 2>/dev/null) $(tail -5 "$T/out")"
+python3 - "$T/sink" <<'PY' || fail "reports: the mail or the webhook is wrong"
+import base64, email, json, sys
+d = sys.argv[1]
+m = [json.loads(l) for l in open(f"{d}/mail.json")]
+assert len(m) == 1, m
+m = m[0]
+assert m["rcpts"] == ["<a@example.com>", "<b@example.com>"], m["rcpts"]
+assert base64.b64decode(m["auth"]) == b"\0mailer\0hunter2"
+msg = email.message_from_string(m["data"])
+assert msg["To"] == "undisclosed-recipients:;" and msg["Cc"] is None and msg["Bcc"] is None, "recipients in a header"
+assert msg["Subject"] == "EU sales — eu" or "=?UTF-8?" in msg["Subject"], msg["Subject"]
+parts = {p.get_content_type(): p for p in msg.walk()}
+for t in ("text/plain", "text/html", "image/png", "application/pdf", "text/csv"):
+    assert t in parts, (t, list(parts))
+assert parts["image/png"].get_payload(decode=True)[:4] == b"\x89PNG"
+assert parts["application/pdf"].get_payload(decode=True)[:4] == b"%PDF"
+csv = parts["text/csv"].get_payload(decode=True).decode()
+assert csv.splitlines() == ['"u","region","c"', '"report:eu","EU","a,b"'], csv
+text = parts["text/plain"].get_payload(decode=True).decode()
+assert "Data as of 2026-10-30" in text and "https://dash.example.com/d/r" in text, text
+h = [json.loads(l) for l in open(f"{d}/hook.json")]
+assert len(h) == 1 and h[0]["sig_ok"] and h[0]["path"] == "/hook?token=t0ps3cret", h
+b = h[0]["body"]
+assert b["report"] == "eu" and b["as_of"] == "Data as of 2026-10-30", b
+assert [f["name"] for f in b["files"]] == ["r.png", "r.pdf", "r-who.csv"], b["files"]
+PY
+# the manual trigger (the session that started the server)
+echo "SELECT anofox_serve_report($PORT, 'later');" >&3
+for _ in $(seq 50); do grep -q '"report":"later"' "$T/reports.jsonl" 2>/dev/null && break; sleep 0.2; done
+grep '"report":"later"' "$T/reports.jsonl" | grep -q '"manual":true' || fail "reports: manual run: $(cat "$T/reports.jsonl")"
+[ "$(wc -l < "$T/sink/hook.json")" = 2 ] && tail -1 "$T/sink/hook.json" | grep -q '"base64"' || fail "reports: the manual webhook: $(cat "$T/sink/hook.json")"
+grep -q "report 'later' sent to 1 recipient(s)" "$T/out" || fail "reports: manual result: $(tail -3 "$T/out")"
+curl -s -H "Authorization: Bearer $MTOKEN" "http://127.0.0.1:$PORT/metrics" > "$T/met"
+grep -qF 'anofox_report_runs{report="eu"} 1' "$T/met" && grep -qF 'anofox_report_consecutive_failures{report="later"} 0' "$T/met" \
+  || fail "reports: /metrics: $(grep anofox_report "$T/met")"
+# the hook's token never reaches a log
+! grep -q t0ps3cret "$T/out" "$T/reports.jsonl" || fail "reports: the webhook URL's token was logged"
+# a viewer can't claim a report principal (proxy header … none here: no auth); the panel API still serves viewers normally
+[ "$(panel 1 '{}' r)" = 200 ] || fail "reports: a viewer's panel request"
+stop
+kill "$SINK_PID" 2>/dev/null; wait "$SINK_PID" 2>/dev/null || true
+unset R_SMTP_USER R_SMTP_PASS R_HOOK_URL R_HOOK_SECRET
+echo "OK: reports — e-mail (Bcc, inline PNG, PDF + CSV attached) and a signed webhook as the report's principal, ::ASOF + link, manual run, run log, /metrics"
+
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting
 # coalesce(getvariable(…), …) keeps the viewer's value.
