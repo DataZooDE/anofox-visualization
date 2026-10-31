@@ -1,7 +1,7 @@
 //! anofox-visualization — a DuckDB C-API extension: `SELECT anofox_render()` →
 //! an SVG rendered by ggplot-rs (via the anofox-visualization core), plus the
 //! serving functions (`anofox_serve`, `anofox_serve_dashboards`,
-//! `anofox_serve_refresh`, `anofox_serve_report`, `anofox_serve_stop`; native only). Uses the C
+//! `anofox_serve_refresh`, `anofox_serve_reload`, `anofox_serve_report`, `anofox_serve_stop`; native only). Uses the C
 //! Extension API — the DuckDB functions are resolved at load time through the
 //! `access` struct, so nothing links against libduckdb. That's what lets the
 //! same crate become a DuckDB-Wasm side-module.
@@ -328,6 +328,18 @@ mod serve_fns {
     ) {
         guarded(info, || {
             per_row(input, output, 1, |d, i| serve::refresh(port_at(d[0], i)?))
+        })
+    }
+
+    /// `anofox_serve_reload(port)` → read a locked server's dashboards folder
+    /// again and swap it in with a new snapshot (#772).
+    pub(super) unsafe extern "C" fn anofox_serve_reload_fn(
+        info: duckdb_function_info,
+        input: duckdb_data_chunk,
+        output: duckdb_vector,
+    ) {
+        guarded(info, || {
+            per_row(input, output, 1, |d, i| serve::reload(port_at(d[0], i)?))
         })
     }
 
@@ -669,6 +681,14 @@ unsafe fn init(
             c"anofox_serve_refresh",
             &[&[DUCKDB_TYPE_INTEGER]],
             serve_fns::anofox_serve_refresh_fn,
+            true,
+            None,
+            None,
+        ) && register_scalar(
+            raw,
+            c"anofox_serve_reload",
+            &[&[DUCKDB_TYPE_INTEGER]],
+            serve_fns::anofox_serve_reload_fn,
             true,
             None,
             None,

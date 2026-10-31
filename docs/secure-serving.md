@@ -853,6 +853,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
   '{"max_rows": 50000, "timeout_ms": 10000, "threads": 8, "cache_mb": 256,
     "refresh_s": 300}');
 SELECT anofox_serve_refresh(8095);   -- fresh data now, without a restart
+SELECT anofox_serve_reload(8095);    -- the dashboards folder again (#772, deployment.md §5a)
 SELECT anofox_serve_stop(8095);
 ```
 

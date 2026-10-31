@@ -1298,3 +1298,45 @@ for p in / /d/t; do
 done
 stop
 echo "OK: #773: css_file checked at start, served at /static/site.css, linked on every page"
+# #772: anofox_serve_reload(port) — the dashboards folder is read again,
+# checked like a start and swapped in with a new snapshot; a broken set
+# leaves the running one in service; a symlinked folder swapped by a deploy
+# is followed (its assets too).
+mkdir -p "$T/r1/assets" "$T/r2/assets"
+printf 'SELECT 1 AS one ::METRIC;\n' > "$T/r1/a.sql"
+printf '<svg xmlns="http://www.w3.org/2000/svg"/>\n' > "$T/r1/assets/one.svg"
+printf 'SELECT 2 AS two ::METRIC;\n' > "$T/r2/b.sql"
+printf '<svg xmlns="http://www.w3.org/2000/svg"/>\n' > "$T/r2/assets/two.svg"
+ln -s "$T/r1" "$T/rlink"
+rget() { curl -s -o "$T/rbody" -w "%{http_code}" "http://127.0.0.1:$PORT$1"; }
+reload() {
+  : > "$T/out"
+  echo "SELECT anofox_serve_reload($PORT);" >&3
+  for _ in $(seq 100); do grep -qE 'reloaded|Error' "$T/out" && break; sleep 0.2; done
+}
+start "$T/main.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/rlink"), $PORT, '{}');" || fail "reload: the server should start"
+[ "$(rget /d/a)" = 200 ] || fail "reload: /d/a before"
+[ "$(rget /d/a/assets/one.svg)" = 200 ] || fail "reload: one.svg before"
+# a new file in the same folder
+printf 'SELECT 3 AS three ::METRIC;\n' > "$T/r1/c.sql"
+[ "$(rget /d/c)" = 404 ] || fail "reload: /d/c should not exist before the reload"
+reload
+grep -q "reloaded 2 dashboard(s)" "$T/out" || fail "reload: $(cat "$T/out")"
+[ "$(rget /d/c)" = 200 ] || fail "reload: /d/c after the reload"
+# a broken file: the reload fails, the running set keeps serving
+printf 'SELECT 1::METRIC; SELECT 2::METRIC FROM' > "$T/r1/broken.sql"
+reload
+grep -q "reload failed, still serving the previous dashboards" "$T/out" || fail "reload of a broken set: $(cat "$T/out")"
+[ "$(rget /d/c)" = 200 ] && [ "$(rget /d/a)" = 200 ] || fail "reload: the old set should still serve"
+[ "$(rget /d/broken)" = 404 ] || fail "reload: the broken dashboard must not appear"
+rm "$T/r1/broken.sql"
+# a deploy swaps the symlink: the new folder's dashboards and assets
+ln -sfn "$T/r2" "$T/rlink"
+reload
+grep -q "reloaded 1 dashboard(s)" "$T/out" || fail "reload after the swap: $(cat "$T/out")"
+[ "$(rget /d/b)" = 200 ] || fail "reload: /d/b after the swap"
+[ "$(rget /d/a)" = 404 ] || fail "reload: /d/a should be gone after the swap"
+[ "$(rget /d/b/assets/two.svg)" = 200 ] || fail "reload: the new folder's assets"
+[ "$(rget /d/b/assets/one.svg)" = 404 ] || fail "reload: the old folder's assets are gone"
+stop
+echo "OK: #772: anofox_serve_reload — new files, a broken set keeps the old one, a swapped symlink is followed"

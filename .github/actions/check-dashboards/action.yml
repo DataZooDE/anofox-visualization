@@ -1,0 +1,82 @@
+# Check a folder of anofox-visualization dashboards in CI (#772): the released
+# `dashboard --check` (structure, SQL, design checks) on every pull request.
+# Deploying stays the operator's: copy the files (or swap a symlink, or ship
+# an image) and call `SELECT anofox_serve_reload(<port>)` on the server —
+# docs/deployment.md, "Deploying dashboard changes".
+#
+#   - uses: DataZooDE/anofox-visualization/.github/actions/check-dashboards@<tag>
+#     with:
+#       folder: dashboards
+name: Check anofox-visualization dashboards
+description: Run the released `dashboard --check` over a folder of dashboards.
+inputs:
+  folder:
+    description: The dashboards folder (every .sql file in it).
+    default: dashboards
+  version:
+    description: The anofox-visualization release tag (e.g. v2026.10.30), or "latest".
+    default: latest
+  strict:
+    description: '"true": design advisories and requires/* warnings fail the check too.'
+    default: "true"
+  db:
+    description: A DuckDB database file the panels' queries run against (optional).
+    default: ""
+  data:
+    description: The data folder, getvariable('anofox_data') as on a locked server (optional).
+    default: ""
+  options:
+    description: The locked server's options file (optional).
+    default: ""
+  policy:
+    description: An access policy file to check against (needs db; optional).
+    default: ""
+  duckdb-version:
+    description: The DuckDB CLI release the queries run in.
+    default: v1.5.6
+runs:
+  using: composite
+  steps:
+    - name: Fetch the dashboard CLI and DuckDB
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ inputs.version }}
+        DUCKDB_VERSION: ${{ inputs.duckdb-version }}
+      run: |
+        set -euo pipefail
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64) triple=x86_64-unknown-linux-gnu; duck=linux-amd64 ;;
+          Linux-aarch64) triple=aarch64-unknown-linux-gnu; duck=linux-arm64 ;;
+          *) echo "::error::check-dashboards runs on Linux x86_64 or arm64 runners"; exit 1 ;;
+        esac
+        dir="$RUNNER_TEMP/anofox-check"
+        mkdir -p "$dir/cli"
+        tag=()
+        [ "$VERSION" = latest ] || tag=("$VERSION")
+        gh release download "${tag[@]}" --repo DataZooDE/anofox-visualization \
+          --pattern "anofox-visualization-cli-*-$triple.tar.gz" --pattern SHA256SUMS --dir "$dir"
+        (cd "$dir" && grep " anofox-visualization-cli-.*-$triple.tar.gz\$" SHA256SUMS | sha256sum -c -)
+        tar -xzf "$dir"/anofox-visualization-cli-*-"$triple".tar.gz -C "$dir/cli" --strip-components=1
+        gh release download "$DUCKDB_VERSION" --repo duckdb/duckdb \
+          --pattern "duckdb_cli-$duck.zip" --dir "$dir"
+        unzip -q -o "$dir/duckdb_cli-$duck.zip" -d "$dir/cli"
+        echo "$dir/cli" >> "$GITHUB_PATH"
+    - name: dashboard --check
+      shell: bash
+      env:
+        FOLDER: ${{ inputs.folder }}
+        STRICT: ${{ inputs.strict }}
+        DB: ${{ inputs.db }}
+        DATA: ${{ inputs.data }}
+        OPTIONS: ${{ inputs.options }}
+        POLICY: ${{ inputs.policy }}
+      run: |
+        set -euo pipefail
+        args=(--check "$FOLDER")
+        [ "$STRICT" != true ] || args+=(--strict)
+        [ -z "$DB" ] || args+=(--db "$DB")
+        [ -z "$DATA" ] || args+=(--data "$DATA")
+        [ -z "$OPTIONS" ] || args+=(--options "$OPTIONS")
+        [ -z "$POLICY" ] || args+=(--policy "$POLICY")
+        dashboard "${args[@]}"
