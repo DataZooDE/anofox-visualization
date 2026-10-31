@@ -390,6 +390,7 @@ fn per_node(r: Role) -> bool {
             | Role::Link
             | Role::Info
             | Role::Title
+            | Role::Subtitle
     )
 }
 

@@ -10213,6 +10213,8 @@ async function runOnce(fresh = true, pv = preview) {
         for (const [ix, r] of proles) if (TFMT.includes(r)) fmtByIdx[ix] = r;
         const titleRole = proles.find((r) => r[1] === "TITLE");
         const titleIdx = titleRole ? titleRole[0] : -1;
+        const subRole = proles.find((r) => r[1] === "SUBTITLE"); // #774
+        const subIdx = subRole ? subRole[0] : -1;
         const base = s.sql;
         const idx = i;
         const rowSelect = nextRowSelect;
@@ -10324,6 +10326,10 @@ async function runOnce(fresh = true, pv = preview) {
             if (tv != null) titleHolder.appendChild(mkTitle((caption = String(tv).replace(/^"|"$/g, ""))));
             sk = titleIdx;
           }
+          if (subIdx >= 0 && rows.length) {
+            const sv = Object.values(rows[0])[subIdx];
+            if (sv != null && String(sv).trim()) titleHolder.appendChild(mkSubtitle(String(sv).replace(/^"|"$/g, "")));
+          }
           if (infoText && !fig.querySelector(".dp-info")) addInfo(fig, infoText); // (a new title drops it)
           const reload = () => {
             stats = null;
@@ -10371,7 +10377,7 @@ async function runOnce(fresh = true, pv = preview) {
             profile: (col) => ((stats._prof ||= {})[col] ||= pageReq({ profile: [col] })),
             fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }, true, "rows"),
           };
-          holder.appendChild(renderTable(rows, sk, fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
+          holder.appendChild(renderTable(rows, subIdx >= 0 ? [sk, subIdx] : sk, fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
           const lost = !document.activeElement || document.activeElement === document.body;
           if (Date.now() - lastTyped < 4000 && lost) {
             filterInput.focus();
@@ -10462,7 +10468,7 @@ async function runOnce(fresh = true, pv = preview) {
           a.target = "_blank";
           a.rel = "noopener";
           container.appendChild(a);
-        } else if (role(s, "DOWNLOAD_CSV") || role(s, "DOWNLOAD_XLSX") || role(s, "DOWNLOAD_PDF")) {
+        } else if (role(s, "DOWNLOAD_CSV") || role(s, "DOWNLOAD_XLSX") || role(s, "DOWNLOAD_PDF") || role(s, "DOWNLOAD_JSON")) {
           const rows = JSON.parse(rowsJson);
           container.appendChild(mkDownload(s, rows));
         } else if (role(s, "SUBMIT")) {
@@ -10696,7 +10702,10 @@ async function runOnce(fresh = true, pv = preview) {
           const fmtByIdx = {};
           for (const [idx, r] of troles) if (TFMT.includes(r)) fmtByIdx[idx] = r;
           if (!rows.length && nextEmpty) fig.appendChild(mkNoData(nextEmpty));
-          else fig.appendChild(renderTable(rows, skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
+          else {
+            const subR = troles.find((r) => r[1] === "SUBTITLE"); // #774: the line under the title, not a cell
+            fig.appendChild(renderTable(rows, subR ? [skip, subR[0]] : skip, fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
+          }
           container.appendChild(fig);
           panels++;
         } else if (metricRole(s)) {
@@ -10832,6 +10841,10 @@ async function runOnce(fresh = true, pv = preview) {
         }
         const ir = s.roles.find((r) => r[1] === "INFO");
         if (ir && made.length) addInfo(made[0], cellAt(rowsJson, ir[0]));
+        // #774: ::SUBTITLE, a line under the title (a ::PAGED table adds its
+        // own, under the title it fills in when its rows arrive).
+        const subr = s.roles.find((r) => r[1] === "SUBTITLE");
+        if (subr && made.length && !role(s, "PAGED")) addSubtitle(made[0], cellAt(rowsJson, subr[0]));
         nextSpan = 0;
         nextHeight = 0;
         nextRowSelect = "";
@@ -11345,7 +11358,7 @@ async function runOnce(fresh = true, pv = preview) {
       } else if (
         lazy &&
         !role(s, "RELOAD") &&
-        (curGrid !== newGrid || !(isHeading(s) || ["SECTION", "HEADER_IMAGE", "FOOTER_LINK", "DOWNLOAD_CSV", "DOWNLOAD_XLSX", "DOWNLOAD_PDF"].some((r) => role(s, r))))
+        (curGrid !== newGrid || !(isHeading(s) || ["SECTION", "HEADER_IMAGE", "FOOTER_LINK", "DOWNLOAD_CSV", "DOWNLOAD_XLSX", "DOWNLOAD_PDF", "DOWNLOAD_JSON"].some((r) => role(s, r))))
       ) {
         // A placeholder now; the query runs and the panel renders once the
         // layout is built — the shown panes' panels in this run (in parallel
@@ -14013,6 +14026,20 @@ function addInfo(fig, text) {
   }
 }
 
+// #774: the ::SUBTITLE line (muted, under the title).
+function mkSubtitle(text) {
+  const p = document.createElement("p");
+  p.className = "panel-subtitle";
+  p.textContent = text;
+  return p;
+}
+function addSubtitle(fig, text) {
+  if (!text.trim() || fig.querySelector(":scope > .panel-subtitle")) return;
+  const t = fig.querySelector(":scope > .panel-title");
+  if (t) t.after(mkSubtitle(text));
+  else fig.prepend(mkSubtitle(text));
+}
+
 function mkTitle(text) {
   const c = document.createElement("figcaption");
   c.className = "panel-title";
@@ -14490,7 +14517,9 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   const allKeys = rows.length ? Object.keys(rows[0]) : server.statCols || [];
   const colFmt = {}; // column key -> format role
   for (const [idx, f] of Object.entries(fmtByIdx)) colFmt[allKeys[idx]] = f;
-  const cols = allKeys.filter((_, i) => i !== skip);
+  // `skip`: a column index, or several (#774: ::TITLE and ::SUBTITLE).
+  const skips = [].concat(skip);
+  const cols = allKeys.filter((_, i) => !skips.includes(i));
   const loc = dashLocale() || NUM_LOCALE;
   const selMode = ["single", "multi"].includes(opts.select) ? opts.select : "none";
   // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL name columns by the raw name or
@@ -17810,10 +17839,10 @@ async function doSavePreview(i, spec, btn, statusEl, errEl) {
   }
 }
 
-// A ::DOWNLOAD_CSV/_XLSX/_PDF button. CSV/XLSX export the query rows; PDF prints.
+// A ::DOWNLOAD_CSV/_XLSX/_JSON/_PDF button. CSV/XLSX/JSON export the query rows; PDF prints.
 function mkDownload(s, rows) {
-  const fmt = role(s, "DOWNLOAD_XLSX") ? "xlsx" : role(s, "DOWNLOAD_PDF") ? "pdf" : "csv";
-  const label = { csv: "Download CSV", xlsx: "Download Excel", pdf: "Download PDF" }[fmt];
+  const fmt = role(s, "DOWNLOAD_XLSX") ? "xlsx" : role(s, "DOWNLOAD_PDF") ? "pdf" : role(s, "DOWNLOAD_JSON") ? "json" : "csv";
+  const label = { csv: "Download CSV", xlsx: "Download Excel", pdf: "Download PDF", json: "Download JSON" }[fmt];
   const wrap = document.createElement("div");
   wrap.className = "controls download-row";
   const btn = document.createElement("button");
@@ -17823,6 +17852,7 @@ function mkDownload(s, rows) {
     if (fmt === "pdf") return window.print();
     const cols = rows.length ? Object.keys(rows[0]) : [];
     if (fmt === "xlsx") download(new Blob([xlsxOfRows(rows, cols)], { type: XLSX_TYPE }), "data.xlsx");
+    else if (fmt === "json") download(new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" }), "data.json");
     else download(new Blob([csvOfRows(rows, cols)], { type: "text/csv" }), "data.csv");
   };
   wrap.appendChild(btn);
@@ -20249,7 +20279,7 @@ function dataTableHtml(dp, limit, caption) {
   }
   const roleFor = (k) => dp.roles.find((x) => x[0] === +String(k).replace(/^c/, ""));
   // Drop non-data columns (the panel title, tooltips, hints) from the view.
-  const SKIP = new Set(["TITLE", "HINT", "OPTION_LABEL", "LABEL", "TRACK"]);
+  const SKIP = new Set(["TITLE", "SUBTITLE", "HINT", "OPTION_LABEL", "LABEL", "TRACK"]);
   const keys = (rows.length ? Object.keys(rows[0]) : []).filter((k) => {
     const r = roleFor(k);
     return !r || !SKIP.has(r[1]);

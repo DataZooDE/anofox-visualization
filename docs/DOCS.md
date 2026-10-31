@@ -52,6 +52,7 @@ terminal.
 | `::LABEL` |  | encoding | section heading when alone; chart title / per-mark or per-feature label otherwise |
 | `::TITLE` | `::HEADING` | encoding | a title bar above one panel |
 | `::ALT` | `::ALT_TEXT` | encoding | an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL |
+| `::SUBTITLE` | `::SUBHEADING` | encoding | a line under the panel's title (smaller, muted) |
 | `::INFO` | `::DESCRIPTION`, `::DEFINITION` | encoding | a definition behind an ⓘ on the panel's title bar (hover, focus or click) |
 | `::OPEN` |  | encoding | candlestick open price |
 | `::HIGH` |  | encoding | candlestick high price |
@@ -200,6 +201,7 @@ terminal.
 | `::DOWNLOAD_CSV` |  | table | CSV export button |
 | `::DOWNLOAD_XLSX` | `::DOWNLOAD_EXCEL` | table | Excel export button |
 | `::DOWNLOAD_PDF` |  | table | print-to-PDF button |
+| `::DOWNLOAD_JSON` |  | table | JSON export button (the rows as an array of objects) |
 | `::DROPDOWN` | `::OPTIONS`, `::SELECT_INPUT` | input | single-select → a DuckDB variable |
 | `::MULTISELECT` | `::MULTI` | input | multi-select → a list variable |
 | `::NUMBER` | `::SLIDER`, `::NUMERIC` | input | numeric input (value = default) |
@@ -286,6 +288,18 @@ and the static pages draw its first non-NULL value, trimmed (a blank one
 draws none), in a 26 px bar above the chart (the chart gets 26 px less); a
 KPI tile has none (its caption is `::LABEL`). The static pages cut a title
 longer than 200 characters to 200 and an ellipsis.
+
+**`::SUBTITLE`** is one smaller, muted line right under the title (a unit, a
+source, the period), in the browser, the locked server, `dashboard --svg` and
+the static pages; in a table it is not a column. The headless SVG shortens a
+line wider than the panel with an ellipsis (the full text on hover).
+`anofox_render` (one chart, no dashboard) doesn't draw it.
+
+```sql
+SELECT week::XAXIS, sum(n)::BARCHART, 'Weekly orders'::TITLE,
+       'Cancelled orders excluded · ISO weeks'::SUBTITLE
+FROM orders GROUP BY ALL ORDER BY 1;
+```
 
 **Percent units.** `::PERCENT` (KPI tiles and table columns),
 `'percent'::YFORMAT` / `::XFORMAT` (axes, tooltips, data labels) and
@@ -3916,7 +3930,7 @@ keep the raw value, e.g. `#,##0.00,,` shows 5,350,000 as 5.35 — dates as dates
 subtotal and totals rows as live `SUBTOTAL()` formulas, a frozen header with a
 filter; a `::PAGED` table exports the loaded rows and its SQL totals as values).
 `::DOWNLOAD_XLSX` writes the raw query rows as a real `.xlsx` (numbers, dates and
-booleans typed). Hovering a
+booleans typed); `::DOWNLOAD_JSON` writes them as a JSON array of objects. Hovering a
 header shows the column's min / max / mean, empty and distinct counts.
 `::TOOLBAR` drops some or all of this chrome for a table that never needs it
 (a small lookup table beside a chart) — see the directive table below.
@@ -3966,7 +3980,7 @@ A table excluding `'export'` (including `'none'`) still gets a small hover ⤓
 CSV button — the same fallback any table with no export menu of its own gets
 (`addExportButtons`, `web/app.js`) — exporting the same matching, sorted,
 visible rows and columns its own ⤓ CSV button would (never just the page on
-screen). Add `::DOWNLOAD_CSV` / `::DOWNLOAD_XLSX` / `::DOWNLOAD_PDF` as their
+screen). Add `::DOWNLOAD_CSV` / `::DOWNLOAD_XLSX` / `::DOWNLOAD_JSON` / `::DOWNLOAD_PDF` as their
 own panel for a bigger, explicit export button when the table's own export
 menu is suppressed but downloading still matters.
 
