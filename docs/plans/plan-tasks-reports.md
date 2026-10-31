@@ -1,6 +1,6 @@
 # Plan: scheduled tasks, reports and alerts (#767, #768)
 
-Status: **design note, waiting for the owner's decisions (§9)**. No code yet.
+Status: **design note, owner decisions taken (2026-10-31): every recommendation in §9 (D1–D8) accepted.** Slices in §6.
 Builds on the locked server (`anofox_serve_dashboards`, docs/secure-serving.md),
 the export API (#764: `GET /api/export/<id>.svg|png|pdf`, `…/<panel>.csv|json`)
 and, for chat channels, the identity rules of
@@ -180,7 +180,7 @@ sends real mail or posts to real Slack.
 - A "send me this" button in the page for a signed-in viewer (their own
   identity, to their own verified e-mail) — a separate issue if wanted.
 
-## 9. Decisions for the owner (recommendation after the arrow)
+## 9. Decisions (owner, 2026-10-31: all recommendations accepted)
 
 - **D1** Where tasks run → their own connection to the serving session's
   database, never in the snapshot; `::REFRESH` rebuilds the snapshot after.
