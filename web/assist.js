@@ -26,7 +26,7 @@ export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
 // scripts/vendor-anthropic-sdk.sh; its SHA-256 is in web/vendor/SHA256SUMS
 // and checked by tests/web/assist_test.mjs). Not a CDN build: it runs with
 // the user's key and the page's data, so what runs is what was reviewed.
-export const SDK_URL = new URL("./vendor/anthropic-sdk-0.135.0.mjs", import.meta.url).href;
+export const SDK_URL = new URL("./vendor/anthropic-sdk-1.3.0.mjs", import.meta.url).href;
 export const API_HOST = "https://api.anthropic.com";
 // #744: from about this many lines, an edit of an existing script may come
 // as propose_dashboard `edits` instead of the whole script (saves output).

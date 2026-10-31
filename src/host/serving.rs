@@ -1974,7 +1974,7 @@ mod tests {
     #[test]
     fn content_types_of_the_builders_files() {
         assert_eq!(
-            super::content_type("vendor/anthropic-sdk-0.135.0.mjs"),
+            super::content_type("vendor/anthropic-sdk-1.3.0.mjs"),
             "text/javascript"
         );
         assert_eq!(

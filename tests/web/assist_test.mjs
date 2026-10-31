@@ -755,7 +755,7 @@ const Anthropic = await A.loadSdk(A.SDK_URL);
     req.on("data", (d) => (body += d));
     req.on("end", () => {
       requests.push({ url: req.url, headers: req.headers, body: JSON.parse(body || "{}") });
-      if (req.headers["x-api-key"] !== "sk-ant-test-key") {
+      if (req.headers.authorization !== "Bearer sk-ant-test-key") {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }));
         return;
@@ -793,7 +793,8 @@ const Anthropic = await A.loadSdk(A.SDK_URL);
     const r0 = requests[0];
     assert.equal(r0.url, "/v1/messages");
     assert.equal(r0.headers["anthropic-dangerous-direct-browser-access"], "true", "the browser-access header (dangerouslyAllowBrowser)");
-    assert.equal(r0.headers["x-api-key"], "sk-ant-test-key");
+    assert.equal(r0.headers.authorization, "Bearer sk-ant-test-key", "SDK 1.x sends the key as a bearer token");
+    assert.equal(r0.headers["x-api-key"], undefined);
     assert.ok(r0.headers["anthropic-version"], "anthropic-version");
     assert.equal(r0.body.stream, true);
     assert.deepEqual(r0.body.cache_control, { type: "ephemeral" });
@@ -834,7 +835,7 @@ const Anthropic = await A.loadSdk(A.SDK_URL);
         const r = await run(st, fakeTools());
         const sent = requests[n0];
         assert.equal(sent.url, "/assist/v1/messages");
-        assert.equal(sent.headers["x-api-key"], "held-by-the-server", "no real key in the page");
+        assert.equal(sent.headers.authorization, "Bearer held-by-the-server", "no real key in the page");
         assert.equal(r.kind, "error", "the fake answers 401 to the placeholder");
         assert.match(r.reason, /server's API key was not accepted/);
         assert.match(A.describeError({ status: 429, error: { error: { message: "this server's hourly token budget for the assistant is used up; try again later" } } }, "serve"), /^The assistant's server: this server's hourly token budget/);
