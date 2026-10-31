@@ -40,6 +40,9 @@ The locked server's rules that every item keeps (docs/secure-serving.md):
 - **Runs on:** the replica with `tasks.run` (one writer, D3 of the tasks
   plan). Other replicas answer `503`; operators route `/api/data` to the
   writer.
+  *As built (#769):* its own `options.ingest.run` flag, like `notify.run`,
+  so ingest doesn't need a `tasks` block; the docs say to set it on the
+  `tasks.run` replica.
 
 ## 2. Temporary dashboards (#770)
 

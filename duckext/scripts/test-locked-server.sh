@@ -1366,3 +1366,75 @@ fi
 grep -q "dashboard id 'overview' is used by both" "$T/out" || fail "duplicate id: no reason given: $(cat "$T/out")"
 exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
 echo "OK: #772: -- @id, options.folders (a folder is a group), duplicate ids refuse the start"
+# #769: the ingest API — POST /api/data/<table> from an API key with an
+# ingest:<table> scope, into an attached read-write database; the first batch
+# creates the table, a new key adds a column, a type that doesn't fit is a
+# 400; other credentials and other tables are refused; a replica without
+# ingest.run answers 503; with ingest.refresh the rows show without a manual
+# refresh.
+mkdir -p "$T/idash"
+cat > "$T/idash/inbox.sql" <<'SQL'
+SELECT count(*)::BIGINT AS n ::METRIC FROM inbox.main.events;
+SQL
+"$DUCKDB" "$T/inbox.duckdb" -c "CREATE TABLE events AS SELECT 'seed' AS kind, 0::BIGINT AS n LIMIT 0;" >/dev/null
+mkkey() { # mkkey <scopes JSON> [dashboards JSON] → prints the key, appends its entry to $T/keys.entries
+  local id key hash
+  id=$(openssl rand -hex 6); key="afx_${id}_$(openssl rand -hex 32)"
+  hash=$(printf %s "$key" | sha256sum | cut -d' ' -f1)
+  printf '{"id": "%s", "sha256": "%s", "user": "svc-%s", "dashboards": %s, "scopes": %s}\n' "$id" "$hash" "$id" "${2:-[]}" "$1" >> "$T/keys.entries"
+  printf %s "$key"
+}
+: > "$T/keys.entries"
+K_EV=$(mkkey '["ingest:events"]')
+K_OTHER=$(mkkey '["ingest:other"]')
+K_NONE=$(mkkey '[]')
+K_READ=$(mkkey '[]' '["inbox"]')
+K_MET=$(mkkey '["ingest:metrics"]')
+printf '{"keys": [%s]}\n' "$(paste -sd, "$T/keys.entries")" > "$T/keys.json"
+chmod 600 "$T/keys.json"
+iauth="\"auth\": {\"mode\": \"api_keys\", \"file\": \"$T/keys.json\"}, \"policy\": \"none\""
+iserve() { echo "ATTACH $(q "$T/inbox.duckdb") AS inbox; SELECT anofox_serve_dashboards($(q "$T/idash"), $PORT, $(q "{$iauth, \"ingest\": $1}"));"; }
+ipost() { # ipost <key> <table> <body> → status; body in $T/ibody
+  curl -s -o "$T/ibody" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/data/$2" \
+    ${1:+-H "Authorization: Bearer $1"} -H 'Content-Type: application/json' -d "$3"
+}
+start "$T/main.duckdb" "" "$(iserve '{"run": true, "database": "inbox", "refresh": true}')" || fail "ingest: the server should start"
+[ "$(ipost "" events '{"kind": "a"}')" = 401 ] || fail "ingest without a key: $(cat "$T/ibody")"
+[ "$(ipost "$K_NONE" events '{"kind": "a"}')" = 403 ] || fail "ingest with a key without the scope: $(cat "$T/ibody")"
+[ "$(ipost "$K_OTHER" events '{"kind": "a"}')" = 403 ] || fail "ingest with another table's scope: $(cat "$T/ibody")"
+[ "$(ipost "$K_EV" events '{"kind": "click", "n": 1}')" = 200 ] || fail "ingest one row: $(cat "$T/ibody")"
+grep -q '"rows":1' "$T/ibody" && grep -q '"created":false' "$T/ibody" || fail "ingest one row: $(cat "$T/ibody")"
+[ "$(ipost "$K_EV" events '[{"kind": "view", "n": 2, "city": "Bonn"}, {"kind": "view", "n": 3}]')" = 200 ] || fail "ingest a new column: $(cat "$T/ibody")"
+grep -q '"added_columns":\["city"\]' "$T/ibody" || fail "ingest a new column: $(cat "$T/ibody")"
+[ "$(ipost "$K_EV" events '{"kind": "x", "n": "not a number"}')" = 400 ] || fail "a VARCHAR into BIGINT should be a 400: $(cat "$T/ibody")"
+grep -q "column 'n' is BIGINT" "$T/ibody" || fail "type conflict message: $(cat "$T/ibody")"
+[ "$(ipost "$K_EV" events '{"_id": "x"}')" = 400 ] || fail "_id is the server's: $(cat "$T/ibody")"
+[ "$(ipost "$K_EV" events 'not json')" = 400 ] || fail "a body that isn't JSON: $(cat "$T/ibody")"
+[ "$(ipost "$K_EV" 'events;drop' '{"kind": "a"}')" = 400 ] || fail "a table that isn't a plain name: $(cat "$T/ibody")"
+# The rows show after the (debounced) refresh: 3 rows, no manual refresh.
+ipanel() { curl -s -o "$T/body" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
+  -H "Authorization: Bearer $K_READ" -d '{"dashboard":"inbox","panel":0,"vars":{}}'; }
+for _ in $(seq 60); do [ "$(ipanel)" = 200 ] && grep -q '"c0":3' "$T/body" && break; sleep 0.5; done
+grep -q '"c0":3' "$T/body" || fail "ingest refresh: the 3 rows should show: $(cat "$T/body")"
+echo "SELECT kind, n, city, _id IS NOT NULL AS has_id FROM inbox.main.events ORDER BY n;" >&3
+stop
+grep -q "Bonn" "$T/out" || fail "ingest: the row with the new column: $(cat "$T/out")"
+# a new table is created by its first batch
+start "$T/main.duckdb" "" "$(iserve '{"run": true, "database": "inbox", "tables": {"metrics": {"name": "VARCHAR", "v": "DOUBLE"}}}')" || fail "ingest (2): start"
+[ "$(ipost "$K_OTHER" other '{"v": 1.5, "note": null}')" = 200 ] && grep -q '"created":true' "$T/ibody" || fail "ingest creates a table: $(cat "$T/ibody")"
+# a fixed schema: its own types, and no other keys
+[ "$(ipost "$K_MET" metrics '{"name": "a", "v": 1}')" = 200 ] && grep -q '"created":true' "$T/ibody" || fail "ingest, fixed schema: $(cat "$T/ibody")"
+[ "$(ipost "$K_MET" metrics '{"name": "b", "extra": 1}')" = 400 ] || fail "ingest, fixed schema: an extra key should be a 400: $(cat "$T/ibody")"
+echo "SELECT 'metrics-type:' || typeof(v) FROM inbox.main.metrics;" >&3
+stop
+grep -q "metrics-type:DOUBLE" "$T/out" || fail "ingest, fixed schema: v should be DOUBLE: $(cat "$T/out")"
+# a replica without run answers 503; an ingest database attached READ_ONLY refuses the start
+start "$T/main.duckdb" "" "$(iserve '{"database": "inbox"}')" || fail "ingest (reader): start"
+[ "$(ipost "$K_EV" events '{"kind": "a"}')" = 503 ] || fail "a replica without ingest.run should answer 503: $(cat "$T/ibody")"
+stop
+if QUIET=1 start "$T/main.duckdb" "" "ATTACH $(q "$T/inbox.duckdb") AS inbox (READ_ONLY); SELECT anofox_serve_dashboards($(q "$T/idash"), $PORT, $(q "{$iauth, \"ingest\": {\"run\": true, \"database\": \"inbox\"}}"));"; then
+  fail "a READ_ONLY ingest database should refuse the start"
+fi
+grep -q "is attached READ_ONLY" "$T/out" || fail "READ_ONLY ingest database: no reason: $(cat "$T/out")"
+exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
+echo "OK: #769: ingest API — scopes, create/add column/400 on a conflict, refresh, 503 on a reader, READ_ONLY refused"

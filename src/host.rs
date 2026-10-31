@@ -19,6 +19,7 @@
 //! * [`serve_options`] — the locked server's `options` key list
 //!   (`duckext/src/serve.rs`'s `LockedOptions::parse`), shared with
 //!   `dashboard --site`'s own options parser so the two can't drift (#501).
+//! * [`ingest`] — `options.ingest` (#769): the ingest API's options and schema rules.
 //! * [`site_css`] — `options.css_file` (#773): the operator stylesheet's check.
 //! * [`writeback`] — `options.writeback` (#684): shared write-back of an
 //!   edited model into declared tables, `POST /api/save`'s change set.
@@ -30,6 +31,7 @@ pub mod assist;
 #[cfg(feature = "auth")]
 pub mod auth;
 pub mod duckdb_cli;
+pub mod ingest;
 pub mod metrics;
 #[cfg(feature = "auth")]
 pub mod notify;
