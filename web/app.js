@@ -10676,6 +10676,18 @@ async function runOnce(fresh = true, pv = preview) {
             (lr ? `<div class="metric-cap">${escapeHtml(r0["c" + lr[0]])}</div>` : "");
           container.appendChild(fig);
           panels++;
+        } else if (role(s, "RECORD")) {
+          // #774: one record as key/value pairs (::INFO / ::SUBTITLE come
+          // from the statement's hook below).
+          const rows = JSON.parse(rowsJson);
+          const fig = mkPanel();
+          const tr = s.roles.find((r) => r[1] === "TITLE");
+          const tv = tr && rows[0] ? Object.values(rows[0])[tr[0]] : null;
+          if (tv != null && String(tv).trim()) fig.appendChild(mkTitle(String(tv)));
+          if (!rows.length && nextEmpty) fig.appendChild(mkNoData(nextEmpty));
+          else fig.appendChild(mkRecord(rows, s.roles));
+          container.appendChild(fig);
+          panels++;
         } else if (role(s, "TABLE")) {
           let rows = JSON.parse(rowsJson);
           const fig = mkPanel();
@@ -14024,6 +14036,51 @@ function addInfo(fig, text) {
     wrap.classList.add("corner");
     fig.appendChild(wrap);
   }
+}
+
+// #774: a ::RECORD card's pairs — one data column holding an object (a
+// STRUCT, MAP or JSON value): its fields; otherwise the first row's columns.
+// ::TITLE / ::SUBTITLE / ::INFO columns aren't data; a nested value shows as
+// JSON, NULL as empty. src/dashboard.rs record_pairs is the same rule (SVG).
+function recordPairs(rows, roles) {
+  const chrome = new Set(roles.filter((r) => ["TITLE", "SUBTITLE", "INFO"].includes(r[1])).map((r) => r[0]));
+  const r0 = rows[0] || {};
+  const data = Object.keys(r0).filter((_, i) => !chrome.has(i));
+  const text = (v) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+  if (data.length === 1) {
+    let v = r0[data[0]];
+    if (typeof v === "string") {
+      try {
+        const j = JSON.parse(v);
+        if (j && typeof j === "object" && !Array.isArray(j)) v = j;
+      } catch (_) {
+        /* not JSON: a plain value */
+      }
+    }
+    if (v && typeof v === "object" && !Array.isArray(v)) return Object.entries(v).map(([k, x]) => [k, text(x)]);
+  }
+  return data.map((k) => [k, text(r0[k])]);
+}
+function mkRecord(rows, roles) {
+  const wrap = document.createElement("div");
+  wrap.className = "dp-record-wrap";
+  const dl = document.createElement("dl");
+  dl.className = "dp-record";
+  for (const [k, v] of recordPairs(rows, roles)) {
+    const dt = document.createElement("dt");
+    dt.textContent = k;
+    const dd = document.createElement("dd");
+    dd.textContent = v;
+    dl.append(dt, dd);
+  }
+  wrap.appendChild(dl);
+  if (rows.length > 1) {
+    const note = document.createElement("p");
+    note.className = "dp-record-note";
+    note.textContent = `The first of ${rows.length} rows.`;
+    wrap.appendChild(note);
+  }
+  return wrap;
 }
 
 // #774: the ::SUBTITLE line (muted, under the title).

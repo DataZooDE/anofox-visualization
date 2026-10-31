@@ -1260,6 +1260,23 @@ fn render_panel_svg(
     {
         return table_svg(rows, roles, place, w, h, title.as_deref(), totals, ropts);
     }
+    // #774: one record as key/value pairs.
+    if roles.iter().any(|(_, r)| matches!(r, Role::Record)) {
+        let t = &ropts.theme;
+        let mut svg = svg_open(place, format!("{w:.0}"), format!("{h:.0}"));
+        if let Some(tt) = &title {
+            svg.push_str(&format!(
+                "<text x=\"{pad}\" y=\"20\" font-family=\"{}\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
+                esc(&t.font.display),
+                hex(t.colors.heading),
+                esc(tt),
+            ));
+        }
+        svg.push_str(&sub_svg);
+        svg.push_str(&record_svg(rows, roles, pad, title_h + 8.0, w, h, ropts));
+        svg.push_str("</svg>");
+        return svg;
+    }
 
     // A KPI / text card — the shared tile (crate::kpi), also used by the
     // static HTML.
@@ -1486,6 +1503,131 @@ fn render_panel_svg(
     svg
 }
 
+/// #774: a `::RECORD`'s key/value pairs and how many rows the result had.
+/// One data column whose first value is a JSON object (a STRUCT, MAP or
+/// JSON value): its fields; otherwise the first row's columns. `::TITLE`,
+/// `::SUBTITLE` and `::INFO` columns are not data. A nested value is shown
+/// as compact JSON; NULL as an empty value. (`web/app.js` `recordPairs` is
+/// the browser's copy of this rule.)
+pub fn record_pairs(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+) -> (Vec<(String, String)>, usize) {
+    let chrome: Vec<usize> = roles
+        .iter()
+        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Info))
+        .map(|(i, _)| *i)
+        .collect();
+    let data: Vec<&(String, Vec<Value>)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !chrome.contains(i))
+        .map(|(_, c)| c)
+        .collect();
+    let n = rows.first().map_or(0, |(_, v)| v.len());
+    let text = |v: &Value| match v {
+        Value::Na => String::new(),
+        v => crate::value_text(v),
+    };
+    if let [(_, vals)] = data.as_slice() {
+        if let Some(serde_json::Value::Object(m)) = vals
+            .first()
+            .map(text)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s.trim()).ok())
+        {
+            let pairs = m
+                .into_iter()
+                .map(|(k, v)| {
+                    let v = match v {
+                        serde_json::Value::Null => String::new(),
+                        serde_json::Value::String(s) => s,
+                        v => v.to_string(),
+                    };
+                    (k, v)
+                })
+                .collect();
+            return (pairs, n);
+        }
+    }
+    let pairs = data
+        .iter()
+        .map(|(name, vals)| (name.clone(), vals.first().map(text).unwrap_or_default()))
+        .collect();
+    (pairs, n)
+}
+
+/// #774: a `::RECORD` card's body, from `top`: one line per field, the name
+/// muted on the left, the value after the widest name (up to 40 % of the
+/// width), shortened with an ellipsis; "… n more" when they don't fit.
+fn record_svg(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    pad: f64,
+    top: f64,
+    w: f64,
+    h: f64,
+    ropts: &RenderOptions,
+) -> String {
+    let t = &ropts.theme;
+    let (pairs, n) = record_pairs(rows, roles);
+    let tw = |s: &str| ggplot_rs::render::text::text_width(s, 12.5);
+    let key_w = pairs
+        .iter()
+        .map(|(k, _)| tw(k))
+        .fold(0.0_f64, f64::max)
+        .min((w - 2.0 * pad) * 0.4);
+    let vx = pad + key_w + 14.0;
+    let fit = |s: &str, avail: f64| {
+        if tw(s) <= avail {
+            return s.to_string();
+        }
+        let mut c: String = s.to_string();
+        while !c.is_empty() && tw(&format!("{c}…")) > avail {
+            c.pop();
+        }
+        format!("{}…", c.trim_end())
+    };
+    let line_h = 21.0;
+    let foot = if n > 1 { 20.0 } else { 0.0 };
+    let max_lines = (((h - top - foot - 6.0) / line_h).floor().max(0.0) as usize).min(pairs.len());
+    let shown = if max_lines < pairs.len() {
+        max_lines.saturating_sub(1)
+    } else {
+        max_lines
+    };
+    let mut out = format!(
+        "<g class=\"dp-record\" font-family=\"{}\" font-size=\"12.5\">",
+        esc(&t.font.family)
+    );
+    for (k, (key, val)) in pairs.iter().take(shown).enumerate() {
+        let y = top + 14.0 + k as f64 * line_h;
+        out.push_str(&format!(
+            "<text x=\"{pad}\" y=\"{y:.1}\" fill=\"{}\" font-weight=\"600\">{}</text><text x=\"{vx:.1}\" y=\"{y:.1}\" fill=\"{}\">{}</text>",
+            hex(t.colors.muted),
+            esc(&fit(key, key_w)),
+            hex(t.colors.ink),
+            esc(&fit(val, (w - vx - pad).max(20.0))),
+        ));
+    }
+    let mut y = top + 14.0 + shown as f64 * line_h;
+    if shown < pairs.len() {
+        out.push_str(&format!(
+            "<text x=\"{pad}\" y=\"{y:.1}\" fill=\"{}\" font-style=\"italic\">… {} more</text>",
+            hex(t.colors.muted),
+            pairs.len() - shown
+        ));
+        y += line_h;
+    }
+    if n > 1 {
+        out.push_str(&format!(
+            "<text x=\"{pad}\" y=\"{y:.1}\" fill=\"{}\" font-size=\"11\">The first of {n} rows.</text>",
+            hex(t.colors.muted)
+        ));
+    }
+    out.push_str("</g>");
+    out
+}
+
 /// Does this panel draw a chart (that `::TRACK`s can go under)?
 fn is_chart(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], o: &RenderOptions) -> bool {
     let has = |f: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, r)| f(r));
@@ -1494,6 +1636,7 @@ fn is_chart(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], o: &RenderOp
             matches!(
                 r,
                 Role::Table
+                    | Role::Record
                     | Role::PagedTable
                     | Role::Markdown
                     | Role::Track

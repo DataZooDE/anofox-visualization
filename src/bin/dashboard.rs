@@ -569,7 +569,7 @@ fn render_dashboard_html(
         let svg = if p
             .roles
             .iter()
-            .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+            .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable))
         {
             let named_rows = sql::result_columns(&rows);
             dashboard::render_panel_doc_svg(

@@ -260,10 +260,12 @@ impl Kpi {
     /// `group_compact`: the enclosing `::GROUP` box's `::KPI_SIZE`, used
     /// unless this tile sets its own.
     pub fn from_columns(cols: &[Column], l: &Locale, group_compact: bool) -> Option<Kpi> {
-        if cols
-            .iter()
-            .any(|c| matches!(c.role, Role::Table | Role::PagedTable | Role::Diagram))
-        {
+        if cols.iter().any(|c| {
+            matches!(
+                c.role,
+                Role::Table | Role::Record | Role::PagedTable | Role::Diagram
+            )
+        }) {
             return None;
         }
         let compact = kpi_size_of(cols).unwrap_or(group_compact);

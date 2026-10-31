@@ -190,6 +190,7 @@ terminal.
 | `::IMAGE` | `::PICTURE`, `::IMG` | kpi | a static picture panel: 'assets/x.svg', data:image/… or https:; ::ALT is its text alternative, ::IMAGE_DARK a dark-theme variant, ::LABEL a caption |
 | `::IMAGE_DARK` | `::IMG_DARK` | kpi | the ::IMAGE shown while the dashboard is dark |
 | `::TABLE` | `::GRID` | table | the whole result as a table (one marker per panel) |
+| `::RECORD` | `::KEY_VALUE` | table | one record as key/value pairs: a STRUCT / MAP / JSON object's fields, or the first row's columns |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
 | `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red); on a ::HEATMAP / ::CALENDAR its tiles, good → warn → bad |
@@ -3906,6 +3907,25 @@ FROM plan;
 The builder example *How will demand develop after today?* (Interactivity)
 combines all four: a reveal from Today, a flowing forecast line, a story on
 the weekly bars and a scenario input whose changes tween both charts.
+
+### One record (`::RECORD`) and schema panels
+
+`::RECORD` shows one record as name/value pairs instead of a one-row table:
+the fields of a STRUCT, MAP or JSON object, or, for several columns, the
+first row's columns (a note says when there were more rows). Values are
+text; a nested value shows as JSON.
+
+```sql
+SELECT {'Customer': name, 'City': city, 'Since': since}::RECORD, 'Customer'::TITLE
+FROM customers WHERE id = getvariable('customer');
+SELECT id ::RECORD, status, total, placed_at FROM orders WHERE id = 42;
+```
+
+A bare `DESCRIBE`, `SUMMARIZE` or `SHOW` statement is a table panel of what it
+returns, e.g. `SUMMARIZE sales;` for a quick profile of a table (one row per
+column: type, min, max, distinct values, nulls). On a locked server with an
+access policy, describe a query rather than a bare name
+(`DESCRIBE SELECT * FROM sales`), so the policy's view applies.
 
 ### Tables
 

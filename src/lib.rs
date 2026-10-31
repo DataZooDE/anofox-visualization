@@ -313,6 +313,9 @@ pub enum Role {
     TableOpt(TableOpt),
     /// A data table (`::TABLE`) — the whole result set as an HTML table.
     Table,
+    /// #774: one record as key/value pairs (`::RECORD`): a STRUCT / MAP /
+    /// JSON object's fields, or the first row's columns.
+    Record,
     /// A SQL-paginated table (`::PAGED`) — the browser pages it with
     /// `LIMIT`/`OFFSET` + `COUNT(*)`, holding one page at a time.
     PagedTable,
