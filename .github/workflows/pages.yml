@@ -16,8 +16,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deploy at a time; let a newer push supersede an in-flight run.
 concurrency:
@@ -40,17 +38,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Full history + tags: the app's footer shows the build version (#216).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
 
       # Same as ci.yml: the rustwasm installer script ships an old wasm-pack
       # that rejects `--profile` next to its implicit `--release` (#316).
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2
         with:
           tool: wasm-pack
 
@@ -65,7 +65,7 @@ jobs:
       - name: Fetch wasm extensions (→ web/localext)
         run: scripts/fetch-wasm-extensions.sh "$(cat .duckdb-version)"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -84,13 +84,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: scripts/release/extension-repo.sh --release latest web/extensions
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: web
 
   deploy:
+    permissions:
+      pages: write
+      id-token: write
     needs: build
     timeout-minutes: 15
     runs-on: ubuntu-latest
@@ -99,4 +102,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

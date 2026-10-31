@@ -1,0 +1,18 @@
+# Reviewed exceptions for zizmor (#766, 2026-10-31).
+rules:
+  # ci.yml also runs on v* tags, but it publishes nothing (its only write is
+  # an issue comment when master goes red): its caches can't reach a release.
+  # extension.yml, which does publish, builds a v* tag without its cache.
+  cache-poisoning:
+    ignore:
+      - ci.yml
+  # pages.yml redeploys after "Release full toolkit" finished on a v* tag
+  # push (checked in its `if:`), and only downloads the release's own assets.
+  dangerous-triggers:
+    ignore:
+      - pages.yml
+  # DuckDB's distribution pipeline is called at its release refs, as the
+  # community-extensions build expects.
+  unpinned-uses:
+    ignore:
+      - MainDistributionPipeline.yml
