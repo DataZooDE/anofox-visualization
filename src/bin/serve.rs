@@ -114,7 +114,7 @@ static ASSIST_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist-key-file FILE] [--no-assist]   (the builder assistant's /assist proxy: on when ANTHROPIC_API_KEY\n                                       or a 0600 key file holds a key; the key never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist-key-file FILE] [--no-assist]   (the builder assistant's /assist proxy: on when ANTHROPIC_API_KEY\n                                       or a 0600 key file holds a key; the key never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -390,6 +390,9 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("api-key") {
         api_key_cli(std::env::args().skip(2).collect());
     }
+    if std::env::args().nth(1).as_deref() == Some("share-password") {
+        share_password_cli(std::env::args().skip(2).collect());
+    }
     let mut o = parse_args();
     let _ = THEME.set(o.theme.clone());
     let _ = APP.set(o.app.script());
@@ -406,6 +409,47 @@ fn main() {
         Some(dir) => serve_dashboards(&dir, &mut o),
         None => authoring_mode(&o),
     }
+}
+
+/// `serve share-password [--generate]` (#763): the `password_hash` of a
+/// password-protected shared dashboard. The password comes from stdin (one
+/// line), or `--generate` makes one up and prints it once. Never takes it as
+/// an argument (it would land in the shell history and the process list).
+fn share_password_cli(args: Vec<String>) -> ! {
+    use anofox_visualization::host::auth::share;
+    let fail = |m: &str| -> ! {
+        eprintln!("serve share-password: {m}");
+        std::process::exit(2)
+    };
+    let password = match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["--generate"] => {
+            let p = share::generate_password();
+            println!("password: {p}   (shown once — give it to the viewers)");
+            p
+        }
+        [] => {
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).is_err() {
+                fail("could not read the password from stdin");
+            }
+            let p = line.trim_end_matches(['\n', '\r']).to_string();
+            if p.len() < share::MIN_PASSWORD {
+                fail(&format!(
+                    "a password of at least {} characters (or --generate)",
+                    share::MIN_PASSWORD
+                ));
+            }
+            p
+        }
+        _ => fail("usage: serve share-password [--generate]   (the password on stdin, one line)"),
+    };
+    println!("password_hash: {}", share::hash_password(&password));
+    std::process::exit(0)
 }
 
 /// `serve api-key new|revoke|list --file KEYS.json …`: manage the API keys of
@@ -1733,7 +1777,9 @@ fn route_serve(
     // in the body (never in a URL, a history entry or a proxy log line).
     let form = match &st.auth {
         Some(a)
-            if a.embed.is_some() && req.method() == &Method::Post && path.starts_with("/d/") =>
+            if (a.embed.is_some() || a.share.is_some())
+                && req.method() == &Method::Post
+                && path.starts_with("/d/") =>
         {
             let urlencoded = req_header(&req, "Content-Type").is_some_and(|c| {
                 c.trim()
@@ -1749,6 +1795,23 @@ fn route_serve(
                 return reply(req, 400, "bad request: expected a small form");
             }
             Some(sv::parse_query(&format!("?{body}")))
+        }
+        _ => None,
+    };
+    // #763: a shared dashboard's password form (`POST /share/<id>`).
+    let share_body = match &st.auth {
+        Some(a) if a.share.is_some() && path.starts_with("/share/") => {
+            let mut body = String::new();
+            if req.method() == &Method::Post {
+                let read = (&mut req as &mut Request)
+                    .as_reader()
+                    .take(MAX_FORM + 1)
+                    .read_to_string(&mut body);
+                if read.is_err() || body.len() as u64 > MAX_FORM {
+                    return reply(req, 400, "bad request: expected a small form");
+                }
+            }
+            Some(body)
         }
         _ => None,
     };
@@ -1769,6 +1832,9 @@ fn route_serve(
             };
             // The OIDC login's own endpoints (/auth/*).
             if let Some(rep) = auth.route(&r) {
+                return send(req, rep);
+            }
+            if let Some(rep) = share_body.and_then(|b| auth.share_login(&r, &b)) {
                 return send(req, rep);
             }
             let res = match &form {
@@ -1851,7 +1917,8 @@ fn route_serve(
     // (`embed_session`), so a `one_time` link is not needed again.
     let embed_link = match ident.as_ref() {
         Some(i) if i.page_session.is_some() => i.page_session.clone(),
-        Some(i) if i.method == "embed" => {
+        // #763: a share link's page session rides along the same way.
+        Some(i) if matches!(i.method, "embed" | "share") => {
             form.as_ref().and_then(|f| f.get("embed_session").cloned())
         }
         _ => None,

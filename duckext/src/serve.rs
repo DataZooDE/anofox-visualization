@@ -4610,6 +4610,22 @@ fn locked_asset(
 }
 
 fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -> u16 {
+    // #763: a shared dashboard's password form (`POST /share/<id>`): its
+    // small body is read now, before the request is borrowed below; it is
+    // only used after the Host and Origin checks.
+    let share_body = match &st.opts.auth {
+        Some(a) if a.share.is_some() && path.starts_with("/share/") => {
+            if req.method() == &Method::Post {
+                match read_body(&mut req, 4096) {
+                    Ok(b) => Some(b),
+                    Err((code, e)) => return reply(req, code, &e),
+                }
+            } else {
+                Some(String::new())
+            }
+        }
+        _ => None,
+    };
     let m = meta(&req);
     // Request data in a diagnostic is escaped (access::diag): a `\n` in it
     // could otherwise forge a line of the request log on the same stderr.
@@ -4662,6 +4678,9 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             };
             // The OIDC login's own endpoints (/auth/*).
             if let Some(rep) = auth.route(&r) {
+                return send(req, rep);
+            }
+            if let Some(rep) = share_body.and_then(|b| auth.share_login(&r, &b)) {
                 return send(req, rep);
             }
             if auth.public_asset(&method, path) {
