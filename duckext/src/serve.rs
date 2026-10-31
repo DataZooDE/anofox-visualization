@@ -54,6 +54,7 @@ use anofox_visualization::host::serving::{
 use anofox_visualization::host::state::{
     NewRecord, RateLimiter, Record, StartContext, StateOptions, Store,
 };
+use anofox_visualization::host::tasks;
 use anofox_visualization::host::telemetry;
 use anofox_visualization::host::writeback::{self as wb, WritebackOptions};
 use anofox_visualization::sql::deps::{self, Deps};
@@ -111,6 +112,8 @@ struct Running {
     /// in the background with nothing else to wait on, so only this thread
     /// gets `stop()`'s short, fixed join budget (#356 I6).
     refresher: Option<JoinHandle<()>>,
+    /// #767: the task runner (`options.tasks.run`), joined like the refresher.
+    tasks: Option<JoinHandle<()>>,
     /// A locked server's state (for `anofox_serve_refresh`).
     locked: Option<Arc<Locked>>,
     /// Dropped after the workers have exited (closes the snapshot DB and
@@ -157,6 +160,9 @@ pub fn stop(port: u16) -> Result<String, String> {
     // short, fixed stop budget, regardless of the build's own `timeout_s`.
     const STOP_JOIN_BUDGET: Duration = Duration::from_secs(5);
     if let Some(h) = r.refresher.take() {
+        join_bounded(vec![h], STOP_JOIN_BUDGET);
+    }
+    if let Some(h) = r.tasks.take() {
         join_bounded(vec![h], STOP_JOIN_BUDGET);
     }
     Ok(format!(
@@ -683,6 +689,7 @@ pub fn start_authoring(
             stop,
             workers,
             refresher: None,
+            tasks: None,
             locked: None,
             _state: Box::new(state),
         },
@@ -1245,6 +1252,22 @@ pub struct LockedOptions {
     /// `metrics` (#765): the bearer token `GET /metrics` needs — `None`: no
     /// such route (404).
     pub metrics_token: Option<String>,
+    /// `tasks` (#767): scheduled `tasks/*.task.sql`.
+    pub tasks: Option<TasksOptions>,
+}
+
+/// `options.tasks` (#767, docs/plans/plan-tasks-reports.md §1).
+#[derive(Debug, Clone)]
+pub struct TasksOptions {
+    /// Run the tasks on this replica (`run`; only one replica should).
+    pub run: bool,
+    /// The attached databases tasks may write; every other one must be
+    /// attached `READ_ONLY` (checked at start).
+    pub write: Vec<String>,
+    /// One run's time limit (`timeout_s`, default 900).
+    pub timeout: Duration,
+    /// Where each run is recorded (`log`: a file or `"stderr"`; default stderr).
+    pub log: Option<String>,
 }
 
 /// One entry of `options.nav_pickers` (or the single-element list
@@ -1467,6 +1490,61 @@ fn parse_metrics(val: &serde_json::Value) -> Result<String, String> {
     Ok(t)
 }
 
+/// `options.tasks` (#767): `{"run": true, "write": ["stage"], "timeout_s":
+/// 900, "log": "/var/log/anofox/tasks.jsonl"}`.
+fn parse_tasks(val: &serde_json::Value) -> Result<TasksOptions, String> {
+    let m = val
+        .as_object()
+        .ok_or("options.tasks must be an object like {\"run\": true, \"write\": [\"stage\"]}")?;
+    let mut t = TasksOptions {
+        run: false,
+        write: Vec::new(),
+        timeout: Duration::from_secs(900),
+        log: None,
+    };
+    for (k, v) in m {
+        match k.as_str() {
+            "run" => {
+                t.run = v
+                    .as_bool()
+                    .ok_or("options.tasks.run must be true or false")?
+            }
+            "write" => {
+                for w in v
+                    .as_array()
+                    .ok_or("options.tasks.write must be a list of database names")?
+                {
+                    let w = w
+                        .as_str()
+                        .filter(|w| sv::valid_ident(w))
+                        .ok_or("options.tasks.write: a database name")?;
+                    t.write.push(w.to_string());
+                }
+            }
+            "timeout_s" => {
+                t.timeout = Duration::from_secs(
+                    v.as_u64()
+                        .filter(|n| (1..=86_400).contains(n))
+                        .ok_or("options.tasks.timeout_s must be 1..=86400")?,
+                )
+            }
+            "log" => {
+                t.log = Some(
+                    v.as_str()
+                        .ok_or("options.tasks.log must be \"stderr\" or a file path")?
+                        .to_string(),
+                )
+            }
+            other => {
+                return Err(format!(
+                    "options.tasks: unknown key '{other}' (run, write, timeout_s, log)"
+                ))
+            }
+        }
+    }
+    Ok(t)
+}
+
 fn parse_nav_picker_label(
     m: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Option<String>, String> {
@@ -1526,6 +1604,7 @@ impl Default for LockedOptions {
             writeback_opts: None,
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
             metrics_token: None,
+            tasks: None,
         }
     }
 }
@@ -1699,6 +1778,9 @@ impl LockedOptions {
                 }
                 "metrics" => {
                     o.metrics_token = Some(parse_metrics(val)?);
+                }
+                "tasks" => {
+                    o.tasks = Some(parse_tasks(val)?);
                 }
                 "bind" => {
                     o.bind = val
@@ -2593,6 +2675,8 @@ struct Locked {
     writeback: Option<Arc<WritebackRuntime>>,
     /// Request counts and latencies for `GET /metrics` (#765).
     metrics: anofox_visualization::host::metrics::Metrics,
+    /// #767: per task, its last run (for `/metrics`).
+    task_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// `<dir>/assets`, canonicalized once at startup (#514 PR B) — `None`
     /// when there is no such folder next to the dashboards, so every
     /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
@@ -3206,6 +3290,22 @@ pub fn start_locked(
         ));
     }
     let (dashboards, mut loads) = load_dashboards(Path::new(dir))?;
+    // #767: tasks/*.task.sql — read (and checked) whenever `options.tasks` is
+    // set; run only on the replica with `tasks.run`, after its attachments
+    // passed the READ_ONLY check (D2).
+    let task_list = match &opts.tasks {
+        None => Vec::new(),
+        Some(t) => {
+            let list = load_tasks(Path::new(dir))?;
+            if t.run {
+                let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+                check_task_attachments(&conn, &t.write)?;
+                list
+            } else {
+                Vec::new()
+            }
+        }
+    };
     // #514 PR B: computed once at startup, like every other path-derived
     // limit here (`options.data`) — an asset request never canonicalizes
     // `dir` itself per request. Review of #554 nit 8: a symlinked `assets`
@@ -3529,6 +3629,7 @@ pub fn start_locked(
         writeback,
         assets_root,
         metrics: Default::default(),
+        task_stats: Mutex::new(BTreeMap::new()),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -3566,6 +3667,11 @@ pub fn start_locked(
         let (st, stop) = (state.clone(), stop.clone());
         std::thread::spawn(move || refresher(&st, &stop, every))
     });
+    // #767: the task runner, on this replica only when `tasks.run`.
+    let tasks_handle = (!task_list.is_empty()).then(|| {
+        let (st, stop) = (state.clone(), stop.clone());
+        std::thread::spawn(move || task_runner(&st, &stop, task_list))
+    });
     servers.insert(
         port,
         Running {
@@ -3574,6 +3680,7 @@ pub fn start_locked(
             stop,
             workers,
             refresher: refresher_handle,
+            tasks: tasks_handle,
             locked: Some(state.clone()),
             _state: Box::new(state),
         },
@@ -3602,6 +3709,273 @@ fn refresher(st: &Locked, stop: &AtomicBool, every: Duration) {
         let _ = st.refresh(false);
         next = Instant::now() + every;
     }
+}
+
+// ---- #767: tasks ---------------------------------------------------------
+
+/// A task's last runs, for `/metrics`.
+#[derive(Debug, Default, Clone)]
+struct TaskStat {
+    last_ok: Option<u64>,
+    runs: u64,
+    failures: u64,
+    failing_in_row: u64,
+}
+
+/// `<dir>/tasks/*.task.sql`, by file name; a task that doesn't parse stops
+/// the start (naming it).
+fn load_tasks(dir: &Path) -> Result<Vec<tasks::Task>, String> {
+    let td = dir.join("tasks");
+    let Ok(rd) = std::fs::read_dir(&td) else {
+        return Ok(Vec::new());
+    };
+    let mut files: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.to_string_lossy().ends_with(".task.sql"))
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|p| {
+            let name = p
+                .file_name()
+                .map(|n| {
+                    n.to_string_lossy()
+                        .trim_end_matches(".task.sql")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            let script = std::fs::read_to_string(p).map_err(|e| format!("task '{name}': {e}"))?;
+            tasks::parse(&name, &script)
+        })
+        .collect()
+}
+
+/// One query's rows as JSON objects (small results only).
+fn small_rows(c: &Conn, sql: &str) -> Result<Vec<Map<String, Value>>, String> {
+    let json = crate::db::json_rows(c, sql, &[], 10_000, &mut |_, want| Ok(want))?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+/// D2: every database not in `write` must be attached READ_ONLY.
+fn check_task_attachments(c: &Conn, write: &[String]) -> Result<(), String> {
+    let rows = small_rows(
+        c,
+        "SELECT database_name AS n, readonly AS r FROM duckdb_databases() WHERE NOT internal",
+    )?;
+    let dbs: Vec<(String, bool)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.get("n").and_then(Value::as_str).unwrap_or("").to_string(),
+                r.get("r").and_then(Value::as_bool).unwrap_or(false),
+            )
+        })
+        .collect();
+    tasks::check_attachments(&dbs, write)
+}
+
+/// When a task runs next.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Next {
+    /// `'init'`: once, at the start.
+    Init,
+    /// An `INTERVAL`: now, then every so many seconds.
+    Every(f64),
+    /// A `TIMESTAMP` (Unix seconds), evaluated again after each run.
+    At(f64),
+}
+
+fn eval_schedule(c: &Conn, expr: &str) -> Result<Next, String> {
+    let rows = small_rows(
+        c,
+        &format!("SELECT typeof(e) AS t, e::VARCHAR AS v FROM (SELECT ({expr}) AS e)"),
+    )?;
+    let r = rows.first().ok_or("the schedule returned no row")?;
+    let t = r.get("t").and_then(Value::as_str).unwrap_or("");
+    let num = |sql: String| -> Result<f64, String> {
+        small_rows(c, &sql)?
+            .first()
+            .and_then(|r| r.get("s"))
+            .and_then(Value::as_f64)
+            .ok_or_else(|| "the schedule is NULL".to_string())
+    };
+    match t {
+        "INTERVAL" => {
+            let s = num(format!("SELECT epoch(({expr})::INTERVAL) AS s"))?;
+            if s < 1.0 {
+                return Err("the schedule's interval must be at least 1 second".into());
+            }
+            Ok(Next::Every(s))
+        }
+        t if t.starts_with("TIMESTAMP") || t == "DATE" => Ok(Next::At(num(format!(
+            "SELECT epoch(({expr})::TIMESTAMPTZ) AS s"
+        ))?)),
+        "VARCHAR" if r.get("v").and_then(Value::as_str) == Some("init") => Ok(Next::Init),
+        _ => Err(format!(
+            "::SCHEDULE must be an INTERVAL, a TIMESTAMP or 'init', not {t}"
+        )),
+    }
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// The task thread: runs each task when it is due, one at a time, until the
+/// server stops.
+fn task_runner(st: &Locked, stop: &AtomicBool, list: Vec<tasks::Task>) {
+    let Some(opts) = st.opts.tasks.clone() else {
+        return;
+    };
+    let schedule = |t: &tasks::Task| -> Result<Next, String> {
+        let c = st.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+        eval_schedule(&c, &t.schedule)
+    };
+    let warn = |t: &tasks::Task, e: &str| {
+        eprintln!("[anofox-serve] task '{}': {}", t.name, access::diag(e));
+    };
+    // When each task is due next (`None`: never again).
+    let mut due: Vec<Option<f64>> = list
+        .iter()
+        .map(|t| match schedule(t) {
+            Ok(Next::Init | Next::Every(_)) => Some(unix_now()),
+            Ok(Next::At(at)) => Some(at),
+            Err(e) => {
+                warn(t, &e);
+                Some(unix_now() + 60.0)
+            }
+        })
+        .collect();
+    while !stop.load(Ordering::SeqCst) {
+        for (i, t) in list.iter().enumerate() {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if !due[i].is_some_and(|d| unix_now() >= d) {
+                continue;
+            }
+            if run_task(st, &opts, t) && t.refresh {
+                if let Err(e) = st.refresh(false) {
+                    warn(t, &format!("refresh failed: {e}"));
+                }
+            }
+            due[i] = match schedule(t) {
+                Ok(Next::Init) => None,
+                Ok(Next::Every(s)) => Some(unix_now() + s),
+                Ok(Next::At(at)) if at > unix_now() + 1.0 => Some(at),
+                Ok(Next::At(_)) => {
+                    warn(
+                        t,
+                        "its ::SCHEDULE gave a time that has passed; tried again in 60 s",
+                    );
+                    Some(unix_now() + 60.0)
+                }
+                Err(e) => {
+                    warn(t, &e);
+                    Some(unix_now() + 60.0)
+                }
+            };
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Run one task on the serving session's connection (D1), with its time
+/// limit; record it. `true` when every statement succeeded.
+fn run_task(st: &Locked, opts: &TasksOptions, t: &tasks::Task) -> bool {
+    let started = unix_now();
+    let t0 = Instant::now();
+    let res = {
+        let c = st.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+        let (r, fired) = c.with_deadline_fired(opts.timeout, |c| {
+            for s in &t.statements {
+                c.exec(s)?;
+            }
+            Ok(())
+        });
+        if fired {
+            Err(format!("timed out after {} s", opts.timeout.as_secs()))
+        } else {
+            r
+        }
+    };
+    let ok = res.is_ok();
+    {
+        let mut m = st.task_stats.lock().unwrap_or_else(|p| p.into_inner());
+        let s = m.entry(t.name.clone()).or_default();
+        s.runs += 1;
+        if ok {
+            s.last_ok = Some(started as u64);
+            s.failing_in_row = 0;
+        } else {
+            s.failures += 1;
+            s.failing_in_row += 1;
+        }
+    }
+    let line = serde_json::json!({
+        "task": t.name,
+        "start": started as u64,
+        "ms": t0.elapsed().as_millis() as u64,
+        "ok": ok,
+        "error": res.err().map(|e| redact(e, st.opts.data.as_deref())),
+    })
+    .to_string();
+    match opts.log.as_deref() {
+        None | Some("stderr") => eprintln!("[anofox-serve] task {line}"),
+        Some(path) => {
+            use std::io::Write as _;
+            let w = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut f| writeln!(f, "{line}"));
+            if let Err(e) = w {
+                eprintln!("[anofox-serve] task log {}: {e}", access::diag(path));
+            }
+        }
+    }
+    ok
+}
+
+/// #767: the tasks' gauges for `/metrics`.
+fn task_gauges(st: &Locked) -> Vec<metrics::Gauge> {
+    let m = st.task_stats.lock().unwrap_or_else(|p| p.into_inner());
+    if m.is_empty() {
+        return Vec::new();
+    }
+    type Values = Vec<(Vec<(&'static str, String)>, f64)>;
+    let per = |f: &dyn Fn(&TaskStat) -> Option<f64>| -> Values {
+        m.iter()
+            .filter_map(|(k, s)| f(s).map(|v| (vec![("task", k.clone())], v)))
+            .collect()
+    };
+    let g = |name, help, values| metrics::Gauge { name, help, values };
+    vec![
+        g(
+            "anofox_task_last_success_timestamp_seconds",
+            "When each task last ran without an error (Unix seconds).",
+            per(&|s| s.last_ok.map(|v| v as f64)),
+        ),
+        g(
+            "anofox_task_runs",
+            "Runs of each task since the start.",
+            per(&|s| Some(s.runs as f64)),
+        ),
+        g(
+            "anofox_task_failures",
+            "Failed runs of each task since the start.",
+            per(&|s| Some(s.failures as f64)),
+        ),
+        g(
+            "anofox_task_consecutive_failures",
+            "Failed runs of each task in a row (0 after a success).",
+            per(&|s| Some(s.failing_in_row as f64)),
+        ),
+    ]
 }
 
 /// `anofox_serve_refresh(port)`: rebuild the snapshot of the locked server on
@@ -5507,6 +5881,7 @@ fn metric_gauges(st: &Locked) -> Vec<metrics::Gauge> {
             b(w.full.load(Ordering::Relaxed)),
         ));
     }
+    g.extend(task_gauges(st));
     if st.opts.source.is_some() {
         g.push(Gauge::one(
             "anofox_source_consecutive_failures",
