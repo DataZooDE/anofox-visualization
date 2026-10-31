@@ -70,6 +70,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TITLE", &["HEADING"], R::Title, "encoding", true, "a title bar above one panel"),
     e("ALT", &["ALT_TEXT"], R::Alt, "encoding", true,
       "an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL"),
+    e("SUBTITLE", &["SUBHEADING"], R::Subtitle, "encoding", true,
+      "a line under the panel's title (smaller, muted)"),
     e("INFO", &["DESCRIPTION", "DEFINITION"], R::Info, "encoding", true,
       "a definition behind an ⓘ on the panel's title bar (hover, focus or click)"),
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
@@ -349,6 +351,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "Excel export button"),
     e("DOWNLOAD_PDF", &[], R::Download(DownloadFmt::Pdf), "table", false,
       "print-to-PDF button"),
+    e("DOWNLOAD_JSON", &[], R::Download(DownloadFmt::Json), "table", false,
+      "JSON export button (the rows as an array of objects)"),
     // ── inputs (the column name becomes getvariable('<name>')) ─────────────
     e("DROPDOWN", &["OPTIONS", "SELECT_INPUT"], R::Input(InputKind::Dropdown), "input", false,
       "single-select → a DuckDB variable"),
@@ -1124,7 +1128,7 @@ mod tests {
         );
         v.extend([M::Plain, M::Money, M::Percent, M::Compact].map(Role::Metric));
         v.extend([T::Small, T::Medium, T::Large].map(Role::Text));
-        v.extend([D::Csv, D::Xlsx, D::Pdf].map(Role::Download));
+        v.extend([D::Csv, D::Xlsx, D::Pdf, D::Json].map(Role::Download));
         v.extend([
             Role::KpiSize,
             Role::X,
@@ -1132,6 +1136,7 @@ mod tests {
             Role::Category,
             Role::Label,
             Role::Title,
+            Role::Subtitle,
             Role::Columns,
             Role::GroupStart,
             Role::GroupEnd,
@@ -1311,6 +1316,7 @@ mod tests {
                 | Role::Category
                 | Role::Label
                 | Role::Title
+                | Role::Subtitle
                 | Role::Value(_)
                 | Role::Input(_)
                 | Role::Columns

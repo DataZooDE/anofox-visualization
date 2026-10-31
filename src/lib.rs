@@ -176,6 +176,8 @@ pub enum DownloadFmt {
     Csv,
     Xlsx,
     Pdf,
+    /// #774: the query rows as a JSON array.
+    Json,
 }
 
 /// The kind of control an `::` input renders.
@@ -250,6 +252,8 @@ pub enum Role {
     Label,
     /// A per-box title bar (`::TITLE`/`::HEADING`) drawn above a single panel.
     Title,
+    /// #774: a line under the panel's title (`::SUBTITLE`), smaller and muted.
+    Subtitle,
     /// An image's text alternative (`::ALT`); `''` means decorative
     /// (`alt=""`, no lint warning).
     Alt,

@@ -1052,7 +1052,12 @@ fn rewrite_list(list: &str) -> Rewritten {
     let inputs_ok = unambiguous.iter().all(|r| {
         matches!(
             r,
-            Role::Input(_) | Role::Hint | Role::OptionLabel | Role::Label | Role::Title
+            Role::Input(_)
+                | Role::Hint
+                | Role::OptionLabel
+                | Role::Label
+                | Role::Title
+                | Role::Subtitle
         )
     });
 
@@ -1086,7 +1091,7 @@ fn rewrite_list(list: &str) -> Rewritten {
                     // number format, colour scale, badge, sparkline) by output
                     // position so the browser can render each.
                     if let Some(rr) = parse_role(tok) {
-                        if matches!(rr, Role::Title | Role::Info)
+                        if matches!(rr, Role::Title | Role::Subtitle | Role::Info)
                             || crate::roles::is_table_format(rr)
                         {
                             roles.push((idx, rr));

@@ -643,6 +643,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/markdown-style-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/subtitle-json-e2e.mjs (#774): ::SUBTITLE right under the title
+      # of a chart, ::TABLE, ::PAGED and ::MARKDOWN (never a cell or drawn
+      # twice); ::DOWNLOAD_JSON downloads the rows; light/dark, 1440/390 px.
+      - name: ::SUBTITLE + ::DOWNLOAD_JSON e2e (#774)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/subtitle-json-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/info-markdown-e2e.mjs (#759): an ::INFO keeps its line breaks
       # and renders the escaped Markdown subset; a long one is wide and
       # scrolls inside the viewport; a ::MARKDOWN GFM table, a <script> cell

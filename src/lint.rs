@@ -6061,7 +6061,7 @@ fn summed_rate_diag(
     let skip = |i: usize| {
         roles
             .iter()
-            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Info))
+            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Info))
     };
     let fmt_of = |i: usize| {
         roles
@@ -6132,7 +6132,7 @@ fn totals_unknown_column_diag(
     let skip = |i: usize| {
         roles
             .iter()
-            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Info))
+            .any(|(j, r)| *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Info))
     };
     let cols: Vec<&String> = first
         .keys()
@@ -6533,16 +6533,15 @@ fn role_index(roles: &[(usize, Role)], want: Role) -> Option<usize> {
 }
 
 /// #330: the column a ::ROWSELECT table's click binds to — the first output
-/// column, skipping a ::TITLE (the card caption) or ::INFO (dropped before
+/// column, skipping a ::TITLE (the card caption), ::SUBTITLE or ::INFO (dropped before
 /// the table ever renders) column, the same "first column" the browser
 /// (`web/app.js` `k0 = cols[0]`) picks.
 fn rowselect_key_column(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Option<String> {
-    let skip_title = role_index(roles, Role::Title);
-    let skip_info = role_index(roles, Role::Info);
+    let skip = [Role::Title, Role::Subtitle, Role::Info].map(|r| role_index(roles, r));
     rows.first()?
         .keys()
         .enumerate()
-        .find(|(i, _)| Some(*i) != skip_title && Some(*i) != skip_info)
+        .find(|(i, _)| !skip.contains(&Some(*i)))
         .map(|(_, k)| k.clone())
 }
 

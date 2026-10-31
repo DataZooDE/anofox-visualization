@@ -134,6 +134,42 @@ fn title_of(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<St
     crate::title_value(&column_at(rows, *i)?.1)
 }
 
+/// #774: a panel's `::SUBTITLE`, like [`title_of`].
+fn subtitle_of(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option<String> {
+    let (i, _) = roles.iter().find(|(_, r)| matches!(r, Role::Subtitle))?;
+    crate::title_value(&column_at(rows, *i)?.1)
+}
+
+/// The height a `::SUBTITLE` line adds under the title bar.
+const SUBTITLE_H: f64 = 16.0;
+
+/// #774: the `::SUBTITLE` line under a title bar (baseline 36), muted and
+/// shortened with an ellipsis to the panel's width.
+fn subtitle_svg(sub: &str, x: f64, w: f64, ropts: &RenderOptions) -> String {
+    let t = &ropts.theme;
+    let avail = (w - 2.0 * x).max(20.0);
+    let mut text = sub.to_string();
+    if ggplot_rs::render::text::text_width(&text, 11.5) > avail {
+        while !text.is_empty()
+            && ggplot_rs::render::text::text_width(&format!("{text}…"), 11.5) > avail
+        {
+            text.pop();
+        }
+        text = format!("{}…", text.trim_end());
+    }
+    let full = if text == sub {
+        String::new()
+    } else {
+        format!("<title>{}</title>", esc(sub))
+    };
+    format!(
+        "<text class=\"dp-subtitle\" x=\"{x}\" y=\"36\" font-family=\"{}\" font-size=\"11.5\" fill=\"{}\">{}{full}</text>",
+        esc(&t.font.family),
+        hex(t.colors.muted),
+        esc(&text),
+    )
+}
+
 /// Render a whole annotated SQL script to one composed SVG dashboard.
 pub fn render_dashboard_svg(
     script: &str,
@@ -1200,12 +1236,21 @@ fn render_panel_svg(
         .and_then(|(_, v)| v.first())
         .map(value_str)
         .filter(|s| !s.trim().is_empty());
-    let title = match (title, &info) {
-        (None, Some(_)) => Some(String::new()),
-        (t, _) => t,
+    let subtitle = subtitle_of(rows, roles);
+    let title = match (title, &info, &subtitle) {
+        (None, Some(_), _) | (None, _, Some(_)) => Some(String::new()),
+        (t, _, _) => t,
     };
-    let title_h = if title.is_some() { 26.0 } else { 0.0 };
+    let title_h = match (&title, &subtitle) {
+        (Some(_), Some(_)) => 26.0 + SUBTITLE_H,
+        (Some(_), None) => 26.0,
+        _ => 0.0,
+    };
     let pad = 14.0;
+    let sub_svg = subtitle
+        .as_deref()
+        .map(|sb| subtitle_svg(sb, pad, w, ropts))
+        .unwrap_or_default();
 
     // A table (before the KPI check: a table's ::MONEY / ::PERCENT columns are
     // column formats, not a KPI).
@@ -1246,6 +1291,7 @@ fn render_panel_svg(
                 esc(tt),
             ));
         }
+        svg.push_str(&sub_svg);
         svg.push_str(&format!(
             "<g class=\"md-text\" font-family=\"{}\" font-size=\"13\" fill=\"{}\">",
             esc(&t.font.family),
@@ -1351,6 +1397,7 @@ fn render_panel_svg(
                 hd = hex(t.colors.heading),
             ));
         }
+        svg.push_str(&sub_svg);
         let cap_h = if img.caption.is_some() { 20.0 } else { 0.0 };
         let ix = pad;
         let iy = title_h + 4.0;
@@ -1433,6 +1480,7 @@ fn render_panel_svg(
             hd = hex(ropts.theme.colors.heading),
         ));
     }
+    svg.push_str(&sub_svg);
     svg.push_str(&chart);
     svg.push_str("</svg>");
     svg
@@ -1522,7 +1570,7 @@ fn table_svg(
     );
     let skip: std::collections::HashSet<usize> = roles
         .iter()
-        .filter(|(_, r)| matches!(r, Role::Title | Role::Info))
+        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Info))
         .map(|(i, _)| *i)
         .collect();
     // Per-column format roles (::MONEY, ::PERCENT, ::TREND, ::COLORSCALE, …),
@@ -1689,7 +1737,9 @@ fn table_svg(
         }
     };
 
-    let top = if title.is_some() { 30.0 } else { 10.0 };
+    let subtitle = subtitle_of(rows, roles);
+    let top = if title.is_some() { 30.0 } else { 10.0 }
+        + if subtitle.is_some() { SUBTITLE_H } else { 0.0 };
     // #457: a nested sparkline/sparkbar panel can't be asked for less than
     // `SPARKLINE_MIN_H` (50px, see its doc comment on ggplot-rs's own
     // layout floor) without clipping the line's low points (or, for
@@ -1721,6 +1771,9 @@ fn table_svg(
             hex(th.colors.heading),
             esc(t)
         ));
+    }
+    if let Some(sb) = &subtitle {
+        s.push_str(&subtitle_svg(sb, 12.0, w, ropts));
     }
     // header — a header wider than its own column is shortened to an
     // ellipsis instead of overlapping the next one (#351); the full text is
