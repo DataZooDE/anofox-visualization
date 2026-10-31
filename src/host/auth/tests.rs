@@ -574,3 +574,246 @@ fn misconfiguration_fails_closed() {
         );
     }
 }
+
+/// #763: share links — a public dashboard opens without a credential, a
+/// password-protected one after its password, each scoped to that one
+/// dashboard, with the configured claims and locked variables.
+fn share_auth(extra: Option<serde_json::Value>) -> (Auth, std::path::PathBuf) {
+    let dir = tmpdir();
+    let mut cfg = vec![json!({"mode": "share", "dashboards": {
+        "sales": {"access": "public", "claims": {"tenant": "acme"}, "vars": {"region": "EU"}},
+        "ops": {"access": "password", "password_hash": share::hash_password("a long enough password")}}})];
+    cfg.extend(extra);
+    let mut a = Auth::from_json(&serde_json::Value::Array(cfg), |_| None).unwrap();
+    let audit = dir.join("audit.jsonl");
+    a.set_audit(Arc::new(AuditLog::new(audit.to_str().unwrap()).unwrap()));
+    (a, audit)
+}
+
+#[test]
+fn share_public_dashboard() {
+    let (a, _) = share_auth(None);
+    assert_eq!(a.methods(), ["share"]);
+    // its page: the shared identity and a page session
+    let id = a.authenticate(&req("GET", "/d/sales?v.x=1", &[])).unwrap();
+    assert_eq!(
+        (id.method, id.claims.user.as_str()),
+        ("share", "share:sales")
+    );
+    assert!(crate::host::access::is_reserved_user(&id.claims.user));
+    assert_eq!(
+        id.claims.attrs,
+        [("tenant".to_string(), Some("acme".to_string()))]
+    );
+    assert_eq!(id.scope.dashboards, Some(vec!["sales".to_string()]));
+    let page = id.page_session.clone().unwrap();
+    // its assets: the identity, no new page session
+    let asset = a
+        .authenticate(&req("GET", "/d/sales/assets/logo.png", &[]))
+        .unwrap();
+    assert!(asset.page_session.is_none());
+    // the page's requests carry the page session
+    let h = [(SESSION_HEADER, page.as_str())];
+    let api = a.authenticate(&req("POST", "/api/panel", &h)).unwrap();
+    assert_eq!((api.method, api.scope.clone()), ("share", id.scope.clone()));
+    let mut vars = vec![("region".to_string(), "'US'".to_string())];
+    api.scope.lock_vars(&mut vars);
+    assert_eq!(vars, [("region".to_string(), "'EU'".to_string())]);
+    // without it, the API and everything else of the server stay closed
+    for (m, p) in [
+        ("POST", "/api/panel"),
+        ("GET", "/"),
+        ("GET", "/d/payroll"),
+        ("GET", "/d/salesx"),
+    ] {
+        let d = a.authenticate(&req(m, p, &[])).unwrap_err();
+        assert_eq!(d.reason, "no_credentials", "{m} {p}");
+        assert!(a.login_redirect(&req(m, p, &[]), &d).is_none(), "{m} {p}");
+    }
+    // a forged or foreign page session is refused, not ignored
+    let d = a
+        .authenticate(&req("POST", "/api/panel", &[(SESSION_HEADER, "x.y.z")]))
+        .unwrap_err();
+    assert_eq!(d.method, Some("share"));
+    // a POST to the page is not a share credential
+    assert!(a.authenticate(&req("POST", "/d/sales", &[])).is_err());
+}
+
+#[test]
+fn share_password_dashboard() {
+    let (a, audit) = share_auth(None);
+    // no cookie: the password page (not a login redirect, not the dashboard)
+    let d = a
+        .authenticate(&req("GET", "/d/ops?v.x=1", &[]))
+        .unwrap_err();
+    assert_eq!((d.reason, d.method), ("no_credentials", Some("share")));
+    let p = a
+        .login_redirect(&req("GET", "/d/ops?v.x=1", &[]), &d)
+        .unwrap();
+    let body = String::from_utf8(p.body.clone()).unwrap();
+    assert!(
+        body.contains("action=\"/share/ops\"") && body.contains("value=\"/d/ops?v.x=1\""),
+        "{body}"
+    );
+    // its assets without the cookie: refused, no password page
+    let d = a
+        .authenticate(&req("GET", "/d/ops/assets/x.png", &[]))
+        .unwrap_err();
+    assert!(a
+        .login_redirect(&req("GET", "/d/ops/assets/x.png", &[]), &d)
+        .is_none());
+    // a wrong password: the page again, 401
+    let wrong = a
+        .share_login(
+            &req("POST", "/share/ops", &[]),
+            "password=nope&next=%2Fd%2Fops%3Fv.x%3D1",
+        )
+        .unwrap();
+    assert_eq!(wrong.status, 401);
+    assert!(wrong.header_value("Set-Cookie").is_none());
+    // the right one: a cookie for /d/ops, back to the page it came from
+    let ok = a
+        .share_login(
+            &req("POST", "/share/ops", &[]),
+            "password=a+long+enough+password&next=%2Fd%2Fops%3Fv.x%3D1",
+        )
+        .unwrap();
+    assert_eq!(ok.status, 303);
+    assert_eq!(ok.header_value("Location"), Some("/d/ops?v.x=1"));
+    let set = ok.header_value("Set-Cookie").unwrap().to_string();
+    assert!(set.contains("Path=/d/ops;") && set.contains("HttpOnly") && set.contains("Secure"));
+    let token = set
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches("__Secure-anofox_share=")
+        .to_string();
+    let cookie = format!("__Secure-anofox_share={token}");
+    let h = [("Cookie", cookie.as_str())];
+    let id = a.authenticate(&req("GET", "/d/ops", &h)).unwrap();
+    assert_eq!((id.method, id.claims.user.as_str()), ("share", "share:ops"));
+    assert!(id.page_session.is_some());
+    assert!(a
+        .authenticate(&req("GET", "/d/ops/assets/x.png", &h))
+        .is_ok());
+    // the cookie is not a credential for anything else
+    assert!(a.authenticate(&req("POST", "/api/panel", &h)).is_err());
+    // an open redirect is not possible through `next`
+    let ok2 = a
+        .share_login(
+            &req("POST", "/share/ops", &[]),
+            "password=a+long+enough+password&next=https%3A%2F%2Fevil.example%2F",
+        )
+        .unwrap();
+    assert_eq!(ok2.header_value("Location"), Some("/d/ops"));
+    // unknown or public dashboards have no password route
+    assert_eq!(
+        a.share_login(&req("POST", "/share/sales", &[]), "password=x")
+            .unwrap()
+            .status,
+        404
+    );
+    assert_eq!(
+        a.share_login(&req("POST", "/share/zzz", &[]), "password=x")
+            .unwrap()
+            .status,
+        404
+    );
+    assert_eq!(
+        a.share_login(&req("GET", "/share/ops", &[]), "")
+            .unwrap()
+            .status,
+        405
+    );
+    assert!(a.share_login(&req("POST", "/auth/x", &[]), "").is_none());
+    // the audit log: the login and the refusal, never the password
+    let log = std::fs::read_to_string(&audit).unwrap();
+    assert!(
+        log.contains("\"audit\":\"share_login\"") && log.contains("\"wrong_password\""),
+        "{log}"
+    );
+    assert!(!log.contains("a long enough password") && !log.contains("nope"));
+    assert!(
+        !log.contains("zzz"),
+        "an unknown id from the URL is not logged"
+    );
+}
+
+#[test]
+fn share_lockout_and_other_logins_first() {
+    let (a, _) = share_auth(Some(
+        json!({"mode": "embed", "secret": EMBED_SECRET, "claims": ["tenant"]}),
+    ));
+    for _ in 0..share::MAX_FAILS_PER_PEER {
+        assert_eq!(
+            a.share_login(&req("POST", "/share/ops", &[]), "password=x")
+                .unwrap()
+                .status,
+            401
+        );
+    }
+    let locked = a
+        .share_login(
+            &req("POST", "/share/ops", &[]),
+            "password=a+long+enough+password",
+        )
+        .unwrap();
+    assert_eq!(locked.status, 429);
+    assert!(locked.header_value("Retry-After").is_some());
+    // an embed page session still works next to share
+    let link = embed_link(json!({"dashboard": "sales", "user": "acme-1", "exp": now_s() + 60}));
+    let id = a
+        .authenticate(&req("GET", &format!("/d/sales?embed={link}"), &[]))
+        .unwrap();
+    assert_eq!(id.method, "embed");
+    let page = id.page_session.unwrap();
+    let api = a
+        .authenticate(&req(
+            "POST",
+            "/api/panel",
+            &[(SESSION_HEADER, page.as_str())],
+        ))
+        .unwrap();
+    assert_eq!((api.method, api.claims.user.as_str()), ("embed", "acme-1"));
+    // the static server's form posts: a share page session in `embed_session`
+    let sp = a
+        .authenticate(&req("GET", "/d/sales", &[]))
+        .unwrap()
+        .page_session
+        .unwrap();
+    assert_eq!(
+        a.page_session(Some(&sp), &req("POST", "/d/sales", &[]))
+            .unwrap()
+            .method,
+        "share"
+    );
+    assert!(a.public_asset("GET", "/app.js") && !a.public_asset("GET", "/d/ops"));
+}
+
+#[test]
+fn share_config_errors() {
+    let e = Auth::from_json(
+        &json!({"mode": "share", "dashboards": {"x": {"access": "public"}},
+        "session_secret": "0123456789abcdef0123456789abcdef"}),
+        |_| None,
+    );
+    assert!(e.is_ok());
+    let both = Auth::from_json(
+        &json!([
+        {"mode": "share", "dashboards": {"x": {"access": "public"}}, "session_secret": PROXY_SECRET},
+        {"mode": "proxy", "shared_secret": PROXY_SECRET}]),
+        |_| None,
+    );
+    assert!(both.unwrap_err().contains("different secrets"));
+    // the proxy may never pose as a share user
+    let p = Auth::from_json(
+        &json!({"mode": "proxy", "shared_secret": PROXY_SECRET}),
+        |_| None,
+    )
+    .unwrap();
+    let h = [
+        ("X-Anofox-Proxy-Secret", PROXY_SECRET),
+        ("X-Forwarded-User", "share:ops"),
+    ];
+    assert!(p.authenticate(&req("GET", "/", &h)).is_err());
+}

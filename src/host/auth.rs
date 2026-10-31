@@ -9,6 +9,7 @@
 //! | `oidc` | a login at the IdP → a server-signed session cookie | [`oidc`] |
 //! | `embed` | a signed link `/d/<id>?embed=<token>` → a page session | [`embed`] |
 //! | `api_keys` | `Authorization: Bearer afx_…` | [`apikey`] |
+//! | `share` | none (a public dashboard) or a password → a login cookie, then a page session | [`share`] |
 //!
 //! Every method ends in the same [`Claims`] as the proxy, so the reserved
 //! `__claim_*` variables, the order they are set in, the cache keys, policies
@@ -18,11 +19,14 @@
 //!
 //! **Which credential counts.** Exactly one is used per request, the first
 //! present of: an embed link (on `GET /d/<id>`), the proxy secret, an
-//! `Authorization` header, an embed page session (`X-Anofox-Session`), the
-//! login cookie, a JWT cookie. A present but invalid credential is refused —
-//! the server never falls back to the next one. With nothing present the
-//! request is refused (a page view is sent to `/auth/login` when `oidc` is
-//! configured). A configuration error fails the server start.
+//! `Authorization` header, a page session (`X-Anofox-Session`, embed or
+//! share), the login cookie, a JWT cookie, and — for a shared dashboard's own
+//! page and assets only — its share login cookie or its being public. A
+//! present but invalid credential is refused — the server never falls back
+//! to the next one. With nothing present the request is refused (a page view
+//! is sent to `/auth/login` when `oidc` is configured, or to the password page
+//! of a password-protected shared dashboard). A configuration error fails the
+//! server start.
 //!
 //! [`audit`] records each authentication event and admin action.
 
@@ -33,6 +37,7 @@ pub mod http;
 pub mod jwt;
 pub mod oidc;
 pub mod session;
+pub mod share;
 
 use crate::host::access::{self, Claims, ProxyAuth};
 use audit::{AuditLog, Event};
@@ -86,7 +91,7 @@ impl Scope {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Identity {
     pub claims: Claims,
-    /// `proxy`, `jwt`, `oidc`, `embed` or `api_key`.
+    /// `proxy`, `jwt`, `oidc`, `embed`, `api_key` or `share`.
     pub method: &'static str,
     pub scope: Scope,
     /// An embed link was just exchanged: the page session for the page.
@@ -253,7 +258,7 @@ fn distinct_secrets(items: &[&Value], env: &dyn Fn(&str) -> Option<String>) -> R
         let keys: &[&str] = match mode {
             "proxy" => &["shared_secret"],
             "embed" => &["secret", "session_secret"],
-            "oidc" => &["session_secret"],
+            "oidc" | "share" => &["session_secret"],
             _ => &[],
         };
         for k in keys {
@@ -284,6 +289,7 @@ pub struct Auth {
     pub oidc: Option<oidc::Oidc>,
     pub embed: Option<embed::Embed>,
     pub keys: Option<apikey::ApiKeys>,
+    pub share: Option<share::Share>,
     pub audit: Option<Arc<AuditLog>>,
     /// When each credential's last successful use was audited (sampling).
     audited_ok: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
@@ -310,7 +316,7 @@ fn https_fetch(ca: Option<&std::path::Path>) -> Result<Arc<dyn http::Fetch>, Str
 
 impl Auth {
     /// Parse `options.auth` / `--auth`: one method object, or a list of up to
-    /// five with different `mode`s. `env` resolves `*_env` settings.
+    /// six with different `mode`s. `env` resolves `*_env` settings.
     pub fn from_json(v: &Value, env: impl Fn(&str) -> Option<String>) -> Result<Auth, String> {
         Auth::from_json_with(v, &env, &https_fetch)
     }
@@ -321,8 +327,8 @@ impl Auth {
         make_fetch: MakeFetch,
     ) -> Result<Auth, String> {
         let items: Vec<&Value> = match v {
-            Value::Array(a) if !a.is_empty() && a.len() <= 5 => a.iter().collect(),
-            Value::Array(_) => return Err("auth: a list of 1 to 5 login methods".into()),
+            Value::Array(a) if !a.is_empty() && a.len() <= 6 => a.iter().collect(),
+            Value::Array(_) => return Err("auth: a list of 1 to 6 login methods".into()),
             o => vec![o],
         };
         distinct_secrets(&items, env)?;
@@ -435,9 +441,15 @@ impl Auth {
                     }
                     a.keys = Some(apikey::ApiKeys::from_json(o)?);
                 }
+                "share" => {
+                    if a.share.is_some() {
+                        return Err(dup());
+                    }
+                    a.share = Some(share::Share::from_json(o, env)?);
+                }
                 _ => {
                     return Err(
-                        "auth.mode must be \"proxy\", \"jwt\", \"oidc\", \"embed\" or \"api_keys\""
+                        "auth.mode must be \"proxy\", \"jwt\", \"oidc\", \"embed\", \"api_keys\" or \"share\""
                             .into(),
                     )
                 }
@@ -469,6 +481,9 @@ impl Auth {
         }
         if self.keys.is_some() {
             m.push("api_keys");
+        }
+        if self.share.is_some() {
+            m.push("share");
         }
         m
     }
@@ -508,6 +523,32 @@ impl Auth {
         }
         if let Some(k) = &self.keys {
             out.push(format!("API keys from {}", k.file.display()));
+        }
+        if let Some(s) = &self.share {
+            let (mut public, mut password) = (Vec::new(), Vec::new());
+            for (id, a) in s.list() {
+                match a {
+                    share::Access::Public => public.push(id),
+                    share::Access::Password { .. } => password.push(id),
+                }
+            }
+            let mut parts = Vec::new();
+            if !public.is_empty() {
+                parts.push(format!("public: {}", public.join(", ")));
+            }
+            if !password.is_empty() {
+                parts.push(format!("password: {}", password.join(", ")));
+            }
+            out.push(format!(
+                "share links ({}; sessions {} s{})",
+                parts.join("; "),
+                s.session_ttl,
+                if s.sessions.persistent {
+                    ""
+                } else {
+                    ", end when the server restarts: set session_secret_env to keep them, and on every replica"
+                }
+            ));
         }
         out.join("; ")
     }
@@ -633,10 +674,10 @@ impl Auth {
     }
 
     /// A static file of the viewer UI (code, styles, fonts — never data) that
-    /// an embedded page loads without its page session: with `embed`
-    /// configured, these are public. They hold nothing but the open-source UI.
+    /// an embedded or shared page loads without its page session: with
+    /// `embed` or `share` configured, these are public. They hold nothing but the open-source UI.
     pub fn public_asset(&self, method: &str, path: &str) -> bool {
-        self.embed.is_some()
+        (self.embed.is_some() || self.share.is_some())
             && method == "GET"
             && !path.starts_with("/d/")
             && !path.starts_with("/api/")
@@ -647,9 +688,18 @@ impl Auth {
                 .any(|e| path.ends_with(e))
     }
 
-    /// Send a browser that has no credential at all to the login.
+    /// Send a browser that has no credential at all to the login — or, on
+    /// a password-protected shared dashboard's page, to its password page.
     pub fn login_redirect(&self, r: &Req, d: &Denied) -> Option<Reply> {
         let path = r.path();
+        if let (Some(s), Some("share"), "GET") = (&self.share, d.method, r.method) {
+            let id = share::dashboard_of(path)?;
+            let shared = s.get(id)?;
+            if share::is_page(path, id) && shared.access != share::Access::Public {
+                return Some(s.password_page(id, &share::Share::next_url(id, Some(r.url)), None));
+            }
+            return None;
+        }
         (self.oidc.is_some()
             && r.method == "GET"
             // no credential, or an ended login session (not a bad link or key)
@@ -676,29 +726,109 @@ impl Auth {
     /// pages have no script: `POST /d/<id>` with `embed_session` in an
     /// `application/x-www-form-urlencoded` body — never in a URL).
     pub fn page_session(&self, token: Option<&str>, r: &Req) -> Result<Identity, Denied> {
-        let res = match (&self.embed, token) {
-            (Some(e), Some(t)) => e
-                .sessions
-                .verify("embed", t.trim())
-                .map(|sess| Identity {
-                    claims: sess.claims,
-                    method: "embed",
-                    scope: sess.scope,
-                    page_session: None,
-                    ref_id: Some(sess.sid),
-                })
-                .map_err(|reason| Denied {
-                    reason,
-                    method: Some("embed"),
-                    audited: false,
-                }),
-            _ => Err(Denied {
+        let res = match token {
+            Some(t) => self.page_session_of(t),
+            None => Err(Denied {
                 reason: "no_credentials",
                 method: None,
                 audited: false,
             }),
         };
         self.audited(r, res)
+    }
+
+    /// A page session: an embed link's or a share link's (each signed with
+    /// its own key and audience, so one is never taken for the other).
+    fn page_session_of(&self, token: &str) -> Result<Identity, Denied> {
+        let t = token.trim();
+        let mut last = Denied {
+            reason: "no_credentials",
+            method: None,
+            audited: false,
+        };
+        let tries: [(&'static str, Option<(&session::Sessions, &str)>); 2] = [
+            ("embed", self.embed.as_ref().map(|e| (&e.sessions, "embed"))),
+            (
+                "share",
+                self.share.as_ref().map(|s| (&s.sessions, share::PAGE_AUD)),
+            ),
+        ];
+        for (method, k) in tries {
+            let Some((sessions, aud)) = k else { continue };
+            match sessions.verify(aud, t) {
+                Ok(sess) => {
+                    return Ok(Identity {
+                        claims: sess.claims,
+                        method,
+                        scope: sess.scope,
+                        page_session: None,
+                        ref_id: Some(sess.sid),
+                    })
+                }
+                Err(reason) => {
+                    last = Denied {
+                        reason,
+                        method: Some(method),
+                        audited: false,
+                    }
+                }
+            }
+        }
+        Err(last)
+    }
+
+    /// `POST /share/<id>`: a password for a shared dashboard (`body`: the
+    /// urlencoded form). `None`: not this route. Runs before
+    /// authentication — after the Host and Origin checks.
+    pub fn share_login(&self, r: &Req, body: &str) -> Option<Reply> {
+        let s = self.share.as_ref()?;
+        let id = r.path().strip_prefix("/share/")?.trim_end_matches('/');
+        if r.method != "POST" {
+            return Some(Reply::text(405, "method not allowed").header("Allow", "POST"));
+        }
+        let form = crate::host::serving::parse_query(&format!("?{body}"));
+        let next = share::Share::next_url(id, form.get("next").map(String::as_str));
+        let password = form.get("password").map(String::as_str).unwrap_or("");
+        let res = s.login(id, password, r.peer);
+        let ev = |outcome, reason| Event {
+            event: "share_login",
+            outcome,
+            method: Some("share"),
+            reason,
+            // only a configured id (never request data) goes to the log
+            dashboard: s.get(id).map(|_| id),
+            peer: r.peer,
+            ..Default::default()
+        };
+        Some(match res {
+            Ok(token) => {
+                self.audit(ev("ok", None));
+                Reply::redirect(303, &next)
+                    .cookie(s.cookie(id, &token))
+                    .header("Cache-Control", "no-store")
+            }
+            Err(e) => {
+                self.audit(ev("deny", Some(e.reason())));
+                match e {
+                    share::LoginError::NotShared => Reply::text(404, "not found"),
+                    share::LoginError::WrongPassword => {
+                        s.password_page(id, &next, Some("That password is not right."))
+                    }
+                    share::LoginError::Locked => {
+                        let mut p = s.password_page(
+                            id,
+                            &next,
+                            Some("Too many wrong passwords. Try again in 15 minutes."),
+                        );
+                        p.status = 429;
+                        p.header("Retry-After", &share::WINDOW.as_secs().to_string())
+                    }
+                    share::LoginError::Busy => {
+                        Reply::text(503, "busy: try again in a moment").header("Retry-After", "5")
+                    }
+                }
+            }
+        })
     }
 
     /// Audit the outcome of an authentication and pass it on.
@@ -845,24 +975,19 @@ impl Auth {
                 return self.jwt_identity(j, token);
             }
         }
-        // 4. An embedded page's session (a header only, never the URL).
-        if let Some(e) = &self.embed {
+        // 4. An embedded or shared page's session (a header only, never
+        // the URL).
+        if self.embed.is_some() || self.share.is_some() {
             let s = r.all(SESSION_HEADER);
             if !s.is_empty() {
                 let [s] = s.as_slice() else {
-                    return Err(deny("embed")("malformed_token"));
+                    return Err(deny(if self.embed.is_some() {
+                        "embed"
+                    } else {
+                        "share"
+                    })("malformed_token"));
                 };
-                let sess = e
-                    .sessions
-                    .verify("embed", s.trim())
-                    .map_err(deny("embed"))?;
-                return Ok(Identity {
-                    claims: sess.claims,
-                    method: "embed",
-                    scope: sess.scope,
-                    page_session: None,
-                    ref_id: Some(sess.sid),
-                });
+                return self.page_session_of(s);
             }
         }
         // 5. The OIDC login cookie.
@@ -894,6 +1019,45 @@ impl Auth {
                     };
                     return self.jwt_identity(j, c);
                 }
+            }
+        }
+        // 7. A shared dashboard's own page and assets: public, or its login
+        // cookie. Its page gets a page session for the page's requests.
+        if let (Some(s), "GET" | "HEAD") = (&self.share, r.method) {
+            if let Some((id, d)) = share::dashboard_of(path).and_then(|id| Some((id, s.get(id)?))) {
+                if d.access != share::Access::Public {
+                    let c = r.cookies(share::COOKIE);
+                    if c.is_empty() {
+                        return Err(deny("share")("no_credentials"));
+                    }
+                    s.logged_in(id, &c).map_err(deny("share"))?;
+                }
+                let page_session = share::is_page(path, id).then(|| {
+                    let (page, sess) =
+                        s.sessions
+                            .issue(share::PAGE_AUD, s.session_ttl, &d.claims, &d.scope);
+                    // A public page's views are not each an audit event.
+                    if d.access != share::Access::Public {
+                        self.audit(Event {
+                            event: "share",
+                            outcome: "ok",
+                            method: Some("share"),
+                            user: Some(&d.claims.user),
+                            dashboard: Some(id),
+                            sid: Some(&sess.sid),
+                            peer: r.peer,
+                            ..Default::default()
+                        });
+                    }
+                    (page, sess.sid)
+                });
+                return Ok(Identity {
+                    claims: d.claims.clone(),
+                    method: "share",
+                    scope: d.scope.clone(),
+                    ref_id: page_session.as_ref().map(|(_, sid)| sid.clone()),
+                    page_session: page_session.map(|(p, _)| p),
+                });
             }
         }
         Err(Denied {

@@ -17,11 +17,13 @@ use std::sync::Mutex;
 #[derive(Debug, Default, Clone)]
 pub struct Event<'a> {
     /// `login`, `logout`, `embed`, `auth` (a refused credential),
-    /// `api_key_created`, `api_key_revoked`, `api_keys_reloaded`, `start`.
+    /// `api_key_created`, `api_key_revoked`, `api_keys_reloaded`, `start`,
+    /// `share_login` (a password for a shared dashboard), `share` (a page
+    /// session for a password-protected shared dashboard).
     pub event: &'a str,
     /// `ok` or `deny` (`error` for a failed admin action).
     pub outcome: &'a str,
-    /// The login method: `proxy`, `jwt`, `oidc`, `embed`, `api_key`.
+    /// The login method: `proxy`, `jwt`, `oidc`, `embed`, `api_key`, `share`.
     pub method: Option<&'a str>,
     pub user: Option<&'a str>,
     pub reason: Option<&'a str>,

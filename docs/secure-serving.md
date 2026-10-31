@@ -1851,6 +1851,67 @@ printf %s "$key" | sha256sum   # → "sha256" of the entry {"id": "$id", "sha256
   closed) and is audited.
 - A key never appears in a log; the audit log names its id.
 
+### Share links (`"mode": "share"`, #763)
+
+Open a dashboard of the locked server to anyone who has its link
+(`"access": "public"`), or to anyone who also knows its password
+(`"access": "password"`) — without a login at an identity provider and
+without a host application signing embed links.
+
+```json
+{"mode": "share", "session_secret_env": "ANOFOX_SHARE_SESSION",
+ "dashboards": {
+   "sales": {"access": "public", "claims": {"tenant": "acme"}},
+   "ops":   {"access": "password", "password_hash": "pbkdf2-sha256$600000$…$…",
+             "groups": ["partner"], "vars": {"region": "EU"}}}}
+```
+
+```sh
+serve share-password --generate       # makes up a password, prints it ONCE, and its hash
+printf '%s\n' "$PW" | serve share-password   # the hash of your own (≥ 12 characters)
+```
+
+| key | default | meaning |
+|---|---|---|
+| `dashboards` | (required) | The shared dashboards, by id. Every other dashboard, the list page `/` and the API without a page session stay closed to a share viewer |
+| `dashboards.<id>.access` | (required) | `"public"` or `"password"` |
+| `dashboards.<id>.password_hash` | | `pbkdf2-sha256$<iterations>$<salt>$<key>` from `serve share-password`; never the password |
+| `dashboards.<id>.groups` / `claims` | none | The share viewer's groups and claims (`__claim_groups`, `__claim_<name>`): the [policies](#row-and-column-policies-access-control-p2) and the panels' claim filters apply as to any viewer |
+| `dashboards.<id>.vars` | none | Locked variables, as an embed link's: set after the viewer's, whatever the URL asks for |
+| `session_ttl_s` | `28800` (8 h) | How long a password login and a page session last (60 s – 7 days) |
+| `session_secret_env` | random per start | Signs the login cookies and page sessions. Without it, logins end when the server restarts and don't carry over between replicas |
+
+How it works:
+
+- A share viewer is the user `share:<id>`. No other login method can claim
+  that name (the proxy, tokens, API keys and embed links are refused), and
+  like an embed link's default user it never submits (`::SUBMIT`) or saves
+  (`::SAVE`): it is one identity shared by everybody with the link.
+- A public dashboard's page and its `assets/` open without any credential;
+  the page gets a page session (`X-Anofox-Session`) for its requests, scoped
+  to that one dashboard, as an embed link's page does.
+- A password-protected dashboard's page shows a password form (`POST
+  /share/<id>`, same-origin only). The right password sets
+  `__Secure-anofox_share` — `HttpOnly; Secure; SameSite=Lax;
+  Path=/d/<id>`, signed by the server, valid for `session_ttl_s` — and goes
+  back to the page it came from (only that dashboard's page: never another
+  site). As with the OIDC login cookie, `Secure` means the browser keeps it
+  only over HTTPS (or on `localhost`).
+- Wrong passwords: at most 10 per client address and 100 per dashboard in 15
+  minutes (`429` with `Retry-After` after that, even for the right password);
+  at most 4 checks at a time (`503`). Counted per replica. A password check
+  takes PBKDF2-HMAC-SHA256 with 600,000 iterations. Behind a reverse proxy
+  every viewer has the proxy's address: limit failed `POST /share/*` there too.
+- Other logins come first: a viewer who also signed in another way (OIDC, a
+  token, an embed link) is that identity on a shared dashboard too.
+- The audit log records `share_login` (`ok`, `wrong_password`,
+  `locked_out`, `busy`) and the page sessions of password-protected
+  dashboards (`share`) — never a password, and only configured dashboard ids.
+  A public dashboard's page views are not audit events (the request log has
+  them).
+- To revoke a password, replace its hash and restart; existing login cookies
+  stay valid until they expire unless `session_secret_env` changes too.
+
 ### Audit log
 
 `"audit": "/var/log/anofox/audit.jsonl"` (`serve`: `--audit`; `"stderr"`
@@ -1917,12 +1978,19 @@ signed the request in.
 | A leaked API key file; a guessed key; a revoked key still working | Only SHA-256 hashes of 256-bit keys; constant-time hash compare; the file is re-read on change (≤ 2 s); revoked/expired keys refused; a broken or group/world-writable file disables every key |
 | Keys, tokens or codes in logs | Never logged; the audit log names key ids and session ids only (unit-tested) |
 | A credential plus another to confuse the server | Exactly one credential counts per request, in a fixed order; an invalid one is refused, never skipped |
+| **Share links (#763):** a share link reaching more than its dashboard | The share identity is scoped to its one dashboard; `/`, other dashboards and the API without a page session are `401`; the login cookie's `Path` is that dashboard's, and it is checked against the dashboard it was issued for |
+| Guessing a shared dashboard's password | 10 failures per address / 100 per dashboard per 15 min, then `429`; PBKDF2-HMAC-SHA256, 600,000 iterations; at most 4 checks at a time; only the hash is configured |
+| Locking everyone out of a shared dashboard on purpose (100 wrong passwords) | Accepted trade-off against distributed guessing: new password logins for that dashboard wait up to 15 minutes; viewers already signed in keep their cookie; public dashboards and other logins are unaffected. Use a generated password (`--generate`) and a reverse-proxy limit in front |
+| Which dashboards have a password (a fast `404` vs. a slow check) | Not secret: a dashboard's page already says it needs one |
+| The share identity used to write or pose as someone | `share:<id>` is reserved (no other method may claim it) and never submits or saves |
+| An open redirect or reflected markup through the password form | `next` must be the dashboard's own page; every value on the page is HTML-escaped; the page is `no-store` |
+| A password in logs | Never logged (unit-tested and e2e-tested) |
 
 **Out of scope for P1 and P3:** on its own, a login relies on the dashboard
 author writing the claim filter into every panel;
 [P2 policies](#row-and-column-policies-access-control-p2) enforce it
 regardless of the panel SQL. Not in P3: per-tenant snapshots, rate limiting of
-failed logins (put it in the reverse proxy), refresh tokens / silent re-login
+failed logins other than share-link passwords (put it in the reverse proxy), refresh tokens / silent re-login
 (a session ends at `session_ttl_s`).
 
 **What can never enforce access:** a static HTML export or the browser /
