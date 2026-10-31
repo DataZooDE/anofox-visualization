@@ -41,6 +41,11 @@ SELECT 1 ::REFRESH;                              -- rebuild the snapshot when do
   rebuilt (`::REFRESH`, or `refresh_s`) to pick up what a task wrote.
 - **What it may write (D2):** the attached databases named in
   `options.tasks.write` (e.g. `["stage"]`), all others read-only for tasks.
+  Enforced by DuckDB itself: the tasks only start when every database of the
+  serving session that is not in `write` is attached `READ_ONLY` (checked at
+  start in `duckdb_databases()`; otherwise the start fails and names it), so
+  a task can't write elsewhere whatever its SQL does. The statement check
+  below is a second line.
   `SET`, `PRAGMA`, `ATTACH`/`DETACH`, `INSTALL`/`LOAD` and `COPY … TO` outside
   `options.data` are refused (the same statement checks the locked server
   already makes for the data folder).
