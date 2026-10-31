@@ -73,16 +73,17 @@ the axes and colour series.
 | Group | Roles |
 |-------|-------|
 | KPI tiles | `::METRIC`, `::MONEY`, `::PERCENT`, `::COMPACT` (+ `::LABEL` caption, `::DELTA` arrow), `'compact'::KPI_SIZE` for a dense one-line strip |
-| Text | `::TEXT_SMALL`/`_MEDIUM`/`_LARGE`, `::MARKDOWN` |
-| Tables | `::TABLE`, `::PAGED` (SQL-paginated), `::COLORSCALE`, `::BADGE`, `::TREND`, `::SPARKLINE`, `::DOWNLOAD_CSV`/`_XLSX`/`_PDF` |
+| Text | `::TEXT_SMALL`/`_MEDIUM`/`_LARGE`, `::MARKDOWN` (GFM tables), `::SUBTITLE` under a panel's title, `::INFO` (a Markdown popover on the title) |
+| Tables | `::TABLE`, `::PAGED` (SQL-paginated), `::COLORSCALE`, `::BADGE`, `::TREND`, `::SPARKLINE`, `::RECORD` (one record as a key/value card), `::DOWNLOAD_CSV`/`_XLSX`/`_PDF`/`_JSON`; a bare `DESCRIBE` / `SUMMARIZE` / `SHOW` is a table panel |
 
 ### Inputs, layout & interactivity
 
 | Group | Roles / behaviour |
 |-------|-------------------|
 | Inputs | `::DROPDOWN` (searchable for long option lists; `::DROPDOWN_STYLE` forces it), `::MULTISELECT`, `::NUMBER`, `::DATE`, `::TEXT`, `::DATERANGE` → each is a DuckDB variable read with `getvariable('name')` |
-| Layout | 12-column grid (`::COLUMNS`/`::COL`/`::HEIGHT`), `::GROUP` boxes, tabs (`::TAB`/`::SUBTAB`), alternative views of one panel (`::VIEW`/`::ENDVIEW` — a Lines/Bars/Table switcher), fit-to-screen tabs (`'fit'::FIT`, no page scroll), `::TRACK` strips under a chart that share its x axis |
-| Interactivity | hover tooltips, **click-to-cross-filter**, range zoom, brush/value filters, dark mode, share links — pure DOM, so it works on exported HTML too |
+| Collect & write back | `::SUBMIT` records a viewer's answers (append-only, per viewer); `::SAVE` writes a `::FORM`'s values or an edited graph into `::SAVE_TABLES`, with conflict checks and an audit trail. On a locked server, its options must enable both; in the builder, a save stays in the tab |
+| Layout | 12-column grid (`::COLUMNS`/`::COL`/`::HEIGHT`), `::GROUP` boxes, tabs (`::TAB`/`::SUBTAB`), alternative views of one panel (`::VIEW`/`::ENDVIEW` — a Lines/Bars/Table switcher), fit-to-screen tabs (`'fit'::FIT`, no page scroll), `::TRACK` strips under a chart that share its x axis, `::FIGURE`/`::ENDFIGURE` (several charts as one patchwork picture with aligned axes) |
+| Interactivity | hover tooltips (extra columns with `::TOOLTIP`, templates with `::TOOLTIP_FORMAT` / `::TOOLTIP_HEADER`), **click-to-cross-filter**, range zoom, brush/value filters, dark mode, share links — pure DOM, so it works on exported HTML too |
 | Formatting | ggplot2-style axis formatters (`::YFORMAT '€'`, `::XFORMAT '$'`, percent, compact) |
 
 ### Contract plots
@@ -101,10 +102,15 @@ and [docs/DOCS.md](docs/DOCS.md).
 ### Key capabilities
 - **Three surfaces, one renderer** — a core library (annotated result → SVG, wasm-compatible), a **DuckDB extension** (render + serve), and a browser builder on DuckDB-Wasm.
 - **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (the client sends only panel ids + variable values) over a locked, read-only snapshot. The folder groups itself from header comments (`-- @group`, `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`, `-- @order N` for nav/start-page ordering, `-- @nav` for a short nav/card label distinct from `-- @title`): a grouped nav (a searchable menu above 8 dashboards) and a `/` landing page of cards with descriptions, owners and a ✓ certified badge.
+- **Run a locked server for others** *(full toolkit)* — see [Secure serving](docs/secure-serving.md):
+  - **Logins:** an auth proxy, OIDC / JWT, signed embed links, API keys, and share links (public or password-protected). Row and column access policies are keyed on the viewer's claims.
+  - **Exports:** `GET /api/export/<dashboard>.svg|png|pdf` (a dashboard or one tab), and a named panel's rows as CSV or JSON.
+  - **Schedules:** scheduled tasks (`tasks/*.task.sql` with `::SCHEDULE`). Reports and alerts go out by e-mail, signed webhooks, Slack or Teams.
+  - **Operations:** Prometheus `/metrics`, and `-- @materialize` for a heavy setup step that runs once per input instead of once per panel.
 - **Publish as a static site** *(full toolkit CLI)* — `dashboard --site <folder> <out-dir> [--data …]` turns a dashboard folder into plain files (HTML, the DuckDB-Wasm renderer, the `.sql`, the data) for GitHub Pages, S3 or any web server; nothing to run. `dashboard --svg` and static HTML export render a dashboard headless — see [Secure serving](docs/secure-serving.md#c-publish-as-a-static-site--dashboard---site-417).
 - **Any DuckDB source** — CSV / Parquet / JSON / Arrow, MotherDuck, Postgres / MySQL / SQLite via `ATTACH`, remote HTTP, and spatial layers (`ST_AsText` → WKT → `::MAP`). A locked server can also snapshot a live **Quack** source (DuckDB 2.0 host, opt-in) instead of a local database — see [Secure serving](docs/secure-serving.md#quack-source-prototype-352).
 - **Authoring aids** — a `dashboard --check` linter (structure + `design/*` quality checks), a `build-dashboard` agent skill that writes dashboards from a prompt, and a per-query timeout for authoring `serve` (`--query-timeout`, default 120s) that ends a hung query and starts a fresh session.
-- **AI assistant in the browser builder** *(off unless an installation enables it in `app-config.json`)* — a plain-language request becomes a dashboard, or follow-up edits to one, via *"new from question"* or the assistant panel; every proposal is previewed in a locked, network-free DuckDB-Wasm sandbox on a capped copy of your tables and only runs on the page's own database after you choose *Apply*. Calls Claude directly with your own API key — never a DataZooDE server ([docs](docs/DOCS.md)).
+- **AI assistant in the browser builder** *(off unless an installation enables it in `app-config.json`)* — a plain-language request becomes a dashboard, or follow-up edits to one, via *"new from question"* or the assistant panel; every proposal is previewed in a locked, network-free DuckDB-Wasm sandbox on a capped copy of your tables and only runs on the page's own database after you choose *Apply*. In the browser app it calls Claude with your own API key. On an authoring `serve`, it goes through the server's `/assist` proxy, so the key stays on the server. It never goes through a DataZooDE server ([docs](docs/DOCS.md)).
 
 ## Quick Start
 
@@ -158,6 +164,7 @@ SELECT anofox_serve_dashboards('dashboards', 8095);
 -- http://127.0.0.1:8095/           a list of the folder's dashboards
 -- http://127.0.0.1:8095/d/<name>   one dashboard — full UI, editor removed
 SELECT anofox_serve_refresh(8095);      -- re-snapshot now (or options.refresh_s)
+SELECT anofox_serve_report(8095, 'weekly');  -- send a scheduled report (or check an alert) now
 SELECT anofox_serve_stop(8095);         -- stop a server (and delete its snapshot)
 ```
 
@@ -195,7 +202,7 @@ macros (SQL → SVG). Serving and the builder are not included (see below).
 
 Every [GitHub release](https://github.com/DataZooDE/anofox-visualization/releases)
 carries the **full toolkit** — rendering **plus** `anofox_serve`,
-`anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` with the browser builder
+`anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_report`, `anofox_serve_stop` with the browser builder
 embedded — prebuilt for each platform, together with the `dashboard` / `serve`
 CLIs and a `SHA256SUMS` file:
 
