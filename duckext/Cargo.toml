@@ -25,16 +25,16 @@ include_dir = "0.7"
 serde_json = "1"
 open = "5"
 # The access policy's `hash` mask: HMAC-SHA256 with the server's key (#49).
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 # #764: PNG / PDF exports — the server's own SVG, rasterised (resvg) or
 # turned into a PDF (svg2pdf) with one bundled font (duckext/fonts/, OFL).
 # Same usvg (0.45) for both.
-resvg = { version = "0.45", default-features = false, features = ["text", "raster-images"] }
+resvg = { version = "0.49", default-features = false, features = ["text", "raster-images"] }
 svg2pdf = { version = "0.13", default-features = false, features = ["image", "text"] }
 
 [build-dependencies]
-bindgen = "0.72"
+bindgen = "0.73"
 
 # NOTE: no `panic = "abort"` — every `extern "C"` entry point wraps its body in
 # `catch_unwind` and turns a panic into a SQL error, which requires unwinding.
