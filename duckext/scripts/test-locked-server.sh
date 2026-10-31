@@ -189,6 +189,66 @@ grep -q '/api\|"t"' "$T/met" && fail "/metrics names a path or a dashboard: $(ca
 stop
 echo "OK: /metrics — 404 without the option, bearer token (401/405), counters, histograms, gauges; no request data in labels"
 
+# 3c. Exports (#764): a dashboard (or one tab) as SVG, a named panel as CSV
+# / JSON — through the same panel path as the page (scope, -- @vars, inputs'
+# defaults, the viewer's own values).
+mkdir "$T/xdash"
+cat > "$T/xdash/ex.sql" <<'SQL'
+-- @title Export test
+-- @vars region
+SELECT 'Overview'::TAB;
+SELECT region ::DROPDOWN FROM (VALUES ('EU'), ('US')) t(region);
+-- @name totals
+SELECT region AS "Region" ::XAXIS, sum(v) AS "Revenue" ::BARCHART FROM ex_t
+WHERE region = getvariable('region') GROUP BY 1 ORDER BY 1;
+-- @name evil
+SELECT '=cmd()' AS "Note" ::TABLE;
+SELECT 'Details'::TAB;
+SELECT 'details-marker-text' ::MARKDOWN;
+SQL
+cat > "$T/xdash/other.sql" <<'SQL'
+SELECT 'other-dashboard-text' ::MARKDOWN;
+SQL
+"$DUCKDB" "$T/ex.duckdb" -c "CREATE TABLE ex_t AS SELECT * FROM (VALUES ('EU', 10), ('EU', 5), ('US', 7)) t(region, v);" >/dev/null
+xserve() { echo "SELECT anofox_serve_dashboards($(q "$T/xdash"), $PORT, $(q "$1"));"; }
+start "$T/ex.duckdb" "-readonly" "$(xserve '{}')" || fail "export server"
+xget() { curl -s -o "$T/x" -D "$T/xh" -w "%{http_code}" "$@"; }
+X="http://127.0.0.1:$PORT/api/export"
+[ "$(xget "$X/ex.svg")" = 200 ] || fail "export svg: $(cat "$T/x")"
+grep -qi "^content-type: image/svg+xml" "$T/xh" && grep -qi '^content-disposition: attachment; filename="ex.svg"' "$T/xh" \
+  && grep -qi "^content-security-policy: default-src 'none'.*sandbox" "$T/xh" || fail "export svg headers: $(cat "$T/xh")"
+grep -q "<svg" "$T/x" && grep -q ">EU<" "$T/x" && grep -q "details-marker-text" "$T/x" || fail "export svg: the default region EU and both tabs: $(head -c 600 "$T/x")"
+grep -q ">US<" "$T/x" && fail "export svg: US drawn although the default is EU"
+[ "$(xget "$X/ex.svg?v.region=US")" = 200 ] && grep -q ">US<" "$T/x" && ! grep -q ">EU<" "$T/x" || fail "export svg with v.region=US"
+[ "$(xget "$X/ex.svg?tab=details")" = 200 ] && grep -q "details-marker-text" "$T/x" && ! grep -q ">EU<" "$T/x" || fail "export one tab"
+[ "$(xget "$X/ex.svg?tab=nope")" = 404 ] || fail "export: an unknown tab should 404"
+[ "$(xget "$X/ex/totals.csv")" = 200 ] || fail "export csv: $(cat "$T/x")"
+grep -qi "^content-type: text/csv" "$T/xh" || fail "export csv content type"
+[ "$(tr -d '\r' < "$T/x")" = "$(printf '"Region","Revenue"\n"EU","15"')" ] || fail "export csv body (the input's default applies): $(cat "$T/x")"
+[ "$(xget "$X/ex/totals.json?v.region=US")" = 200 ] && [ "$(cat "$T/x")" = '[{"Region":"US","Revenue":7.0}]' ] \
+  || fail "export json with v.region=US: $(cat "$T/x")"
+[ "$(xget "$X/ex/evil.csv")" = 200 ] && grep -qF "\"'=cmd()\"" "$T/x" || fail "export csv: a formula cell is neutralised: $(cat "$T/x")"
+[ "$(xget "$X/ex/nope.csv")" = 404 ] || fail "export: an unknown panel name should 404"
+[ "$(xget "$X/ex.csv")" = 404 ] || fail "export: a dashboard is not a csv"
+[ "$(xget "$X/ex.png")" = 404 ] || fail "export: no png yet"
+[ "$(xget "$X/ex.svg?x=1")" = 400 ] || fail "export: an unknown parameter should 400"
+[ "$(xget "$X/ex.svg?v.__claim_user=admin")" = 400 ] || fail "export: a reserved variable should 400"
+[ "$(xget "$X/ex.svg?width=10")" = 400 ] || fail "export: a bad width should 400"
+[ "$(xget "$X/nope.svg")" = 404 ] || fail "export: an unknown dashboard should 404"
+[ "$(xget -X POST "$X/ex.svg")" = 405 ] || fail "export: POST should 405"
+stop
+# With a login: a credential scoped to one dashboard exports only that one.
+start "$T/ex.duckdb" "-readonly" "$(xserve '{"auth": {"mode": "share", "dashboards": {"ex": {"access": "public"}}}, "policy": "none"}')" \
+  || fail "export server with share links"
+[ "$(xget "$X/ex.svg")" = 401 ] || fail "export without a credential should 401"
+sess=$(curl -s "http://127.0.0.1:$PORT/d/ex" | grep -o '"session":"[^"]*"' | head -1 | sed 's/.*:"//; s/"$//')
+[ -n "$sess" ] || fail "no page session on the shared page"
+[ "$(xget -H "X-Anofox-Session: $sess" "$X/ex.svg")" = 200 ] || fail "export with the page session: $(cat "$T/x")"
+[ "$(xget -H "X-Anofox-Session: $sess" "$X/other.svg")" = 403 ] || fail "export of another dashboard should 403"
+[ "$(xget -H "X-Anofox-Session: $sess" "$X/ex/totals.csv")" = 200 ] || fail "export csv with the page session"
+stop
+echo "OK: exports — SVG (dashboard, one tab, variables, inputs' defaults), CSV/JSON of a named panel, formula cells neutralised, scope and login"
+
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting
 # coalesce(getvariable(…), …) keeps the viewer's value.

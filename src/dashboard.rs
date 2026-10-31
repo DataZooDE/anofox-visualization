@@ -64,6 +64,10 @@ pub struct DashboardOptions {
     /// URI ([`crate::image::resolve_relative`]); `None` draws the alt-text
     /// placeholder for every relative source, as PR A did for all of them.
     pub asset_root: Option<PathBuf>,
+    /// Draw only these statements (plan indices, #764: one tab of a
+    /// dashboard). Setup statements, chrome directives and inputs always
+    /// run; `None` draws everything.
+    pub only: Option<Vec<usize>>,
 }
 
 impl Default for DashboardOptions {
@@ -77,6 +81,7 @@ impl Default for DashboardOptions {
             theme: None,
             variant: Variant::Light,
             asset_root: None,
+            only: None,
         }
     }
 }
@@ -174,7 +179,11 @@ fn show_if_holds(
 /// Run the script in order (setup for effect, panels queried) and collect
 /// the dashboard chrome directives — so a `::THEME` anywhere applies to every
 /// panel.
-fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, DashboardChrome) {
+fn execute(
+    script: &str,
+    provider: &mut dyn DataProvider,
+    only: Option<&[usize]>,
+) -> (Vec<Step>, DashboardChrome) {
     // #517 S1: a dashboard reading `viewer_state` (read-back, S3) or
     // carrying `::SUBMIT` gets the server's own temps, empty — see
     // `lint::check_opts`'s matching injection and
@@ -218,7 +227,21 @@ fn execute(script: &str, provider: &mut dyn DataProvider) -> (Vec<Step>, Dashboa
         .map(|p| (p.sql.clone(), p.roles.clone()))
         .collect();
     let mut cond_cache: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
-    for panel in plan {
+    for (idx, panel) in plan.into_iter().enumerate() {
+        // #764: one tab only — every other drawn statement is left out
+        // (setup, chrome directives and inputs still run: they shape the rest).
+        if let Some(only) = only {
+            let keep = panel.setup
+                || only.contains(&idx)
+                || panel
+                    .roles
+                    .iter()
+                    .any(|(_, r)| roles::is_chrome_directive(*r))
+                || crate::inputs::input_kind(&panel.roles).is_some();
+            if !keep {
+                continue;
+            }
+        }
         // Skip any non-setup statement whose `::SHOW_IF` conditions don't
         // all hold, before the `-- @requires` / `::VIEW` checks below (a
         // hidden statement never even reaches those).
@@ -370,7 +393,7 @@ fn render_inner(
     provider: &mut dyn DataProvider,
     opts: &DashboardOptions,
 ) -> Result<String, String> {
-    let (steps, chrome) = execute(script, provider);
+    let (steps, chrome) = execute(script, provider, opts.only.as_deref());
     let compact = compact_flags(&steps);
     // `::GUIDE_STEP` (#516): `steps` only ever holds what `execute()` kept
     // shown, so its total marker count per group ("of N") is known now —

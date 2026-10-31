@@ -17,8 +17,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// The routes requests are counted under.
-pub const ROUTES: [&str; 10] = [
-    "page", "panel", "asset", "health", "submit", "save", "login", "metrics", "list", "other",
+pub const ROUTES: [&str; 11] = [
+    "page", "panel", "export", "asset", "health", "submit", "save", "login", "metrics", "list",
+    "other",
 ];
 /// The status classes.
 const CLASSES: [&str; 5] = ["1xx", "2xx", "3xx", "4xx", "5xx"];
@@ -34,6 +35,7 @@ const MAX_LABELS: usize = 64;
 pub fn route_of(method: &str, path: &str) -> &'static str {
     match (method, path) {
         (_, "/api/panel") => "panel",
+        (_, p) if p.starts_with("/api/export/") => "export",
         (_, "/api/submit") => "submit",
         (_, "/api/save") => "save",
         (_, "/health" | "/healthz") => "health",
@@ -246,6 +248,7 @@ mod tests {
     #[test]
     fn routes() {
         assert_eq!(route_of("POST", "/api/panel"), "panel");
+        assert_eq!(route_of("GET", "/api/export/sales.svg"), "export");
         assert_eq!(route_of("GET", "/d/sales"), "page");
         assert_eq!(route_of("GET", "/d/sales/assets/x.png"), "asset");
         assert_eq!(route_of("GET", "/app.js"), "asset");

@@ -786,6 +786,26 @@ pub fn parse_role(annotation: &str) -> Option<Role> {
     roles::lookup(annotation).map(|s| s.role)
 }
 
+/// A value as plain text (#764 exports): numbers as the server shows them,
+/// `NULL` empty.
+pub fn value_text(v: &Value) -> String {
+    value_str(v)
+}
+
+/// A value as JSON (#764 exports): numbers stay numbers, `NULL` is `null`.
+pub fn value_json(v: &Value) -> serde_json::Value {
+    match v {
+        Value::Na => serde_json::Value::Null,
+        Value::Str(s) => serde_json::Value::String(s.clone()),
+        _ => match v.as_f64() {
+            Some(f) if f.is_finite() => serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            _ => serde_json::Value::String(value_str(v)),
+        },
+    }
+}
+
 pub(crate) fn value_str(v: &Value) -> String {
     match v {
         Value::Str(s) => s.clone(),
