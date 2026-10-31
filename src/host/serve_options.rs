@@ -61,6 +61,7 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("tasks", SiteOptionKind::ServerOnly),
     ("notify", SiteOptionKind::ServerOnly),
     ("reports", SiteOptionKind::ServerOnly),
+    ("alerts", SiteOptionKind::ServerOnly),
     ("bind", SiteOptionKind::ServerOnly),
     ("memory_limit", SiteOptionKind::ServerOnly),
     ("duckdb_threads", SiteOptionKind::ServerOnly),

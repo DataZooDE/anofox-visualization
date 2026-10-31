@@ -105,7 +105,7 @@ The extension is unsigned, so `run-locked.sh` passes `-unsigned`.
 | `max_asset_bytes` | 5 MiB | One file from the dashboards folder's `assets/` subfolder (`GET /d/<id>/assets/<rest>`, #514). Over it: `404`. |
 | `search_path` | default database | `"warehouse"`, `"warehouse.sales"`, or several comma-separated: where unqualified names resolve. |
 | `tasks` | off | `{"run": true, "write": ["stage"]}`: run `tasks/*.task.sql` on a schedule on this replica, writing only `stage` (every other database attached `READ_ONLY`), see [secure-serving](secure-serving.md#scheduled-tasks-optionstasks-767). |
-| `notify`, `reports` | off | Scheduled reports by e-mail (SMTP, STARTTLS required) and signed webhooks, each rendered as its own fixed principal; `notify.run: true` on one replica only. See [secure-serving](secure-serving.md#scheduled-reports-optionsreports-768). |
+| `notify`, `reports`, `alerts` | off | Scheduled reports, and alerts on a panel's rows, by e-mail (SMTP, STARTTLS required) and signed webhooks, each run as its own fixed principal; `notify.run: true` on one replica only; alerts keep their state in `notify.state`. See [secure-serving](secure-serving.md#scheduled-reports-optionsreports-768). |
 | `metrics` | off | `{"token_env": "ANOFOX_METRICS_TOKEN"}`: Prometheus metrics at `GET /metrics` for a scraper that sends `Authorization: Bearer <token>` (§8). |
 
 The DuckDB settings apply before the configuration is locked. A request cannot

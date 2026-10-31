@@ -967,6 +967,34 @@ e-mail or to a webhook ([plan](plans/plan-tasks-reports.md) §2, §4):
   `anofox_report_last_success_timestamp_seconds`, `_runs`, `_failures` and
   `_consecutive_failures` per report.
 
+**Alerts** (`options.alerts`, R2) use the same channels and principals.
+An alert fires when a `-- @name`d panel returns rows (the condition is
+ordinary, reviewed dashboard SQL, e.g. `WHERE qty < safety`):
+
+```json
+{"notify": {"run": true, "state": "/var/lib/anofox/alert-state.json", "webhooks": {"ops": {…}}},
+ "alerts": [{"name": "stock-below-safety", "dashboard": "stock", "panel": "below_safety",
+             "check": "every 15 minutes", "as": {"user": "report:ops"},
+             "attach": ["csv"], "to": [{"webhook": "ops"}], "repeat_after": "24 hours"}],
+ "tasks": {"run": true, "write": ["stage"], "on_failure": {"to": [{"webhook": "ops"}]}}}
+```
+
+- A message goes out when the rows appear (`FIRING`) or change (`CHANGED`,
+  by a hash of the rows), again after `repeat_after` while it keeps firing,
+  and once when they are gone (`RESOLVED`). Nothing is sent while nothing
+  changes.
+- The state is kept in `notify.state` (a `0600` file, replaced atomically),
+  so a restart doesn't send again. A send that fails keeps the old state:
+  the next check tries again.
+- `attach` adds the rows as CSV or JSON (not on `RESOLVED`).
+- `anofox_serve_report(<port>, '<alert>')` checks an alert now.
+- `/metrics`: `anofox_alert_firing`, `anofox_alert_checks`,
+  `anofox_alert_check_failures` per alert. Each check is a JSON line in
+  `notify.log` (`alert`, `rows`, `status`, `sent`, `error`).
+- `tasks.on_failure` tells its recipients when a task starts failing (the
+  first failure in a row, with its redacted error) and when it runs again
+  without one (`RECOVERED`). It is sent from the task replica.
+
 | Threat | Mitigation |
 |---|---|
 | A viewer gets a report's data or identity | The `report:` user prefix is refused by every login method; reports run only from the schedule or the owning SQL session. |
@@ -976,6 +1004,7 @@ e-mail or to a webhook ([plan](plans/plan-tasks-reports.md) §2, §4):
 | SSRF / exfiltration | Endpoints are fixed in the configuration, never built from data; `https://` only (`http://` to loopback), no redirects, no proxy, 30 s timeout. |
 | Header or markup injection | Recipients are plain addresses (checked at start) and go only into the envelope (Bcc); the subject has no line breaks (RFC 2047); the HTML is escaped; file names are fixed; CSV formula cells are neutralised as in exports. |
 | Spoofed or replayed webhooks | `X-Anofox-Signature: sha256=<HMAC-SHA256(secret, "<X-Anofox-Timestamp>.<body>")>`; the receiver checks it and the age of the timestamp. |
+| Alert storms | One message per change of state (plus `repeat_after`), never per check; the state survives restarts. |
 | Flooding | At most 50 recipients per report, 10 MB of files, and `max_per_hour` messages (default 60) for all reports together. Over a limit nothing is sent, the run is logged as failed and the metrics show it. |
 
 ### Per-viewer state (`options.state`, #517)
