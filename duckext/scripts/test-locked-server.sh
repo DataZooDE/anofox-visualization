@@ -1414,7 +1414,9 @@ grep -q "column 'n' is BIGINT" "$T/ibody" || fail "type conflict message: $(cat 
 # The rows show after the (debounced) refresh: 3 rows, no manual refresh.
 ipanel() { curl -s -o "$T/body" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" \
   -H "Authorization: Bearer $K_READ" -d '{"dashboard":"inbox","panel":0,"vars":{}}'; }
-for _ in $(seq 60); do [ "$(ipanel)" = 200 ] && grep -q '"c0":3' "$T/body" && break; sleep 0.5; done
+# The first write's refresh runs at once, the next ones wait out the 30 s
+# debounce (plus a build): allow 50 s.
+for _ in $(seq 100); do [ "$(ipanel)" = 200 ] && grep -q '"c0":3' "$T/body" && break; sleep 0.5; done
 grep -q '"c0":3' "$T/body" || fail "ingest refresh: the 3 rows should show: $(cat "$T/body")"
 echo "SELECT kind, n, city, _id IS NOT NULL AS has_id FROM inbox.main.events ORDER BY n;" >&3
 stop
