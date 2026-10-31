@@ -1,6 +1,6 @@
 # Plan: the P3 gaps to Shaper (#769–#773, #775)
 
-Status: **design note, waiting for owner decisions (§8). No code before they are taken.**
+Status: **decided 2026-10-31: the owner took every recommendation (D1–D9).**
 Follows the gap analysis of 2026-10-30. P1 and P2 are done (#763–#768).
 Each item here adds something the locked server didn't have: a new write
 path (#769, #770, #772, #775), a new credential (#771) or author-controlled
@@ -168,7 +168,7 @@ API-key **scopes** (`ingest`, `preview`, `embed`, `admin`) are shared by
 four items. They come first, as a small PR of their own: keys without
 scopes keep exactly today's rights (read dashboards).
 
-## 8. Decisions for the owner
+## 8. Decisions (taken 2026-10-31: all as recommended)
 
 - **D1 — API-key scopes** (§7): add `scopes` to API keys (`ingest`,
   `preview`, `embed`, `admin`), with no scope meaning read-only as today.
