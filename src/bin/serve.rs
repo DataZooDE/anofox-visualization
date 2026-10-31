@@ -114,7 +114,7 @@ static ASSIST_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist-key-file FILE] [--no-assist]   (the builder assistant's /assist proxy: on when ANTHROPIC_API_KEY\n                                       or a 0600 key file holds a key; the key never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--expires-days N] [--note TEXT] [--audit PATH]\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist-key-file FILE] [--no-assist]   (the builder assistant's /assist proxy: on when ANTHROPIC_API_KEY\n                                       or a 0600 key file holds a key; the key never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--scopes S,…] [--expires-days N] [--note TEXT] [--audit PATH]\n             (S: ingest:<table> | preview | embed | admin; none = read dashboards only)\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -463,6 +463,7 @@ fn api_key_cli(args: Vec<String>) -> ! {
     let cmd = it.next().unwrap_or_default();
     let (mut file, mut user, mut id, mut note, mut audit) = (None, None, None, None, None);
     let (mut groups, mut claims, mut dashboards, mut days) = (Vec::new(), Vec::new(), None, None);
+    let mut scopes: Vec<String> = Vec::new();
     while let Some(a) = it.next() {
         let mut val = || {
             it.next()
@@ -489,12 +490,21 @@ fn api_key_cli(args: Vec<String>) -> ! {
                 claims.push((k.to_string(), serde_json::json!(x)));
             }
             "--dashboards" => {
+                // `--dashboards ''`: none (a key that only ingests, say).
                 dashboards = Some(
                     val()
                         .split(',')
                         .map(|d| d.trim().to_string())
+                        .filter(|d| !d.is_empty())
                         .collect::<Vec<_>>(),
                 )
+            }
+            "--scopes" => {
+                scopes = val()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
             }
             "--expires-days" => {
                 days = Some(
@@ -532,8 +542,18 @@ fn api_key_cli(args: Vec<String>) -> ! {
             if !claims.is_empty() {
                 e["claims"] = serde_json::Value::Object(claims.into_iter().collect());
             }
-            if let Some(d) = dashboards {
+            if let Some(d) = &dashboards {
                 e["dashboards"] = serde_json::json!(d);
+            }
+            if !scopes.is_empty() {
+                let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+                let s = apikey::KeyScopes::parse(&names).unwrap_or_else(|e| fail(&e));
+                e["scopes"] = serde_json::json!(s.names());
+                if dashboards.is_none() {
+                    eprintln!(
+                        "note: this key also reads every dashboard; --dashboards '' gives it none"
+                    );
+                }
             }
             if let Some(d) = days {
                 e["expires"] = serde_json::json!(auth::jwt::now_s() + d * 86400);
@@ -572,11 +592,13 @@ fn api_key_cli(args: Vec<String>) -> ! {
         "list" => {
             for e in &entries {
                 println!(
-                    "{}  {}  {}{}",
+                    "{}  {}  {}{}{}",
                     e["id"].as_str().unwrap_or(""),
                     e["user"].as_str().unwrap_or(""),
                     e.get("dashboards")
                         .map_or("all dashboards".to_string(), |d| d.to_string()),
+                    e.get("scopes")
+                        .map_or(String::new(), |s| format!("  scopes {s}")),
                     if e["revoked"] == true {
                         "  REVOKED"
                     } else {
@@ -3066,6 +3088,7 @@ mod tests {
                 ..Default::default()
             },
             method: "proxy",
+            key_scopes: Default::default(),
             scope: Scope {
                 dashboards: None,
                 vars,

@@ -2005,6 +2005,8 @@ For scripts and server-to-server clients: `Authorization: Bearer afx_<id>_<secre
 serve api-key new --file /etc/anofox/keys.json --user svc-etl --groups etl \
   --claim tenant=acme --dashboards sales,stock --expires-days 90 --audit audit.jsonl
 # prints the key ONCE; the file stores only its SHA-256
+serve api-key new --file /etc/anofox/keys.json --user svc-collector \
+  --dashboards '' --scopes ingest:events   # writes events, reads no dashboard
 serve api-key revoke --file /etc/anofox/keys.json --id 3f9c0a1b2c3d
 serve api-key list --file /etc/anofox/keys.json
 ```
@@ -2017,7 +2019,7 @@ printf %s "$key" | sha256sum   # → "sha256" of the entry {"id": "$id", "sha256
 ```
 
 - The key file (`{"keys": [{"id", "sha256", "user", "groups", "claims",
-  "dashboards", "expires", "revoked", "note", "created"}]}`) must not be
+  "dashboards", "scopes", "expires", "revoked", "note", "created"}]}`) must not be
   writable by group or others; it holds hashes only (a 256-bit key needs no
   slow hash). Keys are scoped to `dashboards` (absent = all) and expire at
   `expires` (Unix seconds).
@@ -2028,6 +2030,33 @@ printf %s "$key" | sha256sum   # → "sha256" of the entry {"id": "$id", "sha256
   becomes group/world-writable, disables **every** key until it is fixed (fail
   closed) and is audited.
 - A key never appears in a log; the audit log names its id.
+
+#### Scopes (#800)
+
+A key reads the dashboards in its `dashboards` list and nothing else. Its
+`scopes` add one right each:
+
+| Scope | Lets the key | Route |
+|---|---|---|
+| `ingest:<table>` (one per table) | write rows into that table of the ingest database | `POST /api/data/<table>` (#769) |
+| `preview` | create temporary dashboards, run under the key's own claims | `POST /api/dashboards` (#770) |
+| `embed` | mint embed tokens, capped by the key's own claims and dashboards | `POST /api/auth/token` (#771) |
+| `admin` | reload the dashboards | (#772) |
+
+- A key without `scopes` keeps exactly the rights it always had. No other
+  login method (proxy, JWT, OIDC, embed link, share link) carries scopes.
+- Each scope is checked only by its own route, and no scope implies
+  another: `admin` does not give `ingest`, and `ingest:events` does not
+  give `ingest:orders`. Table names are plain identifiers; there is no
+  wildcard.
+- Scopes add to reading, they don't replace it. A key meant only to ingest
+  gets `"dashboards": []` (`--dashboards ''`), or it also reads every
+  dashboard (`serve api-key new` says so).
+- An unknown scope name fails the whole file, like any other error in it
+  (fail closed): a file written for a newer server never loads with fewer
+  limits than its author meant.
+- The routes come with the issues named in the table. Until a route ships,
+  its scope opens nothing.
 
 ### Share links (`"mode": "share"`, #763)
 

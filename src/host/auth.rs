@@ -98,6 +98,8 @@ pub struct Identity {
     pub page_session: Option<String>,
     /// The API key id or session id (public; for the audit log).
     pub ref_id: Option<String>,
+    /// An API key's scopes (#800); empty for every other method.
+    pub key_scopes: apikey::KeyScopes,
 }
 
 /// Why a request was refused (`401`; the reason goes to the logs only).
@@ -760,6 +762,7 @@ impl Auth {
                     return Ok(Identity {
                         claims: sess.claims,
                         method,
+                        key_scopes: Default::default(),
                         scope: sess.scope,
                         page_session: None,
                         ref_id: Some(sess.sid),
@@ -905,6 +908,7 @@ impl Auth {
                 return Ok(Identity {
                     claims,
                     method: "embed",
+                    key_scopes: Default::default(),
                     scope,
                     page_session: Some(page),
                     ref_id: Some(sess.sid.clone()),
@@ -920,6 +924,7 @@ impl Auth {
                     .map(|claims| Identity {
                         claims,
                         method: "proxy",
+                        key_scopes: Default::default(),
                         scope: Scope::default(),
                         page_session: None,
                         ref_id: None,
@@ -942,9 +947,10 @@ impl Auth {
                     let on_reload = |rl: &apikey::Reload| self.audit_reload(rl);
                     let (id, res) = k.authenticate(token, &on_reload);
                     return match res {
-                        Ok((claims, scope)) => Ok(Identity {
+                        Ok((claims, scope, key_scopes)) => Ok(Identity {
                             claims,
                             method: "api_key",
+                            key_scopes,
                             scope,
                             page_session: None,
                             ref_id: id,
@@ -1003,6 +1009,7 @@ impl Auth {
                 return Ok(Identity {
                     claims: sess.claims,
                     method: "oidc",
+                    key_scopes: Default::default(),
                     scope: Scope::default(),
                     page_session: None,
                     ref_id: Some(sess.sid),
@@ -1054,6 +1061,7 @@ impl Auth {
                 return Ok(Identity {
                     claims: d.claims.clone(),
                     method: "share",
+                    key_scopes: Default::default(),
                     scope: d.scope.clone(),
                     ref_id: page_session.as_ref().map(|(_, sid)| sid.clone()),
                     page_session: page_session.map(|(p, _)| p),
@@ -1104,6 +1112,7 @@ impl Auth {
         Ok(Identity {
             claims,
             method: "jwt",
+            key_scopes: Default::default(),
             scope: Scope::default(),
             page_session: None,
             ref_id: None,
