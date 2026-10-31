@@ -35,6 +35,7 @@ fn all_methods(f: Arc<FakeIdp>, dir: &std::path::Path) -> (Auth, String) {
             attrs: vec![],
         },
         dashboards: Some(vec!["sales".into()]),
+        scopes: apikey::KeyScopes::parse(&["preview"]).unwrap(),
         expires: None,
         revoked: false,
     };
@@ -130,6 +131,10 @@ fn each_method_yields_the_same_claims_shape() {
         .authenticate(&req("POST", "/api/panel", &[("Authorization", &auth)]))
         .unwrap();
     assert_eq!(id.method, "jwt");
+    assert!(
+        id.key_scopes.is_empty(),
+        "only an API key carries scopes (#800)"
+    );
     assert_eq!(
         id.claims.variables(),
         vec![
@@ -145,6 +150,7 @@ fn each_method_yields_the_same_claims_shape() {
         .unwrap();
     assert_eq!((id.method, id.claims.user.as_str()), ("api_key", "svc-etl"));
     assert!(id.scope.allows("sales") && !id.scope.allows("payroll"));
+    assert!(id.key_scopes.preview && !id.key_scopes.admin);
     // proxy (secret present wins over everything else)
     let h = [
         ("X-Anofox-Proxy-Secret", PROXY_SECRET),
@@ -153,6 +159,10 @@ fn each_method_yields_the_same_claims_shape() {
     ];
     let id = a.authenticate(&req("GET", "/", &h)).unwrap();
     assert_eq!((id.method, id.claims.user.as_str()), ("proxy", "bob"));
+    assert!(
+        id.key_scopes.is_empty(),
+        "the key's scopes never ride on another method"
+    );
     // nothing → no_credentials (and a login redirect for a page view only)
     let d = a.authenticate(&req("GET", "/d/sales", &[])).unwrap_err();
     assert_eq!(d.reason, "no_credentials");

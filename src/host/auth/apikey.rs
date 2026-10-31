@@ -4,8 +4,8 @@
 //! A key is 256 random bits, shown once when it is created
 //! ([`new_key`], `serve api-key new`); the key file stores only its SHA-256
 //! (a high-entropy key needs no slow hash) next to the identity it stands for
-//! (user, groups, claims), the dashboards it may read, an optional expiry and
-//! a `revoked` flag. The public id selects the entry, the hash is compared in
+//! (user, groups, claims), the dashboards it may read, its [`KeyScopes`], an
+//! optional expiry and a `revoked` flag. The public id selects the entry, the hash is compared in
 //! constant time. The file is re-read when it changes, so a revocation takes
 //! effect within [`RELOAD_EVERY`] without a restart; a file that no longer
 //! parses, or that others may write, disables every key (fail closed). Keys
@@ -27,6 +27,83 @@ pub const RELOAD_EVERY: Duration = Duration::from_secs(2);
 const ID_HEX: usize = 12;
 const SECRET_HEX: usize = 64;
 
+/// What a key may do besides reading its dashboards: the entry's `scopes`
+/// (#800, docs/plans/plan-p3-gaps.md D1). A key without scopes keeps exactly
+/// the rights it always had; every other login method has none. Each scope
+/// is checked only by the route it opens, and a route never infers one scope
+/// from another (`admin` does not imply `ingest`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyScopes {
+    /// `ingest:<table>`: the tables the key may write through the ingest API
+    /// (#769). Plain identifiers, lower-cased; no wildcard.
+    pub ingest: Vec<String>,
+    /// `preview`: may create temporary dashboards (#770).
+    pub preview: bool,
+    /// `embed`: may mint embed tokens, capped by its own claims (#771).
+    pub embed: bool,
+    /// `admin`: may reload the dashboards (#772).
+    pub admin: bool,
+}
+
+impl KeyScopes {
+    /// Parse the entry's `scopes` list (`["preview", "ingest:events"]`). An
+    /// unknown name is an error, never ignored: a key file written for a
+    /// newer server must not load with fewer limits than its author meant.
+    pub fn parse(list: &[&str]) -> Result<KeyScopes, String> {
+        let mut s = KeyScopes::default();
+        for &x in list {
+            match x {
+                "preview" => s.preview = true,
+                "embed" => s.embed = true,
+                "admin" => s.admin = true,
+                _ => {
+                    let Some(t) = x.strip_prefix("ingest:") else {
+                        return Err(format!(
+                            "unknown scope '{x}' (ingest:<table>, preview, embed, admin)"
+                        ));
+                    };
+                    if !crate::host::serving::valid_ident(t) {
+                        return Err(format!("scope '{x}': the table must be a plain identifier"));
+                    }
+                    s.ingest.push(t.to_ascii_lowercase());
+                }
+            }
+        }
+        s.ingest.sort();
+        s.ingest.dedup();
+        Ok(s)
+    }
+
+    /// The scopes as the key file writes them, in a fixed order.
+    pub fn names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.ingest.iter().map(|t| format!("ingest:{t}")).collect();
+        for (on, n) in [
+            (self.preview, "preview"),
+            (self.embed, "embed"),
+            (self.admin, "admin"),
+        ] {
+            if on {
+                v.push(n.to_string());
+            }
+        }
+        v
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == KeyScopes::default()
+    }
+
+    /// May the key write rows into `table`? (DuckDB names are
+    /// case-insensitive.)
+    pub fn may_ingest(&self, table: &str) -> bool {
+        self.ingest.iter().any(|t| t.eq_ignore_ascii_case(table))
+    }
+}
+
+/// What an accepted key stands for: its claims, its dashboards and its
+/// scopes.
+pub type Granted = (Claims, Scope, KeyScopes);
+
 /// One key of the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyEntry {
@@ -36,6 +113,7 @@ pub struct KeyEntry {
     pub claims: Claims,
     /// `None` = every dashboard.
     pub dashboards: Option<Vec<String>>,
+    pub scopes: KeyScopes,
     /// Unix seconds.
     pub expires: Option<u64>,
     pub revoked: bool,
@@ -70,7 +148,7 @@ fn key_id(key: &str) -> Option<&str> {
 }
 
 /// Parse a key file: `{"keys": [{"id", "sha256", "user", "groups"?,
-/// "claims"?, "dashboards"?, "expires"?, "revoked"?, "note"?, "created"?}]}`.
+/// "claims"?, "dashboards"?, "scopes"?, "expires"?, "revoked"?, "note"?, "created"?}]}`.
 pub fn parse_file(text: &str) -> Result<Vec<KeyEntry>, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
     let keys = v
@@ -89,6 +167,7 @@ pub fn parse_file(text: &str) -> Result<Vec<KeyEntry>, String> {
                     | "groups"
                     | "claims"
                     | "dashboards"
+                    | "scopes"
                     | "expires"
                     | "revoked"
                     | "note"
@@ -169,6 +248,21 @@ pub fn parse_file(text: &str) -> Result<Vec<KeyEntry>, String> {
                     .collect::<Result<Vec<_>, _>>()?,
             ),
         };
+        let scopes = match o.get("scopes") {
+            None | Some(Value::Null) => KeyScopes::default(),
+            Some(v) => {
+                let names = v
+                    .as_array()
+                    .ok_or_else(|| bad("scopes must be a list of names"))?
+                    .iter()
+                    .map(|x| {
+                        x.as_str()
+                            .ok_or_else(|| bad("scopes must be a list of names"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                KeyScopes::parse(&names).map_err(|e| bad(&e))?
+            }
+        };
         let expires = match o.get("expires") {
             None | Some(Value::Null) => None,
             Some(e) => Some(
@@ -191,6 +285,7 @@ pub fn parse_file(text: &str) -> Result<Vec<KeyEntry>, String> {
                 attrs,
             },
             dashboards,
+            scopes,
             expires,
             revoked,
         });
@@ -215,6 +310,9 @@ pub fn entry_json(e: &KeyEntry, note: Option<&str>, created: Option<&str>) -> Va
     }
     if let Some(d) = &e.dashboards {
         o["dashboards"] = json!(d);
+    }
+    if !e.scopes.is_empty() {
+        o["scopes"] = json!(e.scopes.names());
     }
     if let Some(x) = e.expires {
         o["expires"] = json!(x);
@@ -334,12 +432,12 @@ impl ApiKeys {
     }
 
     /// Authenticate `key`: its id (for the log, also on failure) and the
-    /// claims + scope, or the reason it was refused.
+    /// claims, scope and key scopes, or the reason it was refused.
     pub fn authenticate(
         &self,
         key: &str,
         on_reload: &dyn Fn(&Reload),
-    ) -> (Option<String>, Result<(Claims, Scope), &'static str>) {
+    ) -> (Option<String>, Result<Granted, &'static str>) {
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let r = self.reload(&mut st, false);
         if r != Reload::Unchanged {
@@ -371,6 +469,7 @@ impl ApiKeys {
                         dashboards: e.dashboards.clone(),
                         vars: Vec::new(),
                     },
+                    e.scopes.clone(),
                 )),
             ),
         }
@@ -445,6 +544,7 @@ mod tests {
                 attrs: vec![("tenant".into(), Some("acme".into()))],
             },
             dashboards: Some(vec!["sales".into()]),
+            scopes: KeyScopes::default(),
             expires: None,
             revoked: false,
         }
@@ -466,7 +566,8 @@ mod tests {
         let none = |_: &Reload| {};
         let (kid, r) = k.authenticate(&key, &none);
         assert_eq!(kid.as_deref(), Some(id.as_str()));
-        let (c, s) = r.unwrap();
+        let (c, s, ks) = r.unwrap();
+        assert!(ks.is_empty(), "a key without scopes has none");
         assert_eq!(c.user, "svc-etl");
         assert!(s.allows("sales") && !s.allows("payroll"));
         // a wrong secret with a right id, an unknown id, garbage
@@ -530,5 +631,69 @@ mod tests {
         let e = parse_file(&ok.to_string()).unwrap();
         assert_eq!(e[0].claims.attrs, vec![("tenant".into(), Some("t".into()))]);
         assert_eq!(e[0].dashboards, None);
+        assert!(e[0].scopes.is_empty());
+    }
+
+    #[test]
+    fn scopes_are_parsed_strictly_and_round_trip() {
+        let h = "a".repeat(64);
+        let entry = |scopes: Value| {
+            json!({"keys": [{"id": "0123456789ab", "sha256": h, "user": "u",
+                "dashboards": [], "scopes": scopes}]})
+            .to_string()
+        };
+        let e = parse_file(&entry(json!([
+            "admin",
+            "ingest:Events",
+            "preview",
+            "ingest:events",
+            "ingest:orders"
+        ])))
+        .unwrap();
+        let s = &e[0].scopes;
+        assert_eq!(s.ingest, vec!["events", "orders"]);
+        assert!(s.preview && s.admin && !s.embed);
+        assert!(s.may_ingest("EVENTS") && !s.may_ingest("payroll"));
+        assert_eq!(e[0].dashboards, Some(vec![]));
+        // the file form is stable, and parses back to the same scopes
+        let j = entry_json(&e[0], None, None);
+        assert_eq!(
+            j["scopes"],
+            json!(["ingest:events", "ingest:orders", "preview", "admin"])
+        );
+        let again = parse_file(&json!({"keys": [j]}).to_string()).unwrap();
+        assert_eq!(&again[0].scopes, s);
+        // a key without scopes writes none
+        let plain = parse_file(&entry(Value::Null)).unwrap();
+        assert!(entry_json(&plain[0], None, None).get("scopes").is_none());
+        // unknown names, wildcards, non-identifiers and wrong shapes fail the file
+        for bad in [
+            json!(["ask"]),
+            json!(["read"]),
+            json!(["Admin"]),
+            json!(["ingest:"]),
+            json!(["ingest:*"]),
+            json!(["ingest:a.b"]),
+            json!(["ingest:x; DROP TABLE y"]),
+            json!("admin"),
+            json!([1]),
+            json!({"admin": true}),
+        ] {
+            assert!(parse_file(&entry(bad.clone())).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_key_brings_its_scopes() {
+        let d = tmpdir();
+        let f = d.join("keys.json");
+        let (key, id, hash) = new_key();
+        let mut e = entry(&id, &hash);
+        e.scopes = KeyScopes::parse(&["embed", "ingest:events"]).unwrap();
+        write_file(&f, &[entry_json(&e, None, None)]).unwrap();
+        let k = ApiKeys::from_json(json!({"file": f}).as_object().unwrap()).unwrap();
+        let (_, _, ks) = k.authenticate(&key, &|_| {}).1.unwrap();
+        assert!(ks.embed && ks.may_ingest("events") && !ks.preview && !ks.admin);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
