@@ -649,6 +649,26 @@ pub fn dedup_last_spelling(vars: Vec<(String, String)>) -> Vec<(String, String)>
 /// `/api/submit` accepts exactly what `/api/panel` would have (plan §4.2
 /// step 6: "parse vars exactly like a panel request"). Deduplicated by
 /// [`dedup_last_spelling`].
+/// One CSV cell (#764): quoted, and a text that a spreadsheet would read as
+/// a formula (`=`, `+`, `-`, `@`, a tab or CR first, and not a plain number)
+/// gets a leading `'` — the browser's `csvSafe` rule (web/app.js).
+pub fn csv_cell(s: &str) -> String {
+    let lead = s.starts_with(['=', '+', '-', '@', '\t', '\r']);
+    let number = {
+        let t = s.strip_prefix('-').unwrap_or(s);
+        let (m, e) = t.split_once(['e', 'E']).unwrap_or((t, ""));
+        let (i, f) = m.split_once('.').unwrap_or((m, "0"));
+        let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+        digits(i) && digits(f) && (e.is_empty() || digits(e.strip_prefix(['+', '-']).unwrap_or(e)))
+    };
+    let s = if lead && !number {
+        format!("'{s}")
+    } else {
+        s.to_string()
+    };
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
 pub fn parse_vars_object(v: Option<&serde_json::Value>) -> Result<Vec<(String, String)>, String> {
     let mut vars = Vec::new();
     if let Some(vs) = v {
@@ -1936,6 +1956,21 @@ pub fn daterange_preset_bounds(preset: &str, min: i64, max: i64) -> Option<(i64,
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csv_cells_quote_and_neutralise_formulas() {
+        use super::csv_cell;
+        assert_eq!(csv_cell("plain"), "\"plain\"");
+        assert_eq!(csv_cell("a \"b\""), "\"a \"\"b\"\"\"");
+        assert_eq!(csv_cell("=HYPERLINK(1)"), "\"'=HYPERLINK(1)\"");
+        assert_eq!(csv_cell("+1+A1"), "\"'+1+A1\"");
+        assert_eq!(csv_cell("@SUM"), "\"'@SUM\"");
+        assert_eq!(csv_cell("\tx"), "\"'\tx\"");
+        assert_eq!(csv_cell("-1.5"), "\"-1.5\"");
+        assert_eq!(csv_cell("-2e10"), "\"-2e10\"");
+        assert_eq!(csv_cell("-1+A1"), "\"'-1+A1\"");
+        assert_eq!(csv_cell(""), "\"\"");
+    }
+
     #[test]
     fn content_types_of_the_builders_files() {
         assert_eq!(

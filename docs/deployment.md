@@ -641,7 +641,7 @@ target.
 
 | Metric | Type | What it tells |
 |---|---|---|
-| `anofox_http_requests_total{route, code}` | counter | Requests by route (`page`, `panel`, `asset`, `health`, `submit`, `save`, `login`, `metrics`, `list`, `other`) and status class (`2xx` … `5xx`) |
+| `anofox_http_requests_total{route, code}` | counter | Requests by route (`page`, `panel`, `export`, `asset`, `health`, `submit`, `save`, `login`, `metrics`, `list`, `other`) and status class (`2xx` … `5xx`) |
 | `anofox_http_request_duration_seconds{route}` | histogram | Time to answer, 5 ms – 30 s buckets |
 | `anofox_http_denied_total{reason}` | counter | Refusals by reason (`no_credentials`, `expired`, `out_of_scope`, `metrics_token`, …) |
 | `anofox_panel_requests_total{cache}` | counter | Panel requests answered from the cache (`hit`), by joining a run in flight (`shared`) or by running (`run`) |

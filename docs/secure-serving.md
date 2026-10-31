@@ -852,6 +852,38 @@ SELECT anofox_serve_refresh(8095);   -- fresh data now, without a restart
 SELECT anofox_serve_stop(8095);
 ```
 
+### Exports (`GET /api/export/…`, #764)
+
+Other systems (a report job, a notebook, a script with an API key) can pull
+a dashboard without a browser:
+
+```sh
+curl -H "Authorization: Bearer $KEY" -o sales.svg \
+  "https://dash.example.com/api/export/sales.svg?v.region=EU&tab=Overview"
+curl -H "Authorization: Bearer $KEY" -o totals.csv \
+  "https://dash.example.com/api/export/sales/totals.csv?v.region=EU"
+```
+
+| Request | Answer |
+|---|---|
+| `GET /api/export/<dashboard>.svg` | The whole dashboard as one SVG, as `dashboard --svg` draws it; `?tab=<label>` only that tab, `?width=480…4000` (default 1200), `?dark=1` the dark variant |
+| `GET /api/export/<dashboard>/<name>.csv` / `.json` | The rows of the panel named `-- @name <name>`: CSV with a header row (the query's column names), or a JSON array of objects |
+
+- `?v.<name>=<value>` sets a variable, as a page URL does (a text value; `-- @vars`
+  and a credential's locked variables apply). Inputs not given take their
+  default, as on the page. Any other parameter is `400`.
+- Every panel runs through the same path as the page's own requests
+  (`POST /api/panel`): the login, the credential's scope (`403` for another
+  dashboard), the claims, the access policy, the cache, the query slots and
+  the limits. At most 200 panels per export, and 4 × `timeout_ms` in all.
+- Answers are downloads (`Content-Disposition: attachment`, `no-store`); an
+  SVG is sent with `default-src 'none'; sandbox`, so opened directly it runs
+  nothing. A CSV cell a spreadsheet would read as a formula (`=`, `+`, `-`,
+  `@` first) gets a leading `'`, as in the browser's own CSV download.
+- Setup statements run per panel as always; a `-- @requires` input that is
+  missing shows its panel as not available.
+- PNG and PDF are not in this slice (they need fonts on the server).
+
 ### Per-viewer state (`options.state`, #517)
 
 **This is the one write path on a server that is otherwise read-only by
@@ -1953,6 +1985,7 @@ signed the request in.
 | A viewer sets `__claim_user` / `__claim_groups` / `anofox_data` (`vars`, `?v.*`, a `@param`) | Rejected (`400`) / ignored, in any case and in every configuration; claims and `anofox_data` are set by the server after the viewer's variables (a unit test pins this order) |
 | Snapshot refresh (`refresh_s`) mixing users or snapshots | Each snapshot generation has its own cache; keys include the claims, supersession tickets the user (tested with two users under constant refreshes) |
 | `/healthz` leaks snapshot state | With `auth`, only `status` without a login |
+| An export (#764) reading more than the page could | Each panel goes through the page's own panel path (scope, claims, policy, `-- @vars`, locked variables, limits); an input default the export binds must be a plain literal for an identifier that is not reserved; the SVG is sandboxed, CSV formula cells are neutralised |
 | `/metrics` (#765) leaks server internals or other viewers' activity | Off unless `options.metrics`; its own bearer token (≥ 32 characters, constant-time compare), `401` without it; counts and timings only, with label values fixed by the server (a route name, a status class, a static reason), never a path, dashboard id, user or variable |
 | A panel filters on a viewer-settable variable | Documented rule: filter only on `__claim_*`; `-- @vars` limits what viewers can set |
 | One viewer's cached result served to another | Claims are part of the cache and single-flight key (both servers) |

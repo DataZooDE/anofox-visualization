@@ -40,6 +40,7 @@ use crate::db::{json_rows, Conn, Database};
 use crate::generation::{Current, Generation};
 use crate::limits::{Charge, Inflight, Queries};
 use crate::panel_cache::{Served, SUPERSEDED};
+use anofox_visualization::dashboard;
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
 use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::assist;
@@ -4901,6 +4902,15 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 info,
             )
         }
+        (&Method::Get, p) if p.starts_with("/api/export/") => handle_export(
+            st,
+            req,
+            p,
+            claims.as_ref(),
+            scope,
+            ident.as_ref().map(|i| i.method),
+            info,
+        ),
         (&Method::Post, "/api/panel") => {
             let body = match read_body(&mut req, st.opts.max_body) {
                 Ok(b) => b,
@@ -5012,8 +5022,380 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
     }
 }
 
-/// The effective limits and how much of them is in use (`/healthz`, signed-in
-/// callers only).
+// ---- #764: exports -------------------------------------------------------
+
+/// Most panels one export runs.
+const EXPORT_MAX_PANELS: usize = 200;
+
+/// A dashboard's data for [`dashboard::render_dashboard_svg`] through the
+/// locked server's own panel path ([`locked_panel_req`]): every panel runs
+/// exactly as the page's request for it would — the credential's scope and
+/// locked variables, `-- @vars`, the claims, the access policy, the cache,
+/// the query slots and limits. Setup statements are not run here (the
+/// server runs them per panel); a `SET VARIABLE` the renderer makes for an
+/// input's default becomes a request variable, unless the caller set it.
+struct ExportData<'a> {
+    st: &'a Locked,
+    dash: &'a Dash,
+    claims: Option<&'a Claims>,
+    scope: Option<&'a Scope>,
+    method: Option<&'static str>,
+    /// The caller's variables (`?v.name=value`), then inputs' defaults.
+    vars: Vec<(String, String)>,
+    viewer: Vec<String>,
+    deadline: Instant,
+    panels: usize,
+    /// The first panel failure that is the caller's to see (scope, busy).
+    fatal: Option<(u16, String)>,
+}
+
+/// `SET VARIABLE <name> = <plain literal>` (what the renderer emits for an
+/// input's default or a step number): the name and the literal, else `None`.
+fn set_default(sql: &str) -> Option<(String, String)> {
+    let rest = sql.trim().trim_end_matches(';');
+    let head = rest.get(..13)?;
+    if !head.eq_ignore_ascii_case("SET VARIABLE ") {
+        return None;
+    }
+    let (name, lit) = rest[13..].split_once('=')?;
+    let (name, lit) = (name.trim(), lit.trim());
+    // The renderer quotes the name (`"region"`): still a plain identifier.
+    let name = match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
+        Some(n) if !n.contains('"') => n,
+        Some(_) => return None,
+        None => name,
+    };
+    if !sv::valid_ident(name) || access::is_reserved_var(name) {
+        return None;
+    }
+    // Only literals: strings, numbers, booleans, NULL, lists of them.
+    use anofox_visualization::sql::lex::{tokenize, TokKind};
+    let ok = tokenize(lit).iter().all(|t| match t.kind {
+        TokKind::String | TokKind::Number | TokKind::Whitespace => true,
+        TokKind::Word => matches!(
+            t.text(lit).to_ascii_uppercase().as_str(),
+            "TRUE" | "FALSE" | "NULL"
+        ),
+        TokKind::Punct => matches!(t.text(lit), "[" | "]" | "," | "-" | "."),
+        _ => false,
+    });
+    (ok && !lit.is_empty()).then(|| (name.to_string(), lit.to_string()))
+}
+
+impl ExportData<'_> {
+    fn run(
+        &mut self,
+        panel: usize,
+    ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
+        if Instant::now() > self.deadline {
+            return Err("export timed out".into());
+        }
+        self.panels += 1;
+        if self.panels > EXPORT_MAX_PANELS {
+            return Err(format!("more than {EXPORT_MAX_PANELS} panels"));
+        }
+        let r = sv::PanelRequest {
+            dashboard: self.dash.id.clone(),
+            panel,
+            vars: self.vars.clone(),
+            page: None,
+        };
+        let mut info = LogInfo::default();
+        let mut charge = self.st.inflight.charge();
+        match locked_panel_req(
+            self.st,
+            r,
+            None,
+            self.claims,
+            self.scope,
+            self.method,
+            &mut info,
+            &mut charge,
+        ) {
+            Ok((json, ..)) => {
+                let rows: Vec<serde_json::Map<String, serde_json::Value>> =
+                    serde_json::from_str(&json).map_err(|e| e.to_string())?;
+                Ok(anofox_visualization::sql::result_columns(&rows))
+            }
+            Err((code, e)) => {
+                if matches!(code, 403 | 503) && self.fatal.is_none() {
+                    self.fatal = Some((code, e.clone()));
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+impl dashboard::DataProvider for ExportData<'_> {
+    fn execute(&mut self, sql: &str) -> Result<(), String> {
+        // An input's default (or a step number): a request variable from now
+        // on, unless the caller chose its own value.
+        if let Some((name, lit)) = set_default(sql) {
+            if !self.viewer.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                self.vars.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+                self.vars.push((name, lit));
+            }
+        }
+        Ok(())
+    }
+
+    fn query(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
+        let sql = sql.trim();
+        let i = self
+            .dash
+            .stmts
+            .iter()
+            .position(|(setup, s)| !setup && s.trim() == sql)
+            .ok_or("not available in an export")?;
+        self.run(i)
+    }
+}
+
+/// `GET /api/export/<id>.svg` (the whole dashboard, or `?tab=<label>`) and
+/// `GET /api/export/<id>/<panel name>.csv|.json` (one `-- @name`d panel's
+/// rows), with `?v.<name>=<value>` for the variables (#764).
+#[allow(clippy::too_many_arguments)]
+fn handle_export(
+    st: &Locked,
+    req: Request,
+    path: &str,
+    claims: Option<&Claims>,
+    scope: Option<&Scope>,
+    method: Option<&'static str>,
+    info: &mut LogInfo,
+) -> u16 {
+    let rest = &path["/api/export/".len()..];
+    let (target, ext) = match rest.rsplit_once('.') {
+        Some((t, e)) if matches!(e, "svg" | "csv" | "json") => (t, e),
+        _ => return reply(
+            req,
+            404,
+            "not found: /api/export/<dashboard>.svg or /api/export/<dashboard>/<panel>.csv|json",
+        ),
+    };
+    let (id, panel_name) = match target.split_once('/') {
+        Some((d, p)) => (d, Some(p)),
+        None => (target, None),
+    };
+    if (ext == "svg") != panel_name.is_none() {
+        return reply(
+            req,
+            404,
+            "not found: a dashboard exports as .svg, a named panel as .csv or .json",
+        );
+    }
+    let Some(dash) = st.dashboards.iter().find(|d| d.id == id) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    info.dashboard = Some(dash.id.clone());
+    if !scope.is_none_or(|s| s.allows(&dash.id)) {
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    // ?v.name=value (strings, like a page URL's), ?tab=, ?width=, ?dark=1
+    let q = sv::parse_query(req.url());
+    let mut given = serde_json::Map::new();
+    for (k, v) in &q {
+        if let Some(name) = k.strip_prefix("v.") {
+            given.insert(name.to_string(), serde_json::Value::String(v.clone()));
+        } else if !matches!(k.as_str(), "tab" | "width" | "dark") {
+            return reply(
+                req,
+                400,
+                &format!("unknown parameter '{}'", access::diag(k)),
+            );
+        }
+    }
+    let vars = match sv::parse_vars_object(Some(&serde_json::Value::Object(given))) {
+        Ok(v) => v,
+        Err(e) => return reply(req, 400, &e),
+    };
+    let mut data = ExportData {
+        st,
+        dash,
+        claims,
+        scope,
+        method,
+        viewer: vars.iter().map(|(n, _)| n.clone()).collect(),
+        vars,
+        deadline: Instant::now() + st.opts.timeout * 4,
+        panels: 0,
+        fatal: None,
+    };
+    let plan = anofox_visualization::sql::plan(&dash.sql);
+    let file = |e: &str| match panel_name {
+        Some(p) => format!("{}-{p}.{e}", dash.id),
+        None => format!("{}.{e}", dash.id),
+    };
+    let send = |req: Request, ctype: &str, body: Vec<u8>, name: String| -> u16 {
+        let mut resp = Response::from_data(body)
+            .with_status_code(200)
+            .with_header(header("Content-Type", ctype))
+            .with_header(header(
+                "Content-Disposition",
+                &format!("attachment; filename=\"{name}\""),
+            ))
+            .with_header(header("Cache-Control", "no-store"))
+            .with_header(header("X-Content-Type-Options", "nosniff"));
+        if ctype.starts_with("image/svg") {
+            resp = resp.with_header(header(
+                "Content-Security-Policy",
+                "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+            ));
+        }
+        let _ = req.respond(resp);
+        200
+    };
+    if let Some(name) = panel_name {
+        let Some(i) = plan
+            .iter()
+            .position(|p| !p.setup && p.name.as_deref() == Some(name))
+        else {
+            return reply(
+                req,
+                404,
+                "no such panel: name it with `-- @name <name>` in the dashboard",
+            );
+        };
+        info.panel = Some(i);
+        // The inputs before it bind their defaults first, as on the page.
+        for (j, p) in plan.iter().enumerate().take(i) {
+            if p.setup || anofox_visualization::inputs::input_kind(&p.roles).is_none() {
+                continue;
+            }
+            if let Ok(rows) = data.run(j) {
+                for set in anofox_visualization::inputs::panel_defaults(&p.roles, &rows) {
+                    let _ = dashboard::DataProvider::execute(&mut data, &set);
+                }
+            }
+        }
+        let cols = match data.run(i) {
+            Ok(c) => c,
+            Err(e) => {
+                let (code, e) = data.fatal.take().unwrap_or((400, e));
+                return reply(req, code, &e);
+            }
+        };
+        // Column headers: the query's own names where it has them.
+        let headers: Vec<String> = cols
+            .iter()
+            .map(|(k, _)| {
+                k.strip_prefix('c')
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| {
+                        plan[i]
+                            .names
+                            .iter()
+                            .find(|(j, _)| *j == n)
+                            .map(|(_, s)| s.clone())
+                    })
+                    .unwrap_or_else(|| k.clone())
+            })
+            .collect();
+        let n = cols.first().map_or(0, |(_, v)| v.len());
+        let cell = |v: &anofox_visualization::Value| match v {
+            anofox_visualization::Value::Na => String::new(),
+            v => anofox_visualization::value_text(v),
+        };
+        return if ext == "csv" {
+            let mut out = String::new();
+            let row = |cells: Vec<String>| -> String {
+                cells
+                    .iter()
+                    .map(|c| sv::csv_cell(c))
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    + "\r\n"
+            };
+            out.push_str(&row(headers.clone()));
+            for r in 0..n {
+                out.push_str(&row(cols.iter().map(|(_, v)| cell(&v[r])).collect()));
+            }
+            send(
+                req,
+                "text/csv; charset=utf-8",
+                out.into_bytes(),
+                file("csv"),
+            )
+        } else {
+            let rows: Vec<serde_json::Value> = (0..n)
+                .map(|r| {
+                    let mut m = serde_json::Map::new();
+                    for (h, (_, v)) in headers.iter().zip(&cols) {
+                        m.insert(h.clone(), anofox_visualization::value_json(&v[r]));
+                    }
+                    serde_json::Value::Object(m)
+                })
+                .collect();
+            let body = serde_json::to_vec(&rows).unwrap_or_default();
+            send(req, "application/json", body, file("json"))
+        };
+    }
+    // One tab: its marker and the statements in it.
+    let only = match q.get("tab") {
+        None => None,
+        Some(label) => {
+            let mut found = None;
+            for (j, p) in plan.iter().enumerate() {
+                if !p
+                    .roles
+                    .iter()
+                    .any(|(_, r)| matches!(r, anofox_visualization::Role::Tab))
+                {
+                    continue;
+                }
+                let name = data.run(j).ok().and_then(|c| {
+                    c.first()
+                        .and_then(|(_, v)| v.first().map(anofox_visualization::value_text))
+                });
+                if name.is_some_and(|n| n.trim().eq_ignore_ascii_case(label.trim())) {
+                    found = Some(j);
+                    break;
+                }
+            }
+            let Some(j) = found else {
+                return reply(req, 404, "no such tab");
+            };
+            Some(
+                std::iter::once(j)
+                    .chain(
+                        (0..dash.stmts.len())
+                            .filter(|i| dash.tabs.get(*i).is_some_and(|t| t.contains(&j))),
+                    )
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    let width = match q.get("width").map(|w| w.parse::<u32>()) {
+        None => 1200,
+        Some(Ok(w)) if (480..=4000).contains(&w) => w,
+        _ => return reply(req, 400, "width must be 480..=4000"),
+    };
+    let opts = dashboard::DashboardOptions {
+        width,
+        theme: st.opts.theme.clone(),
+        variant: if q.get("dark").is_some_and(|d| d == "1") {
+            anofox_visualization::theme::Variant::Dark
+        } else {
+            anofox_visualization::theme::Variant::Light
+        },
+        asset_root: st.assets_root.clone(),
+        only,
+        ..Default::default()
+    };
+    match dashboard::render_dashboard_svg(&dash.sql, &mut data, &opts) {
+        _ if data.fatal.is_some() => {
+            let (code, e) = data.fatal.take().unwrap_or_default();
+            reply(req, code, &e)
+        }
+        Ok(svg) => send(req, "image/svg+xml", svg.into_bytes(), file("svg")),
+        Err(e) => reply(req, 400, &e),
+    }
+}
+
 /// The gauges of `GET /metrics` (#765), read now.
 fn metric_gauges(st: &Locked) -> Vec<metrics::Gauge> {
     use metrics::Gauge;
@@ -5124,6 +5506,8 @@ fn metric_gauges(st: &Locked) -> Vec<metrics::Gauge> {
     g
 }
 
+/// The effective limits and how much of them is in use (`/healthz`, signed-in
+/// callers only).
 fn limits_json(st: &Locked) -> serde_json::Value {
     let o = &st.opts;
     let (running, waiting, timed_out) = st.queries.stats();
@@ -5635,7 +6019,23 @@ fn locked_panel(
     info: &mut LogInfo,
     charge: &mut Charge,
 ) -> Result<(Arc<String>, String, String), (u16, String)> {
-    let mut r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+    let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+    locked_panel_req(st, r, supersede, claims, scope, auth_method, info, charge)
+}
+
+/// [`locked_panel`] for a request already parsed and validated (an export,
+/// #764, builds its own from the URL).
+#[allow(clippy::too_many_arguments)]
+fn locked_panel_req(
+    st: &Locked,
+    mut r: sv::PanelRequest,
+    supersede: Option<&str>,
+    claims: Option<&Claims>,
+    scope: Option<&Scope>,
+    auth_method: Option<&str>,
+    info: &mut LogInfo,
+    charge: &mut Charge,
+) -> Result<(Arc<String>, String, String), (u16, String)> {
     info.dashboard = Some(r.dashboard.clone());
     info.panel = Some(r.panel);
     for name in r.vars.iter().map(|(n, _)| n) {
@@ -7708,6 +8108,51 @@ fn list_page(st: &Locked, scope: Option<&Scope>) -> String {
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::set_default;
+
+    #[test]
+    fn only_plain_literal_defaults_become_variables() {
+        let ok = |s: &str| set_default(s);
+        assert_eq!(
+            ok("SET VARIABLE region = 'EU'"),
+            Some(("region".into(), "'EU'".into()))
+        );
+        assert_eq!(
+            ok("set variable n = -2.5;"),
+            Some(("n".into(), "-2.5".into()))
+        );
+        assert_eq!(
+            ok("SET VARIABLE picks = ['a', 'b''c']"),
+            Some(("picks".into(), "['a', 'b''c']".into()))
+        );
+        assert_eq!(
+            ok("SET VARIABLE b = TRUE"),
+            Some(("b".into(), "TRUE".into()))
+        );
+        assert_eq!(
+            ok("SET VARIABLE \"region\" = 'EU'"),
+            Some(("region".into(), "'EU'".into()))
+        );
+        for bad in [
+            "SET VARIABLE x = (SELECT secret FROM t)",
+            "SET VARIABLE x = getvariable('y')",
+            "SET VARIABLE __claim_user = 'admin'",
+            "SET VARIABLE anofox_data = '/'",
+            "SET VARIABLE a b = 1",
+            "SET VARIABLE \"__claim_user\" = 'admin'",
+            "SET VARIABLE \"a\"\"b\" = 1",
+            "SET threads = 1",
+            "CREATE TABLE t AS SELECT 1",
+            "SET VARIABLE x = ",
+            "SET VARIABLE x = 'a'; DROP TABLE t",
+        ] {
+            assert_eq!(set_default(bad), None, "{bad}");
+        }
+    }
 }
 
 #[cfg(test)]
