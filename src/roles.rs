@@ -72,6 +72,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL"),
     e("SUBTITLE", &["SUBHEADING"], R::Subtitle, "encoding", true,
       "a line under the panel's title (smaller, muted)"),
+    e("CLASS", &[], R::Class, "encoding", true,
+      "a class of the operator's stylesheet on the panel (a name of a-z, 0-9 and -; the page adds ax-c-)"),
     e("INFO", &["DESCRIPTION", "DEFINITION"], R::Info, "encoding", true,
       "a definition behind an ⓘ on the panel's title bar (hover, focus or click)"),
     e("OPEN", &[], R::Open, "encoding", true, "candlestick open price"),
@@ -1139,6 +1141,7 @@ mod tests {
             Role::Label,
             Role::Title,
             Role::Subtitle,
+            Role::Class,
             Role::Columns,
             Role::GroupStart,
             Role::GroupEnd,
@@ -1320,6 +1323,7 @@ mod tests {
                 | Role::Label
                 | Role::Title
                 | Role::Subtitle
+                | Role::Class
                 | Role::Value(_)
                 | Role::Input(_)
                 | Role::Columns

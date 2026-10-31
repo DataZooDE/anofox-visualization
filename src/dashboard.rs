@@ -1515,7 +1515,7 @@ pub fn record_pairs(
 ) -> (Vec<(String, String)>, usize) {
     let chrome: Vec<usize> = roles
         .iter()
-        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Info))
+        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info))
         .map(|(i, _)| *i)
         .collect();
     let data: Vec<&(String, Vec<Value>)> = rows
@@ -1713,7 +1713,7 @@ fn table_svg(
     );
     let skip: std::collections::HashSet<usize> = roles
         .iter()
-        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Info))
+        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info))
         .map(|(i, _)| *i)
         .collect();
     // Per-column format roles (::MONEY, ::PERCENT, ::TREND, ::COLORSCALE, …),

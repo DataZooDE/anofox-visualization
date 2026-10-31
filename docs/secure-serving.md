@@ -758,6 +758,10 @@ of the authoring servers carries a
     viewer's own explicit choice (their remembered toggle, or a dashboard
     link's `?tables=`) and never forces a dashboard's own in-page bar on
     (that stays `-- @astables on` / the toolbar's **⋯** menu, #401).
+    Its `favicon` is also every dashboard page's icon, unless a dashboard
+    sets its own `::FAVICON`.
+  - `css_file` — the operator's stylesheet (#773), linked after the theme
+    on every page. See [Your own look](#your-own-look-optionscss_file-class-773).
     `serve --dashboards` (mode B, script-free) has no toggle at all to
     seed — there is no client script there — so `charts_as_tables` only
     ever has an effect on `anofox_serve_dashboards`'s own dashboard pages
@@ -851,6 +855,51 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
 SELECT anofox_serve_refresh(8095);   -- fresh data now, without a restart
 SELECT anofox_serve_stop(8095);
 ```
+
+### Your own look (`options.css_file`, `::CLASS`, #773)
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095,
+  '{"css_file": "/etc/anofox/site.css",
+    "app": {"name": "Acme Analytics", "favicon": "data:image/png;base64,…"}}');
+```
+
+- **`css_file`** is read once at start, served at `/static/site.css` and
+  linked last in `<head>` of every page (the landing page and each
+  dashboard), so its rules win over the theme at equal specificity. The
+  theme's colour tokens (`--ax-*`) can be overridden there too. Changing
+  the file takes a restart.
+- **Nothing off the server:** the server refuses to start when the file has
+  `@import`, a `url(…)` that isn't a `data:` URL, or `image-set(…)` /
+  `src(…)`. CSS escapes are decoded before the check. The page's CSP alone
+  would let a stylesheet load images from any `https:` origin, which would
+  call a third party on every page view. Fonts and images go in as `data:`
+  URLs. At most 256 KiB.
+- `/static/site.css` answers without a login, like the UI's own files (an
+  embedded page's `<link>` can't send its session header). It holds no data.
+- **`::CLASS`** on a panel names one of the stylesheet's classes; the page
+  adds it as **`ax-c-<name>`**:
+
+  ```sql
+  SELECT sum(amount)::MONEY, 'Revenue'::LABEL, 'kpi-hero'::CLASS FROM sales;
+  SELECT region::XAXIS, sum(amount)::BARCHART,
+         CASE WHEN sum(amount) < 0 THEN 'alert' END::CLASS
+  FROM sales GROUP BY ALL;
+  ```
+
+  ```css
+  .ax-c-kpi-hero { font-size: 1.3em; border-left: 4px solid var(--ax-accent); }
+  .ax-c-alert    { outline: 2px solid #b91c1c; }
+  ```
+
+  A name is 1–40 characters of `a-z`, `0-9` and `-`. Several names are
+  separated by spaces (at most 4). Anything else is ignored, and
+  `dashboard --check` warns about a literal one (`class/name`). The prefix
+  is the security property: a dashboard author can only reach the
+  operator's classes, never the app's own (to hide a notice or fake a
+  dialog). There is no per-dashboard CSS.
+- `css_file` is a server option only: `dashboard --site` ignores it, and
+  `serve --dashboards` (the CLI's static render) doesn't take it.
 
 ### Exports (`GET /api/export/…`, #764)
 

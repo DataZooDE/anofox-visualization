@@ -391,6 +391,7 @@ fn per_node(r: Role) -> bool {
             | Role::Info
             | Role::Title
             | Role::Subtitle
+            | Role::Class
     )
 }
 

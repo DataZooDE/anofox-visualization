@@ -1277,3 +1277,24 @@ post_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:$PO
 [ "$post_code" = 405 ] || fail "POST to an asset should be 405: $post_code"
 stop
 echo "OK: #514 PR B: GET/HEAD /d/<id>/assets/<rest> — containment, extension allow-list, magic-byte MIME, size cap, headers; POST 405"
+
+# #773: options.css_file — the operator's stylesheet, checked at start,
+# served at /static/site.css (no login needed, like the UI's own files) and
+# linked last in <head> of every page.
+printf '.ax-c-kpi-hero{font-size:1.4em}\n' > "$T/site.css"
+printf 'a{background:url(https://tracker.example/p.png)}\n' > "$T/remote.css"
+if QUIET=1 start "$T/main.duckdb" "" "$(serve "{\"css_file\": \"$T/remote.css\"}")"; then
+  fail "css_file with a remote url() should refuse the start"
+fi
+grep -q "only data: URLs" "$T/out" || fail "css_file: no reason given: $(cat "$T/out")"
+exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
+start "$T/main.duckdb" "" "$(serve "{\"css_file\": \"$T/site.css\"}")" || fail "css_file: the server should start"
+[ "$(get /static/site.css)" = 200 ] || fail "/static/site.css: $(cat "$T/abody")"
+grep -qi "^content-type: text/css" "$T/aheaders" || fail "site.css content-type: $(cat "$T/aheaders")"
+grep -q "ax-c-kpi-hero" "$T/abody" || fail "site.css body: $(cat "$T/abody")"
+for p in / /d/t; do
+  [ "$(get "$p")" = 200 ] || fail "$p: $(cat "$T/abody")"
+  grep -q '<link rel="stylesheet" href="/static/site.css"></head>' "$T/abody" || fail "$p: no site.css link"
+done
+stop
+echo "OK: #773: css_file checked at start, served at /static/site.css, linked on every page"

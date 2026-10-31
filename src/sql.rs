@@ -1077,6 +1077,7 @@ fn rewrite_list(list: &str) -> Rewritten {
                 | Role::Label
                 | Role::Title
                 | Role::Subtitle
+                | Role::Class
         )
     });
 
@@ -1111,7 +1112,7 @@ fn rewrite_list(list: &str) -> Rewritten {
                     // number format, colour scale, badge, sparkline) by output
                     // position so the browser can render each.
                     if let Some(rr) = parse_role(tok) {
-                        if matches!(rr, Role::Title | Role::Subtitle | Role::Info)
+                        if matches!(rr, Role::Title | Role::Subtitle | Role::Class | Role::Info)
                             || crate::roles::is_table_format(rr)
                         {
                             roles.push((idx, rr));
