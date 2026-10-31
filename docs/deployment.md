@@ -104,6 +104,7 @@ The extension is unsigned, so `run-locked.sh` passes `-unsigned`.
 | `max_response_mb` | 32 | One response; larger is `413`. |
 | `max_asset_bytes` | 5 MiB | One file from the dashboards folder's `assets/` subfolder (`GET /d/<id>/assets/<rest>`, #514). Over it: `404`. |
 | `search_path` | default database | `"warehouse"`, `"warehouse.sales"`, or several comma-separated: where unqualified names resolve. |
+| `metrics` | off | `{"token_env": "ANOFOX_METRICS_TOKEN"}`: Prometheus metrics at `GET /metrics` for a scraper that sends `Authorization: Bearer <token>` (§8). |
 
 The DuckDB settings apply before the configuration is locked. A request cannot
 change them.
@@ -612,6 +613,48 @@ delayed ACK: "hot" panel p95 was 47 ms (now 14), and a dashboard load took
 | refresh under load (L4) | no error spike or latency cliff | 0 errors; panel p95 14 → 18 ms |
 | errors (not 4xx by design) | 0 | 0 in every scenario |
 | RSS ≤ `memory_limit` + `max_inflight_mb` + 400 MB under abuse (#103) | 976 MB at 512MB | 849 MB (before `max_queries`: 1,086 MB) |
+
+## 8. Monitoring
+
+`/healthz` answers a load balancer. For dashboards and alerts, turn on the
+Prometheus endpoint (#765):
+
+```json
+{"metrics": {"token_env": "ANOFOX_METRICS_TOKEN"}}
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: anofox-dash
+    scheme: https
+    authorization: {credentials_file: /etc/prometheus/anofox-metrics-token}
+    static_configs: [{targets: ["dash.example.com"]}]
+```
+
+The token (at least 32 characters, `openssl rand -hex 32`) is the only way
+in: `/metrics` needs no viewer login and is `401` without it (`404` when the
+option is not set). It is not a viewer credential and opens nothing else.
+Behind the reverse proxy (§3), either forward `/metrics` like every other path
+or keep it internal. Each replica reports its own numbers; label them by
+target.
+
+| Metric | Type | What it tells |
+|---|---|---|
+| `anofox_http_requests_total{route, code}` | counter | Requests by route (`page`, `panel`, `asset`, `health`, `submit`, `save`, `login`, `metrics`, `list`, `other`) and status class (`2xx` … `5xx`) |
+| `anofox_http_request_duration_seconds{route}` | histogram | Time to answer, 5 ms – 30 s buckets |
+| `anofox_http_denied_total{reason}` | counter | Refusals by reason (`no_credentials`, `expired`, `out_of_scope`, `metrics_token`, …) |
+| `anofox_panel_requests_total{cache}` | counter | Panel requests answered from the cache (`hit`), by joining a run in flight (`shared`) or by running (`run`) |
+| `anofox_snapshot_epoch`, `anofox_snapshot_age_seconds` | gauge | The snapshot's generation and age: alert when the age grows past `refresh_s` |
+| `anofox_snapshot_refreshing`, `anofox_snapshot_refresh_failed` | gauge | A refresh running; the last one failed |
+| `anofox_queries_running`, `anofox_queries_waiting`, `anofox_queries_refused` | gauge | Query slots (§6): waiting > 0 for long means raise `max_queries` or `duckdb_threads` |
+| `anofox_inflight_bytes`, `anofox_inflight_peak_bytes`, `anofox_inflight_refused` | gauge | Results held until written (`max_inflight_mb`) |
+| `anofox_state_store_ok` / `_full`, `anofox_writeback_ok` / `_full` | gauge | The per-viewer state store and the write-back change log, when configured |
+| `anofox_source_consecutive_failures`, `anofox_source_build_overdue` | gauge | A Quack source, when configured |
+| `anofox_dashboards`, `anofox_build_info{version}` | gauge | What the server serves and which build |
+
+Label values are fixed by the server: never a path, a dashboard id, a user or a
+variable, so a client can't add series or read anything about other viewers.
 
 ## Checklist
 

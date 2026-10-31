@@ -159,6 +159,36 @@ done
 stop
 echo "OK: size cap (413), query slots (503 + Retry-After), limits + version in /healthz"
 
+# 3b. Prometheus metrics (#765): behind their own bearer token; without the
+# option there is no such route.
+if QUIET=1 start "$T/main.duckdb" "" "$(serve '{"metrics": {"token": "short"}}')"; then
+  fail "a metrics token under 32 characters should refuse the start"
+fi
+grep -q "at least 32 printable" "$T/out" || fail "metrics: no reason given: $(cat "$T/out")"
+exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
+start "$T/main.duckdb" "" "$(serve '{}')" || fail "server without metrics"
+[ "$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/metrics")" = 404 ] || fail "/metrics without options.metrics should 404"
+stop
+MTOKEN="$(printf 'm%.0s' $(seq 40))"
+start "$T/main.duckdb" "" "$(serve "{\"metrics\": {\"token\": \"$MTOKEN\"}}")" || fail "metrics server"
+[ "$(panel 0)" = 200 ] && [ "$(panel 0)" = 200 ] || fail "metrics: panel 0"
+[ "$(panel 9)" = 404 ] || fail "metrics: a panel that does not exist"
+met() { curl -s -o "$T/met" -D "$T/meth" -w "%{http_code}" "$@" "http://127.0.0.1:$PORT/metrics"; }
+[ "$(met)" = 401 ] && grep -qi "^www-authenticate: bearer" "$T/meth" || fail "/metrics without a token: $(cat "$T/meth")"
+[ "$(met -H "Authorization: Bearer ${MTOKEN}x")" = 401 ] || fail "/metrics with a wrong token"
+[ "$(met -X POST -H "Authorization: Bearer $MTOKEN")" = 405 ] || fail "POST /metrics should be 405"
+[ "$(met -H "Authorization: Bearer $MTOKEN")" = 200 ] || fail "/metrics with the token: $(cat "$T/met")"
+grep -qi "^content-type: text/plain; version=0.0.4" "$T/meth" || fail "/metrics content type: $(cat "$T/meth")"
+for k in 'anofox_http_requests_total{route="panel",code="2xx"} 2' 'anofox_http_requests_total{route="panel",code="4xx"} 1' \
+         'anofox_http_request_duration_seconds_count{route="panel"} 3' 'anofox_panel_requests_total{cache="run"} 1' \
+         'anofox_panel_requests_total{cache="hit"} 1' 'anofox_http_denied_total{reason="metrics_token"} 2' \
+         'anofox_snapshot_epoch 1' 'anofox_dashboards 1' 'anofox_build_info{version="v' 'anofox_queries_running 0'; do
+  grep -qF "$k" "$T/met" || fail "/metrics lacks $k: $(cat "$T/met")"
+done
+grep -q '/api\|"t"' "$T/met" && fail "/metrics names a path or a dashboard: $(cat "$T/met")"
+stop
+echo "OK: /metrics — 404 without the option, bearer token (401/405), counters, histograms, gauges; no request data in labels"
+
 # 4. Viewer variables (#151). The server sets the viewer's values first, then
 # re-runs the dashboard's own SETs: a plain SET wins, a defaulting
 # coalesce(getvariable(…), …) keeps the viewer's value.

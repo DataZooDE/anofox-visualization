@@ -57,6 +57,7 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("audit", SiteOptionKind::ServerOnly),
     ("log", SiteOptionKind::ServerOnly),
     ("log_vars", SiteOptionKind::ServerOnly),
+    ("metrics", SiteOptionKind::ServerOnly),
     ("bind", SiteOptionKind::ServerOnly),
     ("memory_limit", SiteOptionKind::ServerOnly),
     ("duckdb_threads", SiteOptionKind::ServerOnly),
