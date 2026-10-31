@@ -27,6 +27,11 @@ open = "5"
 # The access policy's `hash` mask: HMAC-SHA256 with the server's key (#49).
 hmac = "0.12"
 sha2 = "0.10"
+# #764: PNG / PDF exports — the server's own SVG, rasterised (resvg) or
+# turned into a PDF (svg2pdf) with one bundled font (duckext/fonts/, OFL).
+# Same usvg (0.45) for both.
+resvg = { version = "0.45", default-features = false, features = ["text", "raster-images"] }
+svg2pdf = { version = "0.13", default-features = false, features = ["image", "text"] }
 
 [build-dependencies]
 bindgen = "0.72"

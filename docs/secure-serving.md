@@ -867,6 +867,7 @@ curl -H "Authorization: Bearer $KEY" -o totals.csv \
 | Request | Answer |
 |---|---|
 | `GET /api/export/<dashboard>.svg` | The whole dashboard as one SVG, as `dashboard --svg` draws it; `?tab=<label>` only that tab, `?width=480…4000` (default 1200), `?dark=1` the dark variant |
+| `GET /api/export/<dashboard>.png` / `.pdf` | The same picture as a PNG (`?scale=1…4`, default 2; at most 40 million pixels) or a one-page vector PDF, drawn with the bundled Hanken Grotesk font (the default theme's; SIL Open Font License) whatever fonts the server has. Only `data:` images are drawn, nothing is fetched |
 | `GET /api/export/<dashboard>/<name>.csv` / `.json` | The rows of the panel named `-- @name <name>`: CSV with a header row (the query's column names), or a JSON array of objects |
 
 - `?v.<name>=<value>` sets a variable, as a page URL does (a text value; `-- @vars`
@@ -882,7 +883,6 @@ curl -H "Authorization: Bearer $KEY" -o totals.csv \
   `@` first) gets a leading `'`, as in the browser's own CSV download.
 - Setup statements run per panel as always; a `-- @requires` input that is
   missing shows its panel as not available.
-- PNG and PDF are not in this slice (they need fonts on the server).
 
 ### Per-viewer state (`options.state`, #517)
 
