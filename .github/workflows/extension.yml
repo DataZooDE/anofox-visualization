@@ -14,7 +14,9 @@ name: Release full toolkit
 #       published static site; a GitHub Pages workflow fetches it with
 #       `gh release download`, same as pages.yml builds the app for its own
 #       Pages deploy.
-#   SHA256SUMS
+#   anofox-visualization-<tag>.spdx.json (the SBOM, #766)
+#   SHA256SUMS, SHA256SUMS.sigstore.json (its keyless signature, #766) and
+#   a build provenance attestation for every asset (GitHub attestations)
 # Each platform builds and smoke-tests on its own runner against the DuckDB CLI
 # pinned in .duckdb-version. The logic lives in scripts/release/ (runnable
 # locally); this file only wires runners to it.
@@ -66,8 +68,9 @@ jobs:
     steps:
       # Full history + tags: the binaries and the embedded web/pkg show the
       # build version from git describe — exactly the tag on a release (#216).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Tag matches the Cargo.toml version
@@ -76,15 +79,20 @@ jobs:
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ "$RELEASE_TAG" = "v$VERSION" ] || { echo "::error::tag $RELEASE_TAG != v$VERSION (Cargo.toml)"; exit 1; }
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      # A release (v* tag) builds cold: no cache another run could have
+      # written goes into the published binaries (#766); the release/**
+      # pre-builds keep it.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2 # zizmor: ignore[cache-poisoning]
+        if: env.RELEASE_TAG == ''
         with:
           key: release-${{ matrix.platform }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -92,7 +100,7 @@ jobs:
       # wasm32-unknown-unknown + wasm-bindgen + wasm-opt — no wasm-pack,
       # which doesn't work on every box; see that script's comments), so
       # this installs the two CLIs it needs instead of wasm-pack.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2
         with:
           # Must match the `wasm-bindgen` crate pinned in Cargo.lock —
           # build-native.sh checks this itself and fails loudly on a
@@ -144,7 +152,7 @@ jobs:
         if: matrix.platform == 'linux_amd64'
         run: scripts/release/build-web.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: full-toolkit-${{ matrix.platform }}
           path: dist/*
@@ -157,23 +165,61 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # #766: keyless signing (cosign) and the build provenance attestation
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: full-toolkit-*
           merge-multiple: true
           path: dist
 
-      - name: SHA256SUMS + upload (release only on a v* tag)
+      # #766: an SPDX SBOM of the source tree's dependencies (Cargo.lock,
+      # package-lock.json), released next to the binaries.
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/anofox-visualization-${{ env.RELEASE_TAG || 'manual' }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: SHA256SUMS
+        env:
+          DRY_RUN: "1"
+        run: scripts/release/upload-release.sh "${RELEASE_TAG:-manual}" dist
+
+      # #766: on a release, SLSA build provenance for every asset (through
+      # SHA256SUMS: `gh attestation verify <file> --repo <this repo>`) and a
+      # keyless Sigstore signature of SHA256SUMS (SHA256SUMS.sigstore.json:
+      # `cosign verify-blob`, see SECURITY.md).
+      - name: Build provenance
+        if: env.RELEASE_TAG != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: env.RELEASE_TAG != ''
+
+      - name: Sign SHA256SUMS
+        if: env.RELEASE_TAG != ''
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+
+      - name: Upload (release only on a v* tag)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           DRY_RUN: ${{ env.RELEASE_TAG == '' && '1' || '0' }}
         run: scripts/release/upload-release.sh "${RELEASE_TAG:-manual}" dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SHA256SUMS
           path: dist/SHA256SUMS

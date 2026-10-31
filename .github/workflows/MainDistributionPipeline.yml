@@ -16,6 +16,10 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# Least privilege (#766); a job that needs more asks for it.
+permissions:
+  contents: read
+
 concurrency:
   # See ci.yml's concurrency group for why: a spurious run (one whose `lane`
   # job skips below — #491/#531) gets its own, never-colliding group (a
