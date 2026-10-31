@@ -184,6 +184,11 @@ not an HTTP admin endpoint, so there is no new route or API-key scope.
 in a row and `RECOVERED` after it. `anofox_serve_report(port, name)` also
 checks an alert.
 
+**As built (R3, #768):** `notify.slack` (`token_env`, `allow_external`,
+`api_url` for a test fake) and `notify.teams` (named `url_env`s);
+recipients `{"slack": "<channel id>"}` and `{"teams": "<name>"}`. Teams'
+image limit is 750 KB of PNG (the card's 1 MB, base64).
+
 ## 7. Not in scope
 
 - A browser UI for tasks or reports (they're files and options, edited in git).
