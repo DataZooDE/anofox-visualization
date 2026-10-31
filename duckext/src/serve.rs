@@ -44,6 +44,7 @@ use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
 use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
+use anofox_visualization::host::metrics;
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
     self as sv, content_type, json_for_script, quote_ident, sql_string_literal, AuthoringGuard,
@@ -1240,6 +1241,9 @@ pub struct LockedOptions {
     /// `max_asset_bytes` (#514 PR B): the cap on one file served from
     /// `<dashboards dir>/assets/` (`GET /d/<id>/assets/<rest>`, [`locked_asset`]).
     pub max_asset_bytes: usize,
+    /// `metrics` (#765): the bearer token `GET /metrics` needs — `None`: no
+    /// such route (404).
+    pub metrics_token: Option<String>,
 }
 
 /// One entry of `options.nav_pickers` (or the single-element list
@@ -1423,6 +1427,45 @@ fn parse_daterange_nav_picker(
     })
 }
 
+/// `options.metrics` (#765): `{"token_env": "NAME"}` (or `{"token": "…"}`) —
+/// the bearer token a Prometheus scraper sends to `GET /metrics`; at least
+/// 32 printable ASCII characters.
+fn parse_metrics(val: &serde_json::Value) -> Result<String, String> {
+    let m = val.as_object().ok_or(
+        "options.metrics must be an object like {\"token_env\": \"ANOFOX_METRICS_TOKEN\"}",
+    )?;
+    for k in m.keys() {
+        if !matches!(k.as_str(), "token" | "token_env") {
+            return Err(format!(
+                "options.metrics: unknown key '{k}' (token_env, token)"
+            ));
+        }
+    }
+    let t = match (m.get("token"), m.get("token_env")) {
+        (Some(t), None) => t
+            .as_str()
+            .ok_or("options.metrics.token must be a string")?
+            .to_string(),
+        (None, Some(e)) => {
+            let name = e
+                .as_str()
+                .ok_or("options.metrics.token_env must be a string")?;
+            std::env::var(name).map_err(|_| {
+                format!("options.metrics.token_env: environment variable '{name}' is not set")
+            })?
+        }
+        _ => return Err("options.metrics: give token_env (or token), one of them".into()),
+    };
+    let t = t.trim().to_string();
+    if t.len() < 32 || !t.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(
+            "options.metrics: the token must be at least 32 printable ASCII characters (e.g. `openssl rand -hex 32`)"
+                .into(),
+        );
+    }
+    Ok(t)
+}
+
 fn parse_nav_picker_label(
     m: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Option<String>, String> {
@@ -1481,6 +1524,7 @@ impl Default for LockedOptions {
             state_opts: None,
             writeback_opts: None,
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
+            metrics_token: None,
         }
     }
 }
@@ -1651,6 +1695,9 @@ impl LockedOptions {
                         val.as_str()
                             .ok_or("options.log_vars must be none, names or values")?,
                     )
+                }
+                "metrics" => {
+                    o.metrics_token = Some(parse_metrics(val)?);
                 }
                 "bind" => {
                     o.bind = val
@@ -2543,6 +2590,8 @@ struct Locked {
     submit: Option<Arc<SubmitRuntime>>,
     /// `options.writeback`'s live runtime (#684) — `None` unless configured.
     writeback: Option<Arc<WritebackRuntime>>,
+    /// Request counts and latencies for `GET /metrics` (#765).
+    metrics: anofox_visualization::host::metrics::Metrics,
     /// `<dir>/assets`, canonicalized once at startup (#514 PR B) — `None`
     /// when there is no such folder next to the dashboards, so every
     /// `GET /d/<id>/assets/<rest>` request 404s ([`locked_asset`]).
@@ -3478,6 +3527,7 @@ pub fn start_locked(
         submit,
         writeback,
         assets_root,
+        metrics: Default::default(),
     });
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -4445,6 +4495,15 @@ fn handle_locked(st: &Locked, req: Request) {
     let peer = req.remote_addr().map(|a| a.ip());
     let mut info = LogInfo::default();
     let status = route_locked(st, req, &path, &mut info);
+    // #765: always counted (cheap atomics); exposed only with options.metrics.
+    st.metrics
+        .record(metrics::route_of(&method, &path), status, t0.elapsed());
+    if let Some(d) = info.deny {
+        st.metrics.denied(d);
+    }
+    if let Some(c) = info.cache {
+        st.metrics.cache(c);
+    }
     if let Some(log) = &st.opts.log {
         // Page views, data requests and refusals; not every static asset.
         // #517 S2, plan §4.6: "/api/submit always logged".
@@ -4640,6 +4699,34 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
     // CSRF: a browser request from another origin is refused outright.
     if !sv::origin_matches_host(m.origin, m.host) {
         return reply(req, 403, "forbidden: cross-origin request");
+    }
+    // #765: Prometheus metrics, behind their own bearer token (a scraper
+    // has no viewer login); without `options.metrics` there is no such route.
+    if let (Some(token), "/metrics") = (&st.opts.metrics_token, path) {
+        if req.method() != &Method::Get {
+            return reply(req, 405, "method not allowed");
+        }
+        let given = req_header(&req, "Authorization")
+            .and_then(|h| h.split_once(' '))
+            .filter(|(s, _)| s.eq_ignore_ascii_case("bearer"))
+            .map(|(_, t)| t.trim().to_string());
+        let ok = given.is_some_and(|t| auth::session::ct_eq(&t, token));
+        if !ok {
+            info.deny = Some("metrics_token");
+            let resp = Response::from_data(&b"unauthorized"[..])
+                .with_status_code(401)
+                .with_header(header("WWW-Authenticate", "Bearer"))
+                .with_header(header("Cache-Control", "no-store"));
+            let _ = req.respond(resp);
+            return 401;
+        }
+        let body = st.metrics.render(&metric_gauges(st));
+        let resp = Response::from_data(body.into_bytes())
+            .with_status_code(200)
+            .with_header(header("Content-Type", metrics::CONTENT_TYPE))
+            .with_header(header("Cache-Control", "no-store"));
+        let _ = req.respond(resp);
+        return 200;
     }
     let health = req.method() == &Method::Get && (path == "/health" || path == "/healthz");
     // Login: with `options.auth` every request but the health check (and,
@@ -4908,6 +4995,116 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
 
 /// The effective limits and how much of them is in use (`/healthz`, signed-in
 /// callers only).
+/// The gauges of `GET /metrics` (#765), read now.
+fn metric_gauges(st: &Locked) -> Vec<metrics::Gauge> {
+    use metrics::Gauge;
+    let gen = st.current.get();
+    let (running, waiting, timed_out) = st.queries.stats();
+    let b = |v: bool| if v { 1.0 } else { 0.0 };
+    let mut g = vec![
+        Gauge {
+            name: "anofox_build_info",
+            help: "The server's build (value 1).",
+            values: vec![(
+                vec![("version", anofox_visualization::BUILD_VERSION.to_string())],
+                1.0,
+            )],
+        },
+        Gauge::one(
+            "anofox_dashboards",
+            "Dashboards served.",
+            st.dashboards.len() as f64,
+        ),
+        Gauge::one(
+            "anofox_snapshot_epoch",
+            "The snapshot's generation (+1 per refresh).",
+            gen.epoch as f64,
+        ),
+        Gauge::one(
+            "anofox_snapshot_age_seconds",
+            "Seconds since the snapshot was built.",
+            gen.built.elapsed().as_secs_f64(),
+        ),
+        Gauge::one(
+            "anofox_snapshot_refreshing",
+            "1 while a refresh runs.",
+            b(st.current.refreshing()),
+        ),
+        Gauge::one(
+            "anofox_snapshot_refresh_failed",
+            "1 when the last refresh failed.",
+            b(st.current.last_failed()),
+        ),
+        Gauge::one(
+            "anofox_queries_running",
+            "Panel queries running.",
+            running as f64,
+        ),
+        Gauge::one(
+            "anofox_queries_waiting",
+            "Panel queries waiting for a slot.",
+            waiting as f64,
+        ),
+        Gauge::one(
+            "anofox_queries_refused",
+            "Panel queries refused (no slot in time) since the start.",
+            timed_out as f64,
+        ),
+        Gauge::one(
+            "anofox_inflight_bytes",
+            "Result bytes held until their responses are written.",
+            st.inflight.used() as f64,
+        ),
+        Gauge::one(
+            "anofox_inflight_peak_bytes",
+            "Peak of anofox_inflight_bytes since the start.",
+            st.inflight.peak() as f64,
+        ),
+        Gauge::one(
+            "anofox_inflight_refused",
+            "Requests refused for the in-flight budget since the start.",
+            st.inflight.refused() as f64,
+        ),
+    ];
+    if let Some(s) = &st.submit {
+        g.push(Gauge::one(
+            "anofox_state_store_ok",
+            "1 while the per-viewer state store accepts submits.",
+            b(!s.store.is_failed()),
+        ));
+        g.push(Gauge::one(
+            "anofox_state_store_full",
+            "1 when the per-viewer state store is full.",
+            b(s.full.load(Ordering::Relaxed)),
+        ));
+    }
+    if let Some(w) = &st.writeback {
+        g.push(Gauge::one(
+            "anofox_writeback_ok",
+            "1 while the write-back change log accepts saves.",
+            b(!w.store.is_failed()),
+        ));
+        g.push(Gauge::one(
+            "anofox_writeback_full",
+            "1 when the write-back change log is full.",
+            b(w.full.load(Ordering::Relaxed)),
+        ));
+    }
+    if st.opts.source.is_some() {
+        g.push(Gauge::one(
+            "anofox_source_consecutive_failures",
+            "Failed snapshot builds from the Quack source in a row.",
+            st.current.consecutive_failures() as f64,
+        ));
+        g.push(Gauge::one(
+            "anofox_source_build_overdue",
+            "1 while a source build runs past its deadline.",
+            b(st.source_build.overdue()),
+        ));
+    }
+    g
+}
+
 fn limits_json(st: &Locked) -> serde_json::Value {
     let o = &st.opts;
     let (running, waiting, timed_out) = st.queries.stats();
