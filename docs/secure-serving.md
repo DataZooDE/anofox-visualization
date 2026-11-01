@@ -1723,6 +1723,19 @@ dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [
   generated pages `SET VARIABLE anofox_data = '<url>'` before every
   dashboard, exactly like a locked server's `getvariable('anofox_data')` —
   dashboard SQL doesn't need to know it's no longer talking to a server.
+- **Performance (#830).** In the browser a `read_parquet` over a URL is a
+  fresh set of HTTP requests, and a `TEMP VIEW` over it reads the file again
+  for every panel that uses it. With `--data <dir>`, `site.json` lists the
+  copied files (`dataFiles`) and the page reads each one **once**: the first
+  statement that names it (`… || '/sales.parquet'`) fetches it, and every
+  later read, views included, is served from memory, across dashboard
+  switches too. `anofox_data` is then a local name (`anofox-site-data`), not
+  the URL. Files no statement names are never fetched; above 192 MB in all,
+  the rest are read over HTTP (DuckDB's HTTP metadata and object caches on).
+  So the locked server's advice — views over `read_parquet` in setup, not
+  `TEMP TABLE`s — holds for a site too. With `--data <url>` nothing is
+  listed and every read goes over HTTP: there, one `CREATE TEMP TABLE … AS
+  FROM read_parquet(…)` per file at the top is much faster than views.
 - The built-in map boundaries (`::REGION`, a named `::BASEMAP`) are copied
   from `--app` into `out/data/boundaries/` (#655), so a local `--data`
   folder must not have its own top-level `boundaries` entry (refused).

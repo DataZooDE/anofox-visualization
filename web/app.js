@@ -1955,6 +1955,55 @@ async function ensureBoundaries(rowsJson, roles) {
 // that can't run in the browser) gets each file fetched and registered with
 // DuckDB-Wasm on first use (memoised per file; a failure is retried later).
 const dataFiles = {};
+// #830: a published site's data files (site.json `dataFiles`, written by
+// `dashboard --site`). In the browser every read_parquet over a URL is new
+// HTTP requests, and a view over one re-reads its file for every panel that
+// uses it — 45 reads of one file on one page were measured. Registering the
+// bytes under the URL itself doesn't help (DuckDB-Wasm still asks the
+// server), so `anofox_data` points at a local name, SITE_DATA_ROOT, and every
+// listed file is registered below it: as its URL at first (DuckDB reads it
+// over HTTP, with the HTTP metadata and object caches on), and — the first
+// time a statement names it — as its bytes, fetched once. Only named files
+// are fetched (a tab nobody opens costs nothing), up to SITE_DATA_CAP bytes
+// in all; the rest stay on HTTP.
+const SITE_DATA_ROOT = "anofox-site-data";
+const SITE_DATA_CAP = 192 << 20;
+let siteData = null; // {url, files: [{path, bytes, p}], used}
+async function siteDataInit(url, list) {
+  const files = (Array.isArray(list) ? list : [])
+    .filter((f) => f && typeof f.path === "string" && /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(f.path) && !f.path.split("/").includes("..") && Number.isFinite(f.bytes) && f.bytes >= 0)
+    .map((f) => ({ path: f.path, bytes: f.bytes, p: null }));
+  if (!files.length) return false;
+  try {
+    for (const f of files) await pageDb().registerFileURL(`${SITE_DATA_ROOT}/${f.path}`, `${url}/${f.path}`, 4 /* DuckDBDataProtocol.HTTP */, false);
+  } catch (e) {
+    console.warn("site data: " + e);
+    return false;
+  }
+  siteData = { url, files, used: 0 };
+  return true;
+}
+// The data files `sql` names (as `/<path>'` or `'<path>'`): fetched once
+// each and registered as bytes, in place of their URL.
+async function ensureSiteData(sql) {
+  if (!siteData) return;
+  const S = siteData;
+  const named = S.files.filter((f) => !f.p && (sql.includes(`/${f.path}'`) || sql.includes(`'${f.path}'`)));
+  for (const f of named) {
+    if (S.used + f.bytes > SITE_DATA_CAP) continue; // stays on HTTP
+    S.used += f.bytes;
+    f.p = (async () => {
+      const r = await fetch(`${S.url}/${f.path}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await pageDb().registerFileBuffer(`${SITE_DATA_ROOT}/${f.path}`, new Uint8Array(await r.arrayBuffer()));
+    })().catch((e) => {
+      // stays registered as its URL (read over HTTP)
+      console.warn(`site data ${f.path}: ${e}`);
+      S.used -= f.bytes;
+    });
+  }
+  await Promise.all(S.files.filter((f) => f.p).map((f) => f.p));
+}
 async function ensureDataFiles(sql) {
   if (backend === "live") return; // the native backend reads them from disk
   if (!db) throw new Error("in-browser DuckDB not ready");
@@ -2086,6 +2135,7 @@ async function prepareSql(sql) {
   if (need.includes("anofox_forecast")) await ensureForecast(sql);
   if (need.includes("anofox_statistics")) await ensureExtension("anofox_statistics");
   if (!servedMode && /'data\/[\w-]+\//.test(sql)) await ensureDataFiles(sql);
+  if (published) await ensureSiteData(sql);
 }
 
 // #244 §3.5: the assistant's view of the page's own DuckDB (pageAdapter)
@@ -2415,10 +2465,19 @@ async function boot() {
     const site = window.__anofoxSite;
     if (published && site && site.data) {
       const url = new URL(site.data.endsWith("/") ? site.data : site.data + "/", site.base).href.replace(/\/$/, "");
+      // #830: the listed files under a local name (siteDataInit), else the URL
+      const root = (await siteDataInit(url, site.dataFiles)) ? SITE_DATA_ROOT : url;
       try {
-        await conn.query(`SET VARIABLE anofox_data = '${url.replace(/'/g, "''")}'`);
+        await conn.query(`SET VARIABLE anofox_data = '${root.replace(/'/g, "''")}'`);
       } catch (e) {
         status("could not set anofox_data: " + e);
+      }
+      for (const q of ["SET enable_http_metadata_cache = true", "SET enable_object_cache = true"]) {
+        try {
+          await conn.query(q);
+        } catch (_) {
+          /* not on this build */
+        }
       }
     }
   }
@@ -9254,6 +9313,7 @@ async function sitePrepare() {
     basePath: new URL(".", base).pathname,
     home: (site.home && dashboards.some((d) => d.id === site.home) && site.home) || dashboards[0]?.id || id,
     data: site.data,
+    dataFiles: site.dataFiles,
   };
   // `anofox_data` itself (#407's locked-server rule, kept: a path_vars value
   // joined onto it never leaves the site — enforced in runSqlInner()

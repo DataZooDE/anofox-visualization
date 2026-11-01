@@ -1482,6 +1482,31 @@ fn site_build_nav_picker(
 /// fine folder needs). Refusing (not skipping) matches `too_broad`: a
 /// folder this command can't safely publish whole is worse to publish
 /// partially and silently than to refuse outright.
+/// The files under `dir` (recursively), as `/`-joined paths below it with
+/// their sizes, sorted; dot-files left out.
+fn list_files(dir: &Path, prefix: &str, out: &mut Vec<(String, u64)>) -> std::io::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            list_files(&entry.path(), &rel, out)?;
+        } else if ft.is_file() {
+            out.push((rel, entry.metadata()?.len()));
+        }
+    }
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -2207,6 +2232,10 @@ fn cmd_site(args: &[String]) {
         .unwrap_or_else(|e| fail(format!("assets/: {e}")));
     }
 
+    // #830: the copied files are listed in site.json (`dataFiles`), so the
+    // page can fetch each one once and keep it in memory instead of
+    // re-reading it over HTTP for every panel (a view over read_parquet).
+    let mut data_files: Vec<(String, u64)> = Vec::new();
     let site_data = match (&data, &data_value) {
         (Some(d), Some(v)) if is_data_url(d) => Some(v.clone()),
         (Some(_), Some(_)) => {
@@ -2214,6 +2243,8 @@ fn cmd_site(args: &[String]) {
             let src = Path::new(data.as_deref().unwrap());
             copy_dir_recursive(src, &data_out)
                 .unwrap_or_else(|e| fail(format!("copy --data: {e}")));
+            list_files(&data_out, "", &mut data_files)
+                .unwrap_or_else(|e| fail(format!("list --data: {e}")));
             Some("data".to_string())
         }
         _ => None,
@@ -2258,6 +2289,12 @@ fn cmd_site(args: &[String]) {
     }
     if let Some(d) = &site_data {
         site_json["data"] = serde_json::json!(d);
+    }
+    if !data_files.is_empty() {
+        site_json["dataFiles"] = serde_json::json!(data_files
+            .iter()
+            .map(|(p, b)| serde_json::json!({"path": p, "bytes": b}))
+            .collect::<Vec<_>>());
     }
     std::fs::write(
         out.join("site.json"),
@@ -3106,6 +3143,28 @@ mod site_tests {
     // side by side with the same folder on the locked server) rather than by
     // a unit test here.
     use super::*;
+
+    #[test]
+    fn list_files_walks_sorted_without_dot_files() {
+        let d = std::env::temp_dir().join(format!("dp-list-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("b.parquet"), b"12345").unwrap();
+        std::fs::write(d.join("a.csv"), b"1").unwrap();
+        std::fs::write(d.join(".hidden"), b"x").unwrap();
+        std::fs::write(d.join("sub/c.parquet"), b"123").unwrap();
+        let mut out = Vec::new();
+        list_files(&d, "", &mut out).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(
+            out,
+            vec![
+                ("a.csv".to_string(), 1),
+                ("b.parquet".to_string(), 5),
+                ("sub/c.parquet".to_string(), 3)
+            ]
+        );
+    }
 
     #[test]
     fn empty_options_are_the_default() {

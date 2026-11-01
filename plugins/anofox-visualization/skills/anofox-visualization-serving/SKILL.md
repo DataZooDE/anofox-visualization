@@ -178,7 +178,7 @@ dashboard --site dash/ out-dir --data data/ --options locked.json \
 
 `--init` runs once, read-write, before serving; `--cache <seconds>` is the shared render cache and the freshness knob. Try: `serve --dashboards examples/serve-dashboards/dash --init examples/serve-dashboards/init.sql`, or `examples/served/` for a locked server with cache, refresh and a data folder.
 
-`dashboard --site` turns a mode-A folder into files any static host (GitHub Pages, S3, …) can serve: the dashboards run in the browser's own DuckDB-Wasm, looking and behaving like the locked server, but with no login and no row/column policy (`--options` takes `path_vars`/`nav_picker`/`app`/`home`/`theme` only) — the data is public to anyone with the URL. See docs/secure-serving.md, "C. Publish as a static site".
+`dashboard --site` turns a mode-A folder into files any static host (GitHub Pages, S3, …) can serve: the dashboards run in the browser's own DuckDB-Wasm, looking and behaving like the locked server, but with no login and no row/column policy (`--options` takes `path_vars`/`nav_picker`/`app`/`home`/`theme` only) — the data is public to anyone with the URL. With `--data <dir>` each data file is fetched once, the first time a statement names it, and kept in memory (up to 192 MB), so `TEMP VIEW`s over `read_parquet(getvariable('anofox_data') || '/x.parquet')` are fast there too; with `--data <url>` every read goes over HTTP, so read each file once into a `TEMP TABLE` instead (#830). See docs/secure-serving.md, "C. Publish as a static site".
 
 ## Dashboard header comments
 
