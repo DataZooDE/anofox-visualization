@@ -378,6 +378,7 @@ fn execute(
                     | Role::Height
                     | Role::Section
                     | Role::TableOpt(TableOpt::Totals)
+                    | Role::Empty
                     | Role::View
                     | Role::GroupStart
                     | Role::GroupEnd
@@ -389,7 +390,20 @@ fn execute(
         if roles::is_directive_panel(&panel.roles) && !layout {
             continue; // inputs, downloads, tabs, reload, …
         }
-        let rows = provider.query(&panel.sql);
+        // #818: no rows come back as no columns; give each role its (empty)
+        // column, so a KPI draws its "–" tile instead of a blank card.
+        let rows = provider.query(&panel.sql).map(|r| {
+            if r.is_empty() {
+                let mut ix: Vec<usize> = panel.roles.iter().map(|(i, _)| *i).collect();
+                ix.sort_unstable();
+                ix.dedup();
+                ix.into_iter()
+                    .map(|i| (format!("c{i}"), Vec::new()))
+                    .collect()
+            } else {
+                r
+            }
+        });
         // #682: an editable ::DIAGRAM binds its graph variable (its rows'
         // own graph) for the panels after it.
         if let Ok(r) = &rows {
@@ -481,6 +495,8 @@ fn render_inner(
     // A ::TOTALS value for the next panel — a table reads it (#226); like the
     // browser's nextTableOpts, any next panel consumes it.
     let mut next_totals: Option<String> = None;
+    // An ::EMPTY message for the next panel (#818), consumed the same way.
+    let mut next_empty: Option<String> = None;
     // A ::VIEW group's width (#214): a ::COL pending when the group's
     // (surviving) marker is reached sets it; absent one, the group spans
     // the full row. `current_group_span` is `(group id, width)` for
@@ -616,8 +632,18 @@ fn render_inner(
                 .filter(|s| !s.is_empty());
             continue;
         }
+        if has(&|r| matches!(r, Role::Empty)) {
+            next_empty = step
+                .rows
+                .as_ref()
+                .ok()
+                .and_then(|r| first_text(r))
+                .filter(|s| !s.trim().is_empty());
+            continue;
+        }
         // every later panel (also a failed one) consumes the value
         let totals_spec = next_totals.take();
+        let empty_spec = next_empty.take();
         let rows = match &step.rows {
             Ok(r) => r,
             Err(_) => continue,
@@ -972,20 +998,41 @@ fn render_inner(
             new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
         }
 
+        // #818: a chart with no rows says so, as the page does (its
+        // ::EMPTY message, else a generic note); a table only with ::EMPTY
+        // (else its header alone). KPIs, text and images draw as usual.
+        let no_rows = rows.iter().all(|(_, v)| v.is_empty());
+        let table = has(&|r| matches!(r, Role::Table | Role::PagedTable | Role::Record));
+        let note = (no_rows && tiles[si].is_none() && md.is_none() && img.is_none())
+            .then_some(match (&empty_spec, table) {
+                (Some(m), _) => Some(m.as_str()),
+                (None, false) => Some("No data for this selection"),
+                (None, true) => None,
+            })
+            .flatten();
         // Render the panel body to an inner SVG sized (cw, ch).
-        let inner = render_panel_svg(
-            rows,
-            roles,
-            &panel.names,
-            Place::At(x, row_y),
-            cw,
-            ch,
-            &ropts,
-            strip.is_some(),
-            &tracks,
-            totals_spec.as_deref(),
-            compact[si],
-        );
+        let inner = match note {
+            Some(m) => format!(
+                "{}<text x=\"14\" y=\"28\" font-family=\"{}\" font-size=\"13\" fill=\"{}\">{}</text></svg>",
+                svg_open(Place::At(x, row_y), format!("{cw:.0}"), format!("{ch:.0}")),
+                esc(&t.font.family),
+                hex(t.colors.muted),
+                esc(m),
+            ),
+            None => render_panel_svg(
+                rows,
+                roles,
+                &panel.names,
+                Place::At(x, row_y),
+                cw,
+                ch,
+                &ropts,
+                strip.is_some(),
+                &tracks,
+                totals_spec.as_deref(),
+                compact[si],
+            ),
+        };
         let inner = if captions.is_empty() {
             inner
         } else {
