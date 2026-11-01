@@ -2519,6 +2519,9 @@ where
     }
 
     let plan = sql::plan(script);
+    if opts.design {
+        diags.extend(remote_view_diags(&plan));
+    }
     diags.extend(view_diags(&plan));
     diags.extend(fit_diags(&plan));
     diags.extend(show_if_diags(&plan));
@@ -7099,6 +7102,117 @@ fn distinct_count(rows: &[Map<String, Value>], col: usize) -> usize {
     seen.len()
 }
 
+/// `design/remote-view` (#833): a setup VIEW that reads a remote file (a
+/// literal `http(s)://`, `s3://`, … in a reader such as `read_parquet`), or
+/// a view over such a view, used by `REMOTE_VIEW_PANELS` panels or more. In
+/// the browser (the builder, a published site with `--data <url>`) every
+/// read of a view re-fetches its file over HTTP, so each of those panels
+/// downloads it again; one `CREATE TEMP TABLE … AS FROM read_parquet(…)`
+/// reads it once. (A locked server prefers the view — `folder/setup-table`.)
+const REMOTE_VIEW_PANELS: usize = 3;
+fn remote_view_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    use sql::lex::{tokenize, TokKind};
+    const READERS: &[&str] = &[
+        "read_parquet",
+        "parquet_scan",
+        "read_csv",
+        "read_csv_auto",
+        "read_json",
+        "read_json_auto",
+        "read_ndjson",
+        "read_text",
+        "read_blob",
+    ];
+    const REMOTE: &[&str] = &[
+        "http://", "https://", "s3://", "s3a://", "gs://", "gcs://", "r2://", "az://", "abfss://",
+        "hf://",
+    ];
+    // per statement: its words (lower-cased) and whether a string literal
+    // names a remote location
+    let toks: Vec<(Vec<String>, bool)> = plan
+        .iter()
+        .map(|p| {
+            let mut words = Vec::new();
+            let mut remote = false;
+            for t in tokenize(&p.sql) {
+                let text = &p.sql[t.start..t.end];
+                match t.kind {
+                    TokKind::Word => words.push(text.to_ascii_lowercase()),
+                    TokKind::QuotedIdent => words.push(text.trim_matches('"').to_ascii_lowercase()),
+                    TokKind::String => {
+                        let lit = text
+                            .trim_start_matches(['E', 'e'])
+                            .trim_matches('\'')
+                            .to_ascii_lowercase();
+                        remote |= REMOTE.iter().any(|r| lit.starts_with(r));
+                    }
+                    _ => {}
+                }
+            }
+            (words, remote)
+        })
+        .collect();
+    // the setup views: (statement, name, reads a remote file itself)
+    let views: Vec<(usize, String, bool)> = plan
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| p.setup && toks[*i].0.iter().take(6).any(|w| w == "view"))
+        .filter_map(|(i, p)| {
+            let name = sql::ask::created_name(&p.sql)?;
+            let (words, remote) = &toks[i];
+            Some((
+                i,
+                name,
+                *remote && words.iter().any(|w| READERS.contains(&w.as_str())),
+            ))
+        })
+        .collect();
+    // a view over a remote view is remote too
+    let mut remote: Vec<bool> = views.iter().map(|v| v.2).collect();
+    loop {
+        let mut changed = false;
+        for (k, (i, _, _)) in views.iter().enumerate() {
+            if !remote[k]
+                && views.iter().enumerate().any(|(j, (_, n, _))| {
+                    j != k && remote[j] && toks[*i].0.iter().skip(3).any(|w| w == n)
+                })
+            {
+                remote[k] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    for (k, (i, name, _)) in views.iter().enumerate() {
+        if !remote[k] {
+            continue;
+        }
+        let uses = plan
+            .iter()
+            .enumerate()
+            .filter(|(j, p)| !p.setup && toks[*j].0.iter().any(|w| w == name))
+            .count();
+        if uses >= REMOTE_VIEW_PANELS {
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: *i,
+                code: "design/remote-view",
+                message: format!(
+                    "view `{name}` reads a remote file and {uses} panels use it: in the browser (the \
+                     builder, a site published with --data <url>) each of them downloads the file \
+                     again. Read it once instead: `CREATE TEMP TABLE {name} AS FROM read_parquet(…)` \
+                     (a locked server prefers the view, see folder/setup-table)"
+                ),
+                sql: plan[*i].sql.clone(),
+            });
+        }
+    }
+    out
+}
+
 /// Emit `design/ungrouped-kpis` if a run of ≥3 top-level KPI tiles closed, and
 /// reset the run counter.
 fn flush_kpi_run(diags: &mut Vec<Diagnostic>, run: &mut usize, start_stmt: usize) {
@@ -8931,6 +9045,35 @@ mod design_tests {
             data,
         );
         assert!(!has(&d, "design/unsorted-bars"), "{d:?}");
+    }
+
+    #[test]
+    fn remote_view_used_by_many_panels_notes() {
+        let codes = |s: &str| -> Vec<(usize, &'static str)> {
+            remote_view_diags(&sql::plan(s))
+                .iter()
+                .map(|d| (d.stmt, d.code))
+                .collect()
+        };
+        let three =
+            "SELECT a::KPI FROM v; SELECT b::KPI FROM v; SELECT a::XAXIS, b::BARCHART FROM v;";
+        // a remote view, three panels: noted on its statement
+        let remote = format!("CREATE OR REPLACE TEMP VIEW v AS SELECT * FROM read_parquet('https://x.example/d.parquet');\n{three}");
+        assert_eq!(codes(&remote), vec![(0, "design/remote-view")]);
+        // through a view over it
+        let nested = format!(
+            "CREATE TEMP VIEW raw AS FROM read_parquet('s3://b/k.parquet');\nCREATE TEMP VIEW v AS SELECT * FROM raw WHERE a > 0;\n{three}"
+        );
+        assert_eq!(codes(&nested), vec![(1, "design/remote-view")]);
+        // a local file, a table, or two panels: nothing
+        let local = format!("CREATE TEMP VIEW v AS FROM read_parquet(getvariable('anofox_data') || '/d.parquet');\n{three}");
+        assert!(codes(&local).is_empty());
+        let table = format!(
+            "CREATE TEMP TABLE v AS FROM read_parquet('https://x.example/d.parquet');\n{three}"
+        );
+        assert!(codes(&table).is_empty());
+        let two = "CREATE TEMP VIEW v AS FROM read_parquet('https://x.example/d.parquet');\nSELECT a::KPI FROM v; SELECT b::KPI FROM v;";
+        assert!(codes(two).is_empty());
     }
 
     #[test]

@@ -266,7 +266,7 @@ fn only_reads(sql: &str) -> bool {
 /// [TEMP | TEMPORARY] {TABLE | VIEW | MACRO | FUNCTION} [IF NOT EXISTS]
 /// name`, `INSERT [OR REPLACE] INTO name` or `SET VARIABLE name` —
 /// lower-cased, without a schema.
-fn created_name(sql: &str) -> Option<String> {
+pub(crate) fn created_name(sql: &str) -> Option<String> {
     let w = words(sql, 14);
     let mut it = w.into_iter().map(|(k, w)| (k, w.to_ascii_lowercase()));
     let ident = |(k, w): (TokKind, String)| match k {

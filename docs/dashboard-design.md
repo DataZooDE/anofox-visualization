@@ -106,6 +106,7 @@ Pick the chart from the *question*, grounded in the column's cardinality
 | > 8 panels, no tabs | split with `::TAB` | `design/too-many-panels` |
 | KPI tiles scattered | wrap in `::GROUP … ::ENDGROUP` | `design/ungrouped-kpis` |
 | 100s of rows in one `::TABLE` | top-N or aggregate (`::PAGED` for remote) | `design/raw-table` |
+| a setup `VIEW` over a remote file (`read_parquet('https://…')`) used by ≥ 3 panels | in the browser each panel downloads the file again: read it once with `CREATE TEMP TABLE … AS FROM read_parquet(…)` (a locked server prefers the view; a site built with `--data <dir>` reads each file once anyway, #830) | `design/remote-view` |
 
 Run `dashboard --check <file.sql>` to see these on your own dashboard; add
 `--strict` to make them fail CI, `--no-design` to silence them. When one chart
