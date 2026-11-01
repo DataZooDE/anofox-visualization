@@ -34,7 +34,7 @@ cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
 # the files you downloaded
 sha256sum --check --ignore-missing SHA256SUMS
 # or, per file, the provenance
-gh attestation verify anofox_visualization.v2026.11.01.duckdb-v1.5.6.linux_amd64.duckdb_extension \
+gh attestation verify anofox_visualization.v2026.11.1.duckdb-v1.5.6.linux_amd64.duckdb_extension \
   --repo DataZooDE/anofox-visualization
 ```
 

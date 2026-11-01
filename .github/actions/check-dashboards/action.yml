@@ -14,7 +14,7 @@ inputs:
     description: The dashboards folder (every .sql file in it).
     default: dashboards
   version:
-    description: The anofox-visualization release tag (e.g. v2026.10.30), or "latest".
+    description: The anofox-visualization release tag (e.g. v2026.11.1), or "latest".
     default: latest
   strict:
     description: '"true": design advisories and requires/* warnings fail the check too.'
