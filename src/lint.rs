@@ -154,7 +154,12 @@ pub struct Diagnostic {
     /// message names it) | `lint/allow-not-design` | `lint/allow-unused`
     /// (warnings).
     /// `-- @ask` marks ([`ask_diags`], #745): `ask/unknown-mark` |
-    /// `ask/include-state` | `ask/mark-unused` (warnings).
+    /// `ask/include-state` | `ask/mark-unused` (warnings). On an `-- @ask on`
+    /// dashboard (#195): `ask/no-vars` (error: Ask may set variables only
+    /// through `-- @vars`) | `ask/personal-column` (error: a column whose
+    /// name suggests personal data in a panel Ask reads, without `-- @ask
+    /// skip` or `-- @ask mask <col>`) | `ask/raw-detail` (warning: an
+    /// unaggregated table Ask reads — its rows go to the model provider).
     pub code: &'static str,
     pub message: String,
     /// The offending statement, trimmed to one line.
@@ -2751,6 +2756,9 @@ fn ask_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     let raws = sql::ask::raw_statements(script);
     let state = sql::ask::reads_viewer_state(plan);
+    if sql::ask::header_on(script) {
+        diags.extend(ask_on_diags(script, plan, &raws));
+    }
     for (i, p) in plan.iter().enumerate() {
         let Some(raw) = raws.get(i) else { break };
         let marks = sql::ask::marks(raw);
@@ -2814,6 +2822,92 @@ fn ask_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
                  (-- @ask mask col,…)"
                     .into(),
             );
+        }
+    }
+    diags
+}
+
+/// The checks of an `-- @ask on` dashboard (#195, plan-ai-assistant.md
+/// §12.3 / §12.7): see [`Diagnostic::code`].
+fn ask_on_diags(script: &str, plan: &[sql::Panel], raws: &[String]) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+    let meta = crate::host::serving::parse_dashboard_meta("", script);
+    if meta.vars.is_none() {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            stmt: 1,
+            code: "ask/no-vars",
+            message: "-- @ask on needs -- @vars <name>, …: the assistant may set only the \
+                      variables listed there (and only those an input binds)"
+                .into(),
+            sql: plan
+                .first()
+                .map(|p| one_line(p.sql.trim()))
+                .unwrap_or_default(),
+        });
+    }
+    let excluded: Vec<usize> = sql::ask::exclusions(script)
+        .into_iter()
+        .map(|(i, _)| i)
+        .collect();
+    for (i, p) in plan.iter().enumerate() {
+        if p.setup || excluded.contains(&i) || roles::is_directive_panel(&p.roles) {
+            continue;
+        }
+        let raw = raws.get(i).map(String::as_str).unwrap_or("");
+        let masked: Vec<String> = sql::ask::marks(raw)
+            .into_iter()
+            .filter(|(w, _)| w == "mask")
+            .flat_map(|(_, r)| {
+                r.split(',')
+                    .map(|c| c.trim().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let labels = sql::column_labels(sql::strip_comments(raw).trim());
+        let flagged: Vec<String> = labels
+            .iter()
+            .map(|(_, n)| n.clone())
+            .filter(|n| sql::ask::personal_column(n) && !masked.contains(&n.to_ascii_lowercase()))
+            .collect();
+        if !flagged.is_empty() {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: i + 1,
+                code: "ask/personal-column",
+                message: format!(
+                    "with -- @ask on, the assistant may read this panel and send its rows to the \
+                     model provider; {} look{} like personal data — add `-- @ask skip` above the \
+                     statement, or `-- @ask mask {}` to send pseudonyms instead",
+                    flagged.join(", "),
+                    if flagged.len() == 1 { "s" } else { "" },
+                    flagged.join(",")
+                ),
+                sql: one_line(p.sql.trim()),
+            });
+        }
+        let table = p
+            .roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable | Role::Record));
+        let lower = p.sql.to_ascii_lowercase();
+        let aggregated = lower.contains("group by")
+            || [
+                "count(", "sum(", "avg(", "min(", "max(", "median(", "quantile",
+            ]
+            .iter()
+            .any(|f| lower.contains(f));
+        if table && !aggregated {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "ask/raw-detail",
+                message: "with -- @ask on, the assistant may read this detail table and send up \
+                          to 200 of its rows to the model provider — add `-- @ask skip` above it \
+                          if they shouldn't leave"
+                    .into(),
+                sql: one_line(p.sql.trim()),
+            });
         }
     }
     diags
@@ -11555,7 +11649,7 @@ mod ask_tests {
     #[test]
     fn unknown_marks() {
         assert_eq!(
-            codes("-- @ask on\nSELECT 1::METRIC;\n-- @ask off\nSELECT 2::METRIC;\n-- @ask skp\nSELECT 3::METRIC;"),
+            codes("-- @ask on\n-- @vars x\nSELECT 1::METRIC;\n-- @ask off\nSELECT 2::METRIC;\n-- @ask skp\nSELECT 3::METRIC;"),
             [(2, "ask/unknown-mark"), (3, "ask/unknown-mark")]
         );
         assert!(codes(
@@ -11596,5 +11690,26 @@ mod ask_tests {
     fn full_check_runs_it() {
         let d = check("-- @ask skp\nSELECT 1::METRIC;", |_| Ok(vec![]));
         assert!(d.iter().any(|x| x.code == "ask/unknown-mark"), "{d:?}");
+    }
+
+    #[test]
+    fn ask_on_needs_vars_and_flags_personal_columns() {
+        let s = "-- @ask on\nSELECT 'A'::TAB;\n\
+                 SELECT region ::XAXIS, sum(v) ::BARCHART FROM t GROUP BY 1;\n\
+                 SELECT name ::TABLE, email FROM people;\n\
+                 -- @ask mask Kunde\nSELECT Kunde ::CATEGORY, sum(v) ::BARCHART FROM t GROUP BY 1;\n\
+                 -- @ask skip\nSELECT customer ::TABLE FROM c;";
+        assert_eq!(
+            codes(s),
+            [
+                (1, "ask/no-vars"),
+                (3, "ask/personal-column"),
+                (3, "ask/raw-detail")
+            ]
+        );
+        let ok = "-- @ask on\n-- @vars region\nSELECT region ::XAXIS, sum(v) ::BARCHART FROM t GROUP BY 1;";
+        assert!(codes(ok).is_empty());
+        // without -- @ask on: nothing
+        assert!(codes("SELECT name ::TABLE FROM people;").is_empty());
     }
 }

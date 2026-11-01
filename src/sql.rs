@@ -1054,6 +1054,56 @@ fn strip_leading_distinct(expr: &str) -> &str {
     }
 }
 
+/// Do the SQL-type tokens (DATE/TEXT/…) read as input roles in a list
+/// whose unambiguous roles are `unambiguous`?
+fn inputs_ok(unambiguous: &[Role]) -> bool {
+    unambiguous.iter().all(|r| {
+        matches!(
+            r,
+            Role::Input(_)
+                | Role::Hint
+                | Role::OptionLabel
+                | Role::Label
+                | Role::Title
+                | Role::Subtitle
+                | Role::Class
+        )
+    })
+}
+
+/// The source name of every role column of a statement's (first) SELECT
+/// list — its alias, else the bare column name — keyed by output position
+/// (`c{i}`). Unlike [`Panel::names`] (the names a chart labels with), this
+/// covers every role (`::TABLE`, `::CATEGORY`, `::LINK`, …): Ask's masking
+/// reads column names (#195).
+pub fn column_labels(stmt: &str) -> Vec<(usize, String)> {
+    if !is_query_statement(stmt) {
+        return Vec::new();
+    }
+    let Some(&(s, e)) = select_list_spans(stmt).first() else {
+        return Vec::new();
+    };
+    let split = split_top_commas(&stmt[s..e]);
+    let unambiguous: Vec<Role> = split
+        .iter()
+        .filter_map(|it| lex::trailing_cast(it.trim()))
+        .filter(|(_, tok)| !is_sql_type_token(tok))
+        .filter_map(|(_, tok)| parse_role(tok))
+        .collect();
+    let ok = inputs_ok(&unambiguous);
+    split
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| {
+            let (expr, _) = item_role(it.trim(), ok)?;
+            let (core, alias) = trailing_alias(expr);
+            alias
+                .or_else(|| lex::simple_ident(strip_leading_distinct(core)))
+                .map(|n| (i, n))
+        })
+        .collect()
+}
+
 /// Rewrite one SELECT list's items (`<expr>::ROLE` → `<expr> AS c{i}`, same
 /// rules as [`rewrite`]) and return the joined item text plus the roles and
 /// display names found, keyed by position within this list.
@@ -1068,18 +1118,7 @@ fn rewrite_list(list: &str) -> Rewritten {
         .filter(|(_, tok)| !is_sql_type_token(tok))
         .filter_map(|(_, tok)| parse_role(tok))
         .collect();
-    let inputs_ok = unambiguous.iter().all(|r| {
-        matches!(
-            r,
-            Role::Input(_)
-                | Role::Hint
-                | Role::OptionLabel
-                | Role::Label
-                | Role::Title
-                | Role::Subtitle
-                | Role::Class
-        )
-    });
+    let inputs_ok = inputs_ok(&unambiguous);
 
     // ::TABLE, ::DATERANGE and ::DOWNLOAD_* keep every column and its name — the
     // whole result is the payload; strip only the casts.
@@ -1383,6 +1422,23 @@ mod alias_tests {
         assert!(s.contains(r#""Q ""3""" AS "md:Q ""3""""#), "{s}");
         assert_eq!(roles, vec![(0, Role::Markdown)]);
     }
+    #[test]
+    fn column_labels_cover_every_role() {
+        let l = column_labels(
+            "SELECT employee ::CATEGORY, sum(x) AS \"Sales\" ::BARCHART, 'T' ::TITLE, \
+             DISTINCT region ::XAXIS FROM t",
+        );
+        assert_eq!(
+            l,
+            vec![
+                (0, "employee".into()),
+                (1, "Sales".into()),
+                (3, "region".into())
+            ]
+        );
+        assert!(column_labels("CREATE TABLE t AS SELECT 1").is_empty());
+    }
+
     #[test]
     fn value_columns_keep_names() {
         // Data lookup stays keyed by c{i}; the human name travels as metadata.

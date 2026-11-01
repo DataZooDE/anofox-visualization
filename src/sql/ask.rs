@@ -21,7 +21,7 @@
 //!   and is not a plain query taints every later statement.
 //!
 //! Statements are numbered like [`super::plan`] (index into its panels).
-//! The dashboard-level `-- @ask on` in the header is read by M2-3.
+//! The dashboard-level `-- @ask on` in the header: [`header_on`].
 
 use super::lex::{tokenize, TokKind};
 use super::Panel;
@@ -74,6 +74,100 @@ pub fn raw_statements(script: &str) -> Vec<String> {
         .into_iter()
         .filter(|raw| !super::strip_comments(raw).trim().is_empty())
         .collect()
+}
+
+/// Column-name words that suggest personal data, English and German
+/// (compared lower-cased, per word of the name).
+const NAME_WORDS: &[&str] = &[
+    // English
+    "name",
+    "names",
+    "firstname",
+    "lastname",
+    "surname",
+    "fullname",
+    "customer",
+    "customers",
+    "client",
+    "contact",
+    "person",
+    "employee",
+    "employees",
+    "staff",
+    "user",
+    "username",
+    "email",
+    "mail",
+    "phone",
+    "mobile",
+    "telephone",
+    "fax",
+    "address",
+    "street",
+    "zip",
+    "postcode",
+    "birthday",
+    "birthdate",
+    "dob",
+    "iban",
+    "ssn",
+    "passport",
+    "owner",
+    "manager",
+    "buyer",
+    "patient",
+    // German
+    "kunde",
+    "kunden",
+    "kundenname",
+    "vorname",
+    "nachname",
+    "mitarbeiter",
+    "mitarbeiterin",
+    "ansprechpartner",
+    "ansprechpartnerin",
+    "straße",
+    "strasse",
+    "telefon",
+    "handy",
+    "adresse",
+    "anschrift",
+    "plz",
+    "personalnummer",
+    "geburtsdatum",
+    "einkäufer",
+    "einkaeufer",
+    "inhaber",
+    "benutzer",
+];
+
+/// Does a column name suggest personal data? Ask masks such a column
+/// (`mask: "auto"`, #195) and the linter flags it on an `@ask on` dashboard.
+pub fn personal_column(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.iter().any(|w| NAME_WORDS.contains(w))
+        // camelCase / joined: customerName, kundenNr — whole-name prefixes
+        || NAME_WORDS
+            .iter()
+            .filter(|w| w.len() >= 5)
+            .any(|w| lower.replace(['_', ' ', '-'], "").starts_with(w))
+}
+
+/// Is Ask on for the dashboard: `-- @ask on` in the header (the first
+/// statement), the last `on` / `off` there winning?
+pub fn header_on(script: &str) -> bool {
+    raw_statements(script)
+        .first()
+        .map(|raw| marks(raw))
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .find(|(w, _)| w == "on" || w == "off")
+        .is_some_and(|(w, _)| w == "on")
 }
 
 /// Is this a write-back statement (D3)?
