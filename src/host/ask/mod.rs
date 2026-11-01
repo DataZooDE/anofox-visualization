@@ -433,15 +433,17 @@ impl Ask {
                 ),
             ));
         }
-        // The view state: validated exactly like a panel request's vars.
-        let view_vars = req.vars.clone();
-        for name in view_vars.keys() {
-            if !allowed_vars.iter().any(|a| a.eq_ignore_ascii_case(name)) {
-                return Err(err(400, format!("variable '{name}' can't be set here")));
-            }
-        }
-        let probe = json!({"dashboard": dash.id, "panel": 0, "vars": view_vars}).to_string();
+        // The view state, as a panel request takes it: a reserved name
+        // (`__claim_*`, `anofox_data`) or a bad value is refused, a variable
+        // outside `-- @vars` is dropped (the page sends its own as well).
+        let probe = json!({"dashboard": dash.id, "panel": 0, "vars": req.vars}).to_string();
         parse_panel_request(&probe).map_err(|e| err(400, e))?;
+        let view_vars: Map<String, Value> = req
+            .vars
+            .iter()
+            .filter(|(k, _)| allowed_vars.iter().any(|a| a.eq_ignore_ascii_case(k)))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         let ticket = self.limits.begin(&viewer.user).map_err(|o| err(429, o.0))?;
         let owner = store::Owner {

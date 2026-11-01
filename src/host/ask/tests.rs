@@ -371,16 +371,25 @@ fn vars_only_through_inputs_and_their_options() {
 #[test]
 fn forged_view_vars_are_refused() {
     let ask = new_ask(&Model::default(), cfg());
-    for (k, v) in [
-        ("__claim_user", "admin"),
-        ("anofox_data", "/etc"),
-        ("other", "x"),
-    ] {
+    for (k, v) in [("__claim_user", "admin"), ("anofox_data", "/etc")] {
         let mut r = q("hi");
         r.vars.insert(k.into(), json!(v));
         let e = ask_with(&ask, &viewer("alice"), DASH, r, &Panels::default()).unwrap_err();
         assert_eq!(e.status, 400, "{k}: {e:?}");
     }
+    // a variable outside -- @vars is dropped, as /api/panel drops it
+    let m = Model::new(vec![answer("ok", json!([]), "answered")]);
+    let mut r = q("hi");
+    r.vars.insert("selected".into(), json!("x"));
+    ask_with(
+        &new_ask(&m, cfg()),
+        &viewer("alice"),
+        DASH,
+        r,
+        &Panels::default(),
+    )
+    .unwrap();
+    assert!(!m.sent().contains("selected"));
 }
 
 #[test]

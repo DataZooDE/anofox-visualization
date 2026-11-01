@@ -1012,6 +1012,13 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/form-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/ask-served-e2e.mjs (#195): Ask on a locked server with a fake
+      # model — the notice, an answer rendered inert, a verified chip opening
+      # its tab and panel, Esc, the phone layout.
+      - name: Ask on a locked server e2e (#195)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/ask-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # scripts/diagram-check-served-e2e.mjs (#699): a ::DIAGRAM_CHECK is one
       # more declared statement — the locked server runs it on the edited
       # graph, and again after an edit.
