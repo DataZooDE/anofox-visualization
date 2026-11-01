@@ -2664,15 +2664,22 @@ mod tests {
     /// strict — it is correct by construction, no fork involved.
     #[cfg(unix)]
     fn reopen(path: &Path, max_mb: u64) -> Result<Store, String> {
+        reopen_with(|| Store::open(path, max_mb))
+    }
+
+    /// [`reopen`] for any opener (a write-back log too); also when the
+    /// reopen is expected to fail for another reason (#794).
+    #[cfg(unix)]
+    fn reopen_with(open: impl Fn() -> Result<Store, String>) -> Result<Store, String> {
         for _ in 0..100 {
-            match Store::open(path, max_mb) {
+            match open() {
                 Err(e) if e.contains("in use by another server") => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 other => return other,
             }
         }
-        Store::open(path, max_mb)
+        open()
     }
 
     #[cfg(unix)]
@@ -3113,17 +3120,20 @@ mod tests {
                 .contains("\"kind\":\"writeback\""),
             "{raw}"
         );
-        let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
+        // Reopens of a dropped store: see `reopen` (#794).
+        let e = reopen(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(
             e.contains("write-back change log, not an options.state file"),
             "{e}"
         );
-        assert_eq!(Store::open_writeback(&p, DEFAULT_MAX_MB).unwrap().len(), 1);
+        let wb = reopen_with(|| Store::open_writeback(&p, DEFAULT_MAX_MB)).unwrap();
+        assert_eq!(wb.len(), 1);
+        drop(wb);
 
         let q = store_path("kind-state");
         mkdir(q.parent().unwrap());
         drop(Store::open(&q, DEFAULT_MAX_MB).unwrap());
-        let e = Store::open_writeback(&q, DEFAULT_MAX_MB).unwrap_err();
+        let e = reopen_with(|| Store::open_writeback(&q, DEFAULT_MAX_MB)).unwrap_err();
         assert!(e.contains("options.writeback.path"), "{e}");
         assert!(
             e.contains("an options.state file, not a write-back change log"),
@@ -3135,7 +3145,7 @@ mod tests {
             b"{\"anofox_state\":1,\"created\":\"x\",\"kind\":\"other\"}\n",
         )
         .unwrap();
-        assert!(Store::open(&q, DEFAULT_MAX_MB)
+        assert!(reopen(&q, DEFAULT_MAX_MB)
             .unwrap_err()
             .contains("unknown 'kind'"));
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
