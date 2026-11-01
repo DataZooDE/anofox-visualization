@@ -59,16 +59,15 @@ fn dashboard(args: &[&std::ffi::OsStr]) -> std::process::Output {
 /// the plain chart's own card.
 fn check_page(html: &str) {
     assert!(!html.contains("<script>alert"), "{html}");
-    assert_eq!(
-        html.matches("<figure class=\"panel dp-figure\">").count(),
-        1,
-        "{html}"
-    );
-    assert_eq!(
-        html.matches("<figure class=\"panel\">").count(),
-        1,
-        "{html}"
-    );
+    // the static render server adds `id="panel-<n>"` (#195 M2-6)
+    let count = |class: &str| {
+        html.matches(&format!("<figure class=\"{class}\">")).count()
+            + html
+                .matches(&format!("<figure class=\"{class}\" id=\"panel-"))
+                .count()
+    };
+    assert_eq!(count("panel dp-figure"), 1, "{html}");
+    assert_eq!(count("panel"), 1, "{html}");
     for tag in ["A", "B", "C"] {
         assert!(
             html.contains(&format!("data-panel=\"{tag}\"")),

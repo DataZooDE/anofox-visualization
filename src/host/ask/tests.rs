@@ -162,6 +162,7 @@ fn dash(script: &str) -> Dash<'_> {
         id: "sales",
         script,
         epoch: 1,
+        params: None,
     }
 }
 
@@ -544,6 +545,7 @@ fn a_refresh_starts_over() {
         id: "sales",
         script: DASH,
         epoch: 2,
+        params: None,
     };
     let b = ask
         .ask(

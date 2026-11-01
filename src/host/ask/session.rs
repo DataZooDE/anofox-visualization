@@ -95,6 +95,7 @@ impl Session {
             view_vars: &self.view_vars,
             allowed_vars: &self.allowed_vars,
             mask: &self.mask,
+            params: None,
         }
     }
 
@@ -224,6 +225,7 @@ impl Session {
             view_vars: &self.view_vars,
             allowed_vars: &self.allowed_vars,
             mask: &self.mask,
+            params: None,
         };
         match core::panel_request(&ctx, &self.masker, &mut self.tally, &input, &mut opts) {
             Ok(req) => {
@@ -259,6 +261,7 @@ impl Session {
             view_vars: &self.view_vars,
             allowed_vars: &self.allowed_vars,
             mask: &self.mask,
+            params: None,
         };
         let r = core::panel_result(
             &ctx,

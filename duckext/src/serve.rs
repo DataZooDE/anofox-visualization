@@ -8629,6 +8629,7 @@ fn handle_ask(
                     id: &dash.id,
                     script: &dash.sql,
                     epoch: gen.epoch,
+                    params: None,
                 };
                 let flag2 = flag.clone();
                 let mut progress = |p: askm::Progress| {

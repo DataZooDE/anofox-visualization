@@ -97,6 +97,10 @@ pub struct Dash<'a> {
     pub script: &'a str,
     /// The snapshot's epoch (a refresh starts a fresh conversation).
     pub epoch: u64,
+    /// The static render server (B, M2-6): the dashboard's `-- @param`s are
+    /// the variables a viewer (and `get_panel`) may set, in place of
+    /// `-- @vars` and the inputs.
+    pub params: Option<&'a [crate::host::serving::Param]>,
 }
 
 /// What the client sends: never a history or SQL.
@@ -242,7 +246,10 @@ impl Ask {
         if !self.cfg.enabled || !ask_on(dash.script) {
             return Err(err(404, "Ask is not on for this dashboard"));
         }
-        let Some(allowed_vars) = meta.vars.clone() else {
+        let params_vars = dash
+            .params
+            .map(|ps| ps.iter().map(|p| p.name.clone()).collect::<Vec<_>>());
+        let Some(allowed_vars) = params_vars.or_else(|| meta.vars.clone()) else {
             // M3: `@ask on` needs `-- @vars` (the lint says so too).
             return Err(err(
                 404,
@@ -319,6 +326,7 @@ impl Ask {
                 view_vars: &view_vars,
                 allowed_vars: &allowed_vars,
                 mask: &self.cfg.mask,
+                params: dash.params,
             },
             meta: &meta,
             runner,

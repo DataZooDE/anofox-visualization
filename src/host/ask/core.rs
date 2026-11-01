@@ -16,7 +16,7 @@ use serde_json::{json, Map, Value};
 use super::catalog::{self, Catalog};
 use super::cite::{self, Citation, Read};
 use super::mask::{self, Mask, Masker};
-use crate::host::serving::parse_panel_request;
+use crate::host::serving::{parse_panel_request, Param};
 
 /// The system instructions (shared by the server and the builder).
 pub const INSTRUCTIONS: &str = include_str!("../../../web/assist/ask-instructions.md");
@@ -81,6 +81,10 @@ pub struct Ctx<'a> {
     /// The variables a panel request may set (`-- @vars`).
     pub allowed_vars: &'a [String],
     pub mask: &'a Mask,
+    /// The static render server (B, M2-6): the viewer's choices are the
+    /// dashboard's `-- @param`s, not its inputs — `get_panel` may set only
+    /// a declared param, and only to one of its allowed values.
+    pub params: Option<&'a [Param]>,
 }
 
 /// One question's tally of panel reads.
@@ -264,6 +268,9 @@ pub fn list_panels(ctx: &Ctx, input: &Value) -> String {
 /// demand). A var [`panel_request`] would refuse anyway is left out.
 pub fn option_panels(ctx: &Ctx, input: &Value) -> Vec<usize> {
     let mut out = Vec::new();
+    if ctx.params.is_some() {
+        return out; // a param's options are its declaration
+    }
     for pair in input["vars"].as_array().into_iter().flatten() {
         let name = pair["name"].as_str().unwrap_or("").trim();
         let Some((ie, spec)) = ctx
@@ -333,6 +340,21 @@ pub fn panel_request(
     for pair in input["vars"].as_array().into_iter().flatten() {
         let name = pair["name"].as_str().unwrap_or("").trim();
         let value = masker.unmask_text(pair["value"].as_str().unwrap_or(""));
+        if let Some(params) = ctx.params {
+            let Some(p) = params.iter().find(|p| p.name.eq_ignore_ascii_case(name)) else {
+                return Err(format!("No parameter of this dashboard sets '{name}'."));
+            };
+            if !p.allowed.iter().any(|a| a == &value) {
+                return Err(format!(
+                    "That value is not one of the options of '{}'.",
+                    p.name
+                ));
+            }
+            tally.tool_vars.push(p.name.clone());
+            vars.insert(p.name.clone(), json!(value));
+            real_vars.insert(p.name.clone(), json!(value));
+            continue;
+        }
         let Some((ie, spec)) = ctx
             .cat
             .inputs()

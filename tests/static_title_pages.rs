@@ -73,11 +73,21 @@ fn http_body(resp: &str) -> String {
     out
 }
 
-/// The page's `<figure class="panel">` contents, in order.
-fn figures(html: &str) -> Vec<&str> {
-    html.split("<figure class=\"panel\">")
+/// The page's `<figure class="panel">` contents, in order (the static render
+/// server's `id="panel-<n>"`, #195 M2-6, left out).
+fn figures(html: &str) -> Vec<String> {
+    let mut plain = String::new();
+    let mut rest = html;
+    while let Some(i) = rest.find(" id=\"panel-") {
+        plain.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        rest = &after[after[4..].find('"').map_or(after.len(), |j| j + 5)..];
+    }
+    plain.push_str(rest);
+    plain
+        .split("<figure class=\"panel\">")
         .skip(1)
-        .map(|f| &f[..f.find("</figure>").expect("closed figure")])
+        .map(|f| f[..f.find("</figure>").expect("closed figure")].to_string())
         .collect()
 }
 

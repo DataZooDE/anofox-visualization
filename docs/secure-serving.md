@@ -1676,6 +1676,41 @@ Consumers pick a dashboard id and whitelisted params
   `400`. The render server has no access policies (only the locked server
   does), so with `--auth` every panel has to filter on the claims itself.
 
+- **Ask (`--ask '<json>'` or `--ask @ask.json`, #195).** The same object
+  and limits as the locked server's `options.ask` (below, *Ask: questions
+  about a dashboard*), with these differences for this script-free page:
+  - **A login is required:** the start fails without `--auth`, and
+    `ask.anonymous` is refused here (a loopback bind behind a proxy is
+    public too). `--threads` must be 2 or more.
+  - The dashboard needs `-- @ask on`. Then the page ends with an *Ask*
+    form: the question, the notice (the provider, the operator's
+    `notice`, and whether questions are logged), the page's `@param`
+    values. API keys and share links get no form; signed embed links only
+    with `ask.embed`.
+  - `POST /d/<id>/ask` answers with the same dashboard page, the answer on
+    top: escaped text (no link, image or markup of the model's), its
+    verified citations as links to the cited panel (`#panel-<n>`; with
+    other param values, `/d/<id>?…#panel-<n>`), the rest marked *not
+    verified*, and a follow-up form naming the server-held conversation
+    (never a history). `Cache-Control: no-store, private`; never cached.
+  - **The assistant's variables are the `@param`s:** `get_panel` may set a
+    declared param to one of its listed values, nothing else (no inputs,
+    no claims, no `-- @vars` here). A panel is read by rendering this
+    page for those values with the asking viewer's claims and credential:
+    a panel the page doesn't show them (`-- @requires`, `::SHOW_IF`, a
+    later `::VIEW` alternative) is not available to the assistant either.
+    Paging (`::PAGED`) isn't.
+  - **CSRF:** the form carries a token (an HMAC of the viewer's claims and
+    the dashboard, keyed by a secret new at every start: a restart expires
+    open forms), and the post must be same-origin (`Origin`, and
+    `Sec-Fetch-Site` when the browser sends it).
+  - A question holds an HTTP worker while it runs (up to `ask.timeout_seconds`, 60 by default):
+    at most `min(ask.concurrency, --threads − 1)` run at once (more get
+    `429`), so pages always have a worker.
+  - No row/column policies here: with Ask on, every panel must still
+    filter on the claims itself — that is what keeps another viewer's rows
+    out of the model's reads too.
+
 Try it: `serve --dashboards examples/serve-dashboards/dash --init
 examples/serve-dashboards/init.sql` → `http://127.0.0.1:8080/`.
 
