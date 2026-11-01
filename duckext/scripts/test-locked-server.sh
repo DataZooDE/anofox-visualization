@@ -198,6 +198,7 @@ cat > "$T/xdash/ex.sql" <<'SQL'
 -- @vars region
 SELECT 'Overview'::TAB;
 SELECT region ::DROPDOWN FROM (VALUES ('EU'), ('US')) t(region);
+SELECT 6::COL; SELECT 200::HEIGHT;
 -- @name totals
 SELECT region AS "Region" ::XAXIS, sum(v) AS "Revenue" ::BARCHART FROM ex_t
 WHERE region = getvariable('region') GROUP BY 1 ORDER BY 1;
@@ -238,7 +239,21 @@ grep -qi "^content-type: text/csv" "$T/xh" || fail "export csv content type"
   || fail "export pdf: $(head -c 200 "$T/x")"
 [ "$(xget "$X/ex.pdf?scale=2")" = 400 ] || fail "export: scale is for png only"
 [ "$(xget "$X/ex.png?scale=9")" = 400 ] || fail "export: scale out of range"
-[ "$(xget "$X/ex/totals.png")" = 404 ] || fail "export: a panel is not a png"
+# One named panel drawn alone (#815): full width (its ::COL ignored), its
+# ::HEIGHT kept, no dashboard title, nothing from other panels or tabs.
+[ "$(xget "$X/ex/totals.svg")" = 200 ] && grep -qi '^content-disposition: attachment; filename="ex-totals.svg"' "$T/xh" \
+  && grep -qi "^content-security-policy: default-src 'none'.*sandbox" "$T/xh" || fail "export panel svg: $(head -c 300 "$T/x")"
+grep -q ">EU<" "$T/x" && ! grep -q ">US<" "$T/x" && ! grep -q "Export test" "$T/x" && ! grep -q "details-marker-text" "$T/x" \
+  && ! grep -q "cmd()" "$T/x" || fail "export panel svg: only the panel, default region EU: $(head -c 600 "$T/x")"
+head -c 300 "$T/x" | grep -q 'width="640" height="232"' || fail "export panel svg: 640 wide, ::HEIGHT 200 + 2 x 16: $(head -c 300 "$T/x")"
+[ "$(xget "$X/ex/totals.svg?v.region=US&width=320")" = 200 ] && grep -q ">US<" "$T/x" || fail "export panel svg with v.region=US, width 320"
+[ "$(xget "$X/ex/totals.png?scale=1")" = 200 ] && grep -qi "^content-type: image/png" "$T/xh" \
+  && [ "$(dd if="$T/x" bs=1 skip=16 count=4 2>/dev/null | od -An -tu1 | awk '{print $1*16777216+$2*65536+$3*256+$4}')" = 640 ] \
+  || fail "export panel png 640 px: $(head -c 200 "$T/x")"
+[ "$(xget "$X/ex/totals.pdf")" = 404 ] || fail "export: a panel is not a pdf"
+[ "$(xget "$X/ex/totals.png?tab=details")" = 400 ] || fail "export: tab doesn't apply to a panel"
+[ "$(xget "$X/ex/totals.png?width=200")" = 400 ] || fail "export: a panel narrower than 320 should 400"
+[ "$(xget "$X/ex/nope.png")" = 404 ] || fail "export: an unknown panel image should 404"
 [ "$(xget "$X/ex.svg?x=1")" = 400 ] || fail "export: an unknown parameter should 400"
 [ "$(xget "$X/ex.svg?v.__claim_user=admin")" = 400 ] || fail "export: a reserved variable should 400"
 [ "$(xget "$X/ex.svg?width=10")" = 400 ] || fail "export: a bad width should 400"
@@ -254,8 +269,10 @@ sess=$(curl -s "http://127.0.0.1:$PORT/d/ex" | grep -o '"session":"[^"]*"' | hea
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/ex.svg")" = 200 ] || fail "export with the page session: $(cat "$T/x")"
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/other.svg")" = 403 ] || fail "export of another dashboard should 403"
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/ex/totals.csv")" = 200 ] || fail "export csv with the page session"
+[ "$(xget -H "X-Anofox-Session: $sess" "$X/ex/totals.png")" = 200 ] || fail "export panel png with the page session"
+[ "$(xget -H "X-Anofox-Session: $sess" "$X/other/x.png")" = 403 ] || fail "export panel png of another dashboard should 403"
 stop
-echo "OK: exports — SVG/PNG/PDF (dashboard, one tab, variables, inputs' defaults), CSV/JSON of a named panel, formula cells neutralised, scope and login"
+echo "OK: exports — SVG/PNG/PDF (dashboard, one tab, variables, inputs' defaults), SVG/PNG/CSV/JSON of a named panel, formula cells neutralised, scope and login"
 
 # 3d. Tasks (#767): tasks/*.task.sql on a schedule, writing only the
 # databases in tasks.write (all others must be attached READ_ONLY), then a
