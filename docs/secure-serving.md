@@ -1069,7 +1069,7 @@ curl -H "Authorization: Bearer $KEY" -o totals.csv \
 | Request | Answer |
 |---|---|
 | `GET /api/export/<dashboard>.svg` | The whole dashboard as one SVG, as `dashboard --svg` draws it; `?tab=<label>` only that tab, `?width=480…4000` (default 1200), `?dark=1` the dark variant |
-| `GET /api/export/<dashboard>.png` / `.pdf` | The same picture as a PNG (`?scale=1…4`, default 2; at most 40 million pixels) or a one-page vector PDF, drawn with the bundled Hanken Grotesk font (the default theme's; SIL Open Font License) whatever fonts the server has. Only `data:` images are drawn, nothing is fetched |
+| `GET /api/export/<dashboard>.png` / `.pdf` | The same picture as a PNG (`?scale=1…4`, default 2; at most 40 million pixels) or a one-page vector PDF, drawn with the bundled Hanken Grotesk font (the default theme's; SIL Open Font License), and a subset of DejaVu Sans for Greek, arrows, math and symbols like ▲ ▼ ✓ ⚠ (its licence: `duckext/fonts/DejaVu-LICENSE.txt`), whatever fonts the server has. The ⓘ of an `::INFO` title is left out (its definition is a hover). Only `data:` images are drawn, nothing is fetched |
 | `GET /api/export/<dashboard>/<name>.csv` / `.json` | The rows of the panel named `-- @name <name>`: CSV with a header row (the query's column names), or a JSON array of objects |
 
 - `?v.<name>=<value>` sets a variable, as a page URL does (a text value; `-- @vars`
