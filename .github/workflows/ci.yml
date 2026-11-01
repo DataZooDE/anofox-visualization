@@ -191,6 +191,9 @@ jobs:
       - name: Submit/read-back state end to end (plan §5, #517 S3)
         run: duckext/scripts/test-state.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      - name: Durability snapshots and restore end to end (#775)
+        run: duckext/scripts/test-durability.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Submit live e2e (auth, rate limits, credential locks)
         run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
@@ -337,6 +340,9 @@ jobs:
 
       - name: Submit/read-back state end to end, against DuckDB 2.0
         run: duckext/scripts/test-state.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      - name: Durability snapshots and restore end to end (#775), against DuckDB 2.0
+        run: duckext/scripts/test-durability.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
       - name: Submit live e2e, against DuckDB 2.0
         run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"

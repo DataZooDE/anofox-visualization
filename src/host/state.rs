@@ -1534,6 +1534,14 @@ impl Store {
         self.failed.load(Ordering::SeqCst)
     }
 
+    /// Copy the file to `dst` while no append or erase can run (the store's
+    /// own lock): a consistent snapshot for `options.durability` (#775).
+    /// The number of bytes.
+    pub fn copy_to(&self, dst: &Path) -> Result<u64, String> {
+        let _held = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        std::fs::copy(&self.path, dst).map_err(|e| format!("{}: {e}", self.path.display()))
+    }
+
     /// The last assigned `seq` (0 before the first append).
     pub fn global_seq(&self) -> u64 {
         self.inner
