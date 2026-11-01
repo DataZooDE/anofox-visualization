@@ -5176,9 +5176,11 @@ impl DurabilityOptions {
                             .min(86_400),
                     )
                 }
-                other => return Err(format!(
+                other => {
+                    return Err(format!(
                     "options.durability: unknown key '{other}' (run, location, snapshot_every_s)"
-                )),
+                ))
+                }
             }
         }
         if out.location.is_empty() {
