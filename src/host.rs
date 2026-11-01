@@ -27,6 +27,8 @@
 pub mod access;
 pub mod app_brand;
 #[cfg(feature = "auth")]
+pub mod ask;
+#[cfg(feature = "auth")]
 pub mod assist;
 #[cfg(feature = "auth")]
 pub mod auth;

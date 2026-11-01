@@ -1255,6 +1255,9 @@ pub struct DashboardMeta {
     /// `dp-as-tables` remembered state) is independent of this and still
     /// applies even when the bar is hidden.
     pub astables: bool,
+    /// `-- @ask on` in the header (#195): the dashboard offers Ask when the
+    /// server's `ask` option is on too. See [`crate::sql::ask::header_on`].
+    pub ask: bool,
     /// `-- @markdown_style <plain|card|callout>` (#536): the dashboard's own
     /// default `::MARKDOWN_STYLE`, used by every `::MARKDOWN` panel that sets
     /// no `::MARKDOWN_STYLE` of its own (and carries no `::CALLOUT`, which
@@ -1491,6 +1494,7 @@ pub fn split_tags(raw: &str) -> impl Iterator<Item = String> + '_ {
 pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
     let mut m = DashboardMeta {
         title: id.to_string(),
+        ask: crate::sql::ask::header_on(script),
         ..Default::default()
     };
     // `-- @tour`'s step lines (#518 PR B) are the comment lines *directly

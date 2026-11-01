@@ -654,6 +654,21 @@ impl Usage {
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_write + self.cache_read
     }
+    /// A whole answer's `usage`.
+    pub fn from_value(u: &Value) -> Usage {
+        let mut x = Usage::default();
+        x.merge(u);
+        x
+    }
+
+    /// Add another call's counts.
+    pub fn add(&mut self, o: &Usage) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_write += o.cache_write;
+        self.cache_read += o.cache_read;
+    }
+
     /// Merge a `usage` object: each count is cumulative within a stream, so
     /// the larger one wins.
     fn merge(&mut self, u: &Value) {
@@ -992,7 +1007,7 @@ fn log_line(r: &Record, now: SystemTime) -> String {
     Value::Object(o).to_string()
 }
 
-fn write_line(sink: &LogSink, line: &str) {
+pub(crate) fn write_line(sink: &LogSink, line: &str) {
     match sink {
         LogSink::Stderr => eprintln!("{line}"),
         LogSink::File(p) => {
