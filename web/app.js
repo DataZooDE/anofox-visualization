@@ -1404,6 +1404,7 @@ async function servedRequest(sql, page, kind, at) {
       if (ac?.signal.aborted) throw new DOMException("superseded", "AbortError");
     }
     if (r.status === 409) throw new DOMException("superseded", "AbortError");
+    if (r.status === 401) embedPost("expired"); // #771: the host mints a new token
     if (!r.ok) throw new Error(await r.text());
     const tag = r.headers.get("X-Anofox-Deps");
     if (tag && window.__served.depsTag && tag !== window.__served.depsTag && !servedDepsOff) {
@@ -7893,6 +7894,80 @@ function syncUrlState() {
     for (const [name, label] of frameUrlParams()) u.searchParams.append("frame." + name, label);
     if (u.href !== location.href) history.replaceState(null, "", u);
   } catch (_) {}
+  embedState();
+}
+
+// ---- #771: the embed bridge (sdk/anofox-embed.js, <anofox-dashboard>) ----
+// A served page in a frame of an allowed origin (options.frame_ancestors,
+// and the frame's referrer) tells its host its height and its variables
+// after every run, asks for a new token when its session ends (a 401), and
+// takes variables from the host — as a `?v.…` link would set them, so a
+// variable the credential locks keeps its locked value on the server. Every
+// message goes to, and is taken from, that one origin and the parent only.
+const embedHost = (() => {
+  try {
+    if (!window.__served || window.parent === window || !document.referrer) return null;
+    const origin = new URL(document.referrer).origin;
+    return (window.__served.frameAncestors || []).includes(origin) ? origin : null;
+  } catch (_) {
+    return null;
+  }
+})();
+function embedPost(type, detail) {
+  if (embedHost) window.parent.postMessage({ source: "anofox", type, detail }, embedHost);
+}
+let embedReady = false;
+function embedState() {
+  if (!embedHost) return;
+  const vars = {};
+  for (const [k, v] of urlStateParams()) {
+    const name = k.slice(2);
+    vars[name] = name in vars ? [].concat(vars[name], v) : v;
+  }
+  if (!embedReady) {
+    embedReady = true;
+    embedPost("ready", { id: window.__served.id });
+  }
+  embedPost("state", { vars });
+  requestAnimationFrame(embedHeight);
+}
+// The dashboard's own height (scrollHeight never drops below the frame's, so
+// a short dashboard couldn't shrink it): the bottom of its content.
+let embedLastHeight = 0;
+function embedHeight() {
+  if (!embedHost) return;
+  const d = document.querySelector(".dash");
+  const bottom = d ? d.getBoundingClientRect().bottom + window.scrollY : document.documentElement.scrollHeight;
+  const h = Math.ceil(bottom + 16);
+  if (Math.abs(h - embedLastHeight) > 2) {
+    embedLastHeight = h;
+    window.parent.postMessage({ source: "anofox", type: "height", height: h }, embedHost);
+  }
+}
+if (embedHost) {
+  // Measured again whenever the page changes or resizes (one per frame).
+  let pending = false;
+  const remeasure = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      embedHeight();
+    });
+  };
+  new ResizeObserver(remeasure).observe(document.body);
+  new MutationObserver(remeasure).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] });
+  window.addEventListener("message", (e) => {
+    if (e.source !== window.parent || e.origin !== embedHost) return;
+    const d = e.data;
+    if (!d || d.source !== "anofox" || d.type !== "set-vars" || !d.vars || typeof d.vars !== "object") return;
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(d.vars).slice(0, 64)) {
+      if (!URL_VAR_RE.test(k) || /^(__claim_|anofox_data$)/i.test(k)) continue;
+      for (const x of (Array.isArray(v) ? v : [v]).slice(0, 200)) qs.append("v." + k, String(x).slice(0, 1000));
+    }
+    if (qs.toString()) followLink("?" + qs.toString());
+  });
 }
 
 // ---- chart interactions: named selections (::SELECT_AS) ----
@@ -8096,6 +8171,12 @@ function followLink(url) {
   }
   const safe = safeUrl(u);
   if (!safe) return status("link blocked: only #tab, ?v.…, paths and http(s) URLs are followed");
+  // #771: in a host's frame, a link that leaves the dashboard is the host's
+  // to follow (navigating the frame would drop its embed session).
+  if (embedHost) {
+    embedPost("link", { href: new URL(safe, location.href).href });
+    if (!/^https?:/i.test(safe) || safe.startsWith(location.origin + "/")) return;
+  }
   if (/^https?:/i.test(safe) && !safe.startsWith(location.origin + "/")) window.open(safe, "_blank", "noopener");
   else {
     // #417: a published site switches a same-site `/d/<id>` ::LINK in place,
