@@ -479,7 +479,11 @@ fn render_inner(
     let pad = opts.gap as f64;
     let gap = opts.gap as f64;
     let content_w = opts.width as f64 - 2.0 * pad;
-    let mut columns = if opts.single { 1 } else { opts.columns.max(1) };
+    // #816: narrower than a phone breakpoint (an export for a chat), one
+    // column as the page's phone layout.
+    let narrow = opts.width < NARROW;
+    let one_col = opts.single || narrow;
+    let mut columns = if one_col { 1 } else { opts.columns.max(1) };
     let mut default_span = (12 / columns).max(1);
 
     // A placed panel: (x, y, w, h, nested svg fragment positioned at x, y).
@@ -506,7 +510,7 @@ fn render_inner(
     let mut current_group_span: Option<(usize, u32)> = None;
 
     // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO).
-    if let Some((svg, h)) = header_svg(t, pad, row_y, content_w).filter(|_| !opts.single) {
+    if let Some((svg, h)) = header_svg(t, pad, row_y, content_w, narrow).filter(|_| !opts.single) {
         headings.push(svg);
         row_y += h + gap;
     }
@@ -570,7 +574,7 @@ fn render_inner(
             if let Some(v) = &panel.view {
                 current_group_span = Some((
                     v.group,
-                    if next_span == 0 || opts.single {
+                    if next_span == 0 || one_col {
                         12
                     } else {
                         next_span.clamp(1, 12)
@@ -599,7 +603,7 @@ fn render_inner(
         }
         // Directives that don't render a box.
         if has(&|r| matches!(r, Role::Columns)) {
-            if let Some(n) = num().filter(|_| !opts.single) {
+            if let Some(n) = num().filter(|_| !one_col) {
                 if n >= 1.0 {
                     columns = n as u32;
                     default_span = (12 / columns).max(1);
@@ -608,7 +612,7 @@ fn render_inner(
             continue;
         }
         if has(&|r| matches!(r, Role::Span)) {
-            if !opts.single {
+            if !one_col {
                 next_span = num().unwrap_or(0.0) as u32;
             }
             continue;
@@ -834,7 +838,7 @@ fn render_inner(
                 if row_units > 0 {
                     new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
                 }
-                let per_row = run.len().min(6);
+                let per_row = run.len().min(if narrow { 2 } else { 6 });
                 let tw = (content_w + gap) / per_row as f64 - gap;
                 // Each tile's own floor (96 normal, 36 ::KPI_SIZE 'compact' —
                 // #405; mirrored in lint.rs fit_ref and web/app.js MIN_KPI /
@@ -1120,12 +1124,19 @@ fn render_inner(
 
 /// The header strip (logo, brand, title), or `None` when the dashboard sets
 /// no branding. Returns the fragment and its height.
-fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)> {
+/// Below this width (px) the static render is one column (#816).
+const NARROW: u32 = 640;
+
+/// `narrow` (#816): a smaller title, the ::ASOF line under it instead of
+/// right-aligned beside it.
+fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64, narrow: bool) -> Option<(String, f64)> {
     let b = &t.brand;
     if b.title.is_none() && b.name.is_none() && b.logo.is_none() && b.asof.is_none() {
         return None;
     }
-    let h = 52.0;
+    let asof_below = narrow && b.asof.is_some();
+    let h = if asof_below { 70.0 } else { 52.0 };
+    let ts = if narrow { 20 } else { 24 };
     let mut s = svg_open(Place::At(x, y), format!("{w:.0}"), format!("{h:.0}"));
     let mut tx = 2.0;
     let logo = match (t.variant, &b.logo_dark, &b.logo) {
@@ -1143,20 +1154,21 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)
     match (&b.name, &b.title) {
         (Some(n), Some(ti)) => s.push_str(&format!(
             "<text x=\"{tx}\" y=\"18\" font-family=\"{font}\" font-size=\"11\" font-weight=\"700\" letter-spacing=\".05em\" fill=\"{m}\">{n}</text>\
-             <text x=\"{tx}\" y=\"42\" font-family=\"{font}\" font-size=\"24\" font-weight=\"800\" fill=\"{hd}\">{ti}</text>",
+             <text x=\"{tx}\" y=\"42\" font-family=\"{font}\" font-size=\"{ts}\" font-weight=\"800\" fill=\"{hd}\">{ti}</text>",
             m = hex(t.colors.muted),
             hd = hex(t.colors.heading),
             n = esc(&n.to_uppercase()),
             ti = esc(ti),
         )),
         (None, Some(ti)) | (Some(ti), None) => s.push_str(&format!(
-            "<text x=\"{tx}\" y=\"34\" font-family=\"{font}\" font-size=\"24\" font-weight=\"800\" fill=\"{hd}\">{}</text>",
+            "<text x=\"{tx}\" y=\"34\" font-family=\"{font}\" font-size=\"{ts}\" font-weight=\"800\" fill=\"{hd}\">{}</text>",
             esc(ti),
             hd = hex(t.colors.heading),
         )),
         (None, None) => {}
     }
-    // The ::ASOF freshness chip, right-aligned (amber text once stale).
+    // The ::ASOF freshness chip, right-aligned (amber text once stale);
+    // narrow: on its own line under the title.
     if let (Some(at), Some(now)) = (b.asof, crate::freshness::now_epoch()) {
         let l = t
             .locale
@@ -1164,8 +1176,13 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64) -> Option<(String, f64)
             .and_then(Locale::from_tag)
             .unwrap_or_default();
         let (text, stale) = crate::freshness::chip_text(at, b.stale_secs, now, &l, b.asof_date);
+        let (ax, ay, anchor) = if asof_below {
+            (tx, h - 6.0, "start")
+        } else {
+            (w, 30.0, "end")
+        };
         s.push_str(&format!(
-            "<text class=\"dp-asof\" x=\"{w:.0}\" y=\"30\" text-anchor=\"end\" font-family=\"{f}\" font-size=\"12\" font-weight=\"600\" fill=\"{c}\">{}</text>",
+            "<text class=\"dp-asof\" x=\"{ax:.0}\" y=\"{ay:.0}\" text-anchor=\"{anchor}\" font-family=\"{f}\" font-size=\"12\" font-weight=\"600\" fill=\"{c}\">{}</text>",
             esc(&text),
             f = esc(&t.font.family),
             c = hex(if stale { t.colors.warning } else { t.colors.muted }),
