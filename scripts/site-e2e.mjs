@@ -354,6 +354,13 @@ try {
     }
   });
   check(offHost.length === 0, `no request to an unexpected host${offHost.length ? ": " + offHost.slice(0, 5).join(", ") : ""}`);
+  // #832: with a local DuckDB-Wasm in --app (scripts/fetch-duckdb-wasm.sh),
+  // the site loads it from its own origin, never from jsdelivr
+  if (existsSync(path.join(APP, "vendor/duckdb-wasm/duckdb-eh.wasm"))) {
+    const cdnDuck = allRequests.filter((u) => /cdn\.jsdelivr\.net\/npm\/(@duckdb|apache-arrow|flatbuffers|tslib)/.test(u));
+    check(cdnDuck.length === 0, `DuckDB-Wasm from the site itself, not jsdelivr (#832)${cdnDuck.length ? ": " + cdnDuck.slice(0, 3).join(", ") : ""}`);
+    check(allRequests.some((u) => u.endsWith("/vendor/duckdb-wasm/duckdb-eh.wasm")), "the site's own duckdb-eh.wasm was loaded (#832)");
+  } else console.log("note: no web/vendor/duckdb-wasm in --app — DuckDB-Wasm from jsdelivr (#832 check skipped)");
 } finally {
   await browser.close();
   server.close();

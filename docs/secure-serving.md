@@ -1723,6 +1723,13 @@ dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [
   generated pages `SET VARIABLE anofox_data = '<url>'` before every
   dashboard, exactly like a locked server's `getvariable('anofox_data')` —
   dashboard SQL doesn't need to know it's no longer talking to a server.
+- **DuckDB-Wasm from the site itself (#832).** The release's web build
+  (`--app`) carries DuckDB-Wasm (`vendor/duckdb-wasm/`, about 37 MB, pinned:
+  `scripts/fetch-duckdb-wasm.sh`), so a published site loads it from its own
+  origin: the host's cache, one TLS connection, and no request to jsdelivr —
+  it works behind an auth proxy that blocks third-party hosts. An `--app`
+  without it (a plain checkout of `web/`) falls back to jsdelivr. Core
+  DuckDB extensions (`parquet`, …) still come from `extensions.duckdb.org`.
 - **Performance (#830).** In the browser a `read_parquet` over a URL is a
   fresh set of HTTP requests, and a `TEMP VIEW` over it reads the file again
   for every panel that uses it. With `--data <dir>`, `site.json` lists the

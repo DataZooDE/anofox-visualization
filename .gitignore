@@ -24,3 +24,4 @@ web/data/boundaries/nuts*.csv
 # #493: the web-build CI job's captured `git describe`, shipped to the web-mjs-shard
 # jobs via the web-build artifact so version_test.mjs doesn't re-derive it.
 /.build-describe.txt
+/web/vendor/duckdb-wasm

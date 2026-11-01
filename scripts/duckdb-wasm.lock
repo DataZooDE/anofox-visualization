@@ -1,0 +1,7 @@
+# sha256  local-name  url — scripts/fetch-duckdb-wasm.sh (#832); re-pin with --pin
+e151df3918b7047d0fccbf03ab4a7bd2962efad6f8a0a040eba47c523193349b  duckdb-wasm.mjs  https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm
+2df175d5ca788380f3794ad2afcf86d84eb188c902e90f9cf90f2b3e33913ffc  apache-arrow.mjs  https://cdn.jsdelivr.net/npm/apache-arrow@17.0.0/+esm
+e2e255fa750cc1ba9c2dbae40290cc8cb00a39546c926f86a49164ad1dea308f  flatbuffers.mjs  https://cdn.jsdelivr.net/npm/flatbuffers@24.3.25/+esm
+4f4982b6423bc56309d1d97cc76b26a4dc0e36c6cec7fee540a2ff8e0f408115  tslib.mjs  https://cdn.jsdelivr.net/npm/tslib@2.6.3/+esm
+89dc43da9faab0f5ecb4e05a4d0bc334c95db2743c146048ba9dd3621c0496eb  duckdb-browser-eh.worker.js  https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/dist/duckdb-browser-eh.worker.js
+7ba4e2ea49b0f8851e90b9ce404cc810d1dd998edabfc1d3677351ba2db0419a  duckdb-eh.wasm  https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/dist/duckdb-eh.wasm
