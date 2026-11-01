@@ -128,7 +128,10 @@ writeFileSync(
   `-- @title Trend\n-- @nav Trend\n-- @order 3\n` +
     // #830: -- @requires resolves against anofox_data, now a local name:
     // a listed file shows its tab, a missing one hides it
+    // #836: a TEMP TABLE named like the other dashboards' TEMP VIEW
+    `CREATE OR REPLACE TEMP TABLE sales AS SELECT 'TRENDMARK' AS product, 'x' AS region, 1 AS units;\n` +
     `-- @requires sales.parquet\nSELECT 'Has sales'::TAB;\n` +
+    `SELECT product AS "Trend product" ::TABLE FROM sales;\n` +
     `SELECT 'nothing here but text — proves nav switches between differently-shaped dashboards'::MARKDOWN;\n` +
     // #655: a ::REGION map on the built-in boundaries, which --site must publish.
     `SELECT iso ::REGION, v AS "Units" ::BARCHART, 'world'::BOUNDARIES, 'Units by country'::TITLE\n` +
@@ -252,6 +255,25 @@ try {
   await p.goForward({ waitUntil: "networkidle" });
   await sleep(500);
   check(p.url() === BASE + "d/by-product/", `forward: URL is ${p.url()}`);
+
+  // ── 3b. #836: dashboards switch on one shared page — a dashboard's TEMP
+  // objects must not survive into the next (trend's TABLE sales vs the
+  // others' VIEW sales): trend → overview → trend → by-product, in place ──
+  const errCards = () => p.$$eval(".dash .dp-errcard", (c) => c.map((x) => x.textContent.slice(0, 160)));
+  for (const [id, want, not] of [
+    ["trend", /TRENDMARK/, /widget/],
+    ["", /Units by product/, /TRENDMARK/],
+    ["trend", /TRENDMARK/, /widget/],
+    ["by-product", /widget/, /TRENDMARK/],
+  ]) {
+    await p.click(`.served-nav a[data-nav-id="${id || "overview"}"]`);
+    await p.waitForFunction((r) => new RegExp(r).test(document.querySelector(".dash")?.textContent || ""), want.source, { timeout: 60000 }).catch(() => {});
+    await sleep(500);
+    const text = await p.evaluate(() => document.querySelector(".dash")?.textContent || "");
+    const errs = await errCards();
+    check(want.test(text) && !not.test(text) && errs.length === 0, `#836 switch to ${id || "overview"}: its own objects only${errs.length ? " — " + errs.join(" | ") : ""}`);
+  }
+  check((await p.evaluate(() => window.__e2eMarker)) === "still-here", "#836: all switches in place (one page)");
 
   // ── 4. a hard reload of /d/<id>/ lands on the right dashboard ──
   const p2 = await openPage(BASE + "d/by-product/");
