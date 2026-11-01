@@ -4,8 +4,9 @@
 # plan's workaround 7 ("a web build in the release"). Built once (any single
 # matrix leg), the same way pages.yml builds the app for GitHub Pages:
 # web/pkg (wasm-pack) + web/localext/ (the pinned DuckDB-Wasm extensions,
-# scripts/fetch-wasm-extensions.sh) + the rest of web/ (html/css/js). DuckDB-Wasm
-# itself is loaded from jsdelivr at runtime (web/app.js), so it isn't bundled.
+# scripts/fetch-wasm-extensions.sh) + web/vendor/duckdb-wasm/ (#832, DuckDB-Wasm
+# itself, scripts/fetch-duckdb-wasm.sh: a published site loads it from its own
+# origin; the builder and Pages still use jsdelivr) + the rest of web/.
 #   output: $DIST/anofox-visualization-web-<tag>.tar.gz
 set -euo pipefail
 # shellcheck source=scripts/release/common.sh
@@ -16,6 +17,9 @@ ensure_web_pkg
 
 echo "== fetch web/localext (pinned DuckDB-Wasm extensions) =="
 DATAZOO_DISABLE_TELEMETRY=1 "$ROOT/scripts/fetch-wasm-extensions.sh" "$DUCKDB_VERSION"
+
+echo "== fetch web/vendor/duckdb-wasm (pinned DuckDB-Wasm, #832) =="
+"$ROOT/scripts/fetch-duckdb-wasm.sh"
 
 mkdir -p "$DIST"
 NAME="anofox-visualization-web-$TAG"

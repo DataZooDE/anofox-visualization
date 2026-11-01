@@ -1493,6 +1493,26 @@ let db = null; // AsyncDuckDB (needed to register remote geo files for the maps)
 let duckdbMod = null,
   duckdbBundle = null;
 const DUCKDB_ESM = "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev65.0/+esm";
+// #832: a published site's own copy (web/vendor/duckdb-wasm/, from
+// scripts/fetch-duckdb-wasm.sh, shipped in the release's web build): same
+// origin, the host's cache, no third-party request. Without it — or in a
+// browser without wasm exceptions (the MVP bundle stays on jsdelivr) — the
+// CDN as before.
+const DUCKDB_LOCAL = new URL("./vendor/duckdb-wasm/", import.meta.url).href;
+async function loadDuckdb() {
+  if (published) {
+    try {
+      const mod = await import(DUCKDB_LOCAL + "duckdb-wasm.mjs");
+      const cdn = mod.getJsDelivrBundles();
+      const eh = { mainModule: DUCKDB_LOCAL + "duckdb-eh.wasm", mainWorker: DUCKDB_LOCAL + "duckdb-browser-eh.worker.js" };
+      return [mod, await mod.selectBundle({ mvp: cdn.mvp, eh })];
+    } catch (_) {
+      /* no local copy: jsdelivr */
+    }
+  }
+  const mod = await import(DUCKDB_ESM);
+  return [mod, await mod.selectBundle(mod.getJsDelivrBundles())];
+}
 let appBrandReady = null; // #204: the Promise boot() keeps from appBrandLoad(), for assistDeps()'s imgOrigins
 // sec-review-256 L-2: the installation's own opt-in (app-config.json's/
 // window.__anofoxApp's `assistant.remember: true`), read alongside the
@@ -2423,15 +2443,13 @@ async function boot() {
   // ratchet below, like every DuckDB-Wasm import (I-4).
   if (backend === "live" && !window.__served && ownAppBool(window.__anofoxApp, ["assistant", "transport"]) === "serve") {
     try {
-      duckdbMod = await import(DUCKDB_ESM);
-      duckdbBundle = await duckdbMod.selectBundle(duckdbMod.getJsDelivrBundles());
+      [duckdbMod, duckdbBundle] = await loadDuckdb();
     } catch (_) {
       duckdbMod = duckdbBundle = null; // the assistant then stays off (finishAssistBoot: no engine)
     }
   }
   if (backend !== "live") {
-    duckdbMod = await import(DUCKDB_ESM);
-    duckdbBundle = await duckdbMod.selectBundle(duckdbMod.getJsDelivrBundles());
+    [duckdbMod, duckdbBundle] = await loadDuckdb();
     const workerUrl = URL.createObjectURL(
       new Blob([`importScripts("${duckdbBundle.mainWorker}");`], { type: "text/javascript" })
     );

@@ -976,6 +976,13 @@ jobs:
       # (#417 S2), no editor flash, and no request leaves this site's own
       # origin / the pinned CDN hosts. Reuses the dashboard CLI and DuckDB
       # CLI built/installed above.
+      # #832: the site's own DuckDB-Wasm (pinned, scripts/duckdb-wasm.lock),
+      # so site-e2e checks it loads from the site, not jsdelivr.
+      - name: Fetch DuckDB-Wasm (web/vendor/duckdb-wasm)
+        run: |
+          for i in 1 2 3; do scripts/fetch-duckdb-wasm.sh && break; echo "fetch attempt $i failed; retrying"; sleep 10; done
+          test -f web/vendor/duckdb-wasm/duckdb-eh.wasm
+
       - name: Published static site e2e (dashboard --site)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-e2e.mjs --dashboard target/debug/dashboard
