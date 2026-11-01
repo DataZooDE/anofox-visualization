@@ -192,7 +192,7 @@ fn key_file_rules() {
 #[test]
 fn options_are_taken_out() {
     let mut o: Map<String, Value> = serde_json::from_str(
-        r#"{"name": "Acme", "assist_models": ["claude-opus-5-5"], "assist_budget_tokens_per_hour": 5000,
+        r#"{"name": "Acme", "assist": true, "assist_models": ["claude-opus-5-5"], "assist_budget_tokens_per_hour": 5000,
             "assist_base_url": "http://127.0.0.1:9", "assist_log_content": true}"#,
     )
     .unwrap();
@@ -200,18 +200,27 @@ fn options_are_taken_out() {
     assert_eq!(o.keys().collect::<Vec<_>>(), ["name"]);
     assert_eq!(a.cfg.models, ["claude-opus-5-5"]);
     assert_eq!(a.cfg.budget_tokens_per_hour, 5000);
-    assert!(a.cfg.log_content && !a.off);
+    assert!(a.cfg.log_content && a.on);
     let mut off: Map<String, Value> = serde_json::from_str(r#"{"assist": false}"#).unwrap();
-    assert!(AssistOptions::take(&mut off).unwrap().off);
+    assert!(!AssistOptions::take(&mut off).unwrap().on);
+    // opt-in: off by default, and settings alone don't turn it on
+    let mut none: Map<String, Value> = serde_json::from_str(r#"{"name": "Acme"}"#).unwrap();
+    assert!(!AssistOptions::take(&mut none).unwrap().on);
+    let mut alone: Map<String, Value> =
+        serde_json::from_str(r#"{"assist_models": ["claude-sonnet-5"]}"#).unwrap();
+    assert!(AssistOptions::take(&mut alone)
+        .unwrap_err()
+        .contains("opt-in"));
     let mut bad: Map<String, Value> =
         serde_json::from_str(r#"{"assist_key_env": "AWS_SECRET"}"#).unwrap();
     assert!(AssistOptions::take(&mut bad)
         .unwrap_err()
         .contains("unknown"));
     let mut http: Map<String, Value> =
-        serde_json::from_str(r#"{"assist_base_url": "http://evil.example"}"#).unwrap();
+        serde_json::from_str(r#"{"assist": true, "assist_base_url": "http://evil.example"}"#)
+            .unwrap();
     assert!(AssistOptions::take(&mut http).is_err());
-    assert!(build(true, cfg(), None, None).unwrap().is_none());
+    assert!(build(false, cfg(), None, None).unwrap().is_none());
 }
 
 // ---- the proxy over a fake upstream ----

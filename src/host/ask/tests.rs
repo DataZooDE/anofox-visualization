@@ -816,6 +816,13 @@ fn the_key_never_reaches_a_message() {
 
 #[test]
 fn config_parses_and_refuses_unknown_keys() {
+    // opt-in: an `ask` object without "enabled": true leaves it off
+    assert!(!AskConfig::default().enabled);
+    assert!(
+        !AskConfig::parse(&json!({"model": "claude-sonnet-5"}))
+            .unwrap()
+            .enabled
+    );
     let c = AskConfig::parse(&json!({
         "enabled": true, "model": "claude-opus-5-5", "per_viewer": {"per_hour": 5},
         "mask": ["customer"], "allow": ["group:analysts"], "notice": null, "effort": "low"

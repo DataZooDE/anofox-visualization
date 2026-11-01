@@ -3,8 +3,8 @@
 // the model API with the key from ANTHROPIC_API_KEY, behind the authoring
 // guard; the key never comes back. A locked server (`anofox_serve_dashboards`)
 // answers 404 on /assist. A session with enable_external_access = false gets
-// no proxy: assist_* options are refused, a key in the environment alone
-// leaves it off with a note.
+// no proxy: assist options are refused. The proxy is opt-in: a key in the
+// environment alone leaves it off.
 //
 //   node scripts/assist-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8975] [--duckdb duckdb]
@@ -78,7 +78,7 @@ const post = (p, pathname, headers = {}, body = request) =>
   fetch(`http://127.0.0.1:${p}${pathname}`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
 
 try {
-  const opts = { assist_base_url: apiBase, assist_models: ["claude-sonnet-5"] };
+  const opts = { assist: true, assist_base_url: apiBase, assist_models: ["claude-sonnet-5"] };
   const out = await session(`SELECT anofox_serve(${port}, ${sqlStr(JSON.stringify(opts))}) AS r;`, /token=[0-9a-f]+/);
   const tok = (out.match(/token=([0-9a-f]+)/) || [])[1];
   check(!!tok, "anofox_serve started with the proxy");
@@ -117,10 +117,10 @@ try {
   check((await fetch(`http://127.0.0.1:${lport}/assist/functions.js`)).status === 200, "locked: the UI's own /assist/functions.js is still served");
 
   // enable_external_access = false: no proxy.
-  const off = await session(`SET enable_external_access = false;\nSELECT anofox_serve(${port + 2}, ${sqlStr(JSON.stringify({ assist_base_url: apiBase }))});`, /enable_external_access/);
+  const off = await session(`SET enable_external_access = false;\nSELECT anofox_serve(${port + 2}, ${sqlStr(JSON.stringify({ assist: true, assist_base_url: apiBase }))});`, /enable_external_access/);
   check(/assist_\* needs enable_external_access/.test(off), "locked-down session: assist_* options are refused");
   const note = await session(`SET enable_external_access = false;\nSELECT anofox_serve(${port + 3}) AS r;`, /token=[0-9a-f]+/);
-  check(/assistant proxy off: enable_external_access is false/.test(note), "…a key in the environment alone leaves it off, with a note");
+  check(!/assistant proxy on/.test(note), "…a key in the environment alone leaves it off (opt-in)");
   const tok3 = (note.match(/token=([0-9a-f]+)/) || [])[1];
   if (tok3) check((await post(port + 3, "/assist/v1/messages", { "X-Anofox-Token": tok3 })).status === 404, "…and /assist is a 404 there");
 } catch (e) {

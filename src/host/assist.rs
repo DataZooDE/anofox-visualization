@@ -1169,11 +1169,13 @@ pub fn write_http(w: &mut dyn Write, r: Reply) -> io::Result<()> {
 // ------------------------------------------------------------------ setup ---
 
 /// The `assist_*` options of `anofox_serve(port, options)`, taken out of
-/// `options` (the rest goes on to the app bar). `assist: false` turns the
-/// proxy off even when a key is set.
+/// `options` (the rest goes on to the app bar). The proxy is **opt-in**:
+/// off unless `assist: true` (`--assist`), whatever key the environment
+/// holds; `assist_*` settings without it are refused.
 #[derive(Debug, Default)]
 pub struct AssistOptions {
-    pub off: bool,
+    /// `assist: true` / `--assist`.
+    pub on: bool,
     pub cfg: AssistConfig,
     pub key_file: Option<PathBuf>,
     pub log: Option<String>,
@@ -1183,6 +1185,8 @@ impl AssistOptions {
     /// Remove and parse every `assist` / `assist_*` key of `obj`.
     pub fn take(obj: &mut Map<String, Value>) -> Result<AssistOptions, String> {
         let mut o = AssistOptions::default();
+        let mut switch = false;
+        let mut settings = false;
         let keys: Vec<String> = obj
             .keys()
             .filter(|k| *k == "assist" || k.starts_with("assist_"))
@@ -1200,8 +1204,12 @@ impl AssistOptions {
                     .filter(|n| *n > 0)
                     .ok_or(format!("options.{k} must be a positive integer"))
             };
+            settings |= k != "assist";
             match k.as_str() {
-                "assist" => o.off = !v.as_bool().ok_or("options.assist must be true or false")?,
+                "assist" => {
+                    switch = true;
+                    o.on = v.as_bool().ok_or("options.assist must be true or false")?
+                }
                 "assist_models" => match &v {
                     Value::Array(a) => {
                         let list: Option<Vec<&str>> = a.iter().map(Value::as_str).collect();
@@ -1225,23 +1233,32 @@ impl AssistOptions {
                 }
             }
         }
+        if settings && !switch {
+            return Err(
+                "options.assist_*: the assistant is opt-in — add \"assist\": true to turn it on"
+                    .into(),
+            );
+        }
         Ok(o)
     }
 }
 
-/// Build the proxy from settings: `Ok(None)` when it is off (switched off,
-/// or no key). The message says where the key came from, never the key.
+/// Build the proxy from settings: `Ok(None)` when it is off (the default:
+/// it is opt-in). Turned on without a key, it is an error. The message
+/// says where the key came from, never the key.
 pub fn build(
-    off: bool,
+    on: bool,
     cfg: AssistConfig,
     key_file: Option<&Path>,
     log: Option<&str>,
 ) -> Result<Option<(Proxy, String)>, String> {
-    if off {
+    if !on {
         return Ok(None);
     }
     let Some(key) = load_key(key_file)? else {
-        return Ok(None);
+        return Err(format!(
+            "the assistant is on (--assist / \"assist\": true) but has no key: set {KEY_ENV} or give a key file"
+        ));
     };
     let from = match key_file {
         Some(p) => format!("key file {}", p.display()),

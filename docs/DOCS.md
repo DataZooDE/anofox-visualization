@@ -4396,9 +4396,12 @@ this section is the panel itself.
 | `remember` | Opt-in for the key dialog's *Remember on this device* checkbox (§4.5) — off by default, always off on `*.github.io`/`*.gitlab.io` regardless. |
 
 **The server's proxy (`/assist`, #740).** `serve <db>` and
-`anofox_serve(port, options)` relay the assistant's model calls when the
-server has a key (`ANTHROPIC_API_KEY`, or `--assist-key-file` /
-`options.assist_key_file`), so the key never reaches the browser. Settings:
+`anofox_serve(port, options)` relay the assistant's model calls, so the key
+never reaches the browser. **It is opt-in:** off unless the server is started
+with `--assist` / `"assist": true` (a key in the environment alone doesn't
+turn it on), and then it needs a key (`ANTHROPIC_API_KEY`, or
+`--assist-key-file` / `options.assist_key_file`). Settings (refused without
+`--assist` / `"assist": true`):
 
 | `serve` flag | `anofox_serve` option | Default |
 |---|---|---|
@@ -4409,7 +4412,7 @@ server has a key (`ANTHROPIC_API_KEY`, or `--assist-key-file` /
 | `--assist-budget-tokens-per-hour N` | `assist_budget_tokens_per_hour` | 2000000 |
 | `--assist-log PATH\|stderr` | `assist_log` | no log |
 | `--assist-log-content` | `assist_log_content` | off |
-| `--no-assist` | `"assist": false` | on when a key is set |
+| `--assist` · `--no-assist` | `"assist": true` · `false` | off (opt-in) |
 
 With the proxy on, the builder's ✦ panel uses it: no key dialog, nothing
 stored in the browser, *What will be sent* names this server. The

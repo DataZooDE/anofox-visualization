@@ -200,6 +200,7 @@ fn proxy_relays_with_the_servers_key_behind_the_authoring_guard() {
     let (_child, port, tok) = spawn_authoring(
         &s,
         &[
+            "--assist",
             "--assist-key-file",
             key.to_str().unwrap(),
             "--assist-base-url",
@@ -436,11 +437,36 @@ fn bad_assist_settings_refuse_to_start() {
             "--no-open",
             "--port",
             "0",
+            "--assist",
             "--assist-key-file",
             key.to_str().unwrap(),
         ]);
         assert_eq!(out.status.code(), Some(2), "{out:?}");
         assert!(!String::from_utf8_lossy(&out.stderr).contains(KEY));
+    }
+    // Opt-in: settings without --assist are refused, and --assist without a
+    // key fails the start.
+    let good = s.key_file();
+    let out = run(&[
+        db,
+        "--no-open",
+        "--port",
+        "0",
+        "--assist-key-file",
+        good.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("opt-in"),
+        "{out:?}"
+    );
+    {
+        let out = run(&[db, "--no-open", "--port", "0", "--assist"]);
+        assert_ne!(out.status.code(), Some(0), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("has no key"),
+            "{out:?}"
+        );
     }
     // A locked server has no /assist: the flags are refused there.
     let dir = s.0.join("dash");

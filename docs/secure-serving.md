@@ -142,11 +142,13 @@ so the protection is about making sure *only you* can send it:
   A's own assets route further down this document.
 - **`POST /assist/v1/messages` and `…/count_tokens` (#740): the builder
   assistant's proxy to the model API.** The API key stays on the server and
-  never reaches the browser. On when the server has a key:
-  `ANTHROPIC_API_KEY` in its environment, or `--assist-key-file FILE` /
-  `options.assist_key_file` (a regular file, not a symlink, not readable by
-  group or others, at most 4 KiB). `--no-assist` / `"assist": false` turns it
-  off even when a key is set. Without a key the route is a 404.
+  never reaches the browser. **Opt-in:** off unless the server is started
+  with `--assist` / `"assist": true`, whatever key its environment holds;
+  `--assist-*` / `assist_*` settings without it are refused. It then needs a
+  key (the start fails without one): `ANTHROPIC_API_KEY` in its environment,
+  or `--assist-key-file FILE` / `options.assist_key_file` (a regular file,
+  not a symlink, not readable by group or others, at most 4 KiB). Off, the
+  route is a 404.
   - *Auth:* the same token / loopback `Host` / same-origin guard as `/query`.
     The proxy adds no auth of its own.
   - *Not an open relay:* a request may carry only the fields the assistant
