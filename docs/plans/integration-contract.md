@@ -58,6 +58,15 @@ group, e.g. anofox-statistics `lowess_by` — drawn as a plain line like
 `pdp`; `nested_cv`: `ridge_nested_cv_by` / `elasticnet_nested_cv_by`'s outer
 folds, `series` = `fold`/`mean`).
 
+Every schema takes an optional **`row_order BIGINT`**: the row's 1-based
+position within its group in the producer's display order (terms in
+coefficient order, augment rows in input order, curve points in curve
+order). The plot macros aggregate with `list(tbl ORDER BY tbl)` for a
+deterministic result under parallel execution, which alone would sort by
+the whole row; the renderer then puts the rows in `row_order`
+(anofox-visualization#445, anofox-statistics#242, set by anofox-statistics
+0.15+). An addition, so the version stays `1`.
+
 Producers write these names. The visualization side also reads common other
 spellings (statsmodels `coef` / `P>|t|` / `[0.025`, broom `.fitted`, R
 `Std. Error`, pingouin `p-unc`; table in `docs/DOCS.md`, *Other column

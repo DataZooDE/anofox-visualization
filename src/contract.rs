@@ -134,6 +134,20 @@ fn render_plot(
         },
         _ => rows,
     };
+    // #445: the producer's display order. The macros sort whole rows for
+    // determinism under parallel execution (`list(tbl ORDER BY tbl)`), which
+    // alphabetises by the first varying field; anofox_statistics (0.15+)
+    // numbers each row within its group (`row_order`), so put them back in
+    // that order. A stable sort: the row-struct order stays the tiebreak
+    // (between groups), so the result is still deterministic.
+    let ordered;
+    let rows = match by_row_order(rows) {
+        Some(r) => {
+            ordered = r;
+            &ordered[..]
+        }
+        None => rows,
+    };
     let name = match plot {
         // No rows have no schema: the "No data" note, as for every macro.
         "auto" if rows.is_empty() => "auto",
@@ -815,6 +829,27 @@ fn closest(keys: &[&str]) -> String {
         })
         .collect();
     format!("; closest: {name}, missing {}", hints.join(", "))
+}
+
+/// The rows in their `row_order` (the integration contract's optional
+/// ordinal, #445), rows without one last; `None` when no row has one.
+fn by_row_order(rows: &[Row]) -> Option<Vec<Row>> {
+    let key = |r: &Row| match r.get("row_order") {
+        Some(J::Number(n)) => n.as_f64().filter(|f| f.is_finite()),
+        Some(J::String(s)) => s.trim().parse::<f64>().ok().filter(|f| f.is_finite()),
+        _ => None,
+    };
+    if !rows.iter().any(|r| key(r).is_some()) {
+        return None;
+    }
+    let mut out = rows.to_vec();
+    out.sort_by(|a, b| match (key(a), key(b)) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    Some(out)
 }
 
 /// How every missing-column error starts.
