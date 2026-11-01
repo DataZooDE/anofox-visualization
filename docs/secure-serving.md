@@ -1071,6 +1071,7 @@ curl -H "Authorization: Bearer $KEY" -o totals.csv \
 | `GET /api/export/<dashboard>.svg` | The whole dashboard as one SVG, as `dashboard --svg` draws it; `?tab=<label>` only that tab, `?width=480…4000` (default 1200), `?dark=1` the dark variant |
 | `GET /api/export/<dashboard>.png` / `.pdf` | The same picture as a PNG (`?scale=1…4`, default 2; at most 40 million pixels) or a one-page vector PDF, drawn with the bundled Hanken Grotesk font (the default theme's; SIL Open Font License) whatever fonts the server has. Only `data:` images are drawn, nothing is fetched |
 | `GET /api/export/<dashboard>/<name>.csv` / `.json` | The rows of the panel named `-- @name <name>`: CSV with a header row (the query's column names), or a JSON array of objects |
+| `GET /api/export/<dashboard>/<name>.svg` / `.png` | That panel drawn alone, for a chat card or a report (#815): the full width (`?width=320…4000`, default 640; its `::COL` is ignored), its own `::HEIGHT` and the other directives right before it, no dashboard title; `?scale=` and `?dark=1` as above, `?tab=` is `400` |
 
 - `?v.<name>=<value>` sets a variable, as a page URL does (a text value; `-- @vars`
   and a credential's locked variables apply). Inputs not given take their

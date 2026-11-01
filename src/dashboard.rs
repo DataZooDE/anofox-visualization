@@ -68,6 +68,10 @@ pub struct DashboardOptions {
     /// dashboard). Setup statements, chrome directives and inputs always
     /// run; `None` draws everything.
     pub only: Option<Vec<usize>>,
+    /// One panel alone (#815: a chat card): no dashboard header, and every
+    /// drawn statement spans the full width (`::COL`, `::COLUMNS` and a
+    /// `::VIEW` group's width are ignored). Use with `only`.
+    pub single: bool,
 }
 
 impl Default for DashboardOptions {
@@ -82,6 +86,7 @@ impl Default for DashboardOptions {
             variant: Variant::Light,
             asset_root: None,
             only: None,
+            single: false,
         }
     }
 }
@@ -460,7 +465,7 @@ fn render_inner(
     let pad = opts.gap as f64;
     let gap = opts.gap as f64;
     let content_w = opts.width as f64 - 2.0 * pad;
-    let mut columns = opts.columns.max(1);
+    let mut columns = if opts.single { 1 } else { opts.columns.max(1) };
     let mut default_span = (12 / columns).max(1);
 
     // A placed panel: (x, y, w, h, nested svg fragment positioned at x, y).
@@ -485,7 +490,7 @@ fn render_inner(
     let mut current_group_span: Option<(usize, u32)> = None;
 
     // The dashboard header (::DASHBOARD_TITLE / ::BRAND / ::LOGO).
-    if let Some((svg, h)) = header_svg(t, pad, row_y, content_w) {
+    if let Some((svg, h)) = header_svg(t, pad, row_y, content_w).filter(|_| !opts.single) {
         headings.push(svg);
         row_y += h + gap;
     }
@@ -549,7 +554,7 @@ fn render_inner(
             if let Some(v) = &panel.view {
                 current_group_span = Some((
                     v.group,
-                    if next_span == 0 {
+                    if next_span == 0 || opts.single {
                         12
                     } else {
                         next_span.clamp(1, 12)
@@ -578,7 +583,7 @@ fn render_inner(
         }
         // Directives that don't render a box.
         if has(&|r| matches!(r, Role::Columns)) {
-            if let Some(n) = num() {
+            if let Some(n) = num().filter(|_| !opts.single) {
                 if n >= 1.0 {
                     columns = n as u32;
                     default_span = (12 / columns).max(1);
@@ -587,7 +592,9 @@ fn render_inner(
             continue;
         }
         if has(&|r| matches!(r, Role::Span)) {
-            next_span = num().unwrap_or(0.0) as u32;
+            if !opts.single {
+                next_span = num().unwrap_or(0.0) as u32;
+            }
             continue;
         }
         if has(&|r| matches!(r, Role::Height)) {

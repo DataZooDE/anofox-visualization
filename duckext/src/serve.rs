@@ -4574,6 +4574,7 @@ fn run_report(st: &Locked, r: &notify::Report) -> Result<usize, String> {
     };
     let look = ExportLook {
         tab: r.tab.as_deref(),
+        panel: None,
         width: 1200,
         dark: false,
         scale: 2.0,
@@ -7961,6 +7962,12 @@ impl<'a> ExportAs<'a> {
     }
 }
 
+/// The plan index of the panel named `-- @name <name>`.
+fn named_panel(plan: &[anofox_visualization::sql::Panel], name: &str) -> Option<usize> {
+    plan.iter()
+        .position(|p| !p.setup && p.name.as_deref() == Some(name))
+}
+
 /// One `-- @name`d panel's rows as CSV or JSON (#764), the inputs before it
 /// bound to their defaults first, as on the page.
 fn export_panel(
@@ -7973,14 +7980,8 @@ fn export_panel(
 ) -> Result<Vec<u8>, (u16, String)> {
     let mut data = who.data(st, dash);
     let plan = anofox_visualization::sql::plan(&dash.sql);
-    let Some(i) = plan
-        .iter()
-        .position(|p| !p.setup && p.name.as_deref() == Some(name))
-    else {
-        return Err((
-            404,
-            "no such panel: name it with `-- @name <name>` in the dashboard".into(),
-        ));
+    let Some(i) = named_panel(&plan, name) else {
+        return Err((404, NO_SUCH_PANEL.into()));
     };
     info.panel = Some(i);
     for (j, p) in plan.iter().enumerate().take(i) {
@@ -8047,10 +8048,14 @@ fn export_panel(
     })
 }
 
+const NO_SUCH_PANEL: &str = "no such panel: name it with `-- @name <name>` in the dashboard";
+
 /// How a dashboard export looks.
 struct ExportLook<'a> {
     /// One tab, by its label.
     tab: Option<&'a str>,
+    /// One `-- @name`d panel alone, full width (#815).
+    panel: Option<&'a str>,
     width: u32,
     dark: bool,
     /// PNG pixels per SVG pixel.
@@ -8072,10 +8077,41 @@ fn export_dashboard(
         c.first()
             .and_then(|(_, v)| v.first().map(anofox_visualization::value_text))
     };
+    // One panel (#815): it and the directives right before it (::HEIGHT,
+    // ::TOTALS, …), not a ::TAB / ::VIEW / ::GROUP / ::FIGURE marker.
     // One tab: its marker and the statements in it.
-    let only = match look.tab {
-        None => None,
-        Some(label) => {
+    let only = match (look.panel, look.tab) {
+        (Some(name), _) => {
+            let i = named_panel(&plan, name).ok_or((404, NO_SUCH_PANEL.to_string()))?;
+            let marker = |p: &anofox_visualization::sql::Panel| {
+                p.roles.iter().any(|(_, r)| {
+                    use anofox_visualization::Role as R;
+                    matches!(
+                        r,
+                        R::Tab
+                            | R::View
+                            | R::GroupStart
+                            | R::GroupEnd
+                            | R::FigureStart
+                            | R::FigureEnd
+                    )
+                })
+            };
+            let mut keep = vec![i];
+            for j in (0..i).rev() {
+                let p = &plan[j];
+                if p.setup {
+                    continue;
+                }
+                if !anofox_visualization::roles::is_directive_panel(&p.roles) || marker(p) {
+                    break;
+                }
+                keep.push(j);
+            }
+            Some(keep)
+        }
+        (None, None) => None,
+        (None, Some(label)) => {
             let mut found = None;
             for (j, p) in plan.iter().enumerate() {
                 if !p
@@ -8113,6 +8149,7 @@ fn export_dashboard(
             anofox_visualization::theme::Variant::Light
         },
         asset_root: st.current.get().snap.dashes.assets_root.clone(),
+        single: look.panel.is_some(),
         only,
         ..Default::default()
     };
@@ -8142,7 +8179,8 @@ fn export_dashboard(
 
 /// `GET /api/export/<id>.svg` (the whole dashboard, or `?tab=<label>`) and
 /// `GET /api/export/<id>/<panel name>.csv|.json` (one `-- @name`d panel's
-/// rows), with `?v.<name>=<value>` for the variables (#764).
+/// rows) or `.svg|.png` (it drawn alone, #815), with `?v.<name>=<value>`
+/// for the variables (#764).
 #[allow(clippy::too_many_arguments)]
 fn handle_export(
     st: &Locked,
@@ -8159,18 +8197,20 @@ fn handle_export(
         _ => return reply(
             req,
             404,
-            "not found: /api/export/<dashboard>.svg|png|pdf or /api/export/<dashboard>/<panel>.csv|json",
+            "not found: /api/export/<dashboard>.svg|png|pdf or /api/export/<dashboard>/<panel>.svg|png|csv|json",
         ),
     };
     let (id, panel_name) = match target.split_once('/') {
         Some((d, p)) => (d, Some(p)),
         None => (target, None),
     };
-    if matches!(ext, "svg" | "png" | "pdf") != panel_name.is_none() {
+    if (panel_name.is_none() && matches!(ext, "csv" | "json"))
+        || (panel_name.is_some() && ext == "pdf")
+    {
         return reply(
             req,
             404,
-            "not found: a dashboard exports as .svg, .png or .pdf, a named panel as .csv or .json",
+            "not found: a dashboard exports as .svg, .png or .pdf, a named panel as .svg, .png, .csv or .json",
         );
     }
     let gen = st.current.get();
@@ -8228,18 +8268,30 @@ fn handle_export(
         let _ = req.respond(resp);
         200
     };
-    if let Some(name) = panel_name {
+    if let Some(name) = panel_name.filter(|_| matches!(ext, "csv" | "json")) {
         return match export_panel(st, dash, &who, name, ext, info) {
             Ok(b) if ext == "csv" => send(req, "text/csv; charset=utf-8", b, file("csv")),
             Ok(b) => send(req, "application/json", b, file("json")),
             Err((code, e)) => reply(req, code, &e),
         };
     }
-    let width = match q.get("width").map(|w| w.parse::<u32>()) {
-        None => 1200,
-        Some(Ok(w)) if (480..=4000).contains(&w) => w,
-        _ => return reply(req, 400, "width must be 480..=4000"),
+    // #815: one panel for a chat card — narrower than a dashboard.
+    let (min_w, default_w) = if panel_name.is_some() {
+        (320, 640)
+    } else {
+        (480, 1200)
     };
+    let width = match q.get("width").map(|w| w.parse::<u32>()) {
+        None => default_w,
+        Some(Ok(w)) if (min_w..=4000).contains(&w) => w,
+        _ => return reply(req, 400, &format!("width must be {min_w}..=4000")),
+    };
+    if panel_name.is_some() && q.contains_key("tab") {
+        return reply(req, 400, "tab doesn't apply to a panel export");
+    }
+    if let Some(name) = panel_name {
+        info.panel = named_panel(&anofox_visualization::sql::plan(&dash.sql), name);
+    }
     let scale = match q.get("scale").map(|v| v.parse::<f32>()) {
         None => 2.0,
         Some(Ok(v)) if ext == "png" && (1.0..=4.0).contains(&v) => v,
@@ -8247,6 +8299,7 @@ fn handle_export(
     };
     let look = ExportLook {
         tab: q.get("tab").map(String::as_str),
+        panel: panel_name,
         width,
         dark: q.get("dark").is_some_and(|d| d == "1"),
         scale,
