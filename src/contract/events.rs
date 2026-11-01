@@ -1,7 +1,7 @@
 //! `events`: point-in-time events over a time or period axis — a twin's
 //! alarms, parameter changes, calibration proposals (`ds | period, kind,
-//! label, severity, value, threshold, model_id, series`). Drawn on their own
-//! as one lane per series (else per kind) by `anofox_plot_events`, or over a
+//! label, severity, value, threshold, model_id, series | id`). Drawn on their
+//! own as one lane per series (else per kind) by `anofox_plot_events`, or over a
 //! forecast as vertical lines by `anofox_plot_prediction(p, events := …)`.
 
 use super::look::{self, Labels};
@@ -43,9 +43,10 @@ fn tip(t: &Table, i: usize) -> String {
         })
     };
     let num = |k: &str| get(k).and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()));
-    let head: Vec<String> = ["severity", "kind", "series"]
+    let head: Vec<String> = ["severity", "kind"]
         .iter()
         .filter_map(|k| txt(k))
+        .chain(txt("series").or_else(|| txt("id")))
         .collect();
     let mut body = txt("label").unwrap_or_default();
     if let Some(v) = num("value") {
@@ -88,7 +89,7 @@ fn rows_of(v: &J) -> Result<Vec<Row>, String> {
 /// Draw `events` over a prediction plot whose x column is `x`: a vertical
 /// line per event in its severity's colour, its text on hover. With panels
 /// (`facet`: the column and its per-row values), an event carrying that
-/// column (or `series`) is drawn in its own panel, else in every one. Returns
+/// column (or `series` / `id`) is drawn in its own panel, else in every one. Returns
 /// the plot and a caption naming the colours.
 pub(super) fn overlay(
     mut plot: GGPlot,
@@ -139,7 +140,7 @@ pub(super) fn overlay(
         })
         .unwrap_or_default();
     let own = facet
-        .and_then(|(f, _)| [f, "series"].into_iter().find(|k| t.has(k)))
+        .and_then(|(f, _)| [f, "series", "id"].into_iter().find(|k| t.has(k)))
         .map(|k| t.text(k));
     // Per severity: the number of events and their lines (one per panel).
     type Lines = Vec<(Value, String, Option<String>)>;
@@ -230,10 +231,12 @@ pub(super) fn events(
         })?;
     t.need(&[key.as_str()])?;
     let xs = t.xpos(&key);
-    let lane_key = ["series", "kind", "model_id"]
+    // `id` is the series key of anofox_forecast's events (ts_*_events_by).
+    let series = if t.has("series") { "series" } else { "id" };
+    let lane_key = [series, "kind", "model_id"]
         .into_iter()
         .find(|k| t.distinct(k) > 1)
-        .or_else(|| ["kind", "series"].into_iter().find(|k| t.has(k)));
+        .or_else(|| ["kind", series].into_iter().find(|k| t.has(k)));
     let lane_v: Vec<String> = match lane_key {
         Some(k) => t
             .text(k)

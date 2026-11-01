@@ -1,4 +1,4 @@
-# Test fixtures and documented demo credentials (reviewed 2026-10-31, #766):
+# Test fixtures and documented demo credentials (reviewed 2026-10-31, #766; 2026-11-01, #792):
 # test secrets in auth tests, the demo user in docs/deployment.md and
 # deploy/compose.yaml. One line per finding (commit:file:rule:line).
 25e605762dba0c41214d09fdc356d2fc3ab3b8f6:duckext/src/serve.rs:generic-api-key:1614
@@ -9,3 +9,5 @@ bc51555c004a22d811401bc2d5d05d985a6706a6:src/host/auth/embed.rs:generic-api-key:
 ccee642fd6e2b3e98f2a018221ad530c6961da6c:src/host/auth/tests.rs:generic-api-key:797
 d389babe588ae6cba3368d0c5bd8b923768c7c82:deploy/compose.yaml:curl-auth-user:3
 d389babe588ae6cba3368d0c5bd8b923768c7c82:docs/deployment.md:curl-auth-user:239
+a21ab757e87a8c6adc8a5fba1281c6c3152fa4d0:duckext/scripts/test-locked-server.sh:generic-api-key:386
+c31f26ae46808b15bd0464d91101a68cbf850dc4:duckext/scripts/test-locked-server.sh:generic-api-key:473

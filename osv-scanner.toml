@@ -1,0 +1,14 @@
+# Reviewed osv-scanner exceptions (security.yml). Each expires so it is
+# looked at again.
+
+# Unmaintained notices (no vulnerability) for crates pulled in by resvg /
+# usvg 0.45 and svg2pdf 0.13 (PNG / PDF export); svg2pdf pins them (#811).
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0206"
+ignoreUntil = 2027-02-01
+reason = "rustybuzz unmaintained; via usvg 0.45, pinned by svg2pdf 0.13 (#811)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+ignoreUntil = 2027-02-01
+reason = "ttf-parser unmaintained; via usvg 0.45 and svg2pdf 0.13 (#811)"

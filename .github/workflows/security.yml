@@ -3,6 +3,7 @@ name: Security scans
 # Weekly (and on demand), not per PR — CI time is shared (#766):
 #   * CodeQL: the browser app (JavaScript), the Rust crates and these workflows
 #   * osv-scanner: known vulnerabilities in Cargo.lock / package-lock.json
+#     (osv-scanner.toml: reviewed exceptions)
 #   * gitleaks: secrets in the whole history (.gitleaksignore: reviewed
 #     test fixtures and documented demo credentials)
 #   * zizmor: these workflows (.github/zizmor.yml: reviewed exceptions)

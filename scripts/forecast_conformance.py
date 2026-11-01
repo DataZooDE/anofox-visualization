@@ -175,6 +175,15 @@ def producers(dated: bool) -> dict[str, dict]:
     add("ts_forecast_explain_by", DECOMP,
         "(SELECT * FROM ts_forecast_explain_by('s', id, ds, y, 'ETS', 14, {seasonal_period: 7}) WHERE id = 'A')",
         "direct")
+    # … and their long twins (tagged anofox.output upstream): id, ds, component, value
+    add("ts_mstl_decomposition_long_by", DECOMP,
+        "(SELECT * FROM ts_mstl_decomposition_long_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) WHERE id = 'B')",
+        "direct")
+    add("ts_forecast_explain_long_by", DECOMP,
+        "(SELECT * FROM ts_forecast_explain_long_by('s', id, ds, y, 'ETS', 14, '1d', {seasonal_period: 7}) "
+        "WHERE id = 'A')", "direct")
+    add("ts_detrend_long_by", DECOMP,
+        "(SELECT * FROM ts_detrend_long_by('s', id, ds, y, 'auto') WHERE id = 'B')", "direct")
 
     # ── cross-validation folds → cv (provisional) ───────────────────────────
     add("ts_cv_folds_by", CV, "ts_cv_folds_by('s', id, ds, y, 3, 7, MAP{})", "direct")
@@ -194,6 +203,9 @@ def producers(dated: bool) -> dict[str, dict]:
         "(SELECT id AS model_id, unnest(generate_series(1, len((inspection).fitted_values))) AS row_id, "
         "unnest((inspection).fitted_values) AS fitted, unnest((inspection).residuals) AS residual "
         "FROM ts_forecast_inspect_by('s', id, ds, y, 'AutoETS', {seasonal_period: 7}) WHERE id = 'A')")
+    add("ts_forecast_fitted_by", OBS,
+        "(SELECT * FROM ts_forecast_fitted_by('s', id, ds, y, 'AutoETS', {seasonal_period: 7}) WHERE id = 'A')",
+        "direct")
 
     # ── ensembles and periods → terms ───────────────────────────────────────
     for f in ("ts_ensemble_inspect_by", "ts_auto_ensemble_inspect_by"):
@@ -207,6 +219,9 @@ def producers(dated: bool) -> dict[str, dict]:
     add("ts_detect_periods_agg", TERMS,
         "(SELECT id AS model_id, 'period ' || p.period AS term, p.strength AS estimate "
         "FROM (SELECT id, unnest(r.periods) AS p FROM (SELECT id, ts_detect_periods_agg(ds, y) AS r FROM s GROUP BY id)))")
+    add("ts_detect_periods_long_by", TERMS,
+        "(SELECT id AS model_id, 'period ' || period AS term, strength AS estimate "
+        "FROM ts_detect_periods_long_by('s', id, ds, y, MAP{}))")
 
     # ── changepoints and peaks → events ─────────────────────────────────────
     add("ts_detect_changepoints_by", EVENTS,
@@ -223,10 +238,14 @@ def producers(dated: bool) -> dict[str, dict]:
     add("ts_analyze_peak_timing_by", EVENTS,
         "(SELECT id AS series, unnest(peak_times)::BIGINT AS period, 'peak' AS kind "
         "FROM ts_analyze_peak_timing_by('s', id, ds, y, 7.0, MAP{}))")
+    add("ts_detect_changepoints_events_by", EVENTS,
+        f"ts_detect_changepoints_events_by('s', id, ds, y, {CP})", "direct")
+    add("ts_detect_peaks_long_by", EVENTS, "ts_detect_peaks_long_by('s', id, ds, y, MAP{})", "direct")
 
     # ── evaluation → summary ────────────────────────────────────────────────
     for m in ("mae", "mse", "rmse", "mape", "smape", "r2", "bias"):
         add(f"ts_{m}_by", SUMMARY, metric(f"ts_{m}_by({BT}, 'ds', 'y', 'yhat')"))
+    add("ts_metrics_by", SUMMARY, f"ts_metrics_by({BT}, ds, y, yhat)", "direct")
     # MASE scales by the in-sample naive error: the history rows carry no yhat.
     # Sorted: on an unsorted UNION ALL ts_mase_by returns NULL (main 5608238).
     hist = ("(SELECT * FROM (SELECT id, ds, y, NULL::DOUBLE AS yhat FROM s WHERE ds < (SELECT min(ds) FROM bt) "
@@ -318,11 +337,13 @@ EXTRA = {
     "forecast_with_history": f"SELECT anofox_plot_prediction(p) FROM ({HISTORY} UNION ALL BY NAME "
                              f"SELECT * FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', {FC})) p",
     # two confidence levels → a nested fan; 95 and 0.8 both read as fractions
+    # Newer anofox-forecast builds return their own `level` (a fraction); drop it so the case
+    # keeps one fraction level and one percent level against old and new builds.
     "forecast_fan_levels": "SELECT anofox_plot_prediction(p) FROM ("
                            f"{HISTORY} UNION ALL BY NAME "
-                           "SELECT *, 0.8 AS level FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', "
+                           "SELECT COLUMNS(c -> c <> 'level'), 0.8 AS level FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', "
                            "MAP{'seasonal_period': '7', 'confidence_level': '0.8'}) UNION ALL BY NAME "
-                           "SELECT *, 95 AS level FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', "
+                           "SELECT COLUMNS(c -> c <> 'level'), 95 AS level FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', "
                            "MAP{'seasonal_period': '7', 'confidence_level': '0.95'})) p WHERE id = 'A'",
     "forecast_models": "SELECT anofox_plot_prediction(p) FROM ("
                        f"{HISTORY} UNION ALL BY NAME "
