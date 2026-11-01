@@ -77,3 +77,11 @@
   .ai-form{position:sticky;bottom:0;padding-bottom:calc(.55rem + env(safe-area-inset-bottom,0px))}
   .ai-dlg-wide,.ai-dlg-full{width:100vw;height:100dvh;max-height:none;border-radius:0}
 }
+/* #195 M2-5: Build / Ask */
+.ai-modes{display:flex;gap:.2rem;padding:.3rem .7rem 0;border-bottom:1px solid var(--ui-line)}
+.ai-mode{font:inherit;font-size:.82rem;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--ui-muted);padding:.3rem .6rem;cursor:pointer}
+.ai-mode[aria-selected="true"]{color:var(--ui-ink);border-bottom-color:var(--ui-accent,#2563eb);font-weight:600}
+.ai-mode:focus-visible{outline:2px solid var(--ui-accent,#2563eb);outline-offset:1px}
+.ai-build,.ai-askbox{display:flex;flex-direction:column;flex:1;min-height:0}
+.ai-build[hidden],.ai-askbox[hidden]{display:none}
+.ai-askbox{padding:.6rem .7rem}

@@ -137,7 +137,10 @@ const tags = (doc) => new Set(doc.made.map((n) => n.tag));
   assert.deepEqual(code.match(/\.href\s*=.*/g), ['.href = new URL("./ask-ui.css", import.meta.url).href;'], "the only href is its own stylesheet");
   const app = read("web/app.js");
   assert.ok(/if \(servedMode && served\?\.ask\) mountAskSoon\(served\);/.test(app), "loaded only on a served page with Ask on");
+  // … or in the builder with the assistant on (#195 M2-5), through one loader
   assert.equal((app.match(/import\("\.\/ask-ui\.js"\)/g) || []).length, 1);
+  assert.ok(/const askUiModule = \(\) => import\("\.\/ask-ui\.js"\);/.test(app));
+  assert.ok(/const on = assistCfg\.enabled && !servedMode && !document\.body\.classList\.contains\("embed"\) && bodyMode\(\) === "view";\n  if \(on && !builderAskUi\)/.test(app), "the builder's sheet: assistant on, not served or embedded, View mode");
   assert.ok(/function askGoTo\(i, c\) \{\n  if \(!Number\.isInteger\(i\)\) return null;/.test(app), "a chip's panel is an integer");
 }
 

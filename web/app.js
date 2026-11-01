@@ -34,6 +34,7 @@ import init, {
   dashboard_meta,
   lint_step,
   version as wasmVersion,
+  AskSession,
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
@@ -43,7 +44,19 @@ import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnos
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
 import { applyAssistCsp } from "./assist-csp.js";
 import { LIVE_LIMITS, engineExtensions, livePageAdapter, pageAdapter } from "./assist-engine.js";
-import { KEY_SLOT, assistConfig, keyStore, rememberAllowed } from "./assist.js";
+import {
+  KEY_SLOT,
+  askTrim,
+  assistConfig,
+  browserKeyTransport,
+  classifyStatement,
+  keyStore,
+  loadSdk,
+  pathsOf,
+  rememberAllowed,
+  runAsk,
+  serveTransport,
+} from "./assist.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
 
@@ -1355,24 +1368,197 @@ function validPathValueLiteral(lit) {
 // #195: the Ask panel (web/ask-ui.js) on a served dashboard. It gets the
 // page's view (the open tab, the current inputs), the panels' titles (for
 // its chips: never the model's text) and askGoTo (a citation chip's click).
+const askTitle = (i) =>
+  Number.isInteger(i) ? document.querySelector(`.dash .panel[data-stmt="${i}"] .panel-title`)?.textContent?.trim() || "" : "";
+const askTitles = () => [...document.querySelectorAll(".dash .panel[data-stmt] .panel-title")].map((t) => t.textContent.trim()).filter(Boolean);
+const askOpenTab = () => document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent ?? null;
+// web/ask-ui.js, loaded only when Ask can be used: a served page whose
+// server says it is on, or the builder with the assistant on.
+const askUiModule = () => import("./ask-ui.js");
 async function mountAskSoon(served) {
   try {
-    const { mountAsk } = await import("./ask-ui.js");
-    const titleOf = (i) =>
-      Number.isInteger(i) ? document.querySelector(`.dash .panel[data-stmt="${i}"] .panel-title`)?.textContent?.trim() || "" : "";
+    const { mountAsk } = await askUiModule();
     mountAsk({
       cfg: served.ask,
       dashboard: served.id,
       session: served.session,
-      view: () => ({ tab: document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent ?? null, vars: { ...servedVars } }),
-      title: titleOf,
-      titles: () => [...document.querySelectorAll(".dash .panel[data-stmt] .panel-title")].map((t) => t.textContent.trim()).filter(Boolean),
+      view: () => ({ tab: askOpenTab(), vars: { ...servedVars } }),
+      title: askTitle,
+      titles: askTitles,
       goTo: askGoTo,
     });
   } catch (e) {
     console.warn("Ask could not load:", e);
   }
 }
+// #195 M2-5: Ask in the builder — a question about the dashboard on this
+// page, answered in the page: web/assist.js runAsk drives the model over the
+// wasm AskSession (src/host/ask/session.rs, the server's own tool checks,
+// masking and citation check); the panel reads are this page's
+// (askReadPanel). Two mounts share this: the ✦ Ask sheet in View mode and
+// the assistant panel's Ask tab in Edit mode — each its own conversation.
+let dpRanScript = null; // the script of the last page run (not a preview) …
+let dpRanStmts = null; // … and its plan
+// The page's view as /api/panel takes it: the open tab and the viewer's
+// input values (an input's pick, a URL seed, a cross-filter var) — not the
+// dashboard's own derived variables.
+function builderAskView() {
+  const vars = {};
+  for (const [k, lit] of Object.entries(dpVarNow)) if (dpViewerVars.has(k.toLowerCase())) vars[k] = sqlLiteralToJson(lit);
+  return { tab: askOpenTab(), vars, hidden: [] };
+}
+// A JSON value as the typed SQL literal a SET VARIABLE takes (never text
+// spliced into the panel's SQL: the panel reads it with getvariable()).
+function askLiteral(v) {
+  if (v === null || v === undefined) return "NULL";
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "NULL";
+  if (Array.isArray(v)) return "[" + v.map((x) => `'${String(x).replace(/'/g, "''")}'`).join(",") + "]::VARCHAR[]";
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
+// One panel read for Ask: after any page run in flight, in the lazy queue
+// (so no tab job or run interleaves on the page's connection). `vars` that
+// differ from the page are set for this read only — the dashboard's derived
+// `SET VARIABLE`s re-run with them — and put back after; a read whose
+// panel depends on a setup table built from such a variable is refused
+// (it would answer from the page's data, not the asked-for values).
+async function askReadPanel(req) {
+  while (runActive) await runActive.catch(() => {});
+  const stmts = dpRanStmts;
+  if (preview || !stmts) throw new Error("the dashboard isn't on the page: run it first");
+  const step = dpLazy.tail.then(() => askReadNow(stmts, req));
+  dpLazy.tail = step.catch(() => {});
+  return step;
+}
+async function askReadNow(stmts, req) {
+  if (stmts !== dpRanStmts || preview) throw new Error("the dashboard re-ran: ask again");
+  const st = stmts[req.panel];
+  if (!st || st.setup) throw new Error("no such panel");
+  // read-only, as the page runs it (its own files are the author's)
+  if (classifyStatement(st.sql, { known: new Set(pathsOf(st.sql)) }).cls !== 1) throw new Error("this panel can't be re-read");
+  // a lazy tab's deferred setup statements, as its own panels would run them
+  const L = dpLazy.cur;
+  if (L && !L.pv && L.stmts === stmts) await lazyFlushSetup(L, Infinity, null);
+  let sql = st.sql;
+  if (req.page) {
+    const built = page_sql(sql, JSON.stringify(req.page));
+    if (built.startsWith("{")) throw new Error(JSON.parse(built).error || "bad page");
+    sql = built;
+  }
+  const now = builderAskView().vars;
+  const over = Object.entries(req.vars || {}).filter(([k, v]) => /^[A-Za-z_]\w*$/.test(k) && JSON.stringify(now[k]) !== JSON.stringify(v));
+  if (!over.length) return req.page ? runSql(sql, undefined, undefined, undefined, req.panel, null) : panelSql(sql, req.panel, null);
+  const reads = (k) => new RegExp(`getvariable\\s*\\(\\s*'${k}'\\s*\\)`, "i");
+  const setup = stmts.filter((s, k) => s.setup && k < req.panel);
+  const setv = (s) => /^\s*SET\s+VARIABLE\b/i.test(sqlCode(s.sql));
+  for (const [k] of over)
+    if (setup.some((s) => !setv(s) && reads(k).test(s.sql))) throw new Error(`a setup statement builds this panel's data from '${k}': change it on the page to see other values`);
+  const derived = stmts.filter((s) => s.setup && setv(s));
+  const saved = over.map(([k]) => [k, Object.hasOwn(dpVarNow, k) ? dpVarNow[k] : undefined]);
+  const q = (s) => runSql(s, undefined, undefined, true, undefined, null);
+  try {
+    for (const [k, v] of over) await q(`SET VARIABLE ${k} = ${askLiteral(v)}`);
+    for (const d of derived) await q(d.sql);
+    return await runSql(sql, undefined, undefined, undefined, req.panel, null);
+  } finally {
+    for (const [k, lit] of saved) {
+      if (lit === undefined) {
+        await q(`RESET VARIABLE ${k}`).catch(() => {});
+        delete dpVarNow[k];
+      } else await q(`SET VARIABLE ${k} = ${lit}`).catch(() => {});
+    }
+    for (const d of derived) await q(d.sql).catch(() => {});
+  }
+}
+// Where the builder's questions go (the notice and the panel's line).
+function askProvider() {
+  return assistCfg.transport === "serve" ? "the assistant's server (which sends them on to Anthropic)" : "Anthropic (Claude), with your API key";
+}
+// The View-mode sheet's transport: the assistant's CSP first (as
+// openAssistant), then the server's proxy or the user's own key.
+async function builderAskTransport() {
+  try {
+    await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
+  } catch (_) {
+    throw new Error("The assistant is not available in this browser: its security policy could not be enforced.");
+  }
+  const Anthropic = await loadSdk();
+  if (assistCfg.transport === "serve") return serveTransport({ Anthropic });
+  const apiKey = keyStore(sessionStorage, localStorage, { remember: assistCfg.remember }).get();
+  if (!apiKey) throw new Error("Add your API key first: open the assistant in Edit mode (✦ Assistant).");
+  return browserKeyTransport({ Anthropic, apiKey });
+}
+// An ask-ui host for the builder. `getTransport()` → a transport.
+function builderAskHost(getTransport, extra = {}) {
+  let st = null; // {session, script, turns}: this mount's conversation
+  const state = () => {
+    const script = dpRanScript ?? "";
+    if (!st || st.script !== script) {
+      st?.session.free?.();
+      st = { session: new AskSession(script), script, turns: [] };
+    }
+    return st;
+  };
+  return {
+    cfg: { provider: askProvider(), perConversation: true },
+    view: () => builderAskView(),
+    title: askTitle,
+    titles: askTitles,
+    goTo: askGoTo,
+    catalog: () => {
+      try {
+        return JSON.parse(state().session.catalog("[]"));
+      } catch {
+        return [];
+      }
+    },
+    onNew: () => {
+      st?.session.free?.();
+      st = null;
+    },
+    run: async (q, { signal, onProgress }) => {
+      if (dpRanScript === null) return { kind: "error", text: "Run the dashboard first." };
+      let transport;
+      try {
+        transport = await getTransport();
+      } catch (e) {
+        return { kind: "error", text: String(e?.message || e) };
+      }
+      const c = state();
+      const r = await runAsk({
+        transport,
+        session: c.session,
+        question: q.question,
+        view: { ...builderAskView(), panel: Number.isInteger(q.panel) ? q.panel : null },
+        readPanel: askReadPanel,
+        turns: c.turns,
+        model: assistCfg.models?.default,
+        signal,
+        onStatus: onProgress,
+      });
+      if (r.kind === "answer" && st === c) c.turns = askTrim([...c.turns, r.turn]);
+      return r;
+    },
+    ...extra,
+  };
+}
+// View mode: the ✦ Ask sheet, loaded on the first switch to View mode with
+// the assistant on (the module isn't loaded otherwise).
+let builderAskUi = null;
+async function builderAskSync() {
+  const on = assistCfg.enabled && !servedMode && !document.body.classList.contains("embed") && bodyMode() === "view";
+  if (on && !builderAskUi) {
+    builderAskUi = (async () => (await askUiModule()).mountAsk(builderAskHost(builderAskTransport)))().catch((e) => {
+      console.warn("Ask could not load:", e);
+      builderAskUi = null;
+    });
+  }
+  const ui = await builderAskUi;
+  if (!ui) return;
+  ui.button.hidden = !on;
+  if (!on) ui.shut?.({ focus: false });
+}
+
 // A verified citation's chip was clicked: open the panel's tab, scroll to it,
 // highlight it (and a table row whose cells show the cited key values — a
 // text comparison, never a selector built from data), move the focus there.
@@ -2262,6 +2448,7 @@ function assistUiSync() {
   if (tabs) tabs.hidden = !on;
   const start = $("assist-start");
   if (start) start.hidden = !on || $("sql").value.trim() !== "" || !!assistUi?.isOpen();
+  builderAskSync();
 }
 // The editor-column tabs (SQL / ✦ Assistant): a standard ARIA tablist
 // (←/→, Home/End move and activate; selecting the Assistant tab opens the
@@ -2339,6 +2526,9 @@ function assistHost() {
     keyStore: () => keyStore(sessionStorage, localStorage, { remember: assistCfg.remember }),
     ui: { toast: sideToast, status, isPhone: () => matchMedia(SIDE_DRAWER).matches, opener: () => lastOpener },
     debug: new URLSearchParams(location.search).get("assist_debug") === "1", // display only
+    // #195 M2-5: the panel's Ask tab (its transport: the panel's own, key
+    // dialog included).
+    ask: { mount: async (container, getTransport) => (await askUiModule()).mountAsk({ ...builderAskHost(getTransport), container }) },
   };
 }
 // Click ✦, the Assistant tab, the start card's submit, or Ctrl/⌘+I: proves
@@ -9878,6 +10068,8 @@ async function runOnce(fresh = true, pv = preview) {
     // `pv`, not the live `preview` (sec-review-272-rereview H-1R): see above.
     stmts = JSON.parse(plan(pv ? pv.sql : $("sql").value));
     stmts.forEach((s, i) => (s.i = i)); // the plan index (served requests name it)
+    dpRanScript = pv ? null : $("sql").value; // #195 M2-5: what Ask asks about
+    dpRanStmts = pv ? null : stmts;
   } catch (e) {
     grid.replaceChildren();
     return showError(grid, String(e));

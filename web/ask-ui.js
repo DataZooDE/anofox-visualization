@@ -185,8 +185,19 @@ const el = (doc, tag, cls, text) => {
 
 // host: {cfg, dashboard, session, view(): {tab, vars}, title(i), titles(),
 //        goTo(panel, citation) → element | null}
+// The builder (M2-5) adds:
+//   run({question, tab, vars, panel}, {signal, onProgress}) → {kind, answer?,
+//     text?}: the question runs in the page (web/assist.js runAsk) instead
+//     of POST /api/ask;
+//   container: an element to mount into (the assistant panel's Ask tab)
+//     instead of a floating sheet with its own ✦ Ask button;
+//   catalog() → [{index, line, excluded}]: *What will be sent*;
+//   onNew(): *New conversation* (the page drops its session).
+// cfg.perConversation: the notice before each conversation's first question
+// (the builder's consent), not once per browser session.
 export function mountAsk(host, doc = document, win = window) {
   const cfg = host.cfg || {};
+  const inline = !!host.container;
   const link = el(doc, "link");
   link.rel = "stylesheet";
   link.href = new URL("./ask-ui.css", import.meta.url).href;
@@ -201,7 +212,8 @@ export function mountAsk(host, doc = document, win = window) {
   sheet.id = "ax-ask";
   sheet.setAttribute("role", "region");
   sheet.setAttribute("aria-label", "Ask about this dashboard");
-  sheet.hidden = true;
+  sheet.hidden = !inline;
+  if (inline) sheet.classList.add("ax-ask-inline");
 
   const head = el(doc, "div", "ax-ask-head");
   head.appendChild(el(doc, "strong", "", "Ask about this dashboard"));
@@ -211,6 +223,7 @@ export function mountAsk(host, doc = document, win = window) {
   close.type = "button";
   close.setAttribute("aria-label", "Close");
   head.append(fresh, close);
+  if (inline) close.hidden = true;
   const line = el(doc, "div", "ax-ask-line", `AI answers · sent to ${cfg.provider || "the model provider"}`);
   const log = el(doc, "div", "ax-ask-log");
   log.setAttribute("role", "log");
@@ -232,7 +245,22 @@ export function mountAsk(host, doc = document, win = window) {
   form.append(input, send);
   const statusRow = el(doc, "div", "ax-ask-statusrow");
   statusRow.append(status, cancel);
-  sheet.append(head, line, log, sugg, statusRow, form);
+  sheet.append(head, line);
+  // *What will be sent* (the builder): the panels the assistant may read.
+  if (typeof host.catalog === "function") {
+    const what = el(doc, "details", "ax-ask-what");
+    what.appendChild(el(doc, "summary", "", "What will be sent"));
+    what.appendChild(el(doc, "p", "", "Your question, the open tab and input values, and the rows of the panels the assistant reads — at most 200 rows each, personal-looking values replaced by placeholders. It may read:"));
+    const ul = el(doc, "ul");
+    what.appendChild(ul);
+    what.addEventListener("toggle", () => {
+      if (!what.open) return;
+      ul.replaceChildren();
+      for (const c of host.catalog() || []) ul.appendChild(el(doc, "li", c.excluded ? "ax-ask-excluded" : "", c.excluded ? `${c.line} (not sent)` : c.line));
+    });
+    sheet.appendChild(what);
+  }
+  sheet.append(log, sugg, statusRow, form);
 
   // the notice, before the first question of a session
   const notice = el(doc, "div", "ax-ask-notice");
@@ -245,13 +273,16 @@ export function mountAsk(host, doc = document, win = window) {
   no.type = "button";
   notice.append(ok, no);
   sheet.appendChild(notice);
-  doc.body.append(btn, sheet);
+  if (inline) host.container.appendChild(sheet);
+  else doc.body.append(btn, sheet);
 
   let conversation = null;
   let opener = null;
   let busy = null; // AbortController of the running question
   let pointed = null; // "ask about this panel"
+  let consented = false; // cfg.perConversation: this conversation's
   const seen = () => {
+    if (cfg.perConversation) return consented;
     try {
       return win.sessionStorage.getItem(NOTICE_KEY) === "1";
     } catch {
@@ -272,14 +303,17 @@ export function mountAsk(host, doc = document, win = window) {
     showNotice(!seen());
     if (seen()) input.focus();
   };
-  const shut = () => {
+  const shut = ({ focus = true } = {}) => {
+    if (inline) return;
+    const was = !sheet.hidden;
     sheet.hidden = true;
     btn.setAttribute("aria-expanded", "false");
-    (opener && opener.focus ? opener : btn).focus();
+    if (focus && was) (opener && opener.focus ? opener : btn).focus();
   };
   btn.addEventListener("click", () => (sheet.hidden ? open() : shut()));
-  close.addEventListener("click", shut);
+  close.addEventListener("click", () => shut());
   ok.addEventListener("click", () => {
+    consented = true;
     try {
       win.sessionStorage.setItem(NOTICE_KEY, "1");
     } catch {
@@ -288,7 +322,7 @@ export function mountAsk(host, doc = document, win = window) {
     showNotice(false);
     input.focus();
   });
-  no.addEventListener("click", shut);
+  no.addEventListener("click", () => (inline ? showNotice(true) : shut()));
   sheet.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
@@ -296,6 +330,7 @@ export function mountAsk(host, doc = document, win = window) {
     }
   });
   win.addEventListener("keydown", (e) => {
+    if (inline) return; // the assistant panel has its own shortcuts
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
       sheet.hidden ? open() : input.focus();
@@ -303,11 +338,15 @@ export function mountAsk(host, doc = document, win = window) {
   });
   fresh.addEventListener("click", () => {
     conversation = null;
+    consented = false;
     log.replaceChildren();
     status.textContent = "";
+    host.onNew?.();
+    if (cfg.perConversation && !sheet.hidden) showNotice(true);
   });
   cancel.addEventListener("click", () => {
     busy?.abort();
+    if (host.run) return;
     const h = {};
     if (host.session) h["X-Anofox-Session"] = host.session;
     fetch("/api/ask", { method: "DELETE", headers: h }).catch(() => {});
@@ -354,7 +393,10 @@ export function mountAsk(host, doc = document, win = window) {
           back.remove();
           b.focus();
         });
-        target.after?.(back);
+        // after the panel's title, or inside a panel without one (never a
+        // loose grid item)
+        if (target.matches?.(".panel")) target.appendChild(back);
+        else target.after?.(back);
       });
       chips.appendChild(b);
     }
@@ -376,6 +418,25 @@ export function mountAsk(host, doc = document, win = window) {
     send.disabled = true;
     status.textContent = "Thinking…";
     const { tab, vars } = host.view();
+    const progress = (data) => {
+      status.textContent = data.phase === "reading" ? `Reading “${host.title(data.panel) || "a panel"}”…` : "Thinking…";
+    };
+    if (host.run) {
+      try {
+        const r = await host.run({ question, tab: tab ?? null, vars, panel: pointed }, { signal: ctl.signal, onProgress: progress });
+        if (r?.kind === "answer") showAnswer(r.answer);
+        else turn("bot", el(doc, "p", "ax-ask-error", String(r?.text || "The assistant couldn't answer.").slice(0, 300)));
+      } catch (e) {
+        turn("bot", el(doc, "p", "ax-ask-error", e?.name === "AbortError" ? "Cancelled." : "The assistant couldn't answer right now."));
+      } finally {
+        busy = null;
+        cancel.hidden = true;
+        send.disabled = false;
+        status.textContent = "";
+        pointed = null;
+      }
+      return;
+    }
     const body = { dashboard: host.dashboard, question, vars, conversation, tab: tab ?? null };
     if (pointed !== null) body.panel = pointed;
     const headers = { "Content-Type": "application/json" };
@@ -403,7 +464,7 @@ export function mountAsk(host, doc = document, win = window) {
         buf = rest;
         for (const { event, data } of events) {
           if (event === "progress") {
-            status.textContent = data.phase === "reading" ? `Reading “${host.title(data.panel) || "a panel"}”…` : "Thinking…";
+            progress(data);
           } else if (event === "answer") {
             conversation = data.conversation;
             showAnswer(data);
@@ -433,5 +494,6 @@ export function mountAsk(host, doc = document, win = window) {
       ask(input.value);
     }
   });
-  return { open, ask, shut };
+  if (inline) showNotice(!seen());
+  return { open, ask, shut, sheet, button: btn };
 }
