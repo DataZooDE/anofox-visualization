@@ -43,6 +43,9 @@ const FIELDS: [&str; 12] = [
 
 pub struct Embed {
     key: DecodingKey,
+    /// The same secret, for tokens this server mints itself (#771,
+    /// `POST /api/auth/token`).
+    sign: jsonwebtoken::EncodingKey,
     pub max_link_ttl: u64,
     pub session_ttl: u64,
     leeway: u64,
@@ -119,6 +122,7 @@ impl Embed {
         let session_ttl = secs("session_ttl_s", 3600, 86_400)?;
         Ok(Embed {
             key: DecodingKey::from_secret(s.as_bytes()),
+            sign: jsonwebtoken::EncodingKey::from_secret(s.as_bytes()),
             max_link_ttl: secs("max_link_ttl_s", 300, 86_400)?,
             session_ttl,
             leeway: secs("leeway_s", 30, super::jwt::MAX_LEEWAY_S)?,
@@ -196,6 +200,130 @@ impl Embed {
                 vars,
             },
         ))
+    }
+
+    /// Mint an embed token for an API key with the `embed` scope (#771,
+    /// `POST /api/auth/token`), capped by the key: one of its own dashboards,
+    /// exactly its claims (all of which this mode must be able to carry), a
+    /// subset of its groups, and locked variables. No `user`: the token's
+    /// viewer is the shared `embed:<dashboard>`, like a link without one, so
+    /// it can never submit or save as somebody. `(token, exp)`.
+    pub fn mint(
+        &self,
+        key: &Claims,
+        key_scope: &Scope,
+        key_id: &str,
+        req: &Value,
+    ) -> Result<(String, u64), String> {
+        let o = req
+            .as_object()
+            .ok_or("the body must be {\"dashboard\": \"<id>\", …}")?;
+        if let Some(k) = o.keys().find(|k| {
+            !matches!(
+                k.as_str(),
+                "dashboard" | "vars" | "groups" | "claims" | "ttl_s"
+            )
+        }) {
+            return Err(format!(
+                "unknown key '{k}' (dashboard, vars, groups, claims, ttl_s)"
+            ));
+        }
+        let dashboard = o
+            .get("dashboard")
+            .and_then(Value::as_str)
+            .filter(|d| crate::host::serving::valid_dashboard_id(d))
+            .ok_or("dashboard must be a dashboard id")?;
+        if !key_scope.allows(dashboard) {
+            return Err(format!(
+                "this API key may not read the dashboard '{dashboard}'"
+            ));
+        }
+        // The key's claims, all of them: a token without one would read as
+        // a viewer who has no such claim.
+        let mut claims = serde_json::Map::new();
+        for (name, v) in &key.attrs {
+            if !self.claims.contains(name) {
+                return Err(format!(
+                    "the key's claim '{name}' can't be carried by an embed token — add it to the embed mode's \"claims\""
+                ));
+            }
+            claims.insert(name.clone(), v.clone().map_or(Value::Null, Value::String));
+        }
+        if let Some(asked) = o.get("claims") {
+            let asked = asked.as_object().ok_or("claims must be an object")?;
+            for (k, v) in asked {
+                let have = claims.get(&k.to_ascii_lowercase());
+                let same = match (have, v) {
+                    (Some(Value::String(a)), Value::String(b)) => a == b,
+                    (Some(Value::Null), Value::Null) => true,
+                    _ => false,
+                };
+                if !same {
+                    return Err(format!(
+                        "claims.{k}: a token carries the key's own claims only, unchanged"
+                    ));
+                }
+            }
+        }
+        let groups: Vec<String> = match o.get("groups") {
+            None | Some(Value::Null) => key.groups.clone(),
+            Some(Value::Array(a)) => {
+                let mut g = Vec::new();
+                for x in a {
+                    let x = x
+                        .as_str()
+                        .ok_or("groups must be a list of the key's groups")?;
+                    if !key.groups.iter().any(|k| k == x) {
+                        return Err(format!("groups: '{x}' is not one of the key's groups"));
+                    }
+                    g.push(x.to_string());
+                }
+                g
+            }
+            Some(_) => return Err("groups must be a list of the key's groups".into()),
+        };
+        let vars = match o.get("vars") {
+            None | Some(Value::Null) => serde_json::Map::new(),
+            Some(Value::Object(m)) => {
+                if m.len() > MAX_VARS {
+                    return Err(format!("at most {MAX_VARS} vars"));
+                }
+                for (name, v) in m {
+                    if !super::lockable_var(name) || sql_literal(v).is_err() {
+                        return Err(format!("vars.{name}: not a variable this token may lock"));
+                    }
+                }
+                m.clone()
+            }
+            Some(_) => return Err("vars must be an object".into()),
+        };
+        let ttl = match o.get("ttl_s") {
+            None => self.max_link_ttl,
+            Some(t) => t
+                .as_u64()
+                .filter(|t| *t > 0)
+                .ok_or("ttl_s must be a positive number of seconds")?
+                .min(self.max_link_ttl),
+        };
+        let now = now_s();
+        let exp = now + ttl;
+        let payload = serde_json::json!({
+            "dashboard": dashboard,
+            "groups": groups,
+            "claims": claims,
+            "vars": vars,
+            "exp": exp,
+            "iat": now,
+            "jti": crate::host::serving::random_token(),
+            "sub": format!("key:{key_id}"),
+        });
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(Algorithm::HS256),
+            &payload,
+            &self.sign,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok((token, exp))
     }
 
     fn claims_of(&self, p: &Value, id: &str) -> Result<Claims, AuthError> {
@@ -292,6 +420,86 @@ mod tests {
         json!({"dashboard": "sales", "user": "acme-viewer", "groups": ["viewers"],
                "claims": {"tenant": "acme"}, "vars": {"region": "EU", "year": 2026},
                "exp": now_s() + 120})
+    }
+
+    // #771: a token minted for an API key is capped by the key, and is a
+    // link like any other.
+    #[test]
+    fn a_minted_token_is_capped_by_its_key() {
+        let e = embed(json!({}));
+        let key = Claims {
+            user: "svc-host".into(),
+            groups: vec!["sales".into(), "viewers".into()],
+            attrs: vec![("tenant".into(), Some("acme".into()))],
+        };
+        let scope = Scope {
+            dashboards: Some(vec!["sales".into()]),
+            vars: Vec::new(),
+        };
+        let (t, exp) = e
+            .mint(
+                &key,
+                &scope,
+                "0123456789ab",
+                &json!({"dashboard": "sales", "groups": ["viewers"], "vars": {"region": "EU"}}),
+            )
+            .unwrap();
+        assert!(exp <= now_s() + e.max_link_ttl);
+        let (c, s) = e.verify_link(&t, "sales").unwrap();
+        assert_eq!(
+            c.user, "embed:sales",
+            "no user of its own: it never submits as somebody"
+        );
+        assert_eq!(c.groups, ["viewers"]);
+        assert_eq!(c.attrs, [("tenant".to_string(), Some("acme".to_string()))]);
+        assert_eq!(s.vars, [("region".to_string(), "'EU'".to_string())]);
+        // capped
+        for (bad, why) in [
+            (json!({"dashboard": "payroll"}), "may not read"),
+            (
+                json!({"dashboard": "sales", "claims": {"tenant": "globex"}}),
+                "own claims only",
+            ),
+            (
+                json!({"dashboard": "sales", "claims": {"region": "EU"}}),
+                "own claims only",
+            ),
+            (
+                json!({"dashboard": "sales", "groups": ["admins"]}),
+                "not one of the key's groups",
+            ),
+            (
+                json!({"dashboard": "sales", "vars": {"__claim_tenant": "x"}}),
+                "may lock",
+            ),
+            (
+                json!({"dashboard": "sales", "user": "alice"}),
+                "unknown key 'user'",
+            ),
+            (json!({}), "dashboard must be"),
+        ] {
+            let err = e.mint(&key, &scope, "k", &bad).unwrap_err();
+            assert!(err.contains(why), "{bad}: {err}");
+        }
+        // a claim the mode can't carry: refused, not dropped
+        let wider = Claims {
+            attrs: vec![("region".into(), Some("EU".into()))],
+            ..key.clone()
+        };
+        let err = e
+            .mint(&wider, &scope, "k", &json!({"dashboard": "sales"}))
+            .unwrap_err();
+        assert!(err.contains("can't be carried"), "{err}");
+        // ttl_s is capped by max_link_ttl_s
+        let (_, exp) = e
+            .mint(
+                &key,
+                &scope,
+                "k",
+                &json!({"dashboard": "sales", "ttl_s": 999999}),
+            )
+            .unwrap();
+        assert!(exp <= now_s() + e.max_link_ttl);
     }
 
     #[test]

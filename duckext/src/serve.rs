@@ -1717,7 +1717,7 @@ impl LockedOptions {
                             .as_str()
                             .ok_or("options.frame_ancestors must be an array of origins")?;
                         if !sv::valid_frame_ancestor(o) {
-                            return Err(format!("options.frame_ancestors: '{o}' is not an origin (https://host[:port], 'self' or 'none')"));
+                            return Err(format!("options.frame_ancestors: '{o}' is not an origin (https://host[:port], http://127.0.0.1|localhost[:port], 'self' or 'none')"));
                         }
                         out.push(o.to_string());
                     }
@@ -4981,6 +4981,89 @@ pub fn refresh(port: u16) -> Result<String, String> {
     Ok(locked.refresh(true)?.unwrap_or_default())
 }
 
+/// `POST /api/auth/token` (#771): an embed token for `<anofox-dashboard>`,
+/// from an API key with the `embed` scope, capped by the key
+/// ([`auth::embed::Embed::mint`]). The host's backend calls this; the
+/// browser only ever gets the token.
+fn handle_embed_token(
+    st: &Locked,
+    mut req: Request,
+    ident: Option<&auth::Identity>,
+    info: &mut LogInfo,
+) -> u16 {
+    let peer = req.remote_addr().map(|a| a.ip());
+    let audit = |outcome: &'static str, reason: Option<&'static str>, detail: Option<&str>| {
+        if let Some(a) = st.opts.auth.as_ref().and_then(|a| a.audit.as_ref()) {
+            a.write(&auth::audit::Event {
+                event: "embed_token",
+                outcome,
+                method: ident.map(|i| i.method),
+                user: ident.map(|i| i.claims.user.as_str()),
+                reason,
+                peer,
+                path: Some("/api/auth/token"),
+                key_id: ident.and_then(|i| i.ref_id.as_deref()),
+                detail,
+                ..Default::default()
+            });
+        }
+    };
+    let Some(embed) = st.opts.auth.as_ref().and_then(|a| a.embed.as_ref()) else {
+        return reply(
+            req,
+            404,
+            "not found: this server has no embed links (an auth mode \"embed\")",
+        );
+    };
+    let Some(id) = ident.filter(|i| i.method == "api_key" && i.key_scopes.embed) else {
+        info.deny = Some("embed_scope");
+        audit("deny", Some("embed_scope"), None);
+        return reply(
+            req,
+            403,
+            "forbidden: only an API key with the embed scope may mint embed tokens",
+        );
+    };
+    let body = match read_body(&mut req, 16 * 1024) {
+        Ok(b) => b,
+        Err((code, e)) => return reply(req, code, &e),
+    };
+    let v: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => return reply(req, 400, &format!("the body is not JSON: {e}")),
+    };
+    let key_id = id.ref_id.as_deref().unwrap_or("");
+    match embed.mint(&id.claims, &id.scope, key_id, &v) {
+        Ok((token, exp)) => {
+            let dash = v.get("dashboard").and_then(Value::as_str).unwrap_or("");
+            if !st
+                .current
+                .get()
+                .snap
+                .dashes
+                .list
+                .iter()
+                .any(|d| d.id == dash)
+            {
+                return reply(req, 404, "no such dashboard");
+            }
+            info.dashboard = Some(dash.to_string());
+            audit("ok", None, Some(dash));
+            let body = serde_json::json!({
+                "token": token,
+                "expires": exp,
+                "url": format!("/d/{dash}?embed={token}"),
+            });
+            respond(req, 200, "application/json", body.to_string());
+            200
+        }
+        Err(e) => {
+            audit("deny", Some("embed_cap"), Some(&e));
+            reply(req, 400, &e)
+        }
+    }
+}
+
 /// `options.preview` (#770).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreviewOptions {
@@ -7048,6 +7131,29 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
     if assist::is_api_path(path) {
         return reply(req, 404, "not found");
     }
+    // #771: the embed SDK (`<anofox-dashboard>`) is loaded by host pages of
+    // other origins as a module script, which needs CORS: public files with
+    // no data, no credentials, and a GET that changes nothing — so before
+    // the cross-origin refusal below.
+    if let (&Method::Get | &Method::Head, Some(name)) = (req.method(), path.strip_prefix("/sdk/")) {
+        let file = WEB.get_file(format!("sdk/{name}")).filter(|_| {
+            name.ends_with(".js") && !name.contains(['/', '\\']) && !name.starts_with('.')
+        });
+        return match file {
+            Some(f) => {
+                let resp = Response::from_data(f.contents().to_vec())
+                    .with_status_code(200)
+                    .with_header(header("Content-Type", "text/javascript; charset=utf-8"))
+                    .with_header(header("X-Content-Type-Options", "nosniff"))
+                    .with_header(header("Access-Control-Allow-Origin", "*"))
+                    .with_header(header("Cross-Origin-Resource-Policy", "cross-origin"))
+                    .with_header(header("Cache-Control", "public, max-age=300"));
+                let _ = req.respond(resp);
+                200
+            }
+            None => reply(req, 404, "not found"),
+        };
+    }
     // CSRF: a browser request from another origin is refused outright.
     if !sv::origin_matches_host(m.origin, m.host) {
         return reply(req, 403, "forbidden: cross-origin request");
@@ -7252,6 +7358,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             )
         }
         (&Method::Post, "/api/dashboards") => handle_preview_create(st, req, ident.as_ref(), info),
+        (&Method::Post, "/api/auth/token") => handle_embed_token(st, req, ident.as_ref(), info),
         (&Method::Delete, p) if p.starts_with("/api/dashboards/") => handle_preview_delete(
             st,
             req,
@@ -10466,6 +10573,11 @@ fn served_index(
         .map(|f| String::from_utf8_lossy(f.contents()).into_owned())
         .unwrap_or_default();
     let mut cfg = serde_json::json!({
+        // #771: the origins that may frame this page, for its postMessage
+        // bridge (sdk/anofox-embed.js) — concrete origins only.
+        "frameAncestors": st.opts.frame_ancestors.as_ref().map(|l| {
+            l.iter().filter(|o| o.starts_with("http")).cloned().collect::<Vec<_>>()
+        }).unwrap_or_default(),
         "id": dash.id, "title": dash.meta.title, "sql": dash.sql,
         "nav": nav_json(&gen.snap.dashes.list, scope), "locked": true,
         "theme": st.opts.theme,

@@ -146,8 +146,22 @@ pub const CDN_FLATBUFFERS: &str = "https://cdn.jsdelivr.net/npm/flatbuffers@24.3
 
 /// `https://host[:port]`, `'self'` or `'none'`.
 pub fn valid_frame_ancestor(o: &str) -> bool {
+    // A loopback origin over http (a local host page while developing, #771):
+    // browsers treat it as a secure context, and nothing off the machine can
+    // be it.
+    let loopback = |h: &str| {
+        let (host, port) = match h.rsplit_once(':') {
+            Some((a, p)) if !a.ends_with('[') && !p.contains(']') => (a, Some(p)),
+            _ => (h, None),
+        };
+        matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+            && port.is_none_or(|p| {
+                !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit())
+            })
+    };
     o == "'self'"
         || o == "'none'"
+        || o.strip_prefix("http://").is_some_and(loopback)
         || o.strip_prefix("https://").is_some_and(|h| {
             !h.is_empty()
                 && h.split_once(':')
@@ -2205,6 +2219,33 @@ mod tests {
             assert!(valid_daterange_preset(p));
         }
         assert!(!valid_daterange_preset("last week"));
+    }
+
+    #[test]
+    fn frame_ancestors_are_origins() {
+        for ok in [
+            "'self'",
+            "'none'",
+            "https://app.example.com",
+            "https://app.example.com:8443",
+            "http://127.0.0.1:8080",
+            "http://localhost",
+            "http://[::1]:3000",
+        ] {
+            assert!(valid_frame_ancestor(ok), "{ok}");
+        }
+        for bad in [
+            "http://app.example.com",
+            "http://127.0.0.1.evil.com",
+            "http://localhost:",
+            "http://localhost:80a",
+            "http://evil.com:127.0.0.1",
+            "https://*.example.com",
+            "*",
+            "https://a b",
+        ] {
+            assert!(!valid_frame_ancestor(bad), "{bad}");
+        }
     }
 
     // #772: `-- @id`, subfolders with `options.folders`, duplicate ids.

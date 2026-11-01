@@ -988,6 +988,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/embed-e2e.mjs (#771): <anofox-dashboard> on a host page of
+      # another origin — a token from POST /api/auth/token (capped by the
+      # key), the frame sized to the dashboard, state / link events,
+      # setVars; a host outside frame_ancestors gets nothing.
+      - name: <anofox-dashboard> embed e2e (#771)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/embed-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # scripts/form-served-e2e.mjs (#683): a ::FORM on a locked server — its
       # value travels as one string variable; a URL seed; a hostile seed is
       # just text.

@@ -657,8 +657,10 @@ of the authoring servers carries a
   configured. Embed links are meant to be framed, so with `embed` the server
   sends no `frame-ancestors` unless you list the sites that may frame the
   pages: `frame_ancestors: ["https://app.example.com"]`. Each entry is an
-  `https://host[:port]` origin, `'self'` or `'none'`. Set it whenever you use
-  embed links.
+  `https://host[:port]` origin, a loopback `http://127.0.0.1[:port]` or
+  `http://localhost[:port]` (a local host page while developing), `'self'` or
+  `'none'`. Set it whenever you use embed links: `<anofox-dashboard>` talks
+  only to these origins.
 
 **Per-request isolation and limits.**
 
@@ -2158,6 +2160,66 @@ minutes and `session_ttl_s` at what a viewing needs, and serve over HTTPS.
 `one_time: true` with a `jti` stops a second exchange of the same link on one
 server process (with several replicas, a link can be used once per replica;
 a page reload then needs a new link).
+
+### Embedding with `<anofox-dashboard>` (#771)
+
+A web component for the host application, so it needs no signing code of its
+own and never holds the embed secret:
+
+```html
+<script type="module" src="https://dash.example.com/sdk/anofox-embed.js"></script>
+<anofox-dashboard src="https://dash.example.com/d/sales" token-callback="getToken"></anofox-dashboard>
+<script>
+  // Your backend calls POST /api/auth/token with its API key; the browser only gets the token.
+  async function getToken(dashboard) {
+    return (await (await fetch("/my-backend/anofox-token?d=" + dashboard)).json()).token;
+  }
+  const d = document.querySelector("anofox-dashboard");
+  d.addEventListener("anofox-state", (e) => console.log(e.detail.vars));   // after every run
+  d.addEventListener("anofox-link", (e) => console.log(e.detail.href));    // a link out of it
+  d.setVars({ region: "EU" });
+</script>
+```
+
+```sh
+# the host's backend (its API key has the embed scope)
+curl -X POST https://dash.example.com/api/auth/token -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' -d '{"dashboard": "sales", "vars": {"region": "EU"}}'
+# {"token":"eyJ…","expires":1793000300,"url":"/d/sales?embed=eyJ…"}
+```
+
+- **The token** is a signed embed link like the ones a host signs itself
+  ([Signed embed links](#signed-embed-links-mode-embed)). It needs an
+  `embed` login (its `secret` signs it) and an API key with the `embed`
+  scope, and it is **capped by that key**:
+  - only the key's dashboards;
+  - exactly the key's claims (every claim the key has must be in the embed
+    mode's `claims`, or the request is refused);
+  - a subset of its groups;
+  - locked variables as asked;
+  - `ttl_s` at most `max_link_ttl_s`.
+
+  A key with `tenant=acme` can't mint a token for another tenant. The token
+  has no user of its own (its viewer is `embed:<dashboard>`, like a link
+  without one), so it never submits or saves as somebody.
+- **The element** keeps the dashboard in an iframe on the dashboard's own
+  origin: its CSP stays in force, and its data never reaches the host
+  page's scripts. It sizes the frame to the dashboard, asks `getToken`
+  again when the page's session ends, and passes messages both ways:
+  - `anofox-ready`;
+  - `anofox-state {vars}` after every run;
+  - `anofox-link {href}` for a link that leaves the dashboard (the frame
+    doesn't navigate: the host decides);
+  - `el.setVars({…})`, applied as a `?v.…` link would be, so a variable
+    the token locks keeps its locked value on the server.
+
+  The page takes and sends messages only from its parent and only to an
+  origin in `frame_ancestors` that is also its referrer.
+- `/sdk/anofox-embed.js` and `/sdk/anofox-react.js` (a React wrapper:
+  `makeAnofoxDashboard(React)`, props `src`, `getToken`, `vars`,
+  `onState`, `onLink`) answer without a login and with CORS
+  (`Access-Control-Allow-Origin: *`): they are code, with no data.
+- Every token minted, or refused, is in the audit log (`"audit": "embed_token"`).
 
 ### API keys (`"mode": "api_keys"`)
 
