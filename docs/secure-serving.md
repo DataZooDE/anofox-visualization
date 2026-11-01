@@ -1087,6 +1087,99 @@ curl -H "Authorization: Bearer $KEY" -o totals.csv \
 - Setup statements run per panel as always; a `-- @requires` input that is
   missing shows its panel as not available.
 
+### Ask: questions about a dashboard (`options.ask`, #195)
+
+Viewers can ask the dashboard in plain language ("which region dropped
+most?"). A model answers on the server, from the panels **this viewer** may
+already read, and cites the panels and values it used. The client never sends
+SQL, and the model never writes any: its only tools read a panel (`get_panel`),
+list the panels and give the answer.
+
+Off by default, at three levels:
+
+1. **The server:** `options.ask`, with a login (`auth`) required.
+2. **The dashboard:** `-- @ask on` in its header, together with `-- @vars`.
+3. **The panel:** `-- @ask skip` keeps one panel out entirely.
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "auth": {"mode": "oidc", …},
+  "ask": {"enabled": true, "model": "claude-sonnet-5",
+          "per_viewer": {"per_hour": 10, "per_day": 30},
+          "allow": ["group:analysts"]}}');
+```
+
+| `ask.` | Default | |
+|---|---|---|
+| `enabled` | `false` | |
+| `model` | `claude-sonnet-5` | `claude-sonnet-5` or `claude-opus-5-5` |
+| `key_env` / `key_file` | `ANTHROPIC_API_KEY` | the model key; a key file must be `0600` and not a symlink |
+| `base_url` | `https://api.anthropic.com` | or a company gateway; `https://` (`http://` only to loopback); no redirects, no proxy from the environment |
+| `provider_label` | `Anthropic (Claude)` | named in the viewer notice |
+| `per_viewer` | 10 / hour, 30 / day, 200 000 / 600 000 tokens | per user |
+| `tokens_per_hour` | 2 000 000 | the whole server |
+| `per_question_tokens` | 60 000 | checked before each model call |
+| `max_question_chars` | 2 000 | |
+| `concurrency` | 4 | questions at once; each runs on a thread of its own, never on the HTTP workers |
+| `allow` | everyone signed in | `group:<name>`, `claim:<name>=<value>` |
+| `anonymous` | `false` | Ask without a login: anyone who reaches the server spends the key (warned at start) |
+| `mask` | `"auto"` | `"auto"`, `"off"` or a list of column names |
+| `log_questions` / `log_answers` | `false` | question / answer text in the request log |
+| `embed` | `false` | Ask inside signed embed links (only about the linked dashboard) |
+| `max_tokens`, `effort`, `timeout_seconds` | 8 000, `medium`, 60 | fixed by the operator |
+
+**Who may ask:**
+- A viewer signed in through the auth proxy, JWT or OIDC, whose credential's scope includes the dashboard.
+- An embed session, only with `ask.embed` and only about the dashboard its link names.
+- **API keys are refused (`403`)**, and so are shared links (`/share/…`), because one link serves anyone.
+
+**What reaches the model provider:**
+- The dashboard's text: titles, column names and roles, never SQL.
+- The view state: the open tab and the inputs.
+- The question.
+- The rows of the panels the model reads, as this viewer sees them.
+
+Each panel read goes through the same path as `POST /api/panel`, with the asking viewer's claims and scope: policies, claims, `-- @vars`, `-- @requires`, the caps, the cache and the query slots all apply. The model may set only a variable an input binds, and only to one of that input's options. Ask holds at most half the query slots, so viewers always have slots.
+
+Caps per question:
+- 200 rows / 16 KB per panel and 64 KB in all;
+- 8 panel reads and 6 model calls;
+- one deadline (the panel's own query time ends by it too).
+
+Nothing about the viewer (name, e-mail, claims) is sent. With `mask: "auto"`, values that look like e-mail addresses, phone numbers or IBANs, and columns whose names suggest personal data (`name`, `customer`, `Kunde`, `Mitarbeiter`, …), go as pseudonyms (`⟦P4⟧`) and come back as the real values in the answer. This is best-effort minimisation, not a guarantee: use `-- @ask skip` for a panel whose rows must not leave. `dashboard --check` flags such columns (`ask/personal-column`) and unaggregated tables (`ask/raw-detail`).
+
+**`POST /api/ask`:**
+- Request body: `{"dashboard", "question", "conversation"?, "tab"?, "vars"?, "panel"?}`. Anything else is `400`; in particular, there is no history field.
+- The same login, same-origin and `Host` rules as `/api/panel` apply.
+- The answer streams as server-sent events: `progress` (`{"phase": "thinking"|"reading", …}`), then `answer`: `{conversation, text, scope, citations, panels, refreshed}`. `scope` is `answered`, `partly`, `not_on_dashboard`, `limit` or `error`.
+- A citation is `verified` only when the server finds that row, column and value in a panel read for this question.
+- Over a limit, the answer is `429` with a plain message.
+- `DELETE /api/ask` cancels the viewer's running question.
+- Conversations stay on the server, in memory: per user and session, at most 10 turns and 30 minutes. A data refresh starts them over. They are per replica.
+
+**Logs:**
+- One request-log line per question: user, dashboard, conversation, panels read, tool variables **by name**, outcome, model, request ids, tokens, ms. There is no question or answer text unless `log_questions` / `log_answers` is set, and never panel data.
+- A viewer's first question in a session writes one `audit: "ask"` event.
+
+**GDPR, for the operator:**
+- The operator who turns Ask on is the controller, and the model provider is a processor. A data processing agreement with the provider, a legal basis and an entry in the records of processing are needed before Ask runs on personal data.
+- Check the provider's current terms, transfer mechanism and retention, and note the date you checked.
+- The people whose data is in the panels are owed Art. 13 / 14 information.
+- A DPIA may be needed.
+- For employee data in Germany, logging question text per user (`log_questions`) can need the works council.
+- Answers are labelled as AI-generated.
+
+| Threat | Mitigation |
+|---|---|
+| The model key reaches a browser or a log | It is read only on the server (environment or key file) and is never in a response, a page, an error or a log line. |
+| A viewer gets more through Ask than through the page | Every read is `/api/panel` with the viewer's own claims and scope. Variables only through inputs and their options; `@ask skip` panels are not even listed. Tested with canary rows under a policy and a claim-dependent text (`duckext/scripts/test-ask.sh`). |
+| SQL from the client or the model | Neither exists. |
+| A forged conversation history | The history is held on the server, bound to the session and the claims. |
+| Prompt injection through data | No tool has a side effect. Panel data is labelled as data. The answer is plain text, rendered without links or images; navigation happens only through citation chips the viewer clicks. |
+| One viewer's data in another's answer | Per-user conversations; the cached prompt prefix is the dashboard's text only (byte-identical across viewers, tested). |
+| Spending the operator's key | Login required; per-viewer and server budgets; one question per viewer at a time; `ask.allow`; API keys and shared links refused. |
+| Personal data to the provider | Panels on demand, the caps, `@ask skip`, masking, no viewer identity; the notice tells the viewer. |
+
 ### Scheduled tasks (`options.tasks`, #767)
 
 SQL that runs on a schedule next to the dashboards, e.g. to load the inbox
