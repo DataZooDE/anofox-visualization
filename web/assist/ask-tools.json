@@ -1,0 +1,156 @@
+[
+  {
+    "name": "list_panels",
+    "description": "List the dashboard's panels (the catalog, no data), optionally only one tab's. The catalog is in your instructions already; use this to see which panels are available to you now.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "tab": {
+          "type": "string",
+          "description": "A tab's label, or an empty string for all"
+        }
+      },
+      "required": [
+        "tab"
+      ],
+      "additionalProperties": false
+    },
+    "strict": true
+  },
+  {
+    "name": "get_panel",
+    "description": "Read one panel's result as the viewer sees it: its columns and rows (at most {MAX_ROWS} rows), and the row count. Without vars it uses the viewer's current inputs. vars may set only a variable one of the dashboard's inputs sets, and an option input only to one of its options. page (paged tables only) sorts, filters or skips rows.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "panel": {
+          "type": "integer",
+          "description": "The panel's index in the catalog"
+        },
+        "vars": {
+          "type": "array",
+          "description": "Variables to set for this read: [{name, value}]",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "page": {
+          "type": "object",
+          "description": "For a paged table",
+          "properties": {
+            "offset": {
+              "type": "integer"
+            },
+            "sort": {
+              "type": "string",
+              "description": "A column to sort by"
+            },
+            "desc": {
+              "type": "boolean"
+            },
+            "filter": {
+              "type": "string",
+              "description": "Text to look for in a row"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "panel"
+      ],
+      "additionalProperties": false
+    },
+    "strict": true
+  },
+  {
+    "name": "answer",
+    "description": "Give the viewer your answer; this ends your turn. text: plain language, at most {MAX_ANSWER_CHARS} characters. citations: the values the answer rests on, each with its panel index, the column, the value as the panel shows it, and the key cells of its row. scope: answered, partly, or not_on_dashboard.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "The answer"
+        },
+        "citations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "panel": {
+                "type": "integer"
+              },
+              "label": {
+                "type": "string",
+                "description": "A short label, e.g. the row's key"
+              },
+              "column": {
+                "type": "string",
+                "description": "The cited column"
+              },
+              "value": {
+                "type": "string",
+                "description": "The cited value, as the panel shows it"
+              },
+              "row": {
+                "type": "array",
+                "description": "The key cells of the cited row: [{name: column, value}]",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "panel",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "answered",
+            "partly",
+            "not_on_dashboard"
+          ]
+        }
+      },
+      "required": [
+        "text",
+        "citations",
+        "scope"
+      ],
+      "additionalProperties": false
+    },
+    "strict": true
+  }
+]

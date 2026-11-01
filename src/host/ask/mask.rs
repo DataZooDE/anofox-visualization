@@ -15,7 +15,16 @@
 
 use std::collections::HashMap;
 
-use super::config::Mask;
+/// What Ask may send of a panel's values (§12.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mask {
+    /// Values that look personal, and the columns whose names do.
+    Auto,
+    /// Exactly these columns (case-insensitive names).
+    Columns(Vec<String>),
+    /// Nothing is masked (the start message says so).
+    Off,
+}
 
 pub const OPEN: char = '⟦';
 pub const CLOSE: char = '⟧';

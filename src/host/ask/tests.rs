@@ -10,6 +10,7 @@ use std::time::Instant;
 use serde_json::{json, Map, Value};
 
 use super::*;
+use crate::host::ask::{catalog, Mask};
 use crate::host::assist::{UpResponse, Upstream};
 
 const DASH: &str = "-- @title Sales

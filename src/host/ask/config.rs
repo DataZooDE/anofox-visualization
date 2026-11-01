@@ -13,16 +13,7 @@ pub const MODELS: &[&str] = &["claude-sonnet-5", "claude-opus-5-5"];
 /// The efforts the operator may fix (`output_config.effort`).
 const EFFORTS: &[&str] = &["low", "medium", "high"];
 
-/// What Ask may send of a panel's values (§12.7).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Mask {
-    /// Values that look personal, and the columns whose names do.
-    Auto,
-    /// Exactly these columns (case-insensitive names).
-    Columns(Vec<String>),
-    /// Nothing is masked (the start message says so).
-    Off,
-}
+pub use super::mask::Mask;
 
 /// Per viewer (the signed-in user), over a sliding hour and day.
 #[derive(Debug, Clone, PartialEq, Eq)]

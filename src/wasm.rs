@@ -855,3 +855,60 @@ fn parse_zoom(s: &str) -> Option<crate::ZoomWindow> {
         _ => None,
     }
 }
+
+/// Ask in the builder (#195 M2-5): one conversation about the dashboard on
+/// the page ([`crate::host::ask::session::Session`] — the server's own tool
+/// checks, masking, caps and citation check). `web/assist.js` runs the loop
+/// and the model calls; the page runs each panel read. Every method returns
+/// JSON (`{ok}` / `{error}` where it can fail); a panic gives `{error}`.
+#[wasm_bindgen]
+pub struct AskSession {
+    inner: crate::host::ask::session::Session,
+}
+
+fn ask_guard(f: impl FnOnce() -> String) -> String {
+    guard(|| Ok(f())).unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }).to_string())
+}
+
+#[wasm_bindgen]
+impl AskSession {
+    #[wasm_bindgen(constructor)]
+    pub fn new(script: &str) -> AskSession {
+        AskSession {
+            inner: crate::host::ask::session::Session::new(script),
+        }
+    }
+    pub fn system(&self) -> String {
+        ask_guard(|| self.inner.system())
+    }
+    pub fn tools(&self) -> String {
+        ask_guard(|| self.inner.tools())
+    }
+    pub fn limits(&self) -> String {
+        ask_guard(|| self.inner.limits())
+    }
+    pub fn catalog(&self, hidden_json: &str) -> String {
+        ask_guard(|| self.inner.catalog(hidden_json))
+    }
+    pub fn begin(&mut self, view_json: &str, question: &str) -> String {
+        ask_guard(|| self.inner.begin(view_json, question))
+    }
+    pub fn list_panels(&self, input_json: &str) -> String {
+        ask_guard(|| self.inner.list_panels(input_json))
+    }
+    pub fn option_panels(&self, input_json: &str) -> String {
+        ask_guard(|| self.inner.option_panels(input_json))
+    }
+    pub fn panel_request(&mut self, input_json: &str, options_json: &str) -> String {
+        ask_guard(|| self.inner.panel_request(input_json, options_json))
+    }
+    pub fn panel_result(&mut self, id: u32, rows_json: &str) -> String {
+        ask_guard(|| self.inner.panel_result(id, rows_json))
+    }
+    pub fn panel_error(&mut self, id: u32, error: &str) -> String {
+        ask_guard(|| self.inner.panel_error(id, error))
+    }
+    pub fn answer(&self, input_json: &str) -> String {
+        ask_guard(|| self.inner.answer(input_json))
+    }
+}
