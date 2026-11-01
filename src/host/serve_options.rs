@@ -84,6 +84,8 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("css_file", SiteOptionKind::ServerOnly),
     // #772: a published site reads the same subfolders.
     ("folders", SiteOptionKind::Site),
+    // #769: a write path; nothing to publish.
+    ("ingest", SiteOptionKind::ServerOnly),
     ("home", SiteOptionKind::Site),
     ("source", SiteOptionKind::ServerOnly),
     // #517 S2: per-viewer append-only state needs a real server behind it

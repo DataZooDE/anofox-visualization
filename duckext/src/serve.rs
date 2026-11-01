@@ -47,6 +47,7 @@ use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
 use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
+use anofox_visualization::host::ingest::{self, IngestOptions};
 use anofox_visualization::host::metrics;
 use anofox_visualization::host::notify;
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
@@ -71,7 +72,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, ListenAddr, Method, Request, Response, Server};
@@ -120,6 +121,8 @@ struct Running {
     tasks: Option<JoinHandle<()>>,
     /// #768: the report runner (`options.notify.run`), joined like the refresher.
     reports: Option<JoinHandle<()>>,
+    /// #769: the ingest refresher (`options.ingest.refresh`), joined likewise.
+    ingest: Option<JoinHandle<()>>,
     /// A locked server's state (for `anofox_serve_refresh`).
     locked: Option<Arc<Locked>>,
     /// Dropped after the workers have exited (closes the snapshot DB and
@@ -172,6 +175,9 @@ pub fn stop(port: u16) -> Result<String, String> {
         join_bounded(vec![h], STOP_JOIN_BUDGET);
     }
     if let Some(h) = r.reports.take() {
+        join_bounded(vec![h], STOP_JOIN_BUDGET);
+    }
+    if let Some(h) = r.ingest.take() {
         join_bounded(vec![h], STOP_JOIN_BUDGET);
     }
     Ok(format!(
@@ -716,6 +722,7 @@ pub fn start_authoring(
             refresher: None,
             tasks: None,
             reports: None,
+            ingest: None,
             locked: None,
             _state: Box::new(state),
         },
@@ -1261,6 +1268,9 @@ pub struct LockedOptions {
     /// `folders` (#772): serve the `*.sql` files one level down too, each
     /// folder a group of the nav and the `/` list.
     pub folders: bool,
+    /// `ingest` (#769): `POST /api/data/<table>` for API keys with an
+    /// `ingest:<table>` scope.
+    pub ingest: Option<IngestOptions>,
     /// `home`: a dashboard id `/` redirects to instead of the landing page
     /// (when the viewer may read it).
     pub home: Option<String>,
@@ -1653,6 +1663,7 @@ impl Default for LockedOptions {
             app: None,
             site_css: None,
             folders: false,
+            ingest: None,
             home: None,
             source: None,
             state_opts: None,
@@ -1906,6 +1917,7 @@ impl LockedOptions {
                         .as_bool()
                         .ok_or("options.folders must be true or false")?;
                 }
+                "ingest" => o.ingest = Some(IngestOptions::parse(val)?),
                 "css_file" => {
                     let f = val
                         .as_str()
@@ -2023,6 +2035,10 @@ impl LockedOptions {
         }
         if let Some(v) = tasks_cfg {
             o.tasks = Some(parse_tasks(v, o.notify.as_ref())?);
+        }
+        // #769: only an API key may ingest, so there must be API keys.
+        if o.ingest.is_some() && !o.auth.as_ref().is_some_and(|a| a.keys.is_some()) {
+            return Err("options.ingest needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with an ingest:<table> scope may write".into());
         }
         match (log, log_vars) {
             (Some(l), v) => {
@@ -2852,6 +2868,8 @@ struct Locked {
     metrics: anofox_visualization::host::metrics::Metrics,
     /// #767: per task, its last run (for `/metrics`).
     task_stats: Mutex<BTreeMap<String, TaskStat>>,
+    /// #769: `options.ingest`'s live runtime (`None` unless configured).
+    ingest: Option<Arc<IngestRuntime>>,
     /// #768: per report, its last run (for `/metrics`).
     report_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// #768: the messages sent in the last hour (`notify.max_per_hour`).
@@ -3862,6 +3880,21 @@ pub fn start_locked(
             }))
         }
     };
+    // #769: the writing replica's ingest database is attached read-write.
+    let ingest_rt = match &opts.ingest {
+        None => None,
+        Some(ing) => {
+            if ing.run {
+                let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+                check_ingest_database(&conn, &ing.database)?;
+            }
+            Some(Arc::new(IngestRuntime {
+                rate: RateLimiter::new(ing.rate_per_minute, ing.rate_per_minute.min(60), 4096),
+                write: Mutex::new(()),
+                want_refresh: (Mutex::new(false), Condvar::new()),
+            }))
+        }
+    };
     let addr = std::net::SocketAddr::new(opts.bind, port);
     if !opts.bind.is_unspecified() && !opts.bind.is_loopback() {
         // Requests addressed to the bound IP itself (health checks) pass the
@@ -3904,6 +3937,7 @@ pub fn start_locked(
         writeback,
         metrics: Default::default(),
         task_stats: Mutex::new(BTreeMap::new()),
+        ingest: ingest_rt,
         report_stats: Mutex::new(BTreeMap::new()),
         report_rate: Mutex::new(notify::Rate::default()),
         alert_stats: Mutex::new(BTreeMap::new()),
@@ -3997,6 +4031,16 @@ pub fn start_locked(
         let (st, stop) = (state.clone(), stop.clone());
         std::thread::spawn(move || report_runner(&st, &stop))
     });
+    // #769: rebuilds the snapshot after writes, at most every 30 s.
+    let ingest_handle = state
+        .opts
+        .ingest
+        .as_ref()
+        .is_some_and(|i| i.run && i.refresh)
+        .then(|| {
+            let (st, stop) = (state.clone(), stop.clone());
+            std::thread::spawn(move || ingest_refresher(&st, &stop))
+        });
     servers.insert(
         port,
         Running {
@@ -4007,6 +4051,7 @@ pub fn start_locked(
             refresher: refresher_handle,
             tasks: tasks_handle,
             reports: reports_handle,
+            ingest: ingest_handle,
             locked: Some(state.clone()),
             _state: Box::new(state),
         },
@@ -4902,6 +4947,323 @@ pub fn refresh(port: u16) -> Result<String, String> {
         }
     };
     Ok(locked.refresh(true)?.unwrap_or_default())
+}
+
+/// `options.ingest`'s live runtime (#769).
+struct IngestRuntime {
+    /// Requests per minute, per API key.
+    rate: RateLimiter,
+    /// One write at a time (the table checks and the insert are one step).
+    write: Mutex<()>,
+    /// A write asked for a refresh (`options.ingest.refresh`).
+    want_refresh: (Mutex<bool>, Condvar),
+}
+
+/// At start, on the writing replica: the ingest database is attached and
+/// not `READ_ONLY`.
+fn check_ingest_database(c: &Conn, db: &str) -> Result<(), String> {
+    let rows = small_rows(
+        c,
+        &format!(
+            "SELECT readonly AS r FROM duckdb_databases() WHERE database_name = {}",
+            sv::sql_string_literal(db)
+        ),
+    )?;
+    match rows.first().and_then(|r| r.get("r")).and_then(Value::as_bool) {
+        None => Err(format!(
+            "options.ingest.database: no database '{db}' is attached (ATTACH it read-write before starting the server)"
+        )),
+        Some(true) => Err(format!(
+            "options.ingest.database: '{db}' is attached READ_ONLY — the ingest API writes into it"
+        )),
+        Some(false) => Ok(()),
+    }
+}
+
+/// `POST /api/data/<table>` (#769): append a JSON object or array of objects
+/// to `<options.ingest.database>.main.<table>`, from an API key whose scopes
+/// name the table. The rows show at the next snapshot refresh.
+fn handle_ingest(
+    st: &Locked,
+    mut req: Request,
+    table: &str,
+    ident: Option<&auth::Identity>,
+    info: &mut LogInfo,
+) -> u16 {
+    let peer = req.remote_addr().map(|a| a.ip());
+    let audit = |outcome: &'static str, reason: Option<&'static str>, detail: Option<&str>| {
+        if let Some(a) = st.opts.auth.as_ref().and_then(|a| a.audit.as_ref()) {
+            a.write(&auth::audit::Event {
+                event: "ingest",
+                outcome,
+                method: ident.map(|i| i.method),
+                user: ident.map(|i| i.claims.user.as_str()),
+                reason,
+                peer,
+                path: Some("/api/data"),
+                key_id: ident.and_then(|i| i.ref_id.as_deref()),
+                detail,
+                ..Default::default()
+            });
+        }
+    };
+    let (Some(ing), Some(rt)) = (&st.opts.ingest, &st.ingest) else {
+        return reply(
+            req,
+            404,
+            "not found: this server has no ingest API (options.ingest)",
+        );
+    };
+    if !ingest::valid_name(table) {
+        return reply(
+            req,
+            400,
+            "the table must be a plain name (letters, digits and _)",
+        );
+    }
+    // Only an API key whose scopes name this table.
+    let Some(id) = ident.filter(|i| i.method == "api_key" && i.key_scopes.may_ingest(table)) else {
+        info.deny = Some("ingest_scope");
+        audit("deny", Some("ingest_scope"), Some(table));
+        return reply(
+            req,
+            403,
+            &format!("forbidden: only an API key with the scope ingest:{table} may write here"),
+        );
+    };
+    if !ing.run {
+        return send(
+            req,
+            auth::Reply::text(
+                503,
+                "this replica doesn't take ingest writes (options.ingest.run) — send them to the writer",
+            )
+            .header("Retry-After", "10"),
+        );
+    }
+    let key = id.ref_id.as_deref().unwrap_or(&id.claims.user);
+    if let Err(wait) = rt.rate.check(key, Instant::now()) {
+        info.deny = Some("ingest_rate");
+        audit("deny", Some("ingest_rate"), Some(table));
+        return send(
+            req,
+            auth::Reply::text(429, "too many requests for this API key")
+                .header("Retry-After", &wait.max(1).to_string()),
+        );
+    }
+    let body = match read_body(&mut req, ing.max_body_bytes) {
+        Ok(b) => b,
+        Err((code, e)) => return reply(req, code, &e),
+    };
+    let fixed = ing.fixed(table);
+    let batch = match ingest::parse_batch(&body, ing.max_rows, fixed) {
+        Ok(b) => b,
+        Err(e) => return reply(req, 400, &e),
+    };
+    match ingest_write(st, ing, rt, table, &batch, fixed) {
+        Ok((created, added)) => {
+            let detail = format!("{table}: {} row(s)", batch.rows.len());
+            audit("ok", None, Some(&detail));
+            if ing.refresh {
+                let (m, cv) = &rt.want_refresh;
+                *m.lock().unwrap_or_else(|p| p.into_inner()) = true;
+                cv.notify_one();
+            }
+            let body = serde_json::json!({
+                "table": table,
+                "rows": batch.rows.len(),
+                "created": created,
+                "added_columns": added,
+            });
+            respond(req, 200, "application/json", body.to_string());
+            200
+        }
+        Err((code, e)) => {
+            audit("error", Some("ingest_write"), Some(table));
+            reply(req, code, &e)
+        }
+    }
+}
+
+/// Write one batch: create the table, or add its new columns, then insert,
+/// in one transaction on the serving session (rolled back on any error).
+/// `(created, added columns)`, or `(status, message)`.
+fn ingest_write(
+    st: &Locked,
+    ing: &IngestOptions,
+    rt: &IngestRuntime,
+    table: &str,
+    batch: &ingest::Batch,
+    fixed: Option<&[(String, String)]>,
+) -> Result<(bool, Vec<String>), (u16, String)> {
+    let _one = rt.write.lock().unwrap_or_else(|p| p.into_inner());
+    let dir = SnapshotDir::create().map_err(|e| (500, e))?;
+    let file = dir.0.join("rows.ndjson");
+    std::fs::write(&file, ingest::ndjson(batch))
+        .map_err(|e| (500, format!("could not stage the rows: {e}")))?;
+    let file_lit = sv::sql_string_literal(&file.to_string_lossy());
+    let target = format!(
+        "{}.main.{}",
+        sv::quote_ident(&ing.database),
+        sv::quote_ident(table)
+    );
+    let read = match fixed {
+        Some(cols) => format!(
+            "read_json({file_lit}, format = 'newline_delimited', columns = {{{}}})",
+            cols.iter()
+                .map(|(c, t)| format!(
+                    "{}: {}",
+                    sv::sql_string_literal(c),
+                    sv::sql_string_literal(t)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => format!("read_json({file_lit}, format = 'newline_delimited')"),
+    };
+    let c = st.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+    let clean = |e: String| e.replace(&file.to_string_lossy().into_owned(), "<request body>");
+    let (res, fired) = c.with_deadline_fired(st.opts.timeout.max(Duration::from_secs(30)), |c| {
+        c.exec("BEGIN")?;
+        let exists = small_rows(
+            c,
+            &format!(
+                "SELECT count(*) AS n FROM duckdb_tables() WHERE database_name = {} AND schema_name = 'main' AND lower(table_name) = lower({})",
+                sv::sql_string_literal(&ing.database),
+                sv::sql_string_literal(table)
+            ),
+        )?
+        .first()
+        .and_then(|r| r.get("n"))
+        .and_then(Value::as_i64)
+            == Some(1);
+        let exclude = |cols: &[String]| {
+            if cols.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " EXCLUDE ({})",
+                    cols.iter().map(|c| sv::quote_ident(c)).collect::<Vec<_>>().join(", ")
+                )
+            }
+        };
+        let system = "gen_random_uuid() AS _id, now() AS _ts";
+        if !exists {
+            match fixed {
+                Some(cols) => {
+                    let defs: Vec<String> = cols
+                        .iter()
+                        .map(|(c, t)| format!("{} {t}", sv::quote_ident(c)))
+                        .collect();
+                    c.exec(&format!(
+                        "CREATE TABLE {target} (_id UUID, _ts TIMESTAMP WITH TIME ZONE, {})",
+                        defs.join(", ")
+                    ))?;
+                    c.exec(&format!("INSERT INTO {target} BY NAME SELECT {system}, * FROM {read}"))?;
+                }
+                None => {
+                    let leave_out: Vec<String> = batch.all_null.iter().cloned().collect();
+                    c.exec(&format!(
+                        "CREATE TABLE {target} AS SELECT {system}, *{} FROM {read}",
+                        exclude(&leave_out)
+                    ))?;
+                }
+            }
+            c.exec("COMMIT")?;
+            return Ok(Ok((true, Vec::new())));
+        }
+        let mut leave_out = Vec::new();
+        let mut added = Vec::new();
+        let col_rows = |sql: String| -> Result<Vec<(String, String)>, String> {
+            Ok(small_rows(c, &sql)?
+                .iter()
+                .map(|r| {
+                    let g = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+                    (g("n"), g("t"))
+                })
+                .collect())
+        };
+        let existing = col_rows(format!(
+            "SELECT column_name AS n, data_type AS t FROM duckdb_columns() WHERE database_name = {} AND schema_name = 'main' AND lower(table_name) = lower({}) ORDER BY column_index",
+            sv::sql_string_literal(&ing.database),
+            sv::sql_string_literal(table)
+        ))?;
+        // A table made before (by the operator) gets the server's columns.
+        for (col, ty) in [("_id", "UUID"), ("_ts", "TIMESTAMP WITH TIME ZONE")] {
+            if !existing.iter().any(|(e, _)| e.eq_ignore_ascii_case(col)) {
+                c.exec(&format!("ALTER TABLE {target} ADD COLUMN {col} {ty}"))?;
+            }
+        }
+        if fixed.is_none() {
+            let incoming = col_rows(format!(
+                "SELECT column_name AS n, column_type AS t FROM (DESCRIBE SELECT * FROM {read})"
+            ))?;
+            let (add, out) = match ingest::plan_columns(&existing, &incoming, &batch.all_null) {
+                Ok(p) => p,
+                Err(e) => return Ok(Err((400, e))),
+            };
+            for (col, ty) in &add {
+                c.exec(&format!("ALTER TABLE {target} ADD COLUMN {} {ty}", sv::quote_ident(col)))?;
+                added.push(col.clone());
+            }
+            leave_out = out;
+        }
+        c.exec(&format!(
+            "INSERT INTO {target} BY NAME SELECT {system}, *{} FROM {read}",
+            exclude(&leave_out)
+        ))?;
+        c.exec("COMMIT")?;
+        Ok(Ok((false, added)))
+    });
+    // Nothing stays open on the shared connection (ROLLBACK succeeds only
+    // when a transaction is).
+    let rolled_back = c.exec("ROLLBACK").is_ok();
+    drop(c);
+    if fired {
+        return Err((503, "the write timed out; nothing was written".into()));
+    }
+    match res {
+        Ok(Ok(ok)) if !rolled_back => Ok(ok),
+        Ok(Ok(_)) => Err((500, "the write left a transaction open; rolled back".into())),
+        Ok(Err(e)) => Err(e),
+        // DuckDB refused it (a value that doesn't convert, an overflow, …).
+        Err(e) => Err((400, format!("not written: {}", clean(e)))),
+    }
+}
+
+/// `options.ingest.refresh` (#769): after a write, rebuild the snapshot — at
+/// most every [`ingest::REFRESH_EVERY_S`] seconds, so a stream of small
+/// writes doesn't rebuild it per request.
+fn ingest_refresher(st: &Locked, stop: &AtomicBool) {
+    let Some(rt) = st.ingest.as_ref() else { return };
+    let (m, cv) = &rt.want_refresh;
+    let every = Duration::from_secs(ingest::REFRESH_EVERY_S);
+    let mut last: Option<Instant> = None;
+    while !stop.load(Ordering::Relaxed) {
+        let mut want = m.lock().unwrap_or_else(|p| p.into_inner());
+        if !*want {
+            want = cv
+                .wait_timeout(want, Duration::from_secs(1))
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+        if !*want {
+            continue;
+        }
+        drop(want);
+        // Wait out the rest of the interval (writes meanwhile join this one).
+        while let Some(l) = last.filter(|l| l.elapsed() < every) {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep((every - l.elapsed()).min(Duration::from_secs(1)));
+        }
+        *m.lock().unwrap_or_else(|p| p.into_inner()) = false;
+        if let Err(e) = st.refresh(true) {
+            eprintln!("[anofox-serve] ingest refresh: {e}");
+        }
+        last = Some(Instant::now());
+    }
 }
 
 /// `anofox_serve_reload(port)` (#772): see [`Locked::reload`].
@@ -6214,6 +6576,9 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 ident.as_ref().map(|i| i.method),
                 info,
             )
+        }
+        (&Method::Post, p) if p.starts_with("/api/data/") => {
+            handle_ingest(st, req, &p["/api/data/".len()..], ident.as_ref(), info)
         }
         (&Method::Get, p) if p.starts_with("/api/export/") => handle_export(
             st,
@@ -11546,6 +11911,16 @@ mod tests {
         assert!(!sets_variables("CREATE TEMP TABLE t AS SELECT 1"));
         assert!(!sets_variables("SELECT 'SET'"));
         assert!(!sets_variables("SETTINGS_TABLE"));
+    }
+
+    // #769: options.ingest is only for API keys, so it needs them.
+    #[test]
+    fn ingest_needs_api_keys() {
+        let e = LockedOptions::parse(Some(r#"{"ingest": {"run": true, "database": "inbox"}}"#))
+            .unwrap_err();
+        assert!(e.contains("options.ingest needs auth with API keys"), "{e}");
+        let e = LockedOptions::parse(Some(r#"{"ingest": {"run": true}}"#)).unwrap_err();
+        assert!(e.contains("options.ingest.database is required"), "{e}");
     }
 
     // #773: options.css_file — checked at start, linked last in <head>.

@@ -910,6 +910,63 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
 - `css_file` is a server option only: `dashboard --site` ignores it, and
   `serve --dashboards` (the CLI's static render) doesn't take it.
 
+### Ingest API (`POST /api/data/<table>`, `options.ingest`, #769)
+
+Scripts, webhooks and other services can push rows into the server:
+
+```sql
+ATTACH '/data/inbox.duckdb' AS inbox;          -- read-write: the rows go here
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "auth": {"mode": "api_keys", "file": "/etc/anofox/keys.json"}, "policy": "none",
+  "ingest": {"run": true, "database": "inbox", "refresh": true}}');
+```
+
+```sh
+serve api-key new --file /etc/anofox/keys.json --user svc-collector \
+  --dashboards '' --scopes ingest:events
+curl -X POST https://dash.example.com/api/data/events \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '[{"kind": "click", "n": 1}, {"kind": "view", "n": 3, "city": "Bonn"}]'
+# {"table":"events","rows":2,"created":false,"added_columns":["city"]}
+```
+
+- **Who may write:** only an API key whose `scopes` name the table
+  (`ingest:events`, [API keys → Scopes](#scopes-800)). Logins, embed links,
+  share links and keys without that scope get `403`. `options.ingest` needs
+  `api_keys` in `auth`.
+- **Where the rows go:** `<database>.main.<table>` of `options.ingest.database`,
+  attached read-write by the operator (the server refuses to start when it is
+  missing or `READ_ONLY`). Never into the snapshot: the rows show after the
+  next refresh. `refresh: true` asks for one after each write, at most every
+  30 s.
+- **Schema:** the first batch creates the table with the types DuckDB infers
+  (strings that look like dates become `DATE`), plus **`_id`** (a UUID) and
+  **`_ts`** (the server time). A table that already exists gets `_id` and
+  `_ts` added. A later batch with a new key adds a column. A key that is
+  `null` in every row of a batch adds nothing yet. A value that doesn't fit
+  its column's type is a **`400`** that names the column, and nothing is
+  written. A whole number may go into any number column, and a `DATE` into
+  a `TIMESTAMP`; anything else must match. For exact types, give the table
+  a fixed schema, and then any other key is a `400`:
+
+  ```json
+  "ingest": {"run": true, "database": "inbox",
+             "tables": {"metrics": {"name": "VARCHAR", "v": "DOUBLE"}}}
+  ```
+
+- **Body:** a JSON object or an array of objects. Keys are plain names
+  (letters, digits, `_`), not `_id` / `_ts`. Limits: `max_body_bytes`
+  (default 1 MiB), `max_rows` (10 000) and `rate_per_minute` per key (60,
+  then `429` with `Retry-After`). The JSON never becomes SQL text: the
+  server writes it to a private temp file that `read_json` reads, inside
+  one transaction that is rolled back on any error.
+- **One writer:** only the replica with `"run": true` writes; the others
+  answer `503`, so route `/api/data/` to it (the same replica as
+  `tasks.run`, if you use tasks: its database must then be in
+  `tasks.write`).
+- Every write and refusal is in the audit log (`"audit": "ingest"`), with
+  the key id and the table.
+
 ### Exports (`GET /api/export/…`, #764)
 
 Other systems (a report job, a notebook, a script with an API key) can pull
