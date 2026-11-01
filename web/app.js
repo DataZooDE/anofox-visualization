@@ -2318,6 +2318,31 @@ async function runSqlInner(sql, page, kind, setup, at, pv) {
   return rowsJson(await pageConn().query(sql));
 }
 
+// A page connection's own settings (boot(), and siteGo()'s fresh connection
+// per dashboard, #836): memory-friendly defaults for the in-browser engine
+// (dropping insertion-order preservation avoids OOM on large ops like
+// forecasting every M5 series), and on a published site `anofox_data` and
+// DuckDB's HTTP caches. Best-effort: an option a build lacks is skipped.
+let siteDataRoot = null; // a published site's `anofox_data`
+async function connSetup(c) {
+  const opts = ["SET preserve_insertion_order=false", "SET memory_limit='3.6GB'"];
+  if (siteDataRoot !== null) opts.push("SET enable_http_metadata_cache = true", "SET enable_object_cache = true");
+  for (const q of opts) {
+    try {
+      await c.query(q);
+    } catch (_) {
+      /* option not available on this build */
+    }
+  }
+  if (siteDataRoot !== null) {
+    try {
+      await c.query(`SET VARIABLE anofox_data = '${siteDataRoot.replace(/'/g, "''")}'`);
+    } catch (e) {
+      status("could not set anofox_data: " + e);
+    }
+  }
+}
+
 // The anofox/spatial extensions a statement's text needs (#204 M-1: used
 // both by prepareSql, over whatever SQL is about to run on the page, and by
 // assistDeps() below, over the *editor*'s own text only — never the
@@ -2654,40 +2679,16 @@ async function boot() {
       /* older duckdb-wasm without the option — extensions just won't load */
     }
     conn = await db.connect();
-    // Memory-friendly defaults for the in-browser (in-memory, ~capped) engine:
-    // dropping insertion-order preservation avoids OOM on large ops like
-    // forecasting every M5 series. Best-effort — ignore if unsupported.
-    for (const pragma of ["SET preserve_insertion_order=false", "SET memory_limit='3.6GB'"]) {
-      try {
-        await conn.query(pragma);
-      } catch (_) {
-        /* option not available on this build */
-      }
-    }
     // #417: a published site's data folder/URL — `getvariable('anofox_data')`
-    // on the locked server (duckext/src/serve.rs's DATA_VAR), set here
-    // (once; siteGo() never needs to repeat it — the connection, and the
-    // variable, stay warm across a dashboard switch) because `conn` exists
-    // only from this point on. Before every dashboard's own statements:
-    // `run()` below is the first one.
+    // on the locked server (duckext/src/serve.rs's DATA_VAR). #830: the
+    // listed files under a local name (siteDataInit, once per database),
+    // else the URL.
     const site = window.__anofoxSite;
     if (published && site && site.data) {
       const url = new URL(site.data.endsWith("/") ? site.data : site.data + "/", site.base).href.replace(/\/$/, "");
-      // #830: the listed files under a local name (siteDataInit), else the URL
-      const root = (await siteDataInit(url, site.dataFiles)) ? SITE_DATA_ROOT : url;
-      try {
-        await conn.query(`SET VARIABLE anofox_data = '${root.replace(/'/g, "''")}'`);
-      } catch (e) {
-        status("could not set anofox_data: " + e);
-      }
-      for (const q of ["SET enable_http_metadata_cache = true", "SET enable_object_cache = true"]) {
-        try {
-          await conn.query(q);
-        } catch (_) {
-          /* not on this build */
-        }
-      }
+      siteDataRoot = (await siteDataInit(url, site.dataFiles)) ? SITE_DATA_ROOT : url;
     }
+    await connSetup(conn);
   }
 
   // #204 (M-2, D1): the tab-wide CSP, applied at boot whenever a key is
@@ -9437,6 +9438,23 @@ async function siteGo(id, search = "", push = true) {
     return false;
   }
   if (preview) await previewExit({ rerun: false });
+  // #836: each dashboard on a fresh connection — the TEMP tables, views and
+  // macros and the variables of the one being left go with its connection
+  // (a same-named object of another type made the next dashboard's setup
+  // fail and its panels read the old one). The database stays warm: loaded
+  // extensions and the site's registered data files (#830) are per database.
+  while (runActive) await runActive.catch(() => {});
+  await dpLazy.tail;
+  dpLazy.gen++; // the old dashboard's lazy jobs are void
+  {
+    const fresh = await pageDb().connect();
+    await connSetup(fresh);
+    const old = pageConn();
+    conn = fresh;
+    previewViewerStateReady = false; // its viewer_state table went with the old connection
+    dpResults.clear(); // cached rows of the old connection's objects
+    await old.close().catch(() => {});
+  }
   tourEnd(false); // #518: a running tour belongs to the dashboard being left — see loadDash()
   clearApplyHold();
   heldTexts.clear();

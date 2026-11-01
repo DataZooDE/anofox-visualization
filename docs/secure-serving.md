@@ -1730,6 +1730,12 @@ dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [
   it works behind an auth proxy that blocks third-party hosts. An `--app`
   without it (a plain checkout of `web/`) falls back to jsdelivr. Core
   DuckDB extensions (`parquet`, …) still come from `extensions.duckdb.org`.
+- **Each dashboard on its own connection (#836).** Switching dashboards in a
+  site happens in place (no page load), but on a fresh DuckDB connection:
+  the `TEMP` tables, views and macros and the variables of the dashboard
+  being left go with it, as on the locked server, so two dashboards may use
+  the same names. The database stays warm (extensions, the data files read
+  once).
 - **Performance (#830).** In the browser a `read_parquet` over a URL is a
   fresh set of HTTP requests, and a `TEMP VIEW` over it reads the file again
   for every panel that uses it. With `--data <dir>`, `site.json` lists the
