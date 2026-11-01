@@ -126,10 +126,15 @@ writeFileSync(
 writeFileSync(
   path.join(dashDir, "trend.sql"),
   `-- @title Trend\n-- @nav Trend\n-- @order 3\n` +
+    // #830: -- @requires resolves against anofox_data, now a local name:
+    // a listed file shows its tab, a missing one hides it
+    `-- @requires sales.parquet\nSELECT 'Has sales'::TAB;\n` +
     `SELECT 'nothing here but text — proves nav switches between differently-shaped dashboards'::MARKDOWN;\n` +
     // #655: a ::REGION map on the built-in boundaries, which --site must publish.
     `SELECT iso ::REGION, v AS "Units" ::BARCHART, 'world'::BOUNDARIES, 'Units by country'::TITLE\n` +
-    `  FROM (VALUES ('DEU', 1.0), ('FRA', 2.0), ('BRA', 3.0)) t(iso, v);\n`
+    `  FROM (VALUES ('DEU', 1.0), ('FRA', 2.0), ('BRA', 3.0)) t(iso, v);\n` +
+    `-- @requires nosuch.parquet\nSELECT 'Never shown'::TAB;\nSELECT 'hidden'::MARKDOWN;\n` +
+    `SELECT 'Last'::TAB;\nSELECT 'last tab'::MARKDOWN;\n`
 );
 const optionsFile = path.join(work, "locked.json");
 writeFileSync(
@@ -192,6 +197,7 @@ async function openPage(url, { width = 1280 } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height: 900 } });
   const p = await ctx.newPage();
   p.on("request", (r) => allRequests.push(r.url()));
+  if (process.env.SITE_E2E_KEEP) p.on("console", (m) => console.log(`[console] ${m.text()}`));
   await p.goto(url, { waitUntil: "networkidle", timeout: 30000 });
   return p;
 }
@@ -234,6 +240,10 @@ try {
   check(p.url() === BASE + "d/by-product/", `in-place nav switch: URL is now ${p.url()}`);
   const tableText = await p.evaluate(() => document.querySelector(".dash")?.textContent || "");
   check(/150/.test(tableText) && /north/.test(tableText), "the parquet data actually reads (a real value renders)");
+  // #830: a view over read_parquet used by three panels, then a second
+  // dashboard over the same file: one fetch, not one HTTP read per panel
+  const salesReads = allRequests.filter((u) => /\/data\/sales\.parquet$/.test(u)).length;
+  check(salesReads === 1, `sales.parquet fetched once across two dashboards (#830), got ${salesReads}`);
 
   // ── 3. back/forward ──
   await p.goBack({ waitUntil: "networkidle" });
@@ -314,6 +324,8 @@ try {
   const mapPaths = await p6.$$eval(".dash .panel svg path", (ps) => ps.length);
   check(mapPaths >= 3, `::REGION map: the three countries drawn (${mapPaths} paths)`);
   if (shots) await p6.screenshot({ path: `${shots}/site-map.png` });
+  const tabs = await p6.$$eval(".dash > .tabbar > .tab-btn", (bs) => bs.filter((b) => !b.hidden && getComputedStyle(b).display !== "none").map((b) => b.textContent.trim()));
+  check(JSON.stringify(tabs) === JSON.stringify(["Has sales", "Last"]), `-- @requires against the site's data (#830): tabs ${tabs.join(", ")}`);
 
   // (#500's locked-server guarantee — siteHref()/servedNavHref() are a
   // no-op when `published` is false, so a locked server's own /d/<id>
@@ -345,7 +357,8 @@ try {
 } finally {
   await browser.close();
   server.close();
-  rmSync(work, { recursive: true, force: true });
+  if (process.env.SITE_E2E_KEEP) console.log(`kept ${work}`);
+  else rmSync(work, { recursive: true, force: true });
 }
 
 if (process.exitCode) console.error("site-e2e: FAILED");
