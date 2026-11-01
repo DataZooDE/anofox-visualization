@@ -2003,6 +2003,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("needs an event time"), "{e}");
+        // anofox_forecast's events (ts_detect_peaks_long_by) key the series by `id`.
+        let peaks = r#"[{"id":"A","ds":"2024-01-02","kind":"peak","value":25.4},
+            {"id":"B","ds":"2024-01-03","kind":"peak","value":41.0},
+            {"id":"B","ds":"2024-01-10","kind":"peak","value":43.2}]"#;
+        let svg = go("events", peaks, "{}").unwrap();
+        assert!(
+            svg.contains(">A</text>") && svg.contains(">B</text>"),
+            "a lane per id"
+        );
+        assert!(svg.contains("peak · B: 41"), "{svg}");
     }
 
     const FOLDS: &str = r#"[
