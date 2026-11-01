@@ -910,6 +910,54 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
 - `css_file` is a server option only: `dashboard --site` ignores it, and
   `serve --dashboards` (the CLI's static render) doesn't take it.
 
+### Temporary dashboards (`POST /api/dashboards`, `options.preview`, #770)
+
+A tool or an agent can show someone a dashboard without adding a file to
+the reviewed folder:
+
+```sql
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  "auth": [{"mode": "oidc", …}, {"mode": "api_keys", "file": "/etc/anofox/keys.json"}],
+  "preview": {"dir": "/var/lib/anofox/previews", "ttl_s": 86400}}');
+```
+
+```sh
+serve api-key new --file /etc/anofox/keys.json --user svc-agent \
+  --claim region=EU --dashboards '' --scopes preview
+curl -X POST https://dash.example.com/api/dashboards -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT region::XAXIS, sum(amount)::BARCHART FROM sales GROUP BY 1;", "ttl_s": 3600}'
+# 201 {"id":"preview-3f9c…","url":"/p/preview-3f9c…","expires":1793000000}
+```
+
+- **Who may create one:** an API key with the `preview` scope
+  ([API keys → Scopes](#scopes-800)). The preview **runs as that key**:
+  every panel gets the key's claims (`__claim_*`) and goes through the
+  access policy like any viewer's. A key with `region=EU` makes previews
+  that show EU rows only, whoever opens them.
+- **Who may open one:** `/p/<id>` needs a login, like `/d/<id>`. A
+  credential limited to some dashboards (an embed link, an API key with a
+  `dashboards` list) can't open it. The id is 128 random bits; the page is
+  sent with `Referrer-Policy: same-origin`. Previews never appear in the
+  `/` list or the nav, and `/d/<preview id>` is a `404`.
+- **Checks before it is stored:** the same as a dashboard file at start
+  (one statement each, the data folder's read-only rule), the access
+  policy's rewrite, and then **every panel is run once as the key**. A
+  panel that fails is a `400` that lists the failures, and nothing is
+  stored. The design checks of `dashboard --check --strict` need your
+  data and the CLI: run them in the pipeline that builds the SQL (or with
+  the check-dashboards action).
+- **What a preview can't do:** `::SAVE`, `::SUBMIT`, `-- @load`, or read
+  the write-back tables. Reports, alerts and tasks never name one.
+- **Limits:** `ttl_s` (default 24 h; a request may ask for any value up
+  to `max_ttl_s`, default 7 days), `max_per_key` live previews (20, then
+  `409`), `max_sql_bytes` (256 KiB), and 30 creations per minute per key.
+  `DELETE /api/dashboards/<id>` with the same key removes one.
+- **Storage:** in memory, plus one `0600` file per preview in `dir` (which
+  must not be writable by group or others), so a restart and replicas
+  sharing the volume keep them. Expired ones are dropped. Creations and
+  refusals are in the audit log (`"audit": "preview"`).
+
 ### Ingest API (`POST /api/data/<table>`, `options.ingest`, #769)
 
 Scripts, webhooks and other services can push rows into the server:

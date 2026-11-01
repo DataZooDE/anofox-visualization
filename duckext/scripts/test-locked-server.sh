@@ -1440,3 +1440,60 @@ fi
 grep -q "is attached READ_ONLY" "$T/out" || fail "READ_ONLY ingest database: no reason: $(cat "$T/out")"
 exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
 echo "OK: #769: ingest API — scopes, create/add column/400 on a conflict, refresh, 503 on a reader, READ_ONLY refused"
+
+# #770: temporary dashboards — POST /api/dashboards from an API key with the
+# preview scope; checked like a file plus every panel run once as the key (a
+# broken panel is a 400); served at /p/<id> to a login, running as the key's
+# claims; never in the list; ::SAVE refused; per-key limit; DELETE by its key;
+# kept on disk across a restart.
+mkdir -p "$T/pdash" "$T/pv"; chmod 700 "$T/pv"
+printf 'SELECT 1 AS one ::METRIC;\n' > "$T/pdash/home.sql"
+: > "$T/keys.entries"
+K_PV=$(mkkey '["preview"]')
+K_PV2=$(mkkey '["preview"]')
+K_NOPV=$(mkkey '[]')
+K_VIEW=$(mkkey '[]' 'null')
+printf '{"keys": [%s]}\n' "$(paste -sd, "$T/keys.entries")" > "$T/keys.json"; chmod 600 "$T/keys.json"
+pauth="\"auth\": {\"mode\": \"api_keys\", \"file\": \"$T/keys.json\"}, \"policy\": \"none\""
+pserve() { echo "SELECT anofox_serve_dashboards($(q "$T/pdash"), $PORT, $(q "{$pauth, \"preview\": $1}"));"; }
+pcreate() { # pcreate <key> <json body> → status; body in $T/pbody
+  curl -s -o "$T/pbody" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/dashboards" \
+    ${1:+-H "Authorization: Bearer $1"} -H 'Content-Type: application/json' -d "$2"
+}
+pget() { curl -s -o "$T/pbody" -w "%{http_code}" -H "Authorization: Bearer $K_VIEW" "http://127.0.0.1:$PORT$1"; }
+start "$T/main.duckdb" "" "$(pserve "{\"dir\": \"$T/pv\", \"max_per_key\": 2}")" || fail "preview: the server should start"
+[ "$(pcreate "$K_NOPV" '{"sql": "SELECT 1 AS x ::METRIC;"}')" = 403 ] || fail "preview without the scope: $(cat "$T/pbody")"
+[ "$(pcreate "$K_PV" '{"sql": "SELECT getvariable('"'"'__claim_user'"'"') AS who ::TABLE;"}')" = 201 ] || fail "preview create: $(cat "$T/pbody")"
+PID1=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$T/pbody")
+grep -q "\"url\":\"/p/$PID1\"" "$T/pbody" || fail "preview url: $(cat "$T/pbody")"
+[ "$(pget "/p/$PID1")" = 200 ] || fail "preview page: $(cat "$T/pbody")"
+grep -q "Referrer-Policy\|$PID1" "$T/pbody" || fail "preview page body"
+# its panel runs as the key that made it, not as the viewer
+code=$(curl -s -o "$T/pbody" -w "%{http_code}" -X POST "http://127.0.0.1:$PORT/api/panel" -H "Authorization: Bearer $K_VIEW" \
+  -d "{\"dashboard\":\"$PID1\",\"panel\":0,\"vars\":{}}")
+[ "$code" = 200 ] || fail "preview panel: $code $(cat "$T/pbody")"
+grep -q "svc-$(printf %s "$K_PV" | cut -c5-16)" "$T/pbody" || fail "preview runs as its key: $(cat "$T/pbody")"
+[ "$(pget "/d/$PID1")" = 404 ] || fail "a preview is not a /d/ dashboard"
+[ "$(pget /)" = 200 ] && ! grep -q "$PID1" "$T/pbody" || fail "a preview is not on the / list"
+# a broken panel, ::SAVE, no panels: 400
+[ "$(pcreate "$K_PV" '{"sql": "SELECT x ::METRIC FROM no_such_table;"}')" = 400 ] && grep -q "no_such_table" "$T/pbody" || fail "a broken preview should be a 400 naming it: $(cat "$T/pbody")"
+[ "$(pcreate "$K_PV" '{"sql": "SELECT '"'"'Save'"'"' AS s ::SAVE, '"'"'t'"'"' ::SAVE_TABLES;"}')" = 400 ] || fail "::SAVE in a preview: $(cat "$T/pbody")"
+[ "$(pcreate "$K_PV" '{"sql": "CREATE TEMP VIEW v AS SELECT 1;"}')" = 400 ] || fail "a preview without panels: $(cat "$T/pbody")"
+# per-key limit (2): one more is fine, the third is a 409; another key is unaffected
+[ "$(pcreate "$K_PV" '{"sql": "SELECT 2 AS two ::METRIC;", "ttl_s": 60}')" = 201 ] || fail "second preview: $(cat "$T/pbody")"
+PID2=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' "$T/pbody")
+[ "$(pcreate "$K_PV" '{"sql": "SELECT 3 AS three ::METRIC;"}')" = 409 ] || fail "the per-key limit: $(cat "$T/pbody")"
+[ "$(pcreate "$K_PV2" '{"sql": "SELECT 3 AS three ::METRIC;"}')" = 201 ] || fail "another key's preview: $(cat "$T/pbody")"
+# DELETE: only by its own key
+code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: Bearer $K_PV2" "http://127.0.0.1:$PORT/api/dashboards/$PID2")
+[ "$code" = 403 ] || fail "another key may not delete a preview: $code"
+code=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: Bearer $K_PV" "http://127.0.0.1:$PORT/api/dashboards/$PID2")
+[ "$code" = 204 ] || fail "its key deletes a preview: $code"
+[ "$(pget "/p/$PID2")" = 404 ] || fail "a deleted preview is gone"
+[ -f "$T/pv/$PID1.json" ] && [ ! -f "$T/pv/$PID2.json" ] || fail "preview files: $(ls "$T/pv")"
+stop
+# kept across a restart
+start "$T/main.duckdb" "" "$(pserve "{\"dir\": \"$T/pv\"}")" || fail "preview (restart): start"
+[ "$(pget "/p/$PID1")" = 200 ] || fail "a kept preview after a restart: $(cat "$T/pbody")"
+stop
+echo "OK: #770: previews — scope, checks (a broken panel is a 400), runs as its key, /p/ only, limit, DELETE, kept on disk"

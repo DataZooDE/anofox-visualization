@@ -1271,6 +1271,9 @@ pub struct LockedOptions {
     /// `ingest` (#769): `POST /api/data/<table>` for API keys with an
     /// `ingest:<table>` scope.
     pub ingest: Option<IngestOptions>,
+    /// `preview` (#770): temporary dashboards from API keys with the
+    /// `preview` scope (`POST /api/dashboards`).
+    pub preview: Option<PreviewOptions>,
     /// `home`: a dashboard id `/` redirects to instead of the landing page
     /// (when the viewer may read it).
     pub home: Option<String>,
@@ -1664,6 +1667,7 @@ impl Default for LockedOptions {
             site_css: None,
             folders: false,
             ingest: None,
+            preview: None,
             home: None,
             source: None,
             state_opts: None,
@@ -1918,6 +1922,7 @@ impl LockedOptions {
                         .ok_or("options.folders must be true or false")?;
                 }
                 "ingest" => o.ingest = Some(IngestOptions::parse(val)?),
+                "preview" => o.preview = Some(PreviewOptions::parse(val)?),
                 "css_file" => {
                     let f = val
                         .as_str()
@@ -2037,6 +2042,9 @@ impl LockedOptions {
             o.tasks = Some(parse_tasks(v, o.notify.as_ref())?);
         }
         // #769: only an API key may ingest, so there must be API keys.
+        if o.preview.is_some() && !o.auth.as_ref().is_some_and(|a| a.keys.is_some()) {
+            return Err("options.preview needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with the preview scope may create one".into());
+        }
         if o.ingest.is_some() && !o.auth.as_ref().is_some_and(|a| a.keys.is_some()) {
             return Err("options.ingest needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with an ingest:<table> scope may write".into());
         }
@@ -2315,6 +2323,12 @@ struct Snapshot {
     /// and value-validated ([`build_nav_picker`]). Recomputed on every
     /// refresh; empty without any pickers.
     nav_picker_snapshots: Vec<PickerSnapshot>,
+    /// Which of the catalog's macros and views read variables (for a
+    /// preview's deps, #770).
+    implicit: HashMap<String, Deps>,
+    /// #770: the previews' policy rewrite and deps on this snapshot, built
+    /// on first use.
+    previews: Mutex<HashMap<String, Arc<PreviewOn>>>,
     /// The dashboards this snapshot was built from (#772).
     dashes: Arc<DashSet>,
     _dir: SnapshotDir,
@@ -2591,6 +2605,42 @@ const CATALOG_SQL: &str =
      WHERE function_type IN ('macro', 'table_macro') \
      UNION ALL SELECT view_name, coalesce(sql, '') FROM duckdb_views()";
 
+/// One dashboard's variables on a snapshot: per statement what its answer
+/// can depend on, their digest, and what its setup reads (warm keys). Under a
+/// policy (`script`), the rewritten statements count too. Shared by
+/// [`analyze_deps`] and the previews (#770).
+fn dash_deps(
+    d: &Dash,
+    script: Option<&Script>,
+    implicit: &HashMap<String, Deps>,
+) -> (Vec<Deps>, String, Vec<Deps>) {
+    let of = |stmts: &[(bool, String)], f: fn(&[deps::Stmt], &_) -> Vec<Deps>| {
+        let view: Vec<deps::Stmt> = stmts
+            .iter()
+            .enumerate()
+            .map(|(i, (setup, sql))| deps::Stmt {
+                setup: *setup,
+                sql,
+                requires: d.requires.get(i).map_or(&[][..], Vec::as_slice),
+                tabs: d.tabs.get(i).map_or(&[][..], Vec::as_slice),
+            })
+            .collect();
+        f(&view, implicit)
+    };
+    let mut ds = of(&d.stmts, deps::script_deps);
+    let mut ws = of(&d.stmts, deps::setup_deps);
+    if let Some(sc) = script {
+        for (a, b) in ds.iter_mut().zip(of(&sc.stmts, deps::script_deps)) {
+            a.extend(&b);
+        }
+        for (a, b) in ws.iter_mut().zip(of(&sc.stmts, deps::setup_deps)) {
+            a.extend(&b);
+        }
+    }
+    let tag = deps_tag(&ds);
+    (ds, tag, ws)
+}
+
 /// Work out every statement's variables ([`deps::script_deps`]) on a new
 /// snapshot: which of its macros and views read variables comes from the
 /// snapshot itself. Under a policy, the rewritten statements count too.
@@ -2608,39 +2658,13 @@ fn analyze_deps(snap: &mut Snapshot, dashboards: &[Dash]) -> Result<(), String> 
     let implicit = deps::catalog_reads(&objects);
     let (mut all, mut tags, mut warm) = (Vec::new(), Vec::new(), Vec::new());
     for (di, d) in dashboards.iter().enumerate() {
-        let of = |stmts: &[(bool, String)], f: fn(&[deps::Stmt], &_) -> Vec<Deps>| {
-            let view: Vec<deps::Stmt> = stmts
-                .iter()
-                .enumerate()
-                .map(|(i, (setup, sql))| deps::Stmt {
-                    setup: *setup,
-                    sql,
-                    requires: d.requires.get(i).map_or(&[][..], Vec::as_slice),
-                    tabs: d.tabs.get(i).map_or(&[][..], Vec::as_slice),
-                })
-                .collect();
-            f(&view, &implicit)
-        };
-        let mut ds = of(&d.stmts, deps::script_deps);
-        let mut ws = of(&d.stmts, deps::setup_deps);
-        if let Some(p) = &snap.policy {
-            for (a, b) in ds
-                .iter_mut()
-                .zip(of(&p.scripts[di].stmts, deps::script_deps))
-            {
-                a.extend(&b);
-            }
-            for (a, b) in ws
-                .iter_mut()
-                .zip(of(&p.scripts[di].stmts, deps::setup_deps))
-            {
-                a.extend(&b);
-            }
-        }
-        tags.push(deps_tag(&ds));
+        let script = snap.policy.as_ref().map(|p| &p.scripts[di]);
+        let (ds, tag, ws) = dash_deps(d, script, &implicit);
+        tags.push(tag);
         all.push(ds);
         warm.push(ws);
     }
+    snap.implicit = implicit;
     snap.deps = all;
     snap.deps_tags = tags;
     snap.warm_deps = warm;
@@ -2870,6 +2894,8 @@ struct Locked {
     task_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// #769: `options.ingest`'s live runtime (`None` unless configured).
     ingest: Option<Arc<IngestRuntime>>,
+    /// #770: the stored previews (`None` without `options.preview`).
+    previews: Option<Arc<PreviewStore>>,
     /// #768: per report, its last run (for `/metrics`).
     report_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// #768: the messages sent in the last hour (`notify.max_per_hour`).
@@ -3880,6 +3906,11 @@ pub fn start_locked(
             }))
         }
     };
+    // #770: previews kept on disk come back (expired ones are dropped).
+    let preview_store = match &opts.preview {
+        None => None,
+        Some(po) => Some(Arc::new(PreviewStore::open(po.clone())?)),
+    };
     // #769: the writing replica's ingest database is attached read-write.
     let ingest_rt = match &opts.ingest {
         None => None,
@@ -3938,6 +3969,7 @@ pub fn start_locked(
         metrics: Default::default(),
         task_stats: Mutex::new(BTreeMap::new()),
         ingest: ingest_rt,
+        previews: preview_store,
         report_stats: Mutex::new(BTreeMap::new()),
         report_rate: Mutex::new(notify::Rate::default()),
         alert_stats: Mutex::new(BTreeMap::new()),
@@ -4949,6 +4981,645 @@ pub fn refresh(port: u16) -> Result<String, String> {
     Ok(locked.refresh(true)?.unwrap_or_default())
 }
 
+/// `options.preview` (#770).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewOptions {
+    /// `dir`: where each preview is kept as a file, so a restart (or replicas
+    /// sharing the volume) keep it; `None`: in memory only.
+    pub dir: Option<PathBuf>,
+    /// `ttl_s`: how long a preview lives by default (24 h); a request may ask
+    /// for less, or more up to `max_ttl_s` (7 days).
+    pub ttl: u64,
+    pub max_ttl: u64,
+    /// `max_per_key`: live previews per API key (20).
+    pub max_per_key: usize,
+    /// `max_sql_bytes`: one preview's SQL (256 KiB).
+    pub max_sql_bytes: usize,
+}
+
+impl PreviewOptions {
+    fn parse(v: &Value) -> Result<PreviewOptions, String> {
+        let o = v.as_object().ok_or(
+            "options.preview must be an object like {\"dir\": \"/var/lib/anofox/previews\"}",
+        )?;
+        let mut out = PreviewOptions {
+            dir: None,
+            ttl: 86_400,
+            max_ttl: 7 * 86_400,
+            max_per_key: 20,
+            max_sql_bytes: 256 * 1024,
+        };
+        let num = |k: &str, v: &Value| {
+            v.as_u64()
+                .filter(|n| *n > 0)
+                .ok_or(format!("options.preview.{k} must be a positive integer"))
+        };
+        for (k, v) in o {
+            match k.as_str() {
+                "dir" => {
+                    out.dir = Some(PathBuf::from(
+                        v.as_str()
+                            .filter(|d| !d.trim().is_empty())
+                            .ok_or("options.preview.dir must be a directory path")?,
+                    ))
+                }
+                "ttl_s" => out.ttl = num(k, v)?,
+                "max_ttl_s" => out.max_ttl = num(k, v)?.min(30 * 86_400),
+                "max_per_key" => out.max_per_key = num(k, v)?.min(1000) as usize,
+                "max_sql_bytes" => out.max_sql_bytes = num(k, v)?.min(4 << 20) as usize,
+                other => {
+                    return Err(format!(
+                        "options.preview: unknown key '{other}' (dir, ttl_s, max_ttl_s, max_per_key, max_sql_bytes)"
+                    ))
+                }
+            }
+        }
+        out.ttl = out.ttl.min(out.max_ttl);
+        Ok(out)
+    }
+}
+
+/// The id prefix of a preview: `/p/preview-<32 hex>`.
+const PREVIEW_PREFIX: &str = "preview-";
+
+/// One stored preview (#770): its dashboard, and the API key it runs as.
+struct Preview {
+    dash: Arc<Dash>,
+    /// The creating key's claims: every viewer of the preview sees what
+    /// they allow.
+    claims: Claims,
+    key_id: String,
+    /// Unix seconds.
+    expires: u64,
+}
+
+/// A preview on one snapshot: its statements rewritten for the access
+/// policy, and its deps (like a file dashboard's, built on first use).
+struct PreviewOn {
+    script: Option<Script>,
+    deps: Vec<Deps>,
+    deps_tag: String,
+    warm_deps: Vec<Deps>,
+}
+
+/// The previews, in memory and (with `dir`) one file each.
+struct PreviewStore {
+    opts: PreviewOptions,
+    map: Mutex<HashMap<String, Arc<Preview>>>,
+    rate: RateLimiter,
+}
+
+impl PreviewStore {
+    /// Read the kept previews (dropping expired or broken files).
+    fn open(opts: PreviewOptions) -> Result<PreviewStore, String> {
+        let mut map = HashMap::new();
+        if let Some(dir) = &opts.dir {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("options.preview.dir {}: {e}", dir.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let m = std::fs::metadata(dir)
+                    .map_err(|e| format!("options.preview.dir {}: {e}", dir.display()))?;
+                if m.permissions().mode() & 0o022 != 0 {
+                    return Err(format!(
+                        "options.preview.dir {}: writable by group or others — chmod 700 it",
+                        dir.display()
+                    ));
+                }
+            }
+            let now = unix_now() as u64;
+            for e in std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
+                let path = e.path();
+                let Some(p) = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|t| preview_from_json(&t))
+                else {
+                    continue;
+                };
+                if p.expires <= now
+                    || path.file_stem().and_then(|s| s.to_str()) != Some(p.dash.id.as_str())
+                {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                map.insert(p.dash.id.clone(), Arc::new(p));
+            }
+        }
+        Ok(PreviewStore {
+            opts,
+            map: Mutex::new(map),
+            rate: RateLimiter::new(30, 10, 4096),
+        })
+    }
+
+    fn file(&self, id: &str) -> Option<PathBuf> {
+        self.opts.dir.as_ref().map(|d| d.join(format!("{id}.json")))
+    }
+
+    /// Drop the expired previews (and their files).
+    fn purge(&self, m: &mut HashMap<String, Arc<Preview>>) {
+        let now = unix_now() as u64;
+        let gone: Vec<String> = m
+            .iter()
+            .filter(|(_, p)| p.expires <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            m.remove(&id);
+            if let Some(f) = self.file(&id) {
+                let _ = std::fs::remove_file(f);
+            }
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<Arc<Preview>> {
+        if !id.starts_with(PREVIEW_PREFIX) {
+            return None;
+        }
+        let mut m = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        self.purge(&mut m);
+        m.get(id).cloned()
+    }
+
+    /// Add a preview unless its key already has `max_per_key` live ones.
+    fn insert(&self, p: Preview) -> Result<Arc<Preview>, String> {
+        let mut m = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        self.purge(&mut m);
+        if m.values().filter(|x| x.key_id == p.key_id).count() >= self.opts.max_per_key {
+            return Err(format!(
+                "this API key already has {} live previews (options.preview.max_per_key) — delete one",
+                self.opts.max_per_key
+            ));
+        }
+        let p = Arc::new(p);
+        m.insert(p.dash.id.clone(), p.clone());
+        Ok(p)
+    }
+
+    /// Keep it on disk (after its checks passed).
+    fn persist(&self, p: &Preview) -> Result<(), String> {
+        let Some(f) = self.file(&p.dash.id) else {
+            return Ok(());
+        };
+        let tmp = f.with_extension("json.tmp");
+        write_private(&tmp, preview_to_json(p).as_bytes())?;
+        std::fs::rename(&tmp, &f).map_err(|e| format!("{}: {e}", f.display()))
+    }
+
+    fn remove(&self, id: &str) -> Option<Arc<Preview>> {
+        let p = self
+            .map
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(id);
+        if let Some(f) = self.file(id) {
+            let _ = std::fs::remove_file(f);
+        }
+        p
+    }
+}
+
+/// Write a file only its owner may read (`0600`).
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.write_all(bytes)
+        .and_then(|_| f.sync_all())
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn preview_to_json(p: &Preview) -> String {
+    serde_json::json!({
+        "id": p.dash.id,
+        "sql": p.dash.sql,
+        "user": p.claims.user,
+        "groups": p.claims.groups,
+        "claims": p.claims.attrs.iter().map(|(k, v)| (k.clone(), serde_json::json!(v))).collect::<serde_json::Map<_, _>>(),
+        "key": p.key_id,
+        "expires": p.expires,
+    })
+    .to_string()
+}
+
+fn preview_from_json(text: &str) -> Option<Preview> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let id = v.get("id")?.as_str()?.to_string();
+    if !id.starts_with(PREVIEW_PREFIX) || !sv::valid_dashboard_id(&id) {
+        return None;
+    }
+    let sql = v.get("sql")?.as_str()?.to_string();
+    let claims = Claims {
+        user: v.get("user")?.as_str()?.to_string(),
+        groups: v
+            .get("groups")?
+            .as_array()?
+            .iter()
+            .filter_map(|g| g.as_str().map(str::to_string))
+            .collect(),
+        attrs: v
+            .get("claims")?
+            .as_object()?
+            .iter()
+            .map(|(k, x)| (k.clone(), x.as_str().map(str::to_string)))
+            .collect(),
+    };
+    let meta = sv::parse_dashboard_meta(&id, &sql);
+    Some(Preview {
+        dash: Arc::new(plan_dash(id, sql, meta, None)),
+        claims,
+        key_id: v.get("key")?.as_str()?.to_string(),
+        expires: v.get("expires")?.as_u64()?,
+    })
+}
+
+/// A preview's policy rewrite and deps on `gen` (built once per snapshot).
+fn preview_on(
+    st: &Locked,
+    gen: &Generation<Snapshot>,
+    p: &Preview,
+) -> Result<Arc<PreviewOn>, String> {
+    if let Some(x) = gen
+        .snap
+        .previews
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&p.dash.id)
+    {
+        return Ok(x.clone());
+    }
+    let script = match (&gen.snap.policy, &st.opts.policy_key) {
+        (Some(pol), Some(key)) => {
+            let c = gen.snap.db.connect()?;
+            crate::register_policy_hash(&c, key.0.clone())?;
+            let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
+            Some(
+                pol.enf
+                    .rewrite_script(&mut duck, &p.dash.stmts, &[])
+                    .map_err(|(i, e)| {
+                        format!("statement {i}: {e} (refused by the access policy)")
+                    })?,
+            )
+        }
+        _ => None,
+    };
+    let (deps, deps_tag, warm_deps) = dash_deps(&p.dash, script.as_ref(), &gen.snap.implicit);
+    let on = Arc::new(PreviewOn {
+        script,
+        deps,
+        deps_tag,
+        warm_deps,
+    });
+    gen.snap
+        .previews
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(p.dash.id.clone(), on.clone());
+    Ok(on)
+}
+
+/// A dashboard as one request sees it on its snapshot: a file's (by index)
+/// or a preview's (#770).
+enum DashHeld {
+    File(usize),
+    Preview(Arc<Preview>, Arc<PreviewOn>),
+}
+
+impl DashHeld {
+    fn resolve(
+        st: &Locked,
+        gen: &Generation<Snapshot>,
+        id: &str,
+    ) -> Result<DashHeld, (u16, String)> {
+        if let Some(di) = gen.snap.dashes.list.iter().position(|d| d.id == id) {
+            return Ok(DashHeld::File(di));
+        }
+        let p = st
+            .previews
+            .as_ref()
+            .and_then(|ps| ps.get(id))
+            .ok_or((404, "no such dashboard".to_string()))?;
+        let on = preview_on(st, gen, &p).map_err(|e| (400, e))?;
+        Ok(DashHeld::Preview(p, on))
+    }
+
+    fn dash<'a>(&'a self, gen: &'a Generation<Snapshot>) -> &'a Dash {
+        match self {
+            DashHeld::File(di) => &gen.snap.dashes.list[*di],
+            DashHeld::Preview(p, _) => &p.dash,
+        }
+    }
+
+    fn script<'a>(&'a self, gen: &'a Generation<Snapshot>) -> Option<&'a Script> {
+        match self {
+            DashHeld::File(di) => gen.snap.policy.as_ref().map(|p| &p.scripts[*di]),
+            DashHeld::Preview(_, on) => on.script.as_ref(),
+        }
+    }
+
+    fn deps<'a>(&'a self, gen: &'a Generation<Snapshot>) -> Option<&'a Vec<Deps>> {
+        match self {
+            DashHeld::File(di) => gen.snap.deps.get(*di),
+            DashHeld::Preview(_, on) => Some(&on.deps),
+        }
+    }
+
+    fn deps_tag(&self, gen: &Generation<Snapshot>) -> String {
+        match self {
+            DashHeld::File(di) => gen.snap.deps_tags.get(*di).cloned().unwrap_or_default(),
+            DashHeld::Preview(_, on) => on.deps_tag.clone(),
+        }
+    }
+
+    fn warm_deps<'a>(&'a self, gen: &'a Generation<Snapshot>) -> Option<&'a Vec<Deps>> {
+        match self {
+            DashHeld::File(di) => gen.snap.warm_deps.get(*di),
+            DashHeld::Preview(_, on) => Some(&on.warm_deps),
+        }
+    }
+
+    fn preview(&self) -> Option<&Preview> {
+        match self {
+            DashHeld::File(_) => None,
+            DashHeld::Preview(p, _) => Some(p),
+        }
+    }
+}
+
+/// A data provider that records every panel that fails (a preview's check).
+struct Recording<'a> {
+    inner: ExportData<'a>,
+    errors: Vec<String>,
+}
+
+impl dashboard::DataProvider for Recording<'_> {
+    fn execute(&mut self, sql: &str) -> Result<(), String> {
+        self.inner.execute(sql)
+    }
+    fn query(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<(String, Vec<anofox_visualization::Value>)>, String> {
+        let r = self.inner.query(sql);
+        if let Err(e) = &r {
+            if self.errors.len() < 20 {
+                let first = sql
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect::<String>();
+                self.errors.push(format!("{first}: {e}"));
+            }
+        }
+        r
+    }
+}
+
+/// `POST /api/dashboards` (#770): `{"sql": "…", "ttl_s"?: n}` from an API key
+/// with the `preview` scope → `201 {"id", "url", "expires"}`. The dashboard
+/// is checked like a file at start, rewritten for the access policy, and
+/// every panel is run once as the key; any failure is a `400`.
+fn handle_preview_create(
+    st: &Locked,
+    mut req: Request,
+    ident: Option<&auth::Identity>,
+    info: &mut LogInfo,
+) -> u16 {
+    let peer = req.remote_addr().map(|a| a.ip());
+    let audit = |outcome: &'static str, reason: Option<&'static str>, detail: Option<&str>| {
+        if let Some(a) = st.opts.auth.as_ref().and_then(|a| a.audit.as_ref()) {
+            a.write(&auth::audit::Event {
+                event: "preview",
+                outcome,
+                method: ident.map(|i| i.method),
+                user: ident.map(|i| i.claims.user.as_str()),
+                reason,
+                peer,
+                path: Some("/api/dashboards"),
+                key_id: ident.and_then(|i| i.ref_id.as_deref()),
+                detail,
+                ..Default::default()
+            });
+        }
+    };
+    let Some(store) = &st.previews else {
+        return reply(
+            req,
+            404,
+            "not found: this server has no previews (options.preview)",
+        );
+    };
+    let Some(id_key) = ident.filter(|i| i.method == "api_key" && i.key_scopes.preview) else {
+        info.deny = Some("preview_scope");
+        audit("deny", Some("preview_scope"), None);
+        return reply(
+            req,
+            403,
+            "forbidden: only an API key with the preview scope may create a preview",
+        );
+    };
+    let key_id = id_key
+        .ref_id
+        .clone()
+        .unwrap_or_else(|| id_key.claims.user.clone());
+    if let Err(wait) = store.rate.check(&key_id, Instant::now()) {
+        info.deny = Some("preview_rate");
+        return send(
+            req,
+            auth::Reply::text(429, "too many previews for this API key")
+                .header("Retry-After", &wait.max(1).to_string()),
+        );
+    }
+    let body = match read_body(&mut req, store.opts.max_sql_bytes + 4096) {
+        Ok(b) => b,
+        Err((code, e)) => return reply(req, code, &e),
+    };
+    let v: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => return reply(req, 400, &format!("the body is not JSON: {e}")),
+    };
+    let Some(sql) = v
+        .get("sql")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return reply(
+            req,
+            400,
+            "the body must be {\"sql\": \"<the dashboard's SQL>\"}",
+        );
+    };
+    if sql.len() > store.opts.max_sql_bytes {
+        return reply(
+            req,
+            413,
+            &format!("the SQL exceeds {} bytes", store.opts.max_sql_bytes),
+        );
+    }
+    if let Some(k) = v
+        .as_object()
+        .and_then(|o| o.keys().find(|k| !matches!(k.as_str(), "sql" | "ttl_s")))
+    {
+        return reply(req, 400, &format!("unknown key '{k}' (sql, ttl_s)"));
+    }
+    let ttl = match v.get("ttl_s") {
+        None => store.opts.ttl,
+        Some(t) => match t.as_u64().filter(|t| *t > 0) {
+            Some(t) => t.min(store.opts.max_ttl),
+            None => return reply(req, 400, "ttl_s must be a positive number of seconds"),
+        },
+    };
+    let id = format!("{PREVIEW_PREFIX}{}", sv::random_token());
+    let meta = sv::parse_dashboard_meta(&id, sql);
+    let dash = plan_dash(id.clone(), sql.to_string(), meta, None);
+    // What a preview may not do (D5): save, submit, load extensions, or
+    // read the saved tables.
+    let refusal = if !dash.saves.is_empty() || !dash.submits.is_empty() {
+        Some("::SAVE and ::SUBMIT are not available in a preview")
+    } else if !dash.meta.loads.is_empty() {
+        Some("-- @load is not available in a preview (the server loads extensions at start)")
+    } else if st
+        .opts
+        .writeback_opts
+        .as_ref()
+        .is_some_and(|w| w.tables.keys().any(|t| wb::references(&dash.sql, t)))
+    {
+        Some("a preview may not read the saved (write-back) tables")
+    } else if dash.stmts.iter().all(|(setup, _)| *setup) {
+        Some("no panels: the SQL has no annotated SELECT")
+    } else {
+        None
+    };
+    if let Some(r) = refusal {
+        return reply(req, 400, r);
+    }
+    // One statement each, and the data folder's read-only rule: as a file.
+    {
+        let gen = st.current.get();
+        let check = || -> Result<(), String> {
+            let c = gen.snap.db.connect()?;
+            for (i, (_, s)) in dash.stmts.iter().enumerate() {
+                match c.count_statements(s) {
+                    Ok(1) => {}
+                    Ok(n) => return Err(format!("statement {i}: expected 1 statement, found {n}")),
+                    Err(e) => return Err(format!("statement {i}: {e}")),
+                }
+            }
+            if st.opts.data.is_some() {
+                check_read_only(&c, std::slice::from_ref(&dash))?;
+            }
+            Ok(())
+        };
+        if let Err(e) = check() {
+            return reply(req, 400, &redact(e, st.opts.data.as_deref()));
+        }
+    }
+    let expires = unix_now() as u64 + ttl;
+    let pv = match store.insert(Preview {
+        dash: Arc::new(dash),
+        claims: id_key.claims.clone(),
+        key_id: key_id.clone(),
+        expires,
+    }) {
+        Ok(p) => p,
+        Err(e) => return reply(req, 409, &e),
+    };
+    // The policy rewrite, then every panel once, as the key.
+    let gen = st.current.get();
+    if let Err(e) = preview_on(st, &gen, &pv) {
+        store.remove(&id);
+        return reply(req, 400, &e);
+    }
+    let who = ExportAs {
+        claims: Some(&pv.claims),
+        scope: None,
+        method: Some("api_key"),
+        vars: Vec::new(),
+    };
+    let mut rec = Recording {
+        inner: who.data(st, &pv.dash),
+        errors: Vec::new(),
+    };
+    let rendered = dashboard::render_dashboard_svg(
+        &pv.dash.sql,
+        &mut rec,
+        &dashboard::DashboardOptions::default(),
+    );
+    let mut errors = rec.errors;
+    if let Err(e) = rendered {
+        errors.push(e);
+    }
+    if let Some((_, e)) = rec.inner.fatal.take() {
+        errors.push(e);
+    }
+    if !errors.is_empty() {
+        store.remove(&id);
+        audit("error", Some("preview_check"), None);
+        let body = serde_json::json!({"error": "the preview's checks failed", "errors": errors});
+        respond(req, 400, "application/json", body.to_string());
+        return 400;
+    }
+    if let Err(e) = store.persist(&pv) {
+        store.remove(&id);
+        return reply(req, 500, &format!("could not keep the preview: {e}"));
+    }
+    info.dashboard = Some(id.clone());
+    audit("ok", None, Some(&id));
+    let body = serde_json::json!({"id": id, "url": format!("/p/{id}"), "expires": expires});
+    respond(req, 201, "application/json", body.to_string());
+    201
+}
+
+/// `DELETE /api/dashboards/<id>` (#770): the key that made a preview removes it.
+fn handle_preview_delete(
+    st: &Locked,
+    req: Request,
+    id: &str,
+    ident: Option<&auth::Identity>,
+    info: &mut LogInfo,
+) -> u16 {
+    let Some(store) = &st.previews else {
+        return reply(
+            req,
+            404,
+            "not found: this server has no previews (options.preview)",
+        );
+    };
+    let key = ident
+        .filter(|i| i.method == "api_key" && i.key_scopes.preview)
+        .map(|i| i.ref_id.clone().unwrap_or_else(|| i.claims.user.clone()));
+    match (store.get(id), key) {
+        (Some(p), Some(k)) if p.key_id == k => {
+            store.remove(id);
+            info.dashboard = Some(id.to_string());
+            respond(req, 204, "text/plain", Vec::new());
+            204
+        }
+        (Some(_), Some(_)) => reply(
+            req,
+            403,
+            "forbidden: only the key that made a preview may delete it",
+        ),
+        (_, None) => reply(
+            req,
+            403,
+            "forbidden: only an API key with the preview scope may delete a preview",
+        ),
+        (None, _) => reply(req, 404, "no such preview (or it expired)"),
+    }
+}
+
 /// `options.ingest`'s live runtime (#769).
 struct IngestRuntime {
     /// Requests per minute, per API key.
@@ -5494,135 +6165,136 @@ fn build_nav_picker(
 /// `-- @load` extensions.
 /// The dashboards of `dir` (and, with `folders`, its subfolders — #772),
 /// planned for serving: [`sv::dashboard_files`] reads them.
+/// One dashboard's SQL planned for serving: a file's (`load_dashboards`) or a
+/// preview's (#770), the same way.
+fn plan_dash(id: String, sql: String, meta: sv::DashboardMeta, updated: Option<String>) -> Dash {
+    let planned = anofox_visualization::sql::plan(&sql);
+    let info = planned
+        .iter()
+        .map(|p| {
+            use anofox_visualization::Role;
+            let has = |want: Role| p.roles.iter().any(|(_, r)| *r == want);
+            has(Role::PagedTable) && has(Role::Info)
+        })
+        .collect();
+    // A statement in a ::TAB / ::SUBTAB section runs under the tab's
+    // `-- @requires` too (setup only under its own): a hidden tab's panels
+    // never run, also when a viewer asks for them directly.
+    let tabs = planned
+        .iter()
+        .map(|p| if p.setup { Vec::new() } else { p.tabs.clone() })
+        .collect();
+    // #517 S2: every input's declared variable name (static — the
+    // column's own name or explicit alias, [`sql::rewrite`]'s
+    // `Role::Input` case; never run to find out), and every `::SUBMIT`
+    // statement's own column layout. `DATERANGE`/`PERIOD` (several
+    // variables each, from a name the lint already can't check
+    // statically either) are left out on purpose: a `SUBMIT_VARS`
+    // naming one then falls through to the ordinary "unknown
+    // variable" refusal, fail-closed either way.
+    let mut inputs: HashMap<String, Vec<(usize, InputKind, usize)>> = HashMap::new();
+    let mut submits: HashMap<usize, SubmitSpec> = HashMap::new();
+    let mut saves: HashMap<usize, SaveSpec> = HashMap::new();
+    for (i, p) in planned.iter().enumerate() {
+        let col = |role: Role| p.roles.iter().find(|(_, r)| *r == role).map(|(j, _)| *j);
+        if let (Some(save_idx), Some(tables_col)) = (col(Role::Save), col(Role::SaveTables)) {
+            let name = p
+                .names
+                .iter()
+                .find(|(j, _)| *j == save_idx)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_else(|| format!("save_{i}"));
+            saves.insert(
+                i,
+                SaveSpec {
+                    name,
+                    graph_col: col(Role::SaveGraph),
+                    form_col: col(Role::SaveForm),
+                    tables_col,
+                },
+            );
+        }
+        use anofox_visualization::inputs::{input_index, input_kind};
+        if let Some(kind) = input_kind(&p.roles) {
+            if !matches!(
+                kind,
+                InputKind::DateRange | InputKind::Period | InputKind::Form
+            ) {
+                let idx = input_index(&p.roles);
+                if let Some(name) = p.names.iter().find(|(j, _)| *j == idx).map(|(_, n)| n) {
+                    inputs
+                        .entry(name.to_ascii_lowercase())
+                        .or_default()
+                        .push((i, kind, idx));
+                }
+            }
+        }
+        if p.roles.iter().any(|(_, r)| matches!(r, Role::Submit)) {
+            let submit_idx = p
+                .roles
+                .iter()
+                .find(|(_, r)| matches!(r, Role::Submit))
+                .map(|(j, _)| *j)
+                .unwrap_or(0);
+            let name = p
+                .names
+                .iter()
+                .find(|(j, _)| *j == submit_idx)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_else(|| format!("submit_{i}"));
+            let vars_col = p
+                .roles
+                .iter()
+                .find(|(_, r)| matches!(r, Role::SubmitVars))
+                .map(|(j, _)| *j);
+            let done_col = p
+                .roles
+                .iter()
+                .find(|(_, r)| matches!(r, Role::SubmitDone))
+                .map(|(j, _)| *j);
+            if let Some(vars_col) = vars_col {
+                submits.insert(
+                    i,
+                    SubmitSpec {
+                        name,
+                        vars_col,
+                        done_col,
+                    },
+                );
+            }
+        }
+    }
+    let materialize = planned
+        .iter()
+        .map(|p| p.materialize && p.setup && materialize::split(&p.sql).is_some())
+        .collect();
+    let (stmts, requires) = planned
+        .into_iter()
+        .map(|p| ((p.setup, p.sql.trim().to_string()), p.requires))
+        .unzip();
+    Dash {
+        id,
+        sql,
+        stmts,
+        info,
+        meta,
+        updated,
+        requires,
+        materialize,
+        tabs,
+        inputs,
+        submits,
+        saves,
+    }
+}
+
 fn load_dashboards(dir: &Path, folders: bool) -> Result<(Vec<Dash>, Vec<String>), String> {
     let mut out = Vec::new();
     let mut loads = Vec::new();
     for f in sv::dashboard_files(dir, folders)? {
-        let sv::DashFile {
-            path: p,
-            id,
-            sql,
-            meta,
-        } = f;
-        loads.extend(meta.loads.iter().cloned());
-        let planned = anofox_visualization::sql::plan(&sql);
-        let info = planned
-            .iter()
-            .map(|p| {
-                use anofox_visualization::Role;
-                let has = |want: Role| p.roles.iter().any(|(_, r)| *r == want);
-                has(Role::PagedTable) && has(Role::Info)
-            })
-            .collect();
-        // A statement in a ::TAB / ::SUBTAB section runs under the tab's
-        // `-- @requires` too (setup only under its own): a hidden tab's panels
-        // never run, also when a viewer asks for them directly.
-        let tabs = planned
-            .iter()
-            .map(|p| if p.setup { Vec::new() } else { p.tabs.clone() })
-            .collect();
-        // #517 S2: every input's declared variable name (static — the
-        // column's own name or explicit alias, [`sql::rewrite`]'s
-        // `Role::Input` case; never run to find out), and every `::SUBMIT`
-        // statement's own column layout. `DATERANGE`/`PERIOD` (several
-        // variables each, from a name the lint already can't check
-        // statically either) are left out on purpose: a `SUBMIT_VARS`
-        // naming one then falls through to the ordinary "unknown
-        // variable" refusal, fail-closed either way.
-        let mut inputs: HashMap<String, Vec<(usize, InputKind, usize)>> = HashMap::new();
-        let mut submits: HashMap<usize, SubmitSpec> = HashMap::new();
-        let mut saves: HashMap<usize, SaveSpec> = HashMap::new();
-        for (i, p) in planned.iter().enumerate() {
-            let col = |role: Role| p.roles.iter().find(|(_, r)| *r == role).map(|(j, _)| *j);
-            if let (Some(save_idx), Some(tables_col)) = (col(Role::Save), col(Role::SaveTables)) {
-                let name = p
-                    .names
-                    .iter()
-                    .find(|(j, _)| *j == save_idx)
-                    .map(|(_, n)| n.clone())
-                    .unwrap_or_else(|| format!("save_{i}"));
-                saves.insert(
-                    i,
-                    SaveSpec {
-                        name,
-                        graph_col: col(Role::SaveGraph),
-                        form_col: col(Role::SaveForm),
-                        tables_col,
-                    },
-                );
-            }
-            use anofox_visualization::inputs::{input_index, input_kind};
-            if let Some(kind) = input_kind(&p.roles) {
-                if !matches!(
-                    kind,
-                    InputKind::DateRange | InputKind::Period | InputKind::Form
-                ) {
-                    let idx = input_index(&p.roles);
-                    if let Some(name) = p.names.iter().find(|(j, _)| *j == idx).map(|(_, n)| n) {
-                        inputs
-                            .entry(name.to_ascii_lowercase())
-                            .or_default()
-                            .push((i, kind, idx));
-                    }
-                }
-            }
-            if p.roles.iter().any(|(_, r)| matches!(r, Role::Submit)) {
-                let submit_idx = p
-                    .roles
-                    .iter()
-                    .find(|(_, r)| matches!(r, Role::Submit))
-                    .map(|(j, _)| *j)
-                    .unwrap_or(0);
-                let name = p
-                    .names
-                    .iter()
-                    .find(|(j, _)| *j == submit_idx)
-                    .map(|(_, n)| n.clone())
-                    .unwrap_or_else(|| format!("submit_{i}"));
-                let vars_col = p
-                    .roles
-                    .iter()
-                    .find(|(_, r)| matches!(r, Role::SubmitVars))
-                    .map(|(j, _)| *j);
-                let done_col = p
-                    .roles
-                    .iter()
-                    .find(|(_, r)| matches!(r, Role::SubmitDone))
-                    .map(|(j, _)| *j);
-                if let Some(vars_col) = vars_col {
-                    submits.insert(
-                        i,
-                        SubmitSpec {
-                            name,
-                            vars_col,
-                            done_col,
-                        },
-                    );
-                }
-            }
-        }
-        let materialize = planned
-            .iter()
-            .map(|p| p.materialize && p.setup && materialize::split(&p.sql).is_some())
-            .collect();
-        let (stmts, requires) = planned
-            .into_iter()
-            .map(|p| ((p.setup, p.sql.trim().to_string()), p.requires))
-            .unzip();
-        out.push(Dash {
-            id,
-            sql,
-            stmts,
-            info,
-            meta,
-            updated: sv::file_date(&p),
-            requires,
-            materialize,
-            tabs,
-            inputs,
-            submits,
-            saves,
-        });
+        loads.extend(f.meta.loads.iter().cloned());
+        let updated = sv::file_date(&f.path);
+        out.push(plan_dash(f.id, f.sql, f.meta, updated));
     }
     if out.is_empty() {
         return Err(format!("no .sql dashboards found in '{}'", dir.display()));
@@ -6096,6 +6768,8 @@ fn build_snapshot(
             deps_tags: Vec::new(),
             warm_deps: Vec::new(),
             nav_picker_snapshots,
+            implicit: HashMap::new(),
+            previews: Mutex::new(HashMap::new()),
             dashes: dashes.clone(),
             _dir: dir,
         },
@@ -6576,6 +7250,31 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 ident.as_ref().map(|i| i.method),
                 info,
             )
+        }
+        (&Method::Post, "/api/dashboards") => handle_preview_create(st, req, ident.as_ref(), info),
+        (&Method::Delete, p) if p.starts_with("/api/dashboards/") => handle_preview_delete(
+            st,
+            req,
+            &p["/api/dashboards/".len()..],
+            ident.as_ref(),
+            info,
+        ),
+        (&Method::Get, p) if p.starts_with("/p/") => {
+            let id = p["/p/".len()..].trim_end_matches('/');
+            match st.previews.as_ref().and_then(|ps| ps.get(id)) {
+                Some(pv) if scope.is_none_or(|s| s.allows(id)) => {
+                    info.dashboard = Some(id.to_string());
+                    let session = ident.as_ref().and_then(|i| i.page_session.as_deref());
+                    let html =
+                        String::from_utf8_lossy(&served_index(st, &pv.dash, scope, session, false))
+                            .into_owned();
+                    // The link is the preview's only name: never sent on.
+                    respond_page(req, &html, &st.opts, &[("Referrer-Policy", "same-origin")]);
+                    200
+                }
+                Some(_) => reply(req, 403, "forbidden: not in this credential's scope"),
+                None => reply(req, 404, "no such preview (or it expired)"),
+            }
         }
         (&Method::Post, p) if p.starts_with("/api/data/") => {
             handle_ingest(st, req, &p["/api/data/".len()..], ident.as_ref(), info)
@@ -7824,15 +8523,21 @@ fn locked_panel_req(
     // The snapshot this request runs on, start to end (a refresh only changes
     // what later requests get).
     let gen = st.current.get();
-    let di = gen
-        .snap
-        .dashes
-        .list
-        .iter()
-        .position(|d| d.id == r.dashboard)
-        .ok_or((404, "no such dashboard".to_string()))?;
-    let dash = &gen.snap.dashes.list[di];
-    let deps_tag = gen.snap.deps_tags.get(di).cloned().unwrap_or_default();
+    let held = DashHeld::resolve(st, &gen, &r.dashboard)?;
+    // #770: a preview runs as the API key that made it — every viewer who
+    // may open it (a login not limited to other dashboards) sees what the
+    // key's claims allow, with no locked variables.
+    let (claims, scope) = match held.preview() {
+        Some(p) => {
+            if scope.is_some_and(|s| !s.allows(&r.dashboard)) {
+                return Err((403, "forbidden: not in this credential's scope".into()));
+            }
+            (Some(&p.claims), None)
+        }
+        None => (claims, scope),
+    };
+    let dash = held.dash(&gen);
+    let deps_tag = held.deps_tag(&gen);
     // `-- @vars`: a variable the dashboard doesn't let viewers set is never set.
     if let Some(allowed) = &dash.meta.vars {
         r.vars
@@ -7872,7 +8577,7 @@ fn locked_panel_req(
         .cloned()
         .collect();
     // Under a policy, the statements rewritten for this snapshot.
-    let script = gen.snap.policy.as_ref().map(|p| &p.scripts[di]);
+    let script = held.script(&gen);
     let stmts = script.map_or(&dash.stmts, |s| &s.stmts);
     let (is_setup, panel_sql) = stmts
         .get(r.panel)
@@ -7912,10 +8617,8 @@ fn locked_panel_req(
     // the analysis can't tell). Credential-locked variables are never
     // narrowed (security review of #210/#222, L1): they act like
     // authorization, so they always count, whatever the analysis says.
-    let deps = gen
-        .snap
-        .deps
-        .get(di)
+    let deps = held
+        .deps(&gen)
         .and_then(|d| d.get(r.panel))
         .cloned()
         .unwrap_or(Deps::All);
@@ -7977,7 +8680,7 @@ fn locked_panel_req(
         key = format!("{key}/wb{g}");
     }
     let t0 = std::time::Instant::now();
-    let mut warm = warm_key(dash, gen.snap.warm_deps.get(di), stmts, &r, claims, scope);
+    let mut warm = warm_key(dash, held.warm_deps(&gen), stmts, &r, claims, scope);
     if let Some(g) = sgen {
         warm = warm.map(|w| format!("{w}/state{g}"));
     }
@@ -7990,7 +8693,7 @@ fn locked_panel_req(
         .filter_map(|i| {
             let k = mat_key(
                 dash,
-                gen.snap.warm_deps.get(di),
+                held.warm_deps(&gen),
                 i,
                 &r,
                 claims,
@@ -9807,10 +10510,11 @@ fn served_index(
     if !nav_pickers.is_empty() {
         cfg["navPickers"] = serde_json::json!(nav_pickers);
     }
-    if let Some(di) = gen.snap.dashes.list.iter().position(|d| d.id == dash.id) {
-        if let (Some(ds), Some(tag)) = (gen.snap.deps.get(di), gen.snap.deps_tags.get(di)) {
+    // A file's or a preview's (#770).
+    if let Ok(h) = DashHeld::resolve(st, &gen, &dash.id) {
+        if let Some(ds) = h.deps(&gen) {
             cfg["deps"] = serde_json::json!(ds.iter().map(Deps::to_json).collect::<Vec<_>>());
-            cfg["depsTag"] = serde_json::json!(tag);
+            cfg["depsTag"] = serde_json::json!(h.deps_tag(&gen));
         }
     }
     // #517 S2, plan §6 / review of #538 should-fix 8: whether *this*
@@ -11911,6 +12615,59 @@ mod tests {
         assert!(!sets_variables("CREATE TEMP TABLE t AS SELECT 1"));
         assert!(!sets_variables("SELECT 'SET'"));
         assert!(!sets_variables("SETTINGS_TABLE"));
+    }
+
+    // #770: options.preview, and a preview's file round trip.
+    #[test]
+    fn preview_options_and_files() {
+        let o = PreviewOptions::parse(&serde_json::json!({"ttl_s": 999999999, "max_per_key": 3}))
+            .unwrap();
+        assert_eq!(
+            (o.ttl, o.max_per_key, o.dir.is_none()),
+            (7 * 86_400, 3, true)
+        );
+        for bad in [
+            serde_json::json!({"nope": 1}),
+            serde_json::json!({"ttl_s": 0}),
+            serde_json::json!("x"),
+        ] {
+            assert!(PreviewOptions::parse(&bad).is_err(), "{bad}");
+        }
+        let e = LockedOptions::parse(Some(r#"{"preview": {}}"#)).unwrap_err();
+        assert!(
+            e.contains("options.preview needs auth with API keys"),
+            "{e}"
+        );
+        let id = format!("{PREVIEW_PREFIX}{}", sv::random_token());
+        let sql = "SELECT 1 AS one ::METRIC;".to_string();
+        let p = Preview {
+            dash: Arc::new(plan_dash(
+                id.clone(),
+                sql.clone(),
+                sv::parse_dashboard_meta(&id, &sql),
+                None,
+            )),
+            claims: Claims {
+                user: "svc".into(),
+                groups: vec!["g".into()],
+                attrs: vec![("region".into(), Some("EU".into()))],
+            },
+            key_id: "0123456789ab".into(),
+            expires: 1_900_000_000,
+        };
+        let back = preview_from_json(&preview_to_json(&p)).unwrap();
+        assert_eq!(
+            (back.dash.id.as_str(), back.dash.sql.as_str()),
+            (id.as_str(), sql.as_str())
+        );
+        assert_eq!(back.claims, p.claims);
+        assert_eq!(
+            (back.key_id.as_str(), back.expires),
+            ("0123456789ab", 1_900_000_000)
+        );
+        // a file that names anything but a preview id is not one
+        let forged = preview_to_json(&p).replace(&id, "sales");
+        assert!(preview_from_json(&forged).is_none());
     }
 
     // #769: options.ingest is only for API keys, so it needs them.
