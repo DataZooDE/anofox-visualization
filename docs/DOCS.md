@@ -921,7 +921,12 @@ long-table schemas of the [anofox integration
 contract](plans/integration-contract.md) shared by anofox-statistics,
 anofox-forecast and friends. They are aggregate macros over **whole rows**:
 name the table with an alias and pass the alias — DuckDB hands each row over
-as a STRUCT, so the macro sees the column names:
+as a STRUCT, so the macro sees the column names. Rows are drawn in the
+producer's order when the table has the optional `row_order` column
+(anofox-statistics 0.15+ sets it on every contract producer: coefficients
+with `(Intercept)` first, then in model order); without it, the macro sorts
+the rows for a deterministic result, so a forest lists its terms
+alphabetically:
 
 ```sql
 SELECT anofox_plot_terms(c) FROM coefficients c;                    -- one SVG

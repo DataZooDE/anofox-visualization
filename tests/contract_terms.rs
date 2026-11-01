@@ -1,20 +1,20 @@
-//! `anofox_plot_terms` on a `mediation_by` output (#409): the producer's
-//! own `acme, ade, total, prop_mediated` order must survive
-//! `anofox_plot_terms`'s aggregation (`list(tbl ORDER BY tbl)`, which
-//! otherwise alphabetises by `term`), and `prop_mediated` — a ratio, not an
-//! outcome-unit effect — gets its own small panel.
+//! `anofox_plot_terms` keeps the producer's term order (`row_order`, #445)
+//! through its aggregation (`list(tbl ORDER BY tbl)`, which otherwise
+//! alphabetises by `term`); on a `mediation_by` output (#409)
+//! `prop_mediated` — a ratio, not an outcome-unit effect — gets its own
+//! small panel.
 
 use anofox_visualization::sql::contract_call::render_call;
 
 /// `mediation_by`'s rows, as `anofox_plot_terms`'s own aggregation macro
 /// would hand them to the renderer: alphabetised by the whole row struct
 /// (`term` being the first field that varies) — `acme, ade, prop_mediated,
-/// total` — not the producer's own `acme, ade, total, prop_mediated`.
+/// total` — with the producer's own order in `row_order`.
 const MEDIATION_ROWS: &str = r#"[
-    {"term": "acme", "estimate": 1.2, "conf_low": -0.4, "conf_high": 2.8, "conf_level": 0.95, "model_id": "mediation"},
-    {"term": "ade", "estimate": -0.6, "conf_low": -2.6, "conf_high": 1.4, "conf_level": 0.95, "model_id": "mediation"},
-    {"term": "prop_mediated", "estimate": 0.22, "conf_low": -0.05, "conf_high": 0.49, "conf_level": 0.95, "model_id": "mediation"},
-    {"term": "total", "estimate": 0.6, "conf_low": -1.4, "conf_high": 2.6, "conf_level": 0.95, "model_id": "mediation"}
+    {"row_order": 1, "term": "acme", "estimate": 1.2, "conf_low": -0.4, "conf_high": 2.8, "conf_level": 0.95, "model_id": "mediation"},
+    {"row_order": 2, "term": "ade", "estimate": -0.6, "conf_low": -2.6, "conf_high": 1.4, "conf_level": 0.95, "model_id": "mediation"},
+    {"row_order": 4, "term": "prop_mediated", "estimate": 0.22, "conf_low": -0.05, "conf_high": 0.49, "conf_level": 0.95, "model_id": "mediation"},
+    {"row_order": 3, "term": "total", "estimate": 0.6, "conf_low": -1.4, "conf_high": 2.6, "conf_level": 0.95, "model_id": "mediation"}
 ]"#;
 
 fn render(rows: &str) -> String {
@@ -38,7 +38,7 @@ fn y_of(svg: &str, term: &str) -> f64 {
 }
 
 #[test]
-fn mediation_terms_keep_the_producers_order() {
+fn terms_keep_the_producers_order() {
     let svg = render(MEDIATION_ROWS);
     // acme above ade above total (smaller SVG y = higher on the chart) —
     // the producer's own order, not alphabetical (which would put
@@ -77,4 +77,28 @@ fn non_mediation_terms_are_unaffected() {
     assert!(!svg.contains(">effect<"), "{svg}");
     assert!(!svg.contains(">share mediated<"), "{svg}");
     assert!(svg.contains(">x1<") && svg.contains(">x2<"), "{svg}");
+}
+
+#[test]
+fn row_order_beats_alphabetical_for_any_producer() {
+    // Coefficient order, (Intercept) first, then x2 before x1 — for two
+    // models, rows alphabetised by the struct (model_id first).
+    let rows = r#"[
+        {"model_id": "a", "row_order": 1, "term": "(Intercept)", "estimate": 1.0},
+        {"model_id": "a", "row_order": 3, "term": "x1", "estimate": 2.0},
+        {"model_id": "a", "row_order": 2, "term": "x2", "estimate": 3.0},
+        {"model_id": "b", "row_order": 1, "term": "(Intercept)", "estimate": 1.5},
+        {"model_id": "b", "row_order": 3, "term": "x1", "estimate": 2.5},
+        {"model_id": "b", "row_order": 2, "term": "x2", "estimate": 3.5}
+    ]"#;
+    let svg = render(rows);
+    let (i, x2, x1) = (
+        y_of(&svg, "(Intercept) · a"),
+        y_of(&svg, "x2 · a"),
+        y_of(&svg, "x1 · a"),
+    );
+    assert!(
+        i < x2 && x2 < x1,
+        "(Intercept), x2, x1 top to bottom: {i} {x2} {x1}"
+    );
 }

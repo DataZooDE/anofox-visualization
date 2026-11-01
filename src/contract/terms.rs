@@ -48,29 +48,6 @@ fn first_seen<'a>(it: impl Iterator<Item = &'a str>) -> Vec<String> {
     out
 }
 
-/// `mediation_by`'s fixed term vocabulary, in its own intended order (#409).
-/// The producer (`anofox_statistics`'s `mediation_by`) already orders its
-/// rows `acme, ade, total, prop_mediated` — but `anofox_plot_terms`'s own
-/// aggregation macro sorts the whole row struct for determinism under
-/// parallel execution (`list(tbl ORDER BY tbl)`, `src/macros.rs`), which —
-/// starting from `term`, the struct's first varying field — alphabetises
-/// them instead (`acme, ade, prop_mediated, total`). Put the known terms
-/// back in the producer's order; anything unexpected (a future
-/// `anofox_statistics` addition) keeps its first-seen place after them,
-/// rather than silently disappearing.
-const MEDIATION_TERM_ORDER: [&str; 4] = ["acme", "ade", "total", "prop_mediated"];
-
-fn mediation_term_order(terms: Vec<String>) -> Vec<String> {
-    let mut out: Vec<String> = MEDIATION_TERM_ORDER
-        .iter()
-        .map(|s| s.to_string())
-        .filter(|s| terms.contains(s))
-        .collect();
-    let extra: Vec<String> = terms.into_iter().filter(|t| !out.contains(t)).collect();
-    out.extend(extra);
-    out
-}
-
 fn conf_label(t: &Table) -> String {
     t.num("conf_level")
         .ok()
@@ -101,9 +78,8 @@ pub(super) fn terms(
 fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Place) -> Out {
     let labels = Labels::from(options);
     // `mediation_by` (#409): a fixed-vocabulary model whose `prop_mediated`
-    // is a ratio, not an effect in outcome units — put its terms back in
-    // the producer's own order and give it its own small panel, away from
-    // `acme`/`ade`/`total`'s shared estimate axis.
+    // is a ratio, not an effect in outcome units — give it its own small
+    // panel, away from `acme`/`ade`/`total`'s shared estimate axis.
     let is_mediation = t
         .text("model_id")
         .first()
@@ -156,10 +132,8 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
             );
         }
     }
-    let mut terms = first_seen(rows.iter().map(|r| r.term.as_str()));
-    if is_mediation {
-        terms = mediation_term_order(terms);
-    }
+    // The producer's order (`row_order`, applied before rendering, #445).
+    let terms = first_seen(rows.iter().map(|r| r.term.as_str()));
     let series: Vec<String> = first_seen(rows.iter().filter_map(|r| r.series.as_deref()));
     let panels: Vec<Option<String>> = if panel_key.is_some() || is_mediation {
         first_seen(rows.iter().filter_map(|r| r.panel.as_deref()))
