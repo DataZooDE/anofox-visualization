@@ -9,7 +9,7 @@ default-members = ["."]
 resolver = "2"
 
 [workspace.package]
-version = "2026.10.30"
+version = "2026.11.1"
 edition = "2021"
 license = "BUSL-1.1"
 
