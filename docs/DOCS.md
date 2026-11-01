@@ -4483,6 +4483,25 @@ truncated for a very large table (noted in the profile); links in a preview
 don't navigate, and the model's own text is always shown as plain text,
 never links, images or HTML.
 
+**Ask (#195).** Questions about the dashboard on the page, answered from its
+panels: *✦ Ask* in View mode, or the panel's *Ask* tab in Edit mode (next to
+*Build*). Same key or proxy as above. The model gets the dashboard's panel
+list (titles, kinds, columns — no SQL), your question, the open tab and the
+input values, and reads only the panels it needs: at most 200 rows each,
+values that look personal (e-mail addresses, phone numbers, IBANs, columns
+named like *name*, *customer*, *Kunde* …) replaced by placeholders and put
+back in the answer. *What will be sent* lists the panels it may read. It can
+ask for a panel with another input value (*what if the region were US?*):
+the page runs that panel with the value set as a variable, then puts the
+page's own value back; a panel whose setup table is built from that input
+can only be read with the page's value. The answer cites the values it rests
+on; a chip that checks out against the panel's rows goes to it, the rest are
+marked *not verified*. `-- @ask skip` keeps a panel out, `-- @ask mask col`
+masks a column; the builder needs no `-- @ask on` (that header is for
+viewers of a served dashboard, see `-- @ask`). The notice comes before each
+conversation's first question; the conversation lives in the page and is
+gone on reload.
+
 **The eval.** `tests/assist-eval/` is a fixed 10-prompt seed exercising new
 dashboards, edits and two adversarial safety prompts, run live against your
 own key (`node scripts/assist-eval.mjs --yes`, about $3 total on Sonnet 5);

@@ -508,7 +508,23 @@ export function mountAssistant(hostArg) {
     formRow.append(modelLbl, sendBtn);
     form.append(qLabel, q, formRow);
 
-    pane.append(head, ctx, target, notice, log, stream, card, statusline, debugLine, form);
+    // #195 M2-5: Build (make or change the dashboard) and Ask (questions
+    // about the dashboard on the page, web/ask-ui.js) — an ARIA tablist.
+    const modes = mk("div", "ai-modes", { role: "tablist", "aria-label": "Assistant mode" });
+    const modeBuild = mk("button", "ai-mode", { type: "button", role: "tab", "aria-selected": "true", "aria-controls": "ai-build" });
+    modeBuild.id = "ai-mode-build";
+    modeBuild.textContent = "Build";
+    const modeAsk = mk("button", "ai-mode", { type: "button", role: "tab", "aria-selected": "false", "aria-controls": "ai-askbox", tabindex: "-1" });
+    modeAsk.id = "ai-mode-ask";
+    modeAsk.textContent = "Ask";
+    modes.append(modeBuild, modeAsk);
+    const buildBox = mk("div", "ai-build", { role: "tabpanel", "aria-labelledby": "ai-mode-build" });
+    buildBox.id = "ai-build";
+    buildBox.append(ctx, target, notice, log, stream, card, statusline, debugLine, form);
+    const askBox = mk("div", "ai-askbox", { role: "tabpanel", "aria-labelledby": "ai-mode-ask" });
+    askBox.id = "ai-askbox";
+    askBox.hidden = true;
+    pane.append(head, modes, buildBox, askBox);
 
     Object.assign(el, {
       title,
@@ -543,8 +559,39 @@ export function mountAssistant(hostArg) {
       modelSel,
       sendBtn,
       form,
+      modeBuild,
+      modeAsk,
+      buildBox,
+      askBox,
     });
     wirePanel();
+  }
+
+  // #195 M2-5: the Ask tab, mounted on its first selection (host.ask.mount:
+  // app.js loads ask-ui.js over its builder Ask host, with this panel's
+  // transport).
+  let askUi = null;
+  function selectMode(mode, focus) {
+    const ask = mode === "ask";
+    for (const [t, on] of [
+      [el.modeBuild, !ask],
+      [el.modeAsk, ask],
+    ]) {
+      t.setAttribute("aria-selected", String(on));
+      t.tabIndex = on ? 0 : -1;
+    }
+    el.buildBox.hidden = ask;
+    el.askBox.hidden = !ask;
+    el.newBtn.hidden = ask; // Ask has its own
+    if (focus) (ask ? el.modeAsk : el.modeBuild).focus();
+    if (ask && !askUi && typeof host.ask?.mount === "function") {
+      askUi = host.ask
+        .mount(el.askBox, () => ensureTransport())
+        .catch((e) => {
+          askUi = null;
+          logEntry("ai-note", "Ask could not load: " + String(e?.message || e).slice(0, 200));
+        });
+    }
   }
 
   // ---- the lazy stylesheet (mount waits for its `load` before showing) ----
@@ -1401,6 +1448,15 @@ export function mountAssistant(hostArg) {
       el.q.focus();
     };
     el.closeBtn.onclick = () => close();
+    el.modeBuild.onclick = () => selectMode("build");
+    el.modeAsk.onclick = () => selectMode("ask");
+    for (const t of [el.modeBuild, el.modeAsk])
+      t.addEventListener("keydown", (e) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+        e.preventDefault();
+        const toAsk = e.key === "End" || ((e.key === "ArrowLeft" || e.key === "ArrowRight") && t === el.modeBuild);
+        selectMode(toAsk ? "ask" : "build", true);
+      });
     el.newBtn.onclick = () => newConversation();
     el.forgetBtn.onclick = () => forgetKey();
     el.previewBtn.onclick = () => enterPreview();

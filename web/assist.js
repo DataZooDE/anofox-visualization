@@ -1710,3 +1710,140 @@ export function resultProfile(types, rows, opts = {}) {
   });
   return stableJson({ rows: capped ? `more than ${LIMITS.runRows}` : data.length, columns });
 }
+
+// ---- Ask in the builder (#195 M2-5, plan §12.1 / §12.8) ----
+// The loop of a question about the dashboard on the page. Every tool runs
+// through `session`, the wasm AskSession (src/host/ask/session.rs): the
+// server's own checks, masking, caps and citation check, so this file only
+// moves messages. `readPanel({panel, vars, page?})` → the panel's rows (a
+// JSON string) is the page's; `vars: null` reads it with the page's current
+// inputs (an input's options). No SQL from the model, ever: get_panel names
+// a panel index and input values, nothing else.
+export const ASK_LIMITS = {
+  maxTokens: 8000, // per model call (the server's default)
+  tokens: 60000, // input-equivalent tokens per question (est. before each call)
+  timeoutMs: 60000, // one deadline per question
+  turns: 10, // conversation turns kept (the oldest drop first)
+  historyChars: 256 << 10,
+};
+
+const askJson = (s) => {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return { error: "the assistant's session failed" };
+  }
+};
+
+// The user turn: into the last message when the history ends with one (the
+// previous question's tool results), so the roles alternate.
+function askPushUser(messages, content) {
+  const last = messages[messages.length - 1];
+  if (last?.role === "user" && Array.isArray(last.content)) messages[messages.length - 1] = { role: "user", content: [...last.content, ...content] };
+  else messages.push({ role: "user", content });
+}
+
+// Keep the conversation to its caps: whole questions, the oldest first.
+export function askTrim(turns, L = ASK_LIMITS) {
+  const out = [...turns];
+  const size = () => out.reduce((n, t) => n + JSON.stringify(t).length, 0);
+  while (out.length > L.turns || (out.length > 1 && size() > L.historyChars)) out.shift();
+  return out;
+}
+
+// Resolves to {kind: "answer", answer: {text, scope, citations, panels},
+// turn: [messages of this question]} | {kind: "error" | "cancelled" |
+// "stopped", text}. `turns`: the earlier questions' messages (askTrim'd).
+export async function runAsk(opts) {
+  const { transport, session, question, view = {}, readPanel, turns = [], model = MODELS.default, effort = "medium", limits = {}, signal, onStatus = () => {} } = ownOpts(opts);
+  const L = { ...ASK_LIMITS, ...ownOpts(limits) };
+  const begun = askJson(session.begin(JSON.stringify(ownOpts(view)), String(question ?? "")));
+  if (begun.error) return { kind: "error", text: String(begun.error) };
+  const caps = askJson(session.limits());
+  const couldnt = { kind: "error", text: caps.couldnt || "I couldn't answer that." };
+  const system = askJson(session.system());
+  const tools = askJson(session.tools());
+  const history = turns.flat();
+  const messages = [...history];
+  askPushUser(messages, begun.ok);
+  const deadline = Date.now() + L.timeoutMs;
+  let spentTokens = 0;
+  for (let turn = 1; turn <= (caps.turns || 6); turn++) {
+    if (signal?.aborted) return { kind: "cancelled", text: "Cancelled." };
+    if (Date.now() >= deadline) return couldnt;
+    onStatus({ phase: "thinking", turn });
+    const request = {
+      model,
+      max_tokens: L.maxTokens,
+      system,
+      tools,
+      messages,
+      thinking: { type: "adaptive" },
+      output_config: { effort },
+      cache_control: { type: "ephemeral" },
+    };
+    // Input-equivalent tokens: about 3 bytes each, plus the output.
+    const est = JSON.stringify(request).length / 3 + L.maxTokens;
+    if (spentTokens + est > L.tokens) return { kind: "stopped", text: "This question needs more than the assistant may use for one question — ask something narrower." };
+    let msg;
+    try {
+      msg = await transport.send(request, { signal });
+    } catch (e) {
+      if (isAbort(e, signal)) return { kind: "cancelled", text: "Cancelled." };
+      return { kind: "error", text: describeError(e, transport?.name) };
+    }
+    spentTokens += spent(msg?.usage);
+    const content = Array.isArray(msg?.content) ? msg.content : [];
+    messages.push({ role: "assistant", content });
+    const uses = content.filter((b) => b?.type === "tool_use");
+    // end_turn with text, max_tokens, a refusal (L4): never the raw text
+    if (!uses.length) return couldnt;
+    const results = [];
+    let answered = null;
+    for (const u of uses) {
+      if (signal?.aborted) return { kind: "cancelled", text: "Cancelled." };
+      const input = JSON.stringify(u.input ?? {});
+      let text;
+      let isError = false;
+      if (u.name === "answer") {
+        const a = askJson(session.answer(input));
+        if (a.error) [text, isError] = [String(a.error), true];
+        else [answered, text] = [a.ok, "Delivered to the viewer."];
+      } else if (u.name === "list_panels") {
+        text = session.list_panels(input);
+      } else if (u.name === "get_panel") {
+        [text, isError] = await askGetPanel(session, input, readPanel, onStatus, signal);
+      } else {
+        [text, isError] = [`no tool named '${String(u.name).slice(0, 40)}'`, true];
+      }
+      results.push({ type: "tool_result", tool_use_id: u.id, content: text, is_error: isError });
+    }
+    messages.push({ role: "user", content: results });
+    if (answered) return { kind: "answer", answer: answered, turn: messages.slice(history.length) };
+  }
+  return couldnt;
+}
+
+// get_panel: the session's checks, the page's read, the session's masking.
+async function askGetPanel(session, input, readPanel, onStatus, signal) {
+  const options = {};
+  for (const i of askJson(session.option_panels(input))) {
+    try {
+      options[i] = JSON.parse(await readPanel({ panel: i, vars: null }, { signal }));
+    } catch {
+      /* the session then says the options are not available */
+    }
+  }
+  const r = askJson(session.panel_request(input, JSON.stringify(options)));
+  if (r.error) return [String(r.error), true];
+  const req = r.ok;
+  onStatus({ phase: "reading", panel: req.panel });
+  let rows;
+  try {
+    rows = await readPanel({ panel: req.panel, vars: req.vars, page: req.page }, { signal });
+  } catch (e) {
+    return [session.panel_error(req.id, String(e?.message ?? e)), true];
+  }
+  const out = askJson(session.panel_result(req.id, String(rows)));
+  return out.error ? [String(out.error), true] : [String(out.ok), false];
+}

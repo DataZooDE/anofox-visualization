@@ -708,6 +708,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/save-preview-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/ask-builder-e2e.mjs (#195 M2-5): Ask in the builder — View
+      # mode's sheet and Edit mode's Ask tab against a mocked Messages API
+      # (its own static server: the assistant on in app-config.json).
+      - name: Ask in the builder e2e
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" TMPDIR="$RUNNER_TEMP" node scripts/ask-builder-e2e.mjs --pkg web/pkg --port 8796
+
       # scripts/form-e2e.mjs (#683): a ::FORM's fields (types, show_if, help,
       # provenance), its one JSON variable read with ->>, edits, URL state,
       # a ::ROWSELECT-filtered form resetting per node, 390 px.
