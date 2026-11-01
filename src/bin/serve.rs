@@ -21,6 +21,7 @@
 use anofox_visualization::format::Locale;
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
 use anofox_visualization::host::app_brand::{self, AppBrand};
+use anofox_visualization::host::ask::{self as askm, AskConfig};
 use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, apikey, audit::AuditLog, Auth, Identity, Scope};
 use anofox_visualization::host::serving::{
@@ -97,6 +98,9 @@ struct Opts {
     /// proxy to the model API. On when a key is set (`ANTHROPIC_API_KEY` or
     /// `--assist-key-file`), unless `--no-assist`.
     assist: assist::AssistOptions,
+    /// `--ask <json | @file>` (with `--dashboards`, #195 M2-6): Ask on this
+    /// server (`options.ask`, docs/secure-serving.md); needs `--auth`.
+    ask: Option<AskConfig>,
 }
 
 /// The `--theme` default (set once in `main`).
@@ -114,7 +118,7 @@ static ASSIST_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist] [--assist-key-file FILE]   (the builder assistant's /assist proxy: opt-in, off unless --assist;\n                                       its key from ANTHROPIC_API_KEY or a 0600 key file; it never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--scopes S,…] [--expires-days N] [--note TEXT] [--audit PATH]\n             (S: ingest:<table> | preview | embed | admin; none = read dashboards only)\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist] [--assist-key-file FILE]   (the builder assistant's /assist proxy: opt-in, off unless --assist;\n                                       its key from ANTHROPIC_API_KEY or a 0600 key file; it never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--ask JSON|@file.json]  (Ask: questions about a dashboard, answered by a model; needs --auth)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--scopes S,…] [--expires-days N] [--note TEXT] [--audit PATH]\n             (S: ingest:<table> | preview | embed | admin; none = read dashboards only)\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -151,6 +155,7 @@ fn parse_args() -> Opts {
         authoring_timeout: Duration::from_secs(120),
         assets_dir: None,
         assist: assist::AssistOptions::default(),
+        ask: None,
     };
     let mut assist_given = false;
     // --assist / --no-assist: the assistant is opt-in.
@@ -263,6 +268,19 @@ fn parse_args() -> Opts {
                 }
                 o.home = Some(h);
             }
+            "--ask" => {
+                let v = args
+                    .next()
+                    .unwrap_or_else(|| usage("--ask needs a JSON object or @file"));
+                let json = match v.strip_prefix('@') {
+                    Some(f) => std::fs::read_to_string(f)
+                        .unwrap_or_else(|e| usage(&format!("--ask {f}: {e}"))),
+                    None => v,
+                };
+                let val: serde_json::Value = serde_json::from_str(&json)
+                    .unwrap_or_else(|e| usage(&format!("--ask: bad JSON: {e}")));
+                o.ask = Some(AskConfig::parse(&val).unwrap_or_else(|e| usage(&format!("--{e}"))));
+            }
             "--log" => {
                 log = Some(
                     args.next()
@@ -341,6 +359,9 @@ fn parse_args() -> Opts {
         }
         (None, Some(_)) => usage("--log-vars needs --log"),
         (None, None) => {}
+    }
+    if o.dashboards_dir.is_none() && o.ask.is_some() {
+        usage("--ask is for --dashboards (the builder's assistant is --assist)");
     }
     if o.dashboards_dir.is_none() && (o.auth.is_some() || o.log.is_some()) {
         usage("--auth and --log apply to --dashboards serving");
@@ -653,6 +674,19 @@ fn respond(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>) {
 /// build ([`sv::page_csp_with`]) — the authoring builder with the `/assist`
 /// proxy on (#740).
 fn respond_csp(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>, duckdb_esm: bool) {
+    respond_csp_cache(req, status, ctype, body, duckdb_esm, "no-store")
+}
+
+/// [`respond_csp`] with its `Cache-Control` (#195 M2-6: an Ask answer is
+/// `no-store, private`).
+fn respond_csp_cache(
+    req: Request,
+    status: u16,
+    ctype: &str,
+    body: impl Into<Vec<u8>>,
+    duckdb_esm: bool,
+    cache: &str,
+) {
     let mut body = body.into();
     // An HTML page gets its CSP header and nonces (#252).
     let csp = ctype.starts_with("text/html").then(|| {
@@ -666,7 +700,7 @@ fn respond_csp(req: Request, status: u16, ctype: &str, body: impl Into<Vec<u8>>,
         .with_status_code(status)
         .with_header(header("Content-Type", ctype))
         .with_header(header("X-Content-Type-Options", "nosniff"))
-        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("Cache-Control", cache))
         .with_header(header("Referrer-Policy", "same-origin"));
     if let Some(csp) = csp {
         resp = resp.with_header(header("Content-Security-Policy", &csp));
@@ -1548,6 +1582,8 @@ struct ServeState {
     timeout: Duration,
     auth: Option<Auth>,
     log: Option<RequestLog>,
+    /// `--ask` (#195 M2-6).
+    ask: Option<AskB>,
     /// `<dir>/assets`, canonicalized (#514 PR B) — `None` when there is no
     /// such folder next to `--dashboards <dir>`. This script-free page has
     /// no client JS to fetch a route with, so a relative `::IMAGE` source
@@ -1555,6 +1591,536 @@ struct ServeState {
     /// `render_dashboard_page`'s `RenderOptions.asset_root`), the same as
     /// `dashboard`'s own `--svg`/HTML CLI output.
     assets_root: Option<PathBuf>,
+}
+
+// ------------------------------------------------------------------ ask ---
+// #195 M2-6: Ask on the static render server (plan-ai-assistant.md §12.8,
+// "B"). This server's pages carry no script, so Ask is a form under the
+// dashboard: `POST /d/<id>/ask` with the page's `@param` values, answered by
+// the same dashboard page with the answer on top — escaped text, citations
+// as `#panel-<n>` links into the page. The loop, limits, masking, citations,
+// conversations and log are the locked server's (`host::ask`); here:
+// - a login is required (`ask.anonymous` is refused at start, M1);
+// - `get_panel` sets `@param`s only, to their declared values, and reads a
+//   panel by rendering this page for those values — the same prefix,
+//   claims, locks, setup and hiding a viewer's page gets;
+// - the form carries a per-viewer token (an HMAC of the claims and the
+//   dashboard) and the post must be same-origin (Origin, Sec-Fetch-Site),
+//   M8; answers are `no-store, private` and never enter the render cache;
+// - a follow-up names the server-held conversation, never a history;
+// - a question holds an HTTP worker for up to its deadline, so at most
+//   `min(ask.concurrency, --threads − 1)` run at once (H2: pages always
+//   have a worker).
+
+/// A query-string component, percent-encoded (unreserved characters kept).
+fn url_enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+struct AskB {
+    ask: askm::Ask,
+    secret: [u8; 32],
+    running: std::sync::atomic::AtomicUsize,
+    max_running: usize,
+}
+
+/// The viewer Ask sees: the session a conversation is bound to, the claims
+/// key, the user its limits count against.
+fn ask_viewer(i: &Identity) -> askm::Viewer {
+    askm::Viewer {
+        session: i.ref_id.clone().unwrap_or_else(|| i.claims.key()),
+        claims_key: i.claims.key(),
+        user: i.claims.user.clone(),
+        groups: i.claims.groups.clone(),
+        claims: i
+            .claims
+            .attrs
+            .iter()
+            .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v)))
+            .collect(),
+        api_key: i.method == "api_key",
+        embed: (i.method == "embed").then(|| {
+            i.scope
+                .dashboards
+                .as_ref()
+                .and_then(|d| d.first().cloned())
+                .unwrap_or_default()
+        }),
+    }
+}
+
+/// Ask for this viewer on this dashboard, if it is on for both.
+fn ask_for<'a>(st: &'a ServeState, dash: &Dashboard, ident: Option<&Identity>) -> Option<&'a AskB> {
+    let ab = st.ask.as_ref()?;
+    let i = ident?;
+    if !askm::ask_on(&dash.script) || matches!(i.method, "api_key" | "share") {
+        return None;
+    }
+    let v = ask_viewer(i);
+    if let Some(d) = &v.embed {
+        if !ab.ask.config().embed || d != &dash.id {
+            return None;
+        }
+    }
+    ab.ask.allowed(&v).then_some(ab)
+}
+
+/// The form's token: the viewer's claims and the dashboard, signed with this
+/// start's secret (M8).
+fn ask_token(ab: &AskB, i: &Identity, dash: &str) -> String {
+    use aws_lc_rs::hmac;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &ab.secret);
+    let tag = hmac::sign(&key, format!("ask\0{}\0{dash}", i.claims.key()).as_bytes());
+    tag.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn ask_token_ok(ab: &AskB, i: &Identity, dash: &str, token: &str) -> bool {
+    use aws_lc_rs::hmac;
+    let Some(bytes) = (0..token.len())
+        .step_by(2)
+        .map(|k| {
+            token
+                .get(k..k + 2)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        })
+        .collect::<Option<Vec<u8>>>()
+    else {
+        return false;
+    };
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &ab.secret);
+    hmac::verify(
+        &key,
+        format!("ask\0{}\0{dash}", i.claims.key()).as_bytes(),
+        &bytes,
+    )
+    .is_ok()
+}
+
+/// The notice (L6): where the question and the panel data go, the
+/// operator's text, and — set by the server — whether questions are logged.
+fn ask_notice(c: &AskConfig) -> String {
+    let mut t = format!(
+        "Your question and the data of the panels on this dashboard that the assistant reads are \
+         sent to {} to answer it. Answers are AI-generated and can be wrong; check the cited panels.",
+        c.provider_label
+    );
+    if c.log_questions {
+        t.push_str(" Your questions are logged by the operator.");
+    }
+    if let Some(n) = c.notice.as_deref().filter(|n| !n.trim().is_empty()) {
+        t.push(' ');
+        t.push_str(n);
+    }
+    t
+}
+
+const ASK_CSS: &str = "<style>.dp-ask{grid-column:1/-1;border:1px solid var(--line);border-radius:10px;padding:.8rem 1rem;margin:.5rem 0;background:var(--card);color:var(--ink)}\
+.dp-ask h2{font-size:1rem;margin:0 0 .4rem}.dp-ask textarea{width:100%;box-sizing:border-box;font:inherit;min-height:3.2rem}\
+.dp-ask .dp-ask-note,.dp-ask .dp-ask-label,.dp-ask .dp-ask-unverified{font-size:.8rem;color:var(--muted)}\
+.dp-ask .dp-ask-error{font-weight:600}.dp-ask .dp-ask-unverified{font-style:italic}\
+.dp-ask .dp-ask-chips{display:flex;flex-wrap:wrap;gap:.35rem;margin:.4rem 0}\
+.dp-ask .dp-ask-chips a,.dp-ask .dp-ask-chips span{font-size:.8rem;border:1px solid var(--line);border-radius:999px;padding:.15rem .55rem}</style>";
+
+/// The Ask form: the question, the page's params, the token, a page
+/// session (embed/share) and, for a follow-up, the conversation.
+fn ask_form(
+    ab: &AskB,
+    i: &Identity,
+    dash: &Dashboard,
+    resolved: &[(String, String)],
+    embed_link: Option<&str>,
+    conversation: Option<&str>,
+) -> String {
+    let c = ab.ask.config();
+    let mut hidden = format!(
+        "<input type=\"hidden\" name=\"ask_token\" value=\"{}\">",
+        ask_token(ab, i, &dash.id)
+    );
+    for (n, v) in resolved {
+        hidden.push_str(&format!(
+            "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
+            esc(n),
+            sv::html_escape_attr_roundtrip(v)
+        ));
+    }
+    if let Some(l) = embed_link {
+        hidden.push_str(&format!(
+            "<input type=\"hidden\" name=\"embed_session\" value=\"{}\">",
+            esc(l)
+        ));
+    }
+    if let Some(cv) = conversation {
+        hidden.push_str(&format!(
+            "<input type=\"hidden\" name=\"conversation\" value=\"{}\">",
+            esc(cv)
+        ));
+    }
+    format!(
+        "<form method=\"post\" action=\"/d/{id}/ask\">{hidden}\
+         <label for=\"dp-ask-q\">{label}</label>\
+         <textarea id=\"dp-ask-q\" name=\"question\" maxlength=\"{max}\" required></textarea>\
+         <p class=\"dp-ask-note\">{notice}</p><button type=\"submit\">Ask</button></form>",
+        id = esc(&dash.id),
+        label = if conversation.is_some() {
+            "A follow-up question"
+        } else {
+            "Ask a question about this dashboard"
+        },
+        max = c.max_question_chars,
+        notice = esc(&ask_notice(c)),
+    )
+}
+
+/// The answer, escaped: paragraphs at blank lines, line breaks kept. No
+/// markup of the model's survives (M5); a URL stays inert text.
+fn ask_answer_html(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("<p>{}</p>", esc(p).replace('\n', "<br>")))
+        .collect()
+}
+
+/// A verified citation's chip text: the panel's name (from the source), the
+/// row's key cells and the cited value — never the model's label (M4).
+fn ask_chip(script: &str, c: &askm::Citation) -> String {
+    let text = |v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "–".into(),
+        v => v.to_string(),
+    };
+    let plan = sql::plan(script);
+    let name = plan
+        .get(c.panel)
+        .and_then(|p| p.name.clone())
+        .unwrap_or_else(|| format!("Panel {}", c.panel));
+    let mut parts = vec![name];
+    parts.extend(c.row.iter().map(|(_, v)| text(v)));
+    if let (Some(col), Some(v)) = (&c.column, &c.value) {
+        parts.push(format!("{col}: {}", text(v)));
+    }
+    parts.join(" · ")
+}
+
+/// The section above the dashboard: the question, the answer (or a refusal),
+/// its citations, and the follow-up form.
+#[allow(clippy::too_many_arguments)]
+fn ask_section(
+    ab: &AskB,
+    i: &Identity,
+    dash: &Dashboard,
+    resolved: &[(String, String)],
+    embed_link: Option<&str>,
+    question: &str,
+    result: &Result<askm::AskAnswer, askm::AskError>,
+) -> String {
+    let mut h = format!(
+        "{ASK_CSS}<section class=\"dp-ask\" id=\"dp-ask\" aria-labelledby=\"dp-ask-h\"><h2 id=\"dp-ask-h\">Ask</h2>\
+         <p><strong>You asked:</strong> {}</p>",
+        esc(question)
+    );
+    let conversation = match result {
+        Ok(a) => {
+            if a.refreshed {
+                h.push_str("<p class=\"dp-ask-note\">The data was refreshed: the conversation started over.</p>");
+            }
+            h.push_str(&ask_answer_html(&a.text));
+            match a.scope.as_str() {
+                "not_on_dashboard" => {
+                    h.push_str("<p class=\"dp-ask-note\">This isn't on the dashboard.</p>")
+                }
+                "partly" => h.push_str(
+                    "<p class=\"dp-ask-note\">The dashboard shows only part of this.</p>",
+                ),
+                _ => {}
+            }
+            let mut chips = String::new();
+            for c in &a.citations {
+                if !c.verified {
+                    let label: String = c.label.chars().take(60).collect();
+                    chips.push_str(&format!(
+                        "<span class=\"dp-ask-unverified\">not verified: {}</span>",
+                        esc(&label)
+                    ));
+                    continue;
+                }
+                let text = ask_chip(&dash.script, c);
+                // read with other values: a link to the page with them (a
+                // GET page only — a page session's page posts its form)
+                let other: Vec<(String, String)> = c
+                    .vars
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            v.as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| v.to_string()),
+                        )
+                    })
+                    .filter(|(k, v)| !resolved.iter().any(|(n, x)| n == k && x == v))
+                    .collect();
+                let note = if other.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (with {})",
+                        other
+                            .iter()
+                            .map(|(k, v)| format!("{k} = {v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let href = if other.is_empty() || embed_link.is_some() {
+                    format!("#panel-{}", c.panel)
+                } else {
+                    let q: Vec<String> = resolved
+                        .iter()
+                        .map(|(n, v)| (n, other.iter().find(|(k, _)| k == n).map_or(v, |(_, x)| x)))
+                        .map(|(n, v)| format!("{}={}", url_enc(n), url_enc(v)))
+                        .collect();
+                    format!("/d/{}?{}#panel-{}", url_enc(&dash.id), q.join("&"), c.panel)
+                };
+                chips.push_str(&format!(
+                    "<a href=\"{}\" aria-label=\"Go to panel {}\">{}{}</a>",
+                    esc(&href),
+                    esc(&text),
+                    esc(&text),
+                    esc(&note)
+                ));
+            }
+            if !chips.is_empty() {
+                h.push_str(&format!("<div class=\"dp-ask-chips\">{chips}</div>"));
+            }
+            h.push_str("<p class=\"dp-ask-label\">AI-generated · check the cited panels</p>");
+            Some(a.conversation.as_str())
+        }
+        Err(e) => {
+            let msg: String = e.message.chars().take(300).collect();
+            h.push_str(&format!("<p class=\"dp-ask-error\">{}</p>", esc(&msg)));
+            None
+        }
+    };
+    h.push_str(&ask_form(ab, i, dash, resolved, embed_link, conversation));
+    h.push_str("</section>");
+    h
+}
+
+/// The page with an Ask section: the form under the dashboard, or an answer
+/// on top. Only into this server's own page shape (its `.grid`).
+fn with_ask(html: &str, section: &str, on_top: bool) -> String {
+    if on_top {
+        if let Some(at) = html.find("<div class=\"grid\">") {
+            let at = at + "<div class=\"grid\">".len();
+            return format!("{}{section}{}", &html[..at], &html[at..]);
+        }
+    } else if let Some(at) = html.find("<div id=\"dp-tip\"") {
+        // the form after the dashboard's own grid
+        if let Some(end) = html[..at].rfind("</div>") {
+            return format!("{}{section}{}", &html[..end], &html[end..]);
+        }
+    }
+    html.to_string()
+}
+
+/// `get_panel` on this server: the `/api/panel`-shaped body Ask built and
+/// checked, read by rendering this page for its `@param` values with the
+/// asking viewer's claims and scope — so a panel the page doesn't show for
+/// them (hidden by `-- @requires`, `::SHOW_IF`, a later `::VIEW`) is not
+/// available either.
+/// One page's panels: `(plan index, rows)`, or why it couldn't be rendered.
+type PageRows = Result<Vec<(usize, Rows)>, String>;
+
+struct AskRunnerB<'a> {
+    st: &'a ServeState,
+    dash: &'a Dashboard,
+    claims: Option<&'a Claims>,
+    scope: Option<&'a Scope>,
+    pages: Mutex<HashMap<String, PageRows>>,
+}
+
+impl askm::PanelRunner for AskRunnerB<'_> {
+    fn panel(&self, body: &str, deadline: Instant) -> Result<String, (u16, String)> {
+        if Instant::now() >= deadline {
+            return Err((503, "the question ran out of time".into()));
+        }
+        let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+        if r.page.is_some() {
+            return Err((400, "paging is not available on this server".into()));
+        }
+        let chosen: BTreeMap<String, String> = r
+            .vars
+            .iter()
+            .map(|(k, lit)| {
+                let t = lit.trim();
+                let v = if t.len() >= 2 && t.starts_with('\'') && t.ends_with('\'') {
+                    t[1..t.len() - 1].replace("''", "'")
+                } else {
+                    t.to_string()
+                };
+                (k.clone(), v)
+            })
+            .collect();
+        let mut resolved = resolve_params(self.dash, &chosen).map_err(|e| (400, e))?;
+        if let Some(s) = self.scope {
+            resolved.retain(|(n, _)| !s.vars.iter().any(|(l, _)| l.eq_ignore_ascii_case(n)));
+        }
+        let key = format!("{resolved:?}");
+        let mut pages = self.pages.lock().unwrap_or_else(|e| e.into_inner());
+        let page = pages.entry(key).or_insert_with(|| {
+            let mut col = Vec::new();
+            render_dashboard_page(
+                self.st,
+                self.dash,
+                &resolved,
+                self.claims,
+                self.scope,
+                None,
+                Some(&mut col),
+            )
+            .map(|_| col)
+            .map_err(|e| match e {
+                PageError::Viewer(m) => m,
+                PageError::Server(_) => PAGE_ERROR.to_string(),
+            })
+        });
+        let rows = match page {
+            Ok(col) => col
+                .iter()
+                .find(|(at, _)| *at == r.panel)
+                .map(|(_, rows)| rows),
+            Err(e) => return Err((400, e.clone())),
+        };
+        match rows {
+            Some(rows) => Ok(serde_json::to_string(rows).unwrap_or_else(|_| "[]".into())),
+            None => Err((404, "not available on this page".into())),
+        }
+    }
+
+    fn hidden(&self) -> Vec<usize> {
+        Vec::new()
+    }
+}
+
+/// `POST /d/<id>/ask`: checked (Ask on, the token, same-origin), asked, and
+/// answered with the dashboard page for the same params, the answer on top.
+#[allow(clippy::too_many_arguments)]
+fn handle_ask_b(
+    st: &ServeState,
+    req: Request,
+    dash: &Dashboard,
+    ident: Option<&Identity>,
+    form: &BTreeMap<String, String>,
+    resolved: &[(String, String)],
+    embed_link: Option<&str>,
+) -> u16 {
+    let (Some(i), Some(ab)) = (ident, ask_for(st, dash, ident)) else {
+        return reply(req, 404, "not found");
+    };
+    // M8: same-origin only (the Origin check ran before any route), and a
+    // browser's own fetch metadata when it sends it.
+    if req_header(&req, "Sec-Fetch-Site").is_some_and(|v| !v.eq_ignore_ascii_case("same-origin")) {
+        return reply(req, 403, "forbidden: cross-site request");
+    }
+    if !form
+        .get("ask_token")
+        .is_some_and(|t| ask_token_ok(ab, i, &dash.id, t))
+    {
+        return reply(
+            req,
+            403,
+            "forbidden: the form has expired — reload the page",
+        );
+    }
+    let question = form.get("question").cloned().unwrap_or_default();
+    // H2: a question holds this worker; pages keep at least one
+    if ab.running.fetch_add(1, Ordering::SeqCst) >= ab.max_running {
+        ab.running.fetch_sub(1, Ordering::SeqCst);
+        return reply(
+            req,
+            429,
+            "The assistant is busy right now — try again in a minute.",
+        );
+    }
+    let viewer = ask_viewer(i);
+    let ask_req = askm::AskRequest {
+        conversation: form.get("conversation").cloned().filter(|c| !c.is_empty()),
+        question: question.clone(),
+        tab: None,
+        vars: resolved
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect(),
+        panel: None,
+    };
+    let runner = AskRunnerB {
+        st,
+        dash,
+        claims: Some(&i.claims),
+        scope: Some(&i.scope),
+        pages: Mutex::new(HashMap::new()),
+    };
+    let d = askm::Dash {
+        id: &dash.id,
+        script: &dash.script,
+        epoch: 0,
+        params: Some(&dash.meta.params),
+    };
+    let result = ab
+        .ask
+        .ask(&viewer, &d, ask_req, &runner, &mut |_| {}, &|| false);
+    ab.running.fetch_sub(1, Ordering::SeqCst);
+    if let Ok(a) = &result {
+        if a.first_in_session {
+            if let Some(auth) = &st.auth {
+                auth.audit_event(auth::audit::Event {
+                    event: "ask",
+                    outcome: "ok",
+                    method: Some(i.method),
+                    user: Some(&viewer.user),
+                    dashboard: Some(&dash.id),
+                    path: Some("/d/ask"),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    let status = match &result {
+        Ok(_) => 200,
+        Err(e) => e.status,
+    };
+    let page = match render_dashboard_page(
+        st,
+        dash,
+        resolved,
+        Some(&i.claims),
+        Some(&i.scope),
+        embed_link,
+        None,
+    ) {
+        Ok(html) => html,
+        Err(PageError::Viewer(e)) => return reply(req, 400, &e),
+        Err(PageError::Server(_)) => return reply(req, 400, PAGE_ERROR),
+    };
+    let section = ask_section(ab, i, dash, resolved, embed_link, &question, &result);
+    respond_csp_cache(
+        req,
+        status,
+        "text/html; charset=utf-8",
+        with_ask(&page, &section, true).into_bytes(),
+        false,
+        "no-store, private",
+    );
+    status
 }
 
 fn serve_dashboards(dir: &str, o: &mut Opts) {
@@ -1633,7 +2199,45 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
         ),
         (None, true) => {}
     }
+    // #195 M2-6: Ask needs a login here, whatever the bind (M1: no
+    // `anonymous` on this server), its key, and a worker left for pages.
+    let ask = match o.ask.take() {
+        Some(c) if c.enabled => {
+            if c.anonymous {
+                eprintln!(
+                    "error: ask.anonymous is not available on this server: Ask here needs --auth"
+                );
+                std::process::exit(2);
+            }
+            if o.threads < 2 {
+                eprintln!("error: --ask needs --threads 2 or more (a question holds a worker while it runs)");
+                std::process::exit(2);
+            }
+            let (key, lines) = c.start(o.auth.is_some()).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(2)
+            });
+            for l in &lines {
+                say(&format!("  {l}"));
+            }
+            let up = assist::HttpUpstream::new(&c.base_url, key).unwrap_or_else(|e| {
+                eprintln!("error: ask: {e}");
+                std::process::exit(2)
+            });
+            let mut secret = [0u8; 32];
+            aws_lc_rs::rand::fill(&mut secret).expect("system randomness");
+            let max_running = c.concurrency.min(o.threads - 1).max(1);
+            Some(AskB {
+                ask: askm::Ask::new(c, Box::new(up), o.log.as_ref().map(|l| l.sink.clone())),
+                secret,
+                running: std::sync::atomic::AtomicUsize::new(0),
+                max_running,
+            })
+        }
+        _ => None,
+    };
     let st = ServeState {
+        ask,
         port: o.port,
         app: o.app.clone(),
         home: o.home.clone(),
@@ -1795,9 +2399,13 @@ fn route_serve(
     }
     // An embedded page posts its form: the page session and the params come
     // in the body (never in a URL, a history entry or a proxy log line).
+    // #195 M2-6: Ask's form posts too (`/d/<id>/ask`).
+    let ask_post = req.method() == &Method::Post
+        && path.starts_with("/d/")
+        && path.trim_end_matches('/').ends_with("/ask");
     let form = match &st.auth {
         Some(a)
-            if (a.embed.is_some() || a.share.is_some())
+            if ((a.embed.is_some() || a.share.is_some()) || ask_post)
                 && req.method() == &Method::Post
                 && path.starts_with("/d/") =>
         {
@@ -1857,9 +2465,13 @@ fn route_serve(
             if let Some(rep) = share_body.and_then(|b| auth.share_login(&r, &b)) {
                 return send(req, rep);
             }
+            // A page session (embed/share) rides in the form; Ask's own
+            // post from a logged-in page has none: its usual credential.
             let res = match &form {
-                Some(f) => auth.page_session(f.get("embed_session").map(String::as_str), &r),
-                None => auth.authenticate(&r),
+                Some(f) if !ask_post || f.contains_key("embed_session") => {
+                    auth.page_session(f.get("embed_session").map(String::as_str), &r)
+                }
+                _ => auth.authenticate(&r),
             };
             match res {
                 Ok(id) => {
@@ -1913,6 +2525,11 @@ fn route_serve(
         return reply(req, 404, "not found");
     };
     let id = rest.trim_end_matches('/');
+    let id = if ask_post {
+        id.trim_end_matches("/ask")
+    } else {
+        id
+    };
     let Some(dash) = st.dashboards.iter().find(|d| d.id == id) else {
         return reply(req, 404, "no such dashboard");
     };
@@ -1943,15 +2560,59 @@ fn route_serve(
         }
         _ => None,
     };
+    if ask_post {
+        let f = form.clone().unwrap_or_default();
+        return handle_ask_b(
+            st,
+            req,
+            dash,
+            ident.as_ref(),
+            &f,
+            &resolved,
+            embed_link.as_deref(),
+        );
+    }
+    // #195 M2-6: the Ask form under the dashboard (after the cache: the
+    // cached page is the same for everyone with these claims and params).
+    let add_ask = |html: String| -> String {
+        match (ident.as_ref(), ask_for(st, dash, ident.as_ref())) {
+            (Some(i), Some(ab)) => {
+                let form = ask_form(ab, i, dash, &resolved, embed_link.as_deref(), None);
+                let section = format!(
+                    "{ASK_CSS}<section class=\"dp-ask\" id=\"dp-ask\" aria-labelledby=\"dp-ask-h\"><h2 id=\"dp-ask-h\">Ask</h2>{form}</section>"
+                );
+                with_ask(&html, &section, false)
+            }
+            _ => html,
+        }
+    };
     let key = cache_key(&dash.id, &resolved, ident.as_ref(), embed_link.as_deref());
     if let Some(html) = st.cache.get(&key, Instant::now()) {
-        respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
+        respond(
+            req,
+            200,
+            "text/html; charset=utf-8",
+            add_ask(html).into_bytes(),
+        );
         return 200; // no DB touched
     }
-    match render_dashboard_page(st, dash, &resolved, claims, scope, embed_link.as_deref()) {
+    match render_dashboard_page(
+        st,
+        dash,
+        &resolved,
+        claims,
+        scope,
+        embed_link.as_deref(),
+        None,
+    ) {
         Ok(html) => {
             st.cache.insert(key, html.clone(), Instant::now());
-            respond(req, 200, "text/html; charset=utf-8", html.into_bytes());
+            respond(
+                req,
+                200,
+                "text/html; charset=utf-8",
+                add_ask(html).into_bytes(),
+            );
             200
         }
         Err(PageError::Viewer(e)) => reply(req, 400, &e),
@@ -2188,6 +2849,7 @@ fn render_dashboard_page(
     claims: Option<&Claims>,
     scope: Option<&Scope>,
     embed_link: Option<&str>,
+    collect: Option<&mut Vec<(usize, Rows)>>,
 ) -> Result<String, PageError> {
     let value_of = |name: &str| -> String {
         resolved
@@ -2267,6 +2929,8 @@ fn render_dashboard_page(
     // never needs `opts`/the theme the usual render does, so it's built
     // directly in phase 1 rather than threading a marker to phase 2).
     let mut queried: Vec<(sql::Panel, Rows, bool, bool, Option<String>)> = Vec::new();
+    // each entry's plan index (#195 M2-6: `id="panel-<n>"`, Ask's rows)
+    let mut queried_at: Vec<usize> = Vec::new();
     // The script-free page shows only a ::VIEW group's first alternative
     // (#214); the others are never queried, and a `?view.*` request param
     // is not a thing — `resolve_params` above only reads declared `@param`s.
@@ -2471,6 +3135,7 @@ fn render_dashboard_page(
                 "Submitting is not enabled here"
             };
             let html = sv::submit_disabled_html(&label, i, reason);
+            queried_at.push(i);
             queried.push((panel, Rows::new(), false, false, Some(html)));
             continue;
         }
@@ -2496,6 +3161,7 @@ fn render_dashboard_page(
         // left out of its chart instead.
         if chrome_role.is_none() && !section && gated {
             if !track::is_track(&panel.roles) {
+                queried_at.push(i);
                 queried.push((panel, Rows::new(), true, false, None));
             }
             continue;
@@ -2525,6 +3191,7 @@ fn render_dashboard_page(
                 }
             };
             let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
+            queried_at.push(i);
             queried.push((panel, rows, false, compact, None));
             continue;
         }
@@ -2569,6 +3236,7 @@ fn render_dashboard_page(
             }
         }
         let compact = kpi_size_json(&panel.roles, &rows).unwrap_or(group_compact);
+        queried_at.push(i);
         queried.push((panel, rows, false, compact, None));
     }
     let set = chrome.resolve(theme_default()).map_err(PageError::Server)?;
@@ -2591,6 +3259,15 @@ fn render_dashboard_page(
         ..RenderOptions::default()
     };
 
+    // #195 M2-6: the rows of each panel this page shows, for Ask's runner.
+    if let Some(c) = collect {
+        for (at, (_, rows, na, _, html)) in queried_at.iter().zip(&queried) {
+            if !na && html.is_none() {
+                c.push((*at, rows.clone()));
+            }
+        }
+    }
+
     // Phase 2: render.
     let mut panels = String::new();
     // `::GUIDE_STEP` (#516): `queried` only ever holds what phase 1 kept
@@ -2599,8 +3276,8 @@ fn render_dashboard_page(
         let shown: Vec<&sql::Panel> = queried.iter().map(|(p, ..)| p).collect();
         sql::steps::StaticSteps::new(&shown)
     };
-    let mut queried = queried.into_iter().peekable();
-    while let Some((panel, rows, na, compact, static_html)) = queried.next() {
+    let mut queried = queried_at.into_iter().zip(queried).peekable();
+    while let Some((at, (panel, rows, na, compact, static_html))) = queried.next() {
         if let Some(html) = static_html {
             panels.push_str(&html);
             continue;
@@ -2610,7 +3287,7 @@ fn render_dashboard_page(
             panels.push_str(NOT_AVAILABLE_HTML);
             // its strips (a ::FIGURE: its cells) go with it
             while queried
-                .next_if(|(q, _, _, _, _)| {
+                .next_if(|(_, (q, _, _, _, _))| {
                     track::is_track(&q.roles) || (figure && q.figure.is_some())
                 })
                 .is_some()
@@ -2622,7 +3299,9 @@ fn render_dashboard_page(
         // cell.
         if figure {
             let mut cells = Vec::new();
-            while let Some((q, r, na, _, _)) = queried.next_if(|(q, ..)| q.figure.is_some()) {
+            while let Some((_, (q, r, na, _, _))) =
+                queried.next_if(|(_, (q, ..))| q.figure.is_some())
+            {
                 cells.push(anofox_visualization::figure::Cell {
                     name: q.name.clone(),
                     zoom: None,
@@ -2654,7 +3333,9 @@ fn render_dashboard_page(
                 );
                 PANEL_RENDER_ERROR_HTML.to_string()
             });
-            panels.push_str(&format!("<figure class=\"panel dp-figure\">{svg}</figure>"));
+            panels.push_str(&format!(
+                "<figure class=\"panel dp-figure\" id=\"panel-{at}\">{svg}</figure>"
+            ));
             continue;
         }
         if let Some(cp) = &panel.contract {
@@ -2667,7 +3348,9 @@ fn render_dashboard_page(
                     );
                     PANEL_RENDER_ERROR_HTML.to_string()
                 });
-                panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
+                panels.push_str(&format!(
+                    "<figure class=\"panel\" id=\"panel-{at}\">{svg}</figure>"
+                ));
             }
             continue;
         }
@@ -2726,15 +3409,15 @@ fn render_dashboard_page(
         }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r, _, _, _)) =
-            queried.next_if(|(q, _, _, _, _)| track::is_track(&q.roles))
+        while let Some((_, (q, r, _, _, _))) =
+            queried.next_if(|(_, (q, _, _, _, _))| track::is_track(&q.roles))
         {
             tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
         }
         // #692: 'caption'::MARKDOWN_STYLE texts right after a chart go under
         // it, in its figure.
         let mut captions = String::new();
-        while let Some(c) = queried.peek().and_then(|(q, r, na, _, _)| {
+        while let Some(c) = queried.peek().and_then(|(_, (q, r, na, _, _))| {
             (!na).then(|| {
                 anofox_visualization::dashboard::caption_html(
                     &rows,
@@ -2786,7 +3469,7 @@ fn render_dashboard_page(
             ("panel".to_string(), String::new())
         };
         panels.push_str(&format!(
-            "<figure class=\"{class}\"{icon_attrs}>{svg}{captions}</figure>"
+            "<figure class=\"{class}\" id=\"panel-{at}\"{icon_attrs}>{svg}{captions}</figure>"
         ));
     }
 
