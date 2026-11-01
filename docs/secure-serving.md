@@ -912,6 +912,43 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
 - `css_file` is a server option only: `dashboard --site` ignores it, and
   `serve --dashboards` (the CLI's static render) doesn't take it.
 
+### Durability: snapshots of the state and the saves (`options.durability`, #775)
+
+The per-viewer state store (`options.state`) and the write-back change log
+(`options.writeback`) are files on the node. With `durability`, the writer
+copies them to S3 and a new node starts from there:
+
+```sql
+INSTALL httpfs; LOAD httpfs;
+CREATE SECRET (TYPE s3, PROVIDER credential_chain, REGION 'eu-central-1');
+SELECT anofox_serve_dashboards('dashboards', 8095, '{
+  …, "state": {…}, "writeback": {…},
+  "durability": {"run": true, "location": "s3://acme-anofox/prod", "snapshot_every_s": 300}}');
+```
+
+- **Snapshots:** every `snapshot_every_s` (default 300) and once at the
+  stop, the writer copies each file under its own lock (no write runs
+  meanwhile) and uploads it to `<location>/state.jsonl` and
+  `<location>/writeback.jsonl`, byte for byte, through DuckDB (`COPY … TO`),
+  so the S3 secret the operator created in the serving session applies. An
+  unchanged file is not uploaded again. `location` may also be `gs://`,
+  `r2://` or a local directory (an NFS mount, a test).
+- **Restore:** at start, a file that is missing locally (a new node) is
+  restored from its snapshot, `0600`. A local file always wins, so a
+  restore never overwrites newer rows. No snapshot yet means an empty start.
+- **One writer:** only the replica with `"run": true` takes submissions and
+  saves and keeps the snapshots. The others answer `503` with `Retry-After`
+  to `/api/submit` and `/api/save`, so route writes to the writer (the same
+  replica as `tasks.run` and `ingest.run`). There is no lease: two
+  replicas with `run` would overwrite each other's snapshots.
+- `/healthz` (for a full login) reports `durability`: `writer`, `last_ok`
+  (Unix seconds) and `failing` (failed snapshots in a row); every failure is
+  also on stderr.
+- **Personal data:** the snapshots hold who answered what. Bucket
+  encryption, access and retention are the operator's. An erasure
+  (`erase_user`) reaches the next snapshot, but older object versions stay
+  until the bucket's retention removes them.
+
 ### Temporary dashboards (`POST /api/dashboards`, `options.preview`, #770)
 
 A tool or an agent can show someone a dashboard without adding a file to

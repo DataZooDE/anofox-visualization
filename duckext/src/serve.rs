@@ -123,6 +123,9 @@ struct Running {
     reports: Option<JoinHandle<()>>,
     /// #769: the ingest refresher (`options.ingest.refresh`), joined likewise.
     ingest: Option<JoinHandle<()>>,
+    /// #775: the durability snapshots (`options.durability.run`), joined
+    /// likewise after a last snapshot.
+    durable: Option<JoinHandle<()>>,
     /// A locked server's state (for `anofox_serve_refresh`).
     locked: Option<Arc<Locked>>,
     /// Dropped after the workers have exited (closes the snapshot DB and
@@ -179,6 +182,11 @@ pub fn stop(port: u16) -> Result<String, String> {
     }
     if let Some(h) = r.ingest.take() {
         join_bounded(vec![h], STOP_JOIN_BUDGET);
+    }
+    if let Some(h) = r.durable.take() {
+        // A last snapshot of what was written up to the stop (an upload
+        // can take longer than the others' budget).
+        join_bounded(vec![h], Duration::from_secs(30));
     }
     Ok(format!(
         "anofox-visualization: stopped the {} server on port {port}",
@@ -723,6 +731,7 @@ pub fn start_authoring(
             tasks: None,
             reports: None,
             ingest: None,
+            durable: None,
             locked: None,
             _state: Box::new(state),
         },
@@ -1274,6 +1283,9 @@ pub struct LockedOptions {
     /// `preview` (#770): temporary dashboards from API keys with the
     /// `preview` scope (`POST /api/dashboards`).
     pub preview: Option<PreviewOptions>,
+    /// `durability` (#775): snapshots of the state store and the write-back
+    /// log to S3 (or another location DuckDB can write), one writer.
+    pub durability: Option<DurabilityOptions>,
     /// `home`: a dashboard id `/` redirects to instead of the landing page
     /// (when the viewer may read it).
     pub home: Option<String>,
@@ -1668,6 +1680,7 @@ impl Default for LockedOptions {
             folders: false,
             ingest: None,
             preview: None,
+            durability: None,
             home: None,
             source: None,
             state_opts: None,
@@ -1923,6 +1936,7 @@ impl LockedOptions {
                 }
                 "ingest" => o.ingest = Some(IngestOptions::parse(val)?),
                 "preview" => o.preview = Some(PreviewOptions::parse(val)?),
+                "durability" => o.durability = Some(DurabilityOptions::parse(val)?),
                 "css_file" => {
                     let f = val
                         .as_str()
@@ -2042,6 +2056,12 @@ impl LockedOptions {
             o.tasks = Some(parse_tasks(v, o.notify.as_ref())?);
         }
         // #769: only an API key may ingest, so there must be API keys.
+        if o.durability.is_some() && o.state_opts.is_none() && o.writeback_opts.is_none() {
+            return Err(
+                "options.durability needs options.state or options.writeback (the files it keeps)"
+                    .into(),
+            );
+        }
         if o.preview.is_some() && !o.auth.as_ref().is_some_and(|a| a.keys.is_some()) {
             return Err("options.preview needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with the preview scope may create one".into());
         }
@@ -2896,6 +2916,8 @@ struct Locked {
     ingest: Option<Arc<IngestRuntime>>,
     /// #770: the stored previews (`None` without `options.preview`).
     previews: Option<Arc<PreviewStore>>,
+    /// #775: the snapshots' bookkeeping (`/healthz`).
+    durable: DurableState,
     /// #768: per report, its last run (for `/metrics`).
     report_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// #768: the messages sent in the last hour (`notify.max_per_hour`).
@@ -3826,6 +3848,26 @@ pub fn start_locked(
         }
         _ => policy_note,
     };
+    // #775: a new node (no local file) starts from the newest snapshot; a
+    // local file always wins, so a restore never overwrites newer rows.
+    if let Some(d) = opts.durability.as_ref().filter(|d| d.run) {
+        let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+        if d.is_local() {
+            std::fs::create_dir_all(&d.location)
+                .map_err(|e| format!("options.durability.location {}: {e}", d.location))?;
+        }
+        for (name, path) in durable_files(&opts) {
+            if !path.exists() {
+                if let Some(n) = durable_restore(&conn, d, name, &path)? {
+                    eprintln!(
+                        "[anofox-serve] restored {} ({n} bytes) from {}",
+                        path.display(),
+                        d.object(name)
+                    );
+                }
+            }
+        }
+    }
     // #517 S2: `options.state`'s start-time refusals (plan §2) need the
     // dashboards and the snapshot, both only available from here on — not
     // inside `LockedOptions::parse`, which runs before either exists.
@@ -3970,6 +4012,7 @@ pub fn start_locked(
         task_stats: Mutex::new(BTreeMap::new()),
         ingest: ingest_rt,
         previews: preview_store,
+        durable: DurableState::default(),
         report_stats: Mutex::new(BTreeMap::new()),
         report_rate: Mutex::new(notify::Rate::default()),
         alert_stats: Mutex::new(BTreeMap::new()),
@@ -4063,6 +4106,16 @@ pub fn start_locked(
         let (st, stop) = (state.clone(), stop.clone());
         std::thread::spawn(move || report_runner(&st, &stop))
     });
+    // #775: the durability snapshots, on the writer only.
+    let durable_handle = state
+        .opts
+        .durability
+        .as_ref()
+        .is_some_and(|d| d.run)
+        .then(|| {
+            let (st, stop) = (state.clone(), stop.clone());
+            std::thread::spawn(move || durability_runner(&st, &stop))
+        });
     // #769: rebuilds the snapshot after writes, at most every 30 s.
     let ingest_handle = state
         .opts
@@ -4084,6 +4137,7 @@ pub fn start_locked(
             tasks: tasks_handle,
             reports: reports_handle,
             ingest: ingest_handle,
+            durable: durable_handle,
             locked: Some(state.clone()),
             _state: Box::new(state),
         },
@@ -5062,6 +5116,241 @@ fn handle_embed_token(
             reply(req, 400, &e)
         }
     }
+}
+
+/// `options.durability` (#775): `{"run": true, "location":
+/// "s3://bucket/prefix", "snapshot_every_s": 300}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DurabilityOptions {
+    /// This replica is the one writer: it takes submissions and saves, and
+    /// keeps the snapshots. The others answer `503` to writes.
+    pub run: bool,
+    /// Where the snapshots go: an `s3://`, `gs://` or `r2://` prefix (DuckDB's
+    /// httpfs, with the S3 secret the operator created in the serving
+    /// session), or a local directory.
+    pub location: String,
+    pub every: Duration,
+}
+
+impl DurabilityOptions {
+    fn parse(v: &Value) -> Result<DurabilityOptions, String> {
+        let o = v.as_object().ok_or(
+            "options.durability must be an object like {\"run\": true, \"location\": \"s3://bucket/prefix\"}",
+        )?;
+        let mut out = DurabilityOptions {
+            run: false,
+            location: String::new(),
+            every: Duration::from_secs(300),
+        };
+        for (k, v) in o {
+            match k.as_str() {
+                "run" => {
+                    out.run = v
+                        .as_bool()
+                        .ok_or("options.durability.run must be true or false")?
+                }
+                "location" => {
+                    let l = v
+                        .as_str()
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .trim_end_matches('/');
+                    let remote = ["s3://", "gs://", "r2://"]
+                        .iter()
+                        .any(|p| l.starts_with(p) && l.len() > p.len());
+                    let safe = l
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/:._-".contains(&b));
+                    if !(safe && (remote || l.starts_with('/'))) {
+                        return Err("options.durability.location must be s3://bucket/prefix (also gs://, r2://) or an absolute directory, letters, digits and / : . _ - only".into());
+                    }
+                    out.location = l.to_string();
+                }
+                "snapshot_every_s" => {
+                    out.every = Duration::from_secs(
+                        v.as_u64()
+                            .filter(|n| *n > 0)
+                            .ok_or(
+                                "options.durability.snapshot_every_s must be a positive integer",
+                            )?
+                            .min(86_400),
+                    )
+                }
+                other => {
+                    return Err(format!(
+                    "options.durability: unknown key '{other}' (run, location, snapshot_every_s)"
+                ))
+                }
+            }
+        }
+        if out.location.is_empty() {
+            return Err("options.durability.location is required".into());
+        }
+        Ok(out)
+    }
+
+    fn is_local(&self) -> bool {
+        self.location.starts_with('/')
+    }
+
+    /// The object (or file) one store's snapshot lives at.
+    fn object(&self, name: &str) -> String {
+        format!("{}/{name}.jsonl", self.location)
+    }
+}
+
+/// The snapshots' bookkeeping.
+#[derive(Default)]
+struct DurableState {
+    /// Unix seconds of the last snapshot that went through.
+    last_ok: AtomicU64,
+    /// Snapshots that failed in a row.
+    failing: std::sync::atomic::AtomicU32,
+    /// Per store: what the last snapshot held (its last seq and length).
+    sent: Mutex<HashMap<&'static str, (u64, u64)>>,
+}
+
+/// The files `options.durability` keeps: `(name, local path)`.
+fn durable_files(opts: &LockedOptions) -> Vec<(&'static str, PathBuf)> {
+    let mut v = Vec::new();
+    if let Some(s) = &opts.state_opts {
+        v.push(("state", s.path.clone()));
+    }
+    if let Some(w) = &opts.writeback_opts {
+        v.push(("writeback", w.path.clone()));
+    }
+    v
+}
+
+/// On a replica that isn't the writer: the `503` for a write.
+fn durable_reader(st: &Locked) -> Option<auth::Reply> {
+    st.opts.durability.as_ref().filter(|d| !d.run).map(|_| {
+        auth::Reply::text(
+            503,
+            "this replica doesn't take writes (options.durability.run is on another one) — send them to the writer",
+        )
+        .header("Retry-After", "10")
+    })
+}
+
+/// The bytes of a text file, through DuckDB, unchanged: one CSV row per file
+/// with no quoting, escaping or other delimiter (a JSON Lines file never
+/// holds a raw control character), minus the newline the CSV writer adds.
+fn copy_text_sql(from: &str, to: &str) -> String {
+    format!(
+        "COPY (SELECT rtrim(content, chr(10)) FROM read_text({}) WHERE content <> '') TO {} \
+         (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\\x01')",
+        sv::sql_string_literal(from),
+        sv::sql_string_literal(to)
+    )
+}
+
+/// Restore one store's newest snapshot into `path` (a new node): `None` when
+/// there is none yet. The file is written `0600` and renamed into place.
+fn durable_restore(
+    c: &Conn,
+    d: &DurabilityOptions,
+    name: &str,
+    path: &Path,
+) -> Result<Option<u64>, String> {
+    let object = d.object(name);
+    let found = small_rows(
+        c,
+        &format!(
+            "SELECT count(*) AS n FROM glob({})",
+            sv::sql_string_literal(&object)
+        ),
+    )
+    .map_err(|e| format!("options.durability: can't list {object}: {e}"))?
+    .first()
+    .and_then(|r| r.get("n"))
+    .and_then(Value::as_i64)
+    .unwrap_or(0);
+    if found == 0 {
+        return Ok(None);
+    }
+    let tmp = path.with_extension("restore.tmp");
+    c.exec(&copy_text_sql(&object, &tmp.to_string_lossy()))
+        .map_err(|e| format!("options.durability: can't restore {object}: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    let n = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(n))
+}
+
+/// Snapshot every kept store that changed since its last snapshot.
+fn durable_snapshot(st: &Locked) {
+    let Some(d) = &st.opts.durability else { return };
+    let stores: Vec<(&'static str, &Store)> = [
+        st.submit.as_ref().map(|s| ("state", &s.store)),
+        st.writeback.as_ref().map(|w| ("writeback", &w.store)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut ok = true;
+    for (name, store) in stores {
+        let res = (|| -> Result<(), String> {
+            let dir = SnapshotDir::create()?;
+            let tmp = dir.0.join(format!("{name}.jsonl"));
+            let seq = store.global_seq();
+            let len = store.copy_to(&tmp)?;
+            if st
+                .durable
+                .sent
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(name)
+                == Some(&(seq, len))
+            {
+                return Ok(());
+            }
+            let c = st.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+            c.exec(&copy_text_sql(&tmp.to_string_lossy(), &d.object(name)))?;
+            drop(c);
+            st.durable
+                .sent
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(name, (seq, len));
+            Ok(())
+        })();
+        if let Err(e) = res {
+            ok = false;
+            eprintln!(
+                "[anofox-serve] durability: snapshot of {name} to {} failed: {e}",
+                d.object(name)
+            );
+        }
+    }
+    if ok {
+        st.durable
+            .last_ok
+            .store(unix_now() as u64, Ordering::Relaxed);
+        st.durable.failing.store(0, Ordering::Relaxed);
+    } else {
+        st.durable.failing.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `options.durability.run`: a snapshot every `snapshot_every_s`, and a last
+/// one at the stop.
+fn durability_runner(st: &Locked, stop: &AtomicBool) {
+    let Some(d) = &st.opts.durability else { return };
+    let mut next = Instant::now() + d.every;
+    while !stop.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(250));
+        if Instant::now() >= next {
+            durable_snapshot(st);
+            next = Instant::now() + d.every;
+        }
+    }
+    durable_snapshot(st);
 }
 
 /// `options.preview` (#770).
@@ -7272,6 +7561,11 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 "snapshot_age_s": gen.built.elapsed().as_secs(),
                 "refresh_s": st.opts.refresh.map(|d| d.as_secs()),
                 "refreshing": st.current.refreshing(),
+                "durability": st.opts.durability.as_ref().map(|d| serde_json::json!({
+                    "writer": d.run,
+                    "last_ok": st.durable.last_ok.load(Ordering::Relaxed),
+                    "failing": st.durable.failing.load(Ordering::Relaxed),
+                })),
                 // The error itself is only logged / returned to the operator.
                 "refresh_failed": st.current.last_failed(),
                 "limits": limits_json(st),
@@ -8984,6 +9278,10 @@ fn handle_submit(
         }
     };
 
+    if let Some(r) = durable_reader(st) {
+        info.deny = Some("not_writer");
+        return send(req, r);
+    }
     let Some(submit) = &st.submit else {
         info.deny = Some("not_enabled");
         audit("deny", Some("not_enabled"), None, None);
@@ -9469,6 +9767,10 @@ fn handle_save(
         }
     };
 
+    if let Some(r) = durable_reader(st) {
+        info.deny = Some("not_writer");
+        return send(req, r);
+    }
     let Some(w) = &st.writeback else {
         info.deny = Some("not_enabled");
         audit("deny", Some("not_enabled"), None, None);
@@ -12727,6 +13029,43 @@ mod tests {
         assert!(!sets_variables("CREATE TEMP TABLE t AS SELECT 1"));
         assert!(!sets_variables("SELECT 'SET'"));
         assert!(!sets_variables("SETTINGS_TABLE"));
+    }
+
+    // #775: options.durability.
+    #[test]
+    fn durability_options() {
+        let d = DurabilityOptions::parse(&serde_json::json!({"run": true, "location": "s3://bucket/anofox/", "snapshot_every_s": 60})).unwrap();
+        assert_eq!(
+            (d.run, d.location.as_str(), d.every.as_secs()),
+            (true, "s3://bucket/anofox", 60)
+        );
+        assert_eq!(d.object("state"), "s3://bucket/anofox/state.jsonl");
+        assert!(!d.is_local());
+        assert!(
+            DurabilityOptions::parse(&serde_json::json!({"location": "/var/lib/anofox/snap"}))
+                .unwrap()
+                .is_local()
+        );
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"location": "relative/dir"}),
+            serde_json::json!({"location": "s3://"}),
+            serde_json::json!({"location": "s3://b/x'; DROP"}),
+            serde_json::json!({"location": "https://x/y"}),
+            serde_json::json!({"location": "/x", "nope": 1}),
+        ] {
+            assert!(DurabilityOptions::parse(&bad).is_err(), "{bad}");
+        }
+        let e = LockedOptions::parse(Some(r#"{"durability": {"run": true, "location": "/x"}}"#))
+            .unwrap_err();
+        assert!(
+            e.contains("needs options.state or options.writeback"),
+            "{e}"
+        );
+        assert!(
+            copy_text_sql("/a'b", "s3://x/y").contains("'/a''b'"),
+            "paths are SQL literals"
+        );
     }
 
     // #770: options.preview, and a preview's file round trip.

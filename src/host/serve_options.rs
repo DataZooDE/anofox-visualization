@@ -88,6 +88,8 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("ingest", SiteOptionKind::ServerOnly),
     // #770: created through the API of a running server.
     ("preview", SiteOptionKind::ServerOnly),
+    // #775: snapshots of server-side files.
+    ("durability", SiteOptionKind::ServerOnly),
     ("home", SiteOptionKind::Site),
     ("source", SiteOptionKind::ServerOnly),
     // #517 S2: per-viewer append-only state needs a real server behind it
