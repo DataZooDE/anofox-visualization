@@ -7717,9 +7717,10 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 Some(pv) if scope.is_none_or(|s| s.allows(id)) => {
                     info.dashboard = Some(id.to_string());
                     let session = ident.as_ref().and_then(|i| i.page_session.as_deref());
-                    let html =
-                        String::from_utf8_lossy(&served_index(st, &pv.dash, scope, session, false))
-                            .into_owned();
+                    let html = String::from_utf8_lossy(&served_index(
+                        st, &pv.dash, scope, session, false, false,
+                    ))
+                    .into_owned();
                     // The link is the preview's only name: never sent on.
                     respond_page(req, &html, &st.opts, &[("Referrer-Policy", "same-origin")]);
                     200
@@ -7828,8 +7829,21 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                                     && w.opts.is_writer(&c.user, &c.groups)
                             })
                     });
-                    let html = String::from_utf8_lossy(&served_index(st, d, scope, page, writer))
-                        .into_owned();
+                    // #195: offer Ask where /api/ask would take this viewer.
+                    let ask = st.ask.as_ref().is_some_and(|rt| {
+                        let v = ask_viewer(ident.as_ref());
+                        let c = rt.ask.config();
+                        askm::ask_on(&d.sql)
+                            && d.meta.vars.is_some()
+                            && (ident.is_some() || c.anonymous)
+                            && !v.api_key
+                            && ident.as_ref().map(|i| i.method) != Some("share")
+                            && v.embed.as_ref().is_none_or(|e| c.embed && e == &d.id)
+                            && rt.ask.allowed(&v)
+                    });
+                    let html =
+                        String::from_utf8_lossy(&served_index(st, d, scope, page, writer, ask))
+                            .into_owned();
                     // A page holding a session is never sent to another
                     // site as a Referer (the link is in the URL).
                     let extra: &[(&str, &str)] = if page.is_some() {
@@ -11315,6 +11329,7 @@ fn served_index(
     scope: Option<&Scope>,
     session: Option<&str>,
     writer: bool,
+    ask: bool,
 ) -> Vec<u8> {
     // The nav and what each statement depends on (#210) come from one
     // snapshot (and its dashboards, #772).
@@ -11400,6 +11415,16 @@ fn served_index(
         // `base`, moved on only by its own saves and a 409's answer.
         "gen": st.writeback.as_ref().map(|w| w.store.global_seq()),
     });
+    // #195: Ask is on for this dashboard and this viewer: the page loads its
+    // panel (web/ask-ui.js) and shows the notice's provider.
+    if let (true, Some(rt)) = (ask, &st.ask) {
+        let c = rt.ask.config();
+        cfg["ask"] = serde_json::json!({
+            "provider": c.provider_label,
+            "notice": c.notice,
+            "logged": c.log_questions,
+        });
+    }
     let cfg = json_for_script(&cfg);
     // #403: a served dashboard page has no app bar of its own (it's always
     // embed chrome — header/sidebar/toolbar hidden) and never fetches

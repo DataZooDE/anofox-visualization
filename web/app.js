@@ -1352,6 +1352,68 @@ function validPathValueLiteral(lit) {
 }
 
 // `at`: the statement's own plan index, when the caller knows it — the same
+// #195: the Ask panel (web/ask-ui.js) on a served dashboard. It gets the
+// page's view (the open tab, the current inputs), the panels' titles (for
+// its chips: never the model's text) and askGoTo (a citation chip's click).
+async function mountAskSoon(served) {
+  try {
+    const { mountAsk } = await import("./ask-ui.js");
+    const titleOf = (i) =>
+      Number.isInteger(i) ? document.querySelector(`.dash .panel[data-stmt="${i}"] .panel-title`)?.textContent?.trim() || "" : "";
+    mountAsk({
+      cfg: served.ask,
+      dashboard: served.id,
+      session: served.session,
+      view: () => ({ tab: document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent ?? null, vars: { ...servedVars } }),
+      title: titleOf,
+      titles: () => [...document.querySelectorAll(".dash .panel[data-stmt] .panel-title")].map((t) => t.textContent.trim()).filter(Boolean),
+      goTo: askGoTo,
+    });
+  } catch (e) {
+    console.warn("Ask could not load:", e);
+  }
+}
+// A verified citation's chip was clicked: open the panel's tab, scroll to it,
+// highlight it (and a table row whose cells show the cited key values — a
+// text comparison, never a selector built from data), move the focus there.
+function askGoTo(i, c) {
+  if (!Number.isInteger(i)) return null;
+  const find = () => document.querySelector(`.dash .panel[data-stmt="${i}"]`);
+  let fig = find();
+  if (!fig) return null;
+  const pane = fig.closest(".dash > .tabwrap > .tabpane");
+  if (pane && pane.style.display === "none") {
+    const panes = [...document.querySelectorAll(".dash > .tabwrap > .tabpane")];
+    const btn = [...document.querySelectorAll(".dash > .tabbar > .tab-btn")][panes.indexOf(pane)];
+    // as the viewer's own click on the tab (openTabNow is a drill-through's,
+    // inside a run)
+    if (btn) btn.click();
+    fig = find() || fig;
+  }
+  fig.scrollIntoView({ block: "center", behavior: dpAnim.still() ? "auto" : "smooth" });
+  const flash = (n, cls) => {
+    n.classList.add(cls);
+    setTimeout(() => n.classList.remove(cls), 2500);
+  };
+  flash(fig, "dp-ask-hit");
+  const keys = (c && Array.isArray(c.row) ? c.row : []).map(([, v]) => String(v));
+  if (keys.length) {
+    for (const tr of fig.querySelectorAll("tr")) {
+      const cells = [...tr.cells].map((td) => td.textContent.trim());
+      if (keys.every((k) => cells.includes(k))) {
+        flash(tr, "dp-ask-row");
+        break;
+      }
+    }
+  }
+  const t = fig.querySelector(".panel-title");
+  if (t) {
+    if (!t.hasAttribute("tabindex")) t.tabIndex = -1;
+    t.focus({ preventScroll: true });
+  }
+  return t || fig;
+}
+
 // SQL can stand in two tabs, whose `-- @requires` differ (#167); else the
 // first statement with that SQL.
 async function servedRequest(sql, page, kind, at) {
@@ -2458,6 +2520,9 @@ async function boot() {
   if (params.get("embed") === "1" || params.has("embed") || served) {
     document.body.classList.add("embed");
   }
+  // #195: Ask, only when the server says it is on for this dashboard and
+  // this viewer (window.__served.ask); the module isn't loaded otherwise.
+  if (servedMode && served?.ask) mountAskSoon(served);
   // An embed link was exchanged for this page's session: drop the link from
   // the address (history, copies of the URL). A reload needs a fresh link.
   if (served?.session && params.has("embed")) {
