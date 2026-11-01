@@ -194,6 +194,9 @@ jobs:
       - name: Durability snapshots and restore end to end (#775)
         run: duckext/scripts/test-durability.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      - name: Ask end to end against a fake model (#195 — canaries, refusals, log, start checks)
+        run: duckext/scripts/test-ask.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       - name: Submit live e2e (auth, rate limits, credential locks)
         run: duckext/scripts/test-submit-live.sh "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 

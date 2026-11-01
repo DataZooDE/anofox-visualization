@@ -569,6 +569,12 @@ impl Auth {
         self.audit = Some(log);
     }
 
+    /// Write an event of the server's own (e.g. a viewer's first use of
+    /// Ask in a session, #195) to the audit log, when there is one.
+    pub fn audit_event(&self, e: Event) {
+        self.audit(e);
+    }
+
     fn audit(&self, e: Event) {
         if let Some(a) = &self.audit {
             a.write(&e);

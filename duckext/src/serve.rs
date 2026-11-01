@@ -45,6 +45,7 @@ use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::dashboard;
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
 use anofox_visualization::host::app_brand::{self, AppBrand};
+use anofox_visualization::host::ask::{self as askm, AskConfig};
 use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::ingest::{self, IngestOptions};
@@ -1280,6 +1281,9 @@ pub struct LockedOptions {
     /// `ingest` (#769): `POST /api/data/<table>` for API keys with an
     /// `ingest:<table>` scope.
     pub ingest: Option<IngestOptions>,
+    /// `ask` (#195): viewers ask questions about an `-- @ask on`
+    /// dashboard, answered by the model on the server (`POST /api/ask`).
+    pub ask: Option<AskConfig>,
     /// `preview` (#770): temporary dashboards from API keys with the
     /// `preview` scope (`POST /api/dashboards`).
     pub preview: Option<PreviewOptions>,
@@ -1679,6 +1683,7 @@ impl Default for LockedOptions {
             site_css: None,
             folders: false,
             ingest: None,
+            ask: None,
             preview: None,
             durability: None,
             home: None,
@@ -1935,6 +1940,7 @@ impl LockedOptions {
                         .ok_or("options.folders must be true or false")?;
                 }
                 "ingest" => o.ingest = Some(IngestOptions::parse(val)?),
+                "ask" => o.ask = Some(AskConfig::parse(val).map_err(|e| format!("options.{e}"))?),
                 "preview" => o.preview = Some(PreviewOptions::parse(val)?),
                 "durability" => o.durability = Some(DurabilityOptions::parse(val)?),
                 "css_file" => {
@@ -2926,6 +2932,24 @@ struct Locked {
     alert_stats: Mutex<BTreeMap<String, TaskStat>>,
     /// #768 R2: per alert, what it last sent (`notify.state` on disk).
     alert_states: Mutex<BTreeMap<String, notify::AlertState>>,
+    /// #195: Ask, when `options.ask.enabled`.
+    ask: Option<AskRt>,
+    /// The `Arc` this state lives in: Ask's threads hold it.
+    me: std::sync::OnceLock<std::sync::Weak<Locked>>,
+}
+
+/// Ask's runtime on the locked server (#195, plan-ai-assistant.md §12.4).
+struct AskRt {
+    ask: askm::Ask,
+    /// Ask's share of the query slots: at most `max(1, max_queries / 2)` at
+    /// once (H2), so viewers always have slots.
+    slots: Queries,
+    /// Questions running (each on a thread of its own, at most
+    /// `ask.concurrency`, never on the HTTP workers).
+    threads: std::sync::atomic::AtomicUsize,
+    /// Per viewer session: the running question's cancel flag
+    /// (`DELETE /api/ask`).
+    running: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 /// Live runtime for `options.state` (#517 S2, plan §1/§4): the open
@@ -3953,6 +3977,28 @@ pub fn start_locked(
         None => None,
         Some(po) => Some(Arc::new(PreviewStore::open(po.clone())?)),
     };
+    // #195: Ask needs a login (or an explicit, warned `anonymous`) and its
+    // model key; the start fails otherwise.
+    let ask_rt = match &opts.ask {
+        Some(c) if c.enabled => {
+            let (key, lines) = c.start(opts.auth.is_some())?;
+            for l in &lines {
+                eprintln!("[anofox-serve] {l}");
+            }
+            let up = assist::HttpUpstream::new(&c.base_url, key)?;
+            Some(AskRt {
+                ask: askm::Ask::new(
+                    c.clone(),
+                    Box::new(up),
+                    opts.log.as_ref().map(|l| l.sink.clone()),
+                ),
+                slots: Queries::new((opts.max_queries / 2).max(1)),
+                threads: std::sync::atomic::AtomicUsize::new(0),
+                running: Mutex::new(HashMap::new()),
+            })
+        }
+        _ => None,
+    };
     // #769: the writing replica's ingest database is attached read-write.
     let ingest_rt = match &opts.ingest {
         None => None,
@@ -4017,7 +4063,10 @@ pub fn start_locked(
         report_rate: Mutex::new(notify::Rate::default()),
         alert_stats: Mutex::new(BTreeMap::new()),
         alert_states: Mutex::new(alert_states),
+        ask: ask_rt,
+        me: std::sync::OnceLock::new(),
     });
+    let _ = state.me.set(Arc::downgrade(&state));
     let auth_note = match &state.opts.auth {
         Some(a) => {
             let warn = a.prefetch();
@@ -7216,6 +7265,7 @@ fn handle_locked(st: &Locked, req: Request) {
         // Page views, data requests and refusals; not every static asset.
         // #517 S2, plan §4.6: "/api/submit always logged".
         if path == "/api/panel"
+            || path == "/api/ask"
             || path == "/api/submit"
             || path == "/api/save"
             || path == "/"
@@ -7690,6 +7740,10 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             ident.as_ref().map(|i| i.method),
             info,
         ),
+        (&Method::Post, "/api/ask") => handle_ask(st, req, ident.as_ref(), info),
+        (&Method::Delete, p) if p == "/api/ask" || p.starts_with("/api/ask/") => {
+            cancel_ask(st, req, ident.as_ref())
+        }
         (&Method::Post, "/api/panel") => {
             let body = match read_body(&mut req, st.opts.max_body) {
                 Ok(b) => b,
@@ -8344,6 +8398,316 @@ fn handle_export(
             send(req, ctype, b, file(ext))
         }
         Err((code, e)) => reply(req, code, &e),
+    }
+}
+
+// ------------------------------------------------------------------ ask ---
+
+/// The viewer Ask sees (#195): the session a conversation is bound to, the
+/// claims key, the user its limits count against.
+fn ask_viewer(ident: Option<&auth::Identity>) -> askm::Viewer {
+    match ident {
+        Some(i) => askm::Viewer {
+            session: i.ref_id.clone().unwrap_or_else(|| i.claims.key()),
+            claims_key: i.claims.key(),
+            user: i.claims.user.clone(),
+            groups: i.claims.groups.clone(),
+            claims: i
+                .claims
+                .attrs
+                .iter()
+                .filter_map(|(k, v)| v.clone().map(|v| (k.clone(), v)))
+                .collect(),
+            api_key: i.method == "api_key",
+            embed: (i.method == "embed").then(|| {
+                i.scope
+                    .dashboards
+                    .as_ref()
+                    .and_then(|d| d.first().cloned())
+                    .unwrap_or_default()
+            }),
+        },
+        // `ask.anonymous` (warned at start): one viewer for everyone.
+        None => askm::Viewer {
+            session: "anonymous".into(),
+            claims_key: "anonymous".into(),
+            user: "anonymous".into(),
+            ..Default::default()
+        },
+    }
+}
+
+/// Ask's panel path: `locked_panel` with the asking viewer's claims and
+/// scope (the tool *is* `/api/panel`), within Ask's slot share and the
+/// question's deadline (D2, #746).
+struct AskRunner<'a> {
+    st: &'a Locked,
+    claims: Option<Claims>,
+    scope: Option<Scope>,
+    method: Option<&'static str>,
+    slots: &'a Queries,
+}
+
+impl askm::PanelRunner for AskRunner<'_> {
+    fn panel(&self, body: &str, deadline: Instant) -> Result<String, (u16, String)> {
+        let Some(_slot) = self.slots.acquire(deadline, || false) else {
+            return Err((503, crate::limits::BUSY.to_string()));
+        };
+        let mut info = LogInfo::default();
+        let mut charge = self.st.inflight.charge().with_deadline(deadline);
+        locked_panel(
+            self.st,
+            body,
+            None,
+            self.claims.as_ref(),
+            self.scope.as_ref(),
+            self.method,
+            &mut info,
+            &mut charge,
+        )
+        .map(|(json, _, _)| json.as_str().to_string())
+        .map_err(|(code, e)| {
+            if e == REQUIRES_MISSING {
+                (code, "not available (an optional input is missing)".into())
+            } else {
+                (code, e)
+            }
+        })
+    }
+
+    /// A tab hidden by an unmet `-- @requires` is refused by the panel path
+    /// itself (no rows, "not available"), so nothing is listed up front.
+    fn hidden(&self) -> Vec<usize> {
+        Vec::new()
+    }
+}
+
+/// One server-sent event, as one chunk of a chunked body (flushed now:
+/// tiny_http keeps the connection, so the body must say where it ends).
+fn sse(w: &mut dyn std::io::Write, event: &str, data: &serde_json::Value) -> std::io::Result<()> {
+    let e = format!("event: {event}\ndata: {data}\n\n");
+    write!(w, "{:x}\r\n{e}\r\n", e.len())?;
+    w.flush()
+}
+
+/// `POST /api/ask` (#195): `{dashboard, conversation?, question, tab?,
+/// vars?, panel?}` — never SQL or a history. Checked here; the question
+/// runs on a thread of its own and its progress and answer stream back as
+/// server-sent events (`progress`, then `answer`). A refusal before the
+/// model is called is a plain JSON error with its status.
+fn handle_ask(
+    st: &Locked,
+    mut req: Request,
+    ident: Option<&auth::Identity>,
+    info: &mut LogInfo,
+) -> u16 {
+    let Some(rt) = &st.ask else {
+        return reply(req, 404, "not found");
+    };
+    if ident.is_none() && !rt.ask.config().anonymous {
+        return reply(req, 401, access::UNAUTHORIZED);
+    }
+    if ident.is_some_and(|i| i.method == "share") {
+        return reply(req, 403, "forbidden: Ask is not on for shared links");
+    }
+    let body = match read_body(&mut req, 16 << 10) {
+        Ok(b) => b,
+        Err((code, e)) => return reply(req, code, &e),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return reply(req, 400, "bad request JSON"),
+    };
+    let Some(o) = v.as_object() else {
+        return reply(req, 400, "request must be a JSON object");
+    };
+    if let Some(k) = o.keys().find(|k| {
+        !matches!(
+            k.as_str(),
+            "dashboard" | "conversation" | "question" | "tab" | "vars" | "panel"
+        )
+    }) {
+        return reply(
+            req,
+            400,
+            &format!("unknown request field '{}'", access::diag(k)),
+        );
+    }
+    let id = o
+        .get("dashboard")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&id) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    info.dashboard = Some(dash.id.clone());
+    let scope = ident.map(|i| i.scope.clone());
+    if !scope.as_ref().is_none_or(|s| s.allows(&dash.id)) {
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    let text = |k: &str| o.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let ask_req = askm::AskRequest {
+        conversation: text("conversation"),
+        question: text("question").unwrap_or_default(),
+        tab: text("tab"),
+        vars: match o.get("vars") {
+            None | Some(serde_json::Value::Null) => serde_json::Map::new(),
+            Some(serde_json::Value::Object(m)) => m.clone(),
+            Some(_) => return reply(req, 400, "'vars' must be an object"),
+        },
+        panel: o.get("panel").and_then(|p| p.as_u64()).map(|p| p as usize),
+    };
+    // Ask's own threads, never more than ask.concurrency (H2).
+    if rt.threads.fetch_add(1, Ordering::SeqCst) >= rt.ask.config().concurrency {
+        rt.threads.fetch_sub(1, Ordering::SeqCst);
+        return reply(
+            req,
+            429,
+            "The assistant is busy right now — try again in a minute.",
+        );
+    }
+    let Some(st) = st.me.get().and_then(|w| w.upgrade()) else {
+        rt.threads.fetch_sub(1, Ordering::SeqCst);
+        return reply(req, 503, "shutting down");
+    };
+    let viewer = ask_viewer(ident);
+    let claims = ident.map(|i| i.claims.clone());
+    let method = ident.map(|i| i.method);
+    let flag = Arc::new(AtomicBool::new(false));
+    rt.running
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(viewer.session.clone(), flag.clone());
+    std::thread::spawn(move || {
+        let rt = st.ask.as_ref().expect("checked before the thread");
+        let gen = st.current.get();
+        let mut w = req.into_writer();
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
+                    Cache-Control: no-store, private\r\nX-Content-Type-Options: nosniff\r\n\
+                    Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        let mut started = false;
+        let result = match gen.snap.dashes.find(&id) {
+            None => Err(askm::AskError {
+                status: 404,
+                message: "no such dashboard".into(),
+            }),
+            Some(dash) => {
+                let runner = AskRunner {
+                    st: &st,
+                    claims: claims.clone(),
+                    scope,
+                    method,
+                    slots: &rt.slots,
+                };
+                let d = askm::Dash {
+                    id: &dash.id,
+                    script: &dash.sql,
+                    epoch: gen.epoch,
+                };
+                let flag2 = flag.clone();
+                let mut progress = |p: askm::Progress| {
+                    let data = match p {
+                        askm::Progress::Thinking { turn } => {
+                            serde_json::json!({"phase": "thinking", "turn": turn})
+                        }
+                        askm::Progress::Reading { panel } => {
+                            serde_json::json!({"phase": "reading", "panel": panel})
+                        }
+                    };
+                    let ok = (started || w.write_all(head.as_bytes()).is_ok())
+                        && sse(&mut *w, "progress", &data).is_ok();
+                    started = true;
+                    // The viewer went away: stop at the next step.
+                    if !ok {
+                        flag2.store(true, Ordering::SeqCst);
+                    }
+                };
+                rt.ask
+                    .ask(&viewer, &d, ask_req, &runner, &mut progress, &|| {
+                        flag.load(Ordering::SeqCst)
+                    })
+            }
+        };
+        match result {
+            Ok(a) => {
+                if a.first_in_session {
+                    if let Some(auth) = &st.opts.auth {
+                        auth.audit_event(auth::audit::Event {
+                            event: "ask",
+                            outcome: "ok",
+                            method,
+                            user: Some(&viewer.user),
+                            dashboard: Some(&id),
+                            path: Some("/api/ask"),
+                            ..Default::default()
+                        });
+                    }
+                }
+                if !started {
+                    let _ = w.write_all(head.as_bytes());
+                }
+                let _ = sse(&mut *w, "answer", &a.to_json());
+                let _ = w.write_all(b"0\r\n\r\n").and_then(|_| w.flush());
+            }
+            Err(e) if started => {
+                let _ = sse(
+                    &mut *w,
+                    "error",
+                    &serde_json::json!({"status": e.status, "error": e.message}),
+                );
+                let _ = w.write_all(b"0\r\n\r\n").and_then(|_| w.flush());
+            }
+            Err(e) => {
+                let body = serde_json::json!({"error": e.message}).to_string();
+                let _ = write!(
+                    w,
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nCache-Control: no-store, private\r\n\
+                     X-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    e.status,
+                    if e.status == 429 { "Too Many Requests" } else { "Error" },
+                    body.len()
+                );
+                let _ = w.flush();
+            }
+        }
+        let mut running = rt.running.lock().unwrap_or_else(|e| e.into_inner());
+        if running
+            .get(&viewer.session)
+            .is_some_and(|f| Arc::ptr_eq(f, &flag))
+        {
+            running.remove(&viewer.session);
+        }
+        drop(running);
+        rt.threads.fetch_sub(1, Ordering::SeqCst);
+    });
+    200
+}
+
+/// `DELETE /api/ask[/<conversation>]` (#195): cancel this viewer's running
+/// question (it stops before its next model call or panel read).
+fn cancel_ask(st: &Locked, req: Request, ident: Option<&auth::Identity>) -> u16 {
+    let Some(rt) = &st.ask else {
+        return reply(req, 404, "not found");
+    };
+    if ident.is_none() && !rt.ask.config().anonymous {
+        return reply(req, 401, access::UNAUTHORIZED);
+    }
+    let viewer = ask_viewer(ident);
+    let flag = rt
+        .running
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&viewer.session)
+        .cloned();
+    match flag {
+        Some(f) => {
+            f.store(true, Ordering::SeqCst);
+            respond(req, 204, "text/plain", Vec::new());
+            204
+        }
+        None => reply(req, 404, "no question running"),
     }
 }
 
@@ -10509,9 +10873,11 @@ fn run_panel(
 ) -> Result<String, (u16, String)> {
     let dash_id = dash.id.as_str();
     let cancelled = || (SUPERSEDED.0, SUPERSEDED.1.to_string());
+    // `timeout_ms`, or an Ask question's nearer deadline (D2, #746).
+    let timeout = charge.timeout(st.opts.timeout);
     let Some(_slot) = st
         .queries
-        .acquire(Instant::now() + st.opts.timeout, || abort.abandoned())
+        .acquire(Instant::now() + timeout, || abort.abandoned())
     else {
         return Err(if abort.abandoned() {
             cancelled()
@@ -10544,7 +10910,7 @@ fn run_panel(
     let Some(registered) = abort.register(move || intr.interrupt()) else {
         return Err(cancelled());
     };
-    let (out, fired) = conn.with_deadline_fired(st.opts.timeout, |c| {
+    let (out, fired) = conn.with_deadline_fired(timeout, |c| {
         if reused {
             // Back to what a fresh connection would hold: the previous
             // request's variables this one doesn't set are reset, this
@@ -10576,7 +10942,7 @@ fn run_panel(
             }
             return run_panel_query(c, st, panel_sql, r, &mut grow);
         }
-        let until = Instant::now() + st.opts.timeout;
+        let until = Instant::now() + timeout;
         c.exec(&gen.snap.enter)?;
         for (_, set) in &sets {
             c.exec(set)?;

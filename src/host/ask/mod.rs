@@ -840,8 +840,7 @@ impl Ask {
                     .map_err(|e| short_err(&conv.masker, &e))?;
                 if !opts.iter().any(|o| o == &value) {
                     return Err(format!(
-                        "'{}' is not one of the options of '{}'.",
-                        conv.masker.mask_text(&value),
+                        "That value is not one of the options of '{}'.",
                         spec.var
                     ));
                 }

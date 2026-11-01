@@ -57,6 +57,7 @@ impl Inflight {
         Charge {
             pool: self,
             held: 0,
+            deadline: None,
         }
     }
 
@@ -77,9 +78,30 @@ impl Inflight {
 pub struct Charge<'a> {
     pool: &'a Inflight,
     held: usize,
+    /// #195 (D2, #746): a caller's own deadline (an Ask question's): the
+    /// request's slot wait, query time and `-- @materialize` build end by
+    /// it as well as by `timeout_ms`.
+    deadline: Option<std::time::Instant>,
 }
 
 impl Charge<'_> {
+    /// End this request by `deadline` too (Ask's `get_panel`).
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// The time a request may take: `base` (`timeout_ms`), or less when the
+    /// caller's deadline is nearer (at least 1 ms, so it fails as a timeout).
+    pub fn timeout(&self, base: std::time::Duration) -> std::time::Duration {
+        match self.deadline {
+            Some(d) => base
+                .min(d.saturating_duration_since(std::time::Instant::now()))
+                .max(std::time::Duration::from_millis(1)),
+            None => base,
+        }
+    }
+
     /// Hold `bytes` in total from now on: call it *before* allocating them.
     /// `Err(BUSY)` (and nothing held beyond what was) if that would take the
     /// server over its cap.
