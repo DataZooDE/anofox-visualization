@@ -383,6 +383,30 @@ try {
     check(cdnDuck.length === 0, `DuckDB-Wasm from the site itself, not jsdelivr (#832)${cdnDuck.length ? ": " + cdnDuck.slice(0, 3).join(", ") : ""}`);
     check(allRequests.some((u) => u.endsWith("/vendor/duckdb-wasm/duckdb-eh.wasm")), "the site's own duckdb-eh.wasm was loaded (#832)");
   } else console.log("note: no web/vendor/duckdb-wasm in --app — DuckDB-Wasm from jsdelivr (#832 check skipped)");
+
+  // ── 8. #833: a budget, every dashboard in one page (in-place switches) —
+  // no data file fetched twice, and each switch done within SWITCH_MS ──
+  {
+    const SWITCH_MS = 15000;
+    const pb = await openPage(BASE);
+    await pb.waitForSelector(".dash .panel", { timeout: 60000 });
+    const reqs = [];
+    pb.on("request", (r) => reqs.push(r.url()));
+    for (const id of ["by-product", "trend", "overview", "by-product"]) {
+      const t0 = Date.now();
+      await pb.click(`.served-nav a[data-nav-id="${id}"]`);
+      // siteGo marks the link active once the dashboard's run is done
+      await pb
+        .waitForFunction((want) => !!document.querySelector(`.served-nav a[data-nav-id="${want}"].active`) && !!document.querySelector(".dash .panel"), id, { timeout: SWITCH_MS })
+        .catch(() => {});
+      const ms = Date.now() - t0;
+      check(ms < SWITCH_MS, `budget: switch to ${id} in ${ms} ms (< ${SWITCH_MS})`);
+    }
+    const data = reqs.filter((u) => /\/data\/[^/]+\.(parquet|csv|json)$/.test(u));
+    const twice = data.filter((u, i) => data.indexOf(u) !== i);
+    check(twice.length === 0, `budget: no data file fetched twice across four switches${twice.length ? ": " + [...new Set(twice)].join(", ") : ""}`);
+    await pb.context().close();
+  }
 } finally {
   await browser.close();
   server.close();
