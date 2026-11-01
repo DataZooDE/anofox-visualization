@@ -114,7 +114,7 @@ static ASSIST_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist-key-file FILE] [--no-assist]   (the builder assistant's /assist proxy: on when ANTHROPIC_API_KEY\n                                       or a 0600 key file holds a key; the key never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--scopes S,…] [--expires-days N] [--note TEXT] [--audit PATH]\n             (S: ingest:<table> | preview | embed | admin; none = read dashboards only)\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist] [--assist-key-file FILE]   (the builder assistant's /assist proxy: opt-in, off unless --assist;\n                                       its key from ANTHROPIC_API_KEY or a 0600 key file; it never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--scopes S,…] [--expires-days N] [--note TEXT] [--audit PATH]\n             (S: ingest:<table> | preview | embed | admin; none = read dashboards only)\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -153,6 +153,8 @@ fn parse_args() -> Opts {
         assist: assist::AssistOptions::default(),
     };
     let mut assist_given = false;
+    // --assist / --no-assist: the assistant is opt-in.
+    let mut assist_switch = false;
     let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut query_timeout_given = false;
     let mut args = std::env::args().skip(1);
@@ -279,8 +281,14 @@ fn parse_args() -> Opts {
                         .unwrap_or_else(|| usage("--log-vars needs none|names|values")),
                 )
             }
+            "--assist" => {
+                o.assist.on = true;
+                assist_switch = true;
+                assist_given = true;
+            }
             "--no-assist" => {
-                o.assist.off = true;
+                o.assist.on = false;
+                assist_switch = true;
                 assist_given = true;
             }
             "--assist-log-content" => {
@@ -351,6 +359,9 @@ fn parse_args() -> Opts {
     // names authoring's otherwise-nonexistent root directly.
     if o.dashboards_dir.is_some() && assist_given {
         usage("--assist-* and --no-assist apply to authoring mode only (serve <db>): a locked server has no /assist");
+    }
+    if assist_given && !assist_switch {
+        usage("--assist-* settings need --assist: the builder assistant is opt-in (off unless --assist)");
     }
     if o.dashboards_dir.is_some() && o.assets_dir.is_some() {
         usage("--assets applies to authoring mode only (serve <db>); --dashboards already serves <dir>/assets");
@@ -793,22 +804,18 @@ fn authoring_mode(o: &Opts) {
         .map(|p: &PathBuf| format!("\n  assets: {}", p.display()))
         .unwrap_or_default();
     let a = &o.assist;
-    let (proxy, assist_note) = match assist::build(
-        a.off,
-        a.cfg.clone(),
-        a.key_file.as_deref(),
-        a.log.as_deref(),
-    ) {
-        Ok(Some((p, note))) => {
-            let _ = ASSIST_PAGE.set(p.page_script());
-            (Some(p), format!("\n  {note}"))
-        }
-        Ok(None) => (None, String::new()),
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(2)
-        }
-    };
+    let (proxy, assist_note) =
+        match assist::build(a.on, a.cfg.clone(), a.key_file.as_deref(), a.log.as_deref()) {
+            Ok(Some((p, note))) => {
+                let _ = ASSIST_PAGE.set(p.page_script());
+                (Some(p), format!("\n  {note}"))
+            }
+            Ok(None) => (None, String::new()),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(2)
+            }
+        };
     say(&format!(
         "anofox-visualization serving {url}\n  (authoring — client SQL; loopback only; the URL carries this run's token)\n  database: {db}{assets_note}{assist_note}\n  (Ctrl-C to stop)"
     ));

@@ -66,7 +66,7 @@ const proc = spawn(duckdb, ["-unsigned", "-batch", ":memory:"], { stdio: ["pipe"
 let log = "";
 proc.stdout.on("data", (d) => (log += d));
 proc.stderr.on("data", (d) => (log += d));
-const opts = { assist_base_url: apiBase };
+const opts = { assist: true, assist_base_url: apiBase };
 proc.stdin.write(
   `LOAD ${sqlStr(ext)};\nCREATE TABLE sales AS SELECT i AS id, ['EU','US','APAC'][1 + i % 3] AS region, (i * 1.5)::DOUBLE AS amount FROM range(0, 600) t(i);\n` +
     // #742: a view the (empty) editor doesn't name: listed, never copied, never run.

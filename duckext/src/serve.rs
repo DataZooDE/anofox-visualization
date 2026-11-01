@@ -467,7 +467,9 @@ fn parse_assets_option(
         .as_object_mut()
         .ok_or_else(|| "options must be a JSON object".to_string())?;
     // #740: the `assist` / `assist_*` keys, same as `assets` below.
-    let asked = obj.keys().any(|k| k.starts_with("assist_"));
+    let asked = obj
+        .keys()
+        .any(|k| k == "assist" || k.starts_with("assist_"));
     let assist = assist::AssistOptions::take(obj)?;
     let assets = match obj.remove("assets") {
         None => None,
@@ -557,19 +559,27 @@ fn inside_allowed_directories(conn: &Conn, what: &str, path: &Path) -> Result<()
 /// `assist_*` keys and the key (`ANTHROPIC_API_KEY` or
 /// `options.assist_key_file`). The proxy calls out of the process and its
 /// key file and log are plain `std::fs`, all past DuckDB's own lockdown, so
-/// on a session with `enable_external_access = false` it stays off: an
-/// error when an `assist_*` option asked for it, a note otherwise (a key in
-/// the environment alone). The key file and the log must be inside
-/// `allowed_directories` when that is set.
+/// on a session with `enable_external_access = false` it can't run: asked
+/// for there, it is an error. It is opt-in: off unless `options.assist` is
+/// true, whatever key the environment holds. The key file and the log must
+/// be inside `allowed_directories` when that is set.
 fn start_assist(
     conn: &Conn,
     a: assist::AssistOptions,
     asked: bool,
 ) -> Result<(Option<assist::Proxy>, String), String> {
+    // Opt-in: off unless options.assist is true, whatever key the
+    // environment holds.
+    if !a.on {
+        return Ok((None, String::new()));
+    }
     let has_key =
         a.key_file.is_some() || std::env::var(assist::KEY_ENV).is_ok_and(|k| !k.trim().is_empty());
-    if a.off || !has_key {
-        return Ok((None, String::new()));
+    if !has_key {
+        return Err(format!(
+            "options.assist is true but there is no key: set {} or options.assist_key_file",
+            assist::KEY_ENV
+        ));
     }
     if !external_access_on(conn) {
         if asked {
@@ -606,7 +616,7 @@ fn start_assist(
             .map_err(|e| format!("options.assist_log {l}: {e}"))?;
         inside_allowed_directories(conn, "options.assist_log", &real)?;
     }
-    match assist::build(false, a.cfg, a.key_file.as_deref(), a.log.as_deref())? {
+    match assist::build(true, a.cfg, a.key_file.as_deref(), a.log.as_deref())? {
         Some((p, note)) => Ok((Some(p), format!("; {note}"))),
         None => Ok((None, String::new())),
     }
