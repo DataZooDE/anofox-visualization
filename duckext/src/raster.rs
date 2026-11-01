@@ -1,7 +1,9 @@
 //! PNG and PDF exports (#764): the server's own dashboard SVG, rasterised
-//! (resvg) or turned into a PDF (svg2pdf), with one bundled font — Hanken
-//! Grotesk, the default theme's (`duckext/fonts/`, SIL Open Font License) —
-//! so the output is the same on every server, fonts installed or not.
+//! (resvg) or turned into a PDF (svg2pdf), with bundled fonts — Hanken
+//! Grotesk, the default theme's (`duckext/fonts/`, SIL Open Font License),
+//! and for the glyphs it lacks (Greek, arrows, math, ▲ ▼ ✓ ✗ ⚠ …) a subset
+//! of DejaVu Sans 2.37 (`DejaVu-LICENSE.txt`, #814) — so the output is the
+//! same on every server, fonts installed or not.
 //! Nothing is loaded from the file system or the network: an image in the
 //! SVG is a `data:` URI already (relative sources were inlined when the SVG
 //! was drawn), anything else is dropped.
@@ -20,6 +22,10 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
         let mut db = usvg::fontdb::Database::new();
         db.load_font_data(include_bytes!("../fonts/HankenGrotesk-Regular.ttf").to_vec());
         db.load_font_data(include_bytes!("../fonts/HankenGrotesk-SemiBold.ttf").to_vec());
+        // Only a fallback: usvg picks a face that has the glyph. Unicode blocks
+        // 0370-03FF, 1D00-1DBF, 2070-209F, 2100-214F, 2190-23FF, 2460-24FF,
+        // 25A0-27BF, 27C0-27EF (pyftsubset --no-hinting).
+        db.load_font_data(include_bytes!("../fonts/DejaVuSans-Symbols.ttf").to_vec());
         for set in [
             usvg::fontdb::Database::set_serif_family,
             usvg::fontdb::Database::set_sans_serif_family,
@@ -35,6 +41,9 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
 }
 
 fn tree(svg: &str) -> Result<usvg::Tree, String> {
+    // The ⓘ after an `::INFO` title marks a hover definition, which a static
+    // image can't show (and no bundled font has the glyph).
+    let svg = svg.replace('ⓘ', "");
     let opt = usvg::Options {
         font_family: FAMILY.to_string(),
         fontdb: fonts(),
@@ -45,7 +54,7 @@ fn tree(svg: &str) -> Result<usvg::Tree, String> {
         },
         ..Default::default()
     };
-    usvg::Tree::from_str(svg, &opt).map_err(|e| format!("could not read the dashboard SVG: {e}"))
+    usvg::Tree::from_str(&svg, &opt).map_err(|e| format!("could not read the dashboard SVG: {e}"))
 }
 
 /// The dashboard as a PNG, `scale` device pixels per SVG pixel.
@@ -109,6 +118,28 @@ mod tests {
             s.contains("HankenGrotesk") || s.contains("Hanken"),
             "font not embedded"
         );
+    }
+
+    /// `text` drawn alone, as RGBA pixels.
+    fn drawn(text: &str) -> Vec<u8> {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40"><rect width="200" height="40" fill="#fff"/><text x="4" y="30" font-size="24">{text}</text></svg>"##
+        );
+        let b = png(&svg, 1.0).unwrap();
+        tiny_skia::Pixmap::decode_png(&b).unwrap().data().to_vec()
+    }
+
+    #[test]
+    fn symbols_hanken_lacks_come_from_the_fallback() {
+        // #814: without a face that has them, each draws the same .notdef box.
+        let notdef = drawn("\u{E000}");
+        for ch in ["λ", "σ", "▲", "▼", "✓", "✗", "⚠", "→", "≤", "ₜ"] {
+            let d = drawn(ch);
+            assert_ne!(d, notdef, "{ch} drew as a missing glyph");
+            assert!(d.chunks(4).any(|p| p[0] < 128), "{ch} drew nothing");
+        }
+        // The info mark is left out, not drawn as a box.
+        assert_eq!(drawn("A ⓘ"), drawn("A "));
     }
 
     #[test]
