@@ -204,6 +204,10 @@ SELECT region AS "Region" ::XAXIS, sum(v) AS "Revenue" ::BARCHART FROM ex_t
 WHERE region = getvariable('region') GROUP BY 1 ORDER BY 1;
 -- @name evil
 SELECT '=cmd()' AS "Note" ::TABLE;
+-- @name styled
+SELECT region AS "Region" ::XAXIS, sum(v) AS "Revenue" ::BARCHART_STACKED, region ::CATEGORY,
+       'EU:bad; good'::COLORS, 1::FLIP, '€'::YFORMAT, 'Styled'::TITLE, 'why'::INFO,
+       ('?v.region=' || region)::LINK FROM ex_t WHERE region = getvariable('region') GROUP BY region;
 SELECT 'Details'::TAB;
 SELECT 'details-marker-text' ::MARKDOWN;
 SQL
@@ -228,6 +232,12 @@ grep -qi "^content-type: text/csv" "$T/xh" || fail "export csv content type"
 [ "$(tr -d '\r' < "$T/x")" = "$(printf '"Region","Revenue"\n"EU","15"')" ] || fail "export csv body (the input's default applies): $(cat "$T/x")"
 [ "$(xget "$X/ex/totals.json?v.region=US")" = 200 ] && [ "$(cat "$T/x")" = '[{"Region":"US","Revenue":7.0}]' ] \
   || fail "export json with v.region=US: $(cat "$T/x")"
+# #817: the data only — chart options and the panel's text are left out,
+# an unnamed column is named after its role.
+[ "$(xget "$X/ex/styled.json")" = 200 ] && [ "$(cat "$T/x")" = '[{"Region":"EU","Revenue":15.0,"category":"EU","link":"?v.region=EU"}]' ] \
+  || fail "export json: data columns only: $(cat "$T/x")"
+[ "$(xget "$X/ex/styled.csv")" = 200 ] && [ "$(head -1 "$T/x" | tr -d '\r')" = '"Region","Revenue","category","link"' ] \
+  || fail "export csv: data columns only: $(cat "$T/x")"
 [ "$(xget "$X/ex/evil.csv")" = 200 ] && grep -qF "\"'=cmd()\"" "$T/x" || fail "export csv: a formula cell is neutralised: $(cat "$T/x")"
 [ "$(xget "$X/ex/nope.csv")" = 404 ] || fail "export: an unknown panel name should 404"
 [ "$(xget "$X/ex.csv")" = 404 ] || fail "export: a dashboard is not a csv"

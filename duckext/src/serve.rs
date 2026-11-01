@@ -7998,23 +7998,53 @@ fn export_panel(
         Ok(c) => c,
         Err(e) => return Err(data.fatal.take().unwrap_or((400, e))),
     };
-    // Column headers: the query's own names where it has them.
-    let headers: Vec<String> = cols
-        .iter()
-        .map(|(k, _)| {
-            k.strip_prefix('c')
-                .and_then(|n| n.parse::<usize>().ok())
-                .and_then(|n| {
-                    plan[i]
-                        .names
-                        .iter()
-                        .find(|(j, _)| *j == n)
-                        .map(|(_, s)| s.clone())
-                })
-                .unwrap_or_else(|| k.clone())
-        })
-        .collect();
-    let n = cols.first().map_or(0, |(_, v)| v.len());
+    // #817: the data only. A column that is only a chart option (::COLORS,
+    // ::FLIP, ::YFORMAT, ::HEIGHT, …) or the panel's text (::TITLE, ::INFO,
+    // …) is left out. Headers: the query's own names where it has them, else
+    // the role (`category`, `link`), else the position.
+    use anofox_visualization::Role as R;
+    let roles_of = |n: usize| {
+        plan[i]
+            .roles
+            .iter()
+            .filter(move |(j, _)| *j == n)
+            .map(|(_, r)| *r)
+    };
+    let option = |r: R| {
+        matches!(r.category(), "modifier" | "layout")
+            || matches!(r, R::Title | R::Subtitle | R::Info | R::Alt | R::Class)
+    };
+    let mut headers: Vec<String> = Vec::new();
+    let mut kept = Vec::new();
+    for (k, v) in &cols {
+        let n = k.strip_prefix('c').and_then(|n| n.parse::<usize>().ok());
+        if n.is_some_and(|n| roles_of(n).next().is_some() && roles_of(n).all(option)) {
+            continue;
+        }
+        let named = n.and_then(|n| {
+            plan[i]
+                .names
+                .iter()
+                .find(|(j, _)| *j == n)
+                .map(|(_, s)| s.clone())
+        });
+        let base = named
+            .or_else(|| {
+                n.and_then(|n| roles_of(n).next())
+                    .map(|r| r.token().to_ascii_lowercase())
+            })
+            .unwrap_or_else(|| k.clone());
+        let mut h = base.clone();
+        let mut dup = 1;
+        while headers.contains(&h) {
+            dup += 1;
+            h = format!("{base}_{dup}");
+        }
+        headers.push(h);
+        kept.push(v);
+    }
+    let cols = kept;
+    let n = cols.first().map_or(0, |v| v.len());
     let cell = |v: &anofox_visualization::Value| match v {
         anofox_visualization::Value::Na => String::new(),
         v => anofox_visualization::value_text(v),
@@ -8031,14 +8061,14 @@ fn export_panel(
         };
         out.push_str(&row(headers.clone()));
         for r in 0..n {
-            out.push_str(&row(cols.iter().map(|(_, v)| cell(&v[r])).collect()));
+            out.push_str(&row(cols.iter().map(|v| cell(&v[r])).collect()));
         }
         out.into_bytes()
     } else {
         let rows: Vec<serde_json::Value> = (0..n)
             .map(|r| {
                 let mut m = serde_json::Map::new();
-                for (h, (_, v)) in headers.iter().zip(&cols) {
+                for (h, v) in headers.iter().zip(&cols) {
                     m.insert(h.clone(), anofox_visualization::value_json(&v[r]));
                 }
                 serde_json::Value::Object(m)
