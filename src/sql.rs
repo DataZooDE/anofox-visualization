@@ -38,6 +38,7 @@ pub mod lex;
 pub mod lint_allow;
 pub mod materialize;
 pub mod name;
+pub mod question;
 pub mod requires;
 pub mod shared;
 pub mod show_if;

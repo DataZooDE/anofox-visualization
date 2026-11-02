@@ -54,6 +54,10 @@ const USAGE: &str = "usage:\n  \
                                              titles and file names the servers skip\n  \
                [--db f --policy policy.json]  …and what an access policy refuses / hides\n  \
                [--data <dir>]                 getvariable('anofox_data') = dir, as a locked server\n  \
+               [--agent]                      …and what publishing as an agent needs (#862)\n  \
+     dashboard --publish <file.sql> --out d  the agent files of its -- @question lines: agent.json,\n  \
+                                             mcp-tools.json, capabilities.md, questions.jsonl\n  \
+                                             (from the SQL text alone; no query runs)\n  \
      dashboard --site <folder> <out-dir>     publish a served folder as a static DuckDB-Wasm\n  \
                [--data <dir|url>]             site (#417) — a GitHub Pages workflow runs this\n  \
                [--options locked.json]        after a scheduled data refresh. --options accepts\n  \
@@ -104,6 +108,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
+        Some("--publish") => cmd_publish(&args[1..]),
         Some("--site") => cmd_site(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
         Some("state") => cmd_state(&args[1..]),
@@ -124,6 +129,60 @@ fn main() {
             std::process::exit(2);
         }
         Some(_) => cmd_render(&args),
+    }
+}
+
+/// `dashboard --publish <file.sql> --out <dir>` (#862): the files a
+/// dashboard published as an agent exposes (`agent.json`, `mcp-tools.json`,
+/// `capabilities.md`, `questions.jsonl`), from its SQL text alone — no query
+/// runs. Refused (exit 1) while `--check --agent`'s static checks fail.
+fn cmd_publish(args: &[String]) {
+    let mut path: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--out" => out = it.next().cloned(),
+            _ if !a.starts_with("--") => path = Some(a.clone()),
+            _ => {}
+        }
+    }
+    let (Some(path), Some(out)) = (path, out) else {
+        eprintln!("usage: dashboard --publish <file.sql> --out <dir>");
+        std::process::exit(2);
+    };
+    let script = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        eprintln!("read {path}: {e}");
+        std::process::exit(2);
+    });
+    let p = Path::new(&path);
+    let id = sv::dashboard_id(p, &sv::parse_dashboard_meta("", &script)).unwrap_or_else(|| {
+        p.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    match anofox_visualization::agent::publish(&id, &script) {
+        Err(errors) => {
+            for d in &errors {
+                eprintln!("error: [stmt {}] {} — {}", d.stmt, d.code, d.message);
+            }
+            eprintln!("\n{} error(s): not published", errors.len());
+            std::process::exit(1);
+        }
+        Ok(files) => {
+            std::fs::create_dir_all(&out).unwrap_or_else(|e| {
+                eprintln!("create {out}: {e}");
+                std::process::exit(2);
+            });
+            for f in files {
+                let dest = Path::new(&out).join(f.name);
+                std::fs::write(&dest, &f.contents).unwrap_or_else(|e| {
+                    eprintln!("write {}: {e}", dest.display());
+                    std::process::exit(2);
+                });
+                println!("wrote {}", dest.display());
+            }
+        }
     }
 }
 
@@ -824,9 +883,12 @@ fn cmd_check(args: &[String]) {
     // file, for submit/not-enabled and state/not-enabled — whether this
     // dashboard's id is actually named in that file's options.state.
     let mut options: Option<String> = None;
+    // --agent (#862): also what publishing as an agent needs (agent/*).
+    let mut agent = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--agent" => agent = true,
             "--db" => db = it.next().cloned(),
             "--data" => data = it.next().cloned(),
             "--policy" => policy = it.next().cloned(),
@@ -841,7 +903,8 @@ fn cmd_check(args: &[String]) {
     let Some(path) = path else {
         eprintln!(
             "usage: dashboard --check <file.sql | folder> [--json] [--db prebuilt.duckdb] \
-             [--policy policy.json] [--data dir] [--options locked.json] [--strict] [--no-design]"
+             [--policy policy.json] [--data dir] [--options locked.json] [--strict] [--no-design] \
+             [--agent]"
         );
         std::process::exit(2);
     };
@@ -927,6 +990,9 @@ fn cmd_check(args: &[String]) {
         );
         if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
             diags.extend(policy_diags(script, db, p));
+        }
+        if agent {
+            diags.extend(lint::agent_diags(script));
         }
         diags
     };
