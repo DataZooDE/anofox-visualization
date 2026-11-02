@@ -67,6 +67,30 @@ pub(crate) fn declared_without_steps(panels: &[Panel]) -> Vec<String> {
     out.iter().map(|s| s.to_ascii_lowercase()).collect()
 }
 
+/// Every input's variable name (lower case) with its input kind: the
+/// variables a `-- @question` slot may fill (#862).
+pub fn input_vars(panels: &[Panel]) -> Vec<(String, InputKind)> {
+    panels
+        .iter()
+        .filter_map(|p| crate::inputs::input_kind(&p.roles).map(|k| (p, k)))
+        .flat_map(|(p, k)| {
+            input_names(p, k)
+                .into_iter()
+                .map(move |n| (n.to_ascii_lowercase(), k))
+        })
+        .collect()
+}
+
+/// The labels of the dashboard's `::TAB` / `::SUBTAB` statements (a literal
+/// value only), in order.
+pub fn tab_labels(panels: &[Panel]) -> Vec<String> {
+    panels
+        .iter()
+        .filter(|p| p.tab_kind().is_some())
+        .filter_map(literal_value)
+        .collect()
+}
+
 fn has_role(p: &Panel, want: Role) -> bool {
     p.roles.iter().any(|(_, r)| *r == want)
 }

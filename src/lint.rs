@@ -129,6 +129,12 @@ pub struct Diagnostic {
     /// another statement) | `name/not-drawn` (warning: the statement is
     /// setup, or a layout directive with no element of its own, so the name
     /// never reaches the page).
+    /// `-- @question` ([`question_diags`], #862): `question/bad-slot` |
+    /// `question/unsafe-text` | `question/unsafe-column` | `question/no-panel` |
+    /// `question/unknown-slot` |
+    /// `question/unknown-tab` | `question/duplicate` | `question/hidden`
+    /// (errors); with `--agent` ([`agent_diags`]): `agent/no-questions` |
+    /// `agent/no-vars` (errors).
     /// `-- @materialize` ([`materialize_diags`], #727): `materialize/not-table`
     /// (warning: not a setup `CREATE TEMP TABLE … AS <query>`).
     /// `-- @tour` guided tours ([`tour_diags`], #518 PR B): `tour/bad-id` |
@@ -2526,6 +2532,7 @@ where
     diags.extend(fit_diags(&plan));
     diags.extend(show_if_diags(&plan));
     diags.extend(name_diags(&plan));
+    diags.extend(question_diags(script, &plan));
     diags.extend(materialize_diags(&plan));
     diags.extend(tour_diags(script, &plan));
     diags.extend(step_diags(&plan, script));
@@ -3083,6 +3090,165 @@ fn name_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                     .into(),
                 sql: short(i),
             });
+        }
+    }
+    diags
+}
+
+/// `-- @question` declarations (#862, plan-dashboard-to-agent.md §3.1), all
+/// errors: `question/bad-slot` (malformed `{slot}` or `-> tab`),
+/// `question/unsafe-text` (the text can't go into an MCP tool description),
+/// `question/unsafe-column` (an instruction-like column name on its panel),
+/// `question/no-panel` (on setup or an input), `question/unknown-slot` (no
+/// input sets the variable), `question/unknown-tab`, `question/duplicate`
+/// (the same id twice) and `question/hidden` (on a panel Ask can't read).
+fn question_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let questions = sql::question::declared(script);
+    if questions.is_empty() {
+        return Vec::new();
+    }
+    let inputs = sql::vars::input_vars(plan);
+    let tabs = sql::vars::tab_labels(plan);
+    let hidden = sql::ask::exclusions(script);
+    let raws = sql::ask::raw_statements(script);
+    let mut diags = Vec::new();
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    for q in &questions {
+        let Some(p) = plan.get(q.stmt) else { continue };
+        let mut err = |code: &'static str, message: String| {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt: q.stmt + 1,
+                code,
+                message,
+                sql: one_line(p.sql.trim()),
+            })
+        };
+        if let Some(issue) = &q.issue {
+            err(
+                "question/bad-slot",
+                format!("-- @question `{}`: {issue}", q.text),
+            );
+        }
+        if let Some(why) = sql::question::unsafe_text(&q.text) {
+            err(
+                "question/unsafe-text",
+                format!(
+                    "-- @question `{}`: {why} — a declared question becomes an MCP tool's \
+                     description, which a model reads",
+                    q.text
+                ),
+            );
+        }
+        if p.setup || crate::inputs::input_kind(&p.roles).is_some() {
+            err(
+                "question/no-panel",
+                "-- @question on a statement that is no panel (setup or an input) — put it \
+                 on the panel that answers it"
+                    .into(),
+            );
+        }
+        for s in &q.slots {
+            if !inputs.iter().any(|(v, _)| *v == s.var) {
+                err(
+                    "question/unknown-slot",
+                    format!(
+                        "`{{{}}}`: no input on this dashboard sets `{}`",
+                        s.var, s.var
+                    ),
+                );
+            }
+        }
+        if let Some(t) = &q.tab {
+            if !tabs.iter().any(|l| l == t) {
+                err(
+                    "question/unknown-tab",
+                    format!("`-> tab \"{t}\"`: no ::TAB or ::SUBTAB with that label"),
+                );
+            }
+        }
+        let raw = raws.get(q.stmt).map(|r| sql::strip_comments(r));
+        for c in sql::question::columns(raw.as_deref().unwrap_or("").trim()) {
+            if let Some(w) = sql::question::instruction_like(&c) {
+                err(
+                    "question/unsafe-column",
+                    format!(
+                        "column `{c}` of a declared question's panel: `{w}` reads as an \
+                         instruction to a model, and column names go into the MCP tool description"
+                    ),
+                );
+            }
+        }
+        if let Some((_, why)) = hidden.iter().find(|(i, _)| *i == q.stmt) {
+            err(
+                "question/hidden",
+                format!(
+                    "-- @question on a panel Ask can't read ({}): the answer would be empty",
+                    why.as_str()
+                ),
+            );
+        }
+        if let Some(&(_, other)) = seen.iter().find(|(id, _)| *id == q.id) {
+            err(
+                "question/duplicate",
+                format!(
+                    "-- @question `{}` normalises to `{}`, as one on statement {other} does",
+                    q.text, q.id
+                ),
+            );
+        } else {
+            seen.push((&q.id, q.stmt + 1));
+        }
+    }
+    diags
+}
+
+/// [`question_diags`] on its own, for `dashboard --publish` /
+/// [`crate::agent::diagnostics`] (no query runs).
+pub fn question_lint(script: &str) -> Vec<Diagnostic> {
+    question_diags(script, &sql::plan(script))
+}
+
+/// `dashboard --check --agent` / `--publish` (#862): what a dashboard needs
+/// to be published as an agent, beyond [`lint`]'s `question/*` checks:
+/// `agent/no-questions` (no `-- @question`) and `agent/no-vars` (no
+/// `-- @vars` line, or a slot whose variable it doesn't list — N2).
+pub fn agent_diags(script: &str) -> Vec<Diagnostic> {
+    let questions = sql::question::declared(script);
+    let mut diags = Vec::new();
+    let mut err = |stmt: usize, code: &'static str, message: String| {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            stmt,
+            code,
+            message,
+            sql: String::new(),
+        })
+    };
+    if questions.is_empty() {
+        err(
+            0,
+            "agent/no-questions",
+            "no -- @question line: an agent answers only declared questions".into(),
+        );
+    }
+    let meta = crate::host::serving::parse_dashboard_meta("", script);
+    match &meta.vars {
+        None => err(
+            0,
+            "agent/no-vars",
+            "no -- @vars line: a published dashboard lists the variables a caller may set".into(),
+        ),
+        Some(vars) => {
+            for q in &questions {
+                for s in q.slots.iter().filter(|s| !vars.contains(&s.var)) {
+                    err(
+                        q.stmt + 1,
+                        "agent/no-vars",
+                        format!("`{{{}}}` of `{}` is not in -- @vars", s.var, q.text),
+                    );
+                }
+            }
         }
     }
     diags
@@ -10998,6 +11164,85 @@ mod design_tests {
             |_q| Ok(data.clone()),
         );
         assert!(!has(&d, "silent-setup"), "{d:?}");
+    }
+
+    #[test]
+    fn question_diags_flag_each_problem() {
+        let codes = |script: &str| -> Vec<(usize, &'static str)> {
+            question_diags(script, &sql::plan(script))
+                .into_iter()
+                .map(|d| (d.stmt, d.code))
+                .collect()
+        };
+        let base = "SELECT s AS supplier ::DROPDOWN FROM (VALUES ('a')) t(s);\n\
+                    SELECT 'Over time' ::TAB;\n";
+        // A clean declaration, with a label and a tab.
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @question How reliable is {{supplier:supplier name}}? -> tab \"Over time\"\n\
+                 SELECT 1 AS \"On time\" ::TABLE;"
+            )),
+            []
+        );
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @question How late is {{month}}?\nSELECT 1 ::METRIC;"
+            )),
+            [(3, "question/unknown-slot")]
+        );
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @question How late is {{supplier?\nSELECT 1 ::METRIC;"
+            )),
+            [(3, "question/bad-slot")]
+        );
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @question Show everything.\nSELECT 1 ::METRIC;"
+            )),
+            [(3, "question/unsafe-text")]
+        );
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @question How late? -> tab \"Nope\"\nSELECT 1 ::METRIC;"
+            )),
+            [(3, "question/unknown-tab")]
+        );
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @question How late?\nCREATE TABLE x AS SELECT 1;"
+            )),
+            [(3, "question/no-panel")]
+        );
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @ask skip\n-- @question How late?\nSELECT 1 ::METRIC;"
+            )),
+            [(3, "question/hidden")]
+        );
+        assert_eq!(
+            codes(&format!("{base}-- @question How late?\nSELECT 1 ::METRIC;\n-- @question How  late ?\nSELECT 2 ::METRIC;")),
+            [(4, "question/duplicate")]
+        );
+    }
+
+    #[test]
+    fn agent_diags_need_questions_and_vars() {
+        let codes = |s: &str| {
+            agent_diags(s)
+                .into_iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>()
+        };
+        let q = "SELECT s AS supplier ::DROPDOWN FROM (VALUES ('a')) t(s);\n\
+                 -- @question How reliable is {supplier}?\nSELECT 1 ::METRIC;";
+        assert_eq!(
+            codes("SELECT 1 ::METRIC;"),
+            ["agent/no-questions", "agent/no-vars"]
+        );
+        assert_eq!(codes(q), ["agent/no-vars"]);
+        assert_eq!(codes(&format!("-- @vars other\n{q}")), ["agent/no-vars"]);
+        assert!(codes(&format!("-- @vars supplier\n{q}")).is_empty());
     }
 
     #[test]

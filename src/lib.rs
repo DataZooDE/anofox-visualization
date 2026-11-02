@@ -22,6 +22,7 @@
 pub use ggplot_rs::prelude::Value;
 use ggplot_rs::prelude::*;
 
+pub mod agent;
 mod boxstats;
 mod chart_frames;
 pub mod contract;
