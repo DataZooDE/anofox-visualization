@@ -4397,7 +4397,7 @@ this section is the panel itself.
 | `transport` | `"browser-key"`: your own key, direct to `api.anthropic.com` (static hosting). `"serve"`: the authoring server's proxy (below), set by the server itself; never on static hosting, and an authoring server uses nothing else. `"openai"` (#843): an OpenAI-compatible endpoint — a local model or a company gateway, see below; static hosting only. |
 | `endpoint` | `"openai"` only: the endpoint's base URL, e.g. `http://localhost:11434/v1` (Ollama). `https://…`, or `http://` to this computer (`localhost`, `127.x`, `[::1]`); no query, fragment or user. |
 | `models` | The two model choices the panel's *Model* select offers ("Standard" / "Try harder"); a malformed id is ignored. With `"openai"`, `models.default` is required (the endpoint's own name for it, e.g. `llama3.1:8b`) and `harder` defaults to it. |
-| `sample_rows_allowed` | Whether the conversation's "Include common values" toggle may be on (it still defaults to the viewer's own choice). |
+| `sample_rows_allowed` | Whether the panel offers *Include sample rows* (#844, default `true`). Off at the start of every conversation; when ticked, the context carries the first 5 rows of each table in scope and `run_sql` the first 20 rows of its result, both shown in *What will be sent* first, with columns that look personal (name, e-mail, phone, IBAN, id-like, …) withheld. `false` removes the box. |
 | `max_rounds` | How many times the assistant may fix and re-check its own proposal before showing it with open issues (1-3). |
 | `remember` | Opt-in for the key dialog's *Remember on this device* checkbox (§4.5) — off by default, always off on `*.github.io`/`*.gitlab.io` regardless. |
 

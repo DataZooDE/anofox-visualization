@@ -5,7 +5,10 @@
 // will be sent" dialog names the endpoint; the request is a chat completion
 // (tools as functions, no Authorization); a tool call and a proposal round
 // trip to the proposal card; the CSP still blocks any other origin; a 401
-// offers a key, which then goes along as a Bearer token.
+// offers a key, which then goes along as a Bearer token. #844: sample rows —
+// off by default, shown in "What will be sent" once turned on, sent only
+// then, off again in a new conversation, absent where the installation
+// forbids them.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/assist-openai-e2e.mjs --pkg web/pkg [--port 8791]
 import { createRequire } from "module";
@@ -73,7 +76,7 @@ const otherServer = createServer((req, res) => {
 const OPORT = await listen(otherServer);
 
 const ENDPOINT = `http://127.0.0.1:${MPORT}/v1`;
-const CFG = { assistant: { enabled: true, transport: "openai", endpoint: ENDPOINT, models: { default: "llama3.1:8b" } } };
+let CFG = { assistant: { enabled: true, transport: "openai", endpoint: ENDPOINT, models: { default: "llama3.1:8b" } } };
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm", ".md": "text/markdown" };
 const server = createServer((req, res) => {
   const u = new URL(req.url, "http://x");
@@ -190,6 +193,52 @@ async function start(page, q) {
   record("K3 the next requests carry the Bearer token", model.requests.slice(1).every((r) => r.auth === "Bearer gw-token-e2e-1234") && model.requests.length === 3, JSON.stringify(model.requests.map((r) => r.auth)));
   record("K3 and the proposal shows", await page.evaluate(() => !document.getElementById("ai-card")?.hidden));
   await context.close();
+}
+
+// ---- #844: sample rows, an opt-in per conversation ----
+{
+  model.requests = [];
+  model.reply = happy;
+  const context = await browser.newContext({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
+  const page = await context.newPage();
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${BASE}?mode=edit#sql=${b64(DASH)}`);
+  await settled(page);
+  await page.click("#assist-btn");
+  await page.waitForSelector("#ai-q", { timeout: 30000 });
+  record("S1 sample rows are off by default", (await page.isVisible("#ai-sample")) && !(await page.isChecked("#ai-sample")));
+  await page.check("#ai-sample");
+  await page.fill("#ai-q", "Which region sells the most?");
+  await page.click("#ai-send");
+  await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+  const dlg = (await page.textContent(".dp-dialog")) || "";
+  record("S2 What will be sent shows the rows before they go", dlg.includes('"sample_rows":{"columns":["region","x"],"rows":[["EU",10]') && /first 20 rows/.test(dlg) && model.requests.length === 0, dlg.slice(0, 200));
+  await page.click('.dp-dialog button:has-text("Send")');
+  await page.waitForSelector("#ai-card:not([hidden])", { timeout: 60000 }).catch(() => {});
+  const first = JSON.stringify(model.requests[0]?.body || {});
+  record("S3 the rows reach the model with the opt-in", first.includes('\\"sample_rows\\":{\\"columns\\":[\\"region\\",\\"x\\"]'), first.slice(0, 120));
+  record("S3 the chips say so", /sample rows ✓/.test((await page.textContent("#ai-chips")) || ""));
+  await page.click("#ai-new");
+  record("S4 a new conversation turns them off", !(await page.isChecked("#ai-sample")));
+  model.requests = [];
+  await page.fill("#ai-q", "Again, please.");
+  await page.click("#ai-send");
+  await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+  await page.click('.dp-dialog button:has-text("Send")');
+  await page.waitForFunction(() => document.querySelectorAll("#ai-log .ai-note, #ai-card:not([hidden])").length > 0, null, { timeout: 60000 }).catch(() => {});
+  const again = JSON.stringify(model.requests[0]?.body || {});
+  record("S4 and nothing of the rows goes", model.requests.length > 0 && !again.includes("[\\\"EU\\\",10]") && again.includes('\\"sample_rows\\":false'), again.slice(0, 120));
+  await context.close();
+  // an installation that forbids them: no box
+  CFG = { assistant: { ...CFG.assistant, sample_rows_allowed: false } };
+  const c2 = await browser.newContext({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
+  const p2 = await c2.newPage();
+  await p2.goto(`${BASE}?mode=edit#sql=${b64(DASH)}`);
+  await settled(p2);
+  await p2.click("#assist-btn");
+  await p2.waitForSelector("#ai-q", { timeout: 30000 });
+  record("S5 sample_rows_allowed: false hides the box", !(await p2.isVisible("#ai-sample")));
+  await c2.close();
 }
 
 record("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));

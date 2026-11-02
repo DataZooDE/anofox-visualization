@@ -261,14 +261,15 @@ export function scopeTables(tables, editorSql, scope) {
 // The chips button's text / aria-label (§5.2): what is in scope, at a
 // glance, and whether common values and sample rows are included.
 export function chipsText(opts = {}) {
-  const { scope = [], cols = 0, commonValues = true } = ownOpts(opts);
+  const { scope = [], cols = 0, commonValues = true, sampleRows = false } = ownOpts(opts);
   const names = scope.length ? scope.join(", ") : "no tables yet";
-  return `${names} · ${cols} column${cols === 1 ? "" : "s"} · profile ✓ · common values ${commonValues ? "✓" : "✗"} · sample rows ✗`;
+  return `${names} · ${cols} column${cols === 1 ? "" : "s"} · profile ✓ · common values ${commonValues ? "✓" : "✗"} · sample rows ${sampleRows ? "✓" : "✗"}`;
 }
 export function chipsLabel(opts = {}) {
-  const { scope = [], cols = 0, commonValues = true } = ownOpts(opts);
+  const { scope = [], cols = 0, commonValues = true, sampleRows = false } = ownOpts(opts);
   const names = scope.length ? scope.join(", ") : "no tables yet";
-  return `In scope for the assistant: ${names}. ${cols} column${cols === 1 ? "" : "s"} profiled. Common values ${commonValues ? "included" : "not included"}. Sample rows are never sent.`;
+  const rows = sampleRows ? "A few sample rows of each table are sent, and the first rows of the assistant's queries." : "Sample rows are not sent.";
+  return `In scope for the assistant: ${names}. ${cols} column${cols === 1 ? "" : "s"} profiled. Common values ${commonValues ? "included" : "not included"}. ${rows}`;
 }
 const TOOL_LABEL = { list_tables: "Listing tables…", profile_table: "Profiling a table…", run_sql: "Running a query…", check_dashboard: "Checking the dashboard…" };
 // The status line's text for one `onStatus`/internal status object.
@@ -378,6 +379,8 @@ export function mountAssistant(hostArg) {
     target: null,
     scope: null,
     commonValues: true,
+    // #844: off at the start of every conversation (an opt-in, plan §2.4)
+    sampleRows: false,
     model: "default",
     proposal: null,
     tools: null,
@@ -428,7 +431,15 @@ export function mountAssistant(hostArg) {
     commonInput.id = "ai-common";
     commonInput.checked = true;
     commonLbl.append(commonInput, " Include common values");
+    // #844: sample rows, per conversation; absent where the installation
+    // forbids them (sample_rows_allowed: false)
+    const sampleLbl = mk("label", "ai-opt");
+    const sampleInput = mk("input", "", { type: "checkbox" });
+    sampleInput.id = "ai-sample";
+    sampleInput.checked = false;
+    sampleLbl.append(sampleInput, " Include sample rows");
     ctx.append(chips, commonLbl);
+    if (host.config.sampleRowsAllowed === true) ctx.append(sampleLbl);
     // #744: "Changing panel 3: Revenue by region ✕" for the next Send.
     const target = mk("div", "ai-target");
     target.id = "ai-target";
@@ -550,6 +561,7 @@ export function mountAssistant(hostArg) {
       closeBtn,
       chips,
       commonInput,
+      sampleInput,
       target,
       targetText,
       targetClear,
@@ -1010,7 +1022,7 @@ export function mountAssistant(hostArg) {
       pageSql: host.wasm.pageSql,
       known: new Set(pathsOf(editorSql)),
       commonValues: () => S.commonValues,
-      sampleRows: () => false,
+      sampleRows: () => S.sampleRows && host.config.sampleRowsAllowed === true,
       profiles: S.profiles,
       snapshot: new Map(engine.tables.map((t) => [t.fq, t])),
       extensions: engine.extensions,
@@ -1030,14 +1042,19 @@ export function mountAssistant(hostArg) {
       await tools.profile_table({ table: t.fq });
       cardsOf.set(t.fq, S.profiles.get(t.fq)?.cards);
     }
-    const tables = [...inScope.map((t) => ({ name: t.fq.replace(/"/g, ""), rows: t.rows, cards: cardsOf.get(t.fq) })), ...rest.map((t) => ({ name: t.fq.replace(/"/g, ""), rows: t.rows }))];
+    // #844: with the opt-in, a few rows of each table in scope (shown in
+    // "What will be sent" before they go)
+    const sampled = S.sampleRows && host.config.sampleRowsAllowed === true;
+    const samples = new Map();
+    if (sampled) for (const t of inScope) samples.set(t.fq, await tools.sampleTable({ table: t.fq }).catch(() => undefined));
+    const tables = [...inScope.map((t) => ({ name: t.fq.replace(/"/g, ""), rows: t.rows, cards: cardsOf.get(t.fq), sample: samples.get(t.fq) })), ...rest.map((t) => ({ name: t.fq.replace(/"/g, ""), rows: t.rows }))];
     if (el.chips) {
       const scopeNames = inScope.map((t) => t.fq.replace(/"/g, ""));
       const cols = inScope.reduce((n, t) => n + (cardsOf.get(t.fq)?.length || 0), 0);
-      el.chips.textContent = chipsText({ scope: scopeNames, cols, commonValues: S.commonValues });
-      el.chips.setAttribute("aria-label", chipsLabel({ scope: scopeNames, cols, commonValues: S.commonValues }));
+      el.chips.textContent = chipsText({ scope: scopeNames, cols, commonValues: S.commonValues, sampleRows: sampled });
+      el.chips.setAttribute("aria-label", chipsLabel({ scope: scopeNames, cols, commonValues: S.commonValues, sampleRows: sampled }));
     }
-    return buildContext({ mode: o.mode || (editorSql.trim() ? "edit" : "new"), panel: o.target?.n, panelTitle: o.target?.title, editing: o.editing, tables, sql: editorSql, spans: statementSpans(editorSql), commonValues: S.commonValues });
+    return buildContext({ mode: o.mode || (editorSql.trim() ? "edit" : "new"), panel: o.target?.n, panelTitle: o.target?.title, editing: o.editing, tables, sql: editorSql, spans: statementSpans(editorSql), commonValues: S.commonValues, sampleRows: sampled });
   }
 
   // ---- status / log / stream ----
@@ -1205,7 +1222,7 @@ export function mountAssistant(hostArg) {
       const base = { sql: baseSql, spans: statementSpans(baseSql) };
       const prefix = await ensurePrefix();
       S.model = el.modelSel.value === "harder" ? "harder" : "default";
-      S.lastPayload = payloadPreview({ prefix, ctx, request, destination: openai ? `${host.config.endpoint}/chat/completions` : usesKey ? "https://api.anthropic.com" : `${location.origin}/assist (this server, which sends it on to the model API)`, toolLog: S.toolLog });
+      S.lastPayload = payloadPreview({ prefix, ctx, request, destination: openai ? `${host.config.endpoint}/chat/completions` : usesKey ? "https://api.anthropic.com" : `${location.origin}/assist (this server, which sends it on to the model API)`, toolLog: S.toolLog, sampleRows: S.sampleRows && host.config.sampleRowsAllowed === true });
       if (!S.conv.skipConsent) {
         const r = await sentDialog(S.lastPayload, engine, { send: true });
         if (r.checked) S.conv.skipConsent = true;
@@ -1449,6 +1466,8 @@ export function mountAssistant(hostArg) {
     if (host.preview.active()) host.preview.exit({ rerun: true });
     discardPreview();
     S.conv = { id: S.conv.id + 1, log: [], skipConsent: false, history: null };
+    S.sampleRows = false;
+    el.sampleInput.checked = false;
     S.toolLog = [];
     S.proposal = null;
     S.scope = null;
@@ -1488,6 +1507,11 @@ export function mountAssistant(hostArg) {
     el.undoBtn.onclick = () => undo();
     el.cancelBtn.onclick = () => S.ctl?.abort();
     el.commonInput.onchange = () => (S.commonValues = el.commonInput.checked);
+    // turning sample rows on shows "What will be sent" again before rows go
+    el.sampleInput.onchange = () => {
+      S.sampleRows = el.sampleInput.checked;
+      if (S.sampleRows) S.conv.skipConsent = false;
+    };
     el.chips.onclick = () => {}; // informational; no popover in M1-3
     el.form.addEventListener("submit", (e) => {
       e.preventDefault();
