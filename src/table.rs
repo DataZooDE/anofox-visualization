@@ -453,7 +453,11 @@ pub fn profile_column(spec: &ColumnSpec, values: &[Cell], locale: &Locale) -> Co
     let nums: Vec<f64> = present.iter().filter_map(|c| c.num()).collect();
     // (::PLAIN only drops the bar: whether the column is numeric comes from its
     // values, so a text column with a few number-like cells stays text)
-    let num_fmt = METRICS.contains(&f) || f.starts_with("COLORSCALE") || f == "TREND";
+    let num_fmt = METRICS.contains(&f)
+        || f.starts_with("COLORSCALE")
+        || f == "TREND"
+        || f == "PVALUE"
+        || f == "SCIENTIFIC";
     let numeric = num_fmt
         || if present.is_empty() {
             spec.range.is_some()
@@ -541,7 +545,9 @@ pub fn profile_column(spec: &ColumnSpec, values: &[Cell], locale: &Locale) -> Co
         && (f == "MONEY"
             || f == "COMPACT"
             || ((f.is_empty() || f == "PLAIN") && ints && !rate_like(spec.name)));
-    let rate = numeric && !label && !additive && (f == "PERCENT" || rate_word(spec.name));
+    // (a p-value is never totalled either, #884)
+    let rate =
+        numeric && !label && !additive && (f == "PERCENT" || f == "PVALUE" || rate_word(spec.name));
     ColumnProfile {
         head,
         name,
@@ -639,6 +645,38 @@ fn fixed(n: f64, dec: u32, group: bool, l: &Locale) -> String {
     }
 }
 
+/// `n` in scientific notation (#884): three significant digits, the
+/// locale's decimal mark, a true minus in the exponent — `1.23e−5`,
+/// `-4.5e3`; `0` stays `0`.
+pub fn scientific(n: f64, l: &Locale) -> String {
+    if n == 0.0 || !n.is_finite() {
+        return if n == 0.0 { "0".into() } else { "–".into() };
+    }
+    let e = n.abs().log10().floor() as i32;
+    let m = n.abs() / 10f64.powi(e);
+    // 9.995 rounds to 10.00: carry into the exponent
+    let (m, e) = if (m * 100.0).round() >= 1000.0 {
+        (m / 10.0, e + 1)
+    } else {
+        (m, e)
+    };
+    let body = fixed(m, 2, false, l);
+    let body = if body.contains(l.decimal) {
+        body.trim_end_matches('0')
+            .trim_end_matches(l.decimal)
+            .to_string()
+    } else {
+        body
+    };
+    let sign = if n < 0.0 { "-" } else { "" };
+    let exp = if e < 0 {
+        format!("\u{2212}{}", -e)
+    } else {
+        e.to_string()
+    };
+    format!("{sign}{body}e{exp}")
+}
+
 /// A number in a table cell as the column profile formats it: the column's
 /// unit (scaled, in the header or the cell), a KPI format, or fixed decimals;
 /// a true minus sign or accounting parentheses.
@@ -669,6 +707,18 @@ pub fn number_text(
         });
     }
     let f = fmt.unwrap_or("");
+    // #884: a p-value — "< 0.001" below the conventional floor, else three
+    // decimals; scientific notation with a true minus in the exponent
+    if f == "PVALUE" {
+        return if n < 0.001 {
+            format!("< {}", fixed(0.001, 3, false, l))
+        } else {
+            fixed(n, 3, false, l)
+        };
+    }
+    if f == "SCIENTIFIC" {
+        return minus(scientific(n, l));
+    }
     // #877: a percent / metric column keeps one decimal count for all rows
     if f == "PERCENT" {
         let sign = if n < 0.0 && n.abs() >= 0.5 * 10f64.powi(-(p.dec as i32)) {
@@ -871,6 +921,19 @@ pub fn count_text(n: usize, l: &Locale) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #884: `::PVALUE` and `::SCIENTIFIC`.
+    #[test]
+    fn pvalue_and_scientific() {
+        let us = Locale::default();
+        let de = Locale::from_tag("de-DE").unwrap();
+        assert_eq!(scientific(0.0000123, &us), "1.23e\u{2212}5");
+        assert_eq!(scientific(-4500.0, &us), "-4.5e3");
+        assert_eq!(scientific(9.996, &us), "1e1");
+        assert_eq!(scientific(1.0, &us), "1e0");
+        assert_eq!(scientific(0.0, &us), "0");
+        assert_eq!(scientific(0.000123, &de), "1,23e\u{2212}4");
+    }
 
     #[test]
     fn headers() {

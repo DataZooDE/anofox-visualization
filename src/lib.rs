@@ -348,6 +348,12 @@ pub enum Role {
     BandUpper,
     /// A trend arrow rendered inside a table cell (`::TREND`).
     Trend,
+    /// A p-value in a table cell (`::PVALUE`, #884): `< 0.001`, else three
+    /// decimals.
+    PValue,
+    /// A number in scientific notation in a table cell (`::SCIENTIFIC`,
+    /// #884): `1.23e−5`.
+    Scientific,
     /// Heatmap-colour a table column's cells by value (`::COLORSCALE`,
     /// `::COLORSCALE_HIGH_GOOD`, `::COLORSCALE_DIVERGING`).
     ColorScale(Scale),

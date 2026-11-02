@@ -26,7 +26,11 @@
         { "name": "Margin %", "values": ["18.2", "12.5", "9.8"],
           "head": "Margin %", "cells": ["18.2", "12.5", "9.8"] },
         { "name": "avgMae", "values": [1.5, 2, 2.25],
-          "head": "Avg MAE", "cells": ["1.50", "2.00", "2.25"] }
+          "head": "Avg MAE", "cells": ["1.50", "2.00", "2.25"] },
+        { "name": "p_value", "fmt": "PVALUE", "values": [0.0000001, 0.0123, 0.5],
+          "head": "P value", "cells": ["< 0.001", "0.012", "0.500"] },
+        { "name": "rate", "fmt": "SCIENTIFIC", "values": [0.0000123, -4500, 0],
+          "head": "Rate", "cells": ["1.23e−5", "−4.5e3", "0"] }
       ]
     },
     {

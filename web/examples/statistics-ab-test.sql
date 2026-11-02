@@ -322,7 +322,7 @@ SELECT 'Guardrail tests, B − A (the rule was fixed before the test)'::TITLE,
        metric AS "Guardrail" ::TABLE, round(a, 2) AS "A" ::PLAIN, round(b, 2) AS "B" ::PLAIN,
        round(diff, 2) AS "B − A" ::COLORSCALE_DIVERGING,
        printf('%+.2f to %+.2f', lo, hi) AS "CI",
-       printf('%.2g', p) AS "p-value", rule AS "Rule", verdict AS "Result" ::BADGE
+       p AS "p-value" ::PVALUE, rule AS "Rule", verdict AS "Result" ::BADGE
 FROM ab_guard ORDER BY k;
 
 SELECT 6::COL;

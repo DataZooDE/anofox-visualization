@@ -194,6 +194,8 @@ terminal.
 | `::RECORD` | `::KEY_VALUE` | table | one record as key/value pairs: a STRUCT / MAP / JSON object's fields, or the first row's columns |
 | `::PAGED` | `::TABLE_PAGED`, `::PAGINATED` | table | SQL-paginated table for large/remote data |
 | `::TREND` |  | table | ▲/▼ arrow in a table cell |
+| `::PVALUE` | `::P_VALUE` | table | a p-value in a table cell: '< 0.001', else three decimals |
+| `::SCIENTIFIC` | `::SCI` | table | a number in scientific notation in a table cell (1.23e−5) |
 | `::COLORSCALE` | `::COLOURSCALE`, `::HEAT`, `::GRADIENT` | table | heatmap-colour a table column's cells (low = green, high = red); on a ::HEATMAP / ::CALENDAR its tiles, good → warn → bad |
 | `::COLORSCALE_HIGH_GOOD` | `::COLORSCALE_HIGH`, `::HEAT_HIGH` | table | heatmap-colour a table column's cells (or a ::HEATMAP's tiles), high = green (scores, accuracy) |
 | `::COLORSCALE_DIVERGING` | `::DIVERGING`, `::HEAT_DIVERGING` | table | colour a table column's cells (or a ::HEATMAP's tiles) around zero: negative red, positive green (deltas) |
@@ -279,9 +281,10 @@ terminal.
 <!-- roles-table:end -->
 
 **Inside a `::TABLE`/`::PAGED` panel** the per-column roles `::MONEY`,
-`::PERCENT`, `::COMPACT`, `::METRIC` (number formats), `::TREND` (▲/▼),
-`::COLORSCALE`, `::BADGE`, `::SPARKLINE` (a `list()` column) and `::PLAIN`
-format that column; `::TITLE` becomes the table's title bar.
+`::PERCENT`, `::COMPACT`, `::METRIC` (number formats), `::PVALUE`
+(`< 0.001`, else three decimals; never totalled), `::SCIENTIFIC`
+(`1.23e−5`), `::TREND` (▲/▼), `::COLORSCALE`, `::BADGE`, `::SPARKLINE` (a
+`list()` column) and `::PLAIN` format that column; `::TITLE` becomes the table's title bar.
 
 **`::TITLE`** is a panel's title bar in every output: the browser, the locked
 server, `dashboard --svg`, the static HTML of `dashboard file.sql out.html` /

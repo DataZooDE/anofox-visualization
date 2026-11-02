@@ -7283,7 +7283,7 @@ async function tourAfterSwap() {
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE", "FORM"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP"];
-let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
+let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "PVALUE", "SCIENTIFIC", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
 let ZOOMABLE = [
@@ -14951,6 +14951,17 @@ function tableNumText(n, p, f, loc, neg) {
   if (u) {
     const num = nf(u.dec, true).format(Math.abs(n) / u.div);
     return minus(`${n < 0 ? "-" : ""}${u.inHead ? num : `${u.pre}${num}${u.word}${u.post}`}`);
+  }
+  // #884: a p-value ("< 0.001", else three decimals) and scientific notation
+  // (the Rust table::number_text / table::scientific)
+  if (f === "PVALUE") return n < 0.001 ? `< ${nf(3, false).format(0.001)}` : nf(3, false).format(n);
+  if (f === "SCIENTIFIC") {
+    if (n === 0) return "0";
+    let e = Math.floor(Math.log10(Math.abs(n)));
+    let m = Math.abs(n) / 10 ** e;
+    if (Math.round(m * 100) >= 1000) (m /= 10), e++;
+    const body = new Intl.NumberFormat(loc, { maximumFractionDigits: 2, useGrouping: false }).format(m);
+    return minus(`${n < 0 ? "-" : ""}${body}e${e < 0 ? "\u2212" + -e : e}`);
   }
   // #877: a percent / metric column keeps one decimal count for all rows
   // (the Rust table::number_text); the % sign as the locale writes it
