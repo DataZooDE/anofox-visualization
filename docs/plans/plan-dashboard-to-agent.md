@@ -238,8 +238,12 @@ validation on top of that; it is not a second, separate trust boundary.
    caller's raw text, which reaches only the route call (M2). Its
    `get_panel` runs with `vars` **fixed by the server** to the routed slots
    plus the declaration's fixed values (`-- @question … where fails = on`);
-   a model-supplied `vars` field is ignored, and a test checks this. Only
-   `page` remains the model's to choose. The allowed panel set is computed
+   a model-supplied `vars` field is ignored, and a test checks this. Of
+   `page`, only `offset` and `limit` remain the model's to choose, with
+   `limit` capped at the channel row cap; every other `page` field
+   (`filter`, `filters`, `distinct`, `profile`, `stats`, `sort`, `omit`,
+   `count`) is refused, since `parse_page` is a small query language and
+   would turn a declared answer into an ad-hoc query over the panel (N1). The allowed panel set is computed
    by the server from the plan: the routed panel, plus — when the
    declaration says `-> tab` — that tab's panels, minus any marked
    `@ask skip`, minus any hidden for this request by `@requires`. A model
@@ -911,6 +915,20 @@ and A3** (§8.1, required condition 16).
 | **A4. Bundle, drift and regression** | the one-customer bundle format with a digest pinned in the deployment config, outside the bundle (H6, M4, R4); no `policy.json` in the bundle, `options.policy` required or an explicit `"policy": "none"` that never disables the implicit classifier (M4, R6); `/healthz` version; the drift job in the server (after refresh + nightly) under a configured `drift_principal`, aggregates only, with question switch-off and the L6 refusal wording; the eval under a configured `eval_principal` (M5); the deterministic regression suite in CI | 3 d + review |
 | **A5. Channels** | the Triton adapter manifest with body logging off (L1); MCP tools from declarations with fixed-template descriptions, length/character-capped column names (M7, R5), and OAuth audience (H3, M7); the A2UI surface with server-rendered PNG panels (restricted resource resolver, claims-keyed render cache or none, M6) and the footer / facts block, with the facts block's own escaping and row cap (M3, R3); DM-only default and the channel-principal opt-in for shared channels — the asker still authenticated, allowed and charged, membership re-checked on every post (H4, R1); buttons re-evaluated under the clicker's identity; Slack / Teams through Triton, with account linking confirmed as a Triton precondition (H3) | 3 d + review |
 
+**First slice: a deterministic MCP endpoint (owner, 2026-11-02).** Before
+the full order above, three PRs ship MCP without any model call:
+**A1** as written; **A2-det**, the no-model part of A2 — `question_id` +
+slots → deterministic slot resolution (§3.2) → the routed panel under
+server-fixed `vars` (M2) → the capped facts block and footer (§5), with the
+fixed error messages of N3 and the agent route set of M1; and **A5-mcp**,
+the MCP part of A5 — one tool per `@question` with fixed-template
+descriptions (M7, R5), JWT with this server as the audience and a pinned
+tenant claim (N6, H3), no token passthrough, structured results labelled
+untrusted. No routing call, no answer model and so no budget yet (decision
+D5 below makes model text on MCP an opt-in that v1 does not offer). A3 and
+A4 follow; until A3, the agent reads the dashboard's own data under the
+operator's explicit policy, merged with the implicit classifier of N4.
+
 That is about 15 days plus reviews. A5 depends on Triton's adapter contract
 and on the Slack/Teams account-linking precondition (H3), both of which we
 should confirm with the Triton owners before A5.
@@ -958,7 +976,29 @@ folded in below, attributed to its finding.
 Before the A-phase starts, the design gets an independent adversarial
 security review, and its findings are fixed in this note. That review is
 #211 (2026-10-19); its required changes are the ones adopted above, and §12
-lists its 16 conditions for the A-phase to start.
+lists its conditions for the A-phase to start (16, plus 17–24 from the
+2026-10-25 code re-check).
+
+### Owner decisions on the #211 re-check (2026-11-02)
+
+The owner took every recommendation of the review's §8
+([`dashboard-agent-review.md`](../security/dashboard-agent-review.md)):
+
+- **D1.** N1–N8 are folded into this note (§3.3, §10, §12 conditions
+  17–24, §13); #211 closes and its A-phase checklist moves to #194.
+- **D2. No charts in channels in v1.** Text, the facts block and the
+  footer only; server-rendered PNG comes later, through ggplot-rs, with
+  N5's resolver. This removes M6's surface from the first release.
+- **D3. The "end user" rule is configuration** (N6), settled with the
+  Triton owners per IdP before Slack / Teams.
+- **D4. DMs / ephemeral replies only in v1.** The channel-principal
+  opt-in (R1) is a later step with its own review.
+- **D5. No model text on MCP / A2A in v1.** Machine channels get the
+  deterministic facts block and footer only.
+- **D6. No dashboard UI in the agent image.** A deployment that wants the
+  UI runs the ordinary locked server separately.
+- **D7. Provider per deployment.** The start message names the provider
+  and region; the bundle records neither.
 
 ## 12. Security review (#211): required conditions before A1
 
@@ -1025,6 +1065,36 @@ sections they point at (§13).
     A1 builds `--publish` (carries H6's data) and A3 executes mappings
     (H1) — §8.1, §10.
 
+The code re-check of 2026-10-25 (the review's §5) adds eight more:
+
+17. The model's `page` is limited to `offset` and `limit` ≤ the channel row
+    cap; every other field is refused, each by a test (N1) — §3.3 step 3.
+18. A publishable dashboard declares `-- @vars`, and every `{slot}` names a
+    listed variable: `agent/no-vars` is an error in `--check --agent`; the
+    slot domain check is the guard's, never `/api/panel`'s (N2) — §3.1,
+    §3.2.
+19. On the agent routes every execution failure answers a fixed message and
+    an error id, never DuckDB's text, to the caller, the model, the channel
+    and the log; agent mode refuses to start with `log_vars: "values"`; a
+    canary slot value failing a cast appears nowhere (N3) — §8.1.
+20. In agent mode `start_locked` synthesises a policy with `rows: true` on
+    each canonical view (until A3: on each table the dashboard reads),
+    merges it with an explicit policy that may only narrow, and runs the
+    same `enforce` at start and at every snapshot rebuild; a refresh with
+    an extra table is refused (N4) — §8.1.
+21. A rasteriser's resolver accepts only `data:image/png` and
+    `data:image/jpeg` with a byte cap, no nested SVG, refusing everything
+    else before any I/O; deferred with all channel charts by D2 (N5) — §8.
+22. `auth.jwt.require` pins claim values and is required in agent mode;
+    "end user" is a configured rule the server checks, and a
+    client-credentials-shaped token is `401` (N6) — §8 Auth.
+23. Agent mode refuses to start unless extension telemetry resolves to off,
+    and the start message lists every outbound destination the
+    configuration implies (N7) — §8.1.
+24. A2's model-calling part opens only after Ask's M2-3 and M2-4 (both
+    merged, #825 #826 #827); A1, A3 and the deterministic slice make no
+    model calls (N8) — §10.
+
 ## 13. Findings → changed sections
 
 | Finding | Topic | Sections changed |
@@ -1056,3 +1126,11 @@ sections they point at (§13).
 | R4 | Certification and the bundle digest must be outside the author's reach | §5, §7, §10 (A4), §12 (9, 10) |
 | R5 | The MCP template still interpolates uncapped author text (column names) | §8 (MCP), §10 (A5), §12 (13) |
 | R6 | The classifier's mapping and panel variants, and `"policy": "none"`, need precise definitions | §4, §8.1, §10 (A3, A4), §12 (15) |
+| N1 | The model's `page` is a query language, not just paging | §3.3 (step 3), §12 (17) |
+| N2 | `-- @vars` is a name allowlist, and optional | §12 (18) |
+| N3 | Values reach errors and logs | §12 (19) |
+| N4 | The implicit classifier needs a defined hook | §10 (first slice), §12 (20) |
+| N5 | No rasteriser yet; the existing URL checks are browser checks | §11 (D2), §12 (21) |
+| N6 | Tenant pinning and "end-user tokens only" need checkable rules | §10 (first slice), §11 (D3), §12 (22) |
+| N7 | "No outbound calls except the model endpoint" is not a start check | §12 (23) |
+| N8 | Ask M2 is a hard prerequisite of A2's model calls | §12 (24) |

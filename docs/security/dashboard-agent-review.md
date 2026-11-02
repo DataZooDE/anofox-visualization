@@ -399,7 +399,14 @@ diff before merge (plan, condition 16).
 - Triton itself, and how Slack / Teams identities map to IdP claims: a
   precondition of A5 (H3), owned by Triton.
 
-## 8. Open decisions for the owner
+## 8. Owner decisions
+
+Decided 2026-11-02: the owner took every recommendation below (D1–D7).
+N1–N8 are folded into the plan as its §12 conditions 17–24, the decisions
+are recorded in its §11, and the first delivery is a deterministic MCP
+slice with no model calls (plan §10). #211 is closed; the A-phase checklist
+of §6 lives on in #194.
+
 
 - **D1. Fold N1–N8 into the plan, and how #211 closes.** Recommendation:
   fold them into `plan-dashboard-to-agent.md` (its §12 grows from 16 to
