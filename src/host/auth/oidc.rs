@@ -92,6 +92,7 @@ impl Oidc {
                     | "max_age_s"
                     | "jwks_url"
                     | "jwks_ttl_s"
+                    | "require"
                     | "session_ttl_s"
                     | "session_secret"
                     | "session_secret_env"

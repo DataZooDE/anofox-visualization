@@ -1229,6 +1229,39 @@ A dashboard published as an agent answers the questions it declares with
 - Until canonical views exist (A3), the operator's own policy is the data
   boundary, as for `/api/panel`.
 
+#### MCP (`agent.mcp`, #864)
+
+```json
+"agent": {
+  "dashboard": "suppliers",
+  "mcp": { "resource": "https://agent.example.com/mcp" }
+}
+```
+
+adds an MCP server (Streamable HTTP, JSON responses, no session) at
+`POST /mcp`:
+
+- **Tools.** One per `-- @question`, exactly the `mcp-tools.json` that
+  `dashboard --publish` writes: the name is the question's id, the
+  description the fixed template "Answers: <question>? Returns: <columns>.",
+  the input schema the question's slots. `tools/call` is
+  `/api/agent/answer`: the same resolution, server-fixed variables, row cap
+  and fixed errors; the result is `structuredContent` (and the same JSON as
+  text), labelled as data. No model, no other method (`resources`,
+  `prompts`, sampling) and no SSE stream: `GET /mcp` answers 405.
+- **Auth.** The bearer is checked like any other request. With `jwt` or
+  `oidc`, the start is refused unless `auth.audience` includes the resource
+  URL (a token is only accepted for this server) and `auth.require` pins the
+  tenant, e.g. `"require": {"tid": "<tenant id>"}` — a claim value, or a
+  list of accepted values, checked after the signature. An unauthenticated
+  `/mcp` call gets `401` with `WWW-Authenticate: Bearer
+  resource_metadata="…"`, and the RFC 9728 metadata
+  (`/.well-known/oauth-protected-resource/mcp`, public) names the issuer.
+  The bearer is never forwarded anywhere.
+- **Connecting a client**, e.g. Claude Code:
+  `claude mcp add --transport http suppliers https://agent.example.com/mcp
+  --header "Authorization: Bearer <token>"`.
+
 ### Scheduled tasks (`options.tasks`, #767)
 
 SQL that runs on a schedule next to the dashboards, e.g. to load the inbox
@@ -2257,6 +2290,7 @@ the same value; their keys are derived per use).
 | `leeway_s` | `60` | Clock skew for `exp`, `nbf`, `iat` (at most 300) |
 | `max_age_s` | — | Refuse tokens issued longer ago (requires `iat`) |
 | `jwks_ttl_s` | `3600` | Key-set cache lifetime (60–86400) |
+| `require` | — | Claim values a token must carry, checked after the signature: `{"tid": "acme"}`, or a list of accepted values; a list claim (`groups`) must hold one of them. Pins a tenant of a shared identity provider (#864); required for `agent.mcp` |
 | `user_claim` | `sub` | Token field → `__claim_user`. If it is an e-mail field (`email`, or a path or namespaced name ending in it, like `profile.email`), the token must also carry `email_verified: true` (`deny: email_unverified`): an address the IdP did not verify is no identity (nOAuth). The same holds for a `claims` entry taken from an e-mail field. Other fields some IdPs let users change (Entra ID's `preferred_username` and `upn`) are no stable identity: prefer `sub` or `oid` |
 | `groups_claim` | off | Token field (list or string) → `__claim_groups`; `{"field": …, "required": true}` makes it mandatory |
 | `claims` | — | `{name: "field"}` → `__claim_<name>`; dotted paths (`realm_access.roles`) and namespaced fields (`https://example.com/tenant`) work |

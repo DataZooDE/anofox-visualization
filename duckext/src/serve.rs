@@ -50,6 +50,7 @@ use anofox_visualization::host::ask::{self as askm, AskConfig};
 use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::ingest::{self, IngestOptions};
+use anofox_visualization::host::mcp as mcpm;
 use anofox_visualization::host::metrics;
 use anofox_visualization::host::notify;
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
@@ -2111,6 +2112,30 @@ impl LockedOptions {
                     "options.agent refuses log_vars \"values\": slot values are never logged"
                         .into(),
                 );
+            }
+            // #864 (N6, C5.1, H3): a bearer for MCP is accepted only with this
+            // server as its audience and its tenant pinned.
+            if let (Some(resource), Some(auth)) =
+                (o.agent.as_ref().and_then(|a| a.mcp.as_ref()), &o.auth)
+            {
+                let verifiers = auth
+                    .jwt
+                    .iter()
+                    .map(|j| &j.verifier)
+                    .chain(auth.oidc.iter().map(|o| &o.verifier));
+                for v in verifiers {
+                    if !v.audiences.iter().any(|a| a == resource) {
+                        return Err(format!(
+                            "options.agent.mcp: auth.audience must include the MCP resource '{resource}' \
+                             (a token is accepted only with this server as its audience)"
+                        ));
+                    }
+                    if v.require.is_empty() {
+                        return Err("options.agent.mcp: auth.require must pin the tenant \
+                                    (e.g. {\"tid\": \"<your tenant>\"}) for MCP bearers"
+                            .into());
+                    }
+                }
             }
         }
         match (log, log_vars) {
@@ -7552,11 +7577,43 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
     }
     // #863 (M1, C2.9, D6): agent mode serves its own routes only — no UI,
     // no assets, no /api/panel; `/metrics` stays behind its own token.
+    let mcp_meta = st
+        .opts
+        .agent
+        .as_ref()
+        .and_then(|a| a.mcp.as_deref())
+        .and_then(|r| mcpm::metadata_location(r).map(|(url, wk)| (r, url, wk)));
+    let mcp_path = mcp_meta
+        .as_ref()
+        .is_some_and(|(_, _, wk)| path == "/mcp" || wk == path);
     if st.opts.agent.is_some()
         && !agentm::route_allowed(req.method().as_str(), path)
         && !(path == "/metrics" && st.opts.metrics_token.is_some())
+        && !mcp_path
     {
         return reply(req, 404, "not found");
+    }
+    // #864: RFC 9728 protected-resource metadata, public (no data).
+    if let Some((resource, _, wk)) = &mcp_meta {
+        if path == wk.as_str() {
+            if req.method() != &Method::Get {
+                return reply(req, 405, "method not allowed");
+            }
+            let issuers: Vec<String> = st
+                .opts
+                .auth
+                .iter()
+                .flat_map(|a| {
+                    a.jwt
+                        .iter()
+                        .map(|j| j.verifier.provider.issuer.clone())
+                        .chain(a.oidc.iter().map(|o| o.verifier.provider.issuer.clone()))
+                })
+                .collect();
+            let m = mcpm::resource_metadata(resource, &issuers);
+            respond(req, 200, "application/json", m.to_string());
+            return 200;
+        }
     }
     // #771: the embed SDK (`<anofox-dashboard>`) is loaded by host pages of
     // other origins as a module script, which needs CORS: public files with
@@ -7669,6 +7726,14 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     info.auth = d.method;
                     if let Some(rep) = d.unavailable() {
                         return send(req, rep);
+                    }
+                    if let (Some((_, url, _)), "/mcp") = (&mcp_meta, path) {
+                        let resp = Response::from_data(&b"unauthorized"[..])
+                            .with_status_code(401)
+                            .with_header(header("WWW-Authenticate", &mcpm::www_authenticate(url)))
+                            .with_header(header("Cache-Control", "no-store"));
+                        let _ = req.respond(resp);
+                        return 401;
                     }
                     if let Some(rep) = auth.login_redirect(&r, &d) {
                         return send(req, rep);
@@ -7829,6 +7894,21 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             info,
         ),
         (&Method::Post, "/api/ask") => handle_ask(st, req, ident.as_ref(), info),
+        (&Method::Post, "/mcp") if mcp_meta.is_some() => {
+            let body = match read_body(&mut req, 64 << 10) {
+                Ok(b) => b,
+                Err((code, e)) => return reply(req, code, &e),
+            };
+            handle_mcp(st, req, &body, ident.as_ref(), info)
+        }
+        (_, "/mcp") if mcp_meta.is_some() => {
+            // No SSE stream and no session to end: POST only.
+            let resp = Response::from_data(&b"method not allowed"[..])
+                .with_status_code(405)
+                .with_header(header("Allow", "POST"));
+            let _ = req.respond(resp);
+            405
+        }
         (&Method::Get, "/api/agent") if st.opts.agent.is_some() => {
             handle_agent(st, req, None, ident.as_ref(), info)
         }
@@ -8678,6 +8758,73 @@ fn handle_agent(
             e.status
         }
     }
+}
+
+/// `POST /mcp` (#864): JSON-RPC over the agent's declared questions, for the
+/// authenticated caller ([`mcpm::handle`]).
+fn handle_mcp(
+    st: &Locked,
+    req: Request,
+    body: &str,
+    ident: Option<&auth::Identity>,
+    info: &mut LogInfo,
+) -> u16 {
+    let (Some(opts), Some(slots)) = (&st.opts.agent, &st.agent) else {
+        return reply(req, 404, "not found");
+    };
+    let Some(ident) = ident else {
+        return reply(req, 401, access::UNAUTHORIZED);
+    };
+    if ident.method == "share" || !ident.scope.allows(&opts.dashboard) {
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&opts.dashboard) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    info.dashboard = Some(dash.id.clone());
+    let Ok(tools) = anofox_visualization::agent::tool_list(&dash.id, &dash.sql) else {
+        return reply(
+            req,
+            503,
+            "the agent's dashboard no longer passes its publish checks",
+        );
+    };
+    let version = req_header(&req, "MCP-Protocol-Version").map(str::to_string);
+    let runner = AskRunner {
+        st,
+        claims: Some(ident.claims.clone()),
+        scope: Some(ident.scope.clone()),
+        method: Some(ident.method),
+        slots,
+    };
+    let srv = mcpm::Server {
+        dash: agentm::Dash {
+            id: &dash.id,
+            title: &dash.meta.title,
+            script: &dash.sql,
+        },
+        tools: &tools,
+        max_rows: opts.max_rows,
+    };
+    let out = mcpm::handle(
+        &srv,
+        body,
+        version.as_deref(),
+        &runner,
+        Instant::now() + st.opts.timeout,
+        &mut |e, status| {
+            eprintln!(
+                "[anofox-serve] mcp {} ({}) id={} panel_status={status}",
+                e.code, e.status, e.id
+            );
+        },
+    );
+    match out.body {
+        Some(b) => respond(req, out.status, "application/json", b.to_string()),
+        None => respond(req, out.status, "application/json", Vec::new()),
+    }
+    out.status
 }
 
 fn handle_ask(
@@ -13803,6 +13950,31 @@ mod tests {
         )))
         .unwrap_err();
         assert!(e.contains("options.agent: unknown key"), "{e}");
+    }
+
+    // #864 (N6, C5.1): MCP with JWT needs this server as the audience and a
+    // pinned tenant.
+    #[test]
+    fn agent_mcp_needs_audience_and_pinned_tenant() {
+        let opts = |aud: &str, require: &str| {
+            format!(
+                r#"{{"auth":{{"mode":"jwt","issuer":"https://idp.example.com","audience":"{aud}"{require}}},"policy":"none",
+                   "agent":{{"dashboard":"s","mcp":{{"resource":"https://agent.example.com/mcp"}}}}}}"#
+            )
+        };
+        let e =
+            LockedOptions::parse(Some(&opts("dash", r#","require":{"tid":"acme"}"#))).unwrap_err();
+        assert!(
+            e.contains("auth.audience must include the MCP resource"),
+            "{e}"
+        );
+        let e = LockedOptions::parse(Some(&opts("https://agent.example.com/mcp", ""))).unwrap_err();
+        assert!(e.contains("auth.require must pin the tenant"), "{e}");
+        let ok = LockedOptions::parse(Some(&opts(
+            "https://agent.example.com/mcp",
+            r#","require":{"tid":"acme"}"#,
+        )));
+        assert!(ok.is_ok(), "{:?}", ok.err());
     }
 
     // #773: options.css_file — checked at start, linked last in <head>.

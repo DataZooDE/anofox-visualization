@@ -369,6 +369,7 @@ impl Auth {
                                 | "audience"
                                 | "jwks_url"
                                 | "jwks_ttl_s"
+                                | "require"
                                 | "algorithms"
                                 | "leeway_s"
                                 | "max_age_s"

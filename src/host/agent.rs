@@ -42,6 +42,9 @@ pub struct AgentOptions {
     pub dashboard: String,
     /// Rows per answer, at most [`MAX_ROWS`].
     pub max_rows: usize,
+    /// `mcp.resource` (#864): this server's MCP URL — the token audience and
+    /// the RFC 9728 resource; `None`: no `/mcp`.
+    pub mcp: Option<String>,
 }
 
 impl AgentOptions {
@@ -49,7 +52,7 @@ impl AgentOptions {
         let o = v.as_object().ok_or("agent: must be an object")?;
         if let Some(k) = o
             .keys()
-            .find(|k| !matches!(k.as_str(), "dashboard" | "max_rows"))
+            .find(|k| !matches!(k.as_str(), "dashboard" | "max_rows" | "mcp"))
         {
             return Err(format!("agent: unknown key '{k}'"));
         }
@@ -66,11 +69,48 @@ impl AgentOptions {
                 .filter(|&n| (1..=MAX_ROWS as u64).contains(&n))
                 .ok_or(format!("agent.max_rows: 1 to {MAX_ROWS}"))? as usize,
         };
+        let mcp = match o.get("mcp") {
+            None => None,
+            Some(m) => {
+                let m = m.as_object().ok_or("agent.mcp: must be an object")?;
+                if let Some(k) = m.keys().find(|k| k.as_str() != "resource") {
+                    return Err(format!("agent.mcp: unknown key '{k}'"));
+                }
+                let r = m
+                    .get("resource")
+                    .and_then(Value::as_str)
+                    .ok_or("agent.mcp.resource: this server's MCP URL (https://…/mcp)")?;
+                if !valid_resource(r) {
+                    return Err("agent.mcp.resource: an https:// URL ending in /mcp \
+                                (http:// only on 127.0.0.1 or localhost)"
+                        .into());
+                }
+                Some(r.to_string())
+            }
+        };
         Ok(AgentOptions {
             dashboard,
             max_rows,
+            mcp,
         })
     }
+}
+
+/// An MCP resource URL: `https://<host>[:port]/…/mcp`, or `http://` on a
+/// loopback host (local testing); no query, fragment or credentials.
+fn valid_resource(r: &str) -> bool {
+    let (rest, https) = match (r.strip_prefix("https://"), r.strip_prefix("http://")) {
+        (Some(x), _) => (x, true),
+        (_, Some(x)) => (x, false),
+        _ => return false,
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    !host.is_empty()
+        && (https || host == "127.0.0.1" || host == "localhost")
+        && r.ends_with("/mcp")
+        && !r.contains(['?', '#', '@'])
+        && r.len() <= 512
+        && r.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// The routes an agent-mode server serves (M1, C2.9, decision D6); every
@@ -611,13 +651,29 @@ mod tests {
             AgentOptions::parse(&json!({"dashboard": "suppliers"})).unwrap(),
             AgentOptions {
                 dashboard: "suppliers".into(),
-                max_rows: DEFAULT_ROWS
+                max_rows: DEFAULT_ROWS,
+                mcp: None,
             }
         );
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 0})).is_err());
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 201})).is_err());
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "ui": true})).is_err());
         assert!(AgentOptions::parse(&json!({})).is_err());
+        let m = |r: &str| AgentOptions::parse(&json!({"dashboard": "s", "mcp": {"resource": r}}));
+        assert_eq!(
+            m("https://agent.example.com/mcp").unwrap().mcp.as_deref(),
+            Some("https://agent.example.com/mcp")
+        );
+        assert!(m("http://127.0.0.1:8958/mcp").is_ok());
+        for bad in [
+            "http://agent.example.com/mcp",
+            "https://a/x",
+            "https://a/mcp?x=1",
+            "https://u@a/mcp",
+            "ftp://a/mcp",
+        ] {
+            assert!(m(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -91,6 +91,19 @@ pub fn publish(id: &str, script: &str) -> Result<Vec<File>, Vec<Diagnostic>> {
     ])
 }
 
+/// The MCP tool list `--publish` writes as `mcp-tools.json`, as a value: what
+/// an agent-mode server's `tools/list` answers (#864), so the two never
+/// differ.
+pub fn tool_list(id: &str, script: &str) -> Result<Value, Vec<Diagnostic>> {
+    let files = publish(id, script)?;
+    let tools = files
+        .iter()
+        .find(|f| f.name == "mcp-tools.json")
+        .and_then(|f| serde_json::from_str::<Value>(&f.contents).ok())
+        .unwrap_or_else(|| json!({ "tools": [] }));
+    Ok(tools)
+}
+
 /// A question with what the generators need around it.
 struct Described {
     q: Question,

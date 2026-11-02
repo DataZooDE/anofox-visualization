@@ -79,7 +79,7 @@ const answer = (body, user = "alice") =>
 
 let srv = null;
 try {
-  srv = await serve({ auth, policy: "none", agent: { dashboard: "suppliers", max_rows: 2 } });
+  srv = await serve({ auth, policy: "none", agent: { dashboard: "suppliers", max_rows: 2, mcp: { resource: `${base}/mcp` } } });
   check(srv.proc != null, "an agent-mode server starts");
   if (!srv.proc) throw new Error(srv.log());
 
@@ -130,6 +130,35 @@ try {
   await sleep(200);
   check(!srv.log().includes("canary-zz9"), "the server log holds no slot value");
   check(/agent panel_failed \(502\) id=\w+/.test(srv.log()), "the log has the error class and its id");
+  // MCP (#864): metadata, the 401 that points at it, the JSON-RPC methods.
+  const meta = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`);
+  check(meta.status === 200 && (await meta.json()).resource === `${base}/mcp`, "the protected-resource metadata names this server");
+  const rpc = (msg, user = "alice", extra = {}) =>
+    fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { ...(user ? as(user) : {}), "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...extra },
+      body: JSON.stringify(msg),
+    });
+  let x = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } }, null);
+  check(x.status === 401 && (x.headers.get("www-authenticate") || "").includes(`resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"`), "an unauthenticated MCP call gets 401 with the metadata URL");
+  x = await (await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } } })).json();
+  check(x.result?.protocolVersion === "2025-06-18" && x.result?.capabilities?.tools, "initialize answers the version and the tools capability");
+  x = await rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
+  check(x.status === 202, "a notification is accepted with 202");
+  const list = await (await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }, "alice", { "MCP-Protocol-Version": "2025-06-18" })).json();
+  const names = (list.result?.tools || []).map((t) => t.name);
+  check(names.length === 3 && names.includes("how_reliable_is_supplier_on_delivery"), "tools/list has one tool per declared question");
+  check(list.result.tools.every((t) => t.description.startsWith("Answers: ")), "every description is the fixed template");
+  x = await (await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "how_reliable_is_supplier_on_delivery", arguments: { supplier: "bore" } } })).json();
+  check(x.result?.isError === false && x.result?.structuredContent?.facts?.rows?.[0]?.["On time %"] === 0.71, "tools/call answers with structured facts");
+  x = await (await rpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "what_is_order_code_worth", arguments: { code: "canary-zz9" } } })).json();
+  check(x.result?.isError === true && !JSON.stringify(x).includes("canary"), "a failing tool call is a fixed error without the value");
+  x = await rpc({ jsonrpc: "2.0", id: 5, method: "ping" }, "alice", { "MCP-Protocol-Version": "1999-01-01" });
+  check(x.status === 400, "an unsupported MCP-Protocol-Version is refused");
+  x = await fetch(`${base}/mcp`, { headers: as("alice") });
+  check(x.status === 405, "GET /mcp (no SSE stream) answers 405");
+  await sleep(200);
+  check(!srv.log().includes("canary-zz9"), "the log still holds no slot value");
   srv.proc.kill();
   await sleep(500);
 
