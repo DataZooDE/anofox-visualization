@@ -180,7 +180,7 @@ fn cell_json(v: Option<&Value>) -> Json {
 
 /// A `::TOGGLE` default as a boolean: `true`, a non-zero number, or the text
 /// `true` / `1` / `yes` / `on` (as the browser reads it).
-fn truthy(v: &Json) -> bool {
+pub(crate) fn truthy(v: &Json) -> bool {
     match v {
         Json::Bool(b) => *b,
         Json::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),

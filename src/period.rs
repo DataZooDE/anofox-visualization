@@ -875,6 +875,21 @@ pub fn resolve_json(spec: &str, state_json: &str) -> Value {
 /// default (the spec's default preset, today = `today=` or the UTC date) —
 /// for the linter and the headless renderers. Empty when no date is known.
 pub fn default_sets(column: &str, spec: &str) -> Vec<String> {
+    default_vars(column, spec)
+        .into_iter()
+        .map(|(name, v)| {
+            format!(
+                "SET VARIABLE \"{name}\" = {}",
+                v.map(|s| format!("'{}'", s.replace('\'', "''")))
+                    .unwrap_or_else(|| "NULL".into())
+            )
+        })
+        .collect()
+}
+
+/// The variables [`default_sets`] sets, as `(name, value)` (an agent answer
+/// sends them as values, #895).
+pub fn default_vars(column: &str, spec: &str) -> Vec<(String, Option<String>)> {
     let prefix = var_prefix(column);
     let (sp, mut errs) = parse_spec(spec);
     let Ok(r) = resolve(&sp, &State::default(), utc_today(), &mut errs) else {
@@ -882,13 +897,7 @@ pub fn default_sets(column: &str, spec: &str) -> Vec<String> {
     };
     r.vars()
         .into_iter()
-        .map(|(k, v)| {
-            format!(
-                "SET VARIABLE \"{prefix}_{k}\" = {}",
-                v.map(|s| format!("'{}'", s.replace('\'', "''")))
-                    .unwrap_or_else(|| "NULL".into())
-            )
-        })
+        .map(|(k, v)| (format!("{prefix}_{k}"), v.map(|s| s.to_string())))
         .collect()
 }
 

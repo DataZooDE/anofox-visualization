@@ -367,6 +367,32 @@ pub fn columns(stmt: &str) -> Vec<String> {
     item_names(stmt).into_iter().flatten().collect()
 }
 
+/// The first select item of `stmt` that expands to several columns — `*`,
+/// `t.*`, `* EXCLUDE (…)` / `REPLACE` / `RENAME`, `COLUMNS(…)` — if any. A
+/// declaring panel lists its columns: the facts block names them by
+/// position (#895).
+pub fn expanding_item(stmt: &str) -> Option<String> {
+    let (start, end) = super::main_select_list(stmt)?;
+    super::lex::split_top_commas(&stmt[start..end])
+        .iter()
+        .find(|item| {
+            let mut core = item.trim();
+            while let Some((expr, _)) = super::lex::trailing_cast(core) {
+                core = expr.trim();
+            }
+            let c = core.to_ascii_lowercase();
+            let c = c.trim_start_matches("distinct ").trim();
+            c == "*"
+                || c.starts_with("* ")
+                || c.starts_with("*\n")
+                || c.ends_with(".*")
+                || c.contains(".* ")
+                || c.starts_with("columns(")
+                || c.starts_with("columns (")
+        })
+        .map(|item| item.trim().to_string())
+}
+
 /// [`columns`] per select item, in order: `None` for a literal item, so
 /// index `i` is the panel response's column `c{i}`.
 pub fn item_names(stmt: &str) -> Vec<Option<String>> {

@@ -131,8 +131,8 @@ pub struct Diagnostic {
     /// never reaches the page).
     /// `-- @question` ([`question_diags`], #862): `question/bad-slot` |
     /// `question/unsafe-text` | `question/unsafe-column` | `question/no-panel` |
-    /// `question/unknown-slot` |
-    /// `question/unknown-tab` | `question/duplicate` | `question/hidden`
+    /// `question/unknown-slot` | `question/unsupported-slot` |
+    /// `question/star-columns` | `question/unknown-tab` | `question/duplicate` | `question/hidden`
     /// (errors); with `--agent` ([`agent_diags`]): `agent/no-questions` |
     /// `agent/no-vars` (errors).
     /// `-- @materialize` ([`materialize_diags`], #727): `materialize/not-table`
@@ -3100,7 +3100,9 @@ fn name_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
 /// `question/unsafe-text` (the text can't go into an MCP tool description),
 /// `question/unsafe-column` (an instruction-like column name on its panel),
 /// `question/no-panel` (on setup or an input), `question/unknown-slot` (no
-/// input sets the variable), `question/unknown-tab`, `question/duplicate`
+/// input sets the variable), `question/unsupported-slot` (an input an answer
+/// can't fill), `question/star-columns` (`*` / `COLUMNS(…)` in the panel),
+/// `question/unknown-tab`, `question/duplicate`
 /// (the same id twice) and `question/hidden` (on a panel Ask can't read).
 fn question_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
     let questions = sql::question::declared(script);
@@ -3108,6 +3110,32 @@ fn question_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
         return Vec::new();
     }
     let inputs = sql::vars::input_vars(plan);
+    // The variables an agent answer can fill from a slot (#895): the first
+    // one of each input of a kind `host::agent::slot_value` handles.
+    let answerable: Vec<String> = plan
+        .iter()
+        .filter(|p| {
+            use crate::InputKind as K;
+            matches!(
+                crate::inputs::input_kind(&p.roles),
+                Some(
+                    K::Dropdown
+                        | K::Buttons
+                        | K::Multiselect
+                        | K::Number
+                        | K::Date
+                        | K::Text
+                        | K::Toggle
+                )
+            )
+        })
+        .filter_map(|p| {
+            sql::vars::input_vars(std::slice::from_ref(p))
+                .into_iter()
+                .next()
+        })
+        .map(|(v, _)| v)
+        .collect();
     let tabs = sql::vars::tab_labels(plan);
     let hidden = sql::ask::exclusions(script);
     let raws = sql::ask::raw_statements(script);
@@ -3157,7 +3185,29 @@ fn question_diags(script: &str, plan: &[sql::Panel]) -> Vec<Diagnostic> {
                         s.var, s.var
                     ),
                 );
+            } else if !answerable.contains(&s.var) {
+                err(
+                    "question/unsupported-slot",
+                    format!(
+                        "`{{{}}}`: an answer fills a dropdown, buttons, multiselect, number, \
+                         date, text or toggle input — through its first variable — not this one \
+                         (a date range, period or form keeps its default)",
+                        s.var
+                    ),
+                );
             }
+        }
+        if let Some(item) = raws
+            .get(q.stmt)
+            .and_then(|r| sql::question::expanding_item(sql::strip_comments(r).trim()))
+        {
+            err(
+                "question/star-columns",
+                format!(
+                    "`{item}`: a declared question's panel lists its columns (no `*` or \
+                     `COLUMNS(…)`) — the answer names each column by its place"
+                ),
+            );
         }
         if let Some(t) = &q.tab {
             if !tabs.iter().any(|l| l == t) {
@@ -11189,6 +11239,37 @@ mod design_tests {
                 "{base}-- @question How late is {{month}}?\nSELECT 1 ::METRIC;"
             )),
             [(3, "question/unknown-slot")]
+        );
+        // #895: a slot on an input an answer can't fill, or on its second
+        // variable; a panel whose columns `*` / COLUMNS(…) expand.
+        let dr = "SELECT DATE '2024-01-01' AS f, DATE '2024-01-31' AS t ::DATERANGE;\n";
+        assert_eq!(
+            codes(&format!(
+                "{dr}-- @question What sold from {{f}}?\nSELECT 1 ::METRIC;"
+            )),
+            [(2, "question/unsupported-slot")]
+        );
+        assert_eq!(
+            codes(&format!(
+                "{dr}-- @question What sold until {{t}}?\nSELECT 1 ::METRIC;"
+            )),
+            [(2, "question/unsupported-slot")]
+        );
+        for star in ["*", "o.*", "* EXCLUDE (x)", "COLUMNS('a.*')"] {
+            assert_eq!(
+                codes(&format!(
+                    "{base}-- @question Which orders are there?\nSELECT {star}, 'x' ::TITLE FROM o;"
+                )),
+                [(3, "question/star-columns")],
+                "{star}"
+            );
+        }
+        assert_eq!(
+            codes(&format!(
+                "{base}-- @question How many orders are there?\nSELECT count(*) AS n ::METRIC FROM o;"
+            )),
+            [],
+            "count(*) is one column"
         );
         assert_eq!(
             codes(&format!(

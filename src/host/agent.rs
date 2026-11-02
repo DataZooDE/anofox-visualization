@@ -368,16 +368,29 @@ fn slot_value(
     }
 }
 
-/// An input's default, from its rows as the caller sees them: the
-/// `::DEFAULT`-marked option(s) or the first; every option for a
-/// multiselect; nothing for the other kinds.
-fn default_value(
+/// An input's default variables, from its rows as the caller sees them —
+/// what the browser's first load sets ([`crate::inputs::input_defaults_with`]):
+/// the `::DEFAULT`-marked option(s) or the first for a dropdown / buttons,
+/// every option (or the marked ones) for a multiselect, both ends for a
+/// date range, the resolved variables for a period, a boolean for a toggle,
+/// the first row's value otherwise. `names` are the input's variables in
+/// order. A form keeps no default here (an agent answers no form).
+fn default_values(
     kind: crate::InputKind,
     roles: &[(usize, crate::Role)],
+    names: &[String],
     out: &str,
-) -> Option<Value> {
+) -> Vec<(String, Value)> {
     use crate::InputKind as K;
-    let rows = parse_rows(out).ok()?;
+    let Ok(rows) = parse_rows(out) else {
+        return Vec::new();
+    };
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    let Some(var) = names.first() else {
+        return Vec::new();
+    };
     let idx = crate::inputs::input_index(roles);
     let cell = |r: &Map<String, Value>, i: usize| -> Option<Value> {
         r.get(&format!("c{i}"))
@@ -387,22 +400,52 @@ fn default_value(
     let marked: Vec<&Map<String, Value>> = match crate::inputs::default_index(roles) {
         Some(d) => rows
             .iter()
-            .filter(|r| cell(r, d).is_some_and(|v| v == Value::Bool(true)))
+            .filter(|r| cell(r, d).is_some_and(|v| crate::inputs::truthy(&v)))
             .collect(),
         None => Vec::new(),
     };
-    let pick: Vec<&Map<String, Value>> = if marked.is_empty() {
-        rows.iter().collect()
-    } else {
-        marked
-    };
     let text = |v: Value| Value::String(super::ask::text_of(&v));
+    let one = |v: Option<Value>| v.map(|v| vec![(var.clone(), v)]).unwrap_or_default();
     match kind {
-        K::Dropdown | K::Buttons => pick.first().and_then(|r| cell(r, idx)).map(text),
-        K::Multiselect => Some(Value::Array(
-            pick.iter().filter_map(|r| cell(r, idx)).map(text).collect(),
-        )),
-        _ => None,
+        K::Dropdown | K::Buttons => {
+            one(cell(marked.first().copied().unwrap_or(first), idx).map(text))
+        }
+        K::Multiselect => {
+            let picked: Vec<&Map<String, Value>> = if marked.is_empty() {
+                rows.iter().collect()
+            } else {
+                marked
+            };
+            one(Some(Value::Array(
+                picked
+                    .iter()
+                    .filter_map(|r| cell(r, idx))
+                    .map(text)
+                    .collect(),
+            )))
+        }
+        K::DateRange => names
+            .iter()
+            .take(2)
+            .enumerate()
+            .filter_map(|(i, n)| cell(first, idx + i).map(|v| (n.clone(), v)))
+            .collect(),
+        K::Period => {
+            let spec = cell(first, idx)
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            // The input's variables are `<prefix>_from`, `<prefix>_to`, ….
+            let prefix = var.strip_suffix("_from").unwrap_or("period");
+            crate::period::default_vars(prefix, &spec)
+                .into_iter()
+                .map(|(n, v)| (n.to_ascii_lowercase(), v.map_or(Value::Null, Value::String)))
+                .collect()
+        }
+        K::Toggle => one(Some(Value::Bool(
+            cell(first, idx).is_some_and(|v| crate::inputs::truthy(&v)),
+        ))),
+        K::Form => Vec::new(),
+        _ => one(cell(first, idx)),
     }
 }
 
@@ -472,6 +515,26 @@ pub fn answer(
         ));
     }
     let plan = crate::sql::plan(d.script);
+    let raws = crate::sql::ask::raw_statements(d.script);
+    // The statements whose variables shape this answer: the declaring panel,
+    // the setup statements and the inputs' own option queries (#895, F9).
+    // An input none of them reads isn't run at all.
+    let readers: String = plan
+        .iter()
+        .enumerate()
+        .filter(|(j, p)| {
+            *j == q.stmt || p.roles.is_empty() || crate::inputs::input_kind(&p.roles).is_some()
+        })
+        .filter_map(|(j, _)| raws.get(j))
+        .map(|r| crate::sql::strip_comments(r).to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .split_whitespace()
+        .collect();
+    let read = |name: &str| {
+        readers.contains(&format!("getvariable('{name}')"))
+            || readers.contains(&format!("getvariable(\"{name}\")"))
+    };
     let mut vars = Map::new();
     let mut resolved = Map::new();
     // The inputs, in order, as the browser's first load runs them: an
@@ -480,12 +543,25 @@ pub fn answer(
         let Some(kind) = crate::inputs::input_kind(&p.roles) else {
             continue;
         };
-        let names = crate::sql::vars::input_vars(std::slice::from_ref(p));
-        let Some((var, _)) = names.first() else {
+        let names: Vec<String> = crate::sql::vars::input_vars(std::slice::from_ref(p))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        let Some(var) = names.first() else {
             continue;
         };
         let slot = q.slots.iter().find(|s| &s.var == var);
-        let out = run(runner, d.id, i, &vars, None, deadline, log)?;
+        if slot.is_none() && !names.iter().any(|n| read(n)) {
+            continue;
+        }
+        let out = match run(runner, d.id, i, &vars, None, deadline, log) {
+            Ok(out) => out,
+            // Not a slot: a failing input (refused for this caller, a tab
+            // whose `-- @requires` is unmet) just has no default, as on a
+            // first load — the answer goes on (F9). `run` logged it.
+            Err(_) if slot.is_none() => continue,
+            Err(e) => return Err(e),
+        };
         match slot {
             Some(s) => {
                 let sent = req.slots.get(&s.var).ok_or_else(|| {
@@ -518,8 +594,8 @@ pub fn answer(
                 }
             }
             None => {
-                if let Some(v) = default_value(kind, &p.roles, &out) {
-                    vars.insert(var.clone(), v);
+                for (n, v) in default_values(kind, &p.roles, &names, &out) {
+                    vars.insert(n, v);
                 }
             }
         }
@@ -537,7 +613,6 @@ pub fn answer(
     let out = run(runner, d.id, q.stmt, &vars, Some(page), deadline, log)?;
     let rows = parse_rows(&out).map_err(|_| failed())?;
     let more = rows.len() > limit;
-    let raws = crate::sql::ask::raw_statements(d.script);
     let stmt = raws
         .get(q.stmt)
         .map(|r| crate::sql::strip_comments(r))
@@ -775,12 +850,113 @@ mod tests {
             r#"{"question_id":"which_supplier_is_the_least_reliable"}"#,
         )
         .unwrap();
-        assert_eq!(
-            f.seen.borrow()[1]["vars"],
-            json!({"supplier": "Alpine Metals AG"})
-        );
+        // The panel reads no input: the dropdown isn't run at all (F9).
+        assert_eq!(f.seen.borrow().len(), 1);
+        assert_eq!(f.seen.borrow()[0]["vars"], json!({}));
         // c1 is the ::METRIC (item 1); item 0 is the ::TITLE literal.
         assert_eq!(a["facts"]["rows"][0], json!({"metric": 3}));
+    }
+
+    /// A panel path from a closure; every body it was sent is kept.
+    struct FnRunner<F: Fn(&Value) -> Result<String, (u16, String)>> {
+        f: F,
+        seen: RefCell<Vec<Value>>,
+    }
+    impl<F: Fn(&Value) -> Result<String, (u16, String)>> PanelRunner for FnRunner<F> {
+        fn panel(&self, body: &str, _: Instant) -> Result<String, (u16, String)> {
+            let v: Value = serde_json::from_str(body).unwrap();
+            self.seen.borrow_mut().push(v.clone());
+            (self.f)(&v)
+        }
+        fn hidden(&self) -> Vec<usize> {
+            Vec::new()
+        }
+    }
+
+    /// #895 F8/F9: every input kind the panel reads gets its first-load
+    /// default; an input nobody reads isn't run; a failing non-slot input
+    /// leaves its variable unset instead of failing the answer.
+    #[test]
+    fn defaults_for_every_kind_and_only_inputs_that_matter() {
+        let script = "-- @vars region, day, flag, n, broken\n\
+            SELECT r AS region ::DROPDOWN FROM (VALUES ('N'), ('S')) t(r);\n\
+            SELECT DATE '2024-05-01' AS day ::DATE;\n\
+            SELECT true AS flag ::TOGGLE;\n\
+            SELECT 7 AS n ::NUMBER;\n\
+            SELECT x AS broken ::DROPDOWN FROM missing_table;\n\
+            -- @question What happened in {region}?\n\
+            SELECT getvariable('region') AS r ::TABLE, getvariable('day') AS d, getvariable('flag') AS f, getvariable('broken') AS b;\n";
+        let runner = FnRunner {
+            f: |v: &Value| match v["panel"].as_u64() {
+                Some(0) => Ok(r#"[{"c0":"N"},{"c0":"S"}]"#.into()),
+                Some(1) => Ok(r#"[{"c0":"2024-05-01"}]"#.into()),
+                Some(2) => Ok(r#"[{"c0":true}]"#.into()),
+                Some(3) => panic!("an input nobody reads was run"),
+                Some(4) => Err((400, "Catalog Error: missing_table".into())),
+                _ => Ok(json!({"rows": [{"r": v["vars"]["region"]}]}).to_string()),
+            },
+            seen: RefCell::new(Vec::new()),
+        };
+        let d = Dash {
+            id: "d",
+            title: "D",
+            script,
+        };
+        let req = parse_answer(
+            r#"{"question_id":"what_happened_in_region","slots":{"region":"S"}}"#,
+            50,
+        )
+        .unwrap();
+        let a = answer(
+            &d,
+            &req,
+            50,
+            &runner,
+            Instant::now() + Duration::from_secs(5),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(a["facts"]["rows"][0]["r"], "S");
+        let seen = runner.seen.borrow();
+        assert_eq!(
+            seen.last().unwrap()["vars"],
+            json!({"region": "S", "day": "2024-05-01", "flag": true})
+        );
+        assert!(seen.iter().all(|v| v["panel"] != 3));
+    }
+
+    #[test]
+    fn period_and_daterange_defaults() {
+        let roles = |sql: &str| crate::sql::plan(sql)[0].roles.clone();
+        let p = roles("SELECT '30d' AS p ::PERIOD;");
+        let names: Vec<String> =
+            crate::sql::vars::input_vars(&crate::sql::plan("SELECT '30d' AS p ::PERIOD;"))
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+        let got = default_values(crate::InputKind::Period, &p, &names, r#"[{"c0":"30d"}]"#);
+        assert!(
+            got.iter().any(|(n, v)| n == "p_from" && v.is_string()),
+            "{got:?}"
+        );
+        assert!(
+            got.iter().all(|(n, _)| names.contains(n)),
+            "{got:?} vs {names:?}"
+        );
+        let r = roles("SELECT DATE '2024-01-01' AS f, DATE '2024-01-31' AS t ::DATERANGE;");
+        let got = default_values(
+            crate::InputKind::DateRange,
+            &r,
+            &["f".into(), "t".into()],
+            r#"[{"c0":"2024-01-01","c1":"2024-01-31"}]"#,
+        );
+        assert_eq!(
+            got,
+            vec![
+                ("f".into(), json!("2024-01-01")),
+                ("t".into(), json!("2024-01-31"))
+            ]
+        );
     }
 
     #[test]
