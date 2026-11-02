@@ -352,12 +352,18 @@ pub fn template_name(name: &str) -> Option<String> {
 /// list (no query): each item's alias, or its bare column name; literal
 /// items (`'…'::TITLE`, `12::COL`) are layout, not data, and left out.
 pub fn columns(stmt: &str) -> Vec<String> {
+    item_names(stmt).into_iter().flatten().collect()
+}
+
+/// [`columns`] per select item, in order: `None` for a literal item, so
+/// index `i` is the panel response's column `c{i}`.
+pub fn item_names(stmt: &str) -> Vec<Option<String>> {
     let Some((start, end)) = super::main_select_list(stmt) else {
         return Vec::new();
     };
     super::lex::split_top_commas(&stmt[start..end])
         .iter()
-        .filter_map(|item| {
+        .map(|item| {
             let mut core = item.trim();
             while let Some((expr, _)) = super::lex::trailing_cast(core) {
                 core = expr.trim();

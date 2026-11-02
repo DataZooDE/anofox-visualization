@@ -1041,6 +1041,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/ask-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/agent-served-e2e.mjs (#863): agent mode — only the agent
+      # routes, a declared question answered with server-fixed variables and
+      # no model, every other field refused, no slot value in a failure's
+      # answer or the log, unpublishable dashboards refused at start.
+      - name: Agent mode on a locked server e2e (#863)
+        timeout-minutes: 5
+        run: node scripts/agent-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # scripts/diagram-check-served-e2e.mjs (#699): a ::DIAGRAM_CHECK is one
       # more declared statement — the locked server runs it on the edited
       # graph, and again after an edit.

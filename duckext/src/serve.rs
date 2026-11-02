@@ -44,6 +44,7 @@ use crate::limits::{Charge, Inflight, Queries};
 use crate::panel_cache::{Served, SUPERSEDED};
 use anofox_visualization::dashboard;
 use anofox_visualization::host::access::{self, Claims, LogEntry, RequestLog};
+use anofox_visualization::host::agent as agentm;
 use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::ask::{self as askm, AskConfig};
 use anofox_visualization::host::assist;
@@ -1296,6 +1297,9 @@ pub struct LockedOptions {
     /// `ask` (#195): viewers ask questions about an `-- @ask on`
     /// dashboard, answered by the model on the server (`POST /api/ask`).
     pub ask: Option<AskConfig>,
+    /// `agent` (#863): agent mode — this server answers only one
+    /// dashboard's declared `-- @question`s (`/api/agent`), deterministically.
+    pub agent: Option<agentm::AgentOptions>,
     /// `preview` (#770): temporary dashboards from API keys with the
     /// `preview` scope (`POST /api/dashboards`).
     pub preview: Option<PreviewOptions>,
@@ -1696,6 +1700,7 @@ impl Default for LockedOptions {
             folders: false,
             ingest: None,
             ask: None,
+            agent: None,
             preview: None,
             durability: None,
             home: None,
@@ -1953,6 +1958,10 @@ impl LockedOptions {
                 }
                 "ingest" => o.ingest = Some(IngestOptions::parse(val)?),
                 "ask" => o.ask = Some(AskConfig::parse(val).map_err(|e| format!("options.{e}"))?),
+                "agent" => {
+                    o.agent =
+                        Some(agentm::AgentOptions::parse(val).map_err(|e| format!("options.{e}"))?)
+                }
                 "preview" => o.preview = Some(PreviewOptions::parse(val)?),
                 "durability" => o.durability = Some(DurabilityOptions::parse(val)?),
                 "css_file" => {
@@ -2085,6 +2094,24 @@ impl LockedOptions {
         }
         if o.ingest.is_some() && !o.auth.as_ref().is_some_and(|a| a.keys.is_some()) {
             return Err("options.ingest needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with an ingest:<table> scope may write".into());
+        }
+        if o.agent.is_some() {
+            // #863: answers per caller (M1, H3); no model text (D5); no
+            // values in the log (N3).
+            if o.auth.is_none() {
+                return Err(
+                    "options.agent needs auth: an agent answers for a signed-in caller".into(),
+                );
+            }
+            if o.ask.as_ref().is_some_and(|a| a.enabled) {
+                return Err("options.agent and options.ask can't both be on: an agent answers without a model".into());
+            }
+            if log_vars == Some("values") {
+                return Err(
+                    "options.agent refuses log_vars \"values\": slot values are never logged"
+                        .into(),
+                );
+            }
         }
         match (log, log_vars) {
             (Some(l), v) => {
@@ -2946,6 +2973,8 @@ struct Locked {
     alert_states: Mutex<BTreeMap<String, notify::AlertState>>,
     /// #195: Ask, when `options.ask.enabled`.
     ask: Option<AskRt>,
+    /// #863: agent mode's query slots (`options.agent`).
+    agent: Option<Queries>,
     /// The `Arc` this state lives in: Ask's threads hold it.
     me: std::sync::OnceLock<std::sync::Weak<Locked>>,
 }
@@ -4007,6 +4036,22 @@ pub fn start_locked(
         }
         _ => None,
     };
+    // #863: agent mode — the dashboard must exist and pass the publish
+    // checks (the same `question/*` + `agent/*` errors `dashboard --publish`
+    // refuses on), and extension telemetry must resolve to off (N7).
+    let agent_slots = match &opts.agent {
+        Some(_) => {
+            let env = std::env::var(anofox_visualization::host::telemetry::VAR).ok();
+            if !anofox_visualization::host::telemetry::is_disabled(env.as_deref()) {
+                return Err(format!(
+                    "options.agent: extension telemetry must be off ({}=1) in agent mode",
+                    anofox_visualization::host::telemetry::VAR
+                ));
+            }
+            Some(Queries::new((opts.max_queries / 2).max(1)))
+        }
+        None => None,
+    };
     // #769: the writing replica's ingest database is attached read-write.
     let ingest_rt = match &opts.ingest {
         None => None,
@@ -4072,9 +4117,35 @@ pub fn start_locked(
         alert_stats: Mutex::new(BTreeMap::new()),
         alert_states: Mutex::new(alert_states),
         ask: ask_rt,
+        agent: agent_slots,
         me: std::sync::OnceLock::new(),
     });
     let _ = state.me.set(Arc::downgrade(&state));
+    if let Some(a) = &state.opts.agent {
+        let gen = state.current.get();
+        let dash =
+            gen.snap.dashes.find(&a.dashboard).ok_or_else(|| {
+                format!("options.agent.dashboard: no dashboard '{}'", a.dashboard)
+            })?;
+        if let Err(errors) = anofox_visualization::agent::publish(&dash.id, &dash.sql) {
+            let list: Vec<String> = errors
+                .iter()
+                .map(|d| format!("[stmt {}] {} — {}", d.stmt, d.code, d.message))
+                .collect();
+            return Err(format!(
+                "options.agent: '{}' can't be published as an agent:\n  {}",
+                dash.id,
+                list.join("\n  ")
+            ));
+        }
+        eprintln!(
+            "[anofox-serve] agent mode: '{}', {} declared question(s), at most {} rows per answer; \
+             no model is called; served: GET /api/agent, POST /api/agent/answer, GET /healthz",
+            dash.id,
+            anofox_visualization::sql::question::declared(&dash.sql).len(),
+            a.max_rows
+        );
+    }
     let auth_note = match &state.opts.auth {
         Some(a) => {
             let warn = a.prefetch();
@@ -7479,6 +7550,14 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
     if assist::is_api_path(path) {
         return reply(req, 404, "not found");
     }
+    // #863 (M1, C2.9, D6): agent mode serves its own routes only — no UI,
+    // no assets, no /api/panel; `/metrics` stays behind its own token.
+    if st.opts.agent.is_some()
+        && !agentm::route_allowed(req.method().as_str(), path)
+        && !(path == "/metrics" && st.opts.metrics_token.is_some())
+    {
+        return reply(req, 404, "not found");
+    }
     // #771: the embed SDK (`<anofox-dashboard>`) is loaded by host pages of
     // other origins as a module script, which needs CORS: public files with
     // no data, no credentials, and a GET that changes nothing — so before
@@ -7750,6 +7829,16 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             info,
         ),
         (&Method::Post, "/api/ask") => handle_ask(st, req, ident.as_ref(), info),
+        (&Method::Get, "/api/agent") if st.opts.agent.is_some() => {
+            handle_agent(st, req, None, ident.as_ref(), info)
+        }
+        (&Method::Post, "/api/agent/answer") if st.opts.agent.is_some() => {
+            let body = match read_body(&mut req, 16 << 10) {
+                Ok(b) => b,
+                Err((code, e)) => return reply(req, code, &e),
+            };
+            handle_agent(st, req, Some(&body), ident.as_ref(), info)
+        }
         (&Method::Delete, p) if p == "/api/ask" || p.starts_with("/api/ask/") => {
             cancel_ask(st, req, ident.as_ref())
         }
@@ -8517,6 +8606,80 @@ fn sse(w: &mut dyn std::io::Write, event: &str, data: &serde_json::Value) -> std
 /// runs on a thread of its own and its progress and answer stream back as
 /// server-sent events (`progress`, then `answer`). A refusal before the
 /// model is called is a plain JSON error with its status.
+/// `GET /api/agent` (`body` `None`: the manifest) and `POST
+/// /api/agent/answer` (#863): the declared questions of `options.agent`'s
+/// dashboard, answered for the caller through the panel path, with no model.
+fn handle_agent(
+    st: &Locked,
+    req: Request,
+    body: Option<&str>,
+    ident: Option<&auth::Identity>,
+    info: &mut LogInfo,
+) -> u16 {
+    let (Some(opts), Some(slots)) = (&st.opts.agent, &st.agent) else {
+        return reply(req, 404, "not found");
+    };
+    let Some(ident) = ident else {
+        return reply(req, 401, access::UNAUTHORIZED);
+    };
+    if ident.method == "share" || !ident.scope.allows(&opts.dashboard) {
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&opts.dashboard) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    info.dashboard = Some(dash.id.clone());
+    let d = agentm::Dash {
+        id: &dash.id,
+        title: &dash.meta.title,
+        script: &dash.sql,
+    };
+    let Some(body) = body else {
+        respond(
+            req,
+            200,
+            "application/json",
+            agentm::manifest(&d).to_string(),
+        );
+        return 200;
+    };
+    let answered = agentm::parse_answer(body, opts.max_rows).and_then(|r| {
+        let runner = AskRunner {
+            st,
+            claims: Some(ident.claims.clone()),
+            scope: Some(ident.scope.clone()),
+            method: Some(ident.method),
+            slots,
+        };
+        let deadline = Instant::now() + st.opts.timeout;
+        agentm::answer(
+            &d,
+            &r,
+            opts.max_rows,
+            &runner,
+            deadline,
+            &mut |e, status| {
+                // The error class and the panel path's status only (N3).
+                eprintln!(
+                    "[anofox-serve] agent {} ({}) id={} panel_status={status}",
+                    e.code, e.status, e.id
+                );
+            },
+        )
+    });
+    match answered {
+        Ok(v) => {
+            respond(req, 200, "application/json", v.to_string());
+            200
+        }
+        Err(e) => {
+            respond(req, e.status, "application/json", e.to_json().to_string());
+            e.status
+        }
+    }
+}
+
 fn handle_ask(
     st: &Locked,
     mut req: Request,
@@ -13612,6 +13775,34 @@ mod tests {
         assert!(e.contains("options.ingest needs auth with API keys"), "{e}");
         let e = LockedOptions::parse(Some(r#"{"ingest": {"run": true}}"#)).unwrap_err();
         assert!(e.contains("options.ingest.database is required"), "{e}");
+    }
+
+    // #863: agent mode needs a login, refuses Ask and logged values.
+    #[test]
+    fn agent_mode_options() {
+        let auth = r#""auth":{"mode":"proxy","shared_secret":"0123456789abcdef0123456789abcdef","trusted_proxies":["127.0.0.1"]},"policy":"none""#;
+        let ok = LockedOptions::parse(Some(&format!(
+            r#"{{{auth},"agent":{{"dashboard":"s","max_rows":5}}}}"#
+        )))
+        .unwrap();
+        assert_eq!(ok.agent.unwrap().max_rows, 5);
+        let e = LockedOptions::parse(Some(r#"{"agent":{"dashboard":"s"}}"#)).unwrap_err();
+        assert!(e.contains("options.agent needs auth"), "{e}");
+        let e = LockedOptions::parse(Some(&format!(
+            r#"{{{auth},"agent":{{"dashboard":"s"}},"log":"stderr","log_vars":"values"}}"#
+        )))
+        .unwrap_err();
+        assert!(e.contains("log_vars"), "{e}");
+        let e = LockedOptions::parse(Some(&format!(
+            r#"{{{auth},"agent":{{"dashboard":"s"}},"ask":{{"enabled":true}}}}"#
+        )))
+        .unwrap_err();
+        assert!(e.contains("can't both be on"), "{e}");
+        let e = LockedOptions::parse(Some(&format!(
+            r#"{{{auth},"agent":{{"dashboard":"s","ui":true}}}}"#
+        )))
+        .unwrap_err();
+        assert!(e.contains("options.agent: unknown key"), "{e}");
     }
 
     // #773: options.css_file — checked at start, linked last in <head>.
