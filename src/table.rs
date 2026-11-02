@@ -7,7 +7,7 @@
 //! `tests/fixtures/table_vectors.json` (Rust: `tests/table.rs`, browser:
 //! `tests/web/table_test.mjs`).
 
-use crate::format::{format_number_l, Locale};
+use crate::format::{format_number_l, Locale, UNIT_SPACE};
 use crate::MetricFmt;
 
 /// Abbreviations a readable header spells out (or keeps in capitals).
@@ -551,6 +551,11 @@ pub fn profile_column(spec: &ColumnSpec, values: &[Cell], locale: &Locale) -> Co
         ints,
         dec: if numeric && (f.is_empty() || f == "PLAIN") {
             col_decimals(&nums)
+        } else if numeric && f == "PERCENT" {
+            // #877: one decimal count per column (95.0% beside 95.7%)
+            col_decimals(&nums).min(1)
+        } else if numeric && f == "METRIC" {
+            col_decimals(&nums).min(2)
         } else {
             0
         },
@@ -664,6 +669,19 @@ pub fn number_text(
         });
     }
     let f = fmt.unwrap_or("");
+    // #877: a percent / metric column keeps one decimal count for all rows
+    if f == "PERCENT" {
+        let sign = if n < 0.0 && n.abs() >= 0.5 * 10f64.powi(-(p.dec as i32)) {
+            "-"
+        } else {
+            ""
+        };
+        let sp = if l.percent_space { UNIT_SPACE } else { "" };
+        return minus(format!("{sign}{}{sp}%", fixed(n.abs(), p.dec, true, l)));
+    }
+    if f == "METRIC" {
+        return minus(fixed(n, p.dec, true, l));
+    }
     if METRICS.contains(&f) {
         return minus(format_number_l(n, metric_of(f), l));
     }

@@ -35,7 +35,7 @@ pub struct Locale {
 
 /// The space between amount and unit (`1.234 €`, `12,5 %`, `1,2 Mio.`) —
 /// a plain space, as ggplot-rs's locale presets use on axes.
-const UNIT_SPACE: &str = " ";
+pub(crate) const UNIT_SPACE: &str = " ";
 
 impl Locale {
     /// US English — the default (unchanged output of earlier releases).
