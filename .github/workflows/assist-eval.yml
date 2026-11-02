@@ -3,6 +3,10 @@
 # cost money (about $9–10 for the assistant's 30 prompts on Sonnet 5, about
 # $1.50 for Ask's 15 cases on both targets) and use the owner's dedicated key
 # (secret ASSIST_EVAL_ANTHROPIC_API_KEY, a workspace key with a monthly limit).
+# #854: or another provider — any OpenAI-compatible endpoint (Gemini,
+# GitHub Models, a gateway): `endpoint` + `model`, its key in the secret
+# ASSIST_EVAL_OPENAI_COMPAT_API_KEY; the judge stays Claude unless `judge` is
+# "endpoint" (one fixed judge keeps providers comparable).
 # Never on a pull request or a schedule. The results are uploaded as an
 # artifact; a pull request copies the assistant's into
 # tests/assist-eval/results/latest/ (what CI rechecks and replays for free).
@@ -17,9 +21,22 @@ on:
         options: [assist, ask, both]
         default: assist
       model:
-        description: "The model (claude-sonnet-5, claude-opus-5-5)"
+        description: "The model (claude-sonnet-5, claude-opus-5-5, claude-haiku-4-5; with an endpoint its own id, e.g. gemini-2.5-pro, openai/gpt-4.1)"
         type: string
         default: claude-sonnet-5
+      endpoint:
+        description: "An OpenAI-compatible base URL instead of Claude (empty: Claude), e.g. https://generativelanguage.googleapis.com/v1beta/openai or https://models.github.ai/inference"
+        type: string
+        default: ""
+      judge:
+        description: "Who grades: claude, or the endpoint (judge_model)"
+        type: choice
+        options: [claude, endpoint]
+        default: claude
+      judge_model:
+        description: "The judge's model on the endpoint (judge: endpoint only)"
+        type: string
+        default: ""
       case:
         description: "One case id only (empty: all)"
         type: string
@@ -87,26 +104,39 @@ jobs:
         if: inputs.eval != 'ask'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ASSIST_EVAL_ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.ASSIST_EVAL_OPENAI_COMPAT_API_KEY }}
           MODEL: ${{ inputs.model }}
           CASE: ${{ inputs.case }}
+          ENDPOINT: ${{ inputs.endpoint }}
+          JUDGE: ${{ inputs.judge }}
+          JUDGE_MODEL: ${{ inputs.judge_model }}
         run: |
-          node scripts/assist-eval.mjs --yes --model "$MODEL" ${CASE:+--case "$CASE"} --out "$RUNNER_TEMP/eval/assist"
+          judge=()
+          if [ "$JUDGE" = endpoint ]; then judge=(--judge-endpoint "$ENDPOINT" --judge-model "$JUDGE_MODEL"); fi
+          node scripts/assist-eval.mjs --yes --model "$MODEL" ${CASE:+--case "$CASE"} ${ENDPOINT:+--endpoint "$ENDPOINT"} "${judge[@]}" --out "$RUNNER_TEMP/eval/assist"
 
-      - name: Ask's eval (15 cases, server + builder)
+      - name: Ask's eval (30 cases, server + builder)
         if: inputs.eval != 'assist'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ASSIST_EVAL_ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.ASSIST_EVAL_OPENAI_COMPAT_API_KEY }}
           MODEL: ${{ inputs.model }}
           CASE: ${{ inputs.case }}
+          ENDPOINT: ${{ inputs.endpoint }}
+          JUDGE: ${{ inputs.judge }}
+          JUDGE_MODEL: ${{ inputs.judge_model }}
         run: |
+          judge=()
+          if [ "$JUDGE" = endpoint ]; then judge=(--judge-endpoint "$ENDPOINT" --judge-model "$JUDGE_MODEL"); fi
           NODE_PATH="$PWD/tests/web/node_modules" TMPDIR="$RUNNER_TEMP" node scripts/ask-eval.mjs --yes --model "$MODEL" \
-            ${CASE:+--case "$CASE"} --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension" --out "$RUNNER_TEMP/eval/ask"
+            ${CASE:+--case "$CASE"} ${ENDPOINT:+--endpoint "$ENDPOINT"} "${judge[@]}" \
+            --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension" --out "$RUNNER_TEMP/eval/ask"
 
       - name: Upload the results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: eval-${{ inputs.eval }}-${{ inputs.model }}-${{ github.run_id }}
+          name: eval-${{ inputs.eval }}-${{ github.run_id }}
           path: ${{ runner.temp }}/eval
           if-no-files-found: warn
           retention-days: 30

@@ -10,6 +10,10 @@
 //     [--target both|server|builder] [--case <id>] [--model <claude-id>]
 //     [--ext <anofox_visualization.duckdb_extension>] [--duckdb duckdb]
 //     [--pkg web/pkg] [--no-judge] [--out DIR] [--port 8971]
+//     [--endpoint URL --model ID]   (#854: an OpenAI-compatible endpoint — Gemini
+//      https://generativelanguage.googleapis.com/v1beta/openai, GitHub Models
+//      https://models.github.ai/inference, a local model; key OPENAI_API_KEY)
+//     [--judge-endpoint URL --judge-model ID]   (the judge there too; JUDGE_API_KEY)
 //   node scripts/ask-eval.mjs --dry     (the seed only: no key, no network)
 //   node scripts/ask-eval.mjs --truth   (also prints every truth; free)
 //
@@ -35,6 +39,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+import { endpointOk, fromChat, openaiTransport } from "../web/assist-openai.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -273,7 +278,9 @@ export function parseSse(text) {
 // A Messages API response (JSON, or the SDK's stream) → {content, usage}.
 export function messageOf(text) {
   try {
-    const m = JSON.parse(text);
+    let m = JSON.parse(text);
+    // #854: an OpenAI-compatible endpoint's chat completion
+    if (Array.isArray(m?.choices)) m = fromChat(m);
     return { content: m.content || [], usage: m.usage || {} };
   } catch (_) {}
   const content = [];
@@ -298,16 +305,16 @@ export function messageOf(text) {
 // The recording relay the eval's server talks to (its `ask.base_url`):
 // every request body and response, forwarded to the real API. Headers are
 // passed on, never recorded.
-async function relay(log) {
+async function relay(log, target = API) {
   const srv = createServer((req, res) => {
     const chunks = [];
     req.on("data", (d) => chunks.push(d));
     req.on("end", async () => {
       const body = Buffer.concat(chunks).toString("utf8");
       const headers = {};
-      for (const k of ["x-api-key", "anthropic-version", "anthropic-beta", "content-type"]) if (req.headers[k]) headers[k] = req.headers[k];
+      for (const k of ["x-api-key", "anthropic-version", "anthropic-beta", "content-type", "authorization"]) if (req.headers[k]) headers[k] = req.headers[k];
       try {
-        const r = await fetch(API + req.url, { method: req.method, headers, body });
+        const r = await fetch(target + req.url, { method: req.method, headers, body });
         const text = await r.text();
         log.push({ request: body, status: r.status, response: text });
         res.writeHead(r.status, { "content-type": r.headers.get("content-type") || "application/json", "request-id": r.headers.get("request-id") || "" });
@@ -349,10 +356,13 @@ async function serverTarget(cases, o) {
   const secret = randomBytes(24).toString("hex");
   const env = { ...process.env, DATAZOO_DISABLE_TELEMETRY: "1", ASK_EVAL_SEC: secret };
   const calls = [];
-  const up = await relay(calls);
+  // #854: an OpenAI-compatible endpoint behind the relay (ask.transport "openai")
+  const up = await relay(calls, o.endpoint || API);
   const servers = {};
   const auth = { mode: "proxy", shared_secret_env: "ASK_EVAL_SEC", trusted_proxies: ["127.0.0.1"] };
   const ask = { enabled: true, base_url: `http://127.0.0.1:${up.address().port}`, model: o.model };
+  if (o.endpoint) Object.assign(ask, { transport: "openai", key_env: "ASK_EVAL_ENDPOINT_KEY" });
+  if (o.endpoint && o.apiKey) env.ASK_EVAL_ENDPOINT_KEY = o.apiKey;
   let port = o.port;
   const serverFor = async (c) => {
     const name = path.basename(c.dashboard, ".sql");
@@ -419,7 +429,7 @@ async function builderTarget(cases, o) {
     const u = new URL(req.url, "http://x");
     if (u.pathname === "/app-config.json") {
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ assistant: { enabled: true, models: { default: o.model } } }));
+      res.end(JSON.stringify({ assistant: o.endpoint ? { enabled: true, transport: "openai", endpoint: o.endpoint, models: { default: o.model } } : { enabled: true, models: { default: o.model } } }));
       return;
     }
     let p = u.pathname.startsWith("/pkg/") ? path.join(o.pkgDir, u.pathname.slice(5)) : path.join(webDir, decodeURIComponent(u.pathname));
@@ -440,12 +450,14 @@ async function builderTarget(cases, o) {
   const results = [];
   try {
     const context = await browser.newContext({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce" });
-    await context.addInitScript((k) => sessionStorage.setItem("dp_assist_key", k), o.apiKey);
+    // #854: an endpoint's key goes in its own slot (or none, for a local model)
+    if (o.apiKey) await context.addInitScript(([slot, k]) => sessionStorage.setItem(slot, k), [o.endpoint ? "dp_assist_key_openai" : "dp_assist_key", o.apiKey]);
     let calls = [];
-    await context.route(`${UPSTREAM}/**`, async (route) => {
+    const origin = o.endpoint ? new URL(o.endpoint).origin : UPSTREAM;
+    await context.route(`${origin}/**`, async (route) => {
       const req = route.request();
       if (req.method() === "OPTIONS") return route.continue();
-      const resp = await route.fetch(API === UPSTREAM ? {} : { url: req.url().replace(UPSTREAM, API) });
+      const resp = await route.fetch(o.endpoint || API === UPSTREAM ? {} : { url: req.url().replace(UPSTREAM, API) });
       const text = await resp.text();
       calls.push({ request: req.postData() || "", status: resp.status(), response: text });
       await route.fulfill({ response: resp, body: text });
@@ -513,7 +525,13 @@ async function judge(c, answer, o) {
       },
     ],
   };
-  const r = await fetch(`${API}/v1/messages`, { method: "POST", headers: { "x-api-key": o.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (o.judgeEndpoint) {
+    // #854: the judge on an OpenAI-compatible endpoint (the same forced call)
+    const m = await openaiTransport({ endpoint: o.judgeEndpoint, apiKey: o.judgeKey }).send({ ...body, model: o.judgeModel });
+    const g = (m.content || []).find((b) => b.type === "tool_use" && b.name === "grade")?.input || {};
+    return { pass: g.pass === true, reason: String(g.reason || "").slice(0, 500), usage: {} };
+  }
+  const r = await fetch(`${API}/v1/messages`, { method: "POST", headers: { "x-api-key": o.judgeKey, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify(body) });
   const m = await r.json();
   if (!r.ok) throw new Error(`judge: ${r.status} ${m?.error?.message || ""}`);
   const g = (m.content || []).find((b) => b.type === "tool_use")?.input || {};
@@ -583,9 +601,28 @@ async function main() {
   const n = runs.reduce((k, [, cs]) => k + cs.length, 0);
   const judged = noJudge ? 0 : runs.reduce((k, [, cs]) => k + cs.filter((c) => c.rubric).length, 0);
   console.log(`${n} question(s) on ${targets.join(" + ")}, ${judged} judged: ≈ $${(0.05 * n + 0.01 * judged).toFixed(2)} on Sonnet 5.`);
-  const apiKey = process.env.ANTHROPIC_API_KEY || "";
-  if (!apiKey) {
+  // #854: an OpenAI-compatible endpoint (Gemini, GitHub Models, a local
+  // model) instead of Claude; and the judge's own choice
+  const endpoint = arg("--endpoint", "");
+  const judgeEndpoint = arg("--judge-endpoint", "");
+  const judgeModel = arg("--judge-model", judgeEndpoint ? "" : JUDGE_MODEL);
+  for (const [k, u] of [["--endpoint", endpoint], ["--judge-endpoint", judgeEndpoint]])
+    if (u && !endpointOk(u)) {
+      console.error(`${k} must be https://host[/path], or http:// to this computer`);
+      return 1;
+    }
+  if ((endpoint && !argv.includes("--model")) || (judgeEndpoint && !judgeModel)) {
+    console.error("an endpoint needs its model: --model <id> (and --judge-model <id> with --judge-endpoint)");
+    return 1;
+  }
+  const apiKey = endpoint ? process.env.OPENAI_API_KEY || "" : process.env.ANTHROPIC_API_KEY || "";
+  const judgeKey = judgeEndpoint ? process.env.JUDGE_API_KEY || process.env.OPENAI_API_KEY || "" : process.env.ANTHROPIC_API_KEY || "";
+  if (!apiKey && !endpoint) {
     console.error("ANTHROPIC_API_KEY is not set — refusing to run a live eval.");
+    return 1;
+  }
+  if (!noJudge && !judgeKey && !judgeEndpoint) {
+    console.error("the judge needs ANTHROPIC_API_KEY (or --judge-endpoint, or --no-judge)");
     return 1;
   }
   if (!argv.includes("--yes")) {
@@ -599,11 +636,11 @@ async function main() {
   }
   const { cost } = await import("./assist-eval.mjs");
   const today = new Date().toISOString().slice(0, 10);
-  const outDir = arg("--out", "") ? path.resolve(arg("--out", "")) : path.join(root, "tests/ask-eval/results", `${today}-${model}`);
-  const o = { wasm, pkgDir, model, apiKey, ext, duckdb: arg("--duckdb", "duckdb"), port: Number(arg("--port", "8971")), scratch: process.env.TMPDIR || tmpdir() };
+  const outDir = arg("--out", "") ? path.resolve(arg("--out", "")) : path.join(root, "tests/ask-eval/results", `${today}-${model.replace(/[^\w.-]+/g, "_")}`);
+  const o = { wasm, pkgDir, model, apiKey, endpoint: endpoint ? endpoint.replace(/\/+$/, "") : "", judgeEndpoint, judgeModel, judgeKey, ext, duckdb: arg("--duckdb", "duckdb"), port: Number(arg("--port", "8971")), scratch: process.env.TMPDIR || tmpdir() };
   const sanitize = (v) => {
     const t = JSON.stringify(v, null, 2);
-    if (t.includes(apiKey)) throw new Error("the API key appeared in the eval output — refusing to write it");
+    for (const k of [apiKey, judgeKey]) if (k && t.includes(k)) throw new Error("an API key appeared in the eval output — refusing to write it");
     return t;
   };
 
@@ -623,7 +660,7 @@ async function main() {
             const g = await judge(c, r.text, o);
             s.correct = g.pass;
             s.judge = g.reason;
-            jcost = cost(JUDGE_MODEL, g.usage);
+            jcost = judgeEndpoint ? 0 : cost(JUDGE_MODEL, g.usage);
           } catch (e) {
             errored = true;
             s.judge = e.message;
@@ -631,7 +668,7 @@ async function main() {
         } else s.correct = false;
       }
       if (r.text?.startsWith("harness:")) errored = true;
-      const usd = r.usage.reduce((k, u) => k + cost(model, u), 0);
+      const usd = endpoint ? 0 : r.usage.reduce((k, u) => k + cost(model, u), 0); // an endpoint has no price here
       const row = { id: c.id, kind: c.kind, answer: r.kind, scope: r.scope ?? null, ...s, calls: r.calls, seconds: Number(r.seconds.toFixed(1)), cost: Number(usd.toFixed(4)), judge_cost: Number(jcost.toFixed(4)) };
       rows.push(row);
       const mark = (v) => (v === null ? "" : v ? " ok" : " FAIL");
