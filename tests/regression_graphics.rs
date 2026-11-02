@@ -913,6 +913,41 @@ fn smooth_methods() {
     assert!(e.contains("::SMOOTH_METHOD 'spline'"), "{e}");
 }
 
+// #872: a smoother's points are its data — still inked on a dense series
+// (900 rows, as plot.lm's residuals vs fitted), unless `::POINTS 'none'`.
+#[test]
+fn smooth_keeps_its_points_when_dense() {
+    let x: Vec<f64> = (0..900).map(|i| i as f64).collect();
+    let y: Vec<f64> = x.iter().map(|v| (v / 50.0).sin() * 10.0).collect();
+    let inked = |points: Option<&str>| -> (usize, usize) {
+        let mut c = vec![
+            Column::new("x", Role::X, nums(&x)),
+            Column::new("y", Role::Value(Kind::Smooth), nums(&y)),
+        ];
+        if let Some(p) = points {
+            c.push(Column::new("p", Role::Points, strs(&[p])));
+        }
+        let s = svg(c);
+        // The data points (the trend line's own hover targets are
+        // `data-geom="smooth"`, uninked by design).
+        let circles: Vec<&str> = s
+            .split("<circle")
+            .skip(1)
+            .filter(|c| c.contains("data-geom=\"point\""))
+            .collect();
+        let hidden = circles
+            .iter()
+            .filter(|c| c.contains("fill-opacity=\"0.000\""))
+            .count();
+        (circles.len(), hidden)
+    };
+    let (n, hidden) = inked(None);
+    assert!(n >= 900, "one circle per row, got {n}");
+    assert_eq!(hidden, 0, "{hidden} of {n} points uninked");
+    let (n, hidden) = inked(Some("none"));
+    assert_eq!(hidden, n, "::POINTS 'none' still hides them");
+}
+
 // ── Residuals vs leverage: Cook's distance contours ─────────────────────
 #[test]
 fn cooks_contours_on_leverage() {
