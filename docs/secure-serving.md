@@ -1191,6 +1191,44 @@ Nothing about the viewer (name, e-mail, claims) is sent. With `mask: "auto"`, va
 | Spending the operator's key | Login required; per-viewer and server budgets; one question per viewer at a time; `ask.allow`; API keys and shared links refused. |
 | Personal data to the provider | Panels on demand, the caps, `@ask skip`, masking, no viewer identity; the notice tells the viewer. |
 
+### Agent mode: declared questions only (`options.agent`, #863)
+
+A dashboard published as an agent answers the questions it declares with
+`-- @question` (see [DOCS.md](DOCS.md)) and nothing else, without a model
+([plan](plans/plan-dashboard-to-agent.md) §10, first slice).
+
+```json
+{
+  "auth": { "mode": "jwt", "...": "..." },
+  "policy": "policy.json",
+  "agent": { "dashboard": "suppliers", "max_rows": 50 }
+}
+```
+
+- **Routes.** Only `GET /api/agent` (the questions and their slots, the
+  same for every caller), `POST /api/agent/answer` and `/healthz` are
+  served, plus `/metrics` behind its own token. Every other path, including
+  the UI, its assets and `/api/panel`, answers 404.
+- **An answer.** `{"question_id": "…", "slots": {"supplier": "bore"},
+  "offset": 0, "limit": 20}`. Each slot value must match one of its input's
+  options *as this caller sees them*: exact, then case-insensitive prefix,
+  then contains. More than one match gets `clarify.candidates` instead of an
+  answer. The other inputs take their defaults; the declaring panel runs with
+  exactly those variables through the panel path, under the caller's claims
+  and the policy. Nothing else in the body is accepted (no `vars`, `page`,
+  `filter`, `sort`, …), and `limit` is capped at `max_rows` (default 50, at
+  most 200). The reply holds `facts` (columns and rows, labelled as data,
+  `truncated` when more rows follow) and a `footer`.
+- **Errors** are a fixed message, a code and an error id; DuckDB's text never
+  reaches the caller, and the log line carries only the code, the id and the
+  panel path's status.
+- **The start is refused** without `auth`, with `ask` on (an agent answers
+  without a model), with `log_vars: "values"`, unless extension telemetry is
+  off (`DATAZOO_DISABLE_TELEMETRY=1`), and when the dashboard fails
+  `dashboard --check --agent`'s static checks (`question/*`, `agent/*`).
+- Until canonical views exist (A3), the operator's own policy is the data
+  boundary, as for `/api/panel`.
+
 ### Scheduled tasks (`options.tasks`, #767)
 
 SQL that runs on a schedule next to the dashboards, e.g. to load the inbox

@@ -27,6 +27,8 @@
 //!   (#843): the translation both ways, for the `/assist` proxy and Ask.
 
 pub mod access;
+#[cfg(feature = "auth")]
+pub mod agent;
 pub mod app_brand;
 pub mod ask;
 #[cfg(feature = "auth")]
