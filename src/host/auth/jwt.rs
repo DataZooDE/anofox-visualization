@@ -603,6 +603,10 @@ pub struct Verifier {
     pub leeway: u64,
     pub max_age: Option<u64>,
     pub jwks: Jwks,
+    /// `auth.require` (#864, N6): claim → accepted values, checked after
+    /// verification — a token of another tenant of the same identity
+    /// provider is refused (`bad_claim`).
+    pub require: Vec<(String, Vec<String>)>,
 }
 
 impl Verifier {
@@ -645,12 +649,56 @@ impl Verifier {
             return Err("bad_issuer");
         }
         check_iat(&payload, self.leeway, self.max_age)?;
+        if !required_claims_hold(&payload, &self.require) {
+            return Err("bad_claim");
+        }
         Ok((payload, header.typ))
     }
 }
 
+/// Does every `auth.require` claim hold? A string claim must equal one of
+/// its accepted values; a list claim (`groups`) must hold one of them.
+pub fn required_claims_hold(payload: &Value, require: &[(String, Vec<String>)]) -> bool {
+    require.iter().all(|(claim, ok)| match payload.get(claim) {
+        Some(Value::String(s)) => ok.contains(s),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|s| ok.iter().any(|o| o == s)),
+        _ => false,
+    })
+}
+
+/// `auth.require`: `{"<claim>": "<value>" | ["<value>", …]}`.
+pub fn parse_require(v: Option<&Value>) -> Result<Vec<(String, Vec<String>)>, String> {
+    let Some(v) = v else { return Ok(Vec::new()) };
+    let o = v
+        .as_object()
+        .ok_or("auth.require must be an object of claim → value(s)")?;
+    let mut out = Vec::new();
+    for (k, val) in o {
+        let vals: Vec<String> = match val {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        };
+        if k.is_empty() || vals.is_empty() || vals.iter().any(|v| v.is_empty()) {
+            return Err(format!(
+                "auth.require.{k} must be a non-empty string or a list of them"
+            ));
+        }
+        out.push((k.clone(), vals));
+    }
+    Ok(out)
+}
+
 /// Parse the verification settings shared by `jwt` and `oidc`: `issuer`
-/// (HTTPS), `algorithms`, `leeway_s`, `max_age_s`, `jwks_url`, `jwks_ttl_s`.
+/// (HTTPS), `algorithms`, `leeway_s`, `max_age_s`, `jwks_url`, `jwks_ttl_s`,
+/// `require`.
 pub fn verifier_from_json(
     o: &serde_json::Map<String, Value>,
     audiences: Vec<String>,
@@ -702,8 +750,10 @@ pub fn verifier_from_json(
             Some(u.to_string())
         }
     };
+    let require = parse_require(o.get("require"))?;
     let provider = Arc::new(Provider::new(issuer, fetch));
     Ok(Verifier {
+        require,
         jwks: Jwks::new(
             provider.clone(),
             jwks_url,
@@ -887,6 +937,37 @@ mod tests {
 
     fn good(now: u64) -> Value {
         json!({"iss": ISS, "aud": "dash", "sub": "alice", "exp": now + 300, "iat": now})
+    }
+
+    /// #864 (N6, C5.1): `auth.require` pins claim values — a token of
+    /// another tenant of the same issuer, or one without the claim, is
+    /// refused after its signature checked out.
+    #[test]
+    fn required_claims_pin_the_tenant() {
+        let e = es256("e1");
+        let f = idp(&[&e]);
+        let v = verifier(
+            f,
+            json!({"require": {"tid": "acme", "roles": ["agent-user", "admin"]}}),
+        );
+        let now = now_s();
+        let mut t = good(now);
+        t["tid"] = json!("acme");
+        t["roles"] = json!(["agent-user"]);
+        assert!(v.verify(&sign(&e, Some("e1"), &t)).is_ok());
+        let mut other = t.clone();
+        other["tid"] = json!("globex");
+        assert_eq!(v.verify(&sign(&e, Some("e1"), &other)), Err("bad_claim"));
+        let mut none = t.clone();
+        none.as_object_mut().unwrap().remove("tid");
+        assert_eq!(v.verify(&sign(&e, Some("e1"), &none)), Err("bad_claim"));
+        // a client-credentials-shaped token without the user role
+        let mut client = t.clone();
+        client["roles"] = json!([]);
+        assert_eq!(v.verify(&sign(&e, Some("e1"), &client)), Err("bad_claim"));
+        assert!(parse_require(Some(&json!({"tid": ""}))).is_err());
+        assert!(parse_require(Some(&json!({"tid": 1}))).is_err());
+        assert!(parse_require(Some(&json!(["tid"]))).is_err());
     }
 
     #[test]
