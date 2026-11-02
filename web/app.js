@@ -898,8 +898,8 @@ SELECT sku::TABLE,
        status::BADGE,
        growth AS "growth %" ::TREND,
        (SELECT list(sales ORDER BY m) FROM hist WHERE hist.sku = fc.sku) AS trend ::SPARKLINE,
-       (SELECT list({'ref': 0.2, 'cur': sales / sum(sales) OVER ()} ORDER BY m)
-          FROM hist WHERE hist.sku = fc.sku) AS "Sales share" ::SPARKBAR
+       (SELECT list({'ref': 0.2, 'cur': share} ORDER BY m)
+          FROM (SELECT m, sales / sum(sales) OVER () AS share FROM hist WHERE hist.sku = fc.sku)) AS "Sales share" ::SPARKBAR
 FROM fc ORDER BY forecast DESC;
 
 -- Totals per column (::TOTALS; click a total's tag to change it), a grouped
