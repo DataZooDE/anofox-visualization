@@ -851,6 +851,11 @@ pub(super) fn build(
                 // not across it. Still left at `BottomRight` (not worth
                 // moving to `TopRight` now that the original reason to
                 // dodge it is gone).
+                // #878: the library's 14 px cells and 8 px captions read as
+                // a ~45 px smudge next to the 10 px class legends; drawn at
+                // their size instead.
+                cell_size: 20.0,
+                text_size: 10.0,
                 ..Default::default()
             })
         }
