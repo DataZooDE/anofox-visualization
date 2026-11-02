@@ -12387,10 +12387,13 @@ function toggleTrackShade(el) {
 // full width, the theme's max-width:760px rule) and touch screens (a phone held
 // sideways, a tablet): the width it is shown at, so its text keeps its size
 // instead of shrinking with the SVG.
-const FIT_TO_PANEL = "(max-width: 760px), (hover: none)";
+// #876: every screen draws a chart at its panel's real pixel width (phones and
+// touch screens did already), so text and ::HEIGHT are real pixels whatever the
+// window size — a chart scaled from a fixed 1200-unit drawing had 7.8 px tick
+// labels in a 1400 px window and 11.6 px at 1920 px.
 function fitWidth(holder, rw) {
   const w = Math.round(holder.clientWidth);
-  return w > 0 && matchMedia(FIT_TO_PANEL).matches ? Math.max(240, w) : rw;
+  return w > 0 ? Math.max(240, w) : rw;
 }
 
 // Redraw every chart whose fitted size changed (after a run, and debounced on
