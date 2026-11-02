@@ -717,7 +717,8 @@ jobs:
 
       # scripts/assist-openai-e2e.mjs (#843 M3-1): the assistant on an
       # OpenAI-compatible endpoint (a fake local model on 127.0.0.1, through
-      # the assistant's CSP): no key for a local model, a 401 offers one.
+      # the assistant's CSP): no key for a local model, a 401 offers one;
+      # #844: sample rows only with the per-conversation opt-in.
       - name: Assistant on an OpenAI-compatible endpoint e2e
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" TMPDIR="$RUNNER_TEMP" node scripts/assist-openai-e2e.mjs --pkg web/pkg --port 8791

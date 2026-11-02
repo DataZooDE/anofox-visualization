@@ -43,6 +43,10 @@ export const LIMITS = {
   columns: 60, // columns per profile
   topValues: 50, // a text column's common values are sent up to this many distinct
   runRows: 1000, // run_sql reads at most this many rows (it returns a profile)
+  // #844: with the per-conversation sample-rows opt-in only
+  sampleRows: 5, // rows of each table in scope sent with the context
+  resultRows: 20, // rows of a run_sql result sent with its profile
+  sampleChars: 200, // a text value of a sample row, at most
   resultChars: 4000, // a tool result's text
   timeoutMs: 10000, // run_sql (cancelled in the worker when it is late)
   checkQueryMs: 30000, // one query of a check
@@ -785,7 +789,7 @@ export const TOOLS = [
   },
   {
     name: "run_sql",
-    description: `Run one read-only query (SELECT, FROM, WITH, VALUES) in a scratch session and get the shape of its result: the columns with their types, the row count (up to ${LIMITS.runRows}), and per column the empty count, distinct count and the min / max of numbers and dates. No rows and no text values are returned. Anything that writes, installs, attaches, runs a dynamic query or reads a file the dashboard does not already use is refused.`,
+    description: `Run one read-only query (SELECT, FROM, WITH, VALUES) in a scratch session and get the shape of its result: the columns with their types, the row count (up to ${LIMITS.runRows}), and per column the empty count, distinct count and the min / max of numbers and dates. No rows and no text values are returned, unless the user turned on sample rows for this conversation (the context then says \"sample_rows\": true): the profile then also carries the first ${LIMITS.resultRows} rows, with columns that look personal withheld. Anything that writes, installs, attaches, runs a dynamic query or reads a file the dashboard does not already use is refused.`,
     input_schema: obj({ sql: str("One read-only SQL statement"), purpose: str("What you want to learn from it, in a few words") }),
     strict: true,
   },
@@ -950,6 +954,21 @@ export function personal(name, values = []) {
   return null;
 }
 
+// #844: rows as the model may get them with the sample-rows opt-in: at most
+// `n`, long text cut, and a column that looks personal (its name, or any of
+// its values — the same rule as common values) withheld: never in the rows,
+// only named in `withheld`. `types` = [[name, type]], `rows` = objects.
+export function sampleOf(types, rows, n) {
+  const data = (Array.isArray(rows) ? rows : []).slice(0, n);
+  const names = (Array.isArray(types) ? types : []).map((t) => String(t[0]));
+  const withheld = names.filter((c) => personal(c, data.map((r) => r?.[c]).filter((v) => v != null)));
+  const keep = names.filter((c) => !withheld.includes(c));
+  const cut = (v) => (typeof v === "string" && v.length > LIMITS.sampleChars ? v.slice(0, LIMITS.sampleChars) + "…" : v);
+  const out = { columns: keep, rows: data.map((r) => keep.map((c) => cut(r?.[c] ?? null))) };
+  if (withheld.length) out.withheld = withheld;
+  return out;
+}
+
 // A column card (web/explore.js) as the model gets it: counts, ranges and
 // hints; the common values only for a text column with at most 50 distinct,
 // when `commonValues` is on and nothing looks personal.
@@ -979,7 +998,7 @@ export function modelCard(c, opts = {}) {
 // `panel_title`; `editing` says whose script the statements are ("editor",
 // or "proposal" while an unapplied proposal is on screen).
 export function buildContext(opts = {}) {
-  const { mode = "new", tables = [], sql = "", spans = [], theme, locale, commonValues = true, panel, panelTitle, editing } = ownOpts(opts);
+  const { mode = "new", tables = [], sql = "", spans = [], theme, locale, commonValues = true, sampleRows = false, panel, panelTitle, editing } = ownOpts(opts);
   const ctx = { mode };
   if (mode === "change_panel") {
     ctx.panel = panel;
@@ -990,6 +1009,8 @@ export function buildContext(opts = {}) {
     name: t.name,
     rows: t.rows ?? undefined,
     columns: t.cards ? t.cards.slice(0, LIMITS.columns).map((c) => modelCard(c, { commonValues })) : undefined,
+    // #844: only with the opt-in (the caller samples only then, too)
+    sample_rows: sampleRows && t.sample ? t.sample : undefined,
   }));
   if (tables.length > LIMITS.tables) ctx.more_tables = tables.slice(LIMITS.tables).map((t) => ({ name: t.name, rows: t.rows ?? undefined }));
   if (mode !== "new" && sql.trim()) {
@@ -1004,6 +1025,7 @@ export function buildContext(opts = {}) {
   if (theme) ctx.theme = theme;
   if (locale) ctx.locale = locale;
   ctx.common_values = commonValues;
+  ctx.sample_rows = !!sampleRows;
   return ctx;
 }
 
@@ -1059,7 +1081,7 @@ export function proposalReaders(sql) {
 // query summaries and check results leave as well.
 // sec-review-256 last check: ownOpts first (same reason as buildPrefix).
 export function payloadPreview(opts = {}) {
-  const { prefix, ctx, request, destination = API_HOST, toolLog = [] } = ownOpts(opts);
+  const { prefix, ctx, request, destination = API_HOST, toolLog = [], sampleRows = false } = ownOpts(opts);
   const msg = firstMessage(ctx, request);
   const dynamic = msg.content.map((c) => c.text).join("\n\n");
   const statics = [
@@ -1076,7 +1098,9 @@ export function payloadPreview(opts = {}) {
     dynamic,
     tools,
     redacted,
-    note: "Then, while the assistant works: each tool result above (table profiles, query summaries without rows, check results).",
+    note: sampleRows
+      ? `Then, while the assistant works: each tool result above (table profiles, query summaries with their first ${LIMITS.resultRows} rows, check results).`
+      : "Then, while the assistant works: each tool result above (table profiles, query summaries without rows, check results).",
     approxTokens: Math.round((chars + tools.reduce((s, t) => s + t.content.length, 0)) / 4),
   };
 }
@@ -1495,6 +1519,17 @@ export function wasmTools(opts) {
         columns: p.cards.slice(0, LIMITS.columns).map((c) => modelCard(c, { commonValues: commonValues() })),
       });
     },
+    // #844: a table's first rows for the context, with the sample-rows
+    // opt-in only (not a model tool: the panel calls it for the tables in
+    // scope, and the rows show in "What will be sent" first).
+    async sampleTable(opts) {
+      const { table } = ownOpts(opts);
+      if (!sampleRows()) throw new Error("sample rows are off for this conversation");
+      await locked();
+      const t = await resolve(table);
+      const rows = await rowsOf(`SELECT * FROM ${t.fq} LIMIT ${LIMITS.sampleRows}`);
+      return sampleOf(Object.keys(rows[0] || {}).map((k) => [k, ""]), rows, LIMITS.sampleRows);
+    },
     // One read-only query, as DuckDB's own parser reads it: exactly one
     // SELECT-class statement (json_serialize_sql), nothing denied in its
     // tree; run as one prepared-checked statement with a cancelling timeout.
@@ -1520,7 +1555,7 @@ export function wasmTools(opts) {
       } catch (e) {
         throw new Error(say((e && e.message) || e, await namesIn(s)));
       }
-      if (!quiet()) return resultProfile(res.types, res.rows, { values: true });
+      if (!quiet()) return resultProfile(res.types, res.rows, { values: true, sample: LIMITS.resultRows });
       // A column name the query does not write and no table has may come
       // from the data (PIVOT … ON a column): withheld. `values: false` is
       // passed explicitly (sec-review-256 last check) rather than left to
@@ -1726,7 +1761,7 @@ const INPUT_ROLES = new Set(["DROPDOWN", "MULTISELECT", "NUMBER", "DATE", "TEXT"
 // else; run_sql below now also passes `values: false` explicitly in the
 // quiet branch rather than relying on the default.
 export function resultProfile(types, rows, opts = {}) {
-  const { values = false, names = () => true } = ownOpts(opts);
+  const { values = false, names = () => true, sample = 0 } = ownOpts(opts);
   const capped = rows.length > LIMITS.runRows;
   const data = capped ? rows.slice(0, LIMITS.runRows) : rows;
   let withheld = 0;
@@ -1749,7 +1784,10 @@ export function resultProfile(types, rows, opts = {}) {
     }
     return c;
   });
-  return stableJson({ rows: capped ? `more than ${LIMITS.runRows}` : data.length, columns });
+  // #844: the first rows too, with the sample-rows opt-in (values only)
+  const out = { rows: capped ? `more than ${LIMITS.runRows}` : data.length, columns };
+  if (values && Number.isInteger(sample) && sample > 0) out.sample = sampleOf(types, data, Math.min(sample, LIMITS.resultRows));
+  return stableJson(out);
 }
 
 // ---- Ask in the builder (#195 M2-5, plan §12.1 / §12.8) ----
