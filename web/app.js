@@ -8524,6 +8524,7 @@ function urlStateParams() {
   }
   for (const [k, r] of Object.entries(dpRange)) {
     if (r) add(k + "_from", r.from), add(k + "_to", r.to);
+    if (r && r.yfrom != null) add(k + "_yfrom", r.yfrom), add(k + "_yto", r.yto); // #886
   }
   for (const [p, path] of Object.entries(dpDrill)) if (path.length) add(p + "_path", path);
   return out;
@@ -8672,6 +8673,11 @@ function seedNamedSelection(sel) {
   const t = take(sel.name + "_to");
   const typed = (x) => (x && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(x[0]) && Number.isFinite(+x[0]) ? +x[0] : x && isIsoDate(x[0].slice(0, 10)) ? x[0] : null);
   if (typed(f) !== null && typed(t) !== null) dpRange[sel.name] = { from: typed(f), to: typed(t) };
+  // #886: a scatter's box brush also bounds y
+  const yf = take(sel.name + "_yfrom");
+  const yt = take(sel.name + "_yto");
+  if (dpRange[sel.name] && typeof typed(yf) === "number" && typeof typed(yt) === "number")
+    Object.assign(dpRange[sel.name], { yfrom: typed(yf), yto: typed(yt) });
 }
 // ---- drill-down (::DRILL) and drill-through (::LINK) ----
 // `'region > country > city'::DRILL` before a chart: the chart shows one level
@@ -9059,6 +9065,9 @@ async function setRangeVars() {
     try {
       await runSql(`SET VARIABLE ${name}_from = ${lit(r && r.from)}`);
       await runSql(`SET VARIABLE ${name}_to = ${lit(r && r.to)}`);
+      // #886: a scatter's box brush also bounds y
+      await runSql(`SET VARIABLE ${name}_yfrom = ${lit(r && r.yfrom)}`);
+      await runSql(`SET VARIABLE ${name}_yto = ${lit(r && r.yto)}`);
     } catch (_) {}
   }
 }
@@ -9126,6 +9135,10 @@ function decorateSelections() {
         if (keys.size && !keys.has(el.getAttribute("data-series"))) return false;
         if (!r || !kind) return true;
         const x = xVal(el.getAttribute("data-x") || "", kind);
+        if (r.yfrom != null) {
+          const y = markValue(el);
+          if (y == null || y < r.yfrom || y > r.yto) return false;
+        }
         return x >= r.from && x <= r.to;
       });
     }
@@ -9152,7 +9165,11 @@ function decorateSelections() {
     panel.querySelector(".dp-ia-bar")?.remove();
     const parts = [];
     if (keys.size) parts.push([`${sel.name}: ${[...keys].join(", ")}`, () => (dpXf[sel.name] = Array.isArray(cur) ? [] : "")]);
-    if (r) parts.push([`${sel.name}: ${r.from} – ${r.to}`, () => (dpRange[sel.name] = null)]);
+    if (r)
+      parts.push([
+        `${sel.name}: ${r.from} – ${r.to}${r.yfrom != null ? ` × ${r.yfrom} – ${r.yto}` : ""}`,
+        () => (dpRange[sel.name] = null),
+      ]);
     if (!parts.length) return;
     const bar = document.createElement("div");
     bar.className = "dp-ia-bar";
@@ -21294,7 +21311,10 @@ function toggleBrush(panel) {
   // On a ::SELECT_AS chart with a continuous / date x the brush is an x band.
   const sel = panel._ia && panel._ia.select;
   const xKind = sel ? xKindOf([...marksOf(panel)].map((el) => el.getAttribute("data-x") || "")) : null;
-  const xBand = !!xKind;
+  // #886: on a scatter / bubble / jitter chart the brush is a box over both
+  // axes (x and y ranges); elsewhere an x band
+  const scatter = (panel._dp?.roles || []).some((r) => ["SCATTER", "BUBBLE", "JITTER"].includes(r[1]));
+  const xBand = !!xKind && !scatter;
   ov.addEventListener("click", (e) => e.stopPropagation()); // a drag is not a click on empty space
   let start = null;
   const rel = (e) => {
@@ -21349,7 +21369,10 @@ function toggleBrush(panel) {
     const hit = [...marksOf(panel)].filter(inBox);
     if (xKind) {
       const xs = hit.map((el) => xVal(el.getAttribute("data-x") || "", xKind)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-      dpRange[sel.name] = xs.length ? { from: xs[0], to: xs[xs.length - 1] } : null;
+      const ys = scatter ? hit.map(markValue).filter((v) => v != null).sort((a, b) => a - b) : [];
+      dpRange[sel.name] = xs.length
+        ? { from: xs[0], to: xs[xs.length - 1], ...(ys.length ? { yfrom: ys[0], yto: ys[ys.length - 1] } : {}) }
+        : null;
     } else if (sel.mode === "multi") {
       dpXf[sel.name] = [...new Set(hit.map((el) => el.getAttribute("data-series")))];
     } else return;

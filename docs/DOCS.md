@@ -3705,7 +3705,12 @@ two charts filter independently (and compose):
 The mark's key is the one the shared `selected` would get (its `::CATEGORY`
 series, else its x). The brushed range is the smallest and largest x of the
 marks inside the band — numbers on a numeric x, `'YYYY-MM-DD'` text on a date x
-(cast it: `getvariable('week_from')::DATE`); `NULL` when nothing is brushed.
+(cast it: `getvariable('week_from')::DATE`); `NULL` when nothing is brushed. On a
+`::SCATTER` / `::BUBBLE` / `::JITTER` chart the brush is a **box**: it also
+sets `region_yfrom` / `region_yto`, the smallest and largest y of the points
+inside it, so a panel can filter
+`x BETWEEN getvariable('region_from') AND getvariable('region_to') AND y BETWEEN getvariable('region_yfrom') AND getvariable('region_yto')`
+(#886; a locked server needs them in `-- @vars`).
 The selected marks stay bright, the rest dim, a brushed range stays shaded, and
 a chip above the chart shows the selection (× clears it). **Esc** or a click on
 empty space clears every selection. Selections are part of the URL state.
