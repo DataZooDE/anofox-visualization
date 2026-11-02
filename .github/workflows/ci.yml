@@ -616,6 +616,13 @@ jobs:
       - name: Telemetry e2e (no request to a telemetry or unexpected host)
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/telemetry-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/examples-e2e.mjs (#891): every sidebar example, every tab and
+      # sub-tab — no error card, no page error, no chart whose data marks are
+      # all uninked (#872, #874 slipped through before). ~2.5 min.
+      - name: Every example and tab renders (#891)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/examples-e2e.mjs --url http://127.0.0.1:8947/
+
       # scratchRunner's timeout against a real, uncancelled-looking query
       # in the real DuckDB-Wasm Worker (#258, a follow-up to #200): the
       # unit tests (tests/web/lint_test.mjs) prove the cleanup logic with a
