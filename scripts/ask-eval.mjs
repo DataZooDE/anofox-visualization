@@ -423,7 +423,7 @@ async function builderTarget(cases, o) {
       return;
     }
     let p = u.pathname.startsWith("/pkg/") ? path.join(o.pkgDir, u.pathname.slice(5)) : path.join(webDir, decodeURIComponent(u.pathname));
-    if (!p.startsWith(webDir) && !p.startsWith(o.pkgDir)) p = "/nonexistent";
+    if (!p.startsWith(webDir + path.sep) && !p.startsWith(o.pkgDir + path.sep)) p = "/nonexistent";
     if (p.endsWith("/")) p = path.join(p, "index.html");
     try {
       const data = readFileSync(p);
