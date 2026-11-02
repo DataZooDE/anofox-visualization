@@ -90,6 +90,8 @@ application/json' -d '<json>'`.
 | S3 | Start without `DATAZOO_DISABLE_TELEMETRY=1` | Refused: telemetry must be off | |
 | S4 | Start with `"log_vars": "values"` | Refused | |
 | S5 | Start as in §1 | Starts; the log names the dashboard, 3 questions, the row cap | |
+| S6 | Start with `auth` mode `oidc` instead of `jwt` | Refused: oidc signs people in through browser pages | |
+| S7 | Start with `"resource": "https://…/agents/suppliers/mcp"` | Refused: the path must be `/mcp` | |
 
 ## 3. Tokens
 
