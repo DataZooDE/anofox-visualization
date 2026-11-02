@@ -2641,7 +2641,7 @@ Events: `start`, `login`, `logout`, `embed` (a link exchanged), `auth` with
 used, then at most every 10 minutes per credential), `auth` with
 `outcome: "deny"` (any refused credential, with its `reason`: `expired`, `not_yet_valid`,
 `bad_signature`, `bad_alg`, `bad_issuer`, `bad_audience`, `unknown_kid`,
-`missing_claim`, `malformed_token`, `revoked`, `unknown_key`, `out_of_scope`,
+`missing_claim`, `bad_claim` (an `auth.require` value), `malformed_token`, `revoked`, `unknown_key`, `out_of_scope`,
 `email_unverified`, `id_token`, `session_ttl`,
 `link_ttl`, `replayed`, `bad_state`, `bad_nonce`, …), `api_key_created`,
 `api_key_revoked`, `api_keys_reloaded`. Never logged: tokens, keys, cookies,
