@@ -19009,7 +19009,7 @@ const SNAPSHOT_JS = `(function(){
       var fv=el.getAttribute('data-fvalue'), x=el.getAttribute('data-fx')||el.getAttribute('data-x'), s=el.getAttribute('data-series');
       if(fv)t=(x&&x!==s?x+(s?' · '+s:''):(s||x||''))+': '+fv;
       el.addEventListener('mouseenter',function(){tip.textContent=t;tip.classList.add('show');});
-      el.addEventListener('mousemove',function(e){tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';});
+      el.addEventListener('mousemove',function(e){var w=tip.offsetWidth,h=tip.offsetHeight,l=e.clientX+14,t=e.clientY+14;if(l+w>innerWidth-8)l=e.clientX-14-w;if(t+h>innerHeight-8)t=e.clientY-14-h;tip.style.left=Math.max(8,l)+'px';tip.style.top=Math.max(8,t)+'px';});
       el.addEventListener('mouseleave',function(){tip.classList.remove('show');});
     });
   }
@@ -19775,6 +19775,20 @@ function isRuleMark(el) {
 // re-show lands at the same spot without a real mouse event.
 let dpTipMark = null;
 let dpLastMouse = { x: 0, y: 0 };
+// Put the chart tooltip at (x, y) + 14 px, flipped to the left of / above
+// the point when it would run past the window's right / bottom edge, and
+// kept inside the window (#875).
+function placeTip(tip, x, y) {
+  const pad = 8;
+  const w = tip.offsetWidth;
+  const h = tip.offsetHeight;
+  let left = x + 14;
+  let top = y + 14;
+  if (left + w > innerWidth - pad) left = x - 14 - w;
+  if (top + h > innerHeight - pad) top = y - 14 - h;
+  tip.style.left = Math.max(pad, Math.min(left, innerWidth - pad - w)) + "px";
+  tip.style.top = Math.max(pad, Math.min(top, innerHeight - pad - h)) + "px";
+}
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -19893,8 +19907,7 @@ function attachHover() {
     el.addEventListener("mousemove", (e) => {
       dpLastMouse = { x: e.clientX, y: e.clientY };
       if (pointered()) return;
-      tip.style.left = e.clientX + 14 + "px";
-      tip.style.top = e.clientY + 14 + "px";
+      placeTip(tip, e.clientX, e.clientY);
     });
     el.addEventListener("mouseleave", () => {
       if (isMapMark) mapHoverEmph(null);
@@ -20133,10 +20146,7 @@ function attachChartA11y() {
         el.dispatchEvent(new MouseEvent("mouseenter"));
         const r = el.getBoundingClientRect();
         const tip = $("dp-tip");
-        if (tip) {
-          tip.style.left = r.right + 8 + "px";
-          tip.style.top = r.top + 8 + "px";
-        }
+        if (tip) placeTip(tip, r.right - 6, r.top - 6);
       });
       el.addEventListener("blur", () => {
         // a diagram node reached along an edge announced it: back to its own label
@@ -21351,8 +21361,7 @@ function attachAxisPointer() {
       } else tip.innerHTML = head + colPts.map((p, i) => (cts[i] ? cts[i].body : tipRow(p.info, p.fill))).join("") + rules.map(ruleRow).join("");
       tip.classList.add("show");
       ours = tip.innerHTML;
-      tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 240) + "px";
-      tip.style.top = e.clientY + 8 + "px";
+      placeTip(tip, e.clientX + 2, e.clientY - 6); // #875: kept inside the window
     };
     let ours = ""; // what this crosshair last wrote into the shared tip
     const off = () => {
