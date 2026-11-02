@@ -1907,7 +1907,8 @@ fn table_svg(
     let totals_off = tspec.all.as_deref() == Some("none") && named.values().all(|a| *a == "none");
     // totals: a numeric, non-label column after the first (badges: no
     // headless count); 'none' leaves the cell empty
-    let totals: Vec<Option<String>> = cols
+    // (the aggregation, the value): #877 tags a total that isn't a sum
+    let totals: Vec<Option<(String, String)>> = cols
         .iter()
         .enumerate()
         .map(|(k, c)| {
@@ -1923,7 +1924,7 @@ fn table_svg(
             }
             let nums: Vec<f64> = c.cells.iter().filter_map(Cell::num).collect();
             if agg == "count" {
-                return Some(count_text(nums.len(), l));
+                return Some((agg.to_string(), count_text(nums.len(), l)));
             }
             let v = aggregate(&nums, agg)?;
             // a mean / median of whole numbers keeps one decimal
@@ -1939,9 +1940,9 @@ fn table_svg(
             if c.fmt
                 .is_some_and(|f| f == "TREND" || f.starts_with("COLORSCALE"))
             {
-                return Some(short_number(v, l, neg));
+                return Some((agg.to_string(), short_number(v, l, neg)));
             }
-            Some(number_text(v, &p, c.fmt, l, neg))
+            Some((agg.to_string(), number_text(v, &p, c.fmt, l, neg)))
         })
         .collect();
     let show_totals = !totals_off
@@ -1973,7 +1974,14 @@ fn table_svg(
             }
             let head = chars(&c.p.head).min(14.0);
             let cells = (0..sample).map(|r| chars(&text(c, r))).fold(0.0, f64::max);
-            let tot = totals[k].as_deref().map_or(0.0, chars);
+            let tot = totals[k].as_ref().map_or(0.0, |(a, t)| {
+                chars(t)
+                    + if a == "sum" {
+                        0.0
+                    } else {
+                        a.len() as f64 + 1.0
+                    }
+            });
             head.max(cells).max(tot).clamp(3.0, 32.0) + 2.5
         })
         .collect();
@@ -2261,10 +2269,19 @@ fn table_svg(
             "<text x=\"12\" y=\"{ty:.0}\" font-size=\"10\" font-weight=\"700\" letter-spacing=\"0.6\" fill=\"{muted}\">TOTAL</text>"
         ));
         for (k, t) in totals.iter().enumerate() {
-            if let Some(t) = t {
+            if let Some((agg, t)) = t {
                 let (x, a) = anchor(k);
+                // a mean / median / min / max says so, as the browser's tag
+                let tag = if agg == "sum" {
+                    String::new()
+                } else {
+                    format!(
+                        "<tspan font-size=\"9\" font-weight=\"600\" letter-spacing=\"0.4\" fill=\"{muted}\">{} </tspan>",
+                        esc(agg)
+                    )
+                };
                 s.push_str(&format!(
-                    "<text x=\"{x:.1}\" y=\"{ty:.0}\" text-anchor=\"{a}\" font-weight=\"700\" fill=\"{ink}\">{}</text>",
+                    "<text x=\"{x:.1}\" y=\"{ty:.0}\" text-anchor=\"{a}\" font-weight=\"700\" fill=\"{ink}\">{tag}{}</text>",
                     esc(t)
                 ));
             }
