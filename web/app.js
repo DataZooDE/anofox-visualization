@@ -9773,6 +9773,19 @@ const varSig = (sql) => varsOf(sql).map((v) => `${v}=${dpVarNow[v] ?? ""}`).join
 // result a query already returned: the cache stays valid. Anything else (a
 // re-run, a replaced object, an INSERT…) starts a new epoch.
 const CREATE_RE = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:TABLE|VIEW|MACRO|FUNCTION|SEQUENCE|TYPE)\s+(?:IF\s+NOT\s+EXISTS\s+)?([\w."]+)/i;
+// Does `sql` name any of `names` (lower-case; the last part of a qualified
+// name) as a whole word? Used to re-run a setup statement whose input this
+// run rebuilt (#873); a false positive (a column of the same name) only
+// costs a re-run.
+function readsAnyOf(sql, names) {
+  if (!names.size) return false;
+  const code = sqlCode(sql).toLowerCase();
+  for (const n of names) {
+    const last = n.split(".").pop().replace(/[^\w]/g, "");
+    if (last && new RegExp(`(^|[^\\w])${last}($|[^\\w])`).test(code)) return true;
+  }
+  return false;
+}
 async function runSetup(sql, pv) {
   const sig = varSig(sql);
   await runSql(sql, undefined, undefined, true, undefined, pv);
@@ -10202,6 +10215,10 @@ async function runOnce(fresh = true, pv = preview) {
   dpTheme.chrome = {};
   dpAsof = null;
   const CHROME_KEY = { LOCALE: "locale", DASHBOARD_TITLE: "title", BRAND: "brand", LOGO: "logo", FAVICON: "favicon" };
+  // #873: the tables (views, macros, …) a setup statement rebuilt in this
+  // run — a later setup statement that reads one runs again even when its
+  // own variables did not change (cc_plan → cc_erlang → cc_day).
+  const rebuilt = new Set();
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
     try {
@@ -10225,7 +10242,9 @@ async function runOnce(fresh = true, pv = preview) {
         // On a cross-filter re-run, skip setup whose variables did not change
         // since it last ran (selection-independent setup ran on the last full
         // run) so clicks don't recompute forecasts etc.
-        if (!fresh && dpSetupRan.has(s.sql) && dpSetupRan.get(s.sql) === varSig(s.sql)) continue;
+        if (!fresh && dpSetupRan.has(s.sql) && dpSetupRan.get(s.sql) === varSig(s.sql) && !readsAnyOf(s.sql, rebuilt)) continue;
+        const made = CREATE_RE.exec(sqlCode(s.sql));
+        if (made) rebuilt.add(made[1].replace(/"/g, "").toLowerCase());
         // Inside a tab's section: runs before the first panel after it does.
         if (lazy && tabAt[i] >= 0 && !/^\s*(SET|USE|ATTACH|DETACH)\b/i.test(sqlCode(s.sql))) {
           lazy.setup.push(i);
