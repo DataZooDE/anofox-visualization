@@ -2118,6 +2118,19 @@ impl LockedOptions {
             if let (Some(resource), Some(auth)) =
                 (o.agent.as_ref().and_then(|a| a.mcp.as_ref()), &o.auth)
             {
+                // A JWT bearer reaches /mcp directly: its audience is this
+                // server only, so a token minted for another API of the same
+                // identity provider is refused here (no token reuse).
+                if auth
+                    .jwt
+                    .iter()
+                    .any(|j| j.verifier.audiences != [resource.clone()])
+                {
+                    return Err(format!(
+                        "options.agent.mcp: auth.audience must be exactly the MCP resource '{resource}' \
+                         (a bearer is accepted only with this server as its audience)"
+                    ));
+                }
                 let verifiers = auth
                     .jwt
                     .iter()
@@ -13965,7 +13978,22 @@ mod tests {
         let e =
             LockedOptions::parse(Some(&opts("dash", r#","require":{"tid":"acme"}"#))).unwrap_err();
         assert!(
-            e.contains("auth.audience must include the MCP resource"),
+            e.contains("auth.audience must be exactly the MCP resource"),
+            "{e}"
+        );
+        let e = LockedOptions::parse(Some(
+            &opts(
+                "https://agent.example.com/mcp",
+                r#","require":{"tid":"acme"}"#,
+            )
+            .replace(
+                r#""audience":"https://agent.example.com/mcp""#,
+                r#""audience":["https://agent.example.com/mcp","other-api"]"#,
+            ),
+        ))
+        .unwrap_err();
+        assert!(
+            e.contains("auth.audience must be exactly the MCP resource"),
             "{e}"
         );
         let e = LockedOptions::parse(Some(&opts("https://agent.example.com/mcp", ""))).unwrap_err();

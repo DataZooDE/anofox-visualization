@@ -1250,8 +1250,9 @@ adds an MCP server (Streamable HTTP, JSON responses, no session) at
   text), labelled as data. No model, no other method (`resources`,
   `prompts`, sampling) and no SSE stream: `GET /mcp` answers 405.
 - **Auth.** The bearer is checked like any other request. With `jwt` or
-  `oidc`, the start is refused unless `auth.audience` includes the resource
-  URL (a token is only accepted for this server) and `auth.require` pins the
+  `oidc`, the start is refused unless `auth.audience` names the resource
+  URL — for `jwt` it must be exactly that URL, so a token minted for another
+  API of the same identity provider is refused — and `auth.require` pins the
   tenant, e.g. `"require": {"tid": "<tenant id>"}` — a claim value, or a
   list of accepted values, checked after the signature. An unauthenticated
   `/mcp` call gets `401` with `WWW-Authenticate: Bearer
