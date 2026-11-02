@@ -1,5 +1,5 @@
-// #244 M1-3: the assistant's eval seed (tests/assist-eval/) is well-formed —
-// exactly 10 prompts, unique ids, every dataset runs, every role the seed
+// #244 M1-3, #845 M3-3: the assistant's eval seed (tests/assist-eval/) is
+// well-formed — exactly 30 prompts in the plan's mix (§6), unique ids, every dataset runs, every role the seed
 // expects actually exists, and an edit prompt's `sql` plans cleanly. This is
 // the only part of the eval the CI loop runs (no API key, no network, no
 // cost) — the live run itself (scripts/assist-eval.mjs, D4) is manual.
@@ -36,16 +36,25 @@ async function rawDb() {
   return d;
 }
 
-const { loadSeed, validateSeed } = await import(path.join(root, "scripts/assist-eval.mjs"));
+const { loadSeed, validateSeed, datasetFiles } = await import(path.join(root, "scripts/assist-eval.mjs"));
 
 // ---- the seed's own shape ----
 const seed = loadSeed(root);
-assert.equal(seed.prompts.length, 10, `exactly 10 prompts, found ${seed.prompts.length}`);
+assert.equal(seed.prompts.length, 30, `exactly 30 prompts, found ${seed.prompts.length}`);
+{
+  const n = (f) => seed.prompts.filter(f).length;
+  assert.equal(n((p) => p.kind === "new" && !p.harder), 10, "10 new, simple");
+  assert.equal(n((p) => p.kind === "new" && p.harder), 8, "8 new, harder");
+  assert.equal(n((p) => p.kind === "edit"), 7, "7 edits");
+  assert.equal(n((p) => p.kind === "explore"), 2, "2 from Explore");
+  assert.equal(n((p) => p.kind === "safety"), 3, "3 safety");
+}
 const ids = new Set();
 for (const p of seed.prompts) {
   assert.ok(!ids.has(p.id), `duplicate id ${p.id}`);
   ids.add(p.id);
-  assert.ok(["new", "edit", "safety"].includes(p.kind), `${p.id}: kind ${p.kind}`);
+  assert.ok(["new", "edit", "explore", "safety"].includes(p.kind), `${p.id}: kind ${p.kind}`);
+  assert.ok(typeof p.rubric === "string" && p.rubric.trim(), `${p.id}: a rubric for the judge`);
   assert.equal(typeof p.request, "string", `${p.id}: request`);
   assert.ok(p.request.trim(), `${p.id}: empty request`);
   assert.equal(typeof p.dataset, "string", `${p.id}: dataset`);
@@ -54,6 +63,11 @@ for (const p of seed.prompts) {
   if (p.kind === "edit") assert.equal(typeof p.sql, "string", `${p.id}: edit prompt needs sql`);
 }
 validateSeed(seed); // throws on anything the loader itself didn't already catch
+// an Explore start names a table its dataset creates
+for (const p of seed.prompts.filter((p) => p.kind === "explore")) {
+  const sql = read(`tests/assist-eval/datasets/${p.dataset}.sql`);
+  for (const t of p.scope) assert.match(sql, new RegExp(`CREATE (OR REPLACE )?TABLE ${t}\\b`, "i"), `${p.id}: ${t} is not in ${p.dataset}.sql`);
+}
 
 // ---- every role the seed expects exists in roles_json() ----
 const roles = new Set(JSON.parse(wasm.roles_json()).roles.map((r) => r.token));
@@ -69,11 +83,7 @@ for (const dataset of new Set(seed.prompts.map((p) => p.dataset))) {
   db.open({});
   const c = db.connect();
   c.query("INSTALL json; LOAD json;");
-  for (const m of sql.matchAll(/'(data\/[\w-]+\/[\w.-]+\.(?:csv|parquet))'/g)) {
-    const file = m[1];
-    const bytes = readFileSync(path.join(root, "web", file));
-    db.registerFileBuffer(file, new Uint8Array(bytes));
-  }
+  for (const file of datasetFiles(sql)) db.registerFileBuffer(file, new Uint8Array(readFileSync(path.join(root, "web", file))));
   try {
     c.query(sql);
   } catch (e) {

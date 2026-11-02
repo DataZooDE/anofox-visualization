@@ -1,0 +1,1 @@
+A hand-written recording (#845) that proves CI's recheck and replay work before a live run has stored real results in `../results/latest/`: a new dashboard (a profile, then a proposal) and an edit (a proposal), replayed through the real loop and tools by `tests/web/assist_eval_replay_test.mjs`.

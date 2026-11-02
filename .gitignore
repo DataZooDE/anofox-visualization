@@ -19,7 +19,9 @@ __pycache__/
 web/data/boundaries/nuts*.csv
 
 # #244: the assistant eval seed's live results (real API calls, cost money) — never committed
-/tests/assist-eval/results/
+/tests/assist-eval/results/*
+# #845 (M3-3): the stored baseline CI rechecks and replays is committed
+!/tests/assist-eval/results/latest/
 # #195 M2-7: the Ask eval's live results, likewise
 /tests/ask-eval/results/
 
