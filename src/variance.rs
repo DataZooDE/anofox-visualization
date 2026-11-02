@@ -567,6 +567,93 @@ pub(crate) fn render_funnel(
     Ok(Panel::plot(plot, width, height))
 }
 
+/// `::TREEMAP` (#880): tiles whose area is the measure, labelled by
+/// `::XAXIS`; with a `::CATEGORY` the tiles nest in group rectangles, filled
+/// by group (ggplot-rs `geom_treemap`). Rows with no positive value are left
+/// out.
+pub(crate) fn render_treemap(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let Some(labels) = x_labels(cols) else {
+        return Ok(note_svg(
+            title,
+            "::TREEMAP needs an ::XAXIS naming each tile",
+            width,
+            height,
+        ));
+    };
+    let groups: Option<Vec<String>> = cols
+        .iter()
+        .find(|c| c.role == Role::Category)
+        .map(|c| c.values.iter().map(value_str).collect());
+    let keep: Vec<usize> = (0..labels.len())
+        .filter(|&i| {
+            value
+                .values
+                .get(i)
+                .and_then(|v| v.as_f64())
+                .is_some_and(|f| f.is_finite() && f > 0.0)
+        })
+        .collect();
+    if keep.is_empty() {
+        return Ok(note_svg(
+            title,
+            "::TREEMAP needs positive values",
+            width,
+            height,
+        ));
+    }
+    let mut data = vec![
+        (
+            "x".to_string(),
+            strs(keep.iter().map(|&i| labels[i].clone())),
+        ),
+        (
+            "w".to_string(),
+            nums(
+                keep.iter()
+                    .map(|&i| value.values[i].as_f64().unwrap_or(0.0)),
+            ),
+        ),
+    ];
+    let mut aes = Aes::new().weight("w").label("x");
+    let mut fills: Vec<(String, ggplot_rs::scale::color::RGBAColor)> = Vec::new();
+    if let Some(g) = &groups {
+        let col: Vec<String> = keep.iter().map(|&i| g[i].clone()).collect();
+        // the theme's series colours, by group in first-seen order
+        for v in &col {
+            if !fills.iter().any(|(k, _)| k == v) {
+                fills.push((v.clone(), crate::dz_color(o, fills.len())));
+            }
+        }
+        data.push(("g".to_string(), strs(col)));
+        aes = aes.subgroup("g").fill("g");
+    }
+    let c0 = o.theme.color(0);
+    let mut plot = GGPlot::new(data)
+        .aes(aes)
+        .geom_treemap_with(ggplot_rs::geom::treemap::GeomTreemap {
+            fill: c0,
+            label_size: 11.0,
+            group_label_size: if groups.is_some() { 11.0 } else { 0.0 },
+            ..Default::default()
+        })
+        .theme(chart_theme(o, 11.0))
+        .legend_position(LegendPosition::None);
+    if !fills.is_empty() {
+        plot = plot.scale_fill_manual(fills.iter().map(|(k, c)| (k.as_str(), *c)).collect());
+    }
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}
+
 /// `::PARETO` (#879): `::XAXIS` categories as bars sorted largest first (a
 /// category's rows summed), with the cumulative share as a line read
 /// against a 0–100 % right axis (ggplot-rs `geom_pareto`).

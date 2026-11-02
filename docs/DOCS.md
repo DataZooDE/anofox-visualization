@@ -97,6 +97,7 @@ terminal.
 | `::WATERFALL` | `::BRIDGE` | chart | bridge from a start total through signed steps (NULL / ::CATEGORY 'total' rows = totals) |
 | `::BULLET` | `::BULLETCHART` | chart | measure per XAXIS row vs a ::GOAL tick over ::RANGE bands '60,80,100' |
 | `::FUNNEL` | `::FUNNELCHART` | chart | ordered XAXIS stages, widths by value, conversion % from the previous stage |
+| `::TREEMAP` | `::TREE_MAP` | chart | part-to-whole tiles, area by the measure: ::XAXIS names a tile, ::CATEGORY nests tiles in groups |
 | `::PARETO` | `::PARETOCHART` | chart | XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis |
 | `::GANTT` | `::GANTTCHART`, `::TIMELINE_BARS` | chart | one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars |
 | `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual) |
