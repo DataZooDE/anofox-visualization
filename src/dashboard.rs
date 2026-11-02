@@ -148,6 +148,33 @@ fn subtitle_of(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> Option
 /// The height a `::SUBTITLE` line adds under the title bar.
 const SUBTITLE_H: f64 = 16.0;
 
+/// A table panel's height for all its rows (#878): what [`table_svg`] draws
+/// — title bar, header, a row per data row (taller with an in-cell
+/// sparkline / sparkbar), and room for a totals row — so the layout gives it
+/// no empty space below. Above the default panel height the table keeps its
+/// "… n more rows" line instead.
+fn table_natural_height(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> f64 {
+    let nrow = rows.iter().map(|(_, v)| v.len()).max().unwrap_or(0) as f64;
+    let spark = roles
+        .iter()
+        .any(|(_, r)| matches!(r, Role::Value(Kind::Sparkline | Kind::Sparkbar)));
+    let row_h = if spark {
+        crate::SPARKLINE_MIN_H + 6.0
+    } else {
+        22.0
+    };
+    let top = if title_of(rows, roles).is_some() {
+        30.0
+    } else {
+        10.0
+    } + if subtitle_of(rows, roles).is_some() {
+        SUBTITLE_H
+    } else {
+        0.0
+    };
+    (top + 30.0 + nrow * row_h + row_h + 6.0).max(80.0)
+}
+
 /// #774: the `::SUBTITLE` line under a title bar (baseline 36), muted and
 /// shortened with an ellipsis to the panel's width.
 fn subtitle_svg(sub: &str, x: f64, w: f64, ropts: &RenderOptions) -> String {
@@ -926,7 +953,29 @@ fn render_inner(
                     (iw * (ah / aw).clamp(0.05, 20.0) + title_h + cap_h + 10.0)
                         .clamp(80.0, opts.panel_height as f64)
                 }
-                (None, None) => opts.panel_height as f64,
+                // #878: a lone KPI and a table are as tall as their content
+                // (≤ the default), not a fixed box with empty space under it.
+                (None, None) => match &tiles[si] {
+                    Some(k) => k.height().max(if k.compact { 36.0 } else { 96.0 }),
+                    None if roles
+                        .iter()
+                        .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable)) =>
+                    {
+                        table_natural_height(rows, roles).min(opts.panel_height as f64)
+                    }
+                    // a text card (::TEXT_*): a tile too, just not in a strip
+                    None if roles.iter().any(|(_, r)| matches!(r, Role::Text(_))) => {
+                        crate::kpi::Kpi::from_columns(
+                            &columns_from_result(rows, roles),
+                            &ropts.locale,
+                            compact[si],
+                        )
+                        .map_or(opts.panel_height as f64, |k| {
+                            k.height().max(if k.compact { 36.0 } else { 96.0 })
+                        })
+                    }
+                    None => opts.panel_height as f64,
+                },
             },
         };
         next_height = 0;
@@ -1340,7 +1389,7 @@ fn render_panel_svg(
                 "<text x=\"{pad}\" y=\"20\" font-family=\"{}\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
                 esc(&t.font.display),
                 hex(t.colors.heading),
-                esc(tt),
+                esc(&fit_title(tt, w - 2.0 * pad)),
             ));
         }
         svg.push_str(&sub_svg);
@@ -1376,7 +1425,7 @@ fn render_panel_svg(
                 "<text x=\"{pad}\" y=\"20\" font-family=\"{}\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
                 esc(&t.font.display),
                 hex(t.colors.heading),
-                esc(tt),
+                esc(&fit_title(tt, w - 2.0 * pad)),
             ));
         }
         svg.push_str(&sub_svg);
@@ -1480,7 +1529,7 @@ fn render_panel_svg(
                 .unwrap_or_default();
             svg.push_str(&format!(
                 "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}{mark}</text>",
-                esc(tt),
+                esc(&fit_title(tt, w - 2.0 * pad - if mark.is_empty() { 0.0 } else { 18.0 })),
                 f = esc(&t.font.display),
                 hd = hex(t.colors.heading),
             ));
@@ -1563,7 +1612,7 @@ fn render_panel_svg(
             .unwrap_or_default();
         svg.push_str(&format!(
             "<text x=\"{pad}\" y=\"20\" font-family=\"{f}\" font-size=\"14\" font-weight=\"700\" fill=\"{hd}\">{}{mark}</text>",
-            esc(tt),
+            esc(&fit_title(tt, w - 2.0 * pad - if mark.is_empty() { 0.0 } else { 18.0 })),
             f = esc(&ropts.theme.font.display),
             hd = hex(ropts.theme.colors.heading),
         ));
@@ -1735,6 +1784,12 @@ fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> S
 /// estimate (the same heuristic `axis_text_x_check_overlap` measures tick
 /// labels with), nudged up a little for the header's semibold weight, which
 /// is a touch wider than the regular weight the table estimates.
+/// A panel title cut to `avail_px` with "…" (#878): a long title used to
+/// run past its card and be clipped mid-word.
+fn fit_title(title: &str, avail_px: f64) -> String {
+    truncate_header(title, 14.0, avail_px).unwrap_or_else(|| title.to_string())
+}
+
 fn truncate_header(head: &str, size: f64, avail_px: f64) -> Option<String> {
     let fits = |s: &str| ggplot_rs::render::text::text_width(s, size) * 1.08 <= avail_px;
     if fits(head) {
@@ -1983,7 +2038,7 @@ fn table_svg(
         s.push_str(&format!(
             "<text x=\"12\" y=\"20\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
             hex(th.colors.heading),
-            esc(t)
+            esc(&fit_title(t, w - 24.0))
         ));
     }
     if let Some(sb) = &subtitle {
