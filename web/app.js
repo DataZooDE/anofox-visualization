@@ -7466,12 +7466,22 @@ function asofStale(v) {
   const m = String(v ?? "").match(/^\s*(?:stale\s*=?\s*)?(\d+)\s*([smhdw])\s*$/i);
   return m ? Number(m[1]) * { s: 1, m: 60, h: 3600, d: 86400, w: 604800 }[m[2].toLowerCase()] : 0;
 }
-function asofRelative(sec) {
+// The chip's words in the dashboard locale's language (#877; the same as
+// src/freshness.rs): English, German, French; any other reads English.
+function asofWords(loc) {
+  const lang = String(loc || "en").slice(0, 2).toLowerCase();
+  if (lang === "de")
+    return { asOf: "Stand:", now: "gerade eben", today: "heute", min: (n) => `vor ${n} Min.`, h: (n) => `vor ${n} Std.`, d: (n) => `vor ${n} Tagen` };
+  if (lang === "fr")
+    return { asOf: "Données au", now: "à l’instant", today: "aujourd’hui", min: (n) => `il y a ${n} min`, h: (n) => `il y a ${n} h`, d: (n) => `il y a ${n} j` };
+  return { asOf: "Data as of", now: "just now", today: "today", min: (n) => `${n} min ago`, h: (n) => `${n} h ago`, d: (n) => `${n} d ago` };
+}
+function asofRelative(sec, w = asofWords()) {
   sec = Math.max(0, sec);
-  if (sec < 60) return "just now";
-  if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
-  if (sec < 172800) return `${Math.floor(sec / 3600)} h ago`;
-  return `${Math.floor(sec / 86400)} d ago`;
+  if (sec < 60) return w.now;
+  if (sec < 3600) return w.min(Math.floor(sec / 60));
+  if (sec < 172800) return w.h(Math.floor(sec / 3600));
+  return w.d(Math.floor(sec / 86400));
 }
 // A date-only ::ASOF value ('2026-01-01', a DATE) → that day, else null: it
 // reads as a calendar day — no time, no time-zone shift (#282).
@@ -7481,6 +7491,7 @@ function asofDay(v) {
 }
 // The chip at `now` (epoch ms) in locale `loc`: {text, title, stale}.
 function asofText(a, now, loc) {
+  const w = asofWords(loc);
   if (a.day) {
     const [y, mo, dd] = a.day.split("-").map(Number);
     const day = new Date(y, mo - 1, dd);
@@ -7489,7 +7500,7 @@ function asofText(a, now, loc) {
     let t;
     try { t = day.toLocaleDateString(loc); } catch (_) { t = a.day; }
     const age = (now - day.getTime()) / 1000;
-    return { text: `Data as of ${t} (${days <= 0 ? "today" : `${days} d ago`})`, title: a.day, stale: a.stale > 0 && age > a.stale };
+    return { text: `${w.asOf} ${t} (${days <= 0 ? w.today : w.d(days)})`, title: a.day, stale: a.stale > 0 && age > a.stale };
   }
   const d = new Date(a.at);
   const age = (now - a.at) / 1000;
@@ -7500,7 +7511,7 @@ function asofText(a, now, loc) {
   } catch (_) {
     t = d.toISOString().slice(0, 16).replace("T", " ");
   }
-  return { text: `Data as of ${t} (${asofRelative(age)})`, title: d.toString(), stale: a.stale > 0 && age > a.stale };
+  return { text: `${w.asOf} ${t} (${asofRelative(age, w)})`, title: d.toString(), stale: a.stale > 0 && age > a.stale };
 }
 // Fill a chip: "Data as of 14:02 (2 h ago)" in the viewer's zone and the
 // dashboard locale (a date is added when it isn't today); amber once stale.
@@ -11240,7 +11251,7 @@ async function runOnce(fresh = true, pv = preview) {
           if (d) {
             const lab = cell("DELTA_LABEL");
             deltaHtml =
-              `<div class="metric-delta ${d.good ? "good" : "bad"}" title="${d.good ? "better" : "worse"} than the comparison">` +
+              `<div class="metric-delta ${d.flat ? "flat" : d.good ? "good" : "bad"}" title="${d.flat ? "no change from" : d.good ? "better than" : "worse than"} the comparison">` +
               `<span class="metric-delta-chg">${d.arrow} ${escapeHtml(d.text)}</span>` +
               (lab != null && String(lab).trim() ? `<span class="metric-delta-label">${escapeHtml(lab)}</span>` : "") +
               `</div>`;

@@ -96,14 +96,59 @@ pub fn is_stale_option(s: &str) -> bool {
     s.trim().trim_matches('"').starts_with("stale")
 }
 
-/// "just now", "5 min ago", "2 h ago", "3 d ago" for an age in seconds.
+/// The chip's words in the dashboard locale's language (#877): English,
+/// German and French; any other language reads English.
+struct Words {
+    as_of: &'static str,
+    just_now: &'static str,
+    today: &'static str,
+    min: fn(i64) -> String,
+    h: fn(i64) -> String,
+    d: fn(i64) -> String,
+}
+
+fn words(l: &Locale) -> Words {
+    match l.tag.split('-').next().unwrap_or("en") {
+        "de" => Words {
+            as_of: "Stand:",
+            just_now: "gerade eben",
+            today: "heute",
+            min: |n| format!("vor {n} Min."),
+            h: |n| format!("vor {n} Std."),
+            d: |n| format!("vor {n} Tagen"),
+        },
+        "fr" => Words {
+            as_of: "Données au",
+            just_now: "à l’instant",
+            today: "aujourd’hui",
+            min: |n| format!("il y a {n} min"),
+            h: |n| format!("il y a {n} h"),
+            d: |n| format!("il y a {n} j"),
+        },
+        _ => Words {
+            as_of: "Data as of",
+            just_now: "just now",
+            today: "today",
+            min: |n| format!("{n} min ago"),
+            h: |n| format!("{n} h ago"),
+            d: |n| format!("{n} d ago"),
+        },
+    }
+}
+
+/// "just now", "5 min ago", "2 h ago", "3 d ago" for an age in seconds (in
+/// English; [`chip_text`] uses the dashboard locale's words).
 pub fn relative(age: i64) -> String {
+    relative_in(age, &words(&Locale::default()))
+}
+
+fn relative_in(age: i64, w: &Words) -> String {
     let age = age.max(0);
     match age {
-        a if a < 60 => "just now".into(),
-        a if a < 3600 => format!("{} min ago", a / 60),
-        a if a < 2 * 86_400 => format!("{} h ago", a / 3600),
-        a => format!("{} d ago", a / 86_400),
+        a if a < 60 => w.just_now.into(),
+        a if a < 3600 => (w.min)(a / 60),
+        a if a < 2 * 86_400 => (w.h)(a / 3600),
+        a => (w.d)(a / 86_400),
     }
 }
 
@@ -121,11 +166,11 @@ pub fn iso_day(epoch: i64) -> String {
 }
 
 /// "today" or "3 d ago" for a calendar day `days` before today.
-fn day_relative(days: i64) -> String {
+fn day_relative(days: i64, w: &Words) -> String {
     if days <= 0 {
-        "today".into()
+        w.today.into()
     } else {
-        format!("{days} d ago")
+        (w.d)(days)
     }
 }
 
@@ -143,12 +188,14 @@ pub fn chip_text(
 ) -> (String, bool) {
     let age = now - asof;
     let stale = stale_secs.is_some_and(|s| age > s as i64);
+    let w = words(l);
     if date_only {
         return (
             format!(
-                "Data as of {} ({})",
+                "{} {} ({})",
+                w.as_of,
                 l.format_date(&iso_day(asof)),
-                day_relative(now.div_euclid(86_400) - asof.div_euclid(86_400))
+                day_relative(now.div_euclid(86_400) - asof.div_euclid(86_400), &w)
             ),
             stale,
         );
@@ -160,7 +207,10 @@ pub fn chip_text(
     } else {
         format!("{} {time}", l.format_date(&iso_day(asof)))
     };
-    (format!("Data as of {when} ({})", relative(age)), stale)
+    (
+        format!("{} {when} ({})", w.as_of, relative_in(age, &w)),
+        stale,
+    )
 }
 
 /// The current time in epoch seconds (`None` on wasm, where the browser draws
@@ -288,7 +338,11 @@ mod tests {
         assert_eq!(relative(600), "10 min ago");
         let de = Locale::from_tag("de-DE").unwrap();
         let (t, _) = chip_text(at, None, at + 86_400 * 2, &de, false);
-        assert!(t.contains("16.10.2026"), "{t}");
+        assert_eq!(t, "Stand: 16.10.2026 14:02 UTC (vor 2 Tagen)");
+        // #877: the chip speaks the dashboard locale's language.
+        let fr = Locale::from_tag("fr-FR").unwrap();
+        let (t, _) = chip_text(at, None, at + 300, &fr, false);
+        assert_eq!(t, "Données au 14:02 UTC (il y a 5 min)");
     }
 
     #[test]
@@ -301,12 +355,12 @@ mod tests {
         let now = parse_timestamp("2026-10-19 12:00:00").unwrap();
         assert_eq!(
             chip_text(at, None, now, &de, true).0,
-            "Data as of 01.01.2026 (291 d ago)"
+            "Stand: 01.01.2026 (vor 291 Tagen)"
         );
         let now = at + 3600;
         assert_eq!(
             chip_text(at, None, now, &de, true).0,
-            "Data as of 01.01.2026 (today)"
+            "Stand: 01.01.2026 (heute)"
         );
         assert!(chip_text(at, Some(86_400), at + 3 * 86_400, &de, true).1);
     }

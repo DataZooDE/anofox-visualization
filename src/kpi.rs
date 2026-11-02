@@ -57,7 +57,10 @@ pub struct Delta {
     pub up: bool,
     /// The change is in the good direction (`::DELTA_LOWER_GOOD` flips it).
     pub good: bool,
-    /// `▲` or `▼`.
+    /// The change as shown is zero (`0%`, `+0`): neither good nor bad, and
+    /// the arrow is `±` (#877).
+    pub flat: bool,
+    /// `▲`, `▼`, or `±` when [`Delta::flat`].
     pub arrow: &'static str,
     /// The relative change without sign (`12.3%`), when shown.
     pub pct: Option<String>,
@@ -92,10 +95,20 @@ pub fn delta(
         (None, Some(a)) => a.clone(),
         (None, None) => return None,
     };
+    // What the reader sees decides: a change that prints as zero isn't a
+    // green "▲ 0%".
+    let flat = !text.chars().any(|c| c.is_ascii_digit() && c != '0');
     Some(Delta {
         up,
         good: up != lower_good,
-        arrow: if up { "▲" } else { "▼" },
+        flat,
+        arrow: if flat {
+            "±"
+        } else if up {
+            "▲"
+        } else {
+            "▼"
+        },
         pct,
         abs,
         text,
@@ -407,7 +420,13 @@ impl Kpi {
         ));
         if let Some(d) = &self.delta {
             y += DELTA_H;
-            let col = if d.good { c.positive } else { c.negative };
+            let col = if d.flat {
+                c.muted
+            } else if d.good {
+                c.positive
+            } else {
+                c.negative
+            };
             // the label beside the change, or on the next line when it
             // doesn't fit (cut with "…" when even that is too narrow)
             let wraps = self.label_line();
@@ -441,7 +460,13 @@ impl Kpi {
                 hex(col),
                 d.arrow,
                 esc(&d.text),
-                cls = if d.good { "good" } else { "bad" },
+                cls = if d.flat {
+                    "flat"
+                } else if d.good {
+                    "good"
+                } else {
+                    "bad"
+                },
             ));
         }
         if !self.caption.is_empty() {
@@ -525,7 +550,13 @@ impl Kpi {
             .delta
             .as_ref()
             .map(|d| {
-                let col = if d.good { c.positive } else { c.negative };
+                let col = if d.flat {
+                    c.muted
+                } else if d.good {
+                    c.positive
+                } else {
+                    c.negative
+                };
                 format!(
                     " <tspan font-size=\"12\" font-weight=\"700\" fill=\"{}\">{} {}</tspan>",
                     hex(col),
@@ -562,6 +593,43 @@ mod tests {
 
     fn en() -> Locale {
         Locale::default()
+    }
+
+    /// #877: a change that prints as zero is flat — `±`, neither good nor
+    /// bad — while a small real one keeps its arrow.
+    #[test]
+    fn zero_change_is_flat() {
+        let l = en();
+        let d = delta(
+            0.935,
+            0.935,
+            MetricFmt::Percent,
+            DeltaFormat::Pct,
+            false,
+            &l,
+        )
+        .unwrap();
+        assert_eq!((d.arrow, d.flat), ("±", true), "{}", d.text);
+        let d = delta(
+            1000.2,
+            1000.0,
+            MetricFmt::Plain,
+            DeltaFormat::Pct,
+            false,
+            &l,
+        )
+        .unwrap();
+        assert_eq!((d.arrow, d.flat), ("±", true), "rounds to 0%: {}", d.text);
+        let d = delta(
+            1100.0,
+            1000.0,
+            MetricFmt::Plain,
+            DeltaFormat::Pct,
+            false,
+            &l,
+        )
+        .unwrap();
+        assert_eq!((d.arrow, d.flat), ("▲", false));
     }
 
     #[test]
