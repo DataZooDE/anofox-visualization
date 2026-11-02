@@ -7,15 +7,18 @@ that tries to read everything, records every request, and never calls out.
 Turn 1 (no tool results yet): get_panel for panels 0..9, then panel 1 with
 each value in $FAKE_TRY_VALUES for variable `region`. Turn 2: `answer`, its
 text all the tool results it got (so a value it saw reaches the viewer), with
-one citation. `x-api-key` must be $FAKE_KEY.
+one citation. `x-api-key` must be $FAKE_KEY. $FAKE_DELAY_MS: wait that long
+before every reply (a slow model, for the load check).
 """
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DIR = sys.argv[1]
 KEY = os.environ.get("FAKE_KEY", "")
+DELAY = int(os.environ.get("FAKE_DELAY_MS", "0")) / 1000
 TRY = [v for v in os.environ.get("FAKE_TRY_VALUES", "").split(",") if v]
 
 
@@ -30,6 +33,7 @@ class H(BaseHTTPRequestHandler):
             f.write(body.replace(b"\n", b" ") + b"\n")
         if self.headers.get("x-api-key") != KEY or self.path != "/v1/messages":
             return self.send(401, {"type": "error", "error": {"type": "authentication_error"}})
+        time.sleep(DELAY)
         req = json.loads(body)
         last = req["messages"][-1]
         results = [b for b in last.get("content", []) if isinstance(b, dict) and b.get("type") == "tool_result"]

@@ -320,6 +320,12 @@ fn proxy_relays_with_the_servers_key_behind_the_authoring_guard() {
     assert!(head.contains("x-should-retry: false"));
     let mcp = request(false).replacen('{', r#"{"mcp_servers":[],"#, 1);
     assert_eq!(send(port, "POST", path, &[auth], &mcp).0, 400);
+    // Ask (#195) is not an authoring route, with the proxy's key or not.
+    let ask = r#"{"dashboard": "d", "question": "hi"}"#;
+    assert!(matches!(
+        send(port, "POST", "/api/ask", &[auth], ask).0,
+        404 | 405
+    ));
     assert_eq!(seen.lock().unwrap().len(), calls);
     assert_eq!(send(port, "GET", path, &[auth], "").0, 405);
     assert_eq!(send(port, "POST", "/assist/v1/files", &[auth], "{}").0, 404);

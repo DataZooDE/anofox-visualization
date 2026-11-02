@@ -1573,7 +1573,12 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             if valid_ident(ext) {
                 m.loads.push(ext.to_string());
             }
-        } else if let Some(r) = l.strip_prefix("-- @vars ") {
+        } else if let Some(r) = (l == "-- @vars")
+            .then_some("")
+            .or_else(|| l.strip_prefix("-- @vars "))
+        {
+            // A bare `-- @vars`: no viewer-settable variables at all (a
+            // dashboard without inputs that turns Ask on, #195).
             let vars = m.vars.get_or_insert_with(Vec::new);
             for v in r.split(',').map(str::trim) {
                 if valid_ident(v) && !crate::host::access::is_reserved_var(v) {
@@ -2669,6 +2674,12 @@ mod tests {
             m.vars,
             Some(vec!["region".to_string(), "selected".to_string()])
         );
+        // a bare `-- @vars`: none at all (not "any"); `-- @varsx` is no header
+        assert_eq!(
+            parse_dashboard_meta("s", "-- @vars\nSELECT 1;").vars,
+            Some(vec![])
+        );
+        assert_eq!(parse_dashboard_meta("s", "-- @varsx\nSELECT 1;").vars, None);
     }
 
     #[test]

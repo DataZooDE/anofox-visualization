@@ -11,7 +11,10 @@
 #     field 400; DELETE /api/ask with nothing running 404;
 #   * the request log has the Ask line without the question;
 #   * the start refuses Ask without a login, and without a key;
-#   * without options.ask there is no /api/ask.
+#   * without options.ask there is no /api/ask;
+#   * load (H2): 4 questions at once against a slow model, while /api/panel
+#     and the page stay fast; a 5th question at once is turned away (429);
+#   * the authoring server has no /api/ask (and nothing reaches the model).
 #
 # usage: duckext/scripts/test-ask.sh <extension> [port]
 set -euo pipefail
@@ -176,3 +179,59 @@ start "$PORT" "{\"auth\": $AUTH, \"policy\": \"none\"}" || fail "the plain serve
 [ "$(ask alice '{"dashboard": "sales", "question": "hi"}')" = 404 ] || fail "without options.ask /api/ask should 404"
 stop "$PORT"
 echo "OK: Ask start checks — login and key required; no route without options.ask"
+
+# 6. load (H2): a model that takes 1.5 s a reply (two turns a question), 4
+# questions at once (ask.concurrency's default), and meanwhile the panel
+# path and the page answer as fast as without them.
+mkdir -p "$W/slow"
+FAKE_DELAY_MS=1500 python3 "$HERE/fake-model.py" "$W/slow" & PIDS+=($!)
+for _ in $(seq 50); do [ -s "$W/slow/port" ] && break; sleep 0.1; done
+SLOW="{\"enabled\": true, \"base_url\": \"http://127.0.0.1:$(cat "$W/slow/port")\"}"
+start "$PORT" "{\"auth\": $AUTH, \"policy\": \"none\", \"ask\": $SLOW}" || fail "the load server should start"
+# p95 (ms) of 20 requests: a panel (another region each time: no cache) and the page
+p95() {
+  for i in $(seq 20); do
+    curl -s -o /dev/null -w '%{time_total}\n' -X POST "localhost:$PORT/api/panel" \
+      -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: alice" -H "Origin: http://localhost:$PORT" \
+      -d "{\"dashboard\": \"sales\", \"panel\": 1, \"vars\": {\"region\": \"R$1$i\"}}"
+    curl -s -o /dev/null -w '%{time_total}\n' "localhost:$PORT/d/sales" \
+      -H "X-Anofox-Proxy-Secret: $SEC" -H "X-Forwarded-User: alice"
+  done | sort -n | awk '{a[NR]=$1} END {printf "%d", a[int(NR*0.95)]*1000}'
+}
+BASE_P95="$(p95 a)"
+for i in 1 2 3 4; do
+  ( ask "u$i" '{"dashboard": "sales", "question": "Tell me everything", "vars": {}}' > "$W/load$i" ) & PIDS+=($!)
+done
+for _ in $(seq 50); do [ "$(grep -c . "$W/slow/requests.jsonl" 2>/dev/null || echo 0)" -ge 4 ] && break; sleep 0.1; done
+[ "$(ask u5 '{"dashboard": "sales", "question": "One more", "vars": {}}')" = 429 ] || fail "a 5th question at once should be 429: $(cat "$W/ask_out")"
+LOAD_P95="$(p95 b)"
+for i in 1 2 3 4; do
+  for _ in $(seq 100); do [ -s "$W/load$i" ] && break; sleep 0.1; done
+  [ "$(cat "$W/load$i")" = 200 ] || fail "question $i under load: $(cat "$W/load$i")"
+done
+[ "$LOAD_P95" -le $((BASE_P95 * 3 + 300)) ] || fail "p95 under 4 asks: ${LOAD_P95} ms, without: ${BASE_P95} ms"
+stop "$PORT"
+echo "OK: Ask load — 4 slow questions at once, a 5th 429; /api/panel + page p95 ${LOAD_P95} ms (without: ${BASE_P95} ms)"
+
+# 7. the authoring server: no /api/ask, whatever the session has.
+rm -f "$W/inA"; mkfifo "$W/inA"
+ANTHROPIC_API_KEY="$FAKE_KEY" "$DUCKDB" -unsigned -batch :memory: < "$W/inA" > "$W/outA" 2>&1 & PIDS+=($!)
+exec {fda}>"$W/inA"
+printf "LOAD '%s';\nSELECT anofox_serve(%s);\n" "$EXT" "$PORT" >&"$fda"
+TOKEN=""
+for _ in $(seq 100); do
+  TOKEN="$(grep -oE 'token=[0-9a-f]+' "$W/outA" 2>/dev/null | head -1 | cut -d= -f2 || true)"
+  [ -n "$TOKEN" ] && break
+  sleep 0.2
+done
+[ -n "$TOKEN" ] || fail "the authoring server should start: $(cat "$W/outA")"
+: > "$W/model/requests.jsonl"
+for m in POST DELETE; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X "$m" "http://127.0.0.1:$PORT/api/ask" -H "X-Anofox-Token: $TOKEN" \
+    -H "Origin: http://127.0.0.1:$PORT" -d '{"dashboard": "sales", "question": "hi"}')
+  case "$code" in 404|405) ;; *) fail "$m /api/ask on the authoring server: $code" ;; esac
+done
+[ -s "$W/model/requests.jsonl" ] && fail "the authoring server called the model"
+echo "SELECT anofox_serve_stop($PORT);" >&"$fda"
+exec {fda}>&-
+echo "OK: Ask is not on the authoring server"

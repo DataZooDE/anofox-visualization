@@ -72,12 +72,12 @@ export function validateSeed(seed) {
   return true;
 }
 
-const PRICE = {
+export const PRICE = {
   // per MTok; check current pricing (plan §5)
   "claude-sonnet-5": { in: 2, out: 10, read: 0.2, write: 2.5 },
   "claude-opus-5-5": { in: 4, out: 20, read: 0.2, write: 5 },
 };
-function cost(model, usage) {
+export function cost(model, usage) {
   const p = PRICE[model] || PRICE["claude-sonnet-5"];
   return (
     (usage.input_tokens || 0) * (p.in / 1e6) +
