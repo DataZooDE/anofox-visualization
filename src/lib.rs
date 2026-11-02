@@ -3602,7 +3602,16 @@ fn cartesian(
         }
         // Scatter + a trend line (no CI ribbon) — an analytical "smooth".
         Kind::Smooth => {
-            plot = plot.geom_point_with(small_point());
+            // The points are the data here, not markers on a line: `auto`
+            // would leave them uninked above ~100 rows (#872).
+            // Only `::POINTS 'none'` hides them.
+            plot = plot.geom_point_with(GeomPoint {
+                visibility: match visibility {
+                    PointVisibility::Hidden => PointVisibility::Hidden,
+                    _ => PointVisibility::Visible,
+                },
+                ..small_point()
+            });
             let method = role_str(cols, Role::SmoothMethod).map(|s| s.to_ascii_lowercase());
             use ggplot_rs::stat::smooth::SmoothMethod;
             let fit = |plot: GGPlot, method: SmoothMethod| {
