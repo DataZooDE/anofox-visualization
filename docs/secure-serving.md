@@ -1100,7 +1100,7 @@ list the panels and give the answer.
 Off by default, at three levels:
 
 1. **The server:** `options.ask`, with a login (`auth`) required.
-2. **The dashboard:** `-- @ask on` in its header, together with `-- @vars`.
+2. **The dashboard:** `-- @ask on` in its header, together with `-- @vars` (a bare `-- @vars` when it has no inputs).
 3. **The panel:** `-- @ask skip` keeps one panel out entirely.
 
 ```sql
