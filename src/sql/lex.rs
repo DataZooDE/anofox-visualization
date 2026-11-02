@@ -195,6 +195,61 @@ pub fn tokenize(src: &str) -> Vec<Token> {
     out
 }
 
+/// The literal or comment `src` ends inside, if any: what it is and the
+/// byte offset it starts at. [`tokenize`] lets an unterminated one run to the
+/// end of the input, so only the last token can be one. Sent as is, such a
+/// statement leaves the DuckDB CLI waiting for the closing quote (#857).
+pub fn unterminated(src: &str) -> Option<(&'static str, usize)> {
+    let t = *tokenize(src).last()?;
+    let text = t.text(src);
+    // A quoted run (after its opening quote) ends at an undoubled `q`.
+    let closes = |body: &str, q: char, backslash: bool| {
+        let mut it = body.chars().peekable();
+        while let Some(c) = it.next() {
+            if backslash && c == '\\' {
+                it.next();
+            } else if c == q {
+                if it.peek() != Some(&q) {
+                    return true;
+                }
+                it.next();
+            }
+        }
+        false
+    };
+    let open = match t.kind {
+        TokKind::String if text.starts_with('\'') => !closes(&text[1..], '\'', false),
+        TokKind::String => !closes(&text[2..], '\'', true),
+        TokKind::QuotedIdent => !closes(&text[1..], '"', false),
+        TokKind::DollarString => {
+            let tag = &text[..=text[1..].find('$').map_or(0, |j| j + 1)];
+            text.len() < 2 * tag.len() || !text.ends_with(tag)
+        }
+        TokKind::BlockComment => {
+            let (b, mut depth, mut i) = (text.as_bytes(), 0i32, 0usize);
+            while i + 1 < b.len() {
+                match (b[i], b[i + 1]) {
+                    (b'/', b'*') => depth += 1,
+                    (b'*', b'/') => depth -= 1,
+                    _ => {
+                        i += 1;
+                        continue;
+                    }
+                }
+                i += 2;
+            }
+            depth > 0
+        }
+        _ => false,
+    };
+    let what = match t.kind {
+        TokKind::QuotedIdent => "quoted identifier",
+        TokKind::BlockComment => "block comment",
+        _ => "string",
+    };
+    open.then_some((what, t.start))
+}
+
 /// If `chars[i]` opens a dollar quote (`$$` or `$tag$`), the index of the
 /// closing `$` of the opening delimiter.
 fn dollar_tag_end(chars: &[(usize, char)], i: usize) -> Option<usize> {
@@ -440,6 +495,37 @@ pub fn is_star_item(item: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_an_unterminated_literal_or_comment() {
+        for ok in [
+            "SELECT 'a';",
+            "SELECT 'it''s';",
+            "SELECT '';",
+            "SELECT E'a\\'b';",
+            "SELECT \"x\"\"y\";",
+            "SELECT $$a$$, $t$b$t$;",
+            "SELECT 1 /* a /* b */ c */;",
+            "SELECT 1 -- 'no",
+            "",
+        ] {
+            assert_eq!(unterminated(ok), None, "{ok}");
+        }
+        // #857: an unescaped apostrophe flips quote parity to the end.
+        let s = "SELECT 'the quarter's orders'::INFO;\nSELECT 1;";
+        assert_eq!(
+            unterminated(s),
+            Some(("string", s.find("'::INFO").unwrap()))
+        );
+        assert_eq!(unterminated("SELECT 'it''"), Some(("string", 7)));
+        assert_eq!(unterminated("SELECT E'a\\'"), Some(("string", 7)));
+        assert_eq!(unterminated("SELECT \"x"), Some(("quoted identifier", 7)));
+        assert_eq!(unterminated("SELECT $t$b$"), Some(("string", 7)));
+        assert_eq!(
+            unterminated("SELECT 1 /* a /* b */"),
+            Some(("block comment", 9))
+        );
+    }
 
     #[test]
     fn round_trips_and_never_panics() {
