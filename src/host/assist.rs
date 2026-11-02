@@ -56,6 +56,21 @@ pub const DEFAULT_BUDGET: u64 = 2_000_000;
 pub const DEFAULT_WORKERS: usize = 2;
 /// The environment variable the key is read from.
 pub const KEY_ENV: &str = "ANTHROPIC_API_KEY";
+/// #843: with `--assist-provider openai`, the (optional) key's variable — never
+/// `ANTHROPIC_API_KEY`, which must not reach another provider.
+pub const OPENAI_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// Where the proxy's calls go (#843).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Provider {
+    /// The Messages API (`--assist-base-url`, default api.anthropic.com).
+    #[default]
+    Anthropic,
+    /// An OpenAI-compatible `/chat/completions` endpoint (a local model or a
+    /// gateway): the proxy checks the Messages body as always, then
+    /// translates it ([`crate::host::openai`]).
+    OpenAi,
+}
 
 /// The assistant's own tools (`TOOLS` in `web/assist.js`). Any other tool
 /// name in a request is a 400.
@@ -122,7 +137,11 @@ const ERROR_TYPES: &[&str] = &[
 /// The proxy's settings (`serve --assist-*`, `anofox_serve`'s `assist_*`).
 #[derive(Debug, Clone)]
 pub struct AssistConfig {
+    pub provider: Provider,
     pub models: Vec<String>,
+    /// `--assist-models` was given (an OpenAI-compatible endpoint has no
+    /// default model).
+    pub models_given: bool,
     pub max_tokens: u64,
     pub base_url: String,
     pub budget_tokens_per_hour: u64,
@@ -134,7 +153,9 @@ pub struct AssistConfig {
 impl Default for AssistConfig {
     fn default() -> Self {
         AssistConfig {
+            provider: Provider::Anthropic,
             models: DEFAULT_MODELS.iter().map(|s| s.to_string()).collect(),
+            models_given: false,
             max_tokens: DEFAULT_MAX_TOKENS,
             base_url: DEFAULT_BASE_URL.into(),
             budget_tokens_per_hour: DEFAULT_BUDGET,
@@ -145,7 +166,10 @@ impl Default for AssistConfig {
 }
 
 impl AssistConfig {
-    /// `claude-a,claude-b`: each a model id (`[a-z0-9.-]`, ≤ 64).
+    /// `claude-a,claude-b`: each a model id — `[a-z0-9.-]`, ≤ 64, for the
+    /// Messages API ([`AssistConfig::check`]); an OpenAI-compatible
+    /// endpoint's own names may also have capitals, `:` `/` `_`
+    /// (`llama3.1:8b`, `Qwen/Qwen2.5-7B`), ≤ 128.
     pub fn set_models(&mut self, list: &str) -> Result<(), String> {
         let models: Vec<String> = list
             .split(',')
@@ -156,15 +180,60 @@ impl AssistConfig {
             return Err("assist models: give at least one model id".into());
         }
         for m in &models {
-            if m.len() > 64
-                || !m
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+            if m.len() > 128
+                || !m.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+                || !m.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b':' | b'/')
+                })
             {
-                return Err(format!("assist models: '{m}' is not a model id"));
+                return Err(format!("assist models: '{}' is not a model id", short(m)));
             }
         }
         self.models = models;
+        self.models_given = true;
+        Ok(())
+    }
+
+    /// `anthropic` | `openai`.
+    pub fn set_provider(&mut self, p: &str) -> Result<(), String> {
+        self.provider = match p.trim() {
+            "anthropic" => Provider::Anthropic,
+            "openai" => Provider::OpenAi,
+            _ => return Err("assist provider: anthropic or openai".into()),
+        };
+        Ok(())
+    }
+
+    /// The settings as a whole, once all are given: the Messages API's model
+    /// ids; an OpenAI-compatible endpoint needs its URL and its models.
+    pub fn check(&self) -> Result<(), String> {
+        match self.provider {
+            Provider::Anthropic => {
+                for m in &self.models {
+                    if m.len() > 64
+                        || !m.bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.'
+                        })
+                    {
+                        return Err(format!(
+                            "assist models: '{}' is not a Claude model id (--assist-provider openai for another endpoint's)",
+                            short(m)
+                        ));
+                    }
+                }
+            }
+            Provider::OpenAi => {
+                if self.base_url == DEFAULT_BASE_URL {
+                    return Err("--assist-provider openai needs --assist-base-url (the endpoint, e.g. http://localhost:11434/v1)".into());
+                }
+                if !self.models_given {
+                    return Err(
+                        "--assist-provider openai needs --assist-models (the endpoint's model ids)"
+                            .into(),
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -214,9 +283,14 @@ pub fn check_base_url(url: &str) -> Result<(), String> {
 /// The key: from `key_file` when given, else from `ANTHROPIC_API_KEY`;
 /// `None` when neither is set (the proxy is then off).
 pub fn load_key(key_file: Option<&Path>) -> Result<Option<String>, String> {
+    load_key_from(key_file, KEY_ENV)
+}
+
+/// [`load_key`] with the environment variable to read (#843: the provider's).
+pub fn load_key_from(key_file: Option<&Path>, env: &str) -> Result<Option<String>, String> {
     let key = match key_file {
         Some(p) => read_key_file(p)?,
-        None => match std::env::var(KEY_ENV) {
+        None => match std::env::var(env) {
             Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
             _ => return Ok(None),
         },
@@ -563,33 +637,37 @@ pub struct HttpUpstream {
     key: String,
 }
 
+/// The upstream HTTP client both providers use (ureq + rustls on aws-lc-rs,
+/// the Mozilla roots; no proxy from the environment, no redirects).
+fn agent(base_url: &str) -> Result<ureq::Agent, String> {
+    use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+    check_base_url(base_url)?;
+    let tls = TlsConfig::builder()
+        .provider(TlsProvider::Rustls)
+        .root_certs(RootCerts::WebPki)
+        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+        .build();
+    let config = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .https_only(base_url.starts_with("https://"))
+        // L3: never a proxy from the environment (it would see the key).
+        .proxy(None)
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .user_agent("anofox-visualization")
+        .timeout_connect(Some(Duration::from_secs(15)))
+        // A long, non-streamed answer takes minutes to start; a whole
+        // call is capped.
+        .timeout_recv_response(Some(Duration::from_secs(10 * 60)))
+        .timeout_global(Some(Duration::from_secs(30 * 60)))
+        .build();
+    Ok(ureq::Agent::new_with_config(config))
+}
+
 impl HttpUpstream {
     pub fn new(base_url: &str, key: String) -> Result<HttpUpstream, String> {
-        use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
-        check_base_url(base_url)?;
-        let tls = TlsConfig::builder()
-            .provider(TlsProvider::Rustls)
-            .root_certs(RootCerts::WebPki)
-            .unversioned_rustls_crypto_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .build();
-        let config = ureq::Agent::config_builder()
-            .tls_config(tls)
-            .https_only(base_url.starts_with("https://"))
-            // L3: never a proxy from the environment (it would see the key).
-            .proxy(None)
-            .max_redirects(0)
-            .http_status_as_error(false)
-            .user_agent("anofox-visualization")
-            .timeout_connect(Some(Duration::from_secs(15)))
-            // A long, non-streamed answer takes minutes to start; a whole
-            // call is capped.
-            .timeout_recv_response(Some(Duration::from_secs(10 * 60)))
-            .timeout_global(Some(Duration::from_secs(30 * 60)))
-            .build();
         Ok(HttpUpstream {
-            agent: ureq::Agent::new_with_config(config),
+            agent: agent(base_url)?,
             base_url: base_url.trim_end_matches('/').to_string(),
             key,
         })
@@ -628,6 +706,107 @@ impl Upstream for HttpUpstream {
             status,
             request_id,
             body: Box::new(resp.into_body().into_reader()),
+        })
+    }
+}
+
+/// #843: an OpenAI-compatible endpoint behind the Messages shape. The proxy
+/// has checked the body as for the Messages API; this translates it to
+/// `/chat/completions` ([`crate::host::openai`]), calls the endpoint (never
+/// streamed) and answers in the Messages shape — as an event stream when the
+/// client asked for one. `count_tokens` has no counterpart: 404. An error
+/// status passes through with the Messages API's error type for it, never
+/// the endpoint's text.
+pub struct OpenAiUpstream {
+    agent: ureq::Agent,
+    base_url: String,
+    /// A gateway's token (`Authorization: Bearer`); a local model has none.
+    key: Option<String>,
+}
+
+impl OpenAiUpstream {
+    pub fn new(base_url: &str, key: Option<String>) -> Result<OpenAiUpstream, String> {
+        Ok(OpenAiUpstream {
+            agent: agent(base_url)?,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            key,
+        })
+    }
+}
+
+fn error_reply(status: u16, message: &str) -> UpResponse {
+    let ty = crate::host::openai::error_type(status);
+    let body = json!({"type": "error", "error": {"type": ty, "message": message}});
+    UpResponse {
+        status,
+        request_id: None,
+        body: Box::new(io::Cursor::new(
+            serde_json::to_vec(&body).unwrap_or_default(),
+        )),
+    }
+}
+
+impl Upstream for OpenAiUpstream {
+    fn post(&self, path: &str, body: &[u8], stream: bool) -> Result<UpResponse, String> {
+        if path != "/v1/messages" {
+            return Ok(error_reply(
+                404,
+                "not available on an OpenAI-compatible endpoint",
+            ));
+        }
+        let req: Value = serde_json::from_slice(body).map_err(|e| e.to_string())?;
+        let model = req
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let chat = serde_json::to_vec(&crate::host::openai::to_chat(&req)).unwrap_or_default();
+        let url = format!("{}/chat/completions", self.base_url);
+        let mut call = self
+            .agent
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json");
+        if let Some(k) = &self.key {
+            call = call.header("authorization", &format!("Bearer {k}"));
+        }
+        // The error text names the host, never the key (stderr only).
+        let resp = call.send(&chat[..]).map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let request_id = ["x-request-id", "request-id"]
+            .iter()
+            .find_map(|h| resp.headers().get(*h).and_then(|v| v.to_str().ok()))
+            .filter(|s| valid_request_id(s))
+            .map(str::to_string);
+        if !(200..300).contains(&status) {
+            return Ok(UpResponse {
+                request_id,
+                ..error_reply(status, "the model endpoint refused the call")
+            });
+        }
+        let mut text = String::new();
+        resp.into_body()
+            .into_reader()
+            .take(MAX_JSON_RESPONSE)
+            .read_to_string(&mut text)
+            .map_err(|e| e.to_string())?;
+        let reply: Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => return Ok(error_reply(502, "the model endpoint's reply is not JSON")),
+        };
+        let msg = match crate::host::openai::from_chat(&reply, &model) {
+            Ok(m) => m,
+            Err(e) => return Ok(error_reply(502, &e)),
+        };
+        let out = if stream {
+            crate::host::openai::sse(&msg).into_bytes()
+        } else {
+            serde_json::to_vec(&msg).unwrap_or_default()
+        };
+        Ok(UpResponse {
+            status,
+            request_id,
+            body: Box::new(io::Cursor::new(out)),
         })
     }
 }
@@ -1218,6 +1397,7 @@ impl AssistOptions {
                     _ => o.cfg.set_models(&s()?)?,
                 },
                 "assist_base_url" => o.cfg.set_base_url(&s()?)?,
+                "assist_provider" => o.cfg.set_provider(&s()?)?,
                 "assist_key_file" => o.key_file = Some(PathBuf::from(s()?)),
                 "assist_budget_tokens_per_hour" => o.cfg.budget_tokens_per_hour = n()?,
                 "assist_max_tokens" => o.cfg.max_tokens = n()?,
@@ -1227,7 +1407,7 @@ impl AssistOptions {
                 }
                 _ => {
                     return Err(format!(
-                        "options.{k}: unknown (assist, assist_models, assist_base_url, assist_key_file, \
+                        "options.{k}: unknown (assist, assist_models, assist_base_url, assist_provider, assist_key_file, \
                          assist_budget_tokens_per_hour, assist_max_tokens, assist_log, assist_log_content)"
                     ))
                 }
@@ -1254,6 +1434,26 @@ pub fn build(
 ) -> Result<Option<(Proxy, String)>, String> {
     if !on {
         return Ok(None);
+    }
+    cfg.check()?;
+    if cfg.provider == Provider::OpenAi {
+        // #843: the key is optional (a local model has none) and never
+        // ANTHROPIC_API_KEY.
+        let key = load_key_from(key_file, OPENAI_KEY_ENV)?;
+        let from = match (key_file, &key) {
+            (Some(p), _) => format!("key file {}", p.display()),
+            (None, Some(_)) => OPENAI_KEY_ENV.to_string(),
+            (None, None) => "none".to_string(),
+        };
+        let log = log.map(log_sink).transpose()?;
+        let upstream = OpenAiUpstream::new(&cfg.base_url, key)?;
+        let note = format!(
+            "assistant proxy on at /assist (OpenAI-compatible endpoint {}; key: {from}; models {}; {} tokens/hour)",
+            cfg.base_url,
+            cfg.models.join(", "),
+            cfg.budget_tokens_per_hour
+        );
+        return Ok(Some((Proxy::new(cfg, Box::new(upstream), log), note)));
     }
     let Some(key) = load_key(key_file)? else {
         return Err(format!(

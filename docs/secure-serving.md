@@ -173,6 +173,14 @@ so the protection is about making sure *only you* can send it:
     no redirects and never uses a proxy from the environment (`HTTPS_PROXY`
     would see the key). Upstream error bodies are never relayed (they can
     echo the request); the client gets the status and the error type only.
+  - *Another provider (#843):* with `--assist-provider openai` /
+    `options.assist_provider` the checked request is translated to an
+    OpenAI-compatible `/chat/completions` at `--assist-base-url` (same URL
+    rules), and the reply back to the Messages shape. The same allowlist,
+    budget, pool and log apply; the models must be listed. Its key is
+    optional and comes from `OPENAI_API_KEY` or the key file, sent as
+    `Authorization: Bearer` — `ANTHROPIC_API_KEY` is never read for it, so a
+    Claude key in the environment never reaches a local model or gateway.
   - *Cost:* an hourly budget of tokens of every kind per server
     (`--assist-budget-tokens-per-hour`, default 2 000 000) answers 429 once
     it is used up. `count_tokens` is free and not counted. At most two calls

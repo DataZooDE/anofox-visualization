@@ -23,6 +23,8 @@
 //! * [`site_css`] — `options.css_file` (#773): the operator stylesheet's check.
 //! * [`writeback`] — `options.writeback` (#684): shared write-back of an
 //!   edited model into declared tables, `POST /api/save`'s change set.
+//! * [`openai`] — an OpenAI-compatible endpoint behind the Messages shape
+//!   (#843): the translation both ways, for the `/assist` proxy and Ask.
 
 pub mod access;
 pub mod app_brand;
@@ -36,6 +38,7 @@ pub mod ingest;
 pub mod metrics;
 #[cfg(feature = "auth")]
 pub mod notify;
+pub mod openai;
 pub mod policy;
 pub mod serve_options;
 pub mod serving;

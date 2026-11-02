@@ -107,7 +107,11 @@ export function assistConfig(block, opts) {
     if (!modelIdOk(aModels.default)) return off("openai-needs-a-model");
     models = { default: aModels.default, harder: modelIdOk(aModels.harder) ? aModels.harder : aModels.default };
   } else {
-    for (const k of ["default", "harder"]) if (typeof aModels[k] === "string" && /^claude-[a-z0-9-]+$/.test(aModels[k])) models[k] = aModels[k];
+    // #843: the server's proxy names its own models (an OpenAI-compatible
+    // endpoint's ids too, `--assist-provider openai`); it checks every call
+    // against that list itself.
+    const ok = transport === "serve" ? modelIdOk : (m) => /^claude-[a-z0-9-]+$/.test(m);
+    for (const k of ["default", "harder"]) if (typeof aModels[k] === "string" && ok(aModels[k])) models[k] = aModels[k];
   }
   const rounds = Number.isInteger(a.max_rounds) ? Math.min(LIMITS.rounds, Math.max(1, a.max_rounds)) : LIMITS.rounds;
   return { enabled: true, transport, ...(endpoint ? { endpoint } : {}), models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false, remember: transport !== "serve" && rememberAllowed(host, a.remember === true) };

@@ -518,3 +518,175 @@ fn http_upstream_pins_headers_and_sends_the_key_only_upstream() {
 fn http_upstream_refuses_plain_http_off_loopback() {
     assert!(HttpUpstream::new("http://api.anthropic.com", "k".into()).is_err());
 }
+
+// ---- #843: --assist-provider openai ----
+
+#[test]
+fn openai_provider_settings() {
+    let mut c = cfg();
+    c.set_provider("openai").unwrap();
+    assert_eq!(c.provider, Provider::OpenAi);
+    assert!(c.set_provider("ollama").is_err());
+    // the endpoint and the models are required
+    assert!(c.check().unwrap_err().contains("--assist-base-url"));
+    c.set_base_url("http://localhost:11434/v1").unwrap();
+    assert!(c.check().unwrap_err().contains("--assist-models"));
+    c.set_models("llama3.1:8b, Qwen/Qwen2.5-7B-Instruct, mistral_small")
+        .unwrap();
+    c.check().unwrap();
+    // the Messages API keeps its own model ids
+    let mut a = cfg();
+    a.set_models("llama3.1:8b").unwrap();
+    assert!(a.check().unwrap_err().contains("not a Claude model id"));
+    assert!(a.set_models(":x").is_err() && a.set_models("a b").is_err());
+    // anofox_serve's option
+    let mut o = json!({"assist": true, "assist_provider": "openai", "assist_base_url": "http://127.0.0.1:8000/v1", "assist_models": ["m-1"]})
+        .as_object()
+        .unwrap()
+        .clone();
+    let t = AssistOptions::take(&mut o).unwrap();
+    assert_eq!(t.cfg.provider, Provider::OpenAi);
+    t.cfg.check().unwrap();
+}
+
+/// What [`one_shot`] saw: the request's header lines (lower case) and body.
+type Request = std::thread::JoinHandle<(Vec<String>, Vec<u8>)>;
+
+/// A one-shot HTTP server: answers `status` + `body`, hands back the request's
+/// header lines (lower case) and body.
+fn one_shot(status: u16, body: &'static str) -> (u16, Request) {
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let t = std::thread::spawn(move || {
+        let (s, _) = l.accept().unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let mut head = Vec::new();
+        let mut len = 0usize;
+        loop {
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            let low = line.to_ascii_lowercase();
+            if let Some(v) = low.strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap();
+            }
+            head.push(low);
+        }
+        let mut b = vec![0; len];
+        r.read_exact(&mut b).unwrap();
+        let mut w = s;
+        let resp = format!(
+            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nx-request-id: chat_1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        w.write_all(resp.as_bytes()).unwrap();
+        (head, b)
+    });
+    (port, t)
+}
+
+fn openai_cfg(port: u16) -> AssistConfig {
+    let mut c = cfg();
+    c.set_provider("openai").unwrap();
+    c.set_base_url(&format!("http://127.0.0.1:{port}/v1"))
+        .unwrap();
+    c.set_models("llama3.1:8b").unwrap();
+    c
+}
+
+#[test]
+fn openai_upstream_translates_and_streams() {
+    const CHAT: &str = r#"{"id":"chatcmpl-9","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"Let me look.","tool_calls":[{"id":"c1","type":"function","function":{"name":"run_sql","arguments":"{\"sql\":\"SELECT 1\"}"}}]}}],"usage":{"prompt_tokens":900,"completion_tokens":60}}"#;
+    let (port, t) = one_shot(200, CHAT);
+    let up = OpenAiUpstream::new(
+        &format!("http://127.0.0.1:{port}/v1"),
+        Some("gw-token-1".into()),
+    )
+    .unwrap();
+    let p = Proxy::new(openai_cfg(port), Box::new(up), None);
+    let r = p.handle(
+        p.try_slot().unwrap(),
+        Endpoint::Messages,
+        &req(json!({"model": "llama3.1:8b", "stream": true})),
+    );
+    assert_eq!(r.status, 200);
+    assert_eq!(r.content_type, "text/event-stream");
+    let out = http(r);
+    assert!(!out.contains("gw-token-1"));
+    for e in [
+        "event: message_start",
+        "\"text_delta\"",
+        "\"input_json_delta\"",
+        "event: message_stop",
+        "\"stop_reason\":\"tool_use\"",
+    ] {
+        assert!(out.contains(e), "{e} in {out}");
+    }
+    assert!(out.contains("request-id: chat_1"));
+    assert_eq!(p.used_last_hour(), 960);
+    let (head, body) = t.join().unwrap();
+    assert!(
+        head[0].starts_with("post /v1/chat/completions "),
+        "{head:?}"
+    );
+    assert!(head
+        .iter()
+        .any(|h| h == "authorization: bearer gw-token-1\r\n"));
+    assert!(
+        !head
+            .iter()
+            .any(|h| h.starts_with("x-api-key") || h.starts_with("anthropic-")),
+        "{head:?}"
+    );
+    let sent: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(sent["model"], "llama3.1:8b");
+    assert_eq!(sent["stream"], false);
+    assert_eq!(sent["messages"][0]["role"], "system");
+    assert_eq!(sent["tools"][0]["type"], "function");
+    assert!(!String::from_utf8_lossy(&body).contains("cache_control"));
+}
+
+#[test]
+fn openai_upstream_errors_and_count_tokens() {
+    // no key, no Authorization; the endpoint's text never reaches the client
+    let (port, t) = one_shot(401, r#"{"error":{"message":"SECRET-ECHO of the request"}}"#);
+    let up = OpenAiUpstream::new(&format!("http://127.0.0.1:{port}/v1"), None).unwrap();
+    let p = Proxy::new(openai_cfg(port), Box::new(up), None);
+    let r = p.handle(
+        p.try_slot().unwrap(),
+        Endpoint::Messages,
+        &req(json!({"model": "llama3.1:8b"})),
+    );
+    assert_eq!(r.status, 401);
+    let out = http(r);
+    assert!(
+        out.contains("authentication_error") && !out.contains("SECRET-ECHO"),
+        "{out}"
+    );
+    let (head, _) = t.join().unwrap();
+    assert!(
+        !head.iter().any(|h| h.starts_with("authorization")),
+        "{head:?}"
+    );
+    // count_tokens has no counterpart, and nothing is called
+    let up = OpenAiUpstream::new("http://127.0.0.1:9/v1", None).unwrap();
+    let p = Proxy::new(openai_cfg(9), Box::new(up), None);
+    let count = req(json!({"model": "llama3.1:8b", "max_tokens": null}));
+    assert_eq!(
+        p.handle(p.try_slot().unwrap(), Endpoint::CountTokens, &count)
+            .status,
+        404
+    );
+    // a model the server doesn't list is refused before anything is sent
+    assert_eq!(
+        p.handle(p.try_slot().unwrap(), Endpoint::Messages, &req(json!({})))
+            .status,
+        400
+    );
+    // plain http only to loopback, as for the Messages API
+    assert!(OpenAiUpstream::new("http://llm.example.com/v1", None).is_err());
+}
