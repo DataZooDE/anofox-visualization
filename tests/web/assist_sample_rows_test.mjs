@@ -15,6 +15,7 @@ const root = path.resolve(here, "../..");
 const require = createRequire(path.join(here, "package.json"));
 const A = await import(path.join(root, "web/assist.js"));
 const { splitStatements } = await import(path.join(root, "web/lint.js"));
+const { datasetFiles } = await import(path.join(root, "scripts/assist-eval.mjs"));
 const wasm = await import(path.join(root, "web/pkg/anofox_visualization.js"));
 wasm.initSync({ module: readFileSync(path.join(root, "web/pkg/anofox_visualization_bg.wasm")) });
 const duckdb = require("@duckdb/duckdb-wasm/dist/duckdb-node-blocking.cjs");
@@ -118,7 +119,8 @@ for (const d of datasets) {
   const db = await rawDb();
   const c = db.connect();
   c.query("INSTALL json; LOAD json;");
-  for (const m of d.sql.matchAll(/'(data\/[\w-]+\/[\w.-]+\.(?:csv|parquet))'/g)) db.registerFileBuffer(m[1], new Uint8Array(readFileSync(path.join(root, "web", m[1]))));
+  // the eval's own rule for a dataset's files (data/…/x.csv, m5_monthly.parquet)
+  for (const f of datasetFiles(d.sql)) db.registerFileBuffer(f, new Uint8Array(readFileSync(path.join(root, "web", f))));
   for (const s of splitStatements(d.sql)) c.query(s);
   c.close();
 
