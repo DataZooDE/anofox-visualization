@@ -1374,8 +1374,8 @@ function validPathValueLiteral(lit) {
 // page's view (the open tab, the current inputs), the panels' titles (for
 // its chips: never the model's text) and askGoTo (a citation chip's click).
 const askTitle = (i) =>
-  Number.isInteger(i) ? document.querySelector(`.dash .panel[data-stmt="${i}"] .panel-title`)?.textContent?.trim() || "" : "";
-const askTitles = () => [...document.querySelectorAll(".dash .panel[data-stmt] .panel-title")].map((t) => t.textContent.trim()).filter(Boolean);
+  Number.isInteger(i) ? titleText(document.querySelector(`.dash .panel[data-stmt="${i}"] .panel-title`)) : "";
+const askTitles = () => [...document.querySelectorAll(".dash .panel[data-stmt] .panel-title")].map(titleText).filter(Boolean);
 const askOpenTab = () => document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent ?? null;
 // web/ask-ui.js, loaded only when Ask can be used: a served page whose
 // server says it is on, or the builder with the assistant on.
@@ -12944,7 +12944,7 @@ function refreshAsTableView(panel) {
   const view = panel.querySelector(":scope > .dp-astable-view");
   const msvg = panel.querySelector(":scope > .panel-svg > svg[data-map]");
   if (!view || !msvg) return;
-  const title = panel.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
+  const title = panelTitleText(panel) || "Chart data";
   view.innerHTML = mapTableHtml(msvg, 200, title);
 }
 // A tooltip left open on a map feature (dpTipMark, set in attachHover)
@@ -14608,6 +14608,18 @@ function mkTitle(text) {
   c.className = "panel-title";
   c.textContent = text;
   return c;
+}
+// A title element's own text — not its ⓘ definition (.dp-info) or a header
+// ::VIEW switcher placed in it. A panel's accessible name, a file name, an
+// export's title strip (#890).
+function titleText(t) {
+  if (!t) return "";
+  const c = t.cloneNode(true);
+  c.querySelectorAll(".dp-info, .dp-viewbar").forEach((el) => el.remove());
+  return c.textContent.trim();
+}
+function panelTitleText(panel) {
+  return titleText(panel?.querySelector(".panel-title"));
 }
 
 // #534: a 'header'-placed ::VIEW group's switcher — one physical bar,
@@ -18522,7 +18534,7 @@ function panelSvg(fig) {
 function openFullSize(fig) {
   const svg = panelSvg(fig);
   if (!svg) return;
-  const title = fig.querySelector(".panel-title")?.textContent || "Full size";
+  const title = panelTitleText(fig) || "Full size";
   const back = document.createElement("div");
   back.className = "dp-modal-back";
   const modal = document.createElement("div");
@@ -20021,7 +20033,7 @@ function attachAssistChange() {
       ev.stopPropagation();
       if (bodyMode() !== "edit") return;
       const n = Number(panel.dataset.stmt) + 1;
-      const title = (panel.querySelector(".panel-title")?.textContent || "").trim();
+      const title = (panelTitleText(panel) || "").trim();
       openAssistant({ opener: b, changePanel: { n, title } });
     });
     bar.insertBefore(b, bar.firstChild);
@@ -20137,7 +20149,7 @@ function attachChartA11y() {
     if (svg.dataset.a11y) continue;
     svg.dataset.a11y = "1";
     const marks = chartMarks(svg);
-    const title = svg._track ? trackName(svg._track) : fig.querySelector(".panel-title")?.textContent?.trim() || "";
+    const title = svg._track ? trackName(svg._track) : panelTitleText(fig) || "";
     // A strip's ticks / tiles are events in lanes: their text is no value.
     const lanes = !!svg._track && svg.hasAttribute("data-ylevels");
     const items = marks.map((el) => {
@@ -20237,7 +20249,7 @@ function keyboardScrollers() {
     if (scrolls && !focusable) {
       el.tabIndex = 0;
       el.setAttribute("role", "region");
-      const t = el.closest(".panel")?.querySelector(".panel-title")?.textContent?.trim();
+      const t = panelTitleText(el.closest(".panel"));
       el.setAttribute("aria-label", t ? `${t} (scrollable table)` : "Scrollable table");
     } else if (el.getAttribute("role") === "region") {
       el.removeAttribute("tabindex");
@@ -20377,7 +20389,7 @@ function applyAsTables() {
     if (dpAsTables && !view) {
       view = document.createElement("div");
       view.className = "dp-astable-view";
-      const title = fig.querySelector(".panel-title")?.textContent?.trim() || "Chart data";
+      const title = panelTitleText(fig) || "Chart data";
       const dsvg = holder.querySelector(":scope > svg[data-diagram]");
       const msvg = holder.querySelector(":scope > svg[data-map]");
       view.innerHTML = dsvg
@@ -20650,6 +20662,7 @@ function attachToolbox() {
     }
     mkTool("Full size", "⤢", () => openFullSize(panel));
     mkTool("Save as PNG", "⭳", () => savePanelPng(panel));
+    mkTool("Save as SVG", "⬇", () => savePanelSvg(panel));
     panel.appendChild(bar);
     foldTools(panel);
   });
@@ -20916,7 +20929,7 @@ function showDataView(panel) {
   const dp = panel._dp;
   if (!dp) return;
   const esc = (v) => escapeHtml(v == null ? "" : String(v));
-  const title = panel.querySelector(".panel-title")?.textContent?.trim() || "Data";
+  const title = panelTitleText(panel) || "Data";
   const back = document.createElement("div");
   back.className = "dp-modal-back";
   back.innerHTML =
@@ -21126,40 +21139,71 @@ function toggleVisualMap(panel) {
   apply();
 }
 
-function savePanelPng(panel) {
+// A panel's chart for export (#890): the chart's SVG (with its ::TRACK
+// strips, panelSvg), the toolbox left out, with the panel's title in a strip
+// above it, sized by its viewBox — the same picture for PNG and SVG.
+function exportSvg(panel) {
   const svg = panelSvg(panel);
-  if (!svg) return;
+  if (!svg) return null;
   const vb = svg.viewBox.baseVal;
-  const clone = svg.cloneNode(true);
-  clone.querySelectorAll(".dp-toolbox").forEach((el) => el.remove());
-  if (!clone.getAttribute("width")) clone.setAttribute("width", vb.width);
-  if (!clone.getAttribute("height")) clone.setAttribute("height", vb.height);
-  const xml = new XMLSerializer().serializeToString(clone);
-  const url = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
+  const w = vb.width || svg.clientWidth || 460;
+  const h = vb.height || svg.clientHeight || 300;
+  const chart = svg.cloneNode(true);
+  chart.querySelectorAll(".dp-toolbox").forEach((el) => el.remove());
+  const title = panelTitleText(panel);
+  const head = title ? 30 : 0;
+  const NS = "http://www.w3.org/2000/svg";
+  const out = document.createElementNS(NS, "svg");
+  out.setAttribute("xmlns", NS);
+  out.setAttribute("width", w);
+  out.setAttribute("height", h + head);
+  out.setAttribute("viewBox", `0 0 ${w} ${h + head}`);
+  const bg = document.createElementNS(NS, "rect");
+  bg.setAttribute("width", w);
+  bg.setAttribute("height", h + head);
+  bg.setAttribute("fill", axToken("export-bg", "white")); // the theme's card colour
+  out.appendChild(bg);
+  if (title) {
+    const t = document.createElementNS(NS, "text");
+    t.setAttribute("x", 12);
+    t.setAttribute("y", 21);
+    t.setAttribute("font-family", getComputedStyle(panel).fontFamily || "sans-serif");
+    t.setAttribute("font-size", 14);
+    t.setAttribute("font-weight", 700);
+    t.setAttribute("fill", axToken("heading", axToken("text", "#111")));
+    t.textContent = title;
+    out.appendChild(t);
+  }
+  chart.setAttribute("x", 0);
+  chart.setAttribute("y", head);
+  chart.setAttribute("width", w);
+  chart.setAttribute("height", h);
+  out.appendChild(chart);
+  return { svg: out, w, h: h + head, name: (title || "chart").replace(/[^\w.-]+/g, "_").slice(0, 60) || "chart" };
+}
+
+function savePanelPng(panel) {
+  const e = exportSvg(panel);
+  if (!e) return;
+  const xml = new XMLSerializer().serializeToString(e.svg);
   const scale = 2;
   const img = new Image();
   img.onload = () => {
     const c = document.createElement("canvas");
-    c.width = vb.width * scale;
-    c.height = vb.height * scale;
-    const ctx = c.getContext("2d");
-    ctx.fillStyle = axToken("export-bg", "white"); // the theme's card colour
-    ctx.fillRect(0, 0, c.width, c.height);
-    ctx.drawImage(img, 0, 0, c.width, c.height);
-    c.toBlob((blob) => {
-      if (!blob) return;
-      const title = (panel.querySelector(".panel-title")?.textContent || "chart")
-        .trim()
-        .replace(/[^\w.-]+/g, "_")
-        .slice(0, 60) || "chart";
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = title + ".png";
-      a.click();
-      URL.revokeObjectURL(a.href);
-    });
+    c.width = e.w * scale;
+    c.height = e.h * scale;
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    c.toBlob((blob) => blob && download(blob, e.name + ".png"));
   };
-  img.src = url;
+  img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
+}
+
+// #890: the same picture as an SVG file (vector, editable).
+function savePanelSvg(panel) {
+  const e = exportSvg(panel);
+  if (!e) return;
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(e.svg);
+  download(new Blob([xml], { type: "image/svg+xml" }), e.name + ".svg");
 }
 
 // The top legend's band (viewBox units): everything above the panel rect
