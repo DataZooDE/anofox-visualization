@@ -239,6 +239,41 @@ impl OneProcessSession {
     /// [`Self::round`] with an explicit timeout (tests use a short one so
     /// a deliberately wedged child doesn't make the suite itself hang).
     fn round_timeout(&mut self, sql: &str, timeout: Duration) -> RoundOutcome {
+        // An unterminated literal would swallow the sentinel below and leave
+        // the CLI waiting for its closing quote until the timeout (#857):
+        // report it as the statement's error instead, without sending it.
+        if let Some((what, at)) = crate::sql::lex::unterminated(sql) {
+            let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+            // The usual cause: an apostrophe that ends a string early, seen
+            // as a closing quote with a word glued to it (`quarter's`).
+            let toks = crate::sql::lex::tokenize(sql);
+            let glued = toks.windows(2).find(|w| {
+                w[0].kind == crate::sql::lex::TokKind::String
+                    && w[1].kind == crate::sql::lex::TokKind::Word
+                    && w[0].end == w[1].start
+            });
+            let hint = match glued {
+                Some(w) => {
+                    let a = sql[..w[0].end - 1]
+                        .char_indices()
+                        .rev()
+                        .nth(29)
+                        .map_or(0, |c| c.0);
+                    let b = sql[w[1].start..]
+                        .char_indices()
+                        .nth(30)
+                        .map_or(sql.len(), |c| w[1].start + c.0);
+                    format!("probably the apostrophe in: …{}…", squash(&sql[a..b]))
+                }
+                None => {
+                    let from: String = sql[at..].chars().take(60).collect();
+                    format!("starting at: {}", squash(&from))
+                }
+            };
+            return RoundOutcome::Sql(format!(
+                "unterminated {what}, {hint} — a quote inside a string is written twice ('it''s')"
+            ));
+        }
         let nonce = super::serving::random_token();
         let missing = std::env::temp_dir().join(format!("anofox-sep-{nonce}"));
         let script = format!(
@@ -724,6 +759,38 @@ mod tests {
             "took {:?}, should have been killed at ~2s",
             start.elapsed()
         );
+    }
+
+    /// #857: an unterminated string is reported at once, pointing at the
+    /// apostrophe — not sent, so the session neither waits for a closing
+    /// quote until the timeout nor dies.
+    #[test]
+    fn an_unterminated_string_is_an_error_not_a_timeout() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        let start = std::time::Instant::now();
+        match s.round_timeout(
+            "SELECT 'the quarter's orders' AS x;",
+            Duration::from_secs(5),
+        ) {
+            RoundOutcome::Sql(e) => assert!(e.contains("quarter's orders"), "{e}"),
+            other => panic!("expected a SQL error, got {}", outcome_label(&other)),
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
+        match s.round("SELECT 1 AS x;") {
+            RoundOutcome::Ok(t) => assert!(t.contains("\"x\""), "{t}"),
+            other => panic!(
+                "the session should still work, got {}",
+                outcome_label(&other)
+            ),
+        }
     }
 
     /// sec-review-342's original hypothesis for the CI hang above (wrong for
