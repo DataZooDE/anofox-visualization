@@ -117,11 +117,22 @@ fn answer(conn: TcpStream, seen: &Seen) {
 /// `serve <scratch>/a.duckdb --port 0 --no-open [extra]` without
 /// `ANTHROPIC_API_KEY` in its environment.
 fn spawn_authoring(scratch: &Scratch, extra: &[&str]) -> (Kill, u16, String) {
+    spawn_authoring_env(scratch, extra, &[])
+}
+
+/// [`spawn_authoring`] with these environment variables set.
+fn spawn_authoring_env(
+    scratch: &Scratch,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> (Kill, u16, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_serve"))
         .arg(scratch.0.join("a.duckdb"))
         .args(["--port", "0", "--no-open"])
         .args(extra)
         .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .envs(env.iter().copied())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -485,4 +496,108 @@ fn bad_assist_settings_refuse_to_start() {
     ]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stderr).contains("authoring mode only"));
+}
+
+/// #843: `--assist-provider openai` — the builder's Messages request goes to
+/// an OpenAI-compatible endpoint as a chat completion and comes back as a
+/// Messages event stream; ANTHROPIC_API_KEY never goes there, a local model
+/// needs no key at all.
+#[test]
+fn proxy_to_an_openai_compatible_endpoint() {
+    const CHAT: &str = r#"{"id":"chatcmpl-1","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"Hello from a local model."}}],"usage":{"prompt_tokens":40,"completion_tokens":6}}"#;
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = l.local_addr().unwrap().port();
+    let seen: Seen = Arc::default();
+    let s2 = seen.clone();
+    std::thread::spawn(move || {
+        for conn in l.incoming() {
+            let Ok(conn) = conn else { continue };
+            let mut r = BufReader::new(conn.try_clone().unwrap());
+            let mut head = Vec::new();
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                let low = line.to_ascii_lowercase();
+                if let Some(v) = low.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                head.push(low);
+            }
+            let mut body = vec![0; len];
+            let _ = r.read_exact(&mut body);
+            s2.lock()
+                .unwrap()
+                .push((head, String::from_utf8_lossy(&body).into_owned()));
+            let mut w = conn;
+            let _ = write!(
+                w,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{CHAT}",
+                CHAT.len()
+            );
+        }
+    });
+    let s = Scratch::new("oai");
+    let base = format!("http://127.0.0.1:{api}/v1");
+    let (_child, port, tok) = spawn_authoring_env(
+        &s,
+        &[
+            "--assist",
+            "--assist-provider",
+            "openai",
+            "--assist-base-url",
+            &base,
+            "--assist-models",
+            "llama3.1:8b",
+        ],
+        &[("ANTHROPIC_API_KEY", "sk-ant-must-not-leave-1234567890")],
+    );
+    let auth = ("X-Anofox-Token", tok.as_str());
+    let body = request(true).replace("claude-sonnet-5", "llama3.1:8b");
+    let (status, head, out) = send(port, "POST", "/assist/v1/messages", &[auth], &body);
+    assert_eq!(status, 200, "{head}\n{out}");
+    assert!(head.contains("content-type: text/event-stream"), "{head}");
+    assert!(
+        out.contains("event: message_start")
+            && out.contains("Hello from a local model.")
+            && out.contains("event: message_stop"),
+        "{out}"
+    );
+    // the page names the server's own models
+    let (_, _, page) = send(port, "GET", "/", &[auth], "");
+    assert!(
+        page.contains(r#""default":"llama3.1:8b""#),
+        "no model in the page"
+    );
+    // a Claude model isn't on this server
+    assert_eq!(
+        send(
+            port,
+            "POST",
+            "/assist/v1/messages",
+            &[auth],
+            &request(false)
+        )
+        .0,
+        400
+    );
+    let s = seen.lock().unwrap();
+    assert_eq!(s.len(), 1);
+    let (h, b) = &s[0];
+    assert!(h[0].starts_with("post /v1/chat/completions "), "{h:?}");
+    for l in h {
+        assert!(
+            !l.starts_with("authorization")
+                && !l.starts_with("x-api-key")
+                && !l.starts_with("anthropic-"),
+            "{l}"
+        );
+        assert!(!l.contains("sk-ant-must-not-leave"), "{l}");
+    }
+    let sent: serde_json::Value = serde_json::from_str(b).unwrap();
+    assert_eq!(sent["model"], "llama3.1:8b");
+    assert_eq!(sent["messages"][0]["content"], "PROMPT-TEXT weekly revenue");
+    assert_eq!(sent["tools"][0]["function"]["name"], "run_sql");
 }

@@ -126,6 +126,8 @@ for (const bad of ["", " x", "a b", "x;y", "-x", "a".repeat(129)]) assert.ok(!O.
   assert.equal(cfg({ transport: "openai", endpoint: "http://localhost:1/v1" }).reason, "openai-needs-a-model");
   assert.equal(cfg({ transport: "openai", endpoint: "http://localhost:1/v1", models: { default: "m" } }, { live: true }).reason, "live-needs-serve", "an authoring server uses its proxy");
   assert.equal(cfg({ transport: "openai", endpoint: "http://localhost:1/v1", models: { default: "m" } }, { served: true }).enabled, false);
+  // #843 part 2: the server's proxy may name an endpoint's own models
+  assert.deepEqual(cfg({ transport: "serve", models: { default: "llama3.1:8b", harder: "x y" } }, { live: true }).models, { default: "llama3.1:8b", harder: "claude-opus-5-5" });
   // a Claude transport keeps its own model rule and has no endpoint
   const bk = cfg({ models: { default: "llama3.1:8b" } });
   assert.equal(bk.models.default, "claude-sonnet-5");

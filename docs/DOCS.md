@@ -4432,11 +4432,23 @@ turn it on), and then it needs a key (`ANTHROPIC_API_KEY`, or
 | `--assist-key-file FILE` | `assist_key_file` | `ANTHROPIC_API_KEY` |
 | `--assist-models a,b` | `assist_models` (text or list) | `claude-sonnet-5,claude-opus-5-5` |
 | `--assist-base-url URL` | `assist_base_url` | `https://api.anthropic.com` |
+| `--assist-provider anthropic\|openai` | `assist_provider` | `anthropic` |
 | `--assist-max-tokens N` | `assist_max_tokens` | 32000 |
 | `--assist-budget-tokens-per-hour N` | `assist_budget_tokens_per_hour` | 2000000 |
 | `--assist-log PATH\|stderr` | `assist_log` | no log |
 | `--assist-log-content` | `assist_log_content` | off |
 | `--assist` · `--no-assist` | `"assist": true` · `false` | off (opt-in) |
+
+**A local model or a gateway behind the proxy (`--assist-provider openai`,
+#843).** The proxy checks the builder's request exactly as for Claude, then
+sends it to `<--assist-base-url>/chat/completions` (e.g.
+`http://localhost:11434/v1` for Ollama) and answers in the Messages shape, so
+the builder doesn't change. `--assist-base-url` and `--assist-models` (the
+endpoint's own ids, e.g. `llama3.1:8b`) are required. The key is optional
+(`OPENAI_API_KEY` or `--assist-key-file`, sent as `Authorization: Bearer`);
+`ANTHROPIC_API_KEY` is never sent there. No prompt caching, no thinking;
+`count_tokens` answers 404; the endpoint's error text is never relayed (its
+status and error type are).
 
 With the proxy on, the builder's ✦ panel uses it: no key dialog, nothing
 stored in the browser, *What will be sent* names this server. The

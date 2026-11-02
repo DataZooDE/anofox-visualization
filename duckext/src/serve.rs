@@ -573,9 +573,11 @@ fn start_assist(
     if !a.on {
         return Ok((None, String::new()));
     }
+    // #843: an OpenAI-compatible endpoint (a local model) may have no key.
+    let openai = a.cfg.provider == assist::Provider::OpenAi;
     let has_key =
         a.key_file.is_some() || std::env::var(assist::KEY_ENV).is_ok_and(|k| !k.trim().is_empty());
-    if !has_key {
+    if !has_key && !openai {
         return Err(format!(
             "options.assist is true but there is no key: set {} or options.assist_key_file",
             assist::KEY_ENV

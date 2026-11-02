@@ -123,6 +123,35 @@ try {
   check(!/assistant proxy on/.test(note), "…a key in the environment alone leaves it off (opt-in)");
   const tok3 = (note.match(/token=([0-9a-f]+)/) || [])[1];
   if (tok3) check((await post(port + 3, "/assist/v1/messages", { "X-Anofox-Token": tok3 })).status === 404, "…and /assist is a 404 there");
+
+  // #843: assist_provider "openai" — an OpenAI-compatible endpoint, no key
+  // needed, and ANTHROPIC_API_KEY (in this session's environment) never sent.
+  const chatSeen = [];
+  const chat = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      chatSeen.push({ url: req.url, headers: req.headers, body });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ id: "c1", choices: [{ finish_reason: "stop", message: { role: "assistant", content: "hi from a local model" } }], usage: { prompt_tokens: 3, completion_tokens: 4 } }));
+    });
+  });
+  await new Promise((r) => chat.listen(0, "127.0.0.1", r));
+  try {
+    const oopts = { assist: true, assist_provider: "openai", assist_base_url: `http://127.0.0.1:${chat.address().port}/v1`, assist_models: ["llama3.1:8b"] };
+    const oout = await session(`SELECT anofox_serve(${port + 4}, ${sqlStr(JSON.stringify(oopts))});`, /token=[0-9a-f]+/);
+    check(/OpenAI-compatible endpoint .*key: none/.test(oout) && !oout.includes(KEY), "openai provider: on without a key, and says so");
+    const otok = (oout.match(/token=([0-9a-f]+)/) || [])[1];
+    const local = JSON.stringify({ model: "llama3.1:8b", max_tokens: 100, messages: [{ role: "user", content: "PROMPT-TEXT" }] });
+    const or = await post(port + 4, "/assist/v1/messages", { "X-Anofox-Token": otok }, local);
+    const oj = await or.json().catch(() => ({}));
+    check(or.status === 200 && oj.content?.[0]?.text === "hi from a local model", `openai provider: a Messages answer from a chat completion (${or.status})`);
+    const c = chatSeen[0];
+    check(c?.url === "/v1/chat/completions" && JSON.parse(c.body).messages[0].content === "PROMPT-TEXT", "…sent as a chat completion");
+    check(c && !JSON.stringify(c.headers).includes(KEY) && !c.headers.authorization && !c.headers["x-api-key"], "…without ANTHROPIC_API_KEY or any key");
+  } finally {
+    chat.close();
+  }
 } catch (e) {
   bad++;
   console.error("FAIL " + (e.stack || e));
