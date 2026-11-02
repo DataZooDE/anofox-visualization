@@ -44,6 +44,27 @@ assist-eval.yml`, manual only), which uses the secret
 limit (plan §11.5) — and uploads the results as an artifact. The same workflow
 runs Ask's eval (`tests/ask-eval/`).
 
+## Other providers (#854)
+
+Any OpenAI-compatible `/chat/completions` endpoint can be measured instead of
+Claude: `--endpoint URL --model ID`, its key in `OPENAI_API_KEY` (none for a
+local model). The first to try:
+
+| Provider | `--endpoint` | `--model` (e.g.) | Key |
+|---|---|---|---|
+| Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.5-pro` | a Gemini API key |
+| GitHub Models | `https://models.github.ai/inference` | `openai/gpt-4.1` | a GitHub token with `models: read` |
+| Ollama (local) | `http://localhost:11434/v1` | `qwen2.5-coder:32b` | none |
+
+(GitHub Copilot itself has no chat API for other apps; GitHub Models is the
+nearest.) The judge stays Claude (`ANTHROPIC_API_KEY`) so the providers are
+graded alike; `--judge-endpoint URL --judge-model ID` (key `JUDGE_API_KEY`,
+else `OPENAI_API_KEY`) grades there instead. The cost is reported as 0 for an
+endpoint (its price isn't known here). In GitHub: the `assist-eval` workflow's
+`endpoint`, `model`, `judge` and `judge_model` inputs, the key in the secret
+`ASSIST_EVAL_OPENAI_COMPAT_API_KEY`. Untested against these providers until a
+live run.
+
 ## Cost
 
 About $0.30 a prompt on Sonnet 5 and $0.01 a judgement: about $9–10 for all

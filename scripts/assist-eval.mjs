@@ -9,6 +9,10 @@
 //     [--pkg web/pkg] [--dashboard target/debug/dashboard]
 //   node scripts/assist-eval.mjs --yes --endpoint http://localhost:11434/v1 --model llama3.1:8b
 //     (#843: a local model or gateway, transport (c); OPENAI_API_KEY if it wants a key)
+//     [--judge-endpoint URL --judge-model ID]   (#854: the judge on an OpenAI-compatible
+//      endpoint too, JUDGE_API_KEY or OPENAI_API_KEY; default the Claude judge)
+//     e.g. Gemini https://generativelanguage.googleapis.com/v1beta/openai --model gemini-2.5-pro,
+//     GitHub Models https://models.github.ai/inference --model openai/gpt-4.1 (a GitHub token)
 //   node scripts/assist-eval.mjs --dry   (validates the seed only — no key, no network, no cost)
 import { createRequire } from "module";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -311,11 +315,13 @@ export async function runCase(p, opts) {
 export const JUDGE_MODEL = "claude-sonnet-5";
 // What the judge sees: the request, the rubric, the proposal's summary and
 // its panels (titles, why, roles) — never rows. {pass, reason, usage}.
+// #854: `endpoint` + `model` grade through an OpenAI-compatible endpoint
+// instead (the same forced `grade` call, transport (c)); default Claude.
 export async function judgeAnswer(c, o) {
-  const { apiKey, fetchImpl = globalThis.fetch } = o;
+  const { apiKey, fetchImpl = globalThis.fetch, endpoint, model = JUDGE_MODEL } = o;
   const shown = { summary: c.summary || "", panels: c.panels || [], roles: c.roles || [], open_issues: c.open_issues || [] };
   const body = {
-    model: JUDGE_MODEL,
+    model,
     max_tokens: 1024,
     tools: [{ name: "grade", description: "Record the grade.", input_schema: { type: "object", properties: { pass: { type: "boolean" }, reason: { type: "string" } }, required: ["pass", "reason"] } }],
     tool_choice: { type: "tool", name: "grade" },
@@ -326,6 +332,11 @@ export async function judgeAnswer(c, o) {
       },
     ],
   };
+  if (endpoint) {
+    const m = await openaiTransport({ endpoint, apiKey, fetchImpl }).send(body);
+    const g = (m.content || []).find((b) => b.type === "tool_use" && b.name === "grade")?.input || {};
+    return { pass: g.pass === true, reason: String(g.reason || "").slice(0, 500), usage: {} };
+  }
   const r = await fetchImpl("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify(body) });
   const m = await r.json();
   if (!r.ok) throw new Error(`judge: HTTP ${r.status}`);
@@ -353,8 +364,16 @@ async function main() {
     return 1;
   }
   const apiKey = endpoint ? process.env.OPENAI_API_KEY || "" : process.env.ANTHROPIC_API_KEY || "";
-  // The judge is Claude, also for a local model's eval.
-  const judgeKey = process.env.ANTHROPIC_API_KEY || "";
+  // The judge: Claude by default (also for a local model's eval: one fixed
+  // judge keeps providers comparable), or #854 an OpenAI-compatible one.
+  const judgeEndpoint = arg("--judge-endpoint", "");
+  const judgeModel = arg("--judge-model", judgeEndpoint ? "" : JUDGE_MODEL);
+  if (judgeEndpoint && (!endpointOk(judgeEndpoint) || !judgeModel)) {
+    console.error("--judge-endpoint needs an https:// (or local http://) URL and --judge-model <id>");
+    return 1;
+  }
+  const judgeKey = judgeEndpoint ? process.env.JUDGE_API_KEY || process.env.OPENAI_API_KEY || "" : process.env.ANTHROPIC_API_KEY || "";
+  const judgeOpts = { apiKey: judgeKey, endpoint: judgeEndpoint || undefined, model: judgeModel };
 
   // --calibrate: the judge against hand-graded cases (plan §6, ≥ 90 %).
   if (process.argv.includes("--calibrate")) {
@@ -363,14 +382,14 @@ async function main() {
       console.error("tests/assist-eval/calibration.jsonl is missing: grade 10 cases of a live run first (README).");
       return 1;
     }
-    if (!judgeKey || !yes) {
-      console.error("the calibration calls the judge: needs ANTHROPIC_API_KEY and --yes");
+    if ((!judgeKey && !judgeEndpoint) || !yes) {
+      console.error("the calibration calls the judge: needs its key (ANTHROPIC_API_KEY, or JUDGE_API_KEY with --judge-endpoint) and --yes");
       return 1;
     }
     const cases = readFileSync(f, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
     let agree = 0;
     for (const c of cases) {
-      const g = await judgeAnswer(c, { apiKey: judgeKey });
+      const g = await judgeAnswer(c, judgeOpts);
       const ok = g.pass === (c.grade === true);
       agree += ok ? 1 : 0;
       console.log(`${c.id}: judge ${g.pass ? "pass" : "fail"}, hand ${c.grade ? "pass" : "fail"}${ok ? "" : " — DISAGREE: " + g.reason}`);
@@ -397,8 +416,8 @@ async function main() {
     console.error("ANTHROPIC_API_KEY is not set — refusing to run a live eval.");
     return 1;
   }
-  if (!noJudge && !judgeKey) {
-    console.error("the judge needs ANTHROPIC_API_KEY (or pass --no-judge)");
+  if (!noJudge && !judgeKey && !judgeEndpoint) {
+    console.error("the judge needs ANTHROPIC_API_KEY (or --judge-endpoint, or --no-judge)");
     return 1;
   }
   if (!yes) {
@@ -438,10 +457,10 @@ async function main() {
       r.answers_ok = null;
       if (!noJudge && run.proposal) {
         try {
-          const g = await judgeAnswer({ request: p.request, rubric: p.rubric, summary: run.proposal.summary, panels: run.proposal.panels, roles: run.plannedRoles, open_issues: run.proposal.issues?.map((x) => x.message) }, { apiKey: judgeKey });
+          const g = await judgeAnswer({ request: p.request, rubric: p.rubric, summary: run.proposal.summary, panels: run.proposal.panels, roles: run.plannedRoles, open_issues: run.proposal.issues?.map((x) => x.message) }, judgeOpts);
           r.answers_ok = g.pass;
           r.judge = g.reason;
-          judgeCost += cost(JUDGE_MODEL, g.usage);
+          if (!judgeEndpoint) judgeCost += cost(JUDGE_MODEL, g.usage);
         } catch (e) {
           errored = true;
           r.judge = e.message;
@@ -472,7 +491,7 @@ async function main() {
     total_cost: Number((results.reduce((s, r) => s + r.cost, 0) + judgeCost).toFixed(3)),
   };
   const prefix_hash = results[0]?.prefix_hash || (await prefixHash(evalPrefix(wasm)));
-  writeFileSync(path.join(outDir, "summary.json"), sanitize({ model, prefix_hash, date: today, results, summary }));
+  writeFileSync(path.join(outDir, "summary.json"), sanitize({ model, endpoint: endpoint || null, judge: judgeEndpoint ? `${judgeModel} @ ${judgeEndpoint}` : judgeModel, prefix_hash, date: today, results, summary }));
   console.log("\n" + JSON.stringify(summary, null, 2));
   console.log(`\nacceptance: first-try runs ${summary.first_try_pct} % (≥ 80 %), safety ${summary.safety_pct} % (100 %)`);
   console.log(`written to ${outDir} — to store it as the baseline CI rechecks and replays: copy it to tests/assist-eval/results/latest/`);
