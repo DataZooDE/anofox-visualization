@@ -6532,12 +6532,42 @@ use sv::{
     wrap_nav_picker_sql, NAV_PICKER_MAX_OPTIONS,
 };
 
+std::thread_local! {
+    /// Set while an agent or MCP answer runs its panels (#895, N3): the
+    /// panel path's own log lines then leave DuckDB's text out, since it
+    /// can quote a caller's slot value or a row value.
+    static QUIET_PANEL_LOG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Quiet panel logging on this thread until the guard drops.
+struct QuietPanelLog(bool);
+impl QuietPanelLog {
+    fn on() -> Self {
+        QuietPanelLog(QUIET_PANEL_LOG.with(|q| q.replace(true)))
+    }
+}
+impl Drop for QuietPanelLog {
+    fn drop(&mut self) {
+        QUIET_PANEL_LOG.with(|q| q.set(self.0));
+    }
+}
+
+/// A DuckDB error's text for the server log — or a placeholder while an
+/// agent answer runs ([`QuietPanelLog`]).
+fn log_text(e: &str) -> String {
+    if QUIET_PANEL_LOG.with(|q| q.get()) {
+        "(details withheld: agent answer)".to_string()
+    } else {
+        access::diag(e)
+    }
+}
+
 /// A DuckDB error as a viewer sees it: the data folder's absolute path is
 /// replaced by `<data>` (the full text goes to the server log).
 fn redact(e: String, data: Option<&Path>) -> String {
     match data.map(|d| d.to_string_lossy()) {
         Some(d) if e.contains(d.as_ref()) => {
-            eprintln!("[anofox-serve] (unredacted) {e}");
+            eprintln!("[anofox-serve] (unredacted) {}", log_text(&e));
             e.replace(d.as_ref(), "<data>")
         }
         _ => e,
@@ -8650,10 +8680,13 @@ struct AskRunner<'a> {
     scope: Option<Scope>,
     method: Option<&'static str>,
     slots: &'a Queries,
+    /// An agent or MCP answer: the panel path logs no DuckDB text (#895).
+    quiet: bool,
 }
 
 impl askm::PanelRunner for AskRunner<'_> {
     fn panel(&self, body: &str, deadline: Instant) -> Result<String, (u16, String)> {
+        let _quiet = self.quiet.then(QuietPanelLog::on);
         let Some(_slot) = self.slots.acquire(deadline, || false) else {
             return Err((503, crate::limits::BUSY.to_string()));
         };
@@ -8723,6 +8756,15 @@ fn handle_agent(
         return reply(req, 404, "no such dashboard");
     };
     info.dashboard = Some(dash.id.clone());
+    // #895: a refresh or reload may have swapped in a version that fails the
+    // publish checks — refused like `/mcp` (fail closed), not served.
+    if anofox_visualization::agent::publish(&dash.id, &dash.sql).is_err() {
+        return reply(
+            req,
+            503,
+            "the agent's dashboard no longer passes its publish checks",
+        );
+    }
     let d = agentm::Dash {
         id: &dash.id,
         title: &dash.meta.title,
@@ -8744,6 +8786,7 @@ fn handle_agent(
             scope: Some(ident.scope.clone()),
             method: Some(ident.method),
             slots,
+            quiet: true,
         };
         let deadline = Instant::now() + st.opts.timeout;
         agentm::answer(
@@ -8810,6 +8853,7 @@ fn handle_mcp(
         scope: Some(ident.scope.clone()),
         method: Some(ident.method),
         slots,
+        quiet: true,
     };
     let srv = mcpm::Server {
         dash: agentm::Dash {
@@ -8945,6 +8989,7 @@ fn handle_ask(
                     scope,
                     method,
                     slots: &rt.slots,
+                    quiet: false,
                 };
                 let d = askm::Dash {
                     id: &dash.id,
@@ -11278,7 +11323,7 @@ fn run_panel(
                         setup_failed = true;
                         eprintln!(
                             "[anofox-serve] setup statement failed in '{dash_id}': {}",
-                            access::diag(&e)
+                            log_text(&e)
                         );
                     }
                 }
@@ -11354,7 +11399,7 @@ fn run_panel(
                     setup_failed = true;
                     eprintln!(
                         "[anofox-serve] setup statement failed in '{dash_id}': {}",
-                        access::diag(&e)
+                        log_text(&e)
                     );
                 }
             }
@@ -11397,7 +11442,7 @@ fn run_panel(
             // message, the log the details.
             eprintln!(
                 "[anofox-serve] panel failed in '{dash_id}': {}",
-                access::diag(&redact(e, st.opts.data.as_deref()))
+                log_text(&redact(e, st.opts.data.as_deref()))
             );
             (400, POLICY_PANEL_ERROR.to_string())
         } else {

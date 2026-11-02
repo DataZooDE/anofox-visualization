@@ -1221,7 +1221,12 @@ A dashboard published as an agent answers the questions it declares with
   `truncated` when more rows follow) and a `footer`.
 - **Errors** are a fixed message, a code and an error id; DuckDB's text never
   reaches the caller, and the log line carries only the code, the id and the
-  panel path's status.
+  panel path's status. The panel path's own log lines (a failing panel under
+  a policy, a failing setup statement) leave DuckDB's text out for agent and
+  MCP answers too, since it can quote a slot value.
+- **After a refresh or reload**, a dashboard version that no longer passes
+  the publish checks is refused on every agent route (`503`) until it does
+  again.
 - **The start is refused** without `auth`, with `ask` on (an agent answers
   without a model), with `log_vars: "values"`, unless extension telemetry is
   off (`DATAZOO_DISABLE_TELEMETRY=1`), and when the dashboard fails
