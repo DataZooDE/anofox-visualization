@@ -36,6 +36,9 @@ const PROBE = `https://${PROBE_HOST}/p.png`;
 
 // A single https:// origin — the app's own imgOrigins never widen past this.
 const ORIGIN_RE = /^https:\/\/[a-z0-9.-]+(:\d+)?$/i;
+// #843: an OpenAI-compatible model endpoint's origin for connect-src — https,
+// or http to a loopback host (a local model). An origin only, never a path.
+const CONNECT_RE = /^(https:\/\/[a-z0-9.-]+|http:\/\/(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|\[::1\]))(:\d{1,5})?$/i;
 // I-R2-3(a): a full URL (scheme + host + path, no query/fragment) is enough
 // and narrower than granting the whole origin — accepted too, so a brand
 // logo/favicon can be listed by its exact address.
@@ -57,11 +60,12 @@ export function assistCsp(opts) {
   const base = o.base ?? appBase();
   const imgOrigins = Array.isArray(o.imgOrigins) ? o.imgOrigins : [];
   const img = [base, "data:", "blob:", ...imgOrigins.filter((x) => ORIGIN_RE.test(x) || FULL_URL_RE.test(x))];
+  const connect = (Array.isArray(o.connect) ? o.connect : []).filter((x) => typeof x === "string" && CONNECT_RE.test(x));
   return [
     "default-src 'none'",
     `script-src ${base} 'wasm-unsafe-eval' ${DUCKDB_WASM} ${KATEX}`,
     "worker-src blob:",
-    `connect-src ${base} ${API} ${DUCKDB_WASM} ${DUCKDB_EXT} ${USGS}`,
+    `connect-src ${[base, API, DUCKDB_WASM, DUCKDB_EXT, USGS, ...connect].join(" ")}`,
     `img-src ${img.join(" ")}`,
     `style-src ${base} 'unsafe-inline' https://fonts.googleapis.com ${KATEX}`,
     `font-src ${base} data: https://fonts.gstatic.com ${KATEX}`,

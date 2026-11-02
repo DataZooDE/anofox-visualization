@@ -42,7 +42,8 @@ assert.equal(A.assistConfig({ enabled: true, transport: "serve" }).reason, "serv
   assert.equal(c.remember, false, "nothing to remember: the server holds the key");
   assert.equal(A.assistConfig({ enabled: true, transport: "serve" }, { live: true, served: true }).enabled, false, "never on a locked server");
 }
-assert.equal(A.assistConfig({ enabled: true, transport: "openai" }).reason, "openai-not-yet");
+assert.equal(A.assistConfig({ enabled: true, transport: "openai" }).reason, "openai-needs-an-endpoint"); // #843: transport (c), tests/web/assist_openai_test.mjs
+assert.equal(A.assistConfig({ enabled: true, transport: "smoke-signals" }).reason, "smoke-signals-not-yet");
 {
   const c = A.assistConfig({ enabled: true });
   assert.deepEqual(c, { enabled: true, transport: "browser-key", models: { default: "claude-sonnet-5", harder: "claude-opus-5-5" }, maxRounds: 3, sampleRowsAllowed: true, remember: false }, "remember: off by default (L-R2-1)");

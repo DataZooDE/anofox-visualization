@@ -20,6 +20,8 @@ import { ANOFOX_TABLES, BUILTIN, RELATION_ARGS, SCALAR_ALLOWED } from "./assist/
 // every tool and the proposal preview there (requireLocked, previewRunner
 // below); engineLocked is the per-call re-check (plan-204 §2.4).
 import { engineLocked } from "./assist-engine.js";
+// #843: transport (c), an OpenAI-compatible endpoint (a local model).
+import { endpointOk, modelIdOk } from "./assist-openai.js";
 
 export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
 // The SDK as one vendored ES module (web/vendor/, built by
@@ -57,7 +59,9 @@ export const LIMITS = {
 // Transports: the user's own key (`browser-key`, static hosting) and, #740,
 // an authoring server's `/assist` proxy (`serve`: the server holds the key
 // and says so in window.__anofoxApp; only there, never on static hosting).
-// An OpenAI-compatible endpoint comes later.
+// #843: an OpenAI-compatible endpoint (`openai`: a local model or a company
+// gateway, `endpoint` + `models.default`), static hosting only like a
+// browser key (an authoring server's page goes through its proxy).
 // T11: a dashboard embedded in someone else's page (an <iframe>) never gets
 // the assistant — the meta CSP it depends on (assist-csp.js) can't carry
 // `frame-ancestors`, so clickjacking the panel into a confirming click is
@@ -69,6 +73,15 @@ export const LIMITS = {
 // alone, with no installation ever configuring either. Copying `block`
 // and the options into null-prototype objects first means a missing key
 // is always `undefined`, never inherited.
+// #843: the installation's OpenAI-compatible endpoint (no trailing slash),
+// or null — the one reading of `endpoint`, shared by assistConfig and the
+// page's CSP (which needs the origin before the config is decided, when a
+// key is already stored at boot).
+export function assistEndpoint(block) {
+  const a = ownOpts(block);
+  return a.transport === "openai" && endpointOk(a.endpoint) ? a.endpoint.replace(/\/+$/, "") : null;
+}
+
 export function assistConfig(block, opts) {
   const o = ownOpts(opts);
   const { served = false, embed = false, live = false, framed = false, host } = o;
@@ -83,12 +96,21 @@ export function assistConfig(block, opts) {
   // hosting has no proxy to use.
   if (live && transport !== "serve") return off("live-needs-serve");
   if (!live && transport === "serve") return off("serve-needs-a-server");
-  if (transport !== "browser-key" && transport !== "serve") return off(`${transport}-not-yet`);
-  const models = { ...MODELS };
+  if (transport !== "browser-key" && transport !== "serve" && transport !== "openai") return off(`${transport}-not-yet`);
   const aModels = ownOpts(a.models); // sec-review-256 final check: a.models[k] read own-only too
-  for (const k of ["default", "harder"]) if (typeof aModels[k] === "string" && /^claude-[a-z0-9-]+$/.test(aModels[k])) models[k] = aModels[k];
+  let models = { ...MODELS };
+  let endpoint = null;
+  if (transport === "openai") {
+    // no Claude defaults here: the installation names its own model
+    endpoint = assistEndpoint(a);
+    if (!endpoint) return off("openai-needs-an-endpoint");
+    if (!modelIdOk(aModels.default)) return off("openai-needs-a-model");
+    models = { default: aModels.default, harder: modelIdOk(aModels.harder) ? aModels.harder : aModels.default };
+  } else {
+    for (const k of ["default", "harder"]) if (typeof aModels[k] === "string" && /^claude-[a-z0-9-]+$/.test(aModels[k])) models[k] = aModels[k];
+  }
   const rounds = Number.isInteger(a.max_rounds) ? Math.min(LIMITS.rounds, Math.max(1, a.max_rounds)) : LIMITS.rounds;
-  return { enabled: true, transport, models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false, remember: transport === "browser-key" && rememberAllowed(host, a.remember === true) };
+  return { enabled: true, transport, ...(endpoint ? { endpoint } : {}), models, maxRounds: rounds, sampleRowsAllowed: a.sample_rows_allowed !== false, remember: transport !== "serve" && rememberAllowed(host, a.remember === true) };
 }
 
 // T13: a shared static host (every project under the same account/org
@@ -107,6 +129,14 @@ export const rememberAllowed = (host = globalThis.location?.hostname || "", allo
 // chose "Remember on this device" (localStorage). Never in the SQL, a link,
 // an export or a log.
 export const KEY_SLOT = "dp_assist_key";
+// #843: an OpenAI-compatible endpoint's key (a gateway's) has a slot of its
+// own: an Anthropic key must never be sent to another endpoint, and the
+// other way round.
+export const OPENAI_KEY_SLOT = "dp_assist_key_openai";
+export const keySlotFor = (transport) => (transport === "openai" ? OPENAI_KEY_SLOT : KEY_SLOT);
+export const KEY_SLOTS = [KEY_SLOT, OPENAI_KEY_SLOT];
+// Every slot's store (the boot ratchet and the fail-closed clear see them all).
+export const allKeyStores = (session, local, opts) => KEY_SLOTS.map((slot) => keyStore(session, local, { ...ownOpts(opts), slot }));
 // `remember`: whether "Remember on this device" (localStorage) is currently
 // allowed (rememberAllowed(host, config) — off by default, always off on a
 // shared static host). When it is not, construction demotes any key already
@@ -120,18 +150,19 @@ export function keyStore(session, local, opts = {}) {
   // the old default of `true` meant a caller that omitted the option, or a
   // polluted Object.prototype.remember, both remembered the key). Real
   // callers (boot(), M1-3) always pass the real, computed value explicitly.
-  const { remember = false } = ownOpts(opts);
+  const { remember = false, slot = KEY_SLOT } = ownOpts(opts);
+  if (slot !== KEY_SLOT && slot !== OPENAI_KEY_SLOT) throw new Error("no such key slot");
   const read = (s) => {
     try {
-      return s?.getItem(KEY_SLOT) || "";
+      return s?.getItem(slot) || "";
     } catch (_) {
       return "";
     }
   };
   const write = (s, v) => {
     try {
-      if (v) s?.setItem(KEY_SLOT, v);
-      else s?.removeItem(KEY_SLOT);
+      if (v) s?.setItem(slot, v);
+      else s?.removeItem(slot);
     } catch (_) {}
   };
   if (!remember) {
@@ -242,6 +273,12 @@ export const isAbort = (e, signal) => !!signal?.aborted || e?.name === "APIUserA
 // (it never relays the API's), so it is shown as it is.
 export function describeError(e, transport = "browser-key") {
   const status = Number(e?.status) || 0;
+  if (transport === "openai") {
+    const m = String(e?.error?.error?.message || "").slice(0, 300);
+    if (status === 401 || status === 403) return "The model endpoint did not accept the request" + (m ? `: ${m}` : ".") + " If it needs a key, add one.";
+    if (status) return `The model endpoint answered HTTP ${status}` + (m ? `: ${m}` : ".");
+    return "The assistant could not reach the model endpoint (is it running, and does it allow this page's origin?)" + (e?.message ? ": " + String(e.message).slice(0, 200) : ".");
+  }
   if (transport === "serve" && status) {
     if (status === 401) return "The server's API key was not accepted. Check ANTHROPIC_API_KEY (or --assist-key-file) where the server runs.";
     const m = String(e?.error?.error?.message || "").slice(0, 300);
