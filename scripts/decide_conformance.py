@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Conformance harness: anofox-decide output → our plots.
 
-anofox_decide tags no function with `tags['anofox.contract'] = '1'` yet, and
-none of its outputs is a contract schema: probabilities, choices and scores
-are per-row scalars, the quality metrics single numbers. So the harness
+anofox_decide tags three table macros with `tags['anofox.contract'] = '1'`
+(decide_metrics_by → `summary`, decide_roc_curve_by and
+decide_calibration_curve_by → `curve`); its per-row outputs are no contract
+schema: probabilities, choices and scores are scalars, the quality metrics
+single numbers. So the harness
 
-  * discovers tagged producers anyway (any `decide_*` function with an
-    `anofox.output` tag) and fails while one has no recipe here;
+  * discovers the tagged producers (any `decide_*` function with an
+    `anofox.output` tag), runs each recipe in PRODUCERS and fails while one
+    has no recipe here;
   * runs every decide output through the SQL bridge the decide examples use
     to a contract schema (metrics → `summary`, probabilities → `curve`: ROC,
     PR, calibration) and hands it to `anofox_plot(...)` and the schema's
@@ -190,6 +193,14 @@ BRIDGES: dict[str, tuple[str, str]] = {
     FROM tickets, decide_table(text, '""" + QUESTIONS + """', 'stub') GROUP BY question_id"""),
 }
 
+# decide's own tagged contract producers (anofox.contract = '1'), fed the
+# fixture's refund probabilities. A tagged producer missing here fails.
+PRODUCERS: dict[str, tuple[str, str]] = {
+    "decide_metrics_by": (SUMMARY, "decide_metrics_by('runs', model_id, p_refund, refund)"),
+    "decide_roc_curve_by": (CURVE, "decide_roc_curve_by('runs', model_id, p_refund, refund)"),
+    "decide_calibration_curve_by": (CURVE, "decide_calibration_curve_by('runs', model_id, p_refund, refund, n_bins := 5)"),
+}
+
 # anofox_statistics' curve producers fed decide probabilities (--statistics).
 STATISTICS = {
     "roc_curve_by": "roc_curve_by('runs', model_id, refund, p_refund)",
@@ -288,7 +299,7 @@ def main() -> int:
         print("FAIL: anofox_contract_version() must be '1'")
         return 1
 
-    # Tagged producers (none today). The anofox_decide_* aliases are skipped.
+    # Tagged producers. The anofox_decide_* aliases are skipped.
     ok, out = run(a.duckdb, load, "SELECT DISTINCT function_name || '|' || function_type || '|' || tags['anofox.output'] "
                   "FROM duckdb_functions() WHERE tags['anofox.output'] IS NOT NULL "
                   "AND function_name LIKE 'decide\\_%' ESCAPE '\\' ORDER BY 1")
@@ -297,7 +308,7 @@ def main() -> int:
         return 1
     producers = sorted({tuple(l.split("|")) for l in out.splitlines() if l.count("|") == 2})
     print(f"{len(producers)} tagged contract producers in anofox_decide")
-    missing = [p[0] for p in producers]  # none has a recipe yet: a tagged one needs one
+    missing = [p[0] for p in producers if p[0] not in PRODUCERS]
 
     stats = a.statistics != "no"
     if stats:
@@ -327,6 +338,10 @@ def main() -> int:
         for which, call in (("auto", "anofox_plot(t)"), ("specific", SPECIFIC[schema])):
             runs.append({"name": name, "which": which, "kind": "case",
                          "sql": f"SELECT {call} FROM ({src}) t"})
+    for name, (schema, src) in PRODUCERS.items():
+        for which, call in (("auto", "anofox_plot(t)"), ("specific", SPECIFIC[schema])):
+            runs.append({"name": f"producer.{name}", "which": which, "kind": "case",
+                         "sql": f"SELECT {call} FROM {src} t"})
     if stats:
         for name, src in STATISTICS.items():
             for which, call in (("auto", "anofox_plot(t)"), ("specific", SPECIFIC[CURVE])):
@@ -352,7 +367,8 @@ def main() -> int:
     good = {"OK", "GAP"}
     passed = sum(1 for r in results if r[1] in good)
     gaps = sum(1 for r in results if r[1] == "GAP")
-    print(f"\n{len(BRIDGES)} decide bridges, {len(producers)} tagged producers, "
+    print(f"\n{len(BRIDGES)} decide bridges, {len(producers)} tagged producers "
+          f"({len(producers) - len(missing)} with a recipe), "
           f"{passed}/{len(results)} calls as expected ({gaps} known gaps)")
     keep = lambda n: not n.startswith("contract_version") and not n.endswith(".auto")
     if not a.no_montage:
