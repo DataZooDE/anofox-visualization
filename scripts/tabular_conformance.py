@@ -52,7 +52,8 @@ import re
 import sys
 
 from conformance_lib import check as _check
-from conformance_lib import NO_SCHEMA, check_raw, ext_path, parser, run_all, run_duckdb, svg_names, write_montage
+from conformance_lib import (NO_SCHEMA, check_raw, ext_path, known_bug, parser, run_all, run_duckdb, svg_names,
+                             write_montage)
 
 # ── demo data ────────────────────────────────────────────────────────────────
 # 120 orders over a month plus two duplicated rows; planted problems: NULL
@@ -254,6 +255,10 @@ for _f, _k in (("anofox_tab_diff_hashdiff", "'id'"), ("anofox_tab_diff_joindiff"
     recipe(_f, f"{_f}('d', 'd_new', {_k})", GENERIC,
            f"SELECT anofox_bar(diff_type, n) FROM (SELECT diff_type, count(*) AS n FROM {_f}('d', 'd_new', {_k}) GROUP BY ALL) t")
 
+# Schema diff: columns per drift kind (same / added / removed / retyped).
+recipe("anofox_tab_diff_schema", "anofox_tab_diff_schema('d', 'd_new')", GENERIC,
+       "SELECT anofox_bar(drift, n) FROM (SELECT drift, count(*) AS n FROM anofox_tab_diff_schema('d', 'd_new') GROUP BY ALL) t")
+
 # PII: matches per column and type.
 recipe("anofox_tab_pii_scan_table", "anofox_tab_pii_scan_table('d')", GENERIC,
        "SELECT anofox_xyc(column_name, match_count, pii_type) FROM anofox_tab_pii_scan_table('d') t")
@@ -354,6 +359,22 @@ EXTRA = {
 # Build warnings the harness accepts (none today).
 ALLOWED_WARNINGS: list[str] = []
 
+# stderr lines that are no failure: info banners, and the diffs' note that
+# `d_new` drops `phone` and adds `note` (the fixture does that on purpose).
+QUIET = ("[anofox] [info]",
+         "[anofox] [warn] diff_hashdiff: columns present on one side only",
+         "[anofox] [warn] diff_joindiff: columns present on one side only")
+
+# Producer bugs of a released anofox_tabular build (by extension_version):
+# every case whose SQL calls the function is XFAIL; one that passes is XPASS
+# (a failure: drop the entry).
+KNOWN: dict[str, dict[str, str]] = {
+    "v2026.11.01": {
+        "anofox_tab_metric_anomaly_iqr": "Binder Error unless the date column is named d (anofox-tabular#131)",
+        "anofox_tab_metric_anomaly_iqr_events": "Binder Error unless the date column is named d (anofox-tabular#131)",
+    },
+}
+
 # PII: the pattern recognizers only. NAME / ORGANIZATION / LOCATION / MISC use
 # an NER model that anofox_tabular downloads from Hugging Face on first use.
 PII_TYPES = ("EMAIL,CREDIT_CARD,US_SSN,IBAN,DE_TAX_ID,IP_ADDRESS,URL,MAC_ADDRESS,UK_NINO,US_PASSPORT,PHONE,"
@@ -364,7 +385,7 @@ def run(duckdb: str, ext: str, sql: str, mode: str = "-list", ext_dir: str | Non
     pre = f"SET extension_directory = '{ext_dir}'; " if ext_dir else ""
     script = (f"{pre}LOAD anofox_tabular; LOAD '{ext}'; SET anofox_telemetry_enabled = false; "
               f"SET anofox_pii_enabled_types = '{PII_TYPES}';\n{SETUP}\n{sql};")
-    return run_duckdb(duckdb, script, mode, timeout=600, quiet=("[anofox] [info]",))
+    return run_duckdb(duckdb, script, mode, timeout=600, quiet=QUIET)
 
 
 check_out = lambda ok, out: _check(ok, out, ALLOWED_WARNINGS)
@@ -387,6 +408,8 @@ def main() -> int:
     if not ok or "tabular=" not in out:
         print("FAIL: cannot LOAD anofox_tabular and the visualization extension")
         return 1
+    version = m.group(1) if (m := re.search(r"tabular=(\S+)", out)) else ""
+    known = KNOWN.get(version, {})
 
     # Every anofox_tab_* table function, plus anything tagged for the contract.
     ok, out = q("SELECT DISTINCT function_name || '|' || (tags['anofox.contract'] IS NOT NULL) FROM duckdb_functions() "
@@ -417,7 +440,11 @@ def main() -> int:
             return c, (check_out(ok, out) if c.get("native") else check_raw(ok, out, ALLOWED_WARNINGS))
         return c, check_out(ok, out)
 
-    results = run_all(runs, one, a.jobs, a.out, key=lambda c: f"{c['key']}.{c['which']}")
+    def post(c, status, msg):
+        bug = next((why for f, why in known.items() if f + "(" in c["sql"]), None)
+        return known_bug(status, msg, bug) if bug else (status, msg)
+
+    results = run_all(runs, one, a.jobs, a.out, key=lambda c: f"{c['key']}.{c['which']}", post=post)
     names = svg_names(results)
     for key, status, msg, n, c in results:
         if status != "NOSCHEMA":
@@ -439,7 +466,7 @@ def main() -> int:
         good = sum(1 for r in mine if r[1] == "OK")
         raw_text = "as it comes" if key in native_keys else ("no schema" if raw.get(key) == "NOSCHEMA" else raw.get(key))
         print(f"{key:40s} {mine[0][4]['schema']:10s} {good}/{len(mine):<4d} {raw_text}")
-    failed = [r for r in results if r[1] not in ("OK", "NOSCHEMA")]
+    failed = [r for r in results if r[1] not in ("OK", "NOSCHEMA", "XFAIL")]
     passed = sum(1 for r in results if r[1] == "OK" and r[4]["which"] != "raw")
     total = sum(1 for r in results if r[4]["which"] != "raw")
     covered = len({c["name"] for c in todo if not c.get("missing")})
