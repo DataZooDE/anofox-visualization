@@ -950,6 +950,9 @@ if (!wasm || !duckdb) {
   assert.deepEqual(scopeTables(engineTables, "", ["memory.main.nothere"]).inScope.length, 2, "an unknown scope falls back");
 }
 
+// #846: Haiku 4.5 runs without thinking or effort
+assert.equal(A.thinks("claude-haiku-4-5"), false);
+assert.equal(A.thinks("claude-sonnet-5"), true);
 console.log("assist_test: ok");
   process.exit(0);
 }
@@ -1658,4 +1661,7 @@ const tools = A.wasmTools({
     engine.close();
   }
 }
+// #846: Haiku 4.5 runs without thinking or effort
+assert.equal(A.thinks("claude-haiku-4-5"), false);
+assert.equal(A.thinks("claude-sonnet-5"), true);
 console.log("assist_test: ok");

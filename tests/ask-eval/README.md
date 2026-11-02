@@ -1,6 +1,6 @@
-# The Ask eval seed (#195, M2-7)
+# The Ask eval (#195 M2-7, #846 M3-4)
 
-Fifteen questions about the example dashboards (`cases.jsonl`), asked of the
+Thirty questions about the example dashboards (`cases.jsonl`), asked of the
 **real** Anthropic API — never mocked — on both places Ask runs:
 
 - **server**: a real locked server (`anofox_serve_dashboards` with
@@ -57,11 +57,13 @@ access policy that nulls the salary column (`SERVER_FIXTURES` in the script).
 
 ## Cost
 
-About $0.05 a question on Sonnet 5 and $0.01 a judged answer: about $1.50 for
-both targets. The script prints the estimate first and refuses to run without
+About $0.05 a question on Sonnet 5 and $0.01 a judged answer: about $3 for
+both targets; less on `--model claude-haiku-4-5` (the cheaper model §12.10
+evaluates — it runs without thinking). The script prints the estimate first and refuses to run without
 `--yes`.
 
 ## Results are not committed
 
 `results/` is gitignored. The owner runs the eval with their own key and pastes
-the summary into the PR; M3-4 adds 15 more cases.
+the summary into the PR. Or run it in GitHub: **Actions → assist-eval** with
+`eval: ask` (`.github/workflows/assist-eval.yml`, #845).
