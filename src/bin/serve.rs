@@ -2222,7 +2222,7 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
             for l in &lines {
                 say(&format!("  {l}"));
             }
-            let up = assist::HttpUpstream::new(&c.base_url, key).unwrap_or_else(|e| {
+            let up = c.build_upstream(key).unwrap_or_else(|e| {
                 eprintln!("error: ask: {e}");
                 std::process::exit(2)
             });
@@ -2230,7 +2230,7 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
             aws_lc_rs::rand::fill(&mut secret).expect("system randomness");
             let max_running = c.concurrency.min(o.threads - 1).max(1);
             Some(AskB {
-                ask: askm::Ask::new(c, Box::new(up), o.log.as_ref().map(|l| l.sink.clone())),
+                ask: askm::Ask::new(c, up, o.log.as_ref().map(|l| l.sink.clone())),
                 secret,
                 running: std::sync::atomic::AtomicUsize::new(0),
                 max_running,

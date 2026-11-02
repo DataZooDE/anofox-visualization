@@ -421,16 +421,19 @@ impl Ask {
             }
             run.turns = turn;
             progress(Progress::Thinking { turn });
-            let body = json!({
+            let mut body = json!({
                 "model": self.cfg.model,
                 "max_tokens": self.cfg.max_tokens,
                 "system": system,
                 "tools": tools,
                 "messages": messages,
-                "thinking": {"type": "adaptive"},
-                "output_config": {"effort": self.cfg.effort},
                 "cache_control": {"type": "ephemeral"},
             });
+            // #846: Haiku 4.5 takes neither adaptive thinking nor an effort
+            if super::config::thinks(&self.cfg.model) {
+                body["thinking"] = json!({"type": "adaptive"});
+                body["output_config"] = json!({"effort": self.cfg.effort});
+            }
             let bytes = serde_json::to_vec(&body).unwrap_or_default();
             // Input-equivalent tokens: about 3 bytes each, plus the output.
             let est = bytes.len() as u64 / 3 + self.cfg.max_tokens;

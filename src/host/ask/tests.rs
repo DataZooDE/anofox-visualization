@@ -800,7 +800,7 @@ fn the_key_never_reaches_a_message() {
     let mut c = cfg();
     c.key_env = "ASK_TEST_KEY_M23".into();
     let (key, msgs) = c.start(true).unwrap();
-    assert_eq!(key, "sk-ant-test-0123456789");
+    assert_eq!(key.as_deref(), Some("sk-ant-test-0123456789"));
     assert!(msgs.iter().all(|m| !m.contains("sk-ant")), "{msgs:?}");
     assert!(msgs[0].contains("claude-sonnet-5") && msgs[0].contains("Anthropic (Claude)"));
     // no login: refused unless anonymous, which warns
@@ -836,7 +836,7 @@ fn config_parses_and_refuses_unknown_keys() {
     assert_eq!(c.mask, Mask::Columns(vec!["customer".into()]));
     for bad in [
         json!({"enabled": true, "modle": "x"}),
-        json!({"model": "claude-haiku-4-5"}),
+        json!({"model": "claude-haiku-3"}),
         json!({"base_url": "http://example.com"}),
         json!({"allow": ["analysts"]}),
         json!({"per_viewer": {"per_week": 1}}),
@@ -872,4 +872,159 @@ fn catalog_is_source_text_only() {
     );
     assert_eq!(catalog::static_literal("SELECT 'a' || x AS c0"), None);
     let _ = Map::<String, Value>::new();
+}
+
+// ---- #846: Haiku 4.5, and an OpenAI-compatible endpoint ----
+
+#[test]
+fn haiku_runs_without_thinking_or_effort() {
+    let m = Model::new(vec![answer("Fine.", json!([]), "answered")]);
+    let mut c = cfg();
+    c.model = "claude-haiku-4-5".into();
+    let ask = new_ask(&m, c);
+    ask_with(
+        &ask,
+        &viewer("alice"),
+        DASH,
+        q("How is it?"),
+        &Panels::default(),
+    )
+    .unwrap();
+    let sent = m.sent();
+    assert!(sent.contains("\"model\":\"claude-haiku-4-5\""), "{sent}");
+    assert!(
+        !sent.contains("\"thinking\"") && !sent.contains("\"output_config\""),
+        "{sent}"
+    );
+    // the default model keeps both
+    let m = Model::new(vec![answer("Fine.", json!([]), "answered")]);
+    let ask = new_ask(&m, cfg());
+    ask_with(
+        &ask,
+        &viewer("alice"),
+        DASH,
+        q("How is it?"),
+        &Panels::default(),
+    )
+    .unwrap();
+    let sent = m.sent();
+    assert!(
+        sent.contains("\"thinking\":{\"type\":\"adaptive\"}")
+            && sent.contains("\"effort\":\"medium\"")
+    );
+}
+
+#[test]
+fn an_openai_compatible_endpoint() {
+    let parse = |v: Value| AskConfig::parse(&v);
+    let c = parse(json!({"enabled": true, "transport": "openai", "base_url": "http://localhost:11434/v1", "model": "llama3.1:8b"})).unwrap();
+    assert_eq!(
+        c.key_env,
+        crate::host::assist::OPENAI_KEY_ENV,
+        "never ANTHROPIC_API_KEY"
+    );
+    assert_eq!(c.provider_label, "the operator's model endpoint");
+    assert!(parse(json!({"transport": "openai", "model": "m"}))
+        .unwrap_err()
+        .contains("ask.base_url"));
+    assert!(
+        parse(json!({"transport": "openai", "base_url": "http://localhost:1/v1"}))
+            .unwrap_err()
+            .contains("ask.model")
+    );
+    assert!(parse(
+        json!({"transport": "openai", "base_url": "http://localhost:1/v1", "model": "a b"})
+    )
+    .is_err());
+    assert!(parse(json!({"transport": "smoke"})).is_err());
+    // a Claude transport keeps its list (Haiku included now)
+    assert!(parse(json!({"model": "llama3.1:8b"}))
+        .unwrap_err()
+        .contains("one of"));
+    parse(json!({"model": "claude-haiku-4-5"})).unwrap();
+    // no key is fine for a self-hosted model (an empty variable name's value)
+    let mut c = c;
+    c.key_env = "ASK_TEST_NO_SUCH_VARIABLE_846".into();
+    let (key, lines) = c.start(true).unwrap();
+    assert_eq!(key, None);
+    assert!(lines[0].contains("llama3.1:8b") && lines[0].contains("localhost:11434"));
+    assert!(c.build_upstream(None).is_ok());
+    let a = parse(json!({"enabled": true, "key_env": "ASK_TEST_NO_SUCH_VARIABLE_846"})).unwrap();
+    assert!(
+        a.start(true).unwrap_err().contains("no model key"),
+        "a Claude key stays required"
+    );
+}
+
+#[test]
+fn asks_through_an_openai_compatible_endpoint() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    // a chat-completions server: one answer as a tool call
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let t = std::thread::spawn(move || {
+        let (s, _) = l.accept().unwrap();
+        let mut r = BufReader::new(s.try_clone().unwrap());
+        let (mut head, mut len) = (Vec::new(), 0usize);
+        loop {
+            let mut line = String::new();
+            r.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            let low = line.to_ascii_lowercase();
+            if let Some(v) = low.strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap();
+            }
+            head.push(low);
+        }
+        let mut b = vec![0; len];
+        r.read_exact(&mut b).unwrap();
+        let args = json!({"text": "Nothing to read for that.", "citations": [], "scope": "not_on_dashboard"}).to_string();
+        let out = json!({"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": null,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "answer", "arguments": args}}]}}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 9}}).to_string();
+        let mut w = s;
+        write!(
+            w,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{out}",
+            out.len()
+        )
+        .unwrap();
+        (head, b)
+    });
+    let c = AskConfig::parse(&json!({"enabled": true, "transport": "openai", "base_url": format!("http://127.0.0.1:{port}/v1"), "model": "llama3.1:8b"})).unwrap();
+    let up = c.build_upstream(None).unwrap();
+    let ask = Ask::new(c, up, None);
+    let a = ask_with(
+        &ask,
+        &viewer("alice"),
+        DASH,
+        q("What is the weather?"),
+        &Panels::default(),
+    )
+    .unwrap();
+    assert_eq!(a.text, "Nothing to read for that.");
+    assert_eq!(a.scope, "not_on_dashboard");
+    let (head, body) = t.join().unwrap();
+    assert!(
+        head[0].starts_with("post /v1/chat/completions "),
+        "{head:?}"
+    );
+    assert!(
+        !head
+            .iter()
+            .any(|h| h.starts_with("authorization") || h.starts_with("x-api-key")),
+        "{head:?}"
+    );
+    let sent: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(sent["model"], "llama3.1:8b");
+    assert_eq!(sent["messages"][0]["role"], "system");
+    assert!(sent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["function"]["name"] == "answer"));
+    assert!(!String::from_utf8_lossy(&body).contains("cache_control"));
 }

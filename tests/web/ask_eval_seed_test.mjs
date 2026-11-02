@@ -20,7 +20,7 @@ const wasm = await loadWasm(path.join(root, "web/pkg"));
 
 const seed = loadCases(root);
 validateCases(seed);
-assert.equal(seed.cases.length, 15, `15 cases (plan §8 M2-7), found ${seed.cases.length}`);
+assert.equal(seed.cases.length, 30, `30 cases (plan §8 M3-4), found ${seed.cases.length}`);
 const kinds = {};
 for (const c of seed.cases) kinds[c.kind] = (kinds[c.kind] || 0) + 1;
 for (const k of ["fact", "view", "explain", "meaning", "refusal"]) assert.ok(kinds[k] >= 2, `at least two ${k} cases: ${JSON.stringify(kinds)}`);

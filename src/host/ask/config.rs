@@ -8,8 +8,14 @@ use serde_json::{Map, Value};
 
 use crate::host::assist;
 
-/// The models Ask may use (M2: no Haiku, §12.10).
-pub const MODELS: &[&str] = &["claude-sonnet-5", "claude-opus-5-5"];
+/// The Claude models Ask may use (#846: Haiku 4.5 for its eval, §12.10 — it
+/// runs without thinking or effort, which it doesn't take).
+pub const MODELS: &[&str] = &["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5"];
+
+/// Does `model` take adaptive thinking and an effort? (Haiku 4.5 doesn't.)
+pub fn thinks(model: &str) -> bool {
+    !model.starts_with("claude-haiku-4-5")
+}
 /// The efforts the operator may fix (`output_config.effort`).
 const EFFORTS: &[&str] = &["low", "medium", "high"];
 
@@ -134,17 +140,14 @@ impl AskConfig {
     pub fn parse(v: &Value) -> Result<AskConfig, String> {
         let obj: &Map<String, Value> = v.as_object().ok_or("ask: an object")?;
         let mut c = AskConfig::default();
+        let mut key_env_given = false;
         for (k, v) in obj {
             match k.as_str() {
                 "enabled" => c.enabled = boolean(v, k)?,
-                "model" => {
-                    let m = text(v, k, 64)?;
-                    if !MODELS.contains(&m.as_str()) {
-                        return Err(format!("ask.model: one of {}", MODELS.join(", ")));
-                    }
-                    c.model = m;
-                }
+                // checked below, with the transport
+                "model" => c.model = text(v, k, 128)?,
                 "key_env" => {
+                    key_env_given = true;
                     let e = text(v, k, 64)?;
                     if !e.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
                         return Err("ask.key_env: an environment variable name".into());
@@ -159,8 +162,8 @@ impl AskConfig {
                 }
                 "transport" => {
                     let t = text(v, k, 32)?;
-                    if t != "anthropic" {
-                        return Err("ask.transport: \"anthropic\" (an OpenAI-compatible transport comes later)".into());
+                    if t != "anthropic" && t != "openai" {
+                        return Err("ask.transport: \"anthropic\" or \"openai\" (an OpenAI-compatible endpoint, #846)".into());
                     }
                     c.transport = t;
                 }
@@ -242,14 +245,58 @@ impl AskConfig {
                 _ => return Err(format!("ask: unknown key '{k}'")),
             }
         }
+        if c.transport == "openai" {
+            // #846: an OpenAI-compatible endpoint (a self-hosted model): its
+            // own URL and model id; its key, if any, never ANTHROPIC_API_KEY.
+            if c.base_url == assist::DEFAULT_BASE_URL {
+                return Err("ask.transport \"openai\" needs ask.base_url (the endpoint, e.g. http://localhost:11434/v1)".into());
+            }
+            if !obj.contains_key("model") {
+                return Err(
+                    "ask.transport \"openai\" needs ask.model (the endpoint's model id)".into(),
+                );
+            }
+            let ok = c
+                .model
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphanumeric())
+                && c.model.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b':' | b'/')
+                });
+            if !ok {
+                return Err(
+                    "ask.model: the endpoint's model id (letters, digits and - . _ : /)".into(),
+                );
+            }
+            if !key_env_given {
+                c.key_env = assist::OPENAI_KEY_ENV.into();
+            }
+            if !obj.contains_key("provider_label") {
+                c.provider_label = "the operator's model endpoint".into();
+            }
+        } else if !MODELS.contains(&c.model.as_str()) {
+            return Err(format!("ask.model: one of {}", MODELS.join(", ")));
+        }
         Ok(c)
+    }
+
+    /// The model API for this config (#846): the Messages API, or an
+    /// OpenAI-compatible endpoint behind the Messages shape. `key` from
+    /// [`AskConfig::start`].
+    pub fn build_upstream(&self, key: Option<String>) -> Result<Box<dyn assist::Upstream>, String> {
+        if self.transport == "openai" {
+            return Ok(Box::new(assist::OpenAiUpstream::new(&self.base_url, key)?));
+        }
+        let key = key.ok_or("ask: no model key")?;
+        Ok(Box::new(assist::HttpUpstream::new(&self.base_url, key)?))
     }
 
     /// The checks before a server starts with Ask on (§12.4): a login is
     /// configured (or `anonymous` is explicit), and the key is there. Returns
     /// the key and the start-message lines (the model, the provider, any
     /// warning). Never the key in a message.
-    pub fn start(&self, auth_configured: bool) -> Result<(String, Vec<String>), String> {
+    pub fn start(&self, auth_configured: bool) -> Result<(Option<String>, Vec<String>), String> {
         if !self.enabled {
             return Err("ask: not enabled".into());
         }
@@ -262,9 +309,11 @@ impl AskConfig {
             );
         }
         let key = match &self.key_file {
-            Some(p) => assist::read_key_file(p)?,
+            Some(p) => Some(assist::read_key_file(p)?),
             None => match std::env::var(&self.key_env) {
-                Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
+                Ok(k) if !k.trim().is_empty() => Some(k.trim().to_string()),
+                // #846: a self-hosted model may need no key
+                _ if self.transport == "openai" => None,
                 _ => {
                     return Err(format!(
                         "ask: no model key — set {} or ask.key_file",
@@ -273,7 +322,10 @@ impl AskConfig {
                 }
             },
         };
-        if key.len() > 512 || !key.bytes().all(|b| b.is_ascii_graphic()) {
+        if key
+            .as_ref()
+            .is_some_and(|k| k.len() > 512 || !k.bytes().all(|b| b.is_ascii_graphic()))
+        {
             return Err("ask: not a valid API key (printable characters, no spaces)".into());
         }
         let mut msg = vec![format!(

@@ -3997,13 +3997,9 @@ pub fn start_locked(
             for l in &lines {
                 eprintln!("[anofox-serve] {l}");
             }
-            let up = assist::HttpUpstream::new(&c.base_url, key)?;
+            let up = c.build_upstream(key)?;
             Some(AskRt {
-                ask: askm::Ask::new(
-                    c.clone(),
-                    Box::new(up),
-                    opts.log.as_ref().map(|l| l.sink.clone()),
-                ),
+                ask: askm::Ask::new(c.clone(), up, opts.log.as_ref().map(|l| l.sink.clone())),
                 slots: Queries::new((opts.max_queries / 2).max(1)),
                 threads: std::sync::atomic::AtomicUsize::new(0),
                 running: Mutex::new(HashMap::new()),

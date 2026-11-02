@@ -1122,8 +1122,9 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
 | `ask.` | Default | |
 |---|---|---|
 | `enabled` | `false` | |
-| `model` | `claude-sonnet-5` | `claude-sonnet-5` or `claude-opus-5-5` |
-| `key_env` / `key_file` | `ANTHROPIC_API_KEY` | the model key; a key file must be `0600` and not a symlink |
+| `model` | `claude-sonnet-5` | `claude-sonnet-5`, `claude-opus-5-5` or `claude-haiku-4-5` (#846: cheaper; it runs without thinking and effort, which it doesn't take — measure it with `scripts/ask-eval.mjs --model claude-haiku-4-5` before you use it); with `transport: "openai"` the endpoint's own model id (required) |
+| `transport` | `anthropic` | or `openai` (#846): an OpenAI-compatible `/chat/completions` endpoint at `base_url` (required), e.g. a self-hosted model; the same tools, checks and limits, no prompt caching or thinking |
+| `key_env` / `key_file` | `ANTHROPIC_API_KEY` | the model key; a key file must be `0600` and not a symlink. With `transport: "openai"`: `OPENAI_API_KEY`, and optional (sent as `Authorization: Bearer`; `ANTHROPIC_API_KEY` is never sent there) |
 | `base_url` | `https://api.anthropic.com` | or a company gateway; `https://` (`http://` only to loopback); no redirects, no proxy from the environment |
 | `provider_label` | `Anthropic (Claude)` | named in the viewer notice |
 | `per_viewer` | 10 / hour, 30 / day, 200 000 / 600 000 tokens | per user |

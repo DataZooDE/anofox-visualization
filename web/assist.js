@@ -24,6 +24,10 @@ import { engineLocked } from "./assist-engine.js";
 import { endpointOk, modelIdOk } from "./assist-openai.js";
 
 export const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
+// #846: Haiku 4.5 takes neither adaptive thinking nor an effort (both are a
+// 400 there); every other model the assistant uses takes both.
+export const thinks = (model) => !/^claude-haiku-4-5/.test(String(model));
+const thinking = (model, effort) => (thinks(model) ? { thinking: { type: "adaptive" }, output_config: { effort } } : {});
 // The SDK as one vendored ES module (web/vendor/, built by
 // scripts/vendor-anthropic-sdk.sh; its SHA-256 is in web/vendor/SHA256SUMS
 // and checked by tests/web/assist_test.mjs). Not a CDN build: it runs with
@@ -1185,8 +1189,7 @@ export async function runAssistant(opts) {
           system: prefix.system,
           tools: prefix.tools,
           messages,
-          thinking: { type: "adaptive" },
-          output_config: { effort: eff },
+          ...thinking(model, eff),
           cache_control: { type: "ephemeral" },
         },
         {
@@ -1857,8 +1860,7 @@ export async function runAsk(opts) {
       system,
       tools,
       messages,
-      thinking: { type: "adaptive" },
-      output_config: { effort },
+      ...thinking(model, effort),
       cache_control: { type: "ephemeral" },
     };
     // Input-equivalent tokens: about 3 bytes each, plus the output.
