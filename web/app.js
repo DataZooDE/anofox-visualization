@@ -1040,6 +1040,7 @@ const FILE_SAMPLES = [
   "examples/stock-outlook.sql",
   "examples/motion-demand.sql",
   "examples/inventory-twin.sql",
+  "examples/materials-quarter-shortage.sql",
   "examples/optimize-replenishment.sql",
   "examples/supplier-lead-times.sql",
   "examples/delivery-coverage.sql",
