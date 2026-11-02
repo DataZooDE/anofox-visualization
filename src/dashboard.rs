@@ -3330,22 +3330,21 @@ mod md_tests {
     #[test]
     fn formulas_render_to_plain_text() {
         // #351: headless output has no KaTeX, so a formula used to show its
-        // raw TeX source (`\hat{y}_t = \alpha y_t`) verbatim. The simple
-        // parts (Greek letters, subscripts) now read as text; `\hat{…}` (an
-        // accent) is outside this small converter's scope and is left as
-        // TeX source — safe, not wrong, just not spelled out.
+        // raw TeX source (`\hat{y}_t = \alpha y_t`) verbatim. It reads as
+        // text: Greek letters, subscripts, and (#878) an accent as a
+        // combining mark.
         let l = super::markdown_lines(
             "Smoothing $\\hat{y}_t = \\alpha y_t$ for $5 and $10:\n$$ \\sum_i x_i $$\nafter",
             400.0,
         );
         assert_eq!(l.len(), 3, "{l:?}");
         let t: Vec<&str> = l.iter().map(text_of).collect();
-        assert!(t[0].contains("\\hat{y}ₜ = α yₜ"), "{t:?}");
+        assert!(t[0].contains("y\u{302}ₜ = α yₜ"), "{t:?}");
         assert!(t[0].contains("$5 and $10"), "{t:?}");
         assert!(t[1].contains("Σᵢ xᵢ"), "{t:?}");
         let svg = super::markdown_line_svg(t[0]);
         assert!(!svg.contains("<tspan") && !svg.contains("md-tex"), "{svg}");
-        assert!(svg.contains("Smoothing \\hat{y}ₜ = α yₜ for"), "{svg}");
+        assert!(svg.contains("Smoothing y\u{302}ₜ = α yₜ for"), "{svg}");
     }
 
     // ---- #524: block/inline markdown images in static output ----

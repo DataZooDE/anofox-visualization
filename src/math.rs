@@ -250,6 +250,25 @@ const SYMBOLS: &[(&str, &str)] = &[
     ("sqrt", "√"),
     ("quad", " "),
     ("qquad", "  "),
+    // #878: delimiters
+    ("lvert", "|"),
+    ("rvert", "|"),
+    ("vert", "|"),
+    ("mid", "|"),
+    ("lVert", "‖"),
+    ("rVert", "‖"),
+    ("Vert", "‖"),
+    ("langle", "⟨"),
+    ("rangle", "⟩"),
+    ("lfloor", "⌊"),
+    ("rfloor", "⌋"),
+    ("lceil", "⌈"),
+    ("rceil", "⌉"),
+    ("min", "min"),
+    ("max", "max"),
+    ("log", "log"),
+    ("exp", "exp"),
+    ("arg", "arg"),
 ];
 
 /// A digit, sign or the few letters Unicode has a superscript form for
@@ -380,8 +399,14 @@ pub fn tex_to_text(tex: &str) -> String {
                     break;
                 };
                 if !next.is_ascii_alphabetic() {
-                    // a control symbol: \\ \{ \} \$ \% \_ \& \# …
-                    out.push(next);
+                    // a control symbol: \\ \{ \} \$ \% \_ \& \# … — but
+                    // `\,` `\:` `\;` `\ ` are spaces and `\!` a negative
+                    // one (#878)
+                    match next {
+                        ',' | ':' | ';' | ' ' => out.push(' '),
+                        '!' => {}
+                        c => out.push(c),
+                    }
                     i += 2;
                     continue;
                 }
@@ -391,6 +416,82 @@ pub fn tex_to_text(tex: &str) -> String {
                     j += 1;
                 }
                 let name: String = chars[start..j].iter().collect();
+                // #878: sizing and \left / \right add nothing in plain text
+                if matches!(
+                    name.as_str(),
+                    "left"
+                        | "right"
+                        | "big"
+                        | "Big"
+                        | "bigg"
+                        | "Bigg"
+                        | "bigl"
+                        | "bigr"
+                        | "Bigl"
+                        | "Bigr"
+                        | "biggl"
+                        | "biggr"
+                        | "Biggl"
+                        | "Biggr"
+                        | "displaystyle"
+                        | "textstyle"
+                        | "limits"
+                        | "nolimits"
+                ) {
+                    i = j;
+                    continue;
+                }
+                // a wrapper: its argument as text (\text keeps it verbatim)
+                if matches!(
+                    name.as_str(),
+                    "text"
+                        | "textrm"
+                        | "textbf"
+                        | "textit"
+                        | "mathrm"
+                        | "mathbf"
+                        | "mathit"
+                        | "mathsf"
+                        | "mathtt"
+                        | "mathbb"
+                        | "mathcal"
+                        | "operatorname"
+                        | "boldsymbol"
+                        | "mbox"
+                ) {
+                    if let Some((arg, gk)) = brace_group(&chars, j) {
+                        if name.starts_with("text") || name == "mbox" {
+                            out.push_str(&arg);
+                        } else {
+                            out.push_str(&tex_to_text(&arg));
+                        }
+                        i = gk;
+                        continue;
+                    }
+                }
+                // an accent: the combining mark after its (last) character
+                let accent = match name.as_str() {
+                    "hat" | "widehat" => Some('\u{0302}'),
+                    "bar" | "overline" => Some('\u{0304}'),
+                    "tilde" | "widetilde" => Some('\u{0303}'),
+                    "dot" => Some('\u{0307}'),
+                    "ddot" => Some('\u{0308}'),
+                    "vec" => Some('\u{20D7}'),
+                    _ => None,
+                };
+                if let Some(mark) = accent {
+                    if let Some((arg, gk)) = brace_group(&chars, j) {
+                        out.push_str(&tex_to_text(&arg));
+                        out.push(mark);
+                        i = gk;
+                        continue;
+                    }
+                }
+                let name = if name == "tfrac" || name == "dfrac" {
+                    "frac".to_string()
+                } else {
+                    name
+                };
                 if name == "frac" {
                     let mut k = j;
                     while chars.get(k).is_some_and(|c| c.is_ascii_whitespace()) {
@@ -467,6 +568,19 @@ pub fn tex_to_text(tex: &str) -> String {
                         .map(|cs| cs.into_iter().collect());
                     if let Some(s) = mapped.filter(|s| !s.is_empty()) {
                         out.push_str(&s);
+                        i = ni;
+                        continue;
+                    }
+                }
+                // #878: no Unicode form (q_{1-\alpha}): a several-character
+                // index in parentheses, so it doesn't run into what follows
+                if let Some((tok, ni)) = sup_sub_token(&chars, i + 1) {
+                    let t = tex_to_text(&tok);
+                    if t.chars().count() > 1 {
+                        out.push(chars[i]);
+                        out.push('(');
+                        out.push_str(&t);
+                        out.push(')');
                         i = ni;
                         continue;
                     }
@@ -656,13 +770,28 @@ mod tests {
         assert_eq!(tex_to_text("x_i"), "xᵢ");
         assert_eq!(tex_to_text("x^{10}"), "x¹⁰");
         assert_eq!(tex_to_text("y_{t-1}"), "yₜ₋₁");
-        // the #351 example: `\hat{…}` (an accent) is outside this small
-        // converter's scope, so it's left as TeX source — safe, not wrong —
-        // while the rest (Greek letters, subscripts) still reads as text.
+        // the #351 example: an accent is a combining mark (#878)
         assert_eq!(
             tex_to_text("\\hat{y}_t = \\alpha y_t + (1-\\alpha)\\hat{y}_{t-1}"),
-            "\\hat{y}ₜ = α yₜ + (1-α)\\hat{y}ₜ₋₁"
+            "y\u{302}ₜ = α yₜ + (1-α)y\u{302}ₜ₋₁"
         );
+    }
+
+    /// #878: the formulas of the shipped examples read as text.
+    #[test]
+    fn tex_to_text_reads_the_example_formulas() {
+        assert_eq!(
+            tex_to_text("\\hat{y}_{t+h} \\pm q_{1-\\alpha}, \\qquad q_{1-\\alpha} = Q_{1-\\alpha}\\big(\\lvert y_s - \\hat{y}_s \\rvert\\big)"),
+            "y\u{302}ₜ₊ₕ ± q_(1-α),    q_(1-α) = Q_(1-α)(| yₛ - y\u{302}ₛ |)"
+        );
+        assert_eq!(
+            tex_to_text("B_i = \\operatorname{Var}(O_i)/\\operatorname{Var}(D)"),
+            "Bᵢ = Var(Oᵢ)/Var(D)"
+        );
+        assert_eq!(tex_to_text("\\lVert \\beta \\rVert_2^2"), "‖ β ‖₂²");
+        assert_eq!(tex_to_text("\\tfrac{1-\\alpha}{2}"), "(1-α)/2");
+        assert_eq!(tex_to_text("a\\,b\\!c"), "a bc");
+        assert_eq!(tex_to_text("\\left( x \\right)"), "( x )");
     }
 
     #[test]
@@ -682,14 +811,16 @@ mod tests {
 
     #[test]
     fn tex_to_text_leaves_what_it_does_not_understand() {
-        // an unknown command with a brace argument: copied through whole,
-        // not partly unwrapped — `\text{{{n}}}` keeps its placeholder intact.
-        assert_eq!(tex_to_text("\\text{{{n}}}"), "\\text{{{n}}}");
-        assert_eq!(tex_to_text("\\mathrm{kg}"), "\\mathrm{kg}");
+        // a text wrapper gives its argument verbatim — a `{{n}}` placeholder
+        // stays intact (#878: before, the whole command was copied through)
+        assert_eq!(tex_to_text("\\text{{{n}}}"), "{{n}}");
+        assert_eq!(tex_to_text("\\mathrm{kg}"), "kg");
+        // an unknown command with a brace argument: copied through whole
+        assert_eq!(tex_to_text("\\overbrace{ab}"), "\\overbrace{ab}");
         // an unmapped command with no argument
         assert_eq!(tex_to_text("\\nope"), "\\nope");
-        // a superscript with no Unicode form falls back to literal text
-        assert_eq!(tex_to_text("x^{abc}"), "x^abc");
+        // a superscript with no Unicode form: in parentheses (#878)
+        assert_eq!(tex_to_text("x^{abc}"), "x^(abc)");
         assert_eq!(tex_to_text("x^y"), "x^y");
         // never panics on a dangling backslash, brace or sub/sup
         assert_eq!(tex_to_text("x^"), "x^");
