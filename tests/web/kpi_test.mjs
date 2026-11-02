@@ -46,7 +46,11 @@ assert.equal(kpiSpark(null), "");
 assert.equal(kpiSpark("12"), "");
 
 let p = parts({ value: 1100, prev: 1000, fmt: "MONEY", delta_format: "both" });
-assert.deepEqual(p.delta, { up: true, good: true, arrow: "▲", pct: "10%", abs: "+$100", text: "10% (+$100)" });
+assert.deepEqual(p.delta, { up: true, good: true, flat: false, arrow: "▲", pct: "10%", abs: "+$100", text: "10% (+$100)" });
+// #877: a change that prints as zero is flat — "±", neither good nor bad
+p = parts({ value: 1000.2, prev: 1000, fmt: "METRIC" });
+assert.equal(p.delta.flat, true);
+assert.equal(p.delta.arrow, "±");
 assert.equal(p.goal, null);
 p = parts({ value: "54.2", prev: "56.5", fmt: "PERCENT", delta_format: "abs", lower_good: true });
 assert.equal(p.delta.text, "−2.3 pp");

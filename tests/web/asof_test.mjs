@@ -14,7 +14,7 @@ const grab = (name) => {
   return m[0];
 };
 const { asofParse, asofStale, asofRelative, asofDay, asofText } = new Function(
-  `${grab("asofParse")}\n${grab("asofStale")}\n${grab("asofRelative")}\n${grab("asofDay")}\n${grab("asofText")}\nreturn { asofParse, asofStale, asofRelative, asofDay, asofText };`
+  `${grab("asofParse")}\n${grab("asofStale")}\n${grab("asofWords")}\n${grab("asofRelative")}\n${grab("asofDay")}\n${grab("asofText")}\nreturn { asofParse, asofStale, asofRelative, asofDay, asofText };`
 )();
 
 const at = 1792159320000; // 2026-10-16 14:02:00 UTC
@@ -41,11 +41,11 @@ assert.equal(asofDay("2026-01-01"), "2026-01-01");
 assert.equal(asofDay("2026-01-01 00:00:00"), null);
 assert.equal(
   asofText({ at: asofParse("2026-01-01"), day: "2026-01-01", stale: 0 }, Date.UTC(2026, 9, 19, 12), "de-DE").text,
-  "Data as of 1.1.2026 (291 d ago)"
+  "Stand: 1.1.2026 (vor 291 Tagen)"
 );
 assert.ok(
   asofText({ at: asofParse("2026-01-01"), day: "2026-01-01", stale: 0 }, Date.UTC(2026, 0, 1, 10), "de-DE").text.endsWith(
-    "(today)"
+    "(heute)"
   )
 );
 assert.ok(asofText({ at, day: null, stale: 0 }, at + 1000, "de-DE").text.includes(":"));

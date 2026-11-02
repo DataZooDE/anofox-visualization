@@ -664,7 +664,7 @@ pub fn kpi_parts(req_json: &str) -> String {
     let g = cur.zip(n("goal")).and_then(|(c, g)| goal(c, g, fmt, &l));
     serde_json::json!({
         "delta": d.map(|d| serde_json::json!({
-            "up": d.up, "good": d.good, "arrow": d.arrow, "pct": d.pct, "abs": d.abs, "text": d.text,
+            "up": d.up, "good": d.good, "flat": d.flat, "arrow": d.arrow, "pct": d.pct, "abs": d.abs, "text": d.text,
         })),
         "goal": g.map(|g| serde_json::json!({"frac": g.frac, "reached": g.reached, "text": g.text})),
         "delta_format_ok": df.is_some(),
