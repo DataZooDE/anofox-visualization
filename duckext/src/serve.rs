@@ -2113,6 +2113,14 @@ impl LockedOptions {
                         .into(),
                 );
             }
+            // #895: OIDC signs people in through browser pages (/auth/*),
+            // which agent mode doesn't serve (D6); its callers bring bearer
+            // tokens, which `jwt` checks (the same issuer works).
+            if o.auth.as_ref().is_some_and(|a| a.oidc.is_some()) {
+                return Err("options.agent: auth mode \"oidc\" signs people in through browser pages, \
+                            which agent mode doesn't serve; use \"jwt\" with the same issuer for bearer tokens"
+                    .into());
+            }
             // #864 (N6, C5.1, H3): a bearer for MCP is accepted only with this
             // server as its audience and its tenant pinned.
             if let (Some(resource), Some(auth)) =
@@ -2131,18 +2139,7 @@ impl LockedOptions {
                          (a bearer is accepted only with this server as its audience)"
                     ));
                 }
-                let verifiers = auth
-                    .jwt
-                    .iter()
-                    .map(|j| &j.verifier)
-                    .chain(auth.oidc.iter().map(|o| &o.verifier));
-                for v in verifiers {
-                    if !v.audiences.iter().any(|a| a == resource) {
-                        return Err(format!(
-                            "options.agent.mcp: auth.audience must include the MCP resource '{resource}' \
-                             (a token is accepted only with this server as its audience)"
-                        ));
-                    }
+                for v in auth.jwt.iter().map(|j| &j.verifier) {
                     if v.require.is_empty() {
                         return Err("options.agent.mcp: auth.require must pin the tenant \
                                     (e.g. {\"tid\": \"<your tenant>\"}) for MCP bearers"
@@ -14008,6 +14005,20 @@ mod tests {
         )))
         .unwrap_err();
         assert!(e.contains("options.agent: unknown key"), "{e}");
+    }
+
+    // #895: OIDC signs people in through browser pages, which agent mode
+    // doesn't serve — refused at start instead of a server nobody can use.
+    #[test]
+    fn agent_mode_refuses_oidc() {
+        let e = LockedOptions::parse(Some(
+            r#"{"auth":{"mode":"oidc","issuer":"https://idp.example.com","client_id":"dash",
+                        "client_secret":"s3cret","redirect_url":"https://dash.example.com/auth/callback",
+                        "session_secret":"0123456789abcdef0123456789abcdef"},
+                "policy":"none","agent":{"dashboard":"s"}}"#,
+        ))
+        .unwrap_err();
+        assert!(e.contains("signs people in through browser pages"), "{e}");
     }
 
     // #864 (N6, C5.1): MCP with JWT needs this server as the audience and a

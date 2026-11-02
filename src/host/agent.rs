@@ -81,7 +81,7 @@ impl AgentOptions {
                     .and_then(Value::as_str)
                     .ok_or("agent.mcp.resource: this server's MCP URL (https://…/mcp)")?;
                 if !valid_resource(r) {
-                    return Err("agent.mcp.resource: an https:// URL ending in /mcp \
+                    return Err("agent.mcp.resource: an https:// URL whose path is /mcp \
                                 (http:// only on 127.0.0.1 or localhost)"
                         .into());
                 }
@@ -96,8 +96,10 @@ impl AgentOptions {
     }
 }
 
-/// An MCP resource URL: `https://<host>[:port]/…/mcp`, or `http://` on a
-/// loopback host (local testing); no query, fragment or credentials.
+/// An MCP resource URL: `https://<host>[:port]/mcp`, or `http://` on a
+/// loopback host (local testing); no query, fragment or credentials. The
+/// path is exactly `/mcp`, the one this server serves: a proxy that adds a
+/// prefix strips it before forwarding (#895).
 fn valid_resource(r: &str) -> bool {
     let (rest, https) = match (r.strip_prefix("https://"), r.strip_prefix("http://")) {
         (Some(x), _) => (x, true),
@@ -105,9 +107,10 @@ fn valid_resource(r: &str) -> bool {
         _ => return false,
     };
     let host = rest.split(['/', ':']).next().unwrap_or("");
+    let path = rest.find('/').map_or("", |i| &rest[i..]);
     !host.is_empty()
         && (https || host == "127.0.0.1" || host == "localhost")
-        && r.ends_with("/mcp")
+        && path == "/mcp"
         && !r.contains(['?', '#', '@'])
         && r.len() <= 512
         && r.bytes().all(|b| b.is_ascii_graphic())
@@ -671,6 +674,9 @@ mod tests {
             "https://a/mcp?x=1",
             "https://u@a/mcp",
             "ftp://a/mcp",
+            // #895: the server serves /mcp only, not a prefixed path.
+            "https://a/agents/suppliers/mcp",
+            "https://a/mcp/",
         ] {
             assert!(m(bad).is_err(), "{bad}");
         }

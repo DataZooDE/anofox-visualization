@@ -1227,8 +1227,10 @@ A dashboard published as an agent answers the questions it declares with
 - **After a refresh or reload**, a dashboard version that no longer passes
   the publish checks is refused on every agent route (`503`) until it does
   again.
-- **The start is refused** without `auth`, with `ask` on (an agent answers
-  without a model), with `log_vars: "values"`, unless extension telemetry is
+- **The start is refused** without `auth`, with `auth` mode `oidc` (it
+  signs people in through browser pages, which agent mode doesn't serve; use
+  `jwt` with the same issuer for bearer tokens), with `ask` on (an agent
+  answers without a model), with `log_vars: "values"`, unless extension telemetry is
   off (`DATAZOO_DISABLE_TELEMETRY=1`), and when the dashboard fails
   `dashboard --check --agent`'s static checks (`question/*`, `agent/*`).
 - Until canonical views exist (A3), the operator's own policy is the data
@@ -1254,10 +1256,12 @@ adds an MCP server (Streamable HTTP, JSON responses, no session) at
   and fixed errors; the result is `structuredContent` (and the same JSON as
   text), labelled as data. No model, no other method (`resources`,
   `prompts`, sampling) and no SSE stream: `GET /mcp` answers 405.
-- **Auth.** The bearer is checked like any other request. With `jwt` or
-  `oidc`, the start is refused unless `auth.audience` names the resource
-  URL — for `jwt` it must be exactly that URL, so a token minted for another
-  API of the same identity provider is refused — and `auth.require` pins the
+- **Resource URL.** Its path is exactly `/mcp`; a proxy that publishes the
+  server under a prefix strips it before forwarding.
+- **Auth.** The bearer is checked like any other request. With `jwt`, the
+  start is refused unless `auth.audience` is exactly the resource URL — so a
+  token minted for another API of the same identity provider is refused —
+  and `auth.require` pins the
   tenant, e.g. `"require": {"tid": "<tenant id>"}` — a claim value, or a
   list of accepted values, checked after the signature. An unauthenticated
   `/mcp` call gets `401` with `WWW-Authenticate: Bearer
