@@ -4394,11 +4394,30 @@ this section is the panel itself.
 | Key | What it does |
 |-----|--------------|
 | `enabled` | Turns the panel on. Never on a locked server, an embed, a frame, or from a URL parameter or a dashboard's own SQL/comment — only this config. |
-| `transport` | `"browser-key"`: your own key, direct to `api.anthropic.com` (static hosting). `"serve"`: the authoring server's proxy (below), set by the server itself; never on static hosting, and an authoring server uses nothing else. |
-| `models` | The two model choices the panel's *Model* select offers ("Standard" / "Try harder"); a malformed id is ignored. |
+| `transport` | `"browser-key"`: your own key, direct to `api.anthropic.com` (static hosting). `"serve"`: the authoring server's proxy (below), set by the server itself; never on static hosting, and an authoring server uses nothing else. `"openai"` (#843): an OpenAI-compatible endpoint — a local model or a company gateway, see below; static hosting only. |
+| `endpoint` | `"openai"` only: the endpoint's base URL, e.g. `http://localhost:11434/v1` (Ollama). `https://…`, or `http://` to this computer (`localhost`, `127.x`, `[::1]`); no query, fragment or user. |
+| `models` | The two model choices the panel's *Model* select offers ("Standard" / "Try harder"); a malformed id is ignored. With `"openai"`, `models.default` is required (the endpoint's own name for it, e.g. `llama3.1:8b`) and `harder` defaults to it. |
 | `sample_rows_allowed` | Whether the conversation's "Include common values" toggle may be on (it still defaults to the viewer's own choice). |
 | `max_rounds` | How many times the assistant may fix and re-check its own proposal before showing it with open issues (1-3). |
 | `remember` | Opt-in for the key dialog's *Remember on this device* checkbox (§4.5) — off by default, always off on `*.github.io`/`*.gitlab.io` regardless. |
+
+**A local model or a gateway (`"transport": "openai"`, #843).** The panel
+then calls `<endpoint>/chat/completions` from the browser — no Anthropic
+key, and nothing goes to Anthropic. Tools become functions; there is no
+prompt caching, no thinking and no streaming (the reply shows when it is
+complete). The endpoint must answer this page's origin (CORS: for Ollama,
+`OLLAMA_ORIGINS=https://your.site`), and its origin joins the assistant's
+security policy (`connect-src`). A local model needs no key; when the
+endpoint answers 401 the panel offers one (a gateway's token), kept like the
+Anthropic key but in a slot of its own (`dp_assist_key_openai`), so neither
+key is ever sent to the other's endpoint. Builder *Ask* uses the same
+endpoint. How well a model builds dashboards depends on the model: the eval
+(`scripts/assist-eval.mjs`) measures it.
+
+```json
+"assistant": { "enabled": true, "transport": "openai", "endpoint": "http://localhost:11434/v1",
+               "models": { "default": "qwen2.5-coder:32b" } }
+```
 
 **The server's proxy (`/assist`, #740).** `serve <db>` and
 `anofox_serve(port, options)` relay the assistant's model calls, so the key

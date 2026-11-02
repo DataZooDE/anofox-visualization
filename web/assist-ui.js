@@ -20,6 +20,7 @@
 import { browserKeyTransport, serveTransport, buildContext, buildPrefix, describeError, isAbort, loadSdk, pathsOf, payloadPreview, proposalReaders, runAssistant, wasmTools } from "./assist.js";
 import { buildEngine, pageFingerprint } from "./assist-engine.js";
 import { ownOpts, splitStatements } from "./lint.js";
+import { endpointOrigin, openaiTransport } from "./assist-openai.js";
 
 // ---- pure helpers (unit-tested; no DOM) ----
 
@@ -51,6 +52,9 @@ export function textBlock(doc, el, text) {
 export function keyLooksValid(k) {
   return /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(String(k ?? "").trim());
 }
+// #843: an OpenAI-compatible endpoint's key (a gateway's token): printable,
+// no spaces, 8–512 characters.
+export const endpointKeyLooksValid = (k) => /^[\x21-\x7e]{8,512}$/.test(String(k ?? "").trim());
 // The span of each of `splitStatements(sql)`'s pieces inside `sql` itself,
 // in order (a later piece is searched for only after the previous one, so
 // a repeated statement's second copy gets its own, later span).
@@ -351,6 +355,13 @@ export function mountAssistant(hostArg) {
   // #740: an authoring server's proxy holds the key (no key dialog, nothing
   // stored here); static hosting uses the viewer's own key.
   const usesKey = host.config.transport !== "serve";
+  // #843: an OpenAI-compatible endpoint (a local model): a key is optional
+  // (a gateway's), asked for only when the endpoint refuses without one.
+  const openai = host.config.transport === "openai";
+  const endpointName = openai ? endpointOrigin(host.config.endpoint) || "the model endpoint" : "";
+  const keyOk = openai ? endpointKeyLooksValid : keyLooksValid;
+  const keyTitle = openai ? `A key for ${endpointName}` : "Your Anthropic API key";
+  const keyHint = openai ? "That doesn't look like a key (8 or more characters, no spaces)." : "That doesn't look like an Anthropic API key (it starts with sk-ant-).";
 
   const S = {
     open: false,
@@ -500,6 +511,12 @@ export function mountAssistant(hostArg) {
     optDefault.textContent = "Standard";
     const optHarder = mk("option", "", { value: "harder" });
     optHarder.textContent = "Try harder (about 2× the cost)";
+    // the installation names the models of an OpenAI-compatible endpoint
+    if (openai) {
+      optDefault.textContent = host.config.models.default;
+      optHarder.textContent = host.config.models.harder;
+      optHarder.hidden = host.config.models.harder === host.config.models.default;
+    }
     modelSel.append(optDefault, optHarder);
     modelLbl.append(modelSel);
     const sendBtn = mk("button", "", { type: "submit" });
@@ -694,14 +711,18 @@ export function mountAssistant(hostArg) {
 
   async function keyDialog() {
     const body = doc.createDocumentFragment();
-    body.append(
-      textP(
-        "The assistant calls Claude from this browser with your own key. The key stays in this tab and is sent only to api.anthropic.com. It is never put in the SQL, a share link, an export or a saved dashboard."
-      )
-    );
-    const p2 = mk("p");
-    p2.append("Create a separate key with a low spend limit. ", consoleKeysLink("Open the Anthropic console"));
-    body.append(p2);
+    if (openai) {
+      body.append(textP(`The assistant calls ${endpointName} from this browser. A local model needs no key; a company gateway may. The key stays in this tab and is sent only to ${endpointName}. It is never put in the SQL, a share link, an export or a saved dashboard.`));
+    } else {
+      body.append(
+        textP(
+          "The assistant calls Claude from this browser with your own key. The key stays in this tab and is sent only to api.anthropic.com. It is never put in the SQL, a share link, an export or a saved dashboard."
+        )
+      );
+      const p2 = mk("p");
+      p2.append("Create a separate key with a low spend limit. ", consoleKeysLink("Open the Anthropic console"));
+      body.append(p2);
+    }
     body.append(textP("While a key is stored, this tab runs under a strict security policy: images, fonts and data from other sites are blocked until you remove the key and reload."));
     const label = mk("label");
     label.append("API key ");
@@ -721,7 +742,7 @@ export function mountAssistant(hostArg) {
     return new Promise((resolve) => {
       const tryResolve = async () => {
         const r = await dialog({
-          title: "Your Anthropic API key",
+          title: keyTitle,
           body,
           buttons: [
             { value: "cancel", label: "Cancel" },
@@ -733,8 +754,8 @@ export function mountAssistant(hostArg) {
           resolve(false);
           return;
         }
-        if (!keyLooksValid(input.value)) {
-          err.textContent = "That doesn't look like an Anthropic API key (it starts with sk-ant-).";
+        if (!keyOk(input.value)) {
+          err.textContent = keyHint;
           body.appendChild(err);
           // re-show (the dialog already closed) with the error kept
           const again = await keyDialog2(body, input, err, checkbox);
@@ -752,7 +773,7 @@ export function mountAssistant(hostArg) {
   async function keyDialog2(body, input, err, checkbox) {
     for (;;) {
       const r = await dialog({
-        title: "Your Anthropic API key",
+        title: keyTitle,
         body,
         buttons: [
           { value: "cancel", label: "Cancel" },
@@ -761,8 +782,8 @@ export function mountAssistant(hostArg) {
         cancel: "cancel",
       });
       if (r.value !== "save") return false;
-      if (!keyLooksValid(input.value)) {
-        err.textContent = "That doesn't look like an Anthropic API key (it starts with sk-ant-).";
+      if (!keyOk(input.value)) {
+        err.textContent = keyHint;
         continue;
       }
       host.keyStore().set(input.value, !!checkbox?.checked);
@@ -937,6 +958,7 @@ export function mountAssistant(hostArg) {
   }
   async function ensureTransport() {
     S.Anthropic ||= await loadSdk();
+    if (openai) return openaiTransport({ endpoint: host.config.endpoint, apiKey: host.keyStore().get() });
     if (!usesKey) return serveTransport({ Anthropic: S.Anthropic });
     return browserKeyTransport({ Anthropic: S.Anthropic, apiKey: host.keyStore().get() });
   }
@@ -1112,7 +1134,7 @@ export function mountAssistant(hostArg) {
     document.getElementById("tab-assist")?.setAttribute("aria-selected", "true");
     syncPhone(true);
     const ks = host.keyStore();
-    if (usesKey && !ks.get()) {
+    if (usesKey && !openai && !ks.get()) {
       const saved = await keyDialog();
       if (!saved) {
         el.notice.hidden = false;
@@ -1183,7 +1205,7 @@ export function mountAssistant(hostArg) {
       const base = { sql: baseSql, spans: statementSpans(baseSql) };
       const prefix = await ensurePrefix();
       S.model = el.modelSel.value === "harder" ? "harder" : "default";
-      S.lastPayload = payloadPreview({ prefix, ctx, request, destination: usesKey ? "https://api.anthropic.com" : `${location.origin}/assist (this server, which sends it on to the model API)`, toolLog: S.toolLog });
+      S.lastPayload = payloadPreview({ prefix, ctx, request, destination: openai ? `${host.config.endpoint}/chat/completions` : usesKey ? "https://api.anthropic.com" : `${location.origin}/assist (this server, which sends it on to the model API)`, toolLog: S.toolLog });
       if (!S.conv.skipConsent) {
         const r = await sentDialog(S.lastPayload, engine, { send: true });
         if (r.checked) S.conv.skipConsent = true;
@@ -1242,9 +1264,9 @@ export function mountAssistant(hostArg) {
       } else if (r.kind === "cancelled") {
         logEntry("ai-note", "Cancelled.");
       } else if (r.kind === "error") {
-        const btn = r.status === 401 && usesKey ? mk("button", "btn2", { type: "button" }) : null;
+        const btn = (r.status === 401 || (openai && r.status === 403)) && usesKey ? mk("button", "btn2", { type: "button" }) : null;
         if (btn) {
-          btn.textContent = "Change key";
+          btn.textContent = openai && !host.keyStore().get() ? "Add key" : "Change key";
           btn.onclick = () => keyDialog();
         }
         logEntry("ai-note", r.reason, btn);

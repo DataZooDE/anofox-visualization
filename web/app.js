@@ -43,11 +43,15 @@ import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnos
 // groundwork for the assistant's own locked DuckDB-Wasm instance
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
 import { applyAssistCsp } from "./assist-csp.js";
+import { endpointOrigin, openaiTransport } from "./assist-openai.js";
 import { LIVE_LIMITS, engineExtensions, livePageAdapter, pageAdapter } from "./assist-engine.js";
 import {
-  KEY_SLOT,
+  KEY_SLOTS,
+  allKeyStores,
+  keySlotFor,
   askTrim,
   assistConfig,
+  assistEndpoint,
   browserKeyTransport,
   classifyStatement,
   keyStore,
@@ -1472,15 +1476,19 @@ async function askReadNow(stmts, req) {
 }
 // Where the builder's questions go (the notice and the panel's line).
 function askProvider() {
+  if (assistCfg.transport === "openai") return `the model endpoint ${endpointOrigin(assistCfg.endpoint) || "configured for this site"}`;
   return assistCfg.transport === "serve" ? "the assistant's server (which sends them on to Anthropic)" : "Anthropic (Claude), with your API key";
 }
 // The View-mode sheet's transport: the assistant's CSP first (as
 // openAssistant), then the server's proxy or the user's own key.
 async function builderAskTransport() {
   try {
-    await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
+    await applyAssistCsp(document, assistCspOpts(await appBrandReady));
   } catch (_) {
     throw new Error("The assistant is not available in this browser: its security policy could not be enforced.");
+  }
+  if (assistCfg.transport === "openai") {
+    return openaiTransport({ endpoint: assistCfg.endpoint, apiKey: keyStore(sessionStorage, localStorage, { remember: assistCfg.remember, slot: keySlotFor("openai") }).get() });
   }
   const Anthropic = await loadSdk();
   if (assistCfg.transport === "serve") return serveTransport({ Anthropic });
@@ -2533,6 +2541,15 @@ function wireEdTabs() {
 // The host object mountAssistant(host) gets — built fresh on every open,
 // never put on `window` (G12): assist-ui.js sees exactly this surface, and
 // nothing else of app.js's state.
+// #843: the options of every applyAssistCsp call (the first call fixes the
+// page's policy): the brand's images and, with an OpenAI-compatible
+// endpoint, its origin for connect-src — from the installation's own config
+// (assistConfig validates it), never from a dashboard or the URL.
+function assistCspOpts(brandCfg) {
+  const ep = assistCfg?.enabled ? assistCfg.endpoint : assistEndpoint(appAssistBlock);
+  const origin = ep ? endpointOrigin(ep) : null;
+  return { imgOrigins: brandImgOrigins(brandCfg), connect: origin ? [origin] : [] };
+}
 function assistHost() {
   return {
     config: assistCfg,
@@ -2568,7 +2585,7 @@ function assistHost() {
       return run(true, { explicit: true });
     },
     dashName: { get: () => $("dash-name").value, set: (v) => ($("dash-name").value = v) },
-    keyStore: () => keyStore(sessionStorage, localStorage, { remember: assistCfg.remember }),
+    keyStore: () => keyStore(sessionStorage, localStorage, { remember: assistCfg.remember, slot: keySlotFor(assistCfg.transport) }),
     ui: { toast: sideToast, status, isPhone: () => matchMedia(SIDE_DRAWER).matches, opener: () => lastOpener },
     debug: new URLSearchParams(location.search).get("assist_debug") === "1", // display only
     // #195 M2-5: the panel's Ask tab (its transport: the panel's own, key
@@ -2597,9 +2614,9 @@ async function openAssistant(opts = {}) {
   if (servedMode || document.body.classList.contains("embed") || bodyMode() !== "edit") return;
   lastOpener = opts.opener || null;
   try {
-    await applyAssistCsp(document, { imgOrigins: brandImgOrigins(await appBrandReady) });
+    await applyAssistCsp(document, assistCspOpts(await appBrandReady));
   } catch (_) {
-    keyStore(sessionStorage, localStorage, { remember: false }).clear();
+    for (const ks of allKeyStores(sessionStorage, localStorage, { remember: false })) ks.clear();
     assistCfg = { enabled: false, reason: "csp" };
     assistUiSync();
     status("The assistant is not available in this browser: its security policy could not be enforced.");
@@ -2704,7 +2721,7 @@ async function boot() {
     // just to find there was no key) — real reads go through keyStore.
     let hasKey = false;
     try {
-      hasKey = !!(sessionStorage.getItem(KEY_SLOT) || localStorage.getItem(KEY_SLOT));
+      hasKey = KEY_SLOTS.some((k) => sessionStorage.getItem(k) || localStorage.getItem(k));
     } catch (_) {}
     if (hasKey) {
       // sec-review-256 L-2: await appBrandReady here — assistantRememberOptIn
@@ -2714,12 +2731,13 @@ async function boot() {
       // installation's own config says so; always off on a shared host
       // regardless of the opt-in). Only paid when a key actually exists.
       const brandCfg = await appBrandReady;
-      const ks = keyStore(sessionStorage, localStorage, { remember: rememberAllowed(location.hostname, assistantRememberOptIn) });
-      if (ks.get()) {
+      const remember = rememberAllowed(location.hostname, assistantRememberOptIn);
+      const stores = allKeyStores(sessionStorage, localStorage, { remember });
+      if (stores.some((ks) => ks.get())) {
         try {
-          await applyAssistCsp(document, { imgOrigins: brandImgOrigins(brandCfg) });
+          await applyAssistCsp(document, assistCspOpts(brandCfg));
         } catch (_) {
-          ks.clear(); // not enforceable here: fail closed — drop the key, the assistant won't open either
+          for (const ks of stores) ks.clear(); // not enforceable here: fail closed — drop the keys, the assistant won't open either
         }
       }
     }

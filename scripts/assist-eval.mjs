@@ -7,6 +7,8 @@
 //   ANTHROPIC_API_KEY=sk-ant-… node scripts/assist-eval.mjs --yes
 //     [--model default|harder|<claude-id>] [--case <id>] [--out DIR]
 //     [--pkg web/pkg] [--dashboard target/debug/dashboard]
+//   node scripts/assist-eval.mjs --yes --endpoint http://localhost:11434/v1 --model llama3.1:8b
+//     (#843: a local model or gateway, transport (c); OPENAI_API_KEY if it wants a key)
 //   node scripts/assist-eval.mjs --dry   (validates the seed only — no key, no network, no cost)
 import { createRequire } from "module";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -24,6 +26,7 @@ import {
   wasmTools,
 } from "../web/assist.js";
 import { buildEngine, pageAdapter } from "../web/assist-engine.js";
+import { endpointOk, openaiTransport } from "../web/assist-openai.js";
 import { lintScript, scratchRunner, splitStatements } from "../web/lint.js";
 // web/assist-ui.js is pure at import time (no document/window), so its
 // helpers are safe to reuse here exactly as the panel builds a request.
@@ -101,7 +104,7 @@ async function nodeDuckdb() {
 }
 
 async function runCase(p, opts) {
-  const { pkgDir, model, apiKey, Anthropic, wasm, dashboardBin, outDir } = opts;
+  const { pkgDir, model, apiKey, Anthropic, wasm, dashboardBin, outDir, endpoint } = opts;
   const t0 = Date.now();
   const pageDb = await nodeDuckdb();
   pageDb.open({});
@@ -133,7 +136,7 @@ async function runCase(p, opts) {
     rolesJson: wasm.roles_json(),
     version: wasm.version(),
   });
-  const transport = browserKeyTransport({ Anthropic, apiKey });
+  const transport = endpoint ? openaiTransport({ endpoint, apiKey }) : browserKeyTransport({ Anthropic, apiKey });
   const t1 = Date.now();
   const r = await runAssistant({ transport, prefix, model, ctx, request: p.request, tools, limits: { rounds: 3 } });
   const seconds = (Date.now() - t1) / 1000;
@@ -199,7 +202,7 @@ async function runCase(p, opts) {
     input_ok: inputOk,
     safety_ok: safetyOk,
     usage: r.usage,
-    cost: cost(model, r.usage),
+    cost: endpoint ? 0 : cost(model, r.usage), // a local model has no price here
     seconds: Number(((Date.now() - t0) / 1000).toFixed(1)),
   };
   if (outDir) {
@@ -207,7 +210,7 @@ async function runCase(p, opts) {
     mkdirSync(caseDir, { recursive: true });
     const sanitize = (s) => {
       const t = JSON.stringify(s);
-      if (t.includes(apiKey)) throw new Error("the API key appeared in the eval output — refusing to write it");
+      if (apiKey && t.includes(apiKey)) throw new Error("the API key appeared in the eval output — refusing to write it");
       return t;
     };
     writeFileSync(path.join(caseDir, "transcript.json"), sanitize({ messages: r.messages, toolLog: r.toolLog }));
@@ -230,7 +233,12 @@ async function main() {
     return 0;
   }
   const yes = process.argv.includes("--yes");
-  const apiKey = process.env.ANTHROPIC_API_KEY || "";
+  const endpoint = arg("--endpoint", "");
+  if (endpoint && !endpointOk(endpoint)) {
+    console.error("--endpoint must be https://host[/path], or http:// to this computer");
+    return 1;
+  }
+  const apiKey = endpoint ? process.env.OPENAI_API_KEY || "" : process.env.ANTHROPIC_API_KEY || "";
   const caseId = arg("--case", "");
   const modelArg = arg("--model", "default");
   const pkgDir = path.resolve(root, arg("--pkg", "web/pkg"));
@@ -244,7 +252,7 @@ async function main() {
   const estSonnet = (0.3 * prompts.length).toFixed(2);
   const estOpus = (0.52 * prompts.length).toFixed(2);
   console.log(`≈ $${estSonnet} on Sonnet 5, ≈ $${estOpus} on Opus 5.5, for ${prompts.length} case(s).`);
-  if (!apiKey) {
+  if (!apiKey && !endpoint) {
     console.error("ANTHROPIC_API_KEY is not set — refusing to run a live eval.");
     return 1;
   }
@@ -260,7 +268,11 @@ async function main() {
   wasm.initSync({ module: readFileSync(path.join(pkgDir, "anofox_visualization_bg.wasm")) });
   const MODELS = { default: "claude-sonnet-5", harder: "claude-opus-5-5" };
   const model = MODELS[modelArg] || modelArg;
-  const Anthropic = await loadSdk();
+  if (endpoint && modelArg === "default") {
+    console.error("--endpoint needs --model <the endpoint's model id>");
+    return 1;
+  }
+  const Anthropic = endpoint ? null : await loadSdk();
   const today = new Date().toISOString().slice(0, 10);
   const outDir = outRoot || path.join(root, "tests/assist-eval/results", `${today}-${model}`);
   mkdirSync(outDir, { recursive: true });
@@ -269,7 +281,7 @@ async function main() {
   let errored = false;
   for (const p of prompts) {
     try {
-      const r = await runCase(p, { pkgDir, model, apiKey, Anthropic, wasm, dashboardBin, outDir });
+      const r = await runCase(p, { pkgDir, model, apiKey, Anthropic, wasm, dashboardBin, outDir, endpoint });
       results.push(r);
       console.log(`${r.id}: runs=${r.runs} first_try=${r.first_try} roles_ok=${r.roles_ok} safety_ok=${r.safety_ok} $${r.cost.toFixed(3)} ${r.seconds}s`);
     } catch (e) {
