@@ -147,8 +147,10 @@ crate-type = ["cdylib", "rlib"]
 # 0.37.0 (sipemu/ggplot-rs#398, #919): `SecAxis::linear` + `with_labeller`
 # — a second measure's own right axis (`::Y2`). Breaking only for `SecAxis`
 # struct literals (none here).
+# 0.37.1 (sipemu/ggplot-rs#399, #917): `geom_density_ridges` (ridgelines)
+# and `ScaleDiscrete::with_expand`.
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.37.0", default-features = false, features = ["sf"] }
+ggplot-rs = { version = "0.37.1", default-features = false, features = ["sf"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

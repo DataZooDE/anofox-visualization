@@ -104,6 +104,7 @@ terminal.
 | `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual) |
 | `::HISTOGRAM` | `::HIST` | chart | histogram of the measure |
 | `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
+| `::RIDGELINE` | `::RIDGES`, `::JOYPLOT` | chart | one density of the measure per ::CATEGORY, stacked as overlapping ridges (distributions over time; the first category on top) |
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
 | `::VIOLIN` | `::VIOLINPLOT` | chart | violin plot — XAXIS groups, measure on y (raw rows) |
 | `::QQ` | `::QQPLOT` | chart | normal quantile-quantile plot with a 95% pointwise band |
@@ -2561,6 +2562,18 @@ palette colour so it never disappears into the base. For a legend that also
 dodges (bars side by side instead of overlaid) or needs a title other than
 the column header, pivot to the long form instead: one shared measure column
 plus a `::CATEGORY` naming the series.
+
+**Distributions over time** (`::RIDGELINE`, #917): one density of the measure
+per `::CATEGORY` (else per `::XAXIS` value), each on its own row and
+overlapping the row above — the shape of delivery delays month by month:
+
+```sql
+SELECT strftime(shipped, '%Y-%m') AS month::CATEGORY, delay_days::RIDGELINE
+FROM shipments ORDER BY shipped;
+```
+
+Rows follow the first appearance of each category, the first on top; at most
+40 rows. Raw rows, like `::DENSITY` (the density is estimated per row).
 
 **A second measure on its own right axis** (`::Y2`, #919): name the measure
 column (by its header) that has other units — revenue bars with a margin
