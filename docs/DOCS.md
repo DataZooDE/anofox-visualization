@@ -5178,7 +5178,10 @@ duckext/      DuckDB C-API extension (native + wasm side-module)
 - `::MAP` uses `::LABEL` as the per-feature hover label, so a map panel has no
   in-SVG title — use `::TITLE` (the panel title bar) instead.
 - Maps take clicks, the keyboard, cross-filter, `::SELECT_AS`, `::DRILL` and
-  `::LINK`, but not the brush or the value filter; `::SYNC_ZOOM` (like all
+  `::LINK`, but not the brush or the value filter (a `::DRILL` on a `::REGION`
+  map passes the clicked region's code, e.g. `DEU` → `DE-BY`, so each level
+  filters on codes and its codes pick the next boundaries: example *Where does
+  our revenue come from, from country down to district?*); `::SYNC_ZOOM` (like all
   zooming) is a browser feature — the static renderers draw the full extent.
 - `::MARKDOWN`, inputs, downloads, tabs and other directives are interactive
   features of the browser builder / `serve`; the static CLI and headless SVG
