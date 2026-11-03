@@ -481,4 +481,6 @@ try {
 }
 await browser.close();
 console.log(`submit-e2e: ${bad} failed`);
-if (bad) process.exitCode = 1;
+// #931: exit explicitly — a lingering handle (the server child's pipes) once
+// kept the process alive after "0 failed" until the step's timeout
+process.exit(bad ? 1 : 0);
