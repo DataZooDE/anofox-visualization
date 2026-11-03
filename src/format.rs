@@ -521,6 +521,11 @@ impl ValueFmt {
                 Some(i) if g.len() - i == 2 => format!("{g}0"),
                 _ => g,
             }
+        } else if a > 0.0 && a < 0.1 {
+            // #877: a small value keeps three significant digits (a density
+            // of 0.000234 isn't "0"); trailing zeros still go.
+            let lead = (-a.log10()).ceil() as u32;
+            grouped(a, (lead + 2).clamp(2, 12))
         } else {
             grouped(a, 2)
         };
@@ -557,6 +562,12 @@ mod tests {
         assert_eq!(f(" kg", 1200.0), "1,200 kg");
         assert_eq!(f("CHF ", 3.0), "CHF 3");
         assert_eq!(f("", 121.94), "121.94");
+        // #877: small values keep three significant digits, not "0"
+        assert_eq!(f("", 0.000234), "0.000234");
+        assert_eq!(f("", 0.0123), "0.0123");
+        assert_eq!(f("", 0.05), "0.05");
+        assert_eq!(f("", 0.5), "0.5");
+        assert_eq!(f("", 0.0), "0");
         assert_eq!(ValueFmt::Share.full(0.125, &us), "12.5%");
         assert_eq!(ValueFmt::parse("€").full(1234.5, &de), "1.234,50 €");
         assert_eq!(ValueFmt::parse("€").full(12.5, &de), "12,50 €");
