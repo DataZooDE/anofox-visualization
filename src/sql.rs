@@ -1213,7 +1213,9 @@ fn rewrite_list(list: &str) -> Rewritten {
                 // Error: Could not convert string … to DOUBLE`) before it
                 // ever gets there. A numeric measure still arrives as a real
                 // number (DuckDB's own INTEGER/DOUBLE), just not widened.
-                Role::Value(Kind::Heatmap) => {
+                // #883: a ::DUMBBELL column names its items (text), the same
+                // way.
+                Role::Value(Kind::Heatmap) | Role::Value(Kind::Dumbbell) => {
                     let (core, alias) = trailing_alias(expr);
                     if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
                         names.push((i, nm));

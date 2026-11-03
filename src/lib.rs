@@ -135,6 +135,9 @@ pub enum Kind {
     Bullet,
     /// Ordered conversion stages, widths by value (`::FUNNEL`).
     Funnel,
+    /// Two values per item joined by a line: `::XMIN` → `::XMAX`
+    /// (`::DUMBBELL`, #883).
+    Dumbbell,
 }
 
 impl Kind {
@@ -159,6 +162,7 @@ impl Kind {
                 | Kind::Waterfall
                 | Kind::Bullet
                 | Kind::Funnel
+                | Kind::Dumbbell
         )
     }
 }
@@ -1894,6 +1898,7 @@ impl Panel {
                     | Kind::Sparkbar
                     | Kind::Calendar
                     | Kind::Funnel
+                    | Kind::Dumbbell
                     | Kind::Bullet
             )
         });
@@ -2642,8 +2647,9 @@ fn render_inner(
     // ::COLORS as a level map) — render_heatmap's own categorical branch
     // handles it, so the numeric guards below (which exist for every other
     // kind, whose measure really must be a number) don't apply to it.
-    let categorical_heatmap =
-        kind == Kind::Heatmap && value.values.iter().any(|v| matches!(v, Value::Str(_)));
+    // (a ::DUMBBELL's measure names its items: text too, #883)
+    let categorical_heatmap = (kind == Kind::Heatmap || kind == Kind::Dumbbell)
+        && value.values.iter().any(|v| matches!(v, Value::Str(_)));
     // Empty / too-small inputs get a clear note instead of a confusing
     // "requires aesthetic 'x'" error from the plotting engine.
     let n_ok = value.values.iter().filter(|v| v.as_f64().is_some()).count();
@@ -2702,6 +2708,9 @@ fn render_inner(
         }
         Kind::Funnel => {
             return variance::render_funnel(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Dumbbell => {
+            return variance::render_dumbbell(o, value, cols, title.as_deref(), width, height)
         }
         _ => {}
     }
@@ -3831,7 +3840,8 @@ fn cartesian(
         | Kind::Sparkbar
         | Kind::Waterfall
         | Kind::Bullet
-        | Kind::Funnel => {
+        | Kind::Funnel
+        | Kind::Dumbbell => {
             unreachable!("handled above")
         }
     };
