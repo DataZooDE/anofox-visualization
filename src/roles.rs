@@ -422,7 +422,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
-    e("HEIGHT", &["TALL"], R::Height, "layout", false, "next panel's height in px"),
+    e("HEIGHT", &["TALL"], R::Height, "layout", false, "next panel's height: px (320), a ratio of its width ('16:9', '0.5') or a share of the window ('40vh')"),
     e("ROWSELECT", &["ROW_SELECT", "SELECTABLE"], R::RowSelect, "layout", false,
       "next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>')"),
     e("TOTALS", &["TOTAL", "AGGREGATE"], R::TableOpt(TableOpt::Totals), "layout", false,

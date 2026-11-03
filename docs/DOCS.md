@@ -239,7 +239,7 @@ terminal.
 | `::SAVE_KEY` |  | input | the variable holding a ::SAVE_FORM row's key (default 'selected', the clicked diagram node) |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
-| `::HEIGHT` | `::TALL` | layout | next panel's height in px |
+| `::HEIGHT` | `::TALL` | layout | next panel's height: px (320), a ratio of its width ('16:9', '0.5') or a share of the window ('40vh') |
 | `::ROWSELECT` | `::ROW_SELECT`, `::SELECTABLE` | layout | next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>') |
 | `::TOTALS` | `::TOTAL`, `::AGGREGATE` | layout | next table's totals: 'sum'\|'mean'\|'median'\|'min'\|'max'\|'count'\|'none', or per column 'Revenue: sum; Per 10k: none' |
 | `::COLGROUP` | `::COL_GROUP`, `::HEADER_GROUP` | layout | next table's grouped header: 'Backtest: mae, rmse \| Holdout: mae_h, rmse_h' |
@@ -2909,6 +2909,7 @@ Directives (browser builder / `serve`; the CLI skips them):
 | Directive | Effect |
 |-----------|--------|
 | `SELECT n::COL;` (`::SPAN`, `::WIDTH`) | the **next** panel's width — `n` of 12 (`12`=full, `6`=half, `4`=third); a statement of its own: written inside a chart's SELECT it turns that statement into the directive and the chart isn't drawn (`layout/inline-layout-role`) |
+| `SELECT 320::HEIGHT;` (`::TALL`) | the **next** panel's height: pixels (`320`), a ratio of the panel's own width (`'16:9'` is width:height, `'0.5'` is height ÷ width — kept when the panel is resized), or a share of the window (`'40vh'`, the browser's; static outputs and exports take a 900 px window). A plain number below 10 is a ratio. Anything else keeps the default height (`layout/bad-height`). `::FIT` (a whole tab fills the window) and `::HEIGHTS` (inside a `::FIGURE`) are unchanged |
 | `SELECT n::COLUMNS;` | default panels per row (each unspecified panel spans `12/n`) |
 | `SELECT 'Title'::GROUP;` … `SELECT 1::ENDGROUP;` | wrap the enclosed controls/charts in one box (a flex row) |
 | `SELECT 'Title'::FIGURE, '(a / b) \| c'::LAYOUT;` … `SELECT 1::ENDFIGURE;` | compose the enclosed charts into **one** picture — aligned plot areas, a shared x axis, one legend, panel tags; see *Figures* below |

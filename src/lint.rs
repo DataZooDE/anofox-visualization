@@ -2007,6 +2007,31 @@ where
                 }),
         );
 
+        // #940: pixels, a ratio of the panel's width or a share of the window.
+        // (one inside a chart's SELECT is layout/inline-layout-role's)
+        if let Some((i, _)) = p
+            .roles
+            .iter()
+            .find(|(_, r)| *r == Role::Height)
+            .filter(|_| p.roles.iter().all(|(_, r)| *r == Role::Height))
+        {
+            if let Some(t) = column_texts(&rows, *i).into_iter().next() {
+                if crate::height::PanelHeight::parse(&t).is_none() {
+                    diags.push(Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code: "layout/bad-height",
+                        message: format!(
+                            "::HEIGHT '{}' is not a height — use pixels (320), a ratio of the \
+                             panel's width ('16:9', '0.5') or a share of the window ('40vh'); \
+                             the panel keeps its default height",
+                            crate::host::access::diag(&t)
+                        ),
+                        sql: short.clone(),
+                    });
+                }
+            }
+        }
         diags.extend(
             map_diags(&p.roles, &rows)
                 .into_iter()

@@ -526,7 +526,11 @@ fn render_inner(
     let mut row_h = 0.0f64;
     let mut row_units = 0u32;
     let mut next_span = 0u32;
-    let mut next_height = 0u32;
+    // #940: pixels, a ratio of the panel's width, or a share of the window.
+    let mut next_height: Option<crate::height::PanelHeight> = None;
+    let height_at = |h: Option<crate::height::PanelHeight>, w: f64| {
+        h.map(|h| h.px(w, crate::height::REFERENCE_WINDOW_H) as f64)
+    };
     // A ::TOTALS value for the next panel — a table reads it (#226); like the
     // browser's nextTableOpts, any next panel consumes it.
     let mut next_totals: Option<String> = None;
@@ -649,7 +653,12 @@ fn render_inner(
             continue;
         }
         if has(&|r| matches!(r, Role::Height)) {
-            next_height = num().unwrap_or(0.0) as u32;
+            next_height = step
+                .rows
+                .as_ref()
+                .ok()
+                .and_then(|r| first_text(r))
+                .and_then(|t| crate::height::PanelHeight::parse(&t));
             continue;
         }
         if has(&|r| matches!(r, Role::TableOpt(TableOpt::Totals))) {
@@ -691,14 +700,10 @@ fn render_inner(
             } else {
                 next_span.clamp(1, 12)
             };
-            let ch = if next_height > 0 {
-                next_height as f64
-            } else {
-                opts.panel_height as f64
-            };
-            next_span = 0;
-            next_height = 0;
             let cw = (unit_w * span as f64) - gap;
+            let ch = height_at(next_height, cw).unwrap_or(opts.panel_height as f64);
+            next_span = 0;
+            next_height = None;
             let title = title_of(rows, roles).unwrap_or_default();
             let maps = json_rows(rows);
             let title_h = 26.0;
@@ -774,13 +779,10 @@ fn render_inner(
             } else {
                 next_span.clamp(1, 12)
             };
-            let ch = if next_height > 0 {
-                next_height as f64
-            } else {
-                opts.panel_height as f64 * 1.5
-            };
+            let ch = height_at(next_height, unit_w * span as f64 - gap)
+                .unwrap_or(opts.panel_height as f64 * 1.5);
             next_span = 0;
-            next_height = 0;
+            next_height = None;
             if row_units + span > 12 {
                 new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
             }
@@ -894,8 +896,13 @@ fn render_inner(
         // box and silently dropping whatever paragraph came after it.
         let md = markdown_text(rows, roles).map(|t| markdown_fill(&t, rows, &ropts.locale));
         let img = image_panel(rows, roles, ropts.theme.variant == Variant::Dark);
+        let own_w = if span == 0 {
+            content_w
+        } else {
+            unit_w * span as f64 - gap
+        };
         let ch = match strip {
-            _ if next_height > 0 => next_height as f64,
+            _ if next_height.is_some() => height_at(next_height, own_w).unwrap_or_default(),
             Some((_, _, _, th)) => th,
             // a ::MARKDOWN box: as tall as its wrapped text (≤ the default)
             None => match (&md, &img) {
@@ -982,7 +989,7 @@ fn render_inner(
                 },
             },
         };
-        next_height = 0;
+        next_height = None;
         // ::TRACKs right after a chart (each optionally after a ::HEIGHT) go
         // under it in its card, which grows by their heights; so do
         // 'caption'::MARKDOWN_STYLE texts after them (#692).

@@ -34,6 +34,7 @@ pub mod figure;
 pub mod form;
 pub mod format;
 pub mod freshness;
+pub mod height;
 pub mod host;
 pub mod image;
 pub mod input_layout;
