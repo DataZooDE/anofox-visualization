@@ -936,10 +936,16 @@ mod tests {
                 }
                 r
             });
+            // at least one compaction per round, even when the writer is
+            // done before the first check (#931: `while !is_finished()`
+            // could run zero times on a fast runner)
             let mut compactions = 0;
-            while !t.is_finished() {
+            loop {
                 compact_revocations(&file, std::thread::yield_now).unwrap();
                 compactions += 1;
+                if t.is_finished() {
+                    break;
+                }
                 std::thread::sleep(std::time::Duration::from_micros(200));
             }
             // what a reload does with logouts queued while the lock was busy
