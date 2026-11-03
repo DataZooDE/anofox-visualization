@@ -233,7 +233,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or |y|"),
     // ── chart modifiers ────────────────────────────────────────────────────
     e("FLIP", &["COORD_FLIP", "HORIZONTAL"], R::Flip, "modifier", true,
-      "swap the axes (horizontal bars)"),
+      "swap the axes (horizontal bars; the first row on top)"),
     e("YFORMAT", &["YAXISFORMAT", "YUNIT", "YCURRENCY"], R::YFormat, "modifier", true,
       "value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'…"),
     e("Y2", &["SECONDARY_AXIS", "RIGHT_AXIS"], R::Y2, "modifier", true,

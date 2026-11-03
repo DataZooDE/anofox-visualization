@@ -138,7 +138,7 @@ terminal.
 | `::ABLINE` | `::AB_LINE` | annotation | straight line y = slope·x + intercept per distinct 'slope,intercept' value |
 | `::IDENTITY` | `::DIAGONAL`, `::IDENTITY_LINE` | annotation | dashed grey y = x line (predicted vs actual, calibration, QQ) |
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
-| `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
+| `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars; the first row on top) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'… |
 | `::Y2` | `::SECONDARY_AXIS`, `::RIGHT_AXIS` | modifier | the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line |
 | `::Y2FORMAT` | `::Y2AXISFORMAT` | modifier | the ::Y2 axis' value format, like ::YFORMAT: 'percent', '€', ' kg'… |
