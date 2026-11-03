@@ -14949,6 +14949,18 @@ function tableNumText(n, p, f, loc, neg) {
     const num = nf(u.dec, true).format(Math.abs(n) / u.div);
     return minus(`${n < 0 ? "-" : ""}${u.inHead ? num : `${u.pre}${num}${u.word}${u.post}`}`);
   }
+  // #877: a percent / metric column keeps one decimal count for all rows
+  // (the Rust table::number_text); the % sign as the locale writes it
+  if (f === "PERCENT") {
+    const body = nf(p.dec, true).format(Math.abs(n));
+    const neg = n < 0 && Math.abs(n) >= 0.5 * 10 ** -p.dec;
+    let pct = "%";
+    try {
+      pct = (loc ? format_number_locale(1, "PERCENT", loc) : format_number(1, "PERCENT")).replace(/^1/, "");
+    } catch (_) {}
+    return minus(`${neg ? "-" : ""}${body}${pct}`);
+  }
+  if (f === "METRIC") return minus(nf(p.dec, true).format(n));
   if (METRICS.includes(f)) return minus(fmtNum(n, f));
   return minus(nf(p.dec, !p.label).format(n));
 }
