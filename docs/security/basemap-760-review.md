@@ -39,7 +39,8 @@ private.
 
 1. **Installation-only source (T2).** The tile URL template lives in the
    server's / CLI's options (`options.basemap`, `--basemap`), never in a
-   dashboard. A dashboard only opts in per map (`'tiles'::BASEMAP`); without
+   dashboard. A dashboard only opts in per map (`'on'::MAPTILES`;
+   `::BASEMAP` already names the boundary pack's base layer); without
    the installation setting the role draws nothing and `--check` notes it.
    The template must be `https://` (or a local directory), contain `{z}`,
    `{x}`, `{y}` and nothing the request can fill.
@@ -67,7 +68,7 @@ private.
 5. **Attribution (T7).** `options.basemap.attribution` is required and drawn
    on every tiled map (ggplot-rs attribution line); the docs name the OSM tile
    usage policy and recommend a self-hosted or commercial tile server.
-6. **Defaults.** Off everywhere. The builder (no server) shows `::BASEMAP` as
+6. **Defaults.** Off everywhere. The builder (no server) shows `::MAPTILES` as
    a note ("needs a server with options.basemap"), never fetches.
 
 ## Not in scope here
@@ -78,14 +79,17 @@ need.
 
 ## Implementation phases (each a PR with this review's checks as tests)
 
-1. Core (no ggplot-rs change needed — its `TileFetcher` is any closure; ggplot-rs
-   feature `tiles` has no dependencies): a first render with a *recording*
+1. Core (ggplot-rs 0.37.3 adds `GeomMapTile::units`, since the map's Mercator
+   is in metres; its `TileFetcher` is any closure; feature `tiles` has no
+   dependencies): a first render with a *recording*
    fetcher (returns `None`, records `z/x/y`) yields the tile list; the host
    fetches those; a second render takes a fetcher backed by the fetched bytes.
-   `::BASEMAP` requires the map's `'mercator'` projection (`src/map/project.rs`)
-   and adds `annotation_map_tile` under the map layers in `src/map/plot.rs`.
+   `::MAPTILES` requires the map's `'mercator'` projection (`src/map/project.rs`)
+   and adds `annotation_map_tile` under the map layers in `src/map/plot.rs`;
+   lint `map/tiles-needs-mercator` otherwise. Done: `map_tiles_needed`,
+   `RenderOptions::basemap`, tests/basemap_760.rs.
 2. Native: `options.basemap` parse + start checks, the proxy endpoint, the
    cache, CLI `--basemap` (local dir or https), static export embedding.
-3. Browser: `::BASEMAP` role, `map_tiles` wasm export, prefetch via
+3. Browser: `::MAPTILES` wiring, `map_tiles` wasm export, prefetch via
    `/api/tiles`, render with bytes; e2e that asserts no request leaves the
    origin.

@@ -469,6 +469,10 @@ pub enum Role {
     /// A y-axis title (`::YTITLE`, #651): names the measure, drawn rotated
     /// beside the y ticks. Read from the first value.
     YTitle,
+    /// #760: draw the installation's tile basemap under this map
+    /// (`'on'::MAPTILES`); needs `'mercator'::PROJECTION` and a host that
+    /// supplies tiles ([`RenderOptions::basemap`]).
+    MapTiles,
     /// A map's projection (`::PROJECTION`): `'auto'` (by the data's extent),
     /// `'equal-earth'`, `'mercator'`, `'albers-europe'`, `'conic'`, `'utm'`
     /// or `'none'` (planar coordinates). Read from the first value.
@@ -1083,6 +1087,62 @@ pub struct RenderOptions {
     /// server): each a rule at an x or a shaded x-range, its text in the
     /// tooltip. The page passes them in the render context (`"notes"`).
     pub notes: Vec<ViewerNote>,
+    /// #760: the installation's tile basemap for a `::MAPTILES` map in the
+    /// `'mercator'` projection — `None`: no basemap (the default, offline).
+    pub basemap: Option<Basemap>,
+}
+
+/// Tiles for `z/x/y` (PNG or JPEG bytes, `None` when missing) — a host
+/// fetches them (never the renderer, which does no networking).
+pub type TileFn = std::sync::Arc<dyn Fn(u32, u32, u32) -> Option<Vec<u8>> + Send + Sync>;
+
+/// A raster basemap (#760): its attribution (drawn on the map) and the
+/// tiles, from a host-supplied source — see [`map_tiles_needed`].
+#[derive(Clone)]
+pub struct Basemap {
+    pub attribution: String,
+    pub tiles: TileFn,
+}
+
+impl std::fmt::Debug for Basemap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Basemap")
+            .field("attribution", &self.attribution)
+            .finish()
+    }
+}
+
+/// #760: the tiles (`z, x, y`) a render of `cols` at `width`×`height` draws
+/// under its `::MAPTILES` map — one render with a recording source, so a host
+/// can fetch exactly those and render again with them. Empty when the panel
+/// has no basemap to draw.
+pub fn map_tiles_needed(
+    cols: &[Column],
+    width: u32,
+    height: u32,
+    opts: &RenderOptions,
+) -> Vec<(u32, u32, u32)> {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rec = seen.clone();
+    let mut o = opts.clone();
+    o.basemap = Some(Basemap {
+        attribution: opts
+            .basemap
+            .as_ref()
+            .map(|b| b.attribution.clone())
+            .unwrap_or_default(),
+        tiles: std::sync::Arc::new(move |z, x, y| {
+            rec.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push((z, x, y));
+            None
+        }),
+    });
+    let _ = render_with(cols, width, height, &o);
+    let mut v = seen.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// A viewer's note on a chart (#889): at `x`, or over `x`…`x2` (numbers or
@@ -1155,6 +1215,7 @@ impl Default for RenderOptions {
             frame: None,
             frame_axes: None,
             notes: Vec::new(),
+            basemap: None,
         }
     }
 }

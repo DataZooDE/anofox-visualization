@@ -267,6 +267,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "x-axis title, e.g. 'Residual load (GW)' — names the ::XAXIS variable, drawn under the x ticks (on a ::FLIP chart it moves with the x axis); charts with axes only"),
     e("YTITLE", &["Y_TITLE", "YLAB"], R::YTitle, "modifier", true,
       "y-axis title, e.g. 'Day-ahead price (EUR/MWh)' — names the measure, drawn rotated beside the y ticks; charts with axes only"),
+    e("MAPTILES", &["MAP_TILES"], R::MapTiles, "modifier", true,
+      "the installation's tile basemap under this map: 'on' — needs 'mercator'::PROJECTION and a server with options.basemap (off otherwise)"),
     e("PROJECTION", &["PROJ"], R::Projection, "modifier", true,
       "map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y)"),
     e("CLASSES", &["CLASS_BREAKS", "BINS"], R::Classes, "modifier", true,
@@ -1239,6 +1241,7 @@ mod tests {
             Role::XTitle,
             Role::YTitle,
             Role::Projection,
+            Role::MapTiles,
             Role::Classes,
             Role::Midpoint,
             Role::Hexbin,
@@ -1424,6 +1427,7 @@ mod tests {
                 | Role::XTitle
                 | Role::YTitle
                 | Role::Projection
+                | Role::MapTiles
                 | Role::Classes
                 | Role::Midpoint
                 | Role::Hexbin
