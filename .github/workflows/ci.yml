@@ -527,7 +527,9 @@ jobs:
     needs: [lane, web-build]
     if: needs.lane.outputs.full == 'true' || needs.lane.outputs.docs_only != 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
+    # ~18 min on master after #934 (its waits allow 120 s per assistant
+    # script); 20 cut green runs off mid-step (#935, #938).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
