@@ -370,6 +370,41 @@ impl Tiles {
     }
 }
 
+impl Tiles {
+    /// The renderer's basemap from these tiles, for a native render (an
+    /// export, `dashboard --svg`): `admit` decides each upstream fetch (a
+    /// server's limits; `|| true` for the CLI). A failed tile is left blank.
+    pub fn basemap(
+        self: &std::sync::Arc<Self>,
+        admit: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> crate::Basemap {
+        let t = self.clone();
+        crate::Basemap {
+            attribution: self.opts.attribution.clone(),
+            max_zoom: self.opts.max_zoom,
+            tiles: std::sync::Arc::new(move |z, x, y| {
+                if t.is_upstream(z, x, y) && !admit() {
+                    return None;
+                }
+                t.get(z, x, y).ok().map(|(b, _)| b)
+            }),
+        }
+    }
+
+    /// `options.basemap` given on the command line: the JSON object itself
+    /// or a file holding it.
+    pub fn from_arg(arg: &str) -> Result<Tiles, String> {
+        let text = if arg.trim_start().starts_with('{') {
+            arg.to_string()
+        } else {
+            std::fs::read_to_string(arg).map_err(|e| format!("--basemap {arg}: {e}"))?
+        };
+        let v: Value =
+            serde_json::from_str(&text).map_err(|e| format!("--basemap: not JSON ({e})"))?;
+        Tiles::open(BasemapOptions::parse(&v)?)
+    }
+}
+
 /// A local tile file: a regular file, not a link, at most the tile cap.
 fn read_tile_file(p: &Path) -> std::io::Result<Vec<u8>> {
     use std::os::unix::fs::OpenOptionsExt;

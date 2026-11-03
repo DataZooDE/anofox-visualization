@@ -91,7 +91,10 @@ need.
 2. Native: `options.basemap` parse + start checks, the proxy endpoint, the
    cache, CLI `--basemap` (local dir or https), static export embedding.
    Done (2a): `src/host/tiles.rs` (options, source, cache), `/api/tiles`,
-   scripts/tiles-served-e2e.mjs. Left (2b): exports, CLI, static embedding.
+   scripts/tiles-served-e2e.mjs. Done (2b): `/api/export` and
+   `dashboard --svg --basemap` draw the tiles (`Basemap::max_zoom` caps the
+   zoom a map asks for). Static `--site` embedding moves to phase 3 (the
+   site is drawn in the browser).
 3. Browser: `::MAPTILES` wiring, `map_tiles` wasm export, prefetch via
    `/api/tiles`, render with bytes; e2e that asserts no request leaves the
    origin.
