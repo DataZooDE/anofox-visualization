@@ -2763,7 +2763,10 @@ Enter, Esc, the summaries, the table switch; axe-core with `--axe <axe.min.js>`)
   stores the page's address as it is now — inputs, selections, brushed
   ranges, frames and tab — under a name, in this browser (per dashboard);
   picking one opens it again, **Delete a view…** removes one. Nothing leaves
-  the browser; a Share link carries the same state for someone else.
+  the browser; a Share link carries the same state for someone else. On a
+  locked server with `options.views` (#913) a served page shows **Views** in
+  its header and the server keeps them per login, so they follow you to
+  another browser (`docs/secure-serving.md` → "Saved views").
 - **⤓ HTML** downloads the current dashboard as a standalone, self-contained HTML
   file (interactive hover + tabs, no server). A `::VIEW` switcher works in the
   export too (click or arrow keys, offline) and the file carries **every

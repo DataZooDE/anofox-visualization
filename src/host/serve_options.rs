@@ -97,6 +97,9 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("state", SiteOptionKind::Refused),
     // #684: shared write-back, same reason — a site has no endpoint to save to.
     ("writeback", SiteOptionKind::Refused),
+    // #913: saved views live in the server's file, per signed-in viewer; a
+    // site keeps them in the browser (#888).
+    ("views", SiteOptionKind::Refused),
 ];
 
 /// `None` for a key that isn't one of `anofox_serve_dashboards`'s options at

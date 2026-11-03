@@ -690,3 +690,59 @@ fn export_out_force_refuses_a_hard_link_before_truncating_it() {
         );
     }
 }
+
+#[test]
+fn erase_and_export_work_on_a_views_file_too() {
+    // #913: `options.views` keeps a user's saved views in the same format,
+    // `"kind":"views"` — the operator tools read the kind from the header.
+    let s = Scratch::new("views");
+    let p = s.0.join("views.jsonl");
+    std::fs::write(
+        &p,
+        "{\"anofox_state\":1,\"created\":\"2026-11-03T00:00:00.000Z\",\"kind\":\"views\"}\n\
+         {\"v\":1,\"seq\":1,\"ts\":\"2026-11-03T00:01:00.000Z\",\"user\":\"alice@example.com\",\"auth\":\"oidc\",\"dashboard\":\"sales\",\"submit\":\"view\",\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"vars\":{\"name\":\"East\",\"query\":\"v.r=east\"}}\n\
+         {\"v\":1,\"seq\":2,\"ts\":\"2026-11-03T00:02:00.000Z\",\"user\":\"bob@example.com\",\"auth\":\"oidc\",\"dashboard\":\"sales\",\"submit\":\"view\",\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"vars\":{\"name\":\"West\",\"query\":\"v.r=west\"}}\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let out = dashboard()
+        .args(["state", "export", "--user", "bob@example.com"])
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exported = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        exported.contains("\"West\"") && !exported.contains("alice"),
+        "{exported}"
+    );
+
+    let out = dashboard()
+        .args(["state", "erase", "--user", "alice@example.com"])
+        .arg(&p)
+        .arg("--yes")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let left = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        left.lines().next().unwrap().contains("\"kind\":\"views\""),
+        "{left}"
+    );
+    assert!(
+        !left.contains("alice@example.com") && left.contains("bob@example.com"),
+        "{left}"
+    );
+}

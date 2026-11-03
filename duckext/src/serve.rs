@@ -64,6 +64,7 @@ use anofox_visualization::host::state::{
 };
 use anofox_visualization::host::tasks;
 use anofox_visualization::host::telemetry;
+use anofox_visualization::host::views::{self as vw, ViewsOptions};
 use anofox_visualization::host::writeback::{self as wb, WritebackOptions};
 use anofox_visualization::sql::deps::{self, Deps};
 use anofox_visualization::sql::materialize;
@@ -1324,6 +1325,9 @@ pub struct LockedOptions {
     /// structurally parsed here; [`start_locked`] runs its start checks and
     /// opens the change log ([`WritebackRuntime`]).
     pub writeback_opts: Option<WritebackOptions>,
+    /// `views` (#913): viewers' saved views, kept per user on the server;
+    /// [`start_locked`] runs its start checks and opens the file.
+    pub views_opts: Option<ViewsOptions>,
     /// `max_asset_bytes` (#514 PR B): the cap on one file served from
     /// `<dashboards dir>/assets/` (`GET /d/<id>/assets/<rest>`, [`locked_asset`]).
     pub max_asset_bytes: usize,
@@ -1708,6 +1712,7 @@ impl Default for LockedOptions {
             source: None,
             state_opts: None,
             writeback_opts: None,
+            views_opts: None,
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
             metrics_token: None,
             tasks: None,
@@ -2005,6 +2010,9 @@ impl LockedOptions {
                 "writeback" => {
                     o.writeback_opts = Some(WritebackOptions::parse(val)?);
                 }
+                "views" => {
+                    o.views_opts = Some(ViewsOptions::parse(val)?);
+                }
                 // The key list is generated, not copied by hand, so it can't
                 // drift from `--site`'s own `SERVER_OPTION_KEYS` (#501).
                 other => {
@@ -2084,9 +2092,14 @@ impl LockedOptions {
             o.tasks = Some(parse_tasks(v, o.notify.as_ref())?);
         }
         // #769: only an API key may ingest, so there must be API keys.
-        if o.durability.is_some() && o.state_opts.is_none() && o.writeback_opts.is_none() {
+        if o.durability.is_some()
+            && o.state_opts.is_none()
+            && o.writeback_opts.is_none()
+            && o.views_opts.is_none()
+        {
             return Err(
-                "options.durability needs options.state or options.writeback (the files it keeps)"
+                "options.durability needs options.state, options.writeback or options.views \
+                 (the files it keeps)"
                     .into(),
             );
         }
@@ -2988,6 +3001,8 @@ struct Locked {
     submit: Option<Arc<SubmitRuntime>>,
     /// `options.writeback`'s live runtime (#684) — `None` unless configured.
     writeback: Option<Arc<WritebackRuntime>>,
+    /// `options.views`' live runtime (#913) — `None` unless configured.
+    views: Option<Arc<ViewsRuntime>>,
     /// Request counts and latencies for `GET /metrics` (#765).
     metrics: anofox_visualization::host::metrics::Metrics,
     /// #767: per task, its last run (for `/metrics`).
@@ -3065,6 +3080,15 @@ struct WritebackRuntime {
     /// Never held across SQL or while a response is written: the check is
     /// in memory, the append one fdatasync.
     commit: Mutex<()>,
+}
+
+/// Live runtime for `options.views` (#913).
+struct ViewsRuntime {
+    opts: ViewsOptions,
+    store: Store,
+    rate: RateLimiter,
+    /// Held across a save's count check and its append.
+    write: Mutex<()>,
 }
 
 /// Each declared table as the change log leaves it ([`wb::fold`]).
@@ -3788,6 +3812,28 @@ fn check_dash_set(
             state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
         })?;
     }
+    // #913: saved views belong to a signed-in viewer; their file is its own.
+    if let Some(v) = &opts.views_opts {
+        if opts.auth.is_none() {
+            return Err(
+                "options.views needs options.auth: a saved view belongs to a signed-in viewer"
+                    .into(),
+            );
+        }
+        let other = [
+            opts.state_opts.as_ref().map(|s| s.path.as_path()),
+            opts.writeback_opts.as_ref().map(|w| w.path.as_path()),
+        ];
+        if other.into_iter().flatten().any(|p| p == v.path) {
+            return Err(
+                "options.views.path must be its own file, not options.state's or \
+                 options.writeback's"
+                    .into(),
+            );
+        }
+        anofox_visualization::host::state::check_path_rules(&v.path, opts.data.as_deref(), dir)
+            .map_err(|e| e.replace("options.state.path", "options.views.path"))?;
+    }
     Ok(())
 }
 
@@ -4048,6 +4094,16 @@ pub fn start_locked(
             }))
         }
     };
+    // #913: saved views.
+    let views = match &opts.views_opts {
+        None => None,
+        Some(v) => Some(Arc::new(ViewsRuntime {
+            store: Store::open_views(&v.path, v.max_mb)?,
+            rate: RateLimiter::new(vw::RATE_PER_MINUTE, vw::RATE_BURST, SUBMIT_BOUNDED_USERS),
+            write: Mutex::new(()),
+            opts: v.clone(),
+        })),
+    };
     // #770: previews kept on disk come back (expired ones are dropped).
     let preview_store = match &opts.preview {
         None => None,
@@ -4142,6 +4198,7 @@ pub fn start_locked(
         source_build: SourceBuildState::new(),
         submit,
         writeback,
+        views,
         metrics: Default::default(),
         task_stats: Mutex::new(BTreeMap::new()),
         ingest: ingest_rt,
@@ -5383,6 +5440,9 @@ fn durable_files(opts: &LockedOptions) -> Vec<(&'static str, PathBuf)> {
     if let Some(w) = &opts.writeback_opts {
         v.push(("writeback", w.path.clone()));
     }
+    if let Some(w) = &opts.views_opts {
+        v.push(("views", w.path.clone()));
+    }
     v
 }
 
@@ -5453,6 +5513,7 @@ fn durable_snapshot(st: &Locked) {
     let stores: Vec<(&'static str, &Store)> = [
         st.submit.as_ref().map(|s| ("state", &s.store)),
         st.writeback.as_ref().map(|w| ("writeback", &w.store)),
+        st.views.as_ref().map(|v| ("views", &v.store)),
     ]
     .into_iter()
     .flatten()
@@ -7412,6 +7473,7 @@ fn handle_locked(st: &Locked, req: Request) {
             || path == "/api/ask"
             || path == "/api/submit"
             || path == "/api/save"
+            || path.starts_with("/api/views")
             || path == "/"
             || path.starts_with("/d/")
             || status >= 400
@@ -7881,6 +7943,21 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 info,
             )
         }
+        (&Method::Get, "/api/views") | (&Method::Post, "/api/views" | "/api/views/delete") => {
+            let (origin, host) = (m.origin.map(str::to_string), m.host.map(str::to_string));
+            let auth_method = ident.as_ref().map(|i| i.method);
+            handle_views(
+                st,
+                req,
+                path,
+                origin.as_deref(),
+                host.as_deref(),
+                claims.as_ref(),
+                scope,
+                auth_method,
+                info,
+            )
+        }
         (&Method::Post, "/api/save") => {
             let (origin, host) = (m.origin.map(str::to_string), m.host.map(str::to_string));
             handle_save(
@@ -7910,7 +7987,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     info.dashboard = Some(id.to_string());
                     let session = ident.as_ref().and_then(|i| i.page_session.as_deref());
                     let html = String::from_utf8_lossy(&served_index(
-                        st, &pv.dash, scope, session, false, false,
+                        st, &pv.dash, scope, session, false, false, false,
                     ))
                     .into_owned();
                     // The link is the preview's only name: never sent on.
@@ -8058,9 +8135,16 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                             && v.embed.as_ref().is_none_or(|e| c.embed && e == &d.id)
                             && rt.ask.allowed(&v)
                     });
-                    let html =
-                        String::from_utf8_lossy(&served_index(st, d, scope, page, writer, ask))
-                            .into_owned();
+                    // #913: views kept on the server for a personal sign-in.
+                    // Not on a page holding an embed link's session: opening a
+                    // view reloads the page, and that needs a fresh link.
+                    let views = st.views.is_some()
+                        && page.is_none()
+                        && views_personal(ident.as_ref().map(|i| i.method), claims.as_ref());
+                    let html = String::from_utf8_lossy(&served_index(
+                        st, d, scope, page, writer, ask, views,
+                    ))
+                    .into_owned();
                     // A page holding a session is never sent to another
                     // site as a Referer (the link is in the URL).
                     let extra: &[(&str, &str)] = if page.is_some() {
@@ -10561,6 +10645,230 @@ fn handle_submit(
     201
 }
 
+/// #913: whether a credential is one viewer's own sign-in — not an API key,
+/// a share link or another shared or reserved identity. Only those keep
+/// views on the server.
+fn views_personal(auth_method: Option<&'static str>, claims: Option<&Claims>) -> bool {
+    !matches!(auth_method, Some("api_key") | Some("share"))
+        && claims.is_some_and(|c| !c.user.is_empty() && !access::is_reserved_user(&c.user))
+}
+
+/// `GET /api/views?dashboard=<id>`, `POST /api/views` `{dashboard, name,
+/// query}` and `POST /api/views/delete` `{dashboard, id}` (#913): the
+/// signed-in viewer's own saved views of one dashboard. Never anyone
+/// else's: every read and write is keyed by the credential's user. A write
+/// passes the same cross-site gate as `/api/submit`.
+#[allow(clippy::too_many_arguments)]
+fn handle_views(
+    st: &Locked,
+    mut req: Request,
+    path: &str,
+    origin: Option<&str>,
+    host: Option<&str>,
+    claims: Option<&Claims>,
+    scope: Option<&Scope>,
+    auth_method: Option<&'static str>,
+    info: &mut LogInfo,
+) -> u16 {
+    let write = req.method() == &Method::Post;
+    let Some(rt) = &st.views else {
+        info.deny = Some("not_enabled");
+        return reply(
+            req,
+            404,
+            "this server keeps no saved views (no options.views)",
+        );
+    };
+    if req_header(&req, "Sec-Fetch-Site").is_some_and(|v| !v.eq_ignore_ascii_case("same-origin")) {
+        info.deny = Some("csrf");
+        return reply(req, 403, "forbidden: Sec-Fetch-Site must be same-origin");
+    }
+    if write {
+        if let Some(r) = durable_reader(st) {
+            info.deny = Some("not_writer");
+            return send(req, r);
+        }
+        if !sv::origin_required_and_matches_host(origin, host) {
+            info.deny = Some("csrf");
+            return reply(
+                req,
+                403,
+                "forbidden: Origin is required on this endpoint and must match this server",
+            );
+        }
+        if !req_header(&req, "Content-Type")
+            .is_some_and(|v| v.eq_ignore_ascii_case("application/json"))
+        {
+            info.deny = Some("csrf");
+            return reply(req, 403, "forbidden: Content-Type must be application/json");
+        }
+        if req_header(&req, "X-Anofox-Views") != Some("1") {
+            info.deny = Some("csrf");
+            return reply(req, 403, "forbidden: missing X-Anofox-Views header");
+        }
+    }
+    let Some(claims) = claims else {
+        return reply(req, 401, access::UNAUTHORIZED);
+    };
+    if !views_personal(auth_method, Some(claims)) {
+        info.deny = Some("shared_identity");
+        return reply(req, 403, "forbidden: saved views need a personal sign-in");
+    }
+    info.user = Some(claims.user.clone());
+
+    let body: Value = if write {
+        let raw = match read_body(&mut req, vw::VIEWS_MAX_BODY) {
+            Ok(b) => b,
+            Err((code, e)) => return reply(req, code, &e),
+        };
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(v) if v.is_object() => v,
+            _ => return reply(req, 400, "the body must be a JSON object"),
+        }
+    } else {
+        Value::Null
+    };
+    let field = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string);
+    let dash_id = if write {
+        field("dashboard")
+    } else {
+        sv::parse_query(req.url()).remove("dashboard")
+    };
+    let Some(dash_id) = dash_id else {
+        return reply(req, 400, "'dashboard' is required");
+    };
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&dash_id) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    info.dashboard = Some(dash.id.clone());
+    if scope.is_some_and(|s| !s.allows(&dash.id)) {
+        info.deny = Some("scope");
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    let list = |rows: &[anofox_visualization::host::state::Record]| {
+        vw::fold(rows, &dash.id, rt.opts.max_per_dashboard)
+    };
+
+    if !write {
+        let views = list(&rt.store.rows_for_user(&claims.user));
+        let out = serde_json::json!({
+            "views": views.iter().map(vw::View::to_json).collect::<Vec<_>>(),
+            "max": rt.opts.max_per_dashboard,
+        });
+        respond(req, 200, "application/json", out.to_string().into_bytes());
+        return 200;
+    }
+
+    if let Err(retry_after) = rt.rate.check(&claims.user, Instant::now()) {
+        info.deny = Some("rate_limited");
+        return rate_limited(req, retry_after);
+    }
+    if rt.store.is_failed() {
+        return reply(
+            req,
+            503,
+            "service unavailable: the views file is unavailable",
+        );
+    }
+    let delete = path == "/api/views/delete";
+    let (kind, id, vars) = if delete {
+        let Some(id) = field("id").filter(|i| vw::valid_id(i)) else {
+            return reply(req, 400, "'id' must be a view's id");
+        };
+        (Some("delete"), id, Map::new())
+    } else {
+        let name = match vw::check_name(&field("name").unwrap_or_default()) {
+            Ok(n) => n,
+            Err(e) => return reply(req, 400, &e),
+        };
+        let query = match vw::check_query(&field("query").unwrap_or_default()) {
+            Ok(q) => q,
+            Err(e) => return reply(req, 400, &e),
+        };
+        let mut vars = Map::new();
+        vars.insert("name".into(), Value::String(name));
+        vars.insert("query".into(), Value::String(query));
+        (Some("view"), sv::random_token(), vars)
+    };
+
+    let _guard = rt.write.lock().unwrap_or_else(|p| p.into_inner());
+    let rows = rt.store.rows_for_user(&claims.user);
+    let now = vw::fold(&rows, &dash.id, usize::MAX);
+    if delete {
+        if !now.iter().any(|v| v.id == id) {
+            return reply(req, 404, "no such view");
+        }
+    } else {
+        let name = vars.get("name").and_then(Value::as_str).unwrap_or_default();
+        if !now.iter().any(|v| v.name == name) && now.len() >= rt.opts.max_per_dashboard {
+            info.deny = Some("viewer_limit");
+            return reply(
+                req,
+                409,
+                &format!(
+                    "at most {} saved views per dashboard — delete one first",
+                    rt.opts.max_per_dashboard
+                ),
+            );
+        }
+    }
+    if rt.store.user_count(&claims.user) >= vw::MAX_LINES_PER_USER {
+        info.deny = Some("viewer_limit");
+        return reply(req, 409, "saved-view limit reached for this account");
+    }
+    let rec = match rt.store.append(NewRecord {
+        user: claims.user.clone(),
+        auth: auth_method.unwrap_or("").to_string(),
+        dashboard: dash.id.clone(),
+        submit: kind.unwrap_or("view").to_string(),
+        id,
+        vars,
+    }) {
+        Ok(r) => r,
+        Err(e) if e.contains("full") => {
+            return reply(req, 507, "insufficient storage: the views file is full")
+        }
+        Err(_) => {
+            return reply(
+                req,
+                503,
+                "service unavailable: the views file is unavailable",
+            )
+        }
+    };
+    drop(_guard);
+    let out = if delete {
+        serde_json::json!({"deleted": rec.id})
+    } else {
+        let view = vw::View {
+            id: rec.id.clone(),
+            name: rec
+                .vars
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            query: rec
+                .vars
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
+            at: rec.ts.clone(),
+        };
+        serde_json::json!({"view": view.to_json()})
+    };
+    let status = if delete { 200 } else { 201 };
+    respond(
+        req,
+        status,
+        "application/json",
+        out.to_string().into_bytes(),
+    );
+    status
+}
+
 /// `POST /api/save` (#684 slice 2): the shared write-back path — a change
 /// set Rust validates against `options.writeback`'s declared tables and
 /// appends to the change log. Like `/api/submit`: the CSRF gate, a personal
@@ -11704,6 +12012,7 @@ fn served_index(
     session: Option<&str>,
     writer: bool,
     ask: bool,
+    views: bool,
 ) -> Vec<u8> {
     // The nav and what each statement depends on (#210) come from one
     // snapshot (and its dashboards, #772).
@@ -11789,6 +12098,8 @@ fn served_index(
         // `base`, moved on only by its own saves and a 409's answer.
         "gen": st.writeback.as_ref().map(|w| w.store.global_seq()),
     });
+    // #913: this viewer's views are kept on the server (a personal sign-in).
+    cfg["views"] = serde_json::json!({ "server": views });
     // #195: Ask is on for this dashboard and this viewer: the page loads its
     // panel (web/ask-ui.js) and shows the notice's provider.
     if let (true, Some(rt)) = (ask, &st.ask) {
@@ -13907,7 +14218,7 @@ mod tests {
         let e = LockedOptions::parse(Some(r#"{"durability": {"run": true, "location": "/x"}}"#))
             .unwrap_err();
         assert!(
-            e.contains("needs options.state or options.writeback"),
+            e.contains("needs options.state, options.writeback or options.views"),
             "{e}"
         );
         assert!(

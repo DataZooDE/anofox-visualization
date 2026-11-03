@@ -50,6 +50,7 @@ pub mod site_css;
 pub mod state;
 pub mod tasks;
 pub mod telemetry;
+pub mod views;
 pub mod writeback;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};

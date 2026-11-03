@@ -36,6 +36,11 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-head .dp-brand{font-size:.78rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ax-muted)}
 .dp-head .dp-title{margin:0;font-family:var(--ax-font-display);font-size:1.55rem;font-weight:800;letter-spacing:-.02em;line-height:1.15;color:var(--ax-heading)}
 .dp-asof{margin-left:auto;align-self:center;font-size:.76rem;font-weight:600;color:var(--ax-muted);background:var(--ax-card);border:1px solid var(--ax-line);border-radius:999px;padding:.28rem .7rem;white-space:nowrap}
+.dp-views-btn{align-self:center;font:inherit;font-size:.8rem;font-weight:600;color:var(--ax-ink);background:var(--ax-card);border:1px solid var(--ax-line);border-radius:999px;padding:.28rem .8rem;cursor:pointer}
+.dp-head .dp-views-btn:first-child,.dp-head-text+.dp-views-btn{margin-left:auto}
+.dp-asof+.dp-views-btn{margin-left:.5rem}
+.dp-views-btn:hover{border-color:var(--ax-accent)}
+.dp-views-btn:focus-visible{outline:2px solid var(--ax-accent);outline-offset:2px}
 .dp-asof.stale{color:var(--ax-badge-warn-ink);background:var(--ax-badge-warn-bg);border-color:transparent}
 .dp-asof.stale::before{content:"⚠ "}
 

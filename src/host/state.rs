@@ -750,6 +750,8 @@ impl std::fmt::Debug for Store {
 enum StoreKind {
     State,
     Writeback,
+    /// `options.views` (#913): viewers' saved views.
+    Views,
 }
 
 /// Bytes accounted per line beyond its own length (the `\n`).
@@ -909,6 +911,38 @@ impl Store {
     pub fn open_writeback(path: &Path, max_mb: u64) -> Result<Store, String> {
         Self::open_impl(path, max_mb, false, StoreKind::Writeback)
             .map_err(|e| e.replace("options.state.path", "options.writeback.path"))
+    }
+
+    /// Open (creating if absent) the saved-views file (#913,
+    /// `options.views.path`): the same file discipline, its header marked
+    /// `"kind":"views"`. Each record is a save (`submit` `"view"`) or a
+    /// delete (`"delete"`) — `crate::host::views`.
+    #[cfg(unix)]
+    pub fn open_views(path: &Path, max_mb: u64) -> Result<Store, String> {
+        Self::open_impl(path, max_mb, false, StoreKind::Views)
+            .map_err(|e| e.replace("options.state.path", "options.views.path"))
+    }
+
+    /// Open an existing store file of whichever kind its header names — a
+    /// state file, a write-back change log or a views file (#913) — for the
+    /// `dashboard state` tools (export, erase), which work on all three.
+    #[cfg(unix)]
+    pub fn open_existing(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
+        use std::io::{BufRead, Read};
+        let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut first = String::new();
+        std::io::BufReader::new(f.take(64 * 1024))
+            .read_line(&mut first)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let kind = match serde_json::from_str::<serde_json::Value>(first.trim())
+            .ok()
+            .and_then(|h| h.get("kind").cloned())
+        {
+            Some(k) if k.as_str() == Some("writeback") => StoreKind::Writeback,
+            Some(k) if k.as_str() == Some("views") => StoreKind::Views,
+            _ => StoreKind::State,
+        };
+        Self::open_impl(path, max_mb, read_only, kind)
     }
 
     #[cfg(unix)]
@@ -1078,6 +1112,9 @@ impl Store {
                 StoreKind::Writeback => format!(
                     "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\",\"kind\":\"writeback\"}}"
                 ),
+                StoreKind::Views => format!(
+                    "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\",\"kind\":\"views\"}}"
+                ),
             };
             let mut header = header_body.clone();
             header.push('\n');
@@ -1122,6 +1159,18 @@ impl Store {
     pub fn open_writeback(path: &Path, max_mb: u64) -> Result<Store, String> {
         let _ = (path, max_mb);
         Err("the write-back change log needs a Unix host (flock)".into())
+    }
+
+    #[cfg(not(unix))]
+    pub fn open_existing(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
+        let _ = (path, max_mb, read_only);
+        Err("the state store needs a Unix host (flock)".into())
+    }
+
+    #[cfg(not(unix))]
+    pub fn open_views(path: &Path, max_mb: u64) -> Result<Store, String> {
+        let _ = (path, max_mb);
+        Err("saved views need a Unix host (flock)".into())
     }
 
     /// Append one submission, assigning its `seq`/`ts`. `fdatasync`s before
@@ -1782,14 +1831,16 @@ fn validate_lines(clean: &str, max_bytes: u64, kind: StoreKind) -> Result<Index,
     let file_kind = match header.get("kind") {
         None => StoreKind::State,
         Some(k) if k.as_str() == Some("writeback") => StoreKind::Writeback,
+        Some(k) if k.as_str() == Some("views") => StoreKind::Views,
         Some(_) => return Err("state file: header line has an unknown 'kind'".into()),
     };
     if file_kind != kind {
-        return Err(match file_kind {
-            StoreKind::State => "this is an options.state file, not a write-back change log",
-            StoreKind::Writeback => "this is a write-back change log, not an options.state file",
-        }
-        .into());
+        let what = |k: StoreKind| match k {
+            StoreKind::State => "an options.state file",
+            StoreKind::Writeback => "a write-back change log",
+            StoreKind::Views => "an options.views file",
+        };
+        return Err(format!("this is {}, not {}", what(file_kind), what(kind)));
     }
 
     for (i, line) in lines.enumerate() {
@@ -3092,6 +3143,53 @@ mod tests {
         let e = Store::open(&p, DEFAULT_MAX_MB).unwrap_err();
         assert!(e.contains("created"), "{e}");
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_views_file_opens_only_as_one() {
+        // #913: `"kind":"views"`; neither a state file nor a change log.
+        let p = store_path("kind-views");
+        mkdir(p.parent().unwrap());
+        {
+            let v = Store::open_views(&p, DEFAULT_MAX_MB).unwrap();
+            v.append(NewRecord {
+                user: "alice".into(),
+                auth: "oidc".into(),
+                dashboard: "sales".into(),
+                submit: "view".into(),
+                id: "0".repeat(32),
+                vars: serde_json::json!({"name": "East", "query": "v.r=east"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            })
+            .unwrap();
+        }
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            raw.lines().next().unwrap().contains("\"kind\":\"views\""),
+            "{raw}"
+        );
+        let e = reopen(&p, DEFAULT_MAX_MB).unwrap_err();
+        assert!(
+            e.contains("an options.views file, not an options.state file"),
+            "{e}"
+        );
+        let e = reopen_with(|| Store::open_writeback(&p, DEFAULT_MAX_MB)).unwrap_err();
+        assert!(e.contains("not a write-back change log"), "{e}");
+        let v = reopen_with(|| Store::open_views(&p, DEFAULT_MAX_MB)).unwrap();
+        assert_eq!(v.rows_for_user("alice").len(), 1);
+        drop(v);
+
+        let q = store_path("kind-views-state");
+        mkdir(q.parent().unwrap());
+        drop(Store::open(&q, DEFAULT_MAX_MB).unwrap());
+        let e = reopen_with(|| Store::open_views(&q, DEFAULT_MAX_MB)).unwrap_err();
+        assert!(e.contains("options.views.path"), "{e}");
+        assert!(e.contains("not an options.views file"), "{e}");
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+        std::fs::remove_dir_all(q.parent().unwrap()).ok();
     }
 
     #[cfg(unix)]
