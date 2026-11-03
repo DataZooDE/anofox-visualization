@@ -2889,7 +2889,7 @@ fn y2_plan(cols: &[Column], kind: Kind, value: &Column, extras: &[&Column]) -> O
             (lo, hi)
         };
         lo.is_finite()
-            .then(|| if hi > lo { (lo, hi) } else { (lo, lo + 1.0) })
+            .then_some(if hi > lo { (lo, hi) } else { (lo, lo + 1.0) })
     };
     let ((plo, phi), (slo, shi)) = (span(&prim)?, span(&sec)?);
     // primary = plo + (s - slo) * f  ⇔  s = primary / f + (slo - plo / f)
