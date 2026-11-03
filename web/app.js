@@ -2812,6 +2812,8 @@ async function boot() {
   // #195: Ask, only when the server says it is on for this dashboard and
   // this viewer (window.__served.ask); the module isn't loaded otherwise.
   if (servedMode && served?.ask) mountAskSoon(served);
+  // #889: the notes on this dashboard's charts
+  if (servedMode && served?.notes?.enabled) loadNotes();
   // An embed link was exchanged for this page's session: drop the link from
   // the address (history, copies of the URL). A reload needs a fresh link.
   if (served?.session && params.has("embed")) {
@@ -7564,6 +7566,117 @@ function defaultThemeSpec() {
 }
 // The wasm render context: "" / "rrggbb" for the default look (byte-identical
 // to earlier releases), else {"primary","theme","variant","locale"}.
+// ---- notes on charts (#889, options.notes on a locked server) ----
+// The server says whether this dashboard shows notes and whether this viewer
+// writes or moderates them (window.__served.notes). The notes come from
+// GET /api/notes once per page; each chart gets its own in the render
+// context ("notes"), and the renderer draws them (a rule or a band, the text
+// as the tooltip, data-note = the id).
+let dpNotes = [];
+const notesCfg = () => (servedMode && window.__served?.notes?.enabled ? window.__served.notes : null);
+function notesFor(stmt) {
+  if (stmt == null || !dpNotes.length) return [];
+  return dpNotes
+    .filter((n) => n.panel === stmt)
+    .map((n) => ({ id: n.id, x: n.x, x2: n.x2 || "", text: n.text, by: n.by, at: String(n.at || "").slice(0, 10) }));
+}
+async function notesCall(method, path, body) {
+  const init = { method, credentials: "same-origin", headers: {} };
+  if (body) {
+    init.headers = { "Content-Type": "application/json", "X-Anofox-Notes": "1" };
+    init.body = JSON.stringify({ dashboard: window.__served.id, ...body });
+  }
+  const r = await fetch(path, init);
+  const t = await r.text();
+  if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+  return JSON.parse(t);
+}
+async function loadNotes() {
+  if (!notesCfg()) return;
+  try {
+    dpNotes = (await notesCall("GET", "/api/notes?dashboard=" + encodeURIComponent(window.__served.id))).notes || [];
+  } catch (e) {
+    console.warn("notes could not load:", e);
+    dpNotes = [];
+  }
+  redrawNotedCharts();
+}
+// Every chart on the page again, with its notes.
+function redrawNotedCharts() {
+  document.querySelectorAll(".dash .panel .panel-svg").forEach((holder) => {
+    const dp = holder.closest(".panel")?._dp;
+    if (holder._stmt == null || !dp || dp.isMap || dp.figure || dp.contract) return;
+    renderChart(holder, dp.rows, dp.drawn || dp.roles, ...chartSize(holder, dp), holder._zoom || "");
+  });
+  wireCharts();
+}
+// Where a new note goes: the mark last pointed at (its data-x).
+function wireNoteAnchor(panel) {
+  if (panel._noteWired) return;
+  panel._noteWired = true;
+  const take = (e) => {
+    const m = e.target.closest?.("[data-x]");
+    if (m && !m.hasAttribute("data-note")) panel._noteX = m.getAttribute("data-x");
+  };
+  panel.addEventListener("pointerover", take);
+  panel.addEventListener("click", take, true);
+}
+async function addNote(panel, stmt) {
+  // a brushed range on this chart, else the point last pointed at
+  const sel = panel._ia && panel._ia.select;
+  const r = sel && dpRange[sel.name];
+  const x = r ? String(r.from) : panel._noteX;
+  const x2 = r ? String(r.to) : "";
+  if (!x) {
+    sideToast("Point at a value on the chart (or brush a range) first, then Add a note.", "OK", () => {});
+    return;
+  }
+  const res = await dpDialog({
+    title: "Add a note",
+    text: x2 ? `On ${x} – ${x2}, shown to everyone who sees this dashboard.` : `At ${x}, shown to everyone who sees this dashboard.`,
+    input: { label: "Note", value: "" },
+    buttons: [
+      { label: "Cancel", value: null },
+      { label: "Add", value: "add", primary: true },
+    ],
+  });
+  const text = (res.input || "").trim();
+  if (res.value !== "add" || !text) return;
+  try {
+    const out = await notesCall("POST", "/api/notes", { panel: stmt, x, x2, text });
+    if (out.note) dpNotes.push(out.note);
+    redrawNotedCharts();
+  } catch (e) {
+    sideToast("The note wasn't added: " + e.message, "OK", () => {});
+  }
+}
+// A click on a note: its text, who and when; its author or a moderator may delete it.
+document.addEventListener(
+  "click",
+  async (e) => {
+    const m = notesCfg() && e.target.closest?.(".dash [data-note]");
+    if (!m) return;
+    const n = dpNotes.find((x) => x.id === m.getAttribute("data-note"));
+    if (!n) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const may = n.mine || notesCfg().moderator;
+    const r = await dpDialog({
+      title: "Note",
+      text: `${n.text} — ${n.by}, ${String(n.at || "").slice(0, 10)}`,
+      buttons: may ? [{ label: "Close", value: null }, { label: "Delete", value: "delete", danger: true }] : [{ label: "Close", value: null, primary: true }],
+    });
+    if (r.value !== "delete") return;
+    try {
+      await notesCall("POST", "/api/notes/delete", { id: n.id });
+      dpNotes = dpNotes.filter((x) => x.id !== n.id);
+      redrawNotedCharts();
+    } catch (err) {
+      sideToast("The note wasn't deleted: " + err.message, "OK", () => {});
+    }
+  },
+  true
+);
 function renderCtx() {
   const set = dpTheme.set;
   const loc = dashLocale();
@@ -11489,6 +11602,7 @@ async function runOnce(fresh = true, pv = preview) {
               Object.assign(dpEdit[i], await diagramChecksFor(stmts, i, pv));
               fig.appendChild(diagramToolbar(dpEdit[i], holder));
             }
+            holder._stmt = i; // #889: its notes
             renderChart(holder, rowsJson, s.roles, rw, ph);
             // ggplot-rs build warnings (dropped rows, skipped layers) ride on the
             // SVG root as data-warnings — surface them for debugging.
@@ -12446,7 +12560,11 @@ function animateIn(panels = document.querySelectorAll(".dash .panel")) {
 // Follow with wireCharts() once the holder is in the page.
 function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const t0 = performance.now();
-  const ctx = holder._frame != null ? ctxWith({ frame: holder._frame }) : renderCtx();
+  const extra = {};
+  if (holder._frame != null) extra.frame = holder._frame;
+  const notes = notesFor(holder._stmt);
+  if (notes.length) extra.notes = notes;
+  const ctx = Object.keys(extra).length ? ctxWith(extra) : renderCtx();
   const tracks = holder._tracks || [];
   if (holder._edit) {
     const ed = holder._edit;
@@ -20830,6 +20948,12 @@ function attachToolbox() {
       bar.addEventListener("mouseenter", syncSel);
       bar.addEventListener("focusin", syncSel);
       mkTool("Find a place", "🔍", () => mh._dpFind());
+    }
+    // #889: a note on this chart (a locked server's note writers)
+    const nh = panel.querySelector(".panel-svg");
+    if (dp && !dp.isMap && !dp.figure && nh && nh._stmt != null && notesCfg()?.writer) {
+      wireNoteAnchor(panel);
+      mkTool("Add a note", "✎", () => addNote(panel, nh._stmt));
     }
     mkTool("Full size", "⤢", () => openFullSize(panel));
     mkTool("Save as PNG", "⭳", () => savePanelPng(panel));

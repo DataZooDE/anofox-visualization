@@ -2771,6 +2771,12 @@ Enter, Esc, the summaries, the table switch; axe-core with `--axe <axe.min.js>`)
   locked server with `options.views` (#913) a served page shows **Views** in
   its header and the server keeps them per login, so they follow you to
   another browser (`docs/secure-serving.md` → "Saved views").
+- **Notes on charts** (#889): on a locked server with `options.notes`, a
+  note writer points at a value (or brushes a range) and picks **✎ Add a
+  note** in a chart's tools; every viewer of the dashboard sees it on the
+  chart (a rule or band, its text, author and day on hover). A click on a
+  note shows it; its author or a moderator deletes it there
+  (`docs/secure-serving.md` → "Notes on charts").
 - **⤓ HTML** downloads the current dashboard as a standalone, self-contained HTML
   file (interactive hover + tabs, no server). A `::VIEW` switcher works in the
   export too (click or arrow keys, offline) and the file carries **every

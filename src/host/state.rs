@@ -752,6 +752,8 @@ enum StoreKind {
     Writeback,
     /// `options.views` (#913): viewers' saved views.
     Views,
+    /// `options.notes` (#889): viewers' notes on charts.
+    Notes,
 }
 
 /// Bytes accounted per line beyond its own length (the `\n`).
@@ -926,6 +928,16 @@ impl Store {
     /// Open an existing store file of whichever kind its header names — a
     /// state file, a write-back change log or a views file (#913) — for the
     /// `dashboard state` tools (export, erase), which work on all three.
+    /// Open (creating if absent) the notes file (#889, `options.notes.path`):
+    /// the same file discipline, its header marked `"kind":"notes"`. Each
+    /// record is a note (`submit` `"note"`) or a delete (`"delete"`) —
+    /// `crate::host::notes`.
+    #[cfg(unix)]
+    pub fn open_notes(path: &Path, max_mb: u64) -> Result<Store, String> {
+        Self::open_impl(path, max_mb, false, StoreKind::Notes)
+            .map_err(|e| e.replace("options.state.path", "options.notes.path"))
+    }
+
     #[cfg(unix)]
     pub fn open_existing(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
         use std::io::{BufRead, Read};
@@ -940,6 +952,7 @@ impl Store {
         {
             Some(k) if k.as_str() == Some("writeback") => StoreKind::Writeback,
             Some(k) if k.as_str() == Some("views") => StoreKind::Views,
+            Some(k) if k.as_str() == Some("notes") => StoreKind::Notes,
             _ => StoreKind::State,
         };
         Self::open_impl(path, max_mb, read_only, kind)
@@ -1115,6 +1128,9 @@ impl Store {
                 StoreKind::Views => format!(
                     "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\",\"kind\":\"views\"}}"
                 ),
+                StoreKind::Notes => format!(
+                    "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\",\"kind\":\"notes\"}}"
+                ),
             };
             let mut header = header_body.clone();
             header.push('\n');
@@ -1165,6 +1181,12 @@ impl Store {
     pub fn open_existing(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
         let _ = (path, max_mb, read_only);
         Err("the state store needs a Unix host (flock)".into())
+    }
+
+    #[cfg(not(unix))]
+    pub fn open_notes(path: &Path, max_mb: u64) -> Result<Store, String> {
+        let _ = (path, max_mb);
+        Err("notes need a Unix host (flock)".into())
     }
 
     #[cfg(not(unix))]
@@ -1832,6 +1854,7 @@ fn validate_lines(clean: &str, max_bytes: u64, kind: StoreKind) -> Result<Index,
         None => StoreKind::State,
         Some(k) if k.as_str() == Some("writeback") => StoreKind::Writeback,
         Some(k) if k.as_str() == Some("views") => StoreKind::Views,
+        Some(k) if k.as_str() == Some("notes") => StoreKind::Notes,
         Some(_) => return Err("state file: header line has an unknown 'kind'".into()),
     };
     if file_kind != kind {
@@ -1839,6 +1862,7 @@ fn validate_lines(clean: &str, max_bytes: u64, kind: StoreKind) -> Result<Index,
             StoreKind::State => "an options.state file",
             StoreKind::Writeback => "a write-back change log",
             StoreKind::Views => "an options.views file",
+            StoreKind::Notes => "an options.notes file",
         };
         return Err(format!("this is {}, not {}", what(file_kind), what(kind)));
     }

@@ -52,6 +52,7 @@ use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
 use anofox_visualization::host::ingest::{self, IngestOptions};
 use anofox_visualization::host::mcp as mcpm;
 use anofox_visualization::host::metrics;
+use anofox_visualization::host::notes::{self as nt, NotesOptions};
 use anofox_visualization::host::notify;
 use anofox_visualization::host::policy::{self, Enforcer, Policy, Script, Viewer};
 use anofox_visualization::host::serving::{
@@ -1328,6 +1329,9 @@ pub struct LockedOptions {
     /// `views` (#913): viewers' saved views, kept per user on the server;
     /// [`start_locked`] runs its start checks and opens the file.
     pub views_opts: Option<ViewsOptions>,
+    /// `notes` (#889): viewers' notes on charts; [`start_locked`] runs its
+    /// start checks and opens the file.
+    pub notes_opts: Option<NotesOptions>,
     /// `max_asset_bytes` (#514 PR B): the cap on one file served from
     /// `<dashboards dir>/assets/` (`GET /d/<id>/assets/<rest>`, [`locked_asset`]).
     pub max_asset_bytes: usize,
@@ -1713,6 +1717,7 @@ impl Default for LockedOptions {
             state_opts: None,
             writeback_opts: None,
             views_opts: None,
+            notes_opts: None,
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
             metrics_token: None,
             tasks: None,
@@ -2013,6 +2018,9 @@ impl LockedOptions {
                 "views" => {
                     o.views_opts = Some(ViewsOptions::parse(val)?);
                 }
+                "notes" => {
+                    o.notes_opts = Some(NotesOptions::parse(val)?);
+                }
                 // The key list is generated, not copied by hand, so it can't
                 // drift from `--site`'s own `SERVER_OPTION_KEYS` (#501).
                 other => {
@@ -2096,10 +2104,11 @@ impl LockedOptions {
             && o.state_opts.is_none()
             && o.writeback_opts.is_none()
             && o.views_opts.is_none()
+            && o.notes_opts.is_none()
         {
             return Err(
-                "options.durability needs options.state, options.writeback or options.views \
-                 (the files it keeps)"
+                "options.durability needs options.state, options.writeback, options.views or \
+                 options.notes (the files it keeps)"
                     .into(),
             );
         }
@@ -3003,6 +3012,8 @@ struct Locked {
     writeback: Option<Arc<WritebackRuntime>>,
     /// `options.views`' live runtime (#913) — `None` unless configured.
     views: Option<Arc<ViewsRuntime>>,
+    /// `options.notes`' live runtime (#889) — `None` unless configured.
+    notes: Option<Arc<NotesRuntime>>,
     /// Request counts and latencies for `GET /metrics` (#765).
     metrics: anofox_visualization::host::metrics::Metrics,
     /// #767: per task, its last run (for `/metrics`).
@@ -3088,6 +3099,15 @@ struct ViewsRuntime {
     store: Store,
     rate: RateLimiter,
     /// Held across a save's count check and its append.
+    write: Mutex<()>,
+}
+
+/// Live runtime for `options.notes` (#889).
+struct NotesRuntime {
+    opts: NotesOptions,
+    store: Store,
+    rate: RateLimiter,
+    /// Held across a write's checks and its append.
     write: Mutex<()>,
 }
 
@@ -3834,6 +3854,35 @@ fn check_dash_set(
         anofox_visualization::host::state::check_path_rules(&v.path, opts.data.as_deref(), dir)
             .map_err(|e| e.replace("options.state.path", "options.views.path"))?;
     }
+    // #889: notes carry their author: a login; their file is its own.
+    if let Some(n) = &opts.notes_opts {
+        if opts.auth.is_none() {
+            return Err(
+                "options.notes needs options.auth: a note always names its signed-in author".into(),
+            );
+        }
+        for d in &n.dashboards {
+            if !set.list.iter().any(|k| &k.id == d) {
+                return Err(format!(
+                    "options.notes names dashboard '{d}', which this server doesn't serve"
+                ));
+            }
+        }
+        let other = [
+            opts.state_opts.as_ref().map(|s| s.path.as_path()),
+            opts.writeback_opts.as_ref().map(|w| w.path.as_path()),
+            opts.views_opts.as_ref().map(|v| v.path.as_path()),
+        ];
+        if other.into_iter().flatten().any(|p| p == n.path) {
+            return Err(
+                "options.notes.path must be its own file, not options.state's, \
+                 options.writeback's or options.views'"
+                    .into(),
+            );
+        }
+        anofox_visualization::host::state::check_path_rules(&n.path, opts.data.as_deref(), dir)
+            .map_err(|e| e.replace("options.state.path", "options.notes.path"))?;
+    }
     Ok(())
 }
 
@@ -4104,6 +4153,16 @@ pub fn start_locked(
             opts: v.clone(),
         })),
     };
+    // #889: viewers' notes.
+    let notes = match &opts.notes_opts {
+        None => None,
+        Some(n) => Some(Arc::new(NotesRuntime {
+            store: Store::open_notes(&n.path, n.max_mb)?,
+            rate: RateLimiter::new(nt::RATE_PER_MINUTE, nt::RATE_BURST, SUBMIT_BOUNDED_USERS),
+            write: Mutex::new(()),
+            opts: n.clone(),
+        })),
+    };
     // #770: previews kept on disk come back (expired ones are dropped).
     let preview_store = match &opts.preview {
         None => None,
@@ -4199,6 +4258,7 @@ pub fn start_locked(
         submit,
         writeback,
         views,
+        notes,
         metrics: Default::default(),
         task_stats: Mutex::new(BTreeMap::new()),
         ingest: ingest_rt,
@@ -5443,6 +5503,9 @@ fn durable_files(opts: &LockedOptions) -> Vec<(&'static str, PathBuf)> {
     if let Some(w) = &opts.views_opts {
         v.push(("views", w.path.clone()));
     }
+    if let Some(n) = &opts.notes_opts {
+        v.push(("notes", n.path.clone()));
+    }
     v
 }
 
@@ -5514,6 +5577,7 @@ fn durable_snapshot(st: &Locked) {
         st.submit.as_ref().map(|s| ("state", &s.store)),
         st.writeback.as_ref().map(|w| ("writeback", &w.store)),
         st.views.as_ref().map(|v| ("views", &v.store)),
+        st.notes.as_ref().map(|n| ("notes", &n.store)),
     ]
     .into_iter()
     .flatten()
@@ -7474,6 +7538,7 @@ fn handle_locked(st: &Locked, req: Request) {
             || path == "/api/submit"
             || path == "/api/save"
             || path.starts_with("/api/views")
+            || path.starts_with("/api/notes")
             || path == "/"
             || path.starts_with("/d/")
             || status >= 400
@@ -7958,6 +8023,21 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 info,
             )
         }
+        (&Method::Get, "/api/notes") | (&Method::Post, "/api/notes" | "/api/notes/delete") => {
+            let (origin, host) = (m.origin.map(str::to_string), m.host.map(str::to_string));
+            let auth_method = ident.as_ref().map(|i| i.method);
+            handle_notes(
+                st,
+                req,
+                path,
+                origin.as_deref(),
+                host.as_deref(),
+                claims.as_ref(),
+                scope,
+                auth_method,
+                info,
+            )
+        }
         (&Method::Post, "/api/save") => {
             let (origin, host) = (m.origin.map(str::to_string), m.host.map(str::to_string));
             handle_save(
@@ -7987,7 +8067,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     info.dashboard = Some(id.to_string());
                     let session = ident.as_ref().and_then(|i| i.page_session.as_deref());
                     let html = String::from_utf8_lossy(&served_index(
-                        st, &pv.dash, scope, session, false, false, false,
+                        st, &pv.dash, scope, session, false, false, false, false, false,
                     ))
                     .into_owned();
                     // The link is the preview's only name: never sent on.
@@ -8141,8 +8221,27 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     let views = st.views.is_some()
                         && page.is_none()
                         && views_personal(ident.as_ref().map(|i| i.method), claims.as_ref());
+                    // #889: may this viewer add notes (a personal sign-in and a
+                    // writer), and delete anyone's?
+                    let personal =
+                        views_personal(ident.as_ref().map(|i| i.method), claims.as_ref());
+                    let (notes_writer, notes_moderator) = match (&st.notes, &claims) {
+                        (Some(n), Some(c)) if personal => (
+                            n.opts.is_writer(&c.user, &c.groups),
+                            n.opts.is_moderator(&c.user, &c.groups),
+                        ),
+                        _ => (false, false),
+                    };
                     let html = String::from_utf8_lossy(&served_index(
-                        st, d, scope, page, writer, ask, views,
+                        st,
+                        d,
+                        scope,
+                        page,
+                        writer,
+                        ask,
+                        views,
+                        notes_writer,
+                        notes_moderator,
                     ))
                     .into_owned();
                     // A page holding a session is never sent to another
@@ -10645,6 +10744,245 @@ fn handle_submit(
     201
 }
 
+/// `GET /api/notes?dashboard=<id>`, `POST /api/notes` `{dashboard, panel,
+/// x, x2?, text}` and `POST /api/notes/delete` `{dashboard, id}` (#889):
+/// the notes on a dashboard's charts. Any credential that may open the
+/// dashboard reads them; a personal sign-in among `writers` adds one; its
+/// author or a moderator deletes it. Writes pass `/api/submit`'s
+/// cross-site gate.
+#[allow(clippy::too_many_arguments)]
+fn handle_notes(
+    st: &Locked,
+    mut req: Request,
+    path: &str,
+    origin: Option<&str>,
+    host: Option<&str>,
+    claims: Option<&Claims>,
+    scope: Option<&Scope>,
+    auth_method: Option<&'static str>,
+    info: &mut LogInfo,
+) -> u16 {
+    let write = req.method() == &Method::Post;
+    let Some(rt) = &st.notes else {
+        info.deny = Some("not_enabled");
+        return reply(req, 404, "this server keeps no notes (no options.notes)");
+    };
+    if req_header(&req, "Sec-Fetch-Site").is_some_and(|v| !v.eq_ignore_ascii_case("same-origin")) {
+        info.deny = Some("csrf");
+        return reply(req, 403, "forbidden: Sec-Fetch-Site must be same-origin");
+    }
+    if write {
+        if let Some(r) = durable_reader(st) {
+            info.deny = Some("not_writer");
+            return send(req, r);
+        }
+        if !sv::origin_required_and_matches_host(origin, host) {
+            info.deny = Some("csrf");
+            return reply(
+                req,
+                403,
+                "forbidden: Origin is required on this endpoint and must match this server",
+            );
+        }
+        if !req_header(&req, "Content-Type")
+            .is_some_and(|v| v.eq_ignore_ascii_case("application/json"))
+        {
+            info.deny = Some("csrf");
+            return reply(req, 403, "forbidden: Content-Type must be application/json");
+        }
+        if req_header(&req, "X-Anofox-Notes") != Some("1") {
+            info.deny = Some("csrf");
+            return reply(req, 403, "forbidden: missing X-Anofox-Notes header");
+        }
+    }
+    let Some(claims) = claims else {
+        return reply(req, 401, access::UNAUTHORIZED);
+    };
+    info.user = Some(claims.user.clone());
+
+    let body: Value = if write {
+        let raw = match read_body(&mut req, nt::NOTES_MAX_BODY) {
+            Ok(b) => b,
+            Err((code, e)) => return reply(req, code, &e),
+        };
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(v) if v.is_object() => v,
+            _ => return reply(req, 400, "the body must be a JSON object"),
+        }
+    } else {
+        Value::Null
+    };
+    let field = |k: &str| body.get(k).and_then(Value::as_str).map(str::to_string);
+    let dash_id = if write {
+        field("dashboard")
+    } else {
+        sv::parse_query(req.url()).remove("dashboard")
+    };
+    let Some(dash_id) = dash_id else {
+        return reply(req, 400, "'dashboard' is required");
+    };
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&dash_id) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    info.dashboard = Some(dash.id.clone());
+    if scope.is_some_and(|s| !s.allows(&dash.id)) {
+        info.deny = Some("scope");
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    if !rt.opts.enabled_for(&dash.id) {
+        info.deny = Some("not_enabled");
+        return reply(req, 404, "this dashboard shows no notes");
+    }
+
+    if !write {
+        let (_, rows) = rt.store.snapshot_all(usize::MAX);
+        let notes = nt::fold(rows.iter().map(|r| r.as_ref()), &dash.id);
+        let out = serde_json::json!({
+            "notes": notes
+                .iter()
+                .map(|n| n.to_json(n.by == claims.user))
+                .collect::<Vec<_>>(),
+        });
+        respond(req, 200, "application/json", out.to_string().into_bytes());
+        return 200;
+    }
+
+    if !views_personal(auth_method, Some(claims)) {
+        info.deny = Some("shared_identity");
+        return reply(req, 403, "forbidden: notes need a personal sign-in");
+    }
+    let moderator = rt.opts.is_moderator(&claims.user, &claims.groups);
+    let delete = path == "/api/notes/delete";
+    if !delete && !rt.opts.is_writer(&claims.user, &claims.groups) {
+        info.deny = Some("not_writer");
+        return reply(
+            req,
+            403,
+            "forbidden: only this dashboard's note writers can add notes",
+        );
+    }
+    if let Err(retry_after) = rt.rate.check(&claims.user, Instant::now()) {
+        info.deny = Some("rate_limited");
+        return rate_limited(req, retry_after);
+    }
+    if rt.store.is_failed() {
+        return reply(
+            req,
+            503,
+            "service unavailable: the notes file is unavailable",
+        );
+    }
+    let (kind, id, vars) = if delete {
+        let Some(id) = field("id").filter(|i| vw::valid_id(i)) else {
+            return reply(req, 400, "'id' must be a note's id");
+        };
+        (Some("delete"), id, Map::new())
+    } else {
+        let Some(panel) = body.get("panel").and_then(Value::as_u64) else {
+            return reply(req, 400, "'panel' must be a statement number");
+        };
+        if !dash
+            .stmts
+            .get(panel as usize)
+            .is_some_and(|(setup, _)| !setup)
+        {
+            return reply(req, 400, "'panel' does not name a panel of this dashboard");
+        }
+        let x = match nt::check_x(&field("x").unwrap_or_default(), "x") {
+            Ok(x) => x,
+            Err(e) => return reply(req, 400, &e),
+        };
+        let x2 = match field("x2").filter(|t| !t.trim().is_empty()) {
+            None => None,
+            Some(t) => match nt::check_x(&t, "x2") {
+                Ok(x) => Some(x),
+                Err(e) => return reply(req, 400, &e),
+            },
+        };
+        let text = match nt::check_text(&field("text").unwrap_or_default(), rt.opts.text_max_chars)
+        {
+            Ok(t) => t,
+            Err(e) => return reply(req, 400, &e),
+        };
+        let mut vars = Map::new();
+        vars.insert("panel".into(), Value::from(panel));
+        vars.insert("x".into(), Value::String(x));
+        if let Some(x2) = x2 {
+            vars.insert("x2".into(), Value::String(x2));
+        }
+        vars.insert("text".into(), Value::String(text));
+        (Some("note"), sv::random_token(), vars)
+    };
+
+    let _guard = rt.write.lock().unwrap_or_else(|p| p.into_inner());
+    let (_, rows) = rt.store.snapshot_all(usize::MAX);
+    let now = nt::fold(rows.iter().map(|r| r.as_ref()), &dash.id);
+    if delete {
+        match now.iter().find(|n| n.id == id) {
+            None => return reply(req, 404, "no such note"),
+            Some(n) if n.by != claims.user && !moderator => {
+                info.deny = Some("not_author");
+                return reply(
+                    req,
+                    403,
+                    "forbidden: only its author or a moderator deletes a note",
+                );
+            }
+            Some(_) => {}
+        }
+    } else if now.len() >= rt.opts.max_per_dashboard {
+        info.deny = Some("limit");
+        return reply(
+            req,
+            409,
+            &format!(
+                "this dashboard has {} notes, its limit — delete one first",
+                rt.opts.max_per_dashboard
+            ),
+        );
+    }
+    if rt.store.user_count(&claims.user) >= nt::MAX_LINES_PER_USER {
+        info.deny = Some("viewer_limit");
+        return reply(req, 409, "note limit reached for this account");
+    }
+    let rec = match rt.store.append(NewRecord {
+        user: claims.user.clone(),
+        auth: auth_method.unwrap_or("").to_string(),
+        dashboard: dash.id.clone(),
+        submit: kind.unwrap_or("note").to_string(),
+        id,
+        vars,
+    }) {
+        Ok(r) => r,
+        Err(e) if e.contains("full") => {
+            return reply(req, 507, "insufficient storage: the notes file is full")
+        }
+        Err(_) => {
+            return reply(
+                req,
+                503,
+                "service unavailable: the notes file is unavailable",
+            )
+        }
+    };
+    drop(_guard);
+    let out = if delete {
+        serde_json::json!({"deleted": rec.id})
+    } else {
+        let n = nt::fold(std::iter::once(&rec), &dash.id);
+        serde_json::json!({"note": n.first().map(|n| n.to_json(true))})
+    };
+    let status = if delete { 200 } else { 201 };
+    respond(
+        req,
+        status,
+        "application/json",
+        out.to_string().into_bytes(),
+    );
+    status
+}
+
 /// #913: whether a credential is one viewer's own sign-in — not an API key,
 /// a share link or another shared or reserved identity. Only those keep
 /// views on the server.
@@ -12005,6 +12343,7 @@ const POLICY_PANEL_ERROR: &str = "this panel could not be shown (the server log 
 /// The served page of `dash`. `scope` limits the navigation to the
 /// dashboards the viewer may read; `session` is an embed link's page session
 /// (the page sends it with each request, see `auth::SESSION_HEADER`).
+#[allow(clippy::too_many_arguments)]
 fn served_index(
     st: &Locked,
     dash: &Dash,
@@ -12013,6 +12352,8 @@ fn served_index(
     writer: bool,
     ask: bool,
     views: bool,
+    notes_writer: bool,
+    notes_moderator: bool,
 ) -> Vec<u8> {
     // The nav and what each statement depends on (#210) come from one
     // snapshot (and its dashboards, #772).
@@ -12100,6 +12441,18 @@ fn served_index(
     });
     // #913: this viewer's views are kept on the server (a personal sign-in).
     cfg["views"] = serde_json::json!({ "server": views });
+    // #889: this dashboard shows notes; may this viewer add (or moderate)?
+    if st
+        .notes
+        .as_ref()
+        .is_some_and(|n| n.opts.enabled_for(&dash.id))
+    {
+        cfg["notes"] = serde_json::json!({
+            "enabled": true,
+            "writer": notes_writer,
+            "moderator": notes_moderator,
+        });
+    }
     // #195: Ask is on for this dashboard and this viewer: the page loads its
     // panel (web/ask-ui.js) and shows the notice's provider.
     if let (true, Some(rt)) = (ask, &st.ask) {
@@ -14218,7 +14571,7 @@ mod tests {
         let e = LockedOptions::parse(Some(r#"{"durability": {"run": true, "location": "/x"}}"#))
             .unwrap_err();
         assert!(
-            e.contains("needs options.state, options.writeback or options.views"),
+            e.contains("needs options.state, options.writeback, options.views or"),
             "{e}"
         );
         assert!(

@@ -100,6 +100,8 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     // #913: saved views live in the server's file, per signed-in viewer; a
     // site keeps them in the browser (#888).
     ("views", SiteOptionKind::Refused),
+    // #889: notes live in the server's file; a site has no endpoint to add one.
+    ("notes", SiteOptionKind::Refused),
 ];
 
 /// `None` for a key that isn't one of `anofox_serve_dashboards`'s options at

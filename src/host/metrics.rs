@@ -17,9 +17,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 /// The routes requests are counted under.
-pub const ROUTES: [&str; 12] = [
-    "page", "panel", "export", "asset", "health", "submit", "save", "views", "login", "metrics",
-    "list", "other",
+pub const ROUTES: [&str; 13] = [
+    "page", "panel", "export", "asset", "health", "submit", "save", "views", "notes", "login",
+    "metrics", "list", "other",
 ];
 /// The status classes.
 const CLASSES: [&str; 5] = ["1xx", "2xx", "3xx", "4xx", "5xx"];
@@ -39,6 +39,7 @@ pub fn route_of(method: &str, path: &str) -> &'static str {
         (_, "/api/submit") => "submit",
         (_, "/api/save") => "save",
         (_, p) if p.starts_with("/api/views") => "views",
+        (_, p) if p.starts_with("/api/notes") => "notes",
         (_, "/health" | "/healthz") => "health",
         (_, "/metrics") => "metrics",
         (_, "/") => "list",
