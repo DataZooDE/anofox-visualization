@@ -108,7 +108,10 @@ pub struct Diagnostic {
     /// `markdown_tone/no-text` | `markdown_tone/ignored` (warnings).
     /// Design advisories
     /// (prefix `design/`): `pie-slices` | `unsorted-bars` | `untitled-chart` |
-    /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table`.
+    /// `many-series` | `too-many-panels` | `ungrouped-kpis` | `raw-table` |
+    /// `ungrouped-inputs` (a note). Input placement ([`crate::input_layout`],
+    /// #949): `layout/input-scope` | `layout/mixed-input-row` |
+    /// `layout/filter-below-content` (warnings) | `input/unused` (a note).
     /// `::IMAGE` / `::IMAGE_DARK` (#514, [`image_src_diag`]): `image/bad-src`
     /// | `image/outside-folder` (errors) | `image/not-in-assets` |
     /// `image/svg-no-size` | `image/too-large` | `image/empty` |
@@ -2520,6 +2523,8 @@ where
     // ---- design: end-of-script checks ----
     if opts.design {
         flush_kpi_run(&mut diags, &mut kpi_run, kpi_run_stmt);
+        // #949: inputs against what they control
+        diags.extend(crate::input_layout::diags(&sql::plan(script)));
         if rendered_panels > 8 && !has_tabs {
             diags.push(Diagnostic {
                 severity: Severity::Warning,

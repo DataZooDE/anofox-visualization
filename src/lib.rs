@@ -36,6 +36,7 @@ pub mod format;
 pub mod freshness;
 pub mod host;
 pub mod image;
+pub mod input_layout;
 pub mod inputs;
 pub mod kpi;
 pub mod lint;
