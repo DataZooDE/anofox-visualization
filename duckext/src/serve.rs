@@ -65,6 +65,7 @@ use anofox_visualization::host::state::{
 };
 use anofox_visualization::host::tasks;
 use anofox_visualization::host::telemetry;
+use anofox_visualization::host::tiles::{self as tl, BasemapOptions, Tiles};
 use anofox_visualization::host::views::{self as vw, ViewsOptions};
 use anofox_visualization::host::writeback::{self as wb, WritebackOptions};
 use anofox_visualization::sql::deps::{self, Deps};
@@ -76,7 +77,7 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -1332,6 +1333,9 @@ pub struct LockedOptions {
     /// `notes` (#889): viewers' notes on charts; [`start_locked`] runs its
     /// start checks and opens the file.
     pub notes_opts: Option<NotesOptions>,
+    /// `basemap` (#760): the installation's map tiles behind
+    /// `GET /api/tiles/{z}/{x}/{y}`; [`start_locked`] opens its cache.
+    pub basemap_opts: Option<BasemapOptions>,
     /// `max_asset_bytes` (#514 PR B): the cap on one file served from
     /// `<dashboards dir>/assets/` (`GET /d/<id>/assets/<rest>`, [`locked_asset`]).
     pub max_asset_bytes: usize,
@@ -1718,6 +1722,7 @@ impl Default for LockedOptions {
             writeback_opts: None,
             views_opts: None,
             notes_opts: None,
+            basemap_opts: None,
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
             metrics_token: None,
             tasks: None,
@@ -2020,6 +2025,9 @@ impl LockedOptions {
                 }
                 "notes" => {
                     o.notes_opts = Some(NotesOptions::parse(val)?);
+                }
+                "basemap" => {
+                    o.basemap_opts = Some(BasemapOptions::parse(val)?);
                 }
                 // The key list is generated, not copied by hand, so it can't
                 // drift from `--site`'s own `SERVER_OPTION_KEYS` (#501).
@@ -3014,6 +3022,8 @@ struct Locked {
     views: Option<Arc<ViewsRuntime>>,
     /// `options.notes`' live runtime (#889) — `None` unless configured.
     notes: Option<Arc<NotesRuntime>>,
+    /// `options.basemap`'s live runtime (#760) — `None` unless configured.
+    tiles: Option<Arc<TilesRuntime>>,
     /// Request counts and latencies for `GET /metrics` (#765).
     metrics: anofox_visualization::host::metrics::Metrics,
     /// #767: per task, its last run (for `/metrics`).
@@ -3103,6 +3113,18 @@ struct ViewsRuntime {
 }
 
 /// Live runtime for `options.notes` (#889).
+/// `options.basemap`'s live runtime (#760).
+struct TilesRuntime {
+    tiles: Tiles,
+    /// Per viewer (or peer address, without a login).
+    rate: RateLimiter,
+    /// Cache misses, for the whole server (one key).
+    upstream: RateLimiter,
+    /// Upstream fetches running now ([`tl::MAX_INFLIGHT`]): a slow source
+    /// must not hold every server worker.
+    inflight: AtomicUsize,
+}
+
 struct NotesRuntime {
     opts: NotesOptions,
     store: Store,
@@ -3883,6 +3905,27 @@ fn check_dash_set(
         anofox_visualization::host::state::check_path_rules(&n.path, opts.data.as_deref(), dir)
             .map_err(|e| e.replace("options.state.path", "options.notes.path"))?;
     }
+    // #760: the tile cache holds public map imagery only, but must not be
+    // readable as data or served as a dashboard file.
+    if let Some(c) = opts
+        .basemap_opts
+        .as_ref()
+        .and_then(|b| b.cache_dir.as_ref())
+    {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let cache = canon(c);
+        let inside = |root: &Path| {
+            let r = canon(root);
+            cache.starts_with(&r) || r.starts_with(&cache)
+        };
+        if inside(dir) || opts.data.as_deref().is_some_and(inside) {
+            return Err(
+                "options.basemap.cache_dir must be outside the dashboards folder and \
+                 options.data (and contain neither)"
+                    .into(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -4163,6 +4206,16 @@ pub fn start_locked(
             opts: n.clone(),
         })),
     };
+    // #760: the tile basemap (its cache directory is opened, or made, now).
+    let tiles = match &opts.basemap_opts {
+        None => None,
+        Some(b) => Some(Arc::new(TilesRuntime {
+            tiles: Tiles::open(b.clone())?,
+            rate: RateLimiter::new(tl::RATE_PER_MINUTE, tl::RATE_BURST, SUBMIT_BOUNDED_USERS),
+            upstream: RateLimiter::new(b.upstream_per_minute, b.upstream_per_minute.min(100), 1),
+            inflight: AtomicUsize::new(0),
+        })),
+    };
     // #770: previews kept on disk come back (expired ones are dropped).
     let preview_store = match &opts.preview {
         None => None,
@@ -4259,6 +4312,7 @@ pub fn start_locked(
         writeback,
         views,
         notes,
+        tiles,
         metrics: Default::default(),
         task_stats: Mutex::new(BTreeMap::new()),
         ingest: ingest_rt,
@@ -8008,6 +8062,9 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 info,
             )
         }
+        (&Method::Get, p) if p.starts_with("/api/tiles/") => {
+            handle_tiles(st, req, path, scope, info)
+        }
         (&Method::Get, "/api/views") | (&Method::Post, "/api/views" | "/api/views/delete") => {
             let (origin, host) = (m.origin.map(str::to_string), m.host.map(str::to_string));
             let auth_method = ident.as_ref().map(|i| i.method);
@@ -10989,6 +11046,93 @@ fn handle_notes(
 fn views_personal(auth_method: Option<&'static str>, claims: Option<&Claims>) -> bool {
     !matches!(auth_method, Some("api_key") | Some("share"))
         && claims.is_some_and(|c| !c.user.is_empty() && !access::is_reserved_user(&c.user))
+}
+
+/// `GET /api/tiles/{z}/{x}/{y}?dashboard=<id>` (#760): one tile of the
+/// installation's basemap, for a dashboard that draws one (`::MAPTILES`) and
+/// that the credential may open. Only the three numbers reach the source.
+fn handle_tiles(
+    st: &Locked,
+    req: Request,
+    path: &str,
+    scope: Option<&Scope>,
+    info: &mut LogInfo,
+) -> u16 {
+    let Some(rt) = &st.tiles else {
+        info.deny = Some("not_enabled");
+        return reply(
+            req,
+            404,
+            "this server draws no basemap (no options.basemap)",
+        );
+    };
+    if req_header(&req, "Sec-Fetch-Site").is_some_and(|v| !v.eq_ignore_ascii_case("same-origin")) {
+        info.deny = Some("csrf");
+        return reply(req, 403, "forbidden: Sec-Fetch-Site must be same-origin");
+    }
+    let Some((z, x, y)) = tl::parse_path(path) else {
+        return reply(req, 400, "a tile is /api/tiles/{z}/{x}/{y}");
+    };
+    let Some(dash_id) = sv::parse_query(req.url()).remove("dashboard") else {
+        return reply(req, 400, "'dashboard' is required");
+    };
+    let gen = st.current.get();
+    let Some(dash) = gen.snap.dashes.find(&dash_id) else {
+        return reply(req, 404, "no such dashboard");
+    };
+    info.dashboard = Some(dash.id.clone());
+    if scope.is_some_and(|s| !s.allows(&dash.id)) {
+        info.deny = Some("scope");
+        return reply(req, 403, "forbidden: not in this credential's scope");
+    }
+    if !tl::uses_map_tiles(&dash.sql) {
+        info.deny = Some("no_basemap");
+        return reply(req, 404, "this dashboard draws no basemap");
+    }
+    let who = info
+        .user
+        .clone()
+        .or_else(|| req.remote_addr().map(|a| a.ip().to_string()))
+        .unwrap_or_default();
+    let now = Instant::now();
+    if let Err(retry_after) = rt.rate.check(&who, now) {
+        info.deny = Some("rate_limited");
+        return rate_limited(req, retry_after);
+    }
+    let upstream = rt.tiles.is_upstream(z, x, y);
+    if upstream {
+        if let Err(retry_after) = rt.upstream.check("", now) {
+            info.deny = Some("rate_limited");
+            return rate_limited(req, retry_after);
+        }
+        if rt.inflight.fetch_add(1, Ordering::AcqRel) >= tl::MAX_INFLIGHT {
+            rt.inflight.fetch_sub(1, Ordering::AcqRel);
+            info.deny = Some("busy");
+            return reply(req, 503, "the tile source is busy, try again");
+        }
+    }
+    let got = rt.tiles.get(z, x, y);
+    if upstream {
+        rt.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+    match got {
+        Ok((bytes, ctype)) => {
+            let resp = Response::from_data(bytes)
+                .with_status_code(200)
+                .with_header(header("Content-Type", ctype))
+                .with_header(header("X-Content-Type-Options", "nosniff"))
+                .with_header(header("Cache-Control", "private, max-age=86400"));
+            let _ = req.respond(resp);
+            200
+        }
+        Err(tl::TileError::Invalid) => reply(req, 404, "no such tile"),
+        Err(tl::TileError::Missing) => reply(req, 404, "the tile source has no such tile"),
+        Err(tl::TileError::Upstream(e)) => {
+            // the reason stays in the server's log; the viewer sees a 502
+            eprintln!("anofox_serve: tile {z}/{x}/{y}: {e}");
+            reply(req, 502, "the tile source is unavailable")
+        }
+    }
 }
 
 /// `GET /api/views?dashboard=<id>`, `POST /api/views` `{dashboard, name,

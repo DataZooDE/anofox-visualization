@@ -102,6 +102,9 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     ("views", SiteOptionKind::Refused),
     // #889: notes live in the server's file; a site has no endpoint to add one.
     ("notes", SiteOptionKind::Refused),
+    // #760: tiles come through the server's /api/tiles; a site gets them
+    // embedded at build time (`dashboard --site --basemap`), not this key.
+    ("basemap", SiteOptionKind::ServerOnly),
 ];
 
 /// `None` for a key that isn't one of `anofox_serve_dashboards`'s options at
