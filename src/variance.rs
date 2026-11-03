@@ -567,6 +567,68 @@ pub(crate) fn render_funnel(
     Ok(Panel::plot(plot, width, height))
 }
 
+/// `::PARETO` (#879): `::XAXIS` categories as bars sorted largest first (a
+/// category's rows summed), with the cumulative share as a line read
+/// against a 0–100 % right axis (ggplot-rs `geom_pareto`).
+pub(crate) fn render_pareto(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let Some(labels) = x_labels(cols) else {
+        return Ok(note_svg(
+            title,
+            "::PARETO needs an ::XAXIS category",
+            width,
+            height,
+        ));
+    };
+    let keep: Vec<usize> = (0..labels.len())
+        .filter(|&i| {
+            value
+                .values
+                .get(i)
+                .and_then(|v| v.as_f64())
+                .is_some_and(|f| f.is_finite() && f >= 0.0)
+        })
+        .collect();
+    if keep.is_empty() {
+        return Ok(note_svg(
+            title,
+            "::PARETO needs non-negative values",
+            width,
+            height,
+        ));
+    }
+    let data = vec![
+        (
+            "x".to_string(),
+            strs(keep.iter().map(|&i| labels[i].clone())),
+        ),
+        (
+            "y".to_string(),
+            nums(
+                keep.iter()
+                    .map(|&i| value.values[i].as_f64().unwrap_or(0.0)),
+            ),
+        ),
+    ];
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("x").y("y"))
+        .geom_pareto()
+        .xlab("")
+        .ylab("")
+        .theme(chart_theme(o, 11.0))
+        .legend_position(LegendPosition::None);
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}
+
 /// `::GANTT` (#882): one bar per row, the `::GANTT` column naming the task,
 /// from `::XMIN` to `::XMAX` (dates or numbers), in the theme's series
 /// colours by `::CATEGORY` (ggplot-rs `geom_xrange`). Tasks stay in row order,

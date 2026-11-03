@@ -3151,6 +3151,19 @@ fn line_chart_still_treats_iso_date_strings_as_a_continuous_axis() {
     );
 }
 
+// #879: ::PARETO — bars plus a cumulative line on a right axis.
+#[test]
+fn pareto_has_a_cumulative_axis() {
+    let s = svg(vec![
+        Column::new("x", Role::X, strs(&["a", "b", "c"])),
+        Column::new("n", Role::Value(Kind::Pareto), nums(&[5.0, 20.0, 10.0])),
+    ]);
+    assert!(s.contains("100%"), "the cumulative axis reaches 100 %");
+    for l in ["a", "b", "c"] {
+        assert!(s.contains(&format!(">{l}<")), "bar {l}");
+    }
+}
+
 // #882: ::GANTT — one bar per task on a date axis.
 #[test]
 fn gantt_bars_per_task() {
