@@ -303,6 +303,8 @@ try {
   await p4.waitForSelector(".dash .panel", { timeout: 60000 });
   const navHref = await p4.$eval('.served-nav a[data-nav-id="by-product"]', (a) => a.getAttribute("href"));
   check(navHref.startsWith("/repo/d/by-product/"), `served-nav href resolves under /repo/: ${navHref}`);
+  // the table panel can render after the first panel (seen flaking on #912)
+  await p4.waitForSelector(".dash .dp-link", { timeout: 60000 });
   const tableLinkHref = await p4.$eval(".dash .dp-link", (a) => a.getAttribute("href"));
   check(tableLinkHref.startsWith("/repo/d/by-product/"), `table ::LINK href resolves under /repo/: ${tableLinkHref}`);
 
