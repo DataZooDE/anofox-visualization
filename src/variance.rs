@@ -566,3 +566,76 @@ pub(crate) fn render_funnel(
     }
     Ok(Panel::plot(plot, width, height))
 }
+
+/// `::DUMBBELL` (#883): per item (the `::DUMBBELL` column) two values,
+/// `::XMIN` and `::XMAX`, as two dots joined by a line, items top down in
+/// row order (ggplot-rs `geom_dumbbell`, flipped). Before/after, plan/actual.
+pub(crate) fn render_dumbbell(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let col = |r: Role| cols.iter().find(|c| c.role == r);
+    let (Some(a), Some(b)) = (col(Role::XMin), col(Role::XMax)) else {
+        return Ok(note_svg(
+            title,
+            "::DUMBBELL needs ::XMIN and ::XMAX values",
+            width,
+            height,
+        ));
+    };
+    let items: Vec<String> = value.values.iter().map(value_str).collect();
+    let keep: Vec<usize> = (0..items.len())
+        .filter(|&i| {
+            a.values.get(i).and_then(|v| v.as_f64()).is_some()
+                && b.values.get(i).and_then(|v| v.as_f64()).is_some()
+        })
+        .collect();
+    if keep.is_empty() {
+        return Ok(note_svg(
+            title,
+            "::DUMBBELL has no item with both values",
+            width,
+            height,
+        ));
+    }
+    let data = vec![
+        (
+            "item".to_string(),
+            strs(keep.iter().map(|&i| items[i].clone())),
+        ),
+        (
+            "lo".to_string(),
+            nums(keep.iter().map(|&i| a.values[i].as_f64().unwrap_or(0.0))),
+        ),
+        (
+            "hi".to_string(),
+            nums(keep.iter().map(|&i| b.values[i].as_f64().unwrap_or(0.0))),
+        ),
+    ];
+    let mut order: Vec<String> = Vec::new();
+    for &i in &keep {
+        if !order.contains(&items[i]) {
+            order.push(items[i].clone());
+        }
+    }
+    order.reverse();
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("item").ymin("lo").ymax("hi"))
+        .geom_dumbbell()
+        .scale_x_discrete(
+            ScaleDiscrete::new().with_limits(order.iter().map(String::as_str).collect()),
+        )
+        .coord_flip()
+        .xlab("")
+        .ylab("")
+        .theme(chart_theme(o, 11.0))
+        .legend_position(LegendPosition::None);
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}

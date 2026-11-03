@@ -3150,3 +3150,21 @@ fn line_chart_still_treats_iso_date_strings_as_a_continuous_axis() {
         labels.len()
     );
 }
+
+// #883: ::DUMBBELL — two dots per item.
+#[test]
+fn dumbbell_two_values_per_item() {
+    let s = svg(vec![
+        Column::new(
+            "i",
+            Role::Value(Kind::Dumbbell),
+            strs(&["Berlin", "Munich"]),
+        ),
+        Column::new("a", Role::XMin, nums(&[420.0, 520.0])),
+        Column::new("b", Role::XMax, nums(&[455.0, 548.0])),
+    ]);
+    for l in ["Berlin", "Munich"] {
+        assert!(s.contains(&format!(">{l}<")), "item {l}");
+    }
+    assert!(s.matches("<circle").count() >= 4, "two dots per item");
+}

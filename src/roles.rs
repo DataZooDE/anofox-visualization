@@ -150,6 +150,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "measure per XAXIS row vs a ::GOAL tick over ::RANGE bands '60,80,100'"),
     e("FUNNEL", &["FUNNELCHART"], R::Value(Kind::Funnel), "chart", true,
       "ordered XAXIS stages, widths by value, conversion % from the previous stage"),
+    e("DUMBBELL", &["DUMBBELLCHART", "SLOPE"], R::Value(Kind::Dumbbell), "chart", true,
+      "two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual)"),
     e("HISTOGRAM", &["HIST"], R::Value(Kind::Histogram), "chart", true, "histogram of the measure"),
     e("DENSITY", &["KDE"], R::Value(Kind::Density), "chart", true,
       "kernel density curve (one per CATEGORY)"),
@@ -1117,6 +1119,7 @@ mod tests {
             K::Waterfall,
             K::Bullet,
             K::Funnel,
+            K::Dumbbell,
         ];
         let mut v: Vec<Role> = kinds.into_iter().map(Role::Value).collect();
         v.extend(
