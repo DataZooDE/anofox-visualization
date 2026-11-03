@@ -112,7 +112,7 @@ rm -f "$W/inX"; mkfifo "$W/inX"
 exec {fx}>"$W/inX"
 printf "LOAD '%s';\nSELECT anofox_serve_dashboards('%s', %s, '{\"durability\": {\"run\": true, \"location\": \"%s\"}}');\n" "$EXT" "$W/dash" "$((PORT + 2))" "$W/snap" >&"$fx"
 exec {fx}>&-
-for _ in $(seq 50); do grep -q 'needs options.state or options.writeback' "$W/outX" && break; sleep 0.2; done
-grep -q 'needs options.state or options.writeback' "$W/outX" || fail "durability alone should refuse the start: $(cat "$W/outX")"
+for _ in $(seq 50); do grep -q 'options.durability needs options.state' "$W/outX" && break; sleep 0.2; done
+grep -q 'options.durability needs options.state' "$W/outX" || fail "durability alone should refuse the start: $(cat "$W/outX")"
 echo "OK: durability without state/writeback refuses the start"
 echo "PASS: durability"
