@@ -78,8 +78,12 @@ need.
 
 ## Implementation phases (each a PR with this review's checks as tests)
 
-1. ggplot-rs: `GeomMapTile::tiles_for(domain, w, h)` (the tile list a render
-   needs) and a fetcher fed from a prefetched map. Release.
+1. Core (no ggplot-rs change needed — its `TileFetcher` is any closure; ggplot-rs
+   feature `tiles` has no dependencies): a first render with a *recording*
+   fetcher (returns `None`, records `z/x/y`) yields the tile list; the host
+   fetches those; a second render takes a fetcher backed by the fetched bytes.
+   `::BASEMAP` requires the map's `'mercator'` projection (`src/map/project.rs`)
+   and adds `annotation_map_tile` under the map layers in `src/map/plot.rs`.
 2. Native: `options.basemap` parse + start checks, the proxy endpoint, the
    cache, CLI `--basemap` (local dir or https), static export embedding.
 3. Browser: `::BASEMAP` role, `map_tiles` wasm export, prefetch via
