@@ -56,6 +56,7 @@ fn with_tiles(seen: Arc<Mutex<Vec<(u32, u32, u32)>>>) -> RenderOptions {
     RenderOptions {
         basemap: Some(Basemap {
             attribution: "© Test tiles".into(),
+            max_zoom: 19,
             tiles: Arc::new(move |z, x, y| {
                 seen.lock().unwrap().push((z, x, y));
                 Some(PNG.to_vec())
@@ -154,10 +155,63 @@ fn without_a_host_source_the_map_draws_as_before() {
     let none = RenderOptions {
         basemap: Some(Basemap {
             attribution: "© Test tiles".into(),
+            max_zoom: 19,
             tiles: Arc::new(|_, _, _| None),
         }),
         ..RenderOptions::default()
     };
     let svg = render_with(&depots(Some("mercator"), Some("on")), 480, 320, &none).unwrap();
     assert!(!svg.contains("data-tile="));
+}
+
+/// One map statement's rows, whatever is asked.
+struct MapRows;
+impl anofox_visualization::dashboard::DataProvider for MapRows {
+    fn execute(&mut self, _sql: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn query(&mut self, _sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+        Ok(depots(Some("mercator"), Some("on"))
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (format!("c{i}"), c.values))
+            .collect())
+    }
+}
+
+#[test]
+fn a_dashboard_render_passes_the_host_tiles_to_its_maps() {
+    use anofox_visualization::dashboard::{render_dashboard_svg, DashboardOptions};
+    let sql = "SELECT g::MAP, v::BARCHART, p::PROJECTION, t::MAPTILES FROM depots;";
+    let plain = render_dashboard_svg(sql, &mut MapRows, &DashboardOptions::default()).unwrap();
+    assert!(!plain.contains("data-tile="));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let o = DashboardOptions {
+        basemap: with_tiles(seen.clone()).basemap,
+        ..DashboardOptions::default()
+    };
+    let svg = render_dashboard_svg(sql, &mut MapRows, &o).unwrap();
+    assert!(svg.contains("data-tile="), "tiles drawn");
+    assert!(svg.contains("© Test tiles"));
+    assert!(!seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_map_never_asks_past_the_source_max_zoom() {
+    let cols = depots(Some("mercator"), Some("on"));
+    let deep = map_tiles_needed(&cols, 480, 320, &RenderOptions::default());
+    assert!(deep[0].0 > 3, "{deep:?}");
+    let o = RenderOptions {
+        basemap: Some(Basemap {
+            attribution: String::new(),
+            max_zoom: 3,
+            tiles: Arc::new(|_, _, _| None),
+        }),
+        ..RenderOptions::default()
+    };
+    let need = map_tiles_needed(&cols, 480, 320, &o);
+    assert!(
+        !need.is_empty() && need.iter().all(|t| t.0 == 3),
+        "{need:?}"
+    );
 }

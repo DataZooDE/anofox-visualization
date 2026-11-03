@@ -1102,12 +1102,15 @@ pub type TileFn = std::sync::Arc<dyn Fn(u32, u32, u32) -> Option<Vec<u8>> + Send
 pub struct Basemap {
     pub attribution: String,
     pub tiles: TileFn,
+    /// The deepest zoom the source serves (a map never asks past it).
+    pub max_zoom: u32,
 }
 
 impl std::fmt::Debug for Basemap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Basemap")
             .field("attribution", &self.attribution)
+            .field("max_zoom", &self.max_zoom)
             .finish()
     }
 }
@@ -1131,6 +1134,7 @@ pub fn map_tiles_needed(
             .as_ref()
             .map(|b| b.attribution.clone())
             .unwrap_or_default(),
+        max_zoom: opts.basemap.as_ref().map_or(19, |b| b.max_zoom),
         tiles: std::sync::Arc::new(move |z, x, y| {
             rec.lock()
                 .unwrap_or_else(|p| p.into_inner())

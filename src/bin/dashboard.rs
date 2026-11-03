@@ -49,6 +49,8 @@ const USAGE: &str = "usage:\n  \
                                              getvariable('anofox_data'), as a locked server\n  \
      dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N] [--data <dir>]\n  \
                                              render the whole dashboard headless to one SVG\n  \
+                                             (--basemap <json|file>: options.basemap's tiles\n  \
+                                             under ::MAPTILES maps, fetched now)\n  \
      dashboard --check <file.sql> [--json]   lint: which panels break / are empty\n  \
      dashboard --check <folder> [--json]     …every .sql of a served folder, plus duplicate\n  \
                                              titles and file names the servers skip\n  \
@@ -757,7 +759,28 @@ fn dashboard_assets_root(sql_path: &Path) -> Option<PathBuf> {
         .and_then(anofox_visualization::image::canonical_assets_dir)
 }
 
-/// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N] [--data <dir>]`:
+/// `--basemap <json | file>` (#760): `options.basemap`'s object; the tiles
+/// are fetched now and embedded in the SVG.
+#[cfg(feature = "auth")]
+fn basemap_arg(v: &str) -> anofox_visualization::Basemap {
+    use anofox_visualization::host::tiles::Tiles;
+    match Tiles::from_arg(v) {
+        Ok(t) => std::sync::Arc::new(t).basemap(|| true),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(not(feature = "auth"))]
+fn basemap_arg(_: &str) -> anofox_visualization::Basemap {
+    eprintln!("error: --basemap needs a build with the serve feature");
+    std::process::exit(2);
+}
+
+/// `dashboard --svg <file.sql> [out.svg] [--theme T] [--dark] [--width N] [--data <dir>]
+/// [--basemap <json | file>]`:
 /// the whole dashboard (KPIs, tables, charts, header) as one SVG.
 fn cmd_svg(args: &[String]) {
     let mut pos: Vec<String> = Vec::new();
@@ -770,6 +793,7 @@ fn cmd_svg(args: &[String]) {
             "--dark" => o.variant = Variant::Dark,
             "--width" => o.width = it.next().and_then(|v| v.parse().ok()).unwrap_or(o.width),
             "--data" => data = it.next().cloned(),
+            "--basemap" => o.basemap = it.next().map(|v| basemap_arg(v)),
             _ => pos.push(a.clone()),
         }
     }

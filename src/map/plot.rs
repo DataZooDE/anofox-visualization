@@ -675,7 +675,9 @@ pub(super) fn build(
     let tile_layer = tile_layer.map(|b| {
         let fetch = b.tiles.clone();
         ggplot_rs::geom::map_tile::GeomMapTile::new(
-            ggplot_rs::geom::map_tile::TileSource::xyz("").attribution(b.attribution.clone()),
+            ggplot_rs::geom::map_tile::TileSource::xyz("")
+                .attribution(b.attribution.clone())
+                .zoom_range(0, b.max_zoom),
             move |z, x, y| fetch(z, x, y),
         )
         .units(super::project::R_MERC)

@@ -5,7 +5,8 @@
 // a login, refuses a cross-site request, a dashboard without ::MAPTILES, a
 // tile outside the grid or past max_zoom, anything but three plain numbers,
 // a file that isn't a PNG/JPEG, and a link; a source with a bad template or
-// a cache inside the dashboards folder refuses to start.
+// a cache inside the dashboards folder refuses to start. An export
+// (/api/export) embeds the tiles.
 //
 //   node scripts/tiles-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8971] [--duckdb duckdb]
@@ -120,6 +121,22 @@ try {
   const tileLines = s.log().split("\n").filter((l) => l.startsWith("anofox_serve: tile"));
   check(tileLines.length === 2 && tileLines.every((l) => !l.includes(src)), `the server logs why a tile failed, without the source path (${tileLines.join(" | ")})`);
   await stop(s);
+
+  // An export draws the tiles in (a source with every tile up to z 2).
+  const full = path.join(W, "full");
+  for (let z = 0; z <= 2; z++)
+    for (let x = 0; x < 1 << z; x++) {
+      mkdirSync(path.join(full, String(z), String(x)), { recursive: true });
+      for (let y = 0; y < 1 << z; y++) writeFileSync(path.join(full, String(z), String(x), `${y}.png`), PNG);
+    }
+  const s2 = await serve({ ...opts, basemap: { url: `${full}/{z}/{x}/{y}.png`, attribution: "© Test tiles", max_zoom: 2 } });
+  const svg = (await get("/api/export/depots.svg")).body.toString();
+  check(/data-tile="2\/\d+\/\d+"/.test(svg), `an export embeds the tiles (${(svg.match(/data-tile=/g) || []).length})`);
+  check(svg.includes("© Test tiles"), "…with the attribution");
+  check(!/href="(https?:|\/)/.test(svg), "…and no link to fetch anything");
+  const noTiles = (await get("/api/export/plain.svg")).body.toString();
+  check(!noTiles.includes("data-tile="), "a dashboard without ::MAPTILES exports without tiles");
+  await stop(s2);
 
   check(await refused({ ...opts, basemap: { ...basemap, url: "http://tiles.example/{z}/{x}/{y}.png" } }, "https://"), "an http:// source refuses the start");
   check(await refused({ ...opts, basemap: { ...basemap, url: "https://t.example/{z}/{x}/{y}.png?key={k}" } }, "only {z}, {x} and {y}"), "a template with another placeholder refuses the start");

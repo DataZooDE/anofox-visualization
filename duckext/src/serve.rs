@@ -3115,7 +3115,7 @@ struct ViewsRuntime {
 /// Live runtime for `options.notes` (#889).
 /// `options.basemap`'s live runtime (#760).
 struct TilesRuntime {
-    tiles: Tiles,
+    tiles: Arc<Tiles>,
     /// Per viewer (or peer address, without a login).
     rate: RateLimiter,
     /// Cache misses, for the whole server (one key).
@@ -3123,6 +3123,35 @@ struct TilesRuntime {
     /// Upstream fetches running now ([`tl::MAX_INFLIGHT`]): a slow source
     /// must not hold every server worker.
     inflight: AtomicUsize,
+}
+
+impl TilesRuntime {
+    /// One upstream fetch may start now (the server-wide rate and the
+    /// in-flight cap); on `true` the caller ends it with [`Self::done`].
+    fn try_start(&self) -> Result<(), &'static str> {
+        if self.upstream.check("", Instant::now()).is_err() {
+            return Err("rate_limited");
+        }
+        if self.inflight.fetch_add(1, Ordering::AcqRel) >= tl::MAX_INFLIGHT {
+            self.inflight.fetch_sub(1, Ordering::AcqRel);
+            return Err("busy");
+        }
+        Ok(())
+    }
+
+    fn done(&self) {
+        self.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// For a render's tile source: admits a fetch and releases its slot
+    /// right away (a render fetches its tiles one after another).
+    fn admit_upstream(&self) -> bool {
+        let ok = self.try_start().is_ok();
+        if ok {
+            self.done();
+        }
+        ok
+    }
 }
 
 struct NotesRuntime {
@@ -4210,7 +4239,7 @@ pub fn start_locked(
     let tiles = match &opts.basemap_opts {
         None => None,
         Some(b) => Some(Arc::new(TilesRuntime {
-            tiles: Tiles::open(b.clone())?,
+            tiles: Arc::new(Tiles::open(b.clone())?),
             rate: RateLimiter::new(tl::RATE_PER_MINUTE, tl::RATE_BURST, SUBMIT_BOUNDED_USERS),
             upstream: RateLimiter::new(b.upstream_per_minute, b.upstream_per_minute.min(100), 1),
             inflight: AtomicUsize::new(0),
@@ -8706,6 +8735,16 @@ fn export_dashboard(
         asset_root: st.current.get().snap.dashes.assets_root.clone(),
         single: look.panel.is_some(),
         only,
+        // #760: an export draws the tiles here, under the same server-wide
+        // upstream limits as /api/tiles (a refused fetch is left blank).
+        basemap: st
+            .tiles
+            .as_ref()
+            .filter(|_| tl::uses_map_tiles(&dash.sql))
+            .map(|rt| {
+                let r = rt.clone();
+                rt.tiles.basemap(move || r.admit_upstream())
+            }),
         ..Default::default()
     };
     let svg = dashboard::render_dashboard_svg(&dash.sql, &mut data, &opts);
@@ -11094,26 +11133,20 @@ fn handle_tiles(
         .clone()
         .or_else(|| req.remote_addr().map(|a| a.ip().to_string()))
         .unwrap_or_default();
-    let now = Instant::now();
-    if let Err(retry_after) = rt.rate.check(&who, now) {
+    if let Err(retry_after) = rt.rate.check(&who, Instant::now()) {
         info.deny = Some("rate_limited");
         return rate_limited(req, retry_after);
     }
     let upstream = rt.tiles.is_upstream(z, x, y);
     if upstream {
-        if let Err(retry_after) = rt.upstream.check("", now) {
-            info.deny = Some("rate_limited");
-            return rate_limited(req, retry_after);
-        }
-        if rt.inflight.fetch_add(1, Ordering::AcqRel) >= tl::MAX_INFLIGHT {
-            rt.inflight.fetch_sub(1, Ordering::AcqRel);
-            info.deny = Some("busy");
+        if let Err(why) = rt.try_start() {
+            info.deny = Some(why);
             return reply(req, 503, "the tile source is busy, try again");
         }
     }
     let got = rt.tiles.get(z, x, y);
     if upstream {
-        rt.inflight.fetch_sub(1, Ordering::AcqRel);
+        rt.done();
     }
     match got {
         Ok((bytes, ctype)) => {
