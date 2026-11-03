@@ -2598,15 +2598,9 @@ fn cmd_state_open(
     }
     let abs = std::fs::canonicalize(p).map_err(|e| format!("{path}: {e}"))?;
     const CLI_MAX_MB: u64 = 1 << 20; // 1 TiB — effectively unlimited for this tool.
-    let open: fn(
-        &std::path::Path,
-        u64,
-    ) -> Result<anofox_visualization::host::state::Store, String> = if read_only {
-        anofox_visualization::host::state::Store::open_read_only
-    } else {
-        anofox_visualization::host::state::Store::open
-    };
-    open(&abs, CLI_MAX_MB).map_err(|e| format!("{path}: {e}"))
+                                     // Any kind the header names: a state file, a change log, a views file (#913).
+    anofox_visualization::host::state::Store::open_existing(&abs, CLI_MAX_MB, read_only)
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 /// `dashboard state export <state.jsonl> [--user U] [--format jsonl|csv] [--out FILE] [--force]`.

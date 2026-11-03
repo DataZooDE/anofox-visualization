@@ -924,8 +924,9 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
 
 ### Durability: snapshots of the state and the saves (`options.durability`, #775)
 
-The per-viewer state store (`options.state`) and the write-back change log
-(`options.writeback`) are files on the node. With `durability`, the writer
+The per-viewer state store (`options.state`), the write-back change log
+(`options.writeback`) and the saved views (`options.views`, #913) are files
+on the node. With `durability`, the writer
 copies them to S3 and a new node starts from there:
 
 ```sql
@@ -938,8 +939,8 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
 
 - **Snapshots:** every `snapshot_every_s` (default 300) and once at the
   stop, the writer copies each file under its own lock (no write runs
-  meanwhile) and uploads it to `<location>/state.jsonl` and
-  `<location>/writeback.jsonl`, byte for byte, through DuckDB (`COPY … TO`),
+  meanwhile) and uploads it to `<location>/state.jsonl`,
+  `<location>/writeback.jsonl` and `<location>/views.jsonl`, byte for byte, through DuckDB (`COPY … TO`),
   so the S3 secret the operator created in the serving session applies. An
   unchanged file is not uploaded again. `location` may also be `gs://`,
   `r2://` or a local directory (an NFS mount, a test).
@@ -1709,6 +1710,48 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   `csrf`, …). The change log keeps every saved row, so a change's before
   and after are both on record; undoing one is a new save of the earlier
   values.
+
+### Saved views (`options.views`, #913)
+
+A viewer's **Views** (named page states: inputs, selections, brushed ranges,
+frames, `::VIEW` picks, tab) are kept per login on the server instead of in
+one browser, so they follow the viewer to another browser or device. A
+served page then shows **Views** in its header: *Save this view…*, the saved
+views (newest first), *Delete a view…*. Without `options.views` (and in the
+builder or a published site) the browser keeps them (#888).
+
+```json
+"views": {"path": "/var/lib/anofox/views.jsonl", "max_per_dashboard": 50, "max_mb": 64}
+```
+
+- **Who.** Needs a login (`options.auth`; the start refuses otherwise) and a
+  personal sign-in: an API key, a share link or another reserved identity
+  gets `403`, and a page holding an embed link's session doesn't offer it.
+  Every read and write is keyed by the signed-in user, and a credential's
+  dashboard scope applies; nobody reads or deletes another viewer's views.
+- **What is stored.** A name (1–80 characters, no control characters) and
+  the address' **state only**: `tab`, `v.*`, `frame.*` and `view.*`
+  parameters (≤ 64, ≤ 4 KB, re-encoded). Never a whole address: the page
+  opens a view on its own dashboard path, so a stored view can't send anyone
+  elsewhere. A `v.*` name the dashboard doesn't declare is ignored by the
+  page, as one typed into the address bar would be; the name is shown as
+  text.
+- **Endpoints.** `GET /api/views?dashboard=<id>` → `{views: [{id, name,
+  query, at}], max}`; `POST /api/views` `{dashboard, name, query}` → `201`
+  (the same name replaces that view); `POST /api/views/delete` `{dashboard,
+  id}`. Writes pass the same cross-site gate as `/api/submit` (`Origin`
+  required and matching, `Sec-Fetch-Site` same-origin when sent, a JSON body,
+  `X-Anofox-Views: 1`); a cross-site read is refused too. At most
+  `max_per_dashboard` (default 50, ≤ 500) views per viewer and dashboard
+  (`409`), 5000 lines per viewer, 30 writes a minute (burst 10).
+- **The file.** The state store's format and file discipline (single
+  writer, `fdatasync` per write, torn-tail recovery, the same path rules),
+  its header marked `"kind":"views"`, so it can't be swapped with a state
+  file or a change log, and its own file (not `options.state`'s or
+  `options.writeback`'s). One line per save (`"submit": "view"`, `"vars":
+  {name, query}`) or delete (`"submit": "delete"`, the view's `id`).
+  `options.durability` keeps it as `<location>/views.jsonl`. Requests are in
+  the request log (`/api/views…`, the user and dashboard, no name or state).
 
 ## B. Static render — `serve --dashboards <dir>`
 

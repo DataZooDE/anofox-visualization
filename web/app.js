@@ -2867,7 +2867,7 @@ async function boot() {
   $("share").onclick = shareLink;
   $("share").disabled = false;
   if ($("views")) {
-    $("views").onclick = () => openSideMenu($("views"), viewsMenu());
+    $("views").onclick = async () => openSideMenu($("views"), await viewsMenu());
     $("views").disabled = false;
   }
   $("dlhtml").onclick = downloadHtml;
@@ -4997,7 +4997,84 @@ function viewsStore(list) {
     return false;
   }
 }
-function viewsMenu() {
+// #913: on a locked server with options.views, a signed-in viewer's views
+// live on the server (GET/POST /api/views), so they follow the login across
+// browsers. A view there is the address' state part only (its query); the
+// page rebuilds the address from its own path.
+const serverViews = () => servedMode && !!window.__served?.views?.server;
+async function serverViewsCall(method, path, body) {
+  const init = { method, credentials: "same-origin", headers: {} };
+  if (body) {
+    init.headers = { "Content-Type": "application/json", "X-Anofox-Views": "1" };
+    init.body = JSON.stringify({ dashboard: window.__served.id, ...body });
+  }
+  const r = await fetch(path, init);
+  const t = await r.text();
+  if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+  return JSON.parse(t);
+}
+async function serverViewsMenu() {
+  let list;
+  try {
+    list = (await serverViewsCall("GET", "/api/views?dashboard=" + encodeURIComponent(window.__served.id))).views || [];
+  } catch (e) {
+    sideToast("Saved views couldn't be loaded: " + e.message, "OK", () => {});
+    return [];
+  }
+  const items = list.map((v) => ({
+    label: v.name,
+    run: () => {
+      // the page's own path, plus the view's state — never another address
+      location.href = location.pathname + (v.query ? "?" + v.query : "");
+    },
+  }));
+  if (list.length) items.push({ sep: true });
+  items.push({
+    label: "Save this view…",
+    run: async () => {
+      syncUrlState();
+      const r = await dpDialog({
+        title: "Save this view",
+        text: "Its inputs, selections and tab, under a name — kept for your sign-in on this server.",
+        input: { label: "Name", value: "" },
+        buttons: [
+          { label: "Cancel", value: null },
+          { label: "Save", value: "save", primary: true },
+        ],
+      });
+      const name = (r.input || "").trim().slice(0, 80);
+      if (r.value !== "save" || !name) return;
+      try {
+        // the page state only (inputs, selections, frames, views, tab)
+        const q = new URLSearchParams();
+        for (const [k, v] of new URLSearchParams(location.search)) if (k === "tab" || /^(v|frame|view)\.\w+$/.test(k)) q.append(k, v);
+        await serverViewsCall("POST", "/api/views", { name, query: q.toString() });
+        sideToast(`View “${name}” saved`, "OK", () => {});
+      } catch (e) {
+        sideToast("The view wasn't saved: " + e.message, "OK", () => {});
+      }
+    },
+  });
+  if (list.length)
+    items.push({
+      label: "Delete a view…",
+      run: async () => {
+        const r = await dpDialog({
+          title: "Delete a saved view",
+          buttons: [{ label: "Cancel", value: null }, ...list.map((v) => ({ label: v.name, value: v.id, danger: true }))],
+        });
+        if (!r.value) return;
+        try {
+          await serverViewsCall("POST", "/api/views/delete", { id: r.value });
+        } catch (e) {
+          sideToast("The view wasn't deleted: " + e.message, "OK", () => {});
+        }
+      },
+    });
+  return items;
+}
+async function viewsMenu() {
+  if (serverViews()) return serverViewsMenu();
   const list = viewsList();
   const items = list.map((v) => ({
     label: v.name,
@@ -7610,20 +7687,35 @@ function mkAsof() {
   }, 60000);
   return c;
 }
+// #913: a served page has no toolbar; its Views button sits in the header.
+function mkViewsBtn() {
+  if (!serverViews()) return null;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dp-views-btn";
+  btn.textContent = "Views";
+  btn.title = "Save this view (inputs, selections, tab) or open a saved one";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-expanded", "false");
+  btn.onclick = async () => openSideMenu(btn, await viewsMenu());
+  return btn;
+}
 function dashHeader() {
   const v = dpTheme.set && dpTheme.set[dpTheme.variant];
   const b = (v && v.brand) || {};
   const chip = mkAsof();
+  const viewsBtn = mkViewsBtn();
   // The builder's Edit mode edits the name and logo in place (#60); a served or
   // embedded dashboard (and View mode) shows them as they are. #244: a
   // preview is never editable either — it's the assistant's proposal, not
   // yet in the editor.
   const editable = !servedMode && !document.body.classList.contains("embed") && !preview;
   if (!b.title && !b.name && !b.logo && !editable) {
-    if (!chip) return null;
+    if (!chip && !viewsBtn) return null;
     const h = document.createElement("div");
     h.className = "dp-head";
-    h.appendChild(chip);
+    if (chip) h.appendChild(chip);
+    if (viewsBtn) h.appendChild(viewsBtn);
     return h;
   }
   const h = document.createElement("div"); // not <header>: the builder styles that
@@ -7662,6 +7754,7 @@ function dashHeader() {
     if (!b.title && !b.name && !logo && !chip) h.classList.add("dp-head-blank");
   }
   if (chip) h.appendChild(chip);
+  if (viewsBtn) h.appendChild(viewsBtn);
   return h;
 }
 // ---- editing the header in the builder (#60): plain SQL, so Share links, the
