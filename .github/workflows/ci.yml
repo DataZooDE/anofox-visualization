@@ -717,6 +717,12 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/save-preview-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/progressive-e2e.mjs (#390): a re-run shows each changed panel
+      # as soon as it is ready, one panel per statement at the end.
+      - name: Progressive re-render e2e (#390)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/progressive-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/ask-builder-e2e.mjs (#195 M2-5): Ask in the builder — View
       # mode's sheet and Edit mode's Ask tab against a mocked Messages API
       # (its own static server: the assistant on in app-config.json).

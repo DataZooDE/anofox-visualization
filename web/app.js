@@ -9257,6 +9257,12 @@ function patchSlots(roots, newRoots, swaps) {
   });
   a.forEach((o, k) => {
     const n = b[k];
+    // #390: already shown early — the new panel is on screen, its old one here
+    if (o._earlyOld && o._earlyOld === n) {
+      delete o._earlyOld;
+      swaps.push([n, o]);
+      return;
+    }
     if (o.matches(".panel") && n.matches(".panel") && !n._async && o._sig === n._sig) {
       o.classList.remove("dp-pending");
       o.removeAttribute("aria-busy");
@@ -10222,6 +10228,8 @@ async function lazyRunJob(job, inline = false) {
   const made = [...frag.querySelectorAll(".panel")];
   const pane = job.ph.closest(".tabpane, .subtabpane, .dp-viewpane");
   job.ph.replaceWith(frag);
+  // #390: a job run inside a re-run (still off screen) is shown at once
+  if (inline && L.showEarly && !job.tracks.length) for (const p of made) if (p.dataset.stmt != null) L.showEarly(+p.dataset.stmt, p);
   if (pane && ![...pane.querySelectorAll(".dp-lazy")].some((p) => p.closest(".tabpane, .subtabpane, .dp-viewpane") === pane)) pane.removeAttribute("aria-busy");
   if (inline) return;
   // #534: the job's real panel just replaced the lazy skeleton — a
@@ -10737,6 +10745,30 @@ async function runOnce(fresh = true, pv = preview) {
   // current container (the grid, or an open ::GROUP box). ::COLUMNS sets the
   // grid columns; ::SPAN widens the next panel.
   let container = newGrid;
+  // #390: a re-run (a cross-filter click, an input) shows each changed panel
+  // as soon as it is ready instead of when the slowest one is: the new
+  // panel takes the pending one's place on screen at once, and the old one
+  // waits in the new tree until the swap below (which keeps the new one,
+  // or undoes the exchange when the dashboard's shape changed).
+  const early = []; // [old (now off screen), new (now on screen)]
+  const showEarly = (i, made = null) => {
+    if (fresh) return;
+    const live = document.querySelector(`.dash .panel.dp-pending[data-stmt="${i}"]`);
+    const fig = made || container.querySelector(`:scope > .panel[data-stmt="${i}"]`);
+    if (!live || !fig || fig._async || fig.isConnected) return;
+    // the panel the viewer is working in (focus, a drill) keeps the end of
+    // the run's swap, which carries its focus and height over
+    if (live.contains(document.activeElement)) return;
+    // its signature as the end of the run takes it, before wiring touches it
+    fig._sig = fig.outerHTML;
+    const mark = document.createElement("i");
+    fig.replaceWith(mark);
+    live.replaceWith(fig);
+    mark.replaceWith(live);
+    fig._earlyOld = live;
+    early.push([live, fig]);
+    wireCharts();
+  };
   let curGrid = newGrid; // the active surface (main grid / tab pane / sub-tab pane)
   let tabBar = null;
   let tabWrap = null;
@@ -11672,7 +11704,10 @@ async function runOnce(fresh = true, pv = preview) {
     }
     return { lastChart, panels };
   };
-  if (lazy) lazy.panelBody = panelBody;
+  if (lazy) {
+    lazy.panelBody = panelBody;
+    lazy.showEarly = showEarly; // #390: an inline job's panel, as soon as it is done
+  }
   let lastYield = performance.now();
   let hiding = null; // "TAB" | "SUBTAB" | "VIEW": the section of a hidden tab/view, left out
   const cond = new Map(); // ::SHOW_IF condition cache (#515), memoized per run
@@ -12194,6 +12229,8 @@ async function runOnce(fresh = true, pv = preview) {
         nextEmpty = "";
       } else {
         const out = await panelBody(i, s, { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, viewScale, trackHost });
+        // a ::TRACK strip still joins its chart below: show it with them
+        if (!role(stmts[i + 1] || {}, "TRACK")) showEarly(i);
         if (out.lastChart) lastChart = out.lastChart;
         panels += out.panels;
         nextSpan = 0;
@@ -12444,7 +12481,17 @@ async function runOnce(fresh = true, pv = preview) {
   const shape = shapeOf(newRoots);
   const swaps = []; // [old, new] panels this run replaced
   const oldRoots = [grid, dash.querySelector(":scope > .tabbar"), dash.querySelector(":scope > .tabwrap")];
-  if (fresh || dash._shape !== shape || !patchSlots(oldRoots, newRoots, swaps)) {
+  const patched = !fresh && dash._shape === shape && patchSlots(oldRoots, newRoots, swaps);
+  if (!patched) {
+    // #390: put any early-shown panel back where it came from first
+    for (const [old, fig] of early) {
+      if (!fig.isConnected || !old.parentNode) continue;
+      const mark = document.createElement("i");
+      old.replaceWith(mark);
+      fig.replaceWith(old);
+      mark.replaceWith(fig);
+      delete fig._earlyOld;
+    }
     const old = new Map();
     for (const p of document.querySelectorAll(".dash .panel[data-stmt]")) if (!old.has(p.dataset.stmt)) old.set(p.dataset.stmt, p);
     grid.replaceChildren(...newGrid.childNodes);
