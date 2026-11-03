@@ -114,7 +114,7 @@ terminal.
 | `::SPARKLINE` | `::SPARK` | chart | minimal trend line (no axes); a list() column in a table; on a map: a mini chart in each feature's tooltip |
 | `::SPARKBAR` | `::SPARK_BAR` | chart | minimal bar histogram (no axes); a table cell's list(v ORDER BY i), or two overlaid series sharing one y scale from list({'ref': r, 'cur': c} ORDER BY i); on a map: a mini chart in each feature's tooltip |
 | `::MAP` | `::GEOMETRY`, `::GEO`, `::CHOROPLETH` | chart | WKT-geometry map, coloured by a measure |
-| `::REGION` | `::REGION_CODE`, `::ISO_CODE` | chart | a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY'), German AGS ('09162') or NUTS ('DE212'), else a name |
+| `::REGION` | `::REGION_CODE`, `::ISO_CODE` | chart | a map region by code, drawn from the built-in boundaries: ISO 3166-1 ('DE', 'DEU'), ISO 3166-2 ('DE-BY', 'US-CA': states and provinces everywhere), German AGS ('09162') or NUTS ('DE212'), else a name |
 | `::LAT` | `::LATITUDE` | chart | a map point's latitude (degrees, WGS84), with ::LON |
 | `::LON` | `::LONGITUDE`, `::LNG` | chart | a map point's longitude (degrees, WGS84), with ::LAT |
 | `::ORIGIN` | `::FROM_PLACE` | chart | a flow map's start: a region code ('DE-BY'), a WKT POINT or {'lon': …, 'lat': …, 'name': …} — with ::DEST, width by ::SIZE |
@@ -160,7 +160,7 @@ terminal.
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
-| `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'de-states', 'de-districts' (default: the layer most codes match) |
+| `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'world-states', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis) |
 | `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's (or a bar/line/area/scatter chart's) frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes, sizes and axes; static output shows the last frame |
 | `::THRESHOLDS` | `::STATUS_RULES` | modifier | status rules '<0:bad; <0.05:warn; good' — colour a KPI value, gauge zones, chart threshold lines, a ::HEATMAP's tiles in steps; alone: the next table's 'column: rules \| …' |
@@ -1923,10 +1923,14 @@ the wasm.
 |---|---|---|
 | `world` | ISO 3166-1 alpha-2 / alpha-3 (`'FR'`, `'FRA'`), Natural Earth `ADM0_A3` | 177 countries (Natural Earth 1:110m) |
 | `world-50m` | as `world` (only with `'world-50m'::BOUNDARIES`; browser only) | 242 countries (1:50m) |
+| `world-states` | ISO 3166-2 (`'US-CA'`, `'FR-75'`, `'IN-MH'`), Natural Earth `adm1_code` (`'USA-3521'`), HASC (`'US.CA'`); German `DE-…` codes stay on `de-states` (browser only; 6.7 MB, fetched only when a map needs it) | 4501 states and provinces (Natural Earth 1:10m admin-1) |
 | `de-states` | ISO 3166-2 (`'DE-BY'`), the 2-digit AGS (`'09'`), NUTS 1 (`'DE2'`) | 16 Länder (BKG VG2500) |
 | `de-districts` | the 5-digit AGS (`'09162'`), NUTS 3 (`'DE212'`); a NUTS 2 code (`'DE21'`) draws all its districts | 400 Kreise (BKG VG2500) |
 
 The layer most codes match is used; `'de-districts'::BOUNDARIES` forces one.
+States and provinces outside Germany (`world-states`) are drawn in the browser
+and on served pages; `dashboard --svg` and the server's exports don't carry
+that layer (`dashboard --check` notes `map/browser-layer`).
 When no code matches, names are tried (`'Bayern'`, `'Köln'`, `'Germany'`;
 case and umlauts folded) and `dashboard --check` notes `map/region-by-name`.
 A code read as a number keeps working (`9162` → `09162`). Codes that match

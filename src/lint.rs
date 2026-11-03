@@ -6685,7 +6685,22 @@ fn region_diags(
         None => None,
     };
     if let Some(codes) = col(Role::Region) {
-        if let Some(m) = crate::map::boundaries::match_codes(&codes, layer) {
+        // #956: states and provinces are the browser's layer; here (native)
+        // it isn't loaded, so its codes can't be checked
+        let browser_only = layer.is_none()
+            && !crate::map::boundaries::available(crate::map::boundaries::OPTIONAL_STATES)
+            && crate::map::boundaries::guess_layers(&codes)
+                .contains(&crate::map::boundaries::OPTIONAL_STATES);
+        if browser_only {
+            out.push((
+                Severity::Note,
+                "map/browser-layer",
+                "these ::REGION codes are states or provinces ('world-states'): the browser and the \
+                 served page draw them; dashboard --svg and the server's exports don't carry that \
+                 layer and draw no region"
+                    .to_string(),
+            ));
+        } else if let Some(m) = crate::map::boundaries::match_codes(&codes, layer) {
             if m.unmatched_count > 0 {
                 let list: Vec<String> = m.unmatched.iter().map(|c| format!("'{c}'")).collect();
                 out.push((

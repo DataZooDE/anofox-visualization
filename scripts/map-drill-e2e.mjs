@@ -2,8 +2,9 @@
 // does our revenue come from, from country down to district?" in the
 // builder. Countries first (world layer), a click on Germany draws its 16
 // states (de-states), a click on Bavaria its districts (de-districts);
-// the breadcrumb goes back, the path is in the URL, and a country without
-// states drills to the example's empty note. No page errors.
+// the breadcrumb goes back, the path is in the URL. France drills to its
+// départements from world-states (#956), which the page fetches only then,
+// and a département (no level below) shows the example's note. No page errors.
 //
 //   python3 serve_nocache.py 8792 &     # serves web/ (after the wasm build)
 //   NODE_PATH=tests/web/node_modules node scripts/map-drill-e2e.mjs [--url http://127.0.0.1:8792/]
@@ -28,6 +29,9 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const errs = [];
   page.on("pageerror", (e) => errs.push(String(e)));
+  const fetched = [];
+  page.on("request", (r) => fetched.push(new URL(r.url()).pathname));
+  const statesFetched = () => fetched.some((p) => p.endsWith("/data/boundaries/world-states.csv"));
   await page.goto(`${base}?embed=1#sql=${b64(SQL)}`);
   await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 120000 });
 
@@ -58,6 +62,7 @@ try {
 
   // 1. countries
   check(await levelIs(/^[A-Z]{3}$/), "the first level draws countries by their ISO code");
+  check(!statesFetched(), "the states layer isn't fetched for the country level");
   const c = await keys();
   check(c.length === 10 && c.includes("DEU") && c.includes("FRA"), `ten countries (${c.join(", ")})`);
   check(/Revenue by country/.test(await title()), "titled by country");
@@ -89,12 +94,18 @@ try {
   await page.locator('.dash .dp-crumbs[data-drill="geo"] button.dp-crumb').first().click();
   check(await levelIs(/^[A-Z]{3}$/), "…and to the countries");
 
-  // 5. a country without states: the example's empty note
+  // 5. France: its départements from world-states, fetched now
   await click("FRA");
+  check(await levelIs(/^FR-[0-9A-Z]{1,3}$/), "a click on France draws its départements (world-states)");
+  const fr = (await keys()).length;
+  check(fr >= 90 && fr <= 101, `France's départements (${fr})`);
+  check(statesFetched(), "…from the world-states layer, fetched only now");
+  // a département: no level below in the sample
+  await click("FR-75");
   const empty = await page
     .waitForFunction(() => /Nothing below this level in the sample/.test(document.querySelector(".dash")?.textContent || "") && !document.querySelector(".dash svg[data-map] path[data-row]"), null, { timeout: 30000 })
     .then(() => true, () => false);
-  check(empty, "France drills to the empty note (no state boundaries for it)");
+  check(empty, "a département drills to the example's note (no districts outside Germany)");
 
   check(errs.length === 0, `no page errors (${errs.join(" | ")})`);
 } finally {
