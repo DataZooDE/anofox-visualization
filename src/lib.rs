@@ -135,6 +135,9 @@ pub enum Kind {
     Bullet,
     /// Ordered conversion stages, widths by value (`::FUNNEL`).
     Funnel,
+    /// Bars sorted descending with a cumulative-% line on a right axis
+    /// (`::PARETO`, #879).
+    Pareto,
     /// One bar per task from `::XMIN` to `::XMAX` (`::GANTT`, #882).
     Gantt,
     /// Two values per item joined by a line: `::XMIN` → `::XMAX`
@@ -164,6 +167,7 @@ impl Kind {
                 | Kind::Waterfall
                 | Kind::Bullet
                 | Kind::Funnel
+                | Kind::Pareto
                 | Kind::Gantt
                 | Kind::Dumbbell
         )
@@ -1901,6 +1905,7 @@ impl Panel {
                     | Kind::Sparkbar
                     | Kind::Calendar
                     | Kind::Funnel
+                    | Kind::Pareto
                     | Kind::Gantt
                     | Kind::Dumbbell
                     | Kind::Bullet
@@ -2713,6 +2718,9 @@ fn render_inner(
         }
         Kind::Funnel => {
             return variance::render_funnel(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Pareto => {
+            return variance::render_pareto(o, value, cols, title.as_deref(), width, height)
         }
         Kind::Gantt => {
             return variance::render_gantt(o, value, cols, title.as_deref(), width, height)
@@ -3850,7 +3858,8 @@ fn cartesian(
         | Kind::Bullet
         | Kind::Funnel
         | Kind::Dumbbell
-        | Kind::Gantt => {
+        | Kind::Gantt
+        | Kind::Pareto => {
             unreachable!("handled above")
         }
     };
