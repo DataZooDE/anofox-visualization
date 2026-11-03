@@ -3151,6 +3151,32 @@ fn line_chart_still_treats_iso_date_strings_as_a_continuous_axis() {
     );
 }
 
+// #882: ::GANTT — one bar per task on a date axis.
+#[test]
+fn gantt_bars_per_task() {
+    let s = svg(vec![
+        Column::new(
+            "t",
+            Role::Value(Kind::Gantt),
+            strs(&["Plan", "Build", "Ship"]),
+        ),
+        Column::new(
+            "s",
+            Role::XMin,
+            strs(&["2026-11-02", "2026-11-04", "2026-11-09"]),
+        ),
+        Column::new(
+            "e",
+            Role::XMax,
+            strs(&["2026-11-04", "2026-11-09", "2026-11-10"]),
+        ),
+    ]);
+    for l in ["Plan", "Build", "Ship"] {
+        assert!(s.contains(&format!(">{l}<")), "task {l} on the axis");
+    }
+    assert!(!s.contains("No numeric values"), "{s}");
+}
+
 // #883: ::DUMBBELL — two dots per item.
 #[test]
 fn dumbbell_two_values_per_item() {
