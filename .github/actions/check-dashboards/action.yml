@@ -52,9 +52,23 @@ runs:
         esac
         dir="$RUNNER_TEMP/anofox-check"
         mkdir -p "$dir/cli"
-        tag=()
-        [ "$VERSION" = latest ] || tag=("$VERSION")
-        gh release download "${tag[@]}" --repo DataZooDE/anofox-visualization \
+        tag="$VERSION"
+        if [ "$VERSION" = latest ]; then
+          # #932: the newest release whose CLI for this platform is uploaded
+          # already — right after a tag the release exists without assets.
+          tag=""
+          for t in $(gh release list --repo DataZooDE/anofox-visualization --exclude-drafts \
+                       --exclude-pre-releases --limit 10 --json tagName --jq '.[].tagName'); do
+            names=$(gh release view "$t" --repo DataZooDE/anofox-visualization --json assets --jq '.assets[].name')
+            if grep -q "^anofox-visualization-cli-.*-$triple\.tar\.gz\$" <<<"$names" && grep -qx SHA256SUMS <<<"$names"; then
+              tag="$t"
+              break
+            fi
+          done
+          [ -n "$tag" ] || { echo "::error::no recent release has the CLI for $triple yet"; exit 1; }
+          echo "using $tag"
+        fi
+        gh release download "$tag" --repo DataZooDE/anofox-visualization \
           --pattern "anofox-visualization-cli-*-$triple.tar.gz" --pattern SHA256SUMS --dir "$dir"
         (cd "$dir" && grep " anofox-visualization-cli-.*-$triple.tar.gz\$" SHA256SUMS | sha256sum -c -)
         tar -xzf "$dir"/anofox-visualization-cli-*-"$triple".tar.gz -C "$dir/cli" --strip-components=1
