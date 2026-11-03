@@ -1427,6 +1427,15 @@ and `<circle>`s for points. Features are drawn in row order.
   `'mercator'` is Web Mercator (`dashboard --check` hints `map/mercator-choropleth`
   on a filled map: it inflates areas towards the poles); `'none'` draws x/y as
   they are (km grids, floor plans).
+- **Tile basemap** (`'on'::MAPTILES`, #760): raster tiles from the
+  *installation's* source under a `'mercator'` map, with its attribution,
+  instead of the land fill. Off unless the host has a source: the locked
+  server's `options.basemap` (its pages and exports draw the tiles;
+  [secure-serving](secure-serving.md#tile-basemap-optionsbasemap-760)) or
+  `dashboard --svg … --basemap '<the same JSON object>'`. The tiles are
+  fetched by the server or the CLI and embedded as images, so nothing is
+  loaded when the SVG is viewed. Any other projection draws no tiles
+  (`map/tiles-needs-mercator`).
 - **Colour**: a measure colours on the theme's sequential ramp (over a
   `::BASEMAP` it starts a quarter in, so pale points don't vanish); when the
   values span 0, or with `::MIDPOINT n`, the theme's diverging ramp around that

@@ -458,6 +458,44 @@ pub fn map_layers(rows_json: &str, roles_json: &str) -> String {
     .unwrap_or_else(|_| "[]".into())
 }
 
+/// The tiles (`[[z, x, y], …]`) a `::MAPTILES` map drawn with `ctx` at
+/// `width`×`height` (and `zoom_json`, as [`render_panel`]) needs that the
+/// page hasn't handed in yet (#760): the page fetches each from its server's
+/// `/api/tiles`, gives it to [`register_tile`] and renders again.
+#[wasm_bindgen]
+pub fn map_tiles(
+    rows_json: &str,
+    roles_json: &str,
+    width: u32,
+    height: u32,
+    ctx: &str,
+    zoom_json: &str,
+) -> String {
+    guard(|| {
+        let rows = sql::parse_rows_json(rows_json).unwrap_or_default();
+        let cols = columns_from_entries(&rows, &entries_of(roles_json));
+        let mut opts = RenderOptions::from_primary_arg(ctx).unwrap_or_default();
+        if opts.basemap.is_none() {
+            return Ok("[]".into());
+        }
+        opts.zoom = parse_zoom(zoom_json);
+        let want: Vec<[u32; 3]> = crate::map_tiles_needed(&cols, width, height, &opts)
+            .into_iter()
+            .filter(|&(z, x, y)| !crate::map::tile_store::has(z, x, y))
+            .map(|(z, x, y)| [z, x, y])
+            .collect();
+        Ok(serde_json::to_string(&want).unwrap_or_else(|_| "[]".into()))
+    })
+    .unwrap_or_else(|_| "[]".into())
+}
+
+/// Hand in tile `z/x/y` (PNG or JPEG bytes) fetched by the page; `false`
+/// when it isn't one (nothing kept).
+#[wasm_bindgen]
+pub fn register_tile(z: u32, x: u32, y: u32, bytes: &[u8]) -> bool {
+    guard(|| Ok(crate::map::tile_store::register(z, x, y, bytes))).unwrap_or(false)
+}
+
 /// Register a built-in boundary layer from its CSV text (fetched by the
 /// UI); returns its region count, or -1 when the name or text is bad.
 #[wasm_bindgen]

@@ -72,6 +72,8 @@ pub struct DashboardOptions {
     /// drawn statement spans the full width (`::COL`, `::COLUMNS` and a
     /// `::VIEW` group's width are ignored). Use with `only`.
     pub single: bool,
+    /// #760: the host's tile basemap for `::MAPTILES` maps (`None`: none).
+    pub basemap: Option<crate::Basemap>,
 }
 
 impl Default for DashboardOptions {
@@ -87,6 +89,7 @@ impl Default for DashboardOptions {
             asset_root: None,
             only: None,
             single: false,
+            basemap: None,
         }
     }
 }
@@ -500,6 +503,7 @@ fn render_inner(
         theme: Arc::new(theme.clone()),
         locale,
         asset_root: opts.asset_root.clone(),
+        basemap: opts.basemap.clone(),
         ..RenderOptions::default()
     };
 

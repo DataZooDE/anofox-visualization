@@ -1800,6 +1800,55 @@ shows it, with **Delete** for its author or a moderator.
   `"vars": {panel, x, x2?, text}`) or delete. `options.durability` keeps it
   as `<location>/notes.jsonl`; `dashboard state export|erase` work on it.
 
+### Tile basemap (`options.basemap`, #760)
+
+A map in `'mercator'::PROJECTION` with `'on'::MAPTILES` draws the
+installation's raster tiles under its features. The source is set here,
+never in a dashboard; without this option `::MAPTILES` draws nothing and
+maps stay offline. Review: [security/basemap-760-review.md](security/basemap-760-review.md).
+
+Served pages, exports (`/api/export`) and `dashboard --svg --basemap` draw
+the tiles. A static `dashboard --site` doesn't yet: it has no server to ask.
+
+```json
+"basemap": {
+  "url": "https://tiles.example.com/{z}/{x}/{y}.png",
+  "attribution": "© OpenStreetMap contributors",
+  "max_zoom": 16,
+  "cache_dir": "/var/cache/anofox/tiles",
+  "cache_mb": 256,
+  "upstream_per_minute": 600
+}
+```
+
+- **The source.** `url` is an `https://` template, or an absolute directory
+  template (`/srv/tiles/{z}/{x}/{y}.png`, regular files only, links
+  refused). It holds `{z}`, `{x}` and `{y}` once each and no other
+  placeholder. The three numbers of a request are the only input that
+  reaches it. `attribution` is required and drawn on every tiled map. Check
+  your provider's terms: OpenStreetMap's public tile servers forbid heavy
+  use, so run your own or use a commercial provider.
+- **The browser never contacts the source.** The page asks this server,
+  `GET /api/tiles/{z}/{x}/{y}?dashboard=<id>`: a login (when configured), a
+  dashboard in the credential's scope that uses `::MAPTILES`, a tile in the
+  grid up to `max_zoom` (default 16, ≤ 19). Same-origin requests only. 600
+  requests a minute per viewer (burst 200); cache misses are capped at
+  `upstream_per_minute` for the whole server, with at most 8 running at
+  once (more get a `503`).
+- **Upstream.** No proxy from the environment, no redirects, 5 s to connect
+  and 15 s per tile. Only PNG or JPEG bodies up to 512 KB are accepted,
+  checked by their bytes. They are served with `nosniff` and
+  `Cache-Control: private`. A failure is a `502`, and the reason goes only
+  to the server's stderr.
+- **The cache.** An `https://` source needs `cache_dir` (or `cache_mb: 0`
+  for none): a directory this server owns and keeps `0700` (it is created
+  if missing; a link or a shared directory refuses the start), outside the
+  dashboards folder and `options.data`. Files are named `z-x-y` and kept at
+  `0600`. The oldest files go first once the cache passes `cache_mb`. The
+  cache is shared between viewers: tiles are public map imagery, and its
+  timing can show at most that *someone* on this server looked at an area.
+  Set `cache_mb: 0` if that matters.
+
 ## B. Static render — `serve --dashboards <dir>`
 
 The most locked-down option: **no client data API at all**, server-side SVG only.

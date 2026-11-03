@@ -20,6 +20,8 @@ import init, {
   map_natural_height,
   map_layers,
   register_boundaries,
+  map_tiles,
+  register_tile,
   roles_json,
   format_number,
   format_number_locale,
@@ -2165,6 +2167,69 @@ async function ensureBoundaries(rowsJson, roles) {
       return boundaryLayers[l];
     })
   );
+}
+
+// #760: a served dashboard with the installation's basemap
+// (window.__served.basemap): a ::MAPTILES map draws tiles the page fetched
+// from its own server's /api/tiles — never from the tile source. A map is
+// drawn first without the tiles it lacks, then once more when they arrive.
+const basemapCfg = () => (servedMode && window.__served?.basemap) || null;
+const tileFetches = new Map(); // "z/x/y" → Promise<boolean> (kept)
+const TILE_FETCHES_AT_ONCE = 6;
+let tileSlots = TILE_FETCHES_AT_ONCE;
+const tileQueue = [];
+function tileSlot() {
+  if (tileSlots > 0) {
+    tileSlots--;
+    return Promise.resolve();
+  }
+  return new Promise((r) => tileQueue.push(r));
+}
+function tileDone() {
+  const next = tileQueue.shift();
+  if (next) next();
+  else tileSlots++;
+}
+function fetchTile([z, x, y]) {
+  const k = `${z}/${x}/${y}`;
+  if (!tileFetches.has(k))
+    tileFetches.set(
+      k,
+      (async () => {
+        await tileSlot();
+        try {
+          const r = await fetch(`/api/tiles/${k}?dashboard=${encodeURIComponent(window.__served.id)}`, { credentials: "same-origin" });
+          if (r.status === 429 || r.status === 503) {
+            tileFetches.delete(k); // busy: a later draw asks again
+            return false;
+          }
+          return r.ok && register_tile(z, x, y, new Uint8Array(await r.arrayBuffer()));
+        } catch (_) {
+          tileFetches.delete(k);
+          return false;
+        } finally {
+          tileDone();
+        }
+      })()
+    );
+  return tileFetches.get(k);
+}
+// After a map's draw: fetch the tiles it lacked, then draw it again (only
+// if it is still showing the same view, and only when a tile was added).
+function fillTiles(holder, rows, roles, w, ph, ctx, zoom) {
+  let want = [];
+  try {
+    want = JSON.parse(map_tiles(rows, JSON.stringify(roles), w, ph, ctx, zoom));
+  } catch (_) {}
+  // (a tile that failed stays in tileFetches as `false`: no redraw loop)
+  if (!want.length) return;
+  const view = `${w}x${ph}|${ctx}|${zoom}`;
+  holder._tileView = view;
+  Promise.all(want.map(fetchTile)).then((kept) => {
+    if (!kept.some(Boolean) || !holder.isConnected || holder._tileView !== view) return;
+    renderChart(holder, rows, roles, w, ph, zoom);
+    wireCharts();
+  });
 }
 
 // Stored showcase results: an example that reads 'data/<ext>/<table>.csv'
@@ -12628,6 +12693,8 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
   if (holder._frame != null) extra.frame = holder._frame;
   const notes = notesFor(holder._stmt);
   if (notes.length) extra.notes = notes;
+  const tiles = basemapCfg() && isMapPanel(roles) ? basemapCfg() : null;
+  if (tiles) extra.basemap = { attribution: String(tiles.attribution || ""), max_zoom: +tiles.max_zoom || 0 };
   const ctx = Object.keys(extra).length ? ctxWith(extra) : renderCtx();
   const tracks = holder._tracks || [];
   if (holder._edit) {
@@ -12656,6 +12723,7 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
   widenDiagram(holder, w, (ww) => render_panel(rows, JSON.stringify(roles), ww, ph, ctx, zoom));
   markFitted(holder, ph);
   markAnim(holder, roles);
+  if (tiles) fillTiles(holder, rows, roles, w, ph, ctx, zoom);
   performance.measure("dp:render", { start: t0 });
 }
 

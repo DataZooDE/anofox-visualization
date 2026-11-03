@@ -1102,12 +1102,15 @@ pub type TileFn = std::sync::Arc<dyn Fn(u32, u32, u32) -> Option<Vec<u8>> + Send
 pub struct Basemap {
     pub attribution: String,
     pub tiles: TileFn,
+    /// The deepest zoom the source serves (a map never asks past it).
+    pub max_zoom: u32,
 }
 
 impl std::fmt::Debug for Basemap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Basemap")
             .field("attribution", &self.attribution)
+            .field("max_zoom", &self.max_zoom)
             .finish()
     }
 }
@@ -1131,6 +1134,7 @@ pub fn map_tiles_needed(
             .as_ref()
             .map(|b| b.attribution.clone())
             .unwrap_or_default(),
+        max_zoom: opts.basemap.as_ref().map_or(19, |b| b.max_zoom),
         tiles: std::sync::Arc::new(move |z, x, y| {
             rec.lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -1284,6 +1288,25 @@ impl RenderOptions {
         // #889: viewers' notes on this chart.
         if let Some(v) = ctx.get("notes") {
             self.notes = ViewerNote::list_from(v);
+        }
+        // #760: the served page's basemap — the tiles it fetched from its
+        // server ([`map::tile_store`]); a malformed entry draws none.
+        if let Some(b) = ctx.get("basemap").and_then(|v| v.as_object()) {
+            let attribution = b
+                .get("attribution")
+                .and_then(|v| v.as_str())
+                .map(|a| a.chars().filter(|c| !c.is_control()).take(200).collect());
+            let max_zoom = b
+                .get("max_zoom")
+                .and_then(|v| v.as_u64())
+                .filter(|z| *z <= map::tile_store::MAX_ZOOM as u64);
+            if let (Some(attribution), Some(max_zoom)) = (attribution, max_zoom) {
+                self.basemap = Some(Basemap {
+                    attribution,
+                    max_zoom: max_zoom as u32,
+                    tiles: std::sync::Arc::new(map::tile_store::get),
+                });
+            }
         }
         Ok(())
     }

@@ -51,6 +51,8 @@ pub mod site_css;
 pub mod state;
 pub mod tasks;
 pub mod telemetry;
+#[cfg(feature = "auth")]
+pub mod tiles;
 pub mod views;
 pub mod writeback;
 
