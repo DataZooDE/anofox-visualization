@@ -99,6 +99,9 @@ pub enum Kind {
     Violin,
     /// A kernel-density curve of the measure column (`::DENSITY`).
     Density,
+    /// One density of the measure per `::CATEGORY`, stacked as overlapping
+    /// ridges (`::RIDGELINE`, #917) — distributions over time.
+    Ridgeline,
     /// A normal quantile-quantile plot of the measure column (`::QQ`).
     QQ,
     /// A heatmap — `x` × `y` tiles coloured by the measure (`::HEATMAP`).
@@ -163,6 +166,7 @@ impl Kind {
                 | Kind::Gauge
                 | Kind::Histogram
                 | Kind::Density
+                | Kind::Ridgeline
                 | Kind::QQ
                 | Kind::Heatmap
                 | Kind::Calendar
@@ -2782,6 +2786,9 @@ fn render_inner(
             return render_histogram(o, value, cols, title.as_deref(), width, height)
         }
         Kind::Density => return render_density(o, value, cols, title.as_deref(), width, height),
+        Kind::Ridgeline => {
+            return render_ridgeline(o, value, cols, title.as_deref(), width, height)
+        }
         Kind::QQ => return render_qq(o, value, cols, title.as_deref(), width, height),
         Kind::Heatmap => {
             return render_heatmap(o, value, cols, title.as_deref(), width, height, None)
@@ -4044,6 +4051,7 @@ fn cartesian(
         | Kind::Gauge
         | Kind::Histogram
         | Kind::Density
+        | Kind::Ridgeline
         | Kind::QQ
         | Kind::Heatmap
         | Kind::Calendar
@@ -4891,6 +4899,76 @@ fn shared_x_zoom(plot: GGPlot, o: &RenderOptions) -> GGPlot {
 
 /// A kernel-density curve of the measure column. An optional `CATEGORY` splits
 /// it into one filled curve per group (overlaid, semi-transparent).
+/// `::RIDGELINE` (#917): one density of the measure per `::CATEGORY` (else
+/// per `::XAXIS` value), each a ridge on its own row, overlapping the row
+/// above; rows in order of first appearance, the first on top (ggplot-rs
+/// `geom_density_ridges`).
+fn render_ridgeline(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    const MAX_ROWS: usize = 40;
+    const SCALE: f64 = 1.6;
+    let group = find_role(cols, Role::Category).or_else(|| find_role(cols, Role::X));
+    let n = value.values.len();
+    let groups: Vec<String> = match group {
+        Some(g) => g.values.iter().map(value_str).collect(),
+        None => vec![String::new(); n],
+    };
+    let mut levels: Vec<String> = Vec::new();
+    for (g, v) in groups.iter().zip(&value.values) {
+        if v.as_f64().is_some_and(f64::is_finite) && !levels.contains(g) {
+            levels.push(g.clone());
+        }
+    }
+    if levels.len() > MAX_ROWS {
+        return Ok(note_svg(
+            title,
+            &format!("::RIDGELINE draws at most {MAX_ROWS} rows — filter or group the ::CATEGORY"),
+            width,
+            height,
+        ));
+    }
+    let data = vec![
+        ("x".to_string(), value.values.clone()),
+        (
+            "g".to_string(),
+            groups.into_iter().map(Value::Str).collect(),
+        ),
+    ];
+    // the first row on top: a discrete y counts from the bottom
+    let limits: Vec<&str> = levels.iter().rev().map(String::as_str).collect();
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().x("x").y("g").group("g"))
+        .geom_density_ridges_with(ggplot_rs::geom::density_ridges::GeomDensityRidges {
+            fill: o.brand(),
+            color: o.theme.colors.card,
+            alpha: 0.9,
+            line_width: 1.0,
+            scale: SCALE,
+        })
+        .scale_y_discrete(
+            ScaleDiscrete::new()
+                .with_limits(limits)
+                .with_expand(0.0, SCALE - 0.5),
+        )
+        .house_theme(o)
+        .xlab("")
+        .ylab("")
+        .legend_position(LegendPosition::None);
+    if let Some(f) = role_fmt(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale)) {
+        plot = plot.scale_x_continuous(ScaleContinuous::new().with_label_formatter(f));
+    }
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}
+
 fn render_density(
     o: &RenderOptions,
     value: &Column,
@@ -7576,7 +7654,7 @@ fn title_text(title: Option<&str>, w: f64) -> String {
 /// something meaningful (`None` = no requirement beyond "some data").
 fn min_values(kind: Kind) -> usize {
     match kind {
-        Kind::Density | Kind::Violin | Kind::QQ | Kind::Boxplot => 2,
+        Kind::Density | Kind::Ridgeline | Kind::Violin | Kind::QQ | Kind::Boxplot => 2,
         Kind::Smooth => 3,
         _ => 1,
     }
