@@ -1430,7 +1430,7 @@ and `<circle>`s for points. Features are drawn in row order.
 - **Tile basemap** (`'on'::MAPTILES`, #760): raster tiles from the
   *installation's* source under a `'mercator'` map, with its attribution,
   instead of the land fill. Off unless the host has a source: the locked
-  server's `options.basemap` (its exports draw the tiles;
+  server's `options.basemap` (its pages and exports draw the tiles;
   [secure-serving](secure-serving.md#tile-basemap-optionsbasemap-760)) or
   `dashboard --svg … --basemap '<the same JSON object>'`. The tiles are
   fetched by the server or the CLI and embedded as images, so nothing is

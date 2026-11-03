@@ -1289,6 +1289,25 @@ impl RenderOptions {
         if let Some(v) = ctx.get("notes") {
             self.notes = ViewerNote::list_from(v);
         }
+        // #760: the served page's basemap — the tiles it fetched from its
+        // server ([`map::tile_store`]); a malformed entry draws none.
+        if let Some(b) = ctx.get("basemap").and_then(|v| v.as_object()) {
+            let attribution = b
+                .get("attribution")
+                .and_then(|v| v.as_str())
+                .map(|a| a.chars().filter(|c| !c.is_control()).take(200).collect());
+            let max_zoom = b
+                .get("max_zoom")
+                .and_then(|v| v.as_u64())
+                .filter(|z| *z <= map::tile_store::MAX_ZOOM as u64);
+            if let (Some(attribution), Some(max_zoom)) = (attribution, max_zoom) {
+                self.basemap = Some(Basemap {
+                    attribution,
+                    max_zoom: max_zoom as u32,
+                    tiles: std::sync::Arc::new(map::tile_store::get),
+                });
+            }
+        }
         Ok(())
     }
 

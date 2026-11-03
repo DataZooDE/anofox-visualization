@@ -98,3 +98,8 @@ need.
 3. Browser: `::MAPTILES` wiring, `map_tiles` wasm export, prefetch via
    `/api/tiles`, render with bytes; e2e that asserts no request leaves the
    origin.
+   Done: `window.__served.basemap` (only for a `::MAPTILES` dashboard), the
+   render context's `basemap`, a bounded page-side store
+   (`src/map/tile_store.rs`), `map_tiles` / `register_tile`; the page draws
+   a map, fetches what it lacked (6 at once) and draws it again. Static
+   `--site` embedding is left for its own issue.

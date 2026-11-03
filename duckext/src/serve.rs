@@ -12630,6 +12630,14 @@ fn served_index(
             "moderator": notes_moderator,
         });
     }
+    // #760: this dashboard draws the installation's tiles; the page asks
+    // /api/tiles for them (never the source itself).
+    if let Some(rt) = st.tiles.as_ref().filter(|_| tl::uses_map_tiles(&dash.sql)) {
+        cfg["basemap"] = serde_json::json!({
+            "attribution": rt.tiles.opts.attribution,
+            "max_zoom": rt.tiles.opts.max_zoom,
+        });
+    }
     // #195: Ask is on for this dashboard and this viewer: the page loads its
     // panel (web/ask-ui.js) and shows the notice's provider.
     if let (true, Some(rt)) = (ask, &st.ask) {

@@ -50,6 +50,7 @@ mod plot;
 pub(crate) mod project;
 mod spark;
 mod symbols;
+pub mod tile_store;
 mod wkt;
 
 use crate::format::ValueFmt;

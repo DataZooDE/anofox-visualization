@@ -1807,8 +1807,8 @@ installation's raster tiles under its features. The source is set here,
 never in a dashboard; without this option `::MAPTILES` draws nothing and
 maps stay offline. Review: [security/basemap-760-review.md](security/basemap-760-review.md).
 
-Status: the endpoint, its cache and exports (`/api/export`) are in place.
-Served pages and `dashboard --site` draw tiles in a follow-up (#760).
+Served pages, exports (`/api/export`) and `dashboard --svg --basemap` draw
+the tiles. A static `dashboard --site` doesn't yet: it has no server to ask.
 
 ```json
 "basemap": {

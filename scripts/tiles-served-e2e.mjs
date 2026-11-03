@@ -6,15 +6,19 @@
 // tile outside the grid or past max_zoom, anything but three plain numbers,
 // a file that isn't a PNG/JPEG, and a link; a source with a bad template or
 // a cache inside the dashboards folder refuses to start. An export
-// (/api/export) embeds the tiles.
+// (/api/export) embeds the tiles; the served page draws them from
+// /api/tiles, and no request of the page leaves the origin for a tile.
 //
-//   node scripts/tiles-served-e2e.mjs \
+//   NODE_PATH=<dir with playwright>/node_modules node scripts/tiles-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8971] [--duckdb duckdb]
+import { createRequire } from "module";
 import { spawn } from "child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "fs";
 import path from "path";
 import crypto from "crypto";
 
+const require = createRequire(import.meta.url);
+const { chromium } = require("playwright");
 const arg = (k, d) => {
   const i = process.argv.indexOf(k);
   return i > 0 ? process.argv[i + 1] : d;
@@ -136,6 +140,40 @@ try {
   check(!/href="(https?:|\/)/.test(svg), "…and no link to fetch anything");
   const noTiles = (await get("/api/export/plain.svg")).body.toString();
   check(!noTiles.includes("data-tile="), "a dashboard without ::MAPTILES exports without tiles");
+
+  // The served page: tiles come from /api/tiles only.
+  const browser = await chromium.launch();
+  try {
+    const ctx = await browser.newContext({ viewport: { width: 1200, height: 900 }, reducedMotion: "reduce" });
+    await ctx.setExtraHTTPHeaders({ "X-Anofox-Proxy-Secret": sec, "X-Forwarded-User": "alice" });
+    const seen = [];
+    ctx.on("request", (r) => seen.push(r.url()));
+    const page = await ctx.newPage();
+    const errs = [];
+    page.on("pageerror", (e) => errs.push(String(e)));
+    await page.goto(BASE + "/d/depots/");
+    const drawn = await page
+      .waitForFunction(() => !!document.querySelector(".panel svg [data-tile]"), null, { timeout: 30000 })
+      .then(() => true, () => false);
+    check(drawn, "the served page draws the tiles under the map");
+    const tileReqs = seen.filter((u) => new URL(u).pathname.startsWith("/api/tiles/"));
+    check(tileReqs.length > 0 && tileReqs.every((u) => new URL(u).searchParams.get("dashboard") === "depots"), `…fetched from /api/tiles for this dashboard (${tileReqs.length})`);
+    check(await page.evaluate(() => document.querySelector(".panel svg")?.textContent.includes("© Test tiles")), "…with the attribution");
+    const CDN = new Set(["cdn.jsdelivr.net", "fonts.googleapis.com", "fonts.gstatic.com", "extensions.duckdb.org"]);
+    const away = seen.filter((u) => {
+      const h = new URL(u).hostname;
+      return !["127.0.0.1", "localhost"].includes(h) && !CDN.has(h) && !u.startsWith("data:") && !u.startsWith("blob:");
+    });
+    check(away.length === 0, `no request leaves the origin but the page's own CDN files (${away.join(", ")})`);
+    check(errs.length === 0, `no page errors (${errs.join(" | ")})`);
+    seen.length = 0;
+    await page.goto(BASE + "/d/plain/");
+    await page.waitForFunction(() => !document.body.classList.contains("loading") && !!document.querySelector(".panel svg"), null, { timeout: 30000 }).catch(() => {});
+    check(!seen.some((u) => u.includes("/api/tiles/")), "a dashboard without ::MAPTILES asks for no tiles");
+    check(!(await page.evaluate(() => !!window.__served?.basemap)), "…and its page gets no basemap config");
+  } finally {
+    await browser.close();
+  }
   await stop(s2);
 
   check(await refused({ ...opts, basemap: { ...basemap, url: "http://tiles.example/{z}/{x}/{y}.png" } }, "https://"), "an http:// source refuses the start");

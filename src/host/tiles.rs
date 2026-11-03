@@ -18,11 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-/// A tile body above this is refused (an ordinary 256 px tile is 5–50 KB).
-pub const MAX_TILE_BYTES: usize = 512 * 1024;
+pub use crate::map::tile_store::{MAX_TILE_BYTES, MAX_ZOOM as MAX_MAX_ZOOM};
 pub const DEFAULT_MAX_ZOOM: u32 = 16;
-/// The deepest level any XYZ source serves.
-pub const MAX_MAX_ZOOM: u32 = 19;
 pub const DEFAULT_CACHE_MB: u64 = 256;
 pub const ATTRIBUTION_MAX_CHARS: usize = 200;
 /// Tile requests per viewer and minute (a map needs about 6–20 tiles).
@@ -189,21 +186,7 @@ pub fn uses_map_tiles(sql: &str) -> bool {
     u.contains("::MAPTILES") || u.contains("::MAP_TILES")
 }
 
-/// The two image types a tile may be, from its first bytes.
-pub fn image_type(b: &[u8]) -> Option<&'static str> {
-    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        Some("image/png")
-    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else {
-        None
-    }
-}
-
-/// Whether `z/x/y` is a tile of a source that goes to `max_zoom`.
-pub fn valid_tile(z: u32, x: u32, y: u32, max_zoom: u32) -> bool {
-    z <= max_zoom && z <= MAX_MAX_ZOOM && (x as u64) < (1u64 << z) && (y as u64) < (1u64 << z)
-}
+pub use crate::map::tile_store::{image_type, valid_tile};
 
 /// `/api/tiles/{z}/{x}/{y}` → the three numbers (plain decimal digits only).
 pub fn parse_path(path: &str) -> Option<(u32, u32, u32)> {
