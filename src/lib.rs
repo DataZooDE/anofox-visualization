@@ -1328,6 +1328,49 @@ impl RenderOptions {
     }
 }
 
+/// Where `::DATALABELS` puts a value (#959).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LabelAt {
+    /// Past the mark's end (above a positive bar, below a negative one;
+    /// right / left when flipped) — the default.
+    Outside,
+    /// Just within the mark's end.
+    Inside,
+    /// The middle of the mark — a stacked segment's default.
+    Center,
+}
+
+/// `::DATALABELS`' value: a size (`12::DATALABELS`), a place
+/// (`'inside'`, `'outside'`, `'center'`), or both (`'inside 12'`).
+fn datalabel_spec(c: Option<&Column>) -> (Option<LabelAt>, Option<f64>) {
+    let Some(c) = c else { return (None, None) };
+    let size_ok = |s: f64| (5.0..=40.0).contains(&s);
+    let mut at = None;
+    let mut size = c
+        .values
+        .iter()
+        .find_map(|v| v.as_f64())
+        .filter(|s| size_ok(*s));
+    for v in &c.values {
+        if let Value::Str(t) = v {
+            for w in t.split(|ch: char| ch.is_whitespace() || ch == ',') {
+                match w.trim().to_ascii_lowercase().as_str() {
+                    "outside" | "end" => at = Some(LabelAt::Outside),
+                    "inside" | "in" => at = Some(LabelAt::Inside),
+                    "center" | "centre" | "middle" => at = Some(LabelAt::Center),
+                    n => {
+                        if let Ok(f) = n.parse::<f64>() {
+                            size = size.or(Some(f).filter(|s| size_ok(*s)));
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    (at, size)
+}
+
 /// Why a render failed — so hosts (the DuckDB extension, services) can surface
 /// a real error instead of an SVG.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3562,22 +3605,70 @@ fn cartesian(
     // `14::DATALABELS` — otherwise a readable default.
     let datalabels = find_role(cols, Role::DataLabels);
     let show_labels = datalabels.is_some();
-    let dlabel_size = datalabels
-        .and_then(|c| c.values.iter().find_map(|v| v.as_f64()))
-        .filter(|s| *s >= 5.0 && *s <= 40.0)
-        .unwrap_or(11.0);
+    let (dlabel_at, dlabel_size) = datalabel_spec(datalabels);
+    let dlabel_size = dlabel_size.unwrap_or(11.0);
+    let label_stacked = matches!(
+        kind,
+        Kind::BarStacked | Kind::BarStackedPercent | Kind::AreaStacked
+    );
+    let label_at = dlabel_at.unwrap_or(if label_stacked {
+        LabelAt::Center
+    } else {
+        LabelAt::Outside
+    });
     if show_labels {
-        // In the panel's value format (`$1,235`, `12%`), short form.
+        // In the panel's value format (`$1,235`, `12%`), short form, one
+        // style for the whole series (#959: `15.1K` … `7.3K`, never `15.1K`
+        // next to `9,800`).
         let fmt = value_fmt(cols, kind, &data[1].1);
+        let nums: Vec<f64> = data[1]
+            .1
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(f64::NAN))
+            .collect();
+        let short = fmt.short_series(&nums, &o.locale);
         let dl: Vec<Value> = data[1]
             .1
             .iter()
-            .map(|v| match v.as_f64() {
-                Some(f) => Value::Str(fmt.short(f, &o.locale)),
+            .zip(short)
+            .map(|(v, s)| match v.as_f64() {
+                Some(_) => Value::Str(s),
                 None => Value::Str(fmt_label(v)),
             })
             .collect();
         data.push(("dlab".to_string(), dl));
+        // #959: each label's side of the mark's end, as ggplot2's hjust /
+        // vjust: past the end of a positive bar above (or right, flipped),
+        // of a negative one below (left); 'inside' just within the end;
+        // 'center' in the middle (a stacked segment: position_stack).
+        let flipped = cols.iter().any(|c| c.role == Role::Flip);
+        let (mut hj, mut vj, mut ly) = (Vec::new(), Vec::new(), Vec::new());
+        for &n in &nums {
+            let neg = n < 0.0;
+            let (out, inn) = (if neg { 1.0 } else { 0.0 }, if neg { 0.0 } else { 1.0 });
+            let side = match label_at {
+                LabelAt::Outside => Some(out),
+                LabelAt::Inside => Some(inn),
+                LabelAt::Center => None,
+            };
+            // a gap of 0.4 of the text's height / 0.15 of its width
+            let (h, v) = match (side, flipped) {
+                (None, _) => (0.5, 0.5),
+                (Some(t), false) => (0.5, if t > 0.5 { 1.4 } else { -0.4 }),
+                (Some(t), true) => (if t > 0.5 { 1.15 } else { -0.15 }, 0.5),
+            };
+            hj.push(Value::Float(h));
+            vj.push(Value::Float(v));
+            let at_middle = matches!(label_at, LabelAt::Center) && !label_stacked;
+            ly.push(if n.is_finite() {
+                Value::Float(if at_middle { n / 2.0 } else { n })
+            } else {
+                Value::Na
+            });
+        }
+        data.push(("dlhj".to_string(), hj));
+        data.push(("dlvj".to_string(), vj));
+        data.push(("dly".to_string(), ly));
     }
 
     // Several measure columns of the same bar family (e.g. two ::BARCHART
@@ -4196,20 +4287,51 @@ fn cartesian(
     // — on a stacked mark, in the middle of its segment, stacked the way the
     // mark is (#219).
     if show_labels {
-        let stacked = matches!(
-            kind,
-            Kind::BarStacked | Kind::BarStackedPercent | Kind::AreaStacked
+        // On the mark (inside, centred): the fills' contrast colour; past
+        // the end the plain label colour. Overlapping labels are dropped
+        // (check_overlap), as a cramped stack would otherwise smear.
+        let on_mark = !matches!(label_at, LabelAt::Outside);
+        let mut text = GeomText {
+            size: dlabel_size,
+            color: o.theme.chart_label(),
+            check_overlap: true,
+            ..Default::default()
+        };
+        if on_mark {
+            // the contrast colour of the fills the labels sit on (white on
+            // the default blue and orange), plain, as ggplot2 would; only a
+            // mix of light and dark fills gets a thin halo instead
+            let fills: Vec<(u8, u8, u8)> = match category {
+                Some(c) => {
+                    let sc = category_scale(o, Aesthetic::Fill, c, cols);
+                    distinct_labels(c)
+                        .into_iter()
+                        .map(|l| {
+                            let k = sc.color_for_value(&Value::Str(l));
+                            (k.r, k.g, k.b)
+                        })
+                        .collect()
+                }
+                None => vec![brand],
+            };
+            let inks: Vec<(u8, u8, u8)> = fills.iter().map(|f| o.theme.text_on(*f)).collect();
+            if inks.windows(2).all(|w| w[0] == w[1]) && !inks.is_empty() {
+                text.color = inks[0];
+            } else {
+                text.color = o.theme.colors.card;
+                text = text.bg_colour(o.theme.colors.ink);
+                text.bg_r = 1.2;
+            }
+        }
+        let y_col = if label_stacked { "y" } else { "dly" };
+        plot = plot.geom_text_with(text).layer_aes(
+            Aes::new()
+                .x("x")
+                .y(y_col)
+                .label("dlab")
+                .hjust("dlhj")
+                .vjust("dlvj"),
         );
-        plot = plot
-            .geom_text_with(GeomText {
-                size: dlabel_size,
-                color: o.theme.chart_label(),
-                // Lift the label clear of the mark (a small gap above the
-                // top); a stacked segment's label is centred in it.
-                vjust: if stacked { 0.5 } else { -0.35 },
-                ..Default::default()
-            })
-            .layer_aes(Aes::new().x("x").y("y").label("dlab"));
         plot = match kind {
             Kind::BarStacked | Kind::AreaStacked => plot.position(position_stack().with_vjust(0.5)),
             Kind::BarStackedPercent => plot.position(position_fill().with_vjust(0.5)),
@@ -4586,6 +4708,7 @@ fn cartesian(
     // even in the plain (no `::YFORMAT`) case.
     let vfmt = value_fmt(cols, kind, &value.values);
     let locale = o.locale;
+    let y_transformed = y_tr.is_some();
     {
         let mut s = ScaleContinuous::new();
         if let Some(f) = y_fmt {
@@ -4598,6 +4721,18 @@ fn cartesian(
             s = s.with_breaks(bs);
         }
         s = s.with_value_formatter(move |n: f64| vfmt.full(n, &locale));
+        // #959: room for value labels past the bars' ends (ggplot2's
+        // `expansion(mult = c(0, .1))` advice), on the side they are drawn
+        if show_labels && matches!(label_at, LabelAt::Outside) && !label_stacked && !y_transformed {
+            let nums = || value.values.iter().filter_map(|v| v.as_f64());
+            let (lo, hi) = (nums().any(|n| n < 0.0), nums().any(|n| n > 0.0));
+            s = s.with_expand_sides(
+                if lo { 0.12 } else { 0.05 },
+                0.0,
+                if hi { 0.12 } else { 0.05 },
+                0.0,
+            );
+        }
         // #919: the right axis, in the ::Y2 measure's own units
         if let Some(p) = &y2 {
             let mut sec =

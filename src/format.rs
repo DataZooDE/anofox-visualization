@@ -534,6 +534,51 @@ impl ValueFmt {
         } else {
             grouped(a, 2)
         };
+        self.finish(v, body, l)
+    }
+
+    /// The short form of every value of one series, in **one** style (data
+    /// labels, #959): compact for all when the largest is ≥ 10 000 (`15.1K`,
+    /// `9.8K`, not `15.1K` next to `9,800`), else one decimal count for all,
+    /// from the largest (`12`, `8`, not `12` next to `8.25`).
+    pub fn short_series(&self, vals: &[f64], l: &Locale) -> Vec<String> {
+        let scale = |n: f64| {
+            if *self == ValueFmt::Share {
+                n * 100.0
+            } else {
+                n
+            }
+        };
+        let max = vals
+            .iter()
+            .filter(|v| v.is_finite())
+            .map(|v| scale(*v).abs())
+            .fold(0.0, f64::max);
+        let digits = if max >= 100.0 {
+            0
+        } else if max >= 10.0 {
+            1
+        } else {
+            2
+        };
+        vals.iter()
+            .map(|&n| {
+                if !n.is_finite() {
+                    return "–".into();
+                }
+                let v = scale(n);
+                let body = if max >= 1e4 {
+                    compact_l(v.abs(), l)
+                } else {
+                    grouped(v.abs(), digits)
+                };
+                self.finish(v, body, l)
+            })
+            .collect()
+    }
+
+    /// Sign, locale and the format's own affix around a formatted `body`.
+    fn finish(&self, v: f64, body: String, l: &Locale) -> String {
         let neg = v < 0.0 && body.chars().any(|c| c.is_ascii_digit() && c != '0');
         let sign = if neg { "-" } else { "" };
         let body = l.localize(&body);
@@ -553,6 +598,20 @@ impl ValueFmt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_series_is_labelled_in_one_style() {
+        let us = Locale::EN_US;
+        let f = |spec: &str, v: &[f64]| ValueFmt::parse(spec).short_series(v, &us);
+        assert_eq!(
+            f("", &[15100.0, 12400.0, 9800.0, 7300.0]),
+            ["15.1K", "12.4K", "9.8K", "7.3K"]
+        );
+        assert_eq!(f("", &[12.0, -8.25, 15.0]), ["12", "-8.3", "15"]);
+        assert_eq!(f("€", &[1_250_000.0, 830_000.0]), ["€1.3M", "€830K"]);
+        assert_eq!(f("", &[0.5, 0.25]), ["0.5", "0.25"]);
+        assert_eq!(f("", &[f64::NAN, 3.0]), ["–", "3"]);
+    }
 
     #[test]
     fn value_formats() {
