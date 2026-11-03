@@ -56,6 +56,9 @@ await page.click('.dp-edit-bar >> text=Add');
 await settle();
 check((await kpi()) === "2", "an edit alone doesn't change the saved table");
 await btn("Save plan").click();
+// #931: wait for what the check reads, not a fixed delay — the save re-runs
+// the panels, and a busy runner can take longer than settle()'s 700 ms
+await page.waitForFunction(() => document.querySelector(".metric-value")?.textContent === "3", null, { timeout: 30000 }).catch(() => {});
 await settle();
 check((await kpi()) === "3", `Save writes the graph into plan_nodes (${await kpi()})`);
 const said = await page.evaluate(() => [...document.querySelectorAll(".save-panel")].map((f) => f.textContent).join(" | "));
@@ -67,10 +70,14 @@ await page.fill('.dp-form-field[data-field="lead_time"] input', "9");
 await page.keyboard.press("Enter");
 await settle();
 await btn("Save parameters").click();
+await page
+  .waitForFunction(() => [...document.querySelectorAll(".textcard .text-value")].map((e) => e.textContent).join("|") === "sup=7,wh=9", null, { timeout: 30000 })
+  .catch(() => {});
 await settle();
 check((await text()) === "sup=7,wh=9", `a form save replaces the clicked node's row, keeps the others (${await text()})`);
 
 await btn("Bad").click();
+await page.waitForFunction(() => /is not a plain table name/.test(document.body.textContent), null, { timeout: 30000 }).catch(() => {});
 await settle();
 check(await page.evaluate(() => /is not a plain table name/.test(document.body.textContent)), "a bad table name is refused, saying why");
 check((await kpi()) === "3", "…and nothing was written");

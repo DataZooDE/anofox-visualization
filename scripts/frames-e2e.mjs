@@ -182,20 +182,22 @@ async function perfGate() {
   await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 120000 });
   await openMap(page);
   await page.click(".dp-frames input[type=range]"); // focus it, so arrow keys reach it
+  // #931: 40 samples after two warm-up steps — with 12, the "p95" was the
+  // maximum, so one GC pause on a shared runner failed the budget.
   const times = [];
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 42; i++) {
     const t = await page.evaluate(async () => {
       const t0 = performance.now();
       document.querySelector(".dp-frames-prev").click();
       await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
       return performance.now() - t0;
     });
-    times.push(t);
+    if (i >= 2) times.push(t);
     await page.waitForTimeout(20);
   }
   times.sort((a, b) => a - b);
   const p95 = times[Math.floor(times.length * 0.95)] ?? times[times.length - 1];
-  console.log(`draw(k) p95 over 12 steps: ${p95.toFixed(1)} ms (budget 150 ms); samples: ${times.map((t) => t.toFixed(1)).join(", ")}`);
+  console.log(`draw(k) p95 over ${times.length} steps: ${p95.toFixed(1)} ms (budget 150 ms); samples: ${times.map((t) => t.toFixed(1)).join(", ")}`);
   if (p95 > 150) fail(`perf: p95 ${p95.toFixed(1)}ms exceeds the 150ms budget`);
   else ok(`perf: p95 ${p95.toFixed(1)}ms within the 150ms budget`);
   await browser.close();
