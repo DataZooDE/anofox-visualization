@@ -139,6 +139,8 @@ terminal.
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'… |
+| `::Y2` | `::SECONDARY_AXIS`, `::RIGHT_AXIS` | modifier | the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line |
+| `::Y2FORMAT` | `::Y2AXISFORMAT` | modifier | the ::Y2 axis' value format, like ::YFORMAT: 'percent', '€', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%b %Y', '%a %H:%M' |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
 | `::YSCALE` | `::YTRANS` | modifier | y-axis transform: 'log10', 'sqrt' or 'reverse' |
@@ -2559,6 +2561,24 @@ palette colour so it never disappears into the base. For a legend that also
 dodges (bars side by side instead of overlaid) or needs a title other than
 the column header, pivot to the long form instead: one shared measure column
 plus a `::CATEGORY` naming the series.
+
+**A second measure on its own right axis** (`::Y2`, #919): name the measure
+column (by its header) that has other units — revenue bars with a margin
+line, visits with a conversion rate:
+
+```sql
+SELECT month::XAXIS, revenue::BARCHART, margin_pct::LINECHART,
+       'margin_pct'::Y2, 'percent'::Y2FORMAT, '€'::YFORMAT
+FROM monthly;
+```
+
+The named measure is drawn rescaled into the left axis' range (from 0 when
+bars or areas start there, so both zeros line up) and reads off a right-hand
+axis in its own units, titled with its name; a combo legend marks it
+"(right axis)". Its points keep their own values on hover and for value
+filters. The first measure stays on the left; `::Y2` is ignored on a
+`::FLIP` or `::YSCALE` chart. `--check`: `chart/y2-unknown-measure`,
+`chart/y2-ignored`.
 
 The toolbar also has an **auto-refresh** interval.
 

@@ -19344,7 +19344,7 @@ const SNAPSHOT_JS = `(function(){
       if(el._dpWired)return; el._dpWired=true;
       var t=el.getAttribute('data-tip'); if(!t)return;
       // the formatted value (::YFORMAT, ::LOCALE) in place of the raw one
-      var fv=el.getAttribute('data-fvalue'), x=el.getAttribute('data-fx')||el.getAttribute('data-x'), s=el.getAttribute('data-series');
+      var fv=el.getAttribute('data-vtext')||el.getAttribute('data-fvalue'), x=el.getAttribute('data-fx')||el.getAttribute('data-x'), s=el.getAttribute('data-series');
       if(fv)t=(x&&x!==s?x+(s?' · '+s:''):(s||x||''))+': '+fv;
       el.addEventListener('mouseenter',function(){tip.textContent=t;tip.classList.add('show');});
       el.addEventListener('mousemove',function(e){var w=tip.offsetWidth,h=tip.offsetHeight,l=e.clientX+14,t=e.clientY+14;if(l+w>innerWidth-8)l=e.clientX-14-w;if(t+h>innerHeight-8)t=e.clientY-14-h;tip.style.left=Math.max(8,l)+'px';tip.style.top=Math.max(8,t)+'px';});
@@ -19927,9 +19927,10 @@ function markInfo(attr, tip) {
   const tValue = i >= 0 ? tip.slice(i + 2) : "";
   const ds = attr("data-series");
   const dv = attr("data-value");
-  // `data-fvalue` (most marks, via svg_formatted_values) or `data-vtext` (a
-  // ::TRACK lane: `data-fvalue` is ggplot-rs-reserved, see `track.rs`).
-  const fv = attr("data-fvalue") || attr("data-vtext");
+  // `data-vtext` (a ::TRACK lane — `data-fvalue` is ggplot-rs-reserved, see
+  // `track.rs` — or a ::Y2 measure's own value, #919: its `data-fvalue` is
+  // the rescaled one it is drawn at), else `data-fvalue` (most marks).
+  const fv = attr("data-vtext") || attr("data-fvalue");
   const series = ds !== null && ds !== "" ? ds : tSeries;
   const raw = dv !== null && dv !== "" ? fmtTipValue(dv) : tValue;
   const value = fv !== null && fv !== "" ? fv : raw;
@@ -19985,7 +19986,7 @@ function mapMarkInfo(attr, tip) {
   // `data-fvalue` (symbol/region marks, written directly — not ggplot-rs
   // output) or `data-vtext` (a count-only hexbin cell: `data-fvalue` is
   // ggplot-rs-reserved, see `map/overlay.rs`).
-  const fv = attr("data-fvalue") || attr("data-vtext");
+  const fv = attr("data-vtext") || attr("data-fvalue");
   const value = fv ? fv : dv !== null && dv !== "" ? fmtTipValue(dv) : "";
   const own = series !== "" && series === label;
   return { series: series || tip, value, x: label, fx: true, own, detail: "" };
