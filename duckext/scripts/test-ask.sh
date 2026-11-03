@@ -78,7 +78,7 @@ start() {
   PIDS+=($!)
   exec {fd}>"$W/in$port"
   eval "FD$port=$fd"
-  printf "CREATE TABLE sales AS SELECT * FROM (VALUES ('EU', 'alice', 10), ('CANARYB', 'bob', 999)) t(region, owner, v);
+  printf "CREATE TABLE sales AS SELECT * FROM (VALUES ('EU', 'alice', 10), ('CANARYB', 'bob', 987654321)) t(region, owner, v);
 CREATE TABLE vault AS SELECT 'SKIPCANARY' AS secret;
 LOAD '%s';
 SELECT anofox_serve_dashboards('%s', %s, '%s');\n" "$EXT" "$W/dash" "$port" "$opts" >&"$fd"
@@ -123,7 +123,7 @@ grep -q "$FAKE_KEY" "$W/out$PORT" && fail "the key is in the start output"
   || fail "alice's question: $(cat "$W/ask_out")"
 grep -q '^event: progress' "$W/ask_out" && grep -q '^event: answer' "$W/ask_out" || fail "no stream: $(cat "$W/ask_out")"
 ANS="$(grep -A1 '^event: answer' "$W/ask_out" | sed -n 's/^data: //p')"
-for canary in CANARYB 999 bob SKIPCANARY; do
+for canary in CANARYB 987654321 bob SKIPCANARY; do
   upstream | grep -q "$canary" && fail "alice's question sent '$canary' upstream"
   printf %s "$ANS" | grep -q "$canary" && fail "alice's answer shows '$canary'"
 done
