@@ -40,6 +40,7 @@ pub mod ingest;
 #[cfg(feature = "auth")]
 pub mod mcp;
 pub mod metrics;
+pub mod notes;
 #[cfg(feature = "auth")]
 pub mod notify;
 pub mod openai;

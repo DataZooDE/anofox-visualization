@@ -1070,6 +1070,65 @@ pub struct RenderOptions {
     /// set by the render itself (`chart_frames::prepare`), never by a caller.
     #[doc(hidden)]
     pub frame_axes: Option<std::sync::Arc<chart_frames::ChartFrameAxes>>,
+    /// Viewers' notes on this chart (#889, `options.notes` on a locked
+    /// server): each a rule at an x or a shaded x-range, its text in the
+    /// tooltip. The page passes them in the render context (`"notes"`).
+    pub notes: Vec<ViewerNote>,
+}
+
+/// A viewer's note on a chart (#889): at `x`, or over `x`…`x2` (numbers or
+/// ISO dates as text, like `::XLINE` values), with its text, author and day.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewerNote {
+    pub id: String,
+    pub x: String,
+    pub x2: Option<String>,
+    pub text: String,
+    pub by: String,
+    pub at: String,
+}
+
+/// Most viewer notes one chart draws.
+pub const MAX_VIEWER_NOTES: usize = 50;
+
+impl ViewerNote {
+    /// The render context's `"notes"`: `[{id, x, x2?, text, by?, at?}]`.
+    /// Anything malformed is dropped, not an error (the notes come from a
+    /// server file, the chart still draws).
+    fn list_from(v: &serde_json::Value) -> Vec<ViewerNote> {
+        let s = |n: &serde_json::Value, k: &str, max: usize| -> Option<String> {
+            n.get(k)
+                .and_then(|v| v.as_str())
+                .map(|t| t.chars().take(max).collect())
+        };
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|n| {
+                        Some(ViewerNote {
+                            id: s(n, "id", 64)?,
+                            x: s(n, "x", 64)?,
+                            x2: s(n, "x2", 64).filter(|t| !t.is_empty()),
+                            text: s(n, "text", 1000)?,
+                            by: s(n, "by", 200).unwrap_or_default(),
+                            at: s(n, "at", 10).unwrap_or_default(),
+                        })
+                    })
+                    .take(MAX_VIEWER_NOTES)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The tooltip: the text, then who and when.
+    fn tip(&self) -> String {
+        match (self.by.is_empty(), self.at.is_empty()) {
+            (true, true) => self.text.clone(),
+            (false, true) => format!("{} — {}", self.text, self.by),
+            (true, false) => format!("{} — {}", self.text, self.at),
+            (false, false) => format!("{} — {}, {}", self.text, self.by, self.at),
+        }
+    }
 }
 
 impl Default for RenderOptions {
@@ -1086,6 +1145,7 @@ impl Default for RenderOptions {
             asset_root: None,
             frame: None,
             frame_axes: None,
+            notes: Vec::new(),
         }
     }
 }
@@ -1150,6 +1210,10 @@ impl RenderOptions {
         // code clamps to the last frame either way).
         if let Some(n) = ctx.get("frame").and_then(|v| v.as_u64()) {
             self.frame = Some(n as usize);
+        }
+        // #889: viewers' notes on this chart.
+        if let Some(v) = ctx.get("notes") {
+            self.notes = ViewerNote::list_from(v);
         }
         Ok(())
     }
@@ -4062,6 +4126,7 @@ fn cartesian(
         }
     }
     plot = data_annotations(plot, o, kind, cols, &data, x_discrete);
+    plot = viewer_notes(plot, o, x_discrete, &data);
     // Threshold lines (`::THRESHOLDS`): one at each bound where the status
     // changes, in the colour of the worse side.
     if let Some(rules) = thresholds_of(cols)? {
@@ -6298,6 +6363,147 @@ pub(crate) fn lighten((r, g, b): (u8, u8, u8), t: f64) -> (u8, u8, u8) {
 /// `LEFT JOIN events ON events.day = t.day`, so only the event rows carry
 /// values; NULL / empty cells draw nothing. Ink and shading come from the
 /// theme (`muted` wash, chart label colour), so dark mode follows.
+/// #889: viewers' notes ([`RenderOptions::notes`]) on a continuous x — a
+/// note at one x is a dotted rule, one over a range a shaded band, both in
+/// the theme's warning colour; the note's text, author and day are the tooltip, its
+/// id `data-note` (the page offers deleting it from there). A note whose x
+/// isn't a number or a date on this axis is skipped.
+fn viewer_notes(
+    mut plot: GGPlot,
+    o: &RenderOptions,
+    x_discrete: bool,
+    data: &[(String, Vec<Value>)],
+) -> GGPlot {
+    if o.notes.is_empty() {
+        return plot;
+    }
+    // a category axis places a note at one of its levels; a continuous one
+    // parses a number or a date
+    let levels: std::collections::HashSet<String> = if x_discrete {
+        data.iter()
+            .find(|(k, _)| k == "x")
+            .map(|(_, v)| {
+                v.iter()
+                    .filter(|v| **v != Value::Na)
+                    .map(value_str)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let at = |t: &str| {
+        if x_discrete {
+            levels.contains(t).then(|| Value::Str(t.to_string()))
+        } else {
+            xline_values(&[Value::Str(t.to_string())])
+                .into_iter()
+                .next()
+        }
+    };
+    // the theme's warning colour: a flag, apart from the series palette
+    let accent = o.theme.colors.warning;
+    let (mut px, mut pid, mut ptip) = (vec![], vec![], vec![]);
+    let (mut bx0, mut bx1, mut bid, mut btip) = (vec![], vec![], vec![], vec![]);
+    for n in &o.notes {
+        let Some(a) = at(&n.x) else { continue };
+        match n.x2.as_deref().and_then(at) {
+            Some(b) => {
+                let (a, b) = if x_discrete || a.as_f64() <= b.as_f64() {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                bx0.push(a);
+                bx1.push(b);
+                bid.push(Value::Str(n.id.clone()));
+                btip.push(Value::Str(n.tip()));
+            }
+            None => {
+                px.push(a);
+                pid.push(Value::Str(n.id.clone()));
+                ptip.push(Value::Str(n.tip()));
+            }
+        }
+    }
+    if !bx0.is_empty() {
+        let k = bx0.len();
+        plot = plot
+            .geom_rect_with(GeomRect {
+                fill: accent,
+                color: accent,
+                alpha: 0.12,
+                line_width: 0.0,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                ("nx0".to_string(), bx0),
+                ("nx1".to_string(), bx1),
+                ("ny0".to_string(), vec![Value::Float(f64::NEG_INFINITY); k]),
+                ("ny1".to_string(), vec![Value::Float(f64::INFINITY); k]),
+                ("nid".to_string(), bid),
+                ("ntip".to_string(), btip),
+            ])
+            .layer_aes(
+                Aes::new()
+                    .xmin("nx0")
+                    .xmax("nx1")
+                    .ymin("ny0")
+                    .ymax("ny1")
+                    .data_attr("note", "nid"),
+            )
+            .tooltip("{ntip}");
+    }
+    if !px.is_empty() && x_discrete {
+        // a rule at a category: a zero-width box, outlined
+        let k = px.len();
+        plot = plot
+            .geom_rect_with(GeomRect {
+                fill: accent,
+                color: accent,
+                alpha: 1.0,
+                line_width: 1.4,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                ("nx0".to_string(), px.clone()),
+                ("nx1".to_string(), px),
+                ("ny0".to_string(), vec![Value::Float(f64::NEG_INFINITY); k]),
+                ("ny1".to_string(), vec![Value::Float(f64::INFINITY); k]),
+                ("nid".to_string(), pid),
+                ("ntip".to_string(), ptip),
+            ])
+            .layer_aes(
+                Aes::new()
+                    .xmin("nx0")
+                    .xmax("nx1")
+                    .ymin("ny0")
+                    .ymax("ny1")
+                    .data_attr("note", "nid"),
+            )
+            .tooltip("{ntip}");
+    } else if !px.is_empty() {
+        plot = plot
+            .geom_vline_aes_with(
+                GeomVline {
+                    xintercept: 0.0,
+                    color: accent,
+                    width: 2.0,
+                    linetype: Linetype::Dashed,
+                    alpha: 1.0,
+                },
+                Aes::new().xintercept("nx").data_attr("note", "nid"),
+            )
+            .layer_data(vec![
+                ("nx".to_string(), px),
+                ("nid".to_string(), pid),
+                ("ntip".to_string(), ptip),
+            ])
+            .tooltip("{ntip}");
+    }
+    plot
+}
+
 fn data_annotations(
     mut plot: GGPlot,
     o: &RenderOptions,

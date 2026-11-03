@@ -925,8 +925,8 @@ SELECT anofox_serve_dashboards('dashboards', 8095,
 ### Durability: snapshots of the state and the saves (`options.durability`, #775)
 
 The per-viewer state store (`options.state`), the write-back change log
-(`options.writeback`) and the saved views (`options.views`, #913) are files
-on the node. With `durability`, the writer
+(`options.writeback`), the saved views (`options.views`, #913) and the notes
+(`options.notes`, #889) are files on the node. With `durability`, the writer
 copies them to S3 and a new node starts from there:
 
 ```sql
@@ -940,7 +940,8 @@ SELECT anofox_serve_dashboards('dashboards', 8095, '{
 - **Snapshots:** every `snapshot_every_s` (default 300) and once at the
   stop, the writer copies each file under its own lock (no write runs
   meanwhile) and uploads it to `<location>/state.jsonl`,
-  `<location>/writeback.jsonl` and `<location>/views.jsonl`, byte for byte, through DuckDB (`COPY … TO`),
+  `<location>/writeback.jsonl`, `<location>/views.jsonl` and
+  `<location>/notes.jsonl`, byte for byte, through DuckDB (`COPY … TO`),
   so the S3 secret the operator created in the serving session applies. An
   unchanged file is not uploaded again. `location` may also be `gs://`,
   `r2://` or a local directory (an NFS mount, a test).
@@ -1752,6 +1753,52 @@ builder or a published site) the browser keeps them (#888).
   {name, query}`) or delete (`"submit": "delete"`, the view's `id`).
   `options.durability` keeps it as `<location>/views.jsonl`. Requests are in
   the request log (`/api/views…`, the user and dashboard, no name or state).
+
+### Notes on charts (`options.notes`, #889)
+
+Viewers pin a short note to a chart, at a value or over a range
+("promotion", "data error"); everyone who sees the dashboard then sees it on
+that chart: a dashed rule (a range: a shaded band) in the theme's warning colour, its
+text, author and day as the tooltip. A writer points at a value (or brushes
+a range) and picks **✎ Add a note** in the chart's tools; a click on a note
+shows it, with **Delete** for its author or a moderator.
+
+```json
+"notes": {
+  "path": "/var/lib/anofox/notes.jsonl",
+  "dashboards": ["sales"],
+  "writers": {"groups": ["analysts"]},
+  "moderators": {"users": ["lead@example.com"]},
+  "max_per_dashboard": 200,
+  "text_max_chars": 280,
+  "max_mb": 64
+}
+```
+
+- **Who.** Needs a login (the start refuses otherwise) and lists its
+  dashboards (an unknown one refuses the start). Every credential that may
+  open a listed dashboard reads its notes (scope applies). Adding one needs
+  a personal sign-in among `writers` (none named: every personal sign-in);
+  an API key, a share link or a reserved identity never writes. A note is
+  deleted by its author or a `moderators` member.
+- **What is shown to others.** The text (1–`text_max_chars` characters, no
+  control characters), the anchor value(s) the writer chose, the author's
+  user id and the day. Nothing is read from the data, so a note shows only
+  what its writer wrote — but it shows it to **every** viewer of the
+  dashboard, whatever the access policy lets each of them see: name as
+  writers only people who may share what they see with all of them. The
+  renderer escapes the text (an SVG `<title>`), the page sets it as text.
+- **Endpoints.** `GET /api/notes?dashboard=<id>` → `{notes: [{id, panel, x,
+  x2, text, by, at, mine}]}`; `POST /api/notes` `{dashboard, panel, x, x2?,
+  text}` → `201` (`panel` is a statement number of that dashboard);
+  `POST /api/notes/delete` `{dashboard, id}`. Writes pass the same
+  cross-site gate as `/api/submit` (header `X-Anofox-Notes: 1`); at most
+  `max_per_dashboard` (default 200, ≤ 2000) notes per dashboard, 20 writes a
+  minute per user (burst 5).
+- **The file.** The state store's format and discipline, header
+  `"kind":"notes"`, its own path. One line per note (`"submit": "note"`,
+  `"vars": {panel, x, x2?, text}`) or delete. `options.durability` keeps it
+  as `<location>/notes.jsonl`; `dashboard state export|erase` work on it.
 
 ## B. Static render — `serve --dashboards <dir>`
 
