@@ -108,7 +108,7 @@ const chat = (message, finish = "tool_calls") => ({ id: "c", object: "chat.compl
 // turn 1: profile the table; turn 2: propose
 const happy = (n) => (n % 2 === 1 ? [200, chat({ content: "Let me look.", tool_calls: [call(`p${n}`, "profile_table", { table: "sales" })] })] : [200, chat({ content: null, tool_calls: [call(`d${n}`, "propose_dashboard", { sql: PROPOSAL, summary: "Sales by region.", panels: [{ stmt: 1, title: "Sales by region", why: "the ranking" }], open_issues: [] })] })]);
 
-const settled = (page) => page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+const settled = (page) => page.waitForFunction(() => /[1-9]\d* panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
 const browser = await chromium.launch();
 const errors = [];
 async function start(page, q) {
