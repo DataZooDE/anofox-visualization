@@ -788,8 +788,12 @@ fn the_log_has_no_question_answer_or_data() {
     assert_eq!(v["outcome"], "answered");
     assert_eq!(v["tokens"]["input"], 2_000);
     assert_eq!(v["request_id"], json!(["req_1", "req_2"]));
+    // The conversation id is random hex and can contain "980" (#921).
+    let mut rest = v.clone();
+    rest.as_object_mut().unwrap().remove("conversation");
+    let rest = rest.to_string();
     for leak in ["How did", "980", "US made", "EU"] {
-        assert!(!line.contains(leak), "{leak} in {line}");
+        assert!(!rest.contains(leak), "{leak} in {line}");
     }
     std::fs::remove_dir_all(dir).ok();
 }
