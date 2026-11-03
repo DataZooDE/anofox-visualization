@@ -5689,6 +5689,13 @@ fn map_diags(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
 ) -> Vec<(Severity, &'static str, String)> {
+    // ::ORIGIN / ::DEST under a ::SANKEY are its stages, not a map (#881)
+    if roles
+        .iter()
+        .any(|(_, r)| *r == Role::Value(crate::Kind::Sankey))
+    {
+        return Vec::new();
+    }
     let mut out = region_diags(roles, rows);
     let has = |want: Role| roles.iter().any(|(_, r)| *r == want);
     let geom = roles

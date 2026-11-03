@@ -2136,6 +2136,8 @@ async function ensureForecast(sql) {
 
 // A ::MAP panel: WKT, a ::REGION code or a ::LAT/::LON point.
 function isMapPanel(roles) {
+  // (::ORIGIN / ::DEST under a ::SANKEY are its stages, not a flow map: #881)
+  if (roles.some((r) => r[1] === "SANKEY" || r[1] === "SANKEYCHART")) return false;
   return roles.some((r) => r[1] === "MAP" || r[1] === "REGION" || r[1] === "LAT" || r[1] === "ORIGIN");
 }
 

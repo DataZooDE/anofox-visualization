@@ -567,6 +567,83 @@ pub(crate) fn render_funnel(
     Ok(Panel::plot(plot, width, height))
 }
 
+/// `::SANKEY` (#881): `::ORIGIN` → `::DEST` flows, link width by the
+/// measure; nodes stack in columns, coloured by name in the theme's series
+/// colours (ggplot-rs `geom_sankey`). Rows without a positive value are left
+/// out.
+pub(crate) fn render_sankey(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let text = |r: Role| -> Option<Vec<String>> {
+        cols.iter()
+            .find(|c| c.role == r)
+            .map(|c| c.values.iter().map(value_str).collect())
+    };
+    let (Some(from), Some(to)) = (text(Role::Origin), text(Role::Dest)) else {
+        return Ok(note_svg(
+            title,
+            "::SANKEY needs an ::ORIGIN and a ::DEST column",
+            width,
+            height,
+        ));
+    };
+    let keep: Vec<usize> = (0..from.len().min(to.len()))
+        .filter(|&i| {
+            value
+                .values
+                .get(i)
+                .and_then(|v| v.as_f64())
+                .is_some_and(|f| f.is_finite() && f > 0.0)
+                && from[i] != to[i]
+        })
+        .collect();
+    if keep.is_empty() {
+        return Ok(note_svg(
+            title,
+            "::SANKEY needs positive flows",
+            width,
+            height,
+        ));
+    }
+    let mut fills: Vec<(String, ggplot_rs::scale::color::RGBAColor)> = Vec::new();
+    for &i in &keep {
+        for n in [&from[i], &to[i]] {
+            if !fills.iter().any(|(k, _)| k == n) {
+                fills.push((n.clone(), crate::dz_color(o, fills.len())));
+            }
+        }
+    }
+    let data = vec![
+        (
+            "from".to_string(),
+            strs(keep.iter().map(|&i| from[i].clone())),
+        ),
+        ("to".to_string(), strs(keep.iter().map(|&i| to[i].clone()))),
+        (
+            "w".to_string(),
+            nums(
+                keep.iter()
+                    .map(|&i| value.values[i].as_f64().unwrap_or(0.0)),
+            ),
+        ),
+    ];
+    let mut plot = GGPlot::new(data)
+        .aes(Aes::new().from("from").to("to").weight("w"))
+        .geom_sankey()
+        .scale_fill_manual(fills.iter().map(|(k, c)| (k.as_str(), *c)).collect())
+        .theme(chart_theme(o, 11.0))
+        .legend_position(LegendPosition::None);
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}
+
 /// `::TREEMAP` (#880): tiles whose area is the measure, labelled by
 /// `::XAXIS`; with a `::CATEGORY` the tiles nest in group rectangles, filled
 /// by group (ggplot-rs `geom_treemap`). Rows with no positive value are left
