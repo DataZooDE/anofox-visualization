@@ -135,8 +135,9 @@ for (const url of lib.FILE_SAMPLES) {
   add(readFileSync(new URL(`../../web/${url}`, import.meta.url), "utf8"), f, f);
 }
 
-assert.equal(EXAMPLES.length, 37);
+assert.equal(EXAMPLES.length, 38);
 assert.ok(EXAMPLES.some((e) => e.name === "Where do our deliveries and customers cluster, and which regions are underserved?" && e.group === "Logistics & production"), "the delivery-coverage map showcase");
+assert.ok(EXAMPLES.some((e) => e.name === "Where does our revenue come from, from country down to district?" && e.group === "Sales & customers"), "the map drill-down (#954)");
 assert.equal(new Set(EXAMPLES.map((e) => e.id)).size, EXAMPLES.length, "example ids are unique");
 for (const e of EXAMPLES) {
   assert.ok(/^-- @title /m.test(e.sql), `${e.name}: no -- @title`);

@@ -955,6 +955,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frames-e2e.mjs --url http://127.0.0.1:8947/ --out /tmp/frames-e2e-shots
 
+      # scripts/map-drill-e2e.mjs (#954): a ::DRILL on a ::REGION map — the
+      # example's countries → Germany's states → Bavaria's districts, the
+      # breadcrumb back, the path in the URL, a country without states.
+      - name: Map drill-down e2e (#954)
+        timeout-minutes: 4
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/map-drill-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/frame-url-e2e.mjs (M3e-2, #647): a named time map's frame
       # in the URL (?frame.<name>=<label>): written on step, restored on
       # reload, absent for the last frame and for unnamed maps.

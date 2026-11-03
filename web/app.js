@@ -1051,6 +1051,7 @@ const FILE_SAMPLES = [
   "examples/optimize-production.sql",
   "examples/optimize-delivery.sql",
   "examples/period-kpis.sql",
+  "examples/drill-revenue-map.sql",
   "examples/statistics-ab-test.sql",
   "examples/statistics-churn-drivers.sql",
   "examples/decide-leads.sql",
@@ -20403,9 +20404,11 @@ function attachHover() {
       const ia = trackSvg
         ? trackLr && { link: { idx: trackLr[0], rows: track.rows, roles: track.roles } }
         : figureCellIa(el) ?? el.closest(".panel")?._ia;
-      // The mark's own value — its x (a drill level is the x), else its series.
+      // The mark's own value — its x (a drill level is the x), else its series;
+      // on a ::REGION map, the clicked region's code (#954: the next level
+      // filters on the code, never on a shown, translated name).
       const dx = el.getAttribute("data-x");
-      const key = dx ? String(dx) : series;
+      const key = dx ? String(dx) : (regionCodeOf(el) ?? series);
       if (!trackSvg && ia && ia.drill && drillInto(ia.drill, key)) return;
       if (ia && ia.link) {
         const k = markKey(el.closest(".panel"), el);
@@ -20699,6 +20702,20 @@ function markGrid(svg) {
 }
 
 // What identifies a mark across re-runs (dpA11yFocus).
+// The ::REGION code of a map feature (its row's), or null (#954).
+function regionCodeOf(el) {
+  if (!el.closest("svg[data-map]") || !el.hasAttribute("data-row")) return null;
+  const dp = el.closest(".panel")?._dp;
+  const ri = dp?.roles?.find((r) => r[1] === "REGION")?.[0];
+  if (ri == null) return null;
+  try {
+    dp._rowsParsed ??= JSON.parse(dp.rows);
+  } catch (_) {
+    return null;
+  }
+  const v = dp._rowsParsed[+el.getAttribute("data-row")]?.["c" + ri];
+  return v == null || v === "" ? null : String(v);
+}
 function markKey(fig, el) {
   return { stmt: fig.dataset.stmt, series: el.getAttribute("data-series"), x: el.getAttribute("data-x") || "" };
 }
