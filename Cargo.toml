@@ -149,6 +149,8 @@ crate-type = ["cdylib", "rlib"]
 # struct literals (none here).
 # 0.37.1 (sipemu/ggplot-rs#399, #917): `geom_density_ridges` (ridgelines)
 # and `ScaleDiscrete::with_expand`.
+# 0.37.2 (sipemu/ggplot-rs#400): a nested ::TREEMAP keeps its group
+# rectangles and labels (they were dropped as "missing values").
 # 0.37.3 (sipemu/ggplot-rs#401, #760): `GeomMapTile::units` — tiles under a
 # map in EPSG:3857 metres; feature `tiles` (no dependencies) for `::MAPTILES`.
 # 0.38.0 (sipemu/ggplot-rs#402, #959): per-row `hjust` / `vjust` aesthetics on
