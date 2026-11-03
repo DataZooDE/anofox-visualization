@@ -2016,6 +2016,16 @@ where
                 }),
         );
 
+        diags.extend(y2_diags(&p.roles, &p.names, &rows).into_iter().map(
+            |(severity, code, message)| Diagnostic {
+                severity,
+                stmt,
+                code,
+                message,
+                sql: short.clone(),
+            },
+        ));
+
         diags.extend(scatter_hexbin_diags(&p.roles, &rows).into_iter().map(
             |(severity, code, message)| Diagnostic {
                 severity,
@@ -6371,6 +6381,60 @@ fn frame_diags(
     out
 }
 
+/// `::Y2` (#919): it must name one of the chart's measures other than the
+/// first (that one is the left axis'), and it is ignored on a flipped or
+/// `::YSCALE`-transformed chart.
+fn y2_diags(
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+    rows: &[Map<String, Value>],
+) -> Vec<(Severity, &'static str, String)> {
+    let mut out = Vec::new();
+    let Some(yi) = roles.iter().find(|(_, r)| *r == Role::Y2).map(|(i, _)| *i) else {
+        return out;
+    };
+    let Some(want) = column_texts(rows, yi).into_iter().next() else {
+        return out;
+    };
+    let name_of = |i: usize| names.iter().find(|(k, _)| *k == i).map(|(_, n)| n.clone());
+    let measures: Vec<String> = roles
+        .iter()
+        .filter(|(_, r)| matches!(r, Role::Value(_)))
+        .filter_map(|(i, _)| name_of(*i))
+        .collect();
+    let others = measures.get(1..).unwrap_or_default();
+    if !others
+        .iter()
+        .any(|m| m.trim().eq_ignore_ascii_case(want.trim()))
+    {
+        out.push((
+            Severity::Warning,
+            "chart/y2-unknown-measure",
+            if others.is_empty() {
+                format!(
+                    "::Y2 '{want}' needs a second measure column to put on the right axis — \
+                     the first measure is the left axis'"
+                )
+            } else {
+                format!(
+                    "::Y2 '{want}' names none of this chart's other measures ({}) — no right axis is drawn",
+                    others.join(", ")
+                )
+            },
+        ));
+    } else if roles
+        .iter()
+        .any(|(_, r)| matches!(r, Role::Flip | Role::YScale))
+    {
+        out.push((
+            Severity::Note,
+            "chart/y2-ignored",
+            "::Y2 is ignored on a flipped (::FLIP) or ::YSCALE-transformed chart".to_string(),
+        ));
+    }
+    out
+}
+
 /// `::HEXBIN` on a planar `::SCATTER`/bubble chart (#426) — a chart-side
 /// sibling of [`hexbin_diags`] (the map case), which only runs for a map
 /// panel. Two checks: a bad size spec, and `::CATEGORY` being ignored (the
@@ -10358,6 +10422,44 @@ mod design_tests {
             .map(|d| (d.severity, d.code))
             .collect();
         assert_eq!(codes, vec![(Severity::Note, "map/hexbin-category")]);
+    }
+
+    #[test]
+    fn y2_must_name_another_measure() {
+        let codes = |sql: &str| -> Vec<(Severity, &'static str)> {
+            // the ::Y2 cell is what the statement selects
+            let y2 = if sql.contains("'revenue'::Y2") {
+                "revenue"
+            } else {
+                "margin"
+            };
+            let data = vec![json!({ "c0": "Jan", "c1": 1200.0, "c2": 12.0, "c3": y2 })
+                .as_object()
+                .unwrap()
+                .clone()];
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code.starts_with("chart/y2"))
+            .map(|d| (d.severity, d.code))
+            .collect()
+        };
+        let ok = "SELECT m::XAXIS, revenue::BARCHART, margin::LINECHART, 'margin'::Y2 FROM t;";
+        assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+        assert_eq!(
+            codes("SELECT m::XAXIS, revenue::BARCHART, margin::LINECHART, 'revenue'::Y2 FROM t;"),
+            vec![(Severity::Warning, "chart/y2-unknown-measure")]
+        );
+        assert_eq!(
+            codes("SELECT m::XAXIS, revenue::BARCHART, margin::LINECHART, 'margin'::Y2, 1::FLIP FROM t;"),
+            vec![(Severity::Note, "chart/y2-ignored")]
+        );
     }
 
     #[test]

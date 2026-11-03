@@ -234,6 +234,10 @@ pub static REGISTRY: &[RoleSpec] = &[
       "swap the axes (horizontal bars)"),
     e("YFORMAT", &["YAXISFORMAT", "YUNIT", "YCURRENCY"], R::YFormat, "modifier", true,
       "value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'…"),
+    e("Y2", &["SECONDARY_AXIS", "RIGHT_AXIS"], R::Y2, "modifier", true,
+      "the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line"),
+    e("Y2FORMAT", &["Y2AXISFORMAT"], R::Y2Format, "modifier", true,
+      "the ::Y2 axis' value format, like ::YFORMAT: 'percent', '€', ' kg'…"),
     e("XFORMAT", &["XAXISFORMAT", "XUNIT", "XCURRENCY"], R::XFormat, "modifier", true,
       "x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%b %Y', '%a %H:%M'"),
     e("XSCALE", &["XTRANS"], R::XScale, "modifier", true,
@@ -1252,6 +1256,8 @@ mod tests {
             Role::Size,
             Role::YFormat,
             Role::XFormat,
+            Role::Y2,
+            Role::Y2Format,
             Role::DataLabels,
             Role::MarkArea,
             Role::VLineLabel,
@@ -1435,6 +1441,8 @@ mod tests {
                 | Role::Size
                 | Role::YFormat
                 | Role::XFormat
+                | Role::Y2
+                | Role::Y2Format
                 | Role::DataLabels
                 | Role::MarkArea
                 | Role::VLineLabel

@@ -541,6 +541,11 @@ pub enum Role {
     YFormat,
     /// Format the x-axis tick labels (`::XFORMAT`), like [`Role::YFormat`].
     XFormat,
+    /// #919: the measure column (by its header) drawn on a right-hand y
+    /// axis of its own (`::Y2`), rescaled into the left axis' range.
+    Y2,
+    /// The right axis' value format (`::Y2FORMAT`), like [`Role::YFormat`].
+    Y2Format,
     /// Draw the value on each mark as a text label (`::DATALABELS`). A marker
     /// column; its values (if any) are ignored — the measure is labelled.
     DataLabels,
@@ -2824,6 +2829,80 @@ fn find_role(cols: &[Column], role: Role) -> Option<&Column> {
 
 /// The first non-empty string value of a `role` column (directive-style
 /// modifiers such as `'€'::YFORMAT`, `'log10'::YSCALE`).
+/// #919: how a `::Y2` measure maps onto the left axis: `secondary =
+/// primary * scale + offset`, the inverse of [`Y2Plan::to_primary`].
+struct Y2Plan {
+    /// Which extra measure (index into the chart's extra measures).
+    k: usize,
+    name: String,
+    fmt: Option<String>,
+    scale: f64,
+    offset: f64,
+}
+
+impl Y2Plan {
+    fn to_primary(&self, v: f64) -> f64 {
+        (v - self.offset) / self.scale
+    }
+}
+
+/// The `::Y2` plan of a vertical, untransformed cartesian chart: the extra
+/// measure named by `::Y2` (its header, any case), its range mapped onto
+/// the other measures' range — both from 0 when bars or areas start there,
+/// so the two zeros line up. `None` when `::Y2` is absent or names no extra
+/// measure (the first measure is the left axis').
+fn y2_plan(cols: &[Column], kind: Kind, value: &Column, extras: &[&Column]) -> Option<Y2Plan> {
+    let name = role_str(cols, Role::Y2)?;
+    if cols.iter().any(|c| c.role == Role::Flip) || find_role(cols, Role::YScale).is_some() {
+        return None;
+    }
+    let k = extras
+        .iter()
+        .position(|c| c.name.trim().eq_ignore_ascii_case(name.trim()))?;
+    let finite = |c: &Column| -> Vec<f64> {
+        c.values
+            .iter()
+            .filter_map(|v| v.as_f64().filter(|f| f.is_finite()))
+            .collect()
+    };
+    let zero_based = |k: Kind| {
+        matches!(
+            k,
+            Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent | Kind::Area
+        )
+    };
+    let mut prim = finite(value);
+    let mut from_zero = zero_based(kind);
+    for (i, c) in extras.iter().enumerate() {
+        if i != k {
+            prim.extend(finite(c));
+            from_zero |= matches!(c.role, Role::Value(ek) if zero_based(ek));
+        }
+    }
+    let sec = finite(extras[k]);
+    let span = |v: &[f64]| -> Option<(f64, f64)> {
+        let lo = v.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let (lo, hi) = if from_zero {
+            (lo.min(0.0), hi.max(0.0))
+        } else {
+            (lo, hi)
+        };
+        lo.is_finite()
+            .then_some(if hi > lo { (lo, hi) } else { (lo, lo + 1.0) })
+    };
+    let ((plo, phi), (slo, shi)) = (span(&prim)?, span(&sec)?);
+    // primary = plo + (s - slo) * f  ⇔  s = primary / f + (slo - plo / f)
+    let f = (phi - plo) / (shi - slo);
+    Some(Y2Plan {
+        k,
+        name: extras[k].name.trim().to_string(),
+        fmt: role_fmt(cols, Role::Y2Format),
+        scale: 1.0 / f,
+        offset: slo - plo / f,
+    })
+}
+
 fn role_str(cols: &[Column], role: Role) -> Option<String> {
     find_role(cols, role).and_then(|c| {
         c.values.iter().find_map(|v| match v {
@@ -3239,6 +3318,34 @@ fn cartesian(
     for (k, ev) in extras.iter().enumerate() {
         data.push((format!("y{}", k + 2), ev.values.clone()));
     }
+    // #919: one extra measure on a right-hand axis of its own — drawn
+    // rescaled into the left axis' range, its marks keep their own values.
+    let y2 = y2_plan(cols, kind, value, &extras);
+    if let Some(p) = &y2 {
+        let col = &extras[p.k];
+        let fmt = format::ValueFmt::parse(&p.fmt.clone().unwrap_or_default());
+        let scaled: Vec<Value> = col
+            .values
+            .iter()
+            .map(|v| match v.as_f64().filter(|f| f.is_finite()) {
+                Some(f) => Value::Float(p.to_primary(f)),
+                None => Value::Na,
+            })
+            .collect();
+        let text: Vec<Value> = col
+            .values
+            .iter()
+            .map(|v| match v.as_f64().filter(|f| f.is_finite()) {
+                Some(f) => Value::Str(fmt.full(f, &o.locale)),
+                None => Value::Na,
+            })
+            .collect();
+        if let Some(d) = data.iter_mut().find(|(n, _)| *n == format!("y{}", p.k + 2)) {
+            d.1 = scaled;
+        }
+        data.push(("y2raw".to_string(), col.values.clone()));
+        data.push(("y2text".to_string(), text));
+    }
     // Interval ends under non-canonical names: a column called `ymin` would be
     // read by geom_col as a stacked bar's base.
     // A missing interval end (e.g. a ridge coefficient, which has no
@@ -3417,6 +3524,12 @@ fn cartesian(
             for ev in &extras {
                 let idx = names.len();
                 names.push(name_of(ev, idx));
+            }
+            // #919: the legend says which series reads off the right axis
+            if let Some(p) = &y2 {
+                if let Some(nm) = names.get_mut(p.k + 1) {
+                    nm.push_str(" (right axis)");
+                }
             }
             for (k, nm) in names.iter().enumerate() {
                 data.push((format!("__s{k}"), vec![Value::Str(nm.clone()); n]));
@@ -4021,6 +4134,12 @@ fn cartesian(
         if let Role::Value(ekind) = ev.role {
             let yk = format!("y{}", k + 2);
             let mut lay = Aes::new().x("x").y(&yk);
+            let on_y2 = y2.as_ref().is_some_and(|p| p.k == k);
+            if on_y2 {
+                // its own value on hover and for value filters, not the
+                // rescaled one it is drawn at
+                lay = lay.data_attr("value", "y2raw").data_attr("vtext", "y2text");
+            }
             if !combo_names.is_empty() {
                 let s = format!("__s{}", k + 1);
                 lay = if pure_bar_combo {
@@ -4057,6 +4176,39 @@ fn cartesian(
                 _ => plot.geom_col_with(card_col(o)),
             }
             .layer_aes(lay);
+            if on_y2 {
+                let name = y2.as_ref().map(|p| p.name.as_str()).unwrap_or_default();
+                let tip = format!(
+                    "{{x}} · {}: {{y2text}}",
+                    name.replace('{', "{{").replace('}', "}}")
+                );
+                plot = plot.tooltip(&tip);
+                // a line / area overlay gets a point per value to hover, in
+                // its own units
+                if matches!(ekind, Kind::Line | Kind::Area) {
+                    plot = plot
+                        .geom_point_with(GeomPoint {
+                            color: own.unwrap_or(brand),
+                            size: 2.4,
+                            ..Default::default()
+                        })
+                        .layer_aes({
+                            let pa = Aes::new()
+                                .x("x")
+                                .y(&yk)
+                                .data_attr("value", "y2raw")
+                                .data_attr("vtext", "y2text");
+                            // a named combo colours its series by name
+                            if combo_names.is_empty() {
+                                pa
+                            } else {
+                                pa.color(&format!("__s{}", k + 1))
+                            }
+                        })
+                        .show_legend(false)
+                        .tooltip(&tip);
+                }
+            }
         }
     }
     // Reference lines, one per distinct value of the column: horizontal
@@ -4353,6 +4505,15 @@ fn cartesian(
             s = s.with_breaks(bs);
         }
         s = s.with_value_formatter(move |n: f64| vfmt.full(n, &locale));
+        // #919: the right axis, in the ::Y2 measure's own units
+        if let Some(p) = &y2 {
+            let mut sec =
+                ggplot_rs::scale::sec_axis::SecAxis::linear(p.scale, p.offset).with_name(&p.name);
+            let f2 = format::ValueFmt::parse(&p.fmt.clone().unwrap_or_default());
+            let loc = o.locale;
+            sec = sec.with_labeller(move |v: f64| f2.short(v, &loc));
+            s = s.with_sec_axis(sec);
+        }
         plot = plot.scale_y_continuous(s);
     }
     // An x formatter/transform only makes sense on a continuous x (numeric/date),
