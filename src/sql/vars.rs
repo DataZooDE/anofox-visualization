@@ -178,7 +178,7 @@ const PERIOD_SUFFIXES: &[&str] = &[
 ];
 
 /// The variable name(s) an input panel sets.
-fn input_names(p: &Panel, kind: InputKind) -> Vec<String> {
+pub(crate) fn input_names(p: &Panel, kind: InputKind) -> Vec<String> {
     match kind {
         InputKind::DateRange => daterange_columns(p),
         InputKind::Period => {
@@ -228,7 +228,7 @@ fn daterange_columns(p: &Panel) -> Vec<String> {
 /// (a `::SELECT_AS`/`::DRILL` marker is a one-column statement): a plain
 /// `'…'`/`E'…'` string (`''` unescaped), or `None` for a computed value —
 /// the same split `views::literal_text` uses for a `::VIEW` label.
-fn literal_value(p: &Panel) -> Option<String> {
+pub(crate) fn literal_value(p: &Panel) -> Option<String> {
     let (start, end) = super::main_select_list(&p.sql)?;
     let item = lex::split_top_commas(&p.sql[start..end])
         .into_iter()
