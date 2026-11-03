@@ -135,6 +135,9 @@ pub enum Kind {
     Bullet,
     /// Ordered conversion stages, widths by value (`::FUNNEL`).
     Funnel,
+    /// Part-to-whole tiles, area by value; `::CATEGORY` nests them in
+    /// groups (`::TREEMAP`, #880).
+    Treemap,
     /// Bars sorted descending with a cumulative-% line on a right axis
     /// (`::PARETO`, #879).
     Pareto,
@@ -167,6 +170,7 @@ impl Kind {
                 | Kind::Waterfall
                 | Kind::Bullet
                 | Kind::Funnel
+                | Kind::Treemap
                 | Kind::Pareto
                 | Kind::Gantt
                 | Kind::Dumbbell
@@ -1905,6 +1909,7 @@ impl Panel {
                     | Kind::Sparkbar
                     | Kind::Calendar
                     | Kind::Funnel
+                    | Kind::Treemap
                     | Kind::Pareto
                     | Kind::Gantt
                     | Kind::Dumbbell
@@ -2718,6 +2723,9 @@ fn render_inner(
         }
         Kind::Funnel => {
             return variance::render_funnel(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Treemap => {
+            return variance::render_treemap(o, value, cols, title.as_deref(), width, height)
         }
         Kind::Pareto => {
             return variance::render_pareto(o, value, cols, title.as_deref(), width, height)
@@ -3859,7 +3867,8 @@ fn cartesian(
         | Kind::Funnel
         | Kind::Dumbbell
         | Kind::Gantt
-        | Kind::Pareto => {
+        | Kind::Pareto
+        | Kind::Treemap => {
             unreachable!("handled above")
         }
     };

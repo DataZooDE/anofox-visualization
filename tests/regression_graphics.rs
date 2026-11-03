@@ -3151,6 +3151,20 @@ fn line_chart_still_treats_iso_date_strings_as_a_continuous_axis() {
     );
 }
 
+// #880: ::TREEMAP — one tile per positive row, the group's theme colour.
+#[test]
+fn treemap_tiles_by_group() {
+    let s = svg(vec![
+        Column::new("x", Role::X, strs(&["A", "B", "C", "D"])),
+        Column::new("g", Role::Category, strs(&["g1", "g1", "g2", "g2"])),
+        Column::new("v", Role::Value(Kind::Treemap), nums(&[4.0, 2.0, 3.0, 0.0])),
+    ]);
+    for l in ["A", "B", "C"] {
+        assert!(s.contains(&format!(">{l}<")), "tile {l} labelled");
+    }
+    assert!(!s.contains(">D<"), "a zero row draws no tile");
+}
+
 // #879: ::PARETO — bars plus a cumulative line on a right axis.
 #[test]
 fn pareto_has_a_cumulative_axis() {
