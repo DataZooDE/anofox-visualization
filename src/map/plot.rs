@@ -663,7 +663,31 @@ pub(super) fn build(
         .filter_map(|f| row_wkt(f))
         .map(Value::Str)
         .collect();
-    let has_base = !base_wkt.is_empty();
+    // #760: the installation's tile basemap under everything (`'on'::MAPTILES`
+    // on a Mercator map, with a host-supplied tile source); it replaces the
+    // land fill. The map's Mercator is in metres (`project::R_MERC`).
+    let tile_layer = o.basemap.as_ref().filter(|_| {
+        m.projection == super::project::Projection::Mercator
+            && crate::find_role(cols, crate::Role::MapTiles)
+                .and_then(|c| c.values.first())
+                .is_some_and(|v| super::tiles_on(&crate::value_str(v)))
+    });
+    let tile_layer = tile_layer.map(|b| {
+        let fetch = b.tiles.clone();
+        ggplot_rs::geom::map_tile::GeomMapTile::new(
+            ggplot_rs::geom::map_tile::TileSource::xyz("").attribution(b.attribution.clone()),
+            move |z, x, y| fetch(z, x, y),
+        )
+        .units(super::project::R_MERC)
+    });
+    let begin = |df: Df, aes: Aes| {
+        let p = GGPlot::new(df).aes(aes);
+        match &tile_layer {
+            Some(t) => p.annotation_map_tile_with(t.clone()),
+            None => p,
+        }
+    };
+    let has_base = !base_wkt.is_empty() && tile_layer.is_none();
 
     // ---- the basemap layer (drawn first — under the features), if any —
     // then the features layer, on top. Skipped when `!any_feature_
@@ -695,7 +719,7 @@ pub(super) fn build(
     // with no `geom_sf` layer of its own.
     let mut plot = if has_base {
         let base_df: Vec<(String, Vec<Value>)> = vec![("geometry".into(), base_wkt)];
-        let mut p = GGPlot::new(base_df).aes(Aes::new()).geom_sf_with(GeomSf {
+        let mut p = begin(base_df, Aes::new()).geom_sf_with(GeomSf {
             fill: land,
             color: land_edge,
             alpha: 1.0,
@@ -717,11 +741,9 @@ pub(super) fn build(
         for (_, v) in features_df.iter_mut() {
             v.truncate(1);
         }
-        GGPlot::new(features_df).aes(features_aes)
+        begin(features_df, features_aes)
     } else {
-        GGPlot::new(features_df)
-            .aes(features_aes)
-            .geom_sf_with(features_geom())
+        begin(features_df, features_aes).geom_sf_with(features_geom())
     };
 
     // ---- the symbols layer (on top of everything else), if any — a

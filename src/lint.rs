@@ -5864,6 +5864,21 @@ fn map_diags(
             ));
         }
     }
+    // #760: tiles are Web Mercator — any other projection draws no basemap.
+    if first(Role::MapTiles).is_some_and(|t| crate::map::tiles_on(&t))
+        && projection
+            .as_deref()
+            .and_then(crate::map::project::Projection::parse)
+            != Some(crate::map::project::Projection::Mercator)
+    {
+        out.push((
+            Severity::Warning,
+            "map/tiles-needs-mercator",
+            "::MAPTILES draws a tile basemap only under 'mercator'::PROJECTION — \
+             this map is drawn without one"
+                .to_string(),
+        ));
+    }
     if let Some(c) = first(Role::Classes) {
         if let Err(e) = crate::map::classes::Method::parse(&c) {
             out.push((
@@ -9978,6 +9993,14 @@ mod design_tests {
             codes(sql, vec![row("robinson", "jenks 4")]),
             vec![(Severity::Warning, "map/unknown-projection")]
         );
+        // #760: a tile basemap needs 'mercator'
+        let tiles = "SELECT g::MAP, v::BARCHART, 'p'::PROJECTION, 't'::MAPTILES FROM t;";
+        let pt = |p: &str| json!({ "c0": "POINT(10 50)", "c1": 1.0, "c2": p, "c3": "on" });
+        assert_eq!(
+            codes(tiles, vec![pt("equal-earth")]),
+            vec![(Severity::Warning, "map/tiles-needs-mercator")]
+        );
+        assert!(codes(tiles, vec![pt("mercator")]).is_empty());
         for bad in ["quantile 12", "kmeans 4", "0,10,5"] {
             assert_eq!(
                 codes(sql, vec![row("auto", bad)]),

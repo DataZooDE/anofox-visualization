@@ -13,7 +13,7 @@ use std::f64::consts::FRAC_PI_4;
 /// The authalic Earth radius PROJ uses for `+R` spheres (metres).
 const R: f64 = 6_371_008.8;
 /// The Web Mercator sphere (EPSG:3857).
-const R_MERC: f64 = 6_378_137.0;
+pub(crate) const R_MERC: f64 = 6_378_137.0;
 /// Web Mercator's latitude cut-off.
 const MERC_LAT: f64 = 85.051_128_779_806_59;
 

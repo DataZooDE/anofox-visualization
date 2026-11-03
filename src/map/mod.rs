@@ -177,6 +177,13 @@ pub(crate) fn is_map(cols: &[Column]) -> bool {
         || (has(Role::Origin) && has(Role::Dest))
 }
 
+/// #760: whether a `::MAPTILES` value asks for the tile basemap (anything but
+/// empty, 'off', 'false', 'no' or '0').
+pub(crate) fn tiles_on(v: &str) -> bool {
+    let t = v.trim().to_ascii_lowercase();
+    !matches!(t.as_str(), "" | "off" | "false" | "no" | "0")
+}
+
 /// A `::REGION` column's codes (trimmed text; `None` when missing).
 pub(crate) fn region_codes(c: &Column) -> Vec<Option<String>> {
     c.values

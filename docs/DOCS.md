@@ -156,6 +156,7 @@ terminal.
 | `::SYNC_FRAME` | `::FRAME_GROUP` | modifier | time maps (::FRAME) with the same value (e.g. 'weeks') step and play together in the browser, by frame label |
 | `::XTITLE` | `::X_TITLE`, `::XLAB` | modifier | x-axis title, e.g. 'Residual load (GW)' — names the ::XAXIS variable, drawn under the x ticks (on a ::FLIP chart it moves with the x axis); charts with axes only |
 | `::YTITLE` | `::Y_TITLE`, `::YLAB` | modifier | y-axis title, e.g. 'Day-ahead price (EUR/MWh)' — names the measure, drawn rotated beside the y ticks; charts with axes only |
+| `::MAPTILES` | `::MAP_TILES` | modifier | the installation's tile basemap under this map: 'on' — needs 'mercator'::PROJECTION and a server with options.basemap (off otherwise) |
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
