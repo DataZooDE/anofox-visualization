@@ -2759,6 +2759,11 @@ Enter, Esc, the summaries, the table switch; axe-core with `--axe <axe.min.js>`)
 - **Share** copies a link with the whole dashboard SQL encoded in the URL hash
   (no server) plus the open tab and the viewer state (`?v.*`, see *Viewer
   state in the URL*) — open it to reproduce exactly that view.
+- **Views** (#888) keeps named views of a dashboard: **Save this view…**
+  stores the page's address as it is now — inputs, selections, brushed
+  ranges, frames and tab — under a name, in this browser (per dashboard);
+  picking one opens it again, **Delete a view…** removes one. Nothing leaves
+  the browser; a Share link carries the same state for someone else.
 - **⤓ HTML** downloads the current dashboard as a standalone, self-contained HTML
   file (interactive hover + tabs, no server). A `::VIEW` switcher works in the
   export too (click or arrow keys, offline) and the file carries **every

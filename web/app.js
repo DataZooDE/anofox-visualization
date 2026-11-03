@@ -2866,6 +2866,10 @@ async function boot() {
   // these handlers exist) can't be silently lost; enabled once wired.
   $("share").onclick = shareLink;
   $("share").disabled = false;
+  if ($("views")) {
+    $("views").onclick = () => openSideMenu($("views"), viewsMenu());
+    $("views").disabled = false;
+  }
   $("dlhtml").onclick = downloadHtml;
   syncDlhtmlDisabled();
   // #401: the "Charts as tables" toggle lives in the toolbar's ⋯ menu so a
@@ -4963,6 +4967,78 @@ function countBadge(n) {
   c.className = "side-count";
   c.textContent = String(n);
   return c;
+}
+
+// ---- saved views (#888) ----
+// A view is the page's address as it is now — the dashboard, its inputs and
+// selections (v.*), frames and tab — under a name, kept per viewer in this
+// browser (localStorage, keyed by the dashboard: its served path, else its
+// sidebar key). Opening one goes to that address. A share link carries the
+// same state; this keeps a named list of them.
+function viewsKey() {
+  const u = new URL(location.href);
+  const id = servedMode ? u.pathname : u.searchParams.get("dashboard") || lastDash() || "draft";
+  return "dp_views:" + id;
+}
+function viewsList() {
+  try {
+    const v = JSON.parse(localStorage.getItem(viewsKey()) || "[]");
+    return Array.isArray(v) ? v.filter((x) => x && typeof x.name === "string" && typeof x.href === "string") : [];
+  } catch (_) {
+    return [];
+  }
+}
+function viewsStore(list) {
+  try {
+    localStorage.setItem(viewsKey(), JSON.stringify(list.slice(0, 50)));
+    return true;
+  } catch (_) {
+    sideToast("Saved views need this browser's storage, which is blocked here.", "OK", () => {});
+    return false;
+  }
+}
+function viewsMenu() {
+  const list = viewsList();
+  const items = list.map((v) => ({
+    label: v.name,
+    run: () => {
+      // same origin only: a stored address never leaves this site
+      const u = new URL(v.href, location.href);
+      if (u.origin === location.origin) location.href = u.href;
+    },
+  }));
+  if (list.length) items.push({ sep: true });
+  items.push({
+    label: "Save this view…",
+    run: async () => {
+      syncUrlState();
+      const r = await dpDialog({
+        title: "Save this view",
+        text: "Its inputs, selections and tab, under a name — kept in this browser.",
+        input: { label: "Name", value: "" },
+        buttons: [
+          { label: "Cancel", value: null },
+          { label: "Save", value: "save", primary: true },
+        ],
+      });
+      const name = (r.input || "").trim().slice(0, 80);
+      if (r.value !== "save" || !name) return;
+      const rest = viewsList().filter((v) => v.name !== name);
+      if (viewsStore([{ name, href: location.href, at: Date.now() }, ...rest])) sideToast(`View “${name}” saved`, "OK", () => {});
+    },
+  });
+  if (list.length)
+    items.push({
+      label: "Delete a view…",
+      run: async () => {
+        const r = await dpDialog({
+          title: "Delete a saved view",
+          buttons: [{ label: "Cancel", value: null }, ...list.map((v) => ({ label: v.name, value: v.name, danger: true }))],
+        });
+        if (r.value) viewsStore(viewsList().filter((v) => v.name !== r.value));
+      },
+    });
+  return items;
 }
 
 // ---- dialogs (instead of prompt / confirm) ----
