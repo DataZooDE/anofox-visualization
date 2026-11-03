@@ -135,6 +135,9 @@ pub enum Kind {
     Bullet,
     /// Ordered conversion stages, widths by value (`::FUNNEL`).
     Funnel,
+    /// Flows between stages, link width by value: `::ORIGIN` → `::DEST`
+    /// (`::SANKEY`, #881).
+    Sankey,
     /// Part-to-whole tiles, area by value; `::CATEGORY` nests them in
     /// groups (`::TREEMAP`, #880).
     Treemap,
@@ -170,6 +173,7 @@ impl Kind {
                 | Kind::Waterfall
                 | Kind::Bullet
                 | Kind::Funnel
+                | Kind::Sankey
                 | Kind::Treemap
                 | Kind::Pareto
                 | Kind::Gantt
@@ -1909,6 +1913,7 @@ impl Panel {
                     | Kind::Sparkbar
                     | Kind::Calendar
                     | Kind::Funnel
+                    | Kind::Sankey
                     | Kind::Treemap
                     | Kind::Pareto
                     | Kind::Gantt
@@ -2623,13 +2628,17 @@ fn render_inner(
         let h = height.min(k.height().ceil() as u32).max(MIN_DIM);
         return Ok(Panel::own(width, h, k.body(width as f64, h as f64, o)));
     }
-    // A map is driven by a ::MAP (geometry) column, coloured by an optional measure.
-    if cols.iter().any(|c| {
-        matches!(
-            c.role,
-            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
-        )
-    }) {
+    // A map is driven by a ::MAP (geometry) column, coloured by an optional
+    // measure — but ::ORIGIN / ::DEST under a ::SANKEY are its stages (#881).
+    let sankey = cols.iter().any(|c| c.role == Role::Value(Kind::Sankey));
+    if !sankey
+        && cols.iter().any(|c| {
+            matches!(
+                c.role,
+                Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+            )
+        })
+    {
         return Ok(match map::build(o, cols, width, height) {
             // #420: every map is a real GGPlot now — the same Panel::Plot
             // every other chart kind renders through.
@@ -2723,6 +2732,9 @@ fn render_inner(
         }
         Kind::Funnel => {
             return variance::render_funnel(o, value, cols, title.as_deref(), width, height)
+        }
+        Kind::Sankey => {
+            return variance::render_sankey(o, value, cols, title.as_deref(), width, height)
         }
         Kind::Treemap => {
             return variance::render_treemap(o, value, cols, title.as_deref(), width, height)
@@ -3868,7 +3880,8 @@ fn cartesian(
         | Kind::Dumbbell
         | Kind::Gantt
         | Kind::Pareto
-        | Kind::Treemap => {
+        | Kind::Treemap
+        | Kind::Sankey => {
             unreachable!("handled above")
         }
     };

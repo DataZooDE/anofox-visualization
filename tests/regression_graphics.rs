@@ -3151,6 +3151,20 @@ fn line_chart_still_treats_iso_date_strings_as_a_continuous_axis() {
     );
 }
 
+// #881: ::SANKEY — ::ORIGIN / ::DEST are its stages (not a flow map).
+#[test]
+fn sankey_draws_nodes_not_a_map() {
+    let s = svg(vec![
+        Column::new("a", Role::Origin, strs(&["Budget", "Budget", "IT"])),
+        Column::new("b", Role::Dest, strs(&["Salaries", "IT", "Cloud"])),
+        Column::new("n", Role::Value(Kind::Sankey), nums(&[60.0, 25.0, 15.0])),
+    ]);
+    for l in ["Budget", "Salaries", "IT", "Cloud"] {
+        assert!(s.contains(&format!(">{l}<")), "node {l} labelled");
+    }
+    assert!(!s.contains("data-map"), "not drawn as a map");
+}
+
 // #880: ::TREEMAP — one tile per positive row, the group's theme colour.
 #[test]
 fn treemap_tiles_by_group() {
