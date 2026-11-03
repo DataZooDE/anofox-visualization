@@ -479,8 +479,9 @@ impl ValueFmt {
         }
     }
 
-    /// The full value, as a tooltip shows it: grouped, ≤ 2 decimals (a
-    /// currency amount with cents keeps both digits: `$1,234.50`).
+    /// The full value, as a tooltip shows it: grouped, ≤ 2 decimals, none
+    /// from 10 000 on (a currency amount with cents keeps both digits:
+    /// `$1,234.50`).
     pub fn full(&self, n: f64, l: &Locale) -> String {
         self.write(n, l, false)
     }
@@ -514,6 +515,10 @@ impl ValueFmt {
                     2
                 },
             )
+        } else if a >= 1e4 {
+            // #877: no cents or fractions on large values (`4,952,845`,
+            // not `4,952,845.12`); the tooltip still shows every digit.
+            grouped(a, 0)
         } else if matches!(self, ValueFmt::Currency(_)) {
             // An amount with cents keeps both digits: $12.50, not $12.5.
             let g = grouped(a, 2);
@@ -562,6 +567,11 @@ mod tests {
         assert_eq!(f(" kg", 1200.0), "1,200 kg");
         assert_eq!(f("CHF ", 3.0), "CHF 3");
         assert_eq!(f("", 121.94), "121.94");
+        // #877: large values drop their decimals (pie/donut tooltips)
+        assert_eq!(f("", 8_237_528.1), "8,237,528");
+        assert_eq!(f("€", 4_952_845.12), "€4,952,845");
+        assert_eq!(ValueFmt::parse("€").full(4_952_845.12, &de), "4.952.845 €");
+        assert_eq!(f("", 9_999.5), "9,999.5");
         // #877: small values keep three significant digits, not "0"
         assert_eq!(f("", 0.000234), "0.000234");
         assert_eq!(f("", 0.0123), "0.0123");
