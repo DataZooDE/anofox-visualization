@@ -567,6 +567,102 @@ pub(crate) fn render_funnel(
     Ok(Panel::plot(plot, width, height))
 }
 
+/// `::GANTT` (#882): one bar per row, the `::GANTT` column naming the task,
+/// from `::XMIN` to `::XMAX` (dates or numbers), in the theme's series
+/// colours by `::CATEGORY` (ggplot-rs `geom_xrange`). Tasks stay in row order,
+/// top to bottom.
+pub(crate) fn render_gantt(
+    o: &RenderOptions,
+    value: &Column,
+    cols: &[Column],
+    title: Option<&str>,
+    width: u32,
+    height: u32,
+) -> Result<Panel, String> {
+    let col = |r: Role| cols.iter().find(|c| c.role == r);
+    let (Some(lo), Some(hi)) = (col(Role::XMin), col(Role::XMax)) else {
+        return Ok(note_svg(
+            title,
+            "::GANTT needs ::XMIN (start) and ::XMAX (end) columns",
+            width,
+            height,
+        ));
+    };
+    let tasks: Vec<String> = value.values.iter().map(value_str).collect();
+    // an ISO date / timestamp as text is a point in time (a continuous date
+    // axis), not a category
+    let when = |v: &Value| match v {
+        Value::Str(t) => crate::freshness::parse_timestamp(t).map_or(v.clone(), Value::DateTime),
+        _ => v.clone(),
+    };
+    let keep: Vec<usize> = (0..tasks.len())
+        .filter(|&i| {
+            !matches!(lo.values.get(i), None | Some(Value::Na))
+                && !matches!(hi.values.get(i), None | Some(Value::Na))
+        })
+        .collect();
+    if keep.is_empty() {
+        return Ok(note_svg(
+            title,
+            "::GANTT has no task with a start and an end",
+            width,
+            height,
+        ));
+    }
+    let mut data = vec![
+        (
+            "task".to_string(),
+            strs(keep.iter().map(|&i| tasks[i].clone())),
+        ),
+        (
+            "lo".to_string(),
+            keep.iter().map(|&i| when(&lo.values[i])).collect(),
+        ),
+        (
+            "hi".to_string(),
+            keep.iter().map(|&i| when(&hi.values[i])).collect(),
+        ),
+    ];
+    let mut aes = Aes::new().y("task").xmin("lo").xmax("hi");
+    let mut fills: Vec<(String, ggplot_rs::scale::color::RGBAColor)> = Vec::new();
+    if let Some(c) = col(Role::Category) {
+        let g: Vec<String> = keep.iter().map(|&i| value_str(&c.values[i])).collect();
+        for v in &g {
+            if !fills.iter().any(|(k, _)| k == v) {
+                fills.push((v.clone(), crate::dz_color(o, fills.len())));
+            }
+        }
+        data.push(("g".to_string(), strs(g)));
+        aes = aes.fill("g");
+    }
+    // first task on top
+    let mut order: Vec<String> = Vec::new();
+    for &i in &keep {
+        if !order.contains(&tasks[i]) {
+            order.push(tasks[i].clone());
+        }
+    }
+    order.reverse();
+    let mut plot = GGPlot::new(data)
+        .aes(aes)
+        .geom_xrange()
+        .scale_y_discrete(
+            ScaleDiscrete::new().with_limits(order.iter().map(String::as_str).collect()),
+        )
+        .xlab("")
+        .ylab("")
+        .theme(chart_theme(o, 11.0));
+    if fills.is_empty() {
+        plot = plot.legend_position(LegendPosition::None);
+    } else {
+        plot = plot.scale_fill_manual(fills.iter().map(|(k, c)| (k.as_str(), *c)).collect());
+    }
+    if let Some(t) = title {
+        plot = plot.title(t);
+    }
+    Ok(Panel::plot(plot, width, height))
+}
+
 /// `::DUMBBELL` (#883): per item (the `::DUMBBELL` column) two values,
 /// `::XMIN` and `::XMAX`, as two dots joined by a line, items top down in
 /// row order (ggplot-rs `geom_dumbbell`, flipped). Before/after, plan/actual.

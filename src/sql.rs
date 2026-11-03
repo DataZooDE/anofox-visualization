@@ -1187,6 +1187,11 @@ fn rewrite_list(list: &str) -> Rewritten {
             )
         })
     });
+    // #882: a ::GANTT's ::XMIN / ::XMAX are its dates (or numbers): left as
+    // their own type, not forced to DOUBLE
+    let gantt_stmt = split.iter().any(|it| {
+        item_role(it.trim(), inputs_ok).is_some_and(|(_, r)| r == Role::Value(Kind::Gantt))
+    });
     for (i, item) in split.into_iter().enumerate() {
         let item = item.trim();
         if let Some((expr, role)) = item_role(item, inputs_ok) {
@@ -1213,9 +1218,15 @@ fn rewrite_list(list: &str) -> Rewritten {
                 // Error: Could not convert string … to DOUBLE`) before it
                 // ever gets there. A numeric measure still arrives as a real
                 // number (DuckDB's own INTEGER/DOUBLE), just not widened.
-                // #883: a ::DUMBBELL column names its items (text), the same
-                // way.
-                Role::Value(Kind::Heatmap) | Role::Value(Kind::Dumbbell) => {
+                Role::XMin | Role::XMax if gantt_stmt => {
+                    format!("{} AS c{i}", trailing_alias(expr).0)
+                }
+                // #883 / #882: a ::DUMBBELL or ::GANTT column names its items
+                // (text), the same way; a ::GANTT's ::XMIN / ::XMAX keep their
+                // dates.
+                Role::Value(Kind::Heatmap)
+                | Role::Value(Kind::Dumbbell)
+                | Role::Value(Kind::Gantt) => {
                     let (core, alias) = trailing_alias(expr);
                     if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
                         names.push((i, nm));
