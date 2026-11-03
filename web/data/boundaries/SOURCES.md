@@ -9,6 +9,7 @@ borders stay shared, then rounded to 3 decimals (about 100 m).
 |---|---|---|---|---|---|
 | `world` | Natural Earth 1:110m Admin 0 – Countries, v5.1.2 | 177 | none (rounded only) | public domain | yes; embedded in native builds |
 | `world-50m` | Natural Earth 1:50m Admin 0 – Countries, v5.1.2 | 242 | 0.02° | public domain | yes; browser only (not embedded) |
+| `world-states` | Natural Earth 1:10m Admin 1 – States, Provinces, v5.1.1 (added 2026-11-03) | 4501 | 0.02° | public domain | yes; browser only (not embedded) |
 | `de-states` | BKG VG2500, Länder (`vg2500_lan`), Stand 31.12.2025 | 16 | 0.005° | Datenlizenz Deutschland – Namensnennung 2.0 | yes; embedded |
 | `de-districts` | BKG VG2500, Kreise (`vg2500_krs`), Stand 31.12.2025 | 400 | 0.005° | Datenlizenz Deutschland – Namensnennung 2.0 | yes; embedded |
 | `nuts0` … `nuts3` | Eurostat/GISCO NUTS 2024, 1:20M | — | none | GISCO terms: **non-commercial only** | **no**: each user runs `scripts/fetch-nuts.sh` (gitignored) |
@@ -22,6 +23,11 @@ borders stay shared, then rounded to 3 decimals (about 100 m).
   (`ISO_A2_EH`, `ISO_A3_EH`, `ISO_A2`, `ISO_A3`; so France is `FR`/`FRA`,
   Norway `NO`/`NOR`); `name_en` = `NAME`, `name_de` = `NAME_DE`; `alt` =
   `NAME_EN`, `NAME_LONG`, `FORMAL_EN`. Default Natural Earth point of view.
+- `world-states`: `key` = ISO 3166-2 (`US-CA`), else Natural Earth's
+  `adm1_code` where it has none (13 regions); parts sharing an ISO code are
+  merged (Manila's 17 into `PH-MNL`); `codes` = `adm1_code` and HASC
+  (`US.CA`, its `~` placeholders dropped); `name_en` = `name_en`, else
+  `name`; `name_de` = `name_de`, else `name`; `alt` = `name`, `name_alt`.
 - `de-states`: `key` = ISO 3166-2 (`DE-BY`); `codes` = the 2-digit AGS (`09`)
   and NUTS 1 (`DE2`); `name_de` = `GEN`, `name_en` = the English name.
 - `de-districts`: `key` = the 5-digit AGS (`09162`); `codes` = NUTS 3
@@ -32,6 +38,8 @@ borders stay shared, then rounded to 3 decimals (about 100 m).
 
 - Natural Earth: <https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@v5.1.2/geojson/>
   `ne_110m_admin_0_countries.geojson`, `ne_50m_admin_0_countries.geojson`.
+  Admin 1 (too large for that mirror): <https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_1_states_provinces.zip>,
+  pinned by SHA-256 in `scripts/build-boundaries.sh`.
   Terms: <https://www.naturalearthdata.com/about/terms-of-use/> — "All
   versions of Natural Earth raster + vector map data found on this website
   are in the public domain." Credit is optional; maps print "Made with

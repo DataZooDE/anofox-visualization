@@ -15,14 +15,19 @@ use std::sync::{Arc, OnceLock, RwLock};
 use super::{shapes, Shape};
 use ggplot_rs::spatial::parse_wkt;
 
+/// Every state and province (#956): an optional layer the browser fetches
+/// when a map's codes look like ISO 3166-2; not embedded in native builds.
+pub(crate) const OPTIONAL_STATES: &str = "world-states";
 /// The default layers (embedded in native builds).
 pub(crate) const DEFAULT_LAYERS: &[&str] = &["world", "de-states", "de-districts"];
-/// Every layer name a map accepts: the pack's (`world-50m` is optional: in
-/// `web/data` for the browser, not embedded) and the EU NUTS levels a user
+/// Every layer name a map accepts: the pack's (`world-50m` and
+/// `world-states` are optional: in `web/data` for the browser, not
+/// embedded) and the EU NUTS levels a user
 /// fetches for themselves (`scripts/fetch-nuts.sh`; never shipped).
 pub(crate) const LAYERS: &[&str] = &[
     "world",
     "world-50m",
+    "world-states",
     "de-states",
     "de-districts",
     "nuts0",
@@ -297,9 +302,18 @@ pub(crate) struct Matched {
 /// else the default layer with the most code matches; by name only when no
 /// code matches anywhere.
 pub(crate) fn match_codes(codes: &[Option<String>], forced: Option<&str>) -> Option<Matched> {
+    // `world-states` (#956) joins once the page has fetched it (it guesses
+    // it from ISO 3166-2 codes); after the defaults, so a tie keeps e.g.
+    // 'DE-BY' on BKG's de-states.
     let names: Vec<&str> = match forced {
         Some(f) => vec![f],
-        None => DEFAULT_LAYERS.to_vec(),
+        None => {
+            let mut v = DEFAULT_LAYERS.to_vec();
+            if available(OPTIONAL_STATES) {
+                v.push(OPTIONAL_STATES);
+            }
+            v
+        }
     };
     let layers: Vec<Arc<Layer>> = names.iter().filter_map(|n| layer(n)).collect();
     let score = |l: &Layer, by_name: bool| -> (usize, Vec<Vec<usize>>) {
@@ -358,6 +372,18 @@ pub(crate) fn match_codes(codes: &[Option<String>], forced: Option<&str>) -> Opt
 /// `world`; `DE-XX`, a 2-digit AGS or `DE` + 1 → `de-states`; a 5-digit AGS
 /// or `DE` + 2–3 → `de-districts`; names → every default layer.
 #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+/// `CC-XXX`: an ISO 3166-2 subdivision code (2 letters, a dash, 1–3 letters
+/// or digits).
+fn is_iso_3166_2(c: &str) -> bool {
+    let b = c.as_bytes();
+    b.len() >= 4
+        && b.len() <= 6
+        && b[0].is_ascii_alphabetic()
+        && b[1].is_ascii_alphabetic()
+        && b[2] == b'-'
+        && b[3..].iter().all(u8::is_ascii_alphanumeric)
+}
+
 pub(crate) fn guess_layers(codes: &[Option<String>]) -> Vec<&'static str> {
     let mut want: Vec<&'static str> = Vec::new();
     fn add(want: &mut Vec<&'static str>, l: &'static str) {
@@ -380,6 +406,9 @@ pub(crate) fn guess_layers(codes: &[Option<String>]) -> Vec<&'static str> {
             add(&mut want, "de-states");
         } else if c.starts_with("DE") && (c.len() == 4 || c.len() == 5) && c.is_ascii() {
             add(&mut want, "de-districts");
+        } else if is_iso_3166_2(&c) {
+            // a state or province anywhere else (#956): 'US-CA', 'FR-75'
+            add(&mut want, "world-states");
         } else if alpha && (c.len() == 2 || c.len() == 3) {
             add(&mut want, "world");
         } else {
@@ -472,5 +501,39 @@ mod tests {
             vec!["de-districts", "world"]
         );
         assert_eq!(guess_layers(&c(&["Bayern"])), DEFAULT_LAYERS.to_vec());
+    }
+
+    #[test]
+    fn states_anywhere_use_the_world_states_layer() {
+        let c = |v: &[&str]| v.iter().map(|s| Some(s.to_string())).collect::<Vec<_>>();
+        assert_eq!(guess_layers(&c(&["US-CA", "FR-75"])), vec!["world-states"]);
+        assert_eq!(
+            guess_layers(&c(&["DE-BY"])),
+            vec!["de-states"],
+            "Germany stays BKG's"
+        );
+        assert_eq!(
+            guess_layers(&c(&["DE-BY", "AT-9"])),
+            vec!["de-states", "world-states"]
+        );
+        assert!(!is_iso_3166_2("USA") && !is_iso_3166_2("US-") && !is_iso_3166_2("US-ABCD"));
+        // once fetched (registered), its codes match; a German one still
+        // goes to de-states on a tie (the defaults come first)
+        register(
+            OPTIONAL_STATES,
+            "key,codes,name_en,name_de,alt,wkt\n\
+             US-RI,USA-3519|US.RI,Rhode Island,Rhode Island,,\"POLYGON ((-71.8 41.3, -71.1 41.3, -71.1 42, -71.8 42, -71.8 41.3))\"\n\
+             FR-75,FRA-5292|FR.PA,Paris,Paris,,\"POLYGON ((2.2 48.8, 2.5 48.8, 2.5 48.9, 2.2 48.9, 2.2 48.8))\"\n",
+        )
+        .unwrap();
+        let m = match_codes(&c(&["US-RI", "FR-75", "US.RI"]), None).unwrap();
+        assert_eq!(
+            (m.layer.name.as_str(), m.unmatched_count),
+            ("world-states", 0)
+        );
+        assert_eq!(
+            match_codes(&c(&["DE-BY"]), None).unwrap().layer.name,
+            "de-states"
+        );
     }
 }

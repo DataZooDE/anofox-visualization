@@ -1,18 +1,19 @@
 -- @title Where does our revenue come from, from country down to district?
 -- @group Sales & customers
 -- @tags  maps, drill-down, regions
--- @description Revenue on a map: European countries first, click Germany for its states, click a state for its districts.
+-- @description Revenue on a map: European countries first, click one for its states or provinces; Germany's states drill on to their districts.
 --
 -- A map drill-down (#954): one ::REGION map, three levels. The level picks
 -- the code column, and the code picks the built-in boundaries: ISO country
--- codes draw the world layer, 'DE-BY' codes the German states, district
--- codes (AGS) the German districts. A click goes one level deeper; the
--- breadcrumb goes back; the path is in the URL (?v.geo_path=DEU).
+-- codes draw the world layer, ISO 3166-2 codes ('FR-75', 'IT-MI') the states
+-- and provinces of world-states (#956), 'DE-BY' the German states and
+-- district codes (AGS) the German districts. A click goes one level deeper;
+-- the breadcrumb goes back; the path is in the URL (?v.geo_path=FRA).
 --
--- SYNTHETIC DATA, made up in the SQL below: revenue per German district from
--- its code, a fixed figure per other country. Only Germany has states and
--- districts in the built-in boundaries; another country drills to an empty
--- level with a note.
+-- SYNTHETIC DATA: revenue per German district made up below from its code;
+-- per state elsewhere from web/data/drill-revenue-map/states.csv (written by
+-- examples/drill-revenue-map/states.sql from the world-states layer). Only
+-- Germany has a level below its states; a click there shows a note.
 --
 -- Natively, run from web/:  dashboard --check examples/drill-revenue-map.sql
 
@@ -32,14 +33,20 @@ SELECT d.key AS ags, d.name_de AS district, s.state_code, s.state,
 FROM read_csv('data/boundaries/de-districts.csv', types = {'key': 'VARCHAR'}) d
 JOIN rm_states s ON s.land = substr(d.key, 1, 2);
 
+-- The states and provinces of the other countries (made-up revenue).
+CREATE OR REPLACE TABLE rm_world_states AS
+FROM read_csv('data/drill-revenue-map/states.csv');
+
 CREATE OR REPLACE TABLE rm_countries AS
-SELECT * FROM (VALUES
-    ('FRA', 'France', 61200), ('NLD', 'Netherlands', 38400), ('BEL', 'Belgium', 17900),
-    ('AUT', 'Austria', 22300), ('CHE', 'Switzerland', 26100), ('POL', 'Poland', 19800),
-    ('DNK', 'Denmark', 11400), ('CZE', 'Czechia', 9700), ('ITA', 'Italy', 33500))
-    t(iso3, country, revenue)
+SELECT c.iso3, c.alpha2, c.country, sum(s.revenue) AS revenue
+FROM (VALUES ('FRA', 'FR', 'France'), ('NLD', 'NL', 'Netherlands'), ('BEL', 'BE', 'Belgium'),
+             ('AUT', 'AT', 'Austria'), ('CHE', 'CH', 'Switzerland'), ('POL', 'PL', 'Poland'),
+             ('DNK', 'DK', 'Denmark'), ('CZE', 'CZ', 'Czechia'), ('ITA', 'IT', 'Italy'))
+     c(iso3, alpha2, country)
+JOIN rm_world_states s ON s.alpha2 = c.alpha2
+GROUP BY ALL
 UNION ALL
-SELECT 'DEU', 'Germany', sum(revenue) FROM rm_districts;
+SELECT 'DEU', 'DE', 'Germany', sum(revenue) FROM rm_districts;
 
 -- One row per place at the current level: its code (the map key and the
 -- drill key), its name and revenue. (A static render — dashboard --svg, an
@@ -51,17 +58,20 @@ SELECT code, name, revenue FROM (
     SELECT 'state', state_code, state, sum(revenue) FROM rm_districts
     WHERE getvariable('country') = 'DEU' GROUP BY ALL
     UNION ALL
+    SELECT 'state', s.state_code, s.state, s.revenue FROM rm_world_states s
+    JOIN rm_countries c ON c.alpha2 = s.alpha2 WHERE c.iso3 = getvariable('country')
+    UNION ALL
     SELECT 'district', ags, district, revenue FROM rm_districts
     WHERE getvariable('country') = 'DEU' AND state_code = getvariable('state')
 )
 WHERE lvl = coalesce(getvariable('geo_level'), 'country');
 
 -- ── Page ─────────────────────────────────────────────────────────────────────
-SELECT ('**Click a country** to see its states, **click a state** to see its districts; the breadcrumb above the map goes back. Only Germany has states and districts in the built-in boundaries. A click passes the region''s **code** (`DEU`, `DE-BY`), not its shown name, so the next level filters on it with `getvariable(''country'')` / `getvariable(''state'')`.')::MARKDOWN, 'How to read this'::TITLE;
+SELECT ('**Click a country** to see its states or provinces; in Germany, **click a state** to see its districts. The breadcrumb above the map goes back. States and provinces come from the built-in *world-states* boundaries (Natural Earth), loaded only when the map first shows them; only Germany has a level below. A click passes the region''s **code** (`DEU`, `DE-BY`), not its shown name, so the next level filters on it with `getvariable(''country'')` / `getvariable(''state'')`.')::MARKDOWN, 'How to read this'::TITLE;
 
 SELECT 8::COL;
 SELECT 'geo: country > state > district'::DRILL;
-SELECT 'Nothing below this level in the sample: only Germany has states and districts.'::EMPTY;
+SELECT 'Nothing below this level in the sample: only Germany has districts.'::EMPTY;
 SELECT code::REGION, name::LABEL,
        revenue AS "Revenue (k€)" ::BARCHART, 'quantile 5'::CLASSES,
        ('Revenue by ' || coalesce(getvariable('geo_level'), 'country'))::TITLE
