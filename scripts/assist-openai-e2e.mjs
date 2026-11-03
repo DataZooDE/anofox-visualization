@@ -108,16 +108,32 @@ const chat = (message, finish = "tool_calls") => ({ id: "c", object: "chat.compl
 // turn 1: profile the table; turn 2: propose
 const happy = (n) => (n % 2 === 1 ? [200, chat({ content: "Let me look.", tool_calls: [call(`p${n}`, "profile_table", { table: "sales" })] })] : [200, chat({ content: null, tool_calls: [call(`d${n}`, "propose_dashboard", { sql: PROPOSAL, summary: "Sales by region.", panels: [{ stmt: 1, title: "Sales by region", why: "the ranking" }], open_issues: [] })] })]);
 
-const settled = (page) => page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+const settled = (page) => page.waitForFunction(() => /[1-9]\d* panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
 const browser = await chromium.launch();
 const errors = [];
 async function start(page, q) {
+  // #937: on a timeout, say what the page shows (CI-only failures)
+  const failed = [];
+  const consoleMsgs = [];
+  page.on("requestfailed", (r) => failed.push(`${r.url()} ${r.failure()?.errorText}`));
+  page.on("console", (m) => m.type() === "error" && consoleMsgs.push(m.text()));
   await page.goto(`${BASE}?mode=edit#sql=${b64(DASH)}`);
   await settled(page);
   await page.click("#side-new");
   await page.fill("#assist-start-q", q);
   await page.click("#assist-start button[type=submit]");
-  await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+  await page.waitForSelector(".dp-dialog", { timeout: 120000 }).catch(async (e) => {
+    const state = await page.evaluate(() => ({
+      status: document.getElementById("status")?.textContent,
+      body: document.body.className,
+      start: !!document.querySelector("#assist-start") && getComputedStyle(document.querySelector("#assist-start")).display,
+      aiLog: (document.getElementById("ai-log")?.textContent || "").slice(-300),
+      toast: document.getElementById("side-toast")?.textContent,
+      dialogs: document.querySelectorAll(".dp-dialog, .md-dialog").length,
+    }));
+    console.error("debug #937:", JSON.stringify({ state, failed, console: consoleMsgs, pageErrors: errors }));
+    throw e;
+  });
 }
 
 // ---- a local model: no key, a full round trip ----
@@ -210,7 +226,7 @@ async function start(page, q) {
   await page.check("#ai-sample");
   await page.fill("#ai-q", "Which region sells the most?");
   await page.click("#ai-send");
-  await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+  await page.waitForSelector(".dp-dialog", { timeout: 120000 });
   const dlg = (await page.textContent(".dp-dialog")) || "";
   record("S2 What will be sent shows the rows before they go", dlg.includes('"sample_rows":{"columns":["region","x"],"rows":[["EU",10]') && /first 20 rows/.test(dlg) && model.requests.length === 0, dlg.slice(0, 200));
   await page.click('.dp-dialog button:has-text("Send")');
@@ -223,7 +239,7 @@ async function start(page, q) {
   model.requests = [];
   await page.fill("#ai-q", "Again, please.");
   await page.click("#ai-send");
-  await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+  await page.waitForSelector(".dp-dialog", { timeout: 120000 });
   await page.click('.dp-dialog button:has-text("Send")');
   await page.waitForFunction(() => document.querySelectorAll("#ai-log .ai-note, #ai-card:not([hidden])").length > 0, null, { timeout: 60000 }).catch(() => {});
   const again = JSON.stringify(model.requests[0]?.body || {});

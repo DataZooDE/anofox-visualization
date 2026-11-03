@@ -103,7 +103,17 @@ try {
   await page.click("#side-new");
   await page.fill("#assist-start-q", "What tables are there?");
   await page.click("#assist-start button[type=submit]");
-  await page.waitForSelector(".dp-dialog", { timeout: 60000 });
+  await page.waitForSelector(".dp-dialog", { timeout: 120000 }).catch(async (e) => {
+    // #937: what the page shows when the dialog never comes (CI-only)
+    const state = await page.evaluate(() => ({
+      status: document.getElementById("status")?.textContent,
+      body: document.body.className,
+      aiLog: (document.getElementById("ai-log")?.textContent || "").slice(-300),
+      toast: document.getElementById("side-toast")?.textContent,
+    }));
+    console.error("debug #937:", JSON.stringify({ state, pageErrors: errs, requests: browserRequests.slice(-15) }));
+    throw e;
+  });
   const dlg = await page.evaluate(() => document.querySelector(".dp-dialog")?.textContent || "");
   check(!/API key/i.test(dlg) && !(await page.locator('.dp-dialog input[type="password"]').count()), "no key dialog");
   check(dlg.includes(`${base}/assist`) && /this server/.test(dlg), "\"what will be sent\" names this server's proxy");

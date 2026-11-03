@@ -243,7 +243,7 @@ async function verifyRememberOptIn(browser) {
     // long *before* boot()'s own ratchet, which runs only after the full
     // DuckDB-Wasm CDN import + instantiate. Wait for the app to actually
     // settle (the same condition scripts/telemetry-e2e.mjs uses).
-    await page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 60000 });
+    await page.waitForFunction(() => /[1-9]\d* panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 60000 });
     const state = await page.evaluate(() => ({ local: localStorage.getItem("dp_assist_key"), session: sessionStorage.getItem("dp_assist_key") }));
     record("L-2 opt-in: the key stays in localStorage across boot", "chromium", state.local === "sk-ant-remember-optin" && !state.session, JSON.stringify(state));
     await page.close();
@@ -257,7 +257,7 @@ async function verifyRememberOptIn(browser) {
       } catch (_) {}
     });
     await page.goto(APP_BASE);
-    await page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 60000 });
+    await page.waitForFunction(() => /[1-9]\d* panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 60000 });
     const state = await page.evaluate(() => ({ local: localStorage.getItem("dp_assist_key"), session: sessionStorage.getItem("dp_assist_key") }));
     record("L-2 default (no opt-in): the key is demoted out of localStorage", "chromium", !state.local && state.session === "sk-ant-remember-default-off", JSON.stringify(state));
     await page.close();

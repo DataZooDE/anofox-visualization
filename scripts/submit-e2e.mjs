@@ -172,7 +172,11 @@ try {
     // after the re-run settles (checked earlier, a slow runner could catch
     // the re-render mid-way): focus is back on — or still on — the button
     await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 15000 });
-    const focused = await page.evaluate(() => document.activeElement?.classList.contains("submit-btn"));
+    // #931: the re-rendered button gets focus back after its frame — wait
+    // for it rather than read it once
+    const focused = await page
+      .waitForFunction(() => document.activeElement?.classList.contains("submit-btn"), null, { timeout: 5000 })
+      .then(() => true, () => false);
     check(focused, "(b) focus stays on the button");
     check(!(await page.locator("#submit-toast").count()), "(b) no toast when the panel itself shows the status (#721)");
     check(!errs.length, `(b) no page errors: ${errs.join(" | ")}`);
@@ -477,4 +481,6 @@ try {
 }
 await browser.close();
 console.log(`submit-e2e: ${bad} failed`);
-if (bad) process.exitCode = 1;
+// #931: exit explicitly — a lingering handle (the server child's pipes) once
+// kept the process alive after "0 failed" until the step's timeout
+process.exit(bad ? 1 : 0);

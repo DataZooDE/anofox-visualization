@@ -112,7 +112,7 @@ function handler() {
 let mockRef = null;
 
 const settled = (page) =>
-  page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  page.waitForFunction(() => /[1-9]\d* panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
 
 const context = await browser.newContext({ viewport: { width: 1400, height: 1000 }, reducedMotion: "reduce", ignoreHTTPSErrors: true });
 await context.addInitScript((k) => sessionStorage.setItem("dp_assist_key", k), KEY);
