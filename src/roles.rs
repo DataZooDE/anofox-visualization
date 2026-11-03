@@ -224,7 +224,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("ANNOTATE", &["ANNOTATION"], R::Annotate, "annotation", true,
       "a text callout at the row's (x, y); NULL rows draw nothing"),
     e("DATALABELS", &["DATALABEL", "VALUELABELS", "SHOWLABELS"], R::DataLabels, "annotation", true,
-      "draw the value on each mark or heatmap cell (value = font size)"),
+      "draw the value on each mark or heatmap cell: a size (12), a place — 'outside' (past a bar's end, the default), 'inside', 'center' (a stack's default) — or both ('inside 12')"),
     e("ABLINE", &["AB_LINE"], R::AbLine, "annotation", true,
       "straight line y = slope·x + intercept per distinct 'slope,intercept' value"),
     e("IDENTITY", &["DIAGONAL", "IDENTITY_LINE"], R::Identity, "annotation", true,
