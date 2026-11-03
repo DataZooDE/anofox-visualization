@@ -103,7 +103,7 @@ try {
   await page.click("#side-new");
   await page.fill("#assist-start-q", "What tables are there?");
   await page.click("#assist-start button[type=submit]");
-  await page.waitForSelector(".dp-dialog", { timeout: 60000 }).catch(async (e) => {
+  await page.waitForSelector(".dp-dialog", { timeout: 120000 }).catch(async (e) => {
     // #937: what the page shows when the dialog never comes (CI-only)
     const state = await page.evaluate(() => ({
       status: document.getElementById("status")?.textContent,
