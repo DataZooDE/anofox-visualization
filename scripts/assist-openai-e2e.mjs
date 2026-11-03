@@ -112,12 +112,28 @@ const settled = (page) => page.waitForFunction(() => /\d+ panels?/.test(document
 const browser = await chromium.launch();
 const errors = [];
 async function start(page, q) {
+  // #937: on a timeout, say what the page shows (CI-only failures)
+  const failed = [];
+  const consoleMsgs = [];
+  page.on("requestfailed", (r) => failed.push(`${r.url()} ${r.failure()?.errorText}`));
+  page.on("console", (m) => m.type() === "error" && consoleMsgs.push(m.text()));
   await page.goto(`${BASE}?mode=edit#sql=${b64(DASH)}`);
   await settled(page);
   await page.click("#side-new");
   await page.fill("#assist-start-q", q);
   await page.click("#assist-start button[type=submit]");
-  await page.waitForSelector(".dp-dialog", { timeout: 30000 });
+  await page.waitForSelector(".dp-dialog", { timeout: 30000 }).catch(async (e) => {
+    const state = await page.evaluate(() => ({
+      status: document.getElementById("status")?.textContent,
+      body: document.body.className,
+      start: !!document.querySelector("#assist-start") && getComputedStyle(document.querySelector("#assist-start")).display,
+      aiLog: (document.getElementById("ai-log")?.textContent || "").slice(-300),
+      toast: document.getElementById("side-toast")?.textContent,
+      dialogs: document.querySelectorAll(".dp-dialog, .md-dialog").length,
+    }));
+    console.error("debug #937:", JSON.stringify({ state, failed, console: consoleMsgs, pageErrors: errors }));
+    throw e;
+  });
 }
 
 // ---- a local model: no key, a full round trip ----
