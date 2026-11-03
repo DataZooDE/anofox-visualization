@@ -86,6 +86,8 @@ try {
   check(!(await panels.nth(4).evaluate((p) => p.classList.contains("has-axis-pointer"))), "'single': no crosshair (only the hovered mark)");
   check(await panels.nth(1).evaluate((p) => p.classList.contains("has-axis-pointer")), "a line chart without a mode keeps its crosshair");
   // 'split': one label per series beside its point
+  // (charts are drawn at their real ::HEIGHT since #876: scroll it into view first)
+  await panels.nth(5).scrollIntoViewIfNeeded();
   const sp = await panels.nth(5).locator("circle.dp-hit").nth(1).boundingBox();
   for (const dy of [40, 20, 0]) await page.mouse.move(sp.x + sp.width / 2, sp.y + sp.height / 2 + dy, { steps: 2 });
   await page.waitForTimeout(300);
