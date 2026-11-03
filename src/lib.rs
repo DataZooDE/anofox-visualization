@@ -4753,6 +4753,32 @@ fn cartesian(
         .and_then(|a| a.x_levels.clone())
         .filter(|_| x_discrete)
         .or(x_levels);
+    // #958: a flipped chart reads top-down, so the query's first row goes on
+    // top (ggplot's coord_flip alone puts it nearest the origin, at the
+    // bottom — a ranking would read upside down)
+    let x_levels = if flipped && x_discrete {
+        let mut l = x_levels.or_else(|| {
+            let mut seen: Vec<String> = Vec::new();
+            for v in &x.values {
+                if let Value::Str(t) = v {
+                    if !seen.contains(t) {
+                        seen.push(t.clone());
+                    }
+                }
+            }
+            (!seen.is_empty()
+                && x.values
+                    .iter()
+                    .all(|v| matches!(v, Value::Str(_) | Value::Na)))
+            .then_some(seen)
+        });
+        if let Some(l) = l.as_mut() {
+            l.reverse();
+        }
+        l
+    } else {
+        x_levels
+    };
     if let Some(levels) = &x_levels {
         plot = plot.scale_x_discrete(
             ScaleDiscrete::new().with_limits(levels.iter().map(String::as_str).collect()),
