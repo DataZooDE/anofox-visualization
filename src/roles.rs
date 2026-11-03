@@ -340,6 +340,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("PAGED", &["TABLE_PAGED", "PAGINATED"], R::PagedTable, "table", true,
       "SQL-paginated table for large/remote data"),
     e("TREND", &[], R::Trend, "table", true, "▲/▼ arrow in a table cell"),
+    e("PVALUE", &["P_VALUE"], R::PValue, "table", true, "a p-value in a table cell: '< 0.001', else three decimals"),
+    e("SCIENTIFIC", &["SCI"], R::Scientific, "table", true, "a number in scientific notation in a table cell (1.23e−5)"),
     e("COLORSCALE", &["COLOURSCALE", "HEAT", "GRADIENT"], R::ColorScale(Scale::LowGood), "table", true,
       "heatmap-colour a table column's cells (low = green, high = red); on a ::HEATMAP / ::CALENDAR its tiles, good → warn → bad"),
     e("COLORSCALE_HIGH_GOOD", &["COLORSCALE_HIGH", "HEAT_HIGH"], R::ColorScale(Scale::HighGood), "table", true,
@@ -820,6 +822,8 @@ pub fn is_table_format(r: Role) -> bool {
         r,
         Role::Metric(_)
             | Role::Trend
+            | Role::PValue
+            | Role::Scientific
             | Role::ColorScale(_)
             | Role::Badge
             | Role::Value(Kind::Sparkline)
@@ -1178,6 +1182,8 @@ mod tests {
             Role::BandLower,
             Role::BandUpper,
             Role::Trend,
+            Role::PValue,
+            Role::Scientific,
             Role::ColorScale(Scale::LowGood),
             Role::ColorScale(Scale::HighGood),
             Role::ColorScale(Scale::Diverging),
@@ -1358,6 +1364,8 @@ mod tests {
                 | Role::BandLower
                 | Role::BandUpper
                 | Role::Trend
+                | Role::PValue
+                | Role::Scientific
                 | Role::ColorScale(_)
                 | Role::Badge
                 | Role::Plain

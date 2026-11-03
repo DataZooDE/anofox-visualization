@@ -355,7 +355,7 @@ WHERE term IN ('area (10 m²)', 'age (decade)', 'km to centre', 'garden');
 SELECT 12::COL;
 SELECT 'Residual tests — the villas break normality; the spread grows with the home'::TITLE,
        question AS "Question" ::TABLE, method AS "Test", round(statistic, 3) AS "Statistic" ::PLAIN,
-       printf('%.2g', p_value) AS "p-value" ::PLAIN,
+       p_value AS "p-value" ::PVALUE,
        CASE WHEN p_value < 0.05 THEN 'reject' ELSE 'ok' END AS "at 5%" ::BADGE
 FROM pm_tests WHERE model_id = 'price';
 
@@ -512,7 +512,7 @@ GROUP BY curve_type ORDER BY curve_type;
 SELECT 12::COL;
 SELECT 'Autocorrelation tests — both reject independence'::TITLE,
        question AS "Question" ::TABLE, method AS "Test", round(statistic, 3) AS "Statistic" ::PLAIN,
-       printf('%.2g', p_value) AS "p-value" ::PLAIN,
+       p_value AS "p-value" ::PVALUE,
        CASE WHEN p_value < 0.05 THEN 'reject' ELSE 'ok' END AS "at 5%" ::BADGE
 FROM pm_tests WHERE model_id = 'time';
 
@@ -569,7 +569,7 @@ GROUP BY series ORDER BY 2;
 
 SELECT 12::COL;
 SELECT 'Log-rank test'::TITLE, question AS "Question" ::TABLE, method AS "Test", round(statistic, 1) AS "χ²" ::PLAIN,
-       df1 AS "df" ::PLAIN, printf('%.2g', p_value) AS "p-value" ::PLAIN,
+       df1 AS "df" ::PLAIN, p_value AS "p-value" ::PVALUE,
        CASE WHEN p_value < 0.05 THEN 'curves differ' ELSE 'no difference' END AS "at 5%" ::BADGE
 FROM pm_tests WHERE model_id = 'market';
 
@@ -596,7 +596,7 @@ GROUP BY method ORDER BY method;
 
 SELECT 12::COL;
 SELECT 'Omnibus tests'::TITLE, question AS "Question" ::TABLE, method AS "Test", round(statistic, 2) AS "Statistic" ::PLAIN,
-       printf('%.2g', p_value) AS "p-value" ::PLAIN,
+       p_value AS "p-value" ::PVALUE,
        CASE WHEN p_value < 0.05 THEN 'differ' ELSE 'same' END AS "at 5%" ::BADGE
 FROM pm_tests WHERE model_id = 'agency';
 SELECT 12::COL;

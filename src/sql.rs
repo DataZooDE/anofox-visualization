@@ -1270,6 +1270,8 @@ fn rewrite_list(list: &str) -> Rewritten {
                 | Role::Censor
                 | Role::CooksContour
                 | Role::Trend
+                | Role::PValue
+                | Role::Scientific
                 | Role::Reload
                 | Role::Bivariate => {
                     // A charted measure remembers a human name (explicit
