@@ -2744,6 +2744,37 @@ fn enforce(
     Ok(())
 }
 
+/// #982 (plan §4 R6): without an access policy, an agent's dashboard still
+/// goes through the panel variant of the implicit classifier on every
+/// snapshot — no name qualified with another database, the reviewed
+/// function list, no macros — or the snapshot isn't served.
+fn check_agent_panels(
+    snap: &Snapshot,
+    opts: &LockedOptions,
+    dashes: &DashSet,
+) -> Result<(), String> {
+    let Some(a) = &opts.agent else {
+        return Ok(());
+    };
+    let Some(d) = dashes.find(&a.dashboard) else {
+        return Ok(());
+    };
+    let c = snap.db.connect()?;
+    let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
+    anofox_visualization::host::policy::check_panels(&mut duck, &d.stmts, &snap.default_db).map_err(
+        |(i, e)| {
+            if e.contains("json_serialize_sql") {
+                format!("options.agent: the agent's checks need the json extension (INSTALL json): {e}")
+            } else {
+                format!(
+                    "options.agent: dashboard '{}' statement {i}: {e} (refused by the agent's classifier; with \"policy\": \"none\" it still runs)",
+                    d.id
+                )
+            }
+        },
+    )
+}
+
 /// The catalog's macros and views with their definitions ([`deps::catalog_reads`]).
 const CATALOG_SQL: &str =
     "SELECT function_name, coalesce(macro_definition, '') FROM duckdb_functions() \
@@ -3690,6 +3721,8 @@ impl Locked {
                     .as_ref()
                     .map(|w| (w, writeback_schema(&self.opts))),
             )?;
+        } else {
+            check_agent_panels(&snap, &self.opts, dashes)?;
         }
         analyze_deps(&mut snap, &dashes.list)?;
         Ok((snap, warnings))
@@ -4081,6 +4114,8 @@ pub fn start_locked(
                 .as_ref()
                 .map(|w| (w, writeback_schema(&opts))),
         )?;
+    } else {
+        check_agent_panels(&snap, &opts, &dashes)?;
     }
     analyze_deps(&mut snap, &dashes.list)?;
     check_dash_set(&dashes, &snap, &opts, Path::new(dir))?;
@@ -7506,7 +7541,8 @@ fn build_snapshot(
         // (`check_read_only`), which lives in the json extension.
         let json = "json".to_string();
         let mut exts: Vec<&String> = loaded.iter().chain(dashes.loads.iter()).collect();
-        if opts.data.is_some() {
+        // #982: so are an agent's dashboard statements (check_agent_panels)
+        if opts.data.is_some() || opts.agent.is_some() {
             exts.push(&json);
         }
         exts.sort();

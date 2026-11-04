@@ -1235,8 +1235,16 @@ A dashboard published as an agent answers the questions it declares with
   answers without a model), with `log_vars: "values"`, unless extension telemetry is
   off (`DATAZOO_DISABLE_TELEMETRY=1`), and when the dashboard fails
   `dashboard --check --agent`'s static checks (`question/*`, `agent/*`).
-- Until canonical views exist (A3), the operator's own policy is the data
-  boundary, as for `/api/panel`.
+- **Without a policy** (`"policy": "none"`) the agent's dashboard still
+  goes through the classifier on every snapshot (#982): no name qualified
+  with another database (a two-part name only for a schema of the default
+  database), the reviewed function list, no macros, no `query` /
+  `query_table`, setup statements only as `CREATE TEMP … AS` / `SET
+  VARIABLE`. A dashboard that fails it doesn't start; a refresh or reload
+  with one keeps the snapshot it had. Under a policy the policy's rewrite
+  does the same.
+- The operator's own policy is the data boundary, as for `/api/panel`; a
+  customer mapping (below) limits the data to the contract's tables.
 
 #### MCP (`agent.mcp`, #864)
 

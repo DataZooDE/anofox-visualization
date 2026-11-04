@@ -520,6 +520,12 @@ enum Mode {
     /// `source.*` (and its own CTEs), no variables, and of the table
     /// functions only `range` / `generate_series` / `unnest`.
     Mapping,
+    /// An agent's dashboard without an access policy (#982, plan §4 R6:
+    /// `"policy": "none"` never turns off this implicit classifier): no
+    /// database-qualified name, a two-part name only for a schema of the
+    /// default database (the walker's `temps` holds those schemas), the
+    /// reviewed function list, no macros.
+    Panel,
 }
 
 /// The table functions a mapping view may call (plan §4).
@@ -797,6 +803,15 @@ impl Walker<'_> {
             o.remove("qualified_name");
         };
         match self.mode {
+            Mode::Panel => {
+                if !catalog.is_empty()
+                    || (!schema.is_empty() && !self.temps.contains(&schema.to_ascii_lowercase()))
+                {
+                    return Err(format!(
+                        "'{shown}': an agent's dashboard reads only names of its own database, never one qualified with another database"
+                    ));
+                }
+            }
             Mode::Mapping => {
                 if catalog.is_empty() && schema.is_empty() && self.cte(&name).is_some() {
                     return Ok(());
@@ -1099,6 +1114,62 @@ pub fn check_mapping(duck: &mut dyn Duck, query: &str) -> Result<Value, String> 
     let none = HashSet::new();
     Walker::new(Mode::Mapping, &enf, &none).walk(&mut ast["statements"])?;
     Ok(tree)
+}
+
+/// #982 (plan §4 R6): an agent's dashboard statements (`stmts` as a
+/// [`crate::sql::Panel`] plan gives them) through the panel variant of the
+/// implicit classifier — what agent mode runs when no access policy does
+/// (`"policy": "none"`). The statements a locked server accepts under a
+/// policy only; `default_db`'s schemas are the only qualifiers allowed.
+/// The first refusal, with its statement's index.
+pub fn check_panels(
+    duck: &mut dyn Duck,
+    stmts: &[(bool, String)],
+    default_db: &str,
+) -> Result<(), (usize, String)> {
+    let enf = Enforcer {
+        policy: Policy {
+            tables: Vec::new(),
+            table_functions: Vec::new(),
+            functions: Vec::new(),
+        },
+        default_db: default_db.to_string(),
+        bodies: Vec::new(),
+        denied_functions: denied_macros(duck).map_err(|e| (0, e))?,
+    };
+    let schemas: HashSet<String> = duck
+        .rows(&format!(
+            "SELECT lower(schema_name)::VARCHAR FROM duckdb_schemas() WHERE database_name = {}",
+            sql_string_literal(default_db)
+        ))
+        .map_err(|e| (0, e))?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+    for (i, (_, sql)) in stmts.iter().enumerate() {
+        let sql = sql.trim().trim_end_matches(';');
+        let query = match classify(sql).map_err(|e| (i, e))? {
+            Setup::Query => sql.to_string(),
+            Setup::Create { name, body, .. } => {
+                if name.to_ascii_lowercase().starts_with(RESERVED_PREFIX) {
+                    return Err((i, format!("'{name}' is a reserved name")));
+                }
+                body.to_string()
+            }
+            Setup::SetVariable { name, expr } => {
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with(CLAIM_PREFIX) || lower.starts_with(RESERVED_PREFIX) {
+                    return Err((i, format!("variable '{name}' is set by the server")));
+                }
+                format!("SELECT {expr}")
+            }
+        };
+        let mut ast = serialize(duck, &query).map_err(|e| (i, e))?;
+        Walker::new(Mode::Panel, &enf, &schemas)
+            .walk(&mut ast["statements"])
+            .map_err(|e| (i, e))?;
+    }
+    Ok(())
 }
 
 /// DuckDB's parse tree of one query (`json_serialize_sql`), for checks on

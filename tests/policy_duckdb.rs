@@ -880,3 +880,42 @@ fn a_redirected_table_s_view_reads_the_server_s_temp_table() {
             .is_err()
     );
 }
+
+#[test]
+fn an_agents_panels_are_classified_without_a_policy() {
+    // #982 (plan §4 R6): `"policy": "none"` never turns the classifier off
+    if !have_duckdb() {
+        return;
+    }
+    let db = db();
+    let file = db.file.clone();
+    let check = |sql: &str| {
+        anofox_visualization::host::policy::check_panels(
+            &mut |s: &str| rows_as_text(&file, s),
+            &[(false, sql.to_string())],
+            "snap",
+        )
+    };
+    for ok in [
+        "SELECT region, sum(amount) FROM sales GROUP BY 1",
+        "SELECT * FROM ref.regions",
+        "WITH x AS (FROM sales) SELECT count(*) FROM x",
+        "SELECT getvariable('region') AS r",
+    ] {
+        assert!(check(ok).is_ok(), "{ok}: {:?}", check(ok));
+    }
+    for bad in [
+        "SELECT * FROM snap.main.payroll",
+        "SELECT * FROM memory.main.x",
+        "SELECT * FROM source.lieferanten",
+        "SELECT * FROM query_table('payroll')",
+        "SELECT leak()",
+        "SELECT * FROM t_leak()",
+        "SELECT * FROM read_csv('/etc/passwd')",
+    ] {
+        assert!(check(bad).is_err(), "{bad} was admitted");
+    }
+    // setup statements too: only the forms a locked server accepts
+    assert!(check("CREATE TABLE copy AS SELECT * FROM payroll").is_err());
+    assert!(check("CREATE TEMP TABLE t AS SELECT * FROM memory.main.x").is_err());
+}
