@@ -32,13 +32,20 @@ fn qi(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// Build the canonical tables into `dir/canonical.duckdb`: `(name, file,
-/// notes)` for the snapshot, or why the mapping is refused.
+/// What a build gives the snapshot: `(name, file, notes)` like a source
+/// build, and the agent's questions this mapping can't answer (#982).
+type Built = ((String, PathBuf, Vec<String>), Vec<String>);
+
+/// Build the canonical tables into `dir/canonical.duckdb`, or say why the
+/// mapping is refused. `script` (the agent's dashboard): its questions are
+/// bound against the views ([`canonical::questions`]); one whose panel
+/// reads a column the mapping leaves out is off for this customer.
 pub fn build(
     m: &MappingOptions,
     dir: &Path,
     stop: &Arc<AtomicBool>,
-) -> Result<(String, PathBuf, Vec<String>), String> {
+    script: Option<&str>,
+) -> Result<Built, String> {
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("agent.mapping: {p}: {e}"));
     let contract = canonical::parse_contract(&read(&m.contract)?)
         .map_err(|e| format!("agent.mapping.contract: {e}"))?;
@@ -74,7 +81,7 @@ pub fn build(
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
-        let r = (|| -> Result<Vec<String>, String> {
+        let r = (|| -> Result<(Vec<String>, Vec<String>), String> {
             let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
                 conn.query(sql)?.string_rows(1_000_000)
             };
@@ -100,6 +107,12 @@ pub fn build(
                     report.to_text()
                 ));
             }
+            let mut notes: Vec<String> = report
+                .findings
+                .iter()
+                .filter(|f| !f.error)
+                .map(|f| format!("agent.mapping: {}: {}", f.table, f.message))
+                .collect();
             for t in &contract.tables {
                 duck(&format!(
                     "CREATE TABLE {}.main.{} AS SELECT * FROM memory.main.{}",
@@ -108,13 +121,28 @@ pub fn build(
                     qi(&t.name)
                 ))?;
             }
+            // the output is done: detached before any dashboard SQL runs here
             duck(&format!("DETACH {}", qi(ATTACH_AS)))?;
-            Ok(report
-                .findings
-                .iter()
-                .filter(|f| !f.error)
-                .map(|f| format!("agent.mapping: {}: {}", f.table, f.message))
-                .collect())
+            // #982: the dashboard's questions bound against the views. Only a
+            // column the mapping leaves out switches one off; any other bind
+            // error (a function this instance doesn't load, a setup statement
+            // that failed here) keeps it listed — the panel path answers it,
+            // or fails it, as before.
+            let mut off = Vec::new();
+            for q in script
+                .map(|s| canonical::questions(&mut duck, s))
+                .unwrap_or_default()
+            {
+                let Some(why) = q.off else { continue };
+                if is_missing_column(&why) {
+                    notes.push(format!(
+                        "agent.mapping: question '{}' is off for this mapping: {why}",
+                        q.id
+                    ));
+                    off.push(q.id);
+                }
+            }
+            Ok((notes, off))
         })();
         finished.store(true, Ordering::SeqCst);
         r
@@ -122,12 +150,38 @@ pub fn build(
     drop(conn);
     drop(db);
     match result {
-        Ok(notes) => Ok((ATTACH_AS.to_string(), out, notes)),
+        Ok((notes, off)) => Ok(((ATTACH_AS.to_string(), out, notes), off)),
         Err(_) if timed_out.load(Ordering::SeqCst) => Err(format!(
             "agent.mapping: the build took longer than {} s (timeout_s) or the server stopped",
             m.timeout_s
         )),
         Err(e) => Err(e),
+    }
+}
+
+/// A bind error that says a column isn't there (and nothing failed before).
+fn is_missing_column(why: &str) -> bool {
+    !why.contains("a setup statement failed first")
+        && (why.contains("Referenced column") || why.contains("does not have a column named"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_missing_column_switches_a_question_off() {
+        use super::is_missing_column;
+        assert!(is_missing_column(
+            r#"Binder Error: Referenced column "rating" not found in FROM clause!"#
+        ));
+        assert!(is_missing_column(
+            r#"Binder Error: Table "s" does not have a column named "rating""#
+        ));
+        assert!(!is_missing_column(
+            "Catalog Error: Scalar Function with name anofox_x does not exist!"
+        ));
+        assert!(!is_missing_column(
+            r#"Binder Error: Referenced column "x" not found (a setup statement failed first: …)"#
+        ));
     }
 }
 

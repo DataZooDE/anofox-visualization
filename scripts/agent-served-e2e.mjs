@@ -205,7 +205,8 @@ try {
     supplier_id VARCHAR PRIMARY KEY,
     name VARCHAR NOT NULL,
     region VARCHAR NOT NULL, -- @scope region
-    days_late INTEGER
+    days_late INTEGER,
+    rating DOUBLE -- @optional
 );
 `
   );
@@ -221,18 +222,30 @@ SELECT name ::DROPDOWN FROM suppliers ORDER BY 1;
 SELECT days_late AS "Days late" ::TABLE FROM suppliers WHERE name = getvariable('name');
 -- @question How late are our suppliers?
 SELECT name AS "Supplier" ::TABLE, days_late AS "Days late" FROM suppliers ORDER BY 1;
+-- @question Which suppliers rate best?
+SELECT name AS "Supplier" ::TABLE, rating FROM suppliers ORDER BY rating DESC;
 -- @question What does the source hold?
 SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM lieferanten;
 `
   );
   const mapping = { contract: path.join(mapDir, "contract.sql"), views, db: srcDb, scope: { region: ["north", "south"] } };
-  srv = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping } }, mapDash);
+  srv = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping, mcp: { resource: `${base}/mcp` } } }, mapDash);
   check(srv.proc != null, "an agent with a conforming customer mapping starts");
   if (srv.proc) {
     a = await (await answer({ question_id: "how_late_are_our_suppliers" })).json();
     check(JSON.stringify(a.facts?.rows) === JSON.stringify([{ Supplier: "Alpha", "Days late": 2 }, { Supplier: "Beta", "Days late": 7 }]), "the question is answered from the mapped canonical table");
     a = await (await answer({ question_id: "how_late_is_name", slots: { name: "bet" } })).json();
     check(a.facts?.rows?.[0]?.["Days late"] === 7, "a slot resolves among the canonical table's values");
+    // #982: the mapping leaves the optional rating out, so the question that
+    // reads it is off for this customer — not listed, not a tool, refused.
+    const ids = ((await (await fetch(`${base}/api/agent`, { headers: as("alice") })).json()).questions || []).map((q) => q.id);
+    check(ids.includes("how_late_is_name") && !ids.includes("which_suppliers_rate_best"), `a question reading a column the mapping leaves out isn't listed (${ids})`);
+    r = await answer({ question_id: "which_suppliers_rate_best" });
+    check(r.status === 404, `…and is refused (${r.status})`);
+    const mcpTools = await (await fetch(`${base}/mcp`, { method: "POST", headers: { ...as("alice"), "Content-Type": "application/json", Accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) })).json();
+    const toolNames = (mcpTools.result?.tools || []).map((t) => t.name);
+    check(toolNames.includes("how_late_is_name") && !toolNames.includes("which_suppliers_rate_best"), "…and is no MCP tool");
+    check(srv.log().includes("question 'which_suppliers_rate_best' is off"), "the start log says which question is off and why");
     r = await answer({ question_id: "what_does_the_source_hold" });
     check(r.status === 502, `the source's own tables aren't in the snapshot (${r.status})`);
     // A refresh builds the mapping again from the source's current rows; a

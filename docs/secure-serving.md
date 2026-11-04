@@ -1347,7 +1347,10 @@ with one keeps the snapshot it had. Then each contract table is copied
 into `canonical.duckdb`, which the snapshot attaches read-only as
 `canonical` and makes the default database: the dashboard's bare names
 resolve to the contract's tables, and the source's own tables are not in
-the snapshot. A watchdog interrupts the build after `timeout_s` (default
+the snapshot. The agent's questions are bound against the views there too
+(like `--conform --dashboard`): one whose panel reads a column the mapping
+leaves out is off for this customer — not in `GET /api/agent` or
+`tools/list`, refused when asked — and the start log says why. A watchdog interrupts the build after `timeout_s` (default
 600) or when the server stops. `mapping` can't be combined with
 `options.source`. Don't attach `db` in the host session as well: the
 mapping is meant to be the only way the agent sees it.

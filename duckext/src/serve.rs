@@ -2465,6 +2465,9 @@ struct Snapshot {
     previews: Mutex<HashMap<String, Arc<PreviewOn>>>,
     /// The dashboards this snapshot was built from (#772).
     dashes: Arc<DashSet>,
+    /// #982: the agent's questions this snapshot's customer mapping can't
+    /// answer (left out of `/api/agent` and `tools/list`, refused).
+    agent_off: Vec<String>,
     _dir: SnapshotDir,
 }
 
@@ -3660,11 +3663,17 @@ impl Locked {
         // console, or a new `anofox_serve_dashboards` sharing this host
         // database's connection.
         let dir = SnapshotDir::create()?;
+        let mut agent_off = Vec::new();
         let source_result = match (
             &self.opts.source,
             self.opts.agent.as_ref().and_then(|a| a.mapping.as_ref()),
         ) {
-            (_, Some(m)) => Some(crate::mapping::build(m, &dir.0, &self.stop)?),
+            (_, Some(m)) => {
+                let (r, off) =
+                    crate::mapping::build(m, &dir.0, &self.stop, agent_script(&self.opts, dashes))?;
+                agent_off = off;
+                Some(r)
+            }
             (Some(src), None) => Some(run_source_build(
                 src,
                 &dir.0,
@@ -3677,6 +3686,7 @@ impl Locked {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
             build_snapshot(&conn, &self.opts, dashes, dir, source_result)?
         };
+        snap.agent_off = agent_off;
         if let (Some(p), Some(k)) = (&self.opts.policy, &self.opts.policy_key) {
             enforce(
                 &mut snap,
@@ -4059,11 +4069,21 @@ pub fn start_locked(
     let startup_build_state = SourceBuildState::new();
     // #194 A3b: an agent's customer mapping, built in its own locked
     // instance (crate::mapping) — never in this session
+    let mut agent_off = Vec::new();
     let source_result = match (
         &opts.source,
         opts.agent.as_ref().and_then(|a| a.mapping.as_ref()),
     ) {
-        (_, Some(m)) => Some(crate::mapping::build(m, &startup_dir.0, &startup_stop)?),
+        (_, Some(m)) => {
+            let (r, off) = crate::mapping::build(
+                m,
+                &startup_dir.0,
+                &startup_stop,
+                agent_script(&opts, &dashes),
+            )?;
+            agent_off = off;
+            Some(r)
+        }
         (Some(src), None) => Some(run_source_build(
             src,
             &startup_dir.0,
@@ -4076,6 +4096,7 @@ pub fn start_locked(
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
         build_snapshot(&conn, &opts, &dashes, startup_dir, source_result)?
     };
+    snap.agent_off = agent_off;
     if let (Some(p), Some(k)) = (&opts.policy, &opts.policy_key) {
         enforce(
             &mut snap,
@@ -7285,6 +7306,13 @@ pub(crate) fn fk_order(
     out
 }
 
+/// The agent's dashboard script in `dashes` (#982: whose questions a
+/// customer mapping is checked for).
+fn agent_script<'a>(opts: &LockedOptions, dashes: &'a DashSet) -> Option<&'a str> {
+    let a = opts.agent.as_ref()?;
+    dashes.find(&a.dashboard).map(|d| d.sql.as_str())
+}
+
 /// Snapshot the live session into a private directory and open it through a
 /// fresh, locked-down DuckDB instance:
 /// * every DuckDB database attached to the session (or just the default one
@@ -7564,6 +7592,7 @@ fn build_snapshot(
             implicit: HashMap::new(),
             previews: Mutex::new(HashMap::new()),
             dashes: dashes.clone(),
+            agent_off: Vec::new(),
             _dir: dir,
         },
         warnings,
@@ -9064,6 +9093,7 @@ fn handle_agent(
         id: &dash.id,
         title: &dash.meta.title,
         script: &dash.sql,
+        off: &gen.snap.agent_off,
     };
     let Some(body) = body else {
         respond(
@@ -9134,13 +9164,17 @@ fn handle_mcp(
         return reply(req, 404, "no such dashboard");
     };
     info.dashboard = Some(dash.id.clone());
-    let Ok(tools) = anofox_visualization::agent::tool_list(&dash.id, &dash.sql) else {
+    let Ok(mut tools) = anofox_visualization::agent::tool_list(&dash.id, &dash.sql) else {
         return reply(
             req,
             503,
             "the agent's dashboard no longer passes its publish checks",
         );
     };
+    // #982: a question this customer's mapping can't answer is no tool
+    if let Some(t) = tools["tools"].as_array_mut() {
+        t.retain(|t| !gen.snap.agent_off.iter().any(|o| t["name"] == o.as_str()));
+    }
     let version = req_header(&req, "MCP-Protocol-Version").map(str::to_string);
     let runner = AskRunner {
         st,
@@ -9155,6 +9189,7 @@ fn handle_mcp(
             id: &dash.id,
             title: &dash.meta.title,
             script: &dash.sql,
+            off: &gen.snap.agent_off,
         },
         tools: &tools,
         max_rows: opts.max_rows,

@@ -364,6 +364,9 @@ pub struct Dash<'a> {
     pub id: &'a str,
     pub title: &'a str,
     pub script: &'a str,
+    /// Question ids this deployment can't answer (#982: its customer
+    /// mapping leaves out a column the panel reads) — not listed, refused.
+    pub off: &'a [String],
 }
 
 /// `GET /api/agent`: the questions, their slots and the footer's title —
@@ -374,7 +377,7 @@ pub fn manifest(d: &Dash) -> Value {
     json!({
         "agent": d.id,
         "title": d.title,
-        "questions": question::declared(d.script).iter().map(|q| json!({
+        "questions": question::declared(d.script).iter().filter(|q| !d.off.contains(&q.id)).map(|q| json!({
             "id": q.id,
             "text": question::display(&q.text, &q.slots),
             "slots": q.slots.iter().map(|s| json!({
@@ -573,7 +576,7 @@ pub fn answer(
     let questions = question::declared(d.script);
     let q: &Question = questions
         .iter()
-        .find(|q| q.id == req.question_id)
+        .find(|q| q.id == req.question_id && !d.off.contains(&q.id))
         .ok_or_else(|| {
             AgentError::new(
                 404,
@@ -799,6 +802,7 @@ mod tests {
             id: "suppliers",
             title: "Suppliers",
             script: DASH,
+            off: &[],
         };
         let req = parse_answer(body, 50)?;
         answer(
@@ -1008,6 +1012,7 @@ mod tests {
             id: "d",
             title: "D",
             script,
+            off: &[],
         };
         let req = parse_answer(
             r#"{"question_id":"what_happened_in_region","slots":{"region":"S"}}"#,
@@ -1110,6 +1115,7 @@ mod tests {
             id: "suppliers",
             title: "Suppliers",
             script: DASH,
+            off: &[],
         };
         let req = parse_answer(r#"{"question_id":"how_reliable_is_supplier_on_delivery","slots":{"supplier":"Boreal"}}"#, 50).unwrap();
         let e = answer(
@@ -1132,6 +1138,7 @@ mod tests {
             id: "suppliers",
             title: "Suppliers",
             script: DASH,
+            off: &[],
         });
         assert_eq!(m["questions"][0]["slots"][0]["input"], "dropdown");
         assert!(!m.to_string().contains("Alpine"), "{m}");
