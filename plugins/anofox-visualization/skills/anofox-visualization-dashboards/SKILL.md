@@ -36,8 +36,18 @@ A dashboard is a `.sql` script. Tag output columns with `::ROLE` casts; each ann
 
 ## Workflow
 
+0. **Get the intention clear first (required).** A dashboard answers one reader's question so they can decide something; build for that, not for the data. Before any SQL, state this **intent brief** in a few lines:
+   - **Who reads it and what they decide** (the head of sales logistics: where the next depot goes).
+   - **The question it answers**, in plain words — it becomes the `-- @title` and `::DASHBOARD_TITLE`.
+   - **The measures and how each is defined** (revenue net of returns? orders or order lines?), and **the comparison** that makes them meaningful (plan, last period, last year, a threshold).
+   - **The grain and period** (weekly, last 12 weeks; per store).
+   - **What the reader filters or drills by** — only these become inputs, each placed with what it controls (*Placing inputs* below).
+
+   **If the question, the decision, a key measure's definition or the period is unclear — or the request names only data ("visualise this table", "a dashboard for sales") — stop and ask before building.** Ask at most three short questions, each with concrete options taken from the schema (`dashboard --describe`): *"Which question should it answer: (a) which regions are behind plan, (b) how revenue develops week by week, (c) which products drive returns?"*. Do not build a generic "everything about the table" dashboard and do not guess a definition. When the request is clear, don't ask; state the brief in one or two lines and go on.
+
+   Every panel must serve the brief: drop a panel you can't tie to the question, the decision or a requested filter.
 1. **Ground on the schema (required).** Never invent columns. `dashboard --describe <table | 'file.parquet' | read_csv(…)> [--db file.duckdb]` prints each column's type, min / max, approx-distinct (low = discrete → bar / category; high = search / paged) and null %.
-2. **Pick panels**: KPIs for headline numbers, a line for trends, bars for category comparisons, a table for detail, inputs for filtering (table *Pick the chart* below).
+2. **Pick panels for the brief**: KPIs for headline numbers, a line for trends, bars for category comparisons, a table for detail, inputs for filtering (table *Pick the chart* below).
 3. **Lay it out**: `SELECT n::COLUMNS;`, `::COL` per panel, KPIs in a `::GROUP` box, `::TAB` / `::SUBTAB` for sections, `::VIEW` for alternative views of one panel (a Lines/Bars/Table switcher over the same query).
 4. **Write the SQL**: one annotated `SELECT` per panel, top to bottom.
 5. **Wire interactivity** if asked: inputs and cross-filter.
