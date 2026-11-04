@@ -213,7 +213,7 @@ SELECT 'Chart gallery — every chart kind, in tabs'::LABEL;
 
 SELECT 'Bars & columns'::TAB;
 SELECT 12::COL;
-SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, waterfall/bullet/funnel, heatmaps & candlestick, sparklines — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, waterfall/bullet/funnel, heatmaps & candlestick, sparklines, flows/parts/schedules (Pareto, treemap, Sankey, Gantt, dumbbell, ridgeline, a second axis) — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week × channel (stacked, € axis)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 -- ::FLIP swaps the axes → a horizontal bar chart
 SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (horizontal, ::FLIP)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
@@ -305,6 +305,24 @@ SELECT 3::COL; SELECT sum(revenue)::SPARKLINE, 'Revenue'::TITLE FROM sales GROUP
 SELECT 3::COL; SELECT y::SPARKLINE, 'alpha'::TITLE FROM tsm WHERE series='alpha' ORDER BY day;
 SELECT 3::COL; SELECT y::SPARKLINE, 'beta'::TITLE FROM tsm WHERE series='beta' ORDER BY day;
 SELECT 3::COL; SELECT y::SPARKLINE, 'gamma'::TITLE FROM tsm WHERE series='gamma' ORDER BY day;
+
+SELECT 'Flows, parts & schedules'::TAB;
+SELECT 'Newer chart types: a **Pareto** (bars largest first, cumulative share on the right), a **treemap** (part to whole), a **Sankey** (flows between stages), a **Gantt** (one bar per task), a **dumbbell** (two values per item), a **ridgeline** (one distribution per month) and a combo with a **second axis** (::Y2).'::MARKDOWN, 'What this shows'::TITLE;
+SELECT 6::COL; SELECT reason::XAXIS, n::PARETO, 'Three reasons cause most returns (::PARETO)'::TITLE
+FROM (VALUES ('Wrong size', 48), ('Damaged', 21), ('Late', 14), ('Not as shown', 9), ('Changed mind', 5), ('Other', 3)) v(reason, n);
+SELECT 6::COL; SELECT channel::XAXIS, region::CATEGORY, revenue::TREEMAP, 'Revenue by region and channel (::TREEMAP)'::TITLE
+FROM (VALUES ('North','Web',420), ('North','Shop',260), ('North','Partner',90), ('South','Web',310), ('South','Shop',180), ('West','Web',150), ('West','Partner',70)) v(region, channel, revenue);
+SELECT 6::COL; SELECT store::DUMBBELL, plan::XMIN, actual::XMAX, 'Plan → actual per store (::DUMBBELL)'::TITLE
+FROM (VALUES ('Berlin', 120, 138), ('Hamburg', 100, 92), ('Munich', 140, 151), ('Cologne', 90, 97)) v(store, plan, actual);
+SELECT 12::COL; SELECT src::ORIGIN, dst::DEST, n::SANKEY, 'Where visits go (::SANKEY)'::TITLE
+FROM (VALUES ('Search','Product',520), ('Ads','Product',310), ('Email','Product',120), ('Product','Cart',540), ('Product','Left',410), ('Cart','Order',380), ('Cart','Left',160)) v(src, dst, n);
+SELECT 6::COL; SELECT task::GANTT, s::XMIN, e::XMAX, team::CATEGORY, 'Launch plan (::GANTT)'::TITLE
+FROM (VALUES ('Research', DATE '2024-03-01', DATE '2024-03-15', 'Product'), ('Design', DATE '2024-03-10', DATE '2024-04-05', 'Product'), ('Build', DATE '2024-03-25', DATE '2024-05-10', 'Engineering'), ('Test', DATE '2024-05-01', DATE '2024-05-24', 'Engineering'), ('Launch', DATE '2024-05-24', DATE '2024-05-31', 'Marketing')) v(task, s, e, team);
+SELECT 6::COL; SELECT month::CATEGORY, delay::RIDGELINE, 'Delivery delays drift up from January to April (::RIDGELINE)'::TITLE
+FROM (SELECT ['Jan','Feb','Mar','Apr'][1 + i % 4] AS month, (i % 4) * 0.8 + ((i * 37) % 50) / 10.0 AS delay FROM range(400) t(i));
+SELECT 12::COL; SELECT week::XAXIS, sum(revenue)::BARCHART, round(100.0 * sum(revenue) FILTER (WHERE channel = 'web') / sum(revenue), 1) AS web_share::LINECHART,
+       'web_share'::Y2, 'percent'::Y2FORMAT, '€'::YFORMAT, 'Revenue (left) and the web share (right, ::Y2)'::TITLE
+FROM sales GROUP BY week ORDER BY week;
 
 SELECT 'Interactive'::TAB;
 -- A ::MARKDOWN column renders as a rich-text panel (headings, lists, links…).

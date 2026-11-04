@@ -6442,12 +6442,14 @@ fn y2_diags(
         return out;
     };
     let name_of = |i: usize| names.iter().find(|(k, _)| *k == i).map(|(_, n)| n.clone());
-    let measures: Vec<String> = roles
+    // by position: the first measure is the left axis' even when it has no
+    // name (`sum(revenue)::BARCHART`)
+    let others: Vec<String> = roles
         .iter()
         .filter(|(_, r)| matches!(r, Role::Value(_)))
+        .skip(1)
         .filter_map(|(i, _)| name_of(*i))
         .collect();
-    let others = measures.get(1..).unwrap_or_default();
     if !others
         .iter()
         .any(|m| m.trim().eq_ignore_ascii_case(want.trim()))
@@ -10524,6 +10526,10 @@ mod design_tests {
             codes("SELECT m::XAXIS, revenue::BARCHART, margin::LINECHART, 'revenue'::Y2 FROM t;"),
             vec![(Severity::Warning, "chart/y2-unknown-measure")]
         );
+        // an unnamed first measure is still the left axis'
+        let unnamed =
+            "SELECT m::XAXIS, sum(revenue)::BARCHART, margin::LINECHART, 'margin'::Y2 FROM t;";
+        assert!(codes(unnamed).is_empty(), "{:?}", codes(unnamed));
         assert_eq!(
             codes("SELECT m::XAXIS, revenue::BARCHART, margin::LINECHART, 'margin'::Y2, 1::FLIP FROM t;"),
             vec![(Severity::Note, "chart/y2-ignored")]
