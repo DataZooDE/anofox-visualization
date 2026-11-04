@@ -1235,8 +1235,16 @@ A dashboard published as an agent answers the questions it declares with
   answers without a model), with `log_vars: "values"`, unless extension telemetry is
   off (`DATAZOO_DISABLE_TELEMETRY=1`), and when the dashboard fails
   `dashboard --check --agent`'s static checks (`question/*`, `agent/*`).
-- Until canonical views exist (A3), the operator's own policy is the data
-  boundary, as for `/api/panel`.
+- **Without a policy** (`"policy": "none"`) the agent's dashboard still
+  goes through the classifier on every snapshot (#982): no name qualified
+  with another database (a two-part name only for a schema of the default
+  database), the reviewed function list, no macros, no `query` /
+  `query_table`, setup statements only as `CREATE TEMP … AS` / `SET
+  VARIABLE`. A dashboard that fails it doesn't start; a refresh or reload
+  with one keeps the snapshot it had. Under a policy the policy's rewrite
+  does the same.
+- The operator's own policy is the data boundary, as for `/api/panel`; a
+  customer mapping (below) limits the data to the contract's tables.
 
 #### MCP (`agent.mcp`, #864)
 
@@ -1293,7 +1301,7 @@ marked `-- @scope <name> constant` in the mapping.
 ```sh
 dashboard --conform canonical/supplier-reliability.sql \
     --views customer-mapping/acme/views.sql --db acme.duckdb \
-    [--dashboard supplier-reliability.sql] [--scope region=north,south] \
+    [--dashboard supplier-reliability.sql] [--policy policy.json] [--scope region=north,south] \
     [--memory-limit 4GB] [--timeout-s 120] [--json]
 ```
 
@@ -1318,6 +1326,10 @@ exit 1 when the mapping doesn't conform):
   values within `--scope name=a,b`, and more than one value when the list
   has more than one;
 - the optional columns the mapping leaves out;
+- with `--policy`: the access policy names only the contract's tables and
+  columns, and its row filters bind against this customer's views
+  (`conform/policy`) — a policy is written against the contract, never a
+  source;
 - with `--dashboard`: which `-- @question`s this customer can answer — each
   question's panel is bound against the views; one that reads a missing
   optional column is off, with the reason.
@@ -1348,7 +1360,10 @@ into `canonical.duckdb`, which the snapshot attaches read-only as
 `canonical` and makes the default database: the dashboard's bare names
 resolve to the contract's tables, and neither the source's own tables nor
 anything of the host session (its databases are not copied, `attach` is
-ignored, `search_path` is refused) is in the snapshot. The agent's questions are bound against the views there too
+ignored, `search_path` is refused) is in the snapshot — the dashboard may read only the contract's tables (its
+own TEMP objects and CTEs aside; `agent/non-canonical-read` stops the
+start), and a `-- @schema <id>` header must name this contract. The
+agent's questions are bound against the views there too
 (like `--conform --dashboard`): one whose panel reads a column the mapping
 leaves out is off for this customer — not in `GET /api/agent` or
 `tools/list`, refused when asked — and the start log says why. A watchdog interrupts the build after `timeout_s` (default

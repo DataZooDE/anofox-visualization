@@ -224,12 +224,6 @@ SELECT days_late AS "Days late" ::TABLE FROM suppliers WHERE name = getvariable(
 SELECT name AS "Supplier" ::TABLE, days_late AS "Days late" FROM suppliers ORDER BY 1;
 -- @question Which suppliers rate best?
 SELECT name AS "Supplier" ::TABLE, rating FROM suppliers ORDER BY rating DESC;
--- @question What does the source hold?
-SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM lieferanten;
--- @question What does the host hold?
-SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM memory.main.host_secret;
--- @question What else does the host hold?
-SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM host_secret;
 `
   );
   const mapping = { contract: path.join(mapDir, "contract.sql"), views, db: srcDb, scope: { region: ["north", "south"] } };
@@ -250,12 +244,6 @@ SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM host_secret;
     const toolNames = (mcpTools.result?.tools || []).map((t) => t.name);
     check(toolNames.includes("how_late_is_name") && !toolNames.includes("which_suppliers_rate_best"), "…and is no MCP tool");
     check(srv.log().includes("question 'which_suppliers_rate_best' is off"), "the start log says which question is off and why");
-    r = await answer({ question_id: "what_does_the_source_hold" });
-    check(r.status === 502, `the source's own tables aren't in the snapshot (${r.status})`);
-    for (const q of ["what_does_the_host_hold", "what_else_does_the_host_hold"]) {
-      r = await answer({ question_id: q });
-      check(r.status === 502, `nor the host session's tables: ${q} (${r.status})`);
-    }
     // A refresh builds the mapping again from the source's current rows; a
     // mapping broken since keeps the snapshot it had.
     spawnSync(duckdb, [srcDb, "-c", "UPDATE lieferanten SET verzug = 9 WHERE code = 'S2';"], { env });
@@ -309,6 +297,47 @@ SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM host_secret;
     else if (!x.log().includes(needle)) console.error(x.log());
   }
   writeFileSync(views, goodViews);
+
+  // #982: with a mapping the dashboard reads only the contract's tables —
+  // not the source's own, not the host session's — and a `-- @schema`
+  // names the mapping's contract
+  const lateSql = readFileSync(path.join(mapDash, "late.sql"), "utf8");
+  for (const [what, extraSql, needle] of [
+    ["the source's own table", "-- @question What does the source hold?\nSELECT count(*) AS n ::METRIC FROM lieferanten;\n", "agent/non-canonical-read"],
+    ["a host session table", "-- @question What does the host hold?\nSELECT count(*) AS n ::METRIC FROM host_secret;\n", "agent/non-canonical-read"],
+  ]) {
+    writeFileSync(path.join(mapDash, "late.sql"), lateSql + extraSql);
+    const x = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping } }, mapDash, "CREATE TABLE host_secret AS SELECT 42 AS n;\n");
+    check(x.proc == null && x.log().includes(needle), `a dashboard reading ${what} doesn't start with a mapping`);
+    if (x.proc) x.proc.kill();
+    else if (!x.log().includes(needle)) console.error(x.log());
+  }
+  writeFileSync(path.join(mapDash, "late.sql"), lateSql.replace("-- @title Late suppliers", "-- @title Late suppliers\n-- @schema other-contract"));
+  const sch = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping } }, mapDash);
+  check(sch.proc == null && sch.log().includes("reads contract 'other-contract'"), "a -- @schema naming another contract doesn't start");
+  if (sch.proc) sch.proc.kill();
+  writeFileSync(path.join(mapDash, "late.sql"), lateSql.replace("-- @title Late suppliers", "-- @title Late suppliers\n-- @schema contract"));
+  const sch2 = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping } }, mapDash);
+  check(sch2.proc != null, "a -- @schema naming the mapping's contract starts");
+  if (sch2.proc) sch2.proc.kill();
+  await sleep(300);
+  writeFileSync(path.join(mapDash, "late.sql"), lateSql);
+
+  // #982 (R6): with "policy": "none" the agent's classifier still runs — a
+  // name qualified with another database stops the start, mapping or not
+  const qualDir = path.join(dir, "qual");
+  mkdirSync(qualDir);
+  writeFileSync(path.join(qualDir, "q.sql"), "-- @vars x\nSELECT 'a' AS x ::DROPDOWN;\n-- @question What does the host hold?\nSELECT count(*) AS n ::METRIC FROM memory.main.host_secret;\n");
+  for (const [what, agent] of [["with a mapping", { dashboard: "q", mapping }], ["without one", { dashboard: "q" }]]) {
+    const x = await serve({ auth, policy: "none", agent }, qualDir, "CREATE TABLE host_secret AS SELECT 42 AS n;\n");
+    check(x.proc == null && x.log().includes("refused by the agent's classifier"), `a database-qualified read doesn't start (${what})`);
+    if (x.proc) x.proc.kill();
+    else if (!x.log().includes("refused by the agent's classifier")) console.error(x.log());
+  }
+  writeFileSync(path.join(qualDir, "q.sql"), "-- @vars x\nSELECT 'a' AS x ::DROPDOWN;\n-- @question What is x?\nSELECT query_table('host_secret') ::TABLE;\n");
+  const qt = await serve({ auth, policy: "none", agent: { dashboard: "q" } }, qualDir);
+  check(qt.proc == null && qt.log().includes("refused by the agent's classifier"), "a query_table() call doesn't start");
+  if (qt.proc) qt.proc.kill();
 
   // An unpublishable dashboard stops the start.
   const badDir = path.join(dir, "bad");

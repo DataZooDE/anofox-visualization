@@ -520,6 +520,13 @@ enum Mode {
     /// `source.*` (and its own CTEs), no variables, and of the table
     /// functions only `range` / `generate_series` / `unnest`.
     Mapping,
+    /// An agent's dashboard without an access policy (#982, plan §4 R6:
+    /// `"policy": "none"` never turns off this implicit classifier): no
+    /// database-qualified name, a two-part name only for a schema of the
+    /// default database, the reviewed function list, no macros; with a
+    /// contract, only its tables, the dashboard's TEMP objects and CTEs
+    /// (`agent/non-canonical-read`).
+    Panel,
 }
 
 /// The table functions a mapping view may call (plan §4).
@@ -539,6 +546,9 @@ struct Walker<'a> {
     used: BTreeSet<usize>,
     /// Column names referenced (lower case, last part) — for the lint.
     columns: BTreeSet<String>,
+    /// `Mode::Panel`: the default database's schemas, and the contract's
+    /// tables when the dashboard reads only those (lower case).
+    panel: Option<(&'a HashSet<String>, Option<&'a HashSet<String>>)>,
 }
 
 fn s<'v>(o: &'v Map<String, Value>, k: &str) -> &'v str {
@@ -583,6 +593,7 @@ impl Walker<'_> {
             next_cte: 0,
             used: BTreeSet::new(),
             columns: BTreeSet::new(),
+            panel: None,
         }
     }
 
@@ -733,7 +744,7 @@ impl Walker<'_> {
             .into_iter()
             .any(|t| t.and_then(Value::as_str) == Some("RECURSIVE_CTE_NODE"));
             let mut visible = frame.clone();
-            if self.mode == Mode::Mapping {
+            if matches!(self.mode, Mode::Mapping | Mode::Panel) {
                 // #984: a mapping's original text is what runs, and DuckDB
                 // binds a name in a CTE body only to the CTEs before it (or
                 // itself when recursive) — a later sibling's name is a table
@@ -797,6 +808,26 @@ impl Walker<'_> {
             o.remove("qualified_name");
         };
         match self.mode {
+            Mode::Panel => {
+                let none = HashSet::new();
+                let (schemas, contract) = self.panel.unwrap_or((&none, None));
+                if !catalog.is_empty()
+                    || (!schema.is_empty() && !schemas.contains(&schema.to_ascii_lowercase()))
+                {
+                    return Err(format!(
+                        "'{shown}': an agent's dashboard reads only names of its own database, never one qualified with another database"
+                    ));
+                }
+                if let Some(tables) = contract {
+                    let cte = schema.is_empty() && self.cte(&name).is_some();
+                    let temp = schema.is_empty() && self.temps.contains(&lower);
+                    if !cte && !temp && !tables.contains(&lower) {
+                        return Err(format!(
+                            "agent/non-canonical-read: '{shown}' is not a table of the dashboard's contract (-- @schema)"
+                        ));
+                    }
+                }
+            }
             Mode::Mapping => {
                 if catalog.is_empty() && schema.is_empty() && self.cte(&name).is_some() {
                     return Ok(());
@@ -1099,6 +1130,69 @@ pub fn check_mapping(duck: &mut dyn Duck, query: &str) -> Result<Value, String> 
     let none = HashSet::new();
     Walker::new(Mode::Mapping, &enf, &none).walk(&mut ast["statements"])?;
     Ok(tree)
+}
+
+/// #982 (plan §4 R6): an agent's dashboard statements (`stmts` as a
+/// [`crate::sql::Panel`] plan gives them) through the panel variant of the
+/// implicit classifier — what agent mode runs when no access policy does
+/// (`"policy": "none"`). The statements a locked server accepts under a
+/// policy only; `default_db`'s schemas are the only qualifiers allowed.
+/// The first refusal, with its statement's index.
+pub fn check_panels(
+    duck: &mut dyn Duck,
+    stmts: &[(bool, String)],
+    default_db: &str,
+    contract: Option<&HashSet<String>>,
+) -> Result<(), (usize, String)> {
+    let enf = Enforcer {
+        policy: Policy {
+            tables: Vec::new(),
+            table_functions: Vec::new(),
+            functions: Vec::new(),
+        },
+        default_db: default_db.to_string(),
+        bodies: Vec::new(),
+        denied_functions: denied_macros(duck).map_err(|e| (0, e))?,
+    };
+    let schemas: HashSet<String> = duck
+        .rows(&format!(
+            "SELECT lower(schema_name)::VARCHAR FROM duckdb_schemas() WHERE database_name = {}",
+            sql_string_literal(default_db)
+        ))
+        .map_err(|e| (0, e))?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+    // the TEMP objects the statements before create
+    let mut temps: HashSet<String> = HashSet::new();
+    for (i, (_, sql)) in stmts.iter().enumerate() {
+        let sql = sql.trim().trim_end_matches(';');
+        let mut created = None;
+        let query = match classify(sql).map_err(|e| (i, e))? {
+            Setup::Query => sql.to_string(),
+            Setup::Create { name, body, .. } => {
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with(RESERVED_PREFIX) {
+                    return Err((i, format!("'{name}' is a reserved name")));
+                }
+                created = Some(lower);
+                body.to_string()
+            }
+            Setup::SetVariable { name, expr } => {
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with(CLAIM_PREFIX) || lower.starts_with(RESERVED_PREFIX) {
+                    return Err((i, format!("variable '{name}' is set by the server")));
+                }
+                format!("SELECT {expr}")
+            }
+        };
+        let mut ast = serialize(duck, &query).map_err(|e| (i, e))?;
+        let mut w = Walker::new(Mode::Panel, &enf, &temps);
+        w.panel = Some((&schemas, contract));
+        w.walk(&mut ast["statements"]).map_err(|e| (i, e))?;
+        temps.extend(created);
+    }
+    Ok(())
 }
 
 /// DuckDB's parse tree of one query (`json_serialize_sql`), for checks on

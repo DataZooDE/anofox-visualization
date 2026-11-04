@@ -1417,6 +1417,60 @@ fn check_keys(duck: &mut dyn Duck, contract: &Contract, r: &mut Report) -> Resul
     Ok(())
 }
 
+/// `--conform --policy` (#982, plan §4 M9): the access policy names only
+/// the contract's tables and columns, and compiles against this customer's
+/// views (its row filters bind) — a policy written against a source's
+/// names would filter nothing the agent serves.
+pub fn check_policy(
+    duck: &mut dyn Duck,
+    contract: &Contract,
+    policy: &crate::host::policy::Policy,
+    r: &mut Report,
+) {
+    let mut named_ok = true;
+    for tp in &policy.tables {
+        let name = tp.name();
+        let Some(t) = contract
+            .table(&tp.table)
+            .filter(|_| tp.schema.eq_ignore_ascii_case("main"))
+        else {
+            r.push(
+                true,
+                &name,
+                None,
+                "conform/policy",
+                format!("the policy names '{name}', which is not a table of the contract"),
+            );
+            named_ok = false;
+            continue;
+        };
+        for rule in &tp.columns {
+            if !t
+                .columns
+                .iter()
+                .any(|c| c.name.eq_ignore_ascii_case(&rule.column))
+            {
+                r.push(
+                    true,
+                    &t.name,
+                    Some(&rule.column),
+                    "conform/policy",
+                    format!(
+                        "the policy names column '{}', which is not a column of the contract's {}",
+                        rule.column, t.name
+                    ),
+                );
+                named_ok = false;
+            }
+        }
+    }
+    if named_ok {
+        if let Err(e) = crate::host::policy::Enforcer::compile(policy, duck, "memory") {
+            r.push(true, "", None, "conform/policy", e);
+        }
+    }
+}
+
 /// One declared question (`-- @question`) and whether this customer's
 /// mapping can answer it (plan §4, L6).
 #[derive(Debug, Clone, PartialEq)]
