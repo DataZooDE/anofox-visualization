@@ -1081,7 +1081,9 @@ pub fn statement_query(sql: &str) -> Result<String, String> {
 /// macros, no `getvariable`, tables only from `source`, table functions
 /// only `range` / `generate_series` / `unnest`. `--conform` and the agent
 /// start both call this, so they agree.
-pub fn check_mapping(duck: &mut dyn Duck, query: &str) -> Result<(), String> {
+/// Returns the query's parse tree, as DuckDB gave it (the scope check
+/// reads it too).
+pub fn check_mapping(duck: &mut dyn Duck, query: &str) -> Result<Value, String> {
     let enf = Enforcer {
         policy: Policy {
             tables: Vec::new(),
@@ -1092,9 +1094,11 @@ pub fn check_mapping(duck: &mut dyn Duck, query: &str) -> Result<(), String> {
         bodies: Vec::new(),
         denied_functions: denied_macros(duck)?,
     };
-    let mut ast = serialize(duck, query)?;
+    let tree = serialize(duck, query)?;
+    let mut ast = tree.clone();
     let none = HashSet::new();
-    Walker::new(Mode::Mapping, &enf, &none).walk(&mut ast["statements"])
+    Walker::new(Mode::Mapping, &enf, &none).walk(&mut ast["statements"])?;
+    Ok(tree)
 }
 
 /// DuckDB's parse tree of one query (`json_serialize_sql`), for checks on

@@ -140,7 +140,18 @@ fn conform_with(
     extra: &[&str],
     dashboard: &str,
 ) -> (i32, serde_json::Value) {
-    let contract = s.write("contract.sql", CONTRACT);
+    conform_full(s, CONTRACT, views, db, extra, dashboard)
+}
+
+fn conform_full(
+    s: &Scratch,
+    contract: &str,
+    views: &str,
+    db: &Path,
+    extra: &[&str],
+    dashboard: &str,
+) -> (i32, serde_json::Value) {
+    let contract = s.write("contract.sql", contract);
     let views = s.write("views.sql", views);
     let dash = s.write("dash.sql", dashboard);
     let out = Command::new(env!("CARGO_BIN_EXE_dashboard"))
@@ -617,6 +628,133 @@ fn a_cte_chain_is_bounded_and_a_failed_setup_cleans_up() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(
+        std::fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "a build directory was left behind"
+    );
+}
+
+#[test]
+fn a_with_before_a_union_is_in_scope() {
+    // #989
+    if !have_duckdb("a_with_before_a_union_is_in_scope") {
+        return;
+    }
+    let s = Scratch::new("third");
+    let (_, renamed) = sources(&s);
+    let scope = ["--scope", "region=north,south"];
+    let suppliers = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region, note::DOUBLE AS rating FROM source.lieferanten LEFT JOIN source.bewertung USING (code);\n";
+    // a WITH before a UNION: its CTEs are in scope for both branches
+    let views = format!("{suppliers}CREATE VIEW deliveries AS WITH d AS (SELECT * FROM source.lieferungen) SELECT code AS supplier_id, termin AS due, verzug::INTEGER AS days_late, gebiet AS region FROM d WHERE verzug > 1 UNION ALL SELECT code, termin, verzug::INTEGER, gebiet FROM d WHERE verzug <= 1;\n");
+    let (code, v) = conform(&s, &views, &renamed, &scope);
+    assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn the_same_scope_value_twice_is_one_value() {
+    // #989
+    if !have_duckdb("the_same_scope_value_twice_is_one_value") {
+        return;
+    }
+    let s = Scratch::new("dupval");
+    let (_, renamed) = sources(&s);
+    // the same value twice is one value
+    let north = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region, note::DOUBLE AS rating FROM source.lieferanten LEFT JOIN source.bewertung USING (code) WHERE gebiet = 'north';\nCREATE VIEW deliveries AS SELECT code AS supplier_id, termin AS due, verzug::INTEGER AS days_late, gebiet AS region FROM source.lieferungen WHERE gebiet = 'north';\n";
+    let (code, v) = conform(&s, north, &renamed, &["--scope", "region=north,north"]);
+    assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn a_dashboard_temp_table_shadows_a_view() {
+    // #989
+    if !have_duckdb("a_dashboard_temp_table_shadows_a_view") {
+        return;
+    }
+    let s = Scratch::new("shadow");
+    let (_, renamed) = sources(&s);
+    let scope = ["--scope", "region=north,south"];
+    // a dashboard TEMP table named like a contract table shadows the view
+    // (as it does when served), it doesn't collide with it
+    let dash = "-- @title Late
+CREATE TEMP TABLE deliveries AS SELECT *, days_late > 0 AS late FROM deliveries;
+-- @question Which deliveries were late?
+SELECT supplier_id ::TABLE, late FROM deliveries ORDER BY 1;
+";
+    let (code, v) = conform_with(&s, RENAMED, &renamed, &scope, dash);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["questions"][0]["available"], true, "{v}");
+}
+
+#[test]
+fn unique_and_check_constraints_are_checked() {
+    // #989
+    if !have_duckdb("unique_and_check_constraints_are_checked") {
+        return;
+    }
+    let s = Scratch::new("uniqchk");
+    let (_, renamed) = sources(&s);
+    let scope = ["--scope", "region=north,south"];
+    // UNIQUE and CHECK in the contract are checked
+    let contract = CONTRACT
+        .replace("name VARCHAR NOT NULL,", "name VARCHAR NOT NULL UNIQUE,")
+        .replace(
+            "rating DOUBLE -- @optional",
+            "rating DOUBLE CHECK (rating <= 4) -- @optional",
+        );
+    let dup_names = RENAMED.replace("l.firma AS name", "l.gebiet AS name");
+    let (code, v) = conform_full(&s, &contract, &dup_names, &renamed, &scope, DASHBOARD);
+    assert_eq!(code, 1, "{v}");
+    let c = codes(&v);
+    assert!(c.contains(&"conform/key-duplicate".to_string()), "{v}");
+    assert!(c.contains(&"conform/check".to_string()), "{v}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_build_dir_is_private_and_removed_on_sigterm() {
+    // #989
+    if !have_duckdb("the_build_dir_is_private_and_removed_on_sigterm") {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let s = Scratch::new("sigterm");
+    let (_, renamed) = sources(&s);
+    let tmp = s.0.join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let runaway = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten;\nCREATE VIEW deliveries AS SELECT d.code AS supplier_id, d.termin AS due, d.verzug::INTEGER AS days_late, d.gebiet AS region FROM source.lieferungen d, range(1000000000000) r;\n";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dashboard"))
+        .args(["--conform"])
+        .arg(s.write("contract.sql", CONTRACT))
+        .arg("--views")
+        .arg(s.write("views.sql", runaway))
+        .arg("--db")
+        .arg(&renamed)
+        .args(["--timeout-s", "60", "--memory-limit", "1GB"])
+        .env("TMPDIR", &tmp)
+        .env("DATAZOO_DISABLE_TELEMETRY", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut dir = None;
+    for _ in 0..200 {
+        if let Some(e) = std::fs::read_dir(&tmp).unwrap().flatten().next() {
+            dir = Some(e.path());
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let dir = dir.expect("no build directory appeared");
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "the build directory is {mode:o}");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    // SAFETY: a plain kill(2) of our own child
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(2), "{status:?}");
     assert_eq!(
         std::fs::read_dir(&tmp).unwrap().count(),
         0,

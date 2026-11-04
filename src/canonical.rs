@@ -341,16 +341,19 @@ fn qi(s: &str) -> String {
 /// the mapping can raise them.
 pub fn instance_setup(source_db: &str, memory_limit: &str, threads: u32) -> Vec<String> {
     vec![
+        // #989: no extension is installed or loaded for the attach either
+        // (a SQLite file would autoload the sqlite extension), and only a
+        // DuckDB file is accepted
+        "SET autoinstall_known_extensions = false".into(),
+        "SET autoload_known_extensions = false".into(),
         format!(
-            "ATTACH {} AS {} (READ_ONLY)",
+            "ATTACH {} AS {} (TYPE duckdb, READ_ONLY)",
             lit(source_db),
             policy::MAPPING_SOURCE
         ),
         format!("SET memory_limit = {}", lit(memory_limit)),
         format!("SET threads = {}", threads.max(1)),
         "SET enable_external_access = false".into(),
-        "SET autoinstall_known_extensions = false".into(),
-        "SET autoload_known_extensions = false".into(),
         "SET lock_configuration = true".into(),
     ]
 }
@@ -501,30 +504,41 @@ impl<'a> Resolver<'a> {
                 out
             }
             "SET_OPERATION_NODE" => {
-                let by_name = st(node, "setop_type").contains("BY_NAME");
-                let (Some(l), Some(r)) = (node.get("left"), node.get("right")) else {
-                    return Origin::Constant;
-                };
-                let rs = if by_name {
-                    vec![me.node_column(l, col), me.node_column(r, col)]
-                } else {
-                    // by position: the left branch names the output column
-                    let Some(i) = me.position_of(l, col) else {
-                        return Origin::Constant;
-                    };
-                    vec![me.column_at(l, i), me.column_at(r, i)]
-                };
-                if rs.iter().all(|r| *r == Origin::Source) {
-                    Origin::Source
-                } else if rs.contains(&Origin::Absent) && !rs.contains(&Origin::Constant) {
-                    Origin::Absent
-                } else {
-                    Origin::Constant
+                // #989: a WITH before a UNION belongs to the set operation
+                let pushed = me.push_ctes(node);
+                let out = me.set_column(node, col);
+                if pushed {
+                    me.ctes.pop();
                 }
+                out
             }
             // a shape this check doesn't know: fail closed
             _ => Origin::Constant,
         })
+    }
+
+    /// Column `col` of a set operation (its CTEs already in scope).
+    fn set_column(&mut self, node: &'a Value, col: &str) -> Origin {
+        let by_name = st(node, "setop_type").contains("BY_NAME");
+        let (Some(l), Some(r)) = (node.get("left"), node.get("right")) else {
+            return Origin::Constant;
+        };
+        let rs = if by_name {
+            vec![self.node_column(l, col), self.node_column(r, col)]
+        } else {
+            // by position: the left branch names the output column
+            let Some(i) = self.position_of(l, col) else {
+                return Origin::Constant;
+            };
+            vec![self.column_at(l, i), self.column_at(r, i)]
+        };
+        if rs.iter().all(|r| *r == Origin::Source) {
+            Origin::Source
+        } else if rs.contains(&Origin::Absent) && !rs.contains(&Origin::Constant) {
+            Origin::Absent
+        } else {
+            Origin::Constant
+        }
     }
 
     /// The output position of `col` in `node` (no `*` before it allowed).
@@ -543,6 +557,7 @@ impl<'a> Resolver<'a> {
                 None
             }
             "SET_OPERATION_NODE" if !st(node, "setop_type").contains("BY_NAME") => {
+                // names only: the CTEs don't matter here
                 self.deeper(None, |me| me.position_of(node.get("left")?, col))
             }
             _ => None,
@@ -575,11 +590,19 @@ impl<'a> Resolver<'a> {
                 let (Some(l), Some(r)) = (node.get("left"), node.get("right")) else {
                     return Origin::Constant;
                 };
-                if me.column_at(l, i) == Origin::Source && me.column_at(r, i) == Origin::Source {
+                // #989: a WITH before a UNION belongs to the set operation
+                let pushed = me.push_ctes(node);
+                let out = if me.column_at(l, i) == Origin::Source
+                    && me.column_at(r, i) == Origin::Source
+                {
                     Origin::Source
                 } else {
                     Origin::Constant
+                };
+                if pushed {
+                    me.ctes.pop();
                 }
+                out
             }
             _ => Origin::Constant,
         })
@@ -1011,12 +1034,15 @@ pub fn conform(
     // the classifier first: nothing is created from a refused statement
     let mut admitted = Vec::new();
     for v in &mapping.views {
+        // #989: the classifier's parse tree is the scope check's too
         match policy::check_mapping(duck, &v.query) {
-            Ok(()) => admitted.push(v),
+            Ok(tree) => admitted.push((v, tree)),
             Err(e) => r.push(true, &v.name, None, "mapping/refused", e),
         }
     }
-    for v in admitted {
+    // #989: read once — `source` is attached read-only
+    let src_cols = source_columns(duck)?;
+    for (v, tree) in admitted {
         if let Err(e) = rows(
             duck,
             &format!("CREATE VIEW main.{} AS {}", qi(&v.name), v.query),
@@ -1024,17 +1050,20 @@ pub fn conform(
             r.push(true, &v.name, None, "mapping/error", e);
             continue;
         }
-        check_table(duck, contract, mapping, v, opts, &mut r)?;
+        check_table(duck, contract, mapping, v, &tree, &src_cols, opts, &mut r)?;
     }
     check_keys(duck, contract, &mut r)?;
     Ok(r)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_table(
     duck: &mut dyn Duck,
     contract: &Contract,
     mapping: &Mapping,
     v: &View,
+    tree: &Value,
+    src_cols: &BTreeMap<String, BTreeSet<String>>,
     opts: &Options,
     r: &mut Report,
 ) -> Result<(), String> {
@@ -1076,13 +1105,6 @@ fn check_table(
     .into_iter()
     .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
     .collect();
-    let tree = match policy::parse_tree(duck, &v.query) {
-        Ok(t) => t,
-        Err(e) => {
-            r.push(true, &t.name, None, "conform/error", e);
-            return Ok(());
-        }
-    };
     for c in &t.columns {
         let Some((ctype, not_null)) = want.get(&c.name) else {
             continue;
@@ -1152,7 +1174,7 @@ fn check_table(
             }
         }
         if let Some(scope) = &c.scope {
-            check_scope(duck, mapping, opts, &tree, t, c, scope, &col, r)?;
+            check_scope(duck, mapping, opts, tree, src_cols, t, c, scope, &col, r)?;
         }
     }
     Ok(())
@@ -1164,6 +1186,7 @@ fn check_scope(
     mapping: &Mapping,
     opts: &Options,
     tree: &Value,
+    src_cols: &BTreeMap<String, BTreeSet<String>>,
     t: &Table,
     c: &Column,
     scope: &str,
@@ -1181,7 +1204,7 @@ fn check_scope(
                 "scope '{scope}' is marked constant for this customer (-- @scope {scope} constant)"
             ),
         );
-    } else if !scope_from_source(tree, &c.name, &source_columns(duck)?) {
+    } else if !scope_from_source(tree, &c.name, src_cols) {
         r.push(true, &t.name, Some(&c.name), "conform/scope-not-source", format!(
             "scope column '{scope}' must come from a source.* column, not a literal or an expression without one — or mark it '-- @scope {scope} constant' when it is one value for this customer"
         ));
@@ -1250,10 +1273,12 @@ fn check_scope(
             ),
         );
     }
-    if !constant && allowed.len() > 1 && n_distinct < 2 {
+    // #989: `--scope tenant=a,a` lists one value
+    let n_allowed = allowed.iter().collect::<BTreeSet<_>>().len();
+    if !constant && n_allowed > 1 && n_distinct < 2 {
         r.push(true, &t.name, Some(&c.name), "conform/scope-one-value", format!(
             "scope '{scope}' has {} distinct value(s) although the operator lists {}: a mapping that fills it with one value would make the policy on it meaningless (mark it constant if that is right)",
-            n_distinct, allowed.len()
+            n_distinct, n_allowed
         ));
     }
     Ok(())
@@ -1265,9 +1290,9 @@ fn check_keys(duck: &mut dyn Duck, contract: &Contract, r: &mut Report) -> Resul
         duck,
         &format!(
             "SELECT lower(table_name), constraint_type, lower(constraint_column_names::VARCHAR), \
-             lower(coalesce(referenced_table, '')), lower(coalesce(referenced_column_names, [])::VARCHAR) \
-             FROM duckdb_constraints() WHERE database_name = 'memory' AND schema_name = {} \
-             AND constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY')",
+             lower(coalesce(referenced_table, '')), lower(coalesce(referenced_column_names, [])::VARCHAR), \
+             expression FROM duckdb_constraints() WHERE database_name = 'memory' AND schema_name = {} \
+             AND constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'CHECK', 'FOREIGN KEY')",
             lit(CONTRACT_SCHEMA)
         ),
     )?;
@@ -1299,8 +1324,52 @@ fn check_keys(duck: &mut dyn Duck, contract: &Contract, r: &mut Report) -> Resul
             continue;
         }
         let k = cols.join(", ");
-        if kind == "PRIMARY KEY" {
-            let dup = one(duck, &format!("SELECT count(*)::VARCHAR FROM (SELECT {k} FROM main.{} GROUP BY ALL HAVING count(*) > 1)", qi(&table)));
+        // #989: a CHECK the contract declares holds on every row (NULL
+        // passes, as in SQL)
+        if kind == "CHECK" {
+            let Some(expr) = c.get(5).cloned().flatten() else {
+                r.push(
+                    true,
+                    &table,
+                    None,
+                    "conform/error",
+                    "a CHECK constraint without its expression".into(),
+                );
+                continue;
+            };
+            match one(
+                duck,
+                &format!(
+                    "SELECT count(*)::VARCHAR FROM main.{} WHERE NOT ({expr})",
+                    qi(&table)
+                ),
+            ) {
+                Ok(Some(n)) if n != "0" => r.push(
+                    true,
+                    &table,
+                    None,
+                    "conform/check",
+                    format!("{n} row(s) fail CHECK {expr}"),
+                ),
+                Ok(_) => {}
+                Err(e) => r.push(true, &table, None, "conform/error", e),
+            }
+            continue;
+        }
+        if kind == "PRIMARY KEY" || kind == "UNIQUE" {
+            // #989: a UNIQUE key too (its NULLs don't collide)
+            let filter = if kind == "UNIQUE" {
+                format!(
+                    " WHERE {}",
+                    cols.iter()
+                        .map(|c| format!("{c} IS NOT NULL"))
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                )
+            } else {
+                String::new()
+            };
+            let dup = one(duck, &format!("SELECT count(*)::VARCHAR FROM (SELECT {k} FROM main.{}{filter} GROUP BY ALL HAVING count(*) > 1)", qi(&table)));
             match dup {
                 Ok(Some(n)) if n != "0" => r.push(
                     true,
@@ -1560,6 +1629,17 @@ CREATE TABLE deliveries (
         assert!(!compatible("TIMESTAMP", "TIMESTAMP[]"));
         assert!(!compatible("TIME", "TIME[3]"));
         assert!(compatible("DECIMAL(18,3)[]", "DECIMAL(18,3)[]"));
+    }
+
+    #[test]
+    fn the_source_is_attached_after_autoloading_is_off() {
+        // #989: a non-DuckDB file autoloads nothing, and is refused
+        let setup = instance_setup("/x.duckdb", "1GB", 2);
+        let at = |p: &str| setup.iter().position(|s| s.starts_with(p)).unwrap();
+        assert!(at("SET autoinstall_known_extensions") < at("ATTACH"));
+        assert!(at("SET autoload_known_extensions") < at("ATTACH"));
+        assert!(setup[at("ATTACH")].contains("(TYPE duckdb, READ_ONLY)"));
+        assert_eq!(setup.last().unwrap(), "SET lock_configuration = true");
     }
 
     #[test]

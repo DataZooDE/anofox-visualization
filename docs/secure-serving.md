@@ -1297,10 +1297,13 @@ dashboard --conform canonical/supplier-reliability.sql \
     [--memory-limit 4GB] [--timeout-s 120] [--json]
 ```
 
-The views are built in a fresh DuckDB that has only `--db` attached
-read-only as `source`, external access off and its configuration locked —
+The views are built in a fresh DuckDB that has only `--db` (a DuckDB file;
+attached with extension autoloading already off) attached read-only as
+`source`, external access off and its configuration locked —
 never in a session holding anything else. It is a temporary database file
-under `TMPDIR` (removed afterwards), capped at `--memory-limit` (default
+under `TMPDIR` in an owner-only directory (removed afterwards, on
+Ctrl-C / SIGTERM too; the dashboard's TEMP objects go to a schema of their
+own there, which shadows the views as TEMP objects do), capped at `--memory-limit` (default
 4GB, 4 threads) set before the lock; each check is stopped after
 `--timeout-s` (default 120) and reported as `conform/error` (exit 1, as
 is any check that fails to run). `--scope name=` with no values is a usage
@@ -1308,7 +1311,8 @@ error. The report (text, or `--json`;
 exit 1 when the mapping doesn't conform):
 - every statement through the mapping classifier (`mapping/refused`), every
   contract table and column present with a compatible type, `NOT NULL`
-  columns without NULLs, keys unique and references resolving;
+  columns without NULLs, `PRIMARY KEY` / `UNIQUE` keys unique, `CHECK`s
+  holding and references resolving;
 - each scope column read from a `source` column (the view's syntax tree is
   checked: `'acme' AS region` is refused unless marked constant), its
   values within `--scope name=a,b`, and more than one value when the list

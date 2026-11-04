@@ -260,7 +260,13 @@ fn cmd_conform(args: &[String]) {
                 std::process::id(),
                 anofox_visualization::host::serving::random_token()
             ));
-            std::fs::create_dir_all(&dir)
+            // #989: owner-only (the dashboard's setup copies source rows into
+            // it), and a fresh one — never one that already exists
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+                .create(&dir)
                 .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
             let file = dir.join("memory.duckdb");
             build_dir = dir.clone();
@@ -269,16 +275,37 @@ fn cmd_conform(args: &[String]) {
                 let _ = std::fs::remove_dir_all(&dir);
                 fail(m)
             };
+            // #989: so does Ctrl-C / SIGTERM, once the running check stops
+            on_interrupt_stop_checks();
+            let mut dash_schema = false;
             let mut state = String::new();
             let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
                 let sql = sql.trim().trim_end_matches(';');
                 // #986: a TEMP table or view lands in the (private, removed)
                 // build file instead, so it isn't replayed — re-run — before
                 // every later check
-                let persisted = untemp(sql);
+                // #989: in a schema of their own, first on the search path —
+                // they shadow the mapping's views as TEMP objects do, never
+                // replace them
+                let persisted = untemp(sql, DASH_SCHEMA);
+                if persisted.is_some() && !dash_schema {
+                    run_query_rw(
+                        &file,
+                        &format!("{state}CREATE SCHEMA IF NOT EXISTS memory.{DASH_SCHEMA}\n;"),
+                        timeout_s,
+                    )?;
+                    state.push_str(&format!(
+                        "SET search_path = 'memory.{DASH_SCHEMA},memory.main'\n;\n"
+                    ));
+                    dash_schema = true;
+                }
                 let sql = persisted.as_deref().unwrap_or(sql);
                 // a newline before each `;`: a statement may end in a `--` comment
-                let rows = run_query_rw(&file, &format!("{state}{sql}\n;"), timeout_s)?;
+                let rows = run_query_rw(&file, &format!("{state}{sql}\n;"), timeout_s);
+                if INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) {
+                    fail("interrupted".into());
+                }
+                let rows = rows?;
                 let first = sql::strip_comments(sql)
                     .split_whitespace()
                     .next()
@@ -334,25 +361,30 @@ fn cmd_conform(args: &[String]) {
             }
         }
     }
+    // #989: removed before anything is written (a closed stdout panics)
+    let _ = std::fs::remove_dir_all(&build_dir);
     if json {
         println!("{}", serde_json::Value::Object(out));
     } else {
         print!("{text}");
     }
-    let _ = std::fs::remove_dir_all(&build_dir);
     std::process::exit(if ok { 0 } else { 1 });
 }
 
-/// `CREATE [OR REPLACE] TEMP|TEMPORARY …` without the TEMP keyword, or
-/// `None` when `sql` is no such statement.
-fn untemp(sql: &str) -> Option<String> {
+/// The schema of the build file a dashboard's TEMP objects go to (#989).
+const DASH_SCHEMA: &str = "anofox_dashboard";
+
+/// `CREATE [OR REPLACE] TEMP|TEMPORARY <kind> [IF NOT EXISTS] <name> …`
+/// as a plain CREATE of `schema.<name>`, or `None` when `sql` is no such
+/// statement (or names a qualified object: kept as written).
+fn untemp(sql: &str, schema: &str) -> Option<String> {
     use anofox_visualization::sql::lex;
     let toks = lex::tokenize(sql);
     let code: Vec<&lex::Token> = toks.iter().filter(|t| !t.is_trivia()).collect();
     if !code.first()?.is_word(sql, "create") {
         return None;
     }
-    let i = if code.get(1)?.is_word(sql, "or") && code.get(2)?.is_word(sql, "replace") {
+    let mut i = if code.get(1)?.is_word(sql, "or") && code.get(2)?.is_word(sql, "replace") {
         3
     } else {
         1
@@ -361,7 +393,39 @@ fn untemp(sql: &str) -> Option<String> {
     if !(t.is_word(sql, "temp") || t.is_word(sql, "temporary")) {
         return None;
     }
-    Some(format!("{}{}", &sql[..t.start], &sql[t.end..]))
+    i += 2; // TEMP, then TABLE / VIEW / …
+    if code.get(i).is_some_and(|w| w.is_word(sql, "if")) {
+        i += 3; // IF NOT EXISTS
+    }
+    let name = code.get(i)?;
+    if code.get(i + 1).is_some_and(|d| d.is_punct(sql, '.')) {
+        return None;
+    }
+    Some(format!(
+        "{}{}{}.{}",
+        &sql[..t.start],
+        &sql[t.end..name.start],
+        schema,
+        &sql[name.start..]
+    ))
+}
+
+/// Set by SIGINT / SIGTERM once [`on_interrupt_stop_checks`] ran: the
+/// running check is stopped and `--conform` cleans up and exits (#989).
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn on_interrupt_stop_checks() {
+    #[cfg(unix)]
+    {
+        extern "C" fn on_signal(_: libc::c_int) {
+            INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        // SAFETY: the handler only stores to an atomic (async-signal-safe)
+        unsafe {
+            libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        }
+    }
 }
 
 fn cmd_publish(args: &[String]) {
@@ -3623,6 +3687,11 @@ fn run_query_rw(
     let status = loop {
         match child.try_wait().map_err(|e| format!("duckdb: {e}"))? {
             Some(s) => break s,
+            None if INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("interrupted".into());
+            }
             None if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
