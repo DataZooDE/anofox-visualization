@@ -345,6 +345,14 @@ pub fn instance_setup(source_db: &str) -> Vec<String> {
 }
 
 // ---- the scope-column check (R2): does a view's column come from source? ----
+//
+// Fail closed (#978): a column counts as from source only when it is a plain
+// column reference that resolves — through CTEs, subqueries, joins, a plain
+// `*` and set operations matched by position — to a real column of a
+// `source.*` table (`columns`, from the build instance's catalog). Anything
+// this resolver doesn't fully understand (a `*` with REPLACE / RENAME /
+// COLUMNS, a scalar subquery, a lambda, a 3+-part name, a positional
+// rename, a table function, an unknown node) is a constant.
 
 /// What a column resolves to in a query.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -357,54 +365,184 @@ enum Origin {
     Absent,
 }
 
+/// The deepest nesting the resolver follows before it gives up (fail closed).
+const MAX_DEPTH: usize = 64;
+
+/// CTE frames, innermost last: (name, its query node).
+type Frames<'a> = Vec<Vec<(String, &'a Value)>>;
+
 struct Resolver<'a> {
-    /// CTE name → its query node, innermost scope last.
-    ctes: Vec<Vec<(String, &'a Value)>>,
+    ctes: Frames<'a>,
+    /// `source` table (lower case) → its columns (lower case).
+    columns: &'a BTreeMap<String, BTreeSet<String>>,
+    depth: usize,
 }
 
 fn st<'v>(v: &'v Value, k: &str) -> &'v str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
 }
 
+/// A select-list entry's output name: its alias, else a bare column's name.
+fn out_name(e: &Value) -> Option<String> {
+    let a = st(e, "alias");
+    if !a.is_empty() {
+        return Some(a.to_ascii_lowercase());
+    }
+    if st(e, "type") == "COLUMN_REF" {
+        return e
+            .get("column_names")
+            .and_then(Value::as_array)
+            .and_then(|a| a.last())
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase);
+    }
+    None
+}
+
+fn is_star(e: &Value) -> bool {
+    st(e, "class") == "STAR"
+}
+
+/// A `*` that only passes columns through (no REPLACE / RENAME / COLUMNS(…)
+/// / unpacking — an EXCLUDE only drops columns).
+fn plain_star(e: &Value) -> bool {
+    let empty = |k: &str| match e.get(k) {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(a)) => a.is_empty(),
+        Some(Value::Object(o)) => o.is_empty(),
+        Some(Value::Bool(b)) => !b,
+        _ => false,
+    };
+    is_star(e)
+        && empty("replace_list")
+        && empty("rename_list")
+        && empty("columns")
+        && empty("expr")
+        && empty("unpacked")
+}
+
 impl<'a> Resolver<'a> {
-    fn cte(&self, name: &str) -> Option<&'a Value> {
-        self.ctes
-            .iter()
-            .rev()
-            .flat_map(|s| s.iter().rev())
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| *v)
+    /// The CTE `name` visible here, and the scope its own body sees: the
+    /// frames outside it and the CTEs written before it in its WITH (a
+    /// non-recursive CTE doesn't see itself — DuckDB binds the outer one).
+    fn cte(&self, name: &str) -> Option<(&'a Value, Frames<'a>)> {
+        for (k, frame) in self.ctes.iter().enumerate().rev() {
+            if let Some(pos) = frame
+                .iter()
+                .rposition(|(n, _)| n.eq_ignore_ascii_case(name))
+            {
+                let mut scope: Frames<'a> = self.ctes[..k].to_vec();
+                scope.push(frame[..pos].to_vec());
+                return Some((frame[pos].1, scope));
+            }
+        }
+        None
     }
 
-    /// Column `col` of query node `node`.
+    fn deeper<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
+        if self.depth >= MAX_DEPTH {
+            return fallback;
+        }
+        self.depth += 1;
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
+    /// Column `col` (lower case) of query node `node`, by name.
     fn node_column(&mut self, node: &'a Value, col: &str) -> Origin {
-        match st(node, "type") {
+        self.deeper(Origin::Constant, |me| match st(node, "type") {
             "SELECT_NODE" => {
-                let pushed = self.push_ctes(node);
-                let out = self.select_column(node, col);
+                let pushed = me.push_ctes(node);
+                let out = me.select_column(node, col);
                 if pushed {
-                    self.ctes.pop();
+                    me.ctes.pop();
                 }
                 out
             }
             "SET_OPERATION_NODE" => {
-                let parts = [node.get("left"), node.get("right")];
-                let rs: Vec<Origin> = parts
-                    .into_iter()
-                    .flatten()
-                    .map(|n| self.node_column(n, col))
-                    .collect();
-                if rs.contains(&Origin::Constant) || rs.is_empty() {
-                    Origin::Constant
-                } else if rs.iter().all(|r| *r == Origin::Source) {
-                    Origin::Source
+                let by_name = st(node, "setop_type").contains("BY_NAME");
+                let (Some(l), Some(r)) = (node.get("left"), node.get("right")) else {
+                    return Origin::Constant;
+                };
+                let rs = if by_name {
+                    vec![me.node_column(l, col), me.node_column(r, col)]
                 } else {
+                    // by position: the left branch names the output column
+                    let Some(i) = me.position_of(l, col) else {
+                        return Origin::Constant;
+                    };
+                    vec![me.column_at(l, i), me.column_at(r, i)]
+                };
+                if rs.iter().all(|r| *r == Origin::Source) {
+                    Origin::Source
+                } else if rs.contains(&Origin::Absent) && !rs.contains(&Origin::Constant) {
                     Origin::Absent
+                } else {
+                    Origin::Constant
                 }
             }
-            // anything else (a shape this check doesn't know): fail closed
+            // a shape this check doesn't know: fail closed
             _ => Origin::Constant,
+        })
+    }
+
+    /// The output position of `col` in `node` (no `*` before it allowed).
+    fn position_of(&mut self, node: &'a Value, col: &str) -> Option<usize> {
+        match st(node, "type") {
+            "SELECT_NODE" => {
+                let list = node.get("select_list")?.as_array()?;
+                for (i, e) in list.iter().enumerate() {
+                    if is_star(e) {
+                        return None;
+                    }
+                    if out_name(e).as_deref() == Some(col) {
+                        return Some(i);
+                    }
+                }
+                None
+            }
+            "SET_OPERATION_NODE" if !st(node, "setop_type").contains("BY_NAME") => {
+                self.deeper(None, |me| me.position_of(node.get("left")?, col))
+            }
+            _ => None,
         }
+    }
+
+    /// The output column at position `i` of `node`.
+    fn column_at(&mut self, node: &'a Value, i: usize) -> Origin {
+        self.deeper(Origin::Constant, |me| match st(node, "type") {
+            "SELECT_NODE" => {
+                let list = node
+                    .get("select_list")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if list.iter().any(is_star) {
+                    return Origin::Constant;
+                }
+                let Some(e) = list.get(i) else {
+                    return Origin::Constant;
+                };
+                let pushed = me.push_ctes(node);
+                let out = me.expr(e, node.get("from_table"));
+                if pushed {
+                    me.ctes.pop();
+                }
+                out
+            }
+            "SET_OPERATION_NODE" if !st(node, "setop_type").contains("BY_NAME") => {
+                let (Some(l), Some(r)) = (node.get("left"), node.get("right")) else {
+                    return Origin::Constant;
+                };
+                if me.column_at(l, i) == Origin::Source && me.column_at(r, i) == Origin::Source {
+                    Origin::Source
+                } else {
+                    Origin::Constant
+                }
+            }
+            _ => Origin::Constant,
+        })
     }
 
     fn push_ctes(&mut self, node: &'a Value) -> bool {
@@ -437,77 +575,78 @@ impl<'a> Resolver<'a> {
             .map(Vec::as_slice)
             .unwrap_or_default();
         let from = node.get("from_table");
+        // DuckDB names output columns left to right; a `*` before a named
+        // entry may already produce `col` — the first match wins
         for e in list {
-            let named = |e: &Value| {
-                let a = st(e, "alias");
-                if !a.is_empty() {
-                    return a.eq_ignore_ascii_case(col);
+            if is_star(e) {
+                if !plain_star(e) {
+                    return Origin::Constant;
                 }
-                st(e, "type") == "COLUMN_REF"
-                    && e.get("column_names")
-                        .and_then(Value::as_array)
-                        .and_then(|a| a.last())
-                        .and_then(Value::as_str)
-                        .is_some_and(|c| c.eq_ignore_ascii_case(col))
-            };
-            if named(e) {
-                return self.expr(e, from);
-            }
-        }
-        // `*` passes the column through from the FROM clause
-        if list
-            .iter()
-            .any(|e| st(e, "class") == "STAR" && st(e, "relation_name").is_empty())
-        {
-            return match from {
-                Some(f) => self.of_column(f, None, col),
-                None => Origin::Absent,
-            };
-        }
-        for e in list.iter().filter(|e| st(e, "class") == "STAR") {
-            if let Some(f) = from {
-                let r = self.of_column(f, Some(st(e, "relation_name")), col);
+                let qual = st(e, "relation_name");
+                let r = match from {
+                    Some(f) => self.of_column(f, (!qual.is_empty()).then_some(qual), col),
+                    None => Origin::Absent,
+                };
                 if r != Origin::Absent {
                     return r;
                 }
+            } else if out_name(e).as_deref() == Some(col) {
+                return self.expr(e, from);
             }
         }
         Origin::Absent
     }
 
-    /// An expression: from source only if every column it reads is, and it
-    /// reads one at all.
+    /// An expression: from source only when it is one plain column
+    /// reference that resolves to a source column (a CAST of one too).
     fn expr(&mut self, e: &'a Value, from: Option<&'a Value>) -> Origin {
-        let mut refs = Vec::new();
-        collect_refs(e, &mut refs);
-        if refs.is_empty() {
-            return Origin::Constant;
-        }
-        for r in refs {
-            let (qual, name) = match r.as_slice() {
-                [c] => (None, c.as_str()),
-                [.., q, c] => (Some(q.as_str()), c.as_str()),
-                [] => continue,
-            };
-            let got = match from {
-                Some(f) => self.of_column(f, qual, name),
-                None => Origin::Constant,
-            };
-            if got != Origin::Source {
-                return Origin::Constant;
+        let mut e = e;
+        // `col::TYPE` keeps the column's values
+        while st(e, "class") == "CAST" {
+            match e.get("child") {
+                Some(c) => e = c,
+                None => return Origin::Constant,
             }
         }
-        Origin::Source
+        if st(e, "type") != "COLUMN_REF" {
+            return Origin::Constant;
+        }
+        let parts: Vec<String> = e
+            .get("column_names")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_ascii_lowercase)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (qual, name) = match parts.as_slice() {
+            [c] => (None, c.as_str()),
+            [q, c] => (Some(q.as_str()), c.as_str()),
+            // a 3+-part name (or none): fail closed
+            _ => return Origin::Constant,
+        };
+        match from {
+            Some(f) => match self.of_column(f, qual, name) {
+                Origin::Source => Origin::Source,
+                _ => Origin::Constant,
+            },
+            None => Origin::Constant,
+        }
     }
 
     /// Column `col` (of relation `qual`, if named) in a FROM item.
     fn of_column(&mut self, f: &'a Value, qual: Option<&str>, col: &str) -> Origin {
-        match st(f, "type") {
+        if col.starts_with('#') {
+            return Origin::Constant;
+        }
+        self.deeper(Origin::Constant, |me| match st(f, "type") {
             "JOIN" => {
                 let rs: Vec<Origin> = [f.get("left"), f.get("right")]
                     .into_iter()
                     .flatten()
-                    .map(|x| self.of_column(x, qual, col))
+                    .map(|x| me.of_column(x, qual, col))
                     .collect();
                 if rs.contains(&Origin::Constant) {
                     Origin::Constant
@@ -528,29 +667,45 @@ impl<'a> Resolver<'a> {
                 if qual.is_some_and(|q| !q.eq_ignore_ascii_case(rel)) {
                     return Origin::Absent;
                 }
-                let renamed = renamed(f, col);
+                // a column list (`AS t(a, b)`) renames by position: fail closed
+                if f.get("column_name_alias")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| !a.is_empty())
+                {
+                    return Origin::Constant;
+                }
                 if cat.is_empty() && sch.is_empty() {
-                    if let Some(n) = self.cte(name) {
-                        return self.node_column(n, &renamed.unwrap_or_else(|| col.to_string()));
+                    if let Some((n, scope)) = me.cte(name) {
+                        let saved = std::mem::replace(&mut me.ctes, scope);
+                        let out = me.node_column(n, col);
+                        me.ctes = saved;
+                        return out;
                     }
                 }
                 let source = cat.eq_ignore_ascii_case(policy::MAPPING_SOURCE)
                     || (cat.is_empty() && sch.eq_ignore_ascii_case(policy::MAPPING_SOURCE));
-                if source {
-                    Origin::Source
-                } else {
-                    Origin::Constant
+                if !source {
+                    return Origin::Constant;
+                }
+                // a real column of that source table, or not there at all
+                match me.columns.get(&name.to_ascii_lowercase()) {
+                    Some(cols) if cols.contains(col) => Origin::Source,
+                    Some(_) => Origin::Absent,
+                    None => Origin::Constant,
                 }
             }
             "SUBQUERY" => {
                 if qual.is_some_and(|q| !q.eq_ignore_ascii_case(st(f, "alias"))) {
                     return Origin::Absent;
                 }
+                if f.get("column_name_alias")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| !a.is_empty())
+                {
+                    return Origin::Constant;
+                }
                 match f.get("subquery").and_then(|s| s.get("node")) {
-                    Some(n) => {
-                        let c = renamed(f, col).unwrap_or_else(|| col.to_string());
-                        self.node_column(n, &c)
-                    }
+                    Some(n) => me.node_column(n, col),
                     None => Origin::Constant,
                 }
             }
@@ -563,55 +718,17 @@ impl<'a> Resolver<'a> {
                     Origin::Constant
                 }
             }
-        }
+        })
     }
 }
 
-/// `FROM x AS a(c1, c2)`: the inner name of output column `col`, by position.
-/// `None` without a column list. A column past the list keeps its name.
-fn renamed(f: &Value, col: &str) -> Option<String> {
-    let names = f.get("column_name_alias").and_then(Value::as_array)?;
-    if names.is_empty() {
-        return None;
-    }
-    names
-        .iter()
-        .position(|n| n.as_str().is_some_and(|n| n.eq_ignore_ascii_case(col)))
-        .map(|i| format!("#{i}"))
-        .or_else(|| Some(col.to_string()))
-}
-
-/// Every column reference in an expression (not inside a subquery).
-fn collect_refs(v: &Value, out: &mut Vec<Vec<String>>) {
-    match v {
-        Value::Object(o) => {
-            if o.get("type").and_then(Value::as_str) == Some("COLUMN_REF") {
-                if let Some(a) = o.get("column_names").and_then(Value::as_array) {
-                    out.push(
-                        a.iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
-                            .collect(),
-                    );
-                }
-                return;
-            }
-            if o.contains_key("subquery") || o.contains_key("node") {
-                // a scalar subquery: its value isn't a column of this row —
-                // treated as no source column (fail closed)
-                out.push(vec!["#subquery".into()]);
-                return;
-            }
-            o.values().for_each(|x| collect_refs(x, out));
-        }
-        Value::Array(a) => a.iter().for_each(|x| collect_refs(x, out)),
-        _ => {}
-    }
-}
-
-/// Whether `col` of the mapping query (its parse tree) comes from a
-/// `source.*` column.
-fn scope_from_source(tree: &Value, col: &str) -> bool {
+/// Whether `col` of the mapping query (its parse tree) comes from a column
+/// of a `source.*` table (`columns`: source table → its columns, lower case).
+fn scope_from_source(
+    tree: &Value,
+    col: &str,
+    columns: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
     let Some(node) = tree
         .get("statements")
         .and_then(|s| s.get(0))
@@ -619,9 +736,30 @@ fn scope_from_source(tree: &Value, col: &str) -> bool {
     else {
         return false;
     };
-    // a renamed column by position (`#i`) only arises inside FROM items; a
-    // name starting with '#' never matches a real column, so it fails closed
-    Resolver { ctes: Vec::new() }.node_column(node, col) == Origin::Source
+    Resolver {
+        ctes: Vec::new(),
+        columns,
+        depth: 0,
+    }
+    .node_column(node, &col.to_ascii_lowercase())
+        == Origin::Source
+}
+
+/// The source database's tables and their columns (lower case).
+fn source_columns(duck: &mut dyn Duck) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+    let mut m: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for r in rows(
+        duck,
+        &format!(
+            "SELECT lower(table_name), lower(column_name) FROM duckdb_columns() WHERE database_name = {}",
+            lit(policy::MAPPING_SOURCE)
+        ),
+    )? {
+        if let [Some(t), Some(c)] = r.as_slice() {
+            m.entry(t.clone()).or_default().insert(c.clone());
+        }
+    }
+    Ok(m)
 }
 
 // ---- the report ----
@@ -910,7 +1048,7 @@ fn check_scope(
                 "scope '{scope}' is marked constant for this customer (-- @scope {scope} constant)"
             ),
         );
-    } else if !scope_from_source(tree, &c.name) {
+    } else if !scope_from_source(tree, &c.name, &source_columns(duck)?) {
         r.push(true, &t.name, Some(&c.name), "conform/scope-not-source", format!(
             "scope column '{scope}' must come from a source.* column, not a literal or an expression without one — or mark it '-- @scope {scope} constant' when it is one value for this customer"
         ));

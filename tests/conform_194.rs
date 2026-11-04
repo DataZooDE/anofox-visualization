@@ -307,3 +307,55 @@ fn inadmissible_mappings_are_refused() {
     );
     assert_eq!(code, 1, "{v}");
 }
+
+/// #978: every way the review found to fill a scope column with a constant
+/// is refused (by the classifier or the scope check), and a shadowing CTE
+/// ends in a report, not a stack overflow.
+#[test]
+fn scope_bypasses_are_refused() {
+    if !have_duckdb("scope_bypasses_are_refused") {
+        return;
+    }
+    let s = Scratch::new("bypass");
+    let (_, renamed) = sources(&s);
+    let deliveries = "CREATE VIEW deliveries AS SELECT code AS supplier_id, termin AS due, verzug::INTEGER AS days_late, gebiet AS region FROM source.lieferungen;\n";
+    let scope = ["--scope", "region=north,south"];
+    let refused = |c: &[String]| {
+        c.iter()
+            .any(|x| x == "conform/scope-not-source" || x == "mapping/refused")
+    };
+    for body in [
+        // 1. a * with REPLACE
+        "SELECT code AS supplier_id, firma AS name, * EXCLUDE (code, firma) REPLACE ('north' AS gebiet) RENAME (gebiet AS region) FROM source.lieferanten",
+        "SELECT * REPLACE ('north' AS region) FROM (SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten)",
+        // 2. a scalar subquery; a positional rename over a constant
+        "SELECT code AS supplier_id, firma AS name, (SELECT 'north') AS region FROM source.lieferanten",
+        "WITH c AS (SELECT 'north', code, firma FROM source.lieferanten) SELECT code AS supplier_id, firma AS name, region FROM c AS c(region, code, firma)",
+        // 3. a lambda parameter; a 3-part name
+        "SELECT code AS supplier_id, firma AS name, list_transform(['north'], lambda gebiet: gebiet)[1] AS region FROM source.lieferanten",
+        // 4. a later UNION branch puts a constant in the scope column
+        "SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten UNION ALL SELECT code, gebiet, 'north' FROM source.lieferanten",
+    ] {
+        let views = format!("CREATE VIEW suppliers AS {body};\n{deliveries}");
+        let (code, v) = conform(&s, &views, &renamed, &scope);
+        assert_eq!(code, 1, "{body}\n{v}");
+        assert!(refused(&codes(&v)), "{body}\n{v}");
+    }
+    // 5. a nested CTE shadowing the outer one: a report, not a crash
+    let views = format!(
+        "CREATE VIEW suppliers AS WITH x AS (SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten) SELECT * FROM (WITH x AS (FROM x) SELECT * FROM x) t;\n{deliveries}"
+    );
+    let (code, v) = conform(&s, &views, &renamed, &scope);
+    assert!(code == 0 || code == 1, "{v}");
+    // the plain forms still conform: a CAST of a source column, a plain *,
+    // a positional UNION of source columns
+    for body in [
+        "SELECT code AS supplier_id, firma AS name, gebiet::VARCHAR AS region FROM source.lieferanten",
+        "SELECT * FROM (SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten)",
+        "SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten WHERE gebiet = 'north' UNION ALL SELECT code, firma, gebiet FROM source.lieferanten WHERE gebiet <> 'north'",
+    ] {
+        let views = format!("CREATE VIEW suppliers AS {body};\n{deliveries}");
+        let (code, v) = conform(&s, &views, &renamed, &scope);
+        assert_eq!(code, 0, "{body}\n{v}");
+    }
+}
