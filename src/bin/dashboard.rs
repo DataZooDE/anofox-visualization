@@ -197,14 +197,21 @@ fn cmd_conform(args: &[String]) {
                 let Some((k, v)) = it.next().and_then(|s| s.split_once('=')) else {
                     usage()
                 };
+                let vals: Vec<String> = v
+                    .split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                // #984: `--scope tenant=` (an empty list) is a mistake, not
+                // "check nothing"
+                if k.trim().is_empty() || vals.is_empty() {
+                    eprintln!("--conform: --scope {k}= needs at least one value");
+                    std::process::exit(2);
+                }
                 opts.scope_values
                     .entry(k.trim().to_ascii_lowercase())
                     .or_default()
-                    .extend(
-                        v.split(',')
-                            .map(|x| x.trim().to_string())
-                            .filter(|x| !x.is_empty()),
-                    );
+                    .extend(vals);
             }
             _ if !a.starts_with("--") && contract.is_none() => contract = Some(a.clone()),
             _ => usage(),
@@ -221,6 +228,8 @@ fn cmd_conform(args: &[String]) {
     let c = canonical::parse_contract(&read(&contract))
         .unwrap_or_else(|e| fail(format!("{contract}: {e}")));
     let db = std::fs::canonicalize(&db).unwrap_or_else(|e| fail(format!("--db {db}: {e}")));
+    // read before the build directory exists (#986: no exit leaves it behind)
+    let dash_sql = dash.as_deref().map(read);
     let mut out = serde_json::Map::new();
     let ok;
     let mut build_dir = std::path::PathBuf::new();
@@ -258,21 +267,26 @@ fn cmd_conform(args: &[String]) {
                 .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
             let file = dir.join("memory.duckdb");
             build_dir = dir.clone();
+            // #986: past this point an error removes the directory first
+            let fail = |m: String| -> ! {
+                let _ = std::fs::remove_dir_all(&dir);
+                fail(m)
+            };
             let mut state = String::new();
             let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
                 let sql = sql.trim().trim_end_matches(';');
+                // #986: a TEMP table or view lands in the (private, removed)
+                // build file instead, so it isn't replayed — re-run — before
+                // every later check
+                let persisted = untemp(sql);
+                let sql = persisted.as_deref().unwrap_or(sql);
                 // a newline before each `;`: a statement may end in a `--` comment
                 let rows = run_query_rw(&file, &format!("{state}{sql}\n;"), timeout_s)?;
-                let words: Vec<String> = sql::strip_comments(sql)
+                let first = sql::strip_comments(sql)
                     .split_whitespace()
-                    .take(4)
-                    .map(|w| w.to_ascii_lowercase())
-                    .collect();
-                let session = matches!(
-                    words.first().map(String::as_str),
-                    Some("use" | "attach" | "set")
-                ) || (words.first().map(String::as_str) == Some("create")
-                    && words.iter().any(|w| w == "temp" || w == "temporary"));
+                    .next()
+                    .map(|w| w.to_ascii_lowercase());
+                let session = matches!(first.as_deref(), Some("use" | "attach" | "set"));
                 if session {
                     state.push_str(sql);
                     state.push_str("\n;\n");
@@ -293,14 +307,20 @@ fn cmd_conform(args: &[String]) {
             for s in canonical::instance_setup(&db.to_string_lossy(), &memory_limit, 4) {
                 duck(&s).unwrap_or_else(|e| fail(format!("the build instance: {e}")));
             }
-            let r = canonical::conform(&mut duck, &c, &m, &opts).unwrap_or_else(|e| fail(e));
+            // #986: a check that fails (or hits --timeout-s) is a
+            // `conform/error` finding: the mapping doesn't conform (exit 1)
+            let r = canonical::conform(&mut duck, &c, &m, &opts).unwrap_or_else(|e| {
+                let mut r = canonical::Report::default();
+                r.push(true, "", None, "conform/error", e);
+                r
+            });
             ok = r.ok();
             text = r.to_text();
             if let serde_json::Value::Object(o) = r.to_json() {
                 out = o;
             }
-            if let Some(d) = &dash {
-                let qs = canonical::questions(&mut duck, &read(d));
+            if let Some(d) = dash_sql.as_deref() {
+                let qs = canonical::questions(&mut duck, d);
                 for q in &qs {
                     text.push_str(&match &q.off {
                         None => format!("question on  [{}] {}\n", q.id, q.text),
@@ -324,6 +344,27 @@ fn cmd_conform(args: &[String]) {
     }
     let _ = std::fs::remove_dir_all(&build_dir);
     std::process::exit(if ok { 0 } else { 1 });
+}
+
+/// `CREATE [OR REPLACE] TEMP|TEMPORARY …` without the TEMP keyword, or
+/// `None` when `sql` is no such statement.
+fn untemp(sql: &str) -> Option<String> {
+    use anofox_visualization::sql::lex;
+    let toks = lex::tokenize(sql);
+    let code: Vec<&lex::Token> = toks.iter().filter(|t| !t.is_trivia()).collect();
+    if !code.first()?.is_word(sql, "create") {
+        return None;
+    }
+    let i = if code.get(1)?.is_word(sql, "or") && code.get(2)?.is_word(sql, "replace") {
+        3
+    } else {
+        1
+    };
+    let t = code.get(i)?;
+    if !(t.is_word(sql, "temp") || t.is_word(sql, "temporary")) {
+        return None;
+    }
+    Some(format!("{}{}", &sql[..t.start], &sql[t.end..]))
 }
 
 fn cmd_publish(args: &[String]) {

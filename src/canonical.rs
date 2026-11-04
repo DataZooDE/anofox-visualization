@@ -155,6 +155,7 @@ pub fn parse_contract(text: &str) -> Result<Contract, String> {
             .unwrap_or(0);
         let mut depth = 0;
         let mut items: Vec<Vec<&lex::Token>> = vec![Vec::new()];
+        let mut comma_end = 0;
         for t in &toks[open..] {
             if t.is_punct(&stmt, '(') {
                 depth += 1;
@@ -176,10 +177,15 @@ pub fn parse_contract(text: &str) -> Result<Contract, String> {
             }
             if depth == 1 && t.is_punct(&stmt, ',') {
                 items.push(Vec::new());
+                comma_end = t.end;
                 continue;
             }
-            // a comment right after a comma belongs to the item before it
-            if t.kind == TokKind::LineComment && items.last().is_some_and(|i| i.is_empty()) {
+            // a comment right after a comma, on the comma's line, belongs to
+            // the item before it; one on a line of its own to the next (#984)
+            if t.kind == TokKind::LineComment
+                && items.last().is_some_and(|i| i.is_empty())
+                && !stmt[comma_end..t.start].contains('\n')
+            {
                 let n = items.len();
                 if n >= 2 {
                     items[n - 2].push(t);
@@ -373,14 +379,20 @@ enum Origin {
 /// The deepest nesting the resolver follows before it gives up (fail closed).
 const MAX_DEPTH: usize = 64;
 
+/// The most steps one column's resolution takes (#986: a CTE body is walked
+/// again for every reference, so a chain of CTEs that each read the one
+/// before several times grows exponentially): past it, fail closed.
+const MAX_VISITS: usize = 100_000;
+
 /// CTE frames, innermost last: (name, its query node).
 type Frames<'a> = Vec<Vec<(String, &'a Value)>>;
 
 struct Resolver<'a> {
     ctes: Frames<'a>,
-    /// `source` table (lower case) → its columns (lower case).
+    /// `source` table as `schema.table` (lower case) → its columns.
     columns: &'a BTreeMap<String, BTreeSet<String>>,
     depth: usize,
+    visits: usize,
 }
 
 fn st<'v>(v: &'v Value, k: &str) -> &'v str {
@@ -409,7 +421,7 @@ fn is_star(e: &Value) -> bool {
 }
 
 /// A `*` that only passes columns through (no REPLACE / RENAME / COLUMNS(…)
-/// / unpacking — an EXCLUDE only drops columns).
+/// / unpacking — an EXCLUDE only drops columns, see [`star_excludes`]).
 fn plain_star(e: &Value) -> bool {
     let empty = |k: &str| match e.get(k) {
         None | Some(Value::Null) => true,
@@ -424,6 +436,28 @@ fn plain_star(e: &Value) -> bool {
         && empty("columns")
         && empty("expr")
         && empty("unpacked")
+}
+
+/// What `*`'s EXCLUDE does to `col` (#984): `Some(true)` the star doesn't
+/// produce it, `Some(false)` an EXCLUDE qualified with a relation names it
+/// (which relation's copy is left is not followed: fail closed), `None`
+/// not excluded.
+fn star_excludes(e: &Value, col: &str) -> Option<bool> {
+    let plain = e
+        .get("exclude_list")
+        .and_then(Value::as_array)
+        .is_some_and(|a| {
+            a.iter()
+                .any(|x| x.as_str().is_some_and(|x| x.eq_ignore_ascii_case(col)))
+        });
+    if plain {
+        return Some(true);
+    }
+    let qualified = e
+        .get("qualified_exclude_list")
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.iter().any(|x| st(x, "column").eq_ignore_ascii_case(col)));
+    qualified.then_some(false)
 }
 
 impl<'a> Resolver<'a> {
@@ -445,9 +479,10 @@ impl<'a> Resolver<'a> {
     }
 
     fn deeper<T>(&mut self, fallback: T, f: impl FnOnce(&mut Self) -> T) -> T {
-        if self.depth >= MAX_DEPTH {
+        if self.depth >= MAX_DEPTH || self.visits >= MAX_VISITS {
             return fallback;
         }
+        self.visits += 1;
         self.depth += 1;
         let r = f(self);
         self.depth -= 1;
@@ -587,6 +622,11 @@ impl<'a> Resolver<'a> {
                 if !plain_star(e) {
                     return Origin::Constant;
                 }
+                match star_excludes(e, col) {
+                    Some(true) => continue,
+                    Some(false) => return Origin::Constant,
+                    None => {}
+                }
                 let qual = st(e, "relation_name");
                 let r = match from {
                     Some(f) => self.of_column(f, (!qual.is_empty()).then_some(qual), col),
@@ -692,8 +732,15 @@ impl<'a> Resolver<'a> {
                 if !source {
                     return Origin::Constant;
                 }
-                // a real column of that source table, or not there at all
-                match me.columns.get(&name.to_ascii_lowercase()) {
+                // a real column of that source table (by schema, #984), or
+                // not there at all
+                let schema = if cat.is_empty() || sch.is_empty() {
+                    "main"
+                } else {
+                    sch
+                };
+                let key = format!("{schema}.{name}").to_ascii_lowercase();
+                match me.columns.get(&key) {
                     Some(cols) if cols.contains(col) => Origin::Source,
                     Some(_) => Origin::Absent,
                     None => Origin::Constant,
@@ -745,18 +792,20 @@ fn scope_from_source(
         ctes: Vec::new(),
         columns,
         depth: 0,
+        visits: 0,
     }
     .node_column(node, &col.to_ascii_lowercase())
         == Origin::Source
 }
 
-/// The source database's tables and their columns (lower case).
+/// The source database's tables (`schema.table`) and their columns (lower
+/// case).
 fn source_columns(duck: &mut dyn Duck) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
     let mut m: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for r in rows(
         duck,
         &format!(
-            "SELECT lower(table_name), lower(column_name) FROM duckdb_columns() WHERE database_name = {}",
+            "SELECT lower(schema_name || '.' || table_name), lower(column_name) FROM duckdb_columns() WHERE database_name = {}",
             lit(policy::MAPPING_SOURCE)
         ),
     )? {
@@ -798,7 +847,7 @@ impl Report {
         !self.findings.iter().any(|f| f.error)
     }
 
-    fn push(
+    pub fn push(
         &mut self,
         error: bool,
         table: &str,
@@ -863,6 +912,10 @@ fn one(duck: &mut dyn Duck, sql: &str) -> Result<Option<String>, String> {
 /// The type family a contract column and a view column are compared by.
 fn family(t: &str) -> &'static str {
     let t = t.to_ascii_uppercase();
+    // a list or array of anything is no scalar family (#984)
+    if t.contains('[') {
+        return "other";
+    }
     let base = t.split('(').next().unwrap_or("").trim();
     match base {
         "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "UTINYINT" | "USMALLINT"
@@ -1119,18 +1172,19 @@ fn check_scope(
         }
         return Ok(());
     };
-    let not_in = format!(
-        " AND {col}::VARCHAR NOT IN ({})",
-        if allowed.is_empty() {
-            "NULL".to_string()
-        } else {
+    // #984: an empty list allows nothing (`NOT IN (NULL)` would allow all)
+    let not_in = if allowed.is_empty() {
+        " AND true".to_string()
+    } else {
+        format!(
+            " AND {col}::VARCHAR NOT IN ({})",
             allowed
                 .iter()
                 .map(|a| lit(a))
                 .collect::<Vec<_>>()
                 .join(", ")
-        }
-    );
+        )
+    };
     let n_outside = match count(duck, &not_in) {
         Ok(n) => n,
         Err(e) => {
@@ -1272,9 +1326,18 @@ pub struct Availability {
 pub fn questions(duck: &mut dyn Duck, script: &str) -> Vec<Availability> {
     let plan = crate::sql::plan(script);
     let mut setup_err: Option<String> = None;
-    for p in plan.iter().filter(|p| p.setup) {
-        if let Err(e) = rows(duck, &p.sql) {
-            setup_err.get_or_insert(first_line(&e));
+    for p in &plan {
+        if p.setup {
+            if let Err(e) = rows(duck, &p.sql) {
+                setup_err.get_or_insert(first_line(&e));
+            }
+        } else if let Some(kind) = crate::inputs::input_kind(&p.roles) {
+            // #985: an input's default is set before the panels bind, as
+            // `dashboard --check` and the agent do — a panel like
+            // `COLUMNS(getvariable('dim'))` doesn't bind with it NULL
+            for set in input_defaults(duck, kind, p) {
+                let _ = rows(duck, &set);
+            }
         }
     }
     crate::sql::question::declared(script)
@@ -1302,6 +1365,63 @@ pub fn questions(duck: &mut dyn Duck, script: &str) -> Vec<Availability> {
             }
         })
         .collect()
+}
+
+/// The `SET VARIABLE`s an input's default makes, from its option query's
+/// rows (named and typed by `DESCRIBE`; at most 1000 rows).
+fn input_defaults(
+    duck: &mut dyn Duck,
+    kind: crate::InputKind,
+    p: &crate::sql::Panel,
+) -> Vec<String> {
+    let q = p.sql.trim().trim_end_matches(';');
+    let Ok(cols) = rows(duck, &format!("DESCRIBE {q}")) else {
+        return Vec::new();
+    };
+    let Ok(data) = rows(duck, &format!("SELECT * FROM ({q}) LIMIT 1000")) else {
+        return Vec::new();
+    };
+    let cols: Vec<(String, &'static str)> = cols
+        .iter()
+        .map(|c| {
+            let name = c.first().cloned().flatten().unwrap_or_default();
+            let ty = c.get(1).cloned().flatten().unwrap_or_default();
+            (
+                name,
+                if ty == "BOOLEAN" {
+                    "boolean"
+                } else {
+                    family(&ty)
+                },
+            )
+        })
+        .collect();
+    let maps: Vec<serde_json::Map<String, Value>> = data
+        .into_iter()
+        .map(|r| {
+            cols.iter()
+                .zip(r)
+                .map(|((n, fam), v)| {
+                    let v = match (v, *fam) {
+                        (None, _) => Value::Null,
+                        (Some(v), "integer" | "number") => v
+                            .parse::<serde_json::Number>()
+                            .map(Value::Number)
+                            .unwrap_or(Value::String(v)),
+                        (Some(v), "boolean") => Value::Bool(v == "true"),
+                        (Some(v), _) => Value::String(v),
+                    };
+                    (n.clone(), v)
+                })
+                .collect()
+        })
+        .collect();
+    crate::inputs::input_defaults_with(
+        kind,
+        crate::inputs::input_index(&p.roles),
+        crate::inputs::default_index(&p.roles),
+        &maps,
+    )
 }
 
 fn first_line(e: &str) -> String {
@@ -1395,5 +1515,25 @@ CREATE TABLE deliveries (
         assert!(!compatible("BLOB", "STRUCT(a INTEGER)"));
         assert!(!compatible("UUID", "VARCHAR"));
         assert!(compatible("INTEGER[]", "INTEGER[]"));
+        // #984: a list of a scalar family is no scalar
+        assert!(!compatible("DECIMAL(18,3)", "DECIMAL(18,3)[]"));
+        assert!(!compatible("TIMESTAMP", "TIMESTAMP[]"));
+        assert!(!compatible("TIME", "TIME[3]"));
+        assert!(compatible("DECIMAL(18,3)[]", "DECIMAL(18,3)[]"));
+    }
+
+    #[test]
+    fn a_marker_on_its_own_line_belongs_to_the_column_below() {
+        // #984: a comment after a comma on the same line is the previous
+        // column's; on a line of its own, the next one's
+        let c = parse_contract(
+            "CREATE TABLE t (\n    a INTEGER, -- the a\n    -- @scope tenant\n    tenant VARCHAR NOT NULL,\n    -- @optional\n    b DOUBLE\n);",
+        )
+        .unwrap();
+        let cols = &c.tables[0].columns;
+        assert_eq!(cols[0].doc, "the a");
+        assert_eq!(cols[0].scope, None);
+        assert_eq!(cols[1].scope.as_deref(), Some("tenant"));
+        assert!(!cols[0].optional && !cols[1].optional && cols[2].optional);
     }
 }

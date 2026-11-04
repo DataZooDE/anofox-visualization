@@ -1279,7 +1279,9 @@ adds an MCP server (Streamable HTTP, JSON responses, no session) at
 A dashboard served to many customers reads a **contract**
 (`canonical/<id>.sql`: `CREATE TABLE` statements; `NOT NULL` for required
 columns, a `-- @optional` comment for optional ones, `-- @scope <name>` for
-a row-policy column, `PRIMARY KEY` / `REFERENCES` for the key checks). Each
+a row-policy column, `PRIMARY KEY` / `REFERENCES` for the key checks; a
+marker comment at the end of a column's line, or on its own line above
+it). Each
 customer maps its own data onto it in `customer-mapping/<customer>/views.sql`:
 **only** `CREATE [OR REPLACE] VIEW <contract table> AS <query>`, one per
 contract table, each reading only `source.<table>` — no macros, no
@@ -1300,7 +1302,9 @@ read-only as `source`, external access off and its configuration locked —
 never in a session holding anything else. It is a temporary database file
 under `TMPDIR` (removed afterwards), capped at `--memory-limit` (default
 4GB, 4 threads) set before the lock; each check is stopped after
-`--timeout-s` (default 120) and reported as `conform/error`. The report (text, or `--json`;
+`--timeout-s` (default 120) and reported as `conform/error` (exit 1, as
+is any check that fails to run). `--scope name=` with no values is a usage
+error. The report (text, or `--json`;
 exit 1 when the mapping doesn't conform):
 - every statement through the mapping classifier (`mapping/refused`), every
   contract table and column present with a compatible type, `NOT NULL`

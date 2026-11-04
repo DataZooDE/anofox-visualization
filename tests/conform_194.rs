@@ -130,9 +130,19 @@ CREATE VIEW deliveries AS
 ";
 
 fn conform(s: &Scratch, views: &str, db: &Path, extra: &[&str]) -> (i32, serde_json::Value) {
+    conform_with(s, views, db, extra, DASHBOARD)
+}
+
+fn conform_with(
+    s: &Scratch,
+    views: &str,
+    db: &Path,
+    extra: &[&str],
+    dashboard: &str,
+) -> (i32, serde_json::Value) {
     let contract = s.write("contract.sql", CONTRACT);
     let views = s.write("views.sql", views);
-    let dash = s.write("dash.sql", DASHBOARD);
+    let dash = s.write("dash.sql", dashboard);
     let out = Command::new(env!("CARGO_BIN_EXE_dashboard"))
         .arg("--conform")
         .arg(&contract)
@@ -444,4 +454,171 @@ fn a_runaway_mapping_is_stopped() {
     assert!(codes(&v).contains(&"conform/error".to_string()), "{v}");
     assert!(v.to_string().contains("longer than 3 s"), "{v}");
     assert!(t0.elapsed().as_secs() < 120, "took {:?}", t0.elapsed());
+}
+
+#[test]
+fn second_review_bypasses_are_refused() {
+    // #984
+    if !have_duckdb("second_review_bypasses_are_refused") {
+        return;
+    }
+    let s = Scratch::new("bypass2");
+    let (_, renamed) = sources(&s);
+    let deliveries = "CREATE VIEW deliveries AS SELECT code AS supplier_id, termin AS due, verzug::INTEGER AS days_late, gebiet AS region FROM source.lieferungen;\n";
+    let scope = ["--scope", "region=north,south"];
+    // 1. a * EXCLUDE that drops the scope column, then a literal under its name
+    let views = format!("CREATE VIEW suppliers AS SELECT * EXCLUDE (region), 'north' AS region FROM (SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten);\n{deliveries}");
+    let (code, v) = conform(&s, &views, &renamed, &scope);
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        codes(&v).contains(&"conform/scope-not-source".to_string()),
+        "{v}"
+    );
+    // …while an EXCLUDE of another column still passes the scope column on
+    let views = format!("CREATE VIEW suppliers AS SELECT * EXCLUDE (code) FROM (SELECT code, code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten);\n{deliveries}");
+    let (code, v) = conform(&s, &views, &renamed, &scope);
+    assert_eq!(code, 0, "{v}");
+}
+
+#[test]
+fn a_cte_reading_a_later_sibling_is_refused() {
+    // #984
+    if !have_duckdb("a_cte_reading_a_later_sibling_is_refused") {
+        return;
+    }
+    let s = Scratch::new("fwdcte");
+    let (_, renamed) = sources(&s);
+    let suppliers = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten;\n";
+    let scope = ["--scope", "region=north,south"];
+    // 2. a CTE reading a later sibling's name reads the catalog (another
+    //    view), not the CTE: refused by the classifier
+    let views = format!("{suppliers}CREATE VIEW deliveries AS WITH a AS (SELECT * FROM suppliers), suppliers AS (SELECT * FROM source.lieferungen) SELECT a.supplier_id, DATE '2026-01-01' AS due, 0 AS days_late, a.region FROM a;\n");
+    let (code, v) = conform(&s, &views, &renamed, &scope);
+    assert_eq!(code, 1, "{v}");
+    assert!(codes(&v).contains(&"mapping/refused".to_string()), "{v}");
+}
+
+#[test]
+fn a_same_named_table_in_another_schema_lends_no_columns() {
+    // #984
+    if !have_duckdb("a_same_named_table_in_another_schema_lends_no_columns") {
+        return;
+    }
+    let s = Scratch::new("schemas");
+    let (_, renamed) = sources(&s);
+    let suppliers = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten;\n";
+    let deliveries = "CREATE VIEW deliveries AS SELECT code AS supplier_id, termin AS due, verzug::INTEGER AS days_late, gebiet AS region FROM source.lieferungen;\n";
+    let scope = ["--scope", "region=north,south"];
+    // 3. a same-named table in another schema doesn't lend its columns
+    let multi = s.0.join("multi.duckdb");
+    duckdb(
+        &multi,
+        &format!("CREATE SCHEMA eu; CREATE TABLE eu.lieferanten AS SELECT code, firma, gebiet AS region FROM (VALUES {DATA}) t(code, firma, gebiet, note);
+                  CREATE TABLE main.lieferanten AS SELECT code AS supplier_id, firma AS name FROM (VALUES {DATA}) t(code, firma, gebiet, note);
+                  CREATE TABLE lieferungen AS SELECT * FROM (VALUES {DELIVERIES}) t(code, termin, verzug, gebiet);"),
+    );
+    let views = format!("CREATE VIEW suppliers AS SELECT *, 'north' AS region FROM source.lieferanten;\n{deliveries}");
+    let (code, v) = conform(&s, &views, &multi, &scope);
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        codes(&v).contains(&"conform/scope-not-source".to_string()),
+        "{v}"
+    );
+    // 4. an empty --scope list is a usage error, not "allow everything"
+    let views = format!("{suppliers}{deliveries}");
+    for bad in ["region=", "region=,"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_dashboard"))
+            .args(["--conform"])
+            .arg(s.write("contract.sql", CONTRACT))
+            .arg("--views")
+            .arg(s.write("views.sql", &views))
+            .arg("--db")
+            .arg(&renamed)
+            .args(["--scope", bad])
+            .env("DATAZOO_DISABLE_TELEMETRY", "1")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "--scope {bad}");
+    }
+}
+
+#[test]
+fn a_question_is_bound_with_its_inputs_defaults() {
+    // #985: COLUMNS(getvariable('dim')) binds only with the input's default
+    if !have_duckdb("a_question_is_bound_with_its_inputs_defaults") {
+        return;
+    }
+    let s = Scratch::new("qdefaults");
+    let (_, renamed) = sources(&s);
+    let dash = "-- @title Suppliers by a column
+-- @vars dim
+SELECT 'name' AS dim ::DROPDOWN;
+-- @question Which suppliers are there by {dim}?
+SELECT COLUMNS(getvariable('dim')) ::TABLE FROM suppliers ORDER BY 1;
+";
+    let (code, v) = conform_with(
+        &s,
+        RENAMED,
+        &renamed,
+        &["--scope", "region=north,south"],
+        dash,
+    );
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["questions"][0]["available"], true, "{v}");
+}
+
+#[test]
+fn a_cte_chain_is_bounded_and_a_failed_setup_cleans_up() {
+    // #986
+    if !have_duckdb("a_cte_chain_is_bounded_and_a_failed_setup_cleans_up") {
+        return;
+    }
+    let s = Scratch::new("chain");
+    let (_, renamed) = sources(&s);
+    // 8. each CTE reads the one before four times, unqualified: ~4^16
+    //    resolver steps without a budget (DISTINCT keeps it two rows)
+    let mut ctes =
+        vec!["a0 AS (SELECT DISTINCT gebiet AS region FROM source.lieferanten)".to_string()];
+    for i in 1..=16 {
+        let p = i - 1;
+        ctes.push(format!("a{i} AS (SELECT DISTINCT region FROM a{p} x1 JOIN a{p} x2 USING (region) JOIN a{p} x3 USING (region) JOIN a{p} x4 USING (region))"));
+    }
+    let views = format!(
+        "CREATE VIEW suppliers AS WITH {} SELECT l.code AS supplier_id, l.firma AS name, region FROM source.lieferanten l JOIN a16 ON a16.region = l.gebiet;\nCREATE VIEW deliveries AS SELECT code AS supplier_id, termin AS due, verzug::INTEGER AS days_late, gebiet AS region FROM source.lieferungen;\n",
+        ctes.join(", ")
+    );
+    let t0 = std::time::Instant::now();
+    let (code, v) = conform(
+        &s,
+        &views,
+        &renamed,
+        &["--scope", "region=north,south", "--timeout-s", "60"],
+    );
+    assert!(code == 0 || code == 1, "{v}");
+    assert!(t0.elapsed().as_secs() < 60, "took {:?}", t0.elapsed());
+    // 9. a build-instance error exits 2 and leaves no build directory
+    let tmp = s.0.join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_dashboard"))
+        .args(["--conform"])
+        .arg(s.write("contract.sql", CONTRACT))
+        .arg("--views")
+        .arg(s.write("views.sql", RENAMED))
+        .arg("--db")
+        .arg(s.write("not-a-database.duckdb", "plain text"))
+        .env("TMPDIR", &tmp)
+        .env("DATAZOO_DISABLE_TELEMETRY", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "a build directory was left behind"
+    );
 }

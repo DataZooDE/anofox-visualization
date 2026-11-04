@@ -733,7 +733,12 @@ impl Walker<'_> {
             .into_iter()
             .any(|t| t.and_then(Value::as_str) == Some("RECURSIVE_CTE_NODE"));
             let mut visible = frame.clone();
-            if !recursive {
+            if self.mode == Mode::Mapping {
+                // #984: a mapping's original text is what runs, and DuckDB
+                // binds a name in a CTE body only to the CTEs before it (or
+                // itself when recursive) — a later sibling's name is a table
+                visible.truncate(if recursive { i + 1 } else { i });
+            } else if !recursive {
                 visible.remove(i);
             }
             self.scopes.push(visible);
