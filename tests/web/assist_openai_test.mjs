@@ -110,6 +110,19 @@ for (const bad of ["", " x", "a b", "x;y", "-x", "a".repeat(129)]) assert.ok(!O.
   await assert.rejects(() => O.openaiTransport({ endpoint: "http://localhost:1/v1", fetchImpl: fake(401, { error: { message: "missing key" } }) }).send({ messages: [] }), (e) => e.status === 401 && e.error.error.message === "missing key" && /missing key/.test(A.describeError(e, "openai")) && /add one/.test(A.describeError(e, "openai")));
   await assert.rejects(() => O.openaiTransport({ endpoint: "http://localhost:1/v1", fetchImpl: fake(200, { nope: 1 }) }).send({ messages: [] }), /not a chat completion/);
   assert.throws(() => O.openaiTransport({ endpoint: "http://evil.example/v1" }), /must be https/);
+  // #941: a published site's own endpoint — a same-origin path, the
+  // viewer's cookies along, never a key; and only with sameOrigin: true
+  const n = calls.length;
+  await O.openaiTransport({ endpoint: "/api/llm/", sameOrigin: true, apiKey: "tok-12345678", fetchImpl: fake(200, { choices: [] }) }).send({ messages: [] });
+  assert.equal(calls[n].url, "/api/llm/chat/completions");
+  assert.equal(calls[n].init.credentials, "same-origin");
+  assert.equal(calls[n].init.headers.authorization, undefined, "no key to the site's endpoint");
+  assert.throws(() => O.openaiTransport({ endpoint: "/api/llm" }), /must be https/, "a path needs sameOrigin");
+  for (const bad of ["https://gw.example.com/v1", "//evil.example/v1", "/api/../x", "/api?x=1", "/", "/a b", "api/llm"]) {
+    assert.equal(O.sitePathOk(bad), false, bad);
+    assert.throws(() => O.openaiTransport({ endpoint: bad, sameOrigin: true }), /a path like/, bad);
+  }
+  for (const ok of ["/api/llm", "/api/llm/", "/v1", "/x/y-z_1.2"]) assert.equal(O.sitePathOk(ok), true, ok);
   assert.match(A.describeError(new TypeError("Failed to fetch"), "openai"), /could not reach the model endpoint/);
 }
 

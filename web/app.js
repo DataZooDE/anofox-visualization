@@ -46,7 +46,7 @@ import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnos
 // groundwork for the assistant's own locked DuckDB-Wasm instance
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
 import { applyAssistCsp } from "./assist-csp.js";
-import { endpointOrigin, openaiTransport } from "./assist-openai.js";
+import { endpointOrigin, modelIdOk, openaiTransport, sitePathOk } from "./assist-openai.js";
 import { LIVE_LIMITS, engineExtensions, livePageAdapter, pageAdapter } from "./assist-engine.js";
 import {
   KEY_SLOTS,
@@ -1520,7 +1520,10 @@ async function builderAskTransport() {
   return browserKeyTransport({ Anthropic, apiKey });
 }
 // An ask-ui host for the builder. `getTransport()` → a transport.
+// `extra.model` / `extra.provider` (#941: a published site's own endpoint)
+// stand in for the assistant's model and provider line.
 function builderAskHost(getTransport, extra = {}) {
+  const { model: askModel, provider: askProviderText, ...more } = extra;
   let st = null; // {session, script, turns}: this mount's conversation
   const state = () => {
     const script = dpRanScript ?? "";
@@ -1531,7 +1534,7 @@ function builderAskHost(getTransport, extra = {}) {
     return st;
   };
   return {
-    cfg: { provider: askProvider(), perConversation: true },
+    cfg: { provider: askProviderText ?? askProvider(), perConversation: true },
     view: () => builderAskView(),
     title: askTitle,
     titles: askTitles,
@@ -1563,15 +1566,41 @@ function builderAskHost(getTransport, extra = {}) {
         view: { ...builderAskView(), panel: Number.isInteger(q.panel) ? q.panel : null },
         readPanel: askReadPanel,
         turns: c.turns,
-        model: assistCfg.models?.default,
+        model: askModel ?? assistCfg.models?.default,
         signal,
         onStatus: onProgress,
       });
       if (r.kind === "answer" && st === c) c.turns = askTrim([...c.turns, r.turn]);
       return r;
     },
-    ...extra,
+    ...more,
   };
+}
+// #941: Ask on a published site (`dashboard --site` with options.site_ask):
+// the builder's in-page Ask — it reads only the panels on this page — with
+// its model calls sent to the site operator's own same-origin endpoint (its
+// proxy holds the key and checks the viewer). Only for a dashboard whose
+// header says `-- @ask on` (site.json lists them), as on a locked server.
+function siteAskCfg() {
+  const a = published ? window.__anofoxSite?.ask : null;
+  if (!a || !Array.isArray(a.dashboards) || !a.dashboards.includes(window.__served?.id)) return null;
+  if (!sitePathOk(a.endpoint) || !modelIdOk(a.model)) return null;
+  return { endpoint: a.endpoint.replace(/\/+$/, ""), model: a.model };
+}
+let siteAskUi = null;
+async function siteAskSync() {
+  const cfg = siteAskCfg();
+  if (cfg && !siteAskUi) {
+    const transport = async () => openaiTransport({ endpoint: cfg.endpoint, sameOrigin: true });
+    siteAskUi = (async () => (await askUiModule()).mountAsk(builderAskHost(transport, { model: cfg.model, provider: `this site's model service (${cfg.endpoint})` })))().catch((e) => {
+      console.warn("Ask could not load:", e);
+      siteAskUi = null;
+    });
+  }
+  const ui = await siteAskUi;
+  if (!ui) return;
+  ui.button.hidden = !cfg;
+  if (!cfg) ui.shut?.({ focus: false });
 }
 // View mode: the ✦ Ask sheet, loaded on the first switch to View mode with
 // the assistant on (the module isn't loaded otherwise).
@@ -2593,6 +2622,7 @@ function assistUiSync() {
   const start = $("assist-start");
   if (start) start.hidden = !on || $("sql").value.trim() !== "" || !!assistUi?.isOpen();
   builderAskSync();
+  if (published) siteAskSync();
 }
 // The editor-column tabs (SQL / ✦ Assistant): a standard ARIA tablist
 // (←/→, Home/End move and activate; selecting the Assistant tab opens the
@@ -9910,6 +9940,7 @@ async function siteGo(id, search = "", push = true) {
   if (push) history.pushState({ anofoxSite: id }, "", site.basePath + "d/" + encodeURIComponent(id) + "/" + search);
   document.title = meta.title || document.title;
   await run(true, { explicit: true });
+  siteAskSync(); // #941: Ask is per dashboard (its `-- @ask on`)
   refreshServedNavHrefs();
   document.querySelectorAll(".served-nav a[data-nav-id]").forEach((a) => {
     const on = a.dataset.navId === id;
@@ -9968,6 +9999,7 @@ async function sitePrepare() {
     data: site.data,
     dataFiles: site.dataFiles,
     basemap: site.basemap, // #946
+    ask: site.ask, // #941
   };
   // `anofox_data` itself (#407's locked-server rule, kept: a path_vars value
   // joined onto it never leaves the site — enforced in runSqlInner()

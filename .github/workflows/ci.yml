@@ -1030,6 +1030,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-e2e.mjs --dashboard target/debug/dashboard
 
+      # scripts/site-ask-e2e.mjs (#941): Ask on a published site through the
+      # site's own endpoint (a fake model on the script's server): only on an
+      # `-- @ask on` dashboard, the viewer's cookie along, no key, nothing
+      # leaves the site.
+      - name: Ask on a published site e2e (#941)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-ask-e2e.mjs --dashboard target/debug/dashboard
+
       # scripts/served-e2e.mjs / scripts/input-options-order-served-e2e.mjs
       # (#590): the browser e2e checks that need a real locked server
       # (anofox_serve_dashboards), not the :8947 static serve_nocache.py

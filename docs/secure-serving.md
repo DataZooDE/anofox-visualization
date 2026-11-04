@@ -2130,6 +2130,37 @@ if the data is sensitive — it's public); `nav_picker`'s options are frozen
 at build time (refresh the site to update them); there is no `/health` or
 request log, because there is no process to ask.
 
+### Ask on a published site (`options.site_ask`, #941)
+
+A static site can offer the in-page **Ask** (questions about the dashboard
+on the screen; not the assistant that edits) through a model endpoint **you**
+run on the site's own origin — a Cloudflare Pages Function, a Worker, a small
+proxy route — so the model key never ships in the published files:
+
+```json
+{"site_ask": {"endpoint": "/api/llm", "model": "gemini-2.5-flash"}}
+```
+
+- `endpoint` is a **path on the site's own origin** (`/` then letters,
+  digits, `-` `_` `.`); another origin, a query, `..` or a `key` / `token`
+  field is refused when the site is built. The page posts OpenAI-style
+  `POST <endpoint>/chat/completions` (non-streaming, with `tools` /
+  `tool_calls`), sends the viewer's cookies along (`credentials:
+  "same-origin"`, so an auth proxy such as Cloudflare Access sees who asks)
+  and **no** `Authorization` header — the endpoint adds the key.
+- Ask shows only on dashboards whose header says `-- @ask on` (and, as on
+  the locked server, `-- @vars`); site.json lists them. `-- @ask skip` /
+  `mask` and the personal-data masking work as in the builder.
+- It runs the panels **in the page** and sends the question, the view and
+  the rows of the panels it reads to your endpoint; the viewer sees that in
+  the notice before the first question. Answers see only what this viewer's
+  page can query — on a static site that is everything the site serves.
+- What the endpoint should do: check the viewer (the auth proxy's header or
+  cookie), keep a per-user budget, allow only the configured model(s),
+  forward to the provider with the key from its own secret store, and log
+  as your policy says. The page enforces none of that.
+- The site's CSP already allows `connect-src 'self'`; nothing else changes.
+
 ---
 
 - **DNS rebinding.** The `Host` must be a loopback name on the server's port,
