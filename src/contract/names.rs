@@ -95,11 +95,41 @@ pub(super) const COLUMNS: &[&str] = &[
     "due",
 ];
 
+/// Estimate columns on a ratio scale (exponentiated coefficients).
+pub(super) const RATIO_ESTIMATES: &[&str] = &[
+    "odds_ratio",
+    "hazard_ratio",
+    "rate_ratio",
+    "risk_ratio",
+    "incidence_rate_ratio",
+    "irr",
+    "exp_estimate",
+    "exp_coef",
+    "exp_b",
+];
+
 /// Other common spellings of a contract column, as [`norm`] writes them
 /// (lowercase, any run of other characters → `_`). statsmodels' `[0.025` /
 /// `0.975]` interval columns are matched by their brackets.
 pub(super) const ALIASES: &[(&str, &[&str])] = &[
-    ("estimate", &["coef", "params", "coefficient"]),
+    (
+        "estimate",
+        &[
+            "coef",
+            "params",
+            "coefficient",
+            // ratio scales (their no-effect value is 1: RATIO_ESTIMATES)
+            "odds_ratio",
+            "hazard_ratio",
+            "rate_ratio",
+            "risk_ratio",
+            "incidence_rate_ratio",
+            "irr",
+            "exp_estimate",
+            "exp_coef",
+            "exp_b",
+        ],
+    ),
     ("std_error", &["std_err", "bse", "std_errors", "se"]),
     (
         "statistic",
@@ -474,7 +504,7 @@ fn rename(rows: &[Row], options: &Row, renamed: &mut Vec<(String, String)>) -> O
     if map.is_empty() {
         return None;
     }
-    let out = rows
+    let out: Vec<Row> = rows
         .iter()
         .map(|r| {
             r.iter()
@@ -488,6 +518,22 @@ fn rename(rows: &[Row], options: &Row, renamed: &mut Vec<(String, String)>) -> O
                 .collect::<Map<_, _>>()
         })
         .collect();
+    // An estimate on a ratio scale (odds / hazard / rate ratios): the
+    // coefficient plot's no-effect value is then 1, not 0.
+    let ratio = map
+        .iter()
+        .any(|(o, c)| *c == "estimate" && RATIO_ESTIMATES.contains(&norm(o).as_str()));
+    let out: Vec<Row> = if ratio {
+        out.into_iter()
+            .map(|mut r: Row| {
+                r.entry("estimate_scale".to_string())
+                    .or_insert_with(|| serde_json::Value::String("ratio".into()));
+                r
+            })
+            .collect()
+    } else {
+        out
+    };
     for (o, c) in map {
         if !renamed.iter().any(|(_, t)| t == c) {
             renamed.push((o.clone(), c.to_string()));

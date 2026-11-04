@@ -150,13 +150,12 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
     } else {
         "estimate".to_string()
     };
-    // The no-effect value: 0, or a numeric `reference :=` (e.g. 1 for odds
-    // ratios). An interval that contains it is not significant: faded.
-    let null = options
-        .get("reference")
-        .and_then(|v| v.as_f64())
-        .filter(|v| v.is_finite())
-        .unwrap_or(0.0);
+    // The no-effect value — coefficients at or above it are blue, below it
+    // red; an interval that contains it is not significant: faded. A
+    // numeric `reference :=` sets it; otherwise (or `'auto'`) 1 for
+    // estimates on a ratio scale (an `odds_ratio` / `hazard_ratio` / `irr` /
+    // `exp_estimate` … column, or `exponentiate` true), else 0.
+    let null = no_effect(t, options);
     let any_faded = rows.iter().any(|r| crosses(r, null));
     let caption = [
         missing_ci.then_some("○ = no interval reported".to_string()),
@@ -205,6 +204,30 @@ fn forest(t: &Table, options: &Row, w: u32, h: u32, o: &RenderOptions, place: Pl
     }
     let n = plots.len();
     grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
+}
+
+/// The coefficients' no-effect value: `reference :=` when a number, else
+/// 1 on a ratio scale (the estimate column was a ratio's, so the rows carry
+/// `estimate_scale = 'ratio'`, or an `exponentiate` column is true), else 0.
+fn no_effect(t: &Table, options: &Row) -> f64 {
+    if let Some(v) = options
+        .get("reference")
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite())
+    {
+        return v;
+    }
+    let truthy = |col: &str, want: &[&str]| {
+        t.has(col)
+            && t.text(col)
+                .iter()
+                .any(|v| matches!(v, Value::Str(s) if want.contains(&s.trim().to_ascii_lowercase().as_str())))
+    };
+    if truthy("estimate_scale", &["ratio"]) || truthy("exponentiate", &["true", "1", "yes"]) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 /// Does a coefficient's interval contain the no-effect value `null` (not

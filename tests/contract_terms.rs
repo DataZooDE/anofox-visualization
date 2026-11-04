@@ -102,3 +102,63 @@ fn row_order_beats_alphabetical_for_any_producer() {
         "(Intercept), x2, x1 top to bottom: {i} {x2} {x1}"
     );
 }
+
+/// The fill of each term's point (the `<circle>` before its tooltip).
+fn fill_of(svg: &str, term: &str) -> String {
+    let at = svg
+        .find(&format!("<title>{term}:"))
+        .unwrap_or_else(|| panic!("no mark for {term}"));
+    let tag = &svg[svg[..at].rfind("<circle").expect("a point")..at];
+    tag.split(" fill=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+fn render_opts(rows: &str, opts: &str) -> String {
+    render_call("anofox_plot_terms", rows, opts, 640, 400, "").expect("renders")
+}
+
+/// Coefficients at or above the no-effect value are blue, below it red; the
+/// value is 0, or 1 for estimates on a ratio scale, or the user's
+/// `reference :=`.
+#[test]
+fn the_no_effect_value_follows_the_scale_and_the_user() {
+    let ratios = r#"[{"term": "a", "odds_ratio": 0.6, "conf_low": 0.4, "conf_high": 0.9},
+                     {"term": "b", "odds_ratio": 1.4, "conf_low": 1.1, "conf_high": 1.8}]"#;
+    let svg = render(ratios);
+    assert_ne!(
+        fill_of(&svg, "a"),
+        fill_of(&svg, "b"),
+        "an odds ratio below 1 is red, above it blue"
+    );
+    let logs = r#"[{"term": "a", "estimate": 0.6, "conf_low": 0.4, "conf_high": 0.9},
+                   {"term": "b", "estimate": 1.4, "conf_low": 1.1, "conf_high": 1.8}]"#;
+    let svg = render(logs);
+    assert_eq!(
+        fill_of(&svg, "a"),
+        fill_of(&svg, "b"),
+        "plain estimates: both ≥ 0, both blue"
+    );
+    // the user's value wins
+    let svg = render_opts(ratios, r#"{"reference": 0}"#);
+    assert_eq!(
+        fill_of(&svg, "a"),
+        fill_of(&svg, "b"),
+        "reference := 0 on ratios: both blue"
+    );
+    let svg = render_opts(logs, r#"{"reference": 1}"#);
+    assert_ne!(
+        fill_of(&svg, "a"),
+        fill_of(&svg, "b"),
+        "reference := 1: 0.6 red, 1.4 blue"
+    );
+    // an `exponentiate` flag means ratios too
+    let flagged = r#"[{"term": "a", "estimate": 0.6, "exponentiate": true},
+                      {"term": "b", "estimate": 1.4, "exponentiate": true}]"#;
+    let svg = render(flagged);
+    assert_ne!(fill_of(&svg, "a"), fill_of(&svg, "b"));
+}
