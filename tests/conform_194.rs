@@ -359,3 +359,58 @@ fn scope_bypasses_are_refused() {
         assert_eq!(code, 0, "{body}\n{v}");
     }
 }
+
+/// #979: no silent "conforms" — a mixed-case contract table is still
+/// checked, a scope value outside the list is found, and a view that fails
+/// when read is a finding (exit 1), not a usage error.
+#[test]
+fn no_false_conforms() {
+    if !have_duckdb("no_false_conforms") {
+        return;
+    }
+    let s = Scratch::new("false");
+    let (_, renamed) = sources(&s);
+    let deliveries = "CREATE VIEW deliveries AS SELECT code AS supplier_id, termin AS due, verzug::INTEGER AS days_late, gebiet AS region FROM source.lieferungen;\n";
+    let suppliers = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten;\n";
+    // a contract table written in mixed case, a view missing its required column
+    let contract = s.write(
+        "mixed.sql",
+        &CONTRACT.replace("CREATE TABLE suppliers", "CREATE TABLE Suppliers"),
+    );
+    let views = s.write("v.sql", &format!("CREATE VIEW suppliers AS SELECT code AS supplier_id, gebiet AS region FROM source.lieferanten;\n{deliveries}"));
+    let out = Command::new(env!("CARGO_BIN_EXE_dashboard"))
+        .args([
+            "--conform",
+            contract.to_str().unwrap(),
+            "--views",
+            views.to_str().unwrap(),
+            "--db",
+            renamed.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{v}");
+    assert!(
+        codes(&v).contains(&"conform/missing-column".to_string()),
+        "{v}"
+    );
+    // a value outside the operator's list
+    let (code, v) = conform(
+        &s,
+        &format!("{suppliers}{deliveries}"),
+        &renamed,
+        &["--scope", "region=north"],
+    );
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        codes(&v).contains(&"conform/scope-values".to_string()),
+        "{v}"
+    );
+    // a view that binds but fails when read
+    let bad = format!("CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, (gebiet::INTEGER)::VARCHAR AS region FROM source.lieferanten;\n{deliveries}");
+    let (code, v) = conform(&s, &bad, &renamed, &["--scope", "region=north,south"]);
+    assert_eq!(code, 1, "{v}");
+    assert!(codes(&v).contains(&"conform/error".to_string()), "{v}");
+}

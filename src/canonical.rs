@@ -874,6 +874,16 @@ fn family(t: &str) -> &'static str {
 
 fn compatible(contract: &str, view: &str) -> bool {
     let (c, v) = (family(contract), family(view));
+    // #979: types outside the known families (lists, BLOB, UUID, STRUCT,
+    // MAP, …) only match exactly
+    if c == "other" || v == "other" {
+        let norm = |t: &str| {
+            t.split_whitespace()
+                .collect::<String>()
+                .to_ascii_uppercase()
+        };
+        return norm(contract) == norm(view);
+    }
     c == v || (c == "number" && v == "integer") || (c == "timestamp" && v == "date")
 }
 
@@ -937,7 +947,7 @@ fn check_table(
         duck,
         &format!(
             "SELECT lower(column_name), data_type, (NOT is_nullable)::VARCHAR FROM duckdb_columns() \
-             WHERE database_name = 'memory' AND schema_name = {} AND table_name = {}",
+             WHERE database_name = 'memory' AND schema_name = {} AND lower(table_name) = {}",
             lit(CONTRACT_SCHEMA),
             lit(&t.name)
         ),
@@ -945,18 +955,36 @@ fn check_table(
     .into_iter()
     .filter_map(|r| Some((r[0].clone()?, (r[1].clone()?, r[2].as_deref() == Some("true")))))
     .collect();
+    // #979: a declared table whose columns can't be read checks nothing —
+    // never a silent pass
+    if want.is_empty() {
+        r.push(
+            true,
+            &t.name,
+            None,
+            "conform/error",
+            "the contract table's columns could not be read".into(),
+        );
+        return Ok(());
+    }
     let have: BTreeMap<String, String> = rows(
         duck,
         &format!(
             "SELECT lower(column_name), data_type FROM duckdb_columns() \
-             WHERE database_name = 'memory' AND schema_name = 'main' AND table_name = {}",
+             WHERE database_name = 'memory' AND schema_name = 'main' AND lower(table_name) = {}",
             lit(&t.name)
         ),
     )?
     .into_iter()
     .filter_map(|r| Some((r[0].clone()?, r[1].clone()?)))
     .collect();
-    let tree = policy::parse_tree(duck, &v.query)?;
+    let tree = match policy::parse_tree(duck, &v.query) {
+        Ok(t) => t,
+        Err(e) => {
+            r.push(true, &t.name, None, "conform/error", e);
+            return Ok(());
+        }
+    };
     for c in &t.columns {
         let Some((ctype, not_null)) = want.get(&c.name) else {
             continue;
@@ -997,14 +1025,21 @@ fn check_table(
         }
         let col = format!("{}.{}", qi(&t.name), qi(&c.name));
         if *not_null {
-            let n = one(
+            let n = match one(
                 duck,
                 &format!(
                     "SELECT count(*)::VARCHAR FROM main.{} WHERE {} IS NULL",
                     qi(&t.name),
                     qi(&c.name)
                 ),
-            )?;
+            ) {
+                Ok(n) => n,
+                // #979: a view that fails when read is a finding, not a usage error
+                Err(e) => {
+                    r.push(true, &t.name, Some(&c.name), "conform/error", e);
+                    continue;
+                }
+            };
             if n.as_deref().is_some_and(|n| n != "0") {
                 r.push(
                     true,
@@ -1054,22 +1089,56 @@ fn check_scope(
         ));
         return Ok(());
     }
-    let distinct: Vec<String> = rows(duck, &format!("SELECT DISTINCT {col}::VARCHAR FROM main.{} WHERE {col} IS NOT NULL ORDER BY 1 LIMIT 1001", qi(&t.name)))?
-        .into_iter()
-        .filter_map(|r| r.into_iter().next().flatten())
-        .collect();
+    // #979: counted in SQL, not over a capped list of values
+    let count = |duck: &mut dyn Duck, extra: &str| -> Result<usize, String> {
+        Ok(one(
+            duck,
+            &format!(
+                "SELECT count(DISTINCT {col})::VARCHAR FROM main.{} WHERE {col} IS NOT NULL{extra}",
+                qi(&t.name)
+            ),
+        )?
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0))
+    };
+    let n_distinct = match count(duck, "") {
+        Ok(n) => n,
+        Err(e) => {
+            r.push(true, &t.name, Some(&c.name), "conform/error", e);
+            return Ok(());
+        }
+    };
     let Some(allowed) = opts.scope_values.get(scope) else {
         if !constant {
-            r.push(false, &t.name, Some(&c.name), "conform/scope-unchecked", format!("{} distinct value(s); give --scope {scope}=<values> to check them against the operator's list", distinct.len()));
+            r.push(false, &t.name, Some(&c.name), "conform/scope-unchecked", format!("{n_distinct} distinct value(s); give --scope {scope}=<values> to check them against the operator's list"));
         }
         return Ok(());
     };
-    let outside: Vec<&String> = distinct.iter().filter(|d| !allowed.contains(d)).collect();
-    if !outside.is_empty() {
-        let shown: Vec<String> = outside
-            .iter()
-            .take(5)
-            .map(|s| crate::host::access::diag(s))
+    let not_in = format!(
+        " AND {col}::VARCHAR NOT IN ({})",
+        if allowed.is_empty() {
+            "NULL".to_string()
+        } else {
+            allowed
+                .iter()
+                .map(|a| lit(a))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    let n_outside = match count(duck, &not_in) {
+        Ok(n) => n,
+        Err(e) => {
+            r.push(true, &t.name, Some(&c.name), "conform/error", e);
+            return Ok(());
+        }
+    };
+    if n_outside > 0 {
+        let shown: Vec<String> = rows(duck, &format!("SELECT DISTINCT {col}::VARCHAR FROM main.{} WHERE {col} IS NOT NULL{not_in} ORDER BY 1 LIMIT 5", qi(&t.name)))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .map(|s| crate::host::access::diag(&s))
             .collect();
         r.push(
             true,
@@ -1077,16 +1146,15 @@ fn check_scope(
             Some(&c.name),
             "conform/scope-values",
             format!(
-                "{} value(s) outside the operator's list for '{scope}', e.g. {}",
-                outside.len(),
+                "{n_outside} value(s) outside the operator's list for '{scope}', e.g. {}",
                 shown.join(", ")
             ),
         );
     }
-    if !constant && allowed.len() > 1 && distinct.len() < 2 {
+    if !constant && allowed.len() > 1 && n_distinct < 2 {
         r.push(true, &t.name, Some(&c.name), "conform/scope-one-value", format!(
             "scope '{scope}' has {} distinct value(s) although the operator lists {}: a mapping that fills it with one value would make the policy on it meaningless (mark it constant if that is right)",
-            distinct.len(), allowed.len()
+            n_distinct, allowed.len()
         ));
     }
     Ok(())
@@ -1317,5 +1385,10 @@ CREATE TABLE deliveries (
         assert!(!compatible("INTEGER", "VARCHAR"));
         assert!(!compatible("DATE", "TIMESTAMP"));
         assert!(!compatible("INTEGER", "DOUBLE"));
+        // #979: outside the known families, only the exact type
+        assert!(!compatible("INTEGER[]", "VARCHAR[]"));
+        assert!(!compatible("BLOB", "STRUCT(a INTEGER)"));
+        assert!(!compatible("UUID", "VARCHAR"));
+        assert!(compatible("INTEGER[]", "INTEGER[]"));
     }
 }
