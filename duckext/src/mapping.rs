@@ -173,16 +173,22 @@ pub fn build(
             duck("LOAD json").map_err(|e| {
                 format!("agent.mapping needs DuckDB's json extension (INSTALL json): {e}")
             })?;
-            // the source and the output first, then the bounds and the lock
             let setup = canonical::instance_setup(&source.to_string_lossy(), &m.memory_limit, 4);
-            let (attach_source, rest) = setup.split_first().ok_or("no setup")?;
-            duck(attach_source)?;
+            // the output is attached right after the source (#989: both
+            // after autoloading is off, before external access and the lock)
+            let at = setup
+                .iter()
+                .position(|s| s.starts_with("ATTACH"))
+                .ok_or("the build instance's setup attaches no source")?;
+            for s in &setup[..=at] {
+                duck(s)?;
+            }
             duck(&format!(
-                "ATTACH {} AS {}",
+                "ATTACH {} AS {} (TYPE duckdb)",
                 lit(&out.to_string_lossy()),
                 qi(ATTACH_AS)
             ))?;
-            for s in rest {
+            for s in &setup[at + 1..] {
                 duck(s)?;
             }
             let opts = canonical::Options {
