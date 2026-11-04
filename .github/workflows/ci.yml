@@ -723,6 +723,12 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/progressive-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/input-placement-e2e.mjs (#950): `-- @inputs auto` puts each
+      # input with what it controls, and a re-run keeps every bar in place.
+      - name: Input placement e2e (#950)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/input-placement-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/ask-builder-e2e.mjs (#195 M2-5): Ask in the builder — View
       # mode's sheet and Edit mode's Ask tab against a mocked Messages API
       # (its own static server: the assistant on in app-config.json).

@@ -44,6 +44,9 @@ pub struct Input {
     /// draw) whose answer reads one of `vars`, directly or through a
     /// dependent input (a country dropdown filtered by this region).
     pub readers: Vec<usize>,
+    /// Plan indices of the inputs that read one of `vars` (a country
+    /// dropdown filtered by this region).
+    pub children: Vec<usize>,
     pub scope: Scope,
 }
 
@@ -154,6 +157,7 @@ pub fn inputs(plan: &[Panel]) -> Vec<Input> {
             stmt: r.stmt,
             vars: r.vars,
             readers,
+            children: r.inputs.into_iter().collect(),
             scope,
         });
     }
@@ -298,6 +302,22 @@ fn scope_word(s: &Scope, plan: &[Panel]) -> String {
     }
 }
 
+/// The input-layout lints of `script`: [`diags`], less the placement
+/// advice for the inputs an `@inputs auto` page places itself (#950).
+pub fn lint(script: &str) -> Vec<Diagnostic> {
+    let plan = sql::plan(script);
+    let mut out = diags(&plan);
+    if auto_on(script) {
+        let (_, placed) = placement(&plan);
+        let moved: BTreeSet<usize> = placed.iter().map(|p| p.stmt + 1).collect();
+        out.retain(|d| {
+            !(d.code.starts_with("layout/") || d.code == "design/ungrouped-inputs")
+                || !moved.contains(&d.stmt)
+        });
+    }
+    out
+}
+
 /// The input-layout lints of `plan` (see the module docs).
 pub fn diags(plan: &[Panel]) -> Vec<Diagnostic> {
     let ins = inputs(plan);
@@ -419,6 +439,354 @@ pub fn diags(plan: &[Panel]) -> Vec<Diagnostic> {
     out
 }
 
+/// `-- @inputs auto` in the header (the first statement), the last
+/// `auto` / `manual` there winning (#950): the page places the loose inputs
+/// by what they control ([`placement`]) instead of where they stand.
+pub fn auto_on(script: &str) -> bool {
+    crate::sql::ask::raw_statements(script)
+        .first()
+        .map(|raw| {
+            raw.lines()
+                .filter_map(|l| l.trim().strip_prefix("--"))
+                .filter_map(|l| l.trim().strip_prefix("@inputs"))
+                .filter(|rest| rest.starts_with(char::is_whitespace))
+                .filter_map(|rest| match rest.trim() {
+                    "auto" => Some(true),
+                    "manual" => Some(false),
+                    _ => None,
+                })
+                .next_back()
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Where an automatically placed input is drawn (#950).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum At {
+    /// The page's filter bar, above everything it drives.
+    Page,
+    /// A section's (`::TAB` / `::SUBTAB`, or the part above the first tab)
+    /// own bar, above its panels.
+    Section,
+    /// A bar right above the one panel it drives.
+    Panel,
+}
+
+impl At {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            At::Page => "page",
+            At::Section => "section",
+            At::Panel => "panel",
+        }
+    }
+}
+
+/// One input [`placement`] moved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    pub stmt: usize,
+    pub at: At,
+    /// The bar it is drawn in: inputs with the same number share one row.
+    pub bar: usize,
+    /// [`At::Panel`]: that panel's plan index (its bar goes into its title).
+    pub target: Option<usize>,
+}
+
+/// The draw order of an `@inputs auto` dashboard: every plan index once,
+/// with each loose input (and the directives right before it, a ::SPAN or
+/// ::SHOW_IF) moved to what it controls — the page's filter bar (its panels
+/// are on several tabs), its section's bar (the top of that ::TAB /
+/// ::SUBTAB, after any intro text), or a bar right above its one panel.
+/// Inside a bar: time (::PERIOD / ::DATERANGE / ::DATE), place, product and
+/// customer, other inputs, then measure / dimension switches; an input that
+/// another one filters (country by region) right after it.
+///
+/// An input stays where it stands when the author placed it: inside a
+/// ::GROUP box, a ::VIEW alternative, a ::GUIDE_STEP or a ::FIGURE; a
+/// ::FORM (a card of its own); one nothing reads.
+pub fn placement(plan: &[Panel]) -> (Vec<usize>, Vec<Placed>) {
+    let ins = inputs(plan);
+    let n = plan.len();
+    let mut grouped = vec![false; n];
+    let mut open = false;
+    for (i, p) in plan.iter().enumerate() {
+        if is_group(p, Role::GroupStart) {
+            open = true;
+        } else if is_group(p, Role::GroupEnd) {
+            open = false;
+        }
+        grouped[i] = open;
+    }
+    let movable = |inp: &Input| {
+        let p = &plan[inp.stmt];
+        !grouped[inp.stmt]
+            && p.view.is_none()
+            && p.step.is_none()
+            && p.figure.is_none()
+            && inp.scope != Scope::Unused
+            && crate::inputs::input_kind(&p.roles) != Some(crate::InputKind::Form)
+    };
+    let moved_inputs: Vec<&Input> = ins.iter().filter(|x| movable(x)).collect();
+    // what moves with each input: the directives right before it
+    let mut moved = vec![false; n];
+    let mut units: Vec<(usize, Vec<usize>)> = Vec::new(); // (input, its statements)
+    for inp in &moved_inputs {
+        let mut k = inp.stmt;
+        while k > 0 && is_modifier(&plan[k - 1]) && !moved[k - 1] {
+            k -= 1;
+        }
+        let stmts: Vec<usize> = (k..=inp.stmt).collect();
+        for &j in &stmts {
+            moved[j] = true;
+        }
+        units.push((inp.stmt, stmts));
+    }
+    // a statement the inputs are drawn above
+    let content = |j: usize| {
+        let p = &plan[j];
+        !moved[j]
+            && !p.setup
+            && ((draws(p) && !is_text(p) && !p.roles.iter().any(|(_, r)| *r == Role::Track))
+                || crate::inputs::input_kind(&p.roles).is_some()
+                || p.tab_kind().is_some()
+                || p.roles.iter().any(|(_, r)| {
+                    matches!(
+                        r,
+                        Role::GroupStart
+                            | Role::View
+                            | Role::FigureStart
+                            | Role::GuideStep
+                            | Role::Placeholder
+                    )
+                }))
+    };
+    // the first statement of `j`'s unit: its group's start, then the
+    // directives right before that (a ::SPAN, a ::HEIGHT)
+    let unit_start = |j: usize| {
+        let p = &plan[j];
+        let mut k = p
+            .view
+            .as_ref()
+            .map(|v| v.group)
+            .or(p.step.as_ref().map(|s| s.group))
+            .or(p.figure)
+            .unwrap_or(j)
+            .min(j);
+        while k > 0 && is_modifier(&plan[k - 1]) && !moved[k - 1] {
+            k -= 1;
+        }
+        k
+    };
+    let top = || (0..n).find(|&j| content(j)).map(unit_start).unwrap_or(n);
+    let mut slots: Vec<(usize, At, usize, Vec<usize>)> = Vec::new(); // (before, at, key, unit)
+    for (inp, (_, stmts)) in moved_inputs.iter().zip(units) {
+        let (pos, at, key) = match &inp.scope {
+            Scope::Page => (top(), At::Page, n),
+            Scope::Section(None) => (top(), At::Section, n),
+            Scope::Section(Some(t)) => {
+                let sub = plan[*t].tab_kind() == Some(true);
+                let end = (t + 1..n)
+                    .find(|&k| match plan[k].tab_kind() {
+                        Some(true) => sub,
+                        Some(false) => true,
+                        None => false,
+                    })
+                    .unwrap_or(n);
+                let pos = (t + 1..end)
+                    .find(|&j| content(j))
+                    .map(|j| unit_start(j).max(t + 1))
+                    .unwrap_or(end);
+                (pos, At::Section, *t)
+            }
+            Scope::Panel(j) => {
+                // a ::TRACK strip is drawn with the chart above it
+                let track = |k: usize| plan[k].roles.iter().any(|(_, r)| *r == Role::Track);
+                let mut j = *j;
+                while track(j) {
+                    match (0..j).rev().find(|&k| draws(&plan[k])) {
+                        Some(k) => j = k,
+                        None => break,
+                    }
+                }
+                (unit_start(j), At::Panel, j)
+            }
+            Scope::Unused => unreachable!(),
+        };
+        slots.push((pos, at, key, stmts));
+    }
+    // bars: one per (place, scope, target)
+    let mut keys: Vec<(usize, At, usize)> = slots.iter().map(|s| (s.0, s.1, s.2)).collect();
+    keys.sort();
+    keys.dedup();
+    let rank_of: HashMap<usize, u8> = moved_inputs
+        .iter()
+        .map(|x| (x.stmt, rank(&plan[x.stmt], &x.vars)))
+        .collect();
+    let children: HashMap<usize, &Vec<usize>> =
+        moved_inputs.iter().map(|x| (x.stmt, &x.children)).collect();
+    let mut by_slot: HashMap<usize, Vec<Vec<usize>>> = HashMap::new(); // pos → units in draw order
+    let mut placed = Vec::new();
+    for (bar, key) in keys.iter().enumerate() {
+        let mut items: Vec<&(usize, At, usize, Vec<usize>)> =
+            slots.iter().filter(|s| (s.0, s.1, s.2) == *key).collect();
+        let input_of = |s: &(usize, At, usize, Vec<usize>)| *s.3.last().unwrap();
+        items.sort_by_key(|s| (rank_of[&input_of(s)], input_of(s)));
+        let here: BTreeSet<usize> = items.iter().map(|s| input_of(s)).collect();
+        let parent_here = |i: usize| {
+            items
+                .iter()
+                .any(|s| children[&input_of(s)].contains(&i) && input_of(s) != i)
+        };
+        // depth-first: a filtered input right after the one filtering it
+        let mut done = BTreeSet::new();
+        let mut seq = Vec::new();
+        fn visit(
+            i: usize,
+            here: &BTreeSet<usize>,
+            children: &HashMap<usize, &Vec<usize>>,
+            done: &mut BTreeSet<usize>,
+            seq: &mut Vec<usize>,
+        ) {
+            if !done.insert(i) {
+                return;
+            }
+            seq.push(i);
+            for &c in children[&i].iter() {
+                if here.contains(&c) {
+                    visit(c, here, children, done, seq);
+                }
+            }
+        }
+        for s in &items {
+            let i = input_of(s);
+            if !parent_here(i) {
+                visit(i, &here, &children, &mut done, &mut seq);
+            }
+        }
+        for s in &items {
+            visit(input_of(s), &here, &children, &mut done, &mut seq);
+        }
+        let entry = by_slot.entry(key.0).or_default();
+        for i in seq {
+            let s = items.iter().find(|s| input_of(s) == i).unwrap();
+            entry.push(s.3.clone());
+            placed.push(Placed {
+                stmt: i,
+                at: key.1,
+                bar,
+                target: (key.1 == At::Panel).then_some(key.2),
+            });
+        }
+    }
+    let mut order = Vec::with_capacity(n);
+    for (k, m) in moved.iter().map(Some).chain([None]).enumerate() {
+        for u in by_slot.get(&k).into_iter().flatten() {
+            order.extend(u);
+        }
+        if m == Some(&false) {
+            order.push(k);
+        }
+    }
+    (order, placed)
+}
+
+/// A directive that applies to the statement after it (::SPAN, ::HEIGHT,
+/// ::SHOW_IF, a table's ::TOTALS …), not a structure of its own.
+fn is_modifier(p: &Panel) -> bool {
+    !p.setup
+        && crate::inputs::input_kind(&p.roles).is_none()
+        && p.tab_kind().is_none()
+        && p.view.as_ref().is_none_or(|v| !v.marker)
+        && crate::roles::is_directive_panel(&p.roles)
+        && !p.roles.iter().any(|(_, r)| {
+            crate::roles::is_chrome_directive(*r)
+                || matches!(
+                    r,
+                    Role::GroupStart
+                        | Role::GroupEnd
+                        | Role::View
+                        | Role::ViewEnd
+                        | Role::FigureStart
+                        | Role::FigureEnd
+                        | Role::GuideStep
+                        | Role::Columns
+                        | Role::Fit
+                        | Role::Section
+                        | Role::Placeholder
+                )
+        })
+}
+
+/// An input's place in a bar: time, place, product / customer, other,
+/// then switches (#950).
+fn rank(p: &Panel, vars: &[String]) -> u8 {
+    use crate::InputKind as K;
+    let kind = crate::inputs::input_kind(&p.roles);
+    if matches!(kind, Some(K::Period | K::DateRange | K::Date)) {
+        return 0;
+    }
+    let has = |words: &[&str]| {
+        vars.iter().any(|v| {
+            v.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| {
+                words
+                    .iter()
+                    .any(|x| w == *x || w.strip_suffix('s') == Some(x))
+            })
+        })
+    };
+    if has(&[
+        "date", "day", "week", "month", "quarter", "year", "period", "from", "to", "since", "until",
+    ]) {
+        return 0;
+    }
+    if has(&[
+        "region",
+        "country",
+        "state",
+        "city",
+        "location",
+        "site",
+        "store",
+        "market",
+        "warehouse",
+        "plant",
+        "territory",
+        "zone",
+        "area",
+        "geo",
+        "branch",
+        "depot",
+        "land",
+        "standort",
+    ]) {
+        return 1;
+    }
+    if has(&[
+        "product", "sku", "item", "category", "brand", "customer", "client", "segment", "channel",
+        "account", "supplier", "vendor", "artikel", "kunde", "produkt",
+    ]) {
+        return 2;
+    }
+    if matches!(kind, Some(K::Buttons | K::Toggle))
+        || has(&[
+            "measure",
+            "metric",
+            "kpi",
+            "dimension",
+            "by",
+            "mode",
+            "view",
+            "show",
+            "split",
+        ])
+    {
+        return 4;
+    }
+    3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +880,105 @@ mod tests {
         );
         let c = codes(&s);
         assert!(!c.iter().any(|x| x.0 == "input/unused"), "{c:?}");
+    }
+
+    fn placed(script: &str) -> (Vec<usize>, Vec<(usize, &'static str, usize)>) {
+        let (order, p) = placement(&sql::plan(script));
+        (
+            order,
+            p.into_iter()
+                .map(|x| (x.stmt, x.at.as_str(), x.bar))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn auto_is_a_header_switch() {
+        assert!(auto_on("-- @inputs auto\nSELECT 1::TEXT;"));
+        assert!(!auto_on(
+            "-- @inputs auto\n-- @inputs manual\nSELECT 1::TEXT;"
+        ));
+        assert!(!auto_on(
+            "SELECT 1::TEXT;\n-- @inputs auto\nSELECT 2::TEXT;"
+        ));
+        assert!(!auto_on("-- @inputsauto\nSELECT 1::TEXT;"));
+    }
+
+    #[test]
+    fn inputs_go_to_what_they_control() {
+        // 0 table, 1 '# Sales' intro, 2 chart switch (one panel), 3 tab A,
+        // 4 tab filter, 5 chart, 6 chart(reads 2), 7 tab B, 8 region (page),
+        // 9 chart
+        let s = format!(
+            "{DATA}SELECT '# Sales'::MARKDOWN;\n\
+             SELECT 'Units' AS measure ::BUTTONS;\n\
+             SELECT 'A'::TAB;\n\
+             SELECT DISTINCT ch AS ch ::DROPDOWN FROM t;\n\
+             SELECT region::XAXIS, sum(v)::BARCHART FROM t WHERE region = getvariable('region') AND ch = getvariable('ch') GROUP BY 1;\n\
+             SELECT region::XAXIS, CASE getvariable('measure') WHEN 'Units' THEN sum(v) END::LINECHART FROM t WHERE ch = getvariable('ch') GROUP BY 1;\n\
+             SELECT 'B'::TAB;\n\
+             SELECT DISTINCT region AS region ::DROPDOWN FROM t;\n\
+             SELECT region::XAXIS, sum(v)::BARCHART FROM t WHERE region = getvariable('region') GROUP BY 1;\n"
+        );
+        let (order, p) = placed(&s);
+        // the page filter goes above the tabs, after the intro text; the tab
+        // filter to its tab's top; the switch right above its chart
+        assert_eq!(order, vec![0, 1, 8, 3, 4, 5, 2, 6, 7, 9]);
+        let at: Vec<(usize, &str)> = p.iter().map(|x| (x.0, x.1)).collect();
+        assert!(at.contains(&(8, "page")), "{p:?}");
+        assert!(at.contains(&(4, "section")), "{p:?}");
+        assert!(at.contains(&(2, "panel")), "{p:?}");
+    }
+
+    #[test]
+    fn a_bar_orders_time_place_product_switches_and_keeps_linked_levels() {
+        let s = format!(
+            "{DATA}SELECT 'Units' AS measure ::BUTTONS;\n\
+             SELECT DISTINCT ch AS product ::DROPDOWN FROM t;\n\
+             SELECT DISTINCT ch AS country ::DROPDOWN FROM t WHERE region = getvariable('region');\n\
+             SELECT DATE '2026-01-01' AS day ::DATE;\n\
+             SELECT DISTINCT region AS region ::DROPDOWN FROM t;\n\
+             SELECT region::XAXIS, sum(v)::BARCHART FROM t WHERE ch = getvariable('country') AND ch = getvariable('product') AND getvariable('day') IS NOT NULL GROUP BY 1, getvariable('measure');\n\
+             SELECT region::XAXIS, sum(v)::LINECHART FROM t WHERE ch = getvariable('country') AND ch = getvariable('product') AND getvariable('day') IS NOT NULL GROUP BY 1, getvariable('measure');\n"
+        );
+        let (order, p) = placed(&s);
+        // day, region, country (filtered by region), product, measure
+        assert_eq!(order, vec![0, 4, 5, 3, 2, 1, 6, 7]);
+        assert!(p.iter().all(|x| x.2 == p[0].2), "one bar: {p:?}");
+    }
+
+    #[test]
+    fn grouped_and_unused_inputs_stay_and_a_span_moves_along() {
+        let s = format!(
+            "{DATA}SELECT 'Filters'::GROUP;\n\
+             SELECT DISTINCT region AS region ::DROPDOWN FROM t;\n\
+             SELECT 1::ENDGROUP;\n\
+             SELECT region::XAXIS, sum(v)::BARCHART FROM t WHERE region = getvariable('region') GROUP BY 1;\n\
+             SELECT 6::SPAN;\n\
+             SELECT DISTINCT ch AS ch ::DROPDOWN FROM t;\n\
+             SELECT DISTINCT ch AS nobody ::DROPDOWN FROM t;\n\
+             SELECT 6::SPAN;\n\
+             SELECT ch::XAXIS, sum(v)::BARCHART FROM t WHERE ch = getvariable('ch') GROUP BY 1;\n"
+        );
+        let (order, p) = placed(&s);
+        assert_eq!(p.iter().map(|x| x.0).collect::<Vec<_>>(), vec![6]);
+        // ch (with its ::SPAN) goes before the second chart's own ::SPAN
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 7, 5, 6, 8, 9]);
+    }
+
+    #[test]
+    fn auto_drops_the_placement_advice_for_what_it_moves() {
+        let body = format!(
+            "{DATA}SELECT region::XAXIS, sum(v)::BARCHART FROM t WHERE region = getvariable('region') GROUP BY 1;\n\
+             SELECT ch::XAXIS, sum(v)::BARCHART FROM t WHERE region = getvariable('region') GROUP BY 1;\n\
+             SELECT DISTINCT region AS region ::DROPDOWN FROM t;\n"
+        );
+        let has = |s: &str| {
+            lint(s)
+                .iter()
+                .any(|d| d.code == "layout/filter-below-content")
+        };
+        assert!(has(&body));
+        assert!(!has(&format!("-- @inputs auto\n{body}")));
     }
 }
