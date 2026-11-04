@@ -1322,8 +1322,39 @@ exit 1 when the mapping doesn't conform):
   question's panel is bound against the views; one that reads a missing
   optional column is off, with the reason.
 
-Building the views at an agent's start (the same classifier, a separate
-locked instance) is the next step of #194.
+**At an agent's start** (`options.agent.mapping`, #194 A3b) the server
+builds the same views itself, so a customer's agent serves the contract's
+tables built from that customer's database:
+
+```json
+{"auth": {…}, "agent": {"dashboard": "supplier-reliability",
+  "mapping": {"contract": "canonical/supplier-reliability.sql",
+              "views": "customer-mapping/acme/views.sql",
+              "db": "/data/acme.duckdb",
+              "scope": {"region": ["north", "south"]},
+              "memory_limit": "4GB", "timeout_s": 600}}}
+```
+
+Every snapshot build (the start, each refresh) opens a throwaway DuckDB
+in the server process — never the serving session: `db` attached
+`READ_ONLY` as `source`, the output file (`canonical.duckdb` in the
+snapshot directory) attached, then `memory_limit` (default 4GB) and 4
+threads, external access off, no extension autoloading and the
+configuration locked, before any of the mapping's SQL runs. The checks
+are `dashboard --conform`'s own (`scope` is its `--scope`); a mapping
+that doesn't conform stops the start with the same report, and a refresh
+with one keeps the snapshot it had. Then each contract table is copied
+into `canonical.duckdb`, which the snapshot attaches read-only as
+`canonical` and makes the default database: the dashboard's bare names
+resolve to the contract's tables, and neither the source's own tables nor
+anything of the host session (its databases are not copied, `attach` is
+ignored, `search_path` is refused) is in the snapshot. The agent's questions are bound against the views there too
+(like `--conform --dashboard`): one whose panel reads a column the mapping
+leaves out is off for this customer — not in `GET /api/agent` or
+`tools/list`, refused when asked — and the start log says why. A watchdog interrupts the build after `timeout_s` (default
+600) or when the server stops. `mapping` can't be combined with
+`options.source`. Don't attach `db` in the host session as well: the
+mapping is meant to be the only way the agent sees it.
 
 ### Scheduled tasks (`options.tasks`, #767)
 

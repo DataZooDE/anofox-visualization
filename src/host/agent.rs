@@ -45,6 +45,121 @@ pub struct AgentOptions {
     /// `mcp.resource` (#864): this server's MCP URL — the token audience and
     /// the RFC 9728 resource; `None`: no `/mcp`.
     pub mcp: Option<String>,
+    /// `mapping` (#194 A3b): build the dashboard's canonical tables from a
+    /// customer's mapping at every snapshot build; `None`: the dashboard
+    /// reads the server's own data.
+    pub mapping: Option<MappingOptions>,
+}
+
+/// `agent.mapping` (#194 A3b, plan §4): the customer's source database, the
+/// canonical contract and the mapping onto it. Built in a separate, locked
+/// DuckDB instance (never the serving one) with the same checks as
+/// `dashboard --conform`; a mapping that doesn't conform refuses the start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappingOptions {
+    pub contract: String,
+    pub views: String,
+    pub db: String,
+    /// Per scope name, the values the operator allows.
+    pub scope: std::collections::BTreeMap<String, Vec<String>>,
+    pub memory_limit: String,
+    pub timeout_s: u64,
+    /// Rows per contract table copied into the snapshot, at most (#987).
+    pub max_rows: u64,
+    /// The size the built database and the build's spill may reach (#987).
+    pub max_bytes: u64,
+}
+
+impl MappingOptions {
+    pub fn parse(v: &Value) -> Result<MappingOptions, String> {
+        let o = v.as_object().ok_or("agent.mapping: must be an object")?;
+        if let Some(k) = o.keys().find(|k| {
+            !matches!(
+                k.as_str(),
+                "contract"
+                    | "views"
+                    | "db"
+                    | "scope"
+                    | "memory_limit"
+                    | "timeout_s"
+                    | "max_rows"
+                    | "max_bytes"
+            )
+        }) {
+            return Err(format!("agent.mapping: unknown key '{k}'"));
+        }
+        let path = |k: &str| -> Result<String, String> {
+            o.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .ok_or(format!("agent.mapping.{k}: a file path"))
+        };
+        let mut scope: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        if let Some(sv) = o.get("scope") {
+            let m = sv
+                .as_object()
+                .ok_or("agent.mapping.scope: {\"<scope>\": [\"value\", …]}")?;
+            for (k, vals) in m {
+                let vals: Vec<&str> = vals
+                    .as_array()
+                    .ok_or("agent.mapping.scope: each scope is a list of values")?
+                    .iter()
+                    .map(Value::as_str)
+                    .collect::<Option<_>>()
+                    .ok_or("agent.mapping.scope: values are strings")?;
+                // #984, #988: parsed as `dashboard --conform --scope` is
+                let (k, vals) = crate::canonical::scope_entry(k, &vals)
+                    .map_err(|e| format!("agent.mapping.scope: {e}"))?;
+                scope.entry(k).or_default().extend(vals);
+            }
+        }
+        let memory_limit = match o.get("memory_limit") {
+            None => "4GB".to_string(),
+            Some(m) => {
+                let m = m.as_str().unwrap_or("").trim().to_ascii_uppercase();
+                let n = m.trim_end_matches(|c: char| c.is_ascii_alphabetic()).trim();
+                let unit = m[n.len()..].trim();
+                if !(n.parse::<f64>().is_ok_and(|n| n > 0.0)
+                    && ["KB", "MB", "GB", "TB", "KIB", "MIB", "GIB", "TIB"].contains(&unit))
+                {
+                    return Err("agent.mapping.memory_limit: a size like \"4GB\"".into());
+                }
+                m
+            }
+        };
+        let timeout_s = match o.get("timeout_s") {
+            None => 600,
+            Some(n) => n
+                .as_u64()
+                .filter(|n| (1..=86_400).contains(n))
+                .ok_or("agent.mapping.timeout_s: 1 to 86400 seconds")?,
+        };
+        // #987: the copy into the snapshot is bounded like `options.source`'s
+        let count = |k: &str, default: u64| -> Result<u64, String> {
+            match o.get(k) {
+                None => Ok(default),
+                Some(n) => n
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or(format!("agent.mapping.{k}: a positive integer")),
+            }
+        };
+        let max_rows = count("max_rows", 50_000_000)?;
+        let max_bytes = count("max_bytes", 10 * 1024 * 1024 * 1024)?;
+        Ok(MappingOptions {
+            max_rows,
+            max_bytes,
+            contract: path("contract")?,
+            views: path("views")?,
+            db: path("db")?,
+            scope,
+            memory_limit,
+            timeout_s,
+        })
+    }
 }
 
 impl AgentOptions {
@@ -52,7 +167,7 @@ impl AgentOptions {
         let o = v.as_object().ok_or("agent: must be an object")?;
         if let Some(k) = o
             .keys()
-            .find(|k| !matches!(k.as_str(), "dashboard" | "max_rows" | "mcp"))
+            .find(|k| !matches!(k.as_str(), "dashboard" | "max_rows" | "mcp" | "mapping"))
         {
             return Err(format!("agent: unknown key '{k}'"));
         }
@@ -88,10 +203,12 @@ impl AgentOptions {
                 Some(r.to_string())
             }
         };
+        let mapping = o.get("mapping").map(MappingOptions::parse).transpose()?;
         Ok(AgentOptions {
             dashboard,
             max_rows,
             mcp,
+            mapping,
         })
     }
 }
@@ -276,6 +393,9 @@ pub struct Dash<'a> {
     pub id: &'a str,
     pub title: &'a str,
     pub script: &'a str,
+    /// Question ids this deployment can't answer (#982: its customer
+    /// mapping leaves out a column the panel reads) — not listed, refused.
+    pub off: &'a [String],
 }
 
 /// `GET /api/agent`: the questions, their slots and the footer's title —
@@ -286,7 +406,7 @@ pub fn manifest(d: &Dash) -> Value {
     json!({
         "agent": d.id,
         "title": d.title,
-        "questions": question::declared(d.script).iter().map(|q| json!({
+        "questions": question::declared(d.script).iter().filter(|q| !d.off.contains(&q.id)).map(|q| json!({
             "id": q.id,
             "text": question::display(&q.text, &q.slots),
             "slots": q.slots.iter().map(|s| json!({
@@ -485,7 +605,7 @@ pub fn answer(
     let questions = question::declared(d.script);
     let q: &Question = questions
         .iter()
-        .find(|q| q.id == req.question_id)
+        .find(|q| q.id == req.question_id && !d.off.contains(&q.id))
         .ok_or_else(|| {
             AgentError::new(
                 404,
@@ -711,6 +831,7 @@ mod tests {
             id: "suppliers",
             title: "Suppliers",
             script: DASH,
+            off: &[],
         };
         let req = parse_answer(body, 50)?;
         answer(
@@ -731,8 +852,35 @@ mod tests {
                 dashboard: "suppliers".into(),
                 max_rows: DEFAULT_ROWS,
                 mcp: None,
+                mapping: None,
             }
         );
+        // #194 A3b: a mapping's paths, scope lists and bounds
+        let m = AgentOptions::parse(&json!({"dashboard": "s", "mapping": {"contract": "c.sql", "views": "v.sql", "db": "acme.duckdb", "scope": {"Region": ["north", "south"]}, "memory_limit": "2GB", "timeout_s": 60}})).unwrap().mapping.unwrap();
+        assert_eq!(
+            (m.db.as_str(), m.memory_limit.as_str(), m.timeout_s),
+            ("acme.duckdb", "2GB", 60)
+        );
+        assert_eq!(m.scope["region"], ["north", "south"]);
+        // #988: trimmed, blanks dropped, case-duplicate keys merged
+        let m = AgentOptions::parse(&json!({"dashboard": "s", "mapping": {"contract": "c", "views": "v", "db": "d", "scope": {"Region": [" north ", ""], "region ": ["south"]}}})).unwrap().mapping.unwrap();
+        assert_eq!(m.scope["region"], ["north", "south"]);
+        assert_eq!((m.max_rows, m.max_bytes), (50_000_000, 10 << 30));
+        for bad in [
+            json!({"contract": "c.sql", "views": "v.sql"}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "memory_limit": "lots"}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "timeout_s": 0}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "key": "x"}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "scope": {"region": []}}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "scope": {"region": [" ", ""]}}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "scope": {" ": ["a"]}}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "max_rows": 0}),
+        ] {
+            assert!(
+                AgentOptions::parse(&json!({"dashboard": "s", "mapping": bad})).is_err(),
+                "{bad}"
+            );
+        }
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 0})).is_err());
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 201})).is_err());
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "ui": true})).is_err());
@@ -901,6 +1049,7 @@ mod tests {
             id: "d",
             title: "D",
             script,
+            off: &[],
         };
         let req = parse_answer(
             r#"{"question_id":"what_happened_in_region","slots":{"region":"S"}}"#,
@@ -1003,6 +1152,7 @@ mod tests {
             id: "suppliers",
             title: "Suppliers",
             script: DASH,
+            off: &[],
         };
         let req = parse_answer(r#"{"question_id":"how_reliable_is_supplier_on_delivery","slots":{"supplier":"Boreal"}}"#, 50).unwrap();
         let e = answer(
@@ -1025,6 +1175,7 @@ mod tests {
             id: "suppliers",
             title: "Suppliers",
             script: DASH,
+            off: &[],
         });
         assert_eq!(m["questions"][0]["slots"][0]["input"], "dropdown");
         assert!(!m.to_string().contains("Alpine"), "{m}");

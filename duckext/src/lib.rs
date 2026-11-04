@@ -34,6 +34,8 @@ mod generation;
 #[cfg(not(target_arch = "wasm32"))]
 mod limits;
 #[cfg(not(target_arch = "wasm32"))]
+mod mapping;
+#[cfg(not(target_arch = "wasm32"))]
 mod panel_cache;
 mod raster;
 #[cfg(not(target_arch = "wasm32"))]
