@@ -33,6 +33,7 @@ use std::sync::OnceLock;
 mod generation;
 #[cfg(not(target_arch = "wasm32"))]
 mod limits;
+mod mapping;
 #[cfg(not(target_arch = "wasm32"))]
 mod panel_cache;
 mod raster;

@@ -2,10 +2,12 @@
 // a declared question is answered for the caller with server-fixed variables
 // and no model; every other request field is refused; a failing panel's text
 // (a canary value in a cast error) reaches neither the answer nor the log;
-// an unpublishable dashboard stops the start.
+// an unpublishable dashboard stops the start; a customer mapping
+// (options.agent.mapping, #194 A3b) serves its canonical tables, and one
+// that doesn't conform stops the start.
 //
 //   node scripts/agent-served-e2e.mjs --ext path/to/anofox_visualization.duckdb_extension [--port 8958]
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -187,6 +189,87 @@ try {
     srv.proc.kill();
     await sleep(500);
   }
+
+  // #194 A3b: a customer mapping, built at the start in its own locked
+  // instance. The source's tables have German names; the dashboard reads
+  // only the contract's.
+  const mapDir = path.join(dir, "map");
+  const mapDash = path.join(mapDir, "dash");
+  mkdirSync(mapDash, { recursive: true });
+  const srcDb = path.join(mapDir, "acme.duckdb");
+  const made = spawnSync(duckdb, [srcDb, "-c", "CREATE TABLE lieferanten AS SELECT * FROM (VALUES ('S1', 'Alpha', 'north', 2), ('S2', 'Beta', 'south', 7)) t(code, firma, gebiet, verzug);"], { env });
+  check(made.status === 0, "the customer's source database is written");
+  writeFileSync(
+    path.join(mapDir, "contract.sql"),
+    `CREATE TABLE suppliers (
+    supplier_id VARCHAR PRIMARY KEY,
+    name VARCHAR NOT NULL,
+    region VARCHAR NOT NULL, -- @scope region
+    days_late INTEGER
+);
+`
+  );
+  const views = path.join(mapDir, "views.sql");
+  const goodViews = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region, verzug::INTEGER AS days_late FROM source.lieferanten;\n";
+  writeFileSync(views, goodViews);
+  writeFileSync(
+    path.join(mapDash, "late.sql"),
+    `-- @title Late suppliers
+-- @vars name
+SELECT name ::DROPDOWN FROM suppliers ORDER BY 1;
+-- @question How late is {name}?
+SELECT days_late AS "Days late" ::TABLE FROM suppliers WHERE name = getvariable('name');
+-- @question How late are our suppliers?
+SELECT name AS "Supplier" ::TABLE, days_late AS "Days late" FROM suppliers ORDER BY 1;
+-- @question What does the source hold?
+SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM lieferanten;
+`
+  );
+  const mapping = { contract: path.join(mapDir, "contract.sql"), views, db: srcDb, scope: { region: ["north", "south"] } };
+  srv = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping } }, mapDash);
+  check(srv.proc != null, "an agent with a conforming customer mapping starts");
+  if (srv.proc) {
+    a = await (await answer({ question_id: "how_late_are_our_suppliers" })).json();
+    check(JSON.stringify(a.facts?.rows) === JSON.stringify([{ Supplier: "Alpha", "Days late": 2 }, { Supplier: "Beta", "Days late": 7 }]), "the question is answered from the mapped canonical table");
+    a = await (await answer({ question_id: "how_late_is_name", slots: { name: "bet" } })).json();
+    check(a.facts?.rows?.[0]?.["Days late"] === 7, "a slot resolves among the canonical table's values");
+    r = await answer({ question_id: "what_does_the_source_hold" });
+    check(r.status === 502, `the source's own tables aren't in the snapshot (${r.status})`);
+    // A refresh builds the mapping again from the source's current rows; a
+    // mapping broken since keeps the snapshot it had.
+    spawnSync(duckdb, [srcDb, "-c", "UPDATE lieferanten SET verzug = 9 WHERE code = 'S2';"], { env });
+    srv.proc.stdin.write(`SELECT anofox_serve_refresh(${port});\n`);
+    await sleep(1500);
+    a = await (await answer({ question_id: "how_late_is_name", slots: { name: "Beta" } })).json();
+    check(a.facts?.rows?.[0]?.["Days late"] === 9, "a refresh rebuilds the canonical tables from the source");
+    writeFileSync(views, "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, 'north' AS region, verzug::INTEGER AS days_late FROM source.lieferanten;\n");
+    spawnSync(duckdb, [srcDb, "-c", "UPDATE lieferanten SET verzug = 11 WHERE code = 'S2';"], { env });
+    srv.proc.stdin.write(`SELECT anofox_serve_refresh(${port});\n`);
+    await sleep(1500);
+    a = await (await answer({ question_id: "how_late_is_name", slots: { name: "Beta" } })).json();
+    check(a.facts?.rows?.[0]?.["Days late"] === 9 && srv.log().includes("conform/scope-not-source"), "a refresh with a broken mapping keeps the old snapshot");
+    writeFileSync(views, goodViews);
+    srv.proc.kill();
+    await sleep(500);
+  } else console.error(srv.log());
+  // Refused at the start, as `dashboard --conform` refuses them (H1, M9, R2).
+  for (const [what, v, needle] of [
+    ["a macro", "CREATE MACRO m() AS 1;\n" + goodViews, ""],
+    ["a query_table call", "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region, verzug::INTEGER AS days_late FROM query_table('source.lieferanten');\n", "mapping/refused"],
+    ["a constant scope column without its marker", "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, 'north' AS region, verzug::INTEGER AS days_late FROM source.lieferanten;\n", "scope"],
+    ["a file reader", "CREATE VIEW suppliers AS SELECT * FROM read_csv('/etc/passwd');\n", "mapping/refused"],
+  ]) {
+    writeFileSync(views, v);
+    const x = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping } }, mapDash);
+    check(x.proc == null && x.log().includes("agent.mapping") && x.log().includes(needle), `a mapping with ${what} doesn't start`);
+    if (process.env.E2E_VERBOSE) console.error(x.log());
+    if (x.proc) x.proc.kill();
+  }
+  writeFileSync(views, goodViews);
+  const both = await serve({ auth, policy: "none", source: { uri: "quack:localhost:9494", token_env: "SEC", as: "src" }, agent: { dashboard: "late", mapping } }, mapDash);
+  check(both.proc == null && both.log().includes("can't be combined"), "a mapping together with options.source doesn't start");
+  if (both.proc) both.proc.kill();
+  else if (!both.log().includes("can't be combined")) console.error(both.log());
 
   // An unpublishable dashboard stops the start.
   const badDir = path.join(dir, "bad");

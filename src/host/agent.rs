@@ -45,6 +45,92 @@ pub struct AgentOptions {
     /// `mcp.resource` (#864): this server's MCP URL — the token audience and
     /// the RFC 9728 resource; `None`: no `/mcp`.
     pub mcp: Option<String>,
+    /// `mapping` (#194 A3b): build the dashboard's canonical tables from a
+    /// customer's mapping at every snapshot build; `None`: the dashboard
+    /// reads the server's own data.
+    pub mapping: Option<MappingOptions>,
+}
+
+/// `agent.mapping` (#194 A3b, plan §4): the customer's source database, the
+/// canonical contract and the mapping onto it. Built in a separate, locked
+/// DuckDB instance (never the serving one) with the same checks as
+/// `dashboard --conform`; a mapping that doesn't conform refuses the start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappingOptions {
+    pub contract: String,
+    pub views: String,
+    pub db: String,
+    /// Per scope name, the values the operator allows.
+    pub scope: std::collections::BTreeMap<String, Vec<String>>,
+    pub memory_limit: String,
+    pub timeout_s: u64,
+}
+
+impl MappingOptions {
+    pub fn parse(v: &Value) -> Result<MappingOptions, String> {
+        let o = v.as_object().ok_or("agent.mapping: must be an object")?;
+        if let Some(k) = o.keys().find(|k| {
+            !matches!(
+                k.as_str(),
+                "contract" | "views" | "db" | "scope" | "memory_limit" | "timeout_s"
+            )
+        }) {
+            return Err(format!("agent.mapping: unknown key '{k}'"));
+        }
+        let path = |k: &str| -> Result<String, String> {
+            o.get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .ok_or(format!("agent.mapping.{k}: a file path"))
+        };
+        let mut scope = std::collections::BTreeMap::new();
+        if let Some(sv) = o.get("scope") {
+            let m = sv
+                .as_object()
+                .ok_or("agent.mapping.scope: {\"<scope>\": [\"value\", …]}")?;
+            for (k, vals) in m {
+                let vals: Vec<String> = vals
+                    .as_array()
+                    .ok_or("agent.mapping.scope: each scope is a list of values")?
+                    .iter()
+                    .map(|x| x.as_str().map(str::to_string))
+                    .collect::<Option<_>>()
+                    .ok_or("agent.mapping.scope: values are strings")?;
+                scope.insert(k.to_ascii_lowercase(), vals);
+            }
+        }
+        let memory_limit = match o.get("memory_limit") {
+            None => "4GB".to_string(),
+            Some(m) => {
+                let m = m.as_str().unwrap_or("").trim().to_ascii_uppercase();
+                let n = m.trim_end_matches(|c: char| c.is_ascii_alphabetic()).trim();
+                let unit = m[n.len()..].trim();
+                if !(n.parse::<f64>().is_ok_and(|n| n > 0.0)
+                    && ["KB", "MB", "GB", "TB", "KIB", "MIB", "GIB", "TIB"].contains(&unit))
+                {
+                    return Err("agent.mapping.memory_limit: a size like \"4GB\"".into());
+                }
+                m
+            }
+        };
+        let timeout_s = match o.get("timeout_s") {
+            None => 600,
+            Some(n) => n
+                .as_u64()
+                .filter(|n| (1..=86_400).contains(n))
+                .ok_or("agent.mapping.timeout_s: 1 to 86400 seconds")?,
+        };
+        Ok(MappingOptions {
+            contract: path("contract")?,
+            views: path("views")?,
+            db: path("db")?,
+            scope,
+            memory_limit,
+            timeout_s,
+        })
+    }
 }
 
 impl AgentOptions {
@@ -52,7 +138,7 @@ impl AgentOptions {
         let o = v.as_object().ok_or("agent: must be an object")?;
         if let Some(k) = o
             .keys()
-            .find(|k| !matches!(k.as_str(), "dashboard" | "max_rows" | "mcp"))
+            .find(|k| !matches!(k.as_str(), "dashboard" | "max_rows" | "mcp" | "mapping"))
         {
             return Err(format!("agent: unknown key '{k}'"));
         }
@@ -88,10 +174,12 @@ impl AgentOptions {
                 Some(r.to_string())
             }
         };
+        let mapping = o.get("mapping").map(MappingOptions::parse).transpose()?;
         Ok(AgentOptions {
             dashboard,
             max_rows,
             mcp,
+            mapping,
         })
     }
 }
@@ -731,8 +819,27 @@ mod tests {
                 dashboard: "suppliers".into(),
                 max_rows: DEFAULT_ROWS,
                 mcp: None,
+                mapping: None,
             }
         );
+        // #194 A3b: a mapping's paths, scope lists and bounds
+        let m = AgentOptions::parse(&json!({"dashboard": "s", "mapping": {"contract": "c.sql", "views": "v.sql", "db": "acme.duckdb", "scope": {"Region": ["north", "south"]}, "memory_limit": "2GB", "timeout_s": 60}})).unwrap().mapping.unwrap();
+        assert_eq!(
+            (m.db.as_str(), m.memory_limit.as_str(), m.timeout_s),
+            ("acme.duckdb", "2GB", 60)
+        );
+        assert_eq!(m.scope["region"], ["north", "south"]);
+        for bad in [
+            json!({"contract": "c.sql", "views": "v.sql"}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "memory_limit": "lots"}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "timeout_s": 0}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "key": "x"}),
+        ] {
+            assert!(
+                AgentOptions::parse(&json!({"dashboard": "s", "mapping": bad})).is_err(),
+                "{bad}"
+            );
+        }
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 0})).is_err());
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 201})).is_err());
         assert!(AgentOptions::parse(&json!({"dashboard": "s", "ui": true})).is_err());

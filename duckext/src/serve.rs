@@ -2126,6 +2126,10 @@ impl LockedOptions {
         if o.ingest.is_some() && !o.auth.as_ref().is_some_and(|a| a.keys.is_some()) {
             return Err("options.ingest needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with an ingest:<table> scope may write".into());
         }
+        // #194 A3b: one data source for an agent's snapshot
+        if o.agent.as_ref().is_some_and(|a| a.mapping.is_some()) && o.source.is_some() {
+            return Err("options.agent.mapping and options.source can't be combined: the mapping builds the snapshot's data".into());
+        }
         if o.agent.is_some() {
             // #863: answers per caller (M1, H3); no model text (D5); no
             // values in the log (N3).
@@ -3656,14 +3660,18 @@ impl Locked {
         // console, or a new `anofox_serve_dashboards` sharing this host
         // database's connection.
         let dir = SnapshotDir::create()?;
-        let source_result = match &self.opts.source {
-            Some(src) => Some(run_source_build(
+        let source_result = match (
+            &self.opts.source,
+            self.opts.agent.as_ref().and_then(|a| a.mapping.as_ref()),
+        ) {
+            (_, Some(m)) => Some(crate::mapping::build(m, &dir.0, &self.stop)?),
+            (Some(src), None) => Some(run_source_build(
                 src,
                 &dir.0,
                 &self.stop,
                 &self.source_build,
             )?),
-            None => None,
+            (None, None) => None,
         };
         let (mut snap, warnings) = {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
@@ -4049,14 +4057,20 @@ pub fn start_locked(
     let startup_dir = SnapshotDir::create()?;
     let startup_stop = Arc::new(AtomicBool::new(false));
     let startup_build_state = SourceBuildState::new();
-    let source_result = match &opts.source {
-        Some(src) => Some(run_source_build(
+    // #194 A3b: an agent's customer mapping, built in its own locked
+    // instance (crate::mapping) — never in this session
+    let source_result = match (
+        &opts.source,
+        opts.agent.as_ref().and_then(|a| a.mapping.as_ref()),
+    ) {
+        (_, Some(m)) => Some(crate::mapping::build(m, &startup_dir.0, &startup_stop)?),
+        (Some(src), None) => Some(run_source_build(
             src,
             &startup_dir.0,
             &startup_stop,
             &startup_build_state,
         )?),
-        None => None,
+        (None, None) => None,
     };
     let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
@@ -7360,7 +7374,12 @@ fn build_snapshot(
     if let Some((name, file, w)) = source_result {
         if copied.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
             return Err(format!(
-                "options.source.as: '{name}' clashes with an existing attached database"
+                "{}: '{name}' clashes with an existing attached database",
+                if opts.agent.as_ref().is_some_and(|a| a.mapping.is_some()) {
+                    "options.agent.mapping (attached as)"
+                } else {
+                    "options.source.as"
+                }
             ));
         }
         warnings.extend(w);
