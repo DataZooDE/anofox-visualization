@@ -98,6 +98,10 @@ impl MappingOptions {
                     .map(|x| x.as_str().map(str::to_string))
                     .collect::<Option<_>>()
                     .ok_or("agent.mapping.scope: values are strings")?;
+                // #984: an empty list is a mistake, not "check nothing"
+                if vals.iter().all(|v| v.trim().is_empty()) {
+                    return Err(format!("agent.mapping.scope.{k}: at least one value"));
+                }
                 scope.insert(k.to_ascii_lowercase(), vals);
             }
         }
@@ -838,6 +842,7 @@ mod tests {
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "memory_limit": "lots"}),
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "timeout_s": 0}),
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "key": "x"}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "scope": {"region": []}}),
         ] {
             assert!(
                 AgentOptions::parse(&json!({"dashboard": "s", "mapping": bad})).is_err(),
