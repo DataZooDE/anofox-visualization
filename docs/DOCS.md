@@ -419,6 +419,42 @@ The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 `::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
 render as on first load in the browser.
 
+#### Placing inputs by what they control (`-- @inputs auto`)
+
+With `-- @inputs auto` in the header the page places the inputs itself
+(#950), from which statements read each input's variable (the same
+analysis as the `layout/*` lints):
+
+- read by panels on **several tabs** → the page's filter bar, above the
+  tabs (after any intro text at the top);
+- read by panels of **one** `::TAB` / `::SUBTAB` → a bar at the top of that
+  tab;
+- read by **one panel** → that panel's title row.
+
+Inside a bar the order is fixed: time (`::PERIOD`, `::DATERANGE`,
+`::DATE`), place, product or customer, other inputs, then measure /
+dimension switches (`::BUTTONS`, `::TOGGLE`); an input another one filters
+(a country dropdown filtered by region) stands right after it. The kind of
+an input comes from its type and its variable name (`region`, `country`,
+`product`, `customer`, `measure`, …).
+
+```sql
+-- @inputs auto
+SELECT m AS measure ::BUTTONS FROM (VALUES ('Units'), ('Revenue')) x(m);  -- → the chart's title
+SELECT 'Detail'::TAB;
+SELECT DISTINCT region::DROPDOWN FROM sales;  -- read on both tabs → the page's filter bar
+SELECT …, getvariable('measure') … ::BARCHART …;
+SELECT 'Trend'::TAB;
+SELECT … WHERE region = getvariable('region') … ::LINECHART;
+```
+
+An input stays where it is written when you placed it on purpose: inside a
+`::GROUP` box, a `::VIEW` alternative, a `::GUIDE_STEP` or a `::FIGURE`; a
+`::FORM` (a card of its own); an input nothing reads. The `layout/*`
+placement lints are not raised for the inputs the page places itself.
+`-- @inputs manual` (or no line) keeps every input where it stands. The
+static outputs draw no controls, so the switch changes nothing there.
+
 ### Forms from rows (`::FORM`)
 
 When every node of a model has its own typed parameters — a supplier's
@@ -2867,6 +2903,7 @@ with the browser through wasm):
 | `-- @astables on` \| `off` | Shows the "▦ Charts as tables" bar on this dashboard for every viewer — off (no bar) by default, or with `off`. A viewer can still turn the feature itself on or off from the toolbar's **⋯ → Charts as tables** menu item whether or not the bar is shown; their choice is remembered across dashboards. |
 | `-- @markdown_style <plain\|card\|callout>` | The dashboard's own default `::MARKDOWN_STYLE` (#536) — used by every `::MARKDOWN` panel that sets no `::MARKDOWN_STYLE` of its own and carries no `::CALLOUT` (which always draws `'callout'`). Without it, every such panel falls back to `'callout'`, today's tinted box. A panel's own `::MARKDOWN_STYLE` overrides this. |
 | `-- @load <ext>` · `-- @param name [a, b] = a` · `-- @vars a, b` | For the servers, see [`secure-serving.md`](secure-serving.md). |
+| `-- @inputs auto` \| `manual` | `auto`: the page places each loose input by what it controls — the page's filter bar, the top of its tab, or the title of its one panel (#950, see *Placing inputs by what they control*). `manual` (the default) keeps them where they stand. |
 | `-- @requires <path>` | Directly above one statement (above a `::TAB` / `::SUBTAB`: the whole tab, hidden when not met): see *Loading, empty, error and "not available" panels*. |
 | `-- @shared <name>, …` | Directly above one `::ROWSELECT` / `::SELECT_AS` / `::DRILL` / input statement: documents that *this* directive deliberately reuses `<name>` with another one, so `dashboard --check --strict` skips `interaction/rowselect-shared-name` / `interaction/name-clash` for it — every other clash still is flagged. See *Selecting table rows* below. |
 | `-- @lint_allow <code>, …` | Directly above one statement: a deliberate exception to a `design/*` advisory (#639), e.g. `-- @lint_allow design/many-series` on a chart with 12 conventional colour series. `--check` still lists it as a `lint/allowed` note, so it stays visible in review, but `--strict` passes. Only `design/*` codes: anything else is flagged (`lint/allow-not-design`), as is a code the statement doesn't trigger (`lint/allow-unused`). On the first statement it also covers `design/too-many-panels`. |
@@ -2887,7 +2924,8 @@ more than 10 tags (`header/too-many-tags`), an empty `@owner`
 (`header/bad-order`), a `@description` over 160 characters
 (`header/long-description`), an `@astables` that isn't `on` or `off`
 (`header/bad-astables`) and a `@markdown_style` that isn't `plain`, `card`
-or `callout` (`header/bad-markdown-style`), reported as statement 0.
+or `callout` (`header/bad-markdown-style`) and an `@inputs` that isn't
+`auto` or `manual` (`header/bad-inputs`), reported as statement 0.
 `dashboard --check
 <folder>` lints every `.sql` of a
 served folder and adds what only the folder shows: two dashboards with the

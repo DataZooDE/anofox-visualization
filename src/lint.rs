@@ -86,7 +86,7 @@ pub struct Diagnostic {
     /// off unless a viewer turns it on) | `header/bad-markdown-style` (not
     /// `plain`/`card`/`callout`, so `-- @markdown_style` is ignored —
     /// `::MARKDOWN` panels without their own `::MARKDOWN_STYLE` fall back to
-    /// 'callout'). A served folder
+    /// 'callout') | `header/bad-inputs` (not `auto`/`manual`, #950). A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
@@ -2549,7 +2549,7 @@ where
     if opts.design {
         flush_kpi_run(&mut diags, &mut kpi_run, kpi_run_stmt);
         // #949: inputs against what they control
-        diags.extend(crate::input_layout::diags(&sql::plan(script)));
+        diags.extend(crate::input_layout::lint(script));
         if rendered_panels > 8 && !has_tabs {
             diags.push(Diagnostic {
                 severity: Severity::Warning,
@@ -3379,6 +3379,7 @@ fn other_header_line(l: &str) -> bool {
         "order",
         "astables",
         "tags",
+        "inputs",
     ]
     .iter()
     .any(|k| header_value(l, k).is_some())
@@ -4834,6 +4835,17 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                          'callout'"
                     )
                 },
+                line,
+            );
+        } else if let Some(v) =
+            header_value(line, "inputs").filter(|v| *v != "auto" && *v != "manual")
+        {
+            warn(
+                "header/bad-inputs",
+                format!(
+                    "`-- @inputs {v}` is not `auto` or `manual` — the inputs stay where they \
+                     stand in the script"
+                ),
                 line,
             );
         }
@@ -8153,6 +8165,9 @@ mod design_tests {
         assert_eq!(codes("-- @astables\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables yes\n"), ["header/bad-astables"]);
         assert_eq!(codes("-- @astables On\n"), ["header/bad-astables"]);
+        assert!(codes("-- @inputs auto\nSELECT 1;").is_empty());
+        assert!(codes("-- @inputs manual\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @inputs automatic\n"), ["header/bad-inputs"]);
         assert!(codes("-- @markdown_style plain\nSELECT 1;").is_empty());
         assert!(codes("-- @markdown_style card\nSELECT 1;").is_empty());
         assert!(codes("-- @markdown_style callout\nSELECT 1;").is_empty());

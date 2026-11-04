@@ -24,8 +24,12 @@ use wasm_bindgen::prelude::*;
 ///    "show_if": [condStmtIdx, …],
 ///    "step": null | {"group": idx, "index": n, "marker": bool,
 ///                     "var": string, "label": string?},
-///    "figure": null | figureStmtIdx }]`
-/// (#214, #515, #516, #661).
+///    "figure": null | figureStmtIdx,
+///    "draw": null | n, "place": null | {"at": "page"|"section"|"panel", "bar": n, "target": null | panelIdx} }]`
+/// (#214, #515, #516, #661). `draw` (#950, only under `-- @inputs auto`): this
+/// statement's position in the draw order; `place`: an input moved there, and
+/// the bar it shares with the other inputs of the same `bar` number, and
+/// for `panel`, the panel whose title that bar goes into.
 /// The caller runs each `sql` through DuckDB-Wasm (setup statements for effect,
 /// panels with `-json`) and passes the rows back to [`render_panel`] — or, for
 /// a contract plot call (`SELECT anofox_plot_terms(t) FROM … t`, see
@@ -43,9 +47,27 @@ pub fn plan(script: &str) -> String {
 }
 
 fn plan_json(script: &str) -> String {
-    let arr: Vec<serde_json::Value> = sql::plan(script)
+    let plan = sql::plan(script);
+    // #950: `-- @inputs auto` — the draw order and each moved input's bar
+    let auto = crate::input_layout::auto_on(script).then(|| crate::input_layout::placement(&plan));
+    let draw_at: Vec<Option<usize>> = match &auto {
+        Some((order, _)) => {
+            let mut at = vec![None; plan.len()];
+            for (k, &i) in order.iter().enumerate() {
+                at[i] = Some(k);
+            }
+            at
+        }
+        None => vec![None; plan.len()],
+    };
+    let arr: Vec<serde_json::Value> = plan
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
+            let place = auto
+                .as_ref()
+                .and_then(|(_, placed)| placed.iter().find(|x| x.stmt == i))
+                .map(|x| serde_json::json!({"at": x.at.as_str(), "bar": x.bar, "target": x.target}));
             // Each role entry is `[colIdx, "ROLE", name]` — the trailing name
             // (a charted measure's display label, else "") is metadata the browser
             // passes back verbatim; JS role checks only read the first two.
@@ -75,6 +97,8 @@ fn plan_json(script: &str) -> String {
                 })),
                 "show_if": p.show_if,
                 "figure": p.figure,
+                "draw": draw_at[i],
+                "place": place,
                 "step": p.step.as_ref().map(|s| serde_json::json!({
                     "group": s.group,
                     "index": s.index,

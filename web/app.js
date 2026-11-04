@@ -7527,6 +7527,8 @@ async function tourAfterSwap() {
 // an older wasm build without that export.
 let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE", "FORM"];
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
+// #950: what ends a bar of automatically placed inputs (with any panel)
+const AUTOBAR_ENDS = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "GUIDE_STEP"];
 let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "PVALUE", "SCIENTIFIC", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
@@ -10330,6 +10332,7 @@ async function lazyRunJob(job, inline = false) {
   // The output a re-run's patch compares with (patchSlots), as the swap
   // records it for the panels it brings: before wiring.
   for (const p of made) if (!p.parentElement.closest(SLOTS)) p._sig = p.outerHTML;
+  placeInputBars(pane || document); // #950: now that the panel is real (after its _sig)
   // Wired at once (hover, a11y summary, toolbox…): a panel is never on the
   // page without its summary.
   const t0 = performance.now();
@@ -10397,6 +10400,7 @@ async function lazyFlushAll() {
   // for the ⤓ HTML export snapshot. One pass over the whole dash covers
   // every group at once.
   placeViewHeaderBars(document);
+  placeInputBars(document);
   wireCharts();
   addExportButtons();
 }
@@ -10912,15 +10916,23 @@ async function runOnce(fresh = true, pv = preview) {
   // gets a metric band without an explicit ::GROUP. Never fires inside a
   // ::GROUP/tab that already boxes the tiles.
   const isKpi = (st) => !st.setup && !directive(st) && !isInput(st) && !!metricRole(st) && !role(st, "TABLE");
+  // #950: `-- @inputs auto` — the plan's draw order, each loose input moved
+  // to what it controls (src/input_layout.rs `placement`); else the script's
+  const drawOrder = stmts.map((_, i) => i);
+  if (stmts.some((s) => s.draw != null)) drawOrder.sort((a, b) => (stmts[a].draw ?? a) - (stmts[b].draw ?? b));
+  const drawPos = new Map(drawOrder.map((i, k) => [i, k]));
+  const nextDrawn = (i) => stmts[drawOrder[drawPos.get(i) + 1]];
   const kpiRun = (from) => {
     let n = 0;
-    for (let j = from; j < stmts.length; j++) {
-      if (stmts[j].setup) continue;
-      if (isKpi(stmts[j])) n++;
+    for (let k = drawPos.get(from); k < drawOrder.length; k++) {
+      const st = stmts[drawOrder[k]];
+      if (st.setup) continue;
+      if (isKpi(st)) n++;
       else break;
     }
     return n;
   };
+  let autoBar = null; // #950: the open bar of automatically placed inputs, {bar, el}
   let autoGroup = null; // open synthetic ::GROUP body element, or null
   const firstValue = async (s) => {
     // A literal directive (SELECT 'Map'::TAB, SELECT 6::SPAN) needs no query.
@@ -11800,10 +11812,13 @@ async function runOnce(fresh = true, pv = preview) {
   let lastYield = performance.now();
   let hiding = null; // "TAB" | "SUBTAB" | "VIEW": the section of a hidden tab/view, left out
   const cond = new Map(); // ::SHOW_IF condition cache (#515), memoized per run
-  for (let i = 0; i < stmts.length; i++) {
+  for (const i of drawOrder) {
     const s = stmts[i];
     if (s.setup) continue;
     const d = directive(s);
+    // #950: an automatically placed input's bar ends at the next thing that
+    // is not one of its inputs (a directive before one of them doesn't)
+    if (autoBar && !(s.place && s.place.bar === autoBar.bar) && (d == null || AUTOBAR_ENDS.includes(d))) autoBar = null;
     // Close an open ::VIEW group the moment this statement is no longer one
     // of its members (#214) — `views.rs` already decided the grouping and
     // every closer (an explicit ::ENDVIEW, ::TAB/::SUBTAB/::SECTION, an
@@ -12268,6 +12283,31 @@ async function runOnce(fresh = true, pv = preview) {
         panels++;
         nextSpan = 0;
         nextHeight = 0;
+      } else if (isInput(s) && s.place) {
+        // #950: an automatically placed input joins its bar — one row for
+        // the page's filters, one per section, one per panel (moved into
+        // that panel's title once it is drawn: placeInputBars)
+        if (dd[i]) {
+          if (!autoBar || autoBar.bar !== s.place.bar) {
+            const el = document.createElement("div");
+            el.className = "controls dp-autobar";
+            el.dataset.at = s.place.at;
+            if (s.place.at === "panel") {
+              const home = document.createElement("i");
+              home.className = "dp-autobar-home";
+              home.hidden = true;
+              home.dataset.for = el.dataset.for = s.place.target;
+              container.appendChild(home);
+            }
+            container.appendChild(el);
+            autoBar = { bar: s.place.bar, el };
+          }
+          const ctl = makeControl(dd[i], false);
+          tagName(ctl, s);
+          autoBar.el.appendChild(ctl);
+        }
+        nextSpan = 0;
+        nextHeight = 0;
       } else if (isInput(s)) {
         if (dd[i]) {
           const ctl = makeControl(dd[i], container === curGrid);
@@ -12319,7 +12359,7 @@ async function runOnce(fresh = true, pv = preview) {
       } else {
         const out = await panelBody(i, s, { container, curGrid, nextSpan, nextHeight, nextRowSelect, nextTableOpts, nextIa, nextEmpty, defaultSpan, viewScale, trackHost });
         // a ::TRACK strip still joins its chart below: show it with them
-        if (!role(stmts[i + 1] || {}, "TRACK")) showEarly(i);
+        if (!role(nextDrawn(i) || {}, "TRACK")) showEarly(i);
         if (out.lastChart) lastChart = out.lastChart;
         panels += out.panels;
         nextSpan = 0;
@@ -12550,6 +12590,7 @@ async function runOnce(fresh = true, pv = preview) {
   // relocation) before that can happen; placeViewHeaderBars(dash) below
   // re-places them once the swap has settled.
   unplaceViewHeaderBars(dash);
+  unplaceInputBars(dash); // #950: the same for a panel's own input bar
   const newRoots = [newGrid, tabBar, tabWrap];
   // #554 review (S1): every embed-fetched assets/ <img> this run might
   // discard — the old ones still in `.dash`, *and* any new ones (still
@@ -12642,6 +12683,7 @@ async function runOnce(fresh = true, pv = preview) {
     a11yBar.remove();
   }
   placeViewHeaderBars(dash); // #534: before fitScreen/fitCharts measure the title rows
+  placeInputBars(dash); // #950
   fitScreen(); // a ::FIT tab: every panel (patched-in ones too) at its fitted size, before the charts draw
   fitCharts(true);
   const tWire = performance.now();
@@ -15082,11 +15124,37 @@ function mkTitle(text) {
 function titleText(t) {
   if (!t) return "";
   const c = t.cloneNode(true);
-  c.querySelectorAll(".dp-info, .dp-viewbar").forEach((el) => el.remove());
+  c.querySelectorAll(".dp-info, .dp-viewbar, .dp-autobar").forEach((el) => el.remove());
   return c.textContent.trim();
 }
 function panelTitleText(panel) {
   return titleText(panel?.querySelector(".panel-title"));
+}
+
+// #950: an `@inputs auto` bar for one panel's inputs, drawn in its own row
+// after a hidden home marker, goes into that panel's title once the panel
+// is real (not its lazy skeleton) — one physical bar, moved, like a
+// 'header' ::VIEW switcher. Before a re-run's patch it goes back home, so
+// the old and the new layout have their slots in the same places.
+function placeInputBars(root) {
+  root.querySelectorAll(".dp-autobar-home").forEach((home) => {
+    const bar = home.nextElementSibling;
+    if (!bar || !bar.matches(`.dp-autobar[data-for="${home.dataset.for}"]`)) return;
+    const panel = home.parentElement.querySelector(`.panel[data-stmt="${home.dataset.for}"]`);
+    if (!panel || panel.classList.contains("dp-lazy")) return;
+    let title = panel.querySelector(":scope > .panel-title");
+    if (!title) {
+      title = mkTitle("");
+      panel.prepend(title);
+    }
+    title.appendChild(bar);
+  });
+}
+function unplaceInputBars(root) {
+  root.querySelectorAll(".dp-autobar-home").forEach((home) => {
+    const bar = root.querySelector(`.panel-title > .dp-autobar[data-for="${home.dataset.for}"]`);
+    if (bar) home.after(bar);
+  });
 }
 
 // #534: a 'header'-placed ::VIEW group's switcher — one physical bar,

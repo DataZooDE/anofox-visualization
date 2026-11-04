@@ -604,6 +604,10 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
    shrinks first; the bar never does) before the buttons do. */
 .panel-title:has(.dp-viewbar){display:flex;flex-wrap:wrap;align-items:baseline;gap:.3rem .6rem}
 .panel-title .dp-viewbar{flex:0 0 auto;align-self:center;margin-left:auto}
+/* #950: an `@inputs auto` bar for one panel, moved into its title */
+.panel-title:has(.dp-autobar){display:flex;flex-wrap:wrap;align-items:baseline;gap:.3rem .6rem}
+.panel-title .dp-autobar{margin-left:auto;align-self:center;background:none;border:0;box-shadow:none;padding:0;gap:.6rem;font-weight:400;font-size:.85rem;overflow:visible}
+.panel-title .dp-autobar::before{display:none}
 .panel-title .dp-seg{padding:1px;gap:1px}
 .panel-title .dp-seg button{padding:.28rem .55rem;font-size:.76rem}
 /* below a minimum card width: segmented buttons fold into one <select> —
