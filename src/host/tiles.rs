@@ -390,11 +390,22 @@ impl Tiles {
 
 /// A local tile file: a regular file, not a link, at most the tile cap.
 fn read_tile_file(p: &Path) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(p)?;
+    #[cfg(unix)]
+    let f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(p)?
+    };
+    // no O_NOFOLLOW: refuse a link by its own metadata first
+    #[cfg(not(unix))]
+    let f = {
+        if std::fs::symlink_metadata(p)?.file_type().is_symlink() {
+            return Err(std::io::Error::other("a link"));
+        }
+        std::fs::File::open(p)?
+    };
     if !f.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
@@ -412,6 +423,17 @@ struct Cache {
 }
 
 impl Cache {
+    /// The cache's checks (owner, mode 0700, no link) need a Unix host, like
+    /// the state store's.
+    #[cfg(not(unix))]
+    fn open(dir: &Path, _max_bytes: u64) -> Result<Cache, String> {
+        Err(format!(
+            "options.basemap.cache_dir '{}': the tile cache needs a Unix host — set cache_mb: 0",
+            dir.display()
+        ))
+    }
+
+    #[cfg(unix)]
     fn open(dir: &Path, max_bytes: u64) -> Result<Cache, String> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
         let err = |e: std::io::Error| format!("options.basemap.cache_dir '{}': {e}", dir.display());
@@ -491,6 +513,12 @@ impl Cache {
         read_tile_file(&self.dir.join(Self::name(z, x, y))).ok()
     }
 
+    #[cfg(not(unix))]
+    fn put(&self, _z: u32, _x: u32, _y: u32, _bytes: &[u8]) {
+        // never reached: a cache can't be opened off Unix
+    }
+
+    #[cfg(unix)]
     fn put(&self, z: u32, x: u32, y: u32, bytes: &[u8]) {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
