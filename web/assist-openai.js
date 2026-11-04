@@ -21,6 +21,15 @@ export function endpointOk(url) {
   if (m[1].toLowerCase() === "https") return /^[a-z0-9.-]+(:\d{1,5})?$/i.test(m[2]);
   return /^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|\[::1\])(:\d{1,5})?$/i.test(m[2]);
 }
+// #941: a published site's own endpoint — a path on the page's origin
+// (`/api/llm`), where the site operator's proxy holds the model key. `/`
+// then segments of letters, digits, - _ . (none `.` or `..`); the same rule
+// as `dashboard --site`'s `site_path_ok`.
+export function sitePathOk(p) {
+  if (typeof p !== "string" || p.length > 200 || !p.startsWith("/")) return false;
+  const segs = p.slice(1).replace(/\/+$/, "").split("/");
+  return segs[0] !== "" && segs.every((x) => x !== "" && x !== "." && x !== ".." && /^[A-Za-z0-9._-]+$/.test(x));
+}
 // The endpoint's origin, for the assistant's CSP connect-src.
 export const endpointOrigin = (url) => (endpointOk(url) ? new URL(url).origin : null);
 // A model id as a local server names it: `llama3.1:8b`, `qwen2.5-coder:32b`,
@@ -102,9 +111,13 @@ export function fromChat(reply) {
 // (a gateway's bearer token; a local model needs none). Errors carry
 // `status` and the endpoint's own message as `error.error.message`, the
 // shape describeError() reads.
+// #941 `sameOrigin: true`: `endpoint` is a path on the page's own origin (a
+// published site's proxy, sitePathOk); the request carries the viewer's
+// cookies (an auth proxy in front of the site needs them) and never a key.
 export function openaiTransport(opts) {
-  const { endpoint, apiKey = "", fetchImpl = globalThis.fetch } = ownOpts(opts);
-  if (!endpointOk(endpoint)) throw new Error("the model endpoint must be https://host[/path] (http:// only to this computer)");
+  const { endpoint, apiKey = "", fetchImpl = globalThis.fetch, sameOrigin = false } = ownOpts(opts);
+  const site = sameOrigin === true;
+  if (site ? !sitePathOk(endpoint) : !endpointOk(endpoint)) throw new Error(site ? "the site's model endpoint must be a path like /api/llm" : "the model endpoint must be https://host[/path] (http:// only to this computer)");
   const url = endpoint.replace(/\/+$/, "") + "/chat/completions";
   return {
     name: "openai",
@@ -112,8 +125,8 @@ export function openaiTransport(opts) {
     async send(request, o = {}) {
       const { signal, onText } = ownOpts(o);
       const headers = { "content-type": "application/json" };
-      if (apiKey) headers.authorization = `Bearer ${apiKey}`;
-      const r = await fetchImpl(url, { method: "POST", headers, body: JSON.stringify(toChat(request)), signal, credentials: "omit", referrerPolicy: "no-referrer" });
+      if (apiKey && !site) headers.authorization = `Bearer ${apiKey}`;
+      const r = await fetchImpl(url, { method: "POST", headers, body: JSON.stringify(toChat(request)), signal, credentials: site ? "same-origin" : "omit", referrerPolicy: "no-referrer" });
       let body = null;
       try {
         body = await r.json();

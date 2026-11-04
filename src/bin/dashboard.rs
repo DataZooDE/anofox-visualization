@@ -1387,9 +1387,82 @@ struct SiteOptions {
     max_asset_bytes: Option<u64>,
     /// `folders` (#772): the subfolders' dashboards too, as on the server.
     folders: bool,
+    /// `site_ask` (#941): Ask on the published pages through the operator's
+    /// own same-origin, OpenAI-compatible endpoint.
+    site_ask: Option<SiteAsk>,
     /// Server-only keys this file had, that `--site` skipped — named once
     /// on stderr by the caller ([`cmd_site`]), sorted for a stable message.
     ignored: Vec<String>,
+}
+
+/// `options.site_ask` (#941): `{"endpoint": "/api/llm", "model": "…"}`. The endpoint is a path on the site's own origin — the
+/// operator's proxy, which holds the model key, checks the viewer and keeps
+/// the budget; no key, token or other origin is ever accepted here, so none
+/// can end up in the published files.
+#[derive(Debug, Clone, PartialEq)]
+struct SiteAsk {
+    endpoint: String,
+    model: String,
+}
+
+impl SiteAsk {
+    fn parse(v: &serde_json::Value) -> Result<SiteAsk, String> {
+        let m = v.as_object().ok_or(
+            "options.site_ask must be an object like {\"endpoint\": \"/api/llm\", \"model\": \"…\"}",
+        )?;
+        if let Some(k) = m
+            .keys()
+            .find(|k| !matches!(k.as_str(), "endpoint" | "model"))
+        {
+            return Err(format!(
+                "options.site_ask: unknown key '{k}' (endpoint, model) — a model key \
+                 belongs on the endpoint's proxy, never in a published site"
+            ));
+        }
+        let endpoint = m
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .filter(|e| site_path_ok(e))
+            .ok_or(
+                "options.site_ask.endpoint must be a path on the site's own origin, like \
+                 \"/api/llm\" (letters, digits, - _ . / only; the proxy there answers \
+                 POST <endpoint>/chat/completions)",
+            )?
+            .trim_end_matches('/')
+            .to_string();
+        let model_ok = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._:/-".contains(c))
+        };
+        let model = m
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|s| model_ok(s))
+            .ok_or("options.site_ask.model must be a model id, like \"gemini-2.5-flash\"")?
+            .to_string();
+        Ok(SiteAsk { endpoint, model })
+    }
+}
+
+/// A same-origin path for `site_ask.endpoint`: `/` then segments of
+/// letters, digits, `-` `_` `.`, none of them `.` or `..`.
+fn site_path_ok(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix('/') else {
+        return false;
+    };
+    p.len() <= 200
+        && !rest.trim_end_matches('/').is_empty()
+        && rest.trim_end_matches('/').split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        })
 }
 
 fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
@@ -1521,6 +1594,7 @@ fn parse_site_options(json: Option<&str>) -> Result<SiteOptions, String> {
             // apply to its own asset route, not a fixed `--site`-only
             // value — clamped the same way `LockedOptions::parse`
             // (`duckext/src/serve.rs`) clamps it, its own 64 MiB ceiling.
+            "site_ask" => o.site_ask = Some(SiteAsk::parse(val)?),
             "folders" => {
                 o.folders = val
                     .as_bool()
@@ -2452,6 +2526,25 @@ fn cmd_site(args: &[String]) {
     if let Some(b) = site_basemap {
         site_json["basemap"] = b;
     }
+    // #941: Ask through the operator's endpoint, on the dashboards whose
+    // header says `-- @ask on` (as the locked server: both must agree)
+    if let Some(a) = &opts.site_ask {
+        let on: Vec<&str> = dashboards
+            .iter()
+            .filter(|d| anofox_visualization::sql::ask::header_on(&d.sql))
+            .map(|d| d.id.as_str())
+            .collect();
+        if on.is_empty() {
+            eprintln!(
+                "--site: options.site_ask is set but no dashboard has `-- @ask on` in its header — Ask stays off"
+            );
+        }
+        site_json["ask"] = serde_json::json!({
+            "endpoint": a.endpoint,
+            "model": a.model,
+            "dashboards": on,
+        });
+    }
     if !opts.path_vars.is_empty() {
         site_json["pathVars"] = serde_json::json!(opts.path_vars);
     }
@@ -3354,6 +3447,47 @@ mod site_tests {
         assert!(o.theme.is_none());
         let o2 = parse_site_options(Some("  ")).unwrap();
         assert!(o2.path_vars.is_empty());
+    }
+
+    #[test]
+    fn site_ask_takes_a_same_origin_path_and_a_model_never_a_key() {
+        let o = parse_site_options(Some(
+            r#"{"site_ask": {"endpoint": "/api/llm/", "model": "gemini-2.5-flash"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            o.site_ask,
+            Some(SiteAsk {
+                endpoint: "/api/llm".into(),
+                model: "gemini-2.5-flash".into(),
+            })
+        );
+        for (bad, says) in [
+            (
+                r#"{"endpoint": "https://api.example.com/v1", "model": "m"}"#,
+                "own origin",
+            ),
+            (
+                r#"{"endpoint": "//evil.example/v1", "model": "m"}"#,
+                "own origin",
+            ),
+            (r#"{"endpoint": "/api/../x", "model": "m"}"#, "own origin"),
+            (r#"{"endpoint": "/api?x=1", "model": "m"}"#, "own origin"),
+            (r#"{"endpoint": "/", "model": "m"}"#, "own origin"),
+            (
+                r#"{"endpoint": "/api/llm", "model": "m", "key": "sk-1"}"#,
+                "never in a published site",
+            ),
+            (
+                r#"{"endpoint": "/api/llm", "model": "m", "token": "t"}"#,
+                "never in a published site",
+            ),
+            (r#"{"endpoint": "/api/llm", "model": "a b"}"#, "model id"),
+            (r#"{"endpoint": "/api/llm"}"#, "model id"),
+        ] {
+            let e = parse_site_options(Some(&format!(r#"{{"site_ask": {bad}}}"#))).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
     }
 
     #[test]
