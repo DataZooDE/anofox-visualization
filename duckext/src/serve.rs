@@ -2130,6 +2130,9 @@ impl LockedOptions {
         if o.agent.as_ref().is_some_and(|a| a.mapping.is_some()) && o.source.is_some() {
             return Err("options.agent.mapping and options.source can't be combined: the mapping builds the snapshot's data".into());
         }
+        if o.agent.as_ref().is_some_and(|a| a.mapping.is_some()) && !o.search_path.is_empty() {
+            return Err("options.agent.mapping and options.search_path can't be combined: the snapshot holds only the mapping's canonical tables".into());
+        }
         if o.agent.is_some() {
             // #863: answers per caller (M1, H3); no model text (D5); no
             // values in the log (N3).
@@ -7333,7 +7336,11 @@ fn build_snapshot(
     dir: SnapshotDir,
     source_result: Option<(String, PathBuf, Vec<String>)>,
 ) -> Result<(Snapshot, Vec<String>), String> {
-    let attach_all = opts.attach;
+    // #194 A3b: an agent's customer mapping is the snapshot's only data —
+    // nothing of the host session is copied (a panel can't reach it, not
+    // even database-qualified, with or without a policy)
+    let mapping = opts.agent.as_ref().is_some_and(|a| a.mapping.is_some());
+    let attach_all = opts.attach && !mapping;
     let mut warnings = Vec::new();
     let current = live
         .query("SELECT current_database()::VARCHAR")?
@@ -7350,7 +7357,7 @@ fn build_snapshot(
         .string_rows(10_000)?;
     // The databases the panels must find: the default one, or the search path's.
     let mut needed: Vec<&str> = opts.search_path.iter().map(|(d, _)| d.as_str()).collect();
-    if needed.is_empty() {
+    if needed.is_empty() && !mapping {
         needed.push(&current);
     }
     let mut copied: Vec<(String, PathBuf)> = Vec::new();
@@ -7358,7 +7365,7 @@ fn build_snapshot(
         let (Some(name), ty) = (row[0].clone(), row[1].clone().unwrap_or_default()) else {
             continue;
         };
-        if !attach_all && !needed.contains(&name.as_str()) {
+        if mapping || (!attach_all && !needed.contains(&name.as_str())) {
             continue;
         }
         if ty != "duckdb" {

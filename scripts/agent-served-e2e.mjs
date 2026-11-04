@@ -55,12 +55,12 @@ writeFileSync(path.join(dashDir, "other.sql"), "SELECT 1 AS n ::METRIC, 'Other' 
 
 const auth = { mode: "proxy", shared_secret_env: "SEC", trusted_proxies: ["127.0.0.1"] };
 
-async function serve(opts, dashes = dashDir) {
+async function serve(opts, dashes = dashDir, pre = "") {
   const p = spawn(duckdb, ["-unsigned", "-batch"], { stdio: ["pipe", "pipe", "pipe"], env });
   let log = "";
   p.stdout.on("data", (d) => (log += d));
   p.stderr.on("data", (d) => (log += d));
-  p.stdin.write(`LOAD ${sqlStr(ext)};\nSELECT anofox_serve_dashboards(${sqlStr(dashes)}, ${port}, ${sqlStr(JSON.stringify(opts))});\n`);
+  p.stdin.write(`LOAD ${sqlStr(ext)};\n${pre}SELECT anofox_serve_dashboards(${sqlStr(dashes)}, ${port}, ${sqlStr(JSON.stringify(opts))});\n`);
   for (let i = 0; i < 100; i++) {
     try {
       if ((await fetch(`${base}/healthz`)).ok) return { proc: p, log: () => log };
@@ -226,10 +226,14 @@ SELECT name AS "Supplier" ::TABLE, days_late AS "Days late" FROM suppliers ORDER
 SELECT name AS "Supplier" ::TABLE, rating FROM suppliers ORDER BY rating DESC;
 -- @question What does the source hold?
 SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM lieferanten;
+-- @question What does the host hold?
+SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM memory.main.host_secret;
+-- @question What else does the host hold?
+SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM host_secret;
 `
   );
   const mapping = { contract: path.join(mapDir, "contract.sql"), views, db: srcDb, scope: { region: ["north", "south"] } };
-  srv = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping, mcp: { resource: `${base}/mcp` } } }, mapDash);
+  srv = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping, mcp: { resource: `${base}/mcp` } } }, mapDash, "CREATE TABLE host_secret AS SELECT 42 AS n;\n");
   check(srv.proc != null, "an agent with a conforming customer mapping starts");
   if (srv.proc) {
     a = await (await answer({ question_id: "how_late_are_our_suppliers" })).json();
@@ -248,6 +252,10 @@ SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM lieferanten;
     check(srv.log().includes("question 'which_suppliers_rate_best' is off"), "the start log says which question is off and why");
     r = await answer({ question_id: "what_does_the_source_hold" });
     check(r.status === 502, `the source's own tables aren't in the snapshot (${r.status})`);
+    for (const q of ["what_does_the_host_hold", "what_else_does_the_host_hold"]) {
+      r = await answer({ question_id: q });
+      check(r.status === 502, `nor the host session's tables: ${q} (${r.status})`);
+    }
     // A refresh builds the mapping again from the source's current rows; a
     // mapping broken since keeps the snapshot it had.
     spawnSync(duckdb, [srcDb, "-c", "UPDATE lieferanten SET verzug = 9 WHERE code = 'S2';"], { env });
@@ -282,6 +290,9 @@ SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM lieferanten;
   const both = await serve({ auth, policy: "none", source: { uri: "quack:localhost:9494", token_env: "SEC", as: "src" }, agent: { dashboard: "late", mapping } }, mapDash);
   check(both.proc == null && both.log().includes("can't be combined"), "a mapping together with options.source doesn't start");
   if (both.proc) both.proc.kill();
+  const sp = await serve({ auth, policy: "none", search_path: "memory", agent: { dashboard: "late", mapping } }, mapDash);
+  check(sp.proc == null && sp.log().includes("options.search_path can't be combined"), "a mapping together with options.search_path doesn't start");
+  if (sp.proc) sp.proc.kill();
   else if (!both.log().includes("can't be combined")) console.error(both.log());
 
   // An unpublishable dashboard stops the start.
