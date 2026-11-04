@@ -49,8 +49,9 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .section::before{content:"";width:11px;height:11px;border-radius:4px;background:var(--ax-accent-bar);box-shadow:var(--ax-accent-glow)}
 
 /* ---- inputs / filters ---- */
-.controls{grid-column:1/-1;display:flex;gap:1.3rem;flex-wrap:wrap;align-items:center;background:var(--ax-card);border:1px solid var(--ax-line);border-radius:var(--ax-radius-sm);padding:.5rem .9rem;box-shadow:var(--ax-shadow);position:relative;overflow:hidden;padding-left:1.1rem}
-.controls::before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:var(--ax-accent-bar)}
+/* An input row sits on the page itself — no card, border, shadow or accent
+   stripe: inputs read as a filter line above the panels, not as a panel. */
+.controls{grid-column:1/-1;display:flex;gap:.6rem 1.6rem;flex-wrap:wrap;align-items:center;padding:.1rem 0 .3rem;position:relative}
 .control{font-size:.82rem;font-weight:600;color:var(--ax-muted);display:flex;align-items:center;gap:.5rem}
 .control select,.control input{font:inherit;font-size:.85rem;font-weight:600;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:10px;padding:.5rem .8rem;min-width:130px;transition:border-color .15s,box-shadow .15s;box-shadow:var(--ax-input-shadow)}
 .control input{cursor:text}
@@ -106,8 +107,8 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-dd-input{width:220px;max-width:100%;padding-right:2rem;background-image:var(--ax-chevron);background-repeat:no-repeat;background-position:right .7rem center}
 .dp-dd[data-open="true"] .dp-dd-input{border-color:var(--ax-accent);box-shadow:var(--ax-focus-ring)}
 /* `.dp-ms-pop` is `position:absolute` inside `.dp-ms` (fine for a short
-   ::MULTISELECT popover), but a `.controls` bar has `overflow:hidden`
-   (its accent bar, above), which clips that — invisible for a short
+   ::MULTISELECT popover), but a `.controls` bar could clip it (it had
+   `overflow:hidden` for its accent bar until the bar lost its card) — invisible for a short
    popover, but this one is often many rows tall. `position:fixed` escapes
    that clipping (a plain `overflow:hidden` ancestor, with no transform of
    its own, does not become a containing block for a fixed descendant) and
@@ -607,7 +608,6 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 /* #950: an `@inputs auto` bar for one panel, moved into its title */
 .panel-title:has(.dp-autobar){display:flex;flex-wrap:wrap;align-items:baseline;gap:.3rem .6rem}
 .panel-title .dp-autobar{margin-left:auto;align-self:center;background:none;border:0;box-shadow:none;padding:0;gap:.6rem;font-weight:400;font-size:.85rem;overflow:visible}
-.panel-title .dp-autobar::before{display:none}
 .panel-title .dp-seg{padding:1px;gap:1px}
 .panel-title .dp-seg button{padding:.28rem .55rem;font-size:.76rem}
 /* below a minimum card width: segmented buttons fold into one <select> —

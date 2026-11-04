@@ -12345,9 +12345,20 @@ async function runOnce(fresh = true, pv = preview) {
         nextHeight = 0;
       } else if (isInput(s)) {
         if (dd[i]) {
-          const ctl = makeControl(dd[i], container === curGrid);
-          tagName(ctl, s);
-          container.appendChild(ctl);
+          const top = container === curGrid;
+          const ctl = makeControl(dd[i], top);
+          // consecutive loose inputs share one row (a filter line), not a
+          // row each — the previous one is still the grid's last element
+          const prev = top ? container.lastElementChild : null;
+          if (prev && prev.dataset.loose === "1" && ctl.firstElementChild) {
+            const inner = ctl.firstElementChild;
+            tagName(inner, s);
+            prev.appendChild(inner);
+          } else {
+            if (top) ctl.dataset.loose = "1";
+            tagName(ctl, s);
+            container.appendChild(ctl);
+          }
         }
       } else if (trackHost && trackHost.lazy) {
         // a ::TRACK under a chart that renders later: it renders with it
