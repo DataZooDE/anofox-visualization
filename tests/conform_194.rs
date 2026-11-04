@@ -809,3 +809,52 @@ WITH x AS (FROM suppliers) SELECT name ::TABLE FROM x WHERE region = getvariable
     let out = check("none.sql", &ok.replace("-- @schema sr", "-- @schema nope"));
     assert!(out.contains("agent/no-contract"), "{out}");
 }
+
+#[test]
+fn a_policy_names_only_the_contract() {
+    // #982 (M9): `--conform --policy`
+    if !have_duckdb("a_policy_names_only_the_contract") {
+        return;
+    }
+    let s = Scratch::new("policy");
+    let (_, renamed) = sources(&s);
+    let run = |policy: &str| {
+        let p = s.write("policy.json", policy);
+        conform(
+            &s,
+            RENAMED,
+            &renamed,
+            &[
+                "--scope",
+                "region=north,south",
+                "--policy",
+                &p.to_string_lossy(),
+            ],
+        )
+    };
+    let (code, v) = run(
+        r#"{"tables": {"suppliers": {"rows": "region = getvariable('__claim_region')", "columns": {"rating": "null"}}, "deliveries": {"rows": true}}}"#,
+    );
+    assert_eq!(code, 0, "{v}");
+    for (bad, why) in [
+        (
+            r#"{"tables": {"lieferanten": {"rows": true}}}"#,
+            "a source table",
+        ),
+        (
+            r#"{"tables": {"suppliers": {"rows": true, "columns": {"firma": "null"}}}}"#,
+            "a source column",
+        ),
+        (
+            r#"{"tables": {"suppliers": {"rows": "gebiet = getvariable('__claim_region')"}}}"#,
+            "a row filter over a source column",
+        ),
+    ] {
+        let (code, v) = run(bad);
+        assert_eq!(code, 1, "{why}: {v}");
+        assert!(
+            codes(&v).contains(&"conform/policy".to_string()),
+            "{why}: {v}"
+        );
+    }
+}

@@ -1301,7 +1301,7 @@ marked `-- @scope <name> constant` in the mapping.
 ```sh
 dashboard --conform canonical/supplier-reliability.sql \
     --views customer-mapping/acme/views.sql --db acme.duckdb \
-    [--dashboard supplier-reliability.sql] [--scope region=north,south] \
+    [--dashboard supplier-reliability.sql] [--policy policy.json] [--scope region=north,south] \
     [--memory-limit 4GB] [--timeout-s 120] [--json]
 ```
 
@@ -1326,6 +1326,10 @@ exit 1 when the mapping doesn't conform):
   values within `--scope name=a,b`, and more than one value when the list
   has more than one;
 - the optional columns the mapping leaves out;
+- with `--policy`: the access policy names only the contract's tables and
+  columns, and its row filters bind against this customer's views
+  (`conform/policy`) — a policy is written against the contract, never a
+  source;
 - with `--dashboard`: which `-- @question`s this customer can answer — each
   question's panel is bound against the views; one that reads a missing
   optional column is off, with the reason.

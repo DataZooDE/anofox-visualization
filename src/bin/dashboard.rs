@@ -156,7 +156,8 @@ fn cmd_conform(args: &[String]) {
     let usage = || -> ! {
         eprintln!(
             "usage: dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb> \
-             [--dashboard <file.sql>] [--scope name=a,b] [--memory-limit 4GB] [--timeout-s 120] [--json]"
+             [--dashboard <file.sql>] [--policy <policy.json>] [--scope name=a,b] [--memory-limit 4GB] \
+             [--timeout-s 120] [--json]"
         );
         std::process::exit(2);
     };
@@ -165,9 +166,11 @@ fn cmd_conform(args: &[String]) {
     let mut json = false;
     let mut memory_limit = "4GB".to_string();
     let mut timeout_s: u64 = 120;
+    let mut policy_file: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--policy" => policy_file = it.next().cloned(),
             "--views" => views = it.next().cloned(),
             "--db" => db = it.next().cloned(),
             "--dashboard" => dash = it.next().cloned(),
@@ -227,6 +230,11 @@ fn cmd_conform(args: &[String]) {
     let db = std::fs::canonicalize(&db).unwrap_or_else(|e| fail(format!("--db {db}: {e}")));
     // read before the build directory exists (#986: no exit leaves it behind)
     let dash_sql = dash.as_deref().map(read);
+    // #982 (M9): the policy is written against the contract's names
+    let policy = policy_file.as_deref().map(|p| {
+        anofox_visualization::host::policy::Policy::parse(&read(p))
+            .unwrap_or_else(|e| fail(format!("--policy {p}: {e}")))
+    });
     let mut out = serde_json::Map::new();
     let ok;
     let mut build_dir = std::path::PathBuf::new();
@@ -333,11 +341,14 @@ fn cmd_conform(args: &[String]) {
             }
             // #986: a check that fails (or hits --timeout-s) is a
             // `conform/error` finding: the mapping doesn't conform (exit 1)
-            let r = canonical::conform(&mut duck, &c, &m, &opts).unwrap_or_else(|e| {
+            let mut r = canonical::conform(&mut duck, &c, &m, &opts).unwrap_or_else(|e| {
                 let mut r = canonical::Report::default();
                 r.push(true, "", None, "conform/error", e);
                 r
             });
+            if let Some(p) = &policy {
+                canonical::check_policy(&mut duck, &c, p, &mut r);
+            }
             ok = r.ok();
             text = r.to_text();
             if let serde_json::Value::Object(o) = r.to_json() {
