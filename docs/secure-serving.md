@@ -1957,7 +1957,7 @@ server — there is nothing to run, and no TLS/auth/process-isolation
 concerns from the rest of this document apply, because there is no process.
 
 ```
-dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [--app <web dir|tarball>]
+dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [--app <web dir|tarball>] [--basemap <json|file>]
 ```
 
 - `<folder>` is the same dashboard folder `anofox_serve_dashboards` opens.
@@ -2027,6 +2027,20 @@ dashboard --site <folder> <out-dir> [--data <dir|url>] [--options locked.json] [
   `--app`, this command looks for a `web/` folder next to its own binary and
   never downloads anything itself — a CI workflow fetches the release asset
   with `gh release download` (see the Action below) before running `--site`.
+- `--basemap <json|file>` (#946): the `options.basemap` object (or a file
+  holding it, as for `dashboard --svg --basemap`). For every dashboard with
+  a `'on'::MAPTILES` map, `--site` runs it once (inputs at their defaults),
+  works out the tiles the page draws at its render widths, fetches them
+  (at most `upstream_per_minute` a minute from an `https://` source) and
+  writes them into the site as `tiles/<z>/<x>/<y>`; `site.json` gets the
+  attribution and `max_zoom`. The published page reads its tiles from
+  there — nothing loads from the tile source when someone views the site
+  (T6 of the [basemap review](security/basemap-760-review.md)). A view the
+  reader zooms or pans past the prefetched set, or a filter that moves the
+  map elsewhere, draws without tiles. More than 3000 tiles stop the build:
+  tile servers forbid bulk downloads (OpenStreetMap's public servers among
+  them) — narrow the maps, lower `max_zoom`, or use your own tile server.
+  Without `--basemap` a `::MAPTILES` map draws no tiles on the site.
 - Every path the generated site writes is **relative**, so it works from a
   bucket root or a GitHub project-pages sub-path (`https://you.github.io/<repo>/`)
   without configuration.

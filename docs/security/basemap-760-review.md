@@ -103,3 +103,13 @@ need.
    (`src/map/tile_store.rs`), `map_tiles` / `register_tile`; the page draws
    a map, fetches what it lacked (6 at once) and draws it again. Static
    `--site` embedding is left for its own issue.
+4. Static `--site` (#946): `dashboard --site --basemap` runs each
+   `::MAPTILES` dashboard at build time, collects `map_tiles_needed` at the
+   page's render widths (300–1200 px, the page's own height rules), fetches
+   those (paced by `upstream_per_minute`, capped at 3000 tiles — T7) and
+   writes them as `tiles/<z>/<x>/<y>` into the site; site.json carries only
+   the attribution and `max_zoom`, never the source. The page fetches
+   `tiles/…` from its own origin (`connect-src 'self'`, already allowed);
+   nothing reaches the tile host at view time (T6).
+   scripts/site-tiles-e2e.mjs checks the tiles are drawn, every tile the
+   page asks for is in the site, and no request leaves the site.

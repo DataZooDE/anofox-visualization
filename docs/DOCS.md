@@ -1434,7 +1434,9 @@ and `<circle>`s for points. Features are drawn in row order.
   [secure-serving](secure-serving.md#tile-basemap-optionsbasemap-760)) or
   `dashboard --svg … --basemap '<the same JSON object>'`. The tiles are
   fetched by the server or the CLI and embedded as images, so nothing is
-  loaded when the SVG is viewed. Any other projection draws no tiles
+  loaded when the SVG is viewed. A static site (`dashboard --site …
+  --basemap '<…>'`, #946) gets the tiles its maps draw written into it at
+  build time. Any other projection draws no tiles
   (`map/tiles-needs-mercator`).
 - **Colour**: a measure colours on the theme's sequential ramp (over a
   `::BASEMAP` it starts a quarter in, so pale points don't vanish); when the
