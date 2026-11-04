@@ -195,7 +195,12 @@ fn step_per_category() {
             nums(&[1.0, 2.0, 3.0, 5.0, 6.0, 7.0]),
         ),
     ]);
-    let lines = polylines(&s);
+    // the plotted lines (ggplot-rs 0.40 also draws a line key per series in
+    // the legend, without the mark class)
+    let lines: Vec<String> = polylines(&s)
+        .into_iter()
+        .filter(|l| l.contains("gg-mark"))
+        .collect();
     assert_eq!(lines.len(), 2, "two step lines: {lines:?}");
     let (l0, l1) = (lines[0].to_uppercase(), lines[1].to_uppercase());
     assert!(l0.contains(&slot(0)) && l1.contains(&slot(1)), "{lines:?}");
@@ -2828,7 +2833,13 @@ fn qq_category_draws_one_series_per_group_with_its_own_line_and_band() {
     ]);
     // One envelope + one dashed reference line per group.
     assert_eq!(s.matches("<polygon ").count(), 2, "one band per group: {s}");
-    assert_eq!(s.matches("<circle ").count(), n);
+    // the plotted points (the legend's point keys carry no mark class)
+    let points = s
+        .split("<circle ")
+        .skip(1)
+        .filter(|t| t[..t.find('>').unwrap()].contains("gg-mark"))
+        .count();
+    assert_eq!(points, n);
     // A legend names both groups.
     assert!(s.contains(">reference<") && s.contains(">current<"), "{s}");
 }
@@ -3234,4 +3245,59 @@ fn dumbbell_two_values_per_item() {
         assert!(s.contains(&format!(">{l}<")), "item {l}");
     }
     assert!(s.matches("<circle").count() >= 4, "two dots per item");
+}
+
+// ── #970: grouped boxplots / violins dodge (ggplot-rs 0.40, position_dodge2) ──
+#[test]
+fn grouped_boxplots_stand_side_by_side_in_legend_order() {
+    let mut x = Vec::new();
+    let mut g = Vec::new();
+    let mut y = Vec::new();
+    for (i, slot) in ["compact", "suv"].iter().enumerate() {
+        for (k, grp) in ["4", "f", "r"].iter().enumerate() {
+            for j in 0..12 {
+                x.push(*slot);
+                g.push(*grp);
+                y.push(20.0 + i as f64 * 2.0 + k as f64 * 4.0 + (j % 5) as f64);
+            }
+        }
+    }
+    let s = svg(vec![
+        Column::new("class", Role::X, strs(&x)),
+        Column::new("drv", Role::Category, strs(&g)),
+        Column::new("hwy", Role::Value(Kind::Boxplot), nums(&y)),
+    ]);
+    let boxes: Vec<Vec<(f64, f64)>> = ["4", "f", "r"].iter().map(|grp| bars(&s, grp)).collect();
+    assert!(
+        boxes.iter().all(|b| b.len() == 2),
+        "one box per group and slot: {boxes:?}"
+    );
+    for (slot, ((a, b), c)) in boxes[0].iter().zip(&boxes[1]).zip(&boxes[2]).enumerate() {
+        // in the legend's order, and no two overlap
+        assert!(
+            a.0 + a.1 <= b.0 + 0.01 && b.0 + b.1 <= c.0 + 0.01,
+            "slot {slot}: {a:?} {b:?} {c:?}"
+        );
+    }
+    // a single group per slot stays one full-width box per slot
+    let one = svg(vec![
+        Column::new("class", Role::X, strs(&x)),
+        Column::new("hwy", Role::Value(Kind::Boxplot), nums(&y)),
+    ]);
+    let widths: Vec<f64> = one
+        .split("<rect ")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap()])
+        .filter(|t| t.contains("data-geom=\"boxplot\""))
+        .map(|t| {
+            let k = t.find(" width=\"").unwrap() + 8;
+            t[k..k + t[k..].find('"').unwrap()].parse().unwrap()
+        })
+        .collect();
+    assert_eq!(widths.len(), 2, "{widths:?}");
+    assert!(
+        widths.iter().all(|w| *w > 2.0 * boxes[0][0].1),
+        "{widths:?} vs dodged {:?}",
+        boxes[0][0]
+    );
 }
