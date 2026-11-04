@@ -1734,6 +1734,11 @@ impl Default for LockedOptions {
 }
 
 impl LockedOptions {
+    /// `options.agent.mapping` (#194 A3b).
+    fn mapping(&self) -> Option<&agentm::MappingOptions> {
+        self.agent.as_ref().and_then(|a| a.mapping.as_ref())
+    }
+
     pub fn parse(json: Option<&str>) -> Result<LockedOptions, String> {
         let mut o = LockedOptions::default();
         let Some(json) = json.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -2127,10 +2132,10 @@ impl LockedOptions {
             return Err("options.ingest needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with an ingest:<table> scope may write".into());
         }
         // #194 A3b: one data source for an agent's snapshot
-        if o.agent.as_ref().is_some_and(|a| a.mapping.is_some()) && o.source.is_some() {
+        if o.mapping().is_some() && o.source.is_some() {
             return Err("options.agent.mapping and options.source can't be combined: the mapping builds the snapshot's data".into());
         }
-        if o.agent.as_ref().is_some_and(|a| a.mapping.is_some()) && !o.search_path.is_empty() {
+        if o.mapping().is_some() && !o.search_path.is_empty() {
             return Err("options.agent.mapping and options.search_path can't be combined: the snapshot holds only the mapping's canonical tables".into());
         }
         if o.agent.is_some() {
@@ -3666,25 +3671,8 @@ impl Locked {
         // console, or a new `anofox_serve_dashboards` sharing this host
         // database's connection.
         let dir = SnapshotDir::create()?;
-        let mut agent_off = Vec::new();
-        let source_result = match (
-            &self.opts.source,
-            self.opts.agent.as_ref().and_then(|a| a.mapping.as_ref()),
-        ) {
-            (_, Some(m)) => {
-                let (r, off) =
-                    crate::mapping::build(m, &dir.0, &self.stop, agent_script(&self.opts, dashes))?;
-                agent_off = off;
-                Some(r)
-            }
-            (Some(src), None) => Some(run_source_build(
-                src,
-                &dir.0,
-                &self.stop,
-                &self.source_build,
-            )?),
-            (None, None) => None,
-        };
+        let (source_result, agent_off) =
+            build_data(&self.opts, &dir.0, &self.stop, &self.source_build, dashes)?;
         let (mut snap, warnings) = {
             let conn = self.ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
             build_snapshot(&conn, &self.opts, dashes, dir, source_result)?
@@ -4070,31 +4058,13 @@ pub fn start_locked(
     let startup_dir = SnapshotDir::create()?;
     let startup_stop = Arc::new(AtomicBool::new(false));
     let startup_build_state = SourceBuildState::new();
-    // #194 A3b: an agent's customer mapping, built in its own locked
-    // instance (crate::mapping) — never in this session
-    let mut agent_off = Vec::new();
-    let source_result = match (
-        &opts.source,
-        opts.agent.as_ref().and_then(|a| a.mapping.as_ref()),
-    ) {
-        (_, Some(m)) => {
-            let (r, off) = crate::mapping::build(
-                m,
-                &startup_dir.0,
-                &startup_stop,
-                agent_script(&opts, &dashes),
-            )?;
-            agent_off = off;
-            Some(r)
-        }
-        (Some(src), None) => Some(run_source_build(
-            src,
-            &startup_dir.0,
-            &startup_stop,
-            &startup_build_state,
-        )?),
-        (None, None) => None,
-    };
+    let (source_result, agent_off) = build_data(
+        &opts,
+        &startup_dir.0,
+        &startup_stop,
+        &startup_build_state,
+        &dashes,
+    )?;
     let (mut snap, warnings) = {
         let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
         build_snapshot(&conn, &opts, &dashes, startup_dir, source_result)?
@@ -7309,6 +7279,28 @@ pub(crate) fn fk_order(
     out
 }
 
+/// A snapshot build's own data, before the serving connection is taken: an
+/// agent's customer mapping (#194 A3b, built in its own locked instance,
+/// never this session) or `options.source`'s Quack copy — the database to
+/// attach, and the agent's questions the mapping can't answer (#982).
+#[allow(clippy::type_complexity)]
+fn build_data(
+    opts: &LockedOptions,
+    dir: &Path,
+    stop: &Arc<AtomicBool>,
+    state: &Arc<SourceBuildState>,
+    dashes: &DashSet,
+) -> Result<(Option<(String, PathBuf, Vec<String>)>, Vec<String>), String> {
+    match (&opts.source, opts.mapping()) {
+        (_, Some(m)) => {
+            let (r, off) = crate::mapping::build(m, dir, stop, agent_script(opts, dashes))?;
+            Ok((Some(r), off))
+        }
+        (Some(src), None) => Ok((Some(run_source_build(src, dir, stop, state)?), Vec::new())),
+        (None, None) => Ok((None, Vec::new())),
+    }
+}
+
 /// The agent's dashboard script in `dashes` (#982: whose questions a
 /// customer mapping is checked for).
 fn agent_script<'a>(opts: &LockedOptions, dashes: &'a DashSet) -> Option<&'a str> {
@@ -7339,7 +7331,7 @@ fn build_snapshot(
     // #194 A3b: an agent's customer mapping is the snapshot's only data —
     // nothing of the host session is copied (a panel can't reach it, not
     // even database-qualified, with or without a policy)
-    let mapping = opts.agent.as_ref().is_some_and(|a| a.mapping.is_some());
+    let mapping = opts.mapping().is_some();
     let attach_all = opts.attach && !mapping;
     let mut warnings = Vec::new();
     let current = live
@@ -7410,7 +7402,7 @@ fn build_snapshot(
         if copied.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) {
             return Err(format!(
                 "{}: '{name}' clashes with an existing attached database",
-                if opts.agent.as_ref().is_some_and(|a| a.mapping.is_some()) {
+                if opts.mapping().is_some() {
                     "options.agent.mapping (attached as)"
                 } else {
                     "options.source.as"

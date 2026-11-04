@@ -290,10 +290,25 @@ SELECT count(*) AS n ::METRIC, 'Rows' ::LABEL FROM host_secret;
   const both = await serve({ auth, policy: "none", source: { uri: "quack:localhost:9494", token_env: "SEC", as: "src" }, agent: { dashboard: "late", mapping } }, mapDash);
   check(both.proc == null && both.log().includes("can't be combined"), "a mapping together with options.source doesn't start");
   if (both.proc) both.proc.kill();
+  else if (!both.log().includes("can't be combined")) console.error(both.log());
   const sp = await serve({ auth, policy: "none", search_path: "memory", agent: { dashboard: "late", mapping } }, mapDash);
   check(sp.proc == null && sp.log().includes("options.search_path can't be combined"), "a mapping together with options.search_path doesn't start");
   if (sp.proc) sp.proc.kill();
-  else if (!both.log().includes("can't be combined")) console.error(both.log());
+  // #987, #988: the build's bounds, and a scope the contract doesn't declare
+  for (const [what, extra, v, needle] of [
+    ["more rows than max_rows", { max_rows: 1 }, goodViews, "max_rows (1)"],
+    ["a build past max_bytes", { max_bytes: 1000 }, goodViews, "max_bytes (1000 bytes)"],
+    ["a runaway view past timeout_s", { timeout_s: 2 }, "CREATE VIEW suppliers AS SELECT l.code AS supplier_id, l.firma AS name, l.gebiet AS region, l.verzug::INTEGER AS days_late FROM source.lieferanten l, range(1000000000000) r;\n", "longer than 2 s"],
+    ["a misspelt scope", { scope: { regions: ["north"] } }, goodViews, "agent.mapping.scope.regions"],
+  ]) {
+    writeFileSync(views, v);
+    const t0 = Date.now();
+    const x = await serve({ auth, policy: "none", agent: { dashboard: "late", mapping: { ...mapping, ...extra } } }, mapDash);
+    check(x.proc == null && x.log().includes(needle) && Date.now() - t0 < 60000, `${what} doesn't start`);
+    if (x.proc) x.proc.kill();
+    else if (!x.log().includes(needle)) console.error(x.log());
+  }
+  writeFileSync(views, goodViews);
 
   // An unpublishable dashboard stops the start.
   const badDir = path.join(dir, "bad");

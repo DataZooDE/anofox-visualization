@@ -64,6 +64,10 @@ pub struct MappingOptions {
     pub scope: std::collections::BTreeMap<String, Vec<String>>,
     pub memory_limit: String,
     pub timeout_s: u64,
+    /// Rows per contract table copied into the snapshot, at most (#987).
+    pub max_rows: u64,
+    /// The size the built database and the build's spill may reach (#987).
+    pub max_bytes: u64,
 }
 
 impl MappingOptions {
@@ -72,7 +76,14 @@ impl MappingOptions {
         if let Some(k) = o.keys().find(|k| {
             !matches!(
                 k.as_str(),
-                "contract" | "views" | "db" | "scope" | "memory_limit" | "timeout_s"
+                "contract"
+                    | "views"
+                    | "db"
+                    | "scope"
+                    | "memory_limit"
+                    | "timeout_s"
+                    | "max_rows"
+                    | "max_bytes"
             )
         }) {
             return Err(format!("agent.mapping: unknown key '{k}'"));
@@ -85,24 +96,24 @@ impl MappingOptions {
                 .map(str::to_string)
                 .ok_or(format!("agent.mapping.{k}: a file path"))
         };
-        let mut scope = std::collections::BTreeMap::new();
+        let mut scope: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
         if let Some(sv) = o.get("scope") {
             let m = sv
                 .as_object()
                 .ok_or("agent.mapping.scope: {\"<scope>\": [\"value\", …]}")?;
             for (k, vals) in m {
-                let vals: Vec<String> = vals
+                let vals: Vec<&str> = vals
                     .as_array()
                     .ok_or("agent.mapping.scope: each scope is a list of values")?
                     .iter()
-                    .map(|x| x.as_str().map(str::to_string))
+                    .map(Value::as_str)
                     .collect::<Option<_>>()
                     .ok_or("agent.mapping.scope: values are strings")?;
-                // #984: an empty list is a mistake, not "check nothing"
-                if vals.iter().all(|v| v.trim().is_empty()) {
-                    return Err(format!("agent.mapping.scope.{k}: at least one value"));
-                }
-                scope.insert(k.to_ascii_lowercase(), vals);
+                // #984, #988: parsed as `dashboard --conform --scope` is
+                let (k, vals) = crate::canonical::scope_entry(k, &vals)
+                    .map_err(|e| format!("agent.mapping.scope: {e}"))?;
+                scope.entry(k).or_default().extend(vals);
             }
         }
         let memory_limit = match o.get("memory_limit") {
@@ -126,7 +137,21 @@ impl MappingOptions {
                 .filter(|n| (1..=86_400).contains(n))
                 .ok_or("agent.mapping.timeout_s: 1 to 86400 seconds")?,
         };
+        // #987: the copy into the snapshot is bounded like `options.source`'s
+        let count = |k: &str, default: u64| -> Result<u64, String> {
+            match o.get(k) {
+                None => Ok(default),
+                Some(n) => n
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                    .ok_or(format!("agent.mapping.{k}: a positive integer")),
+            }
+        };
+        let max_rows = count("max_rows", 50_000_000)?;
+        let max_bytes = count("max_bytes", 10 * 1024 * 1024 * 1024)?;
         Ok(MappingOptions {
+            max_rows,
+            max_bytes,
             contract: path("contract")?,
             views: path("views")?,
             db: path("db")?,
@@ -837,12 +862,19 @@ mod tests {
             ("acme.duckdb", "2GB", 60)
         );
         assert_eq!(m.scope["region"], ["north", "south"]);
+        // #988: trimmed, blanks dropped, case-duplicate keys merged
+        let m = AgentOptions::parse(&json!({"dashboard": "s", "mapping": {"contract": "c", "views": "v", "db": "d", "scope": {"Region": [" north ", ""], "region ": ["south"]}}})).unwrap().mapping.unwrap();
+        assert_eq!(m.scope["region"], ["north", "south"]);
+        assert_eq!((m.max_rows, m.max_bytes), (50_000_000, 10 << 30));
         for bad in [
             json!({"contract": "c.sql", "views": "v.sql"}),
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "memory_limit": "lots"}),
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "timeout_s": 0}),
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "key": "x"}),
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "scope": {"region": []}}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "scope": {"region": [" ", ""]}}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "scope": {" ": ["a"]}}),
+            json!({"contract": "c.sql", "views": "v.sql", "db": "a", "max_rows": 0}),
         ] {
             assert!(
                 AgentOptions::parse(&json!({"dashboard": "s", "mapping": bad})).is_err(),
