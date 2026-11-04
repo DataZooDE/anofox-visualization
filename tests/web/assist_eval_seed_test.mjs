@@ -1,5 +1,5 @@
 // #244 M1-3, #845 M3-3: the assistant's eval seed (tests/assist-eval/) is
-// well-formed — exactly 30 prompts in the plan's mix (§6), unique ids, every dataset runs, every role the seed
+// well-formed — exactly 32 prompts in the plan's mix (§6, + #951's vague ones), unique ids, every dataset runs, every role the seed
 // expects actually exists, and an edit prompt's `sql` plans cleanly. This is
 // the only part of the eval the CI loop runs (no API key, no network, no
 // cost) — the live run itself (scripts/assist-eval.mjs, D4) is manual.
@@ -40,10 +40,13 @@ const { loadSeed, validateSeed, datasetFiles } = await import(path.join(root, "s
 
 // ---- the seed's own shape ----
 const seed = loadSeed(root);
-assert.equal(seed.prompts.length, 30, `exactly 30 prompts, found ${seed.prompts.length}`);
+assert.equal(seed.prompts.length, 32, `exactly 32 prompts, found ${seed.prompts.length}`);
 {
   const n = (f) => seed.prompts.filter(f).length;
-  assert.equal(n((p) => p.kind === "new" && !p.harder), 10, "10 new, simple");
+  assert.equal(n((p) => p.kind === "new" && !p.harder && !p.vague), 10, "10 new, simple");
+  // #951: vague requests (2 new, the 2 Explore starts) must be asked about
+  assert.equal(n((p) => p.vague), 4, "4 vague");
+  for (const p of seed.prompts) assert.equal(!!p.vague, !!p.expect.asks, `${p.id}: vague ⇔ expect.asks`);
   assert.equal(n((p) => p.kind === "new" && p.harder), 8, "8 new, harder");
   assert.equal(n((p) => p.kind === "edit"), 7, "7 edits");
   assert.equal(n((p) => p.kind === "explore"), 2, "2 from Explore");
