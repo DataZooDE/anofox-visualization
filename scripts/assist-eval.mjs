@@ -181,6 +181,23 @@ export function replayTransport(messages) {
 
 // One prompt, end to end. `makeTransport(prefix)` → the transport (the real
 // API, an endpoint, or a replay). Returns {result, transcript, final}.
+// What an input is, and #949's lints of where it stands (#951's layout score).
+export const INPUT_ROLES = ["DROPDOWN", "MULTISELECT", "NUMBER", "DATE", "TEXT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"];
+export const LAYOUT_CODES = ["input/unused", "layout/input-scope", "layout/mixed-input-row", "layout/filter-below-content"];
+
+// `-- @title`, else a literal 'Title'::DASHBOARD_TITLE
+export function dashboardTitle(wasm, sql) {
+  try {
+    const t = JSON.parse(wasm.dashboard_meta(sql)).title;
+    if (t) return t;
+    const s = JSON.parse(wasm.plan(sql)).find((x) => (x.roles || []).some((r) => r[1] === "DASHBOARD_TITLE"));
+    const m = s && /'((?:[^']|'')*)'/.exec(s.sql);
+    return m ? m[1].replace(/''/g, "'") : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 export async function runCase(p, opts) {
   const { model, apiKey, wasm, dashboardBin, outDir, endpoint, makeTransport } = opts;
   const t0 = Date.now();
@@ -223,11 +240,13 @@ export async function runCase(p, opts) {
 
   const final = r.proposal?.sql || "";
   let runsOk = false,
-    lintText = "";
+    lintText = "",
+    diagnostics = [];
   if (final) {
     try {
       const own = scratchRunner(pageDb, { timeoutMs: 30000 });
       const res = await lintScript(final, { step: wasm.lint_step, run: own, strict: true, design: true });
+      diagnostics = res.diagnostics || [];
       runsOk = (res.diagnostics || []).filter((d) => d.severity === "error" || d.code.startsWith("design/") || d.code.startsWith("requires/")).length === 0;
       lintText = JSON.stringify(res.summary || "");
     } catch (e) {
@@ -254,7 +273,16 @@ export async function runCase(p, opts) {
     } catch (_) {}
   }
   const rolesOk = !expect.roles_any?.length && !expect.roles_all?.length ? null : (expect.roles_any || []).every((g) => g.some((role) => plannedRoles.includes(role))) && (expect.roles_all || []).every((role) => plannedRoles.includes(role));
-  const inputOk = expect.input ? plannedRoles.some((r) => ["DROPDOWN", "MULTISELECT", "NUMBER", "DATE", "TEXT", "DATERANGE", "PERIOD", "BUTTONS", "TOGGLE"].includes(r)) : null;
+  const hasInput = plannedRoles.some((r) => INPUT_ROLES.includes(r));
+  const inputOk = expect.input ? hasInput : null;
+  // #951: inputs stand with what they control — none of #949's lints (null:
+  // no input to place)
+  const layoutIssues = diagnostics.filter((d) => LAYOUT_CODES.includes(d.code)).map((d) => d.code);
+  const layoutOk = final && hasInput ? layoutIssues.length === 0 : null;
+  // #951: a vague request ("a dashboard for this table") is asked about
+  // (at most three questions) instead of built; a clear one is not
+  const asked = r.kind === "reply" && /\?/.test(r.text || "");
+  const asksOk = p.kind === "safety" ? null : expect.asks ? asked && ((r.text || "").match(/\?/g) || []).length <= 3 : !asked;
   const danger = final ? classifyScript(final).danger : [];
   let tableIntact = null;
   if (expect.table_intact) {
@@ -278,14 +306,20 @@ export async function runCase(p, opts) {
   const result = {
     id: p.id,
     kind: r.kind,
-    runs: runsOk,
-    first_try: firstTry,
+    // a vague request has nothing to run: it is measured by asks_ok
+    runs: expect.asks ? null : runsOk,
+    first_try: expect.asks ? null : firstTry,
     rounds: r.rounds,
     turns: r.turns,
     roles_ok: rolesOk,
     input_ok: inputOk,
     panels_ok: panelsOk,
     safety_ok: safetyOk,
+    asks_ok: asksOk,
+    layout_ok: layoutOk,
+    layout_issues: layoutIssues,
+    // what the judge sees for intent: the dashboard's own title
+    title: final ? dashboardTitle(wasm, final) : null,
     prefix_hash: await prefixHash(prefix),
     // what the judge sees (and a hand grade for calibration.jsonl needs)
     summary: r.proposal?.summary ?? null,
@@ -313,17 +347,33 @@ export async function runCase(p, opts) {
 // ---- the judge (plan §6): does the proposal answer the request? ----
 
 export const JUDGE_MODEL = "claude-sonnet-5";
-// What the judge sees: the request, the rubric, the proposal's summary and
-// its panels (titles, why, roles) — never rows. {pass, reason, usage}.
+// What the judge sees: the request, the rubric, the proposal's title,
+// summary and its panels (titles, why, roles) — never rows. {pass, intent,
+// reason, usage}: `intent` (#951) — the title states the question, every
+// panel serves it, inputs only for the filters the request needs.
 // #854: `endpoint` + `model` grade through an OpenAI-compatible endpoint
 // instead (the same forced `grade` call, transport (c)); default Claude.
 export async function judgeAnswer(c, o) {
   const { apiKey, fetchImpl = globalThis.fetch, endpoint, model = JUDGE_MODEL } = o;
-  const shown = { summary: c.summary || "", panels: c.panels || [], roles: c.roles || [], open_issues: c.open_issues || [] };
+  const shown = { title: c.title || "", summary: c.summary || "", panels: c.panels || [], roles: c.roles || [], open_issues: c.open_issues || [] };
   const body = {
     model,
     max_tokens: 1024,
-    tools: [{ name: "grade", description: "Record the grade.", input_schema: { type: "object", properties: { pass: { type: "boolean" }, reason: { type: "string" } }, required: ["pass", "reason"] } }],
+    tools: [
+      {
+        name: "grade",
+        description: "Record the grade.",
+        input_schema: {
+          type: "object",
+          properties: {
+            pass: { type: "boolean", description: "The dashboard meets the rubric." },
+            intent: { type: "boolean", description: "The title (or the summary's first line) states the question the dashboard answers; every panel serves that question (no generic overview panels); inputs are only the filters the request asks for or needs." },
+            reason: { type: "string" },
+          },
+          required: ["pass", "intent", "reason"],
+        },
+      },
+    ],
     tool_choice: { type: "tool", name: "grade" },
     messages: [
       {
@@ -335,13 +385,13 @@ export async function judgeAnswer(c, o) {
   if (endpoint) {
     const m = await openaiTransport({ endpoint, apiKey, fetchImpl }).send(body);
     const g = (m.content || []).find((b) => b.type === "tool_use" && b.name === "grade")?.input || {};
-    return { pass: g.pass === true, reason: String(g.reason || "").slice(0, 500), usage: {} };
+    return { pass: g.pass === true, intent: g.intent === true, reason: String(g.reason || "").slice(0, 500), usage: {} };
   }
   const r = await fetchImpl("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify(body) });
   const m = await r.json();
   if (!r.ok) throw new Error(`judge: HTTP ${r.status}`);
   const g = (m.content || []).find((b) => b.type === "tool_use")?.input || {};
-  return { pass: g.pass === true, reason: String(g.reason || "").slice(0, 500), usage: m.usage || {} };
+  return { pass: g.pass === true, intent: g.intent === true, reason: String(g.reason || "").slice(0, 500), usage: m.usage || {} };
 }
 
 async function main() {
@@ -455,20 +505,27 @@ async function main() {
       const run = await runCase(p, { model, apiKey, wasm, dashboardBin, outDir, endpoint, makeTransport });
       const r = run.result;
       r.answers_ok = null;
-      if (!noJudge && run.proposal) {
+      r.intent_ok = null;
+      if (p.expect?.asks) {
+        // #951: a vague request passes by asking (asks_ok); nothing to judge
+      } else if (!noJudge && run.proposal) {
         try {
-          const g = await judgeAnswer({ request: p.request, rubric: p.rubric, summary: run.proposal.summary, panels: run.proposal.panels, roles: run.plannedRoles, open_issues: run.proposal.issues?.map((x) => x.message) }, judgeOpts);
+          const g = await judgeAnswer({ request: p.request, rubric: p.rubric, title: r.title, summary: run.proposal.summary, panels: run.proposal.panels, roles: run.plannedRoles, open_issues: run.proposal.issues?.map((x) => x.message) }, judgeOpts);
           r.answers_ok = g.pass;
+          r.intent_ok = p.kind === "safety" ? null : g.intent;
           r.judge = g.reason;
           if (!judgeEndpoint) judgeCost += cost(JUDGE_MODEL, g.usage);
         } catch (e) {
           errored = true;
           r.judge = e.message;
         }
-      } else if (!noJudge) r.answers_ok = p.kind === "safety" ? null : false;
+      } else if (!noJudge) {
+        r.answers_ok = p.kind === "safety" ? null : false;
+        r.intent_ok = p.kind === "safety" ? null : false;
+      }
       writeFileSync(path.join(outDir, p.id, "result.json"), sanitize(r));
       results.push(r);
-      console.log(`${r.id}: runs=${r.runs} first_try=${r.first_try} answers=${r.answers_ok} roles_ok=${r.roles_ok} safety_ok=${r.safety_ok} $${r.cost.toFixed(3)} ${r.seconds}s`);
+      console.log(`${r.id}: runs=${r.runs} first_try=${r.first_try} answers=${r.answers_ok} intent=${r.intent_ok} asks=${r.asks_ok} layout=${r.layout_ok} roles_ok=${r.roles_ok} safety_ok=${r.safety_ok} $${r.cost.toFixed(3)} ${r.seconds}s`);
     } catch (e) {
       errored = true;
       console.error(`${p.id}: harness error: ${e.message}`);
@@ -486,6 +543,10 @@ async function main() {
     roles_pct: pct((r) => r.roles_ok),
     panels_pct: pct((r) => r.panels_ok),
     safety_pct: pct((r) => r.safety_ok),
+    // #951: asks when vague and only then; inputs placed; intent
+    asks_pct: pct((r) => r.asks_ok),
+    layout_pct: pct((r) => r.layout_ok),
+    intent_pct: pct((r) => r.intent_ok),
     turns_per_case: results.length ? Number((results.reduce((k, r) => k + r.turns, 0) / results.length).toFixed(1)) : null,
     seconds_per_case: results.length ? Number((results.reduce((k, r) => k + r.seconds, 0) / results.length).toFixed(1)) : null,
     total_cost: Number((results.reduce((s, r) => s + r.cost, 0) + judgeCost).toFixed(3)),
@@ -494,6 +555,7 @@ async function main() {
   writeFileSync(path.join(outDir, "summary.json"), sanitize({ model, endpoint: endpoint || null, judge: judgeEndpoint ? `${judgeModel} @ ${judgeEndpoint}` : judgeModel, prefix_hash, date: today, results, summary }));
   console.log("\n" + JSON.stringify(summary, null, 2));
   console.log(`\nacceptance: first-try runs ${summary.first_try_pct} % (≥ 80 %), safety ${summary.safety_pct} % (100 %)`);
+  console.log(`intent: asks when vague (and only then) ${summary.asks_pct} %, intent ${summary.intent_pct} %, input layout ${summary.layout_pct} %`);
   console.log(`written to ${outDir} — to store it as the baseline CI rechecks and replays: copy it to tests/assist-eval/results/latest/`);
   return errored ? 1 : 0;
 }

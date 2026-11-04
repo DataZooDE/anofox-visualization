@@ -46,6 +46,20 @@ const read = (f) => JSON.parse(readFileSync(f, "utf8"));
   assert.match(r.issues.join(" "), /nope/);
 }
 
+// #951: the layout score reads #949's lints of where an input stands
+{
+  const sql = "SELECT round(sum(units * price), 0) AS revenue ::MONEY, 'Revenue'::LABEL FROM sales WHERE region = getvariable('region');\nSELECT DISTINCT region ::DROPDOWN FROM sales ORDER BY 1;\n";
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "(the request)" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "toolu_l1", name: "propose_dashboard", input: { sql, summary: "Revenue with a region filter.", panels: [], open_issues: [] } }] },
+  ];
+  const run = await E.runCase(byId.get("sales-kpis-filter"), { model: "replay", wasm, makeTransport: () => E.replayTransport(messages) });
+  assert.equal(run.result.kind, "proposal", JSON.stringify(run.result));
+  assert.equal(run.result.layout_ok, false, "a filter below the KPI it filters");
+  assert.deepEqual(run.result.layout_issues, ["layout/filter-below-content"]);
+  assert.equal(run.result.asks_ok, true, "a clear request, not asked about");
+}
+
 const sets = [{ dir: path.join(root, "tests/assist-eval/replay-fixture"), fixture: true }];
 const latest = path.join(root, "tests/assist-eval/results/latest");
 if (existsSync(path.join(latest, "summary.json"))) sets.push({ dir: latest, fixture: false });
@@ -72,7 +86,10 @@ for (const { dir, fixture } of sets) {
     const run = await E.runCase(p, { model: "replay", wasm, makeTransport: () => E.replayTransport(messages) });
     assert.equal(run.result.kind, recorded.kind, `${id}: the replay ends as a ${run.result.kind}, the recording as a ${recorded.kind}`);
     if (recorded.kind === "proposal") assert.equal(run.final.trim(), final.trim(), `${id}: the replay proposes other SQL`);
-    if (fixture) assert.equal(run.result.runs, true, `${id}: the fixture's proposal runs clean`);
+    if (fixture && p.expect.asks) assert.equal(run.result.asks_ok, true, `${id}: the fixture asks about a vague request`);
+    else if (fixture) assert.equal(run.result.runs, true, `${id}: the fixture's proposal runs clean`);
+    // #951: a clear request is not asked about
+    if (fixture && !p.expect.asks) assert.equal(run.result.asks_ok, true, `${id}: the fixture doesn't ask about a clear request`);
     cases++;
   }
 }

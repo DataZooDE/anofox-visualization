@@ -1,6 +1,6 @@
 # The live evals of the assistant (#845 M3-3, plan-ai-assistant.md §6 / §11.5)
 # and of Ask (#195, §12.9), against the real Anthropic API. Manual only: they
-# cost money (about $9–10 for the assistant's 30 prompts on Sonnet 5, about
+# cost money (about $9–10 for the assistant's 32 prompts on Sonnet 5, about
 # $1.50 for Ask's 15 cases on both targets) and use the owner's dedicated key
 # (secret ASSIST_EVAL_ANTHROPIC_API_KEY, a workspace key with a monthly limit).
 # #854: or another provider — any OpenAI-compatible endpoint (Gemini,
@@ -100,7 +100,7 @@ jobs:
         working-directory: tests/web
         run: npx playwright install --with-deps chromium
 
-      - name: The assistant's eval (30 prompts, judged)
+      - name: The assistant's eval (32 prompts, judged)
         if: inputs.eval != 'ask'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ASSIST_EVAL_ANTHROPIC_API_KEY }}
