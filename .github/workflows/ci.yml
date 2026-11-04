@@ -1041,6 +1041,16 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/site-tiles-e2e.mjs (#946): `dashboard --site --basemap`
+      # writes the map tiles into the site; the page draws them from there,
+      # nothing from the tile source. --basemap needs the CLI with `auth`
+      # (its deps are already built for the extension just above).
+      - name: Published site with map tiles e2e (#946)
+        timeout-minutes: 8
+        run: |
+          cargo build --locked --bin dashboard --features auth
+          NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-tiles-e2e.mjs --dashboard target/debug/dashboard
+
       # scripts/embed-e2e.mjs (#771): <anofox-dashboard> on a host page of
       # another origin — a token from POST /api/auth/token (capped by the
       # key), the frame sized to the dashboard, state / link events,

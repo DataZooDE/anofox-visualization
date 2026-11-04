@@ -759,6 +759,88 @@ fn dashboard_assets_root(sql_path: &Path) -> Option<PathBuf> {
         .and_then(anofox_visualization::image::canonical_assets_dir)
 }
 
+/// The most tiles `--site --basemap` writes (#946): a tile source's usage
+/// policy (OpenStreetMap's forbids bulk downloads) and the site's size.
+#[cfg(feature = "auth")]
+const SITE_MAX_TILES: usize = 3000;
+
+/// `dashboard --site --basemap` (#946): fetch the tiles every `::MAPTILES`
+/// dashboard's maps draw on the page ([`dashboard::site_map_tiles`]) into
+/// `<out>/tiles/<z>/<x>/<y>`; returns site.json's `basemap`.
+#[cfg(feature = "auth")]
+fn site_write_tiles(
+    arg: &str,
+    dashboards: &[SiteDash],
+    data: Option<&str>,
+    out: &Path,
+) -> Result<serde_json::Value, String> {
+    use anofox_visualization::host::tiles::{uses_map_tiles, Tiles};
+    let tiles = Tiles::from_arg(arg)?;
+    let mut want = std::collections::BTreeSet::new();
+    for d in dashboards.iter().filter(|d| uses_map_tiles(&d.sql)) {
+        let session = anofox_visualization::host::duckdb_cli::SessionRunner::spawn(None)?;
+        let mut p = CliProvider { session };
+        if let Some(dir) = data {
+            p.session.run(&data_set_stmt(dir))?;
+        }
+        want.extend(dashboard::site_map_tiles(
+            &d.sql,
+            &mut p,
+            &tiles.opts.attribution,
+            tiles.opts.max_zoom,
+        ));
+    }
+    if want.len() > SITE_MAX_TILES {
+        return Err(format!(
+            "--basemap: the maps need {} tiles, more than {SITE_MAX_TILES} — narrow the maps' areas, \
+             lower options.basemap.max_zoom or use your own tile server",
+            want.len()
+        ));
+    }
+    let (mut wrote, mut missing) = (0, 0);
+    // as the server: at most upstream_per_minute fetches from the source
+    let gap = std::time::Duration::from_secs(60) / tiles.opts.upstream_per_minute.max(1);
+    let mut last: Option<std::time::Instant> = None;
+    for &(z, x, y) in &want {
+        if tiles.is_upstream(z, x, y) {
+            if let Some(t) = last {
+                std::thread::sleep(gap.saturating_sub(t.elapsed()));
+            }
+            last = Some(std::time::Instant::now());
+        }
+        match tiles.get(z, x, y) {
+            Ok((bytes, _)) => {
+                let dir = out.join("tiles").join(z.to_string()).join(x.to_string());
+                std::fs::create_dir_all(&dir).map_err(|e| format!("tiles: {e}"))?;
+                std::fs::write(dir.join(y.to_string()), bytes)
+                    .map_err(|e| format!("tiles: {e}"))?;
+                wrote += 1;
+            }
+            Err(e) => {
+                missing += 1;
+                if missing <= 3 {
+                    eprintln!("--site: tile {z}/{x}/{y}: {e:?}");
+                }
+            }
+        }
+    }
+    eprintln!("--site: wrote {wrote} map tiles ({missing} missing)");
+    Ok(serde_json::json!({
+        "attribution": tiles.opts.attribution,
+        "max_zoom": tiles.opts.max_zoom,
+    }))
+}
+
+#[cfg(not(feature = "auth"))]
+fn site_write_tiles(
+    _: &str,
+    _: &[SiteDash],
+    _: Option<&str>,
+    _: &Path,
+) -> Result<serde_json::Value, String> {
+    Err("--basemap needs a build with the serve feature".into())
+}
+
 /// `--basemap <json | file>` (#760): `options.basemap`'s object; the tiles
 /// are fetched now and embedded in the SVG.
 #[cfg(feature = "auth")]
@@ -2048,11 +2130,13 @@ fn cmd_site(args: &[String]) {
     let mut data: Option<String> = None;
     let mut options: Option<String> = None;
     let mut app: Option<String> = None;
+    let mut basemap: Option<String> = None;
     let mut positional = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => data = it.next().cloned(),
+            "--basemap" => basemap = it.next().cloned(),
             "--options" => options = it.next().cloned(),
             "--app" => app = it.next().cloned(),
             _ if !a.starts_with("--") => positional.push(a.clone()),
@@ -2071,7 +2155,7 @@ fn cmd_site(args: &[String]) {
     let (Some(folder), Some(out)) = (folder, out) else {
         eprintln!(
             "usage: dashboard --site <folder> <out-dir> [--data <dir|url>] \
-             [--options locked.json] [--app <web dir|tarball>]"
+             [--options locked.json] [--app <web dir|tarball>] [--basemap <json|file>]"
         );
         std::process::exit(2);
     };
@@ -2354,10 +2438,20 @@ fn cmd_site(args: &[String]) {
         );
     }
 
+    // #946: `--basemap`: the tiles the pages' ::MAPTILES maps draw, fetched
+    // now and written into the site — the page reads them from there, never
+    // from the tile source (T6, docs/security/basemap-760-review.md).
+    let site_basemap = basemap.as_deref().map(|b| {
+        site_write_tiles(b, &dashboards, data_value.as_deref(), out).unwrap_or_else(|e| fail(e))
+    });
+
     let nav: Vec<serde_json::Value> = dashboards.iter().map(|d| d.meta.nav_json(&d.id)).collect();
     let mut site_json = serde_json::json!({
         "dashboards": nav,
     });
+    if let Some(b) = site_basemap {
+        site_json["basemap"] = b;
+    }
     if !opts.path_vars.is_empty() {
         site_json["pathVars"] = serde_json::json!(opts.path_vars);
     }

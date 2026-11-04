@@ -2193,7 +2193,10 @@ async function ensureBoundaries(rowsJson, roles) {
 // (window.__served.basemap): a ::MAPTILES map draws tiles the page fetched
 // from its own server's /api/tiles — never from the tile source. A map is
 // drawn first without the tiles it lacks, then once more when they arrive.
-const basemapCfg = () => (servedMode && window.__served?.basemap) || null;
+// #946: a published site (`dashboard --site --basemap`) has its tiles in its
+// own tiles/ folder, written at build time (site.json `basemap`).
+const basemapCfg = () => (servedMode && window.__served?.basemap) || (published && window.__anofoxSite?.basemap) || null;
+const tileUrl = (k) => (published && window.__anofoxSite?.basemap ? new URL(`tiles/${k}`, window.__anofoxSite.base) : `/api/tiles/${k}?dashboard=${encodeURIComponent(window.__served.id)}`);
 const tileFetches = new Map(); // "z/x/y" → Promise<boolean> (kept)
 const TILE_FETCHES_AT_ONCE = 6;
 let tileSlots = TILE_FETCHES_AT_ONCE;
@@ -2218,7 +2221,7 @@ function fetchTile([z, x, y]) {
       (async () => {
         await tileSlot();
         try {
-          const r = await fetch(`/api/tiles/${k}?dashboard=${encodeURIComponent(window.__served.id)}`, { credentials: "same-origin" });
+          const r = await fetch(tileUrl(k), { credentials: "same-origin" });
           if (r.status === 429 || r.status === 503) {
             tileFetches.delete(k); // busy: a later draw asks again
             return false;
@@ -9962,6 +9965,7 @@ async function sitePrepare() {
     home: (site.home && dashboards.some((d) => d.id === site.home) && site.home) || dashboards[0]?.id || id,
     data: site.data,
     dataFiles: site.dataFiles,
+    basemap: site.basemap, // #946
   };
   // `anofox_data` itself (#407's locked-server rule, kept: a path_vars value
   // joined onto it never leaves the site — enforced in runSqlInner()

@@ -220,6 +220,81 @@ struct Step {
     rows: Result<Vec<(String, Vec<Value>)>, String>,
 }
 
+/// #946: the tiles a published site's page draws under this dashboard's
+/// `::MAPTILES` maps, so `dashboard --site --basemap` can write them into the
+/// site (nothing loads from the tile source at view time). The script runs
+/// as the static render runs it (inputs at their defaults); each tiled map is
+/// sized as the page sizes it — a render width of 100 px per ::COL unit
+/// (300–1200), its ::HEIGHT (a window share at 700 and 900 px high), else
+/// the map's own aspect — and every size's tiles are kept. A view the reader
+/// zooms or pans to past these stays without tiles.
+pub fn site_map_tiles(
+    script: &str,
+    provider: &mut dyn DataProvider,
+    attribution: &str,
+    max_zoom: u32,
+) -> Vec<(u32, u32, u32)> {
+    let (steps, _) = execute(script, provider, None);
+    let opts = RenderOptions {
+        basemap: Some(crate::Basemap {
+            attribution: attribution.to_string(),
+            tiles: Arc::new(|_, _, _| None),
+            max_zoom,
+        }),
+        ..RenderOptions::default()
+    };
+    let mut out = std::collections::BTreeSet::new();
+    let mut height: Option<crate::height::PanelHeight> = None;
+    for step in &steps {
+        let roles = &step.panel.roles;
+        if roles.iter().any(|(_, r)| *r == Role::Height) {
+            height = step
+                .rows
+                .as_ref()
+                .ok()
+                .and_then(|r| first_text(r))
+                .and_then(|t| crate::height::PanelHeight::parse(&t));
+            continue;
+        }
+        let pending = height.take();
+        if !roles.iter().any(|(_, r)| *r == Role::MapTiles) {
+            continue;
+        }
+        let Ok(rows) = &step.rows else { continue };
+        let cols = columns_from_result(rows, roles);
+        for w in (300..=1200).step_by(100) {
+            let hs: Vec<u32> = match pending {
+                Some(h @ crate::height::PanelHeight::Window(_)) => {
+                    vec![h.px(w as f64, 700.0), h.px(w as f64, 900.0)]
+                }
+                Some(h) => vec![h.px(w as f64, crate::height::REFERENCE_WINDOW_H)],
+                // the page's mapHeight(): the drawn box's aspect, a little
+                // room for the legend, within 220…640 px (300 when unknown)
+                None => {
+                    let ar = crate::map::view_bounds(&cols, &RenderOptions::default(), 0, 0)
+                        .map(|[x0, x1, y0, y1]| (y1 - y0) / (x1 - x0))
+                        .filter(|a| a.is_finite() && *a > 0.0)
+                        .unwrap_or(0.0);
+                    let wf = w as f64;
+                    let h = if ar > 0.0 {
+                        (wf * ar * 1.1)
+                            .max(220.0)
+                            .min((wf * 1.1).max(320.0))
+                            .min(640.0)
+                    } else {
+                        300.0
+                    };
+                    vec![h.round() as u32]
+                }
+            };
+            for h in hs {
+                out.extend(crate::map_tiles_needed(&cols, w, h, &opts));
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// The first cell of a result as text.
 fn first_text(rows: &[(String, Vec<Value>)]) -> Option<String> {
     rows.first().and_then(|(_, v)| v.first()).map(value_str)
