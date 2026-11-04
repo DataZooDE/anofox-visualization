@@ -60,6 +60,12 @@ const USAGE: &str = "usage:\n  \
      dashboard --publish <file.sql> --out d  the agent files of its -- @question lines: agent.json,\n  \
                                              mcp-tools.json, capabilities.md, questions.jsonl\n  \
                                              (from the SQL text alone; no query runs)\n  \
+     dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb>\n  \
+               [--dashboard f.sql] [--scope name=a,b] [--json]\n  \
+                                             check a customer's mapping against a canonical\n  \
+                                             contract (#194), in a locked instance with only\n  \
+                                             the source attached read-only; --dashboard: which\n  \
+                                             of its -- @question lines this customer can answer\n  \
      dashboard --site <folder> <out-dir>     publish a served folder as a static DuckDB-Wasm\n  \
                [--data <dir|url>]             site (#417) — a GitHub Pages workflow runs this\n  \
                [--options locked.json]        after a scheduled data refresh. --options accepts\n  \
@@ -111,6 +117,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
         Some("--publish") => cmd_publish(&args[1..]),
+        Some("--conform") => cmd_conform(&args[1..]),
         Some("--site") => cmd_site(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
         Some("state") => cmd_state(&args[1..]),
@@ -138,6 +145,145 @@ fn main() {
 /// dashboard published as an agent exposes (`agent.json`, `mcp-tools.json`,
 /// `capabilities.md`, `questions.jsonl`), from its SQL text alone — no query
 /// runs. Refused (exit 1) while `--check --agent`'s static checks fail.
+/// `dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb>
+/// [--dashboard <file.sql>] [--scope name=a,b …] [--json]` (#194 A3, plan
+/// §4): a customer's mapping against a canonical contract, built in a fresh
+/// DuckDB with only the source attached read-only, external access off and
+/// the configuration locked (H1) — never a session holding anything else.
+/// Exit 0 when it conforms, 1 when not, 2 on a usage error.
+fn cmd_conform(args: &[String]) {
+    use anofox_visualization::canonical;
+    let usage = || -> ! {
+        eprintln!(
+            "usage: dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb> \
+             [--dashboard <file.sql>] [--scope name=a,b] [--json]"
+        );
+        std::process::exit(2);
+    };
+    let (mut contract, mut views, mut db, mut dash) = (None, None, None, None);
+    let mut opts = canonical::Options::default();
+    let mut json = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--views" => views = it.next().cloned(),
+            "--db" => db = it.next().cloned(),
+            "--dashboard" => dash = it.next().cloned(),
+            "--json" => json = true,
+            "--scope" => {
+                let Some((k, v)) = it.next().and_then(|s| s.split_once('=')) else {
+                    usage()
+                };
+                opts.scope_values
+                    .entry(k.trim().to_ascii_lowercase())
+                    .or_default()
+                    .extend(
+                        v.split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty()),
+                    );
+            }
+            _ if !a.starts_with("--") && contract.is_none() => contract = Some(a.clone()),
+            _ => usage(),
+        }
+    }
+    let (Some(contract), Some(views), Some(db)) = (contract, views, db) else {
+        usage()
+    };
+    let fail = |m: String| -> ! {
+        eprintln!("--conform: {m}");
+        std::process::exit(2);
+    };
+    let read = |p: &str| std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("{p}: {e}")));
+    let c = canonical::parse_contract(&read(&contract))
+        .unwrap_or_else(|e| fail(format!("{contract}: {e}")));
+    let db = std::fs::canonicalize(&db).unwrap_or_else(|e| fail(format!("--db {db}: {e}")));
+    let mut out = serde_json::Map::new();
+    let ok;
+    let mut text = String::new();
+    match canonical::parse_mapping(&read(&views), &c) {
+        Err(errs) => {
+            ok = false;
+            for e in &errs {
+                text.push_str(&format!("error [mapping/parse] {views}: {e}\n"));
+            }
+            text.push_str("the mapping does not conform\n");
+            out.insert("ok".into(), false.into());
+            out.insert(
+                "findings".into(),
+                errs.iter()
+                    .map(|e| serde_json::json!({"severity": "error", "table": null, "column": null, "code": "mapping/parse", "message": e}))
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+        }
+        Ok(m) => {
+            // One `duckdb` run per call, replaying what changed the instance
+            // so far (the attach, the lock, the views): a long-lived session
+            // can't be used here, since its end-of-round marker reads a
+            // file, which external access off forbids.
+            let mut state = String::new();
+            let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
+                let sql = sql.trim().trim_end_matches(';');
+                // a newline before each `;`: a statement may end in a `--` comment
+                let rows = run_query(None, &format!("{state}{sql}\n;"))?;
+                let first = sql::strip_comments(sql)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ["create", "use", "attach", "set", "drop", "alter"].contains(&first.as_str()) {
+                    state.push_str(sql);
+                    state.push_str("\n;\n");
+                }
+                Ok(rows
+                    .into_iter()
+                    .map(|r| {
+                        r.into_values()
+                            .map(|v| match v {
+                                serde_json::Value::Null => None,
+                                serde_json::Value::String(s) => Some(s),
+                                other => Some(other.to_string()),
+                            })
+                            .collect()
+                    })
+                    .collect())
+            };
+            for s in canonical::instance_setup(&db.to_string_lossy()) {
+                duck(&s).unwrap_or_else(|e| fail(format!("the build instance: {e}")));
+            }
+            let r = canonical::conform(&mut duck, &c, &m, &opts).unwrap_or_else(|e| fail(e));
+            ok = r.ok();
+            text = r.to_text();
+            if let serde_json::Value::Object(o) = r.to_json() {
+                out = o;
+            }
+            if let Some(d) = &dash {
+                let qs = canonical::questions(&mut duck, &read(d));
+                for q in &qs {
+                    text.push_str(&match &q.off {
+                        None => format!("question on  [{}] {}\n", q.id, q.text),
+                        Some(why) => format!("question off [{}] {} — {why}\n", q.id, q.text),
+                    });
+                }
+                out.insert(
+                    "questions".into(),
+                    qs.iter()
+                        .map(|q| serde_json::json!({"id": q.id, "text": q.text, "available": q.off.is_none(), "reason": q.off}))
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
+            }
+        }
+    }
+    if json {
+        println!("{}", serde_json::Value::Object(out));
+    } else {
+        print!("{text}");
+    }
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
 fn cmd_publish(args: &[String]) {
     let mut path: Option<String> = None;
     let mut out: Option<String> = None;

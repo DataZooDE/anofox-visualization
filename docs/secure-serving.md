@@ -1274,6 +1274,45 @@ adds an MCP server (Streamable HTTP, JSON responses, no session) at
   `claude mcp add --transport http suppliers https://agent.example.com/mcp
   --header "Authorization: Bearer <token>"`.
 
+### Canonical contracts and customer mappings (`dashboard --conform`, #194)
+
+A dashboard served to many customers reads a **contract**
+(`canonical/<id>.sql`: `CREATE TABLE` statements; `NOT NULL` for required
+columns, a `-- @optional` comment for optional ones, `-- @scope <name>` for
+a row-policy column, `PRIMARY KEY` / `REFERENCES` for the key checks). Each
+customer maps its own data onto it in `customer-mapping/<customer>/views.sql`:
+**only** `CREATE [OR REPLACE] VIEW <contract table> AS <query>`, one per
+contract table, each reading only `source.<table>` — no macros, no
+`query` / `query_table`, no table functions but `range` /
+`generate_series` / `unnest`, no `getvariable`, no other database, no
+helper view. A scope column the mapping fills with one value on purpose is
+marked `-- @scope <name> constant` in the mapping.
+
+```sh
+dashboard --conform canonical/supplier-reliability.sql \
+    --views customer-mapping/acme/views.sql --db acme.duckdb \
+    [--dashboard supplier-reliability.sql] [--scope region=north,south] [--json]
+```
+
+The views are built in a fresh DuckDB that has only `--db` attached
+read-only as `source`, external access off and its configuration locked —
+never in a session holding anything else. The report (text, or `--json`;
+exit 1 when the mapping doesn't conform):
+- every statement through the mapping classifier (`mapping/refused`), every
+  contract table and column present with a compatible type, `NOT NULL`
+  columns without NULLs, keys unique and references resolving;
+- each scope column read from a `source` column (the view's syntax tree is
+  checked: `'acme' AS region` is refused unless marked constant), its
+  values within `--scope name=a,b`, and more than one value when the list
+  has more than one;
+- the optional columns the mapping leaves out;
+- with `--dashboard`: which `-- @question`s this customer can answer — each
+  question's panel is bound against the views; one that reads a missing
+  optional column is off, with the reason.
+
+Building the views at an agent's start (the same classifier, a separate
+locked instance) is the next step of #194.
+
 ### Scheduled tasks (`options.tasks`, #767)
 
 SQL that runs on a schedule next to the dashboards, e.g. to load the inbox
