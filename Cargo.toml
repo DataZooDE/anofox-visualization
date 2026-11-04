@@ -160,8 +160,12 @@ crate-type = ["cdylib", "rlib"]
 # dodge by default (position_dodge2); boxplot/violin parameters (#405),
 # new layers and annotations, per-layer legend key glyphs (#410). New
 # GeomBoxplot/GeomViolin fields: literals here end in `..Default::default()`.
+# 0.41.0 (sipemu/ggplot-rs#408–#414, #428, #429): dodge order follows the
+# legend's level order (boxes from statistics too, #970); jitterdodge scales
+# its width by the groups itself; the default discrete hue palette is
+# ggplot2's hue_pal() over the level count; binned scales draw guide_bins().
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.40.0", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.41.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

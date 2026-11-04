@@ -3301,3 +3301,41 @@ fn grouped_boxplots_stand_side_by_side_in_legend_order() {
         boxes[0][0]
     );
 }
+
+// #970: boxes from statistics (one row per box) dodge in the legend's order
+// whatever the row order (ggplot-rs 0.41.0, sipemu/ggplot-rs#428)
+#[test]
+fn grouped_boxes_from_statistics_dodge_in_legend_order() {
+    // rows deliberately out of the legend's order, and differently per slot
+    let rows = [
+        ("compact", "r"),
+        ("compact", "4"),
+        ("compact", "f"),
+        ("suv", "f"),
+        ("suv", "r"),
+        ("suv", "4"),
+    ];
+    let x: Vec<&str> = rows.iter().map(|r| r.0).collect();
+    let g: Vec<&str> = rows.iter().map(|r| r.1).collect();
+    let n = rows.len();
+    let s = svg(vec![
+        Column::new("class", Role::X, strs(&x)),
+        Column::new("drv", Role::Category, strs(&g)),
+        Column::new("q1", Role::Q1, nums(&vec![2.0; n])),
+        Column::new("m", Role::Median, nums(&vec![4.0; n])),
+        Column::new("q3", Role::Q3, nums(&vec![6.0; n])),
+        Column::new("lo", Role::WhiskerLow, nums(&vec![0.0; n])),
+        Column::new("hi", Role::WhiskerHigh, nums(&vec![8.0; n])),
+    ]);
+    let boxes: Vec<Vec<(f64, f64)>> = ["4", "f", "r"].iter().map(|grp| bars(&s, grp)).collect();
+    assert!(
+        boxes.iter().all(|b| b.len() == 2),
+        "one box per group and slot: {boxes:?}"
+    );
+    for (slot, ((a, b), c)) in boxes[0].iter().zip(&boxes[1]).zip(&boxes[2]).enumerate() {
+        assert!(
+            a.0 + a.1 <= b.0 + 0.01 && b.0 + b.1 <= c.0 + 0.01,
+            "slot {slot}: {a:?} {b:?} {c:?}"
+        );
+    }
+}
