@@ -17,7 +17,7 @@ SQL *is* the dashboard.
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 [![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.5.6%20%7C%202.0-brightgreen.svg)](https://duckdb.org)
 [![Live demo](https://img.shields.io/badge/live%20demo-online-2ea44f.svg)](https://datazoode.github.io/anofox-visualization/)
-[![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-plugin-8A2BE2)](#claude-code-plugin)
+[![Claude Code skills](https://img.shields.io/badge/Claude_Code-plugin_%C2%B7_5_skills-8A2BE2)](#claude-code-plugin)
 
 > [!IMPORTANT]
 > This extension is in early development, so bugs and breaking changes are expected.
@@ -326,7 +326,7 @@ The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 - **[Dashboard design principles](docs/dashboard-design.md)** — what makes a dashboard good (enforced by `dashboard --check`).
 - **[Visual review rubric](docs/dashboard-visual-review.md)** — the appearance gate.
 - **[Secure serving](docs/secure-serving.md)** — the trust model for locked serving; [`examples/served/`](examples/served/) runs it end to end.
-- **[Claude Code plugin](#claude-code-plugin)** — four skills that document the SQL API for Claude Code, including the dashboard-authoring workflow (also available in this checkout as the project skill [`build-dashboard`](.claude/skills/build-dashboard/SKILL.md)).
+- **[Claude Code plugin](#claude-code-plugin)** — five skills that document the SQL API for Claude Code, including the dashboard-authoring workflow (it starts by clarifying what the dashboard is for) (also available in this checkout as the project skill [`build-dashboard`](.claude/skills/build-dashboard/SKILL.md)).
 
 ### Conformance with anofox-statistics
 
