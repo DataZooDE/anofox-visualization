@@ -156,13 +156,15 @@ fn cmd_conform(args: &[String]) {
     let usage = || -> ! {
         eprintln!(
             "usage: dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb> \
-             [--dashboard <file.sql>] [--scope name=a,b] [--json]"
+             [--dashboard <file.sql>] [--scope name=a,b] [--memory-limit 4GB] [--timeout-s 120] [--json]"
         );
         std::process::exit(2);
     };
     let (mut contract, mut views, mut db, mut dash) = (None, None, None, None);
     let mut opts = canonical::Options::default();
     let mut json = false;
+    let mut memory_limit = "4GB".to_string();
+    let mut timeout_s: u64 = 120;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -170,6 +172,27 @@ fn cmd_conform(args: &[String]) {
             "--db" => db = it.next().cloned(),
             "--dashboard" => dash = it.next().cloned(),
             "--json" => json = true,
+            // #980: what one check of a customer's mapping may take
+            "--memory-limit" => {
+                memory_limit = it
+                    .next()
+                    .filter(|v| {
+                        let v = v.trim().to_ascii_uppercase();
+                        let n = v.trim_end_matches(|c: char| c.is_ascii_alphabetic()).trim();
+                        let unit = v[n.len()..].trim();
+                        n.parse::<f64>().is_ok_and(|n| n > 0.0)
+                            && ["KB", "MB", "GB", "TB", "KIB", "MIB", "GIB", "TIB"].contains(&unit)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| usage())
+            }
+            "--timeout-s" => {
+                timeout_s = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or_else(|| usage())
+            }
             "--scope" => {
                 let Some((k, v)) = it.next().and_then(|s| s.split_once('=')) else {
                     usage()
@@ -200,6 +223,7 @@ fn cmd_conform(args: &[String]) {
     let db = std::fs::canonicalize(&db).unwrap_or_else(|e| fail(format!("--db {db}: {e}")));
     let mut out = serde_json::Map::new();
     let ok;
+    let mut build_dir = std::path::PathBuf::new();
     let mut text = String::new();
     match canonical::parse_mapping(&read(&views), &c) {
         Err(errs) => {
@@ -218,21 +242,38 @@ fn cmd_conform(args: &[String]) {
             );
         }
         Ok(m) => {
-            // One `duckdb` run per call, replaying what changed the instance
-            // so far (the attach, the lock, the views): a long-lived session
-            // can't be used here, since its end-of-round marker reads a
-            // file, which external access off forbids.
+            // #980: the build instance is a fresh database file (its catalog
+            // is `memory`, as the checks expect), one `duckdb` run per check
+            // under a deadline. Tables and views stay in the file; only the
+            // session's own state (the attach, the settings and the lock,
+            // `USE`, TEMP objects) is replayed before each check. (A
+            // long-lived session can't be used: its end-of-round marker
+            // reads a file, which external access off forbids.)
+            let dir = std::env::temp_dir().join(format!(
+                "anofox-conform-{}-{}",
+                std::process::id(),
+                anofox_visualization::host::serving::random_token()
+            ));
+            std::fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+            let file = dir.join("memory.duckdb");
+            build_dir = dir.clone();
             let mut state = String::new();
             let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
                 let sql = sql.trim().trim_end_matches(';');
                 // a newline before each `;`: a statement may end in a `--` comment
-                let rows = run_query(None, &format!("{state}{sql}\n;"))?;
-                let first = sql::strip_comments(sql)
+                let rows = run_query_rw(&file, &format!("{state}{sql}\n;"), timeout_s)?;
+                let words: Vec<String> = sql::strip_comments(sql)
                     .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if ["create", "use", "attach", "set", "drop", "alter"].contains(&first.as_str()) {
+                    .take(4)
+                    .map(|w| w.to_ascii_lowercase())
+                    .collect();
+                let session = matches!(
+                    words.first().map(String::as_str),
+                    Some("use" | "attach" | "set")
+                ) || (words.first().map(String::as_str) == Some("create")
+                    && words.iter().any(|w| w == "temp" || w == "temporary"));
+                if session {
                     state.push_str(sql);
                     state.push_str("\n;\n");
                 }
@@ -249,7 +290,7 @@ fn cmd_conform(args: &[String]) {
                     })
                     .collect())
             };
-            for s in canonical::instance_setup(&db.to_string_lossy()) {
+            for s in canonical::instance_setup(&db.to_string_lossy(), &memory_limit, 4) {
                 duck(&s).unwrap_or_else(|e| fail(format!("the build instance: {e}")));
             }
             let r = canonical::conform(&mut duck, &c, &m, &opts).unwrap_or_else(|e| fail(e));
@@ -281,6 +322,7 @@ fn cmd_conform(args: &[String]) {
     } else {
         print!("{text}");
     }
+    let _ = std::fs::remove_dir_all(&build_dir);
     std::process::exit(if ok { 0 } else { 1 });
 }
 
@@ -3503,6 +3545,62 @@ fn run_query(
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
     let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    sql::parse_rows_json(s).map_err(|e| format!("parse duckdb json: {e}"))
+}
+
+/// One `duckdb <file> -json -c <sql>` run, read-write, killed after
+/// `timeout_s` (#980: a check of a customer's mapping is bounded in time).
+fn run_query_rw(
+    file: &Path,
+    sql: &str,
+    timeout_s: u64,
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    use std::io::Read;
+    let mut cmd = Command::new("duckdb");
+    cmd.arg(file).arg("-json").arg("-c").arg(sql);
+    anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run duckdb: {e}"))?;
+    let mut so = child.stdout.take().expect("piped");
+    let mut se = child.stderr.take().expect("piped");
+    let out_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = so.read_to_end(&mut b);
+        b
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = se.read_to_end(&mut b);
+        b
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("duckdb: {e}"))? {
+            Some(s) => break s,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "the check took longer than {timeout_s} s (--timeout-s) and was stopped"
+                ));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    let stdout = out_t.join().unwrap_or_default();
+    let stderr = err_t.join().unwrap_or_default();
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr).to_string());
+    }
+    let s = String::from_utf8_lossy(&stdout);
     let s = s.trim();
     if s.is_empty() {
         return Ok(Vec::new());

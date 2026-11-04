@@ -414,3 +414,34 @@ fn no_false_conforms() {
     assert_eq!(code, 1, "{v}");
     assert!(codes(&v).contains(&"conform/error".to_string()), "{v}");
 }
+
+/// #980: a mapping that would run for ever is stopped by the per-check
+/// deadline and reported, not left hanging.
+#[test]
+fn a_runaway_mapping_is_stopped() {
+    if !have_duckdb("a_runaway_mapping_is_stopped") {
+        return;
+    }
+    let s = Scratch::new("runaway");
+    let (_, renamed) = sources(&s);
+    let suppliers = "CREATE VIEW suppliers AS SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten;\n";
+    let runaway = format!("{suppliers}CREATE VIEW deliveries AS SELECT d.code AS supplier_id, d.termin AS due, d.verzug::INTEGER AS days_late, d.gebiet AS region FROM source.lieferungen d, range(1000000000000) r;\n");
+    let t0 = std::time::Instant::now();
+    let (code, v) = conform(
+        &s,
+        &runaway,
+        &renamed,
+        &[
+            "--scope",
+            "region=north,south",
+            "--timeout-s",
+            "3",
+            "--memory-limit",
+            "1GB",
+        ],
+    );
+    assert_eq!(code, 1, "{v}");
+    assert!(codes(&v).contains(&"conform/error".to_string()), "{v}");
+    assert!(v.to_string().contains("longer than 3 s"), "{v}");
+    assert!(t0.elapsed().as_secs() < 120, "took {:?}", t0.elapsed());
+}

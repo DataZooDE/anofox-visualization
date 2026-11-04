@@ -327,16 +327,21 @@ fn qi(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// The statements that set up a build instance on a fresh `:memory:` DuckDB:
+/// The statements that set up a build instance on a fresh DuckDB:
 /// the customer's database attached as `source`, read-only, then external
 /// access off and the configuration locked (H1).
-pub fn instance_setup(source_db: &str) -> Vec<String> {
+/// `memory_limit` (a DuckDB size, `4GB`) and `threads` bound what a
+/// customer's mapping can take (#980) — set before the lock, so nothing in
+/// the mapping can raise them.
+pub fn instance_setup(source_db: &str, memory_limit: &str, threads: u32) -> Vec<String> {
     vec![
         format!(
             "ATTACH {} AS {} (READ_ONLY)",
             lit(source_db),
             policy::MAPPING_SOURCE
         ),
+        format!("SET memory_limit = {}", lit(memory_limit)),
+        format!("SET threads = {}", threads.max(1)),
         "SET enable_external_access = false".into(),
         "SET autoinstall_known_extensions = false".into(),
         "SET autoload_known_extensions = false".into(),

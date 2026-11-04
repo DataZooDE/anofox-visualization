@@ -1291,12 +1291,16 @@ marked `-- @scope <name> constant` in the mapping.
 ```sh
 dashboard --conform canonical/supplier-reliability.sql \
     --views customer-mapping/acme/views.sql --db acme.duckdb \
-    [--dashboard supplier-reliability.sql] [--scope region=north,south] [--json]
+    [--dashboard supplier-reliability.sql] [--scope region=north,south] \
+    [--memory-limit 4GB] [--timeout-s 120] [--json]
 ```
 
 The views are built in a fresh DuckDB that has only `--db` attached
 read-only as `source`, external access off and its configuration locked —
-never in a session holding anything else. The report (text, or `--json`;
+never in a session holding anything else. It is a temporary database file
+under `TMPDIR` (removed afterwards), capped at `--memory-limit` (default
+4GB, 4 threads) set before the lock; each check is stopped after
+`--timeout-s` (default 120) and reported as `conform/error`. The report (text, or `--json`;
 exit 1 when the mapping doesn't conform):
 - every statement through the mapping classifier (`mapping/refused`), every
   contract table and column present with a compatible type, `NOT NULL`
