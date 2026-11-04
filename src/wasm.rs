@@ -494,6 +494,8 @@ pub fn map_tiles(
 #[wasm_bindgen]
 pub fn register_tile(z: u32, x: u32, y: u32, bytes: &[u8]) -> bool {
     guard(|| Ok(crate::map::tile_store::register(z, x, y, bytes))).unwrap_or(false)
+}
+
 /// A `::HEIGHT` value (#940) for the page: `{"px": n}`, `{"ratio": r}`
 /// (height ÷ width) or `{"vh": share}`; `{}` when it isn't a height.
 #[wasm_bindgen]
