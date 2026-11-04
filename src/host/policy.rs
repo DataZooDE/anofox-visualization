@@ -516,7 +516,16 @@ enum Mode {
     /// A policy's row filter: tables → the snapshot's own tables; it may only
     /// read claim variables.
     Rows,
+    /// A customer mapping's view (#194 A3, plan §4, H1/R6): it reads only
+    /// `source.*` (and its own CTEs), no variables, and of the table
+    /// functions only `range` / `generate_series` / `unnest`.
+    Mapping,
 }
+
+/// The table functions a mapping view may call (plan §4).
+const MAPPING_TABLE_FUNCTIONS: [&str; 3] = ["range", "generate_series", "unnest"];
+/// The only database a mapping view may name.
+pub const MAPPING_SOURCE: &str = "source";
 
 struct Walker<'a> {
     mode: Mode,
@@ -724,7 +733,12 @@ impl Walker<'_> {
             .into_iter()
             .any(|t| t.and_then(Value::as_str) == Some("RECURSIVE_CTE_NODE"));
             let mut visible = frame.clone();
-            if !recursive {
+            if self.mode == Mode::Mapping {
+                // #984: a mapping's original text is what runs, and DuckDB
+                // binds a name in a CTE body only to the CTEs before it (or
+                // itself when recursive) — a later sibling's name is a table
+                visible.truncate(if recursive { i + 1 } else { i });
+            } else if !recursive {
                 visible.remove(i);
             }
             self.scopes.push(visible);
@@ -783,6 +797,18 @@ impl Walker<'_> {
             o.remove("qualified_name");
         };
         match self.mode {
+            Mode::Mapping => {
+                if catalog.is_empty() && schema.is_empty() && self.cte(&name).is_some() {
+                    return Ok(());
+                }
+                let from_source = catalog.eq_ignore_ascii_case(MAPPING_SOURCE)
+                    || (catalog.is_empty() && schema.eq_ignore_ascii_case(MAPPING_SOURCE));
+                if !from_source {
+                    return Err(format!(
+                        "'{shown}': a mapping reads only {MAPPING_SOURCE}.<table> (the customer's source database)"
+                    ));
+                }
+            }
             Mode::Verify => {
                 let ok = if catalog.is_empty() && schema.is_empty() {
                     lower.starts_with(CTE_PREFIX) && self.cte(&name).is_some()
@@ -845,6 +871,16 @@ impl Walker<'_> {
             .to_ascii_lowercase();
         let qualified =
             f.is_some_and(|f| !s(f, "schema").is_empty() || !s(f, "catalog").is_empty());
+        if self.mode == Mode::Mapping {
+            return if !qualified && MAPPING_TABLE_FUNCTIONS.contains(&name.as_str()) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "table function '{name}()' is not allowed in a mapping (only {})",
+                    MAPPING_TABLE_FUNCTIONS.join(", ")
+                ))
+            };
+        }
         let ok = !qualified
             && (functions().get(true, &name).is_some_and(|(ok, _)| ok)
                 || self.enf.policy.table_functions.contains(&name));
@@ -885,6 +921,9 @@ impl Walker<'_> {
                     "'{name}()' is not allowed under the access policy: it is not on the reviewed function list (an extension's function can be allowed with the policy's \"functions\")"
                 ))
             }
+        }
+        if self.mode == Mode::Mapping && lower == "getvariable" {
+            return Err("a mapping can't read session variables (getvariable)".into());
         }
         if self.mode == Mode::Rows && lower == "getvariable" {
             let arg = single_string_argument(o).unwrap_or("");
@@ -1035,6 +1074,37 @@ pub fn statement_query(sql: &str) -> Result<String, String> {
         Setup::Create { body, .. } => body.to_string(),
         Setup::SetVariable { expr, .. } => format!("SELECT {expr}"),
     })
+}
+
+/// #194 A3: is `query` (a mapping view's body) admissible — the mapping
+/// variant of the classifier (plan §4): the reviewed function list, no
+/// macros, no `getvariable`, tables only from `source`, table functions
+/// only `range` / `generate_series` / `unnest`. `--conform` and the agent
+/// start both call this, so they agree.
+/// Returns the query's parse tree, as DuckDB gave it (the scope check
+/// reads it too).
+pub fn check_mapping(duck: &mut dyn Duck, query: &str) -> Result<Value, String> {
+    let enf = Enforcer {
+        policy: Policy {
+            tables: Vec::new(),
+            table_functions: Vec::new(),
+            functions: Vec::new(),
+        },
+        default_db: String::new(),
+        bodies: Vec::new(),
+        denied_functions: denied_macros(duck)?,
+    };
+    let tree = serialize(duck, query)?;
+    let mut ast = tree.clone();
+    let none = HashSet::new();
+    Walker::new(Mode::Mapping, &enf, &none).walk(&mut ast["statements"])?;
+    Ok(tree)
+}
+
+/// DuckDB's parse tree of one query (`json_serialize_sql`), for checks on
+/// its shape (#194 A3's scope-column check).
+pub fn parse_tree(duck: &mut dyn Duck, query: &str) -> Result<Value, String> {
+    serialize(duck, query)
 }
 
 /// Is `sql` exactly one query, by DuckDB's parser (`json_serialize_sql`

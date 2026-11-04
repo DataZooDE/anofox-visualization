@@ -24,6 +24,7 @@ use ggplot_rs::prelude::*;
 
 pub mod agent;
 mod boxstats;
+pub mod canonical;
 mod chart_frames;
 pub mod contract;
 pub mod dashboard;

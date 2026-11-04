@@ -60,6 +60,12 @@ const USAGE: &str = "usage:\n  \
      dashboard --publish <file.sql> --out d  the agent files of its -- @question lines: agent.json,\n  \
                                              mcp-tools.json, capabilities.md, questions.jsonl\n  \
                                              (from the SQL text alone; no query runs)\n  \
+     dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb>\n  \
+               [--dashboard f.sql] [--scope name=a,b] [--json]\n  \
+                                             check a customer's mapping against a canonical\n  \
+                                             contract (#194), in a locked instance with only\n  \
+                                             the source attached read-only; --dashboard: which\n  \
+                                             of its -- @question lines this customer can answer\n  \
      dashboard --site <folder> <out-dir>     publish a served folder as a static DuckDB-Wasm\n  \
                [--data <dir|url>]             site (#417) — a GitHub Pages workflow runs this\n  \
                [--options locked.json]        after a scheduled data refresh. --options accepts\n  \
@@ -111,6 +117,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
         Some("--publish") => cmd_publish(&args[1..]),
+        Some("--conform") => cmd_conform(&args[1..]),
         Some("--site") => cmd_site(&args[1..]),
         Some("--describe") => cmd_describe(&args[1..]),
         Some("state") => cmd_state(&args[1..]),
@@ -138,6 +145,289 @@ fn main() {
 /// dashboard published as an agent exposes (`agent.json`, `mcp-tools.json`,
 /// `capabilities.md`, `questions.jsonl`), from its SQL text alone — no query
 /// runs. Refused (exit 1) while `--check --agent`'s static checks fail.
+/// `dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb>
+/// [--dashboard <file.sql>] [--scope name=a,b …] [--json]` (#194 A3, plan
+/// §4): a customer's mapping against a canonical contract, built in a fresh
+/// DuckDB with only the source attached read-only, external access off and
+/// the configuration locked (H1) — never a session holding anything else.
+/// Exit 0 when it conforms, 1 when not, 2 on a usage error.
+fn cmd_conform(args: &[String]) {
+    use anofox_visualization::canonical;
+    let usage = || -> ! {
+        eprintln!(
+            "usage: dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb> \
+             [--dashboard <file.sql>] [--scope name=a,b] [--memory-limit 4GB] [--timeout-s 120] [--json]"
+        );
+        std::process::exit(2);
+    };
+    let (mut contract, mut views, mut db, mut dash) = (None, None, None, None);
+    let mut opts = canonical::Options::default();
+    let mut json = false;
+    let mut memory_limit = "4GB".to_string();
+    let mut timeout_s: u64 = 120;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--views" => views = it.next().cloned(),
+            "--db" => db = it.next().cloned(),
+            "--dashboard" => dash = it.next().cloned(),
+            "--json" => json = true,
+            // #980: what one check of a customer's mapping may take
+            "--memory-limit" => {
+                memory_limit = it
+                    .next()
+                    .filter(|v| {
+                        let v = v.trim().to_ascii_uppercase();
+                        let n = v.trim_end_matches(|c: char| c.is_ascii_alphabetic()).trim();
+                        let unit = v[n.len()..].trim();
+                        n.parse::<f64>().is_ok_and(|n| n > 0.0)
+                            && ["KB", "MB", "GB", "TB", "KIB", "MIB", "GIB", "TIB"].contains(&unit)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| usage())
+            }
+            "--timeout-s" => {
+                timeout_s = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|n| *n > 0)
+                    .unwrap_or_else(|| usage())
+            }
+            "--scope" => {
+                let Some((k, v)) = it.next().and_then(|s| s.split_once('=')) else {
+                    usage()
+                };
+                // #984: `--scope tenant=` (an empty list) is a mistake, not
+                // "check nothing"
+                let (k, vals) = canonical::scope_entry(k, &v.split(',').collect::<Vec<_>>())
+                    .unwrap_or_else(|e| {
+                        eprintln!("--conform: --scope: {e}");
+                        std::process::exit(2);
+                    });
+                opts.scope_values.entry(k).or_default().extend(vals);
+            }
+            _ if !a.starts_with("--") && contract.is_none() => contract = Some(a.clone()),
+            _ => usage(),
+        }
+    }
+    let (Some(contract), Some(views), Some(db)) = (contract, views, db) else {
+        usage()
+    };
+    let fail = |m: String| -> ! {
+        eprintln!("--conform: {m}");
+        std::process::exit(2);
+    };
+    let read = |p: &str| std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("{p}: {e}")));
+    let c = canonical::parse_contract(&read(&contract))
+        .unwrap_or_else(|e| fail(format!("{contract}: {e}")));
+    // #988: a scope the contract doesn't declare is a typo, not "unchecked"
+    if let Some(k) = canonical::unknown_scopes(&c, &opts.scope_values).first() {
+        fail(format!("--scope {k}: the contract declares no such scope"));
+    }
+    let db = std::fs::canonicalize(&db).unwrap_or_else(|e| fail(format!("--db {db}: {e}")));
+    // read before the build directory exists (#986: no exit leaves it behind)
+    let dash_sql = dash.as_deref().map(read);
+    let mut out = serde_json::Map::new();
+    let ok;
+    let mut build_dir = std::path::PathBuf::new();
+    let mut text = String::new();
+    match canonical::parse_mapping(&read(&views), &c) {
+        Err(errs) => {
+            ok = false;
+            for e in &errs {
+                text.push_str(&format!("error [mapping/parse] {views}: {e}\n"));
+            }
+            text.push_str("the mapping does not conform\n");
+            out.insert("ok".into(), false.into());
+            out.insert(
+                "findings".into(),
+                errs.iter()
+                    .map(|e| serde_json::json!({"severity": "error", "table": null, "column": null, "code": "mapping/parse", "message": e}))
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+        }
+        Ok(m) => {
+            // #980: the build instance is a fresh database file (its catalog
+            // is `memory`, as the checks expect), one `duckdb` run per check
+            // under a deadline. Tables and views stay in the file; only the
+            // session's own state (the attach, the settings and the lock,
+            // `USE`, TEMP objects) is replayed before each check. (A
+            // long-lived session can't be used: its end-of-round marker
+            // reads a file, which external access off forbids.)
+            let dir = std::env::temp_dir().join(format!(
+                "anofox-conform-{}-{}",
+                std::process::id(),
+                anofox_visualization::host::serving::random_token()
+            ));
+            // #989: owner-only (the dashboard's setup copies source rows into
+            // it), and a fresh one — never one that already exists
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+                .create(&dir)
+                .unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
+            let file = dir.join("memory.duckdb");
+            build_dir = dir.clone();
+            // #986: past this point an error removes the directory first
+            let fail = |m: String| -> ! {
+                let _ = std::fs::remove_dir_all(&dir);
+                fail(m)
+            };
+            // #989: so does Ctrl-C / SIGTERM, once the running check stops
+            on_interrupt_stop_checks();
+            let mut dash_schema = false;
+            let mut state = String::new();
+            let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
+                let sql = sql.trim().trim_end_matches(';');
+                // #986: a TEMP table or view lands in the (private, removed)
+                // build file instead, so it isn't replayed — re-run — before
+                // every later check
+                // #989: in a schema of their own, first on the search path —
+                // they shadow the mapping's views as TEMP objects do, never
+                // replace them
+                let persisted = untemp(sql, DASH_SCHEMA);
+                if persisted.is_some() && !dash_schema {
+                    run_query_rw(
+                        &file,
+                        &format!("{state}CREATE SCHEMA IF NOT EXISTS memory.{DASH_SCHEMA}\n;"),
+                        timeout_s,
+                    )?;
+                    state.push_str(&format!(
+                        "SET search_path = 'memory.{DASH_SCHEMA},memory.main'\n;\n"
+                    ));
+                    dash_schema = true;
+                }
+                let sql = persisted.as_deref().unwrap_or(sql);
+                // a newline before each `;`: a statement may end in a `--` comment
+                let rows = run_query_rw(&file, &format!("{state}{sql}\n;"), timeout_s);
+                if INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) {
+                    fail("interrupted".into());
+                }
+                let rows = rows?;
+                let first = sql::strip_comments(sql)
+                    .split_whitespace()
+                    .next()
+                    .map(|w| w.to_ascii_lowercase());
+                let session = matches!(first.as_deref(), Some("use" | "attach" | "set"));
+                if session {
+                    state.push_str(sql);
+                    state.push_str("\n;\n");
+                }
+                Ok(rows
+                    .into_iter()
+                    .map(|r| {
+                        r.into_values()
+                            .map(|v| match v {
+                                serde_json::Value::Null => None,
+                                serde_json::Value::String(s) => Some(s),
+                                other => Some(other.to_string()),
+                            })
+                            .collect()
+                    })
+                    .collect())
+            };
+            for s in canonical::instance_setup(&db.to_string_lossy(), &memory_limit, 4) {
+                duck(&s).unwrap_or_else(|e| fail(format!("the build instance: {e}")));
+            }
+            // #986: a check that fails (or hits --timeout-s) is a
+            // `conform/error` finding: the mapping doesn't conform (exit 1)
+            let r = canonical::conform(&mut duck, &c, &m, &opts).unwrap_or_else(|e| {
+                let mut r = canonical::Report::default();
+                r.push(true, "", None, "conform/error", e);
+                r
+            });
+            ok = r.ok();
+            text = r.to_text();
+            if let serde_json::Value::Object(o) = r.to_json() {
+                out = o;
+            }
+            if let Some(d) = dash_sql.as_deref() {
+                let qs = canonical::questions(&mut duck, d);
+                for q in &qs {
+                    text.push_str(&match &q.off {
+                        None => format!("question on  [{}] {}\n", q.id, q.text),
+                        Some(why) => format!("question off [{}] {} — {why}\n", q.id, q.text),
+                    });
+                }
+                out.insert(
+                    "questions".into(),
+                    qs.iter()
+                        .map(|q| serde_json::json!({"id": q.id, "text": q.text, "available": q.off.is_none(), "reason": q.off}))
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
+            }
+        }
+    }
+    // #989: removed before anything is written (a closed stdout panics)
+    let _ = std::fs::remove_dir_all(&build_dir);
+    if json {
+        println!("{}", serde_json::Value::Object(out));
+    } else {
+        print!("{text}");
+    }
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
+/// The schema of the build file a dashboard's TEMP objects go to (#989).
+const DASH_SCHEMA: &str = "anofox_dashboard";
+
+/// `CREATE [OR REPLACE] TEMP|TEMPORARY <kind> [IF NOT EXISTS] <name> …`
+/// as a plain CREATE of `schema.<name>`, or `None` when `sql` is no such
+/// statement (or names a qualified object: kept as written).
+fn untemp(sql: &str, schema: &str) -> Option<String> {
+    use anofox_visualization::sql::lex;
+    let toks = lex::tokenize(sql);
+    let code: Vec<&lex::Token> = toks.iter().filter(|t| !t.is_trivia()).collect();
+    if !code.first()?.is_word(sql, "create") {
+        return None;
+    }
+    let mut i = if code.get(1)?.is_word(sql, "or") && code.get(2)?.is_word(sql, "replace") {
+        3
+    } else {
+        1
+    };
+    let t = code.get(i)?;
+    if !(t.is_word(sql, "temp") || t.is_word(sql, "temporary")) {
+        return None;
+    }
+    i += 2; // TEMP, then TABLE / VIEW / …
+    if code.get(i).is_some_and(|w| w.is_word(sql, "if")) {
+        i += 3; // IF NOT EXISTS
+    }
+    let name = code.get(i)?;
+    if code.get(i + 1).is_some_and(|d| d.is_punct(sql, '.')) {
+        return None;
+    }
+    Some(format!(
+        "{}{}{}.{}",
+        &sql[..t.start],
+        &sql[t.end..name.start],
+        schema,
+        &sql[name.start..]
+    ))
+}
+
+/// Set by SIGINT / SIGTERM once [`on_interrupt_stop_checks`] ran: the
+/// running check is stopped and `--conform` cleans up and exits (#989).
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn on_interrupt_stop_checks() {
+    #[cfg(unix)]
+    {
+        extern "C" fn on_signal(_: libc::c_int) {
+            INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        // SAFETY: the handler only stores to an atomic (async-signal-safe)
+        unsafe {
+            libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+        }
+    }
+}
+
 fn cmd_publish(args: &[String]) {
     let mut path: Option<String> = None;
     let mut out: Option<String> = None;
@@ -3357,6 +3647,67 @@ fn run_query(
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
     let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    sql::parse_rows_json(s).map_err(|e| format!("parse duckdb json: {e}"))
+}
+
+/// One `duckdb <file> -json -c <sql>` run, read-write, killed after
+/// `timeout_s` (#980: a check of a customer's mapping is bounded in time).
+fn run_query_rw(
+    file: &Path,
+    sql: &str,
+    timeout_s: u64,
+) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    use std::io::Read;
+    let mut cmd = Command::new("duckdb");
+    cmd.arg(file).arg("-json").arg("-c").arg(sql);
+    anofox_visualization::host::duckdb_cli::prepare("duckdb", &mut cmd);
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("run duckdb: {e}"))?;
+    let mut so = child.stdout.take().expect("piped");
+    let mut se = child.stderr.take().expect("piped");
+    let out_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = so.read_to_end(&mut b);
+        b
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = se.read_to_end(&mut b);
+        b
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+    let status = loop {
+        match child.try_wait().map_err(|e| format!("duckdb: {e}"))? {
+            Some(s) => break s,
+            None if INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("interrupted".into());
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "the check took longer than {timeout_s} s (--timeout-s) and was stopped"
+                ));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    let stdout = out_t.join().unwrap_or_default();
+    let stderr = err_t.join().unwrap_or_default();
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr).to_string());
+    }
+    let s = String::from_utf8_lossy(&stdout);
     let s = s.trim();
     if s.is_empty() {
         return Ok(Vec::new());
