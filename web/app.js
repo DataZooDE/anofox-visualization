@@ -18560,8 +18560,24 @@ function mkSubmit(s, i, rowsJson) {
     requestAnimationFrame(() => {
       if (saved.kind === "err") renderSubmitError(errEl, text, varName);
       else statusEl.textContent = text;
-      if (focusAfter && btn.isConnected) btn.focus();
     });
+    // #948: the click disabled the old button (which drops its focus), and a
+    // re-run's patch may keep that old panel and drop this new one — so
+    // focus whichever submit button of this statement is on the page once
+    // the run has settled (polled like refocus(), at most 5 s)
+    if (focusAfter) {
+      const until = performance.now() + 5000;
+      const go = () => {
+        const live = btn.isConnected ? btn : document.querySelector(`.dash .panel[data-stmt="${i}"] .submit-btn`);
+        if (live && !live.disabled && live.offsetParent !== null && !document.body.classList.contains("loading")) {
+          // only where focus fell to the page, never away from what the
+          // viewer moved to meanwhile
+          const ae = document.activeElement;
+          if (!ae || ae === document.body || ae === btn || ae.classList?.contains("submit-btn")) live.focus();
+        } else if (performance.now() < until) requestAnimationFrame(go);
+      };
+      requestAnimationFrame(go);
+    }
   }
 
   if (!servedMode && !published) {
