@@ -22,6 +22,7 @@ import init, {
   register_boundaries,
   map_tiles,
   register_tile,
+  panel_height,
   roles_json,
   format_number,
   format_number_locale,
@@ -11703,7 +11704,7 @@ async function runOnce(fresh = true, pv = preview) {
                 facetH = map_natural_height(rowsJson, JSON.stringify(s.roles), Math.max(300, span * 100 * viewScale));
               } catch (_) {}
             }
-            const ph = boxH || (spark ? 90 : facetH || (mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300)); // ::HEIGHT, else default
+            const ph = boxH ? (boxH.rel ? relHeight(boxH.rel, Math.max(300, span * 100 * viewScale)) : +boxH) : spark ? 90 : facetH || (mapAr ? mapHeight(mapAr, Math.max(300, span * 100 * viewScale)) : 300); // ::HEIGHT, else default
             const holder = document.createElement("div");
             holder.className = "panel-svg";
             // Render width proportional to the panel's span, so displayed height
@@ -11726,7 +11727,7 @@ async function runOnce(fresh = true, pv = preview) {
             fig.appendChild(holder);
             // Stash the panel's data/roles so the toolbox (data view, chart-type
             // toggle) can reach them without re-querying.
-            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap, mapAr };
+            fig._dp = { rows: rowsJson, roles: s.roles, rw, ph, isMap, mapAr, hRel: boxH?.rel };
             // Maps + continuous cartesian charts are scroll-to-zoom / drag-to-pan
             // (double-click resets).
             if (isMap) attachMapZoom(holder, rowsJson, s.roles, ph);
@@ -11924,7 +11925,7 @@ async function runOnce(fresh = true, pv = preview) {
       } else if (d === "SPAN") {
         nextSpan = parseInt(await firstValue(s)) || 0;
       } else if (d === "HEIGHT") {
-        nextHeight = parseInt(await firstValue(s)) || 0;
+        nextHeight = heightOf(await firstValue(s), nextSpan || defaultSpan, viewScale);
       } else if (d === "VIEW_PLACEMENT") {
         // #534: a pending ::VIEW_PLACEMENT right before a ::VIEW group's
         // first marker. views.rs already resolved the effective placement
@@ -12840,12 +12841,13 @@ function fitCharts(watch = false) {
     const svg = holder.querySelector(":scope > svg");
     const fit = panel._dpFit;
     const w = fit ? fit.w : fitWidth(holder, dp.rw);
-    const h = fit ? fit.h : dp.mapAr ? mapHeight(dp.mapAr, w) : dp.ph;
+    const h = fit ? fit.h : dp.hRel ? relHeight(dp.hRel, w) : dp.mapAr ? mapHeight(dp.mapAr, w) : dp.ph;
     // hidden (a tab not shown, charts as tables): fitted once it shows
     if (!svg || !holder.clientWidth) return;
     // a fitted chart: redrawn when its height changed too; one no longer
     // fitted: redrawn at its authored size
-    const sameH = fit ? Math.abs(h - (svg._dpAskH ?? svg.viewBox.baseVal.height)) < 2 : !svg._dpFitted;
+    // (a relative ::HEIGHT, #940: its height follows the width / window too)
+    const sameH = fit || dp.hRel ? Math.abs(h - (svg._dpAskH ?? svg.viewBox.baseVal.height)) < 2 : !svg._dpFitted;
     if (Math.abs(w - (svg._dpAskW ?? svg.viewBox.baseVal.width)) < 2 && sameH) return;
     if (dp.contract) {
       holder.innerHTML = render_contract(dp.contract.macro, dp.rows, dp.contract.args, w, h, renderCtx());
@@ -12861,7 +12863,28 @@ function fitCharts(watch = false) {
 // panel (#400), else fitWidth × its authored height.
 function chartSize(holder, dp) {
   const fit = holder.closest(".panel")?._dpFit;
-  return fit ? [fit.w, fit.h] : [fitWidth(holder, dp.rw), dp.ph];
+  if (fit) return [fit.w, fit.h];
+  const w = fitWidth(holder, dp.rw);
+  return [w, dp.hRel ? relHeight(dp.hRel, w) : dp.ph];
+}
+
+// ::HEIGHT (#940): pixels, or relative — a ratio of the panel's width
+// ('16:9', '0.5') or a share of the window ('40vh'), parsed by the renderer
+// (crate::height). A relative one is a Number holding its pixel estimate
+// at the panel's render width (what every plain use of nextHeight reads)
+// with `.rel` attached, which the chart path and fitCharts size by.
+function heightOf(v, span, scale) {
+  let h = {};
+  try {
+    h = JSON.parse(panel_height(String(v ?? "")));
+  } catch (_) {}
+  if (h.px) return h.px;
+  if (!h.ratio && !h.vh) return 0;
+  return Object.assign(new Number(relHeight(h, Math.max(300, span * 100 * scale))), { rel: h });
+}
+function relHeight(rel, w) {
+  const px = rel.ratio ? w * rel.ratio : innerHeight * rel.vh;
+  return Math.round(Math.min(5000, Math.max(40, px)));
 }
 // Remember the height a chart was asked for and whether it was drawn at a
 // fitted size (fitCharts compares against both).
