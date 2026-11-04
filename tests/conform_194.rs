@@ -526,7 +526,8 @@ fn a_same_named_table_in_another_schema_lends_no_columns() {
     );
     // 4. an empty --scope list is a usage error, not "allow everything"
     let views = format!("{suppliers}{deliveries}");
-    for bad in ["region=", "region=,"] {
+    // …and so is a scope the contract doesn't declare (#988, a typo)
+    for bad in ["region=", "region=,", "regions=north,south"] {
         let out = Command::new(env!("CARGO_BIN_EXE_dashboard"))
             .args(["--conform"])
             .arg(s.write("contract.sql", CONTRACT))

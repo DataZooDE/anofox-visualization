@@ -197,21 +197,14 @@ fn cmd_conform(args: &[String]) {
                 let Some((k, v)) = it.next().and_then(|s| s.split_once('=')) else {
                     usage()
                 };
-                let vals: Vec<String> = v
-                    .split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect();
                 // #984: `--scope tenant=` (an empty list) is a mistake, not
                 // "check nothing"
-                if k.trim().is_empty() || vals.is_empty() {
-                    eprintln!("--conform: --scope {k}= needs at least one value");
-                    std::process::exit(2);
-                }
-                opts.scope_values
-                    .entry(k.trim().to_ascii_lowercase())
-                    .or_default()
-                    .extend(vals);
+                let (k, vals) = canonical::scope_entry(k, &v.split(',').collect::<Vec<_>>())
+                    .unwrap_or_else(|e| {
+                        eprintln!("--conform: --scope: {e}");
+                        std::process::exit(2);
+                    });
+                opts.scope_values.entry(k).or_default().extend(vals);
             }
             _ if !a.starts_with("--") && contract.is_none() => contract = Some(a.clone()),
             _ => usage(),
@@ -227,6 +220,10 @@ fn cmd_conform(args: &[String]) {
     let read = |p: &str| std::fs::read_to_string(p).unwrap_or_else(|e| fail(format!("{p}: {e}")));
     let c = canonical::parse_contract(&read(&contract))
         .unwrap_or_else(|e| fail(format!("{contract}: {e}")));
+    // #988: a scope the contract doesn't declare is a typo, not "unchecked"
+    if let Some(k) = canonical::unknown_scopes(&c, &opts.scope_values).first() {
+        fail(format!("--scope {k}: the contract declares no such scope"));
+    }
     let db = std::fs::canonicalize(&db).unwrap_or_else(|e| fail(format!("--db {db}: {e}")));
     // read before the build directory exists (#986: no exit leaves it behind)
     let dash_sql = dash.as_deref().map(read);

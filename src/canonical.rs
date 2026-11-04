@@ -818,6 +818,46 @@ fn source_columns(duck: &mut dyn Duck) -> Result<BTreeMap<String, BTreeSet<Strin
 
 // ---- the report ----
 
+/// One scope's allowed values as an operator wrote them (`--scope
+/// name=a,b`, `agent.mapping.scope`): the name trimmed and lower-cased, the
+/// values trimmed with blanks dropped; an empty name or no value at all is
+/// an error (#984, #988). The CLI and the server parse alike.
+pub fn scope_entry(name: &str, values: &[&str]) -> Result<(String, Vec<String>), String> {
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return Err("a scope needs a name".into());
+    }
+    let vals: Vec<String> = values
+        .iter()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect();
+    if vals.is_empty() {
+        return Err(format!("scope '{name}' needs at least one value"));
+    }
+    Ok((name, vals))
+}
+
+/// The scope names `scope_values` gives that `contract` doesn't declare
+/// (#988: a misspelt one would otherwise switch its check off unnoticed).
+pub fn unknown_scopes(
+    contract: &Contract,
+    scope_values: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    scope_values
+        .keys()
+        .filter(|k| {
+            !contract.tables.iter().flat_map(|t| &t.columns).any(|c| {
+                c.scope
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(k))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 /// What `--conform` is told besides the files.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
