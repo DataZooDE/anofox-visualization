@@ -72,7 +72,10 @@ try {
   check(await levelIs(/^DE-[A-Z]{2}$/), "a click on Germany draws its states");
   check((await keys()).length === 16, `16 states (${(await keys()).length})`);
   check(/Revenue by state/.test(await title()), "titled by state");
-  check(/v\.geo_path=DEU/.test(page.url()), `the path is in the URL (${page.url().split("?")[1] || ""})`);
+  // #975: the URL follows the run's end, which can come a moment after the
+  // map is drawn (a panel shows as soon as it is ready, #938) — wait for it
+  const inUrl = await page.waitForFunction(() => /v\.geo_path=DEU/.test(location.href), null, { timeout: 5000 }).then(() => true, () => false);
+  check(inUrl, `the path is in the URL (${page.url().split("?")[1] || ""})`);
   const crumbs = () => page.evaluate(() => document.querySelector('.dash .dp-crumbs[data-drill="geo"]')?.textContent || "");
   check(/DEU/.test(await crumbs()), `a breadcrumb names the drill (${await crumbs()})`);
 
