@@ -371,6 +371,85 @@ fn cmd_conform(args: &[String]) {
     std::process::exit(if ok { 0 } else { 1 });
 }
 
+/// `dashboard --check --agent` on a dashboard with `-- @schema <id>` (#982,
+/// plan §2.2): the contract `canonical/<id>.sql` (next to the dashboard,
+/// or one folder up) must exist, and every statement reads only its
+/// tables, the dashboard's TEMP objects and CTEs, through the agent's
+/// classifier (`agent/non-canonical-read`, `agent/no-contract`).
+type Rows = Result<Vec<Vec<Option<String>>>, String>;
+
+fn contract_diags(
+    script: &str,
+    file: &Path,
+    duck: &mut dyn FnMut(&str) -> Rows,
+) -> Vec<lint::Diagnostic> {
+    let diag = |stmt: usize, code: &'static str, message: String| lint::Diagnostic {
+        severity: Severity::Error,
+        stmt,
+        code,
+        message,
+        sql: String::new(),
+    };
+    let Some(id) = sv::parse_dashboard_meta("", script).schema else {
+        return Vec::new();
+    };
+    let dir = file.parent().unwrap_or(Path::new("."));
+    let found = [dir.join("canonical"), dir.join("../canonical")]
+        .into_iter()
+        .map(|d| d.join(format!("{id}.sql")))
+        .find(|p| p.is_file());
+    let Some(path) = found else {
+        return vec![diag(
+            0,
+            "agent/no-contract",
+            format!(
+                "-- @schema {id}: no canonical/{id}.sql next to the dashboard or one folder up"
+            ),
+        )];
+    };
+    let contract = match std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|t| anofox_visualization::canonical::parse_contract(&t))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return vec![diag(
+                0,
+                "agent/no-contract",
+                format!("{}: {e}", path.display()),
+            )]
+        }
+    };
+    let tables: std::collections::HashSet<String> = contract
+        .tables
+        .iter()
+        .map(|t| t.name.to_ascii_lowercase())
+        .collect();
+    let stmts: Vec<(bool, String)> = sql::plan(script)
+        .into_iter()
+        .map(|p| (p.setup, p.sql))
+        .collect();
+    let default_db = duck("SELECT current_database()::VARCHAR")
+        .ok()
+        .and_then(|r| r.into_iter().next())
+        .and_then(|r| r.into_iter().next().flatten())
+        .unwrap_or_else(|| "memory".into());
+    match anofox_visualization::host::policy::check_panels(
+        &mut |s: &str| duck(s),
+        &stmts,
+        &default_db,
+        Some(&tables),
+    ) {
+        Ok(()) => Vec::new(),
+        Err((i, e)) => vec![diag(
+            i + 1,
+            "agent/non-canonical-read",
+            e.trim_start_matches("agent/non-canonical-read: ")
+                .to_string(),
+        )],
+    }
+}
+
 /// The schema of the build file a dashboard's TEMP objects go to (#989).
 const DASH_SCHEMA: &str = "anofox_dashboard";
 
@@ -1360,7 +1439,7 @@ fn cmd_check(args: &[String]) {
     } else {
         dashboard_assets_root(Path::new(&path))
     };
-    let lint_one = |script: &str| -> Vec<lint::Diagnostic> {
+    let lint_one = |script: &str, file: &Path| -> Vec<lint::Diagnostic> {
         // #435: one persistent session per file (in-memory, or read-only
         // against --db) backs the whole check — not a fresh process per
         // statement replaying everything run so far. A folder's dashboards
@@ -1389,6 +1468,26 @@ fn cmd_check(args: &[String]) {
         }
         if agent {
             diags.extend(lint::agent_diags(script));
+            // #982: `-- @schema <id>` — only the contract's tables
+            let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
+                // the session reads a statement up to its `;` (a newline
+                // first: one may end in a `--` comment)
+                let sql = format!("{}\n;", sql.trim().trim_end_matches(';'));
+                Ok(session
+                    .run(&sql)?
+                    .into_iter()
+                    .map(|r| {
+                        r.into_values()
+                            .map(|v| match v {
+                                serde_json::Value::Null => None,
+                                serde_json::Value::String(s) => Some(s),
+                                other => Some(other.to_string()),
+                            })
+                            .collect()
+                    })
+                    .collect())
+            };
+            diags.extend(contract_diags(script, file, &mut duck));
         }
         diags
     };
@@ -1438,7 +1537,7 @@ fn cmd_check(args: &[String]) {
             .collect();
         let extra = lint::folder_diags(&scripts);
         for (n, script) in &scripts {
-            let mut d = lint_one(script);
+            let mut d = lint_one(script, &Path::new(&path).join(n));
             d.extend(extra.iter().filter(|(f, _)| f == n).map(|(_, d)| d.clone()));
             // The exact id the running server's own loader would derive
             // for this file (review of #538 round 2: reuse
@@ -1458,7 +1557,7 @@ fn cmd_check(args: &[String]) {
         }
     } else {
         let script = read(&path);
-        let mut d = lint_one(&script);
+        let mut d = lint_one(&script, Path::new(&path));
         if let (Some((submit_ok, state_ok)), Some(id)) = (
             &state_enablement,
             sv::dashboard_id(Path::new(&path), &sv::parse_dashboard_meta("", &script)),

@@ -2759,9 +2759,47 @@ fn check_agent_panels(
     let Some(d) = dashes.find(&a.dashboard) else {
         return Ok(());
     };
+    // #982: with a customer mapping the dashboard reads only the contract's
+    // tables; one that names its contract (`-- @schema`) names this one
+    let contract: Option<std::collections::HashSet<String>> = match opts.mapping() {
+        None => None,
+        Some(m) => {
+            let text = std::fs::read_to_string(&m.contract)
+                .map_err(|e| format!("agent.mapping: {}: {e}", m.contract))?;
+            let c = anofox_visualization::canonical::parse_contract(&text)
+                .map_err(|e| format!("agent.mapping.contract: {e}"))?;
+            let stem = Path::new(&m.contract)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if let Some(id) = d
+                .meta
+                .schema
+                .as_deref()
+                .filter(|id| !id.eq_ignore_ascii_case(&stem))
+            {
+                return Err(format!(
+                    "options.agent: dashboard '{}' reads contract '{id}' (-- @schema), but agent.mapping.contract is '{stem}'",
+                    d.id
+                ));
+            }
+            Some(
+                c.tables
+                    .iter()
+                    .map(|t| t.name.to_ascii_lowercase())
+                    .collect(),
+            )
+        }
+    };
     let c = snap.db.connect()?;
     let mut duck = |sql: &str| c.query(sql)?.string_rows(1_000_000);
-    anofox_visualization::host::policy::check_panels(&mut duck, &d.stmts, &snap.default_db).map_err(
+    anofox_visualization::host::policy::check_panels(
+        &mut duck,
+        &d.stmts,
+        &snap.default_db,
+        contract.as_ref(),
+    )
+    .map_err(
         |(i, e)| {
             if e.contains("json_serialize_sql") {
                 format!("options.agent: the agent's checks need the json extension (INSTALL json): {e}")

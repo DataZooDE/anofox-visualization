@@ -1273,6 +1273,11 @@ pub struct DashboardMeta {
     /// viewer's first visit (`None` without the header, or if it names no
     /// tour — lint checks that: `tour/autostart-unknown`).
     pub tour_autostart: Option<String>,
+    /// `-- @schema <id>` (#194, plan §4): the canonical contract
+    /// (`canonical/<id>.sql`) this dashboard reads — only its tables
+    /// (`agent/non-canonical-read`). `None` without the header or with an
+    /// id that isn't a valid file name.
+    pub schema: Option<String>,
 }
 
 /// One `-- @tour <id> [title]` block: an id (`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`,
@@ -1543,6 +1548,18 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
                     None => r.to_string(),
                 });
             }
+        } else if let Some(r) = header_value(l, "schema") {
+            // the first word: `-- @schema supplier-reliability (canonical/…)`
+            m.schema = r
+                .split_whitespace()
+                .next()
+                .filter(|id| {
+                    id.len() <= 64
+                        && id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                })
+                .map(str::to_string);
         } else if let Some(r) = header_value(l, "owner") {
             m.owner = Some(r.to_string()).filter(|o| !o.is_empty());
         } else if let Some(r) = header_value(l, "certified") {

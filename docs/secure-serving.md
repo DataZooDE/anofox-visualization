@@ -1356,7 +1356,10 @@ into `canonical.duckdb`, which the snapshot attaches read-only as
 `canonical` and makes the default database: the dashboard's bare names
 resolve to the contract's tables, and neither the source's own tables nor
 anything of the host session (its databases are not copied, `attach` is
-ignored, `search_path` is refused) is in the snapshot. The agent's questions are bound against the views there too
+ignored, `search_path` is refused) is in the snapshot — the dashboard may read only the contract's tables (its
+own TEMP objects and CTEs aside; `agent/non-canonical-read` stops the
+start), and a `-- @schema <id>` header must name this contract. The
+agent's questions are bound against the views there too
 (like `--conform --dashboard`): one whose panel reads a column the mapping
 leaves out is off for this customer — not in `GET /api/agent` or
 `tools/list`, refused when asked — and the start log says why. A watchdog interrupts the build after `timeout_s` (default

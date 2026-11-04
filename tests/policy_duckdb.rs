@@ -894,6 +894,7 @@ fn an_agents_panels_are_classified_without_a_policy() {
             &mut |s: &str| rows_as_text(&file, s),
             &[(false, sql.to_string())],
             "snap",
+            None,
         )
     };
     for ok in [
@@ -918,4 +919,28 @@ fn an_agents_panels_are_classified_without_a_policy() {
     // setup statements too: only the forms a locked server accepts
     assert!(check("CREATE TABLE copy AS SELECT * FROM payroll").is_err());
     assert!(check("CREATE TEMP TABLE t AS SELECT * FROM memory.main.x").is_err());
+    // with a contract: only its tables, the TEMP objects before, and CTEs
+    let contract: std::collections::HashSet<String> = ["sales".to_string()].into_iter().collect();
+    let with = |stmts: &[&str]| {
+        let stmts: Vec<(bool, String)> = stmts.iter().map(|s| (false, s.to_string())).collect();
+        anofox_visualization::host::policy::check_panels(
+            &mut |s: &str| rows_as_text(&file, s),
+            &stmts,
+            "snap",
+            Some(&contract),
+        )
+    };
+    assert!(with(&["SELECT * FROM sales", "WITH emp AS (FROM sales) FROM emp"]).is_ok());
+    assert!(with(&[
+        "CREATE TEMP TABLE t AS SELECT * FROM sales",
+        "SELECT * FROM t"
+    ])
+    .is_ok());
+    assert_eq!(with(&["SELECT 1", "SELECT * FROM emp"]).unwrap_err().0, 1);
+    assert!(
+        with(&["SELECT * FROM t"]).is_err(),
+        "a TEMP object read before it is created"
+    );
+    // a CTE that reads a later sibling's name reads the table, not the CTE
+    assert!(with(&["WITH a AS (FROM emp), emp AS (FROM sales) FROM a"]).is_err());
 }

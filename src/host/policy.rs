@@ -523,8 +523,9 @@ enum Mode {
     /// An agent's dashboard without an access policy (#982, plan §4 R6:
     /// `"policy": "none"` never turns off this implicit classifier): no
     /// database-qualified name, a two-part name only for a schema of the
-    /// default database (the walker's `temps` holds those schemas), the
-    /// reviewed function list, no macros.
+    /// default database, the reviewed function list, no macros; with a
+    /// contract, only its tables, the dashboard's TEMP objects and CTEs
+    /// (`agent/non-canonical-read`).
     Panel,
 }
 
@@ -545,6 +546,9 @@ struct Walker<'a> {
     used: BTreeSet<usize>,
     /// Column names referenced (lower case, last part) — for the lint.
     columns: BTreeSet<String>,
+    /// `Mode::Panel`: the default database's schemas, and the contract's
+    /// tables when the dashboard reads only those (lower case).
+    panel: Option<(&'a HashSet<String>, Option<&'a HashSet<String>>)>,
 }
 
 fn s<'v>(o: &'v Map<String, Value>, k: &str) -> &'v str {
@@ -589,6 +593,7 @@ impl Walker<'_> {
             next_cte: 0,
             used: BTreeSet::new(),
             columns: BTreeSet::new(),
+            panel: None,
         }
     }
 
@@ -739,7 +744,7 @@ impl Walker<'_> {
             .into_iter()
             .any(|t| t.and_then(Value::as_str) == Some("RECURSIVE_CTE_NODE"));
             let mut visible = frame.clone();
-            if self.mode == Mode::Mapping {
+            if matches!(self.mode, Mode::Mapping | Mode::Panel) {
                 // #984: a mapping's original text is what runs, and DuckDB
                 // binds a name in a CTE body only to the CTEs before it (or
                 // itself when recursive) — a later sibling's name is a table
@@ -804,12 +809,23 @@ impl Walker<'_> {
         };
         match self.mode {
             Mode::Panel => {
+                let none = HashSet::new();
+                let (schemas, contract) = self.panel.unwrap_or((&none, None));
                 if !catalog.is_empty()
-                    || (!schema.is_empty() && !self.temps.contains(&schema.to_ascii_lowercase()))
+                    || (!schema.is_empty() && !schemas.contains(&schema.to_ascii_lowercase()))
                 {
                     return Err(format!(
                         "'{shown}': an agent's dashboard reads only names of its own database, never one qualified with another database"
                     ));
+                }
+                if let Some(tables) = contract {
+                    let cte = schema.is_empty() && self.cte(&name).is_some();
+                    let temp = schema.is_empty() && self.temps.contains(&lower);
+                    if !cte && !temp && !tables.contains(&lower) {
+                        return Err(format!(
+                            "agent/non-canonical-read: '{shown}' is not a table of the dashboard's contract (-- @schema)"
+                        ));
+                    }
                 }
             }
             Mode::Mapping => {
@@ -1126,6 +1142,7 @@ pub fn check_panels(
     duck: &mut dyn Duck,
     stmts: &[(bool, String)],
     default_db: &str,
+    contract: Option<&HashSet<String>>,
 ) -> Result<(), (usize, String)> {
     let enf = Enforcer {
         policy: Policy {
@@ -1146,14 +1163,19 @@ pub fn check_panels(
         .into_iter()
         .filter_map(|r| r.into_iter().next().flatten())
         .collect();
+    // the TEMP objects the statements before create
+    let mut temps: HashSet<String> = HashSet::new();
     for (i, (_, sql)) in stmts.iter().enumerate() {
         let sql = sql.trim().trim_end_matches(';');
+        let mut created = None;
         let query = match classify(sql).map_err(|e| (i, e))? {
             Setup::Query => sql.to_string(),
             Setup::Create { name, body, .. } => {
-                if name.to_ascii_lowercase().starts_with(RESERVED_PREFIX) {
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with(RESERVED_PREFIX) {
                     return Err((i, format!("'{name}' is a reserved name")));
                 }
+                created = Some(lower);
                 body.to_string()
             }
             Setup::SetVariable { name, expr } => {
@@ -1165,9 +1187,10 @@ pub fn check_panels(
             }
         };
         let mut ast = serialize(duck, &query).map_err(|e| (i, e))?;
-        Walker::new(Mode::Panel, &enf, &schemas)
-            .walk(&mut ast["statements"])
-            .map_err(|e| (i, e))?;
+        let mut w = Walker::new(Mode::Panel, &enf, &temps);
+        w.panel = Some((&schemas, contract));
+        w.walk(&mut ast["statements"]).map_err(|e| (i, e))?;
+        temps.extend(created);
     }
     Ok(())
 }

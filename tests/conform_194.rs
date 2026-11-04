@@ -761,3 +761,51 @@ fn the_build_dir_is_private_and_removed_on_sigterm() {
         "a build directory was left behind"
     );
 }
+
+#[test]
+fn check_agent_reads_only_the_contract() {
+    // #982: `-- @schema <id>` → `agent/non-canonical-read`, `agent/no-contract`
+    if !have_duckdb("check_agent_reads_only_the_contract") {
+        return;
+    }
+    let s = Scratch::new("schema");
+    std::fs::create_dir_all(s.0.join("canonical")).unwrap();
+    s.write("canonical/sr.sql", CONTRACT);
+    let ok = "-- @title Late
+-- @schema sr
+-- @vars r
+CREATE TEMP TABLE suppliers AS SELECT 'S1' AS supplier_id, 'A' AS name, 'north' AS region;
+SELECT region AS r ::DROPDOWN FROM suppliers;
+-- @question Which suppliers are in {r}?
+WITH x AS (FROM suppliers) SELECT name ::TABLE FROM x WHERE region = getvariable('r');
+";
+    let check = |name: &str, script: &str| -> String {
+        let f = s.write(name, script);
+        let out = Command::new(env!("CARGO_BIN_EXE_dashboard"))
+            .arg("--check")
+            .arg(&f)
+            .arg("--agent")
+            .env("DATAZOO_DISABLE_TELEMETRY", "1")
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let out = check("ok.sql", ok);
+    assert!(!out.contains("agent/"), "{out}");
+    let out = check(
+        "bad.sql",
+        &ok.replace("FROM x WHERE", "FROM x JOIN payroll USING (name) WHERE"),
+    );
+    assert!(out.contains("agent/non-canonical-read"), "{out}");
+    let out = check(
+        "qual.sql",
+        &ok.replace("FROM x WHERE", "FROM x, memory.main.secret WHERE"),
+    );
+    assert!(out.contains("agent/non-canonical-read"), "{out}");
+    let out = check("none.sql", &ok.replace("-- @schema sr", "-- @schema nope"));
+    assert!(out.contains("agent/no-contract"), "{out}");
+}
