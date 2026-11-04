@@ -4160,14 +4160,32 @@ fn cartesian(
             }),
             (None, None) => plot.geom_point(),
         },
-        Kind::Jitter => match point_alpha {
-            Some(alpha) => plot.geom_jitter_with(GeomJitter {
-                alpha,
-                color: brand,
-                ..Default::default()
-            }),
-            None => plot.geom_jitter(),
-        },
+        Kind::Jitter => {
+            let p = match point_alpha {
+                Some(alpha) => plot.geom_jitter_with(GeomJitter {
+                    alpha,
+                    color: brand,
+                    ..Default::default()
+                }),
+                None => plot.geom_jitter(),
+            };
+            // #970: a ::CATEGORY splits each x slot, as a dodged boxplot
+            // or violin does (ggplot2's position_jitterdodge). The jitter
+            // width is ggplot2's 0.4 / (groups + 2) — ggplot-rs doesn't
+            // scale it yet (sipemu/ggplot-rs#429); drop this then.
+            match category.filter(|_| x_discrete) {
+                Some(cat) => {
+                    let groups = cat
+                        .values
+                        .iter()
+                        .map(value_str)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len();
+                    p.position(PositionJitterDodge::new(0.4 / (groups as f64 + 2.0), 0.0))
+                }
+                None => p,
+            }
+        }
         // Box plots and violins: a light brand body with a dark outline (a
         // CATEGORY fill still wins).
         Kind::Boxplot if box_stats => {
@@ -4184,6 +4202,7 @@ fn cartesian(
                     color: o.theme.chart_label(),
                     width: 0.6,
                     alpha: 1.0,
+                    ..Default::default()
                 })
                 .stat(StatIdentity)
                 .layer_aes(boxstats::layer_aes());
@@ -4216,12 +4235,14 @@ fn cartesian(
             color: o.theme.chart_label(),
             width: 0.6,
             alpha: 1.0,
+            ..Default::default()
         }),
         Kind::Violin => plot.geom_violin_with(GeomViolin {
             fill: body_fill,
             color: theme::mix(brand, o.theme.colors.ink, 0.35),
             alpha: 1.0,
             line_width: 1.0,
+            ..Default::default()
         }),
         Kind::Pie
         | Kind::Donut

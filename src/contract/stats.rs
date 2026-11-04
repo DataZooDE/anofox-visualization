@@ -893,6 +893,7 @@ pub(super) fn compare(
                 color: crate::darken(brand, 0.35),
                 alpha: 1.0,
                 line_width: 1.0,
+                ..Default::default()
             })
             .geom_jitter_with(points),
         "points" => plot.geom_jitter_with(GeomJitter {
@@ -906,6 +907,7 @@ pub(super) fn compare(
                 color: (60, 60, 60),
                 width: 0.55,
                 alpha: 1.0,
+                ..Default::default()
             })
             .geom_jitter_with(points),
     };

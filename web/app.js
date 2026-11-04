@@ -251,6 +251,9 @@ SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
 SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
+-- A ::CATEGORY splits each box (or violin, or jitter) side by side, as ggplot2 dodges.
+SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, IF(id % 2 = 0, 'New', 'Returning') AS customer ::CATEGORY, 'Box plots by channel and customer (::CATEGORY)'::TITLE FROM m;
+SELECT 6::COL; SELECT channel::XAXIS, value::JITTER, IF(id % 2 = 0, 'New', 'Returning') AS customer ::CATEGORY, 'Jitter by channel and customer'::TITLE FROM m;
 -- A box plot from statistics: one row per box, the numbers computed in SQL —
 -- for a population too large to send as rows (::Q1 / ::MEDIAN / ::Q3, no ::BOXPLOT).
 SELECT 12::COL; SELECT channel::XAXIS, q1::Q1, med::MEDIAN, q3::Q3, lo::WHISKER_LOW, hi::WHISKER_HIGH, mean::MEAN,

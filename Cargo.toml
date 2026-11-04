@@ -155,8 +155,13 @@ crate-type = ["cdylib", "rlib"]
 # map in EPSG:3857 metres; feature `tiles` (no dependencies) for `::MAPTILES`.
 # 0.38.0 (sipemu/ggplot-rs#402, #959): per-row `hjust` / `vjust` aesthetics on
 # geom_text; hjust beyond [0, 1] moves by the text's width (bar value labels).
+# 0.39.0 (sipemu/ggplot-rs#403): a shared JSON spec for its CLI/npm (unused here).
+# 0.40.0 (sipemu/ggplot-rs#415–#422, #970): grouped boxplots and violins
+# dodge by default (position_dodge2); boxplot/violin parameters (#405),
+# new layers and annotations, per-layer legend key glyphs (#410). New
+# GeomBoxplot/GeomViolin fields: literals here end in `..Default::default()`.
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.38.0", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.40.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
