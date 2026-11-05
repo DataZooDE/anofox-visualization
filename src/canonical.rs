@@ -441,6 +441,23 @@ fn plain_star(e: &Value) -> bool {
         && empty("unpacked")
 }
 
+/// A set operation's branches, in order: DuckDB ≤ 1.x writes `left` /
+/// `right`, 2.0 an n-ary `children` list with both null (#993). Empty when
+/// neither shape is there (the callers fail closed).
+fn branches(node: &Value) -> Vec<&Value> {
+    if let Some(c) = node
+        .get("children")
+        .and_then(Value::as_array)
+        .filter(|c| !c.is_empty())
+    {
+        return c.iter().collect();
+    }
+    match (node.get("left"), node.get("right")) {
+        (Some(l), Some(r)) if !l.is_null() && !r.is_null() => vec![l, r],
+        _ => Vec::new(),
+    }
+}
+
 /// What `*`'s EXCLUDE does to `col` (#984): `Some(true)` the star doesn't
 /// produce it, `Some(false)` an EXCLUDE qualified with a relation names it
 /// (which relation's copy is left is not followed: fail closed), `None`
@@ -520,17 +537,18 @@ impl<'a> Resolver<'a> {
     /// Column `col` of a set operation (its CTEs already in scope).
     fn set_column(&mut self, node: &'a Value, col: &str) -> Origin {
         let by_name = st(node, "setop_type").contains("BY_NAME");
-        let (Some(l), Some(r)) = (node.get("left"), node.get("right")) else {
+        let bs = branches(node);
+        let Some(first) = bs.first().copied() else {
             return Origin::Constant;
         };
-        let rs = if by_name {
-            vec![self.node_column(l, col), self.node_column(r, col)]
+        let rs: Vec<Origin> = if by_name {
+            bs.iter().map(|b| self.node_column(b, col)).collect()
         } else {
-            // by position: the left branch names the output column
-            let Some(i) = self.position_of(l, col) else {
+            // by position: the first branch names the output column
+            let Some(i) = self.position_of(first, col) else {
                 return Origin::Constant;
             };
-            vec![self.column_at(l, i), self.column_at(r, i)]
+            bs.iter().map(|b| self.column_at(b, i)).collect()
         };
         if rs.iter().all(|r| *r == Origin::Source) {
             Origin::Source
@@ -558,7 +576,7 @@ impl<'a> Resolver<'a> {
             }
             "SET_OPERATION_NODE" if !st(node, "setop_type").contains("BY_NAME") => {
                 // names only: the CTEs don't matter here
-                self.deeper(None, |me| me.position_of(node.get("left")?, col))
+                self.deeper(None, |me| me.position_of(branches(node).first()?, col))
             }
             _ => None,
         }
@@ -587,14 +605,13 @@ impl<'a> Resolver<'a> {
                 out
             }
             "SET_OPERATION_NODE" if !st(node, "setop_type").contains("BY_NAME") => {
-                let (Some(l), Some(r)) = (node.get("left"), node.get("right")) else {
+                let bs = branches(node);
+                if bs.is_empty() {
                     return Origin::Constant;
-                };
+                }
                 // #989: a WITH before a UNION belongs to the set operation
                 let pushed = me.push_ctes(node);
-                let out = if me.column_at(l, i) == Origin::Source
-                    && me.column_at(r, i) == Origin::Source
-                {
+                let out = if bs.iter().all(|b| me.column_at(b, i) == Origin::Source) {
                     Origin::Source
                 } else {
                     Origin::Constant
