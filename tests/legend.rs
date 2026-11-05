@@ -175,13 +175,16 @@ fn bottom_and_right_move_a_maps_legend() {
     let none = choropleth(Some("none"));
     let bottom = choropleth(Some("bottom"));
     let right = choropleth(Some("right"));
-    let [_, _, n_x1, n_y1] = plot_rect(&none).unwrap();
-    let [_, _, b_x1, b_y1] = plot_rect(&bottom).unwrap();
-    let [_, _, r_x1, r_y1] = plot_rect(&right).unwrap();
-    // `'right'` narrows the panel, `'bottom'` shortens it — the legend goes
-    // outside on that side instead of ggplot-rs's own pick
-    assert!(r_x1 < n_x1 && r_y1 == n_y1, "{none}\n{right}");
-    assert!(b_y1 < n_y1 && b_x1 == n_x1, "{none}\n{bottom}");
+    let [n_x0, n_y0, n_x1, n_y1] = plot_rect(&none).unwrap();
+    let [_, b_y0, _, b_y1] = plot_rect(&bottom).unwrap();
+    let [r_x0, _, r_x1, _] = plot_rect(&right).unwrap();
+    // `'right'` takes width from the panel's right side, `'bottom'` height
+    // from its bottom — the legend goes outside on that side instead of
+    // ggplot-rs's own pick. (A map's panel keeps its aspect since ggplot-rs
+    // 0.41.0, sipemu/ggplot-rs#411, so it also shrinks the other way and is
+    // centred there: only the edge opposite the legend stays put.)
+    assert!(r_x1 < n_x1 && r_x0 == n_x0, "{none}\n{right}");
+    assert!(b_y1 < n_y1 && b_y0 == n_y0, "{none}\n{bottom}");
 }
 
 #[test]

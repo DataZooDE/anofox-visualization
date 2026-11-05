@@ -4171,19 +4171,10 @@ fn cartesian(
                 None => plot.geom_jitter(),
             };
             // #970: a ::CATEGORY splits each x slot, as a dodged boxplot
-            // or violin does (ggplot2's position_jitterdodge). The jitter
-            // width is ggplot2's 0.4 / (groups + 2) — ggplot-rs doesn't
-            // scale it yet (sipemu/ggplot-rs#429); drop this then.
+            // or violin does (ggplot2's position_jitterdodge, its default
+            // jitter width 0.4 / (groups + 2) since ggplot-rs 0.41.0, #429)
             match category.filter(|_| x_discrete) {
-                Some(cat) => {
-                    let groups = cat
-                        .values
-                        .iter()
-                        .map(value_str)
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .len();
-                    p.position(PositionJitterDodge::new(0.4 / (groups as f64 + 2.0), 0.0))
-                }
+                Some(_) => p.position(PositionJitterDodge::default()),
                 None => p,
             }
         }
