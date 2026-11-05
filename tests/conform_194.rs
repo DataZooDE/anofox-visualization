@@ -356,6 +356,8 @@ fn scope_bypasses_are_refused() {
         "SELECT code AS supplier_id, firma AS name, list_transform(['north'], lambda gebiet: gebiet)[1] AS region FROM source.lieferanten",
         // 4. a later UNION branch puts a constant in the scope column
         "SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten UNION ALL SELECT code, gebiet, 'north' FROM source.lieferanten",
+        // …the third of three (DuckDB 2.0's set operations are n-ary, #993)
+        "SELECT code AS supplier_id, firma AS name, gebiet AS region FROM source.lieferanten UNION ALL SELECT code, firma, gebiet FROM source.lieferanten UNION ALL SELECT code, firma, 'north' FROM source.lieferanten",
     ] {
         let views = format!("CREATE VIEW suppliers AS {body};\n{deliveries}");
         let (code, v) = conform(&s, &views, &renamed, &scope);
