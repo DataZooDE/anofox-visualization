@@ -88,7 +88,12 @@ const NATIVE_HELPER_ALLOWED = new Set(
     "_ts_coverage_native _ts_cv_folds_native _ts_cv_forecast_native _ts_cv_hydrate_native " +
     "_ts_cv_split_native _ts_detect_changepoints_by_native _ts_features_native _ts_fill_forward_native _ts_fill_gaps_native " +
     "_ts_forecast_panel_native _ts_forecast_var_native _ts_mase_native _ts_metrics_native _ts_mstl_decomposition_native " +
-    "_ts_quantile_loss_native _ts_rmae_native _ts_stats_by_native"
+    "_ts_quantile_loss_native _ts_rmae_native _ts_stats_by_native " +
+    // wasm-ext-v1.5.6-20261106 (#995): the macros' relation wrapper
+    // (_ts_passthrough(TABLE) only) and the natives the hierarchy, metrics
+    // and key-splitting macros call on it — TABLE + column names / options
+    "_ts_aggregate_hierarchy_native _ts_metrics_long_native _ts_passthrough _ts_split_keys_native " +
+    "_ts_validate_separator_native"
   ).split(" ")
 );
 
@@ -222,6 +227,10 @@ export function build(fns) {
           review.push(`${r.f}: calls ${c}(), a native table function outside its family (review it into NATIVE_HELPER_ALLOWED)`);
         else if (kinds.get(c)?.has("table_macro")) review.push(`${r.f}: calls ${c}(), a table macro outside its family`);
       }
+  // #995: an *_operator is left out whatever its kind — wasm-ext-20261106
+  // ships ts_fill_forward_operator as a table macro, and #223's reason (SQL
+  // built from its string arguments) holds for the wrapper too
+  for (const r of fns) if (r.t === "table_macro" && NATIVE_OPERATOR.test(r.f)) left.add(r.f);
   // A table macro that calls a left-out function (quoted or not, directly or
   // through another macro) is left out too.
   for (let grew = true; grew; ) {

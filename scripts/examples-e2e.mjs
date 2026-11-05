@@ -2,7 +2,8 @@
 // and sub-tab, and fail on what a viewer would see broken — an error card, a
 // page error, a chart with no data marks, or a chart whose data marks are
 // all uninked (#872: a ::SMOOTH lost its points above ~100 rows; #874: a
-// gallery table failed to bind). The optional-data card of an example that
+// gallery table failed to bind), or an empty result on the default view
+// (#995: the forecast backtests). The optional-data card of an example that
 // demonstrates `-- @requires` ("Not available") is fine.
 //
 //   python3 serve_nocache.py 8947 &
@@ -44,6 +45,10 @@ const problems = (page) =>
     const title = (p) => p.querySelector(".panel-title")?.textContent.trim().slice(0, 60) || "(untitled)";
     for (const p of [...document.querySelectorAll(".dash .panel")].filter(vis)) {
       if (p.classList.contains("dp-errcard")) out.push(`error card: ${title(p)}: ${p.textContent.trim().slice(0, 200)}`);
+      // #995: an example's default view shows data — an empty result there
+      // (a backtest join that matched nothing) is broken, not "no data"
+      const empty = /\bNo rows\b|No data for this selection|\b0 rows\b/.exec(p.innerText);
+      if (empty) out.push(`empty panel ("${empty[0]}"): ${title(p)}`);
       const svg = p.querySelector(".panel-svg > svg");
       if (!svg || svg.hasAttribute("data-diagram")) continue;
       const marks = [...svg.querySelectorAll("circle[data-geom='point'], rect.gg-mark, path.gg-mark, polyline.gg-mark, polygon.gg-mark, .dp-hit")];
