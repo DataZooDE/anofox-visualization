@@ -1891,6 +1891,42 @@ fn truncate_header(head: &str, size: f64, avail_px: f64) -> Option<String> {
     Some("\u{2026}".to_string())
 }
 
+/// Column widths from natural pixel widths `nat` (#1011): with room to
+/// spare, every column grows in proportion; without, the narrow columns keep
+/// their natural width and only the widest give way, down to one common cap
+/// (their cells then end in an ellipsis), so a short id column is never cut.
+fn column_widths(nat: &[f64], inner: f64, total: f64) -> Vec<f64> {
+    if total <= inner {
+        return nat.iter().map(|n| inner * n / total).collect();
+    }
+    let mut sorted: Vec<f64> = nat.iter().copied().filter(|n| *n > 0.0).collect();
+    sorted.sort_by(f64::total_cmp);
+    // the largest cap c with sum(min(n, c)) <= inner
+    let (mut used, mut cap) = (0.0, 0.0);
+    for (i, n) in sorted.iter().enumerate() {
+        let rest = (sorted.len() - i) as f64;
+        if used + n * rest > inner {
+            cap = (inner - used) / rest;
+            break;
+        }
+        used += n;
+        cap = *n;
+    }
+    nat.iter().map(|n| n.min(cap)).collect()
+}
+
+/// A body cell's text fitted to its column (#1011): shortened to an ellipsis
+/// like a header ([`truncate_header`], at the 12 px cell size, a little wider
+/// for the bold first column), the full text kept as a `<title>` on hover.
+/// Text that fits comes back as it was, with no `<title>`.
+fn fit_cell(t: &str, bold: bool, avail_px: f64) -> (String, String) {
+    let size = if bold { 12.6 } else { 12.0 };
+    match truncate_header(t, size, avail_px) {
+        Some(short) => (esc(&short), format!("<title>{}</title>", esc(t))),
+        None => (esc(t), String::new()),
+    }
+}
+
 /// The headless table: the browser table's formatting decisions (shared
 /// [`crate::table`] module — humanised headers, one unit per money / compact
 /// column moved into the header, aligned decimals, a true minus sign, ids and
@@ -2048,9 +2084,15 @@ fn table_svg(
     // so the other columns still split the rest by their own natural width
     // (same approach as #427's SPARKLINE fix).
     let sample = nrow.min(200);
-    let chars = |s: &str| s.chars().count() as f64;
     let is_spark = |k: usize| matches!(cols[k].fmt, Some("SPARKLINE" | "SPARKBAR"));
     const SPARK_COL_W: f64 = 92.0;
+    // #1011: in pixels, measured the way [`fit_cell`] / [`truncate_header`]
+    // fit the text (the bold first column a little wider), plus the gutter
+    // they keep — so a column that gets its natural width shows its cells
+    // whole. The header counts up to 14 characters (it is shortened past
+    // that); 32 characters' worth caps a long-text column.
+    let px = |t: &str, size: f64| ggplot_rs::render::text::text_width(t, size) * 1.08;
+    let gutter_px = 11.0;
     let nat: Vec<f64> = cols
         .iter()
         .enumerate()
@@ -2058,30 +2100,29 @@ fn table_svg(
             if is_spark(k) {
                 return 0.0;
             }
-            let head = chars(&c.p.head).min(14.0);
-            let cells = (0..sample).map(|r| chars(&text(c, r))).fold(0.0, f64::max);
+            let bold = k == 0 && !c.p.numeric;
+            let cell_size = if bold { 12.6 } else { 12.0 };
+            let head: String = c.p.head.chars().take(14).collect();
+            let head = px(&head, 11.0);
+            let cells = (0..sample)
+                .map(|r| px(&text(c, r), cell_size))
+                .fold(0.0, f64::max);
             let tot = totals[k].as_ref().map_or(0.0, |(a, t)| {
-                chars(t)
-                    + if a == "sum" {
-                        0.0
-                    } else {
-                        a.len() as f64 + 1.0
-                    }
+                px(t, 12.0) + if a == "sum" { 0.0 } else { px(a, 12.0) + 4.0 }
             });
-            head.max(cells).max(tot).clamp(3.0, 32.0) + 2.5
+            head.max(cells)
+                .max(tot)
+                .clamp(20.0, px(&"m".repeat(32), 12.0))
+                + gutter_px
+                + 6.0
         })
         .collect();
-    let total_ch: f64 = nat.iter().sum::<f64>().max(1.0);
+    let total_px: f64 = nat.iter().sum::<f64>().max(1.0);
     let spark_w: f64 = (0..cols.len()).filter(|&k| is_spark(k)).count() as f64 * SPARK_COL_W;
     let inner = (w - 24.0 - spark_w).max(0.0);
+    let fit = column_widths(&nat, inner, total_px);
     let widths: Vec<f64> = (0..cols.len())
-        .map(|k| {
-            if is_spark(k) {
-                SPARK_COL_W
-            } else {
-                inner * nat[k] / total_ch
-            }
-        })
+        .map(|k| if is_spark(k) { SPARK_COL_W } else { fit[k] })
         .collect();
     let xs: Vec<f64> = widths
         .iter()
@@ -2189,15 +2230,16 @@ fn table_svg(
                     })
                     .unwrap_or_default();
                 let filled = fill_link_row(&raw, rows, r, value_idx);
-                let label = esc(&link_label(&filled));
+                let (label, tip) =
+                    fit_cell(&link_label(&filled), false, (widths[k] - gutter).max(10.0));
                 match headless_link_href(&filled) {
                     Some(href) => s.push_str(&format!(
-                        "<a href=\"{href}\"><text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{link}\" text-decoration=\"underline\">{label}</text></a>",
+                        "<a href=\"{href}\"><text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{link}\" text-decoration=\"underline\">{label}{tip}</text></a>",
                         href = esc(&href),
                         link = hex(th.colors.link),
                     )),
                     None => s.push_str(&format!(
-                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">{label}</text>"
+                        "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{muted}\">{label}{tip}</text>"
                     )),
                 }
                 continue;
@@ -2314,14 +2356,11 @@ fn table_svg(
                 _ if neg_num && neg == Negatives::Red => hex(th.colors.negative),
                 _ => ink.clone(),
             };
-            let weight = if k == 0 && !c.p.numeric {
-                " font-weight=\"600\""
-            } else {
-                ""
-            };
+            let bold = k == 0 && !c.p.numeric;
+            let weight = if bold { " font-weight=\"600\"" } else { "" };
+            let (shown, tip) = fit_cell(&t, bold, (widths[k] - gutter).max(10.0));
             s.push_str(&format!(
-                "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{fill}\"{weight}>{}</text>",
-                esc(&t)
+                "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{fill}\"{weight}>{shown}{tip}</text>"
             ));
         }
         if r + 1 < max_rows {
@@ -3924,6 +3963,74 @@ mod doc_table_tests {
             svg.contains(">Feature<") && svg.contains(">Mx<") && svg.contains(">4<"),
             "every column must render, not just the ::TABLE's own: {svg}"
         );
+    }
+
+    #[test]
+    fn narrow_columns_keep_their_width_when_the_table_overflows() {
+        // #1011: room to spare → proportional; overflow → only the widest
+        // columns give way, to one cap, and the total fits.
+        assert_eq!(
+            column_widths(&[50.0, 50.0], 200.0, 100.0),
+            vec![100.0, 100.0]
+        );
+        let w = column_widths(&[40.0, 60.0, 300.0, 300.0], 400.0, 700.0);
+        assert_eq!(&w[..2], &[40.0, 60.0]);
+        assert!(
+            (w[2] - 150.0).abs() < 1e-9 && (w[3] - 150.0).abs() < 1e-9,
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn long_cells_end_in_an_ellipsis_instead_of_running_into_the_next() {
+        // #1011: a narrow card, a long text column next to a short id column.
+        let long = "a long reason that cannot fit in its column at all";
+        let rows = vec![
+            ("item".to_string(), vec![Value::Str("SKU-040".into())]),
+            ("why".to_string(), vec![Value::Str(long.into())]),
+            ("more".to_string(), vec![Value::Str(long.into())]),
+            ("n".to_string(), vec![Value::Float(4.0)]),
+        ];
+        let roles = vec![(0usize, Role::Table)];
+        let svg = render_panel_doc_svg(
+            &rows,
+            &roles,
+            &[],
+            360.0,
+            200.0,
+            &RenderOptions::default(),
+            false,
+            &[],
+            None,
+            false,
+        );
+        assert!(svg.contains(">SKU-040<"), "the short id stays whole: {svg}");
+        assert!(
+            svg.contains("\u{2026}<title>a long reason"),
+            "shortened, full text on hover: {svg}"
+        );
+        // every drawn cell fits its column: x positions of the row's texts
+        // are at least their measured widths apart
+        let row: Vec<(f64, String)> = svg
+            .split("<text ")
+            .filter_map(|t| {
+                let x: f64 = t.split("x=\"").nth(1)?.split('"').next()?.parse().ok()?;
+                let body = t.split('>').nth(1)?.split('<').next()?.to_string();
+                (t.contains("fill=") && !t.contains("font-size")).then_some((x, body))
+            })
+            .collect();
+        for w in row.windows(2) {
+            let (x0, t0) = (&w[0].0, &w[0].1);
+            if w[1].0 > *x0 {
+                let tw = ggplot_rs::render::text::text_width(t0, 12.6);
+                assert!(
+                    x0 + tw <= w[1].0 + 1.0,
+                    "{t0:?} at {x0} runs into {:?} at {}",
+                    w[1].1,
+                    w[1].0
+                );
+            }
+        }
     }
 
     #[test]
