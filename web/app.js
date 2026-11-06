@@ -216,7 +216,7 @@ SELECT 12::COL;
 SELECT 'Charts are grouped into **tabs by family**: bars, lines & areas, scatter, distributions, pie/gauge/radar, waterfall/bullet/funnel, heatmaps & candlestick, sparklines, flows/parts/schedules (Pareto, treemap, Sankey, Gantt, dumbbell, ridgeline, a second axis) — plus an **interactivity playground** and **maps**. This tab: a **stacked bar**, a **horizontal bar** (::FLIP swaps the axes), and **bars with data labels** (::DATALABELS).'::MARKDOWN, 'What this shows'::TITLE;
 SELECT 6::COL; SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, '€'::YFORMAT, 'Revenue by week × channel (stacked, € axis)'::TITLE FROM sales GROUP BY ALL ORDER BY week, channel;
 -- ::FLIP swaps the axes → a horizontal bar chart
-SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (horizontal, ::FLIP)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n);
+SELECT 6::COL; SELECT channel::XAXIS, sum(n)::BARCHART, TRUE::FLIP, 'Sessions by channel (horizontal, ::FLIP)'::TITLE FROM sales GROUP BY channel ORDER BY sum(n) DESC;
 SELECT 12::COL; SELECT channel::XAXIS, sum(n)::BARCHART, ''::DATALABELS, 'Bars with data labels (::DATALABELS)'::TITLE FROM sales GROUP BY channel ORDER BY channel;
 
 SELECT 'Lines & areas'::TAB;
@@ -249,7 +249,7 @@ SELECT 6::COL; SELECT val::XAXIS, 1::JITTER, 'Strip plot — one variable on a s
 SELECT 'Distributions'::TAB;
 SELECT 6::COL; SELECT value::HISTOGRAM, 'Histogram'::TITLE FROM m;
 SELECT 6::COL; SELECT value::DENSITY, channel::CATEGORY, 'Density by channel'::TITLE FROM m;
-SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot (unfilled)'::TITLE FROM m;
+SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, 'Box plot'::TITLE FROM m;
 SELECT 6::COL; SELECT channel::XAXIS, value::VIOLIN, 'Violin'::TITLE FROM m;
 -- A ::CATEGORY splits each box (or violin, or jitter) side by side, as ggplot2 dodges.
 SELECT 6::COL; SELECT channel::XAXIS, value::BOXPLOT, IF(id % 2 = 0, 'New', 'Returning') AS customer ::CATEGORY, 'Box plots by channel and customer (::CATEGORY)'::TITLE FROM m;
@@ -432,7 +432,7 @@ WHERE getvariable('selected') = '' OR q.country = getvariable('selected');`,
 CREATE TABLE IF NOT EXISTS lx_m AS SELECT series, ds, y FROM read_parquet('m5_monthly.parquet');
 
 CREATE TABLE IF NOT EXISTS lx_fc AS
-  SELECT series, ds, round(yhat,0) AS yhat, round(yhat_lower,0) AS lo, round(yhat_upper,0) AS hi
+  SELECT series, ds, round(yhat,0) AS yhat, greatest(round(yhat_lower,0), 0) AS lo, round(yhat_upper,0) AS hi
   FROM ts_forecast_by('lx_m', series, ds, y, 'SeasonalES', 12, '1mo', MAP{'seasonal_period':'12'});
 
 -- Small per-series summary computed straight from lx_m + lx_fc (no big materialised
@@ -7819,6 +7819,28 @@ function ctxWith(extra) {
   const ctx = base.startsWith("{") ? JSON.parse(base) : base ? { primary: base } : {};
   return JSON.stringify({ ...ctx, ...extra });
 }
+// #996: a sideways-scrolling table fades out at its right edge while more
+// columns lie beyond it, so a cut-off column reads as "scroll", not as a
+// clipped cell (the cells' own backgrounds would hide a background cue)
+function watchMoreRight(el) {
+  const upd = () => el.classList.toggle("dp-more-r", el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+  el.addEventListener("scroll", upd, { passive: true });
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(upd).observe(el);
+  requestAnimationFrame(upd);
+}
+
+// #996: the few words the inputs write themselves, in the dashboard's
+// language (::LOCALE); English otherwise.
+const UI_WORDS = {
+  de: { all: "Alle", none: "Keine", of: "von" },
+  fr: { all: "Tous", none: "Aucun", of: "sur" },
+  es: { all: "Todos", none: "Ninguno", of: "de" },
+};
+function uiWord(key, en) {
+  const lang = (dashLocale() || "").slice(0, 2).toLowerCase();
+  return UI_WORDS[lang]?.[key] ?? en;
+}
+
 // The dashboard locale (::LOCALE or the theme's locale token), "" = en-US.
 function dashLocale() {
   // ?locale=de-DE: a viewer override (not in served/locked mode).
@@ -14421,12 +14443,12 @@ function makeControl(meta, bar) {
       const names = picked.join(", ");
       sum.textContent =
         sel.size === 0
-          ? "None"
+          ? uiWord("none", "None")
           : sel.size === options.length
-            ? "All"
+            ? uiWord("all", "All")
             : picked.length <= 3 && names.length <= 32
               ? names
-              : `${sel.size} of ${options.length}`;
+              : `${sel.size} ${uiWord("of", "of")} ${options.length}`;
       sum.title = sel.size && sel.size < options.length ? names : "";
     };
     // Re-running rebuilds the controls (closing this popover), so we batch:
@@ -14458,7 +14480,7 @@ function makeControl(meta, bar) {
     tools.className = "dp-ms-tools";
     const allB = document.createElement("button");
     allB.type = "button";
-    allB.textContent = "All";
+    allB.textContent = uiWord("all", "All");
     const noB = document.createElement("button");
     noB.type = "button";
     noB.textContent = "None";
@@ -16323,6 +16345,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   scroller.className = "tbl-scroll";
   scroller.appendChild(t);
   wrap.appendChild(scroller);
+  watchMoreRight(scroller);
   const legend = document.createElement("div"); // what the totals are, under the table
   legend.className = "tot-legend";
   legend.hidden = true;
