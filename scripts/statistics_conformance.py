@@ -159,6 +159,29 @@ for _f in ("brown_forsythe_agg", "kruskal_wallis_agg", "one_way_anova_agg"):
     AGG_ARGS[_f] = "y, level3"
 for _f in ("tukey_hsd_agg", "pairwise_t_test_agg", "dunn_test_agg"):
     AGG_ARGS[_f] = "y, level3"
+# #999: one-sample and paired tests (the residual's mean is near 0; f1, f2 pair).
+AGG_ARGS.update({
+    "t_test_one_sample_agg": "y - 0.5 * x1", "t_test_paired_agg": "f1, f2",
+    "tost_one_sample_agg": "f1 - f2, {'mu': 0.0, 'delta': 1.0}",
+    "tost_wilcoxon_paired_agg": "f1, f2, {'delta': 1.0}",
+})
+# #999: two-sample equivalence (value, group_id); the bootstrap gets a seed (#264).
+AGG_ARGS["tost_bootstrap_agg"] = "y, g2, {'delta': 2.0, 'n_bootstrap': 999, 'seed': 42}"
+AGG_ARGS["tost_wilcoxon_agg"] = "y, g2, {'delta': 2.0}"
+AGG_ARGS["tost_yuen_agg"] = "y, g2, {'delta': 2.0, 'trim': 0.2}"
+# #999: proportion equivalence on a BIGINT 0/1 outcome; b1 splits it unevenly.
+AGG_ARGS["tost_prop_one_agg"] = "y_bin::BIGINT, {'p0': 0.5, 'delta': 0.15}"
+AGG_ARGS["tost_prop_two_agg"] = "y_bin::BIGINT, b1, {'delta': 0.2}"
+# #999: x2 vs y with the x1 trend partialled out (r ~ -0.64, not the trivial ~1).
+AGG_ARGS["partial_cor_agg"] = "x2, y, [x1]"
+AGG_ARGS["semi_partial_cor_agg"] = "x2, y, [x1]"
+# #999: superior predictive ability, the averaged forecast as benchmark against
+# f1 and f2 (losses resp. errors). The options go BEFORE `ORDER BY`: after it,
+# `ORDER BY id, {...}` reads the struct as a second sort key and silently drops
+# the options (n_bootstrap, block_length and seed all fall back to defaults).
+_SPA = "{'n_bootstrap': 499, 'block_length': 5, 'seed': 42} ORDER BY id"
+AGG_ARGS["spa_test_agg"] = f"(y - (f1 + f2) / 2) ^ 2, [(y - f1) ^ 2, (y - f2) ^ 2], {_SPA}"
+AGG_ARGS["mspe_adjusted_spa_agg"] = f"y - (f1 + f2) / 2, [y - f1, y - f2], {_SPA}"
 
 
 # Aggregates that need other rows than the demo table's.
