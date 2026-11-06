@@ -82,6 +82,15 @@ INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualizat
 LOAD anofox_visualization;
 ```
 
+If that release has no complete set of extensions yet (SHA256SUMS and every
+extension it lists, checksums verified), the Pages run polls for up to 10
+minutes and then **fails without deploying**, so the previous repository stays
+live (#1008: a release recreated mid-run once deployed the site without
+`/extensions`, and GitHub Pages ignored the later complete redeploys of the
+same commit). The `workflow_run` deploy after the release run then publishes
+it. Only a repository with no published release at all (first bootstrap)
+deploys the app without `/extensions`.
+
 DuckDB requests `<repository>/<its own version>/<platform>/…`, so only DuckDB
 v1.5.6 finds the files there. C-API (`C_STRUCT`) extensions are portable across
 DuckDB releases that provide that API version (v1.2.0+), so for another DuckDB
