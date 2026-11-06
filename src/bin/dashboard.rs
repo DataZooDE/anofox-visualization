@@ -561,7 +561,7 @@ fn cmd_publish(args: &[String]) {
     // #194 A4 (C4.1): the whole bundle — the generated files, the dashboard
     // itself and the mapping it is deployed with — and its digest, which the
     // deployment config pins (agent.digest); the bundle holds no copy of it.
-    let files = match anofox_visualization::host::agent::bundle_files(
+    let files = match anofox_visualization::agent::bundle_files(
         &id,
         &script,
         mapping.as_ref().map(|(v, c)| (v.as_str(), c.as_str())),
@@ -591,7 +591,7 @@ fn cmd_publish(args: &[String]) {
     }
     println!(
         "digest: {}\n(pin it in the deployment config as options.agent.digest, with options.agent.bundle = \"{out}\")",
-        anofox_visualization::host::agent::bundle_digest(&files)
+        anofox_visualization::agent::bundle_digest(&files)
     );
 }
 
