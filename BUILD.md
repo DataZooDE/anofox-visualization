@@ -151,6 +151,7 @@ scripts/release/package-cli.sh       # dashboard + serve, smoke test, archive
 #   → dist/anofox-visualization-cli-v<version>-<rust target>.tar.gz (.zip on Windows)
 DRY_RUN=1 scripts/release/upload-release.sh v<version> dist   # SHA256SUMS only
 scripts/release/extension-repo.sh dist /tmp/repo   # → /tmp/repo/v1.5.6/<platform>/anofox_visualization.duckdb_extension.gz
+scripts/release/test-extension-repo.sh             # its tests (stub gh): an incomplete release fails, #1008
 ```
 
 The extension smoke test (`smoke-extension.sh`) loads the file in the pinned

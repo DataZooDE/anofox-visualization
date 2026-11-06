@@ -6,6 +6,10 @@ name: Deploy web app to Pages
 # custom extension repository under /extensions (scripts/release/extension-repo.sh):
 #   INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualization/extensions';
 # so it also redeploys after "Release full toolkit" (extension.yml) uploaded them.
+# Once a release exists, a run whose latest release lacks a complete set of
+# extensions FAILS rather than deploy the site without /extensions: the
+# previous deployment stays live, and Pages ignores a later redeploy of the
+# same commit, so an empty one would stick until the next commit (#1008).
 on:
   push:
     branches: [master]
@@ -34,7 +38,8 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
        startsWith(github.event.workflow_run.head_branch, 'v'))
-    timeout-minutes: 15
+    # 15 for the build + up to 10 polling a release that is still uploading.
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       # Full history + tags: the app's footer shows the build version (#216).
@@ -76,12 +81,17 @@ jobs:
         run: node scripts/gen-assist-functions.mjs --check
 
       # The latest release's native extensions → web/extensions/<duckdb>/<platform>/
-      # anofox_visualization.duckdb_extension.gz (a warning, not a failure, when
-      # no release has them yet).
+      # anofox_visualization.duckdb_extension.gz. Fails the run (no deploy) when
+      # that release lacks SHA256SUMS or any extension it lists, after polling
+      # up to EXT_REPO_WAIT seconds in case a release was just (re)created and
+      # is still uploading (#1008). Only "no published release at all" (first
+      # bootstrap) deploys the app without /extensions.
       - name: DuckDB extension repository (latest release → web/extensions)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          EXT_REPO_WAIT: "600"
+          EXT_REPO_POLL: "30"
         run: scripts/release/extension-repo.sh --release latest web/extensions
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0

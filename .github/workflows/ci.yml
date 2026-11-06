@@ -131,6 +131,10 @@ jobs:
       - name: Lockfile is up to date
         run: cargo metadata --locked --format-version 1 > /dev/null
 
+      # pages.yml must never publish an empty extension repository (#1008).
+      - name: extension-repo.sh (stub gh, no network)
+        run: scripts/release/test-extension-repo.sh
+
       - name: rustfmt
         run: cargo fmt --all --check
 
