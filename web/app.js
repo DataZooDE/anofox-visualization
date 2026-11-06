@@ -868,6 +868,15 @@ FROM orders
 WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
 GROUP BY week ORDER BY week;
 
+-- #1002: a ::TREEMAP drills the same way — its own ::DRILL ('tm: …' names
+-- tm_level / tm_path; zone and nation are its per-level variables)
+SELECT 12::COL; SELECT 'tm: zone > nation > town'::DRILL;
+SELECT CASE getvariable('tm_level') WHEN 'zone' THEN region WHEN 'nation' THEN country ELSE city END AS place ::XAXIS,
+       sum(revenue)::TREEMAP, ('Revenue by ' || getvariable('tm_level') || ' — a ::TREEMAP drills too: click a tile')::TITLE
+FROM orders
+WHERE getvariable('zone') IN ('', region) AND getvariable('nation') IN ('', country)
+GROUP BY 1;
+
 SELECT 'Drill-through'::TAB;
 SELECT 12::COL;
 SELECT 'A **::LINK** column is a drill-through target. Its value is a template — \`{value}\` is the clicked bar (or the table row''s first column), \`{column}\` any column of a table row. \`#Tab?v.x={value}\` opens a tab with variables set (an input only accepts one of its own options), \`/d/<id>?v.x={value}\` opens another served dashboard pre-filtered, an https: URL opens in a new browser tab. **Click a city bar or a table link** to open its detail page; **click a country** for its Wikipedia article.'::MARKDOWN, 'What this shows'::TITLE;
