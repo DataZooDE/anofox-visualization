@@ -210,7 +210,6 @@ SELECT round(rpv_b, 2)::METRIC, round(rpv_a, 2)::DELTA, 'Revenue per visitor B (
 SELECT printf('%.2g', conv.p_value)::TEXT_LARGE, 'p-value of the lift'::LABEL,
        'The chance of a lift at least this large if B truly made no difference. Below 0.05 counts as significant here; it says nothing about how large the lift is — read the interval for that.'::INFO
 FROM ab_head;
-SELECT verdict::TEXT_LARGE, 'Verdict (pre-registered rule)'::LABEL FROM ab_verdict;
 SELECT 1::ENDGROUP;
 
 SELECT 12::COL;

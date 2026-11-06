@@ -54,11 +54,11 @@ WITH t AS (
   FROM md_weeks GROUP BY ALL
 )
 SELECT week ::XAXIS,
-       CASE WHEN future THEN 'Forecast' ELSE 'Observed' END ::CATEGORY,
+       CASE WHEN future THEN 'Forecast' ELSE 'Actual' END ::CATEGORY,
        round(demand) ::LINECHART,
        round(demand - CASE WHEN future THEN 9.0 * (i - 40) ELSE 0 END) ::BAND_LOWER,
        round(demand + CASE WHEN future THEN 11.0 * (i - 40) ELSE 0 END) ::BAND_UPPER,
-       DATE '2026-10-12' ::XLINE,
+       DATE '2026-10-12' ::XLINE, 'Today' ::XLINE_LABEL,
        CASE WHEN future THEN 'flow' END ::LINESTYLE,
        'reveal' ::ANIMATE,
        'tween' ::TRANSITION,
@@ -66,7 +66,7 @@ SELECT week ::XAXIS,
 FROM t
 UNION ALL
 -- the forecast starts where the history ends, so the two lines join at Today
-SELECT week, 'Forecast', round(demand), round(demand), round(demand), DATE '2026-10-12', 'flow', 'reveal', 'tween', ''
+SELECT week, 'Forecast', round(demand), round(demand), round(demand), DATE '2026-10-12', 'Today', 'flow', 'reveal', 'tween', ''
 FROM t WHERE i = 40
 ORDER BY 1, 2;
 

@@ -4689,7 +4689,14 @@ fn cartesian(
         };
         Some(f)
     } else {
-        y_fmt
+        // #996: no format given — group thousands once the axis reaches
+        // 10,000 (`10000` → `10,000`; a year axis like 2016 stays as it is)
+        y_fmt.or_else(|| {
+            role_str(cols, Role::YScale)
+                .is_none()
+                .then(|| grouped_axis(&value.values, &o.locale))
+                .flatten()
+        })
     };
     let y_tr = role_str(cols, Role::YScale)
         .map(|s| axis_transform(&s, Role::YScale))
@@ -4806,7 +4813,15 @@ fn cartesian(
             ggplot_rs::scale::datetime::ScaleDateTime::new().with_date_labels(&pattern),
         );
     } else if !x_discrete {
-        let x_fmt = role_fmt(cols, Role::XFormat).and_then(|s| axis_formatter(&s, &o.locale));
+        let x_fmt = role_fmt(cols, Role::XFormat)
+            .and_then(|s| axis_formatter(&s, &o.locale))
+            .or_else(|| {
+                // #996: as for y
+                role_str(cols, Role::XScale)
+                    .is_none()
+                    .then(|| grouped_axis(&x.values, &o.locale))
+                    .flatten()
+            });
         let x_tr = role_str(cols, Role::XScale)
             .map(|s| axis_transform(&s, Role::XScale))
             .transpose()?;
@@ -5323,6 +5338,26 @@ fn axis_formatter(
         }
     };
     Some(f)
+}
+
+/// The thousands-grouping axis formatter (`","` in the locale) when the
+/// largest magnitude in `values` is 10,000 or more (#996: ggplot-rs's default
+/// labels print `10000`); `None` below that, so a year axis keeps `2016`.
+fn grouped_axis(
+    values: &[Value],
+    locale: &format::Locale,
+) -> Option<Box<dyn Fn(f64) -> String + Send + Sync>> {
+    let max = values
+        .iter()
+        .filter_map(|v| match v {
+            Value::Integer(i) => Some((*i as f64).abs()),
+            Value::Float(f) if f.is_finite() => Some(f.abs()),
+            _ => None,
+        })
+        .fold(0.0_f64, f64::max);
+    (max >= 10_000.0)
+        .then(|| axis_formatter(",", locale))
+        .flatten()
 }
 
 /// [`axis_formatter`] in a non-default locale (ggplot-rs `label_*_locale`).

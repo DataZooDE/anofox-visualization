@@ -94,7 +94,7 @@ FROM nl_umsatz WHERE nl_in(region, warengruppe);
 SELECT 8::COL;
 SELECT 340::HEIGHT;
 SELECT make_date(2026, month(tag), 1) ::XAXIS, CASE WHEN year(tag) = 2026 THEN '2026' ELSE 'Vorjahr 2025' END ::CATEGORY,
-       sum(umsatz) / 1000 ::LINECHART, '€'::YFORMAT, 'Monatsumsatz in Tsd. € — 2026 liegt jeden Monat über dem Vorjahr'::TITLE
+       sum(umsatz) / 1000 ::LINECHART, ' Tsd. €'::YFORMAT, 'Monatsumsatz in Tsd. € — 2026 liegt jeden Monat über dem Vorjahr'::TITLE
 FROM nl_umsatz WHERE nl_in(region, warengruppe) AND month(tag) <= 9 GROUP BY ALL ORDER BY 1, 2;
 
 SELECT 4::COL;
