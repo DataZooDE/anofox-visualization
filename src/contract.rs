@@ -213,6 +213,7 @@ fn render_plot(
             "roc" => return direct(&|| curves::roc(&t, options, w, h, o, place)),
             "pr" => return direct(&|| curves::pr(&t, options, w, h, o, place)),
             "calibration" => return direct(&|| curves::calibration(&t, options, w, h, o, place)),
+            "calibrate" => return direct(&|| curves::calibrate(&t, options, w, h, o, place)),
             ty @ ("acf" | "pacf") => {
                 return direct(&|| curves::acf(&t, ty, options, w, h, o, place))
             }
@@ -1036,7 +1037,7 @@ fn curve_type(t: &Table) -> Result<String, String> {
 }
 
 /// `curve` types drawn by the role renderer: qq (points + identity +
-/// envelope), null_dist / pdp / lift / lowess (line ± band). roc, pr, calibration,
+/// envelope), null_dist / pdp / lift / lowess (line ± band). roc, pr, calibration, calibrate,
 /// acf / pacf ([`curves`]), km, lambda_cv and nested_cv ([`stats`]) are drawn directly.
 fn curve(t: &Table) -> Result<Vec<Column>, String> {
     let ty = curve_type(t)?;
@@ -1058,7 +1059,7 @@ fn curve(t: &Table) -> Result<Vec<Column>, String> {
         }
         other => {
             return Err(format!(
-                "unknown curve_type '{other}' (roc, pr, calibration, lambda_cv, nested_cv, km, \
+                "unknown curve_type '{other}' (roc, pr, calibration, calibrate, lambda_cv, nested_cv, km, \
                  acf, pacf, qq, null_dist, pdp, lift, lowess)"
             ))
         }
@@ -1613,6 +1614,38 @@ mod tests {
             {"curve_type":"nested_cv","series":"fold","x":2,"y":0.53,"fold":2,"metric":"mse"}]"#;
         let svg = go("curve", folds_only, "{}").unwrap();
         assert!(!svg.contains("mean"), "{svg}");
+    }
+
+    #[test]
+    fn calibrate_apparent_and_corrected() {
+        // calibrate_by rows (#1006): x = predy, y = calibrated_corrected.
+        let row = |id: &str, x: f64, y: f64, o: f64| {
+            format!(
+                r#"{{"id":"{id}","model_id":"calibrate","model_name":"ols","curve_type":"calibrate","series":null,"x":{x},"y":{y},"calibrated_orig":{o},"n":39,"mean_abs_error":0.0367,"method":"boot"}}"#
+            )
+        };
+        let one = format!(
+            "[{},{},{}]",
+            row("A", 5.0, 5.2, 5.1),
+            row("A", 15.0, 14.6, 14.9),
+            row("A", 25.0, 25.5, 25.2)
+        );
+        let svg = go("curve", &one, "{}").unwrap();
+        assert!(
+            svg.contains("bias-corrected") && svg.contains("apparent"),
+            "{svg}"
+        );
+        assert!(svg.contains("mean |error| 0.0367 · n 39 · boot"), "{svg}");
+        // Two groups: a panel each, titled by the id.
+        let two = format!(
+            "[{},{},{},{}]",
+            row("A", 5.0, 5.2, 5.1),
+            row("A", 25.0, 25.5, 25.2),
+            row("B", 4.0, 4.4, 4.1),
+            row("B", 24.0, 23.5, 23.9)
+        );
+        let svg = go("curve", &two, "{}").unwrap();
+        assert!(svg.contains(">A<") && svg.contains(">B<"), "{svg}");
     }
 
     #[test]

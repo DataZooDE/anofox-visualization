@@ -52,8 +52,10 @@ write `ds` instead when a calendar is configured. `level` is the interval's
 coverage as a fraction (0.8, 0.95); 80 / 95 read the same. A prediction
 with several levels has one row per (x, model, level), `yhat` repeated.
 
-`curve_type` vocabulary: `roc, pr, calibration, lambda_cv, nested_cv, km, acf,
-pacf, qq, null_dist, pdp, lift, lowess` (`lowess`: a smoothed y over x per
+`curve_type` vocabulary: `roc, pr, calibration, calibrate, lambda_cv, nested_cv,
+km, acf, pacf, qq, null_dist, pdp, lift, lowess` (`calibrate`: anofox-statistics
+`calibrate_by`, rms::calibrate — x the prediction, y the bias-corrected
+calibration, `calibrated_orig` the apparent one; `lowess`: a smoothed y over x per
 group, e.g. anofox-statistics `lowess_by` — drawn as a plain line like
 `pdp`; `nested_cv`: `ridge_nested_cv_by` / `elasticnet_nested_cv_by`'s outer
 folds, `series` = `fold`/`mean`).

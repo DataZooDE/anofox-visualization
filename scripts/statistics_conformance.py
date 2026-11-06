@@ -49,6 +49,10 @@ SELECT i AS id, CASE WHEN i % 2 = 0 THEN 'A' ELSE 'B' END AS grp,
        1.0 + 0.5 * i + 0.8 * sin(i) AS f1, 1.0 + 0.5 * i + 1.2 * cos(i) AS f2,
        ((i * 7) % 3 = 0)::BIGINT AS hit
 FROM range(1, 61) t(i);
+-- predict_grid_by reads a fitted model per group from its source (#1006).
+CREATE TABLE dm AS SELECT d.*, m.fit FROM d JOIN (
+  SELECT grp, ols_fit_agg(y, [x1, x2], {'compute_inference': true}) AS fit FROM d GROUP BY grp
+) m USING (grp);
 """
 
 TERMS, SUMMARY, OBS, PRED, CURVE, TEST = "terms", "summary", "obs", "prediction", "curve", "test"
@@ -84,6 +88,11 @@ def producer_sql(name: str) -> str | None:
     if m:
         model, kind = m.groups()
         y = response(model)
+        if model == "gls":
+            # gls_{tidy,glance,augment}_by take subject_col, time_col after
+            # x_cols (anofox_statistics 2026-11, #1006).
+            names = ", names := ['trend', 'cycle']" if kind == "tidy" else ""
+            return f"{name}('d', grp, {y}, {X}, subj, id{names})"
         if model == "glmm":
             # glmm_{tidy,glance,augment}_by take a required positional
             # re_group after x_cols (#406); the demo table's `subj` column.
@@ -92,13 +101,18 @@ def producer_sql(name: str) -> str | None:
         if kind == "prediction":
             if model == "isotonic":
                 return f"isotonic_prediction_by('d', grp, x1, y)"
+            if model == "pspline":
+                # one smooth term: (x_col, y_col), like isotonic (#1006)
+                return f"pspline_prediction_by('d', grp, x1, y, split := CASE WHEN id > 50 THEN 'test' ELSE 'train' END)"
             extra = ", w" if model == "wls" else ""
             return f"{name}('d', grp, id, {y}, {X}{extra}, split := CASE WHEN id > 50 THEN 'test' ELSE 'train' END)"
         if kind == "rolling_tidy":
             extra = ", w" if model == "wls" else ""
             return f"{name}('d', grp, id, {y}, {X}{extra}, window_size := 15)"
-        extra = {"wls": ", w", "aft": ", event_d"}.get(model, "")
-        y = "time" if model == "aft" else y
+        # survival fits: (time, x_cols, event) with a DOUBLE event (cox_*_by
+        # took aft's shape in anofox_statistics 2026-11, #1006).
+        extra = {"wls": ", w", "aft": ", event_d", "cox": ", event_d"}.get(model, "")
+        y = "time" if model in ("aft", "cox") else y
         names = ", names := ['trend', 'cycle']" if kind in ("tidy", "path") else ""
         return f"{name}('d', grp, {y}, {X}{extra}{names})"
     if name == "quantile_process_by":
@@ -119,6 +133,20 @@ def producer_sql(name: str) -> str | None:
         return "kaplan_meier_by('d', grp, time, event)"
     if name in ("tukey_hsd_by", "pairwise_t_test_by", "dunn_test_by"):
         return f"{name}('d', grp, y, level3)"
+    # #1006: rms-style bootstrap, calibration, partial effect and nested tests.
+    if name == "bootcov_by":
+        return "bootcov_by('d', grp, y, [x1, x2], names := ['trend', 'cycle'])"
+    if name == "calibrate_by":
+        return "calibrate_by('d', grp, y, [x1, x2])"
+    if name == "predict_grid_by":
+        return ("predict_grid_by('dm', grp, [x1, x2], fit, "
+                "[effects_term('x1', 'linear'), effects_term('x2', 'linear')], 'x1')")
+    if name == "glm_score_test_by":
+        return "glm_score_test_by('d', grp, y, x_reduced := [x1], x_add := [x2])"
+    if name == "lr_test":
+        # a scalar on two nested fits: x2 added to the x1 model
+        return ("(SELECT grp, unnest(lr_test(ols_fit_agg(y, [x1, x2], {'compute_inference': true}), "
+                "ols_fit_agg(y, [x1], {'compute_inference': true})), recursive := true) FROM d GROUP BY grp)")
     return None
 
 
@@ -182,11 +210,28 @@ AGG_ARGS["semi_partial_cor_agg"] = "x2, y, [x1]"
 _SPA = "{'n_bootstrap': 499, 'block_length': 5, 'seed': 42} ORDER BY id"
 AGG_ARGS["spa_test_agg"] = f"(y - (f1 + f2) / 2) ^ 2, [(y - f1) ^ 2, (y - f2) ^ 2], {_SPA}"
 AGG_ARGS["mspe_adjusted_spa_agg"] = f"y - (f1 + f2) / 2, [y - f1, y - f2], {_SPA}"
+# #1006: drift and multivariate two-sample tests, first half (reference)
+# against second half; y - 0.47 * x1 keeps a small trend, so p is neither ~0
+# nor ~1. The permutation tests get a seed (#264).
+_DRIFT_CAT = "CASE WHEN y - 0.47 * x1 < 0 THEN 'low' WHEN y - 0.47 * x1 < 1.5 THEN 'mid' ELSE 'high' END"
+AGG_ARGS["chisq_drift_agg"] = f"{_DRIFT_CAT}, (id > 30)::BIGINT"
+AGG_ARGS["g_drift_agg"] = f"{_DRIFT_CAT}, (id > 30)::BIGINT"
+AGG_ARGS["z_drift_agg"] = "(y - 0.47 * x1 > 1)::VARCHAR, (id > 30)::BIGINT"
+for _f in ("energy_distance_test_agg", "mmd_test_agg"):
+    AGG_ARGS[_f] = "[y - 0.47 * x1, x2], (id > 30)::BIGINT, {'seed': 42}"
+# #1006: dependence, nested-model and ANOVA tests.
+AGG_ARGS["hoeffding_d_agg"] = "x2, y - 0.5 * x1"
+AGG_ARGS["spearman2_agg"] = "y, x2"
+AGG_ARGS["glm_score_test_agg"] = "y, [x1], [x2]"
+AGG_ARGS["two_way_anova_agg"] = "y, level3, g2"
+AGG_ARGS["repeated_measures_anova_agg"] = "y, subj, rater"
 
 
 # Aggregates that need other rows than the demo table's.
 AGG_FROM = {
     "chisq_gof_agg": "(SELECT grp, level3, count(*) AS n FROM d GROUP BY grp, level3)",
+    # one row per subject and condition (5 x 3 in each group)
+    "repeated_measures_anova_agg": "(SELECT grp, subj, rater, avg(y) AS y FROM d GROUP BY ALL)",
 }
 
 
