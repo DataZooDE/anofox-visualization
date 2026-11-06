@@ -464,7 +464,8 @@ fn classed_measure_routes_through_geom_sf_with_counts_and_a_hatch() {
     // and a "No data (n)" key for the hatched row — no hand-rolled count
     // text, this is `scale_fill_binned`'s native format (sipemu/ggplot-rs#180).
     assert!(s.contains(">1–2 (1)</text>"), "{s}");
-    assert!(s.contains(">2–1000 (2)</text>"), "{s}");
+    // the edges in the measure's own short format, as the tooltip (#996)
+    assert!(s.contains(">2–1,000 (2)</text>"), "{s}");
     assert!(s.contains(">No data (1)</text>"), "{s}");
     // the legend title (the measure's own name, same as the old writer's
     // stepped-bar legend and `MapFill::measure`'s continuous one).

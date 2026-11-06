@@ -3,7 +3,8 @@
 -- @tags  maps, drill-down, regions
 -- @description Revenue on a map: European countries first, click one for its states or provinces; Germany's states drill on to their districts.
 --
--- A map drill-down (#954): one ::REGION map, three levels. The level picks
+-- A map drill-down (#954): one ::REGION map, three levels, and a ::TREEMAP
+-- under the same drill path below it (#1002). The level picks
 -- the code column, and the code picks the built-in boundaries: ISO country
 -- codes draw the world layer, ISO 3166-2 codes ('FR-75', 'IT-MI') the states
 -- and provinces of world-states (#956), 'DE-BY' the German states and
@@ -81,3 +82,14 @@ SELECT 4::COL;
 SELECT name::XAXIS, revenue AS "Revenue (k€)" ::BARCHART, 1::FLIP,
        ('Top 10 by ' || coalesce(getvariable('geo_level'), 'country'))::TITLE
 FROM rm_level() ORDER BY revenue DESC LIMIT 10;
+
+-- The same drill as a ::TREEMAP (#1002): the same 'geo: …' path, so a click on
+-- a tile or on the map moves both. ::XAXIS is the tile's key (the code the
+-- drill passes on), ::LABEL the name it shows.
+SELECT 12::COL;
+-- @shared geo_level, geo_depth, geo_path, country, state, district
+SELECT 'geo: country > state > district'::DRILL;
+SELECT 'Nothing below this level in the sample: only Germany has districts.'::EMPTY;
+SELECT code::XAXIS, name::LABEL, revenue AS "Revenue (k€)" ::TREEMAP,
+       ('Share of revenue by ' || coalesce(getvariable('geo_level'), 'country') || ' (click a tile to drill, in step with the map)')::TITLE
+FROM rm_level() ORDER BY revenue DESC;

@@ -3190,6 +3190,29 @@ fn treemap_tiles_by_group() {
     assert!(!s.contains(">D<"), "a zero row draws no tile");
 }
 
+// #1002: a ::LABEL names the tiles; ::XAXIS stays each tile's key (data-x),
+// what a click and ::DRILL read.
+#[test]
+fn treemap_label_shows_names_xaxis_keys_the_tile() {
+    let s = svg(vec![
+        Column::new("x", Role::X, strs(&["DE-BY", "DE-BE", "FR-IDF"])),
+        Column::new("n", Role::Label, strs(&["Bavaria", "Berlin", ""])),
+        Column::new("v", Role::Value(Kind::Treemap), nums(&[7.0, 2.0, 7.5])),
+    ]);
+    for k in ["DE-BY", "DE-BE", "FR-IDF"] {
+        assert!(
+            s.contains(&format!("data-x=\"{k}\"")),
+            "tile {k} keyed: {s}"
+        );
+    }
+    assert!(s.contains(">Bavaria<") && s.contains(">Berlin<"), "{s}");
+    assert!(!s.contains(">DE-BY<"), "the code is not shown");
+    assert!(
+        s.contains(">FR-IDF<"),
+        "a blank label falls back to the key"
+    );
+}
+
 // #879: ::PARETO — bars plus a cumulative line on a right axis.
 #[test]
 fn pareto_has_a_cumulative_axis() {

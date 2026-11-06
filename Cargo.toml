@@ -164,8 +164,11 @@ crate-type = ["cdylib", "rlib"]
 # legend's level order (boxes from statistics too, #970); jitterdodge scales
 # its width by the groups itself; the default discrete hue palette is
 # ggplot2's hue_pal() over the level count; binned scales draw guide_bins().
+# 0.42.0 (sipemu/ggplot-rs#473–#476, #996, #1002): polygon legend keys take the
+# layer's own fill/alpha; repel labels leave points at the panel edge;
+# ScaleFillBinned::with_label_formatter; Aes::key (a treemap tile's data-x).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.41.0", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.42.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

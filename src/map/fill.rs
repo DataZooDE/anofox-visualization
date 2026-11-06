@@ -52,7 +52,11 @@ pub(super) fn scale_for(
                 .chain(c.edges.iter().copied())
                 .chain(std::iter::once(c.hi))
                 .collect();
+            // The class edges in the measure's own short format (2.7M, not
+            // 2657637), as the continuous legend prints them (#996).
+            let fmt = s.fmt.clone();
             let mut scale = ScaleFillBinned::new(Aesthetic::Fill, breaks, colors.clone())
+                .with_label_formatter(move |v| fmt.short(v, &locale))
                 .na_color(hatch_bg)
                 .na_pattern(FillPattern::stripe(hatch_fg, hatch_bg))
                 .na_label("No data")

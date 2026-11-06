@@ -3933,7 +3933,10 @@ fn cartesian(
                     direction: StepDirection::Hv,
                 })
                 .layer_data(subset(&data, &rows))
-                .layer_aes(aes);
+                .layer_aes(aes)
+                // the series' line keys it (a band layer inherits the colour
+                // mapping and would key its fill under every series)
+                .show_legend(false);
         } else {
             if multi_band {
                 aes = aes.fill("cat");
@@ -3945,7 +3948,8 @@ fn cartesian(
                     ..Default::default()
                 })
                 .layer_data(subset(&data, &rows))
-                .layer_aes(aes);
+                .layer_aes(aes)
+                .show_legend(false);
         }
     }
     // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
