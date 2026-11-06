@@ -1202,10 +1202,40 @@ A dashboard published as an agent answers the questions it declares with
 ```json
 {
   "auth": { "mode": "jwt", "...": "..." },
-  "policy": "policy.json",
-  "agent": { "dashboard": "suppliers", "max_rows": 50 }
+  "policy": "/etc/anofox/policy.json",
+  "agent": {
+    "dashboard": "suppliers",
+    "max_rows": 50,
+    "bundle": "/srv/agent/suppliers",
+    "digest": "sha256:…"
+  }
 }
 ```
+
+- **The bundle** (#194 A4, plan §7). `dashboard --publish suppliers.sql --out
+  /srv/agent/suppliers` writes it: `agent.json`, `mcp-tools.json`,
+  `capabilities.md`, `questions.jsonl`, a copy of `suppliers.sql` and, with
+  `--mapping views.sql --contract contract.sql`, the mapping the agent is
+  deployed with (`mapping/`). It prints the bundle's digest; the deployment
+  config pins it as `agent.digest` (the bundle holds no copy of it). At the
+  start the server refuses a bundle
+  - whose dashboard isn't the served one, byte for byte;
+  - with a generated file that differs from the one it rebuilds from the
+    `.sql` (a hand-edited `agent.json`);
+  - with a mapping other than `agent.mapping`'s files;
+  - with a `policy.json`, or any other file `--publish` doesn't write (plain
+    files only, no symlinks);
+  - whose digest isn't the pinned one.
+
+  A reload that serves another dashboard text, and a snapshot build that
+  reads changed mapping files, are refused too (`503`, the old snapshot
+  stays) until a new bundle is published, pinned and started.
+- **The policy** is configured explicitly: `options.policy`, a file outside
+  the bundle, or `"policy": "none"`. A `policy.json` next to the dashboards
+  isn't picked up in agent mode.
+- **Outbound.** The start message lists every destination the server may
+  call (the login provider's keys, a Quack source, snapshots to object
+  storage, report channels; hosts only). Extension telemetry must be off.
 
 - **Routes.** Only `GET /api/agent` (the questions and their slots, the
   same for every caller), `POST /api/agent/answer` and `/healthz` are
@@ -1344,8 +1374,15 @@ tables built from that customer's database:
               "views": "customer-mapping/acme/views.sql",
               "db": "/data/acme.duckdb",
               "scope": {"region": ["north", "south"]},
-              "memory_limit": "4GB", "timeout_s": 600}}}
+              "memory_limit": "4GB", "timeout_s": 600},
+  "bundle": "/srv/agent/supplier-reliability",
+  "digest": "sha256:…"}}
 ```
+
+The bundle then holds that mapping's views and contract (`dashboard --publish
+… --mapping customer-mapping/acme/views.sql --contract
+canonical/supplier-reliability.sql`), and only that one (plan §5: never
+every mapping it was tested against).
 
 Every snapshot build (the start, each refresh) opens a throwaway DuckDB
 in the server process — never the serving session: `db` attached

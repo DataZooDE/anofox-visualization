@@ -6,7 +6,13 @@
 // (options.agent.mapping, #194 A3b) serves its canonical tables, and one
 // that doesn't conform stops the start.
 //
-//   node scripts/agent-served-e2e.mjs --ext path/to/anofox_visualization.duckdb_extension [--port 8958]
+// #194 A4: every agent start checks its bundle (`dashboard --publish`, the
+// digest pinned in the options): a hand-edited agent.json, a policy.json in
+// the bundle, a wrong digest, a policy picked up from the dashboard folder and
+// a reload to another dashboard text are each refused.
+//
+//   node scripts/agent-served-e2e.mjs --ext path/to/anofox_visualization.duckdb_extension \
+//     --dashboard target/debug/dashboard [--port 8958]
 import { spawn, spawnSync } from "child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
 import { tmpdir } from "os";
@@ -20,6 +26,7 @@ const arg = (k, d) => {
 const ext = arg("--ext", "");
 const port = Number(arg("--port", "8958"));
 const duckdb = arg("--duckdb", "duckdb");
+const dashboardBin = arg("--dashboard", "target/debug/dashboard");
 if (!ext || !existsSync(ext)) {
   console.error("usage: agent-served-e2e.mjs --ext <anofox_visualization.duckdb_extension>");
   process.exit(2);
@@ -55,7 +62,24 @@ writeFileSync(path.join(dashDir, "other.sql"), "SELECT 1 AS n ::METRIC, 'Other' 
 
 const auth = { mode: "proxy", shared_secret_env: "SEC", trusted_proxies: ["127.0.0.1"] };
 
+// #194 A4: publish the agent's bundle (the files `dashboard --publish`
+// writes) and its digest; an unpublishable dashboard gets an empty bundle
+// (its start is refused on the publish checks, as before).
+let bundles = 0;
+function publish(dashes, id, mapping) {
+  const out = path.join(dir, `bundle-${bundles++}`);
+  mkdirSync(out, { recursive: true });
+  const extra = mapping ? ["--mapping", mapping.views, "--contract", mapping.contract] : [];
+  const r = spawnSync(dashboardBin, ["--publish", path.join(dashes, `${id}.sql`), "--out", out, ...extra], { encoding: "utf8" });
+  const m = /digest: (sha256:[0-9a-f]{64})/.exec(r.stdout || "");
+  return { bundle: out, digest: m ? m[1] : "sha256:" + "0".repeat(64), ok: !!m };
+}
+
 async function serve(opts, dashes = dashDir, pre = "") {
+  if (opts.agent && opts.agent.bundle === undefined) {
+    const { bundle, digest } = publish(dashes, opts.agent.dashboard, opts.agent.mapping);
+    opts = { ...opts, agent: { ...opts.agent, bundle, digest } };
+  }
   const p = spawn(duckdb, ["-unsigned", "-batch"], { stdio: ["pipe", "pipe", "pipe"], env });
   let log = "";
   p.stdout.on("data", (d) => (log += d));
@@ -185,7 +209,18 @@ try {
     check((await fetch(`${base}/api/agent`, { headers: as("alice") })).status === 503, "after a reload to an unpublishable version, GET /api/agent answers 503");
     r = await answer({ question_id: "how_reliable_is_supplier_on_delivery", slots: { supplier: "Boreal" } });
     check(r.status === 503, `…and so does POST /api/agent/answer (${r.status})`);
+    // #194 A4: a reload to a version that passes the publish checks but isn't
+    // the pinned bundle's is refused too
+    writeFileSync(path.join(dashDir, "suppliers.sql"), good.replace("-- @title Supplier reliability", "-- @title Supplier reliability (edited)"));
+    srv.proc.stdin.write(`SELECT anofox_serve_reload(${port});\n`);
+    await sleep(1500);
+    r = await answer({ question_id: "how_reliable_is_supplier_on_delivery", slots: { supplier: "Boreal" } });
+    check(r.status === 503, `after a reload to a publishable but unpinned version, an answer is refused (${r.status})`);
     writeFileSync(path.join(dashDir, "suppliers.sql"), good);
+    srv.proc.stdin.write(`SELECT anofox_serve_reload(${port});\n`);
+    await sleep(1500);
+    r = await answer({ question_id: "how_reliable_is_supplier_on_delivery", slots: { supplier: "Boreal" } });
+    check(r.status === 200, `…and the pinned version answers again (${r.status})`);
     srv.proc.kill();
     await sleep(500);
   }
@@ -256,7 +291,8 @@ SELECT name AS "Supplier" ::TABLE, rating FROM suppliers ORDER BY rating DESC;
     srv.proc.stdin.write(`SELECT anofox_serve_refresh(${port});\n`);
     await sleep(1500);
     a = await (await answer({ question_id: "how_late_is_name", slots: { name: "Beta" } })).json();
-    check(a.facts?.rows?.[0]?.["Days late"] === 9 && srv.log().includes("conform/scope-not-source"), "a refresh with a broken mapping keeps the old snapshot");
+    // #194 A4: the views file changed after the start: refused before conform
+    check(a.facts?.rows?.[0]?.["Days late"] === 9 && srv.log().includes("changed since the start"), "a refresh with a changed mapping keeps the old snapshot");
     writeFileSync(views, goodViews);
     srv.proc.kill();
     await sleep(500);
@@ -334,10 +370,46 @@ SELECT name AS "Supplier" ::TABLE, rating FROM suppliers ORDER BY rating DESC;
     if (x.proc) x.proc.kill();
     else if (!x.log().includes("refused by the agent's classifier")) console.error(x.log());
   }
-  writeFileSync(path.join(qualDir, "q.sql"), "-- @vars x\nSELECT 'a' AS x ::DROPDOWN;\n-- @question What is x?\nSELECT query_table('host_secret') ::TABLE;\n");
+  writeFileSync(path.join(qualDir, "q.sql"), "-- @vars x\nSELECT 'a' AS x ::DROPDOWN;\n-- @question What is x?\nSELECT query_table('host_secret') AS n ::TABLE;\n");
   const qt = await serve({ auth, policy: "none", agent: { dashboard: "q" } }, qualDir);
   check(qt.proc == null && qt.log().includes("refused by the agent's classifier"), "a query_table() call doesn't start");
   if (qt.proc) qt.proc.kill();
+
+  // #194 A4 (C4.1): what the server trusts at the start.
+  {
+    const pub = publish(dashDir, "suppliers");
+    check(pub.ok, "dashboard --publish prints the bundle's digest");
+    const ok = await serve({ auth, policy: "none", agent: { dashboard: "suppliers", bundle: pub.bundle, digest: pub.digest } });
+    check(ok.proc != null && ok.log().includes(`digest ${pub.digest}`), "a published bundle with its pinned digest starts");
+    check(ok.log().includes("agent mode outbound:"), "the start message lists the outbound destinations");
+    if (ok.proc) {
+      ok.proc.kill();
+      await sleep(500);
+    }
+    const wrong = await serve({ auth, policy: "none", agent: { dashboard: "suppliers", bundle: pub.bundle, digest: "sha256:" + "1".repeat(64) } });
+    check(wrong.proc == null && wrong.log().includes("not the pinned one"), "a bundle whose digest isn't the pinned one doesn't start");
+    const edited = publish(dashDir, "suppliers");
+    const m = path.join(edited.bundle, "agent.json");
+    writeFileSync(m, readFileSync(m, "utf8").replace('"questions"', '"questions" '));
+    const e = await serve({ auth, policy: "none", agent: { dashboard: "suppliers", bundle: edited.bundle, digest: edited.digest } });
+    check(e.proc == null && e.log().includes("agent.json differs from the one rebuilt"), "a hand-edited agent.json doesn't start");
+    const withPolicy = publish(dashDir, "suppliers");
+    writeFileSync(path.join(withPolicy.bundle, "policy.json"), JSON.stringify({ tables: {} }));
+    const wp = await serve({ auth, policy: "none", agent: { dashboard: "suppliers", bundle: withPolicy.bundle, digest: withPolicy.digest } });
+    check(wp.proc == null && wp.log().includes("may not contain policy.json"), "a bundle with a policy.json doesn't start");
+    const inside = await serve({ auth, policy: path.join(withPolicy.bundle, "policy.json"), agent: { dashboard: "suppliers", bundle: withPolicy.bundle, digest: withPolicy.digest } });
+    check(inside.proc == null && inside.log().includes("may not live inside the agent's bundle"), "options.policy inside the bundle doesn't start");
+    const implicit = await serve({ auth, agent: { dashboard: "suppliers", bundle: pub.bundle, digest: pub.digest } });
+    check(implicit.proc == null && implicit.log().includes("configure the access policy explicitly"), "agent mode doesn't pick up policy.json from the dashboard folder");
+    const tel = await (async () => {
+      const saved = env.DATAZOO_DISABLE_TELEMETRY;
+      env.DATAZOO_DISABLE_TELEMETRY = "0";
+      const t = await serve({ auth, policy: "none", agent: { dashboard: "suppliers", bundle: pub.bundle, digest: pub.digest } });
+      env.DATAZOO_DISABLE_TELEMETRY = saved;
+      return t;
+    })();
+    check(tel.proc == null && tel.log().includes("telemetry must be off"), "agent mode with DATAZOO_DISABLE_TELEMETRY=0 doesn't start");
+  }
 
   // An unpublishable dashboard stops the start.
   const badDir = path.join(dir, "bad");

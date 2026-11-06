@@ -1272,6 +1272,9 @@ pub struct LockedOptions {
     /// `"policy": "none"`: serve without a policy although `auth` is set
     /// (otherwise that combination refuses to start).
     pub policy_none: bool,
+    /// Where `options.policy` was read from (#194 A4: agent mode refuses a
+    /// policy inside its bundle).
+    pub policy_path: Option<PathBuf>,
     /// Key of the policy's `hash` mask (`policy_key_env`; random per server
     /// start when not given).
     pub policy_key: Option<PolicyKey>,
@@ -1703,6 +1706,7 @@ impl Default for LockedOptions {
             duckdb_threads: None,
             policy: None,
             policy_none: false,
+            policy_path: None,
             policy_key: None,
             max_inflight: 256 << 20,
             max_response: 32 << 20,
@@ -1938,6 +1942,7 @@ impl LockedOptions {
                         o.policy_none = true;
                     } else {
                         o.policy = Some(Arc::new(read_policy(Path::new(path))?));
+                        o.policy_path = Some(PathBuf::from(path));
                     }
                 }
                 "policy_key_env" => {
@@ -3130,6 +3135,10 @@ struct Locked {
     ask: Option<AskRt>,
     /// #863: agent mode's query slots (`options.agent`).
     agent: Option<Queries>,
+    /// #194 A4 (C4.1): the dashboard text the agent's bundle was checked
+    /// against at the start; a reload that serves any other text is refused
+    /// (503) until a new bundle is published, pinned and started.
+    agent_sql: Option<Arc<str>>,
     /// The `Arc` this state lives in: Ask's threads hold it.
     me: std::sync::OnceLock<std::sync::Weak<Locked>>,
 }
@@ -4091,6 +4100,29 @@ pub fn start_locked(
         Some(p) if !opts.alerts.is_empty() => notify::load_states(p)?,
         _ => BTreeMap::new(),
     };
+    // #194 A4 (C4.1, M4): an agent's access policy is configured explicitly,
+    // outside its bundle — never picked up from the dashboard folder or
+    // shipped inside the bundle, where a permissive one could apply silently.
+    if let Some(a) = &opts.agent {
+        if opts.policy.is_none() && !opts.policy_none {
+            return Err(
+                "options.agent: configure the access policy explicitly — options.policy \
+                        (a file outside the agent's bundle) or \"policy\": \"none\"; a policy.json \
+                        next to the dashboards is not picked up in agent mode"
+                    .into(),
+            );
+        }
+        if let Some(p) = &opts.policy_path {
+            let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            if canon(p).starts_with(canon(Path::new(&a.bundle))) {
+                return Err(
+                    "options.policy: the access policy may not live inside the agent's bundle \
+                            (agent.bundle)"
+                        .into(),
+                );
+            }
+        }
+    }
     // A policy file next to the dashboards is enforced even without the
     // option: forgetting the option must not serve every row.
     if opts.policy.is_none() {
@@ -4126,6 +4158,45 @@ pub fn start_locked(
     // (never set) is enough here, the Quack copy's own `timeout_s` still
     // applies.
     let dashes = Arc::new(load_dash_set(Path::new(dir), &opts)?);
+    // #194 A4 (C4.1, M4, R4): the bundle `dashboard --publish` wrote must be
+    // the served dashboard's, rebuilt byte for byte, with its digest pinned in
+    // the deployment config and no policy.json.
+    let agent_sql: Option<Arc<str>> = match opts.agent.clone() {
+        None => None,
+        Some(a) => {
+            let dash = dashes.find(&a.dashboard).ok_or_else(|| {
+                format!("options.agent.dashboard: no dashboard '{}'", a.dashboard)
+            })?;
+            let mapping = match &a.mapping {
+                None => None,
+                Some(m) => {
+                    let read = |p: &str, k: &str| {
+                        std::fs::read_to_string(p)
+                            .map_err(|e| format!("options.agent.mapping.{k} {p}: {e}"))
+                    };
+                    Some((read(&m.views, "views")?, read(&m.contract, "contract")?))
+                }
+            };
+            agentm::check_bundle(
+                Path::new(&a.bundle),
+                &dash.id,
+                &dash.sql,
+                mapping.as_ref().map(|(v, c)| (v.as_str(), c.as_str())),
+                &a.digest,
+            )
+            .map_err(|e| format!("options.{e}"))?;
+            let sql: Arc<str> = Arc::from(dash.sql.as_str());
+            // every later build reads the mapping files again: they must
+            // still be the ones checked here
+            if let (Some(m), Some(texts)) = (
+                opts.agent.as_mut().and_then(|a| a.mapping.as_mut()),
+                mapping,
+            ) {
+                m.pinned = Some(texts);
+            }
+            Some(sql)
+        }
+    };
     let startup_dir = SnapshotDir::create()?;
     let startup_stop = Arc::new(AtomicBool::new(false));
     let startup_build_state = SourceBuildState::new();
@@ -4365,6 +4436,7 @@ pub fn start_locked(
         }
         None => None,
     };
+
     // #769: the writing replica's ingest database is attached read-write.
     let ingest_rt = match &opts.ingest {
         None => None,
@@ -4434,6 +4506,7 @@ pub fn start_locked(
         alert_states: Mutex::new(alert_states),
         ask: ask_rt,
         agent: agent_slots,
+        agent_sql,
         me: std::sync::OnceLock::new(),
     });
     let _ = state.me.set(Arc::downgrade(&state));
@@ -4456,10 +4529,23 @@ pub fn start_locked(
         }
         eprintln!(
             "[anofox-serve] agent mode: '{}', {} declared question(s), at most {} rows per answer; \
-             no model is called; served: GET /api/agent, POST /api/agent/answer, GET /healthz",
+             no model is called; served: GET /api/agent, POST /api/agent/answer, GET /healthz; \
+             bundle {} checked, digest {}",
             dash.id,
             anofox_visualization::sql::question::declared(&dash.sql).len(),
-            a.max_rows
+            a.max_rows,
+            a.bundle,
+            a.digest
+        );
+        // #194 A4 (C4.3, N7): every place this server may call out to.
+        let out = agent_outbound(&state.opts);
+        eprintln!(
+            "[anofox-serve] agent mode outbound: {}",
+            if out.is_empty() {
+                "none".to_string()
+            } else {
+                out.join("; ")
+            }
         );
     }
     let auth_note = match &state.opts.auth {
@@ -7374,6 +7460,67 @@ fn build_data(
     }
 }
 
+/// The host of a URL, for a start message (a webhook's path or query may
+/// carry its secret: never printed).
+fn url_host(u: &str) -> String {
+    let rest = u.split_once("://").map_or(u, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    host.rsplit('@').next().unwrap_or("").to_string()
+}
+
+/// #194 A4 (C4.3, N7): the outbound destinations an agent-mode server may
+/// call — the login provider's keys, a Quack source, snapshot durability to
+/// object storage, and the report channels — for the start message. Hosts
+/// only. Extension telemetry is refused separately (it must be off).
+fn agent_outbound(opts: &LockedOptions) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(a) = &opts.auth {
+        if let Some(j) = &a.jwt {
+            out.push(format!(
+                "JWT keys (discovery + JWKS) from {}",
+                url_host(&j.verifier.provider.issuer)
+            ));
+        }
+        if let Some(o) = &a.oidc {
+            out.push(format!(
+                "OIDC provider {}",
+                url_host(&o.verifier.provider.issuer)
+            ));
+        }
+    }
+    if let Some(src) = &opts.source {
+        out.push(format!("Quack source {}", src.uri));
+    }
+    if let Some(d) = &opts.durability {
+        if d.location.contains("://") {
+            out.push(format!("snapshots to {}", url_host(&d.location)));
+        }
+    }
+    if let Some(n) = &opts.notify {
+        if let Some(m) = &n.smtp {
+            out.push(format!("mail via {}:{}", m.host, m.port));
+        }
+        for (name, w) in &n.webhooks {
+            out.push(format!("webhook '{name}' at {}", url_host(&w.url)));
+        }
+        if let Some(sl) = &n.slack {
+            out.push(format!("Slack API {}", url_host(&sl.api)));
+        }
+        for (name, t) in &n.teams {
+            out.push(format!("Teams '{name}' at {}", url_host(&t.url)));
+        }
+    }
+    out
+}
+
+impl Locked {
+    /// #194 A4 (C4.1): whether `sql` is the dashboard text the agent's bundle
+    /// was checked against at the start (always, outside agent mode).
+    fn agent_serves(&self, sql: &str) -> bool {
+        self.agent_sql.as_deref().is_none_or(|pinned| pinned == sql)
+    }
+}
+
 /// The agent's dashboard script in `dashes` (#982: whose questions a
 /// customer mapping is checked for).
 fn agent_script<'a>(opts: &LockedOptions, dashes: &'a DashSet) -> Option<&'a str> {
@@ -9155,6 +9302,14 @@ fn handle_agent(
     info.dashboard = Some(dash.id.clone());
     // #895: a refresh or reload may have swapped in a version that fails the
     // publish checks — refused like `/mcp` (fail closed), not served.
+    // #194 A4: so is any text other than the one its pinned bundle holds.
+    if !st.agent_serves(&dash.sql) {
+        return reply(
+            req,
+            503,
+            "the agent's dashboard isn't the one its pinned bundle was published from",
+        );
+    }
     if anofox_visualization::agent::publish(&dash.id, &dash.sql).is_err() {
         return reply(
             req,
@@ -9237,6 +9392,13 @@ fn handle_mcp(
         return reply(req, 404, "no such dashboard");
     };
     info.dashboard = Some(dash.id.clone());
+    if !st.agent_serves(&dash.sql) {
+        return reply(
+            req,
+            503,
+            "the agent's dashboard isn't the one its pinned bundle was published from",
+        );
+    }
     let Ok(mut tools) = anofox_visualization::agent::tool_list(&dash.id, &dash.sql) else {
         return reply(
             req,
@@ -14960,24 +15122,24 @@ mod tests {
     fn agent_mode_options() {
         let auth = r#""auth":{"mode":"proxy","shared_secret":"0123456789abcdef0123456789abcdef","trusted_proxies":["127.0.0.1"]},"policy":"none""#;
         let ok = LockedOptions::parse(Some(&format!(
-            r#"{{{auth},"agent":{{"dashboard":"s","max_rows":5}}}}"#
+            r#"{{{auth},"agent":{{"bundle":"b","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","dashboard":"s","max_rows":5}}}}"#
         )))
         .unwrap();
         assert_eq!(ok.agent.unwrap().max_rows, 5);
-        let e = LockedOptions::parse(Some(r#"{"agent":{"dashboard":"s"}}"#)).unwrap_err();
+        let e = LockedOptions::parse(Some(r#"{"agent":{"bundle":"b","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","dashboard":"s"}}"#)).unwrap_err();
         assert!(e.contains("options.agent needs auth"), "{e}");
         let e = LockedOptions::parse(Some(&format!(
-            r#"{{{auth},"agent":{{"dashboard":"s"}},"log":"stderr","log_vars":"values"}}"#
+            r#"{{{auth},"agent":{{"bundle":"b","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","dashboard":"s"}},"log":"stderr","log_vars":"values"}}"#
         )))
         .unwrap_err();
         assert!(e.contains("log_vars"), "{e}");
         let e = LockedOptions::parse(Some(&format!(
-            r#"{{{auth},"agent":{{"dashboard":"s"}},"ask":{{"enabled":true}}}}"#
+            r#"{{{auth},"agent":{{"bundle":"b","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","dashboard":"s"}},"ask":{{"enabled":true}}}}"#
         )))
         .unwrap_err();
         assert!(e.contains("can't both be on"), "{e}");
         let e = LockedOptions::parse(Some(&format!(
-            r#"{{{auth},"agent":{{"dashboard":"s","ui":true}}}}"#
+            r#"{{{auth},"agent":{{"bundle":"b","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","dashboard":"s","ui":true}}}}"#
         )))
         .unwrap_err();
         assert!(e.contains("options.agent: unknown key"), "{e}");
@@ -14991,7 +15153,7 @@ mod tests {
             r#"{"auth":{"mode":"oidc","issuer":"https://idp.example.com","client_id":"dash",
                         "client_secret":"s3cret","redirect_url":"https://dash.example.com/auth/callback",
                         "session_secret":"0123456789abcdef0123456789abcdef"},
-                "policy":"none","agent":{"dashboard":"s"}}"#,
+                "policy":"none","agent":{"bundle":"b","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","dashboard":"s"}}"#,
         ))
         .unwrap_err();
         assert!(e.contains("signs people in through browser pages"), "{e}");
@@ -15004,7 +15166,7 @@ mod tests {
         let opts = |aud: &str, require: &str| {
             format!(
                 r#"{{"auth":{{"mode":"jwt","issuer":"https://idp.example.com","audience":"{aud}"{require}}},"policy":"none",
-                   "agent":{{"dashboard":"s","mcp":{{"resource":"https://agent.example.com/mcp"}}}}}}"#
+                   "agent":{{"bundle":"b","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","dashboard":"s","mcp":{{"resource":"https://agent.example.com/mcp"}}}}}}"#
             )
         };
         let e =
