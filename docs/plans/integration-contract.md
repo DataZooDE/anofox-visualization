@@ -65,7 +65,9 @@ order). The plot macros aggregate with `list(tbl ORDER BY tbl)` for a
 deterministic result under parallel execution, which alone would sort by
 the whole row; the renderer then puts the rows in `row_order`
 (anofox-visualization#445, anofox-statistics#242, set by anofox-statistics
-0.15+). An addition, so the version stays `1`.
+0.15+). It is never a group column: a schema that facets by "the producer's
+other varying column" (assignment, selection, sequence, weights) skips it
+(anofox-visualization#1000). An addition, so the version stays `1`.
 
 Producers write these names. The visualization side also reads common other
 spellings (statsmodels `coef` / `P>|t|` / `[0.025`, broom `.fitted`, R

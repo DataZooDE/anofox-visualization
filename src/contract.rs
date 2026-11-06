@@ -982,7 +982,31 @@ impl Table<'_> {
     fn model_key(&self) -> Option<&'static str> {
         ["model_id", "model_name"].into_iter().find(|k| self.has(k))
     }
+    /// The producer's own group column (anofox-optimize's `group_col :=`,
+    /// #499): the first column, in the row's own order, with more than one
+    /// distinct value that is not one of the schema's `own` columns, a model
+    /// key or a [`NOT_A_GROUP`] contract column.
+    fn producer_group(&self, own: &[&str]) -> Option<String> {
+        let keys: Vec<String> = self
+            .rows
+            .first()
+            .map(|r| r.keys().cloned().collect())
+            .unwrap_or_default();
+        keys.into_iter().find(|k| {
+            let k = k.as_str();
+            !own.contains(&k)
+                && !NOT_A_GROUP.contains(&k)
+                && !matches!(k, "model_id" | "model_name")
+                && self.distinct(k) > 1
+        })
+    }
 }
+
+/// Contract columns that annotate a row and never tell groups apart, so no
+/// producer-group search ([`Table::producer_group`]) may pick them:
+/// `row_order` (#445) numbers every row, and as a group it drew one facet
+/// per row (#1000).
+const NOT_A_GROUP: &[&str] = &["row_order"];
 
 fn col(name: &str, role: Role, values: Vec<Value>) -> Column {
     Column::new(name, role, values)

@@ -665,6 +665,65 @@ SELECT anofox_plot_weights(w) LIKE '%Expected return 0.05%', anofox_plot(w) LIKE
 ----
 true	true
 
+# ── row_order is never a group column ────────────────────────────────────────
+# The contract's optional `row_order` numbers each row; every anofox-optimize
+# `*_by` producer carries it. Taken as the producer's group column it drew one
+# facet per row ("24 · next_fit"); several model_id's facet by model alone,
+# and a real group column next to row_order still combines with the model.
+statement ok
+CREATE TABLE opt_pack AS SELECT * FROM (VALUES
+  ('next_fit', 's1', 1, 'a', 6, 10, 1), ('next_fit', 's1', 2, 'b', 6, 10, 2), ('next_fit', 's1', 3, 'c', 4, 10, 3),
+  ('bin_completion', 's1', 1, 'a', 6, 10, 1), ('bin_completion', 's1', 1, 'c', 4, 10, 2), ('bin_completion', 's1', 2, 'b', 6, 10, 3)
+) t(model_id, site, bin, item, size, capacity, row_order);
+
+query III
+SELECT anofox_plot(b) LIKE '%>next_fit</text>%>bin_completion</text>%' OR anofox_plot(b) LIKE '%>bin_completion</text>%>next_fit</text>%',
+       anofox_plot(b) NOT LIKE '% · next_fit</text>%' AND anofox_plot(b) NOT LIKE '% · bin_completion</text>%',
+       anofox_plot(b) NOT LIKE '%data-warnings%'
+FROM opt_pack b;
+----
+true	true	true
+
+query I
+SELECT anofox_plot(b) LIKE '%>s1 · next_fit</text>%' AND anofox_plot(b) LIKE '%>s2 · next_fit</text>%'
+FROM (SELECT * FROM opt_pack UNION ALL SELECT model_id, 's2', bin, item, size, capacity, row_order FROM opt_pack) b;
+----
+true
+
+query II
+SELECT anofox_plot(s) LIKE '%>exact</text>%' AND anofox_plot(s) LIKE '%>greedy_value</text>%',
+       anofox_plot(s) NOT LIKE '% · exact</text>%' AND anofox_plot(s) NOT LIKE '%data-warnings%'
+FROM (VALUES
+  ('exact', 'a', 10, 5, false, 10, 1), ('exact', 'b', 40, 4, true, 10, 2), ('exact', 'c', 30, 6, true, 10, 3),
+  ('greedy_value', 'a', 10, 5, false, 10, 1), ('greedy_value', 'b', 40, 4, true, 10, 2), ('greedy_value', 'c', 30, 6, false, 10, 3)
+) s(model_id, item, value, weight, selected, capacity, row_order);
+----
+true	true
+
+query II
+SELECT anofox_plot(s) LIKE '%>as_given</text>%' AND anofox_plot(s) LIKE '%>two_opt</text>%',
+       anofox_plot(s) NOT LIKE '% · two_opt</text>%' AND anofox_plot(s) NOT LIKE '%data-warnings%'
+FROM (VALUES
+  ('as_given', 1, 'a', 0, 1), ('as_given', 2, 'b', 3, 2), ('as_given', 3, 'c', 5, 3),
+  ('two_opt', 1, 'a', 0, 1), ('two_opt', 2, 'c', 1, 2), ('two_opt', 3, 'b', 2, 3)
+) s(model_id, position, item, setup, row_order);
+----
+true	true
+
+# Weights: a one-row facet was a 100 % bar of one segment; a zero weight
+# made it 0/0 ("geom_col: removed … non-finite values").
+query II
+SELECT anofox_plot(w) NOT LIKE '%data-warnings%',
+       anofox_plot(w) LIKE '%>equal</text>%' AND anofox_plot(w) LIKE '%>min_variance</text>%'
+         AND anofox_plot(w) LIKE '%data-series="x"%' AND anofox_plot(w) LIKE '%data-series="y"%'
+         AND anofox_plot(w) LIKE '%data-series="z"%'
+FROM (VALUES
+  ('min_variance', 'x', 0.0, 0.08, 1), ('min_variance', 'y', 0.6, 0.04, 2), ('min_variance', 'z', 0.4, 0.05, 3),
+  ('equal', 'x', 0.3333, 0.08, 1), ('equal', 'y', 0.3333, 0.04, 2), ('equal', 'z', 0.3334, 0.05, 3)
+) w(model_id, item, weight, expected_return, row_order);
+----
+true	true
+
 # ── distribution (#181) ──────────────────────────────────────────────────────
 # One id: a plain bar per option.
 query II
