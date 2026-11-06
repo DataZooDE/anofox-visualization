@@ -1,6 +1,7 @@
 //! `curve` plots drawn directly: ROC (square, AUC in the legend), PR
 //! (base-rate line, the degenerate recall-0 points trimmed), calibration
-//! (square, point size by bin count) and ACF / PACF (lag 0 dropped).
+//! (square, point size by bin count), rms calibrate (apparent vs
+//! bias-corrected, square) and ACF / PACF (lag 0 dropped).
 
 use super::look::{self, Labels};
 use super::stats::{curve_series, fin, finish, fmt_num, grid, grid_cols, s, text_of, Frame, Out};
@@ -404,6 +405,116 @@ pub(super) fn calibration(
         plot = plot.legend_position_inside(0.03, 0.97);
     }
     finish(plot, w, h, place)
+}
+
+/// `curve_type = 'calibrate'` (calibrate_by, rms::calibrate): the
+/// bias-corrected curve (y) and the apparent one (calibrated_orig) against
+/// the predicted value (x), with the ideal diagonal, as rms plot.calibrate
+/// draws it. A square panel on shared x / y limits (an OLS model's
+/// predictions are not probabilities); the mean absolute error, n and the
+/// resampling method in the caption. One panel per series (model / group).
+pub(super) fn calibrate(
+    t: &Table,
+    options: &Row,
+    w: u32,
+    h: u32,
+    o: &RenderOptions,
+    place: Place,
+) -> Out {
+    let labels = Labels::from(options);
+    let (_, series) = by_series(t)?;
+    let (x, y) = (t.num("x")?, t.num("y")?);
+    let orig = if t.has("calibrated_orig") {
+        Some(t.num("calibrated_orig")?)
+    } else {
+        None
+    };
+    let first = |k: &str, idx: &[usize]| -> Option<f64> {
+        let v = t.num(k).ok()?;
+        idx.iter().find_map(|&i| fin(&v[i]))
+    };
+    let method = t.has("method").then(|| t.text("method"));
+    let small = series.len() > 1;
+    let (corr, app) = ("bias-corrected", "apparent");
+    let mut plots = Vec::new();
+    for (k, idx) in &series {
+        let (mut fx, mut fy, mut fk) = (vec![], vec![], vec![]);
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        let mut push = |xv: &Value, yv: &Value, key: &str| {
+            if let (Some(a), Some(b)) = (fin(xv), fin(yv)) {
+                lo = lo.min(a).min(b);
+                hi = hi.max(a).max(b);
+                fx.push(xv.clone());
+                fy.push(yv.clone());
+                fk.push(s(key.to_string()));
+            }
+        };
+        if let Some(ov) = &orig {
+            for &i in idx {
+                push(&x[i], &ov[i], app);
+            }
+        }
+        for &i in idx {
+            push(&x[i], &y[i], corr);
+        }
+        if fx.is_empty() {
+            continue;
+        }
+        let pad = ((hi - lo) * 0.04).max(1e-9);
+        let (lo, hi) = (lo - pad, hi + pad);
+        let mut plot = diagonal(
+            GGPlot::new(vec![
+                ("x".to_string(), fx),
+                ("y".to_string(), fy),
+                ("model".to_string(), fk),
+            ])
+            .aes(Aes::new().x("x").y("y").color("model").group("model")),
+        )
+        .geom_line_with(GeomLine {
+            width: 1.4,
+            alpha: 0.95,
+            ..Default::default()
+        })
+        .scale_color_manual(vec![
+            (corr, super::stats::rgba(o.brand())),
+            (app, super::stats::rgba((140, 148, 160))),
+        ])
+        .scale_x_continuous(ScaleContinuous::new().with_limits(lo, hi))
+        .scale_y_continuous(ScaleContinuous::new().with_limits(lo, hi));
+        let mut cap = Vec::new();
+        if let Some(e) = first("mean_abs_error", idx) {
+            cap.push(format!("mean |error| {}", fmt_num(e)));
+        }
+        if let Some(n) = first("n", idx) {
+            cap.push(format!("n {}", fmt_num(n)));
+        }
+        if let Some(m) = method
+            .as_ref()
+            .and_then(|m| idx.iter().find_map(|&i| text_of(&m[i])))
+        {
+            cap.push(m);
+        }
+        if !cap.is_empty() {
+            plot = plot.caption(&cap.join(" · "));
+        }
+        let mut plot = look::styled_aspect(plot, o, small, Some(1.0))
+            .xlab(&labels.x_or("predicted"))
+            .ylab(&labels.y_or("actual"));
+        if small && !k.is_empty() {
+            plot = plot.title(k);
+        } else if let (false, Some(t)) = (small, &labels.title) {
+            plot = plot.title(t);
+        }
+        plots.push(plot.legend_position_inside(0.03, 0.97));
+    }
+    if plots.is_empty() {
+        return crate::note_svg(None, "No data", w, h).finish(place);
+    }
+    if plots.len() == 1 {
+        return finish(plots.pop().expect("one"), w, h, place);
+    }
+    let n = plots.len();
+    grid(plots, grid_cols(n, 3), labels.title.as_deref(), w, h, place)
 }
 
 /// ACF / PACF lollipops (lag 0 of the ACF is 1 by definition: dropped),

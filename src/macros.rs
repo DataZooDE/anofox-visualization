@@ -195,7 +195,7 @@ row per model and level.",
         params: &["tbl"],
         named: &[("base_rate", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],
         body: contract_body!("curve", "'base_rate', base_rate, 'title', title, 'x_label', x_label, 'y_label', y_label"),
-        description: "Plot a `curve` table; the geom follows curve_type: roc/calibration (line + diagonal), pr/pdp/lift/lowess \
+        description: "Plot a `curve` table; the geom follows curve_type: roc/calibration (line + diagonal), calibrate (apparent and bias-corrected lines + diagonal), pr/pdp/lift/lowess \
 (line), km (step), acf/pacf (lollipops + bounds from y_low/y_high), lambda_cv (point ± y_low..y_high on a log x), \
 nested_cv (outer-fold points + a mean ± SE band), qq (points + identity). One curve_type per call (GROUP BY curve_type); \
 several model_id/series are coloured.",
