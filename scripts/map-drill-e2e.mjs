@@ -4,7 +4,8 @@
 // states (de-states), a click on Bavaria its districts (de-districts);
 // the breadcrumb goes back, the path is in the URL. France drills to its
 // départements from world-states (#956), which the page fetches only then,
-// and a département (no level below) shows the example's note. No page errors.
+// and a département (no level below) shows the example's note. A ::TREEMAP
+// under the same drill path moves in step (#1002). No page errors.
 //
 //   python3 serve_nocache.py 8792 &     # serves web/ (after the wasm build)
 //   NODE_PATH=tests/web/node_modules node scripts/map-drill-e2e.mjs [--url http://127.0.0.1:8792/]
@@ -96,6 +97,26 @@ try {
   check(await levelIs(/^DE-[A-Z]{2}$/), "the breadcrumb goes back to the states");
   await page.locator('.dash .dp-crumbs[data-drill="geo"] button.dp-crumb').first().click();
   check(await levelIs(/^[A-Z]{3}$/), "…and to the countries");
+
+  // 4b. #1002: the ::TREEMAP under the same 'geo: …' drill — tiles keyed by
+  // the code (::XAXIS) and showing the name (::LABEL); a tile click drills
+  // the map too, and the map's level moves the treemap.
+  // the live treemap svg's tiles (not a drill motion's fading .dp-ghost copy)
+  const TILES = `[...([...document.querySelectorAll(".dash .panel")].find((p) => /Share of revenue by/.test(p.textContent))?.querySelectorAll(".panel-svg > svg [data-x]") || [])].filter((e) => !e.closest(".dp-ghost"))`;
+  await page.waitForFunction((t) => { const k = [...eval(t)].map((e) => e.getAttribute("data-x")); return k.length > 0 && k.every((x) => /^[A-Z]{3}$/.test(x)); }, TILES, { timeout: 30000 }).catch(() => {});
+  const tiles = () => page.evaluate((t) => [...eval(t)].map((e) => e.getAttribute("data-x")), TILES);
+  const tk = await tiles();
+  check(tk.length === 10 && tk.includes("DEU") && tk.every((k) => /^[A-Z]{3}$/.test(k)), `treemap tiles keyed by country code (${tk.join(", ")})`);
+  const shown = await page.evaluate((t) => [...eval(t)].map((e) => [...e.closest("svg").querySelectorAll("text")].map((t) => t.textContent).join(" ")).join(" "), TILES);
+  check(/Germany/.test(shown) && !/\bDEU\b/.test(shown), "…showing the names, not the codes");
+  await page.evaluate((t) => [...eval(t)].find((e) => e.getAttribute("data-x") === "DEU")?.dispatchEvent(new MouseEvent("click", { bubbles: true })), TILES);
+  check(await levelIs(/^DE-[A-Z]{2}$/), "a treemap tile click drills the map to Germany's states");
+  const tStates = await page
+    .waitForFunction((t) => { const k = [...eval(t)].map((e) => e.getAttribute("data-x")); return k.length > 0 && k.every((x) => /^DE-[A-Z]{2}$/.test(x)); }, TILES, { timeout: 30000 })
+    .then(() => true, () => false);
+  check(tStates, "…and the treemap to the same states");
+  await page.locator('.dash .dp-crumbs[data-drill="geo"] button.dp-crumb').first().click();
+  check(await levelIs(/^[A-Z]{3}$/), "the breadcrumb takes both back to the countries");
 
   // 5. France: its départements from world-states, fetched now
   await click("FRA");

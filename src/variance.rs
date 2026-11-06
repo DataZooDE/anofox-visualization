@@ -645,9 +645,9 @@ pub(crate) fn render_sankey(
 }
 
 /// `::TREEMAP` (#880): tiles whose area is the measure, labelled by
-/// `::XAXIS`; with a `::CATEGORY` the tiles nest in group rectangles, filled
-/// by group (ggplot-rs `geom_treemap`). Rows with no positive value are left
-/// out.
+/// `::XAXIS` (or a `::LABEL`, with `::XAXIS` kept as the tile's key, #1002);
+/// with a `::CATEGORY` the tiles nest in group rectangles, filled by group
+/// (ggplot-rs `geom_treemap`). Rows with no positive value are left out.
 pub(crate) fn render_treemap(
     o: &RenderOptions,
     value: &Column,
@@ -698,7 +698,27 @@ pub(crate) fn render_treemap(
             ),
         ),
     ];
+    // A ::LABEL names the tile while ::XAXIS stays its key (#1002): the
+    // tile's data-x, which a click and ::DRILL read (a code shown as a name).
+    let shown: Option<Vec<String>> = cols
+        .iter()
+        .find(|c| c.role == Role::Label)
+        .map(|c| c.values.iter().map(value_str).collect());
     let mut aes = Aes::new().weight("w").label("x");
+    if let Some(shown) = &shown {
+        data.push((
+            "k".to_string(),
+            strs(keep.iter().map(|&i| labels[i].clone())),
+        ));
+        data[0].1 = strs(keep.iter().map(|&i| {
+            shown
+                .get(i)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| labels[i].clone())
+        }));
+        aes = aes.key("k");
+    }
     let mut fills: Vec<(String, ggplot_rs::scale::color::RGBAColor)> = Vec::new();
     if let Some(g) = &groups {
         let col: Vec<String> = keep.iter().map(|&i| g[i].clone()).collect();

@@ -98,7 +98,7 @@ terminal.
 | `::BULLET` | `::BULLETCHART` | chart | measure per XAXIS row vs a ::GOAL tick over ::RANGE bands '60,80,100' |
 | `::FUNNEL` | `::FUNNELCHART` | chart | ordered XAXIS stages, widths by value, conversion % from the previous stage |
 | `::SANKEY` | `::SANKEYCHART` | chart | flows between stages: ::ORIGIN → ::DEST, link width by the measure; nodes stack in columns |
-| `::TREEMAP` | `::TREE_MAP` | chart | part-to-whole tiles, area by the measure: ::XAXIS names a tile, ::CATEGORY nests tiles in groups |
+| `::TREEMAP` | `::TREE_MAP` | chart | part-to-whole tiles, area by the measure: ::XAXIS names a tile (its key; a ::LABEL then shows a name instead), ::CATEGORY nests tiles in groups |
 | `::PARETO` | `::PARETOCHART` | chart | XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis |
 | `::GANTT` | `::GANTTCHART`, `::TIMELINE_BARS` | chart | one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars |
 | `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual) |
@@ -250,7 +250,7 @@ terminal.
 | `::SELECT_AS` | `::SELECTAS`, `::SELECTION` | layout | next chart's named selection: 'region' → a click sets getvariable('region'); 'region multi' → a list (shift/ctrl-click adds); a brush on a continuous x sets region_from / region_to |
 | `::EMPTY` | `::EMPTY_MESSAGE`, `::NODATA` | layout | next panel's message when its result is empty: 'No orders in range — widen the dates' |
 | `::SHOW_IF` | `::SHOWIF`, `::VISIBLE_IF` | layout | show the next panel (or ::GROUP box) only while this BOOLEAN is TRUE — re-checked on every input change: getvariable('q1') <> '' |
-| `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back. Bars, ::REGION maps (on the region code) and ::TREEMAP tiles (on the tile's label) drill |
+| `::DRILL` | `::DRILLDOWN`, `::DRILL_DOWN` | layout | next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back. Bars, ::REGION maps (on the region code) and ::TREEMAP tiles (on the tile's ::XAXIS, shown as its ::LABEL when there is one) drill |
 | `::GROUP` | `::BOX`, `::ROW` | layout | open a box; ::ENDGROUP closes it |
 | `::ENDGROUP` | `::ENDBOX`, `::ENDROW` | layout | close the current box |
 | `::DIAGRAM_MODE` | `::DIAGRAM_EDIT` | encoding | on a ::DIAGRAM: 'edit' lets the viewer add, connect, rename and remove nodes; the alias names the variable holding the edited graph as JSON {nodes:[{id,type,label}], edges:[{from,to}]} |
