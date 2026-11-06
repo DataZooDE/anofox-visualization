@@ -19,22 +19,6 @@ use super::{opt_str, Row, Table};
 use crate::{Column, Kind, Role};
 use ggplot_rs::prelude::Value;
 
-/// The producer's group column: the first column outside `own` (and the
-/// model key) with more than one value.
-fn group_key(t: &Table, own: &[&str], model: Option<&str>) -> Option<String> {
-    let keys: Vec<String> = t
-        .rows
-        .first()
-        .map(|r| r.keys().cloned().collect())
-        .unwrap_or_default();
-    keys.into_iter().find(|k| {
-        !own.contains(&k.as_str())
-            && !matches!(k.as_str(), "model_id" | "model_name")
-            && Some(k.as_str()) != model
-            && t.distinct(k) > 1
-    })
-}
-
 fn finite(v: &Value) -> Option<f64> {
     v.as_f64().filter(|f| f.is_finite())
 }
@@ -45,7 +29,7 @@ pub(super) fn sequence(t: &Table) -> Result<(Vec<Column>, Vec<String>), String> 
     let n = t.rows.len();
     let pos = t.num("position")?;
     let model = t.model_key().filter(|m| t.distinct(m) > 1);
-    let group = group_key(t, &["position", "item", "setup", "cumulative_setup"], model);
+    let group = t.producer_group(&["position", "item", "setup", "cumulative_setup"]);
     // one sequence per (group, model): order by position inside each
     let part = |i: usize| -> String {
         let g = group.as_deref().map(|g| t.text(g)[i].clone());
@@ -112,7 +96,7 @@ pub(super) fn weights(t: &Table, options: &Row) -> Result<(Vec<Column>, Vec<Stri
     let n = t.rows.len();
     let w = t.num("weight")?;
     let model = t.model_key().filter(|m| t.distinct(m) > 1);
-    let group = group_key(t, &["item", "weight", "expected_return"], model);
+    let group = t.producer_group(&["item", "weight", "expected_return"]);
     let items = t.text("item");
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
@@ -243,5 +227,54 @@ mod tests {
         let (cols, _) = weights(&table(&r), &Row::new()).unwrap();
         assert!(matches!(cols[1].role, Role::Value(Kind::BarStackedPercent)));
         assert_eq!(cols[0].name, "model_id");
+    }
+
+    /// `row_order` (the contract's per-row ordinal) is never a group column.
+    /// For weights a one-row facet is a 100 % bar of one segment, and a zero
+    /// weight made it 0/0 ("geom_col: removed … non-finite values").
+    #[test]
+    fn row_order_is_never_a_group() {
+        let r = rows(
+            r#"[{"row_order":1,"model_id":"nn","position":1,"item":"a","setup":0},
+                {"row_order":2,"model_id":"nn","position":2,"item":"b","setup":3},
+                {"row_order":1,"model_id":"two_opt","position":1,"item":"b","setup":0},
+                {"row_order":2,"model_id":"two_opt","position":2,"item":"a","setup":2}]"#,
+        );
+        let (cols, _) = sequence(&table(&r)).unwrap();
+        let facets: Vec<&Column> = cols.iter().filter(|c| c.role == Role::Facet).collect();
+        assert_eq!(facets.len(), 1);
+        assert_eq!(facets[0].name, "model_id");
+
+        let r = rows(
+            r#"[{"row_order":1,"model_id":"mv","item":"x","weight":0.0},
+                {"row_order":2,"model_id":"mv","item":"y","weight":1.0},
+                {"row_order":1,"model_id":"eq","item":"x","weight":0.5},
+                {"row_order":2,"model_id":"eq","item":"y","weight":0.5}]"#,
+        );
+        let (cols, _) = weights(&table(&r), &Row::new()).unwrap();
+        assert!(cols.iter().all(|c| c.role != Role::Facet));
+        assert_eq!(cols[0].name, "model_id");
+
+        // one model: the expected-return title is not suppressed by a
+        // phantom group
+        let r = rows(
+            r#"[{"row_order":1,"item":"x","weight":0.25,"expected_return":0.08},
+                {"row_order":2,"item":"y","weight":0.75,"expected_return":0.04}]"#,
+        );
+        let (cols, _) = weights(&table(&r), &Row::new()).unwrap();
+        assert!(cols.iter().all(|c| c.role != Role::Facet));
+        assert!(cols.iter().any(|c| c.role == Role::Title));
+
+        // a real group column next to row_order still facets
+        let r = rows(
+            r#"[{"row_order":1,"site":"n","item":"x","weight":0.5},
+                {"row_order":2,"site":"n","item":"y","weight":0.5},
+                {"row_order":1,"site":"s","item":"x","weight":1.0}]"#,
+        );
+        let (cols, _) = weights(&table(&r), &Row::new()).unwrap();
+        assert_eq!(
+            cols.iter().find(|c| c.role == Role::Facet).unwrap().name,
+            "site"
+        );
     }
 }

@@ -9,11 +9,11 @@
 //! instances (e.g. one packing per warehouse) and keeps the column under
 //! its own name next to `model_id` (anofox-optimize#14) — any column this
 //! module doesn't otherwise read (not the bin/wave key, `item`, `size`,
-//! `capacity`, `priority` or the model key) that carries more than one
-//! value. Two groups' own bin 1 must never stack into one bar (it would
-//! look over capacity), so a group column facets too: alone when there is
-//! one `model_id`, combined with it into one `"group · model_id"` facet
-//! title when both vary (ggplot-rs facets on a single column here — see
+//! `capacity`, `priority`, the model key or the contract's `row_order`) that
+//! carries more than one value. Two groups' own bin 1 must never stack into
+//! one bar (it would look over capacity), so a group column facets too:
+//! alone when there is one `model_id`, combined with it into one
+//! `"group · model_id"` facet title when both vary (ggplot-rs facets on a single column here — see
 //! [`group_key`]), or not at all when the table has only one group.
 //!
 //! Ordering: the bin/wave axis sorts numerically when every row's key parses
@@ -189,7 +189,7 @@ pub(super) fn columns(t: &Table, options: &Row) -> Result<Columns, String> {
         }
     }
     let model = t.model_key().filter(|m| t.distinct(m) > 1);
-    match (group_key(t, &key, model), model) {
+    match (group_key(t, &key), model) {
         (Some(g), Some(m)) => {
             let gv = gather(&t.text(&g));
             let mv = gather(&t.text(m));
@@ -207,28 +207,12 @@ pub(super) fn columns(t: &Table, options: &Row) -> Result<Columns, String> {
     Ok((cols, warnings, marks))
 }
 
-/// The producer's own group column (see the module docs): the first column
-/// — in the row's own order, so a tie favours the column closest to the
-/// bin/wave key — outside the `assignment` schema with more than one
-/// distinct value. `key` is the bin/wave column actually in use (an
-/// explicit `x :=` or [`KEYS`]'s pick); `model` is the model-id column only
-/// when it already varies, so a single-model table never loses its one
-/// group to a `model_id` column that happens to sort first.
-fn group_key(t: &Table, key: &str, model: Option<&str>) -> Option<String> {
-    let first_row_keys: Vec<String> = t
-        .rows
-        .first()
-        .map(|r| r.keys().cloned().collect())
-        .unwrap_or_default();
-    first_row_keys.into_iter().find(|k| {
-        let k = k.as_str();
-        k != key
-            && !matches!(k, "item" | "size" | "capacity" | "priority")
-            && k != "model_id"
-            && k != "model_name"
-            && Some(k) != model
-            && t.distinct(k) > 1
-    })
+/// The producer's own group column (see the module docs): any column
+/// outside the `assignment` schema, see [`Table::producer_group`]. `key` is
+/// the bin/wave column actually in use (an explicit `x :=` or [`KEYS`]'s
+/// pick).
+fn group_key(t: &Table, key: &str) -> Option<String> {
+    t.producer_group(&[key, "item", "size", "capacity", "priority"])
 }
 
 /// A facet level's display text: `Value::Str` as given, else `"NA"` (the
@@ -527,5 +511,34 @@ mod tests {
             "the dropped row's 999 must not appear: {:?}",
             cap.values
         );
+    }
+
+    /// The contract's `row_order` (one value per row, by design) is never
+    /// the producer's group column: every anofox-optimize `*_by` producer
+    /// carries it, and taking it as a group drew one facet per row ("24 ·
+    /// next_fit"). Several `model_id`s alone facet by model.
+    #[test]
+    fn row_order_is_never_a_group() {
+        let r = rows(
+            r#"[{"row_order":1,"model_id":"next_fit","bin":1,"item":"a","size":3},
+                {"row_order":2,"model_id":"next_fit","bin":2,"item":"b","size":9},
+                {"row_order":1,"model_id":"bin_completion","bin":1,"item":"a","size":3},
+                {"row_order":2,"model_id":"bin_completion","bin":1,"item":"b","size":7}]"#,
+        );
+        let (cols, _, _) = columns(&table(&r), &Row::new()).unwrap();
+        let facets: Vec<&Column> = cols.iter().filter(|c| c.role == Role::Facet).collect();
+        assert_eq!(facets.len(), 1);
+        assert_eq!(facets[0].name, "model_id");
+        // a real group column next to row_order is still the group
+        let r = rows(
+            r#"[{"row_order":1,"site":"a","model_id":"next_fit","bin":1,"item":"x","size":3},
+                {"row_order":1,"site":"a","model_id":"best_of","bin":1,"item":"x","size":3},
+                {"row_order":1,"site":"b","model_id":"next_fit","bin":1,"item":"y","size":9},
+                {"row_order":2,"site":"b","model_id":"best_of","bin":1,"item":"z","size":1}]"#,
+        );
+        let (cols, _, _) = columns(&table(&r), &Row::new()).unwrap();
+        let facet = cols.iter().find(|c| c.role == Role::Facet).unwrap();
+        assert_eq!(facet.name, "site");
+        assert_eq!(facet.values[0], Value::Str("a · next_fit".into()));
     }
 }

@@ -14,7 +14,7 @@
 //!
 //! Groups: as for `assignment`, several `model_id`s facet, and so does a
 //! producer group column (`group_col := …`, any other column with more than
-//! one value) — two groups' items are never mixed into one picture.
+//! one value, never `row_order`) — two groups' items are never mixed into one picture.
 
 use super::{opt_str, Row, Table};
 use crate::{Column, Kind, Role};
@@ -145,7 +145,7 @@ pub(super) fn columns(t: &Table, options: &Row) -> Result<(Vec<Column>, Vec<Stri
     ];
 
     let model = t.model_key().filter(|m| t.distinct(m) > 1);
-    let group = group_key(t, model);
+    let group = t.producer_group(OWN);
     match (&group, model) {
         (Some(g), Some(m)) => {
             let (gv, mv) = (t.text(g), t.text(m));
@@ -192,18 +192,6 @@ pub(super) fn columns(t: &Table, options: &Row) -> Result<(Vec<Column>, Vec<Stri
         }
     }
     Ok((cols, Vec::new()))
-}
-
-/// The producer's group column: the first column outside the schema with
-/// more than one value (see the module docs and `assignment::group_key`).
-fn group_key(t: &Table, model: Option<&str>) -> Option<String> {
-    let keys: Vec<String> = t
-        .rows
-        .first()
-        .map(|r| r.keys().cloned().collect())
-        .unwrap_or_default();
-    keys.into_iter()
-        .find(|k| !OWN.contains(&k.as_str()) && Some(k.as_str()) != model && t.distinct(k) > 1)
 }
 
 fn label(v: &Value) -> String {
@@ -280,5 +268,31 @@ mod tests {
             .err()
             .unwrap_or_default()
             .contains("`selected`"));
+    }
+
+    /// `row_order` (the contract's per-row ordinal) is never a group column:
+    /// a knapsack_by / assortment_by result faceted one facet per item.
+    #[test]
+    fn row_order_is_never_a_group() {
+        let r = rows(
+            r#"[{"row_order":1,"model_id":"greedy","item":"a","value":10,"weight":5,"selected":true},
+                {"row_order":2,"model_id":"greedy","item":"b","value":40,"weight":4,"selected":false},
+                {"row_order":1,"model_id":"dp","item":"a","value":10,"weight":5,"selected":false},
+                {"row_order":2,"model_id":"dp","item":"b","value":40,"weight":4,"selected":true}]"#,
+        );
+        let (cols, _) = columns(&table(&r), &Row::new()).unwrap();
+        let facets: Vec<&Column> = cols.iter().filter(|c| c.role == Role::Facet).collect();
+        assert_eq!(facets.len(), 1);
+        assert_eq!(facets[0].name, "model_id");
+        let r = rows(
+            r#"[{"row_order":1,"site":"n","item":"a","value":1,"selected":true},
+                {"row_order":2,"site":"n","item":"b","value":3,"selected":false},
+                {"row_order":1,"site":"s","item":"a","value":2,"selected":false}]"#,
+        );
+        let (cols, _) = columns(&table(&r), &Row::new()).unwrap();
+        assert_eq!(
+            cols.iter().find(|c| c.role == Role::Facet).unwrap().name,
+            "site"
+        );
     }
 }
