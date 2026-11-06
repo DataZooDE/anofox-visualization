@@ -444,7 +444,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SHOW_IF", &["SHOWIF", "VISIBLE_IF"], R::ShowIf, "layout", false,
       "show the next panel (or ::GROUP box) only while this BOOLEAN is TRUE — re-checked on every input change: getvariable('q1') <> ''"),
     e("DRILL", &["DRILLDOWN", "DRILL_DOWN"], R::Drill, "layout", false,
-      "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back"),
+      "next chart drills down 'region > country > city' ('geo: …' names the variables): drill_level / drill_depth / drill_path + a variable per level, a breadcrumb back. Bars, ::REGION maps (on the region code) and ::TREEMAP tiles (on the tile's label) drill"),
     e("GROUP", &["BOX", "ROW"], R::GroupStart, "layout", false, "open a box; ::ENDGROUP closes it"),
     e("ENDGROUP", &["ENDBOX", "ENDROW"], R::GroupEnd, "layout", false, "close the current box"),
     e("DIAGRAM_MODE", &["DIAGRAM_EDIT"], R::DiagramMode, "encoding", true,
