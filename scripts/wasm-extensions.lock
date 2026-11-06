@@ -3,7 +3,7 @@
 # scripts/release/pin-wasm-extensions.sh <tag>, then node scripts/gen-assist-functions.mjs,
 # and commit this file with web/assist/functions.js.
 # duckdb platform extension sha256 url
-v1.5.6 wasm_eh anofox_statistics 30542b5a26d955873eceb8d985a8153181d87a0ecf1d0ff4872d90d310eef155 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_eh-anofox_statistics.duckdb_extension.wasm
-v1.5.6 wasm_eh anofox_forecast e71b80e8dedf3ed70242315ce146bfb92cc9ecabdef511ec8ca56f13c0807e62 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_eh-anofox_forecast.duckdb_extension.wasm
-v1.5.6 wasm_mvp anofox_statistics dd4d99428f256fb61f34403d94722591465365fa24fc68e8856f19af89713bf9 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_mvp-anofox_statistics.duckdb_extension.wasm
-v1.5.6 wasm_mvp anofox_forecast 268c6bc4ad2f2f442359660a198eb9b40e06dc8f4c71a089a985d6627876b411 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261019/wasm_mvp-anofox_forecast.duckdb_extension.wasm
+v1.5.6 wasm_eh anofox_statistics ee5d84e0f5dd32ce48814c2668c29d88bbe022ae7edf51d308875693e9428c0a https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261106/wasm_eh-anofox_statistics.duckdb_extension.wasm
+v1.5.6 wasm_eh anofox_forecast e4d0914561107ad54a5f2e90eda7429b2cf5561bd23adc5662dc2419edee40a7 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261106/wasm_eh-anofox_forecast.duckdb_extension.wasm
+v1.5.6 wasm_mvp anofox_statistics cf1a25afa83d2d0d58d23bb8950eee7f78d8aec8b0c42c26ece1c4b209733728 https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261106/wasm_mvp-anofox_statistics.duckdb_extension.wasm
+v1.5.6 wasm_mvp anofox_forecast 909c87ecf36f6ab9020726446dc217ef74852efd18ffac9629c99c0d4c1e80bc https://github.com/DataZooDE/anofox-visualization/releases/download/wasm-ext-v1.5.6-20261106/wasm_mvp-anofox_forecast.duckdb_extension.wasm
