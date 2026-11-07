@@ -319,6 +319,22 @@ SELECT anofox_serve(8080);
 The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 `cargo run --bin dashboard -- file.sql`, `cargo run --features serve --bin serve -- my.duckdb`.
 
+## Ways to run it
+
+| You want to … | Use | Server? | Docs |
+|---|---|---|---|
+| render a chart as SVG inside any DuckDB query | the community extension: `INSTALL anofox_visualization FROM community` | no | [Installation](#installation) |
+| try it, or build a dashboard in the browser | the [live builder](https://datazoode.github.io/anofox-visualization/) (DuckDB-Wasm, nothing to install) | no | [DOCS § 2](docs/DOCS.md#2-three-ways-to-run-it) |
+| render dashboards to SVG / HTML, check them in CI | the `dashboard` CLI (`--svg`, `out.html`, `--check`) and the [`check-dashboards` action](docs/deployment.md) | no | [DOCS § 2](docs/DOCS.md#2-three-ways-to-run-it) |
+| publish dashboards as a static website (GitHub Pages, S3, any web host) | `dashboard --site` | no | [Static site](docs/secure-serving.md#c-publish-as-a-static-site--dashboard---site-417) |
+| author against your own database | `anofox_serve(port)` / `serve <db>` (loopback only) | yes, local | [Authoring](docs/secure-serving.md#authoring--anofox_serveport-and-serve-db) |
+| serve dashboards to others: login, row policies, refresh, write-back | the locked server `anofox_serve_dashboards(dir, port, options)` (one process, a container, behind a reverse proxy, several replicas) | yes | [Locked serving](docs/secure-serving.md#a-locked-full-ui--anofox_serve_dashboardsdir-port-options), [Deployment](docs/deployment.md) |
+| serve server-rendered pages with no data API at all | `serve --dashboards <dir>` | yes | [Static render](docs/secure-serving.md#b-static-render--serve---dashboards-dir) |
+| put a dashboard into your own app | `<anofox-dashboard>` (web component, React) or signed embed links | yes (locked server) | [Embedding](docs/secure-serving.md#embedding-with-anofox-dashboard-771) |
+| answer a dashboard's questions for agents (REST, MCP) | agent mode: `-- @question`, `dashboard --publish`, `options.agent` | yes | [Agent mode](docs/secure-serving.md#agent-mode-declared-questions-only-optionsagent-863) |
+| plot model results from Python or R | `anofox_plot_*` from pandas / polars / R | no | [Python & R](docs/python-r.md) |
+| use the anofox extensions' results | statistics, forecast, tabular, optimize, decide → `anofox_plot(...)` | no | [the conformance sections below](#conformance-with-anofox-statistics), [integration contract](docs/plans/integration-contract.md) |
+
 ## Documentation
 
 - **[Annotation model & role reference](docs/DOCS.md)** — every `::ROLE`, layout, and serving mode.
