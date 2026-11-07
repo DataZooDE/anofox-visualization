@@ -1,0 +1,40 @@
+---
+title: anofox-optimize
+description: "Packing, assignment, waves, sequencing with changeovers, knapsack and assortment selection, scheduling and replenishment — solvers callable from SQL."
+---
+
+import { Badge } from "@astrojs/starlight/components";
+
+<Badge text="Browser: precomputed results" variant="note" /> <Badge text="Native: community extension and full toolkit" variant="note" />
+
+[anofox-optimize](https://github.com/DataZooDE/anofox-optimize) — packing, assignment, waves, sequencing with changeovers, knapsack and assortment selection, scheduling and replenishment — solvers callable from SQL.
+
+```sql
+INSTALL anofox_optimize FROM 'https://get.erpl.io';   -- duckdb -unsigned
+LOAD anofox_optimize; LOAD anofox_visualization;
+```
+
+## Plot its results
+
+The solvers return a STRUCT of lists per instance. Unnest the plan into one row per item, and the decision views draw it:
+
+| Output | Plotted by |
+|---|---|
+| bin packing, waves (`pack_*`, `wave_*`) | `anofox_plot_assignment`: items stacked per bin against the capacity |
+| knapsack, assortment | `anofox_plot_selection`: picked items first |
+| sequencing (`opt_sequence_by`) | `anofox_plot_sequence`: cumulative setup by position |
+| scheduling | `anofox_plot_schedule`: a Gantt per resource, late tasks marked |
+| objectives per algorithm | `anofox_plot_summary` |
+
+`anofox_plot(t)` picks the macro from the table's columns. The macros are aggregates: `GROUP BY` gives one SVG per group.
+
+## In the builder
+
+- [How do we plan a busy day at the distribution centre?](../../app/?dashboard=optimize-showcase)
+- [Which line runs which order, with the least changeover?](../../app/?dashboard=optimize-production)
+- [Which van serves which stop tomorrow?](../../app/?dashboard=optimize-delivery)
+- [What should we order this week to sell the most?](../../app/?dashboard=optimize-replenishment)
+
+## Checked in CI
+
+Every producer of the extension's latest build is plotted on every push ([`scripts/optimize_conformance.py`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/optimize_conformance.py)): a SQL error, a missing SVG or a producer without a recipe fails the run. [Reference →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#plotting-model-output-contract-macros)

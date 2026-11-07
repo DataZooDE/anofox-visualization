@@ -1,0 +1,43 @@
+---
+title: anofox-tabular
+description: "Data profiling, data-quality checks, anomaly scores, PII detection, diffs and deduplication for tables in DuckDB."
+---
+
+import { Badge } from "@astrojs/starlight/components";
+
+<Badge text="Browser: precomputed results" variant="note" /> <Badge text="Native: community extension and full toolkit" variant="note" />
+
+[anofox-tabular](https://github.com/DataZooDE/anofox-tabular) — data profiling, data-quality checks, anomaly scores, PII detection, diffs and deduplication for tables in DuckDB.
+
+```sql
+INSTALL anofox_tabular FROM community;
+LOAD anofox_tabular; LOAD anofox_visualization;
+```
+
+## Plot its results
+
+The suite check already returns the `check` schema, so it plots as it comes; a profile's correlations plot as a matrix:
+
+```sql
+SELECT anofox_plot(t) FROM anofox_tab_run_checks('checks') t;                 -- a check band per rule
+SELECT anofox_plot_matrix(t) FROM anofox_tab_profile_correlations('d') t;      -- a correlation matrix
+```
+
+| Output | Plotted by |
+|---|---|
+| `anofox_tab_run_checks`, `anofox_tab_agg_check` | `anofox_plot_checks` |
+| profile correlations | `anofox_plot_matrix` |
+| one-row checks (`null_rate`, `compliance`, …) | `anofox_plot_summary`, after a reshape |
+| time-aware checks | `anofox_plot_events` |
+
+`anofox_plot(t)` picks the macro from the table's columns. The macros are aggregates: `GROUP BY` gives one SVG per group.
+
+## In the builder
+
+- [Is today's supplier feed safe to load?](../../app/?dashboard=tabular-feed)
+- [Can we switch on the new CRM?](../../app/?dashboard=tabular-showcase)
+- [Which duplicate customers should we merge?](../../app/?dashboard=tabular-dedup)
+
+## Checked in CI
+
+Every producer of the extension's latest build is plotted on every push ([`scripts/tabular_conformance.py`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/tabular_conformance.py)): a SQL error, a missing SVG or a producer without a recipe fails the run. [Reference →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#plotting-anofox-tabular-results)

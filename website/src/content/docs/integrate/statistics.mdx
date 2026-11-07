@@ -1,0 +1,53 @@
+---
+title: anofox-statistics
+description: "Regression (OLS to GLMM), survival (Cox, AFT, Kaplan–Meier), hypothesis tests, ANOVA, calibration, bootstrap validation and multiple imputation — in SQL."
+---
+
+import { Badge } from "@astrojs/starlight/components";
+
+<Badge text="Runs live in the browser" variant="success" /> <Badge text="Native: community extension and full toolkit" variant="note" />
+
+[anofox-statistics](https://github.com/DataZooDE/anofox-statistics) — regression (OLS to GLMM), survival (Cox, AFT, Kaplan–Meier), hypothesis tests, ANOVA, calibration, bootstrap validation and multiple imputation — in SQL.
+
+```sql
+INSTALL anofox_statistics FROM 'https://get.erpl.io';   -- duckdb -unsigned
+LOAD anofox_statistics; LOAD anofox_visualization;
+```
+
+## Plot its results
+
+Every plot-ready producer returns a contract table and carries `duckdb_functions()` tags, so `anofox_plot(t)` draws it as it comes:
+
+```sql
+SELECT anofox_plot_terms(t) FROM ols_tidy_by('d', grp, y, [x1, x2]) t WHERE grp = 'A';         -- coefficients
+SELECT curve_type, anofox_plot_curve(t)
+FROM (SELECT * FROM roc_curve_by('d', grp, label, prob)
+      UNION ALL SELECT * FROM calibration_curve_by('d', grp, label, prob, n_bins := 4)) t
+GROUP BY curve_type;                                                                     -- ROC + calibration
+SELECT grp, anofox_plot_tests(t) FROM tukey_hsd_by('d', grp, y, level3) t GROUP BY grp;    -- pairwise tests
+
+-- every contract producer of the loaded build:
+SELECT DISTINCT function_name, tags['anofox.output'] AS output
+FROM duckdb_functions() WHERE tags['anofox.contract'] = '1' ORDER BY output, function_name;
+```
+
+| Output | Plotted by |
+|---|---|
+| `*_tidy_by` (coefficients) | `anofox_plot_terms` |
+| `*_glance_by`, metrics | `anofox_plot_summary` |
+| `*_augment_by`, `*_fit_predict_by`, effects | `anofox_plot_prediction`, `anofox_plot_obs`, `anofox_plot_diagnostics` |
+| ROC, PR, calibration, Kaplan–Meier, λ CV | `anofox_plot_curve` |
+| tests (`*_test_by`, `*_agg`) | `anofox_plot_tests`, `anofox_plot_compare` |
+| partial residuals | `anofox_plot_partial` |
+
+`anofox_plot(t)` picks the macro from the table's columns. The macros are aggregates: `GROUP BY` gives one SVG per group.
+
+## In the builder
+
+- [What sets the price of a home?](../../app/?dashboard=statistics-showcase)
+- [Why do customers cancel?](../../app/?dashboard=statistics-churn-drivers)
+- [Did the new checkout lift conversion?](../../app/?dashboard=statistics-ab-test)
+
+## Checked in CI
+
+Every producer of the extension's latest build is plotted on every push ([`scripts/statistics_conformance.py`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/statistics_conformance.py)): a SQL error, a missing SVG or a producer without a recipe fails the run. [Reference →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#plotting-anofox-statistics-results)
