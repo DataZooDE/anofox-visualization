@@ -1,0 +1,29 @@
+/* The app's chrome: graphite with a blue accent (theme-base.css). */
+:root {
+  --sl-color-accent-low: #dbe6fd;
+  --sl-color-accent: #2563eb;
+  --sl-color-accent-high: #1e3a8a;
+  --sl-color-white: #0a0a0a;
+  --sl-color-gray-1: #1f2329;
+  --sl-color-gray-2: #2c2e33;
+  --sl-color-gray-3: #4b5160;
+  --sl-color-gray-4: #6b7280;
+  --sl-color-gray-5: #d8dbe0;
+  --sl-color-gray-6: #eceef1;
+  --sl-color-gray-7: #f4f5f7;
+  --sl-color-black: #ffffff;
+}
+:root[data-theme="dark"] {
+  --sl-color-accent-low: #172554;
+  --sl-color-accent: #60a5fa;
+  --sl-color-accent-high: #dbeafe;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #eceef1;
+  --sl-color-gray-2: #d8dbe0;
+  --sl-color-gray-3: #a2a8b3;
+  --sl-color-gray-4: #6b7280;
+  --sl-color-gray-5: #3a3f48;
+  --sl-color-gray-6: #24272d;
+  --sl-color-black: #16181c;
+}
+.hero-shot img, .shot img { border: 1px solid var(--sl-color-gray-5); border-radius: 8px; }

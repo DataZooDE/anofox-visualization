@@ -88,11 +88,20 @@ jobs:
       # bootstrap) deploys the app without /extensions.
       # #1017 P0 (D4): the site is the latest release's own web build at /,
       # master's at /next/ (noindex).
+      # #1020: the website preview (Astro Starlight) at /next/, master's
+      # builder at /next/app/.
+      - name: Build the website (→ website/dist)
+        working-directory: website
+        env:
+          SITE_BASE: /anofox-visualization/next
+        run: |
+          npm ci --no-audit --no-fund
+          npx astro build
       - name: Site (latest release at /, master at /next/)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: scripts/release/pages-site.sh web site
+        run: scripts/release/pages-site.sh web site website/dist
       - name: DuckDB extension repository (latest release → site/extensions)
         env:
           GH_TOKEN: ${{ github.token }}
