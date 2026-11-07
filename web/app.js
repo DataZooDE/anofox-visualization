@@ -3000,6 +3000,19 @@ async function boot() {
   // these handlers exist) can't be silently lost; enabled once wired.
   $("share").onclick = shareLink;
   $("share").disabled = false;
+  // #1017 P0: the builder links to the documentation (a served dashboard,
+  // whose readers are its consumers, doesn't).
+  if (!window.__served && !$("docs-link")) {
+    const a = document.createElement("a");
+    a.id = "docs-link";
+    a.className = "btn2";
+    a.href = "https://github.com/DataZooDE/anofox-visualization#documentation";
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "Docs ↗";
+    a.title = "how it works, how to install and deploy it, and the integrations with the other anofox extensions";
+    $("actions").prepend(a);
+  }
   if ($("views")) {
     $("views").onclick = async () => openSideMenu($("views"), await viewsMenu());
     $("views").disabled = false;

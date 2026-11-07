@@ -80,25 +80,32 @@ jobs:
       - name: The assistant's function lists match the pinned builds
         run: node scripts/gen-assist-functions.mjs --check
 
-      # The latest release's native extensions → web/extensions/<duckdb>/<platform>/
+      # The latest release's native extensions → site/extensions/<duckdb>/<platform>/
       # anofox_visualization.duckdb_extension.gz. Fails the run (no deploy) when
       # that release lacks SHA256SUMS or any extension it lists, after polling
       # up to EXT_REPO_WAIT seconds in case a release was just (re)created and
       # is still uploading (#1008). Only "no published release at all" (first
       # bootstrap) deploys the app without /extensions.
-      - name: DuckDB extension repository (latest release → web/extensions)
+      # #1017 P0 (D4): the site is the latest release's own web build at /,
+      # master's at /next/ (noindex).
+      - name: Site (latest release at /, master at /next/)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/release/pages-site.sh web site
+      - name: DuckDB extension repository (latest release → site/extensions)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           EXT_REPO_WAIT: "600"
           EXT_REPO_POLL: "30"
-        run: scripts/release/extension-repo.sh --release latest web/extensions
+        run: scripts/release/extension-repo.sh --release latest site/extensions
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: web
+          path: site
 
   deploy:
     permissions:
