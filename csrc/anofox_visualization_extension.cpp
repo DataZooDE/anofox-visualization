@@ -86,20 +86,54 @@ static void AnofoxRenderFunction(DataChunk &args, ExpressionState &state, Vector
 // the extension, never a caller's SQL. The extension-ci-tools build for
 // either DuckDB version does not reliably expose a `DUCKDB_MAJOR_VERSION`
 // preprocessor define to this translation unit, so the two call shapes
-// (static class method vs. instance method) are picked on
-// `duckdb/parser/token_iterator.hpp`'s presence instead: a header `__has_include`
-// confirmed is new in 2.0.0 and absent from 1.5.6 (unlike `identifier.hpp`
-// above, which exists -- as a 1.5.6-only backport shim -- on both).
-#if __has_include("duckdb/parser/token_iterator.hpp")
-static vector<unique_ptr<ParsedExpression>> AnofoxParseExpressionList(const std::string &sql) {
-	auto parser = Parser::GetBuiltinParser();
+// (static class method vs. instance method) are picked by overload
+// resolution on what the compiled headers declare: the `int` overload exists
+// only where `Parser::GetBuiltinParser()` does. Not on a header's presence:
+// `__has_include("duckdb/parser/token_iterator.hpp")` also finds a system
+// DuckDB 2.0's copy (/usr/include/duckdb) from a 1.5.6 build. The template
+// parameter keeps the lookup dependent, so SFINAE can discard the overload.
+template <class P>
+static auto ParseExpressionListWith(const std::string &sql, int)
+    -> decltype(P::GetBuiltinParser().ParseExpressionList(sql)) {
+	auto parser = P::GetBuiltinParser();
 	return parser.ParseExpressionList(sql);
 }
-#else
-static vector<unique_ptr<ParsedExpression>> AnofoxParseExpressionList(const std::string &sql) {
-	return Parser::ParseExpressionList(sql);
+template <class P>
+static vector<unique_ptr<ParsedExpression>> ParseExpressionListWith(const std::string &sql, long) {
+	return P::ParseExpressionList(sql);
 }
-#endif
+static vector<unique_ptr<ParsedExpression>> AnofoxParseExpressionList(const std::string &sql) {
+	return ParseExpressionListWith<Parser>(sql, 0);
+}
+
+template <class P, class = void>
+struct HasBuiltinParser : std::false_type {};
+template <class P>
+struct HasBuiltinParser<P, decltype(void(P::GetBuiltinParser()))> : std::true_type {};
+template <class F, class = void>
+struct HasSignature : std::false_type {};
+template <class F>
+struct HasSignature<F, decltype(void(std::declval<F &>().GetSignature()))> : std::true_type {};
+
+// DuckDB 2.0 (the line with a FunctionSignature): parameters carry their own
+// names, and duckdb_functions() prefers those over the description's
+// parameter_names, so an unnamed one would show up as `col0` (#372). A
+// LogicalType-only argument is POSITIONAL_ONLY there, and SetName keeps the
+// kind, so the parameter is replaced by a STANDARD one: `spec := ...` binds.
+// 1.5.6 has no signature on the function; the false_type overload is a no-op.
+template <class F>
+static void NameParameter(F &function, idx_t index, const char *name, std::true_type) {
+	auto &param = function.GetSignature().GetParameter(index);
+	using Param = typename std::decay<decltype(param)>::type;
+	param = Param(Identifier(name), param.GetType());
+}
+template <class F>
+static void NameParameter(F &, idx_t, const char *, std::false_type) {
+}
+// On DuckDB 2.0 the no-op fallback must never be chosen: the parameter would
+// silently lose its name with the build still green.
+static_assert(!HasBuiltinParser<Parser>::value || HasSignature<ScalarFunction>::value,
+              "DuckDB 2.0 API without FunctionSignature: update NameParameter");
 
 // Built like DefaultFunctionGenerator::CreateInternalMacroInfo, without its
 // fixed-size parameter arrays.
@@ -225,16 +259,9 @@ void LoadInternal(ExtensionLoader &loader) {
 	// Guarded: anofox_render is the single user-facing entry point. Every
 	// anofox_bar/_line/_scatter/_area/_xy/_xyc macro below expands to a call to
 	// it, so one guard puts the issue link on a failure from any of them.
-#if __has_include("duckdb/parser/token_iterator.hpp")
-	// DuckDB 2.0 (see AnofoxParseExpressionList): parameters carry their own
-	// names, and duckdb_functions() prefers those over the description's
-	// parameter_names, so an unnamed one would show up as `col0` (#372).
-	ScalarFunction render("anofox_render", {FunctionParameter("spec", LogicalType::VARCHAR)}, LogicalType::VARCHAR,
-	                      DATAZOO_GUARD(ANOFOX_VISUALIZATION_BANNER, AnofoxRenderFunction));
-#else
 	ScalarFunction render("anofox_render", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                      DATAZOO_GUARD(ANOFOX_VISUALIZATION_BANNER, AnofoxRenderFunction));
-#endif
+	NameParameter(render, 0, "spec", HasSignature<ScalarFunction> {});
 	// A bad spec is a real SQL error (InvalidInputException). DuckDB 2.0
 	// turns an error from a function not marked fallible into an INTERNAL
 	// error (#372); SetErrorMode exists on 1.5.6 and 2.0 alike.
