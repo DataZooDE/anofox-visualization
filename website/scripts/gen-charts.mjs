@@ -109,8 +109,15 @@ const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
 const prose = (t) => t.split(/(`[^`]*`)/).map((p, i) => (i % 2 ? p : p.replace(/[{}]/g, "\\$&").replace(/</g, "&lt;"))).join("");
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
 
-rmSync(out, { recursive: true, force: true });
+// Written in place (only stale pages removed, unchanged ones not touched):
+// a dev server's file watcher loses pages when the folder is recreated.
 mkdirSync(out, { recursive: true });
+const written = new Set();
+const put = (f, text) => {
+  written.add(f);
+  const p = path.join(out, f);
+  if (!existsSync(p) || readFileSync(p, "utf8") !== text) writeFileSync(p, text);
+};
 for (const k of kinds) {
   const s = shapes[k.name] || {};
   const mate = s.with && all.find((o) => o.name === s.with);
@@ -150,7 +157,7 @@ for (const k of kinds) {
     related.length ? `## Related\n\n${related.map((o) => `[${shapes[o.name]?.title ? "`" + shapes[o.name].title + "`" : "`::" + o.name + "`"}](../${slug(o.name)}/)`).join(" · ")}` : "",
     "",
   ].join("\n");
-  writeFileSync(path.join(out, `${slug(k.name)}.mdx`), md.replace(/\n{3,}/g, "\n\n"));
+  put(`${slug(k.name)}.mdx`, md.replace(/\n{3,}/g, "\n\n"));
 }
 
 // The overview: by family, a picture per kind.
@@ -159,7 +166,7 @@ const idx = [
   "title: Charts",
   "description: Every chart kind, grouped by what it shows — one page each with the data it needs and a panel to edit in the builder.",
   "sidebar:",
-  "  label: Overview",
+  "  label: All charts",
   "  order: 0",
   "---",
   "",
@@ -179,5 +186,6 @@ for (const [fam] of [...families, ["Other"]]) {
 }
 const imports = kinds.filter((k) => existsSync(path.join(thumbs, `${slug(k.name)}.svg`))).map((k) => `import pic_${k.name} from "../../../../assets/charts/${slug(k.name)}.svg?url";`);
 idx.splice(idx.indexOf("---", 1) + 1, 0, "", ...imports);
-writeFileSync(path.join(out, "index.mdx"), idx.join("\n"));
+put("index.mdx", idx.join("\n"));
+for (const f of readdirSync(out)) if (!written.has(f)) rmSync(path.join(out, f));
 console.log(`charts: ${kinds.length} pages`);

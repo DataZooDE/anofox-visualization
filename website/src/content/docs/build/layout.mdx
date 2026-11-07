@@ -3,7 +3,17 @@ title: Layout and tabs
 description: A 12-column grid, boxes, tabs, alternative views, composed figures and fit-to-screen — all from SQL.
 ---
 
+import shotL from "../../../assets/showcase/how-do-we-plan-a-busy-day-at-the-distribution-centre-light.webp";
+import shotD from "../../../assets/showcase/how-do-we-plan-a-busy-day-at-the-distribution-centre-dark.webp";
+
 Panels flow left to right on a **12-column grid** in the order of the script and wrap when a row is full. On a narrow screen every panel goes full width.
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL.src} alt="A dashboard with an input box, a KPI strip, tabs and two panels side by side" />
+  <img class="lp-dark" src={shotD.src} alt="" />
+  <figcaption>Inputs in a box, a KPI strip, tabs, and an 8 + 4 column row. <a href="../../app/?dashboard=how-do-we-plan-a-busy-day-at-the-distribution-centre">Open it ↗</a></figcaption>
+</figure>
+
 
 ```sql
 SELECT 'Overview'::TAB;

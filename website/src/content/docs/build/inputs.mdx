@@ -3,7 +3,19 @@ title: Inputs and interactivity
 description: Dropdowns, date periods and switches from SQL; clicks that filter, select and drill.
 ---
 
+import shotL from "../../../assets/showcase/map-drill-germany-light.webp";
+import shotD from "../../../assets/showcase/map-drill-germany-dark.webp";
+
+Filters, switches, clicks and drill-downs are all DuckDB variables: a control sets one, any query reads it with `getvariable()`. No callbacks, no state to wire up.
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL.src} alt="A map after a click on Germany: states, a ranking by state and a breadcrumb back" />
+  <img class="lp-dark" src={shotD.src} alt="" />
+  <figcaption>A click on Germany sets <code>getvariable('country')</code>; the map and the ranking re-query. <a href="../../app/?dashboard=where-does-our-revenue-come-from-from-country-down-to-district">Try it ↗</a></figcaption>
+</figure>
+
 ## Inputs are variables
+
 
 An input is a `SELECT` whose column carries an input role. The **column name is a DuckDB variable**; any statement reads it with `getvariable('name')`, and changing the control re-runs what depends on it.
 

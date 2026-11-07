@@ -5,6 +5,19 @@ description: Every way to run anofox-visualization — what each needs and what 
 
 The same `.sql` dashboards run everywhere below; what changes is who reads them, whether the data is live, and who may see which rows.
 
+<div class="lp-ways doc-ways">
+  <a href="browser/"><strong>In the browser</strong><span>DuckDB-Wasm: open files, author, explore. Nothing to install.</span></a>
+  <a href="cli/"><strong>CLI, HTML and CI</strong><span>Render HTML and SVG, lint every pull request.</span></a>
+  <a href="static-site/"><strong>A static website</strong><span>GitHub Pages, S3, nginx — no server to run.</span></a>
+  <a href="authoring/"><strong>Authoring on your data</strong><span>The builder wired to your database, on loopback.</span></a>
+  <a href="locked-server/"><strong>The locked server</strong><span>Read-only snapshots, refresh, reports and alerts.</span></a>
+  <a href="security/"><strong>Login and row policies</strong><span>OIDC, JWT, API keys; rows and columns per reader.</span></a>
+  <a href="embedding/"><strong>Embedding</strong><span>Signed links and a web component in your own app.</span></a>
+  <a href="agent/"><strong>Agents and MCP</strong><span>A dashboard's questions answered over REST and MCP.</span></a>
+</div>
+
+## Compare them
+
 | Way to run it | Needs | Live data | Login & row policies | Readers interact | Best for |
 |---|---|---|---|---|---|
 | [In the browser](browser/) | nothing (DuckDB-Wasm) | files you open | — | ✔ | trying it, authoring, one-off analyses |

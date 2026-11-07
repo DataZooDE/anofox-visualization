@@ -3,7 +3,17 @@ title: Models and forecasts
 description: Plot regression, forecast, test and data-quality results with one anofox_plot call, or draw intervals, fans and bands with roles.
 ---
 
+import shotL from "../../../assets/showcase/will-any-substation-exceed-its-capacity-next-week-light.webp";
+import shotD from "../../../assets/showcase/will-any-substation-exceed-its-capacity-next-week-dark.webp";
+
 ## One call per result
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL.src} alt="An hourly load forecast with a 95/80/50 % fan against firm capacity" />
+  <img class="lp-dark" src={shotD.src} alt="" />
+  <figcaption>A forecast from anofox-forecast with a nested fan, a reference line and a marked forecast start. <a href="../../app/?dashboard=will-any-substation-exceed-its-capacity-next-week">Open it ↗</a></figcaption>
+</figure>
+
 
 The anofox extensions return their results as tables in a shared *integration contract*. `anofox_plot(t)` picks the plot from the table's columns. The `anofox_plot_*` macros choose it explicitly:
 

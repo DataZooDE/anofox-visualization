@@ -3,7 +3,17 @@ title: The annotation model
 description: A dashboard is a .sql script — setup statements, and SELECTs whose columns carry ::ROLE casts that say how each column is drawn.
 ---
 
+import shotL from "../../../assets/showcase/1-one-chart.svg?url";
+import shotD from "../../../assets/showcase/1-one-chart-dark.svg?url";
+
 A dashboard is a `.sql` file. It has two kinds of statement:
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL} alt="A bar chart drawn from one SELECT" />
+  <img class="lp-dark" src={shotD} alt="" />
+  <figcaption>One <code>SELECT</code>, one chart: the query on this page, drawn by the dashboard CLI.</figcaption>
+</figure>
+
 
 - **Setup**: any statement *without* a role cast (`CREATE TABLE`, `INSTALL`, `LOAD`, `SET VARIABLE`, …). It runs for its effect, once, on a shared connection.
 - **Panels**: a `SELECT` whose output columns carry `::ROLE` casts. Each one becomes a chart, a KPI tile, a table, an input or a block of text.
