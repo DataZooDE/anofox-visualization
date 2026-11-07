@@ -1,4 +1,4 @@
-// #1022: the website's chart catalogue (website/scripts/gen-charts.mjs) —
+// #1022: the website's chart catalogue (website/scripts/gen-charts.mjs) and Gallery (gen-gallery.mjs) —
 // every chart kind of the role table has a data shape and a picture, every
 // minimal panel lints without an error in the dashboard CLI (DASHBOARD, else
 // target/debug/dashboard), the pages generate, and every `?dashboard=<id>` link
@@ -14,6 +14,10 @@ const root = path.resolve(import.meta.dirname, "..", "..");
 const gen = path.join(root, "website", "scripts", "gen-charts.mjs");
 execFileSync(process.execPath, [gen, "--check"], { stdio: "inherit" });
 execFileSync(process.execPath, [gen], { stdio: "inherit" });
+// the Gallery: every tile lints and has its pictures, the pages generate
+const gal = path.join(root, "website", "scripts", "gen-gallery.mjs");
+execFileSync(process.execPath, [gal, "--check"], { stdio: "inherit" });
+execFileSync(process.execPath, [gal], { stdio: "inherit" });
 const pages = readdirSync(path.join(root, "website", "src", "content", "docs", "build", "charts"));
 assert.ok(pages.includes("index.mdx") && pages.length > 40, `chart pages: ${pages.length}`);
 

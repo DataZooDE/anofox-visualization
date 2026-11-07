@@ -1,0 +1,44 @@
+---
+title: What you can build
+description: A picture of everything — inputs, KPIs, tables, maps, interactions, the 42 chart kinds and what each anofox extension draws — each with its SQL.
+sidebar:
+  order: 0
+---
+
+import inL from "../../../assets/gallery/inputs/3-light.webp";
+import inD from "../../../assets/gallery/inputs/3-dark.webp";
+import kpL from "../../../assets/gallery/kpis/6-light.webp";
+import kpD from "../../../assets/gallery/kpis/6-dark.webp";
+import tbL from "../../../assets/gallery/tables/1-light.webp";
+import tbD from "../../../assets/gallery/tables/1-dark.webp";
+import mpL from "../../../assets/gallery/maps/3-light.webp";
+import mpD from "../../../assets/gallery/maps/3-dark.webp";
+import ftL from "../../../assets/gallery/features/5-light.webp";
+import ftD from "../../../assets/gallery/features/5-dark.webp";
+import charts from "../../../assets/charts/sankey.svg?url";
+import st from "../../../assets/plots/statistics/kaplan_meier_by.svg?url";
+import fc from "../../../assets/plots/forecast/forecast_fan_levels.svg?url";
+import tb from "../../../assets/plots/tabular/profile_correlations.svg?url";
+import op from "../../../assets/plots/optimize/schedule_best_of.svg?url";
+import dc from "../../../assets/plots/decide/decide_calibration_curve_by.svg?url";
+
+Every picture in this gallery is drawn by anofox-visualization from the SQL shown beside it, on made-up sample data. Open any of them in the builder and change it.
+
+<div class="gal-index">
+  <a href="inputs/"><img class="lp-light" src={inL.src} alt="" /><img class="lp-dark" src={inD.src} alt="" /><strong>Inputs and filters</strong><span>Dropdowns, multi-selects, buttons, toggles, dates, periods, search.</span></a>
+  <a href="kpis/"><img class="lp-light" src={kpL.src} alt="" /><img class="lp-dark" src={kpD.src} alt="" /><strong>KPIs</strong><span>Change, trend, goal, status colours, strips, gauges and bullets.</span></a>
+  <a href="tables/"><img class="lp-light" src={tbL.src} alt="" /><img class="lp-dark" src={tbD.src} alt="" /><strong>Tables</strong><span>Formats, sparklines, subtotals, grouped headers, flags, selection, links.</span></a>
+  <a href="maps/"><img class="lp-light" src={mpL.src} alt="" /><img class="lp-dark" src={mpD.src} alt="" /><strong>Maps</strong><span>Regions by code, points, flows, two measures, small multiples, drill-down.</span></a>
+  <a href="features/"><img class="lp-light" src={ftL.src} alt="" /><img class="lp-dark" src={ftD.src} alt="" /><strong>Interactions and features</strong><span>Drill-down, selections, views, figures, annotations, guided steps, diagrams.</span></a>
+  <a href="../build/charts/"><img src={charts} alt="" /><strong>42 chart kinds</strong><span>One page each, with the data it needs.</span></a>
+</div>
+
+## What each anofox extension draws
+
+<div class="gal-index">
+  <a href="statistics/"><img src={st} alt="" /><strong>anofox-statistics</strong><span>Coefficients, diagnostics, survival, ROC and calibration, tests.</span></a>
+  <a href="forecast/"><img src={fc} alt="" /><strong>anofox-forecast</strong><span>Forecast fans, backtests, decompositions, folds, metrics.</span></a>
+  <a href="tabular/"><img src={tb} alt="" /><strong>anofox-tabular</strong><span>Quality checks, profiles, correlations, anomalies, PII.</span></a>
+  <a href="optimize/"><img src={op} alt="" /><strong>anofox-optimize</strong><span>Packing, waves, schedules, routes, selections.</span></a>
+  <a href="decide/"><img src={dc} alt="" /><strong>anofox-decide</strong><span>ROC, calibration, precision and recall, choice distributions.</span></a>
+</div>

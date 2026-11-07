@@ -27,6 +27,8 @@ import mapL from "../../assets/showcase/where-does-our-revenue-come-from-from-co
 import mapD from "../../assets/showcase/where-does-our-revenue-come-from-from-country-down-to-district-dark.webp";
 import drillL from "../../assets/showcase/map-drill-germany-light.webp";
 import drillD from "../../assets/showcase/map-drill-germany-dark.webp";
+import kpiL from "../../assets/gallery/kpis/6-light.webp";
+import kpiD from "../../assets/gallery/kpis/6-dark.webp";
 import fcL from "../../assets/showcase/will-any-substation-exceed-its-capacity-next-week-light.webp";
 import fcD from "../../assets/showcase/will-any-substation-exceed-its-capacity-next-week-dark.webp";
 import optL from "../../assets/showcase/how-do-we-plan-a-busy-day-at-the-distribution-centre-light.webp";
@@ -41,6 +43,17 @@ import tabL from "../../assets/showcase/is-today-s-supplier-feed-safe-to-load-li
 import tabD from "../../assets/showcase/is-today-s-supplier-feed-safe-to-load-dark.webp";
 import galL from "../../assets/showcase/which-chart-fits-which-question-light.webp";
 import galD from "../../assets/showcase/which-chart-fits-which-question-dark.webp";
+import gInL from "../../assets/gallery/inputs/1-light.webp";
+import gInD from "../../assets/gallery/inputs/1-dark.webp";
+import gKpL from "../../assets/gallery/kpis/2-light.webp";
+import gKpD from "../../assets/gallery/kpis/2-dark.webp";
+import gTbL from "../../assets/gallery/tables/3-light.webp";
+import gTbD from "../../assets/gallery/tables/3-dark.webp";
+import gMpL from "../../assets/gallery/maps/4-light.webp";
+import gMpD from "../../assets/gallery/maps/4-dark.webp";
+import gFtL from "../../assets/gallery/features/6-light.webp";
+import gFtD from "../../assets/gallery/features/6-dark.webp";
+import gSt from "../../assets/plots/statistics/kaplan_meier_by.svg?url";
 import c1 from "../../assets/charts/sankey.svg?url";
 import c2 from "../../assets/charts/treemap.svg?url";
 import c3 from "../../assets/charts/ridgeline.svg?url";
@@ -56,12 +69,18 @@ import c12 from "../../assets/charts/diagram.svg?url";
 
 <div class="lp">
 
-<figure class="lp-window">
-  <div class="lp-window-bar"><span></span><span></span><span></span><em>Where does our revenue come from, from country down to district?</em></div>
-  <img class="lp-light" src={mapL.src} alt="A dashboard with a choropleth map of Europe by revenue, drillable from country to state to district, beside a top-10 bar chart" />
-  <img class="lp-dark" src={mapD.src} alt="" />
-  <figcaption>One <code>.sql</code> file: a map that drills from country to state to district, with a ranking that follows each click. <a href="app/?dashboard=where-does-our-revenue-come-from-from-country-down-to-district">Click through it live ↗</a></figcaption>
-</figure>
+<div class="lp-stage" aria-label="Three dashboards drawn from SQL: a forecast fan, a drill-down map and a KPI strip, beside the SQL that makes a chart">
+  <a class="lp-card lp-c1" href="app/?dashboard=where-does-our-revenue-come-from-from-country-down-to-district"><img class="lp-light" src={drillL.src} alt="" /><img class="lp-dark" src={drillD.src} alt="" /></a>
+  <a class="lp-card lp-c2" href="app/?dashboard=will-any-substation-exceed-its-capacity-next-week"><img class="lp-light" src={fcL.src} alt="" /><img class="lp-dark" src={fcD.src} alt="" /></a>
+  <div class="lp-card lp-c3 lp-sql" aria-hidden="true"><span class="k">SELECT</span> ds <b>::XAXIS</b>, yhat <b>::LINECHART</b>,
+       yhat_lower <b>::BAND_LOWER</b>,
+       yhat_upper <b>::BAND_UPPER</b>,
+       firm_mw <b>::REFLINE</b>
+<span class="k">FROM</span> forecast
+<span class="k">WHERE</span> substation = getvariable(<i>'substation'</i>);</div>
+  <div class="lp-card lp-c4"><img class="lp-light" src={kpiL.src} alt="" /><img class="lp-dark" src={kpiD.src} alt="" /></div>
+</div>
+<p class="lp-stage-cap">Real dashboards from the builder's examples — <a href="app/?dashboard=will-any-substation-exceed-its-capacity-next-week">a forecast against capacity</a>, <a href="app/?dashboard=where-does-our-revenue-come-from-from-country-down-to-district">a map that drills</a> — each one <code>.sql</code> file.</p>
 
 <ul class="lp-facts">
   <li><strong>42</strong> chart kinds</li>
@@ -189,6 +208,19 @@ serve --dashboards dashboards/ --db sales.duckdb --options locked.json
   <a href="app/?dashboard=can-a-model-triage-the-support-inbox"><img class="lp-light" src={decL.src} alt="" loading="lazy" /><img class="lp-dark" src={decD.src} alt="" loading="lazy" /><span class="lp-tag">anofox-decide</span><strong>Can a model triage the support inbox?</strong><em>Probabilities to decisions: thresholds, costs, calibration, routing.</em></a>
   <a href="app/?dashboard=is-today-s-supplier-feed-safe-to-load"><img class="lp-light" src={tabL.src} alt="" loading="lazy" /><img class="lp-dark" src={tabD.src} alt="" loading="lazy" /><span class="lp-tag">anofox-tabular</span><strong>Is today's supplier feed safe to load?</strong><em>Data-quality checks, a go / no-go verdict and the history behind it.</em></a>
   <a href="app/?dashboard=which-chart-fits-which-question"><img class="lp-light" src={galL.src} alt="" loading="lazy" /><img class="lp-dark" src={galD.src} alt="" loading="lazy" /><span class="lp-tag">chart gallery</span><strong>Which chart fits which question?</strong><em>Every chart kind, by family, with the SQL beside it.</em></a>
+</div>
+
+## Everything, with its SQL
+
+<p class="lp-lead">The gallery shows every input, KPI, table option, map and interaction as a picture with the SQL that draws it — and what each anofox extension plots.</p>
+
+<div class="gal-index lp-galband">
+  <a href="gallery/inputs/"><img class="lp-light" src={gInL.src} alt="" loading="lazy" /><img class="lp-dark" src={gInD.src} alt="" loading="lazy" /><strong>Inputs and filters</strong><span>8 controls, each driving a chart</span></a>
+  <a href="gallery/kpis/"><img class="lp-light" src={gKpL.src} alt="" loading="lazy" /><img class="lp-dark" src={gKpD.src} alt="" loading="lazy" /><strong>KPIs</strong><span>change, trend, goal, status</span></a>
+  <a href="gallery/tables/"><img class="lp-light" src={gTbL.src} alt="" loading="lazy" /><img class="lp-dark" src={gTbD.src} alt="" loading="lazy" /><strong>Tables</strong><span>formats, subtotals, flags, links</span></a>
+  <a href="gallery/maps/"><img class="lp-light" src={gMpL.src} alt="" loading="lazy" /><img class="lp-dark" src={gMpD.src} alt="" loading="lazy" /><strong>Maps</strong><span>regions, points, flows, drill</span></a>
+  <a href="gallery/features/"><img class="lp-light" src={gFtL.src} alt="" loading="lazy" /><img class="lp-dark" src={gFtD.src} alt="" loading="lazy" /><strong>Interactions</strong><span>drill, views, figures, steps</span></a>
+  <a href="gallery/statistics/"><img src={gSt} alt="" loading="lazy" /><strong>Extension plots</strong><span>statistics, forecast, tabular, optimize, decide</span></a>
 </div>
 
 ## 42 chart kinds, one grammar
