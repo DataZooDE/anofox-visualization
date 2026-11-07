@@ -41,6 +41,7 @@ export default defineConfig({
   site: "https://datazoode.github.io",
   base,
   trailingSlash: "always",
+  devToolbar: { enabled: false },
   image: { service: passthroughImageService() },
   integrations: [
     builderInDev,
@@ -49,7 +50,7 @@ export default defineConfig({
       description: "Charts and dashboards for DuckDB, straight from SQL.",
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/DataZooDE/anofox-visualization" }],
       editLink: { baseUrl: "https://github.com/DataZooDE/anofox-visualization/edit/master/website/" },
-      customCss: ["./src/styles/theme.css"],
+      customCss: ["./src/styles/theme.css", "./src/styles/landing.css"],
       lastUpdated: false,
       sidebar: [
         { label: "Start", items: [
