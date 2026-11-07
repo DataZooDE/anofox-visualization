@@ -1,0 +1,69 @@
+---
+title: Charts and dashboards for DuckDB, straight from SQL
+description: Write ordinary DuckDB SQL, tag the output columns with ::ROLE casts, get an interactive dashboard — in the browser, as a static site, or on a locked server with login and row policies.
+template: splash
+hero:
+  tagline: Write ordinary DuckDB SQL and tag the output columns with <code>::ROLE</code> casts. Every annotated <code>SELECT</code> becomes a chart, a KPI, a table or an input. No JavaScript charting library, no config files — the SQL is the dashboard.
+  image:
+    light: ../../assets/readme-hero-light.png
+    dark: ../../assets/readme-hero-dark.png
+    alt: A sales cockpit built from SQL — period filters, KPI tiles with deltas and sparklines, weekly revenue against the prior year, a channel-mix donut
+  actions:
+    - text: Try it in the browser
+      link: app/
+      icon: right-arrow
+      variant: primary
+    - text: Install
+      link: start/install/
+      variant: secondary
+    - text: Deploy
+      link: deploy/
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+## SQL in, dashboard out
+
+```sql
+SELECT 'Revenue by channel'::TITLE;
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED
+FROM sales GROUP BY ALL ORDER BY week;
+
+SELECT sum(revenue)::MONEY, 'Revenue'::LABEL,
+       sum(revenue) - sum(revenue_prev)::DELTA FROM sales;
+```
+
+Each `SELECT` is one panel. The casts say what a column is for: `::XAXIS`, `::CATEGORY` and a chart kind (`::BARCHART_STACKED`) make a chart, `::MONEY` + `::DELTA` a KPI tile with its change. Inputs (`::DROPDOWN`, `::PERIOD`), tabs, drill-downs and cross-filters are roles too — [241 of them](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md), checked by `dashboard --check`.
+
+## What you get
+
+<CardGrid>
+  <Card title="Charts and maps" icon="seti:svg">
+    Bars, lines, areas, scatter, boxplots, heatmaps, Sankey, treemaps, Gantt, waterfalls, gauges — and choropleth, point and flow maps with built-in boundaries. Rendered to SVG by the ggplot-rs grammar of graphics.
+  </Card>
+  <Card title="Interactive dashboards" icon="puzzle">
+    Inputs, tabs, cross-filtering, drill-down, drill-through, tables with totals and sparklines, guided steps — the same SQL in the browser, as a static site or on a server.
+  </Card>
+  <Card title="Runs where your data is" icon="laptop">
+    In the browser on DuckDB-Wasm, in any DuckDB as an extension, from the `dashboard` CLI, or on a locked server with login, row and column policies, refresh and write-back.
+  </Card>
+  <Card title="Checked like code" icon="approve-check">
+    `dashboard --check` lints structure, SQL and design; a GitHub Action runs it on every pull request. Dashboards are plain `.sql` files in your repository.
+  </Card>
+  <Card title="Works with the anofox extensions" icon="random">
+    Statistics, forecast, tabular, optimize and decide results plot with one `anofox_plot(...)` call through a shared contract.
+  </Card>
+  <Card title="Ready for agents" icon="rocket">
+    A dashboard's declared questions can be answered over REST and MCP — deterministically, through the same panels, for the signed-in caller.
+  </Card>
+</CardGrid>
+
+## Pick your way in
+
+<CardGrid>
+  <LinkCard title="Try it now" description="The full builder in your browser, with 38 example dashboards. Nothing to install." href="app/" />
+  <LinkCard title="Install the extension" description="INSTALL anofox_visualization FROM community — or the full toolkit from a release." href="start/install/" />
+  <LinkCard title="Choose a deployment" description="From a static site to a locked multi-replica server: which one fits." href="deploy/" />
+  <LinkCard title="Plot the anofox extensions" description="Statistics, forecast, tabular, optimize, decide." href="integrate/" />
+</CardGrid>

@@ -1,0 +1,23 @@
+---
+title: Which way to run it
+description: Every way to run anofox-visualization — what each needs and what it is for.
+---
+
+The same `.sql` dashboards run everywhere below; what changes is who reads them, whether the data is live, and who may see which rows.
+
+| Way to run it | Needs | Live data | Login & row policies | Readers interact | Best for |
+|---|---|---|---|---|---|
+| [In the browser](browser/) | nothing (DuckDB-Wasm) | files you open | — | ✔ | trying it, authoring, one-off analyses |
+| [CLI, HTML and CI](cli/) | the `dashboard` CLI | at render time | — | HTML: ✔ / SVG: — | reports, e-mail, CI checks |
+| [A static website](static-site/) | any static host (GitHub Pages, S3, nginx) | at build time, or Parquet fetched in the browser | — (the host's own) | ✔ | public or intranet sites without a server |
+| [Authoring on your data](authoring/) | the full toolkit, loopback | ✔ live, read-write | — (local only) | ✔ (+ SQL editor) | building dashboards against your database |
+| [The locked server](locked-server/) | the full toolkit, a reverse proxy | ✔ snapshot, refreshed | ✔ | ✔ | sharing dashboards with others |
+| [Embedding](embedding/) | a locked server | ✔ | ✔ (signed links, keys) | ✔ | dashboards inside your own app |
+| [Agents and MCP](agent/) | a locked server in agent mode | ✔ | ✔ | — (questions and answers) | AI assistants and tools asking a dashboard's questions |
+
+Two rules of thumb:
+
+- **No server** — a site built with `dashboard --site` runs entirely in the reader's browser; there is no data API to secure, but everything you ship is public to whoever can open the site.
+- **A server** — when readers must only see their own rows, or the data must stay on your machines, run the [locked server](locked-server/) with [login and policies](security/). Never expose the authoring server beyond loopback.
+
+The [operator checklist](checklist/) covers what to set before going live.
