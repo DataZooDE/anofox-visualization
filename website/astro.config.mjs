@@ -3,8 +3,39 @@
 // for the preview (P1), the root once it replaces the builder there.
 import { defineConfig, passthroughImageService } from "astro/config";
 import starlight from "@astrojs/starlight";
+import { existsSync, readFileSync, statSync } from "fs";
+import path from "path";
 
 const base = process.env.SITE_BASE ?? "/anofox-visualization/next";
+
+// `npm run dev` only: the builder (../web, with web/pkg built) at <base>/app/,
+// where Pages puts master's builder — so the site's "open in the builder"
+// links work locally too. The production build never includes it.
+const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
+  ".json": "application/json", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".png": "image/png",
+  ".sql": "text/plain", ".txt": "text/plain", ".woff2": "font/woff2", ".geojson": "application/json" };
+const builderInDev = {
+  name: "builder-in-dev",
+  hooks: {
+    "astro:server:setup": ({ server }) => {
+      const web = path.resolve(import.meta.dirname, "..", "web");
+      const prefix = base.replace(/\/$/, "") + "/app/";
+      server.middlewares.use((req, res, next) => {
+        // the dev server hands middlewares the path with or without the base
+        let url = decodeURIComponent((req.url || "").split(/[?#]/)[0]);
+        if (url.startsWith(prefix)) url = url.slice(prefix.length - "/app/".length);
+        if (!url.startsWith("/app/")) return next();
+        let file = path.join(web, url.slice("/app/".length));
+        if (!file.startsWith(web)) return next();
+        if (existsSync(file) && statSync(file).isDirectory()) file = path.join(file, "index.html");
+        if (!existsSync(file)) return next();
+        res.setHeader("Content-Type", types[path.extname(file)] || "application/octet-stream");
+        res.setHeader("Cache-Control", "no-store");
+        res.end(readFileSync(file));
+      });
+    },
+  },
+};
 
 export default defineConfig({
   site: "https://datazoode.github.io",
@@ -12,6 +43,7 @@ export default defineConfig({
   trailingSlash: "always",
   image: { service: passthroughImageService() },
   integrations: [
+    builderInDev,
     starlight({
       title: "anofox-visualization",
       description: "Charts and dashboards for DuckDB, straight from SQL.",

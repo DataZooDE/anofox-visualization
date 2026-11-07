@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import os from "os";
 import path from "path";
 import { shapes } from "./chart-shapes.mjs";
+import { examples } from "./examples.mjs";
 
 const root = path.resolve(import.meta.dirname, "..", "..");
 const site = path.resolve(import.meta.dirname, "..");
@@ -96,12 +97,9 @@ if (mode === "--check" || mode === "--thumbs") {
   process.exit(0);
 }
 
-// The examples: title, id, and their statements.
-const exDir = path.join(root, "web", "examples");
-const examples = readdirSync(exDir).filter((f) => f.endsWith(".sql")).sort().map((f) => {
-  const sql = readFileSync(path.join(exDir, f), "utf8");
-  return { id: f.replace(/\.sql$/, ""), title: (/^-- @title (.+)$/m.exec(sql) || [, f])[1].trim(), stmts: sql.split(/;\s*\n/) };
-});
+// The builder's examples (examples.mjs: its sidebar's list and ids) and
+// their statements.
+const exampleStmts = examples.map((e) => ({ ...e, stmts: e.sql.split(/;\s*\n/) }));
 const code = (stmt) => stmt.split("\n").filter((l) => !/^\s*--/.test(l)).join("\n").trim();
 const uses = (stmt, n) => new RegExp(`::${n}(?![A-Z0-9_])`).test(code(stmt));
 const app = "../../../app/";
@@ -116,7 +114,7 @@ mkdirSync(out, { recursive: true });
 for (const k of kinds) {
   const s = shapes[k.name] || {};
   const mate = s.with && all.find((o) => o.name === s.with);
-  const ex = examples.filter((e) => e.stmts.some((st) => uses(st, k.name)));
+  const ex = exampleStmts.filter((e) => e.stmts.some((st) => uses(st, k.name)));
   const first = ex[0];
   const lines = code(first?.stmts.find((st) => uses(st, k.name)) || "").split("\n");
   const related = kinds.filter((o) => o.name !== k.name && family(o.name) === family(k.name)).slice(0, 8);
