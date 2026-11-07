@@ -182,6 +182,10 @@ open = { version = "5", optional = true }
 # and randomness, and TLS for the JWKS/OIDC fetches (rustls through ureq).
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"], optional = true }
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"], optional = true }
+# The agent bundle's digest (#194 A4), in the default `dashboard --publish`
+# (aws-lc-rs above is `auth`-only). Pure Rust; the same crate the DuckDB
+# extension already uses.
+sha2 = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"], optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"], optional = true }
 # #768: the Mozilla roots for the reports' SMTP client (the same crate ureq uses).

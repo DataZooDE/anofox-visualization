@@ -42,13 +42,20 @@ SELECT anofox_serve_dashboards('dash', 8095, '{
            "audience": "https://agent-staging.example.com/mcp",
            "require": {"tid": "<tenant id>", "roles": "agent-user"},
            "claims": {"region": "region"}},
-  "policy": "policy.json",
+  "policy": "/etc/anofox/policy.json",
   "audit": "/var/log/anofox/audit.jsonl",
   "log": "/var/log/anofox/requests.jsonl",
   "agent": {"dashboard": "suppliers", "max_rows": 20,
-            "mcp": {"resource": "https://agent-staging.example.com/mcp"}}
+            "mcp": {"resource": "https://agent-staging.example.com/mcp"},
+            "bundle": "/srv/agent/suppliers",
+            "digest": "<the digest dashboard --publish printed>"}
 }');
 ```
+
+The bundle comes first (#194 A4): `dashboard --publish dash/suppliers.sql
+--out /srv/agent/suppliers` writes it and prints the digest to pin above. The
+policy lives outside the bundle (a `policy.json` in it, or next to the
+dashboards without `options.policy`, refuses the start).
 
 `dash/suppliers.sql`:
 

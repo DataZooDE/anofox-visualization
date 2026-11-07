@@ -91,6 +91,56 @@ pub fn publish(id: &str, script: &str) -> Result<Vec<File>, Vec<Diagnostic>> {
     ])
 }
 
+// #194 A4 (C4.1): the agent's bundle, here (not under `host`) so the
+// default `dashboard` CLI publishes it.
+
+/// The bundle's file of the dashboard itself.
+pub fn bundle_sql_name(id: &str) -> String {
+    format!("{id}.sql")
+}
+
+/// The bundle's copies of a customer mapping (#194 A3, plan §5: only the one
+/// mapping the agent is deployed with).
+pub const BUNDLE_VIEWS: &str = "mapping/views.sql";
+pub const BUNDLE_CONTRACT: &str = "mapping/contract.sql";
+
+/// The files of an agent's bundle (C4.1, plan §5), by their path in it: the
+/// dashboard's `.sql`, the generated files of `dashboard --publish`, and the
+/// mapping's views and contract when it is deployed with one. Generated from
+/// the texts alone, so the CLI and the server agree byte for byte.
+pub fn bundle_files(
+    id: &str,
+    script: &str,
+    mapping: Option<(&str, &str)>,
+) -> Result<Vec<(String, Vec<u8>)>, Vec<crate::lint::Diagnostic>> {
+    let mut files: Vec<(String, Vec<u8>)> = publish(id, script)?
+        .into_iter()
+        .map(|f| (f.name.to_string(), f.contents.into_bytes()))
+        .collect();
+    files.push((bundle_sql_name(id), script.as_bytes().to_vec()));
+    if let Some((views, contract)) = mapping {
+        files.push((BUNDLE_VIEWS.to_string(), views.as_bytes().to_vec()));
+        files.push((BUNDLE_CONTRACT.to_string(), contract.as_bytes().to_vec()));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+/// The bundle's digest (C4.1): SHA-256 over every file, in path order, each
+/// as `<path>\n<length>\n<bytes>` (unambiguous: no file can pass for two).
+pub fn bundle_digest(files: &[(String, Vec<u8>)]) -> String {
+    let mut sorted: Vec<&(String, Vec<u8>)> = files.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    use sha2::Digest;
+    let mut ctx = sha2::Sha256::new();
+    for (name, bytes) in sorted {
+        ctx.update(format!("{name}\n{}\n", bytes.len()).as_bytes());
+        ctx.update(bytes);
+    }
+    let hex: String = ctx.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256:{hex}")
+}
+
 /// The MCP tool list `--publish` writes as `mcp-tools.json`, as a value: what
 /// an agent-mode server's `tools/list` answers (#864), so the two never
 /// differ.

@@ -1097,7 +1097,9 @@ jobs:
       # answer or the log, unpublishable dashboards refused at start.
       - name: Agent mode on a locked server e2e (#863)
         timeout-minutes: 5
-        run: node scripts/agent-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+        # #194 A4: `dashboard --publish` (built for the site tiles step above)
+        # writes each agent start's bundle and digest.
+        run: node scripts/agent-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension" --dashboard target/debug/dashboard
 
       # scripts/diagram-check-served-e2e.mjs (#699): a ::DIAGRAM_CHECK is one
       # more declared statement — the locked server runs it on the edited

@@ -49,6 +49,12 @@ pub struct AgentOptions {
     /// customer's mapping at every snapshot build; `None`: the dashboard
     /// reads the server's own data.
     pub mapping: Option<MappingOptions>,
+    /// `bundle` (#194 A4, C4.1): the directory `dashboard --publish` wrote;
+    /// checked at the start against the served dashboard ([`check_bundle`]).
+    pub bundle: String,
+    /// `digest` (C4.1, plan R4): the bundle's `sha256:<hex>`, pinned in the
+    /// deployment config — never read back from the bundle itself.
+    pub digest: String,
 }
 
 /// `agent.mapping` (#194 A3b, plan §4): the customer's source database, the
@@ -68,6 +74,10 @@ pub struct MappingOptions {
     pub max_rows: u64,
     /// The size the built database and the build's spill may reach (#987).
     pub max_bytes: u64,
+    /// #194 A4 (C4.1): the views and contract texts the bundle was checked
+    /// against at the start; set by the server, never parsed. A build that
+    /// reads anything else is refused (the old snapshot stays).
+    pub pinned: Option<(String, String)>,
 }
 
 impl MappingOptions {
@@ -158,6 +168,7 @@ impl MappingOptions {
             scope,
             memory_limit,
             timeout_s,
+            pinned: None,
         })
     }
 }
@@ -165,10 +176,12 @@ impl MappingOptions {
 impl AgentOptions {
     pub fn parse(v: &Value) -> Result<AgentOptions, String> {
         let o = v.as_object().ok_or("agent: must be an object")?;
-        if let Some(k) = o
-            .keys()
-            .find(|k| !matches!(k.as_str(), "dashboard" | "max_rows" | "mcp" | "mapping"))
-        {
+        if let Some(k) = o.keys().find(|k| {
+            !matches!(
+                k.as_str(),
+                "dashboard" | "max_rows" | "mcp" | "mapping" | "bundle" | "digest"
+            )
+        }) {
             return Err(format!("agent: unknown key '{k}'"));
         }
         let dashboard = o
@@ -204,13 +217,154 @@ impl AgentOptions {
             }
         };
         let mapping = o.get("mapping").map(MappingOptions::parse).transpose()?;
+        let bundle = o
+            .get("bundle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .ok_or("agent.bundle: the directory `dashboard --publish` wrote (the agent's bundle)")?
+            .to_string();
+        let digest = o
+            .get("digest")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|d| valid_digest(d))
+            .ok_or("agent.digest: the bundle's \"sha256:<64 hex>\" that `dashboard --publish` printed, pinned here in the deployment config")?
+            .to_string();
         Ok(AgentOptions {
             dashboard,
             max_rows,
             mcp,
             mapping,
+            bundle,
+            digest,
         })
     }
+}
+
+/// `sha256:` and 64 lowercase hex digits.
+fn valid_digest(d: &str) -> bool {
+    d.strip_prefix("sha256:")
+        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+use crate::agent::{bundle_digest, bundle_files, bundle_sql_name};
+pub use crate::agent::{BUNDLE_CONTRACT, BUNDLE_VIEWS};
+
+/// The most a bundle file may weigh (a dashboard, a mapping or a generated
+/// file; read whole at the start).
+const MAX_BUNDLE_FILE: u64 = 8 * 1024 * 1024;
+
+/// Read a bundle directory: regular files only (no symlink, nothing else),
+/// one level of subdirectory at most, each at most [`MAX_BUNDLE_FILE`].
+fn read_bundle(dir: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut out = Vec::new();
+    let mut walk = vec![(dir.to_path_buf(), String::new(), 0usize)];
+    while let Some((d, prefix, depth)) = walk.pop() {
+        let entries =
+            std::fs::read_dir(&d).map_err(|e| format!("agent.bundle {}: {e}", d.display()))?;
+        for e in entries {
+            let e = e.map_err(|e| format!("agent.bundle {}: {e}", d.display()))?;
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = format!("{prefix}{name}");
+            let meta = std::fs::symlink_metadata(e.path())
+                .map_err(|err| format!("agent.bundle {rel}: {err}"))?;
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "agent.bundle: {rel} is a symlink; a bundle holds plain files only"
+                ));
+            } else if meta.is_dir() {
+                if depth > 0 {
+                    return Err(format!("agent.bundle: unexpected directory {rel}"));
+                }
+                walk.push((e.path(), format!("{rel}/"), depth + 1));
+            } else if meta.is_file() {
+                if meta.len() > MAX_BUNDLE_FILE {
+                    return Err(format!(
+                        "agent.bundle: {rel} is larger than {MAX_BUNDLE_FILE} bytes"
+                    ));
+                }
+                let bytes =
+                    std::fs::read(e.path()).map_err(|err| format!("agent.bundle {rel}: {err}"))?;
+                out.push((rel, bytes));
+            } else {
+                return Err(format!("agent.bundle: {rel} is not a plain file"));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// The start check of an agent's bundle (C4.1, plan §7 "what the server
+/// trusts at start", M4, R4). Refused when
+///
+/// - the bundle holds a `policy.json`, or any file `dashboard --publish`
+///   doesn't write (a permissive policy shipped in the bundle can never apply
+///   silently);
+/// - its dashboard isn't the served one, byte for byte;
+/// - a generated file (`agent.json`, …) differs from the one rebuilt from the
+///   served `.sql` (a hand-edited manifest);
+/// - its mapping isn't the one configured, or it has a mapping while none is
+///   configured (or none while one is);
+/// - its digest isn't the one `pinned` in the deployment config.
+///
+/// `mapping`: the configured views and contract texts.
+pub fn check_bundle(
+    dir: &std::path::Path,
+    id: &str,
+    served_sql: &str,
+    mapping: Option<(&str, &str)>,
+    pinned: &str,
+) -> Result<(), String> {
+    let found = read_bundle(dir)?;
+    if found
+        .iter()
+        .any(|(n, _)| n.rsplit('/').next() == Some("policy.json"))
+    {
+        return Err(
+            "agent.bundle: a bundle may not contain policy.json — the access policy is configured \
+                    outside it (options.policy), or \"policy\": \"none\""
+                .into(),
+        );
+    }
+    let want = bundle_files(id, served_sql, mapping).map_err(|errors| {
+        let list: Vec<String> = errors
+            .iter()
+            .map(|d| format!("[stmt {}] {} — {}", d.stmt, d.code, d.message))
+            .collect();
+        format!(
+            "agent: '{id}' can't be published as an agent:\n  {}",
+            list.join("\n  ")
+        )
+    })?;
+    for (name, _) in &found {
+        if !want.iter().any(|(w, _)| w == name) {
+            return Err(format!("agent.bundle: unexpected file {name} (a bundle holds only what `dashboard --publish` writes)"));
+        }
+    }
+    for (name, bytes) in &want {
+        match found.iter().find(|(n, _)| n == name) {
+            None => return Err(format!("agent.bundle: {name} is missing")),
+            Some((_, got)) if got != bytes => {
+                return Err(if *name == bundle_sql_name(id) {
+                    format!("agent.bundle: {name} is not the served dashboard")
+                } else if name.starts_with("mapping/") {
+                    format!("agent.bundle: {name} is not the configured agent.mapping")
+                } else {
+                    format!("agent.bundle: {name} differs from the one rebuilt from {id}.sql (edited by hand?)")
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    let digest = bundle_digest(&found);
+    if digest != pinned {
+        return Err(format!(
+            "agent.digest: the bundle's digest is {digest}, not the pinned one — publish again and pin the new digest"
+        ));
+    }
+    Ok(())
 }
 
 /// An MCP resource URL: `https://<host>[:port]/mcp`, or `http://` on a
@@ -844,26 +998,137 @@ mod tests {
         )
     }
 
+    /// A fresh bundle of `DASH` (+ `mapping`) in its own temp directory, and
+    /// its digest.
+    fn bundle_dir(tag: &str, mapping: Option<(&str, &str)>) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("ax-bundle-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let files = bundle_files("suppliers", DASH, mapping).unwrap();
+        for (name, bytes) in &files {
+            let dest = dir.join(name);
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(dest, bytes).unwrap();
+        }
+        (dir, bundle_digest(&files))
+    }
+
+    // #194 A4 (C4.1): what the server trusts at the start.
+    #[test]
+    fn a_published_bundle_with_its_pinned_digest_starts() {
+        let (dir, digest) = bundle_dir("ok", None);
+        assert_eq!(check_bundle(&dir, "suppliers", DASH, None, &digest), Ok(()));
+        // the digest covers the dashboard: another text, another digest
+        let other = bundle_digest(&bundle_files("suppliers", &format!("{DASH}\n"), None).unwrap());
+        assert_ne!(other, digest);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_hand_edited_manifest_refuses_the_start() {
+        let (dir, _) = bundle_dir("edited", None);
+        let m = dir.join("agent.json");
+        let edited =
+            std::fs::read_to_string(&m)
+                .unwrap()
+                .replacen("\"questions\"", "\"questions\" ", 1);
+        std::fs::write(&m, edited).unwrap();
+        // re-pinned to the edited bundle's own digest: still refused
+        let digest = bundle_digest(&read_bundle(&dir).unwrap());
+        let e = check_bundle(&dir, "suppliers", DASH, None, &digest).unwrap_err();
+        assert!(e.contains("agent.json differs from the one rebuilt"), "{e}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_bundle_with_a_policy_or_a_stray_file_refuses_the_start() {
+        let (dir, digest) = bundle_dir("policy", None);
+        std::fs::write(dir.join("policy.json"), "{}").unwrap();
+        let e = check_bundle(&dir, "suppliers", DASH, None, &digest).unwrap_err();
+        assert!(e.contains("may not contain policy.json"), "{e}");
+        std::fs::remove_file(dir.join("policy.json")).unwrap();
+        std::fs::create_dir_all(dir.join("mapping")).unwrap();
+        std::fs::write(dir.join("mapping/policy.json"), "{}").unwrap();
+        let e = check_bundle(&dir, "suppliers", DASH, None, &digest).unwrap_err();
+        assert!(e.contains("may not contain policy.json"), "{e}");
+        std::fs::remove_dir_all(dir.join("mapping")).unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        let e = check_bundle(&dir, "suppliers", DASH, None, &digest).unwrap_err();
+        assert!(e.contains("unexpected file notes.txt"), "{e}");
+        std::fs::remove_file(dir.join("notes.txt")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/hostname", dir.join("link")).unwrap();
+            let e = check_bundle(&dir, "suppliers", DASH, None, &digest).unwrap_err();
+            assert!(e.contains("is a symlink"), "{e}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn another_dashboard_or_digest_refuses_the_start() {
+        let (dir, digest) = bundle_dir("other", None);
+        // the served dashboard isn't the bundle's
+        let served = format!("{DASH}\n-- edited after publishing\n");
+        let e = check_bundle(&dir, "suppliers", &served, None, &digest).unwrap_err();
+        assert!(
+            e.contains("suppliers.sql is not the served dashboard") || e.contains("differs"),
+            "{e}"
+        );
+        // a digest that isn't the bundle's
+        let wrong = format!("sha256:{}", "1".repeat(64));
+        let e = check_bundle(&dir, "suppliers", DASH, None, &wrong).unwrap_err();
+        assert!(e.contains("not the pinned one"), "{e}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_bundle_holds_exactly_the_configured_mapping() {
+        let (views, contract) = ("CREATE VIEW v AS SELECT 1;", "CREATE TABLE t (a INT);");
+        let (dir, digest) = bundle_dir("mapping", Some((views, contract)));
+        assert_eq!(
+            check_bundle(&dir, "suppliers", DASH, Some((views, contract)), &digest),
+            Ok(())
+        );
+        let e = check_bundle(
+            &dir,
+            "suppliers",
+            DASH,
+            Some(("CREATE VIEW v AS SELECT 2;", contract)),
+            &digest,
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("mapping/views.sql is not the configured agent.mapping"),
+            "{e}"
+        );
+        // a bundle with a mapping, served without one
+        let e = check_bundle(&dir, "suppliers", DASH, None, &digest).unwrap_err();
+        assert!(e.contains("unexpected file mapping/"), "{e}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn options_parse() {
         assert_eq!(
-            AgentOptions::parse(&json!({"dashboard": "suppliers"})).unwrap(),
+            AgentOptions::parse(&json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "suppliers"})).unwrap(),
             AgentOptions {
                 dashboard: "suppliers".into(),
                 max_rows: DEFAULT_ROWS,
                 mcp: None,
                 mapping: None,
+                bundle: "b".into(),
+                digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
             }
         );
         // #194 A3b: a mapping's paths, scope lists and bounds
-        let m = AgentOptions::parse(&json!({"dashboard": "s", "mapping": {"contract": "c.sql", "views": "v.sql", "db": "acme.duckdb", "scope": {"Region": ["north", "south"]}, "memory_limit": "2GB", "timeout_s": 60}})).unwrap().mapping.unwrap();
+        let m = AgentOptions::parse(&json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "s", "mapping": {"contract": "c.sql", "views": "v.sql", "db": "acme.duckdb", "scope": {"Region": ["north", "south"]}, "memory_limit": "2GB", "timeout_s": 60}})).unwrap().mapping.unwrap();
         assert_eq!(
             (m.db.as_str(), m.memory_limit.as_str(), m.timeout_s),
             ("acme.duckdb", "2GB", 60)
         );
         assert_eq!(m.scope["region"], ["north", "south"]);
         // #988: trimmed, blanks dropped, case-duplicate keys merged
-        let m = AgentOptions::parse(&json!({"dashboard": "s", "mapping": {"contract": "c", "views": "v", "db": "d", "scope": {"Region": [" north ", ""], "region ": ["south"]}}})).unwrap().mapping.unwrap();
+        let m = AgentOptions::parse(&json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "s", "mapping": {"contract": "c", "views": "v", "db": "d", "scope": {"Region": [" north ", ""], "region ": ["south"]}}})).unwrap().mapping.unwrap();
         assert_eq!(m.scope["region"], ["north", "south"]);
         assert_eq!((m.max_rows, m.max_bytes), (50_000_000, 10 << 30));
         for bad in [
@@ -877,15 +1142,34 @@ mod tests {
             json!({"contract": "c.sql", "views": "v.sql", "db": "a", "max_rows": 0}),
         ] {
             assert!(
-                AgentOptions::parse(&json!({"dashboard": "s", "mapping": bad})).is_err(),
+                AgentOptions::parse(&json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "s", "mapping": bad})).is_err(),
                 "{bad}"
             );
         }
-        assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 0})).is_err());
-        assert!(AgentOptions::parse(&json!({"dashboard": "s", "max_rows": 201})).is_err());
-        assert!(AgentOptions::parse(&json!({"dashboard": "s", "ui": true})).is_err());
+        assert!(AgentOptions::parse(&json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "s", "max_rows": 0})).is_err());
+        assert!(AgentOptions::parse(&json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "s", "max_rows": 201})).is_err());
+        assert!(AgentOptions::parse(&json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "s", "ui": true})).is_err());
         assert!(AgentOptions::parse(&json!({})).is_err());
-        let m = |r: &str| AgentOptions::parse(&json!({"dashboard": "s", "mcp": {"resource": r}}));
+        // #194 A4: the bundle and its pinned digest are required
+        assert!(AgentOptions::parse(&json!({"dashboard": "s", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"})).is_err());
+        assert!(AgentOptions::parse(&json!({"dashboard": "s", "bundle": "b"})).is_err());
+        for bad in [
+            "sha256:abc",
+            "sha1:0000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            assert!(
+                AgentOptions::parse(&json!({"dashboard": "s", "bundle": "b", "digest": bad}))
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        let m = |r: &str| {
+            AgentOptions::parse(
+                &json!({"bundle": "b", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "dashboard": "s", "mcp": {"resource": r}}),
+            )
+        };
         assert_eq!(
             m("https://agent.example.com/mcp").unwrap().mcp.as_deref(),
             Some("https://agent.example.com/mcp")

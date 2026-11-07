@@ -57,9 +57,10 @@ const USAGE: &str = "usage:\n  \
                [--db f --policy policy.json]  …and what an access policy refuses / hides\n  \
                [--data <dir>]                 getvariable('anofox_data') = dir, as a locked server\n  \
                [--agent]                      …and what publishing as an agent needs (#862)\n  \
-     dashboard --publish <file.sql> --out d  the agent files of its -- @question lines: agent.json,\n  \
-                                             mcp-tools.json, capabilities.md, questions.jsonl\n  \
-                                             (from the SQL text alone; no query runs)\n  \
+     dashboard --publish <file.sql> --out d [--mapping v.sql --contract c.sql]  the agent bundle of its -- @question lines: agent.json,\n  \
+                                             mcp-tools.json, capabilities.md, questions.jsonl, a copy\n  \
+                                             of the .sql (and the mapping), and the digest to pin as\n  \
+                                             options.agent.digest (from the texts alone; no query runs)\n  \
      dashboard --conform <contract.sql> --views <views.sql> --db <source.duckdb>\n  \
                [--dashboard f.sql] [--scope name=a,b] [--json]\n  \
                                              check a customer's mapping against a canonical\n  \
@@ -521,29 +522,50 @@ fn on_interrupt_stop_checks() {
 fn cmd_publish(args: &[String]) {
     let mut path: Option<String> = None;
     let mut out: Option<String> = None;
+    let (mut views, mut contract): (Option<String>, Option<String>) = (None, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--out" => out = it.next().cloned(),
+            "--mapping" => views = it.next().cloned(),
+            "--contract" => contract = it.next().cloned(),
             _ if !a.starts_with("--") => path = Some(a.clone()),
             _ => {}
         }
     }
     let (Some(path), Some(out)) = (path, out) else {
-        eprintln!("usage: dashboard --publish <file.sql> --out <dir>");
+        eprintln!("usage: dashboard --publish <file.sql> --out <dir> [--mapping <views.sql> --contract <contract.sql>]");
         std::process::exit(2);
     };
-    let script = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        eprintln!("read {path}: {e}");
+    if views.is_some() != contract.is_some() {
+        eprintln!("--publish: --mapping and --contract go together (the mapping the agent is deployed with)");
         std::process::exit(2);
-    });
+    }
+    let read = |p: &str| {
+        std::fs::read_to_string(p).unwrap_or_else(|e| {
+            eprintln!("read {p}: {e}");
+            std::process::exit(2);
+        })
+    };
+    let script = read(&path);
+    let mapping = views
+        .as_deref()
+        .zip(contract.as_deref())
+        .map(|(v, c)| (read(v), read(c)));
     let p = Path::new(&path);
     let id = sv::dashboard_id(p, &sv::parse_dashboard_meta("", &script)).unwrap_or_else(|| {
         p.file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     });
-    match anofox_visualization::agent::publish(&id, &script) {
+    // #194 A4 (C4.1): the whole bundle — the generated files, the dashboard
+    // itself and the mapping it is deployed with — and its digest, which the
+    // deployment config pins (agent.digest); the bundle holds no copy of it.
+    let files = match anofox_visualization::agent::bundle_files(
+        &id,
+        &script,
+        mapping.as_ref().map(|(v, c)| (v.as_str(), c.as_str())),
+    ) {
         Err(errors) => {
             for d in &errors {
                 eprintln!("error: [stmt {}] {} — {}", d.stmt, d.code, d.message);
@@ -551,21 +573,26 @@ fn cmd_publish(args: &[String]) {
             eprintln!("\n{} error(s): not published", errors.len());
             std::process::exit(1);
         }
-        Ok(files) => {
-            std::fs::create_dir_all(&out).unwrap_or_else(|e| {
-                eprintln!("create {out}: {e}");
+        Ok(files) => files,
+    };
+    for (name, bytes) in &files {
+        let dest = Path::new(&out).join(name);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                eprintln!("create {}: {e}", parent.display());
                 std::process::exit(2);
             });
-            for f in files {
-                let dest = Path::new(&out).join(f.name);
-                std::fs::write(&dest, &f.contents).unwrap_or_else(|e| {
-                    eprintln!("write {}: {e}", dest.display());
-                    std::process::exit(2);
-                });
-                println!("wrote {}", dest.display());
-            }
         }
+        std::fs::write(&dest, bytes).unwrap_or_else(|e| {
+            eprintln!("write {}: {e}", dest.display());
+            std::process::exit(2);
+        });
+        println!("wrote {}", dest.display());
     }
+    println!(
+        "digest: {}\n(pin it in the deployment config as options.agent.digest, with options.agent.bundle = \"{out}\")",
+        anofox_visualization::agent::bundle_digest(&files)
+    );
 }
 
 /// Render an annotated `.sql` file to an interactive HTML dashboard.

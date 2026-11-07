@@ -100,7 +100,16 @@ pub fn build(
     script: Option<&str>,
 ) -> Result<Built, String> {
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("agent.mapping: {p}: {e}"));
-    let contract = canonical::parse_contract(&read(&m.contract)?)
+    let (contract_text, views_text) = (read(&m.contract)?, read(&m.views)?);
+    // #194 A4 (C4.1): the files the bundle was checked against at the start
+    if let Some((views, contract)) = &m.pinned {
+        if *views != views_text || *contract != contract_text {
+            return Err("agent.mapping: the views or contract file changed since the start \
+                        (they are pinned by agent.digest) — publish, pin the new digest and restart"
+                .into());
+        }
+    }
+    let contract = canonical::parse_contract(&contract_text)
         .map_err(|e| format!("agent.mapping.contract: {e}"))?;
     // #988: a scope the contract doesn't declare is a typo, not "unchecked"
     if let Some(k) = canonical::unknown_scopes(&contract, &m.scope).first() {
@@ -108,7 +117,7 @@ pub fn build(
             "agent.mapping.scope.{k}: the contract declares no such scope"
         ));
     }
-    let mapping = canonical::parse_mapping(&read(&m.views)?, &contract)
+    let mapping = canonical::parse_mapping(&views_text, &contract)
         .map_err(|e| format!("agent.mapping.views: {}", e.join("; ")))?;
     let source =
         std::fs::canonicalize(&m.db).map_err(|e| format!("agent.mapping.db {}: {e}", m.db))?;
