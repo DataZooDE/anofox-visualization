@@ -96,11 +96,18 @@ if (mode === "--check" || mode === "--thumbs") {
   process.exit(0);
 }
 
+// An example's id in the builder's `?dashboard=`: its title's slug
+// (web/app.js slugify), not its file name.
+const slugify = (name) =>
+  String(name).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/ß/g, "ss")
+    .replace(/&/g, " and ").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "dashboard";
+
 // The examples: title, id, and their statements.
 const exDir = path.join(root, "web", "examples");
 const examples = readdirSync(exDir).filter((f) => f.endsWith(".sql")).sort().map((f) => {
   const sql = readFileSync(path.join(exDir, f), "utf8");
-  return { id: f.replace(/\.sql$/, ""), title: (/^-- @title (.+)$/m.exec(sql) || [, f])[1].trim(), stmts: sql.split(/;\s*\n/) };
+  const title = (/^-- @title (.+)$/m.exec(sql) || [, f])[1].trim();
+  return { id: slugify(title), title, stmts: sql.split(/;\s*\n/) };
 });
 const code = (stmt) => stmt.split("\n").filter((l) => !/^\s*--/.test(l)).join("\n").trim();
 const uses = (stmt, n) => new RegExp(`::${n}(?![A-Z0-9_])`).test(code(stmt));
