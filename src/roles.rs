@@ -984,6 +984,38 @@ mod tests {
         assert_eq!(callout_kind(""), "note");
     }
 
+    /// The Claude Code skills name every role (2026-11-07: 20 shipped roles
+    /// — ::TREEMAP, ::SANKEY, ::Y2, … — were in no skill). A new role fails
+    /// here until a skill mentions it (as `::NAME`).
+    #[test]
+    fn every_role_is_in_a_claude_code_skill() {
+        let skills = [
+            include_str!("../plugins/anofox-visualization/skills/anofox-visualization-dashboards/SKILL.md"),
+            include_str!("../plugins/anofox-visualization/skills/anofox-visualization-charts/SKILL.md"),
+            include_str!("../plugins/anofox-visualization/skills/anofox-visualization-serving/SKILL.md"),
+            include_str!("../plugins/anofox-visualization/skills/anofox-visualization-access-control/SKILL.md"),
+            include_str!("../plugins/anofox-visualization/skills/anofox-visualization-statistics-plots/SKILL.md"),
+        ]
+        .concat();
+        let named = |n: &str| {
+            skills.match_indices(&format!("::{n}")).any(|(i, m)| {
+                !skills[i + m.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        };
+        let missing: Vec<&str> = REGISTRY
+            .iter()
+            .map(|d| d.token)
+            .filter(|n| !named(n))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "roles no Claude Code skill names (plugins/anofox-visualization/skills): {missing:?}"
+        );
+    }
+
     #[test]
     fn docs_role_table_is_in_sync() {
         let doc = include_str!("../docs/DOCS.md");
