@@ -14,12 +14,12 @@ SELECT anofox_plot(t) FROM ols_tidy_by('sales', region, revenue, [price, promo])
 
 | Extension | What it produces | In the browser | CI conformance |
 |---|---|---|---|
-| **anofox-statistics** | regression (OLS … GLMM), survival, tests, ANOVA, calibration, bootstrap | live (Wasm build) | all 211 producers |
-| **anofox-forecast** | forecasts with intervals, backtests, decomposition | live (Wasm build) | ✔ |
-| **anofox-tabular** | profiling, data quality, deduplication | precomputed | ✔ |
-| **anofox-optimize** | packing, assignment, sequencing, replenishment | precomputed | ✔ |
-| **anofox-decide** | decision models, triage | precomputed | ✔ |
+| [**anofox-statistics**](statistics/) | regression (OLS … GLMM), survival, tests, ANOVA, calibration, bootstrap | live (Wasm build) | every contract producer |
+| [**anofox-forecast**](forecast/) | forecasts with intervals, backtests, decomposition | live (Wasm build) | ✔ |
+| [**anofox-tabular**](tabular/) | profiling, data quality, deduplication | precomputed | ✔ |
+| [**anofox-optimize**](optimize/) | packing, assignment, sequencing, replenishment | precomputed | ✔ |
+| [**anofox-decide**](decide/) | decision models, triage | precomputed | ✔ |
 
 Every producer of every extension is rendered in CI against the extension's latest build (`*-conformance` jobs), so a contract change is caught the day it lands.
 
-Coming in this section (#1017 P2): one page per extension with a runnable example, the contract schemas, Python and R ([today: python-r.md](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/python-r.md)), and the Claude Code plugin. Until then: the [integration contract](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/plans/integration-contract.md) and the [conformance sections of the README](https://github.com/DataZooDE/anofox-visualization/blob/master/README.md#conformance-with-anofox-statistics).
+One page per extension: [anofox-statistics](statistics/) · [anofox-forecast](forecast/) · [anofox-tabular](tabular/) · [anofox-optimize](optimize/) · [anofox-decide](decide/). From Python and R: [python-r.md](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/python-r.md). The schemas: the [integration contract](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/plans/integration-contract.md).

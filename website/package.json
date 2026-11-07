@@ -4,8 +4,9 @@
   "type": "module",
   "description": "The anofox-visualization website (#1017): landing page and docs, Astro Starlight.",
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
+    "gen": "node scripts/gen-charts.mjs",
+    "dev": "node scripts/gen-charts.mjs && astro dev",
+    "build": "node scripts/gen-charts.mjs && astro build",
     "preview": "astro preview"
   },
   "dependencies": {

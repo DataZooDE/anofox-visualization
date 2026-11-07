@@ -1,0 +1,50 @@
+---
+title: The annotation model
+description: A dashboard is a .sql script — setup statements, and SELECTs whose columns carry ::ROLE casts that say how each column is drawn.
+---
+
+A dashboard is a `.sql` file. It has two kinds of statement:
+
+- **Setup**: any statement *without* a role cast (`CREATE TABLE`, `INSTALL`, `LOAD`, `SET VARIABLE`, …). It runs for its effect, once, on a shared connection.
+- **Panels**: a `SELECT` whose output columns carry `::ROLE` casts. Each one becomes a chart, a KPI tile, a table, an input or a block of text.
+
+```sql
+CREATE TABLE sales AS FROM read_parquet('sales.parquet');          -- setup
+
+SELECT region ::XAXIS, sum(revenue) ::BARCHART,                    -- a panel
+       'The North sells most'::TITLE
+FROM sales GROUP BY ALL ORDER BY 2 DESC;
+```
+
+## How a panel reads
+
+- **The measure's cast picks the chart.** `::BARCHART`, `::LINECHART`, `::HEATMAP`, `::MAP`, … — the [chart catalogue](charts/) has one page for each kind, with the data it needs.
+- **The other columns say where and how each row is drawn.** These are *encodings*: `::XAXIS`, `::YAXIS`, `::CATEGORY` (colour / series), `::SIZE`, `::LABEL`, `::FACET` (small multiples), `::YMIN`/`::YMAX` (intervals).
+- **Constant columns set options.** `'Revenue by week'::TITLE`, `'€'::YFORMAT`, `'quantile 5'::CLASSES`: one value for the whole panel, written in the same `SELECT`.
+- **SQL does the work.** One row per mark: aggregate with `GROUP BY` and sort with `ORDER BY` in SQL, not in the chart. Measures are cast to `DOUBLE` for you, so `sum()` of a `HUGEINT` draws as a number.
+
+## Statements that shape the page
+
+Some roles are a statement of their own and act on what follows. They are *directives*:
+
+```sql
+SELECT 'Overview'::TAB;               -- a tab: the panels after it live under it
+SELECT 8::COL;                        -- the next panel is 8 of 12 columns wide
+SELECT DISTINCT region ::DROPDOWN FROM sales;   -- an input → getvariable('region')
+```
+
+Write a directive as its own statement, never as an extra column on a chart's `SELECT`. `dashboard --check --strict` flags one written inline (`layout/next-panel`). See [Layout and tabs](layout/) and [Inputs and interactivity](inputs/).
+
+## The file's header
+
+`-- @…` comment lines at the top name and file the dashboard: `-- @title` (a plain business question), `-- @description`, `-- @group`, `-- @tags`, `-- @owner`, `-- @certified`. The builder's sidebar and the servers' start pages read them. [All header lines →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#dashboard-header-comments)
+
+## Check it
+
+```sh
+dashboard --check my.sql            # which panels break, are empty, or break a design rule
+dashboard --check --strict my.sql   # …and fail on warnings (for CI)
+dashboard --roles                   # every role, grouped
+```
+
+The [role reference](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#roles) lists all of them (generated from the role registry, `src/roles.rs`).

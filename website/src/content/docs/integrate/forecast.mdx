@@ -1,0 +1,50 @@
+---
+title: anofox-forecast
+description: "Forecasts with prediction intervals (ETS, ARIMA, Theta, global models, ensembles), backtests, conformal intervals, decompositions, changepoints, periods and residual tests."
+---
+
+import { Badge } from "@astrojs/starlight/components";
+
+<Badge text="Runs live in the browser" variant="success" /> <Badge text="Native: community extension and full toolkit" variant="note" />
+
+[anofox-forecast](https://github.com/DataZooDE/anofox-forecast) — forecasts with prediction intervals (ETS, ARIMA, Theta, global models, ensembles), backtests, conformal intervals, decompositions, changepoints, periods and residual tests.
+
+```sql
+INSTALL anofox_forecast FROM community;
+LOAD anofox_forecast; LOAD anofox_visualization;
+```
+
+## Plot its results
+
+A forecast table plots as returned; decompositions and backtests too:
+
+```sql
+CREATE TABLE fc AS
+SELECT * FROM ts_forecast_by('s', id, ds, y, 'AutoETS', 14, '1d', MAP{'seasonal_period': '7'});
+SELECT id, anofox_plot_prediction(f) FROM fc f GROUP BY id;                     -- forecast with bands, per series
+
+SELECT anofox_plot_decomposition(t)
+FROM ts_mstl_decomposition_by('s', id, ds, y, MAP{'seasonal_periods': '[7]'}) t WHERE id = 'B';
+```
+
+| Output | Plotted by |
+|---|---|
+| `ts_forecast_by`, `ts_forecast_panel_by`, `ts_cv_forecast_by`, conformal | `anofox_plot_prediction` |
+| decompositions (MSTL, …) | `anofox_plot_decomposition` |
+| CV splits | `anofox_plot_cv` |
+| changepoints, anomalies | `anofox_plot_events`, `events :=` on a prediction |
+| metrics | `anofox_plot_summary` |
+
+`anofox_plot(t)` picks the macro from the table's columns. The macros are aggregates: `GROUP BY` gives one SVG per group.
+
+In a dashboard, draw the same forecast with roles: `ds ::XAXIS, y ::SCATTER, yhat ::LINECHART, yhat_lower ::BAND_LOWER, yhat_upper ::BAND_UPPER` — see [Models and forecasts](../../build/model-output/).
+
+## In the builder
+
+- [Will any substation exceed its capacity next week?](../../app/?dashboard=forecast-energy-load)
+- [How many agents do we need per half-hour?](../../app/?dashboard=forecast-callcentre-staffing)
+- [Which materials will run short next quarter?](../../app/?dashboard=materials-quarter-shortage)
+
+## Checked in CI
+
+Every producer of the extension's latest build is plotted on every push ([`scripts/forecast_conformance.py`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/forecast_conformance.py)): a SQL error, a missing SVG or a producer without a recipe fails the run. [Reference →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#plotting-model-output-contract-macros)

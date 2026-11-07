@@ -1,0 +1,44 @@
+---
+title: anofox-decide
+description: "Decisions from text with a language model: probabilities, choices and scores per row, with calibration and quality metrics."
+---
+
+import { Badge } from "@astrojs/starlight/components";
+
+<Badge text="Browser: precomputed results" variant="note" /> <Badge text="Native: community extension and full toolkit" variant="note" />
+
+[anofox-decide](https://github.com/DataZooDE/anofox-decide) — decisions from text with a language model: probabilities, choices and scores per row, with calibration and quality metrics.
+
+```sql
+INSTALL anofox_decide FROM community;
+LOAD anofox_decide; LOAD anofox_visualization;
+```
+
+## Plot its results
+
+Its answers are per-row probabilities and choices; the metrics and curves made from them are contract tables:
+
+```sql
+-- runs: one row per text and model, with the model's probability and the true label
+SELECT anofox_plot_summary(t) FROM decide_metrics_by('runs', model_id, p_refund, refund) t;
+SELECT anofox_plot_curve(t)   FROM decide_roc_curve_by('runs', model_id, p_refund, refund) t;
+```
+
+| Output | Plotted by |
+|---|---|
+| `decide_metrics_by` (Brier, ECE, accuracy, …) | `anofox_plot_summary` |
+| `decide_roc_curve_by`, `decide_calibration_curve_by` | `anofox_plot_curve` |
+| probabilities through `roc_curve_by` / `calibration_curve_by` (anofox-statistics) | `anofox_plot_curve` |
+| `decide_choice_distribution` | `anofox_plot_distribution` |
+
+`anofox_plot(t)` picks the macro from the table's columns. The macros are aggregates: `GROUP BY` gives one SVG per group.
+
+## In the builder
+
+- [Can a model triage the support inbox?](../../app/?dashboard=decide-showcase)
+- [Who should sales call first?](../../app/?dashboard=decide-leads)
+- [Which claims can we fast-track?](../../app/?dashboard=decide-claims)
+
+## Checked in CI
+
+Every producer of the extension's latest build is plotted on every push ([`scripts/decide_conformance.py`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/decide_conformance.py)): a SQL error, a missing SVG or a producer without a recipe fails the run. [Reference →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#plotting-model-output-contract-macros)

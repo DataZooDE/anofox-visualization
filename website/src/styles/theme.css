@@ -27,3 +27,12 @@
   --sl-color-black: #16181c;
 }
 .hero-shot img, .shot img { border: 1px solid var(--sl-color-gray-5); border-radius: 8px; }
+
+/* #1022: the chart catalogue's overview grid */
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: 0.75rem; }
+.chart-grid > * { margin: 0 !important; }
+.chart-grid a { display: flex; flex-direction: column; gap: 0.35rem; padding: 0.6rem; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; text-decoration: none; color: var(--sl-color-gray-2); font-size: var(--sl-text-sm); line-height: 1.35; }
+.chart-grid a:hover { border-color: var(--sl-color-accent); }
+.chart-grid img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #fff; border-radius: 4px; }
+.chart-grid code { color: var(--sl-color-white); font-weight: 600; }
+.sl-markdown-content img[src*="charts/"] { background: #fff; border-radius: 8px; max-width: 36rem; width: 100%; }

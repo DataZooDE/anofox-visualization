@@ -96,7 +96,7 @@ jobs:
           SITE_BASE: /anofox-visualization/next
         run: |
           npm ci --no-audit --no-fund
-          npx astro build
+          npm run build
       - name: Site (latest release at /, master at /next/)
         env:
           GH_TOKEN: ${{ github.token }}
