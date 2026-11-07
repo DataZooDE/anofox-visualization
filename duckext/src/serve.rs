@@ -49,6 +49,7 @@ use anofox_visualization::host::app_brand::{self, AppBrand};
 use anofox_visualization::host::ask::{self as askm, AskConfig};
 use anofox_visualization::host::assist;
 use anofox_visualization::host::auth::{self, audit::AuditLog, Auth, Scope};
+use anofox_visualization::host::drift as driftm;
 use anofox_visualization::host::ingest::{self, IngestOptions};
 use anofox_visualization::host::mcp as mcpm;
 use anofox_visualization::host::metrics;
@@ -3139,6 +3140,12 @@ struct Locked {
     /// against at the start; a reload that serves any other text is refused
     /// (503) until a new bundle is published, pinned and started.
     agent_sql: Option<Arc<str>>,
+    /// #194 A4b (C4.2): the questions the last drift run switched off, by id
+    /// (with the mapping's own, `snap.agent_off`, the ones not answered).
+    drift_off: RwLock<Vec<String>>,
+    /// A drift run is due on the snapshot in service: agent answers wait
+    /// (503) until it has run, so no unchecked question is answered.
+    drift_pending: AtomicBool,
     /// The `Arc` this state lives in: Ask's threads hold it.
     me: std::sync::OnceLock<std::sync::Weak<Locked>>,
 }
@@ -3786,6 +3793,8 @@ impl Locked {
                 // place before any later refresh builds.
                 let (snap, w) = self.build(&self.latest())?;
                 warnings = w;
+                // #194 A4b: a drift run is due on it before agent answers
+                self.drift_due();
                 Ok(snap)
             })
             .map_err(|e| {
@@ -3795,6 +3804,7 @@ impl Locked {
         let Some(gen) = gen else {
             return Ok(None);
         };
+        self.run_drift();
         let warn = if warnings.is_empty() {
             String::new()
         } else {
@@ -3833,10 +3843,12 @@ impl Locked {
                 warnings = w;
                 count = set.list.len();
                 *self.dashes.write().unwrap_or_else(|p| p.into_inner()) = set;
+                self.drift_due();
                 Ok(snap)
             })
             .map_err(fail)?
             .ok_or_else(|| fail("a rebuild was skipped".into()))?;
+        self.run_drift();
         let warn = if warnings.is_empty() {
             String::new()
         } else {
@@ -4112,8 +4124,35 @@ pub fn start_locked(
                     .into(),
             );
         }
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        // #194 A4b (C4.2, H6): the release ranges belong to the deployment
+        if let Some(d) = &a.drift {
+            let r = Path::new(&d.ranges);
+            let in_bundle = canon(r.parent().unwrap_or(r)).starts_with(canon(Path::new(&a.bundle)));
+            if in_bundle {
+                return Err(
+                    "options.agent.drift.ranges: the release ranges live in the deployment, \
+                            not inside the agent's bundle"
+                        .into(),
+                );
+            }
+            match (d.record, r.exists()) {
+                (true, true) => {
+                    return Err(format!(
+                        "options.agent.drift.record: {} exists already — remove it to record new ranges",
+                        d.ranges
+                    ))
+                }
+                (false, false) => {
+                    return Err(format!(
+                        "options.agent.drift.ranges: no file {} — record the release ranges first (\"record\": true)",
+                        d.ranges
+                    ))
+                }
+                _ => {}
+            }
+        }
         if let Some(p) = &opts.policy_path {
-            let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
             if canon(p).starts_with(canon(Path::new(&a.bundle))) {
                 return Err(
                     "options.policy: the access policy may not live inside the agent's bundle \
@@ -4507,6 +4546,8 @@ pub fn start_locked(
         ask: ask_rt,
         agent: agent_slots,
         agent_sql,
+        drift_off: RwLock::new(Vec::new()),
+        drift_pending: AtomicBool::new(false),
         me: std::sync::OnceLock::new(),
     });
     let _ = state.me.set(Arc::downgrade(&state));
@@ -4547,6 +4588,10 @@ pub fn start_locked(
                 out.join("; ")
             }
         );
+        // #194 A4b: the drift test on the start's snapshot, before any
+        // request is served
+        state.drift_due();
+        state.run_drift();
     }
     let auth_note = match &state.opts.auth {
         Some(a) => {
@@ -7514,6 +7559,125 @@ fn agent_outbound(opts: &LockedOptions) -> Vec<String> {
 }
 
 impl Locked {
+    /// #194 A4b: the questions not answered on `snap` — the mapping's (#982)
+    /// and the last drift run's.
+    fn agent_off(&self, snap: &Snapshot) -> Vec<String> {
+        let mut off = snap.agent_off.clone();
+        for q in self
+            .drift_off
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+        {
+            if !off.contains(q) {
+                off.push(q.clone());
+            }
+        }
+        off
+    }
+
+    /// #194 A4b (C4.2): mark a drift run due on the snapshot about to go
+    /// into service (agent answers wait for it).
+    fn drift_due(&self) {
+        if self.opts.agent.as_ref().is_some_and(|a| a.drift.is_some()) {
+            self.drift_pending.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// #194 A4b (C4.2, M5): the drift test on the snapshot in service — every
+    /// declared question through the panel path under the configured
+    /// principal, aggregates only — then the switch-off list, logged by id
+    /// and check code. With `record`, the aggregates are written to the
+    /// ranges file instead. Answers wait while it runs.
+    fn run_drift(&self) {
+        let Some((a, drift)) = self
+            .opts
+            .agent
+            .as_ref()
+            .and_then(|a| a.drift.as_ref().map(|d| (a, d)))
+        else {
+            return;
+        };
+        let Some(slots) = &self.agent else {
+            return;
+        };
+        let gen = self.current.get();
+        let Some(dash) = gen.snap.dashes.find(&a.dashboard) else {
+            self.drift_pending.store(false, Ordering::SeqCst);
+            return;
+        };
+        let d = agentm::Dash {
+            id: &dash.id,
+            title: &dash.meta.title,
+            script: &dash.sql,
+            off: &gen.snap.agent_off,
+        };
+        let runner = AskRunner {
+            st: self,
+            claims: Some(drift.claims()),
+            scope: Some(auth::Scope {
+                dashboards: Some(vec![a.dashboard.clone()]),
+                vars: Vec::new(),
+            }),
+            method: Some("drift"),
+            slots,
+            quiet: true,
+        };
+        let deadline = Instant::now() + self.opts.timeout * 4;
+        // The release ranges, re-read every run (a release updates them); an
+        // unreadable file switches every question off (fail closed).
+        let release: Result<Option<serde_json::Value>, String> = if drift.record {
+            Ok(None)
+        } else {
+            std::fs::read_to_string(&drift.ranges)
+                .map_err(|e| e.to_string())
+                .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+                .map(Some)
+        };
+        let off: Vec<(String, String)> = match &release {
+            Err(e) => {
+                eprintln!("[anofox-serve] drift: the ranges file can't be read ({e}); every question is off");
+                anofox_visualization::sql::question::declared(&dash.sql)
+                    .into_iter()
+                    .map(|q| (q.id, "drift/no-ranges".to_string()))
+                    .collect()
+            }
+            Ok(rel) => {
+                let (record, off) =
+                    driftm::run_all(&d, drift.max_rows, &runner, deadline, rel.as_ref());
+                if drift.record {
+                    let doc = serde_json::json!({
+                        "agent": dash.id,
+                        "digest": a.digest,
+                        "questions": record,
+                    });
+                    match write_private(
+                        Path::new(&drift.ranges),
+                        serde_json::to_string_pretty(&doc).unwrap_or_default().as_bytes(),
+                    ) {
+                        Ok(()) => eprintln!(
+                            "[anofox-serve] drift: recorded the ranges of {} question(s) to {} (aggregates only)",
+                            record.len(),
+                            drift.ranges
+                        ),
+                        Err(e) => eprintln!("[anofox-serve] drift: could not write {}: {e}", drift.ranges),
+                    }
+                }
+                off
+            }
+        };
+        for (id, code) in &off {
+            // the question's id (from the SQL text) and the check, never a value
+            eprintln!("[anofox-serve] drift: question '{id}' is off ({code})");
+        }
+        if off.is_empty() {
+            eprintln!("[anofox-serve] drift: every question is in its release range");
+        }
+        *self.drift_off.write().unwrap_or_else(|p| p.into_inner()) =
+            off.into_iter().map(|(id, _)| id).collect();
+        self.drift_pending.store(false, Ordering::SeqCst);
+    }
+
     /// #194 A4 (C4.1): whether `sql` is the dashboard text the agent's bundle
     /// was checked against at the start (always, outside agent mode).
     fn agent_serves(&self, sql: &str) -> bool {
@@ -9310,6 +9474,13 @@ fn handle_agent(
             "the agent's dashboard isn't the one its pinned bundle was published from",
         );
     }
+    if st.drift_pending.load(Ordering::SeqCst) {
+        return reply(
+            req,
+            503,
+            "the agent is checking its data; try again in a minute",
+        );
+    }
     if anofox_visualization::agent::publish(&dash.id, &dash.sql).is_err() {
         return reply(
             req,
@@ -9317,11 +9488,12 @@ fn handle_agent(
             "the agent's dashboard no longer passes its publish checks",
         );
     }
+    let off = st.agent_off(&gen.snap);
     let d = agentm::Dash {
         id: &dash.id,
         title: &dash.meta.title,
         script: &dash.sql,
-        off: &gen.snap.agent_off,
+        off: &off,
     };
     let Some(body) = body else {
         respond(
@@ -9399,6 +9571,13 @@ fn handle_mcp(
             "the agent's dashboard isn't the one its pinned bundle was published from",
         );
     }
+    if st.drift_pending.load(Ordering::SeqCst) {
+        return reply(
+            req,
+            503,
+            "the agent is checking its data; try again in a minute",
+        );
+    }
     let Ok(mut tools) = anofox_visualization::agent::tool_list(&dash.id, &dash.sql) else {
         return reply(
             req,
@@ -9406,9 +9585,11 @@ fn handle_mcp(
             "the agent's dashboard no longer passes its publish checks",
         );
     };
-    // #982: a question this customer's mapping can't answer is no tool
+    // #982: a question this customer's mapping can't answer is no tool;
+    // #194 A4b: nor one the drift test switched off
+    let off = st.agent_off(&gen.snap);
     if let Some(t) = tools["tools"].as_array_mut() {
-        t.retain(|t| !gen.snap.agent_off.iter().any(|o| t["name"] == o.as_str()));
+        t.retain(|t| !off.iter().any(|o| t["name"] == o.as_str()));
     }
     let version = req_header(&req, "MCP-Protocol-Version").map(str::to_string);
     let runner = AskRunner {
@@ -9424,7 +9605,7 @@ fn handle_mcp(
             id: &dash.id,
             title: &dash.meta.title,
             script: &dash.sql,
-            off: &gen.snap.agent_off,
+            off: &off,
         },
         tools: &tools,
         max_rows: opts.max_rows,

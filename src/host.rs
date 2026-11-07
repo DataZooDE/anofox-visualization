@@ -35,6 +35,8 @@ pub mod ask;
 pub mod assist;
 #[cfg(feature = "auth")]
 pub mod auth;
+#[cfg(feature = "auth")]
+pub mod drift;
 pub mod duckdb_cli;
 pub mod ingest;
 #[cfg(feature = "auth")]

@@ -1230,6 +1230,36 @@ A dashboard published as an agent answers the questions it declares with
   A reload that serves another dashboard text, and a snapshot build that
   reads changed mapping files, are refused too (`503`, the old snapshot
   stays) until a new bundle is published, pinned and started.
+- **The drift test** (`agent.drift`, #194 A4b, plan §7):
+
+  ```json
+  "drift": {
+    "principal": {"user": "drift-job", "claims": {"region": "north"}},
+    "ranges": "/var/lib/anofox/suppliers-ranges.json"
+  }
+  ```
+
+  After every snapshot build (the start, each refresh, so nightly with
+  `refresh`, and each reload) every declared question's panel runs once
+  through the panel path, as `principal` (claims from the server config,
+  under the policy and every limit, never without claims or a bypass), with
+  every input at its default. Only aggregates are kept: the row count, the
+  column names, NULL counts and the numeric columns' min / max. They are
+  compared with the release ranges in `ranges`, a file of the deployment
+  (outside the bundle). A question is switched off on a panel error (a
+  missing column), a changed column set, an empty result that wasn't empty at
+  release, a row count off by more than 10× either way, a numeric column
+  beyond its recorded width or 10× its magnitude, or no record. A switched-off
+  question is refused like an undeclared one (`404`, not listed, no MCP
+  tool), the same for every caller, and the log names its id and the check
+  (`drift/range`, `drift/empty`, …), never a value. The other questions keep
+  answering. While a run is due, agent answers wait (`503`). Anyone who can
+  shape the source data can switch a question off; that is intended (fail
+  safe). `"record": true` writes `ranges` from the start's probes instead (the
+  release step; refused when the file exists, written `0600`); without it a
+  missing `ranges` file refuses the start, and an unreadable one switches
+  every question off. `max_rows` (default 5000, at most 9999) bounds each
+  probe.
 - **The policy** is configured explicitly: `options.policy`, a file outside
   the bundle, or `"policy": "none"`. A `policy.json` next to the dashboards
   isn't picked up in agent mode.

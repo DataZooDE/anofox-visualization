@@ -411,6 +411,75 @@ SELECT name AS "Supplier" ::TABLE, rating FROM suppliers ORDER BY rating DESC;
     check(tel.proc == null && tel.log().includes("telemetry must be off"), "agent mode with DATAZOO_DISABLE_TELEMETRY=0 doesn't start");
   }
 
+  // #194 A4b (C4.2): the drift test — through the panel path under the
+  // configured principal, aggregates only; a drifted question is switched
+  // off (the others kept), logged by id and check, never a value.
+  {
+    const driftDir = path.join(dir, "drift");
+    mkdirSync(driftDir);
+    writeFileSync(
+      path.join(driftDir, "deliv.sql"),
+      `-- @title Deliveries
+-- @vars supplier
+SELECT name AS supplier ::DROPDOWN FROM deliveries ORDER BY 1;
+-- @question How reliable is {supplier} on delivery?
+SELECT name AS "Supplier" ::TABLE, on_time AS "On time %" FROM deliveries WHERE name = getvariable('supplier');
+-- @question How many deliveries does my region have?
+SELECT count(*) AS n ::METRIC, 'Deliveries' ::LABEL FROM deliveries WHERE region = getvariable('__claim_region');
+`
+    );
+    const pre = "CREATE TABLE deliveries AS SELECT * FROM (VALUES ('Alpine', 0.9::DOUBLE, 'north'), ('Boreal', 0.7, 'north'), ('Cobalt', 0.8, 'south')) t(name, on_time, region);\n";
+    const ranges = path.join(dir, "drift-ranges.json");
+    const principal = { user: "drift-job", claims: { region: "north" } };
+    const pub = publish(driftDir, "deliv");
+    const agentOpts = (record) => ({ dashboard: "deliv", bundle: pub.bundle, digest: pub.digest, drift: { principal, ranges, record } });
+    const missing = await serve({ auth, policy: "none", agent: agentOpts(false) }, driftDir, pre);
+    check(missing.proc == null && missing.log().includes("record the release ranges first"), "drift without recorded ranges doesn't start");
+    const inBundle = await serve({ auth, policy: "none", agent: { ...agentOpts(true), drift: { principal, ranges: path.join(pub.bundle, "r.json"), record: true } } }, driftDir, pre);
+    check(inBundle.proc == null && inBundle.log().includes("not inside the agent's bundle"), "drift ranges inside the bundle don't start");
+    let rec = await serve({ auth, policy: "none", agent: agentOpts(true) }, driftDir, pre);
+    check(rec.proc != null && rec.log().includes("drift: recorded the ranges of 2 question(s)"), "drift.record writes the release ranges");
+    if (!rec.log().includes("drift: recorded the ranges of 2 question(s)")) console.error(rec.log().split("\n").filter((l) => /drift|agent|error|Error/.test(l)).join("\n"));
+    if (rec.proc) {
+      rec.proc.kill();
+      await sleep(500);
+    }
+    const doc = existsSync(ranges) ? readFileSync(ranges, "utf8") : "";
+    check(doc !== "" && !/Alpine|Boreal|Cobalt|north|south/.test(doc), "the ranges hold aggregates only, no row value");
+    const rd = doc ? JSON.parse(doc) : {};
+    const n = rd.questions?.how_many_deliveries_does_my_region_have?.columns?.find((c) => c.name === "n");
+    check(n?.min === 2 && n?.max === 2, `the probe ran under the drift principal's claims (north: ${JSON.stringify(n)})`);
+    const again = await serve({ auth, policy: "none", agent: agentOpts(true) }, driftDir, pre);
+    check(again.proc == null && again.log().includes("exists already"), "drift.record doesn't overwrite recorded ranges");
+    srv = await serve({ auth, policy: "none", agent: agentOpts(false) }, driftDir, pre);
+    check(srv.proc != null && srv.log().includes("every question is in its release range"), "a start in range keeps every question");
+    if (srv.proc) {
+      let r = await answer({ question_id: "how_reliable_is_supplier_on_delivery", slots: { supplier: "Alpine" } });
+      check(r.status === 200, `…and answers (${r.status})`);
+      // the data drifts: on-time shares become percentages, a canary row
+      srv.proc.stdin.write("UPDATE deliveries SET on_time = on_time * 100; INSERT INTO deliveries VALUES ('canary-dd1', 77.7, 'north');\n");
+      srv.proc.stdin.write(`SELECT anofox_serve_refresh(${port});\n`);
+      await sleep(2500);
+      check(srv.log().includes("drift: question 'how_reliable_is_supplier_on_delivery' is off (drift/range)"), "a refresh with drifted data switches the question off, by id and check");
+      if (!srv.log().includes("is off (drift/range)")) console.error(srv.log().split("\n").filter((l) => /anofox-serve|Error|error/.test(l)).slice(-12).join("\n"));
+      r = await answer({ question_id: "how_reliable_is_supplier_on_delivery", slots: { supplier: "Alpine" } });
+      check(r.status === 404, `…which is refused like an undeclared one (${r.status})`);
+      const mr = await fetch(`${base}/api/agent`, { headers: as("alice") });
+      const mt = await mr.text();
+      let m = {};
+      try {
+        m = JSON.parse(mt);
+      } catch (_) {}
+      if (!m.questions) console.error(`GET /api/agent: ${mr.status} ${mt.slice(0, 200)}`);
+      const ids = (m.questions || []).map((q) => q.id);
+      check(!ids.includes("how_reliable_is_supplier_on_delivery") && ids.includes("how_many_deliveries_does_my_region_have"), `…and not listed, the other question kept (${ids})`);
+      const driftLines = srv.log().split("\n").filter((l) => l.startsWith("[anofox-serve] drift"));
+      check(driftLines.length > 0 && !driftLines.some((l) => /canary-dd1|77\.7|Alpine|Boreal/.test(l)), "the drift log holds no row value");
+      srv.proc.kill();
+      await sleep(500);
+    }
+  }
+
   // An unpublishable dashboard stops the start.
   const badDir = path.join(dir, "bad");
   mkdirSync(badDir);

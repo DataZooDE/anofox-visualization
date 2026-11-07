@@ -55,6 +55,8 @@ pub struct AgentOptions {
     /// `digest` (C4.1, plan R4): the bundle's `sha256:<hex>`, pinned in the
     /// deployment config — never read back from the bundle itself.
     pub digest: String,
+    /// `drift` (#194 A4b, C4.2): the drift test after every snapshot build.
+    pub drift: Option<super::drift::DriftOptions>,
 }
 
 /// `agent.mapping` (#194 A3b, plan §4): the customer's source database, the
@@ -179,7 +181,7 @@ impl AgentOptions {
         if let Some(k) = o.keys().find(|k| {
             !matches!(
                 k.as_str(),
-                "dashboard" | "max_rows" | "mcp" | "mapping" | "bundle" | "digest"
+                "dashboard" | "max_rows" | "mcp" | "mapping" | "bundle" | "digest" | "drift"
             )
         }) {
             return Err(format!("agent: unknown key '{k}'"));
@@ -231,6 +233,10 @@ impl AgentOptions {
             .filter(|d| valid_digest(d))
             .ok_or("agent.digest: the bundle's \"sha256:<64 hex>\" that `dashboard --publish` printed, pinned here in the deployment config")?
             .to_string();
+        let drift = o
+            .get("drift")
+            .map(super::drift::DriftOptions::parse)
+            .transpose()?;
         Ok(AgentOptions {
             dashboard,
             max_rows,
@@ -238,6 +244,7 @@ impl AgentOptions {
             mapping,
             bundle,
             digest,
+            drift,
         })
     }
 }
@@ -408,7 +415,7 @@ pub struct AgentError {
 }
 
 impl AgentError {
-    fn new(status: u16, code: &'static str, message: &'static str) -> AgentError {
+    pub(super) fn new(status: u16, code: &'static str, message: &'static str) -> AgentError {
         AgentError {
             status,
             code,
@@ -572,7 +579,7 @@ pub fn manifest(d: &Dash) -> Value {
     })
 }
 
-fn failed() -> AgentError {
+pub(super) fn failed() -> AgentError {
     AgentError::new(
         502,
         "panel_failed",
@@ -582,7 +589,7 @@ fn failed() -> AgentError {
 
 /// Run one panel for the caller; any failure is [`failed`], with the
 /// runner's own text only in `log` (never in the answer, N3).
-fn run(
+pub(super) fn run(
     runner: &dyn PanelRunner,
     dash: &str,
     panel: usize,
@@ -649,7 +656,7 @@ fn slot_value(
 /// date range, the resolved variables for a period, a boolean for a toggle,
 /// the first row's value otherwise. `names` are the input's variables in
 /// order. A form keeps no default here (an agent answers no form).
-fn default_values(
+pub(super) fn default_values(
     kind: crate::InputKind,
     roles: &[(usize, crate::Role)],
     names: &[String],
@@ -728,7 +735,7 @@ fn default_values(
 /// role (`3 ::METRIC`) the role's word; `None` for what is presentation, not
 /// data — `::TITLE`, `::SUBTITLE`, `::INFO` and layout / modifier / chrome
 /// directives.
-fn item_names(stmt: &str, roles: &[(usize, crate::Role)]) -> Vec<Option<String>> {
+pub(super) fn item_names(stmt: &str, roles: &[(usize, crate::Role)]) -> Vec<Option<String>> {
     use crate::Role;
     question::item_names(stmt)
         .into_iter()
@@ -1116,6 +1123,7 @@ mod tests {
                 max_rows: DEFAULT_ROWS,
                 mcp: None,
                 mapping: None,
+                drift: None,
                 bundle: "b".into(),
                 digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
             }
