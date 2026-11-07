@@ -49,11 +49,11 @@ export default defineConfig({
       title: "anofox-visualization",
       logo: { src: "./src/assets/logo.svg" },
       favicon: "/favicon.svg",
-      // the builder's own typeface (web/index.html)
+      // the site's typefaces: Instrument Sans, Instrument Serif (titles), JetBrains Mono
       head: [
         { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.googleapis.com" } },
         { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" } },
-        { tag: "link", attrs: { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" } },
+        { tag: "link", attrs: { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" } },
       ],
       description: "Charts and dashboards for DuckDB, straight from SQL.",
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/DataZooDE/anofox-visualization" }],

@@ -1,30 +1,45 @@
 /* The app's chrome: graphite with a blue accent (theme-base.css). */
 :root {
-  --sl-color-accent-low: #dbe6fd;
-  --sl-color-accent: #2563eb;
-  --sl-color-accent-high: #1e3a8a;
-  --sl-color-white: #0a0a0a;
-  --sl-color-gray-1: #1f2329;
-  --sl-color-gray-2: #2c2e33;
-  --sl-color-gray-3: #4b5160;
-  --sl-color-gray-4: #6b7280;
-  --sl-color-gray-5: #d8dbe0;
-  --sl-color-gray-6: #eceef1;
-  --sl-color-gray-7: #f4f5f7;
-  --sl-color-black: #ffffff;
+  /* #1017: the site's palette (owner: like fna-ibc-score) — warm paper, deep teal, pink and indigo accents.
+     The builder keeps its own default theme (graphite + blue). */
+  --sl-color-accent-low: #e2efed;
+  --sl-color-accent: #0b5d5e;
+  --sl-color-accent-high: #084a4b;
+  --sl-color-white: #121a19;
+  --sl-color-gray-1: #121a19;
+  --sl-color-gray-2: #4a5654;
+  --sl-color-gray-3: #7c8784;
+  --sl-color-gray-4: #9aa39f;
+  --sl-color-gray-5: #cdd2cb;
+  --sl-color-gray-6: #e1e4df;
+  --sl-color-gray-7: #eceeeb;
+  --sl-color-black: #f6f7f5;
+  --sl-color-bg-nav: #f6f7f5;
+  --sl-color-bg-sidebar: #f4f5f3;
+  --site-pink: #c03a62; --site-pink-soft: #fae8ee;
+  --site-indigo: #3d56a6; --site-indigo-soft: #e8ecf8;
+  --site-amber: #a35d0b; --site-amber-soft: #fbf0df;
+  --site-grid: #0b5d5e10;
 }
 :root[data-theme="dark"] {
-  --sl-color-accent-low: #172554;
-  --sl-color-accent: #60a5fa;
-  --sl-color-accent-high: #dbeafe;
-  --sl-color-white: #ffffff;
-  --sl-color-gray-1: #eceef1;
-  --sl-color-gray-2: #d8dbe0;
-  --sl-color-gray-3: #a2a8b3;
-  --sl-color-gray-4: #6b7280;
-  --sl-color-gray-5: #3a3f48;
-  --sl-color-gray-6: #24272d;
-  --sl-color-black: #16181c;
+  --sl-color-accent-low: #12302d;
+  --sl-color-accent: #3bb3a6;
+  --sl-color-accent-high: #6ed1c5;
+  --sl-color-white: #e7eeec;
+  --sl-color-gray-1: #e7eeec;
+  --sl-color-gray-2: #a9b6b3;
+  --sl-color-gray-3: #73817e;
+  --sl-color-gray-4: #5b6866;
+  --sl-color-gray-5: #2f3b3a;
+  --sl-color-gray-6: #222c2b;
+  --sl-color-gray-7: #161e1d;
+  --sl-color-black: #0b1010;
+  --sl-color-bg-nav: #0e1413;
+  --sl-color-bg-sidebar: #0e1413;
+  --site-pink: #f2799c; --site-pink-soft: #3a1823;
+  --site-indigo: #8fa4ec; --site-indigo-soft: #1a2240;
+  --site-amber: #f0b35c; --site-amber-soft: #33240f;
+  --site-grid: #6ed1c50d;
 }
 .hero-shot img, .shot img { border: 1px solid var(--sl-color-gray-5); border-radius: 8px; }
 
@@ -39,12 +54,14 @@
 
 /* #1017: the docs' look — the builder's typeface, quieter chrome, cards */
 :root {
-  --sl-font: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --sl-font: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --site-serif: "Instrument Serif", ui-serif, Georgia, serif;
   --sl-content-width: 48rem;
   --sl-text-h1: 2.6rem; --sl-text-h2: 1.65rem; --sl-text-h3: 1.25rem;
-  --doc-card: #ffffff; --doc-soft: #f7f8fa;
+  --doc-card: #ffffff; --doc-soft: #f8f9f7;
 }
-:root[data-theme="dark"] { --doc-card: #1c1f24; --doc-soft: #1a1d22; }
+:root[data-theme="dark"] { --doc-card: #121918; --doc-soft: #161e1d; }
 .site-title { font-weight: 800; letter-spacing: -0.02em; font-size: 1.15rem; color: var(--sl-color-white); gap: 0.55rem; }
 .site-title img { height: 1.6rem; }
 header.header { border-bottom: 1px solid var(--sl-color-gray-6); backdrop-filter: saturate(1.4) blur(8px); }
@@ -74,18 +91,15 @@ header.header { border-bottom: 1px solid var(--sl-color-gray-6); backdrop-filter
 
 /* sidebar: quiet tier badges, rounded current page */
 .sidebar-content .sl-badge { font-family: var(--sl-font); font-size: 0.62rem; font-weight: 600; letter-spacing: 0.02em; padding: 0.05rem 0.4rem; border-radius: 999px; border: 0; opacity: 0.9; }
-.sidebar-content .sl-badge.success { background: color-mix(in srgb, #16a34a 14%, transparent); color: #15803d; }
-.sidebar-content .sl-badge.note { background: color-mix(in srgb, var(--sl-color-accent) 13%, transparent); color: var(--sl-color-accent); }
-.sidebar-content .sl-badge.tip { background: color-mix(in srgb, #7c3aed 13%, transparent); color: #7c3aed; }
-:root[data-theme="dark"] .sidebar-content .sl-badge.success { color: #4ade80; }
-:root[data-theme="dark"] .sidebar-content .sl-badge.tip { color: #c4b5fd; }
+.sidebar-content .sl-badge.success { background: var(--sl-color-accent-low); color: var(--sl-color-accent); }
+.sidebar-content .sl-badge.note { background: var(--site-indigo-soft); color: var(--site-indigo); }
+.sidebar-content .sl-badge.tip { background: var(--site-pink-soft); color: var(--site-pink); }
 .sidebar-content a[aria-current="page"] { border-radius: 6px; }
 
 /* in-page badges (chart and extension pages) */
 .sl-markdown-content .sl-badge { font-family: var(--sl-font); font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 0.15rem 0.6rem; border: 0; }
-.sl-markdown-content .sl-badge.success { background: color-mix(in srgb, #16a34a 14%, transparent); color: #15803d; }
-.sl-markdown-content .sl-badge.note { background: color-mix(in srgb, var(--sl-color-accent) 13%, transparent); color: var(--sl-color-accent); }
-:root[data-theme="dark"] .sl-markdown-content .sl-badge.success { color: #4ade80; }
+.sl-markdown-content .sl-badge.success { background: var(--sl-color-accent-low); color: var(--sl-color-accent); }
+.sl-markdown-content .sl-badge.note { background: var(--site-indigo-soft); color: var(--site-indigo); }
 
 /* prev / next */
 .pagination-links a { border-radius: 10px; box-shadow: none; border-color: var(--sl-color-gray-5); }
@@ -125,3 +139,13 @@ header.header { border-bottom: 1px solid var(--sl-color-gray-6); backdrop-filter
 .gal-index span { padding: 0 0.9rem; font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); }
 /* gallery pages: no table of contents, a wider column, two tiles a row */
 main:has(.gal) { --sl-content-width: 76rem; }
+
+/* type: serif page titles, mono eyebrows (fna-ibc-score's voice) */
+.content-panel h1#_top, [data-has-hero] .hero h1 { font-family: var(--site-serif); font-weight: 400; letter-spacing: -0.01em; }
+.content-panel h1#_top { font-size: 3rem; }
+.site-title { font-family: var(--sl-font); }
+.sl-markdown-content :is(h2, h3) { font-weight: 600; }
+.sidebar-content .top-level > li > details > summary .group-label > span,
+.sidebar-content .top-level > li > .large { font-family: var(--sl-font-mono); font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--sl-color-accent); font-weight: 500; }
+header.header { background: color-mix(in srgb, var(--sl-color-bg-nav) 85%, transparent); }
+.expressive-code { --ec-frm-edBg: var(--doc-soft); }
