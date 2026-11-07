@@ -16,6 +16,13 @@ SELECT anofox_render('{"rows":[{"c0":"a","c1":3},{"c0":"b","c1":5}],"roles":[[0,
 ----
 true
 
+# The parameter can be passed by name on every DuckDB line: on 2.0 it must be a
+# STANDARD parameter called `spec`, not a positional-only `col0` (#372, #1015).
+query I
+SELECT anofox_render(spec := '{"rows":[{"c0":"a","c1":3},{"c0":"b","c1":5}],"roles":[[0,"XAXIS"],[1,"BARCHART"]],"width":320,"height":200}') LIKE '<svg%';
+----
+true
+
 # One SVG per row, vectorised over a column of specs.
 query I
 SELECT count(*) FROM (

@@ -106,31 +106,34 @@ static vector<unique_ptr<ParsedExpression>> AnofoxParseExpressionList(const std:
 	return ParseExpressionListWith<Parser>(sql, 0);
 }
 
-// DuckDB 2.0 (the line with Parser::GetBuiltinParser): parameters carry their
-// own names, and duckdb_functions() prefers those over the description's
-// parameter_names, so an unnamed one would show up as `col0` (#372). 1.5.6
-// has no FunctionSignature on the function; the `long` overload is a no-op.
-template <class F>
-static auto NameParameter(F &function, idx_t index, const char *name, int)
-    -> decltype(function.GetSignature().GetParameter(index).SetName(Identifier(name))) {
-	function.GetSignature().GetParameter(index).SetName(Identifier(name));
-}
-template <class F>
-static void NameParameter(F &, idx_t, const char *, long) {
-}
 template <class P, class = void>
 struct HasBuiltinParser : std::false_type {};
 template <class P>
 struct HasBuiltinParser<P, decltype(void(P::GetBuiltinParser()))> : std::true_type {};
 template <class F, class = void>
-struct HasNamedParameters : std::false_type {};
+struct HasSignature : std::false_type {};
 template <class F>
-struct HasNamedParameters<F, decltype(void(std::declval<F &>().GetSignature().GetParameter(0).SetName(
-                                 std::declval<Identifier>())))> : std::true_type {};
+struct HasSignature<F, decltype(void(std::declval<F &>().GetSignature()))> : std::true_type {};
+
+// DuckDB 2.0 (the line with a FunctionSignature): parameters carry their own
+// names, and duckdb_functions() prefers those over the description's
+// parameter_names, so an unnamed one would show up as `col0` (#372). A
+// LogicalType-only argument is POSITIONAL_ONLY there, and SetName keeps the
+// kind, so the parameter is replaced by a STANDARD one: `spec := ...` binds.
+// 1.5.6 has no signature on the function; the false_type overload is a no-op.
+template <class F>
+static void NameParameter(F &function, idx_t index, const char *name, std::true_type) {
+	auto &param = function.GetSignature().GetParameter(index);
+	using Param = typename std::decay<decltype(param)>::type;
+	param = Param(Identifier(name), param.GetType());
+}
+template <class F>
+static void NameParameter(F &, idx_t, const char *, std::false_type) {
+}
 // On DuckDB 2.0 the no-op fallback must never be chosen: the parameter would
 // silently lose its name with the build still green.
-static_assert(!HasBuiltinParser<Parser>::value || HasNamedParameters<ScalarFunction>::value,
-              "DuckDB 2.0 API without FunctionSignature parameter names: update NameParameter");
+static_assert(!HasBuiltinParser<Parser>::value || HasSignature<ScalarFunction>::value,
+              "DuckDB 2.0 API without FunctionSignature: update NameParameter");
 
 // Built like DefaultFunctionGenerator::CreateInternalMacroInfo, without its
 // fixed-size parameter arrays.
@@ -258,7 +261,7 @@ void LoadInternal(ExtensionLoader &loader) {
 	// it, so one guard puts the issue link on a failure from any of them.
 	ScalarFunction render("anofox_render", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                      DATAZOO_GUARD(ANOFOX_VISUALIZATION_BANNER, AnofoxRenderFunction));
-	NameParameter(render, 0, "spec", 0);
+	NameParameter(render, 0, "spec", HasSignature<ScalarFunction> {});
 	// A bad spec is a real SQL error (InvalidInputException). DuckDB 2.0
 	// turns an error from a function not marked fallible into an INTERNAL
 	// error (#372); SetErrorMode exists on 1.5.6 and 2.0 alike.

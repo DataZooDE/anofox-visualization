@@ -254,6 +254,15 @@ jobs:
       - name: Compile the extension source with stray headers on the include path
         run: scripts/check_compat_stray_headers.sh
 
+      # The bundled tree is v1.5.6, so the step above only exercises the 1.5
+      # side of the API detection. This compiles the 2.0 side too, including
+      # NameParameter's static_assert (#1015).
+      - name: Compile the extension source against DuckDB v2.0.0 headers
+        run: |
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v2.0.0 --filter=blob:none --sparse https://github.com/duckdb/duckdb.git "$RUNNER_TEMP/duckdb-v2"
+          git -C "$RUNNER_TEMP/duckdb-v2" sparse-checkout set src/include
+          DUCKDB_INCLUDE="$RUNNER_TEMP/duckdb-v2/src/include" scripts/check_compat_stray_headers.sh
+
   sqllogictest:
     # #491: test/sql/*.test (the sqllogictests for the C++ ABI build, `make
     # test`) used to only run inside MainDistributionPipeline's full
