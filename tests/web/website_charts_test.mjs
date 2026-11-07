@@ -2,8 +2,8 @@
 // every chart kind of the role table has a data shape and a picture, every
 // minimal panel lints without an error in the dashboard CLI (DASHBOARD, else
 // target/debug/dashboard), the pages generate, and every `?dashboard=<id>` link
-// of the site names an example: its id is its -- @title's slug (web/app.js
-// slugify), not its file name.
+// of the site names one of the builder's examples (its id is its -- @title's
+// slug, not its file name).
 process.env.DATAZOO_DISABLE_TELEMETRY = "1";
 import { execFileSync } from "child_process";
 import { readdirSync, readFileSync } from "fs";
@@ -17,11 +17,8 @@ execFileSync(process.execPath, [gen], { stdio: "inherit" });
 const pages = readdirSync(path.join(root, "website", "src", "content", "docs", "build", "charts"));
 assert.ok(pages.includes("index.mdx") && pages.length > 40, `chart pages: ${pages.length}`);
 
-const slugify = (n) => String(n).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/ß/g, "ss")
-  .replace(/&/g, " and ").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-const exDir = path.join(root, "web", "examples");
-const ids = new Set(readdirSync(exDir).filter((f) => f.endsWith(".sql"))
-  .map((f) => slugify((/^-- @title (.+)$/m.exec(readFileSync(path.join(exDir, f), "utf8")) || [, f])[1].trim())));
+const { examples } = await import(path.join(root, "website", "scripts", "examples.mjs"));
+const ids = new Set(examples.map((e) => e.id));
 const docs = path.join(root, "website", "src", "content", "docs");
 const bad = [];
 for (const f of readdirSync(docs, { recursive: true }).filter((f) => /\.mdx?$/.test(f)))
