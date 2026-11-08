@@ -3386,3 +3386,29 @@ fn grouped_boxes_from_statistics_dodge_in_legend_order() {
         );
     }
 }
+
+// #1033: ::DENSITY and ::HISTOGRAM draw ::XLINE (+ ::XLINE_LABEL) and take
+// 'reverse'::XSCALE, like the role charts (they were dropped silently).
+#[test]
+fn density_and_histogram_draw_xlines_and_reverse() {
+    let xs: Vec<f64> = (0..120)
+        .map(|i| 7.5 + ((i * 37) % 200) as f64 / 100.0)
+        .collect();
+    for kind in [Kind::Density, Kind::Histogram] {
+        let n = xs.len();
+        let mut line = vec![f64::NAN; n];
+        line[0] = 8.2;
+        let mut label = vec![""; n];
+        label[0] = "athlete: 8.2 s";
+        let plain = svg(vec![Column::new("v", Role::Value(kind), nums(&xs))]);
+        let s = svg(vec![
+            Column::new("v", Role::Value(kind), nums(&xs)),
+            Column::new("l", Role::VLine, nums(&line)),
+            Column::new("t", Role::VLineLabel, strs(&label)),
+            Column::new("s", Role::XScale, strs(&vec!["reverse"; n])),
+        ]);
+        assert!(s.contains("stroke-dasharray"), "{kind:?}: the ::XLINE");
+        assert!(s.contains("athlete: 8.2 s"), "{kind:?}: its label");
+        assert_ne!(plain, s, "{kind:?}: annotations change the picture");
+    }
+}
