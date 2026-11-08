@@ -66,8 +66,9 @@ if (mode === "--check" || mode === "--thumbs") {
     writeFileSync(f, s.sql + ";\n");
     if (mode === "--thumbs") {
       mkdirSync(thumbs, { recursive: true });
-      const svg = path.join(thumbs, `${slug(k.name)}.svg`);
-      execFileSync(bin, ["--svg", f, svg, "--width", "560"], { stdio: ["ignore", "ignore", "inherit"] });
+      for (const dark of [false, true]) {
+      const svg = path.join(thumbs, `${slug(k.name)}${dark ? "-dark" : ""}.svg`);
+      execFileSync(bin, ["--svg", f, svg, "--width", "560", "--theme", path.join(site, "showcase", "site-theme.json"), ...(dark ? ["--dark"] : [])], { stdio: ["ignore", "ignore", "inherit"] });
       // The headless render is a whole dashboard: a page background around
       // one card. Keep the card.
       const t = readFileSync(svg, "utf8");
@@ -75,6 +76,7 @@ if (mode === "--check" || mode === "--thumbs") {
       if (card) {
         const [, , x, y, w, h] = card;
         writeFileSync(svg, t.replace(/^<svg ([^>]*?)width="[\d.]+" height="[\d.]+" viewBox="[^"]+"/, `<svg $1width="${w}" height="${h}" viewBox="${x} ${y} ${w} ${h}"`).replace(/<rect width="[\d.]+" height="[\d.]+" fill="[^"]+"\/>/, ""));
+      }
       }
       continue;
     }
@@ -109,8 +111,15 @@ const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
 const prose = (t) => t.split(/(`[^`]*`)/).map((p, i) => (i % 2 ? p : p.replace(/[{}]/g, "\\$&").replace(/</g, "&lt;"))).join("");
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
 
-rmSync(out, { recursive: true, force: true });
+// Written in place (only stale pages removed, unchanged ones not touched):
+// a dev server's file watcher loses pages when the folder is recreated.
 mkdirSync(out, { recursive: true });
+const written = new Set();
+const put = (f, text) => {
+  written.add(f);
+  const p = path.join(out, f);
+  if (!existsSync(p) || readFileSync(p, "utf8") !== text) writeFileSync(p, text);
+};
 for (const k of kinds) {
   const s = shapes[k.name] || {};
   const mate = s.with && all.find((o) => o.name === s.with);
@@ -135,7 +144,9 @@ for (const k of kinds) {
     "",
     aliases ? `**Also spelled:** ${aliases}` : "",
     "",
-    existsSync(path.join(thumbs, `${slug(k.name)}.svg`)) ? `![The minimal panel below, rendered](../../../../assets/charts/${slug(k.name)}.svg)` : "",
+    existsSync(path.join(thumbs, `${slug(k.name)}.svg`))
+      ? `import picL from "../../../../assets/charts/${slug(k.name)}.svg?url";\nimport picD from "../../../../assets/charts/${slug(k.name)}-dark.svg?url";\n\n<figure class="chart-pic"><img class="lp-light" src={picL} alt="The minimal panel below, rendered" /><img class="lp-dark" src={picD} alt="" /></figure>`
+      : "",
     "",
     "## The data it needs",
     "",
@@ -150,7 +161,7 @@ for (const k of kinds) {
     related.length ? `## Related\n\n${related.map((o) => `[${shapes[o.name]?.title ? "`" + shapes[o.name].title + "`" : "`::" + o.name + "`"}](../${slug(o.name)}/)`).join(" · ")}` : "",
     "",
   ].join("\n");
-  writeFileSync(path.join(out, `${slug(k.name)}.mdx`), md.replace(/\n{3,}/g, "\n\n"));
+  put(`${slug(k.name)}.mdx`, md.replace(/\n{3,}/g, "\n\n"));
 }
 
 // The overview: by family, a picture per kind.
@@ -159,7 +170,7 @@ const idx = [
   "title: Charts",
   "description: Every chart kind, grouped by what it shows — one page each with the data it needs and a panel to edit in the builder.",
   "sidebar:",
-  "  label: Overview",
+  "  label: All charts",
   "  order: 0",
   "---",
   "",
@@ -173,11 +184,12 @@ for (const [fam] of [...families, ["Other"]]) {
   for (const k of ks) {
     const t = shapes[k.name]?.title || "::" + k.name;
     const pic = existsSync(path.join(thumbs, `${slug(k.name)}.svg`));
-    idx.push(`<a href="${slug(k.name)}/">${pic ? `<img src={pic_${k.name}} alt="" loading="lazy" />` : ""}<code>${t}</code><span>${k.desc.replace(/`/g, "").replace(/[{}<>]/g, "")}</span></a>`);
+    idx.push(`<a href="${slug(k.name)}/">${pic ? `<img class="lp-light" src={pic_${k.name}} alt="" loading="lazy" /><img class="lp-dark" src={picd_${k.name}} alt="" loading="lazy" />` : ""}<code>${t}</code><span>${k.desc.replace(/`/g, "").replace(/[{}<>]/g, "")}</span></a>`);
   }
   idx.push("", "</div>", "");
 }
-const imports = kinds.filter((k) => existsSync(path.join(thumbs, `${slug(k.name)}.svg`))).map((k) => `import pic_${k.name} from "../../../../assets/charts/${slug(k.name)}.svg?url";`);
+const imports = kinds.filter((k) => existsSync(path.join(thumbs, `${slug(k.name)}.svg`))).flatMap((k) => [`import pic_${k.name} from "../../../../assets/charts/${slug(k.name)}.svg?url";`, `import picd_${k.name} from "../../../../assets/charts/${slug(k.name)}-dark.svg?url";`]);
 idx.splice(idx.indexOf("---", 1) + 1, 0, "", ...imports);
-writeFileSync(path.join(out, "index.mdx"), idx.join("\n"));
+put("index.mdx", idx.join("\n"));
+for (const f of readdirSync(out)) if (!written.has(f)) rmSync(path.join(out, f));
 console.log(`charts: ${kinds.length} pages`);

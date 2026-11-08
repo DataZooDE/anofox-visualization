@@ -2,3 +2,5 @@ node_modules/
 dist/
 .astro/
 src/content/docs/build/charts/
+src/content/docs/gallery/*
+!src/content/docs/gallery/index.mdx

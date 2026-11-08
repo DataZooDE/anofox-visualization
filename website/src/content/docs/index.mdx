@@ -1,69 +1,281 @@
 ---
-title: Charts and dashboards for DuckDB, straight from SQL
-description: Write ordinary DuckDB SQL, tag the output columns with ::ROLE casts, get an interactive dashboard — in the browser, as a static site, or on a locked server with login and row policies.
+title: Dashboards that are just SQL
+description: Write ordinary DuckDB SQL, tag the output columns with ::ROLE casts, and get an interactive dashboard — in the browser, as a static site, or on a locked server with login and row policies.
 template: splash
+editUrl: false
 hero:
-  tagline: Write ordinary DuckDB SQL and tag the output columns with <code>::ROLE</code> casts. Every annotated <code>SELECT</code> becomes a chart, a KPI, a table or an input. No JavaScript charting library, no config files — the SQL is the dashboard.
-  image:
-    light: ../../assets/readme-hero-light.png
-    dark: ../../assets/readme-hero-dark.png
-    alt: A sales cockpit built from SQL — period filters, KPI tiles with deltas and sparklines, weekly revenue against the prior year, a channel-mix donut
+  title: Dashboards that are <em>just SQL.</em>
+  tagline: Tag the columns of an ordinary DuckDB <code>SELECT</code> with a <code>::ROLE</code> and it becomes a chart, a KPI, a table or an input. Maps, forecasts, drill-downs, guarded servers and agents come from the same SQL file — no JavaScript, no config.
   actions:
-    - text: Try it in the browser
+    - text: Open the builder — nothing to install
       link: app/
       icon: right-arrow
       variant: primary
-    - text: Install
-      link: start/install/
+    - text: Your first dashboard
+      link: start/first-dashboard/
       variant: secondary
-    - text: Deploy
-      link: deploy/
+    - text: Star on GitHub
+      link: https://github.com/DataZooDE/anofox-visualization
+      icon: github
       variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard } from "@astrojs/starlight/components";
+import step1 from "../../assets/showcase/1-one-chart.svg?url";
+import step2 from "../../assets/showcase/2-dashboard.svg?url";
+import step1d from "../../assets/showcase/1-one-chart-dark.svg?url";
+import step2d from "../../assets/showcase/2-dashboard-dark.svg?url";
+import mapL from "../../assets/showcase/where-does-our-revenue-come-from-from-country-down-to-district-light.webp";
+import mapD from "../../assets/showcase/where-does-our-revenue-come-from-from-country-down-to-district-dark.webp";
+import drillL from "../../assets/showcase/map-drill-germany-light.webp";
+import drillD from "../../assets/showcase/map-drill-germany-dark.webp";
+import kpiL from "../../assets/gallery/kpis/6-light.webp";
+import kpiD from "../../assets/gallery/kpis/6-dark.webp";
+import fcL from "../../assets/showcase/will-any-substation-exceed-its-capacity-next-week-light.webp";
+import fcD from "../../assets/showcase/will-any-substation-exceed-its-capacity-next-week-dark.webp";
+import optL from "../../assets/showcase/how-do-we-plan-a-busy-day-at-the-distribution-centre-light.webp";
+import optD from "../../assets/showcase/how-do-we-plan-a-busy-day-at-the-distribution-centre-dark.webp";
+import statL from "../../assets/showcase/what-sets-the-price-of-a-home-light.webp";
+import statD from "../../assets/showcase/what-sets-the-price-of-a-home-dark.webp";
+import delL from "../../assets/showcase/where-do-our-deliveries-and-customers-cluster-and-which-regions-are-underserved-light.webp";
+import delD from "../../assets/showcase/where-do-our-deliveries-and-customers-cluster-and-which-regions-are-underserved-dark.webp";
+import decL from "../../assets/showcase/can-a-model-triage-the-support-inbox-light.webp";
+import decD from "../../assets/showcase/can-a-model-triage-the-support-inbox-dark.webp";
+import tabL from "../../assets/showcase/is-today-s-supplier-feed-safe-to-load-light.webp";
+import tabD from "../../assets/showcase/is-today-s-supplier-feed-safe-to-load-dark.webp";
+import galL from "../../assets/showcase/which-chart-fits-which-question-light.webp";
+import galD from "../../assets/showcase/which-chart-fits-which-question-dark.webp";
+import gInL from "../../assets/gallery/inputs/1-light.webp";
+import gInD from "../../assets/gallery/inputs/1-dark.webp";
+import gKpL from "../../assets/gallery/kpis/2-light.webp";
+import gKpD from "../../assets/gallery/kpis/2-dark.webp";
+import gTbL from "../../assets/gallery/tables/3-light.webp";
+import gTbD from "../../assets/gallery/tables/3-dark.webp";
+import gMpL from "../../assets/gallery/maps/4-light.webp";
+import gMpD from "../../assets/gallery/maps/4-dark.webp";
+import gFtL from "../../assets/gallery/features/6-light.webp";
+import gFtD from "../../assets/gallery/features/6-dark.webp";
+import gSt from "../../assets/plots/statistics/kaplan_meier_by.svg?url";
+import c1 from "../../assets/charts/sankey.svg?url";
+import c1d from "../../assets/charts/sankey-dark.svg?url";
+import c2 from "../../assets/charts/treemap.svg?url";
+import c2d from "../../assets/charts/treemap-dark.svg?url";
+import c3 from "../../assets/charts/ridgeline.svg?url";
+import c3d from "../../assets/charts/ridgeline-dark.svg?url";
+import c4 from "../../assets/charts/candlestick.svg?url";
+import c4d from "../../assets/charts/candlestick-dark.svg?url";
+import c5 from "../../assets/charts/region.svg?url";
+import c5d from "../../assets/charts/region-dark.svg?url";
+import c6 from "../../assets/charts/waterfall.svg?url";
+import c6d from "../../assets/charts/waterfall-dark.svg?url";
+import c7 from "../../assets/charts/heatmap.svg?url";
+import c7d from "../../assets/charts/heatmap-dark.svg?url";
+import c8 from "../../assets/charts/violin.svg?url";
+import c8d from "../../assets/charts/violin-dark.svg?url";
+import c9 from "../../assets/charts/gantt.svg?url";
+import c9d from "../../assets/charts/gantt-dark.svg?url";
+import c10 from "../../assets/charts/radar.svg?url";
+import c10d from "../../assets/charts/radar-dark.svg?url";
+import c11 from "../../assets/charts/smooth.svg?url";
+import c11d from "../../assets/charts/smooth-dark.svg?url";
+import c12 from "../../assets/charts/diagram.svg?url";
+import c12d from "../../assets/charts/diagram-dark.svg?url";
 
-## SQL in, dashboard out
+<div class="lp">
+
+<div class="lp-stage" aria-label="Three dashboards drawn from SQL: a forecast fan, a drill-down map and a KPI strip, beside the SQL that makes a chart">
+  <a class="lp-card lp-c1" href="app/?dashboard=where-does-our-revenue-come-from-from-country-down-to-district"><img class="lp-light" src={drillL.src} alt="" /><img class="lp-dark" src={drillD.src} alt="" /></a>
+  <a class="lp-card lp-c2" href="app/?dashboard=will-any-substation-exceed-its-capacity-next-week"><img class="lp-light" src={fcL.src} alt="" /><img class="lp-dark" src={fcD.src} alt="" /></a>
+  <div class="lp-card lp-c3 lp-sql" aria-hidden="true"><span class="k">SELECT</span> ds <b>::XAXIS</b>, yhat <b>::LINECHART</b>,
+       yhat_lower <b>::BAND_LOWER</b>,
+       yhat_upper <b>::BAND_UPPER</b>,
+       firm_mw <b>::REFLINE</b>
+<span class="k">FROM</span> forecast
+<span class="k">WHERE</span> substation = getvariable(<i>'substation'</i>);</div>
+  <div class="lp-card lp-c4"><img class="lp-light" src={kpiL.src} alt="" /><img class="lp-dark" src={kpiD.src} alt="" /></div>
+</div>
+<p class="lp-stage-cap">Real dashboards from the builder's examples — <a href="app/?dashboard=will-any-substation-exceed-its-capacity-next-week">a forecast against capacity</a>, <a href="app/?dashboard=where-does-our-revenue-come-from-from-country-down-to-district">a map that drills</a> — each one <code>.sql</code> file.</p>
+
+<ul class="lp-facts">
+  <li><strong>42</strong> chart kinds</li>
+  <li><strong>241</strong> roles</li>
+  <li><strong>38</strong> live examples</li>
+  <li><strong>5</strong> anofox extensions plotted</li>
+  <li><strong>0</strong> lines of JavaScript</li>
+</ul>
+
+## From one line to an application
+
+<p class="lp-lead">Start with a single chart. Every step below adds a few lines to the same file — nothing has to be rewritten when it grows.</p>
+
+<div class="lp-step">
+<div class="lp-step-text">
+<span class="lp-num">1</span>
+### A chart is one `SELECT`
+
+The cast on the measure picks the chart; the other columns say where each row goes. Sort and aggregate in SQL — the chart draws what the query returns.
 
 ```sql
-SELECT 'Revenue by channel'::TITLE;
-SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED
-FROM sales GROUP BY ALL ORDER BY week;
-
-SELECT sum(revenue)::MONEY, 'Revenue'::LABEL,
-       sum(revenue) - sum(revenue_prev)::DELTA FROM sales;
+SELECT region ::XAXIS, sum(revenue) ::BARCHART,
+       'North leads, South close behind'::TITLE
+FROM sales GROUP BY ALL ORDER BY 2 DESC;
 ```
+[Every chart kind →](build/charts/)
+</div>
+<div class="lp-step-pic"><img class="lp-light" src={step1} alt="A sorted bar chart titled North leads, South close behind" /><img class="lp-dark" src={step1d} alt="" /></div>
+</div>
 
-Each `SELECT` is one panel. The casts say what a column is for: `::XAXIS`, `::CATEGORY` and a chart kind (`::BARCHART_STACKED`) make a chart, `::MONEY` + `::DELTA` a KPI tile with its change. Inputs (`::DROPDOWN`, `::PERIOD`), tabs, drill-downs and cross-filters are roles too — [241 of them](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md), checked by `dashboard --check`.
+<div class="lp-step">
+<div class="lp-step-text">
+<span class="lp-num">2</span>
+### A dashboard is a few more
 
-## What you get
+KPI tiles with change, trend line and goal; a 12-column grid; boxes, tabs and sections — each a statement of its own.
 
-<CardGrid>
-  <Card title="Charts and maps" icon="seti:svg">
-    Bars, lines, areas, scatter, boxplots, heatmaps, Sankey, treemaps, Gantt, waterfalls, gauges — and choropleth, point and flow maps with built-in boundaries. Rendered to SVG by the ggplot-rs grammar of graphics.
-  </Card>
-  <Card title="Interactive dashboards" icon="puzzle">
-    Inputs, tabs, cross-filtering, drill-down, drill-through, tables with totals and sparklines, guided steps — the same SQL in the browser, as a static site or on a server.
-  </Card>
-  <Card title="Runs where your data is" icon="laptop">
-    In the browser on DuckDB-Wasm, in any DuckDB as an extension, from the `dashboard` CLI, or on a locked server with login, row and column policies, refresh and write-back.
-  </Card>
-  <Card title="Checked like code" icon="approve-check">
-    `dashboard --check` lints structure, SQL and design; a GitHub Action runs it on every pull request. Dashboards are plain `.sql` files in your repository.
-  </Card>
-  <Card title="Works with the anofox extensions" icon="random">
-    Statistics, forecast, tabular, optimize and decide results plot with one `anofox_plot(...)` call through a shared contract.
-  </Card>
-  <Card title="Ready for agents" icon="rocket">
-    A dashboard's declared questions can be answered over REST and MCP — deterministically, through the same panels, for the signed-in caller.
-  </Card>
-</CardGrid>
+```sql
+SELECT 'Headline'::GROUP;
+SELECT sum(revenue) ::MONEY, 'Revenue'::LABEL,
+       sum(revenue_prev) ::DELTA,
+       list(r ORDER BY week) ::SPARKLINE FROM …;
+SELECT 1::ENDGROUP;
+SELECT 8::COL;
+SELECT week ::XAXIS, channel ::CATEGORY,
+       revenue ::AREACHART_STACKED FROM sales;
+```
+[KPIs and tables →](build/kpis-tables/) · [Layout →](build/layout/)
+</div>
+<div class="lp-step-pic"><img class="lp-light" src={step2} alt="Three KPI tiles, a stacked area chart and a donut" /><img class="lp-dark" src={step2d} alt="" /></div>
+</div>
 
-## Pick your way in
+<div class="lp-step">
+<div class="lp-step-text">
+<span class="lp-num">3</span>
+### Interaction is variables
 
-<CardGrid>
-  <LinkCard title="Try it now" description="The full builder in your browser, with 38 example dashboards. Nothing to install." href="app/" />
-  <LinkCard title="Install the extension" description="INSTALL anofox_visualization FROM community — or the full toolkit from a release." href="start/install/" />
-  <LinkCard title="Choose a deployment" description="From a static site to a locked multi-replica server: which one fits." href="deploy/" />
-  <LinkCard title="Plot the anofox extensions" description="Statistics, forecast, tabular, optimize, decide." href="integrate/" />
-</CardGrid>
+An input's column name is a DuckDB variable. Clicks set variables too: cross-filter, named selections, row selection, and drill-down through any hierarchy — on bars, maps and treemaps.
+
+```sql
+SELECT 'geo: country > state > district'::DRILL;
+SELECT code ::REGION, name ::LABEL, revenue ::BARCHART,
+       'quantile 5'::CLASSES
+FROM rm_level()             -- reads getvariable('country'), …
+ORDER BY revenue DESC;
+```
+[Inputs and interactivity →](build/inputs/)
+</div>
+<div class="lp-step-pic lp-shot"><img class="lp-light" src={drillL.src} alt="After a click on Germany: the map and the ranking by state, with a breadcrumb back" /><img class="lp-dark" src={drillD.src} alt="" /></div>
+</div>
+
+<div class="lp-step">
+<div class="lp-step-text">
+<span class="lp-num">4</span>
+### Forecasts and models, in the same SQL
+
+Load an anofox extension and plot its results: forecasts with nested interval fans, backtests, regression forests, survival curves, optimiser plans. Here: next week's load per substation, three methods backtested, against firm capacity.
+
+```sql
+LOAD anofox_forecast;
+CREATE TABLE fc AS
+SELECT * FROM ts_forecast_by('load', substation, ds, mw, 'MSTL',
+  168, '1h', MAP{'seasonal_periods': '[24,168]'});
+SELECT ds ::XAXIS, yhat ::LINECHART,
+       yhat_lower ::BAND_LOWER, yhat_upper ::BAND_UPPER,
+       firm_mw ::REFLINE,
+       'firm capacity' ::REFLINE_LABEL
+FROM fc JOIN substations USING (substation)
+WHERE substation = getvariable('substation');
+```
+[Models and forecasts →](build/model-output/) · [The extensions →](integrate/)
+</div>
+<div class="lp-step-pic lp-shot"><img class="lp-light" src={fcL.src} alt="An hourly load forecast with a 95/80/50 % fan against a firm-capacity line, a weekday-by-hour heatmap and a peak table" /><img class="lp-dark" src={fcD.src} alt="" /></div>
+</div>
+
+<div class="lp-step">
+<div class="lp-step-text">
+<span class="lp-num">5</span>
+### Ship it — to a page, a server or an agent
+
+The same file renders to HTML and SVG in CI, publishes as a static site, or runs on a **locked, read-only server** with login, row and column policies, scheduled reports and alerts. A dashboard's `-- @question` lines can be answered over **REST and MCP** for the signed-in caller.
+
+```sh
+dashboard --check sales.sql --strict     # lint in CI
+dashboard --site dashboards/ public/     # a static site
+serve --dashboards dashboards/ \
+      --db sales.duckdb --options locked.json
+```
+[Which way to run it →](deploy/)
+</div>
+<div class="lp-step-pic">
+<div class="lp-ways">
+  <a href="deploy/browser/"><strong>Browser</strong><span>DuckDB-Wasm, nothing to install</span></a>
+  <a href="deploy/cli/"><strong>CLI and CI</strong><span>HTML, SVG, lint on every PR</span></a>
+  <a href="deploy/static-site/"><strong>Static site</strong><span>GitHub Pages, S3, any host</span></a>
+  <a href="deploy/locked-server/"><strong>Locked server</strong><span>login, row policies, refresh</span></a>
+  <a href="deploy/embedding/"><strong>Embedded</strong><span>signed links inside your app</span></a>
+  <a href="deploy/agent/"><strong>Agents</strong><span>REST and MCP, deterministic</span></a>
+</div>
+</div>
+</div>
+
+## Ideas to start from
+
+<p class="lp-lead">Example dashboards on made-up sample data, each built around a question a team might ask. Open one, read its SQL, change it.</p>
+
+<div class="lp-gallery">
+  <a href="app/?dashboard=how-do-we-plan-a-busy-day-at-the-distribution-centre"><img class="lp-light" src={optL.src} alt="" loading="lazy" /><img class="lp-dark" src={optD.src} alt="" loading="lazy" /><span class="lp-tag">anofox-optimize</span><strong>How do we plan a busy day at the distribution centre?</strong><em>Six solvers — packing, carrier, waves, sequencing — against today's rule.</em></a>
+  <a href="app/?dashboard=what-sets-the-price-of-a-home"><img class="lp-light" src={statL.src} alt="" loading="lazy" /><img class="lp-dark" src={statD.src} alt="" loading="lazy" /><span class="lp-tag">anofox-statistics</span><strong>What sets the price of a home?</strong><em>A regression workflow in ten tabs: compare, check, predict, regularise, survival.</em></a>
+  <a href="app/?dashboard=where-do-our-deliveries-and-customers-cluster-and-which-regions-are-underserved"><img class="lp-light" src={delL.src} alt="" loading="lazy" /><img class="lp-dark" src={delD.src} alt="" loading="lazy" /><span class="lp-tag">maps</span><strong>Where do our customers cluster, and which regions are underserved?</strong><em>Districts, points, flows and clusters on built-in boundaries.</em></a>
+  <a href="app/?dashboard=can-a-model-triage-the-support-inbox"><img class="lp-light" src={decL.src} alt="" loading="lazy" /><img class="lp-dark" src={decD.src} alt="" loading="lazy" /><span class="lp-tag">anofox-decide</span><strong>Can a model triage the support inbox?</strong><em>Probabilities to decisions: thresholds, costs, calibration, routing.</em></a>
+  <a href="app/?dashboard=is-today-s-supplier-feed-safe-to-load"><img class="lp-light" src={tabL.src} alt="" loading="lazy" /><img class="lp-dark" src={tabD.src} alt="" loading="lazy" /><span class="lp-tag">anofox-tabular</span><strong>Is today's supplier feed safe to load?</strong><em>Data-quality checks, a go / no-go verdict and the history behind it.</em></a>
+  <a href="app/?dashboard=which-chart-fits-which-question"><img class="lp-light" src={galL.src} alt="" loading="lazy" /><img class="lp-dark" src={galD.src} alt="" loading="lazy" /><span class="lp-tag">chart gallery</span><strong>Which chart fits which question?</strong><em>Every chart kind, by family, with the SQL beside it.</em></a>
+</div>
+
+## Everything, with its SQL
+
+<p class="lp-lead">The gallery shows every input, KPI, table option, map and interaction as a picture with the SQL that draws it — and what each anofox extension plots.</p>
+
+<div class="gal-index lp-galband">
+  <a href="gallery/inputs/"><img class="lp-light" src={gInL.src} alt="" loading="lazy" /><img class="lp-dark" src={gInD.src} alt="" loading="lazy" /><strong>Inputs and filters</strong><span>8 controls, each driving a chart</span></a>
+  <a href="gallery/kpis/"><img class="lp-light" src={gKpL.src} alt="" loading="lazy" /><img class="lp-dark" src={gKpD.src} alt="" loading="lazy" /><strong>KPIs</strong><span>change, trend, goal, status</span></a>
+  <a href="gallery/tables/"><img class="lp-light" src={gTbL.src} alt="" loading="lazy" /><img class="lp-dark" src={gTbD.src} alt="" loading="lazy" /><strong>Tables</strong><span>formats, subtotals, flags, links</span></a>
+  <a href="gallery/maps/"><img class="lp-light" src={gMpL.src} alt="" loading="lazy" /><img class="lp-dark" src={gMpD.src} alt="" loading="lazy" /><strong>Maps</strong><span>regions, points, flows, drill</span></a>
+  <a href="gallery/features/"><img class="lp-light" src={gFtL.src} alt="" loading="lazy" /><img class="lp-dark" src={gFtD.src} alt="" loading="lazy" /><strong>Interactions</strong><span>drill, views, figures, steps</span></a>
+  <a href="gallery/statistics/"><img src={gSt} alt="" loading="lazy" /><strong>Extension plots</strong><span>statistics, forecast, tabular, optimize, decide</span></a>
+</div>
+
+## 42 chart kinds, one grammar
+
+<p class="lp-lead">Rendered to crisp SVG by <a href="https://github.com/sipemu/ggplot-rs">ggplot-rs</a>, a grammar-of-graphics engine in Rust — the same picture in the browser, the CLI, a PDF export or an e-mail.</p>
+
+<div class="lp-wall">
+  <a href="build/charts/sankey/"><img class="lp-light" src={c1} alt="" loading="lazy" /><img class="lp-dark" src={c1d} alt="" loading="lazy" /><code>::SANKEY</code></a>
+  <a href="build/charts/treemap/"><img class="lp-light" src={c2} alt="" loading="lazy" /><img class="lp-dark" src={c2d} alt="" loading="lazy" /><code>::TREEMAP</code></a>
+  <a href="build/charts/ridgeline/"><img class="lp-light" src={c3} alt="" loading="lazy" /><img class="lp-dark" src={c3d} alt="" loading="lazy" /><code>::RIDGELINE</code></a>
+  <a href="build/charts/candlestick/"><img class="lp-light" src={c4} alt="" loading="lazy" /><img class="lp-dark" src={c4d} alt="" loading="lazy" /><code>::CANDLESTICK</code></a>
+  <a href="build/charts/region/"><img class="lp-light" src={c5} alt="" loading="lazy" /><img class="lp-dark" src={c5d} alt="" loading="lazy" /><code>::REGION</code></a>
+  <a href="build/charts/waterfall/"><img class="lp-light" src={c6} alt="" loading="lazy" /><img class="lp-dark" src={c6d} alt="" loading="lazy" /><code>::WATERFALL</code></a>
+  <a href="build/charts/heatmap/"><img class="lp-light" src={c7} alt="" loading="lazy" /><img class="lp-dark" src={c7d} alt="" loading="lazy" /><code>::HEATMAP</code></a>
+  <a href="build/charts/violin/"><img class="lp-light" src={c8} alt="" loading="lazy" /><img class="lp-dark" src={c8d} alt="" loading="lazy" /><code>::VIOLIN</code></a>
+  <a href="build/charts/gantt/"><img class="lp-light" src={c9} alt="" loading="lazy" /><img class="lp-dark" src={c9d} alt="" loading="lazy" /><code>::GANTT</code></a>
+  <a href="build/charts/radar/"><img class="lp-light" src={c10} alt="" loading="lazy" /><img class="lp-dark" src={c10d} alt="" loading="lazy" /><code>::RADAR</code></a>
+  <a href="build/charts/smooth/"><img class="lp-light" src={c11} alt="" loading="lazy" /><img class="lp-dark" src={c11d} alt="" loading="lazy" /><code>::SMOOTH</code></a>
+  <a href="build/charts/diagram/"><img class="lp-light" src={c12} alt="" loading="lazy" /><img class="lp-dark" src={c12d} alt="" loading="lazy" /><code>::DIAGRAM</code></a>
+</div>
+<p class="lp-more"><a href="build/charts/">See all 42, with the data each one needs →</a></p>
+
+## Treated like code
+
+<div class="lp-cards">
+  <div><strong>Plain files in Git</strong><span>A dashboard is a <code>.sql</code> file: review it in a pull request, diff it, blame it.</span></div>
+  <div><strong>Linted in CI</strong><span><code>dashboard --check</code> catches broken SQL, empty panels and design mistakes; a GitHub Action runs it on every PR.</span></div>
+  <div><strong>Guarded when served</strong><span>Read-only snapshots, login (OIDC, JWT, signed links), row and column policies, audit logs.</span></div>
+  <div><strong>Written with an agent</strong><span>The Claude Code plugin builds dashboards from a plain request; every SQL block in its skills is tested in CI.</span></div>
+</div>
+
+<div class="lp-cta">
+  <h2>Try it on your own data</h2>
+  <p>Open the builder, load a CSV, Parquet or JSON file with <em>Explore data</em>, and tag a column.</p>
+  <a class="lp-btn" href="app/">Open the builder →</a>
+  <a class="lp-btn lp-btn-2" href="start/install/">Install the extension</a>
+</div>
+
+</div>

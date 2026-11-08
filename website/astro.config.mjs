@@ -41,21 +41,46 @@ export default defineConfig({
   site: "https://datazoode.github.io",
   base,
   trailingSlash: "always",
+  devToolbar: { enabled: false },
   image: { service: passthroughImageService() },
   integrations: [
     builderInDev,
     starlight({
       title: "anofox-visualization",
+      logo: { src: "./src/assets/logo.svg" },
+      favicon: "/favicon.svg",
+      // the site's typefaces: Instrument Sans, Instrument Serif (titles), JetBrains Mono
+      head: [
+        { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.googleapis.com" } },
+        { tag: "link", attrs: { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" } },
+        { tag: "link", attrs: { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" } },
+      ],
       description: "Charts and dashboards for DuckDB, straight from SQL.",
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/DataZooDE/anofox-visualization" }],
       editLink: { baseUrl: "https://github.com/DataZooDE/anofox-visualization/edit/master/website/" },
-      customCss: ["./src/styles/theme.css"],
+      customCss: ["./src/styles/theme.css", "./src/styles/landing.css"],
       lastUpdated: false,
       sidebar: [
         { label: "Start", items: [
           { label: "What it is", slug: "start/overview" },
           { label: "Install", slug: "start/install" },
           { label: "Your first dashboard", slug: "start/first-dashboard" },
+        ] },
+        { label: "Gallery", items: [
+          { label: "What you can build", slug: "gallery" },
+          { label: "Inputs and filters", slug: "gallery/inputs" },
+          { label: "KPIs", slug: "gallery/kpis" },
+          { label: "Tables", slug: "gallery/tables" },
+          { label: "Maps", slug: "gallery/maps" },
+          { label: "Interactions and features", slug: "gallery/features" },
+          { label: "All 42 chart kinds", link: "/build/charts/" },
+          { label: "What each extension draws", collapsed: true, items: [
+            { label: "anofox-statistics", slug: "gallery/statistics" },
+            { label: "anofox-forecast", slug: "gallery/forecast" },
+            { label: "anofox-tabular", slug: "gallery/tabular" },
+            { label: "anofox-optimize", slug: "gallery/optimize" },
+            { label: "anofox-decide", slug: "gallery/decide" },
+          ] },
         ] },
         { label: "Build", items: [
           { label: "The annotation model", slug: "build" },
@@ -87,7 +112,7 @@ export default defineConfig({
           { label: "anofox-optimize", slug: "integrate/optimize" },
           { label: "anofox-decide", slug: "integrate/decide" },
         ] },
-        { label: "Builder ↗", link: "app/", attrs: { target: "_blank" } },
+        { label: "Builder ↗", link: "/app/", attrs: { target: "_blank" } },
       ],
     }),
   ],
