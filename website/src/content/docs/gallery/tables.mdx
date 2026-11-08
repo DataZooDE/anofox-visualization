@@ -1,0 +1,175 @@
+---
+title: "Tables"
+description: "Every ::TABLE gets search, filters, totals, column stats, CSV and Excel export. Column roles format the cells; directives before the table add totals, groups, flags and selection."
+tableOfContents: false
+sidebar:
+  order: 50
+---
+
+import t1l from "../../../assets/gallery/tables/1-light.webp";
+import t1d from "../../../assets/gallery/tables/1-dark.webp";
+import t2l from "../../../assets/gallery/tables/2-light.webp";
+import t2d from "../../../assets/gallery/tables/2-dark.webp";
+import t3l from "../../../assets/gallery/tables/3-light.webp";
+import t3d from "../../../assets/gallery/tables/3-dark.webp";
+import t4l from "../../../assets/gallery/tables/4-light.webp";
+import t4d from "../../../assets/gallery/tables/4-dark.webp";
+import t5l from "../../../assets/gallery/tables/5-light.webp";
+import t5d from "../../../assets/gallery/tables/5-dark.webp";
+import t6l from "../../../assets/gallery/tables/6-light.webp";
+import t6d from "../../../assets/gallery/tables/6-dark.webp";
+import t7l from "../../../assets/gallery/tables/7-light.webp";
+import t7d from "../../../assets/gallery/tables/7-dark.webp";
+
+Every `::TABLE` gets search, filters, totals, column stats, CSV and Excel export. Column roles format the cells; directives before the table add totals, groups, flags and selection.
+
+<details class="gal-data">
+<summary>The sample data every tile on this page uses</summary>
+
+```sql
+CREATE TABLE stores AS SELECT * FROM (VALUES
+  ('North', 'Berlin',  1240000, 0.124, 4.1,  'on plan',  [5, 7, 6, 9, 8, 11]),
+  ('North', 'Hamburg',  980000, 0.098, -2.3, 'at risk',  [6, 5, 5, 4, 5, 4]),
+  ('South', 'Munich',  1410000, 0.141, 6.8,  'on plan',  [4, 6, 7, 8, 9, 10]),
+  ('South', 'Stuttgart', 760000, 0.076, -5.1, 'behind',   [7, 6, 5, 4, 3, 3]),
+  ('West',  'Cologne',  890000, 0.089, 1.2,  'on plan',  [5, 5, 6, 6, 6, 7]),
+  ('West',  'Düsseldorf', 640000, 0.064, -0.4, 'at risk', [4, 4, 5, 4, 4, 4])
+) t(region, store, revenue, margin, growth, status, weekly);
+```
+
+</details>
+
+<div class="gal">
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t1l.src} alt="" loading="lazy" /><img class="lp-dark" src={t1d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Formatted columns
+
+Money, a colour scale, a signed trend and status pills — one role per column.
+
+```sql
+SELECT store ::TABLE, revenue AS "Revenue" ::MONEY, round(100 * margin, 1) AS "Margin %" ::COLORSCALE,
+       growth AS "vs last year" ::TREND, status AS "Status" ::BADGE
+FROM stores ORDER BY revenue DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHN0b3JlcyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ05vcnRoJywgJ0JlcmxpbicsICAxMjQwMDAwLCAwLjEyNCwgNC4xLCAgJ29uIHBsYW4nLCAgWzUsIDcsIDYsIDksIDgsIDExXSksCiAgKCdOb3J0aCcsICdIYW1idXJnJywgIDk4MDAwMCwgMC4wOTgsIC0yLjMsICdhdCByaXNrJywgIFs2LCA1LCA1LCA0LCA1LCA0XSksCiAgKCdTb3V0aCcsICdNdW5pY2gnLCAgMTQxMDAwMCwgMC4xNDEsIDYuOCwgICdvbiBwbGFuJywgIFs0LCA2LCA3LCA4LCA5LCAxMF0pLAogICgnU291dGgnLCAnU3R1dHRnYXJ0JywgNzYwMDAwLCAwLjA3NiwgLTUuMSwgJ2JlaGluZCcsICAgWzcsIDYsIDUsIDQsIDMsIDNdKSwKICAoJ1dlc3QnLCAgJ0NvbG9nbmUnLCAgODkwMDAwLCAwLjA4OSwgMS4yLCAgJ29uIHBsYW4nLCAgWzUsIDUsIDYsIDYsIDYsIDddKSwKICAoJ1dlc3QnLCAgJ0TDvHNzZWxkb3JmJywgNjQwMDAwLCAwLjA2NCwgLTAuNCwgJ2F0IHJpc2snLCBbNCwgNCwgNSwgNCwgNCwgNF0pCikgdChyZWdpb24sIHN0b3JlLCByZXZlbnVlLCBtYXJnaW4sIGdyb3d0aCwgc3RhdHVzLCB3ZWVrbHkpOwoKU0VMRUNUIHN0b3JlIDo6VEFCTEUsIHJldmVudWUgQVMgIlJldmVudWUiIDo6TU9ORVksIHJvdW5kKDEwMCAqIG1hcmdpbiwgMSkgQVMgIk1hcmdpbiAlIiA6OkNPTE9SU0NBTEUsCiAgICAgICBncm93dGggQVMgInZzIGxhc3QgeWVhciIgOjpUUkVORCwgc3RhdHVzIEFTICJTdGF0dXMiIDo6QkFER0UKRlJPTSBzdG9yZXMgT1JERVIgQlkgcmV2ZW51ZSBERVNDOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t2l.src} alt="" loading="lazy" /><img class="lp-dark" src={t2d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Sparklines in cells
+
+A `list()` column becomes a mini chart per row: `::SPARKLINE` or `::SPARKBAR`.
+
+```sql
+SELECT store ::TABLE, revenue AS "Revenue" ::MONEY, weekly AS "Last 6 weeks" ::SPARKLINE, weekly AS "Weekly orders" ::SPARKBAR
+FROM stores ORDER BY revenue DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHN0b3JlcyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ05vcnRoJywgJ0JlcmxpbicsICAxMjQwMDAwLCAwLjEyNCwgNC4xLCAgJ29uIHBsYW4nLCAgWzUsIDcsIDYsIDksIDgsIDExXSksCiAgKCdOb3J0aCcsICdIYW1idXJnJywgIDk4MDAwMCwgMC4wOTgsIC0yLjMsICdhdCByaXNrJywgIFs2LCA1LCA1LCA0LCA1LCA0XSksCiAgKCdTb3V0aCcsICdNdW5pY2gnLCAgMTQxMDAwMCwgMC4xNDEsIDYuOCwgICdvbiBwbGFuJywgIFs0LCA2LCA3LCA4LCA5LCAxMF0pLAogICgnU291dGgnLCAnU3R1dHRnYXJ0JywgNzYwMDAwLCAwLjA3NiwgLTUuMSwgJ2JlaGluZCcsICAgWzcsIDYsIDUsIDQsIDMsIDNdKSwKICAoJ1dlc3QnLCAgJ0NvbG9nbmUnLCAgODkwMDAwLCAwLjA4OSwgMS4yLCAgJ29uIHBsYW4nLCAgWzUsIDUsIDYsIDYsIDYsIDddKSwKICAoJ1dlc3QnLCAgJ0TDvHNzZWxkb3JmJywgNjQwMDAwLCAwLjA2NCwgLTAuNCwgJ2F0IHJpc2snLCBbNCwgNCwgNSwgNCwgNCwgNF0pCikgdChyZWdpb24sIHN0b3JlLCByZXZlbnVlLCBtYXJnaW4sIGdyb3d0aCwgc3RhdHVzLCB3ZWVrbHkpOwoKU0VMRUNUIHN0b3JlIDo6VEFCTEUsIHJldmVudWUgQVMgIlJldmVudWUiIDo6TU9ORVksIHdlZWtseSBBUyAiTGFzdCA2IHdlZWtzIiA6OlNQQVJLTElORSwgd2Vla2x5IEFTICJXZWVrbHkgb3JkZXJzIiA6OlNQQVJLQkFSCkZST00gc3RvcmVzIE9SREVSIEJZIHJldmVudWUgREVTQzsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t3l.src} alt="" loading="lazy" /><img class="lp-dark" src={t3d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Subtotals and totals
+
+`::SUBTOTAL` adds a row per group, `::TOTALS` sets the totals row — in the browser, Excel and the static page.
+
+```sql
+SELECT 'region'::SUBTOTAL;
+SELECT 'Revenue: sum; Margin: mean'::TOTALS;
+SELECT region ::TABLE, store, revenue AS "Revenue" ::MONEY, round(100 * margin, 1) AS "Margin" ::PERCENT
+FROM stores ORDER BY region, revenue DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHN0b3JlcyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ05vcnRoJywgJ0JlcmxpbicsICAxMjQwMDAwLCAwLjEyNCwgNC4xLCAgJ29uIHBsYW4nLCAgWzUsIDcsIDYsIDksIDgsIDExXSksCiAgKCdOb3J0aCcsICdIYW1idXJnJywgIDk4MDAwMCwgMC4wOTgsIC0yLjMsICdhdCByaXNrJywgIFs2LCA1LCA1LCA0LCA1LCA0XSksCiAgKCdTb3V0aCcsICdNdW5pY2gnLCAgMTQxMDAwMCwgMC4xNDEsIDYuOCwgICdvbiBwbGFuJywgIFs0LCA2LCA3LCA4LCA5LCAxMF0pLAogICgnU291dGgnLCAnU3R1dHRnYXJ0JywgNzYwMDAwLCAwLjA3NiwgLTUuMSwgJ2JlaGluZCcsICAgWzcsIDYsIDUsIDQsIDMsIDNdKSwKICAoJ1dlc3QnLCAgJ0NvbG9nbmUnLCAgODkwMDAwLCAwLjA4OSwgMS4yLCAgJ29uIHBsYW4nLCAgWzUsIDUsIDYsIDYsIDYsIDddKSwKICAoJ1dlc3QnLCAgJ0TDvHNzZWxkb3JmJywgNjQwMDAwLCAwLjA2NCwgLTAuNCwgJ2F0IHJpc2snLCBbNCwgNCwgNSwgNCwgNCwgNF0pCikgdChyZWdpb24sIHN0b3JlLCByZXZlbnVlLCBtYXJnaW4sIGdyb3d0aCwgc3RhdHVzLCB3ZWVrbHkpOwoKU0VMRUNUICdyZWdpb24nOjpTVUJUT1RBTDsKU0VMRUNUICdSZXZlbnVlOiBzdW07IE1hcmdpbjogbWVhbic6OlRPVEFMUzsKU0VMRUNUIHJlZ2lvbiA6OlRBQkxFLCBzdG9yZSwgcmV2ZW51ZSBBUyAiUmV2ZW51ZSIgOjpNT05FWSwgcm91bmQoMTAwICogbWFyZ2luLCAxKSBBUyAiTWFyZ2luIiA6OlBFUkNFTlQKRlJPTSBzdG9yZXMgT1JERVIgQlkgcmVnaW9uLCByZXZlbnVlIERFU0M7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t4l.src} alt="" loading="lazy" /><img class="lp-dark" src={t4d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Grouped headers
+
+`::COLGROUP` puts a label over adjacent columns.
+
+```sql
+SELECT 'This year: Revenue, Margin | Change: vs last year'::COLGROUP;
+SELECT store ::TABLE, revenue AS "Revenue" ::MONEY, round(100 * margin, 1) AS "Margin" ::PERCENT, growth AS "vs last year" ::TREND
+FROM stores ORDER BY revenue DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHN0b3JlcyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ05vcnRoJywgJ0JlcmxpbicsICAxMjQwMDAwLCAwLjEyNCwgNC4xLCAgJ29uIHBsYW4nLCAgWzUsIDcsIDYsIDksIDgsIDExXSksCiAgKCdOb3J0aCcsICdIYW1idXJnJywgIDk4MDAwMCwgMC4wOTgsIC0yLjMsICdhdCByaXNrJywgIFs2LCA1LCA1LCA0LCA1LCA0XSksCiAgKCdTb3V0aCcsICdNdW5pY2gnLCAgMTQxMDAwMCwgMC4xNDEsIDYuOCwgICdvbiBwbGFuJywgIFs0LCA2LCA3LCA4LCA5LCAxMF0pLAogICgnU291dGgnLCAnU3R1dHRnYXJ0JywgNzYwMDAwLCAwLjA3NiwgLTUuMSwgJ2JlaGluZCcsICAgWzcsIDYsIDUsIDQsIDMsIDNdKSwKICAoJ1dlc3QnLCAgJ0NvbG9nbmUnLCAgODkwMDAwLCAwLjA4OSwgMS4yLCAgJ29uIHBsYW4nLCAgWzUsIDUsIDYsIDYsIDYsIDddKSwKICAoJ1dlc3QnLCAgJ0TDvHNzZWxkb3JmJywgNjQwMDAwLCAwLjA2NCwgLTAuNCwgJ2F0IHJpc2snLCBbNCwgNCwgNSwgNCwgNCwgNF0pCikgdChyZWdpb24sIHN0b3JlLCByZXZlbnVlLCBtYXJnaW4sIGdyb3d0aCwgc3RhdHVzLCB3ZWVrbHkpOwoKU0VMRUNUICdUaGlzIHllYXI6IFJldmVudWUsIE1hcmdpbiB8IENoYW5nZTogdnMgbGFzdCB5ZWFyJzo6Q09MR1JPVVA7ClNFTEVDVCBzdG9yZSA6OlRBQkxFLCByZXZlbnVlIEFTICJSZXZlbnVlIiA6Ok1PTkVZLCByb3VuZCgxMDAgKiBtYXJnaW4sIDEpIEFTICJNYXJnaW4iIDo6UEVSQ0VOVCwgZ3Jvd3RoIEFTICJ2cyBsYXN0IHllYXIiIDo6VFJFTkQKRlJPTSBzdG9yZXMgT1JERVIgQlkgcmV2ZW51ZSBERVNDOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t5l.src} alt="" loading="lazy" /><img class="lp-dark" src={t5d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Flags and top-n
+
+`::FLAG` marks cells that meet a condition, `::HIGHLIGHT` ranks the top and bottom values.
+
+```sql
+SELECT 'Growth < 0'::FLAG;
+SELECT 'Revenue: top 2'::HIGHLIGHT;
+SELECT store ::TABLE, revenue AS "Revenue" ::MONEY, growth AS "Growth" FROM stores ORDER BY store;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHN0b3JlcyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ05vcnRoJywgJ0JlcmxpbicsICAxMjQwMDAwLCAwLjEyNCwgNC4xLCAgJ29uIHBsYW4nLCAgWzUsIDcsIDYsIDksIDgsIDExXSksCiAgKCdOb3J0aCcsICdIYW1idXJnJywgIDk4MDAwMCwgMC4wOTgsIC0yLjMsICdhdCByaXNrJywgIFs2LCA1LCA1LCA0LCA1LCA0XSksCiAgKCdTb3V0aCcsICdNdW5pY2gnLCAgMTQxMDAwMCwgMC4xNDEsIDYuOCwgICdvbiBwbGFuJywgIFs0LCA2LCA3LCA4LCA5LCAxMF0pLAogICgnU291dGgnLCAnU3R1dHRnYXJ0JywgNzYwMDAwLCAwLjA3NiwgLTUuMSwgJ2JlaGluZCcsICAgWzcsIDYsIDUsIDQsIDMsIDNdKSwKICAoJ1dlc3QnLCAgJ0NvbG9nbmUnLCAgODkwMDAwLCAwLjA4OSwgMS4yLCAgJ29uIHBsYW4nLCAgWzUsIDUsIDYsIDYsIDYsIDddKSwKICAoJ1dlc3QnLCAgJ0TDvHNzZWxkb3JmJywgNjQwMDAwLCAwLjA2NCwgLTAuNCwgJ2F0IHJpc2snLCBbNCwgNCwgNSwgNCwgNCwgNF0pCikgdChyZWdpb24sIHN0b3JlLCByZXZlbnVlLCBtYXJnaW4sIGdyb3d0aCwgc3RhdHVzLCB3ZWVrbHkpOwoKU0VMRUNUICdHcm93dGggPCAwJzo6RkxBRzsKU0VMRUNUICdSZXZlbnVlOiB0b3AgMic6OkhJR0hMSUdIVDsKU0VMRUNUIHN0b3JlIDo6VEFCTEUsIHJldmVudWUgQVMgIlJldmVudWUiIDo6TU9ORVksIGdyb3d0aCBBUyAiR3Jvd3RoIiBGUk9NIHN0b3JlcyBPUkRFUiBCWSBzdG9yZTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t6l.src} alt="" loading="lazy" /><img class="lp-dark" src={t6d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Status rules
+
+`::THRESHOLDS` alone colours the next table's cells by rules per column.
+
+```sql
+SELECT 'Growth: <0:bad; <3:warn; good'::THRESHOLDS;
+SELECT store ::TABLE, revenue AS "Revenue" ::MONEY, growth AS "Growth" FROM stores ORDER BY growth DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHN0b3JlcyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ05vcnRoJywgJ0JlcmxpbicsICAxMjQwMDAwLCAwLjEyNCwgNC4xLCAgJ29uIHBsYW4nLCAgWzUsIDcsIDYsIDksIDgsIDExXSksCiAgKCdOb3J0aCcsICdIYW1idXJnJywgIDk4MDAwMCwgMC4wOTgsIC0yLjMsICdhdCByaXNrJywgIFs2LCA1LCA1LCA0LCA1LCA0XSksCiAgKCdTb3V0aCcsICdNdW5pY2gnLCAgMTQxMDAwMCwgMC4xNDEsIDYuOCwgICdvbiBwbGFuJywgIFs0LCA2LCA3LCA4LCA5LCAxMF0pLAogICgnU291dGgnLCAnU3R1dHRnYXJ0JywgNzYwMDAwLCAwLjA3NiwgLTUuMSwgJ2JlaGluZCcsICAgWzcsIDYsIDUsIDQsIDMsIDNdKSwKICAoJ1dlc3QnLCAgJ0NvbG9nbmUnLCAgODkwMDAwLCAwLjA4OSwgMS4yLCAgJ29uIHBsYW4nLCAgWzUsIDUsIDYsIDYsIDYsIDddKSwKICAoJ1dlc3QnLCAgJ0TDvHNzZWxkb3JmJywgNjQwMDAwLCAwLjA2NCwgLTAuNCwgJ2F0IHJpc2snLCBbNCwgNCwgNSwgNCwgNCwgNF0pCikgdChyZWdpb24sIHN0b3JlLCByZXZlbnVlLCBtYXJnaW4sIGdyb3d0aCwgc3RhdHVzLCB3ZWVrbHkpOwoKU0VMRUNUICdHcm93dGg6IDwwOmJhZDsgPDM6d2FybjsgZ29vZCc6OlRIUkVTSE9MRFM7ClNFTEVDVCBzdG9yZSA6OlRBQkxFLCByZXZlbnVlIEFTICJSZXZlbnVlIiA6Ok1PTkVZLCBncm93dGggQVMgIkdyb3d0aCIgRlJPTSBzdG9yZXMgT1JERVIgQlkgZ3Jvd3RoIERFU0M7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t7l.src} alt="" loading="lazy" /><img class="lp-dark" src={t7d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Selectable rows and links
+
+`::ROWSELECT` makes a click set a variable; a `::LINK` column opens another tab, dashboard or URL.
+
+```sql
+SELECT 'single'::ROWSELECT;
+SELECT store ::TABLE, revenue AS "Revenue" ::MONEY, '?v.store=' || store AS "Details" ::LINK FROM stores ORDER BY revenue DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHN0b3JlcyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ05vcnRoJywgJ0JlcmxpbicsICAxMjQwMDAwLCAwLjEyNCwgNC4xLCAgJ29uIHBsYW4nLCAgWzUsIDcsIDYsIDksIDgsIDExXSksCiAgKCdOb3J0aCcsICdIYW1idXJnJywgIDk4MDAwMCwgMC4wOTgsIC0yLjMsICdhdCByaXNrJywgIFs2LCA1LCA1LCA0LCA1LCA0XSksCiAgKCdTb3V0aCcsICdNdW5pY2gnLCAgMTQxMDAwMCwgMC4xNDEsIDYuOCwgICdvbiBwbGFuJywgIFs0LCA2LCA3LCA4LCA5LCAxMF0pLAogICgnU291dGgnLCAnU3R1dHRnYXJ0JywgNzYwMDAwLCAwLjA3NiwgLTUuMSwgJ2JlaGluZCcsICAgWzcsIDYsIDUsIDQsIDMsIDNdKSwKICAoJ1dlc3QnLCAgJ0NvbG9nbmUnLCAgODkwMDAwLCAwLjA4OSwgMS4yLCAgJ29uIHBsYW4nLCAgWzUsIDUsIDYsIDYsIDYsIDddKSwKICAoJ1dlc3QnLCAgJ0TDvHNzZWxkb3JmJywgNjQwMDAwLCAwLjA2NCwgLTAuNCwgJ2F0IHJpc2snLCBbNCwgNCwgNSwgNCwgNCwgNF0pCikgdChyZWdpb24sIHN0b3JlLCByZXZlbnVlLCBtYXJnaW4sIGdyb3d0aCwgc3RhdHVzLCB3ZWVrbHkpOwoKU0VMRUNUICdzaW5nbGUnOjpST1dTRUxFQ1Q7ClNFTEVDVCBzdG9yZSA6OlRBQkxFLCByZXZlbnVlIEFTICJSZXZlbnVlIiA6Ok1PTkVZLCAnP3Yuc3RvcmU9JyB8fCBzdG9yZSBBUyAiRGV0YWlscyIgOjpMSU5LIEZST00gc3RvcmVzIE9SREVSIEJZIHJldmVudWUgREVTQzsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+</div>

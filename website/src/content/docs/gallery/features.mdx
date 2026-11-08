@@ -1,0 +1,308 @@
+---
+title: "Interactions and special features"
+description: "Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams — each a few lines of SQL."
+tableOfContents: false
+sidebar:
+  order: 50
+---
+
+import t1l from "../../../assets/gallery/features/1-light.webp";
+import t1d from "../../../assets/gallery/features/1-dark.webp";
+import t2l from "../../../assets/gallery/features/2-light.webp";
+import t2d from "../../../assets/gallery/features/2-dark.webp";
+import t3l from "../../../assets/gallery/features/3-light.webp";
+import t3d from "../../../assets/gallery/features/3-dark.webp";
+import t4l from "../../../assets/gallery/features/4-light.webp";
+import t4d from "../../../assets/gallery/features/4-dark.webp";
+import t5l from "../../../assets/gallery/features/5-light.webp";
+import t5d from "../../../assets/gallery/features/5-dark.webp";
+import t6l from "../../../assets/gallery/features/6-light.webp";
+import t6d from "../../../assets/gallery/features/6-dark.webp";
+import t7l from "../../../assets/gallery/features/7-light.webp";
+import t7d from "../../../assets/gallery/features/7-dark.webp";
+import t8l from "../../../assets/gallery/features/8-light.webp";
+import t8d from "../../../assets/gallery/features/8-dark.webp";
+import t9l from "../../../assets/gallery/features/9-light.webp";
+import t9d from "../../../assets/gallery/features/9-dark.webp";
+import t10l from "../../../assets/gallery/features/10-light.webp";
+import t10d from "../../../assets/gallery/features/10-dark.webp";
+import t11l from "../../../assets/gallery/features/11-light.webp";
+import t11d from "../../../assets/gallery/features/11-dark.webp";
+import t12l from "../../../assets/gallery/features/12-light.webp";
+import t12d from "../../../assets/gallery/features/12-dark.webp";
+
+Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams — each a few lines of SQL.
+
+<details class="gal-data">
+<summary>The sample data every tile on this page uses</summary>
+
+```sql
+CREATE TABLE geo AS SELECT * FROM (VALUES
+  ('EU','Germany','Berlin'),('EU','Germany','Munich'),('EU','France','Paris'),('EU','France','Lyon'),
+  ('Americas','USA','New York'),('Americas','USA','Chicago'),('Americas','Canada','Toronto'),
+  ('APAC','Japan','Tokyo'),('APAC','Japan','Osaka'),('APAC','Australia','Sydney')) t(region, country, city);
+CREATE TABLE orders AS
+SELECT DATE '2026-01-05' + (7 * w)::INT AS week, g.region, g.country, g.city, c.channel,
+       (abs(hash(g.city || c.channel || w)) % 60 + 20 + 2 * w) AS revenue
+FROM geo g, (VALUES ('web'), ('app'), ('store')) c(channel), range(26) r(w);
+SELECT 2::COLUMNS;
+```
+
+</details>
+
+<div class="gal">
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t1l.src} alt="" loading="lazy" /><img class="lp-dark" src={t1d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Drill-down
+
+`::DRILL` walks a hierarchy on a click — here after a click on EU; a breadcrumb leads back.
+
+```sql
+SELECT 'region > country > city'::DRILL;
+SELECT CASE getvariable('drill_level') WHEN 'region' THEN region WHEN 'country' THEN country ELSE city END AS place ::XAXIS,
+       sum(revenue) ::BARCHART, ('Revenue by ' || getvariable('drill_level'))::TITLE
+FROM orders WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country)
+GROUP BY 1 ORDER BY 2 DESC;
+SELECT week ::XAXIS, sum(revenue) ::AREACHART, ('Weekly — ' || coalesce(nullif(getvariable('region'), ''), 'all regions'))::TITLE
+FROM orders WHERE getvariable('region') IN ('', region) AND getvariable('country') IN ('', country) GROUP BY 1 ORDER BY 1;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdyZWdpb24gPiBjb3VudHJ5ID4gY2l0eSc6OkRSSUxMOwpTRUxFQ1QgQ0FTRSBnZXR2YXJpYWJsZSgnZHJpbGxfbGV2ZWwnKSBXSEVOICdyZWdpb24nIFRIRU4gcmVnaW9uIFdIRU4gJ2NvdW50cnknIFRIRU4gY291bnRyeSBFTFNFIGNpdHkgRU5EIEFTIHBsYWNlIDo6WEFYSVMsCiAgICAgICBzdW0ocmV2ZW51ZSkgOjpCQVJDSEFSVCwgKCdSZXZlbnVlIGJ5ICcgfHwgZ2V0dmFyaWFibGUoJ2RyaWxsX2xldmVsJykpOjpUSVRMRQpGUk9NIG9yZGVycyBXSEVSRSBnZXR2YXJpYWJsZSgncmVnaW9uJykgSU4gKCcnLCByZWdpb24pIEFORCBnZXR2YXJpYWJsZSgnY291bnRyeScpIElOICgnJywgY291bnRyeSkKR1JPVVAgQlkgMSBPUkRFUiBCWSAyIERFU0M7ClNFTEVDVCB3ZWVrIDo6WEFYSVMsIHN1bShyZXZlbnVlKSA6OkFSRUFDSEFSVCwgKCdXZWVrbHkg4oCUICcgfHwgY29hbGVzY2UobnVsbGlmKGdldHZhcmlhYmxlKCdyZWdpb24nKSwgJycpLCAnYWxsIHJlZ2lvbnMnKSk6OlRJVExFCkZST00gb3JkZXJzIFdIRVJFIGdldHZhcmlhYmxlKCdyZWdpb24nKSBJTiAoJycsIHJlZ2lvbikgQU5EIGdldHZhcmlhYmxlKCdjb3VudHJ5JykgSU4gKCcnLCBjb3VudHJ5KSBHUk9VUCBCWSAxIE9SREVSIEJZIDE7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t2l.src} alt="" loading="lazy" /><img class="lp-dark" src={t2d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Named selections
+
+`::SELECT_AS` makes a click set a variable of its own; selections combine.
+
+```sql
+SELECT 'regions multi'::SELECT_AS;
+SELECT region ::XAXIS, sum(revenue) ::BARCHART, 'Regions — click to select'::TITLE FROM orders GROUP BY 1 ORDER BY 2 DESC;
+SELECT channel ::CATEGORY, sum(revenue) ::DONUTCHART, 'Channels in the selection'::TITLE FROM orders
+WHERE len(getvariable('regions')) = 0 OR list_contains(getvariable('regions'), region) GROUP BY 1 ORDER BY 2 DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdyZWdpb25zIG11bHRpJzo6U0VMRUNUX0FTOwpTRUxFQ1QgcmVnaW9uIDo6WEFYSVMsIHN1bShyZXZlbnVlKSA6OkJBUkNIQVJULCAnUmVnaW9ucyDigJQgY2xpY2sgdG8gc2VsZWN0Jzo6VElUTEUgRlJPTSBvcmRlcnMgR1JPVVAgQlkgMSBPUkRFUiBCWSAyIERFU0M7ClNFTEVDVCBjaGFubmVsIDo6Q0FURUdPUlksIHN1bShyZXZlbnVlKSA6OkRPTlVUQ0hBUlQsICdDaGFubmVscyBpbiB0aGUgc2VsZWN0aW9uJzo6VElUTEUgRlJPTSBvcmRlcnMKV0hFUkUgbGVuKGdldHZhcmlhYmxlKCdyZWdpb25zJykpID0gMCBPUiBsaXN0X2NvbnRhaW5zKGdldHZhcmlhYmxlKCdyZWdpb25zJyksIHJlZ2lvbikgR1JPVVAgQlkgMSBPUkRFUiBCWSAyIERFU0M7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t3l.src} alt="" loading="lazy" /><img class="lp-dark" src={t3d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Treemap
+
+Part-to-whole tiles nested by `::CATEGORY`; with a `::DRILL` they drill like bars.
+
+```sql
+SELECT 12::COL;
+SELECT country ::XAXIS, region ::CATEGORY, sum(revenue) ::TREEMAP, 'Revenue by region and country'::TITLE FROM orders GROUP BY ALL;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCBjb3VudHJ5IDo6WEFYSVMsIHJlZ2lvbiA6OkNBVEVHT1JZLCBzdW0ocmV2ZW51ZSkgOjpUUkVFTUFQLCAnUmV2ZW51ZSBieSByZWdpb24gYW5kIGNvdW50cnknOjpUSVRMRSBGUk9NIG9yZGVycyBHUk9VUCBCWSBBTEw7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t4l.src} alt="" loading="lazy" /><img class="lp-dark" src={t4d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Alternative views
+
+Consecutive `::VIEW` sections share a switcher: the same numbers as lines, bars or a table.
+
+```sql
+SELECT 12::COL;
+SELECT 'Lines' AS shape ::VIEW;
+SELECT week ::XAXIS, region ::CATEGORY, sum(revenue) ::LINECHART, 'Revenue by region'::TITLE FROM orders GROUP BY ALL ORDER BY 1;
+SELECT 'Bars' ::VIEW;
+SELECT week ::XAXIS, region ::CATEGORY, sum(revenue) ::BARCHART_STACKED, 'Revenue by region'::TITLE FROM orders GROUP BY ALL ORDER BY 1;
+SELECT 'Table' ::VIEW;
+SELECT region ::TABLE, sum(revenue) AS "Revenue" ::MONEY FROM orders GROUP BY 1 ORDER BY 2 DESC;
+SELECT 1::ENDVIEW;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCAnTGluZXMnIEFTIHNoYXBlIDo6VklFVzsKU0VMRUNUIHdlZWsgOjpYQVhJUywgcmVnaW9uIDo6Q0FURUdPUlksIHN1bShyZXZlbnVlKSA6OkxJTkVDSEFSVCwgJ1JldmVudWUgYnkgcmVnaW9uJzo6VElUTEUgRlJPTSBvcmRlcnMgR1JPVVAgQlkgQUxMIE9SREVSIEJZIDE7ClNFTEVDVCAnQmFycycgOjpWSUVXOwpTRUxFQ1Qgd2VlayA6OlhBWElTLCByZWdpb24gOjpDQVRFR09SWSwgc3VtKHJldmVudWUpIDo6QkFSQ0hBUlRfU1RBQ0tFRCwgJ1JldmVudWUgYnkgcmVnaW9uJzo6VElUTEUgRlJPTSBvcmRlcnMgR1JPVVAgQlkgQUxMIE9SREVSIEJZIDE7ClNFTEVDVCAnVGFibGUnIDo6VklFVzsKU0VMRUNUIHJlZ2lvbiA6OlRBQkxFLCBzdW0ocmV2ZW51ZSkgQVMgIlJldmVudWUiIDo6TU9ORVkgRlJPTSBvcmRlcnMgR1JPVVAgQlkgMSBPUkRFUiBCWSAyIERFU0M7ClNFTEVDVCAxOjpFTkRWSUVXOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t5l.src} alt="" loading="lazy" /><img class="lp-dark" src={t5d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A composed figure
+
+`::FIGURE` lays several charts out as one picture with aligned axes and panel tags.
+
+```sql
+SELECT 12::COL;
+SELECT 'Revenue, three ways' ::FIGURE, '(hist / weekly) | regions' ::LAYOUT, '2,1' ::WIDTHS, 'A' ::TAG_LEVELS;
+-- @name hist
+SELECT revenue ::HISTOGRAM FROM orders;
+-- @name weekly
+SELECT week ::XAXIS, sum(revenue) ::LINECHART FROM orders GROUP BY 1 ORDER BY 1;
+-- @name regions
+SELECT region ::XAXIS, sum(revenue) ::BARCHART FROM orders GROUP BY 1 ORDER BY 2 DESC;
+SELECT 1 ::ENDFIGURE;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCAnUmV2ZW51ZSwgdGhyZWUgd2F5cycgOjpGSUdVUkUsICcoaGlzdCAvIHdlZWtseSkgfCByZWdpb25zJyA6OkxBWU9VVCwgJzIsMScgOjpXSURUSFMsICdBJyA6OlRBR19MRVZFTFM7Ci0tIEBuYW1lIGhpc3QKU0VMRUNUIHJldmVudWUgOjpISVNUT0dSQU0gRlJPTSBvcmRlcnM7Ci0tIEBuYW1lIHdlZWtseQpTRUxFQ1Qgd2VlayA6OlhBWElTLCBzdW0ocmV2ZW51ZSkgOjpMSU5FQ0hBUlQgRlJPTSBvcmRlcnMgR1JPVVAgQlkgMSBPUkRFUiBCWSAxOwotLSBAbmFtZSByZWdpb25zClNFTEVDVCByZWdpb24gOjpYQVhJUywgc3VtKHJldmVudWUpIDo6QkFSQ0hBUlQgRlJPTSBvcmRlcnMgR1JPVVAgQlkgMSBPUkRFUiBCWSAyIERFU0M7ClNFTEVDVCAxIDo6RU5ERklHVVJFOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t6l.src} alt="" loading="lazy" /><img class="lp-dark" src={t6d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Annotations from data
+
+Event lines, shaded ranges, callouts and a target line, read per row from SQL.
+
+```sql
+SELECT 12::COL;
+SELECT week ::XAXIS, sum(revenue) ::LINECHART,
+       CASE WHEN week = DATE '2026-03-02' THEN week END ::XLINE, CASE WHEN week = DATE '2026-03-02' THEN 'launch' END ::XLINE_LABEL,
+       CASE WHEN week = DATE '2026-05-04' THEN week END ::XBAND_FROM, CASE WHEN week = DATE '2026-05-04' THEN DATE '2026-05-25' END ::XBAND_TO,
+       CASE WHEN week = DATE '2026-05-04' THEN 'promotion' END ::XBAND_LABEL,
+       CASE WHEN sum(revenue) = max(sum(revenue)) OVER () THEN 'record week' END ::ANNOTATE,
+       2400 ::REFLINE, 'target' ::REFLINE_LABEL, 'The launch lifted revenue; the promotion held it'::TITLE
+FROM orders GROUP BY week ORDER BY week;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCB3ZWVrIDo6WEFYSVMsIHN1bShyZXZlbnVlKSA6OkxJTkVDSEFSVCwKICAgICAgIENBU0UgV0hFTiB3ZWVrID0gREFURSAnMjAyNi0wMy0wMicgVEhFTiB3ZWVrIEVORCA6OlhMSU5FLCBDQVNFIFdIRU4gd2VlayA9IERBVEUgJzIwMjYtMDMtMDInIFRIRU4gJ2xhdW5jaCcgRU5EIDo6WExJTkVfTEFCRUwsCiAgICAgICBDQVNFIFdIRU4gd2VlayA9IERBVEUgJzIwMjYtMDUtMDQnIFRIRU4gd2VlayBFTkQgOjpYQkFORF9GUk9NLCBDQVNFIFdIRU4gd2VlayA9IERBVEUgJzIwMjYtMDUtMDQnIFRIRU4gREFURSAnMjAyNi0wNS0yNScgRU5EIDo6WEJBTkRfVE8sCiAgICAgICBDQVNFIFdIRU4gd2VlayA9IERBVEUgJzIwMjYtMDUtMDQnIFRIRU4gJ3Byb21vdGlvbicgRU5EIDo6WEJBTkRfTEFCRUwsCiAgICAgICBDQVNFIFdIRU4gc3VtKHJldmVudWUpID0gbWF4KHN1bShyZXZlbnVlKSkgT1ZFUiAoKSBUSEVOICdyZWNvcmQgd2VlaycgRU5EIDo6QU5OT1RBVEUsCiAgICAgICAyNDAwIDo6UkVGTElORSwgJ3RhcmdldCcgOjpSRUZMSU5FX0xBQkVMLCAnVGhlIGxhdW5jaCBsaWZ0ZWQgcmV2ZW51ZTsgdGhlIHByb21vdGlvbiBoZWxkIGl0Jzo6VElUTEUKRlJPTSBvcmRlcnMgR1JPVVAgQlkgd2VlayBPUkRFUiBCWSB3ZWVrOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t7l.src} alt="" loading="lazy" /><img class="lp-dark" src={t7d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Small multiples
+
+`::FACET` draws one panel per value on shared axes.
+
+```sql
+SELECT 12::COL;
+SELECT week ::XAXIS, channel ::CATEGORY, sum(revenue) ::AREACHART_STACKED, region ::FACET, 'Revenue by channel, per region'::TITLE
+FROM orders GROUP BY ALL ORDER BY 1;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCB3ZWVrIDo6WEFYSVMsIGNoYW5uZWwgOjpDQVRFR09SWSwgc3VtKHJldmVudWUpIDo6QVJFQUNIQVJUX1NUQUNLRUQsIHJlZ2lvbiA6OkZBQ0VULCAnUmV2ZW51ZSBieSBjaGFubmVsLCBwZXIgcmVnaW9uJzo6VElUTEUKRlJPTSBvcmRlcnMgR1JPVVAgQlkgQUxMIE9SREVSIEJZIDE7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t8l.src} alt="" loading="lazy" /><img class="lp-dark" src={t8d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A strip under a chart
+
+`::TRACK` draws ticks, lanes or a small line under the chart above, on its x axis.
+
+```sql
+SELECT 12::COL;
+SELECT week ::XAXIS, sum(revenue) ::LINECHART, 'Revenue with campaign weeks underneath'::TITLE FROM orders GROUP BY 1 ORDER BY 1;
+SELECT week ::XAXIS, 'Campaigns' ::TRACK, 'campaign' ::LABEL FROM orders WHERE week IN (DATE '2026-02-02', DATE '2026-03-16', DATE '2026-05-11', DATE '2026-06-08') GROUP BY 1;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCB3ZWVrIDo6WEFYSVMsIHN1bShyZXZlbnVlKSA6OkxJTkVDSEFSVCwgJ1JldmVudWUgd2l0aCBjYW1wYWlnbiB3ZWVrcyB1bmRlcm5lYXRoJzo6VElUTEUgRlJPTSBvcmRlcnMgR1JPVVAgQlkgMSBPUkRFUiBCWSAxOwpTRUxFQ1Qgd2VlayA6OlhBWElTLCAnQ2FtcGFpZ25zJyA6OlRSQUNLLCAnY2FtcGFpZ24nIDo6TEFCRUwgRlJPTSBvcmRlcnMgV0hFUkUgd2VlayBJTiAoREFURSAnMjAyNi0wMi0wMicsIERBVEUgJzIwMjYtMDMtMTYnLCBEQVRFICcyMDI2LTA1LTExJywgREFURSAnMjAyNi0wNi0wOCcpIEdST1VQIEJZIDE7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t9l.src} alt="" loading="lazy" /><img class="lp-dark" src={t9d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Guided steps
+
+`::GUIDE_STEP` turns sections into a sequence with Back / Next — onboarding, tutorials, wizards.
+
+```sql
+SELECT 12::COL;
+SELECT 'Where the revenue comes from' AS tour ::GUIDE_STEP;
+SELECT 'Step one looks at **regions**. Next shows the channels, then the trend.'::MARKDOWN;
+SELECT region ::XAXIS, sum(revenue) ::BARCHART, 'Revenue by region'::TITLE FROM orders GROUP BY 1 ORDER BY 2 DESC;
+SELECT 'Channels' ::GUIDE_STEP;
+SELECT channel ::XAXIS, sum(revenue) ::BARCHART FROM orders GROUP BY 1 ORDER BY 2 DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCAnV2hlcmUgdGhlIHJldmVudWUgY29tZXMgZnJvbScgQVMgdG91ciA6OkdVSURFX1NURVA7ClNFTEVDVCAnU3RlcCBvbmUgbG9va3MgYXQgKipyZWdpb25zKiouIE5leHQgc2hvd3MgdGhlIGNoYW5uZWxzLCB0aGVuIHRoZSB0cmVuZC4nOjpNQVJLRE9XTjsKU0VMRUNUIHJlZ2lvbiA6OlhBWElTLCBzdW0ocmV2ZW51ZSkgOjpCQVJDSEFSVCwgJ1JldmVudWUgYnkgcmVnaW9uJzo6VElUTEUgRlJPTSBvcmRlcnMgR1JPVVAgQlkgMSBPUkRFUiBCWSAyIERFU0M7ClNFTEVDVCAnQ2hhbm5lbHMnIDo6R1VJREVfU1RFUDsKU0VMRUNUIGNoYW5uZWwgOjpYQVhJUywgc3VtKHJldmVudWUpIDo6QkFSQ0hBUlQgRlJPTSBvcmRlcnMgR1JPVVAgQlkgMSBPUkRFUiBCWSAyIERFU0M7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t10l.src} alt="" loading="lazy" /><img class="lp-dark" src={t10d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Show a panel only when …
+
+`::SHOW_IF` hides the next panel until a condition holds — here a toggle.
+
+```sql
+SELECT true AS details ::TOGGLE, 'Show the detail table'::LABEL;
+SELECT getvariable('details') ::SHOW_IF;
+SELECT city ::TABLE, sum(revenue) AS "Revenue" ::MONEY FROM orders GROUP BY 1 ORDER BY 2 DESC LIMIT 6;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIHRydWUgQVMgZGV0YWlscyA6OlRPR0dMRSwgJ1Nob3cgdGhlIGRldGFpbCB0YWJsZSc6OkxBQkVMOwpTRUxFQ1QgZ2V0dmFyaWFibGUoJ2RldGFpbHMnKSA6OlNIT1dfSUY7ClNFTEVDVCBjaXR5IDo6VEFCTEUsIHN1bShyZXZlbnVlKSBBUyAiUmV2ZW51ZSIgOjpNT05FWSBGUk9NIG9yZGVycyBHUk9VUCBCWSAxIE9SREVSIEJZIDIgREVTQyBMSU1JVCA2Owo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t11l.src} alt="" loading="lazy" /><img class="lp-dark" src={t11d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Text with live values
+
+`::MARKDOWN` fills `{{col:fmt}}` from its own row, renders formulas and callouts.
+
+```sql
+SELECT 12::COL;
+SELECT 'Revenue so far is **{{total:money}}**, {{share:percent}} of it from the web. Growth follows $r_t = \frac{y_t}{y_{t-1}} - 1$.' ::MARKDOWN,
+       'note' ::CALLOUT, sum(revenue) AS total, round(100 * sum(revenue) FILTER (WHERE channel = 'web') / sum(revenue), 1) AS share FROM orders;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCAnUmV2ZW51ZSBzbyBmYXIgaXMgKip7e3RvdGFsOm1vbmV5fX0qKiwge3tzaGFyZTpwZXJjZW50fX0gb2YgaXQgZnJvbSB0aGUgd2ViLiBHcm93dGggZm9sbG93cyAkcl90ID0gXGZyYWN7eV90fXt5X3t0LTF9fSAtIDEkLicgOjpNQVJLRE9XTiwKICAgICAgICdub3RlJyA6OkNBTExPVVQsIHN1bShyZXZlbnVlKSBBUyB0b3RhbCwgcm91bmQoMTAwICogc3VtKHJldmVudWUpIEZJTFRFUiAoV0hFUkUgY2hhbm5lbCA9ICd3ZWInKSAvIHN1bShyZXZlbnVlKSwgMSkgQVMgc2hhcmUgRlJPTSBvcmRlcnM7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t12l.src} alt="" loading="lazy" /><img class="lp-dark" src={t12d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A process diagram
+
+`::DIAGRAM` draws nodes and edges from rows: a pipeline, a lineage, a process in swimlanes.
+
+```sql
+SELECT 12::COL;
+SELECT id ::DIAGRAM, label ::LABEL, up ::UPSTREAM, lane ::LANE, 'From the order feed to the dashboard'::TITLE
+FROM (VALUES ('feed', 'Order feed', []::VARCHAR[], 'Ingest'), ('clean', 'Clean and dedupe', ['feed'], 'Ingest'),
+             ('fx', 'FX rates', []::VARCHAR[], 'Ingest'), ('model', 'Revenue model', ['clean', 'fx'], 'Model'),
+             ('fc', 'Forecast', ['model'], 'Model'), ('dash', 'Dashboard', ['model', 'fc'], 'Serve')) t(id, label, up, lane);
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCBpZCA6OkRJQUdSQU0sIGxhYmVsIDo6TEFCRUwsIHVwIDo6VVBTVFJFQU0sIGxhbmUgOjpMQU5FLCAnRnJvbSB0aGUgb3JkZXIgZmVlZCB0byB0aGUgZGFzaGJvYXJkJzo6VElUTEUKRlJPTSAoVkFMVUVTICgnZmVlZCcsICdPcmRlciBmZWVkJywgW106OlZBUkNIQVJbXSwgJ0luZ2VzdCcpLCAoJ2NsZWFuJywgJ0NsZWFuIGFuZCBkZWR1cGUnLCBbJ2ZlZWQnXSwgJ0luZ2VzdCcpLAogICAgICAgICAgICAgKCdmeCcsICdGWCByYXRlcycsIFtdOjpWQVJDSEFSW10sICdJbmdlc3QnKSwgKCdtb2RlbCcsICdSZXZlbnVlIG1vZGVsJywgWydjbGVhbicsICdmeCddLCAnTW9kZWwnKSwKICAgICAgICAgICAgICgnZmMnLCAnRm9yZWNhc3QnLCBbJ21vZGVsJ10sICdNb2RlbCcpLCAoJ2Rhc2gnLCAnRGFzaGJvYXJkJywgWydtb2RlbCcsICdmYyddLCAnU2VydmUnKSkgdChpZCwgbGFiZWwsIHVwLCBsYW5lKTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+</div>

@@ -802,7 +802,15 @@ pub(crate) fn render_pareto(
     ];
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("x").y("y"))
-        .geom_pareto()
+        // #1027: the theme's colours — bars in the first palette slot, the
+        // cumulative line in the second (GeomPareto's defaults are fixed
+        // blue / orange whatever the theme)
+        .geom_pareto_with(ggplot_rs::geom::pareto::GeomPareto {
+            fill: o.theme.color(0),
+            color: o.theme.color(0),
+            line_color: o.theme.color(1),
+            ..Default::default()
+        })
         .xlab("")
         .ylab("")
         .theme(chart_theme(o, 11.0))

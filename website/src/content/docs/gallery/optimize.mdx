@@ -1,0 +1,127 @@
+---
+title: "What anofox-optimize draws"
+description: "The plots anofox-visualization draws from anofox-optimize's results — one anofox_plot call each."
+tableOfContents: false
+sidebar:
+  label: anofox-optimize
+  order: 13
+---
+
+import p0 from "../../../assets/plots/optimize/pack_best_of.svg?url";
+import p1 from "../../../assets/plots/optimize/wave_best_of.svg?url";
+import p2 from "../../../assets/plots/optimize/schedule_best_of.svg?url";
+import p3 from "../../../assets/plots/optimize/sequence_best_of.svg?url";
+import p4 from "../../../assets/plots/optimize/knapsack_best_of.svg?url";
+import p5 from "../../../assets/plots/optimize/assortment_best_of.svg?url";
+import p6 from "../../../assets/plots/optimize/portfolio_best_of.svg?url";
+import p7 from "../../../assets/plots/optimize/schedule_compare.svg?url";
+
+Each picture is one `anofox_plot(...)` call on a result table of anofox-optimize, drawn in CI on every push from the extension's latest build. [Install and use it →](../../integrate/optimize/)
+
+<div class="gal gal-plots">
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p0} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Bin packing
+
+Items stacked per container against the capacity line, drawn with roles from the solver's STRUCT.
+
+<code class="gal-call">anofox_render (stacked bars) · anofox_optimize_pack_best_of</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p1} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Pick waves
+
+Order lines per wave, coloured by priority, against the wave size.
+
+<code class="gal-call">anofox_render (stacked bars) · anofox_optimize_wave_best_of</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p2} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A schedule
+
+Tasks per resource as a Gantt chart, late tasks red with a connector to the due date.
+
+<code class="gal-call">anofox_plot_schedule · anofox_optimize_schedule_best_of</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p3} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A route
+
+The optimised visiting order drawn on a map.
+
+<code class="gal-call">anofox_render (::MAP) · anofox_optimize_sequence_best_of</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p4} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### What fits the carrier
+
+Selected shipments against the ones left out.
+
+<code class="gal-call">anofox_render (bars) · anofox_optimize_knapsack_best_of</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p5} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Which products to list
+
+Listed against unlisted products by expected margin.
+
+<code class="gal-call">anofox_render (bars) · anofox_optimize_assortment_best_of</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p6} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Portfolio weights
+
+The weight per asset of the optimised portfolio.
+
+<code class="gal-call">anofox_render (bars) · anofox_optimize_portfolio_best_of</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p7} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Algorithms compared
+
+Makespan and weighted tardiness for each scheduling rule.
+
+<code class="gal-call">anofox_plot_summary · six anofox_optimize_schedule_* rules</code>
+
+</div>
+</div>
+
+</div>

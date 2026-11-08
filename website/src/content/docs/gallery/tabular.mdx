@@ -1,0 +1,127 @@
+---
+title: "What anofox-tabular draws"
+description: "The plots anofox-visualization draws from anofox-tabular's results — one anofox_plot call each."
+tableOfContents: false
+sidebar:
+  label: anofox-tabular
+  order: 12
+---
+
+import p0 from "../../../assets/plots/tabular/checks_board.svg?url";
+import p1 from "../../../assets/plots/tabular/null_rate.svg?url";
+import p2 from "../../../assets/plots/tabular/checks_side_by_side.svg?url";
+import p3 from "../../../assets/plots/tabular/profile_correlations.svg?url";
+import p4 from "../../../assets/plots/tabular/profile_summary.svg?url";
+import p5 from "../../../assets/plots/tabular/isolation_forest-scores-.svg?url";
+import p6 from "../../../assets/plots/tabular/dbscan-clusters-.svg?url";
+import p7 from "../../../assets/plots/tabular/pii_scan_table.svg?url";
+
+Each picture is one `anofox_plot(...)` call on a result table of anofox-tabular, drawn in CI on every push from the extension's latest build. [Install and use it →](../../integrate/tabular/)
+
+<div class="gal gal-plots">
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p0} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A data-quality board
+
+One panel per check: the value against its acceptance band, coloured by status.
+
+<code class="gal-call">anofox_plot_checks · anofox_tab_run_checks</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p1} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### One check
+
+A single check's value against its threshold.
+
+<code class="gal-call">anofox_plot_checks · null_rate</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p2} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Checks compared
+
+Several one-row checks as one summary.
+
+<code class="gal-call">anofox_plot_summary · compliance, match_rate, null_rate, …</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p3} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Correlation matrix
+
+A profile's correlations on a diverging scale, values in the cells.
+
+<code class="gal-call">anofox_plot_matrix · anofox_tab_profile_correlations</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p4} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Table profile
+
+Row and column counts, null rates and duplicates at a glance.
+
+<code class="gal-call">anofox_plot_summary · anofox_tab_profile_summary</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p5} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Anomaly scores
+
+Isolation-forest scores per row, anomalies coloured.
+
+<code class="gal-call">anofox_render · anofox_tab_isolation_forest</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p6} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Clusters and noise
+
+DBSCAN core points and noise per cluster.
+
+<code class="gal-call">anofox_render · anofox_tab_dbscan</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p7} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Personal data found
+
+PII matches per column and kind (e-mail, phone, …).
+
+<code class="gal-call">anofox_render · anofox_tab_pii_scan_table</code>
+
+</div>
+</div>
+
+</div>
