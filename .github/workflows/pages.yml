@@ -97,11 +97,27 @@ jobs:
         run: |
           npm ci --no-audit --no-fund
           npm run build
+      # #1017 (owner 11-08): the website becomes the main page — built from
+      # the latest release's tag at / (its builder at /app/), once that tag
+      # has a website/; until then / stays the release's builder.
+      - name: Build the release's website (→ release-site/website/dist)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SITE_BASE: /anofox-visualization
+        run: |
+          tag="$(gh release view --json tagName -q .tagName)"
+          git worktree add release-site "$tag"
+          if [ -f release-site/website/package.json ]; then
+            (cd release-site/website && npm ci --no-audit --no-fund && npm run build)
+          else
+            echo "release $tag has no website/: / stays its builder"
+          fi
       - name: Site (latest release at /, master at /next/)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: scripts/release/pages-site.sh web site website/dist
+        run: scripts/release/pages-site.sh web site website/dist release-site/website/dist
       - name: DuckDB extension repository (latest release → site/extensions)
         env:
           GH_TOKEN: ${{ github.token }}
