@@ -7844,10 +7844,40 @@ function ctxWith(extra) {
 // #996: a sideways-scrolling table fades out at its right edge while more
 // columns lie beyond it, so a cut-off column reads as "scroll", not as a
 // clipped cell (the cells' own backgrounds would hide a background cue)
+//
+// #1026: before that, a table only a little too wide tightens its cells'
+// horizontal padding (.dp-tight) to fit, so a short overflow doesn't fade out
+// the last column (a status pill read as clipped); it scrolls only when even
+// the tight table is too wide.
+function fitTight(el) {
+  const t = el.querySelector(":scope > table.dp-table");
+  if (!t || !t.dataset.minNormal) return;
+  t.classList.remove("dp-tight");
+  t.style.minWidth = t.dataset.minNormal;
+  if (el.scrollWidth > el.clientWidth + 2) {
+    t.classList.add("dp-tight");
+    t.style.minWidth = t.dataset.minTight;
+  }
+  el.classList.toggle("dp-more-r", el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+}
 function watchMoreRight(el) {
-  const upd = () => el.classList.toggle("dp-more-r", el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+  let lastW = -1;
+  const upd = () => {
+    if (el.clientWidth !== lastW) {
+      lastW = el.clientWidth;
+      fitTight(el);
+    }
+    el.classList.toggle("dp-more-r", el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+  };
   el.addEventListener("scroll", upd, { passive: true });
-  if (typeof ResizeObserver !== "undefined") new ResizeObserver(upd).observe(el);
+  if (typeof ResizeObserver !== "undefined") {
+    // the table too: its width changes without the card's (a web font
+    // arriving, a re-render), and the fade must follow
+    const ro = new ResizeObserver(upd);
+    ro.observe(el);
+    const t = el.querySelector(":scope > table");
+    if (t) ro.observe(t);
+  }
   requestAnimationFrame(upd);
 }
 
@@ -16397,6 +16427,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // and scrolling never shift them. Long text is capped (it wraps); the slack of
   // a wide card is shared in proportion, never absorbed by one column.
   const PAD_CH = 3.5; // the cell's horizontal padding
+  const PAD_TIGHT_CH = 1.6; // … in a .dp-tight table (#1026)
   let natW = null;
   const chars = (x) => [...String(x)].length;
   const measure = () => {
@@ -16463,6 +16494,11 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
     // never narrower than the content (the card scrolls sideways instead), and
     // at most ~1.6× its natural width, so a few columns don't spread over a wide card
     t.style.minWidth = `${minTotal.toFixed(1)}ch`;
+    // #1026: a table that overflows its card by a little tightens its cells'
+    // padding first (watchMoreRight); only past that does it scroll sideways
+    t.dataset.minNormal = `${minTotal.toFixed(1)}ch`;
+    t.dataset.minTight = `${(minTotal - visCols().length * (PAD_CH - PAD_TIGHT_CH)).toFixed(1)}ch`;
+    if (t.parentElement && t.parentElement.isConnected) fitTight(t.parentElement);
     wrap.style.maxWidth = `max(44rem, ${(total * 1.6 * 0.84).toFixed(1)}ch)`;
   }
   function renderHead() {
