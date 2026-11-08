@@ -1,0 +1,192 @@
+---
+title: "KPIs"
+description: "A KPI is one statement with a value column; more columns of the same statement add the change, a trend, a goal and status colours."
+tableOfContents: false
+sidebar:
+  order: 50
+---
+
+import t1l from "../../../assets/gallery/kpis/1-light.webp";
+import t1d from "../../../assets/gallery/kpis/1-dark.webp";
+import t2l from "../../../assets/gallery/kpis/2-light.webp";
+import t2d from "../../../assets/gallery/kpis/2-dark.webp";
+import t3l from "../../../assets/gallery/kpis/3-light.webp";
+import t3d from "../../../assets/gallery/kpis/3-dark.webp";
+import t4l from "../../../assets/gallery/kpis/4-light.webp";
+import t4d from "../../../assets/gallery/kpis/4-dark.webp";
+import t5l from "../../../assets/gallery/kpis/5-light.webp";
+import t5d from "../../../assets/gallery/kpis/5-dark.webp";
+import t6l from "../../../assets/gallery/kpis/6-light.webp";
+import t6d from "../../../assets/gallery/kpis/6-dark.webp";
+import t7l from "../../../assets/gallery/kpis/7-light.webp";
+import t7d from "../../../assets/gallery/kpis/7-dark.webp";
+import t8l from "../../../assets/gallery/kpis/8-light.webp";
+import t8d from "../../../assets/gallery/kpis/8-dark.webp";
+
+A KPI is one statement with a value column; more columns of the same statement add the change, a trend, a goal and status colours.
+
+<details class="gal-data">
+<summary>The sample data every tile on this page uses</summary>
+
+```sql
+CREATE TABLE daily AS
+SELECT DATE '2026-09-01' + INTERVAL (d) DAY AS day, round(9000 + 40 * d + 900 * sin(d / 3.0)) AS revenue, 120 + (d * 7) % 23 AS tickets
+FROM range(0, 60) r(d);
+```
+
+</details>
+
+<div class="gal">
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t1l.src} alt="" loading="lazy" /><img class="lp-dark" src={t1d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A number and a caption
+
+`::METRIC`, `::MONEY`, `::PERCENT` or `::COMPACT` for the value, `::LABEL` for the caption.
+
+```sql
+SELECT sum(revenue) ::MONEY, 'Revenue, last 60 days'::LABEL FROM daily;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUIHN1bShyZXZlbnVlKSA6Ok1PTkVZLCAnUmV2ZW51ZSwgbGFzdCA2MCBkYXlzJzo6TEFCRUwgRlJPTSBkYWlseTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t2l.src} alt="" loading="lazy" /><img class="lp-dark" src={t2d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Change against a period
+
+`::DELTA` is the comparison value: ▲ / ▼ and the change, green when it moves the good way.
+
+```sql
+SELECT sum(revenue) FILTER (WHERE day >= DATE '2026-10-01') ::MONEY,
+       sum(revenue) FILTER (WHERE day < DATE '2026-10-01') ::DELTA, 'both'::DELTA_FORMAT, 'vs September'::DELTA_LABEL,
+       'Revenue in October'::LABEL FROM daily;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUIHN1bShyZXZlbnVlKSBGSUxURVIgKFdIRVJFIGRheSA+PSBEQVRFICcyMDI2LTEwLTAxJykgOjpNT05FWSwKICAgICAgIHN1bShyZXZlbnVlKSBGSUxURVIgKFdIRVJFIGRheSA8IERBVEUgJzIwMjYtMTAtMDEnKSA6OkRFTFRBLCAnYm90aCc6OkRFTFRBX0ZPUk1BVCwgJ3ZzIFNlcHRlbWJlcic6OkRFTFRBX0xBQkVMLAogICAgICAgJ1JldmVudWUgaW4gT2N0b2Jlcic6OkxBQkVMIEZST00gZGFpbHk7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t3l.src} alt="" loading="lazy" /><img class="lp-dark" src={t3d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A trend line
+
+`::SPARKLINE` takes a `list()` — the last point is marked.
+
+```sql
+SELECT sum(revenue) ::MONEY, list(revenue ORDER BY day) ::SPARKLINE, 'Revenue'::LABEL FROM daily;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUIHN1bShyZXZlbnVlKSA6Ok1PTkVZLCBsaXN0KHJldmVudWUgT1JERVIgQlkgZGF5KSA6OlNQQVJLTElORSwgJ1JldmVudWUnOjpMQUJFTCBGUk9NIGRhaWx5Owo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t4l.src} alt="" loading="lazy" /><img class="lp-dark" src={t4d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Progress to a goal
+
+`::GOAL` draws a progress bar and says how far it is.
+
+```sql
+SELECT sum(revenue) ::MONEY, 750000 ::GOAL, 'Revenue against the quarter goal'::LABEL FROM daily;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUIHN1bShyZXZlbnVlKSA6Ok1PTkVZLCA3NTAwMDAgOjpHT0FMLCAnUmV2ZW51ZSBhZ2FpbnN0IHRoZSBxdWFydGVyIGdvYWwnOjpMQUJFTCBGUk9NIGRhaWx5Owo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t5l.src} alt="" loading="lazy" /><img class="lp-dark" src={t5d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Status colours
+
+`::THRESHOLDS` colours the value by rules — here fewer tickets are better.
+
+```sql
+SELECT avg(tickets)::INT ::METRIC, '<130:good; <140:warn; bad'::THRESHOLDS, 'Open tickets per day'::LABEL FROM daily;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUIGF2Zyh0aWNrZXRzKTo6SU5UIDo6TUVUUklDLCAnPDEzMDpnb29kOyA8MTQwOndhcm47IGJhZCc6OlRIUkVTSE9MRFMsICdPcGVuIHRpY2tldHMgcGVyIGRheSc6OkxBQkVMIEZST00gZGFpbHk7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t6l.src} alt="" loading="lazy" /><img class="lp-dark" src={t6d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A KPI strip
+
+Tiles in a `::GROUP` box share one row.
+
+```sql
+SELECT 'Headline'::GROUP;
+SELECT sum(revenue) ::MONEY, 'Revenue'::LABEL FROM daily;
+SELECT sum(tickets) ::COMPACT, 'Tickets'::LABEL FROM daily;
+SELECT 96.4 ::PERCENT, 'Answered in time'::LABEL, '>=95:good; >=90:warn; bad'::THRESHOLDS;
+SELECT 4.6 ::METRIC, 'Satisfaction (of 5)'::LABEL;
+SELECT 1::ENDGROUP;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUICdIZWFkbGluZSc6OkdST1VQOwpTRUxFQ1Qgc3VtKHJldmVudWUpIDo6TU9ORVksICdSZXZlbnVlJzo6TEFCRUwgRlJPTSBkYWlseTsKU0VMRUNUIHN1bSh0aWNrZXRzKSA6OkNPTVBBQ1QsICdUaWNrZXRzJzo6TEFCRUwgRlJPTSBkYWlseTsKU0VMRUNUIDk2LjQgOjpQRVJDRU5ULCAnQW5zd2VyZWQgaW4gdGltZSc6OkxBQkVMLCAnPj05NTpnb29kOyA+PTkwOndhcm47IGJhZCc6OlRIUkVTSE9MRFM7ClNFTEVDVCA0LjYgOjpNRVRSSUMsICdTYXRpc2ZhY3Rpb24gKG9mIDUpJzo6TEFCRUw7ClNFTEVDVCAxOjpFTkRHUk9VUDsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t7l.src} alt="" loading="lazy" /><img class="lp-dark" src={t7d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A compact status row
+
+`'compact'::KPI_SIZE` packs the tiles onto one line.
+
+```sql
+SELECT 'Status'::GROUP, 'compact'::KPI_SIZE;
+SELECT 42 ::METRIC, 'Open orders'::LABEL;
+SELECT 3 ::METRIC, 'Alerts'::LABEL, '<1:good; <4:warn; bad'::THRESHOLDS;
+SELECT 99.2 ::PERCENT, 'Uptime'::LABEL, '>=99:good; bad'::THRESHOLDS;
+SELECT 1::ENDGROUP;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUICdTdGF0dXMnOjpHUk9VUCwgJ2NvbXBhY3QnOjpLUElfU0laRTsKU0VMRUNUIDQyIDo6TUVUUklDLCAnT3BlbiBvcmRlcnMnOjpMQUJFTDsKU0VMRUNUIDMgOjpNRVRSSUMsICdBbGVydHMnOjpMQUJFTCwgJzwxOmdvb2Q7IDw0Ondhcm47IGJhZCc6OlRIUkVTSE9MRFM7ClNFTEVDVCA5OS4yIDo6UEVSQ0VOVCwgJ1VwdGltZSc6OkxBQkVMLCAnPj05OTpnb29kOyBiYWQnOjpUSFJFU0hPTERTOwpTRUxFQ1QgMTo6RU5ER1JPVVA7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t8l.src} alt="" loading="lazy" /><img class="lp-dark" src={t8d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Gauge and bullet
+
+A value on an arc toward a range, or bars against a goal tick over bands.
+
+```sql
+SELECT 6::COL;
+SELECT 72 ::GAUGE, '0,100' ::RANGE, 'Capacity used (%)'::TITLE;
+SELECT 6::COL;
+SELECT team ::XAXIS, score ::BULLET, 85 ::GOAL, '60,80,100' ::RANGE, 'Scores against the goal of 85'::TITLE
+FROM (VALUES ('Support', 78), ('Sales', 91), ('Ops', 64)) t(team, score);
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGRhaWx5IEFTClNFTEVDVCBEQVRFICcyMDI2LTA5LTAxJyArIElOVEVSVkFMIChkKSBEQVkgQVMgZGF5LCByb3VuZCg5MDAwICsgNDAgKiBkICsgOTAwICogc2luKGQgLyAzLjApKSBBUyByZXZlbnVlLCAxMjAgKyAoZCAqIDcpICUgMjMgQVMgdGlja2V0cwpGUk9NIHJhbmdlKDAsIDYwKSByKGQpOwoKU0VMRUNUIDY6OkNPTDsKU0VMRUNUIDcyIDo6R0FVR0UsICcwLDEwMCcgOjpSQU5HRSwgJ0NhcGFjaXR5IHVzZWQgKCUpJzo6VElUTEU7ClNFTEVDVCA2OjpDT0w7ClNFTEVDVCB0ZWFtIDo6WEFYSVMsIHNjb3JlIDo6QlVMTEVULCA4NSA6OkdPQUwsICc2MCw4MCwxMDAnIDo6UkFOR0UsICdTY29yZXMgYWdhaW5zdCB0aGUgZ29hbCBvZiA4NSc6OlRJVExFCkZST00gKFZBTFVFUyAoJ1N1cHBvcnQnLCA3OCksICgnU2FsZXMnLCA5MSksICgnT3BzJywgNjQpKSB0KHRlYW0sIHNjb3JlKTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+</div>

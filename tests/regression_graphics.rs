@@ -3226,6 +3226,30 @@ fn pareto_has_a_cumulative_axis() {
     }
 }
 
+// #1027: ::PARETO wears the theme — the palette's first colour on the bars,
+// the second on the cumulative line, not ggplot-rs's fixed blue / orange.
+#[test]
+fn pareto_follows_the_theme_palette() {
+    let s = svg(vec![
+        Column::new("x", Role::X, strs(&["a", "b", "c"])),
+        Column::new("n", Role::Value(Kind::Pareto), nums(&[5.0, 20.0, 10.0])),
+    ])
+    .to_lowercase();
+    let t = anofox_visualization::theme::ResolvedTheme::default();
+    for (i, what) in [(0, "bars"), (1, "cumulative line")] {
+        let (r, g, b) = t.color(i);
+        let hex = format!("#{r:02x}{g:02x}{b:02x}");
+        assert!(
+            s.contains(&hex) || s.contains(&format!("rgb({r},{g},{b})")),
+            "{what} in {hex}: {s}"
+        );
+    }
+    assert!(
+        !s.contains("#619cff") && !s.contains("#e8590c"),
+        "no fixed default colours: {s}"
+    );
+}
+
 // #882: ::GANTT — one bar per task on a date axis.
 #[test]
 fn gantt_bars_per_task() {

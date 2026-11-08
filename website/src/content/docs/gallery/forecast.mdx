@@ -1,0 +1,183 @@
+---
+title: "What anofox-forecast draws"
+description: "The plots anofox-visualization draws from anofox-forecast's results — one anofox_plot call each."
+tableOfContents: false
+sidebar:
+  label: anofox-forecast
+  order: 11
+---
+
+import p0 from "../../../assets/plots/forecast/forecast_fan_levels.svg?url";
+import p1 from "../../../assets/plots/forecast/forecast_models.svg?url";
+import p2 from "../../../assets/plots/forecast/forecast_with_history.svg?url";
+import p3 from "../../../assets/plots/forecast/backtest_two_models.svg?url";
+import p4 from "../../../assets/plots/forecast/changepoints_over_history.svg?url";
+import p5 from "../../../assets/plots/forecast/mstl_long_with_dates.svg?url";
+import p6 from "../../../assets/plots/forecast/cv_folds_per_series.0.svg?url";
+import p7 from "../../../assets/plots/forecast/ts_conformal_by.svg?url";
+import p8 from "../../../assets/plots/forecast/ts_forecast_explain_by.svg?url";
+import p9 from "../../../assets/plots/forecast/ts_metrics_by.svg?url";
+import p10 from "../../../assets/plots/forecast/tests_two_methods.svg?url";
+import p11 from "../../../assets/plots/forecast/ts_residual_diagnostics_by.svg?url";
+
+Each picture is one `anofox_plot(...)` call on a result table of anofox-forecast, drawn in CI on every push from the extension's latest build. [Install and use it →](../../integrate/forecast/)
+
+<div class="gal gal-plots">
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p0} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A forecast fan
+
+History, the forecast and nested 80 % / 95 % intervals from the forecast start.
+
+<code class="gal-call">anofox_plot_prediction · ts_forecast_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p1} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Several methods
+
+One line per method beside the reference method's band.
+
+<code class="gal-call">anofox_plot_prediction · ts_forecast_by × 3</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p2} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### One panel per series
+
+Forecasts for every series of a panel, each with its history.
+
+<code class="gal-call">anofox_plot_prediction · ts_forecast_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p3} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Backtest
+
+Two methods' backtest forecasts against the actuals.
+
+<code class="gal-call">anofox_plot_prediction · ts_cv_forecast_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p4} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Changepoints
+
+Detected changepoints as events over the history and the forecast.
+
+<code class="gal-call">anofox_plot_prediction · ts_detect_changepoints_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p5} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Decomposition
+
+Trend, seasonal and remainder as stacked panels on one time axis.
+
+<code class="gal-call">anofox_plot_decomposition · ts_mstl_decomposition_long_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p6} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Cross-validation folds
+
+Train and test windows per fold.
+
+<code class="gal-call">anofox_plot_cv · ts_cv_folds_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p7} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Conformal intervals
+
+Forecasts with calibrated conformal bands, one panel per series.
+
+<code class="gal-call">anofox_plot_prediction · ts_conformal_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p8} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### What the model sees
+
+Observed, level, trend, seasonal and residual of a fitted model.
+
+<code class="gal-call">anofox_plot_decomposition · ts_forecast_explain_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p9} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Accuracy metrics
+
+RMSE, MAE, MAPE, bias and more per series, one panel per metric.
+
+<code class="gal-call">anofox_plot_summary · ts_metrics_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p10} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Stationarity tests
+
+ADF and KPSS per series, each on its own scale, coloured by significance.
+
+<code class="gal-call">anofox_plot_tests · ts_adf_by ∪ ts_kpss_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p11} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Residual diagnostics
+
+Durbin–Watson, Jarque–Bera and Ljung–Box per series.
+
+<code class="gal-call">anofox_plot_tests · ts_residual_diagnostics_by</code>
+
+</div>
+</div>
+
+</div>
