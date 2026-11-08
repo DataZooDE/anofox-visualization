@@ -5013,6 +5013,135 @@ fn hist_bin_of(v: f64, edges: &[f64]) -> Option<usize> {
 /// pre-aggregated bars (`StatIdentity`) so groups/panels/shares line up. No
 /// `::POSITION` role exists yet for an explicit dodge; overlay (the default)
 /// is the only layout `::CATEGORY` draws.
+/// #1033: `::XLINE` (+ `::XLINE_LABEL`) and `::XSCALE` on the charts that
+/// bin or smooth their own x (`::HISTOGRAM`, `::DENSITY`) — the same quiet
+/// dashed rules and top labels as the role charts, and the axis transform
+/// (`'reverse'`, `'log10'`, …). They used to be dropped silently.
+/// The top of what a ::HISTOGRAM (30 equal bins) or ::DENSITY (Gaussian KDE,
+/// Silverman's bandwidth) draws, for labels above it (#1033).
+fn computed_top(kind: Kind, value: &Column) -> f64 {
+    let v: Vec<f64> = value
+        .values
+        .iter()
+        .filter_map(|x| x.as_f64())
+        .filter(|x| x.is_finite())
+        .collect();
+    let n = v.len() as f64;
+    if v.is_empty() {
+        return 1.0;
+    }
+    let (lo, hi) = v
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    if kind == Kind::Histogram {
+        let w = ((hi - lo) / 30.0).max(f64::EPSILON);
+        let mut c = [0usize; 31];
+        for x in &v {
+            c[(((x - lo) / w) as usize).min(30)] += 1;
+        }
+        return *c.iter().max().unwrap_or(&1) as f64;
+    }
+    let mean = v.iter().sum::<f64>() / n;
+    let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0)).sqrt();
+    let h = (1.06 * sd * n.powf(-0.2)).max(f64::EPSILON);
+    (0..=200)
+        .map(|i| {
+            let g = lo + (hi - lo) * i as f64 / 200.0;
+            v.iter()
+                .map(|x| (-0.5 * ((g - x) / h).powi(2)).exp())
+                .sum::<f64>()
+                / (n * h * (2.0 * std::f64::consts::PI).sqrt())
+        })
+        .fold(0.0, f64::max)
+}
+
+fn x_marks(
+    mut plot: GGPlot,
+    o: &RenderOptions,
+    kind: Kind,
+    cols: &[Column],
+    value: &Column,
+) -> Result<GGPlot, String> {
+    let ink = o.theme.chart_text();
+    for c in cols.iter().filter(|c| c.role == Role::VLine) {
+        let vals = xline_values(&c.values);
+        if vals.is_empty() {
+            continue;
+        }
+        plot = plot
+            .geom_vline_aes_with(
+                GeomVline {
+                    xintercept: 0.0,
+                    color: ink,
+                    width: 0.8,
+                    linetype: Linetype::Dashed,
+                    alpha: 1.0,
+                },
+                Aes::new().xintercept("xintercept"),
+            )
+            .layer_data(vec![("xintercept".to_string(), vals)])
+            .tooltip("{xintercept}");
+    }
+    // The labels: the y these charts draw is computed (bin counts, a
+    // density), so data_annotations has no "top of the data" to put them at —
+    // they hang from the panel's top edge instead, beside their line.
+    if let (Some(line), Some(lab)) = (
+        find_role(cols, Role::VLine),
+        find_role(cols, Role::VLineLabel),
+    ) {
+        let mut seen = std::collections::HashSet::new();
+        let (mut xs, mut ls) = (vec![], vec![]);
+        for (i, v) in line.values.iter().enumerate() {
+            let l = lab
+                .values
+                .get(i)
+                .filter(|l| **l != Value::Na)
+                .map(|l| value_str(l).trim().to_string());
+            if let (true, Some(l)) = (
+                v.as_f64().is_some_and(f64::is_finite),
+                l.filter(|l| !l.is_empty()),
+            ) {
+                if xs.len() < 64 && seen.insert((value_str(v), l.clone())) {
+                    xs.push(v.clone());
+                    ls.push(format!("\u{a0}{l}"));
+                }
+            }
+        }
+        if !xs.is_empty() {
+            let k = xs.len();
+            plot = plot
+                .geom_text_with(GeomText {
+                    size: 9.5,
+                    color: o.theme.chart_label(),
+                    hjust: 0.0,
+                    vjust: 0.0,
+                    check_overlap: true,
+                    ..Default::default()
+                })
+                .layer_data(vec![
+                    ("x".to_string(), xs),
+                    (
+                        "y".to_string(),
+                        vec![Value::Float(computed_top(kind, value)); k],
+                    ),
+                    (
+                        "label".to_string(),
+                        ls.into_iter().map(Value::Str).collect(),
+                    ),
+                ])
+                .layer_aes(Aes::new().x("x").y("y").label("label"));
+        }
+    }
+
+    if let Some(t) = role_str(cols, Role::XScale)
+        .map(|s| axis_transform(&s, Role::XScale))
+        .transpose()?
+    {
+        plot = plot.scale_x_continuous(ScaleContinuous::new().with_transform(t));
+    }
+    Ok(plot)
+}
+
 fn render_histogram(
     o: &RenderOptions,
     value: &Column,
@@ -5039,6 +5168,7 @@ fn render_histogram(
             })
             .house_theme(o)
             .primary_color(o.brand());
+        plot = x_marks(plot, o, Kind::Histogram, cols, value)?;
         if let Some(t) = title {
             plot = plot.title(t);
         }
@@ -5155,6 +5285,7 @@ fn render_histogram(
     if share {
         plot = plot.ylab("Share");
     }
+    plot = x_marks(plot, o, Kind::Histogram, cols, value)?;
     if let Some(t) = title {
         plot = plot.title(t);
     }
@@ -5282,6 +5413,7 @@ fn render_density(
             .house_theme(o)
             .primary_color(o.brand());
     }
+    plot = x_marks(plot, o, Kind::Density, cols, value)?;
     if let Some(t) = title {
         plot = plot.title(t);
     }
