@@ -1,0 +1,198 @@
+---
+title: "Inputs and filters"
+description: "An input's column name is a DuckDB variable; every query that reads it with getvariable() re-runs when it changes. Each tile below is an input and a chart that reads it."
+tableOfContents: false
+sidebar:
+  order: 50
+---
+
+import t1l from "../../../assets/gallery/inputs/1-light.webp";
+import t1d from "../../../assets/gallery/inputs/1-dark.webp";
+import t2l from "../../../assets/gallery/inputs/2-light.webp";
+import t2d from "../../../assets/gallery/inputs/2-dark.webp";
+import t3l from "../../../assets/gallery/inputs/3-light.webp";
+import t3d from "../../../assets/gallery/inputs/3-dark.webp";
+import t4l from "../../../assets/gallery/inputs/4-light.webp";
+import t4d from "../../../assets/gallery/inputs/4-dark.webp";
+import t5l from "../../../assets/gallery/inputs/5-light.webp";
+import t5d from "../../../assets/gallery/inputs/5-dark.webp";
+import t6l from "../../../assets/gallery/inputs/6-light.webp";
+import t6d from "../../../assets/gallery/inputs/6-dark.webp";
+import t7l from "../../../assets/gallery/inputs/7-light.webp";
+import t7d from "../../../assets/gallery/inputs/7-dark.webp";
+import t8l from "../../../assets/gallery/inputs/8-light.webp";
+import t8d from "../../../assets/gallery/inputs/8-dark.webp";
+
+An input's column name is a DuckDB variable; every query that reads it with `getvariable()` re-runs when it changes. Each tile below is an input and a chart that reads it.
+
+<details class="gal-data">
+<summary>The sample data every tile on this page uses</summary>
+
+```sql
+CREATE TABLE sales AS
+SELECT DATE '2026-11-02' - (29 - w)::INTEGER * 7 AS week, region, channel,
+       round(80 + w * 3 + (CASE region WHEN 'North' THEN 30 WHEN 'South' THEN 10 ELSE 0 END)
+             + (CASE channel WHEN 'Web' THEN 25 ELSE 0 END) + 10 * sin(w / 2.0 + length(region))) AS revenue
+FROM range(0, 30) r(w), (VALUES ('North'), ('South'), ('West')) a(region), (VALUES ('Web'), ('Store')) b(channel);
+SELECT 1::COLUMNS;
+```
+
+</details>
+
+<div class="gal">
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t1l.src} alt="" loading="lazy" /><img class="lp-dark" src={t1d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Dropdown
+
+One choice from a query's rows; the column name `region` is the variable.
+
+```sql
+SELECT DISTINCT region ::DROPDOWN, 'Region'::LABEL FROM sales ORDER BY 1;
+SELECT week ::XAXIS, channel ::CATEGORY, sum(revenue) ::LINECHART, ('Revenue in ' || getvariable('region'))::TITLE
+FROM sales WHERE region = getvariable('region') GROUP BY ALL ORDER BY 1;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgRElTVElOQ1QgcmVnaW9uIDo6RFJPUERPV04sICdSZWdpb24nOjpMQUJFTCBGUk9NIHNhbGVzIE9SREVSIEJZIDE7ClNFTEVDVCB3ZWVrIDo6WEFYSVMsIGNoYW5uZWwgOjpDQVRFR09SWSwgc3VtKHJldmVudWUpIDo6TElORUNIQVJULCAoJ1JldmVudWUgaW4gJyB8fCBnZXR2YXJpYWJsZSgncmVnaW9uJykpOjpUSVRMRQpGUk9NIHNhbGVzIFdIRVJFIHJlZ2lvbiA9IGdldHZhcmlhYmxlKCdyZWdpb24nKSBHUk9VUCBCWSBBTEwgT1JERVIgQlkgMTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t2l.src} alt="" loading="lazy" /><img class="lp-dark" src={t2d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Multi-select
+
+Several choices as a list: `list_contains(getvariable('regions'), region)`.
+
+```sql
+SELECT DISTINCT region AS regions ::MULTISELECT, 'Regions'::LABEL FROM sales ORDER BY 1;
+SELECT region ::XAXIS, sum(revenue) ::BARCHART, 'Revenue of the picked regions'::TITLE
+FROM sales WHERE list_contains(getvariable('regions'), region) GROUP BY ALL ORDER BY 2 DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgRElTVElOQ1QgcmVnaW9uIEFTIHJlZ2lvbnMgOjpNVUxUSVNFTEVDVCwgJ1JlZ2lvbnMnOjpMQUJFTCBGUk9NIHNhbGVzIE9SREVSIEJZIDE7ClNFTEVDVCByZWdpb24gOjpYQVhJUywgc3VtKHJldmVudWUpIDo6QkFSQ0hBUlQsICdSZXZlbnVlIG9mIHRoZSBwaWNrZWQgcmVnaW9ucyc6OlRJVExFCkZST00gc2FsZXMgV0hFUkUgbGlzdF9jb250YWlucyhnZXR2YXJpYWJsZSgncmVnaW9ucycpLCByZWdpb24pIEdST1VQIEJZIEFMTCBPUkRFUiBCWSAyIERFU0M7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t3l.src} alt="" loading="lazy" /><img class="lp-dark" src={t3d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Buttons as a metric switcher
+
+A segmented group for a handful of options; `CASE` picks the measure.
+
+```sql
+SELECT m AS metric ::BUTTONS, 'Show'::LABEL FROM (VALUES (1, 'Revenue'), (2, 'Orders')) t(o, m) ORDER BY o;
+SELECT week ::XAXIS, CASE getvariable('metric') WHEN 'Orders' THEN count(*) * 12 ELSE sum(revenue) END ::AREACHART,
+       getvariable('metric')::TITLE
+FROM sales GROUP BY ALL ORDER BY 1;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgbSBBUyBtZXRyaWMgOjpCVVRUT05TLCAnU2hvdyc6OkxBQkVMIEZST00gKFZBTFVFUyAoMSwgJ1JldmVudWUnKSwgKDIsICdPcmRlcnMnKSkgdChvLCBtKSBPUkRFUiBCWSBvOwpTRUxFQ1Qgd2VlayA6OlhBWElTLCBDQVNFIGdldHZhcmlhYmxlKCdtZXRyaWMnKSBXSEVOICdPcmRlcnMnIFRIRU4gY291bnQoKikgKiAxMiBFTFNFIHN1bShyZXZlbnVlKSBFTkQgOjpBUkVBQ0hBUlQsCiAgICAgICBnZXR2YXJpYWJsZSgnbWV0cmljJyk6OlRJVExFCkZST00gc2FsZXMgR1JPVVAgQlkgQUxMIE9SREVSIEJZIDE7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t4l.src} alt="" loading="lazy" /><img class="lp-dark" src={t4d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Toggle
+
+An on/off switch → a `BOOLEAN` variable.
+
+```sql
+SELECT true AS web_only ::TOGGLE, 'Web only'::LABEL;
+SELECT region ::XAXIS, sum(revenue) ::BARCHART, CASE WHEN getvariable('web_only') THEN 'Web revenue' ELSE 'All revenue' END ::TITLE
+FROM sales WHERE NOT getvariable('web_only') OR channel = 'Web' GROUP BY ALL ORDER BY 2 DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgdHJ1ZSBBUyB3ZWJfb25seSA6OlRPR0dMRSwgJ1dlYiBvbmx5Jzo6TEFCRUw7ClNFTEVDVCByZWdpb24gOjpYQVhJUywgc3VtKHJldmVudWUpIDo6QkFSQ0hBUlQsIENBU0UgV0hFTiBnZXR2YXJpYWJsZSgnd2ViX29ubHknKSBUSEVOICdXZWIgcmV2ZW51ZScgRUxTRSAnQWxsIHJldmVudWUnIEVORCA6OlRJVExFCkZST00gc2FsZXMgV0hFUkUgTk9UIGdldHZhcmlhYmxlKCd3ZWJfb25seScpIE9SIGNoYW5uZWwgPSAnV2ViJyBHUk9VUCBCWSBBTEwgT1JERVIgQlkgMiBERVNDOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t5l.src} alt="" loading="lazy" /><img class="lp-dark" src={t5d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Number
+
+A number with its default; here a threshold the chart draws as a line.
+
+```sql
+SELECT 150 AS target ::NUMBER, 'Weekly target'::LABEL;
+SELECT week ::XAXIS, sum(revenue) FILTER (WHERE region = 'North') ::LINECHART, getvariable('target') ::REFLINE, 'target'::REFLINE_LABEL,
+       'North against the target'::TITLE FROM sales GROUP BY week ORDER BY 1;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgMTUwIEFTIHRhcmdldCA6Ok5VTUJFUiwgJ1dlZWtseSB0YXJnZXQnOjpMQUJFTDsKU0VMRUNUIHdlZWsgOjpYQVhJUywgc3VtKHJldmVudWUpIEZJTFRFUiAoV0hFUkUgcmVnaW9uID0gJ05vcnRoJykgOjpMSU5FQ0hBUlQsIGdldHZhcmlhYmxlKCd0YXJnZXQnKSA6OlJFRkxJTkUsICd0YXJnZXQnOjpSRUZMSU5FX0xBQkVMLAogICAgICAgJ05vcnRoIGFnYWluc3QgdGhlIHRhcmdldCc6OlRJVExFIEZST00gc2FsZXMgR1JPVVAgQlkgd2VlayBPUkRFUiBCWSAxOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t6l.src} alt="" loading="lazy" /><img class="lp-dark" src={t6d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Date range
+
+Two date columns → `from_day` / `to_day`.
+
+```sql
+SELECT DATE '2026-06-15' AS from_day, DATE '2026-10-05' AS to_day ::DATERANGE, 'Weeks'::LABEL;
+SELECT week ::XAXIS, region ::CATEGORY, sum(revenue) ::BARCHART_STACKED, 'Revenue in the picked weeks'::TITLE
+FROM sales WHERE week BETWEEN getvariable('from_day')::DATE AND getvariable('to_day')::DATE GROUP BY ALL ORDER BY 1;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgREFURSAnMjAyNi0wNi0xNScgQVMgZnJvbV9kYXksIERBVEUgJzIwMjYtMTAtMDUnIEFTIHRvX2RheSA6OkRBVEVSQU5HRSwgJ1dlZWtzJzo6TEFCRUw7ClNFTEVDVCB3ZWVrIDo6WEFYSVMsIHJlZ2lvbiA6OkNBVEVHT1JZLCBzdW0ocmV2ZW51ZSkgOjpCQVJDSEFSVF9TVEFDS0VELCAnUmV2ZW51ZSBpbiB0aGUgcGlja2VkIHdlZWtzJzo6VElUTEUKRlJPTSBzYWxlcyBXSEVSRSB3ZWVrIEJFVFdFRU4gZ2V0dmFyaWFibGUoJ2Zyb21fZGF5Jyk6OkRBVEUgQU5EIGdldHZhcmlhYmxlKCd0b19kYXknKTo6REFURSBHUk9VUCBCWSBBTEwgT1JERVIgQlkgMTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t7l.src} alt="" loading="lazy" /><img class="lp-dark" src={t7d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Text search
+
+Free text; here it filters by a substring.
+
+```sql
+SELECT 'th' AS q ::TEXT, 'Region contains'::LABEL;
+SELECT region ::XAXIS, sum(revenue) ::BARCHART, 'Regions matching the search'::TITLE
+FROM sales WHERE region ILIKE '%' || getvariable('q') || '%' GROUP BY ALL ORDER BY 2 DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgJ3RoJyBBUyBxIDo6VEVYVCwgJ1JlZ2lvbiBjb250YWlucyc6OkxBQkVMOwpTRUxFQ1QgcmVnaW9uIDo6WEFYSVMsIHN1bShyZXZlbnVlKSA6OkJBUkNIQVJULCAnUmVnaW9ucyBtYXRjaGluZyB0aGUgc2VhcmNoJzo6VElUTEUKRlJPTSBzYWxlcyBXSEVSRSByZWdpb24gSUxJS0UgJyUnIHx8IGdldHZhcmlhYmxlKCdxJykgfHwgJyUnIEdST1VQIEJZIEFMTCBPUkRFUiBCWSAyIERFU0M7Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t8l.src} alt="" loading="lazy" /><img class="lp-dark" src={t8d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Period with comparison
+
+Presets, a grain and a comparison period → `p_from`, `p_to`, `p_prev_from`, … for KPIs with a change.
+
+```sql
+SELECT 'presets=30d,90d,ytd; default=90d' AS p ::PERIOD;
+SELECT sum(revenue) FILTER (WHERE week BETWEEN getvariable('p_from')::DATE AND getvariable('p_to')::DATE) ::MONEY,
+       sum(revenue) FILTER (WHERE week BETWEEN getvariable('p_prev_from')::DATE AND getvariable('p_prev_to')::DATE) ::DELTA,
+       getvariable('p_prev_label') ::DELTA_LABEL, 'Revenue in the period'::LABEL FROM sales;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIHNhbGVzIEFTClNFTEVDVCBEQVRFICcyMDI2LTExLTAyJyAtICgyOSAtIHcpOjpJTlRFR0VSICogNyBBUyB3ZWVrLCByZWdpb24sIGNoYW5uZWwsCiAgICAgICByb3VuZCg4MCArIHcgKiAzICsgKENBU0UgcmVnaW9uIFdIRU4gJ05vcnRoJyBUSEVOIDMwIFdIRU4gJ1NvdXRoJyBUSEVOIDEwIEVMU0UgMCBFTkQpCiAgICAgICAgICAgICArIChDQVNFIGNoYW5uZWwgV0hFTiAnV2ViJyBUSEVOIDI1IEVMU0UgMCBFTkQpICsgMTAgKiBzaW4odyAvIDIuMCArIGxlbmd0aChyZWdpb24pKSkgQVMgcmV2ZW51ZQpGUk9NIHJhbmdlKDAsIDMwKSByKHcpLCAoVkFMVUVTICgnTm9ydGgnKSwgKCdTb3V0aCcpLCAoJ1dlc3QnKSkgYShyZWdpb24pLCAoVkFMVUVTICgnV2ViJyksICgnU3RvcmUnKSkgYihjaGFubmVsKTsKU0VMRUNUIDE6OkNPTFVNTlM7CgpTRUxFQ1QgJ3ByZXNldHM9MzBkLDkwZCx5dGQ7IGRlZmF1bHQ9OTBkJyBBUyBwIDo6UEVSSU9EOwpTRUxFQ1Qgc3VtKHJldmVudWUpIEZJTFRFUiAoV0hFUkUgd2VlayBCRVRXRUVOIGdldHZhcmlhYmxlKCdwX2Zyb20nKTo6REFURSBBTkQgZ2V0dmFyaWFibGUoJ3BfdG8nKTo6REFURSkgOjpNT05FWSwKICAgICAgIHN1bShyZXZlbnVlKSBGSUxURVIgKFdIRVJFIHdlZWsgQkVUV0VFTiBnZXR2YXJpYWJsZSgncF9wcmV2X2Zyb20nKTo6REFURSBBTkQgZ2V0dmFyaWFibGUoJ3BfcHJldl90bycpOjpEQVRFKSA6OkRFTFRBLAogICAgICAgZ2V0dmFyaWFibGUoJ3BfcHJldl9sYWJlbCcpIDo6REVMVEFfTEFCRUwsICdSZXZlbnVlIGluIHRoZSBwZXJpb2QnOjpMQUJFTCBGUk9NIHNhbGVzOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+</div>

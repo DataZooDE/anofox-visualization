@@ -41,7 +41,7 @@ import init, {
 } from "./pkg/anofox_visualization.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
-import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnostics, splitStatements } from "./lint.js";
+import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnostics, splitStatements, wasmSql } from "./lint.js";
 // #204: the tab-wide CSP (whenever an assistant key is stored) and the
 // groundwork for the assistant's own locked DuckDB-Wasm instance
 // (assistDeps(), for M1-3 — #244 — to pass into assist-ui.js).
@@ -2455,7 +2455,7 @@ async function runSqlInner(sql, page, kind, setup, at, pv) {
     return (await r.text()) || "[]";
   }
   // (DATE / TIMESTAMP / DECIMAL back to what the CLI's JSON reads: web/lint.js)
-  return rowsJson(await pageConn().query(sql));
+  return rowsJson(await pageConn().query(wasmSql(sql)));
 }
 
 // A page connection's own settings (boot(), and siteGo()'s fresh connection

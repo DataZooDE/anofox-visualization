@@ -1,0 +1,239 @@
+---
+title: "What anofox-statistics draws"
+description: "The plots anofox-visualization draws from anofox-statistics's results — one anofox_plot call each."
+tableOfContents: false
+sidebar:
+  label: anofox-statistics
+  order: 10
+---
+
+import p0 from "../../../assets/plots/statistics/terms_two_models.svg?url";
+import p1 from "../../../assets/plots/statistics/prediction_two_models.svg?url";
+import p2 from "../../../assets/plots/statistics/ols_augment_by.svg?url";
+import p3 from "../../../assets/plots/statistics/kaplan_meier_by.svg?url";
+import p4 from "../../../assets/plots/statistics/ridge_path_by.svg?url";
+import p5 from "../../../assets/plots/statistics/elasticnet_cv_by.svg?url";
+import p6 from "../../../assets/plots/statistics/quantile_process_by.svg?url";
+import p7 from "../../../assets/plots/statistics/logistic_effects_by.svg?url";
+import p8 from "../../../assets/plots/statistics/curve_roc_calibration_grouped.0.svg?url";
+import p9 from "../../../assets/plots/statistics/curve_roc_calibration_grouped.1.svg?url";
+import p10 from "../../../assets/plots/statistics/compare_box.svg?url";
+import p11 from "../../../assets/plots/statistics/tukey_hsd_by.svg?url";
+import p12 from "../../../assets/plots/statistics/summary_two_models.svg?url";
+import p13 from "../../../assets/plots/statistics/partial_component.svg?url";
+import p14 from "../../../assets/plots/statistics/acf_by.svg?url";
+import p15 from "../../../assets/plots/statistics/obs_leverage.svg?url";
+
+Each picture is one `anofox_plot(...)` call on a result table of anofox-statistics, drawn in CI on every push from the extension's latest build. [Install and use it →](../../integrate/statistics/)
+
+<div class="gal gal-plots">
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p0} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Coefficients of two models
+
+A coefficient forest with 95 % intervals; two estimators dodged, a term whose interval crosses 0 fades.
+
+<code class="gal-call">anofox_plot_terms · ols_tidy_by ∪ huber_tidy_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p1} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Fit and prediction band
+
+Observed points, each model's fit and the reference model's prediction band.
+
+<code class="gal-call">anofox_plot_prediction · ols_prediction_by ∪ huber_prediction_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p2} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Regression diagnostics
+
+The plot.lm 2×2 in one picture: residuals, normal Q-Q, scale-location, leverage.
+
+<code class="gal-call">anofox_plot_diagnostics · ols_augment_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p3} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Survival curves
+
+Kaplan–Meier steps with bands, censor marks, the median line and a number-at-risk table.
+
+<code class="gal-call">anofox_plot_curve · kaplan_meier_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p4} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Regularisation path
+
+Every coefficient along λ on a log axis, labelled at its line end.
+
+<code class="gal-call">anofox_plot_terms · ridge_path_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p5} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Cross-validated λ
+
+CV error ± one SE with λ.min and λ.1se marked.
+
+<code class="gal-call">anofox_plot_curve · elasticnet_cv_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p6} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Quantile process
+
+A coefficient across quantiles τ with its band, one panel per term and group.
+
+<code class="gal-call">anofox_plot_terms · quantile_process_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p7} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Effects on the probability
+
+P(y = 1) along a focal variable with its interval, one panel per group.
+
+<code class="gal-call">anofox_plot_prediction · logistic_effects_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p8} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### ROC curves
+
+True against false positive rate with the AUC in the legend.
+
+<code class="gal-call">anofox_plot_curve · roc_curve_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p9} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Calibration
+
+Observed rate against predicted probability, dots sized by the bin count.
+
+<code class="gal-call">anofox_plot_curve · calibration_curve_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p10} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Groups with significance brackets
+
+Box plots per group with brackets from a post-hoc test.
+
+<code class="gal-call">anofox_plot_compare · tukey_hsd_agg</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p11} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Pairwise comparisons
+
+Differences with 95 % intervals and p-values, one panel per group.
+
+<code class="gal-call">anofox_plot_tests · tukey_hsd_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p12} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Model metrics side by side
+
+One small panel per metric, the models in one order, the best highlighted.
+
+<code class="gal-call">anofox_plot_summary · *_glance_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p13} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Component + residual
+
+A partial-residual plot per term with its component line and a smoother.
+
+<code class="gal-call">anofox_plot_partial · ols_partial_residuals_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p14} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Autocorrelation
+
+ACF lollipops with significance bounds, one panel per series.
+
+<code class="gal-call">anofox_plot_curve · acf_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p15} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Leverage and outliers
+
+Standardised residuals against leverage, the most influential rows labelled.
+
+<code class="gal-call">anofox_plot_obs · ols_augment_by</code>
+
+</div>
+</div>
+
+</div>

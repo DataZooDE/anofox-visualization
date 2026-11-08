@@ -1,0 +1,85 @@
+---
+title: "What anofox-decide draws"
+description: "The plots anofox-visualization draws from anofox-decide's results — one anofox_plot call each."
+tableOfContents: false
+sidebar:
+  label: anofox-decide
+  order: 14
+---
+
+import p0 from "../../../assets/plots/decide/decide_roc_curve_by.svg?url";
+import p1 from "../../../assets/plots/decide/decide_calibration_curve_by.svg?url";
+import p2 from "../../../assets/plots/decide/pr_base_rate.svg?url";
+import p3 from "../../../assets/plots/decide/summary_metrics.svg?url";
+import p4 from "../../../assets/plots/decide/choice_distribution.specific.svg?url";
+
+Each picture is one `anofox_plot(...)` call on a result table of anofox-decide, drawn in CI on every push from the extension's latest build. [Install and use it →](../../integrate/decide/)
+
+<div class="gal gal-plots">
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p0} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### ROC per model
+
+Two decision models' ROC curves with their AUC.
+
+<code class="gal-call">anofox_plot_curve · decide_roc_curve_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p1} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Calibration per model
+
+Are the model's probabilities honest? Observed against predicted, with intervals.
+
+<code class="gal-call">anofox_plot_curve · decide_calibration_curve_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p2} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Precision and recall
+
+Precision against recall with the base rate as a dashed line.
+
+<code class="gal-call">anofox_plot_curve · pr_curve_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p3} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Brier score and ECE
+
+Quality metrics per model, one panel each.
+
+<code class="gal-call">anofox_plot_summary · decide_metrics_by</code>
+
+</div>
+</div>
+
+<div class="gal-tile gal-plot">
+<div class="gal-pic"><img src={p4} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A choice distribution
+
+The probability of each option a model gives for one text.
+
+<code class="gal-call">anofox_plot_distribution · decide_choice_distribution</code>
+
+</div>
+</div>
+
+</div>
