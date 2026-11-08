@@ -11,6 +11,7 @@ import { execFileSync } from "child_process";
 import { createRequire } from "module";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import path from "path";
+import { examples } from "./examples.mjs";
 
 const site = path.resolve(import.meta.dirname, "..");
 const root = path.resolve(site, "..");
@@ -18,7 +19,8 @@ const out = path.join(site, "src", "assets", "showcase");
 mkdirSync(out, { recursive: true });
 const only = (process.argv.find((a) => a.startsWith("--only=")) || "").slice(7).split(",").filter(Boolean);
 
-// The examples shown on the landing page (ids as in the builder's sidebar):
+// The examples shown on the landing page (ids as in the builder's sidebar),
+// or `file`: a .sql of showcase/shots/ (the docs' own dashboards):
 // `tab` opens that tab (the picture starts at the tab bar), `click` clicks an
 // element first (a map region to drill into), `name` names the file (default: the id).
 export const SHOTS = [
@@ -31,6 +33,7 @@ export const SHOTS = [
   { id: "can-a-model-triage-the-support-inbox" },
   { id: "is-today-s-supplier-feed-safe-to-load" },
   { id: "which-chart-fits-which-question" },
+  { id: "first-dashboard", file: "first-dashboard.sql" },
 ];
 
 if (!only.length || only.includes("svg")) {
@@ -38,7 +41,7 @@ if (!only.length || only.includes("svg")) {
   for (const f of readdirSync(path.join(site, "showcase")).filter((f) => f.endsWith(".sql")))
   for (const dark of [false, true]) {
     const svg = path.join(out, f.replace(/\.sql$/, dark ? "-dark.svg" : ".svg"));
-    execFileSync(bin, ["--svg", path.join(site, "showcase", f), svg, "--width", "900", ...(dark ? ["--dark"] : [])], { stdio: ["ignore", "ignore", "inherit"] });
+    execFileSync(bin, ["--svg", path.join(site, "showcase", f), svg, "--width", "900", "--theme", path.join(site, "showcase", "site-theme.json"), ...(dark ? ["--dark"] : [])], { stdio: ["ignore", "ignore", "inherit"] });
     // drop the page background and crop to the cards (rx rects at the top level)
     let t = readFileSync(svg, "utf8").replace(/^(<svg [^>]*>)<rect width="[\d.]+" height="[\d.]+" fill="[^"]+"\/>/, "$1");
     const cards = [...t.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)" rx=/g)].map((m) => m.slice(1).map(Number));
@@ -58,9 +61,13 @@ if (shots.length) {
   const browser = await chromium.launch();
   for (const scheme of ["light", "dark"]) {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1.5, colorScheme: scheme, reducedMotion: "reduce" });
-    for (const { id, tab, click, name = id } of shots) {
+    for (const { id, tab, click, file, name = id } of shots) {
       const page = await ctx.newPage();
-      await page.goto(`${builder}?dashboard=${id}&embed=1`);
+      // the example's own SQL in the site's theme (showcase/site-theme.json)
+      const ex = file ? { sql: readFileSync(path.join(site, "showcase", "shots", file), "utf8") } : examples.find((e) => e.id === id);
+      if (!ex) throw new Error(`no example ${id}`);
+      const theme = JSON.stringify(JSON.parse(readFileSync(path.join(site, "showcase", "site-theme.json"), "utf8")));
+      await page.goto(`${builder}?embed=1#sql=${Buffer.from(`SELECT '${theme}'::THEME;\n${ex.sql}`, "utf8").toString("base64")}`);
       await page.waitForSelector(".dash .panel", { timeout: 180000 });
       await page.waitForFunction(() => !document.body.classList.contains("loading") && !document.querySelector(".dash .panel.dp-skel, .dash .panel.placeholder"), null, { timeout: 180000 });
       if (tab) {

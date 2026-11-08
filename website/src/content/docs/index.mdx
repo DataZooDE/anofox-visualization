@@ -56,17 +56,29 @@ import gFtL from "../../assets/gallery/features/6-light.webp";
 import gFtD from "../../assets/gallery/features/6-dark.webp";
 import gSt from "../../assets/plots/statistics/kaplan_meier_by.svg?url";
 import c1 from "../../assets/charts/sankey.svg?url";
+import c1d from "../../assets/charts/sankey-dark.svg?url";
 import c2 from "../../assets/charts/treemap.svg?url";
+import c2d from "../../assets/charts/treemap-dark.svg?url";
 import c3 from "../../assets/charts/ridgeline.svg?url";
+import c3d from "../../assets/charts/ridgeline-dark.svg?url";
 import c4 from "../../assets/charts/candlestick.svg?url";
+import c4d from "../../assets/charts/candlestick-dark.svg?url";
 import c5 from "../../assets/charts/region.svg?url";
+import c5d from "../../assets/charts/region-dark.svg?url";
 import c6 from "../../assets/charts/waterfall.svg?url";
+import c6d from "../../assets/charts/waterfall-dark.svg?url";
 import c7 from "../../assets/charts/heatmap.svg?url";
+import c7d from "../../assets/charts/heatmap-dark.svg?url";
 import c8 from "../../assets/charts/violin.svg?url";
+import c8d from "../../assets/charts/violin-dark.svg?url";
 import c9 from "../../assets/charts/gantt.svg?url";
+import c9d from "../../assets/charts/gantt-dark.svg?url";
 import c10 from "../../assets/charts/radar.svg?url";
+import c10d from "../../assets/charts/radar-dark.svg?url";
 import c11 from "../../assets/charts/smooth.svg?url";
+import c11d from "../../assets/charts/smooth-dark.svg?url";
 import c12 from "../../assets/charts/diagram.svg?url";
+import c12d from "../../assets/charts/diagram-dark.svg?url";
 
 <div class="lp">
 
@@ -122,10 +134,12 @@ KPI tiles with change, trend line and goal; a 12-column grid; boxes, tabs and se
 ```sql
 SELECT 'Headline'::GROUP;
 SELECT sum(revenue) ::MONEY, 'Revenue'::LABEL,
-       sum(revenue_prev) ::DELTA, list(r ORDER BY week) ::SPARKLINE FROM …;
+       sum(revenue_prev) ::DELTA,
+       list(r ORDER BY week) ::SPARKLINE FROM …;
 SELECT 1::ENDGROUP;
 SELECT 8::COL;
-SELECT week ::XAXIS, channel ::CATEGORY, revenue ::AREACHART_STACKED FROM sales;
+SELECT week ::XAXIS, channel ::CATEGORY,
+       revenue ::AREACHART_STACKED FROM sales;
 ```
 [KPIs and tables →](build/kpis-tables/) · [Layout →](build/layout/)
 </div>
@@ -143,7 +157,8 @@ An input's column name is a DuckDB variable. Clicks set variables too: cross-fil
 SELECT 'geo: country > state > district'::DRILL;
 SELECT code ::REGION, name ::LABEL, revenue ::BARCHART,
        'quantile 5'::CLASSES
-FROM rm_level() ORDER BY revenue DESC;   -- reads getvariable('country'), …
+FROM rm_level()             -- reads getvariable('country'), …
+ORDER BY revenue DESC;
 ```
 [Inputs and interactivity →](build/inputs/)
 </div>
@@ -159,11 +174,13 @@ Load an anofox extension and plot its results: forecasts with nested interval fa
 
 ```sql
 LOAD anofox_forecast;
-CREATE TABLE fc AS SELECT * FROM ts_forecast_by('load', substation, ds, mw,
-  'MSTL', 168, '1h', MAP{'seasonal_periods': '[24,168]'});
+CREATE TABLE fc AS
+SELECT * FROM ts_forecast_by('load', substation, ds, mw, 'MSTL',
+  168, '1h', MAP{'seasonal_periods': '[24,168]'});
 SELECT ds ::XAXIS, yhat ::LINECHART,
        yhat_lower ::BAND_LOWER, yhat_upper ::BAND_UPPER,
-       firm_mw ::REFLINE, 'firm capacity' ::REFLINE_LABEL
+       firm_mw ::REFLINE,
+       'firm capacity' ::REFLINE_LABEL
 FROM fc JOIN substations USING (substation)
 WHERE substation = getvariable('substation');
 ```
@@ -180,9 +197,10 @@ WHERE substation = getvariable('substation');
 The same file renders to HTML and SVG in CI, publishes as a static site, or runs on a **locked, read-only server** with login, row and column policies, scheduled reports and alerts. A dashboard's `-- @question` lines can be answered over **REST and MCP** for the signed-in caller.
 
 ```sh
-dashboard --check sales.sql --strict          # lint in CI
-dashboard --site dashboards/ public/          # a static DuckDB-Wasm site
-serve --dashboards dashboards/ --db sales.duckdb --options locked.json
+dashboard --check sales.sql --strict     # lint in CI
+dashboard --site dashboards/ public/     # a static site
+serve --dashboards dashboards/ \
+      --db sales.duckdb --options locked.json
 ```
 [Which way to run it →](deploy/)
 </div>
@@ -229,18 +247,18 @@ serve --dashboards dashboards/ --db sales.duckdb --options locked.json
 <p class="lp-lead">Rendered to crisp SVG by <a href="https://github.com/sipemu/ggplot-rs">ggplot-rs</a>, a grammar-of-graphics engine in Rust — the same picture in the browser, the CLI, a PDF export or an e-mail.</p>
 
 <div class="lp-wall">
-  <a href="build/charts/sankey/"><img src={c1} alt="" loading="lazy" /><code>::SANKEY</code></a>
-  <a href="build/charts/treemap/"><img src={c2} alt="" loading="lazy" /><code>::TREEMAP</code></a>
-  <a href="build/charts/ridgeline/"><img src={c3} alt="" loading="lazy" /><code>::RIDGELINE</code></a>
-  <a href="build/charts/candlestick/"><img src={c4} alt="" loading="lazy" /><code>::CANDLESTICK</code></a>
-  <a href="build/charts/region/"><img src={c5} alt="" loading="lazy" /><code>::REGION</code></a>
-  <a href="build/charts/waterfall/"><img src={c6} alt="" loading="lazy" /><code>::WATERFALL</code></a>
-  <a href="build/charts/heatmap/"><img src={c7} alt="" loading="lazy" /><code>::HEATMAP</code></a>
-  <a href="build/charts/violin/"><img src={c8} alt="" loading="lazy" /><code>::VIOLIN</code></a>
-  <a href="build/charts/gantt/"><img src={c9} alt="" loading="lazy" /><code>::GANTT</code></a>
-  <a href="build/charts/radar/"><img src={c10} alt="" loading="lazy" /><code>::RADAR</code></a>
-  <a href="build/charts/smooth/"><img src={c11} alt="" loading="lazy" /><code>::SMOOTH</code></a>
-  <a href="build/charts/diagram/"><img src={c12} alt="" loading="lazy" /><code>::DIAGRAM</code></a>
+  <a href="build/charts/sankey/"><img class="lp-light" src={c1} alt="" loading="lazy" /><img class="lp-dark" src={c1d} alt="" loading="lazy" /><code>::SANKEY</code></a>
+  <a href="build/charts/treemap/"><img class="lp-light" src={c2} alt="" loading="lazy" /><img class="lp-dark" src={c2d} alt="" loading="lazy" /><code>::TREEMAP</code></a>
+  <a href="build/charts/ridgeline/"><img class="lp-light" src={c3} alt="" loading="lazy" /><img class="lp-dark" src={c3d} alt="" loading="lazy" /><code>::RIDGELINE</code></a>
+  <a href="build/charts/candlestick/"><img class="lp-light" src={c4} alt="" loading="lazy" /><img class="lp-dark" src={c4d} alt="" loading="lazy" /><code>::CANDLESTICK</code></a>
+  <a href="build/charts/region/"><img class="lp-light" src={c5} alt="" loading="lazy" /><img class="lp-dark" src={c5d} alt="" loading="lazy" /><code>::REGION</code></a>
+  <a href="build/charts/waterfall/"><img class="lp-light" src={c6} alt="" loading="lazy" /><img class="lp-dark" src={c6d} alt="" loading="lazy" /><code>::WATERFALL</code></a>
+  <a href="build/charts/heatmap/"><img class="lp-light" src={c7} alt="" loading="lazy" /><img class="lp-dark" src={c7d} alt="" loading="lazy" /><code>::HEATMAP</code></a>
+  <a href="build/charts/violin/"><img class="lp-light" src={c8} alt="" loading="lazy" /><img class="lp-dark" src={c8d} alt="" loading="lazy" /><code>::VIOLIN</code></a>
+  <a href="build/charts/gantt/"><img class="lp-light" src={c9} alt="" loading="lazy" /><img class="lp-dark" src={c9d} alt="" loading="lazy" /><code>::GANTT</code></a>
+  <a href="build/charts/radar/"><img class="lp-light" src={c10} alt="" loading="lazy" /><img class="lp-dark" src={c10d} alt="" loading="lazy" /><code>::RADAR</code></a>
+  <a href="build/charts/smooth/"><img class="lp-light" src={c11} alt="" loading="lazy" /><img class="lp-dark" src={c11d} alt="" loading="lazy" /><code>::SMOOTH</code></a>
+  <a href="build/charts/diagram/"><img class="lp-light" src={c12} alt="" loading="lazy" /><img class="lp-dark" src={c12d} alt="" loading="lazy" /><code>::DIAGRAM</code></a>
 </div>
 <p class="lp-more"><a href="build/charts/">See all 42, with the data each one needs →</a></p>
 

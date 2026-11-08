@@ -3,6 +3,9 @@ title: Your first dashboard
 description: From a table to a dashboard in four statements.
 ---
 
+import shotL from "../../../assets/showcase/first-dashboard-light.webp";
+import shotD from "../../../assets/showcase/first-dashboard-dark.webp";
+
 Open the [builder](../../app/), click **New dashboard**, and paste:
 
 ```sql
@@ -19,7 +22,13 @@ SELECT week::XAXIS, sum(revenue)::LINECHART, 'Revenue by week'::TITLE
 FROM sales WHERE channel = getvariable('channel') GROUP BY ALL ORDER BY week;
 ```
 
-**Run** draws a dropdown, a KPI tile and a line chart; changing the dropdown filters both.
+**Run** draws a dropdown, a KPI tile and a line chart; changing the dropdown filters both:
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL.src} alt="The dashboard: a channel dropdown, a revenue tile and a weekly line" />
+  <img class="lp-dark" src={shotD.src} alt="" />
+  <figcaption>The four statements above, in the builder. <a href="../../app/?mode=edit#sql=LS0gQHRpdGxlIEhvdyBhcmUgb3VyIGNoYW5uZWxzIGRvaW5nPwpDUkVBVEUgVEFCTEUgc2FsZXMgQVMgU0VMRUNUICogRlJPTSAoVkFMVUVTCiAgKCdXMScsJ2FwcCcsMzApLCAoJ1cxJywnd2ViJywyMiksICgnVzInLCdhcHAnLDM1KSwgKCdXMicsJ3dlYicsMjUpLCAoJ1czJywnYXBwJyw0MSksICgnVzMnLCd3ZWInLDI0KQopIHQod2VlaywgY2hhbm5lbCwgcmV2ZW51ZSk7CgpTRUxFQ1QgY2hhbm5lbCBBUyBjaGFubmVsIDo6RFJPUERPV04gRlJPTSBzYWxlcyBHUk9VUCBCWSAxIE9SREVSIEJZIDE7CgpTRUxFQ1Qgc3VtKHJldmVudWUpOjpNT05FWSwgJ1JldmVudWUnOjpMQUJFTCBGUk9NIHNhbGVzIFdIRVJFIGNoYW5uZWwgPSBnZXR2YXJpYWJsZSgnY2hhbm5lbCcpOwoKU0VMRUNUIHdlZWs6OlhBWElTLCBzdW0ocmV2ZW51ZSk6OkxJTkVDSEFSVCwgJ1JldmVudWUgYnkgd2Vlayc6OlRJVExFCkZST00gc2FsZXMgV0hFUkUgY2hhbm5lbCA9IGdldHZhcmlhYmxlKCdjaGFubmVsJykgR1JPVVAgQlkgQUxMIE9SREVSIEJZIHdlZWs7Cg==">Open it there ↗</a></figcaption>
+</figure>
 
 - `-- @title` names the dashboard (a question it answers).
 - The dropdown's column alias (`channel`) is the variable; panels read it with `getvariable('channel')`.

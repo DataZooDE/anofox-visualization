@@ -1,0 +1,12 @@
+{"name": "site", "extends": "light",
+ "palette": ["#0b5d5e", "#c03a62", "#3d56a6", "#c27c0e", "#3bb3a6", "#8a5cc2"],
+ "sequential": ["#e2efed", "#0b5d5e"],
+ "colors": {"bg": "#f4f5f3", "bg2": "#f4f5f3", "card": "#ffffff", "ink": "#121a19", "muted": "#7c8784",
+            "line": "#e1e4df", "heading": "#121a19", "accent": "#0b5d5e", "accent2": "#3bb3a6",
+            "positive": "#1f7a52", "negative": "#c03a62", "warning": "#a35d0b"},
+ "radius": 10,
+ "dark": {"palette": ["#3bb3a6", "#f2799c", "#8fa4ec", "#f0b35c", "#6ed1c5", "#c4a5f0"],
+          "sequential": ["#12302d", "#6ed1c5"],
+          "colors": {"bg": "#0b1010", "bg2": "#0b1010", "card": "#121918", "ink": "#e7eeec", "muted": "#73817e",
+                     "line": "#222c2b", "heading": "#e7eeec", "accent": "#3bb3a6", "accent2": "#6ed1c5",
+                     "positive": "#5fd3a0", "negative": "#f2799c", "warning": "#f0b35c"}}}

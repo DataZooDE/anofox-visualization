@@ -3,7 +3,16 @@ title: What it is
 description: anofox-visualization in one page — the annotation model, the builds, and where it runs.
 ---
 
+import dashL from "../../../assets/showcase/2-dashboard.svg?url";
+import dashD from "../../../assets/showcase/2-dashboard-dark.svg?url";
+
 anofox-visualization turns DuckDB SQL into charts and dashboards. You write ordinary queries and tag output columns with `::ROLE` casts; each annotated `SELECT` becomes a panel, rendered to SVG by [ggplot-rs](https://github.com/sipemu/ggplot-rs), a grammar-of-graphics engine written in Rust.
+
+<figure class="doc-shot">
+  <img class="lp-light" src={dashL} alt="Three KPI tiles, a stacked area chart and a donut, drawn from a dozen lines of SQL" />
+  <img class="lp-dark" src={dashD} alt="" />
+  <figcaption>A dashboard from a dozen lines of SQL — <a href="../../#from-one-line-to-an-application">see them on the start page</a>.</figcaption>
+</figure>
 
 ## The annotation model
 

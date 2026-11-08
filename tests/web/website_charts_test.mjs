@@ -36,4 +36,17 @@ const roleRows = doc.slice(doc.indexOf("<!-- roles-table:start -->"), doc.indexO
 const kinds = pages.filter((f) => f !== "index.mdx").length;
 for (const [n, what] of [[kinds, "chart kinds"], [roleRows.length, "roles"], [examples.length, "live examples"]])
   assert.ok(landing.includes(`<strong>${n}</strong> ${what}`), `index.mdx: "<strong>${n}</strong> ${what}"`);
+
+// The docs' own dashboards (showcase/shots/*.sql) are the SQL their pages show, and lint clean.
+const shots = path.join(root, "website", "showcase", "shots");
+const firstPage = readFileSync(path.join(docs, "start", "first-dashboard.mdx"), "utf8");
+const firstSql = readFileSync(path.join(shots, "first-dashboard.sql"), "utf8");
+assert.ok(firstPage.includes("```sql\n" + firstSql), "start/first-dashboard.mdx shows showcase/shots/first-dashboard.sql");
+const cli = process.env.DASHBOARD || path.join(root, "target", "debug", "dashboard");
+for (const f of readdirSync(shots).filter((f) => f.endsWith(".sql"))) {
+  let r;
+  try { r = JSON.parse(execFileSync(cli, ["--check", path.join(shots, f), "--json"], { encoding: "utf8" })); }
+  catch (e) { r = JSON.parse(e.stdout); }
+  assert.deepEqual((r.diagnostics || []).filter((d) => d.severity === "error"), [], f);
+}
 console.log("website charts: ok");

@@ -48,9 +48,10 @@
 .chart-grid > * { margin: 0 !important; }
 .chart-grid a { display: flex; flex-direction: column; gap: 0.35rem; padding: 0.6rem; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; text-decoration: none; color: var(--sl-color-gray-2); font-size: var(--sl-text-sm); line-height: 1.35; }
 .chart-grid a:hover { border-color: var(--sl-color-accent); }
-.chart-grid img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #fff; border-radius: 4px; }
+.chart-grid img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-radius: 6px; }
 .chart-grid code { color: var(--sl-color-white); font-weight: 600; }
-.sl-markdown-content img[src*="charts/"] { background: #fff; border-radius: 8px; max-width: 36rem; width: 100%; }
+.chart-pic { margin: 1rem 0 !important; max-width: 36rem; }
+.chart-pic img { width: 100%; border-radius: 10px; border: 1px solid var(--sl-color-gray-6); }
 
 /* #1017: the docs' look — the builder's typeface, quieter chrome, cards */
 :root {
@@ -94,7 +95,7 @@ header.header { border-bottom: 1px solid var(--sl-color-gray-6); backdrop-filter
 .sidebar-content .sl-badge.success { background: var(--sl-color-accent-low); color: var(--sl-color-accent); }
 .sidebar-content .sl-badge.note { background: var(--site-indigo-soft); color: var(--site-indigo); }
 .sidebar-content .sl-badge.tip { background: var(--site-pink-soft); color: var(--site-pink); }
-.sidebar-content a[aria-current="page"] { border-radius: 6px; }
+.sidebar-content a[aria-current="page"] { border-radius: 6px; background: var(--sl-color-accent); color: var(--sl-color-black) !important; }
 
 /* in-page badges (chart and extension pages) */
 .sl-markdown-content .sl-badge { font-family: var(--sl-font); font-size: 0.72rem; font-weight: 600; border-radius: 999px; padding: 0.15rem 0.6rem; border: 0; }

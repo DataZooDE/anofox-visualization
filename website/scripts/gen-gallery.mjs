@@ -12,7 +12,7 @@
 //   node scripts/gen-gallery.mjs --plots   copy the extension plots from a conformance run
 //       (CONFORMANCE_OUT/<ext>/*.svg, default ../../scratch-showcase) → src/assets/plots/<ext>/
 import { execFileSync } from "child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createRequire } from "module";
 import os from "os";
 import path from "path";
@@ -42,6 +42,9 @@ const pages = readdirSync(src).filter((f) => f.endsWith(".sql")).sort().map((f) 
   return { slug: f.replace(/\.sql$/, ""), title: head("page"), lead: head("lead"), order: Number(head("order") || 50), setup, tiles };
 });
 const full = (p, t) => `${p.setup}\n\n${t.sql}\n`;
+// The pictures wear the site's theme (showcase/site-theme.json); the SQL shown
+// and the "Edit it in the builder" links stay without it.
+const themed = (sql) => `SELECT '${JSON.stringify(JSON.parse(readFileSync(path.join(site, "showcase", "site-theme.json"), "utf8")))}'::THEME;\n${sql}`;
 const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
 
 if (mode === "--check") {
@@ -66,11 +69,20 @@ if (mode === "--check") {
   process.exit(0);
 }
 
+// default palette → site palette (showcase/site-theme.json)
+const SITE_COLORS = { "#2563EB": "#0B5D5E", "#EB6834": "#C03A62", "#1BAF7A": "#3D56A6", "#EDA100": "#C27C0E",
+  "#1F54C8": "#084A4B", "#C2D3F9": "#BFDCD8", "#DC2626": "#C03A62", "#15803D": "#1F7A52" };
+
 if (mode === "--plots") {
   const from = process.env.CONFORMANCE_OUT || path.resolve(root, "..", "scratch-showcase");
   for (const [ext, list] of Object.entries(plots)) {
     mkdirSync(path.join(plotPics, ext), { recursive: true });
-    for (const x of list) copyFileSync(path.join(from, ext, x.from), path.join(plotPics, ext, x.file));
+    // the extension draws in the builder's default palette: recoloured to the site's
+    for (const x of list) {
+      let svg = readFileSync(path.join(from, ext, x.from), "utf8");
+      for (const [a, b] of Object.entries(SITE_COLORS)) svg = svg.replace(new RegExp(a, "gi"), b);
+      writeFileSync(path.join(plotPics, ext, x.file), svg);
+    }
   }
   console.log("plots copied");
   process.exit(0);
@@ -87,7 +99,7 @@ if (mode === "--shots") {
       mkdirSync(path.join(pics, p.slug), { recursive: true });
       for (const t of p.tiles) {
         const page = await ctx.newPage();
-        await page.goto(`${builder}?embed=1#sql=${b64(full(p, t))}`);
+        await page.goto(`${builder}?embed=1#sql=${b64(themed(full(p, t)))}`);
         await page.waitForSelector(".dash .panel", { timeout: 120000 });
         await page.waitForFunction(() => !document.body.classList.contains("loading") && !document.querySelector(".dash .panel.dp-skel, .dash .panel.placeholder"), null, { timeout: 120000 });
         if (t.click) {
