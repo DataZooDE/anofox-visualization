@@ -85,6 +85,50 @@ function knownJson(known) {
 // assistant's parse-tree check at the execution point).
 // Works with the async (browser) and the blocking (Node) DuckDB-Wasm alike.
 let scratchSeq = 0; // unique across runners: two may run at once
+// #1025: in DuckDB-Wasm (1.33.1-dev65.0) a database opened with db.open(…) —
+// the page must, for allowUnsignedExtensions — traps ("null function", or
+// the tab crashes) on `current_date` inside an expression (day(current_date),
+// current_date - INTERVAL …), while today(), its synonym, works. SQL sent to
+// the in-browser engine spells it today(): outside string literals, quoted
+// identifiers and comments; `current_date()` too.
+export function wasmSql(sql) {
+  if (!/current_date/i.test(sql)) return sql;
+  let out = "";
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i];
+    const two = sql.slice(i, i + 2);
+    let j = i;
+    if (ch === "'" || ch === '"') {
+      // a literal or quoted identifier ('' / "" escape the quote)
+      j = i + 1;
+      while (j < n && !(sql[j] === ch && sql[j + 1] !== ch)) j += sql[j] === ch ? 2 : 1;
+      j = Math.min(n, j + 1);
+    } else if (two === "--") {
+      j = sql.indexOf("\n", i);
+      if (j < 0) j = n;
+    } else if (two === "/*") {
+      j = sql.indexOf("*/", i + 2);
+      j = j < 0 ? n : j + 2;
+    } else if (/[A-Za-z_]/.test(ch) && !/[A-Za-z0-9_$.]/.test(sql[i - 1] || "")) {
+      j = i;
+      while (j < n && /[A-Za-z0-9_$]/.test(sql[j])) j++;
+      if (sql.slice(i, j).toLowerCase() === "current_date" && sql[j] !== ".") {
+        const call = /^\s*\(\s*\)/.exec(sql.slice(j));
+        out += "today()";
+        i = j + (call ? call[0].length : 0);
+        continue;
+      }
+    } else {
+      j = i + 1;
+    }
+    out += sql.slice(i, j);
+    i = j;
+  }
+  return out;
+}
+
 export function scratchRunner(db, opts = {}) {
   const { prepare, toRows = rowsJson, timeoutMs = 0, guard } = ownOpts(opts);
   return async (sql) => {
@@ -164,6 +208,7 @@ export function scratchRunner(db, opts = {}) {
 // that differs from DuckDB's, e.g. around E'\'' strings, can't hide a
 // second statement). Sent, not queried, so a timeout can cancel it.
 async function runOne(c, sql) {
+  sql = wasmSql(sql);
   try {
     const st = await c.prepare(sql);
     await st.close();
