@@ -409,7 +409,8 @@ def load_refs(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tasks", default="pilot", help="pilot | all | id,id,…")
+    ap.add_argument("--tasks", default="pilot", help="pilot | all (the 20 comparison tasks) | coverage (the gap-finding set) | id,id,…")
+    ap.add_argument("--family", help="with --tasks coverage: only these families (time,map,kpi,…)")
     ap.add_argument("--arms", default="anofox,python,vegalite")
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--model", default="claude-sonnet-5")
@@ -425,10 +426,17 @@ def main():
     ap.add_argument("--yes", action="store_true", help="don't ask before spending")
     a = ap.parse_args()
 
-    tasks = [json.loads(l) for l in (HERE / "tasks.jsonl").read_text().splitlines() if l.strip()]
+    tasks = [json.loads(l) for f in ("tasks.jsonl", "coverage.jsonl")
+             for l in (HERE / f).read_text().splitlines() if l.strip()]
     if a.tasks == "pilot":
         tasks = [t for t in tasks if t["pilot"]]
-    elif a.tasks != "all":
+    elif a.tasks == "all":
+        tasks = [t for t in tasks if "family" not in t]
+    elif a.tasks == "coverage":
+        tasks = [t for t in tasks if "family" in t]
+        if a.family:
+            tasks = [t for t in tasks if t["family"] in a.family.split(",")]
+    else:
         want = set(a.tasks.split(","))
         tasks = [t for t in tasks if t["id"] in want]
     arms = a.arms.split(",")

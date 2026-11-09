@@ -171,6 +171,23 @@ def main():
             L.append(f"| {arm} | {m('explore'):,.0f} | {m('chart'):,.0f} | {m('repair'):,.0f} | {m('answer'):,.0f} | {m('none'):,.0f} "
                      f"| {'–' if ref is None else f'{ref:,.0f}'} | {sum(x['artifact_chars'] for x in R) / len(R):,.0f} |")
 
+    fam = {}
+    here = Path(__file__).resolve().parent
+    for f in ("tasks.jsonl", "coverage.jsonl"):
+        for t in map(json.loads, (here / f).read_text().splitlines()):
+            if "family" in t:
+                fam[t["id"]] = t["family"]
+    if judged and any(x["task"] in fam for x in rows):
+        L.append("\n## Per family (pass / runs, first answer + follow-up)\n")
+        L.append("| family | " + " | ".join(arms) + " |")
+        L.append("|---|" + "---|" * len(arms))
+        for fm in sorted(set(fam.values())):
+            cells = []
+            for arm in arms:
+                R = [x for x in rows if fam.get(x["task"]) == fm and x["arm"] == arm]
+                cells.append(f"{sum(bool(x['pass']) for x in R)}/{len(R)}" if R else "–")
+            L.append(f"| {fm} | " + " | ".join(cells) + " |")
+
     L.append("\n## Per task (median total tokens over repeats; pass count)\n")
     L.append("| task | phase | " + " | ".join(arms) + " |")
     L.append("|---|---|" + "---|" * len(arms))

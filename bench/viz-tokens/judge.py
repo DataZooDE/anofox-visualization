@@ -27,7 +27,8 @@ RUBRIC = """You grade one answer of a data assistant: a chart (the image) and a 
 
 Judge:
 1. numbers_correct: every number and ranking the written answer states agrees with the ground truth (rounding is fine; a claim the truth can't check is fine if it doesn't contradict it). false if a key number or the main conclusion is wrong or missing.
-2. chart_answers: the chart shows what the request asks for (the right measure, grouping and breakdown) and agrees with the ground truth. For a follow-up, the chart must show the requested change.
+2. chart_answers: the chart shows what the request asks for (the right measure, grouping and breakdown) and agrees with the ground truth. For a follow-up, the chart must show the requested change. When a good chart is described, a chart that serves the request clearly worse (a bar chart where a map was asked for, no uncertainty band where one was asked for) is false.
+   With no ground-truth rows, the right answer says there is no such data.
 3. readable: 1-5, how quickly a business reader gets the answer from the chart (title, labels, number format, chart type, clutter). 5 = at a glance, 3 = works with effort, 1 = misleading or unreadable.
 
 Reply with JSON only: {"numbers_correct": true|false, "chart_answers": true|false, "readable": 1-5, "reason": "one or two sentences"}"""
@@ -66,7 +67,8 @@ def main():
     a = ap.parse_args()
     key = os.environ.get("ANTHROPIC_API_KEY") or sys.exit("ANTHROPIC_API_KEY is not set")
     out = Path(a.results)
-    tasks = {t["id"]: t for t in map(json.loads, (HERE / "tasks.jsonl").read_text().splitlines())}
+    tasks = {t["id"]: t for f in ("tasks.jsonl", "coverage.jsonl")
+             for t in map(json.loads, (HERE / f).read_text().splitlines())}
     done = set()
     jpath = out / "judgments.jsonl"
     if jpath.exists():
@@ -83,8 +85,10 @@ def main():
                 else:
                     req = t["question"] if ph["phase"] == "first" else f"{t['question']}\n\nThen the user asked: {t['followup']}"
                     png = base64.b64encode((out / ph["chart"]).read_bytes()).decode()
+                    expect = (f"\nA good chart for the first request: {t['expect']} (another kind of chart that answers "
+                              "the request as well is fine; one that answers it clearly worse is not).\n") if t.get("expect") else ""
                     content = [
-                        {"type": "text", "text": f"Request:\n{req}\n\nGround truth rows (CSV):\n{truth_rows(a.data, t, ph['phase'])}\nWritten answer:\n{ph['answer']}\n\nThe chart:"},
+                        {"type": "text", "text": f"Request:\n{req}\n{expect}\nGround truth rows (CSV):\n{truth_rows(a.data, t, ph['phase'])}\nWritten answer:\n{ph['answer']}\n\nThe chart:"},
                         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}},
                     ]
                     m = call(key, content)
