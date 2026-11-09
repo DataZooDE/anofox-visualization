@@ -953,7 +953,8 @@ fn render_inner(
                 // #405; mirrored in lint.rs fit_ref and web/app.js MIN_KPI /
                 // MIN_KPI_COMPACT), the tallest tile wins.
                 let th = run.iter().fold(0.0f64, |a, k| {
-                    a.max(k.height()).max(if k.compact { 36.0 } else { 96.0 })
+                    a.max(k.height_in(tw))
+                        .max(if k.compact { 36.0 } else { 96.0 })
                 });
                 strip = Some((run.len(), per_row, tw, th));
             }
@@ -1043,7 +1044,7 @@ fn render_inner(
                 // #878: a lone KPI and a table are as tall as their content
                 // (≤ the default), not a fixed box with empty space under it.
                 (None, None) => match &tiles[si] {
-                    Some(k) => k.height().max(if k.compact { 36.0 } else { 96.0 }),
+                    Some(k) => k.height_in(own_w).max(if k.compact { 36.0 } else { 96.0 }),
                     None if roles
                         .iter()
                         .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable)) =>
@@ -1058,7 +1059,7 @@ fn render_inner(
                             compact[si],
                         )
                         .map_or(opts.panel_height as f64, |k| {
-                            k.height().max(if k.compact { 36.0 } else { 96.0 })
+                            k.height_in(own_w).max(if k.compact { 36.0 } else { 96.0 })
                         })
                     }
                     None => opts.panel_height as f64,
