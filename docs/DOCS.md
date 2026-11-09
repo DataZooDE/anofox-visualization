@@ -4207,6 +4207,10 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
   chart; for an input it *is* the DuckDB variable name
   (`SELECT region AS zone ::DROPDOWN` → `getvariable('zone')`); in a
   `::TABLE`/`::PAGED`/`::DOWNLOAD_*` panel it is the column header.
+- **The role may also come before the alias** (#1047), the order a SQL cast
+  usually takes: `sum(units)::BARCHART AS total_units` reads as
+  `sum(units) AS total_units ::BARCHART`. A token that is also a SQL type
+  stays a cast there: `d::DATE AS day` is DuckDB's `DATE` cast.
 - **Role tokens that are also SQL types** — `::DATE`, `::TEXT`, `::STRING`,
   `::NUMERIC` (inputs) and `::MAP`, `::GEOMETRY` (maps). In a query statement
   `::MAP`/`::GEOMETRY` are always the map role. The input tokens are roles only

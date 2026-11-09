@@ -272,6 +272,7 @@ fn plan_statements(script: &str) -> Vec<Panel> {
             let name = name::parse(&raw);
             let materialize = materialize::parse(&raw);
             let clean = strip_comments(&raw);
+            let clean = normalize_role_alias(clean.trim()).into_owned();
             let stmt = clean.trim();
             if stmt.is_empty() {
                 return None;
@@ -908,6 +909,53 @@ fn select_list_spans(stmt: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// #1047: `<expr>::ROLE AS alias`, the cast before the alias (the order a SQL
+/// cast usually takes), as `<expr> AS alias ::ROLE`. Only a recognised role
+/// that is not also a SQL type: `d::DATE AS day` stays a cast.
+fn role_before_alias(item: &str) -> Option<String> {
+    let t = item.trim();
+    let (core, alias) = trailing_alias(t);
+    alias?;
+    let (expr, tok) = lex::trailing_cast(core)?;
+    if is_sql_type_token(tok) || parse_role(tok).is_none() {
+        return None;
+    }
+    Some(format!("{expr} {} ::{tok}", t[core.len()..].trim()))
+}
+
+/// `stmt` with every select list's `<expr>::ROLE AS alias` items in the usual
+/// order, `<expr> AS alias ::ROLE` (#1047); unchanged lists keep their text.
+pub(crate) fn normalize_role_alias(stmt: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if !is_query_statement(stmt) {
+        return Cow::Borrowed(stmt);
+    }
+    let mut out = String::new();
+    let mut prev = 0;
+    for (s, e) in select_list_spans(stmt) {
+        let items = split_top_commas(&stmt[s..e]);
+        let fixed: Vec<Option<String>> = items.iter().map(|it| role_before_alias(it)).collect();
+        if fixed.iter().all(Option::is_none) {
+            continue;
+        }
+        out.push_str(&stmt[prev..s]);
+        let list: Vec<String> = items
+            .iter()
+            .zip(fixed)
+            .map(|(it, f)| f.unwrap_or_else(|| it.trim().to_string()))
+            .collect();
+        out.push(' ');
+        out.push_str(&list.join(", "));
+        out.push(' ');
+        prev = e;
+    }
+    if prev == 0 {
+        return Cow::Borrowed(stmt);
+    }
+    out.push_str(&stmt[prev..]);
+    Cow::Owned(out)
+}
+
 /// A recognised trailing `::ROLE` on a select item, honouring the SQL-type
 /// ambiguity rules (see the module docs). `inputs_ok` = this SELECT is an
 /// input statement.
@@ -927,6 +975,7 @@ fn item_role(item: &str, inputs_ok: bool) -> Option<(&str, Role)> {
 /// `want`. Looks at the raw statement text (casts intact), not a
 /// [`Panel`]'s rewritten `sql`.
 pub(crate) fn role_source_expr(stmt: &str, want: Role) -> Option<String> {
+    let stmt = &*normalize_role_alias(stmt);
     for (s, e) in select_list_spans(stmt) {
         for item in lex::split_top_commas(&stmt[s..e]) {
             if let Some((expr, role)) = item_role(&item, true) {
@@ -1009,6 +1058,7 @@ pub const INFO_COLUMN: &str = "__anofox_info";
 /// stripped too — left alone, DuckDB sees them as real (nonexistent) type
 /// casts and raises a raw SQL error instead of rendering the panel (#294).
 pub fn rewrite(stmt: &str) -> Rewritten {
+    let stmt = &*normalize_role_alias(stmt);
     let none = || (stmt.to_string(), Vec::new(), Vec::new());
     if !is_query_statement(stmt) {
         return none();
@@ -1078,6 +1128,7 @@ fn inputs_ok(unambiguous: &[Role]) -> bool {
 /// covers every role (`::TABLE`, `::CATEGORY`, `::LINK`, …): Ask's masking
 /// reads column names (#195).
 pub fn column_labels(stmt: &str) -> Vec<(usize, String)> {
+    let stmt = &*normalize_role_alias(stmt);
     if !is_query_statement(stmt) {
         return Vec::new();
     }
@@ -1882,5 +1933,46 @@ mod describe_tests {
         // anything else without a role stays setup
         assert!(plan("CREATE TEMP VIEW v AS SELECT 1")[0].setup);
         assert!(plan("SET VARIABLE x = 1")[0].setup);
+    }
+}
+
+#[cfg(test)]
+mod role_before_alias_tests {
+    use super::*;
+
+    // #1047: `expr::ROLE AS alias`, the cast before the alias (the order a SQL
+    // cast usually takes), reached DuckDB as a cast to a type named after the
+    // role. It now reads as `expr AS alias ::ROLE`.
+    #[test]
+    fn a_role_before_the_alias_is_read_as_after_it() {
+        let a = plan("SELECT item::XAXIS, sum(units)::BARCHART AS total_units FROM m5 GROUP BY 1 ORDER BY total_units DESC");
+        let b = plan("SELECT item::XAXIS, sum(units) AS total_units ::BARCHART FROM m5 GROUP BY 1 ORDER BY total_units DESC");
+        assert_eq!(a[0].roles, b[0].roles);
+        assert_eq!(a[0].sql, b[0].sql);
+        assert!(!a[0].sql.contains("::BARCHART"), "{}", a[0].sql);
+        // the alias names the series, as after the cast
+        assert_eq!(
+            column_labels("SELECT x::XAXIS, (sum(y))::LINECHART AS \"Revenue\" FROM t GROUP BY 1"),
+            vec![(0, "x".to_string()), (1, "Revenue".to_string())]
+        );
+    }
+
+    #[test]
+    fn real_casts_and_the_usual_order_stay_as_they_are() {
+        // a SQL type (also an input role) before an alias is a cast
+        for s in [
+            "SELECT d::DATE AS day, n::BARCHART FROM t",
+            "SELECT c::TEXT AS name, n::BARCHART FROM t",
+        ] {
+            assert_eq!(normalize_role_alias(s), s);
+        }
+        let s = "SELECT x AS a ::XAXIS, y AS b ::BARCHART FROM t";
+        assert_eq!(normalize_role_alias(s), s);
+        // not a role at all: left for DuckDB
+        let s = "SELECT x::DOUBLE AS a FROM t";
+        assert_eq!(normalize_role_alias(s), s);
+        // every branch of a UNION, and an input
+        let n = normalize_role_alias("SELECT region::DROPDOWN AS region FROM a UNION ALL SELECT r::DROPDOWN AS region FROM b");
+        assert_eq!(n.matches("AS region ::DROPDOWN").count(), 2, "{n}");
     }
 }
