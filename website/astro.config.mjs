@@ -92,6 +92,12 @@ export default defineConfig({
           { label: "Themes and branding", slug: "build/theming" },
           { label: "Design guide", slug: "build/design" },
         ] },
+        { label: "Connect", items: [
+          { label: "Where the data comes from", slug: "connect" },
+          { label: "Files", slug: "connect/files" },
+          { label: "HTTPS, S3, GCS", slug: "connect/remote" },
+          { label: "Databases", slug: "connect/databases" },
+        ] },
         { label: "Deploy", items: [
           { label: "Which way to run it", slug: "deploy" },
           { label: "In the browser", slug: "deploy/browser", badge: { text: "Browser", variant: "success" } },
@@ -102,6 +108,7 @@ export default defineConfig({
           { label: "Login and row policies", slug: "deploy/security", badge: { text: "Locked server", variant: "tip" } },
           { label: "Embedding in your app", slug: "deploy/embedding", badge: { text: "Locked server", variant: "tip" } },
           { label: "Agents and MCP", slug: "deploy/agent", badge: { text: "Locked server", variant: "tip" } },
+          { label: "Platform recipes", slug: "deploy/recipes" },
           { label: "Checklist", slug: "deploy/checklist" },
         ] },
         { label: "Integrate", items: [
@@ -111,6 +118,14 @@ export default defineConfig({
           { label: "anofox-tabular", slug: "integrate/tabular" },
           { label: "anofox-optimize", slug: "integrate/optimize" },
           { label: "anofox-decide", slug: "integrate/decide" },
+        ] },
+        { label: "Reference", items: [
+          { label: "Overview and CLI", slug: "reference" },
+          { label: "Roles", slug: "reference/roles" },
+        ] },
+        { label: "Releases", items: [
+          { label: "Releases and upgrades", slug: "releases" },
+          { label: "FAQ and troubleshooting", slug: "releases/faq" },
         ] },
         { label: "Builder ↗", link: "/app/", attrs: { target: "_blank" } },
       ],
