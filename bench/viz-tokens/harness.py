@@ -93,6 +93,12 @@ CHART_TOOLS = {
                  "input_schema": {"type": "object", "properties": {"sql": {"type": "string"}, "spec": {"type": "object"}}, "required": ["sql", "spec"]}},
 }
 EXPLORE = {"list_tables", "describe", "query"}
+# anofox-lean: the anofox arm with the --lean reference (anofox-reference.mjs)
+BASE = {"anofox-lean": "anofox"}
+
+
+def base(arm):
+    return BASE.get(arm, arm)
 
 
 def cost(model, u):
@@ -147,7 +153,7 @@ def sandboxed(cmd, workdir, extra_ro=()):
 
 class Tools:
     def __init__(self, arm, db, workdir, cfg):
-        self.arm, self.db, self.work, self.cfg = arm, Path(db), Path(workdir), cfg
+        self.arm, self.db, self.work, self.cfg = base(arm), Path(db), Path(workdir), cfg
         self.con = duckdb.connect(str(self.db), read_only=True,
                                   config={"enable_external_access": False, "lock_configuration": True})
         self.chart = None  # (png bytes, artifact text) of the last successful chart
@@ -343,12 +349,12 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
     work = Path(tempfile.mkdtemp(prefix=run_id + "-", dir=cfg["workdir"]))
     db = Path(cfg["data"]) / f"{task['dataset']}.duckdb"
     kit = Tools(arm, db, work, cfg)
-    chart_tool = CHART_TOOLS[arm]["name"]
+    chart_tool = CHART_TOOLS[base(arm)]["name"]
     system = [
-        {"type": "text", "text": INSTRUCTIONS.format(chart_tool=chart_tool) + "\n" + ARM_NOTES[arm]},
+        {"type": "text", "text": INSTRUCTIONS.format(chart_tool=chart_tool) + "\n" + ARM_NOTES[base(arm)]},
         {"type": "text", "text": refs[arm], "cache_control": {"type": "ephemeral"}},
     ]
-    tools = COMMON_TOOLS + [CHART_TOOLS[arm]]
+    tools = COMMON_TOOLS + [CHART_TOOLS[base(arm)]]
     messages = [{"role": "user", "content": task["question"]}]
     rec = {"run": run_id, "task": task["id"], "dataset": task["dataset"], "arm": arm, "rep": rep,
            "model": getattr(model, "model", "?"), "phases": []}
@@ -389,9 +395,11 @@ def load_refs(args):
         if (d / "style-reference.md").exists():
             parts.append("# Style reference\n\n" + (d / "style-reference.md").read_text())
         return "\n\n".join(parts)
-    anofox = subprocess.run(["node", str(HERE / "anofox-reference.mjs"), "--pkg", args.pkg],
-                            capture_output=True, text=True, check=True).stdout
-    return {"anofox": anofox, "python": bundle(args.python_ref), "vegalite": bundle(args.vega_ref)}
+    def anofox(*flags):
+        return subprocess.run(["node", str(HERE / "anofox-reference.mjs"), "--pkg", args.pkg, *flags],
+                              capture_output=True, text=True, check=True).stdout
+    return {"anofox": anofox(), "anofox-lean": anofox("--lean"),
+            "python": bundle(args.python_ref), "vegalite": bundle(args.vega_ref)}
 
 
 def main():
@@ -430,8 +438,8 @@ def main():
 
     meta = {"model": a.model, "effort": a.effort, "reps": a.reps, "arms": arms, "tasks": [t["id"] for t in tasks],
             "dry": a.dry, "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "ref_sha": {k: hashlib.sha256(v.encode()).hexdigest()[:12] for k, v in refs.items()},
-            "ref_chars": {k: len(v) for k, v in refs.items()}}
+            "ref_sha": {k: hashlib.sha256(v.encode()).hexdigest()[:12] for k, v in refs.items() if k in arms},
+            "ref_chars": {k: len(v) for k, v in refs.items() if k in arms}}
     if not a.dry:
         key = os.environ.get("ANTHROPIC_API_KEY")
         if not key:
@@ -439,9 +447,10 @@ def main():
         api = Anthropic(key, a.model, a.effort)
         meta["prefix_tokens"] = {}
         for arm in arms:
-            sysblocks = [{"type": "text", "text": INSTRUCTIONS.format(chart_tool=CHART_TOOLS[arm]["name"]) + "\n" + ARM_NOTES[arm]},
+            b = base(arm)
+            sysblocks = [{"type": "text", "text": INSTRUCTIONS.format(chart_tool=CHART_TOOLS[b]["name"]) + "\n" + ARM_NOTES[b]},
                          {"type": "text", "text": refs[arm]}]
-            meta["prefix_tokens"][arm] = api.count(sysblocks, COMMON_TOOLS + [CHART_TOOLS[arm]])
+            meta["prefix_tokens"][arm] = api.count(sysblocks, COMMON_TOOLS + [CHART_TOOLS[b]])
         n = len(tasks) * len(arms) * a.reps
         print(f"{n} runs ({len(tasks)} tasks × {len(arms)} arms × {a.reps}), prefix tokens {meta['prefix_tokens']}")
         if not a.yes and input("Spend on these runs? [y/N] ").strip().lower() != "y":
@@ -453,7 +462,7 @@ def main():
         for rep in range(1, a.reps + 1):
             for t in tasks:
                 for arm in arms:
-                    model = Scripted(arm) if a.dry else Anthropic(os.environ["ANTHROPIC_API_KEY"], a.model, a.effort)
+                    model = Scripted(base(arm)) if a.dry else Anthropic(os.environ["ANTHROPIC_API_KEY"], a.model, a.effort)
                     rec = run_one(t, arm, rep, model, cfg, out, refs)
                     f.write(json.dumps(rec, default=str) + "\n")
                     f.flush()

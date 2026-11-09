@@ -46,6 +46,12 @@ the truth rows, the written answer and the chart image. It grades
 - where the output went: exploration, chart, repair, answer, and the
   reference read per run.
 
+A fourth arm, `anofox-lean`, is anofox with a lean reference
+(`anofox-reference.mjs --lean`, rules fixed before any results). It keeps one
+role source, the guide's Roles table without its dashboard-only rows, plus the
+guide's sections on design, tables, heatmaps and gotchas: ≈29 k characters,
+the size of the Vega-Lite reference.
+
 ## The reference sizes differ
 
 The anofox reference is about 4× the others (≈104 k characters against 22 k

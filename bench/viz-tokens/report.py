@@ -2,7 +2,10 @@
 """#1044: the report of a results folder (runs.jsonl + judgments.jsonl) —
 report.md and summary.json in the same folder.
 
-  python report.py results/pilot
+  python report.py results/pilot [results/pilot-lean …]
+
+Several folders (the same tasks, run apart, e.g. a later arm) are read as one;
+the report goes to the first.
 """
 import json
 import math
@@ -63,14 +66,21 @@ def geo_ci(ratios, n=4000, seed=1044):
 
 
 def main():
-    out = Path(sys.argv[1])
+    dirs = [Path(d) for d in sys.argv[1:]]
+    out = dirs[0]
     meta = json.loads((out / "meta.json").read_text())
-    runs = [json.loads(l) for l in (out / "runs.jsonl").read_text().splitlines() if l.strip()]
-    jp = out / "judgments.jsonl"
-    judg = {}
-    if jp.exists():
-        for j in map(json.loads, jp.read_text().splitlines()):
-            judg[(j["run"], j["phase"])] = j
+    runs, judg = [], {}
+    for d in dirs:
+        m = json.loads((d / "meta.json").read_text())
+        if d != out:  # a later arm: its arms, references and prefix counts join
+            meta["arms"] += [a for a in m["arms"] if a not in meta["arms"]]
+            for k in ("ref_chars", "ref_sha", "prefix_tokens"):
+                meta.setdefault(k, {}).update(m.get(k, {}))
+        runs += [json.loads(l) for l in (d / "runs.jsonl").read_text().splitlines() if l.strip()]
+        jp = d / "judgments.jsonl"
+        if jp.exists():
+            for j in map(json.loads, jp.read_text().splitlines()):
+                judg[(j["run"], j["phase"])] = j
     arms = meta["arms"]
     prefix = meta.get("prefix_tokens", {})
 
@@ -119,33 +129,34 @@ def main():
                      f"| {f(s['median_output'])} | ${s['median_cost']:.3f} | {f(s['tokens_per_pass'])} | {money(s['cost_per_pass'])} "
                      f"| {f(s['median_calls'], 1)} | {s['repairs']} | {f(s['readable'], 1)} |")
 
-        # paired, per task: the median over repeats, anofox against each other arm
-        if "anofox" in arms:
-            L.append("\n**Paired by task (anofox ÷ other; < 1 means anofox needs less).** Geometric mean of the per-task ratios of the medians over repeats, 95 % bootstrap CI over tasks, Wilcoxon signed-rank on the log ratios. Success: McNemar (exact) over the same task and repeat.\n")
+        # paired, per task: the median over repeats, each anofox variant against python and vegalite
+        for ours in [a for a in ("anofox", "anofox-lean") if a in arms]:
+            L.append(f"\n**Paired by task ({ours} ÷ other; < 1 means {ours} needs less).** Geometric mean of the per-task ratios of the medians over repeats, 95 % bootstrap CI over tasks, Wilcoxon signed-rank on the log ratios. Success: McNemar (exact) over the same task and repeat.\n")
             L.append("| vs | metric | ratio | 95 % CI | Wilcoxon p | tasks |")
             L.append("|---|---|---|---|---|---|")
-            for other in [a for a in arms if a != "anofox"]:
+            for other in [a for a in arms if not a.startswith("anofox")]:
+                cmp = summary["paired"].setdefault(phase, {}).setdefault(f"{ours} vs {other}", {})
                 for metric in ("total", "output", "cost"):
                     ratios = []
                     for t in sorted({x["task"] for x in rows}):
-                        a = [x[metric] for x in rows if x["task"] == t and x["arm"] == "anofox" and x["phase"] == phase]
+                        a = [x[metric] for x in rows if x["task"] == t and x["arm"] == ours and x["phase"] == phase]
                         b = [x[metric] for x in rows if x["task"] == t and x["arm"] == other and x["phase"] == phase]
                         if a and b and median(b) > 0:
                             ratios.append(median(a) / median(b))
                     g, lo, hi = geo_ci(ratios)
                     p = wilcoxon([math.log(r) for r in ratios]).pvalue if len(ratios) >= 5 and any(r != 1 for r in ratios) else float("nan")
-                    summary["paired"].setdefault(phase, {}).setdefault(other, {})[metric] = {"ratio": g, "ci": [lo, hi], "p": p, "n": len(ratios)}
+                    cmp[metric] = {"ratio": g, "ci": [lo, hi], "p": p, "n": len(ratios)}
                     L.append(f"| {other} | {'cost ($)' if metric == 'cost' else metric + ' tokens'} | {g:.2f} | {lo:.2f}–{hi:.2f} | {p:.3g} | {len(ratios)} |")
                 if judged:
                     key = lambda x: (x["task"], x["rep"])
-                    A = {key(x): x["pass"] for x in rows if x["arm"] == "anofox" and x["phase"] == phase}
+                    A = {key(x): x["pass"] for x in rows if x["arm"] == ours and x["phase"] == phase}
                     B = {key(x): x["pass"] for x in rows if x["arm"] == other and x["phase"] == phase}
                     both = [k for k in A if k in B]
-                    b = sum(A[k] and not B[k] for k in both)
-                    c = sum(B[k] and not A[k] for k in both)
+                    b = sum(bool(A[k]) and not B[k] for k in both)
+                    c = sum(bool(B[k]) and not A[k] for k in both)
                     p = binomtest(b, b + c).pvalue if b + c else float("nan")
-                    summary["paired"][phase][other]["mcnemar"] = {"anofox_only": b, "other_only": c, "p": p}
-                    L.append(f"| {other} | pass (McNemar) | anofox only {b}, {other} only {c} | | {p:.3g} | {len(both)} pairs |")
+                    cmp["mcnemar"] = {"ours_only": b, "other_only": c, "p": p}
+                    L.append(f"| {other} | pass (McNemar) | {ours} only {b}, {other} only {c} | | {p:.3g} | {len(both)} pairs |")
 
         # where the output tokens went
         L.append("\n**Where the output went** (mean output tokens per run, by the tool each model call used; thinking included) and the reference read per run (cached prefix × calls):\n")
