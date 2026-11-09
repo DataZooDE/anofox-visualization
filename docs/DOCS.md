@@ -2610,10 +2610,17 @@ column's own header (an `AS alias` wins; a bare column name otherwise) — not
 a positional `c1`, `c2`, … placeholder. A **mixed** combo (a different-kind
 overlay on a base chart, e.g. `sessions::BARCHART, revenue::LINECHART`) keeps
 the base in the brand colour with no legend; each overlay just takes the next
-palette colour so it never disappears into the base. For a legend that also
-dodges (bars side by side instead of overlaid) or needs a title other than
-the column header, pivot to the long form instead: one shared measure column
-plus a `::CATEGORY` naming the series.
+palette colour so it never disappears into the base.
+
+Several measures of **one bar kind** (and no `::CATEGORY`) are that chart's
+series, as if pivoted to the long form (#1049): `h AS "Holding"
+::BARCHART_STACKED, b AS "Backlog" ::BARCHART_STACKED` stacks them, two
+`::BARCHART` columns sit side by side, and the percent kinds stack to 100 %.
+Their order and colours follow the series names, as for any `::CATEGORY`
+(`::COLORS` sets both). Not with a `::Y2` axis or per-measure `::YMIN` /
+`::YMAX`. For a legend title other than the column headers, write the long
+form yourself: one shared measure column plus a `::CATEGORY` naming the
+series.
 
 **Distributions over time** (`::RIDGELINE`, #917): one density of the measure
 per `::CATEGORY` (else per `::XAXIS` value), each on its own row and
