@@ -207,6 +207,11 @@ class Tools:
         rc, out, err = sandboxed([dash, "--svg", "chart.sql", "chart.svg", "--width", "900"], d)
         if rc != 0 or not (d / "chart.svg").exists():
             return False, clip(f"render failed: {err or out}")
+        # a script without a chart role draws an empty page: say so, as the
+        # other arms fail without a chart.png / a mark (#1044 pilot)
+        svg = (d / "chart.svg").read_text()
+        if "data-geom=" not in svg and "kpi-value" not in svg:
+            return False, "nothing was drawn: no statement carries a chart role (e.g. `sum(x) AS \"Revenue\" ::BARCHART`)"
         rc, _, err = sandboxed(["rsvg-convert", "chart.svg", "-o", "chart.png"], d)
         if rc != 0:
             return False, clip(f"render failed: {err}")
