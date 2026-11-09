@@ -64,9 +64,9 @@ fn cards(svg: &str) -> Vec<(f64, f64)> {
 fn below_640_px_panels_are_full_width_and_tiles_two_per_row() {
     let c = cards(&svg(480));
     assert_eq!(c.len(), 6, "{c:?}");
-    // two charts: full width (480 - 2 x 16 padding - 16 gap), both at x = 16
+    // two charts: full width (480 - 2 x 16 padding), both at x = 16
     for (x, w) in &c[4..] {
-        assert_eq!((*x, *w), (16.0, 432.0), "{c:?}");
+        assert_eq!((*x, *w), (16.0, 448.0), "{c:?}");
     }
     // four tiles: two per row, two distinct x positions
     let mut xs: Vec<i64> = c[..4].iter().map(|(x, _)| *x as i64).collect();
@@ -83,6 +83,20 @@ fn wide_renders_keep_their_columns() {
     // four tiles in one row
     let xs: std::collections::BTreeSet<i64> = c[..4].iter().map(|(x, _)| *x as i64).collect();
     assert_eq!(xs.len(), 4, "{c:?}");
+}
+
+/// #1040: a row of panels ends where the KPI strip ends, at the right
+/// padding, as a CSS grid does (a 12-column unit is (content + gap) / 12).
+#[test]
+fn panels_and_tiles_end_at_the_same_right_edge() {
+    for width in [480, 640, 1200] {
+        let c = cards(&svg(width));
+        let right = |(x, w): &(f64, f64)| x + w;
+        let tiles = c[..4].iter().map(right).fold(0.0, f64::max);
+        let charts = c[4..].iter().map(right).fold(0.0, f64::max);
+        assert_eq!(tiles, width as f64 - 16.0, "{width}: {c:?}");
+        assert!((charts - tiles).abs() < 0.01, "{width}: {c:?}");
+    }
 }
 
 #[test]

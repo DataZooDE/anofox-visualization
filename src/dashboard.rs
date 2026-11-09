@@ -625,7 +625,8 @@ fn render_inner(
         row_y += h + gap;
     }
 
-    let unit_w = content_w / 12.0;
+    // A CSS grid: 12 spans fill content_w exactly (#1040).
+    let unit_w = (content_w + gap) / 12.0;
     let new_row = |row_y: &mut f64, row_h: &mut f64, x: &mut f64, row_units: &mut u32| {
         *row_y += *row_h + gap;
         *row_h = 0.0;
