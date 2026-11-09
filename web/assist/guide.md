@@ -488,6 +488,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 
 - **Inverted pyramid**: KPI strip of 2–6 tiles inside `::GROUP … ::ENDGROUP` **[lint: ungrouped-kpis]** → the primary full-width chart → 2-up breakdowns → a detail table.
 - **Title every chart with the takeaway** (`'Revenue up 12% YoY'`, not `'Revenue'`) **[lint: untitled-chart]**; format money / percent axes (`'€'::YFORMAT`).
+- **Annotate the answer** when the reader needs the exact numbers, e.g. bars of nearly the same length: label the marks (`''::DATALABELS`, formatted by `::YFORMAT`) and put the key figure or gap in a `::SUBTITLE` (`'US leads APAC by $14.8k (0.5 %)'`). Shares get `'percent'::YFORMAT` (values 0–100).
 - **Sort bars by value** unless x is time **[lint: unsorted-bars]**; long labels → `1::FLIP`.
 - **No pie / donut past ~6 slices** **[lint: pie-slices]**; ≤ ~7 colour series (top-N + "Other") **[lint: many-series]**.
 - **≤ ~7 panels per view**, split topics with `::TAB` **[lint: too-many-panels]**.
