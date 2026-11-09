@@ -353,16 +353,50 @@ impl Kpi {
     /// headless layouts size a KPI row to the tallest tile. A `::KPI_SIZE`
     /// `'compact'` tile is one line, no sparkline / goal (#405).
     pub fn height(&self) -> f64 {
+        self.height_in(f64::INFINITY)
+    }
+
+    /// [`Kpi::height`] for a tile `w` px wide: a caption too long for one
+    /// line wraps (#1042), and each extra line adds [`CAP_LINE_H`].
+    pub fn height_in(&self, w: f64) -> f64 {
         if self.compact {
             return PAD_COMPACT * 2.0 + LINE_H_COMPACT;
         }
+        let cap = match self.caption_lines(w).len() {
+            0 => 0.0,
+            n => CAP_H + (n - 1) as f64 * CAP_LINE_H,
+        };
         PAD * 2.0
             + VALUE_H
             + if self.delta.is_some() { DELTA_H } else { 0.0 }
             + if self.label_line() { DELTA_H } else { 0.0 }
-            + if self.caption.is_empty() { 0.0 } else { CAP_H }
+            + cap
             + if self.spark.is_empty() { 0.0 } else { SPARK_H }
             + if self.goal.is_some() { GOAL_H } else { 0.0 }
+    }
+
+    /// The caption's lines in a tile `w` px wide (none when it is empty),
+    /// wrapped as ggplot-rs wraps text, at most [`CAP_MAX_LINES`] — the last
+    /// then ends in "…".
+    fn caption_lines(&self, w: f64) -> Vec<String> {
+        if self.caption.is_empty() {
+            return Vec::new();
+        }
+        // 600-weight text runs a little wider than the estimate (as
+        // dashboard.rs pads it elsewhere)
+        let avail = (w - 2.0 * PAD).max(20.0) / 1.08;
+        let mut lines = ggplot_rs::render::text::wrap_text(&self.caption, avail, CAP_SIZE);
+        if lines.len() > CAP_MAX_LINES {
+            lines.truncate(CAP_MAX_LINES);
+            let last = &mut lines[CAP_MAX_LINES - 1];
+            while !last.is_empty()
+                && ggplot_rs::render::text::text_width(&format!("{last}…"), CAP_SIZE) > avail
+            {
+                last.pop();
+            }
+            *last = format!("{}…", last.trim_end());
+        }
+        lines
     }
 
     /// The `::DELTA_LABEL` has its own line under the change (always — so the
@@ -398,7 +432,7 @@ impl Kpi {
         let vsize = (inner / (chars * 0.62)).clamp(16.0, 34.0);
         let mut y = PAD
             + if center {
-                (h - self.height()).max(0.0) / 2.0
+                (h - self.height_in(w)).max(0.0) / 2.0
             } else {
                 0.0
             };
@@ -469,14 +503,23 @@ impl Kpi {
                 },
             ));
         }
-        if !self.caption.is_empty() {
+        let cap = self.caption_lines(w);
+        if !cap.is_empty() {
             y += CAP_H;
+            let lines: String = cap
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    let dy = if i == 0 { 0.0 } else { CAP_LINE_H };
+                    format!("<tspan x=\"{PAD}\" dy=\"{dy}\">{}</tspan>", esc(l))
+                })
+                .collect();
             s.push_str(&format!(
-                "<text class=\"kpi-caption\" x=\"{PAD}\" y=\"{:.1}\" font-family=\"{fb}\" font-size=\"12\" font-weight=\"600\" fill=\"{}\">{}</text>",
+                "<text class=\"kpi-caption\" x=\"{PAD}\" y=\"{:.1}\" font-family=\"{fb}\" font-size=\"{CAP_SIZE}\" font-weight=\"600\" fill=\"{}\">{lines}</text>",
                 y - 5.0,
                 hex(c.muted),
-                esc(&self.caption)
             ));
+            y += (cap.len() - 1) as f64 * CAP_LINE_H;
         }
         if self.spark.len() >= 2 {
             let (top, sh) = (y + 8.0, SPARK_H - 12.0);
@@ -578,6 +621,11 @@ const PAD: f64 = 14.0;
 const VALUE_H: f64 = 40.0;
 const DELTA_H: f64 = 20.0;
 const CAP_H: f64 = 18.0;
+/// The caption's font size, each wrapped line after its first (#1042), and
+/// the most lines it takes.
+const CAP_SIZE: f64 = 12.0;
+const CAP_LINE_H: f64 = 15.0;
+const CAP_MAX_LINES: usize = 3;
 const SPARK_H: f64 = 42.0;
 const GOAL_H: f64 = 30.0;
 /// `::KPI_SIZE` `'compact'` tile padding and its one line's height (px) —
@@ -969,5 +1017,44 @@ mod tests {
         assert!(!s.contains("kpi-spark") && !s.contains("kpi-goal"), "{s}");
         // the label line's own text ("vs last month") has no room either
         assert!(!s.contains("vs last month"), "{s}");
+    }
+
+    /// #1042: a caption wider than the tile wraps onto more lines (the tile
+    /// grows), as the page's `.metric-cap` does, instead of being cut at the
+    /// tile edge mid-word; past three lines the last ends in "…".
+    #[test]
+    fn a_long_caption_wraps_and_the_tile_grows() {
+        let o = RenderOptions::default();
+        let k = Kpi {
+            value: "5".into(),
+            caption: "Without a qualified backup".into(),
+            delta: None,
+            label: None,
+            spark: vec![],
+            goal: None,
+            text_card: false,
+            status: None,
+            compact: false,
+        };
+        // wide: one line, the natural height unchanged
+        assert_eq!(k.height_in(400.0), k.height());
+        let s = k.body(400.0, k.height_in(400.0), &o);
+        assert_eq!(s.matches("<tspan").count(), 1, "{s}");
+        // a 150 px tile (5 in a row at 800): two lines, every word whole
+        let h = k.height_in(150.0);
+        assert!(h > k.height(), "{h}");
+        let s = k.body(150.0, h, &o);
+        assert_eq!(s.matches("<tspan").count(), 2, "{s}");
+        for word in ["Without", "qualified", "backup"] {
+            assert!(s.contains(word), "{word}: {s}");
+        }
+        // very narrow: at most three lines, the last cut with "…"
+        let k = Kpi {
+            caption: "Parts from this supplier without any qualified second source".into(),
+            ..k
+        };
+        let s = k.body(90.0, k.height_in(90.0), &o);
+        assert_eq!(s.matches("<tspan").count(), 3, "{s}");
+        assert!(s.contains('…'), "{s}");
     }
 }
