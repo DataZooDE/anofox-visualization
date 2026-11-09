@@ -89,6 +89,30 @@ jobs:
     uses: ./.github/workflows/lane.yml
 
   # ---- docs-only PRs: a markdown/link check instead of the whole lane ----
+  # #1017 (owner 11-09): a PR that touches website/ builds the site and checks
+  # its links — the light lane for website-only PRs (lane.yml counts them as
+  # docs). The chart and gallery tiles are linted with the dashboard CLI in the
+  # web tests whenever the code lanes run (tests/web/website_charts_test.mjs).
+  website-build:
+    name: website build + links
+    needs: lane
+    if: needs.lane.outputs.website == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Build the website and check its links
+        working-directory: website
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          node scripts/check-links.mjs
+
   docs-check:
     name: docs/link check (docs-only PR)
     needs: lane
@@ -1689,6 +1713,7 @@ jobs:
     needs:
       - lane
       - docs-check
+      - website-build
       - rust
       - sqllogictest
       - compat-stray-headers
