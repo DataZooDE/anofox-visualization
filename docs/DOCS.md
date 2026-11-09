@@ -4218,6 +4218,11 @@ A few rules where the wrong form makes a panel render incorrectly or disappear:
   usually takes: `sum(units)::BARCHART AS total_units` reads as
   `sum(units) AS total_units ::BARCHART`. A token that is also a SQL type
   stays a cast there: `d::DATE AS day` is DuckDB's `DATE` cast.
+- **`ORDER BY` may name an alias** (#1046): `sum(units) AS total ::BARCHART …
+  ORDER BY total DESC` sorts by that column, as DuckDB resolves an ORDER BY
+  name to the select list first. `GROUP BY` and `HAVING` can't see an alias in
+  a panel (every column is renamed): group by the expression, its position
+  (`GROUP BY 1`) or `GROUP BY ALL`; `--check` says so when it happens.
 - **Role tokens that are also SQL types** — `::DATE`, `::TEXT`, `::STRING`,
   `::NUMERIC` (inputs) and `::MAP`, `::GEOMETRY` (maps). In a query statement
   `::MAP`/`::GEOMETRY` are always the map role. The input tokens are roles only

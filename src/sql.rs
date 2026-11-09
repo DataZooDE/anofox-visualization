@@ -1090,8 +1090,124 @@ pub fn rewrite(stmt: &str) -> Rewritten {
         prev_end = e;
     }
     out.push(' ');
-    out.push_str(&stmt[prev_end..]);
+    let tail = &stmt[prev_end..];
+    match list_aliases(&stmt[sel..list_end]).and_then(|a| order_by_aliases(tail, &a, &items0)) {
+        Some(t) => out.push_str(&t),
+        None => out.push_str(tail),
+    }
     (out, roles, names)
+}
+
+/// #1046: a hint for DuckDB's `Referenced column "x" not found` when the
+/// statement's `GROUP BY` or `HAVING` names `x` — most likely a select-list
+/// alias, which the role rewrite renames away. It isn't rewritten there:
+/// when an alias shares a source column's name, DuckDB groups by the column,
+/// so guessing could change the result.
+pub fn group_by_alias_hint(err: &str, sql: &str) -> Option<String> {
+    let rest = err.split("Referenced column \"").nth(1)?;
+    let name = &rest[..rest.find('"')?];
+    let at = lex::find_top_level_any(sql, &["GROUP", "HAVING"], 0)?.0;
+    let end = lex::find_top_level_any(sql, &["QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET"], at)
+        .map_or(sql.len(), |(p, _)| p);
+    let clause = &sql[at..end];
+    let named = lex::tokenize(clause).into_iter().any(|t| {
+        (t.kind == lex::TokKind::Word && t.is_word(clause, name))
+            || (t.kind == lex::TokKind::QuotedIdent
+                && lex::simple_ident(t.text(clause)).as_deref() == Some(name))
+    });
+    named.then(|| {
+        format!(
+            "if `{name}` is a column alias: GROUP BY / HAVING can't see select-list aliases in a panel; \
+             group by the expression or its position (`GROUP BY 1`), or use `GROUP BY ALL`"
+        )
+    })
+}
+
+/// Does the rewritten list name a column `c{i}` (not `c{i}0`, …)?
+fn has_column(rewritten: &str, i: usize) -> bool {
+    let pat = format!("AS c{i}");
+    rewritten.match_indices(&pat).any(|(p, _)| {
+        !rewritten[p + pat.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// #1046: each item's explicit `AS alias` in a select list, by output
+/// position (`None` with a `*`: the positions after it are unknown).
+fn list_aliases(list: &str) -> Option<Vec<Option<String>>> {
+    let items = split_top_commas(list);
+    if items.iter().any(|it| lex::is_star_item(it.trim())) {
+        return None;
+    }
+    Some(
+        items
+            .iter()
+            .map(|it| {
+                let it = it.trim();
+                let expr = lex::trailing_cast(it).map_or(it, |(e, _)| e);
+                trailing_alias(expr).1
+            })
+            .collect(),
+    )
+}
+
+/// #1046: the statement's top-level `ORDER BY` with every item that is a
+/// bare alias of the select list (`total DESC`, `"Revenue" NULLS LAST`)
+/// pointed at that column's `c{i}` — the rewrite renames every item, so the
+/// alias is gone, and DuckDB resolves an ORDER BY name to the select list's
+/// alias before a source column, so this is what the statement meant. Only
+/// where the rewritten list really has `AS c{i}` (a table keeps its names).
+/// `None` when nothing changes.
+fn order_by_aliases(tail: &str, aliases: &[Option<String>], rewritten: &str) -> Option<String> {
+    let order = lex::find_top_level_keyword(tail, "ORDER", 0)?;
+    let by = lex::tokenize(&tail[order + "ORDER".len()..])
+        .into_iter()
+        .find(|t| !t.is_trivia())
+        .filter(|t| t.is_word(&tail[order + "ORDER".len()..], "BY"))?;
+    let start = order + "ORDER".len() + by.end;
+    let end = lex::find_top_level_any(tail, &["LIMIT", "OFFSET", "FETCH"], start)
+        .map_or(tail.len(), |(p, _)| p);
+    let mut changed = false;
+    let items: Vec<String> = split_top_commas(&tail[start..end])
+        .into_iter()
+        .map(|item| {
+            let it = item.trim().to_string();
+            let toks: Vec<_> = lex::tokenize(&it)
+                .into_iter()
+                .filter(|t| !t.is_trivia())
+                .collect();
+            let Some(first) = toks.first() else { return it };
+            let rest_ok = toks[1..].iter().all(|t| {
+                t.kind == lex::TokKind::Word
+                    && ["ASC", "DESC", "NULLS", "FIRST", "LAST"]
+                        .iter()
+                        .any(|k| t.is_word(&it, k))
+            });
+            let name = match first.kind {
+                lex::TokKind::Word => Some((first.text(&it).to_string(), false)),
+                lex::TokKind::QuotedIdent => lex::simple_ident(first.text(&it)).map(|n| (n, true)),
+                _ => None,
+            };
+            let hit = name.filter(|_| rest_ok).and_then(|(n, quoted)| {
+                aliases.iter().position(|a| {
+                    a.as_deref().is_some_and(|a| {
+                        if quoted {
+                            a == n
+                        } else {
+                            a.eq_ignore_ascii_case(&n)
+                        }
+                    })
+                })
+            });
+            match hit {
+                Some(i) if has_column(rewritten, i) => {
+                    changed = true;
+                    format!("c{i}{}", &it[first.end..])
+                }
+                _ => it,
+            }
+        })
+        .collect();
+    changed.then(|| format!("{} {} {}", &tail[..start], items.join(", "), &tail[end..]))
 }
 
 /// Strip a leading `DISTINCT` keyword (as DuckDB itself ignores it when
@@ -1974,5 +2090,56 @@ mod role_before_alias_tests {
         // every branch of a UNION, and an input
         let n = normalize_role_alias("SELECT region::DROPDOWN AS region FROM a UNION ALL SELECT r::DROPDOWN AS region FROM b");
         assert_eq!(n.matches("AS region ::DROPDOWN").count(), 2, "{n}");
+    }
+}
+
+#[cfg(test)]
+mod order_by_alias_tests {
+    use super::*;
+
+    #[test]
+    fn a_group_by_alias_error_gets_a_hint() {
+        let (sql, _, _) = rewrite(
+            "SELECT date_trunc('month', d) AS m ::XAXIS, sum(n)::LINECHART FROM t GROUP BY m",
+        );
+        let err = "Binder Error: Referenced column \"m\" not found in FROM clause! Candidate bindings: \"d\"";
+        assert!(group_by_alias_hint(err, &sql).is_some_and(|h| h.contains("GROUP BY 1")));
+        // not in GROUP BY / HAVING: no hint
+        assert!(group_by_alias_hint(
+            "Binder Error: Referenced column \"zz\" not found in FROM clause!",
+            &sql
+        )
+        .is_none());
+    }
+
+    // #1046: every select item is renamed `c{i}`, so an `ORDER BY <alias>`
+    // found no such column. DuckDB resolves an ORDER BY name to the select
+    // list's alias first, so the alias now points at its `c{i}`.
+    #[test]
+    fn order_by_an_alias_points_at_its_column() {
+        let (s, _, _) = rewrite("SELECT item::XAXIS, sum(units) AS total_units ::BARCHART FROM m5 GROUP BY item ORDER BY total_units DESC LIMIT 5");
+        assert!(s.contains("ORDER BY c1 DESC"), "{s}");
+        assert!(s.trim_end().ends_with("LIMIT 5"), "{s}");
+        // quoted, several items, NULLS LAST, and a plain column left alone
+        let (s, _, _) = rewrite("SELECT region::XAXIS, sum(x) AS \"Revenue\" ::BARCHART, count(*) AS n ::LINECHART FROM t GROUP BY 1 ORDER BY \"Revenue\" DESC NULLS LAST, n, region");
+        assert!(s.contains("ORDER BY c1 DESC NULLS LAST, c2, region"), "{s}");
+        // the role before the alias (#1047) too
+        let (s, _, _) = rewrite(
+            "SELECT item::XAXIS, sum(units)::BARCHART AS total FROM m5 GROUP BY 1 ORDER BY total",
+        );
+        assert!(s.contains("ORDER BY c1"), "{s}");
+    }
+
+    #[test]
+    fn other_order_bys_stay() {
+        // an expression, a window's ORDER BY, a subquery's, and a table (which keeps its names)
+        for q in [
+            "SELECT x::XAXIS, sum(y) AS total ::BARCHART FROM t GROUP BY 1 ORDER BY sum(y) DESC",
+            "SELECT x::XAXIS, row_number() OVER (ORDER BY total) AS r ::BARCHART FROM (SELECT x, 1 AS total FROM t ORDER BY total)",
+            "SELECT name AS \"Name\" ::TABLE, n AS total FROM t ORDER BY total",
+        ] {
+            let (s, _, _) = rewrite(q);
+            assert!(!s.contains("ORDER BY c"), "{q} → {s}");
+        }
     }
 }
