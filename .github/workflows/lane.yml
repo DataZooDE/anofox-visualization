@@ -22,8 +22,11 @@ on:
         description: "true when this run should take the full lane (release-grade checks)"
         value: ${{ jobs.lane.outputs.full }}
       docs_only:
-        description: "true when every changed file is docs/markdown (pull_request only)"
+        description: "true when every changed file is docs/markdown or the website (pull_request only)"
         value: ${{ jobs.lane.outputs.docs_only }}
+      website:
+        description: "true when a website/ file changed (pull_request only): the website build job runs"
+        value: ${{ jobs.lane.outputs.website }}
 
 jobs:
   lane:
@@ -32,6 +35,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       full: ${{ steps.decide.outputs.full }}
+      website: ${{ steps.decide.outputs.website }}
       docs_only: ${{ steps.decide.outputs.docs_only }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,14 +71,20 @@ jobs:
           echo "full lane: $full (${reason:-no trigger matched})"
 
           docs_only=false
+          website=false
           if [ "$EVENT_NAME" = "pull_request" ] && [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
             changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- || true)
             if [ -n "$changed" ]; then
               echo "changed files:"; echo "$changed"
               # *.md anywhere, or anything under docs/ (any extension, e.g. docs/img/*.png).
-              non_docs=$(echo "$changed" | grep -vE '\.md$|^docs/' || true)
+              # #1017 (owner 11-09): the website (website/, Astro) counts as docs
+              # too — its own light job (ci.yml website-build) builds and
+              # link-checks it instead of the Rust/wasm/e2e lanes.
+              non_docs=$(echo "$changed" | grep -vE '\.md$|^docs/|^website/' || true)
               if [ -z "$non_docs" ]; then docs_only=true; fi
+              if echo "$changed" | grep -qE '^website/'; then website=true; fi
             fi
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "website=$website" >> "$GITHUB_OUTPUT"
           echo "docs only: $docs_only"
