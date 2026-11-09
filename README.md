@@ -16,7 +16,7 @@ SQL *is* the dashboard.
 
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 [![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.5.6%20%7C%202.0-brightgreen.svg)](https://duckdb.org)
-[![Live demo](https://img.shields.io/badge/live%20demo-online-2ea44f.svg)](https://datazoode.github.io/anofox-visualization/)
+[![Website](https://img.shields.io/badge/website-docs%20%26%20gallery-0b5d5e.svg)](https://datazoode.github.io/anofox-visualization/) [![Live demo](https://img.shields.io/badge/live%20demo-online-2ea44f.svg)](https://datazoode.github.io/anofox-visualization/app/)
 [![Claude Code skills](https://img.shields.io/badge/Claude_Code-plugin_%C2%B7_5_skills-8A2BE2)](#claude-code-plugin)
 
 > [!IMPORTANT]
@@ -31,7 +31,7 @@ WITH sales AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
 SELECT anofox_bar(ch, n) FROM sales;                 -- <svg> bar chart
 ```
 
-**[▶ Live demo](https://datazoode.github.io/anofox-visualization/)** — the full
+**[▶ Live demo](https://datazoode.github.io/anofox-visualization/app/)** — the full
 builder running in your browser on DuckDB-Wasm. Its sidebar keeps your own
 dashboards first, then one **Examples** library grouped by business area (start
 here, demand & stock, logistics & production, sales & customers, service &
@@ -324,7 +324,7 @@ The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 | You want to … | Use | Server? | Docs |
 |---|---|---|---|
 | render a chart as SVG inside any DuckDB query | the community extension: `INSTALL anofox_visualization FROM community` | no | [Installation](#installation) |
-| try it, or build a dashboard in the browser | the [live builder](https://datazoode.github.io/anofox-visualization/) (DuckDB-Wasm, nothing to install) | no | [DOCS § 2](docs/DOCS.md#2-three-ways-to-run-it) |
+| try it, or build a dashboard in the browser | the [live builder](https://datazoode.github.io/anofox-visualization/app/) (DuckDB-Wasm, nothing to install) | no | [DOCS § 2](docs/DOCS.md#2-three-ways-to-run-it) |
 | render dashboards to SVG / HTML, check them in CI | the `dashboard` CLI (`--svg`, `out.html`, `--check`) and the [`check-dashboards` action](docs/deployment.md) | no | [DOCS § 2](docs/DOCS.md#2-three-ways-to-run-it) |
 | publish dashboards as a static website (GitHub Pages, S3, any web host) | `dashboard --site` | no | [Static site](docs/secure-serving.md#c-publish-as-a-static-site--dashboard---site-417) |
 | author against your own database | `anofox_serve(port)` / `serve <db>` (loopback only) | yes, local | [Authoring](docs/secure-serving.md#authoring--anofox_serveport-and-serve-db) |
