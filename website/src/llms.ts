@@ -4,7 +4,7 @@
 import { getCollection } from "astro:content";
 
 const site = "https://datazoode.github.io" + import.meta.env.BASE_URL.replace(/\/$/, "");
-const sections: [string, string][] = [["start", "Start"], ["gallery", "Gallery"], ["build", "Build"], ["build/charts", "Charts"], ["deploy", "Deploy"], ["integrate", "Integrate"]];
+const sections: [string, string][] = [["start", "Start"], ["gallery", "Gallery"], ["build", "Build"], ["build/charts", "Charts"], ["connect", "Connect"], ["deploy", "Deploy"], ["integrate", "Integrate"], ["reference", "Reference"], ["releases", "Releases"]];
 const section = (id: string) => [...sections].reverse().find(([p]) => id === p || id.startsWith(p + "/"))?.[1];
 
 // The sidebar's order (astro.config.mjs); the chart pages follow their overview.
@@ -12,8 +12,8 @@ const ORDER = ["start/overview", "start/install", "start/first-dashboard", "gall
   "gallery/tables", "gallery/maps", "gallery/features", "gallery/statistics", "gallery/forecast", "gallery/tabular", "gallery/optimize",
   "gallery/decide", "build", "build/kpis-tables", "build/inputs", "build/layout",
   "build/model-output", "build/theming", "build/design", "build/charts", "deploy", "deploy/browser", "deploy/cli", "deploy/static-site",
-  "deploy/authoring", "deploy/locked-server", "deploy/security", "deploy/embedding", "deploy/agent", "deploy/checklist", "integrate",
-  "integrate/statistics", "integrate/forecast", "integrate/tabular", "integrate/optimize", "integrate/decide"];
+  "deploy/authoring", "deploy/locked-server", "deploy/security", "deploy/embedding", "deploy/agent", "deploy/recipes", "deploy/checklist", "integrate",
+  "integrate/statistics", "integrate/forecast", "integrate/tabular", "integrate/optimize", "integrate/decide", "connect", "connect/files", "connect/remote", "connect/databases", "reference", "reference/roles", "releases", "releases/faq"];
 
 const clean = (body: string) =>
   body

@@ -4,3 +4,4 @@ dist/
 src/content/docs/build/charts/
 src/content/docs/gallery/*
 !src/content/docs/gallery/index.mdx
+src/content/docs/reference/roles.md
