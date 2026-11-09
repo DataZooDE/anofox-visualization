@@ -77,6 +77,11 @@ Pick the chart from the *question*, grounded in the column's cardinality
   `'Revenue by month'`. An untitled chart makes the reader guess. **[lint: untitled-chart]**
 - **Format the axis.** Money/percent axes get `::YFORMAT '€'` / a `_PERCENT`
   kind — bare numbers read as noise. **[guide]**
+- **Annotate the answer.** When the reader needs the exact numbers (bars of
+  nearly the same length, a gap that decides the question), label the marks
+  (`''::DATALABELS`) and put the key figure in a `::SUBTITLE`
+  (`'US leads APAC by $14.8k (0.5 %)'`). The axis alone makes the reader
+  estimate. **[guide]**
 - **Direct labels ≤ 5 series; legend beyond.** Keep the legend out of the plot.
   **[guide]**
 - **One accent, mute the rest.** Colour should highlight the point, not
