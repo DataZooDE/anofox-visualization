@@ -37,7 +37,10 @@ def truth_rows(data, task, phase):
     sql = task["truth_sql"] if phase == "first" else task["followup_truth_sql"]
     c = duckdb.connect(str(Path(data) / f"{task['dataset']}.duckdb"), read_only=True)
     df = c.execute(sql).df()
-    return df.head(60).to_csv(index=False)
+    # all of it up to 300 rows (#1044 pilot: a 60-row cut hid the answer's
+    # rows from the judge, which then marked right answers wrong)
+    more = f"\n({len(df)} rows, first 300 shown)" if len(df) > 300 else ""
+    return df.head(300).to_csv(index=False) + more
 
 
 def call(key, content):

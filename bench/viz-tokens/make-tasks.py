@@ -35,7 +35,8 @@ T = [
  ("lt-late","lead_times",True,"Which supplier delivers late most often (first receipt after the promised date)?",
   f"SELECT s.name, avg((f.first_at > h.promised_at)::INT) AS late_share, count(*) AS lines FROM po_history h JOIN {FIRST} f USING (po_id, line_id) JOIN suppliers s USING (supplier_id) GROUP BY 1 ORDER BY 2 DESC",
   "Show how that supplier's late share developed by order month.",
-  f"SELECT s.name, date_trunc('month', h.ordered_at) AS m, avg((f.first_at > h.promised_at)::INT) AS late_share FROM po_history h JOIN {FIRST} f USING (po_id, line_id) JOIN suppliers s USING (supplier_id) GROUP BY ALL ORDER BY 1,2"),
+  f"WITH l AS (SELECT s.name, h.ordered_at, (f.first_at > h.promised_at)::INT AS late FROM po_history h JOIN {FIRST} f USING (po_id, line_id) JOIN suppliers s USING (supplier_id)) "
+  "SELECT name, date_trunc('month', ordered_at) AS m, avg(late) AS late_share FROM l WHERE name = (SELECT name FROM l GROUP BY 1 ORDER BY avg(late) DESC LIMIT 1) GROUP BY ALL ORDER BY 2"),
  ("lt-leadtime","lead_times",False,"What is each supplier's average actual lead time (order to first receipt, in days), compared with the days they promise?",
   f"SELECT s.name, s.promised_days, avg(f.first_at - h.ordered_at) AS actual_days FROM po_history h JOIN {FIRST} f USING (po_id, line_id) JOIN suppliers s USING (supplier_id) GROUP BY ALL ORDER BY 3 DESC",
   "Show the spread of lead times per supplier instead of the average.",
