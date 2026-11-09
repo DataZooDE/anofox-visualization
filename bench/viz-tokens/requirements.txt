@@ -1,0 +1,8 @@
+duckdb==1.5.6
+pandas
+numpy
+matplotlib
+seaborn
+vl-convert-python
+scipy
+pillow
