@@ -3277,6 +3277,82 @@ fn subset(data: &[(String, Vec<Value>)], idx: &[usize]) -> Vec<(String, Vec<Valu
 /// `position_dodge`, which orders the groups by first appearance: the rows
 /// are reordered by ::CATEGORY (the sorted legend order) and rows without an
 /// x dropped, and the x levels keep their original first-seen order.
+/// #1049: several measure columns of one bar kind and no `::CATEGORY`
+/// (`h AS "Holding" ::BARCHART_STACKED, b AS "Backlog" ::BARCHART_STACKED`)
+/// as the long form the bar kinds already draw right: one measure, and the
+/// column names as a `::CATEGORY`. ggplot-rs then stacks, dodges or stacks to
+/// 100 %; drawn as overlaid layers, the larger bar hid the smaller one. Every
+/// other column repeats once per measure. `None` when it doesn't apply: a
+/// mixed combo (bars and a line), a right-hand axis (`::Y2`), or per-measure
+/// intervals (`::YMIN` / `::YMAX`).
+fn long_bar_measures(kind: Kind, cols: &[Column]) -> Option<(Column, Vec<Column>)> {
+    if !matches!(
+        kind,
+        Kind::Bar | Kind::BarStacked | Kind::BarPercent | Kind::BarStackedPercent
+    ) {
+        return None;
+    }
+    let has_category =
+        find_role(cols, Role::Category).is_some_and(|c| c.values.iter().any(|v| *v != Value::Na));
+    let measures: Vec<&Column> = cols
+        .iter()
+        .filter(|c| matches!(c.role, Role::Value(_)))
+        .collect();
+    if has_category
+        || measures.len() < 2
+        || measures.iter().any(|c| c.role != Role::Value(kind))
+        || cols
+            .iter()
+            .any(|c| matches!(c.role, Role::Y2 | Role::YMin | Role::YMax))
+    {
+        return None;
+    }
+    let n = measures[0].values.len();
+    if measures.iter().any(|c| c.values.len() != n) {
+        return None;
+    }
+    let name = |i: usize, c: &Column| {
+        if c.name.is_empty() {
+            format!("series {}", i + 1)
+        } else {
+            c.name.clone()
+        }
+    };
+    let value = Column::new(
+        measures[0].name.clone(),
+        Role::Value(kind),
+        measures
+            .iter()
+            .flat_map(|c| c.values.iter().cloned())
+            .collect(),
+    );
+    let series = Column::new(
+        "",
+        Role::Category,
+        measures
+            .iter()
+            .enumerate()
+            .flat_map(|(i, c)| vec![Value::Str(name(i, c)); n])
+            .collect(),
+    );
+    let k = measures.len();
+    let mut out: Vec<Column> = cols
+        .iter()
+        .filter(|c| !matches!(c.role, Role::Value(_) | Role::Category))
+        .map(|c| match c.values.len() == n {
+            true => Column::new(
+                c.name.clone(),
+                c.role,
+                (0..k).flat_map(|_| c.values.iter().cloned()).collect(),
+            ),
+            false => c.clone(),
+        })
+        .collect();
+    out.push(value.clone());
+    out.push(series);
+    Some((value, out))
+}
+
 fn render_cartesian(
     o: &RenderOptions,
     kind: Kind,
@@ -3286,6 +3362,9 @@ fn render_cartesian(
     width: u32,
     height: u32,
 ) -> Result<Panel, String> {
+    if let Some((v, long)) = long_bar_measures(kind, cols) {
+        return render_cartesian(o, kind, &v, &long, title, width, height);
+    }
     let (Some(x), Some(cat)) = (find_role(cols, Role::X), find_role(cols, Role::Category)) else {
         return cartesian(o, kind, value, cols, title, width, height, None);
     };
