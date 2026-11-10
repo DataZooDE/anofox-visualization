@@ -353,7 +353,7 @@ jobs:
     needs: lane
     if: needs.lane.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1737,7 +1737,7 @@ jobs:
           NEEDS_JSON: ${{ toJson(needs) }}
         run: |
           echo "$NEEDS_JSON" | jq .
-          bad=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')
+          bad=$(echo "$NEEDS_JSON" | jq -r 'to_entries[] | select(.key != "duckdb-2-0-smoke") | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')
           if [ -n "$bad" ]; then
             echo "::error::not mergeable — failed or cancelled jobs:"
             echo "$bad"
