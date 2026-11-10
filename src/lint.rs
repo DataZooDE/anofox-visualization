@@ -7620,7 +7620,10 @@ fn sql_error(
                 one_line(e)
             )
         } else {
-            one_line(e)
+            match sql::group_by_alias_hint(e, short) {
+                Some(h) => format!("{} — {h}", one_line(e)),
+                None => one_line(e),
+            }
         },
         sql: short.to_string(),
     }
