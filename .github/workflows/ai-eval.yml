@@ -49,6 +49,16 @@ jobs:
       BENCH_RESULTS: ${{ github.workspace }}/target/bench
       BENCH_PYTHON: ${{ github.workspace }}/.venv/bin/python
     steps:
+      # before anything is built: the run needs the owner's key
+      - name: The API key is set
+        env:
+          KEY: ${{ secrets.ASSIST_EVAL_ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::the repository secret ASSIST_EVAL_ANTHROPIC_API_KEY is not set (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
