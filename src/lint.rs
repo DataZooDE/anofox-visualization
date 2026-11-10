@@ -781,7 +781,7 @@ where
                 } else {
                     p.requires.clone()
                 };
-                diags.push(sql_error(stmt, &reqs, &e, &short));
+                diags.push(sql_error(stmt, &reqs, &e, &short, &p.sql, false));
             } else if !opts.stateful_session {
                 // Genuine setup succeeded: with a persistent session it's
                 // already in scope for later panels (#435) and there's
@@ -936,7 +936,14 @@ where
                         }
                     }
                 }
-                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
+                Err(e) => diags.push(sql_error(
+                    stmt,
+                    &p.requires,
+                    &e,
+                    &short,
+                    &p.sql,
+                    is_table(&p.roles),
+                )),
             }
             continue;
         }
@@ -999,7 +1006,14 @@ where
                         err("save/table-count", "a form saves into one table".into());
                     }
                 }
-                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
+                Err(e) => diags.push(sql_error(
+                    stmt,
+                    &p.requires,
+                    &e,
+                    &short,
+                    &p.sql,
+                    is_table(&p.roles),
+                )),
             }
             continue;
         }
@@ -1162,7 +1176,14 @@ where
                         }
                     }
                 }
-                Err(e) => diags.push(sql_error(stmt, &p.requires, &e, &short)),
+                Err(e) => diags.push(sql_error(
+                    stmt,
+                    &p.requires,
+                    &e,
+                    &short,
+                    &p.sql,
+                    is_table(&p.roles),
+                )),
             }
             // `submit/dynamic-vars`: syntactic, on the raw statement text —
             // checked whether or not the query above succeeded.
@@ -1213,7 +1234,14 @@ where
         let rows = match run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
             Ok(rows) => rows,
             Err(e) => {
-                diags.push(sql_error(stmt, &p.requires, &e, &short));
+                diags.push(sql_error(
+                    stmt,
+                    &p.requires,
+                    &e,
+                    &short,
+                    &p.sql,
+                    is_table(&p.roles),
+                ));
                 // (its "Not available" / error card takes the panel's place)
                 if opts.design && is_content_panel(&p.roles) && counts_for_design {
                     count_design_panel(
@@ -2589,8 +2617,63 @@ where
     diags.extend(figure_diags(&plan, &figure_cols));
     diags.extend(diagram_check_diags(&plan));
     diags.extend(ask_diags(script, &plan));
+    script_hints(script, &plan, &mut diags);
     apply_lint_allow(&mut diags, &plan, opts.design);
     diags
+}
+
+/// #1082: hints that need the other statements of the script — a `WITH` of
+/// an earlier statement a later one reads, a chart with its categories on a
+/// column without a role.
+fn script_hints(script: &str, plan: &[sql::Panel], diags: &mut [Diagnostic]) {
+    let sources = sql::source_statements(script);
+    for d in diags.iter_mut() {
+        let Some(i) = d.stmt.checked_sub(1).filter(|i| *i < plan.len()) else {
+            continue;
+        };
+        if d.code == "sql-error" && d.message.contains("Referenced column \"") {
+            // #1081: an alias of the same SELECT
+            if let Some(h) = sources
+                .get(i)
+                .filter(|_| sources.len() == plan.len())
+                .and_then(|src| sql::lateral_alias_hint(&d.message, src))
+            {
+                d.message.push_str(&format!(" — {h}"));
+            }
+        } else if d.code == "sql-error" {
+            let Some(rest) = d.message.split("Table with name ").nth(1) else {
+                continue;
+            };
+            let name: String = rest
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '!')
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if let Some(j) = (0..i)
+                .rev()
+                .find(|&j| sql::cte_names(plan[j].sql.trim()).contains(&name))
+            {
+                d.message.push_str(&format!(
+                    " — `{name}` is a WITH of statement {}: a WITH belongs to the one statement it \
+                     starts. Put it on this statement too, or share it with \
+                     `CREATE OR REPLACE TEMP VIEW {name} AS …;`",
+                    j + 1
+                ));
+            }
+        } else if d.code == "render-error" && d.message.starts_with("no XAXIS column") {
+            let chart = plan[i].roles.iter().find_map(|(_, r)| match r {
+                Role::Value(k) => Some(Role::Value(*k).token()),
+                _ => None,
+            });
+            if let (Some(tok), Some(item)) =
+                (chart, sql::first_unroled_item(&plan[i].sql, &plan[i].roles))
+            {
+                d.message.push_str(&format!(
+                    " — a ::{tok} draws its categories from ::XAXIS: `{item}::XAXIS`"
+                ));
+            }
+        }
+    }
 }
 
 /// `::DIAGRAM_CHECK` (#699): it belongs right before an editable
@@ -6863,6 +6946,11 @@ fn link_target_ok(t: &str) -> bool {
     }
 }
 
+/// `s` on one line, whole (the hints match on it).
+fn one_line_full(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn one_line(s: &str) -> String {
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if s.chars().count() > 140 {
@@ -7635,6 +7723,13 @@ fn flush_kpi_run(diags: &mut Vec<Diagnostic>, run: &mut usize, start_stmt: usize
     *run = 0;
 }
 
+/// A `::TABLE` / `::PAGED` panel?
+fn is_table(roles: &[(usize, Role)]) -> bool {
+    roles
+        .iter()
+        .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable))
+}
+
 /// A failed statement: an error, or — for a `-- @requires` statement whose
 /// input is missing — a note (the panel reads "Not available").
 fn sql_error(
@@ -7642,6 +7737,10 @@ fn sql_error(
     requires: &[sql::requires::Requirement],
     e: &str,
     short: &str,
+    // the whole statement: `short` is cut at 140 characters, too short for
+    // the hints to read a model's statement (#1083)
+    full: &str,
+    table: bool,
 ) -> Diagnostic {
     let optional = !requires.is_empty() && sql::is_missing_input_error(e);
     Diagnostic {
@@ -7662,7 +7761,7 @@ fn sql_error(
                 one_line(e)
             )
         } else {
-            match sql::error_hint(e, short) {
+            match sql::error_hint_in(e, &one_line_full(full), table) {
                 Some(h) => format!("{} — {h}", one_line(e)),
                 None => one_line(e),
             }
@@ -8846,6 +8945,46 @@ mod design_tests {
             rows(1, |_| json!({ "c0": "EUR" })),
         );
         assert!(has(&d, "currency/alone"), "{d:?}");
+    }
+
+    #[test]
+    fn a_with_of_another_statement_and_a_chart_without_xaxis_get_hints() {
+        // #1082: the WITH of statement 1, read by statement 3
+        let d = check(
+            "WITH agg AS (SELECT 1 AS u)\nSELECT 'x'::TITLE;\nSELECT u::METRIC FROM agg;",
+            |q| {
+                if q.contains("FROM agg") {
+                    Err(
+                        "Catalog Error: Table with name agg does not exist! Did you mean \"x\"?"
+                            .into(),
+                    )
+                } else {
+                    Ok(vec![json!({ "c0": "x" }).as_object().unwrap().clone()])
+                }
+            },
+        );
+        let e = d
+            .iter()
+            .find(|d| d.code == "sql-error")
+            .expect("an sql-error");
+        assert!(
+            e.message.contains("`agg` is a WITH of statement 1"),
+            "{e:?}"
+        );
+        assert!(
+            e.message.contains("CREATE OR REPLACE TEMP VIEW agg"),
+            "{e:?}"
+        );
+        // a bar chart whose categories have no role
+        let d = lint_one(
+            "SELECT region AS supplier, sum(units)::BARCHART, 1::FLIP FROM t GROUP BY ALL;",
+            rows(2, |i| json!({ "c0": (["a", "b"][i]), "c1": i, "c2": 1 })),
+        );
+        let e = d
+            .iter()
+            .find(|d| d.code == "render-error")
+            .expect("a render-error");
+        assert!(e.message.contains("`region::XAXIS`"), "{e:?}");
     }
 
     #[test]
