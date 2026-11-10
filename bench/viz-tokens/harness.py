@@ -30,6 +30,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+
+import auth
 from pathlib import Path
 
 import duckdb
@@ -298,13 +300,17 @@ class Anthropic:
         body = {"model": self.model, "max_tokens": 16000, "system": system, "tools": tools,
                 "messages": messages, "thinking": {"type": "adaptive"},
                 "output_config": {"effort": self.effort}, "cache_control": {"type": "ephemeral"}}
-        req = urllib.request.Request(API, data=json.dumps(body).encode(), method="POST", headers={
-            "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
         for attempt in range(5):
+            # the auth header per attempt: a federated token may be re-exchanged (#1075)
+            req = urllib.request.Request(API, data=json.dumps(body).encode(), method="POST", headers={
+                **auth.headers(), "anthropic-version": "2023-06-01", "content-type": "application/json"})
             try:
                 with urllib.request.urlopen(req, timeout=300) as r:
                     return json.loads(r.read())
             except urllib.error.HTTPError as e:
+                if e.code == 401 and attempt < 4:
+                    auth.invalidate()
+                    continue
                 if e.code in (429, 500, 502, 503, 529) and attempt < 4:
                     time.sleep(10 * (attempt + 1))
                     continue
@@ -314,7 +320,7 @@ class Anthropic:
         body = {"model": self.model, "system": system, "tools": tools,
                 "messages": [{"role": "user", "content": "x"}]}
         req = urllib.request.Request(API + "/count_tokens", data=json.dumps(body).encode(), method="POST", headers={
-            "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+            **auth.headers(), "anthropic-version": "2023-06-01", "content-type": "application/json"})
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read())["input_tokens"]
 
@@ -486,10 +492,9 @@ def main():
             "ref_sha": {k: hashlib.sha256(v.encode()).hexdigest()[:12] for k, v in refs.items() if k in arms},
             "ref_chars": {k: len(v) for k, v in refs.items() if k in arms}}
     if not a.dry:
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            sys.exit("ANTHROPIC_API_KEY is not set")
-        api = Anthropic(key, a.model, a.effort)
+        if not auth.available():
+            sys.exit("no Claude API credential: set ANTHROPIC_API_KEY, or the ANTHROPIC_FEDERATION_* variables (auth.py)")
+        api = Anthropic(None, a.model, a.effort)
         meta["prefix_tokens"] = {}
         for arm in arms:
             b = base(arm)
@@ -507,7 +512,7 @@ def main():
         for rep in range(1, a.reps + 1):
             for t in tasks:
                 for arm in arms:
-                    model = Scripted(base(arm)) if a.dry else Anthropic(os.environ["ANTHROPIC_API_KEY"], a.model, a.effort)
+                    model = Scripted(base(arm)) if a.dry else Anthropic(None, a.model, a.effort)
                     rec = run_one(t, arm, rep, model, cfg, out, refs)
                     f.write(json.dumps(rec, default=str) + "\n")
                     f.flush()

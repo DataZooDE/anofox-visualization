@@ -33,7 +33,7 @@ PY=${BENCH_PYTHON:-python3}
 RESULTS=${BENCH_RESULTS:-$ROOT/target/bench}
 DATA=${BENCH_DATA:-$RESULTS/data}
 export DATAZOO_DISABLE_TELEMETRY=1
-[ -n "$DRY" ] || : "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY (or pass --dry)}"
+[ -n "$DRY" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_FEDERATION_RULE_ID:-}" ] || { echo "set ANTHROPIC_API_KEY, or the ANTHROPIC_FEDERATION_* variables (bench/viz-tokens/auth.py), or pass --dry" >&2; exit 64; }
 case "$SET" in
   smoke) TASKS=$("$PY" -c "import json,sys; print(','.join(json.load(open(sys.argv[1]))['smoke']))" "$HERE/sets.json"); REPS=${REPS:-1} ;;
   full) TASKS=coverage; REPS=${REPS:-3} ;;
