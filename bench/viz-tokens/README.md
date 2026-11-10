@@ -87,8 +87,8 @@ The harness counts each arm's prefix tokens and asks before it spends
 ## One command (#1074)
 
 ```sh
-ANTHROPIC_API_KEY=… BENCH_PYTHON=.venv/bin/python bench/viz-tokens/run.sh --set smoke   # ≈ 14 questions × 1, ≈ $0.50
-ANTHROPIC_API_KEY=… BENCH_PYTHON=.venv/bin/python bench/viz-tokens/run.sh --set full    # 40 × 3, ≈ $8
+ANTHROPIC_API_KEY=… BENCH_PYTHON=.venv/bin/python bench/viz-tokens/run.sh --set smoke   # ≈ 18 questions × 1, ≈ $0.65
+ANTHROPIC_API_KEY=… BENCH_PYTHON=.venv/bin/python bench/viz-tokens/run.sh --set full    # 50 × 3, ≈ $10
 bench/viz-tokens/run.sh --dry                                                           # the plumbing, no API
 ```
 
