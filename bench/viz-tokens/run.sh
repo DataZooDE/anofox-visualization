@@ -1,7 +1,10 @@
 #!/bin/bash
 # #1074: one command for the AI evaluation — build, run, judge, report, compare, history.
 #
-#   bench/viz-tokens/run.sh [--set smoke|full] [--reps N] [--model M] [--baseline DIR] [--dry]
+#   bench/viz-tokens/run.sh [--set smoke|full] [--reps N] [--model M] [--arms A,B] [--baseline DIR] [--dry]
+#
+# --arms: anofox-lean (default, the short reference) or anofox (what the builder's assistant sends:
+# the role reference + web/assist/guide.md), or both; --model claude-haiku-4-5 for a weaker model (#1078).
 #
 # smoke = sets.json's ~14 questions × 1 repeat (≈ $0.50); full = the 40-question coverage set × 3
 # (≈ $8 with judging). Results land in $BENCH_RESULTS (default target/bench)/<set>-<time>/:
@@ -14,12 +17,13 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-SET=smoke REPS="" MODEL=claude-sonnet-5 BASE="" DRY=""
+SET=smoke REPS="" MODEL=claude-sonnet-5 ARMS=anofox-lean BASE="" DRY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --set) SET=$2; shift 2 ;;
     --reps) REPS=$2; shift 2 ;;
     --model) MODEL=$2; shift 2 ;;
+    --arms) ARMS=$2; shift 2 ;;
     --baseline) BASE=$2; shift 2 ;;
     --dry) DRY=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
@@ -45,11 +49,11 @@ fi
 [ -f "$ROOT/web/pkg/anofox_visualization_bg.wasm" ] \
   || (cd "$ROOT" && wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm)
 [ -d "$DATA" ] || "$PY" "$HERE/make-data.py" "$DATA"
-OUT=$RESULTS/$SET-$(date +%Y%m%d-%H%M%S)
-# the previous run of this set, before this one exists
-[ -n "$BASE" ] || BASE=$(find "$RESULTS" -maxdepth 1 -type d -name "$SET-*" | sort | tail -1)
-echo "engine $ENGINE · set $SET · $REPS repeat(s) · model $MODEL · baseline ${BASE:-none}"
-"$PY" "$HERE/harness.py" --tasks "$TASKS" --arms anofox-lean --reps "$REPS" --model "$MODEL" --yes \
+OUT=$RESULTS/$SET-$MODEL-$(date +%Y%m%d-%H%M%S)
+# the previous run of this set with this model, before this one exists
+[ -n "$BASE" ] || BASE=$(find "$RESULTS" -maxdepth 1 -type d -name "$SET-$MODEL-*" | sort | tail -1)
+echo "engine $ENGINE · set $SET · $REPS repeat(s) · model $MODEL · arms $ARMS · baseline ${BASE:-none}"
+"$PY" "$HERE/harness.py" --tasks "$TASKS" --arms "$ARMS" --reps "$REPS" --model "$MODEL" --yes \
   --data "$DATA" --dashboard "$DASH" --pkg "$ROOT/web/pkg" --boundaries "$ROOT/web/data/boundaries" \
   --out "$OUT" ${DRY:+--dry} 2>&1 | tee "$OUT.log"
 [ -n "$DRY" ] || "$PY" "$HERE/judge.py" --data "$DATA" "$OUT" 2>&1 | tee -a "$OUT.log"
