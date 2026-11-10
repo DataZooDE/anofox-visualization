@@ -129,6 +129,23 @@ def clip(s, n=TOOL_TEXT_MAX):
 
 # ---------------------------------------------------------------- sandbox
 
+_SCOPES = None
+
+
+def user_scopes():
+    """Can this machine run a memory-capped `systemd-run --user --scope`? A CI
+    runner has no user session (#1075): there the sandbox is bubblewrap alone
+    (the runner is a throwaway VM; the time limit still holds)."""
+    global _SCOPES
+    if _SCOPES is None:
+        try:
+            _SCOPES = subprocess.run(["systemd-run", "--user", "--scope", "-q", "--", "true"],
+                                     capture_output=True, timeout=20).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            _SCOPES = False
+    return _SCOPES
+
+
 def sandboxed(cmd, workdir, extra_ro=()):
     """Run cmd in bubblewrap (read-only /, private /tmp, writable workdir, no
     network) in a memory-capped systemd scope, with a time limit."""
@@ -140,8 +157,8 @@ def sandboxed(cmd, workdir, extra_ro=()):
         args += ["--ro-bind", str(p), str(p)]
     # a cgroup cap, not RLIMIT_AS: V8 (vl-convert) reserves far more address
     # space than it uses and dies under an address-space limit
-    full = ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={EXEC_MEM}",
-            "-p", "MemorySwapMax=0", "--"] + args + ["--"] + cmd
+    full = (["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={EXEC_MEM}",
+             "-p", "MemorySwapMax=0", "--"] if user_scopes() else []) + args + ["--"] + cmd
     try:
         r = subprocess.run(full, capture_output=True, text=True, timeout=EXEC_TIMEOUT)
         return r.returncode, r.stdout, r.stderr

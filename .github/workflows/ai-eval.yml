@@ -1,0 +1,155 @@
+# #1075 (part of #1073): the AI evaluation — models answer data questions with
+# charts through anofox, a judge checks them against truth computed from the
+# data (bench/viz-tokens). Weekly (the full set, ≈ $8–10) and by hand (smoke ≈ $0.50
+# or full). Never on a pull request. Accuracy first: the job summary leads with
+# the pass rate and the regressions against the previous run of the same set;
+# a regression opens (or comments on) an issue labelled ai-eval.
+# The key is the owner's dedicated, monthly-capped workspace key
+# (ASSIST_EVAL_ANTHROPIC_API_KEY, shared with assist-eval.yml).
+name: ai-eval
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      set:
+        description: "smoke (≈ 14 questions × 1, ≈ $0.50) or full (40 × 3, ≈ $8)"
+        type: choice
+        options: [smoke, full]
+        default: smoke
+      model:
+        description: "The model answering (the judge stays claude-sonnet-5)"
+        type: string
+        default: claude-sonnet-5
+      arms:
+        description: "anofox-lean (the short reference), anofox (what the builder's assistant sends), or both: anofox,anofox-lean"
+        type: string
+        default: anofox-lean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-eval
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      issues: write
+    env:
+      DATAZOO_DISABLE_TELEMETRY: "1"
+      SET: ${{ inputs.set || 'full' }}
+      MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
+      ARMS: ${{ inputs.arms || 'anofox-lean' }}
+      BENCH_RESULTS: ${{ github.workspace }}/target/bench
+      BENCH_PYTHON: ${{ github.workspace }}/.venv/bin/python
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2
+        with:
+          tool: wasm-pack
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the bench's Python, bubblewrap and the DuckDB CLI (pinned)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q -r bench/viz-tokens/requirements.txt
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          # Ubuntu 24.04 blocks unprivileged user namespaces, which bubblewrap needs
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          d="$HOME/.local/duckdb-1.5.6"
+          mkdir -p "$d"
+          curl -fsSL --retry 3 -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
+          unzip -q duckdb.zip -d "$d"
+          chmod +x "$d/duckdb"
+          echo "$d" >> "$GITHUB_PATH"
+
+      # the previous run of this set (its judgments) and the history, for compare.py
+      - name: Restore the previous results
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/bench
+          key: ai-eval-${{ env.SET }}-${{ github.run_id }}
+          restore-keys: ai-eval-${{ env.SET }}-
+
+      - name: Run, judge, report, compare
+        id: run
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ASSIST_EVAL_ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          bench/viz-tokens/run.sh --set "$SET" --model "$MODEL" --arms "$ARMS"
+          status=$?
+          set -e
+          out=$(find "$BENCH_RESULTS" -maxdepth 1 -type d -name "$SET-*" | sort | tail -1)
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          [ -f "$out/compare.md" ] && cat "$out/compare.md" >> "$GITHUB_STEP_SUMMARY"
+          # 2 = a regression (reported below); anything else non-zero is a failure
+          [ "$status" = 0 ] || [ "$status" = 2 ]
+
+      - name: Keep only the latest run for the next comparison
+        if: always() && steps.run.outputs.out != ''
+        env:
+          OUT: ${{ steps.run.outputs.out }}
+        run: |
+          find "$BENCH_RESULTS" -maxdepth 1 -name "$SET-*" ! -path "$OUT*" -exec rm -rf {} +
+          rm -rf "$BENCH_RESULTS/data"
+
+      - name: Save the results
+        if: always() && steps.run.outputs.out != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/bench
+          key: ai-eval-${{ env.SET }}-${{ github.run_id }}
+
+      - name: Upload the run
+        if: always() && steps.run.outputs.out != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ai-eval-${{ env.SET }}-${{ github.run_id }}
+          path: |
+            ${{ steps.run.outputs.out }}/*.md
+            ${{ steps.run.outputs.out }}/*.json
+            ${{ steps.run.outputs.out }}/*.jsonl
+            ${{ steps.run.outputs.out }}/charts
+            target/bench/history.csv
+          retention-days: 90
+
+      - name: Report a regression
+        if: steps.run.outputs.status == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ steps.run.outputs.out }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$RUN_URL"$'\n\n'"$(sed -n '/^## Regressions/,/^## Cost/p' "$OUT/compare.md" | sed '$d')"
+          open=$(gh issue list --label ai-eval --state open --json number -q '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh label create ai-eval --color d93f0b --description "AI evaluation (#1073)" 2>/dev/null || true
+            gh issue create --label ai-eval --title "AI eval: a regression ($SET, $(date +%F))" --body "$body"
+          fi
