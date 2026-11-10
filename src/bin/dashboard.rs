@@ -108,13 +108,48 @@ const USAGE: &str = "usage:\n  \
      semantics across statements (SET VARIABLE, TEMP views/tables, and other\n  \
      setup all stay in scope for every later statement) comes for free.";
 
+static BOUNDARY_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// A layer's CSV from the `--boundaries` folder (#1057), read once: the
+/// renderer asks whether a layer is there before it draws it.
+fn boundary_file(name: &str) -> Option<&'static str> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static READ: std::sync::OnceLock<Mutex<HashMap<String, Option<&'static str>>>> =
+        std::sync::OnceLock::new();
+    let mut read = READ.get_or_init(Default::default).lock().ok()?;
+    *read.entry(name.to_string()).or_insert_with(|| {
+        let p = BOUNDARY_DIR.get()?.join(format!("{name}.csv"));
+        std::fs::read_to_string(p)
+            .ok()
+            .map(|s| &*Box::leak(s.into_boxed_str()))
+    })
+}
+
 fn main() {
     // Owner decision (#333): the anofox extensions this binary's `duckdb`
     // child processes may LOAD default to no telemetry. Must run before any
     // thread or `duckdb` child exists — first line of `main`, see
     // `host::telemetry` for the default and its thread-safety reasoning.
     anofox_visualization::host::telemetry::ensure_default_once();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // #1057: `--boundaries <dir>` (or ANOFOX_BOUNDARIES): a folder with the
+    // optional boundary layers (web/data/boundaries: world-states.csv, …),
+    // so --svg / --check draw state and province maps outside Germany
+    let dir = match args.iter().position(|a| a == "--boundaries") {
+        Some(i) if i + 1 < args.len() => {
+            let d = args.remove(i + 1);
+            args.remove(i);
+            Some(d)
+        }
+        _ => std::env::var("ANOFOX_BOUNDARIES")
+            .ok()
+            .filter(|d| !d.is_empty()),
+    };
+    if let Some(d) = dir {
+        let _ = BOUNDARY_DIR.set(std::path::PathBuf::from(d));
+        anofox_visualization::set_boundary_source(boundary_file);
+    }
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
         Some("--publish") => cmd_publish(&args[1..]),

@@ -1961,14 +1961,18 @@ the wasm.
 |---|---|---|
 | `world` | ISO 3166-1 alpha-2 / alpha-3 (`'FR'`, `'FRA'`), Natural Earth `ADM0_A3` | 177 countries (Natural Earth 1:110m) |
 | `world-50m` | as `world` (only with `'world-50m'::BOUNDARIES`; browser only) | 242 countries (1:50m) |
-| `world-states` | ISO 3166-2 (`'US-CA'`, `'FR-75'`, `'IN-MH'`), Natural Earth `adm1_code` (`'USA-3521'`), HASC (`'US.CA'`); German `DE-…` codes stay on `de-states` (browser only; 6.7 MB, fetched only when a map needs it) | 4501 states and provinces (Natural Earth 1:10m admin-1) |
+| `world-states` | ISO 3166-2 (`'US-CA'`, `'FR-75'`, `'IN-MH'`), Natural Earth `adm1_code` (`'USA-3521'`), HASC (`'US.CA'`); German `DE-…` codes stay on `de-states` (6.7 MB, loaded only when a map needs it: fetched by the browser, read from the server's embedded copy, or `dashboard --boundaries <dir>`) | 4501 states and provinces (Natural Earth 1:10m admin-1) |
 | `de-states` | ISO 3166-2 (`'DE-BY'`), the 2-digit AGS (`'09'`), NUTS 1 (`'DE2'`) | 16 Länder (BKG VG2500) |
 | `de-districts` | the 5-digit AGS (`'09162'`), NUTS 3 (`'DE212'`); a NUTS 2 code (`'DE21'`) draws all its districts | 400 Kreise (BKG VG2500) |
 
 The layer most codes match is used; `'de-districts'::BOUNDARIES` forces one.
-States and provinces outside Germany (`world-states`) are drawn in the browser
-and on served pages; `dashboard --svg` and the server's exports don't carry
-that layer (`dashboard --check` notes `map/browser-layer`).
+States and provinces outside Germany (`world-states`) are drawn in the browser,
+on served pages and in the server's PNG / PDF / SVG exports (#1057: the server
+reads the layer from its embedded copy, on the first map that needs it).
+`dashboard --svg` and `--check` draw them with `--boundaries <dir>` (or
+`ANOFOX_BOUNDARIES`) naming a folder with the layer files, e.g.
+`web/data/boundaries` of a checkout; without it `dashboard --check` notes
+`map/browser-layer` and the region isn't drawn.
 When no code matches, names are tried (`'Bayern'`, `'Köln'`, `'Germany'`;
 case and umlauts folded) and `dashboard --check` notes `map/region-by-name`.
 A code read as a number keeps working (`9162` → `09162`). Codes that match

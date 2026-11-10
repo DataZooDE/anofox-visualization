@@ -2207,6 +2207,17 @@ pub fn render(cols: &[Column], width: u32, height: u32) -> Result<String, String
     render_with(cols, width, height, &opts).map_err(|e| e.to_string())
 }
 
+/// #1057: give the renderer the map boundary layers that aren't compiled in
+/// (`world-states`, `world-50m`): `f(name)` returns a layer's CSV text, or
+/// `None`. A host that has them calls it once — the extension and `serve`
+/// embed `web/` — and a map of states or provinces outside Germany then
+/// draws natively, in `dashboard --svg` and the server's exports. Later
+/// calls are ignored.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_boundary_source(f: fn(&str) -> Option<&'static str>) {
+    map::boundaries::set_optional_source(f)
+}
+
 /// Render an annotated result set to an SVG panel.
 ///
 /// Recognises one `X` column, an optional `Category` column, an optional `Label`

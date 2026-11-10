@@ -43,6 +43,13 @@ use tiny_http::{Header, Method, Request, Response, Server};
 // web/pkg` first.
 static WEB: Dir = include_dir!("$CARGO_MANIFEST_DIR/web");
 
+/// #1057: the boundary layers that aren't compiled into the renderer, from
+/// the embedded `web/` (state and province maps in exports).
+fn boundary_csv(name: &str) -> Option<&'static str> {
+    WEB.get_file(format!("data/boundaries/{name}.csv"))?
+        .contents_utf8()
+}
+
 /// Max body of an embedded page's form post.
 const MAX_FORM: u64 = 16 << 10;
 
@@ -421,6 +428,7 @@ fn main() {
     // thread or `duckdb` child exists — first line of `main`, see
     // `host::telemetry` for the default and its thread-safety reasoning.
     anofox_visualization::host::telemetry::ensure_default_once();
+    anofox_visualization::set_boundary_source(boundary_csv);
     if std::env::args().nth(1).as_deref() == Some("api-key") {
         api_key_cli(std::env::args().skip(2).collect());
     }
