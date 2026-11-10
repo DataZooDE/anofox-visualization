@@ -5687,6 +5687,16 @@ fn motion_diags(
                 format!("::POINTS `{v}` is not 'auto', 'none' or 'always' — markers follow 'auto'"),
             ));
         }
+        // #1060: a method with nothing to fit draws no trend, silently
+        if *r == Role::SmoothMethod && !has(Role::Value(Kind::Smooth)) {
+            out.push((
+                "smooth/no-trend",
+                format!(
+                    "::SMOOTH_METHOD `{v}` without a ::SMOOTH column draws no trend — add the \
+                     measure again as `y::SMOOTH` (e.g. `amount::SCATTER, amount::SMOOTH`)"
+                ),
+            ));
+        }
         if *r == Role::HoverFocus && !crate::HOVER_FOCUS_MODES.contains(&v.as_str()) {
             out.push((
                 "hover-focus/unknown",
@@ -12392,5 +12402,40 @@ mod ask_tests {
         assert!(codes(ok).is_empty());
         // without -- @ask on: nothing
         assert!(codes("SELECT name ::TABLE FROM people;").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod smooth_method_tests {
+    use super::*;
+
+    fn row(m: &str) -> Map<String, Value> {
+        let mut r = Map::new();
+        r.insert("c0".into(), Value::from(1.0));
+        r.insert("c1".into(), Value::from(2.0));
+        r.insert("c2".into(), Value::from(m));
+        r
+    }
+
+    // #1060: 'lm'::SMOOTH_METHOD next to a scatter but no ::SMOOTH column
+    #[test]
+    fn a_smooth_method_without_a_smooth_column_is_flagged() {
+        let rows = vec![row("lm"), row("lm")];
+        let scatter = [
+            (0, Role::X),
+            (1, Role::Value(Kind::Point)),
+            (2, Role::SmoothMethod),
+        ];
+        assert!(motion_diags(&scatter, &rows)
+            .iter()
+            .any(|(c, _)| *c == "smooth/no-trend"));
+        let with_trend = [
+            (0, Role::X),
+            (1, Role::Value(Kind::Smooth)),
+            (2, Role::SmoothMethod),
+        ];
+        assert!(!motion_diags(&with_trend, &rows)
+            .iter()
+            .any(|(c, _)| *c == "smooth/no-trend"));
     }
 }

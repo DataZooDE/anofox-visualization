@@ -4553,6 +4553,26 @@ fn cartesian(
                     size: 3.4,
                     ..Default::default()
                 }),
+                // #1060: a trend of an extra measure (`units::LINECHART,
+                // units::SMOOTH`): the fitted line, not a bar fallback
+                (Kind::Smooth, own) => {
+                    use ggplot_rs::stat::smooth::SmoothMethod;
+                    let method = match role_str(cols, Role::SmoothMethod)
+                        .map(|s| s.to_ascii_lowercase())
+                        .as_deref()
+                    {
+                        Some("lm") | Some("glm") | Some("linear") => SmoothMethod::Lm,
+                        Some("gam") => SmoothMethod::Gam,
+                        _ => SmoothMethod::Loess { span: 0.75 },
+                    };
+                    plot.geom_smooth_with(GeomSmooth {
+                        color: own.unwrap_or_else(|| o.theme.color(k + 1)),
+                        se: false,
+                        line_width: 2.0,
+                        method,
+                        ..Default::default()
+                    })
+                }
                 _ => plot.geom_col_with(card_col(o)),
             }
             .layer_aes(lay);
