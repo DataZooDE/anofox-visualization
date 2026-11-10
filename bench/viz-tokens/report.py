@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""#1044: the report of a results folder (runs.jsonl + judgments.jsonl) —
+report.md and summary.json in the same folder.
+
+  python report.py results/pilot [results/pilot-lean …]
+
+Several folders (the same tasks, run apart, e.g. a later arm) are read as one;
+the report goes to the first.
+"""
+import json
+import math
+import random
+import sys
+from collections import defaultdict
+from pathlib import Path
+from statistics import median
+
+from scipy.stats import binomtest, wilcoxon
+
+PHASES = ("first", "followup")
+
+
+def pct(xs, q):
+    xs = sorted(xs)
+    if not xs:
+        return float("nan")
+    k = (len(xs) - 1) * q
+    lo, hi = math.floor(k), math.ceil(k)
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def tokens(ph):
+    t = ph["tokens"]
+    inp = t["input_tokens"] + t["cache_read_input_tokens"] + t["cache_creation_input_tokens"]
+    return {"input": inp, "output": t["output_tokens"], "total": inp + t["output_tokens"], "cost": ph["cost"],
+            "cache_read": t["cache_read_input_tokens"]}
+
+
+def tool_stats(ph):
+    tools = [x for c in ph["calls"] for x in c["tools"]]
+    chart = [x for x in tools if x["kind"] in ("chart", "repair")]
+    return {"calls": len(ph["calls"]), "explore": sum(x["kind"] == "explore" for x in tools),
+            "chart_calls": len(chart), "chart_failed": sum(not x["ok"] for x in chart),
+            "first_try": bool(chart) and chart[0]["ok"]}
+
+
+def split_output(ph):
+    """Each model call's output tokens, given to the kind of tool it called
+    (shared equally when it called several): where the writing went."""
+    out = defaultdict(float)
+    for c in ph["calls"]:
+        n = c["usage"].get("output_tokens", 0)
+        kinds = [x["kind"] for x in c["tools"]] or ["none"]
+        for k in kinds:
+            out[k] += n / len(kinds)
+    return out
+
+
+def geo_ci(ratios, n=4000, seed=1044):
+    logs = [math.log(r) for r in ratios if r > 0]
+    if not logs:
+        return float("nan"), float("nan"), float("nan")
+    rnd = random.Random(seed)
+    boots = sorted(sum(rnd.choice(logs) for _ in logs) / len(logs) for _ in range(n))
+    return math.exp(sum(logs) / len(logs)), math.exp(boots[int(0.025 * n)]), math.exp(boots[int(0.975 * n)])
+
+
+def main():
+    dirs = [Path(d) for d in sys.argv[1:]]
+    out = dirs[0]
+    meta = json.loads((out / "meta.json").read_text())
+    runs, judg = [], {}
+    for d in dirs:
+        m = json.loads((d / "meta.json").read_text())
+        if d != out:  # a later arm: its arms, references and prefix counts join
+            meta["arms"] += [a for a in m["arms"] if a not in meta["arms"]]
+            for k in ("ref_chars", "ref_sha", "prefix_tokens"):
+                meta.setdefault(k, {}).update(m.get(k, {}))
+        runs += [json.loads(l) for l in (d / "runs.jsonl").read_text().splitlines() if l.strip()]
+        jp = d / "judgments.jsonl"
+        if jp.exists():
+            for j in map(json.loads, jp.read_text().splitlines()):
+                judg[(j["run"], j["phase"])] = j
+    arms = meta["arms"]
+    prefix = meta.get("prefix_tokens", {})
+
+    # one row per run and phase
+    rows = []
+    for r in runs:
+        for ph in r["phases"]:
+            j = judg.get((r["run"], ph["phase"]))
+            rows.append({"run": r["run"], "task": r["task"], "arm": r["arm"], "rep": r["rep"], "phase": ph["phase"],
+                         "answered": bool(ph.get("answer")), "chart": bool(ph.get("chart")),
+                         "pass": None if j is None else j["pass"], "readable": None if j is None else j.get("readable"),
+                         **tokens(ph), **tool_stats(ph), "split": split_output(ph),
+                         "artifact_chars": len(ph.get("artifact") or "")})
+    judged = bool(judg)
+    L = [f"# Talk to data: anofox vs Python vs Vega-Lite (#1044)\n",
+         f"Model `{meta['model']}`, effort `{meta['effort']}`, {meta['reps']} repeats, {len(meta['tasks'])} tasks, started {meta['started']}."
+         + (" **Dry run (scripted turns): the numbers mean nothing.**" if meta.get("dry") else ""),
+         f"Reference per arm (system prompt, cached): " + ", ".join(f"{a} {prefix.get(a, '?')} tokens ({meta['ref_chars'][a]:,} chars)" for a in arms) + ".",
+         "" if judged else "\n**Not judged yet** (judge.py): pass rates are missing.\n"]
+
+    summary = {"meta": meta, "arms": {}, "paired": {}}
+    for phase in PHASES:
+        L.append(f"\n## {'First answer' if phase == 'first' else 'Follow-up edit'}\n")
+        L.append("| | runs | pass | chart first try | median tokens (p90) | median output | median cost | tokens per pass | cost per pass | median calls | chart repairs | readable |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+        for arm in arms:
+            R = [x for x in rows if x["arm"] == arm and x["phase"] == phase]
+            if not R:
+                continue
+            passes = [x for x in R if x["pass"]]
+            npass = len(passes)
+            tot = sum(x["total"] for x in R)
+            cst = sum(x["cost"] for x in R)
+            rd = [x["readable"] for x in R if isinstance(x["readable"], (int, float))]
+            s = {"runs": len(R), "pass": npass if judged else None,
+                 "first_try": sum(x["first_try"] for x in R),
+                 "median_total": median(x["total"] for x in R), "p90_total": pct([x["total"] for x in R], 0.9),
+                 "median_output": median(x["output"] for x in R), "median_cost": median(x["cost"] for x in R),
+                 "tokens_per_pass": tot / npass if npass else None, "cost_per_pass": cst / npass if npass else None,
+                 "median_calls": median(x["calls"] for x in R), "repairs": sum(x["chart_failed"] for x in R),
+                 "readable": sum(rd) / len(rd) if rd else None}
+            summary["arms"].setdefault(arm, {})[phase] = s
+            f = lambda v, d=0: "–" if v is None else f"{v:,.{d}f}"
+            money = lambda v: "–" if v is None else f"${v:.3f}"
+            L.append(f"| {arm} | {s['runs']} | {f(s['pass']) if judged else '–'} | {s['first_try']} | {f(s['median_total'])} ({f(s['p90_total'])}) "
+                     f"| {f(s['median_output'])} | ${s['median_cost']:.3f} | {f(s['tokens_per_pass'])} | {money(s['cost_per_pass'])} "
+                     f"| {f(s['median_calls'], 1)} | {s['repairs']} | {f(s['readable'], 1)} |")
+
+        # paired, per task: the median over repeats, each anofox variant against python and vegalite
+        for ours in [a for a in ("anofox", "anofox-lean") if a in arms]:
+            L.append(f"\n**Paired by task ({ours} ÷ other; < 1 means {ours} needs less).** Geometric mean of the per-task ratios of the medians over repeats, 95 % bootstrap CI over tasks, Wilcoxon signed-rank on the log ratios. Success: McNemar (exact) over the same task and repeat.\n")
+            L.append("| vs | metric | ratio | 95 % CI | Wilcoxon p | tasks |")
+            L.append("|---|---|---|---|---|---|")
+            for other in [a for a in arms if not a.startswith("anofox")]:
+                cmp = summary["paired"].setdefault(phase, {}).setdefault(f"{ours} vs {other}", {})
+                for metric in ("total", "output", "cost"):
+                    ratios = []
+                    for t in sorted({x["task"] for x in rows}):
+                        a = [x[metric] for x in rows if x["task"] == t and x["arm"] == ours and x["phase"] == phase]
+                        b = [x[metric] for x in rows if x["task"] == t and x["arm"] == other and x["phase"] == phase]
+                        if a and b and median(b) > 0:
+                            ratios.append(median(a) / median(b))
+                    g, lo, hi = geo_ci(ratios)
+                    p = wilcoxon([math.log(r) for r in ratios]).pvalue if len(ratios) >= 5 and any(r != 1 for r in ratios) else float("nan")
+                    cmp[metric] = {"ratio": g, "ci": [lo, hi], "p": p, "n": len(ratios)}
+                    L.append(f"| {other} | {'cost ($)' if metric == 'cost' else metric + ' tokens'} | {g:.2f} | {lo:.2f}–{hi:.2f} | {p:.3g} | {len(ratios)} |")
+                if judged:
+                    key = lambda x: (x["task"], x["rep"])
+                    A = {key(x): x["pass"] for x in rows if x["arm"] == ours and x["phase"] == phase}
+                    B = {key(x): x["pass"] for x in rows if x["arm"] == other and x["phase"] == phase}
+                    both = [k for k in A if k in B]
+                    b = sum(bool(A[k]) and not B[k] for k in both)
+                    c = sum(bool(B[k]) and not A[k] for k in both)
+                    p = binomtest(b, b + c).pvalue if b + c else float("nan")
+                    cmp["mcnemar"] = {"ours_only": b, "other_only": c, "p": p}
+                    L.append(f"| {other} | pass (McNemar) | {ours} only {b}, {other} only {c} | | {p:.3g} | {len(both)} pairs |")
+
+        # where the output tokens went
+        L.append("\n**Where the output went** (mean output tokens per run, by the tool each model call used; thinking included) and the reference read per run (cached prefix × calls):\n")
+        L.append("| | explore | chart | repair | answer | other | reference read | artifact (chars) |")
+        L.append("|---|---|---|---|---|---|---|---|")
+        for arm in arms:
+            R = [x for x in rows if x["arm"] == arm and x["phase"] == phase]
+            if not R:
+                continue
+            m = lambda k: sum(x["split"].get(k, 0) for x in R) / len(R)
+            ref = sum(x["calls"] for x in R) / len(R) * prefix[arm] if arm in prefix else None
+            L.append(f"| {arm} | {m('explore'):,.0f} | {m('chart'):,.0f} | {m('repair'):,.0f} | {m('answer'):,.0f} | {m('none'):,.0f} "
+                     f"| {'–' if ref is None else f'{ref:,.0f}'} | {sum(x['artifact_chars'] for x in R) / len(R):,.0f} |")
+
+    fam = {}
+    here = Path(__file__).resolve().parent
+    for f in ("tasks.jsonl", "coverage.jsonl"):
+        for t in map(json.loads, (here / f).read_text().splitlines()):
+            if "family" in t:
+                fam[t["id"]] = t["family"]
+    if judged and any(x["task"] in fam for x in rows):
+        L.append("\n## Per family (pass / runs, first answer + follow-up)\n")
+        L.append("| family | " + " | ".join(arms) + " |")
+        L.append("|---|" + "---|" * len(arms))
+        for fm in sorted(set(fam.values())):
+            cells = []
+            for arm in arms:
+                R = [x for x in rows if fam.get(x["task"]) == fm and x["arm"] == arm]
+                cells.append(f"{sum(bool(x['pass']) for x in R)}/{len(R)}" if R else "–")
+            L.append(f"| {fm} | " + " | ".join(cells) + " |")
+
+    L.append("\n## Per task (median total tokens over repeats; pass count)\n")
+    L.append("| task | phase | " + " | ".join(arms) + " |")
+    L.append("|---|---|" + "---|" * len(arms))
+    for t in sorted({x["task"] for x in rows}):
+        for phase in PHASES:
+            cells = []
+            for arm in arms:
+                R = [x for x in rows if x["task"] == t and x["arm"] == arm and x["phase"] == phase]
+                if not R:
+                    cells.append("–")
+                    continue
+                ps = sum(bool(x["pass"]) for x in R)
+                cells.append(f"{median(x['total'] for x in R):,.0f}" + (f" ({ps}/{len(R)})" if judged else ""))
+            L.append(f"| {t} | {phase} | " + " | ".join(cells) + " |")
+
+    (out / "report.md").write_text("\n".join(L) + "\n")
+    (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
+    print(out / "report.md")
+
+
+if __name__ == "__main__":
+    main()
