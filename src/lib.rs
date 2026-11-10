@@ -3364,6 +3364,55 @@ fn long_bar_measures(kind: Kind, cols: &[Column]) -> Option<(Column, Vec<Column>
     Some((value, out))
 }
 
+/// #1059: bars with series dodge only on a text x, so on a numeric one
+/// (month 1–12, a year, a week number) they were drawn on top of each other
+/// and the first series hid behind the next. Such an x is read as its
+/// values instead, rows in numeric order (each value a slot, as on a text
+/// x). Only for plain / percent bars with a `::CATEGORY`; dates keep their
+/// time axis.
+fn numeric_x_as_slots(
+    kind: Kind,
+    value: &Column,
+    cols: &[Column],
+) -> Option<(Column, Vec<Column>)> {
+    if !matches!(kind, Kind::Bar | Kind::BarPercent) {
+        return None;
+    }
+    let x = find_role(cols, Role::X)?;
+    let category = find_role(cols, Role::Category)?;
+    let numeric =
+        |v: &Value| v.as_f64().is_some_and(f64::is_finite) && !matches!(v, Value::DateTime(_));
+    if !category.values.iter().any(|v| *v != Value::Na)
+        || !x.values.iter().any(numeric)
+        || x.values.iter().any(|v| *v != Value::Na && !numeric(v))
+    {
+        return None;
+    }
+    let n = x.values.len();
+    let key = |i: usize| x.values[i].as_f64().unwrap_or(f64::INFINITY);
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| key(a).total_cmp(&key(b)));
+    let reorder = |c: &Column| -> Column {
+        if c.values.len() != n {
+            return c.clone();
+        }
+        let values = order
+            .iter()
+            .map(|&i| match (c.role, &c.values[i]) {
+                (Role::X, v @ (Value::Integer(_) | Value::Float(_))) => Value::Str(value_str(v)),
+                (_, v) => v.clone(),
+            })
+            .collect();
+        Column::new(c.name.clone(), c.role, values)
+    };
+    let out: Vec<Column> = cols.iter().map(reorder).collect();
+    let v = match cols.iter().position(|c| std::ptr::eq(c, value)) {
+        Some(i) => out[i].clone(),
+        None => reorder(value),
+    };
+    Some((v, out))
+}
+
 fn render_cartesian(
     o: &RenderOptions,
     kind: Kind,
@@ -3375,6 +3424,9 @@ fn render_cartesian(
 ) -> Result<Panel, String> {
     if let Some((v, long)) = long_bar_measures(kind, cols) {
         return render_cartesian(o, kind, &v, &long, title, width, height);
+    }
+    if let Some((v, discrete)) = numeric_x_as_slots(kind, value, cols) {
+        return render_cartesian(o, kind, &v, &discrete, title, width, height);
     }
     let (Some(x), Some(cat)) = (find_role(cols, Role::X), find_role(cols, Role::Category)) else {
         return cartesian(o, kind, value, cols, title, width, height, None);
