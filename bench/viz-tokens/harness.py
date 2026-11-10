@@ -193,7 +193,9 @@ class Tools:
 
     def render_anofox(self, sql):
         d = self.step_dir()
-        script = f"ATTACH '{self.db}' AS d (READ_ONLY);\nUSE d;\n{sql}\n"
+        # the data read-only, a writable in-memory database first in the path
+        # for the model's own helper tables (#1044: `USE d` refused them)
+        script = f"ATTACH '{self.db}' AS d (READ_ONLY);\nSET search_path = 'memory.main,d.main';\n{sql}\n"
         (d / "chart.sql").write_text(script)
         dash = self.cfg["dashboard"]
         rc, out, err = sandboxed([dash, "--check", "chart.sql", "--json"], d)
@@ -210,8 +212,14 @@ class Tools:
         # a script without a chart role draws an empty page: say so, as the
         # other arms fail without a chart.png / a mark (#1044 pilot)
         svg = (d / "chart.svg").read_text()
-        if "data-geom=" not in svg and "kpi-value" not in svg:
+        # every panel is a nested <svg x=…>; none = no statement carried a
+        # role (#1044: the first version only knew marks and KPI tiles and
+        # refused a correct ::TABLE). A panel saying "No data" is what a
+        # viewer would see, so the model hears it too.
+        if '<svg x="' not in svg:
             return False, "nothing was drawn: no statement carries a chart role (e.g. `sum(x) AS \"Revenue\" ::BARCHART`)"
+        if ">No data<" in svg:
+            return False, "drawn, but a panel shows 'No data' (no rows, or values the chart could not place)"
         rc, _, err = sandboxed(["rsvg-convert", "chart.svg", "-o", "chart.png"], d)
         if rc != 0:
             return False, clip(f"render failed: {err}")
@@ -220,7 +228,8 @@ class Tools:
 
     def run_python(self, code):
         d = self.step_dir()
-        pre = (f"import duckdb\ncon = duckdb.connect({str(self.db)!r}, read_only=True)\n"
+        pre = (f"import duckdb\ncon = duckdb.connect()\ncon.execute(\"ATTACH '{self.db}' AS d (READ_ONLY)\")\n"
+               "con.execute(\"SET search_path = 'memory.main,d.main'\")\n"
                "import matplotlib\nmatplotlib.use('Agg')\n")
         (d / "main.py").write_text(pre + code + "\n")
         rc, out, err = sandboxed([self.cfg["python"], "main.py"], d)
