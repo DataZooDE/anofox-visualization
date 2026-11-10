@@ -187,10 +187,7 @@ fn mutations(sql: &str) -> Vec<(&'static str, String)> {
             with(last.replacen(k, &format!(" AS \"v\" {k}"), 1)),
         ));
     }
-    out.push((
-        "roles in lower case",
-        with(last.to_lowercase()),
-    ));
+    out.push(("roles in lower case", with(last.to_lowercase())));
     out.push((
         "roles inside a subquery",
         with(format!("SELECT * FROM ({last})")),
