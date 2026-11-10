@@ -1123,6 +1123,65 @@ pub fn group_by_alias_hint(err: &str, sql: &str) -> Option<String> {
     })
 }
 
+/// #1056: two statements run together — a second top-level `SELECT` that no
+/// `UNION` / `INTERSECT` / `EXCEPT` joins to the first (`SELECT … FROM t`
+/// newline `SELECT …`, the `;` forgotten).
+pub fn missing_semicolon(stmt: &str) -> bool {
+    const SET_OPS: &[&str] = &["UNION", "INTERSECT", "EXCEPT"];
+    let mut prev = match lex::find_top_level_keyword(stmt, "SELECT", 0) {
+        Some(p) => p,
+        None => return false,
+    };
+    while let Some(next) = lex::find_top_level_keyword(stmt, "SELECT", prev + "SELECT".len()) {
+        let joined = lex::find_top_level_any(stmt, SET_OPS, prev + "SELECT".len())
+            .is_some_and(|(p, _)| p < next);
+        if !joined {
+            return true;
+        }
+        prev = next;
+    }
+    false
+}
+
+/// A hint for a DuckDB error that a panel's roles caused (#1046, #1056):
+/// an alias in GROUP BY / HAVING, a role that reached DuckDB as a type (two
+/// roles on one column, or a role inside a subquery), or text on a role that
+/// needs a number. `None` when the error isn't one of those.
+pub fn error_hint(err: &str, sql: &str) -> Option<String> {
+    if let Some(h) = group_by_alias_hint(err, sql) {
+        return Some(h);
+    }
+    if let Some(rest) = err.split("Type with name ").nth(1) {
+        let tok: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if let Some(role) = parse_role(&tok).filter(|_| !is_sql_type_token(&tok)) {
+            let how = if matches!(role, Role::Metric(_)) {
+                format!(" — on a chart, format the axis instead: `revenue::BARCHART` with `'€'::YFORMAT` (or `'percent'`) rather than `revenue::{tok}::BARCHART`")
+            } else {
+                " — e.g. a scatter's y column is its `::SCATTER` column, not `y::YAXIS::SCATTER`"
+                    .to_string()
+            };
+            return Some(format!(
+                "`::{tok}` is a role, and a column takes one role: only the last cast on a column of the \
+                 outermost SELECT is read as its role, so this one reached DuckDB as a type{how}"
+            ));
+        }
+    }
+    if let Some(rest) = err.split("when casting from source column ").nth(1) {
+        let col: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+        if err.contains("Could not convert string") && !col.is_empty() {
+            return Some(format!(
+                "`{col}` holds text, but its role needs a number (a chart measure such as ::BARCHART or \
+                 ::FUNNEL, a KPI value, …): put the text on ::XAXIS / ::CATEGORY / ::LABEL and the \
+                 number on the measure"
+            ));
+        }
+    }
+    None
+}
+
 /// Does the rewritten list name a column `c{i}` (not `c{i}0`, …)?
 fn has_column(rewritten: &str, i: usize) -> bool {
     let pat = format!("AS c{i}");
@@ -2141,5 +2200,55 @@ mod order_by_alias_tests {
             let (s, _, _) = rewrite(q);
             assert!(!s.contains("ORDER BY c"), "{q} → {s}");
         }
+    }
+}
+
+#[cfg(test)]
+mod error_hint_tests {
+    use super::*;
+
+    // #1056: three common mistakes whose DuckDB error pointed nowhere.
+    #[test]
+    fn two_selects_without_a_semicolon_are_spotted() {
+        assert!(missing_semicolon(
+            "SELECT 1 AS m FROM t\nSELECT m::XAXIS, u::LINECHART FROM s"
+        ));
+        for ok in [
+            "SELECT a::XAXIS, b::BARCHART FROM t UNION ALL SELECT a, b FROM s",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SELECT a FROM (SELECT 1 AS a)",
+            "CREATE TABLE t AS SELECT 1",
+            "SELECT 1 EXCEPT SELECT 2",
+        ] {
+            assert!(!missing_semicolon(ok), "{ok}");
+        }
+    }
+
+    #[test]
+    fn a_role_reaching_duckdb_as_a_type_gets_a_hint() {
+        let h = error_hint(
+            "Catalog Error: Type with name MONEY does not exist! Did you mean \"JSON\"?",
+            "SELECT m AS c0, CAST(revenue::MONEY AS DOUBLE) AS c1",
+        )
+        .unwrap();
+        assert!(h.contains("one role") && h.contains("YFORMAT"), "{h}");
+        let h = error_hint(
+            "Catalog Error: Type with name YAXIS does not exist!",
+            "SELECT x AS c0, CAST(y::YAXIS AS DOUBLE) AS c1",
+        )
+        .unwrap();
+        assert!(h.contains("one role"), "{h}");
+        // a real unknown type is not ours
+        assert!(error_hint(
+            "Catalog Error: Type with name FOO does not exist!",
+            "SELECT x::FOO"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn text_on_a_number_role_gets_a_hint() {
+        let h = error_hint("Conversion Error: Could not convert string 'All' to DOUBLE when casting from source column stage", "SELECT CAST(stage AS DOUBLE) AS c0, n AS c1").unwrap();
+        assert!(h.contains("`stage`") && h.contains("::XAXIS"), "{h}");
     }
 }

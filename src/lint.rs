@@ -750,12 +750,22 @@ where
                     severity: Severity::Error,
                     stmt,
                     code: "silent-setup",
-                    message: "this looks like a chart panel but its ::ROLE casts weren't \
-                              recognised, so it renders nothing. Role casts are read only from \
-                              the main (outermost) SELECT list of a query statement — put them \
-                              on the outer SELECT, not inside a subquery or CTE body. (A \
-                              leading WITH is fine.)"
-                        .into(),
+                    // #1056: two statements run together read as one whose
+                    // roles sit in the wrong SELECT — say the likelier cause
+                    message: if sql::missing_semicolon(&p.sql) {
+                        "two statements without a ';' between them? This statement has a second \
+                         SELECT that no UNION / INTERSECT / EXCEPT joins to the first, so it is read \
+                         as one statement and its ::ROLE casts aren't recognised — end the first \
+                         one with ';'"
+                            .into()
+                    } else {
+                        "this looks like a chart panel but its ::ROLE casts weren't \
+                         recognised, so it renders nothing. Role casts are read only from \
+                         the main (outermost) SELECT list of a query statement — put them \
+                         on the outer SELECT, not inside a subquery or CTE body. (A \
+                         leading WITH is fine.)"
+                            .into()
+                    },
                     sql: short.clone(),
                 });
             } else if let Err(e) = run_query(&stmt_text(opts.stateful_session, &prelude, &p.sql)) {
@@ -7621,7 +7631,7 @@ fn sql_error(
                 one_line(e)
             )
         } else {
-            match sql::group_by_alias_hint(e, short) {
+            match sql::error_hint(e, short) {
                 Some(h) => format!("{} — {h}", one_line(e)),
                 None => one_line(e),
             }
