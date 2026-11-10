@@ -877,6 +877,41 @@ where
                             });
                         }
                     }
+                    // #1086: one option that is a whole list
+                    // (`list(DISTINCT region)::DROPDOWN`) — the input shows a
+                    // single option, and every panel filters on the list
+                    // (an input keeps its column name: read the cell by position)
+                    let opt_col = p
+                        .roles
+                        .iter()
+                        .find(|(_, r)| {
+                            matches!(r, Role::Input(InputKind::Dropdown | InputKind::Buttons))
+                        })
+                        .map(|(i, _)| *i);
+                    let list_option = opt_col.is_some_and(|c| {
+                        rows.iter().any(|r| {
+                            r.values().nth(c).is_some_and(|v| {
+                                v.is_array()
+                                    || v.as_str().is_some_and(|s| s.trim_start().starts_with('['))
+                            })
+                        })
+                    });
+                    if list_option {
+                        let what = if kind == InputKind::Buttons {
+                            "::BUTTONS"
+                        } else {
+                            "::DROPDOWN"
+                        };
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            stmt,
+                            code: "input/list-option",
+                            message: format!(
+                                "a {what} option is a list, so the input shows one option and every panel filters on the whole list — one option per row: `SELECT DISTINCT region AS region {what} FROM t ORDER BY 1` (with an 'All' option: `SELECT r AS region {what}, r = 'All' ::DEFAULT FROM (SELECT 'All' AS r UNION ALL SELECT DISTINCT region FROM t) ORDER BY r <> 'All', r`, then `WHERE getvariable('region') IN ('All', region)`); a list is a ::MULTISELECT's value"
+                            ),
+                            sql: short.clone(),
+                        });
+                    }
                     if kind == InputKind::Buttons && rows.len() > 7 {
                         diags.push(Diagnostic {
                             severity: Severity::Warning,
@@ -8985,6 +9020,24 @@ mod design_tests {
             .find(|d| d.code == "render-error")
             .expect("a render-error");
         assert!(e.message.contains("`region::XAXIS`"), "{e:?}");
+    }
+
+    #[test]
+    fn a_list_as_a_dropdown_option_is_flagged() {
+        // #1086: the coverage run's dash-filter
+        let d = lint_one(
+            "SELECT 'All'::LABEL, list(DISTINCT region)::DROPDOWN AS region FROM sales;",
+            vec![json!({ "c0": "All", "region": ["North", "South"] })
+                .as_object()
+                .unwrap()
+                .clone()],
+        );
+        assert!(has(&d, "input/list-option"), "{d:?}");
+        let ok = lint_one(
+            "SELECT region AS region ::DROPDOWN FROM sales;",
+            rows(2, |i| json!({ "region": (["North", "South"][i]) })),
+        );
+        assert!(!has(&ok, "input/list-option"), "{ok:?}");
     }
 
     #[test]
