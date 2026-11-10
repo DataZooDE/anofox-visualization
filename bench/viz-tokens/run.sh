@@ -6,8 +6,8 @@
 # --arms: anofox-lean (default, the short reference) or anofox (what the builder's assistant sends:
 # the role reference + web/assist/guide.md), or both; --model claude-haiku-4-5 for a weaker model (#1078).
 #
-# smoke = sets.json's ~14 questions × 1 repeat (≈ $0.50); full = the 40-question coverage set × 3
-# (≈ $8 with judging). Results land in $BENCH_RESULTS (default target/bench)/<set>-<time>/:
+# smoke = sets.json's ~18 questions × 1 repeat (≈ $0.65); full = the 50-question coverage set × 3
+# (≈ $10 with judging). Results land in $BENCH_RESULTS (default target/bench)/<set>-<time>/:
 # report.md, gaps.md, compare.md (vs --baseline, else the previous run of the same set), and a row
 # per arm in $BENCH_RESULTS/history.csv. Exit status 2 when compare.py finds a regression.
 #

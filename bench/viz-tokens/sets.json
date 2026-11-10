@@ -1,6 +1,24 @@
 {
-  "_doc": "#1074: question sets for run.sh. smoke: one or two per family, the weak ones first (about $0.50 at 1 repeat); full: the whole coverage set.",
-  "smoke": ["dash-filter", "dash-tabs", "tbl-colorscale", "tbl-suppliers", "map-flows", "map-districts",
-            "ts-yoy", "ts-trend", "pw-share", "funnel", "dist-box", "combo-y2", "kpi-strip", "rel-bubble"],
+  "_doc": "#1074: question sets for run.sh. smoke: one or two per family, the weak ones first, plus the #1077 situations (about $0.65 at 1 repeat); full: the whole coverage set.",
+  "smoke": [
+    "dash-filter",
+    "dash-tabs",
+    "tbl-colorscale",
+    "tbl-suppliers",
+    "map-flows",
+    "map-districts",
+    "ts-yoy",
+    "ts-trend",
+    "pw-share",
+    "funnel",
+    "dist-box",
+    "combo-y2",
+    "kpi-strip",
+    "rel-bubble",
+    "messy-de-columns",
+    "none-salesperson",
+    "big-long-tail",
+    "fc-stockout"
+  ],
   "full": "coverage"
 }
