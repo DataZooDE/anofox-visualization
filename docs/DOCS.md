@@ -1503,7 +1503,10 @@ and `<circle>`s for points. Features are drawn in row order.
 - **Backdrop** (`::BASEMAP`): a built-in layer (`'world'` — without
   Antarctica —, `'de-states'`, `'de-districts'`, `'world-50m'`) or a second
   WKT column, drawn first in a pale land colour with hairline borders;
-  `::ALPHA` sets the data layer's opacity.
+  `::ALPHA` sets the data layer's opacity. A built-in layer is context: the
+  map fits its data and shows the layer around it (#1062), so points in
+  Germany on `'world'` show Germany and its neighbours, not the whole world.
+  A WKT backdrop of your own (a floor plan, a site) frames the map instead.
 
 #### Graduated symbols (`::SIZE`)
 
