@@ -21,12 +21,12 @@ const grab = (name) => {
   return m[0];
 };
 let LOCALE = "";
-const { fmtNum, fmtCell } = new Function(
+const { fmtNum, fmtCell, panelLocale } = new Function(
   "format_number",
   "format_number_locale",
   "format_date_locale",
   "dashLocale",
-  `const NUM_LOCALE = "en-US";\n${grab("fmtNum")}\n${grab("fmtCell")}\nreturn { fmtNum, fmtCell };`
+  `const NUM_LOCALE = "en-US";\n${grab("fmtNum")}\n${grab("fmtCell")}\n${grab("panelLocale")}\nreturn { fmtNum, fmtCell, panelLocale };`
 )(wasm.format_number, wasm.format_number_locale, wasm.format_date_locale, () => LOCALE);
 
 const fx = JSON.parse(readFileSync(new URL("../fixtures/locale_vectors.json", import.meta.url), "utf8"));
@@ -44,6 +44,20 @@ assert.equal(fmtCell("2026-10-15"), "2026-10-15", "no locale: verbatim");
 assert.equal(fmtCell(1234.5), 1234.5, "no locale: verbatim number");
 LOCALE = "de-DE";
 assert.equal(fmtCell("1234.5"), "1.234,5");
+// #1064: a panel's 'EUR'::CURRENCY_CODE rides on its locale tag (-u-cu-eur)
+// to the wasm formatters — the same text as the headless tile
+LOCALE = "";
+const kpiRoles = [[0, "MONEY"], [1, "LABEL"], [2, "CURRENCY_CODE"]];
+assert.equal(panelLocale(kpiRoles, { c0: 889560, c1: "Revenue", c2: "EUR" }), "en-US-u-cu-eur");
+assert.equal(fmtNum(889560, "MONEY", panelLocale(kpiRoles, { c0: 1, c2: "EUR" })), "€889,560");
+assert.equal(panelLocale([[0, "MONEY"]], { c0: 1 }), "", "no code: the dashboard's locale");
+assert.equal(panelLocale(kpiRoles, { c0: 1, c2: "Euro" }), "", "not a code");
+LOCALE = "de-DE";
+assert.equal(fmtNum(1234, "MONEY", panelLocale(kpiRoles, { c2: "usd" })), "1.234 $");
+assert.equal(fmtNum(1234, "MONEY"), "1.234 €", "a panel without a code keeps the locale's");
+// a table row is keyed by column name
+assert.equal(panelLocale([[0, "TABLE"], [2, "CURRENCY_CODE"]], { r: "a", v: 1, cur: "GBP" }), "de-DE-u-cu-gbp");
+LOCALE = "";
 // the theme resolver export
 const t = JSON.parse(wasm.resolve_dashboard_theme("dark", JSON.stringify({ title: "T", locale: "de-DE" })));
 assert.equal(t.ok, true);

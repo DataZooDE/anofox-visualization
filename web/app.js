@@ -11243,6 +11243,8 @@ async function runOnce(fresh = true, pv = preview) {
         const subIdx = subRole ? subRole[0] : -1;
         const clsRole = proles.find((r) => r[1] === "CLASS"); // #773
         const clsIdx = clsRole ? clsRole[0] : -1;
+        const curRole = proles.find((r) => r[1] === "CURRENCY_CODE"); // #1064
+        const curIdx = curRole ? curRole[0] : -1;
         const base = s.sql;
         const idx = i;
         const rowSelect = nextRowSelect;
@@ -11406,7 +11408,7 @@ async function runOnce(fresh = true, pv = preview) {
             profile: (col) => ((stats._prof ||= {})[col] ||= pageReq({ profile: [col] })),
             fetchRows: (offset, limit) => pageReq({ limit, offset, ...sortPart() }, true, "rows"),
           };
-          holder.appendChild(renderTable(rows, [sk, subIdx, clsIdx].filter((x) => x >= 0), fmtByIdx, server, null, { select: rowSelect, caption, ...tableOpts }));
+          holder.appendChild(renderTable(rows, [sk, subIdx, clsIdx, curIdx].filter((x) => x >= 0), fmtByIdx, server, null, { select: rowSelect, caption, locale: panelLocale(proles, rows[0]), ...tableOpts }));
           const lost = !document.activeElement || document.activeElement === document.body;
           if (Date.now() - lastTyped < 4000 && lost) {
             filterInput.focus();
@@ -11745,8 +11747,9 @@ async function runOnce(fresh = true, pv = preview) {
           if (!rows.length && nextEmpty) fig.appendChild(mkNoData(nextEmpty));
           else {
             // #774 / #773: the line under the title and the panel's class, not cells
-            const chromeIdx = troles.filter((r) => r[1] === "SUBTITLE" || r[1] === "CLASS").map((r) => r[0]);
-            fig.appendChild(renderTable(rows, [skip, ...chromeIdx], fmtByIdx, null, i, { select: nextRowSelect, caption, ...nextTableOpts }));
+            const chromeIdx = troles.filter((r) => ["SUBTITLE", "CLASS", "CURRENCY_CODE"].includes(r[1])).map((r) => r[0]);
+            const locale = panelLocale(troles, rows[0]);
+            fig.appendChild(renderTable(rows, [skip, ...chromeIdx], fmtByIdx, null, i, { select: nextRowSelect, caption, locale, ...nextTableOpts }));
           }
           container.appendChild(fig);
           panels++;
@@ -11773,6 +11776,7 @@ async function runOnce(fresh = true, pv = preview) {
             .toLowerCase();
           if (sizeVal === "compact") fig.classList.add("metric-size-compact");
           else if (sizeVal === "normal") fig.classList.add("metric-size-normal");
+          const ploc = panelLocale(s.roles, r0);
           let parts = {};
           try {
             parts = JSON.parse(
@@ -11784,7 +11788,7 @@ async function runOnce(fresh = true, pv = preview) {
                   fmt: mr[1],
                   delta_format: String(cell("DELTA_FORMAT") ?? ""),
                   lower_good: !!dr && dr[1] === "DELTA_LOWER_GOOD",
-                  locale: dashLocale() || "",
+                  locale: ploc,
                 }),
               ),
             );
@@ -11809,7 +11813,7 @@ async function runOnce(fresh = true, pv = preview) {
           const st = thr && thresholdRule((parseThresholds(r0["c" + thr[0]])[0] || {}).rules, r0["c" + mr[0]]);
           const stAttr = st ? ` th-${st.status}" title="${escapeHtml(`${st.status}: ${st.text}`)}` : "";
           fig.innerHTML =
-            `<div class="metric-value${stAttr}">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1]))}</div>` +
+            `<div class="metric-value${stAttr}">${escapeHtml(fmtNum(r0["c" + mr[0]], mr[1], ploc))}</div>` +
             deltaHtml +
             `<div class="metric-cap">${escapeHtml(lr ? r0["c" + lr[0]] : "")}</div>` +
             kpiSpark(cell("SPARKLINE")) +
@@ -15166,7 +15170,7 @@ function addInfo(fig, text) {
 // ::TITLE / ::SUBTITLE / ::INFO columns aren't data; a nested value shows as
 // JSON, NULL as empty. src/dashboard.rs record_pairs is the same rule (SVG).
 function recordPairs(rows, roles) {
-  const chrome = new Set(roles.filter((r) => ["TITLE", "SUBTITLE", "CLASS", "INFO"].includes(r[1])).map((r) => r[0]));
+  const chrome = new Set(roles.filter((r) => ["TITLE", "SUBTITLE", "CLASS", "INFO", "CURRENCY_CODE"].includes(r[1])).map((r) => r[0]));
   const r0 = rows[0] || {};
   const data = Object.keys(r0).filter((_, i) => !chrome.has(i));
   const text = (v) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
@@ -15642,7 +15646,7 @@ function tableNumText(n, p, f, loc, neg) {
     return minus(`${neg ? "-" : ""}${body}${pct}`);
   }
   if (f === "METRIC") return minus(nf(p.dec, true).format(n));
-  if (METRICS.includes(f)) return minus(fmtNum(n, f));
+  if (METRICS.includes(f)) return minus(fmtNum(n, f, loc));
   return minus(nf(p.dec, !p.label).format(n));
 }
 const ROW_H_COMFY = 37; // row height of the virtualised Scroll view (px), comfortable density
@@ -15773,7 +15777,7 @@ function renderTable(rows, skip = -1, fmtByIdx = {}, server = null, key = null, 
   // `skip`: a column index, or several (#774: ::TITLE and ::SUBTITLE).
   const skips = [].concat(skip);
   const cols = allKeys.filter((_, i) => !skips.includes(i));
-  const loc = dashLocale() || NUM_LOCALE;
+  const loc = opts.locale || dashLocale() || NUM_LOCALE;
   const selMode = ["single", "multi"].includes(opts.select) ? opts.select : "none";
   // ::TOTALS / ::COLGROUP / ::FLAG / ::HIGHLIGHT / ::SUBTOTAL name columns by the raw name or
   // the header people read (case-insensitive)
@@ -17608,16 +17612,26 @@ const NUM_LOCALE = "en-US";
 // headless renderer print identical numbers ("$12,400", "$53.8M", "1.2K", "46%");
 // see src/format.rs for the spec + shared test vectors. A non-numeric value is
 // shown verbatim (callers HTML-escape it).
-function fmtNum(v, fmt) {
+function fmtNum(v, fmt, loc = dashLocale()) {
   if (v == null) return "–";
   const n = typeof v === "number" ? v : parseFloat(v);
   if (Number.isNaN(n)) return String(v);
   try {
-    const loc = dashLocale();
     return loc ? format_number_locale(n, fmt || "METRIC", loc) : format_number(n, fmt || "METRIC");
   } catch (_) {
     return n.toLocaleString(NUM_LOCALE, { maximumFractionDigits: 2 });
   }
+}
+
+// #1064: a panel's locale — the dashboard's, with the panel's
+// 'EUR'::CURRENCY_CODE as the BCP-47 currency extension (en-US-u-cu-eur; the
+// Rust Locale::from_tag reads it). The dashboard's locale without one.
+function panelLocale(roles, row) {
+  const base = dashLocale() || "";
+  const r = roles.find((x) => x[1] === "CURRENCY_CODE");
+  const code = r && row ? String(row["c" + r[0]] ?? Object.values(row)[r[0]] ?? "").replace(/^"|"$/g, "").trim() : "";
+  if (!/^[A-Za-z]{3}$/.test(code)) return base;
+  return `${base.replace(/-u-.*$/, "") || "en-US"}-u-cu-${code.toLowerCase()}`;
 }
 
 // A plain table cell in the dashboard locale: numbers grouped with its marks,

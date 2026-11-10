@@ -5734,6 +5734,27 @@ fn motion_diags(
                 ));
             }
         }
+        if *r == Role::CurrencyCode {
+            if crate::format::currency_symbol(&v).is_none() {
+                out.push((
+                    "currency/unknown",
+                    format!(
+                        "::CURRENCY_CODE `{v}` is not an ISO 4217 code this renderer knows ({}) — \
+                         amounts keep the locale's currency",
+                        crate::format::currency_codes()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            } else if roles.iter().all(|(_, r)| *r == Role::CurrencyCode) {
+                out.push((
+                    "currency/alone",
+                    "::CURRENCY_CODE belongs beside the value it formats, in the same SELECT: \
+                     SELECT sum(amount)::MONEY, 'EUR'::CURRENCY_CODE FROM t — alone it formats nothing"
+                        .into(),
+                ));
+            }
+        }
         if *r == Role::Legend {
             if !crate::LEGEND_POSITIONS.contains(&v.as_str()) {
                 out.push((
@@ -6601,9 +6622,9 @@ fn summed_rate_diag(
     }
     let first = rows.first()?;
     let skip = |i: usize| {
-        roles.iter().any(|(j, r)| {
-            *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info)
-        })
+        roles
+            .iter()
+            .any(|(j, r)| *j == i && roles::is_table_chrome(*r))
     };
     let fmt_of = |i: usize| {
         roles
@@ -6672,9 +6693,9 @@ fn totals_unknown_column_diag(
     let t = parse_totals(spec);
     let first = rows.first()?;
     let skip = |i: usize| {
-        roles.iter().any(|(j, r)| {
-            *j == i && matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info)
-        })
+        roles
+            .iter()
+            .any(|(j, r)| *j == i && roles::is_table_chrome(*r))
     };
     let cols: Vec<&String> = first
         .keys()
@@ -8798,6 +8819,33 @@ mod design_tests {
             rows(2, |i| json!({ "c0": i, "c1": "r", "c2": i, "c3": "" })),
         );
         assert!(!has(&d, "colorscale/no-tiles"), "{d:?}");
+    }
+
+    #[test]
+    fn currency_code_is_checked() {
+        // #1064: a known code beside a value is clean
+        let ok = lint_one(
+            "SELECT v::MONEY, 'Revenue'::LABEL, 'EUR'::CURRENCY_CODE FROM t;",
+            rows(
+                1,
+                |_| json!({ "c0": 889560.0, "c1": "Revenue", "c2": "EUR" }),
+            ),
+        );
+        assert!(
+            !ok.iter().any(|d| d.code.starts_with("currency/")),
+            "{ok:?}"
+        );
+        let d = lint_one(
+            "SELECT v::MONEY, 'Euro'::CURRENCY_CODE FROM t;",
+            rows(1, |_| json!({ "c0": 1.0, "c1": "Euro" })),
+        );
+        assert!(has(&d, "currency/unknown"), "{d:?}");
+        // alone it formats nothing: the hint shows where it goes
+        let d = lint_one(
+            "SELECT 'EUR'::CURRENCY_CODE;",
+            rows(1, |_| json!({ "c0": "EUR" })),
+        );
+        assert!(has(&d, "currency/alone"), "{d:?}");
     }
 
     #[test]

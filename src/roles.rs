@@ -236,6 +236,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "swap the axes (horizontal bars; the first row on top)"),
     e("YFORMAT", &["YAXISFORMAT", "YUNIT", "YCURRENCY"], R::YFormat, "modifier", true,
       "value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'…"),
+    e("CURRENCY_CODE", &["CURRENCYCODE", "ISO_CURRENCY"], R::CurrencyCode, "modifier", true,
+      "the panel's currency as an ISO 4217 code beside the value: 'EUR', 'USD', 'GBP', 'CHF'… — ::MONEY KPIs and table columns, and a chart's y axis without its own ::YFORMAT; symbol and placement follow ::LOCALE (€1,234 / 1.234 €)"),
     e("Y2", &["SECONDARY_AXIS", "RIGHT_AXIS"], R::Y2, "modifier", true,
       "the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line"),
     e("Y2FORMAT", &["Y2AXISFORMAT"], R::Y2Format, "modifier", true,
@@ -834,6 +836,15 @@ pub fn is_chrome_directive(r: Role) -> bool {
     )
 }
 
+/// The roles a `::TABLE` / `::PAGED` / `::RECORD` panel reads but never
+/// shows as a column: its title bar, subtitle, class, ⓘ and currency (#1064).
+pub fn is_table_chrome(r: Role) -> bool {
+    matches!(
+        r,
+        Role::Title | Role::Subtitle | Role::Class | Role::Info | Role::CurrencyCode
+    )
+}
+
 /// Per-column formatting roles honoured inside a `::TABLE`/`::PAGED` panel.
 pub fn is_table_format(r: Role) -> bool {
     matches!(
@@ -1293,6 +1304,7 @@ mod tests {
             Role::Fit,
             Role::Size,
             Role::YFormat,
+            Role::CurrencyCode,
             Role::XFormat,
             Role::Y2,
             Role::Y2Format,
@@ -1479,6 +1491,7 @@ mod tests {
                 | Role::Fit
                 | Role::Size
                 | Role::YFormat
+                | Role::CurrencyCode
                 | Role::XFormat
                 | Role::Y2
                 | Role::Y2Format
