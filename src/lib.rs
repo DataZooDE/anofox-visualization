@@ -4065,7 +4065,10 @@ fn cartesian(
         if rows.is_empty() {
             continue;
         }
-        let mut aes = Aes::new().x("x").ymin(&lo).ymax(&hi);
+        // #1061: a `y` the band rows have (a ribbon doesn't draw it) — else
+        // the layer inherits the chart's, the history measure, which a
+        // forecast row lacks, and every band row was dropped as non-finite
+        let mut aes = Aes::new().x("x").y(&lo).ymin(&lo).ymax(&hi);
         if step_band {
             if category.is_some() {
                 aes = aes.fill("cat");
