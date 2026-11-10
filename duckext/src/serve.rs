@@ -88,6 +88,14 @@ use tiny_http::{Header, ListenAddr, Method, Request, Response, Server};
 // build-native.sh and CI build it first).
 static WEB: Dir = include_dir!("$CARGO_MANIFEST_DIR/../web");
 
+/// #1057: the boundary layers that aren't compiled into the renderer
+/// (`world-states`, `world-50m`) from this extension's embedded `web/`, so
+/// server exports draw state and province maps outside Germany.
+pub(crate) fn boundary_csv(name: &str) -> Option<&'static str> {
+    WEB.get_file(format!("data/boundaries/{name}.csv"))?
+        .contents_utf8()
+}
+
 /// Per-database context handed to the serving functions as extra_info: the
 /// connection opened at LOAD time on *that* database (so two databases that
 /// load the extension each serve their own data).

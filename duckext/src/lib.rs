@@ -566,6 +566,8 @@ unsafe fn init(
     // this same process, whose own telemetry worker thread may call getenv
     // at send time.
     anofox_visualization::host::telemetry::ensure_default_once();
+    // #1057: state / province maps in exports, from the embedded web/
+    anofox_visualization::set_boundary_source(serve::boundary_csv);
     let get_api = access.get_api.ok_or("no get_api")?;
     let api_ptr = get_api(info, c"v1.2.0".as_ptr()) as *const duckdb_ext_api_v1;
     if api_ptr.is_null() {

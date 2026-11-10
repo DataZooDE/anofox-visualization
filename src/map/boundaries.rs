@@ -247,13 +247,27 @@ pub(crate) fn register(name: &str, csv: &str) -> Result<usize, String> {
     Ok(n)
 }
 
-/// The embedded CSV of a default layer (native builds only).
+/// The host's source for the layers that aren't compiled in (#1057): the
+/// extension and `serve` embed `web/`, `world-states.csv` included, and hand
+/// its text over, so their exports draw state and province maps. Set once.
+#[cfg(not(target_arch = "wasm32"))]
+static OPTIONAL: OnceLock<fn(&str) -> Option<&'static str>> = OnceLock::new();
+
+/// Register the host's source for the optional layers (see [`OPTIONAL`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn set_optional_source(f: fn(&str) -> Option<&'static str>) {
+    let _ = OPTIONAL.set(f);
+}
+
+/// The CSV of a layer: a default one embedded here, else the host's copy of
+/// an optional one (native builds only).
 #[cfg(not(target_arch = "wasm32"))]
 fn embedded(name: &str) -> Option<&'static str> {
     Some(match name {
         "world" => include_str!("../../web/data/boundaries/world.csv"),
         "de-states" => include_str!("../../web/data/boundaries/de-states.csv"),
         "de-districts" => include_str!("../../web/data/boundaries/de-districts.csv"),
+        _ if LAYERS.contains(&name) => return OPTIONAL.get().and_then(|f| f(name)),
         _ => return None,
     })
 }

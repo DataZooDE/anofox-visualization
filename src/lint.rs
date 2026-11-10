@@ -6739,9 +6739,10 @@ fn region_diags(
             out.push((
                 Severity::Note,
                 "map/browser-layer",
-                "these ::REGION codes are states or provinces ('world-states'): the browser and the \
-                 served page draw them; dashboard --svg and the server's exports don't carry that \
-                 layer and draw no region"
+                "these ::REGION codes are states or provinces ('world-states'): the browser, the \
+                 served page and the server's exports draw them; this dashboard --svg / --check has \
+                 no copy of that layer and draws no region — pass --boundaries <dir> \
+                 (web/data/boundaries)"
                     .to_string(),
             ));
         } else if let Some(m) = crate::map::boundaries::match_codes(&codes, layer) {
