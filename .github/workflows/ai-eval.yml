@@ -100,7 +100,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install -q -r bench/viz-tokens/requirements.txt
-          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap librsvg2-bin # rsvg-convert: the charts as PNG for the judge
           # Ubuntu 24.04 blocks unprivileged user namespaces, which bubblewrap needs
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           d="$HOME/.local/duckdb-1.5.6"
