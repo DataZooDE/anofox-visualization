@@ -122,7 +122,7 @@ terminal.
 | `::BIVARIATE` | `::BIVAR` | encoding | a map's second measure: regions coloured by tertiles of both (a 3×3 palette and legend) — with the measure column |
 | `::BASEMAP` | `::MAPBASE`, `::BACKDROP` | chart | a backdrop under a map: WKT, or a built-in layer 'world', 'de-states', 'de-districts' |
 | `::DIAGRAM` | `::NODE` | chart | node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES) |
-| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick |
+| `::REFLINE` | `::TARGET`, `::GOAL`, `::YLINE` | annotation | horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick; on a box from statistics (::Q1/::MEDIAN/::Q3) a tick across each row's box |
 | `::XLINE` |  | annotation | vertical reference line at an x (a number, date or timestamp) |
 | `::COOKS_CONTOUR` | `::COOKS` | annotation | Cook's distance contours (0.5, 1) on residuals vs leverage; value = the model's parameter count p |
 | `::BAND_LOWER` | `::BANDLOWER` | annotation | lower edge of a shaded band around a line; several ::BAND_LOWER / ::BAND_UPPER pairs = a nested fan |
