@@ -214,6 +214,29 @@ pub fn render_dashboard_svg(
     render_inner(script, provider, opts)
 }
 
+/// #1063: `(name, value)` of an input default's `SET VARIABLE "name" = …`,
+/// for the "Filtered:" line of a static render (quotes stripped).
+fn filter_of(set: &str) -> Option<(String, String)> {
+    let rest = set.strip_prefix("SET VARIABLE ")?;
+    let (name, value) = rest.split_once(" = ")?;
+    let unquote = |s: &str, q: char| {
+        let s = s.trim();
+        s.strip_prefix(q)
+            .and_then(|t| t.strip_suffix(q))
+            .map(|t| t.replace(&format!("{q}{q}"), &q.to_string()))
+            .unwrap_or_else(|| s.to_string())
+    };
+    let value = unquote(value, '\'');
+    Some((
+        unquote(name, '"'),
+        if value.is_empty() {
+            "(all)".into()
+        } else {
+            value
+        },
+    ))
+}
+
 /// One executed statement of the script (phase 1).
 struct Step {
     panel: sql::Panel,
@@ -234,7 +257,7 @@ pub fn site_map_tiles(
     attribution: &str,
     max_zoom: u32,
 ) -> Vec<(u32, u32, u32)> {
-    let (steps, _) = execute(script, provider, None);
+    let (steps, _, _) = execute(script, provider, None);
     let opts = RenderOptions {
         basemap: Some(crate::Basemap {
             attribution: attribution.to_string(),
@@ -329,7 +352,8 @@ fn execute(
     script: &str,
     provider: &mut dyn DataProvider,
     only: Option<&[usize]>,
-) -> (Vec<Step>, DashboardChrome) {
+) -> (Vec<Step>, DashboardChrome, Vec<(String, String)>) {
+    let mut filters: Vec<(String, String)> = Vec::new();
     // #517 S1: a dashboard reading `viewer_state` (read-back, S3) or
     // carrying `::SUBMIT` gets the server's own temps, empty — see
     // `lint::check_opts`'s matching injection and
@@ -447,7 +471,9 @@ fn execute(
         if crate::inputs::input_kind(&panel.roles).is_some() {
             if let Ok(rows) = provider.query(&panel.sql) {
                 for set in crate::inputs::panel_defaults(&panel.roles, &rows) {
-                    provider.execute(&set).ok();
+                    if provider.execute(&set).is_ok() {
+                        filters.extend(filter_of(&set));
+                    }
                 }
             }
             continue;
@@ -519,7 +545,7 @@ fn execute(
         }
         steps.push(Step { panel, rows });
     }
-    (steps, chrome)
+    (steps, chrome, filters)
 }
 
 /// Each step's effective `::KPI_SIZE` (#405): `true` once the tile itself,
@@ -553,7 +579,7 @@ fn render_inner(
     provider: &mut dyn DataProvider,
     opts: &DashboardOptions,
 ) -> Result<String, String> {
-    let (steps, chrome) = execute(script, provider, opts.only.as_deref());
+    let (steps, chrome, filters) = execute(script, provider, opts.only.as_deref());
     let compact = compact_flags(&steps);
     // `::GUIDE_STEP` (#516): `steps` only ever holds what `execute()` kept
     // shown, so its total marker count per group ("of N") is known now —
@@ -623,6 +649,20 @@ fn render_inner(
     if let Some((svg, h)) = header_svg(t, pad, row_y, content_w, narrow).filter(|_| !opts.single) {
         headings.push(svg);
         row_y += h + gap;
+    }
+    // #1063: a static picture has no input to look at — say what it's
+    // filtered by (each input's value as drawn), so a PDF, chat card or
+    // report doesn't pass one region's numbers off as the whole
+    if !filters.is_empty() && !opts.single {
+        let text: Vec<String> = filters.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+        headings.push(format!(
+            "<text class=\"dp-filters\" x=\"{pad:.1}\" y=\"{:.1}\" font-family=\"{}\" font-size=\"11.5\" fill=\"{}\">Filtered: {}</text>",
+            row_y + 12.0,
+            esc(&t.font.family),
+            hex(t.colors.muted),
+            esc(&text.join(" · ")),
+        ));
+        row_y += 18.0 + gap / 2.0;
     }
 
     // A CSS grid: 12 spans fill content_w exactly (#1040).
@@ -4204,5 +4244,32 @@ mod doc_table_tests {
                  its own {h}px-tall viewBox, not clipped: {frag}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod filter_line_tests {
+    use super::*;
+
+    // #1063: the "Filtered:" line reads each input default's SET VARIABLE
+    #[test]
+    fn filter_of_reads_name_and_value() {
+        assert_eq!(
+            filter_of("SET VARIABLE \"region\" = 'APAC'"),
+            Some(("region".into(), "APAC".into()))
+        );
+        assert_eq!(
+            filter_of("SET VARIABLE \"who\" = 'O''Brien'"),
+            Some(("who".into(), "O'Brien".into()))
+        );
+        assert_eq!(
+            filter_of("SET VARIABLE \"n\" = 5"),
+            Some(("n".into(), "5".into()))
+        );
+        assert_eq!(
+            filter_of("SET VARIABLE \"r\" = ''"),
+            Some(("r".into(), "(all)".into()))
+        );
+        assert_eq!(filter_of("CREATE TABLE t AS SELECT 1"), None);
     }
 }

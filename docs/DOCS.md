@@ -417,7 +417,10 @@ The static outputs (`dashboard file.sql`, `dashboard --svg`, the view-only
 `serve --dashboards` page) draw no control but bind each input's **default**
 (the first option — or the `::DEFAULT`-marked one(s) — every option of a `::MULTISELECT`, both ends of a
 `::DATERANGE`, the default period of a `::PERIOD`), so `getvariable()` panels
-render as on first load in the browser.
+render as on first load in the browser. A line under the header says what the
+picture is filtered by (`Filtered: region = APAC`, #1063), so a PDF, a chat card
+or a report doesn't pass one region's numbers off as the whole; a single-panel
+export leaves it out.
 
 #### Placing inputs by what they control (`-- @inputs auto`)
 
