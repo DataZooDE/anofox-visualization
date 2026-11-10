@@ -550,6 +550,10 @@ pub enum Role {
     /// Format the y-axis tick labels (`::YFORMAT`) — the column's (string) value
     /// is a currency symbol / keyword ("$", "€", "comma", "percent"…).
     YFormat,
+    /// #1064: the panel's currency as an ISO 4217 code (`'EUR'::CURRENCY_CODE`)
+    /// — `::MONEY` KPIs and table columns, and a chart's value format when it
+    /// has no `::YFORMAT`; placed per the locale.
+    CurrencyCode,
     /// Format the x-axis tick labels (`::XFORMAT`), like [`Role::YFormat`].
     XFormat,
     /// #919: the measure column (by its header) drawn on a right-hand y
@@ -1228,6 +1232,19 @@ impl Default for RenderOptions {
 }
 
 impl RenderOptions {
+    /// These options for one panel: its `'EUR'::CURRENCY_CODE` (#1064)
+    /// replaces the locale's currency (an unknown code keeps it — lint says
+    /// so). Borrowed unchanged without one.
+    pub fn for_panel(&self, cols: &[Column]) -> std::borrow::Cow<'_, RenderOptions> {
+        match role_str(cols, Role::CurrencyCode).and_then(|c| self.locale.with_currency_code(&c)) {
+            Some(l) if l != self.locale => std::borrow::Cow::Owned(RenderOptions {
+                locale: l,
+                ..self.clone()
+            }),
+            _ => std::borrow::Cow::Borrowed(self),
+        }
+    }
+
     /// The effective brand colour: the explicit `brand`, else the theme's
     /// first palette colour.
     pub fn brand(&self) -> (u8, u8, u8) {
@@ -2363,6 +2380,7 @@ fn render_placed(
 ) -> Result<(String, Vec<String>), RenderError> {
     let indexed = with_row_index(cols);
     let cols: &[Column] = &indexed;
+    let o = &*o.for_panel(cols);
     guard(|| {
         let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
         // A diagram draws its own SVG: none of the chart post-passes apply,
@@ -3073,11 +3091,21 @@ fn thresholds_of(cols: &[Column]) -> Result<Option<thresholds::Rules>, String> {
 /// A format spec (`::YFORMAT` / `::XFORMAT`) as written: a leading space is
 /// meaningful (`' kg'` = a suffix), so only an all-blank value counts as unset.
 fn role_fmt(cols: &[Column], role: Role) -> Option<String> {
-    find_role(cols, role).and_then(|c| {
-        c.values.iter().find_map(|v| match v {
-            Value::Str(s) if !s.trim().is_empty() => Some(s.trim_end().to_string()),
-            _ => None,
+    let first = |role| {
+        find_role(cols, role).and_then(|c| {
+            c.values.iter().find_map(|v| match v {
+                Value::Str(s) if !s.trim().is_empty() => Some(s.trim_end().to_string()),
+                _ => None,
+            })
         })
+    };
+    // #1064: a panel's ::CURRENCY_CODE is its value format unless it has a
+    // ::YFORMAT of its own.
+    first(role).or_else(|| {
+        (role == Role::YFormat)
+            .then(|| first(Role::CurrencyCode))
+            .flatten()
+            .filter(|c| format::currency_symbol(c).is_some())
     })
 }
 
@@ -5622,6 +5650,15 @@ fn axis_formatter(
         "£" | "gbp" | "pound" | "pounds" => money("£"),
         "¥" | "jpy" | "yen" | "cny" | "yuan" => money("¥"),
         "%" | "percent" | "pct" => Box::new(|v: f64| format!("{}%", label_comma(v))),
+        // #1064: another ISO 4217 code (`CHF 1,200`, `A$1,200`)
+        c if c == s.to_ascii_lowercase() && format::currency_symbol(c).is_some() => {
+            let sym = format::currency_symbol(c).map_or("", |(_, s)| s);
+            let l = *locale;
+            Box::new(move |v: f64| {
+                let sign = if v < 0.0 { "-" } else { "" };
+                l.place_currency(sign, &label_comma(v.abs()), sym)
+            })
+        }
         "," | "comma" | "thousands" | "number" => Box::new(label_comma),
         _ => {
             // Literal prefix, or suffix if it starts with a space.
@@ -5687,6 +5724,9 @@ fn axis_formatter_locale(
         "€" | "eur" | "euro" | "euros" => currency("€"),
         "£" | "gbp" | "pound" | "pounds" => currency("£"),
         "¥" | "jpy" | "yen" | "cny" | "yuan" => currency("¥"),
+        c if c == s.to_ascii_lowercase() && format::currency_symbol(c).is_some() => {
+            currency(format::currency_symbol(c).map_or("", |(_, s)| s))
+        }
         "%" | "percent" | "pct" => {
             let suffix = gg.percent_suffix.clone();
             Box::new(move |v: f64| format!("{}{suffix}", comma(v)))

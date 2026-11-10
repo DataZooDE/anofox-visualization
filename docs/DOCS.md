@@ -140,6 +140,7 @@ terminal.
 | `::LABEL_TOP` | `::LABELTOP`, `::TOPLABELS` | annotation | label the top-k points (k = value) with the ::LABEL text, ranked by ::RANK or \|y\| |
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars; the first row on top) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'… |
+| `::CURRENCY_CODE` | `::CURRENCYCODE`, `::ISO_CURRENCY` | modifier | the panel's currency as an ISO 4217 code beside the value: 'EUR', 'USD', 'GBP', 'CHF'… — ::MONEY KPIs and table columns, and a chart's y axis without its own ::YFORMAT; symbol and placement follow ::LOCALE (€1,234 / 1.234 €) |
 | `::Y2` | `::SECONDARY_AXIS`, `::RIGHT_AXIS` | modifier | the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line |
 | `::Y2FORMAT` | `::Y2AXISFORMAT` | modifier | the ::Y2 axis' value format, like ::YFORMAT: 'percent', '€', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%b %Y', '%a %H:%M' |

@@ -20,6 +20,9 @@ pub struct Locale {
     pub group: &'static str,
     /// Currency symbol for `::MONEY`.
     pub currency: &'static str,
+    /// Its ISO 4217 code (`USD`); a `::CURRENCY_CODE` or a `-u-cu-eur` tag
+    /// extension replaces both (see [`Locale::with_currency_code`]).
+    pub currency_code: &'static str,
     /// `1.234 €` (true) vs `€1,234` (false).
     pub currency_suffix: bool,
     /// `12,5 %` (true) vs `12.5%` (false).
@@ -44,6 +47,7 @@ impl Locale {
         decimal: '.',
         group: ",",
         currency: "$",
+        currency_code: "USD",
         currency_suffix: false,
         percent_space: false,
         compact: ["K", "M", "B", "T"],
@@ -56,6 +60,7 @@ impl Locale {
     pub const EN_GB: Locale = Locale {
         tag: "en-GB",
         currency: "£",
+        currency_code: "GBP",
         date: "D/M/Y",
         ..Locale::EN_US
     };
@@ -64,6 +69,7 @@ impl Locale {
     pub const EN_IE: Locale = Locale {
         tag: "en-IE",
         currency: "€",
+        currency_code: "EUR",
         date: "D/M/Y",
         ..Locale::EN_US
     };
@@ -73,6 +79,7 @@ impl Locale {
         decimal: ',',
         group: ".",
         currency: "€",
+        currency_code: "EUR",
         currency_suffix: true,
         percent_space: true,
         compact: ["", "Mio.", "Mrd.", "Bio."],
@@ -88,6 +95,7 @@ impl Locale {
         decimal: ',',
         group: " ",
         currency: "€",
+        currency_code: "EUR",
         currency_suffix: true,
         percent_space: true,
         compact: ["k", "M", "Md", "Bn"],
@@ -108,6 +116,22 @@ impl Locale {
     /// for an unknown language.
     pub fn from_tag(tag: &str) -> Option<Locale> {
         let t = tag.trim().replace('_', "-").to_ascii_lowercase();
+        // `en-US-u-cu-eur`: the BCP-47 currency extension (#1064) — the
+        // language's marks, another currency.
+        if let Some((base, ext)) = t.split_once("-u-") {
+            let l = Locale::from_tag(base)?;
+            let mut keys = ext.split('-');
+            while let Some(k) = keys.next() {
+                if k == "cu" {
+                    return Some(
+                        keys.next()
+                            .and_then(|c| l.with_currency_code(c))
+                            .unwrap_or(l),
+                    );
+                }
+            }
+            return Some(l);
+        }
         let exact = match t.as_str() {
             "en-us" => Some(Locale::EN_US),
             "en-gb" => Some(Locale::EN_GB),
@@ -141,12 +165,60 @@ impl Locale {
 
     /// The matching ggplot-rs locale (chart axes, legends, date labels).
     pub fn gg(&self) -> ggplot_rs::locale::Locale {
-        if self.tag == "en-IE" {
-            let mut g = ggplot_rs::locale::Locale::en_gb().with_currency(self.currency);
+        let mut g = if self.tag == "en-IE" {
+            let mut g = ggplot_rs::locale::Locale::en_gb();
             g.tag = "en-IE".into();
-            return g;
+            g
+        } else {
+            ggplot_rs::locale::Locale::from_tag(self.tag)
+        };
+        if g.currency_symbol != self.currency {
+            g = g.with_currency(self.currency);
         }
-        ggplot_rs::locale::Locale::from_tag(self.tag)
+        if word_symbol(self.currency) {
+            g.currency_spacing = UNIT_SPACE.into();
+        }
+        g
+    }
+
+    /// This locale with another currency (`'EUR'::CURRENCY_CODE`, #1064):
+    /// its symbol, placed the locale's way (`€1,234` in en-US, `1.234 $` in
+    /// de-DE). `None` for a code [`currency_symbol`] doesn't know.
+    pub fn with_currency_code(self, code: &str) -> Option<Locale> {
+        let (code, currency) = currency_symbol(code)?;
+        Some(Locale {
+            currency,
+            currency_code: code,
+            ..self
+        })
+    }
+
+    /// The BCP-47 tag that [`from_tag`](Self::from_tag) reads back to this
+    /// locale: the base tag, plus `-u-cu-eur` when the currency isn't the
+    /// base's own.
+    pub fn full_tag(&self) -> String {
+        match Locale::from_tag(self.tag) {
+            Some(b) if b.currency_code != self.currency_code => {
+                format!(
+                    "{}-u-cu-{}",
+                    self.tag,
+                    self.currency_code.to_ascii_lowercase()
+                )
+            }
+            _ => self.tag.to_string(),
+        }
+    }
+
+    /// `symbol amount` / `amount symbol` per the locale, with a space after a
+    /// prefix word (`CHF 1,234`) but not a sign (`$1,234`).
+    pub(crate) fn place_currency(&self, sign: &str, body: &str, sym: &str) -> String {
+        if self.currency_suffix {
+            format!("{sign}{body}{UNIT_SPACE}{sym}")
+        } else if word_symbol(sym) {
+            format!("{sign}{sym}{UNIT_SPACE}{body}")
+        } else {
+            format!("{sign}{sym}{body}")
+        }
     }
 
     /// Is this the default (en-US) locale?
@@ -199,6 +271,76 @@ impl Locale {
             format!("{date} {}", &time[..time.len().min(8)])
         }
     }
+}
+
+/// ISO 4217 codes `::CURRENCY_CODE` and `::YFORMAT` know, with the symbol
+/// an English reader expects (CLDR's, where it is unambiguous; the code
+/// itself otherwise — `CHF 1,234`, `SEK 1,234`).
+const CURRENCIES: &[(&str, &str)] = &[
+    ("USD", "$"),
+    ("EUR", "€"),
+    ("GBP", "£"),
+    ("JPY", "¥"),
+    ("CNY", "CN¥"),
+    ("INR", "₹"),
+    ("KRW", "₩"),
+    ("CHF", "CHF"),
+    ("CAD", "CA$"),
+    ("AUD", "A$"),
+    ("NZD", "NZ$"),
+    ("HKD", "HK$"),
+    ("SGD", "SGD"),
+    ("MXN", "MX$"),
+    ("BRL", "R$"),
+    ("SEK", "SEK"),
+    ("NOK", "NOK"),
+    ("DKK", "DKK"),
+    ("ISK", "ISK"),
+    ("PLN", "PLN"),
+    ("CZK", "CZK"),
+    ("HUF", "HUF"),
+    ("RON", "RON"),
+    ("BGN", "BGN"),
+    ("TRY", "TRY"),
+    ("ILS", "₪"),
+    ("ZAR", "ZAR"),
+    ("AED", "AED"),
+    ("SAR", "SAR"),
+    ("THB", "THB"),
+    ("TWD", "NT$"),
+    ("VND", "₫"),
+    ("PHP", "₱"),
+    ("IDR", "IDR"),
+    ("MYR", "MYR"),
+    ("UAH", "UAH"),
+    ("RUB", "RUB"),
+    ("ARS", "ARS"),
+    ("CLP", "CLP"),
+    ("COP", "COP"),
+    ("EGP", "EGP"),
+    ("NGN", "NGN"),
+    ("KES", "KES"),
+    ("PKR", "PKR"),
+    ("BTC", "BTC"),
+];
+
+/// The known ISO 4217 code (`eur`, `EUR` → `("EUR", "€")`).
+pub fn currency_symbol(code: &str) -> Option<(&'static str, &'static str)> {
+    let c = code.trim();
+    CURRENCIES
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(c))
+        .copied()
+}
+
+/// Every code [`currency_symbol`] knows (for lint messages and the reference).
+pub fn currency_codes() -> impl Iterator<Item = &'static str> {
+    CURRENCIES.iter().map(|(k, _)| *k)
+}
+
+/// A symbol that is a word (`CHF`, `SEK`) — set off by a space as a prefix.
+fn word_symbol(sym: &str) -> bool {
+    sym.chars().last().is_some_and(|c| c.is_alphabetic())
 }
 
 impl Default for Locale {
@@ -393,11 +535,7 @@ pub fn format_number_l(n: f64, fmt: MetricFmt, l: &Locale) -> String {
             let neg = n < 0.0 && body.chars().any(|c| c.is_ascii_digit() && c != '0');
             let body = l.localize(&body);
             let sign = if neg { "-" } else { "" };
-            if l.currency_suffix {
-                format!("{sign}{body}{UNIT_SPACE}{}", l.currency)
-            } else {
-                format!("{sign}{}{body}", l.currency)
-            }
+            l.place_currency(sign, &body, l.currency)
         }
     }
 }
@@ -472,6 +610,9 @@ impl ValueFmt {
             "£" | "gbp" | "pound" | "pounds" => ValueFmt::Currency("£".into()),
             "¥" | "jpy" | "yen" | "cny" | "yuan" => ValueFmt::Currency("¥".into()),
             "%" | "percent" | "pct" => ValueFmt::Percent,
+            c if currency_symbol(c).is_some() && c == s.to_ascii_lowercase() => {
+                ValueFmt::Currency(currency_symbol(c).unwrap().1.into())
+            }
             _ => match s.strip_prefix(' ') {
                 Some(suffix) => ValueFmt::Suffix(suffix.trim().to_string()),
                 None => ValueFmt::Prefix(s.to_string()),
@@ -586,10 +727,8 @@ impl ValueFmt {
         match self {
             ValueFmt::Plain => format!("{sign}{body}"),
             ValueFmt::Percent | ValueFmt::Share => format!("{sign}{body}{pct}"),
-            ValueFmt::Currency(sym) if l.currency_suffix => {
-                format!("{sign}{body}{UNIT_SPACE}{sym}")
-            }
-            ValueFmt::Currency(sym) | ValueFmt::Prefix(sym) => format!("{sign}{sym}{body}"),
+            ValueFmt::Currency(sym) => l.place_currency(sign, &body, sym),
+            ValueFmt::Prefix(sym) => format!("{sign}{sym}{body}"),
             ValueFmt::Suffix(unit) => format!("{sign}{body} {unit}"),
         }
     }
@@ -729,6 +868,44 @@ mod tests {
         assert_eq!(
             escape_xml_attr_roundtrip("a\tb\nc\rd & <x> \"y\" 'z'"),
             escape_xml("a\tb\nc\rd & <x> \"y\" 'z'")
+        );
+    }
+
+    #[test]
+    fn a_currency_code_keeps_the_language_and_changes_the_currency() {
+        // #1064: euros on an English dashboard, dollars on a German one
+        let eur = Locale::EN_US.with_currency_code("eur").unwrap();
+        assert_eq!(
+            format_number_l(889_560.0, MetricFmt::Money, &eur),
+            "€889,560"
+        );
+        let usd = Locale::DE_DE.with_currency_code("USD").unwrap();
+        assert_eq!(format_number_l(1234.0, MetricFmt::Money, &usd), "1.234 $");
+        // a word symbol is set off by a space before the amount
+        let chf = Locale::EN_US.with_currency_code("CHF").unwrap();
+        assert_eq!(
+            format_number_l(-12_400.0, MetricFmt::Money, &chf),
+            "-CHF 12,400"
+        );
+        assert_eq!(chf.gg().currency_affixes("CHF").0, "CHF ");
+        assert_eq!(Locale::EN_US.with_currency_code("XYZ"), None);
+        // the tag carries it (the browser hands panels' locales over as tags)
+        assert_eq!(eur.full_tag(), "en-US-u-cu-eur");
+        assert_eq!(Locale::from_tag("en-US-u-cu-eur"), Some(eur));
+        assert_eq!(Locale::from_tag("de-u-cu-usd"), Some(usd));
+        assert_eq!(Locale::from_tag("en-US-u-cu-xyz"), Some(Locale::EN_US));
+        assert_eq!(Locale::from_tag("xx-u-cu-eur"), None);
+        assert_eq!(Locale::DE_DE.full_tag(), "de-DE");
+        assert_eq!(Locale::EN_US.with_currency_code("usd"), Some(Locale::EN_US));
+        // ::YFORMAT takes an ISO code too
+        assert_eq!(ValueFmt::parse("CHF"), ValueFmt::Currency("CHF".into()));
+        assert_eq!(
+            ValueFmt::parse("CHF ").full(1200.0, &Locale::EN_US),
+            "CHF 1,200"
+        );
+        assert_eq!(
+            ValueFmt::parse("CHF").full(1200.0, &Locale::DE_DE),
+            "1.200 CHF"
         );
     }
 

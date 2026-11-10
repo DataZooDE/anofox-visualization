@@ -684,7 +684,7 @@ fn render_inner(
                 return None;
             }
             let cols = columns_from_result(rows, &st.panel.roles);
-            crate::kpi::Kpi::from_columns(&cols, &ropts.locale, compact[si])
+            crate::kpi::Kpi::from_columns(&cols, &ropts.for_panel(&cols).locale, compact[si])
                 .filter(|k| !k.text_card)
         })
         .collect();
@@ -1473,6 +1473,7 @@ fn render_panel_svg(
     compact: bool,
 ) -> String {
     let cols = columns_named(rows, roles, names);
+    let ropts = &*ropts.for_panel(&cols);
     // Title bar (::TITLE) eats a strip off the top.
     let title = title_of(rows, roles);
     // ::INFO: an ⓘ after the title whose SVG <title> is the definition (a
@@ -1763,7 +1764,7 @@ pub fn record_pairs(
 ) -> (Vec<(String, String)>, usize) {
     let chrome: Vec<usize> = roles
         .iter()
-        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info))
+        .filter(|(_, r)| roles::is_table_chrome(*r))
         .map(|(i, _)| *i)
         .collect();
     let data: Vec<&(String, Vec<Value>)> = rows
@@ -2003,7 +2004,7 @@ fn table_svg(
     );
     let skip: std::collections::HashSet<usize> = roles
         .iter()
-        .filter(|(_, r)| matches!(r, Role::Title | Role::Subtitle | Role::Class | Role::Info))
+        .filter(|(_, r)| roles::is_table_chrome(*r))
         .map(|(i, _)| *i)
         .collect();
     // Per-column format roles (::MONEY, ::PERCENT, ::TREND, ::COLORSCALE, …),
