@@ -52,7 +52,8 @@ pub(crate) fn prepare(cols: Vec<Column>) -> Result<Vec<Column>, String> {
     }
     if let Some(m) = cols.iter().find(|c| matches!(c.role, Role::Value(_))) {
         return Err(format!(
-            "::{} draws from raw rows; a box from statistics (::Q1, ::MEDIAN, ::Q3) takes no chart measure",
+            "::{} draws from raw rows; a box from statistics (::Q1, ::MEDIAN, ::Q3) takes no chart measure \
+             — to mark one value per box (a target, a promise), cast it ::TARGET",
             m.role.token()
         ));
     }

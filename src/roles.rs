@@ -200,7 +200,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "node/edge diagram, one row per node (this column = the id; ::LABEL, a KPI format, ::BADGE in the box; edges from ::UPSTREAM / ::EDGES)"),
     // ── annotations on a chart ─────────────────────────────────────────────
     e("REFLINE", &["TARGET", "GOAL", "YLINE"], R::RefLine, "annotation", true,
-      "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick"),
+      "horizontal reference line per distinct value; in a KPI statement the KPI's goal → a progress bar; on a ::BULLET the per-row goal tick; on a box from statistics (::Q1/::MEDIAN/::Q3) a tick across each row's box"),
     e("XLINE", &[], R::VLine, "annotation", true,
       "vertical reference line at an x (a number, date or timestamp)"),
     e("COOKS_CONTOUR", &["COOKS"], R::CooksContour, "annotation", true,

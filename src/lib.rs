@@ -4377,7 +4377,7 @@ fn cartesian(
                 })
                 .stat(StatIdentity)
                 .layer_aes(boxstats::layer_aes());
-            match find_role(cols, Role::Mean) {
+            let p = match find_role(cols, Role::Mean) {
                 Some(mean) => p
                     .geom_point_with(GeomPoint {
                         size: 2.6,
@@ -4398,6 +4398,51 @@ fn cartesian(
                     // mapped `data_attr("decorative", …)` web/app.js had to
                     // special-case.
                     .decorative(),
+                None => p,
+            };
+            // #1065: `::TARGET` (`::REFLINE`) per row — a short tick across
+            // that box (a promised lead time, a budget), a bit wider than
+            // the box; boxes without one get none.
+            match find_role(cols, Role::RefLine) {
+                Some(t) => {
+                    let idx: Vec<usize> = (0..t.values.len().min(x.values.len()))
+                        .filter(|&i| {
+                            t.values[i].as_f64().is_some_and(f64::is_finite)
+                                && x.values[i] != Value::Na
+                        })
+                        .collect();
+                    let fmt = value_fmt(cols, Kind::Boxplot, &t.values);
+                    let mut frame = subset(&data, &idx);
+                    frame.retain(|(n, _)| matches!(n.as_str(), "x" | "facet"));
+                    let tips = idx
+                        .iter()
+                        .map(|&i| {
+                            let v = t.values[i].as_f64().unwrap_or(0.0);
+                            Value::Str(format!(
+                                "{}: Target {}",
+                                value_str(&x.values[i]),
+                                fmt.full(v, &o.locale)
+                            ))
+                        })
+                        .collect();
+                    frame.push(("ttip".to_string(), tips));
+                    let ys: Vec<Value> = idx.iter().map(|&i| t.values[i].clone()).collect();
+                    frame.push(("tlo".to_string(), ys.clone()));
+                    frame.push(("thi".to_string(), ys));
+                    // a zero-height error bar: a tick across the box, wider
+                    // than it (the box is 0.48 / n of the panel — ggplot-rs:
+                    // width / (n · 2.5) a side; the tick 0.6 / n)
+                    let n = distinct_labels(x).len().max(1) as f64;
+                    p.geom_errorbar_with(GeomErrorbar {
+                        // the accent: apart from the box's dark median line
+                        color: o.theme.colors.accent,
+                        width: 2.6,
+                        cap_width: 0.3 / n,
+                        alpha: 1.0,
+                    })
+                    .layer_data(frame)
+                    .layer_aes(Aes::new().x("x").ymin("tlo").ymax("thi").tooltip("ttip"))
+                }
                 None => p,
             }
         }
@@ -4653,7 +4698,9 @@ fn cartesian(
         (Role::RefLine, "yintercept", false),
         (Role::VLine, "xintercept", true),
     ] {
-        for c in cols.iter().filter(|c| c.role == role) {
+        // a statistics box draws its ::TARGET as a tick per box (#1065)
+        let ticks = role == Role::RefLine && box_stats;
+        for c in cols.iter().filter(|c| c.role == role && !ticks) {
             let vals: Vec<Value> = if vertical {
                 xline_values(&c.values)
             } else {
