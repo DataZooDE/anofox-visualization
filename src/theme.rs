@@ -1354,6 +1354,30 @@ impl ResolvedTheme {
     }
 
     /// Tokens computed from the semantic colours (every non-default theme).
+    /// The `::COLORSCALE` stops (`--ax-scale-lo/-mid/-hi`): good, middle,
+    /// bad, mixed into the card colour — the browser's cell tint and the
+    /// static table's (#1084) read the same three.
+    pub fn scale_stops(&self) -> [Rgb; 3] {
+        let c = &self.colors;
+        let dark = luminance(c.card) < 0.25;
+        [
+            mix(c.card, c.positive, if dark { 0.45 } else { 0.7 }),
+            mix(c.card, c.warning, if dark { 0.45 } else { 0.55 }),
+            mix(c.card, c.negative, if dark { 0.45 } else { 0.55 }),
+        ]
+    }
+
+    /// A `::BADGE` pill's (background, ink) for a status colour
+    /// (`--ax-badge-*-bg` / `-ink`).
+    pub fn badge_colors(&self, base: Rgb) -> (Rgb, Rgb) {
+        let c = &self.colors;
+        let dark = luminance(c.card) < 0.25;
+        (
+            mix(c.card, base, if dark { 0.22 } else { 0.12 }),
+            mix(base, c.ink, 0.25),
+        )
+    }
+
     fn derived_tokens(&self) -> Vec<(String, String)> {
         let c = &self.colors;
         let dark = luminance(c.card) < 0.25;
@@ -1417,10 +1441,8 @@ impl ResolvedTheme {
             _ => ("none".to_string(), hex(c.ink)),
         };
         let badge = |base: Rgb| {
-            (
-                hex(mix(c.card, base, if dark { 0.22 } else { 0.12 })),
-                hex(mix(base, c.ink, 0.25)),
-            )
+            let (bg, ink) = self.badge_colors(base);
+            (hex(bg), hex(ink))
         };
         let (gb, gi) = badge(c.positive);
         let (wb, wi) = badge(c.warning);
@@ -1576,18 +1598,9 @@ impl ResolvedTheme {
             t("badge-bad-ink", bi),
             t("badge-neutral-bg", nb),
             t("badge-neutral-ink", ni),
-            t(
-                "scale-lo",
-                hex(mix(c.card, c.positive, if dark { 0.45 } else { 0.7 })),
-            ),
-            t(
-                "scale-mid",
-                hex(mix(c.card, c.warning, if dark { 0.45 } else { 0.55 })),
-            ),
-            t(
-                "scale-hi",
-                hex(mix(c.card, c.negative, if dark { 0.45 } else { 0.55 })),
-            ),
+            t("scale-lo", hex(self.scale_stops()[0])),
+            t("scale-mid", hex(self.scale_stops()[1])),
+            t("scale-hi", hex(self.scale_stops()[2])),
             t("spark", hex(brand)),
             t("spark-dot", hex(brand)),
             t("err-ink", hex(c.negative)),

@@ -2400,8 +2400,79 @@ fn table_svg(
                 _ => ink.clone(),
             };
             let bold = k == 0 && !c.p.numeric;
-            let weight = if bold { " font-weight=\"600\"" } else { "" };
             let (shown, tip) = fit_cell(&t, bold, (widths[k] - gutter).max(10.0));
+            let num = c.cells.get(r).and_then(Cell::num);
+            // #1084: what the browser draws around a cell — a ::COLORSCALE
+            // tint, a ::BADGE pill, the slim bar of a plain numeric column
+            let tw = ggplot_rs::render::text::text_width(&t, 12.0) * 1.08;
+            let (fill, bold) = match (c.fmt, num) {
+                (Some(f), Some(n)) if f.starts_with("COLORSCALE") => {
+                    let stops = th.scale_stops();
+                    let cs = if f == "COLORSCALE_DIVERGING" {
+                        let u = (n / c.p.max_abs.max(f64::MIN_POSITIVE)).clamp(-1.0, 1.0);
+                        mix(th.colors.card, stops[if u >= 0.0 { 0 } else { 2 }], u.abs())
+                    } else {
+                        let t = ((n - c.p.min) / (c.p.max - c.p.min).max(f64::MIN_POSITIVE))
+                            .clamp(0.0, 1.0);
+                        let t = if f == "COLORSCALE_HIGH_GOOD" {
+                            1.0 - t
+                        } else {
+                            t
+                        };
+                        let (a, b, u) = if t < 0.5 {
+                            (stops[0], stops[1], t / 0.5)
+                        } else {
+                            (stops[1], stops[2], (t - 0.5) / 0.5)
+                        };
+                        mix(a, b, u)
+                    };
+                    let bw = (tw + 16.0).max(48.0).min(widths[k] - 4.0);
+                    let x0 = if a == "end" { x + 6.0 - bw } else { x - 6.0 };
+                    s.push_str(&format!(
+                        "<rect x=\"{x0:.1}\" y=\"{ry:.1}\" width=\"{bw:.1}\" height=\"18\" rx=\"5\" fill=\"{}\"/><rect x=\"{x0:.1}\" y=\"{ry:.1}\" width=\"3\" height=\"18\" fill=\"{}\"/>",
+                        hex(mix(th.colors.card, cs, 0.22)),
+                        hex(cs),
+                        ry = y - 13.0,
+                    ));
+                    (fill, true)
+                }
+                (Some("BADGE"), _) if !t.is_empty() => {
+                    use crate::thresholds::Status;
+                    let base = match crate::diagram::badge_status(&t) {
+                        Some(Status::Good) => th.colors.positive,
+                        Some(Status::Warn) => th.colors.warning,
+                        Some(Status::Bad) => th.colors.negative,
+                        _ => th.colors.muted,
+                    };
+                    let (bg, ink) = th.badge_colors(base);
+                    let bw = (tw + 14.0).min(widths[k] - 4.0);
+                    let x0 = if a == "end" { x + 7.0 - bw } else { x - 7.0 };
+                    s.push_str(&format!(
+                        "<rect x=\"{x0:.1}\" y=\"{ry:.1}\" width=\"{bw:.1}\" height=\"18\" rx=\"9\" fill=\"{}\"/>",
+                        hex(bg),
+                        ry = y - 13.0,
+                    ));
+                    (hex(ink), true)
+                }
+                (None, Some(n)) if c.p.bars && c.p.max_abs > 0.0 => {
+                    let frac = (n.abs() / c.p.max_abs).clamp(0.02, 1.0);
+                    let bw = frac * (widths[k] - 24.0).max(8.0);
+                    let color = if n < 0.0 {
+                        th.colors.negative
+                    } else {
+                        th.colors.accent
+                    };
+                    s.push_str(&format!(
+                        "<rect x=\"{bx:.1}\" y=\"{by:.1}\" width=\"{bw:.1}\" height=\"3\" rx=\"1.5\" fill=\"{}\" opacity=\"0.32\"/>",
+                        hex(color),
+                        bx = xs[k] + widths[k] - 8.0 - bw,
+                        by = y + 3.0,
+                    ));
+                    (fill, bold)
+                }
+                _ => (fill, bold),
+            };
+            let weight = if bold { " font-weight=\"600\"" } else { "" };
             s.push_str(&format!(
                 "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" fill=\"{fill}\"{weight}>{shown}{tip}</text>"
             ));
