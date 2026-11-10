@@ -261,6 +261,55 @@ pub fn plan(script: &str) -> Vec<Panel> {
     panels
 }
 
+/// Each planned statement's own text (comments stripped), in [`plan`]'s
+/// order — what the author wrote, before the role rewrite (#1081).
+pub fn source_statements(script: &str) -> Vec<String> {
+    split_statements(script)
+        .into_iter()
+        .map(|raw| {
+            normalize_role_alias(strip_comments(&raw).trim())
+                .trim()
+                .to_string()
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// #1081: DuckDB's `Referenced column "x" not found` where `x` is an alias
+/// defined earlier in the same select list (`strftime(m, '%b') AS mo_name, …,
+/// mo_name::XAXIS`). DuckDB itself allows that, but the role rewrite renames
+/// every item to `c{i}`, so the alias is gone. Not rewritten: DuckDB prefers
+/// a source column of that name, which a rewrite can't know — but when it
+/// errors, there is none, and repeating the expression is what was meant.
+pub fn lateral_alias_hint(err: &str, source: &str) -> Option<String> {
+    let rest = err.split("Referenced column \"").nth(1)?;
+    let name = &rest[..rest.find('"')?];
+    let (a, b) = select_list_spans(source).into_iter().next()?;
+    let items = lex::split_top_commas(&source[a..b]);
+    let (j, expr) = items.iter().enumerate().find_map(|(j, it)| {
+        let it = it.trim();
+        let core = lex::trailing_cast(it).map_or(it, |(e, _)| e);
+        let (expr, alias) = trailing_alias(core);
+        alias
+            .filter(|a| a.eq_ignore_ascii_case(name))
+            .map(|_| (j, expr.trim().to_string()))
+    })?;
+    // used by a later item, not only defined — with that item's role
+    let user = items[j + 1..].iter().find(|it| {
+        lex::tokenize(it)
+            .iter()
+            .any(|t| t.kind == lex::TokKind::Word && t.is_word(it, name))
+    })?;
+    let role = lex::trailing_cast(user.trim())
+        .map(|(_, tok)| tok)
+        .filter(|tok| parse_role(tok).is_some())
+        .map_or_else(String::new, |tok| format!("::{}", tok.to_ascii_uppercase()));
+    Some(format!(
+        "`{name}` is an alias of this SELECT — the role rewrite renames each column (`AS c{j}`), \
+         so a later column can't refer to it: repeat the expression there, `{expr}{role}`"
+    ))
+}
+
 fn plan_statements(script: &str) -> Vec<Panel> {
     split_statements(script)
         .into_iter()
@@ -1143,12 +1192,163 @@ pub fn missing_semicolon(stmt: &str) -> bool {
     false
 }
 
+/// #1082: the names a statement's leading `WITH` defines (`WITH a AS (…),
+/// b AS (…) SELECT …` → `a`, `b`), lower-cased; empty without one.
+pub fn cte_names(stmt: &str) -> Vec<String> {
+    let toks: Vec<lex::Token> = lex::tokenize(stmt)
+        .into_iter()
+        .filter(|t| !t.is_trivia())
+        .collect();
+    let word = |i: usize, w: &str| toks.get(i).is_some_and(|t| t.is_word(stmt, w));
+    let mut out = Vec::new();
+    if !word(0, "WITH") {
+        return out;
+    }
+    let mut i = 1;
+    if word(i, "RECURSIVE") {
+        i += 1;
+    }
+    // name [(cols)] AS [NOT] [MATERIALIZED] ( … )
+    while let Some(name) = toks.get(i) {
+        let n = match name.kind {
+            lex::TokKind::Word => name.text(stmt).to_ascii_lowercase(),
+            lex::TokKind::QuotedIdent => name.text(stmt).trim_matches('"').to_ascii_lowercase(),
+            _ => break,
+        };
+        i += 1;
+        let paren_skip = |mut i: usize| -> usize {
+            let mut depth = 0i32;
+            while let Some(t) = toks.get(i) {
+                match t.text(stmt) {
+                    "(" => depth += 1,
+                    ")" => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            i
+        };
+        if toks.get(i).is_some_and(|t| t.text(stmt) == "(") {
+            i = paren_skip(i);
+        }
+        if !word(i, "AS") {
+            break;
+        }
+        i += 1;
+        while word(i, "NOT") || word(i, "MATERIALIZED") {
+            i += 1;
+        }
+        if !toks.get(i).is_some_and(|t| t.text(stmt) == "(") {
+            break;
+        }
+        out.push(n);
+        i = paren_skip(i);
+        if toks.get(i).is_some_and(|t| t.text(stmt) == ",") {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// #1082: the expression of the first select-list item without a role
+/// (`region` of `region AS supplier` beside `sum(units)::BARCHART`) — what a
+/// chart without `::XAXIS` most likely meant to put there. `roles` are the
+/// panel's (by output position); `rewritten` its SQL.
+pub fn first_unroled_item(rewritten: &str, roles: &[(usize, Role)]) -> Option<String> {
+    let (a, b) = select_list_spans(rewritten).into_iter().next()?;
+    lex::split_top_commas(&rewritten[a..b])
+        .into_iter()
+        .enumerate()
+        .find(|(i, it)| !roles.iter().any(|(j, _)| j == i) && !it.trim().starts_with('\''))
+        .map(|(_, it)| trailing_alias(it.trim()).0.trim().to_string())
+}
+
 /// A hint for a DuckDB error that a panel's roles caused (#1046, #1056):
 /// an alias in GROUP BY / HAVING, a role that reached DuckDB as a type (two
 /// roles on one column, or a role inside a subquery), or text on a role that
 /// needs a number. `None` when the error isn't one of those.
 pub fn error_hint(err: &str, sql: &str) -> Option<String> {
+    error_hint_in(err, sql, false)
+}
+
+/// #1083: a parser error our role syntax explains — two aliases around a
+/// role cast (`x AS "v" ::BARCHART AS "Units"`), a statement that starts
+/// without a `;` before it, a role cast after the FROM clause.
+fn parser_hint(err: &str, sql: &str) -> Option<String> {
+    if !err.contains("syntax error at or near") {
+        return None;
+    }
+    // the rewrite turned `x AS "v" ::BARCHART AS "Units"` into
+    // `CAST(x AS "v" AS DOUBLE)`
+    let two_aliases = err.contains("at or near \"AS\"")
+        && sql.match_indices("CAST(").any(|(p, _)| {
+            let rest = &sql[p..];
+            let end = rest.find(" AS DOUBLE)").unwrap_or(0);
+            end > 0 && rest[..end].contains(" AS ")
+        });
+    if two_aliases {
+        return Some(
+            "one alias per column, before or after its role: `sum(units)::BARCHART AS \"Units\"` \
+             (or `sum(units) AS \"Units\" ::BARCHART`), not both"
+                .into(),
+        );
+    }
+    // DuckDB quotes the line it stopped at: `LINE 2: SELECT …`
+    let line = err.split("LINE ").nth(1).and_then(|l| {
+        let (n, rest) = l.split_once(':')?;
+        Some((n.trim().parse::<usize>().ok()?, rest.trim_start()))
+    });
+    if let Some((n, text)) = line {
+        let first = text
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        const STARTS: &[&str] = &[
+            "SELECT", "WITH", "CREATE", "INSERT", "UPDATE", "DELETE", "DROP", "SET", "ATTACH",
+            "COPY", "INSTALL", "LOAD", "PIVOT", "FROM",
+        ];
+        if n > 1 && STARTS.contains(&first.as_str()) {
+            return Some(format!(
+                "a new statement starts at line {n} (`{first} …`) without a ';' before it — end the \
+                 statement above with ';'"
+            ));
+        }
+        let after_from = lex::find_top_level_keyword(sql, "FROM", 0).map(|p| &sql[p..]);
+        let stray = text.strip_prefix("::").map(str::to_string).or_else(|| {
+            // the quoted line is cut short: look for the cast after FROM
+            err.contains("at or near \"::\"")
+                .then(|| after_from?.rsplit_once("::").map(|(_, t)| t.to_string()))
+                .flatten()
+        });
+        if let Some(tok) = stray.as_deref() {
+            let tok: String = tok
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if parse_role(&tok).is_some() && !is_sql_type_token(&tok) {
+                return Some(format!(
+                    "a ::ROLE goes on a column of the SELECT list (`n::{tok}`), not after the FROM / \
+                     WHERE clause or on a whole statement"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// [`error_hint`] for a statement that is (`table`) or isn't a `::TABLE` /
+/// `::PAGED` panel — their fix for a chained role differs (#1083).
+pub fn error_hint_in(err: &str, sql: &str, table: bool) -> Option<String> {
     if let Some(h) = group_by_alias_hint(err, sql) {
+        return Some(h);
+    }
+    if let Some(h) = parser_hint(err, sql) {
         return Some(h);
     }
     if let Some(rest) = err.split("Type with name ").nth(1) {
@@ -1157,7 +1357,9 @@ pub fn error_hint(err: &str, sql: &str) -> Option<String> {
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
         if let Some(role) = parse_role(&tok).filter(|_| !is_sql_type_token(&tok)) {
-            let how = if matches!(role, Role::Metric(_)) {
+            let how = if table {
+                format!(" — in a table, ::TABLE goes on the first column only and a format such as ::{tok} on each amount column: `region::TABLE, revenue::MONEY`")
+            } else if matches!(role, Role::Metric(_)) {
                 format!(" — on a chart, format the axis instead: `revenue::BARCHART` with `'€'::YFORMAT` (or `'percent'`) rather than `revenue::{tok}::BARCHART`")
             } else {
                 " — e.g. a scatter's y column is its `::SCATTER` column, not `y::YAXIS::SCATTER`"
@@ -2242,6 +2444,110 @@ mod error_hint_tests {
             "SELECT x::FOO"
         )
         .is_none());
+    }
+
+    #[test]
+    fn parser_errors_from_role_syntax_get_a_hint() {
+        // #1083: two aliases around a role cast
+        let h = error_hint(
+            "Parser Error: syntax error at or near \"AS\" LINE 1: SELECT month AS c0, CAST(sum(units) AS \"v\" AS DOUBLE) AS c1",
+            "SELECT month AS c0, CAST(sum(units) AS \"v\" AS DOUBLE) AS c1 FROM sales GROUP BY ALL",
+        )
+        .unwrap();
+        assert!(h.contains("one alias per column"), "{h}");
+        // a statement without a ';' before it
+        let h = error_hint(
+            "Parser Error: syntax error at or near \"SELECT\" LINE 4: SELECT month::XAXIS, sum(units)::BARCHART ... ^",
+            "CREATE TABLE sales AS SELECT 1 AS a SELECT month::XAXIS FROM sales",
+        )
+        .unwrap();
+        assert!(h.contains("starts at line 4") && h.contains("';'"), "{h}");
+        let h = error_hint(
+            "Parser Error: syntax error at or near \"s\" LINE 4: WITH s AS (SELECT month ...",
+            "x",
+        )
+        .unwrap();
+        assert!(h.contains("`WITH …`"), "{h}");
+        // the first line is not a new statement
+        assert!(error_hint(
+            "Parser Error: syntax error at or near \"SELECT\" LINE 1: SELECT SELECT",
+            "x"
+        )
+        .is_none());
+        // a role cast after FROM: in the quoted line, or (cut short) in the statement
+        let h = error_hint(
+            "Parser Error: syntax error at or near \"::\" LINE 2: ::SCATTER; ^",
+            "x",
+        )
+        .unwrap();
+        assert!(h.contains("`n::SCATTER`"), "{h}");
+        let h = error_hint(
+            "Parser Error: syntax error at or near \"::\" LINE 1: ...2)) t(d, n) ^",
+            "SELECT d AS c0 FROM (VALUES ('a', 2)) t(d, n) ::SCATTER",
+        )
+        .unwrap();
+        assert!(h.contains("`n::SCATTER`"), "{h}");
+        // a real cast after FROM is not a role
+        assert!(error_hint(
+            "Parser Error: syntax error at or near \"::\" LINE 1: ... ^",
+            "SELECT a AS c0 FROM t WHERE d::DATE"
+        )
+        .is_none());
+        // a chained role in a table: the table's fix
+        let h = error_hint_in(
+            "Catalog Error: Type with name MONEY does not exist!",
+            "SELECT region::MONEY, plan FROM regions",
+            true,
+        )
+        .unwrap();
+        assert!(h.contains("in a table") && !h.contains("YFORMAT"), "{h}");
+    }
+
+    #[test]
+    fn an_alias_of_the_same_select_gets_a_hint() {
+        // #1081
+        let src = "SELECT strftime(month, '%b') AS mo_name, sum(units) AS \"Units\" ::BARCHART, mo_name::XAXIS FROM sales GROUP BY ALL";
+        let h = lateral_alias_hint(
+            "Binder Error: Referenced column \"mo_name\" not found in FROM clause! Candidate bindings: \"month\"",
+            src,
+        )
+        .unwrap();
+        assert!(h.contains("`strftime(month, '%b')::XAXIS`"), "{h}");
+        // defined but not used later: some other cause
+        assert!(lateral_alias_hint(
+            "Binder Error: Referenced column \"mo_name\" not found",
+            "SELECT mo_name::XAXIS, strftime(month, '%b') AS mo_name FROM sales"
+        )
+        .is_none());
+        assert!(
+            lateral_alias_hint("Binder Error: Referenced column \"zz\" not found", src).is_none()
+        );
+    }
+
+    #[test]
+    fn cte_names_and_the_first_item_without_a_role() {
+        assert_eq!(
+            cte_names("WITH recv AS (SELECT 1), \"Agg\" AS MATERIALIZED (SELECT (2)) SELECT 1"),
+            ["recv", "agg"]
+        );
+        assert_eq!(
+            cte_names("WITH RECURSIVE r(n) AS (SELECT 1) SELECT * FROM r"),
+            ["r"]
+        );
+        assert!(cte_names("SELECT 1 AS x").is_empty());
+        let roles = [(1, Role::Value(Kind::Bar)), (2, Role::Flip)];
+        assert_eq!(
+            first_unroled_item(
+                "SELECT region AS c0, CAST(sum(u) AS DOUBLE) AS c1, 1 AS c2 FROM s",
+                &roles
+            )
+            .as_deref(),
+            Some("region")
+        );
+        assert_eq!(
+            first_unroled_item("SELECT 'T' AS c0, x AS c1 FROM s", &[(1, Role::Flip)]),
+            None
+        );
     }
 
     #[test]
