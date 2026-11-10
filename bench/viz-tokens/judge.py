@@ -15,6 +15,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+import auth
 from pathlib import Path
 
 import duckdb
@@ -48,13 +50,17 @@ def call(key, content):
     # #1044: 1000 tokens cut some replies off before the JSON (about 1 in 12)
     body = {"model": JUDGE_MODEL, "max_tokens": 4000, "system": RUBRIC,
             "messages": [{"role": "user", "content": content}]}
-    req = urllib.request.Request(API, data=json.dumps(body).encode(), method="POST", headers={
-        "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
     for attempt in range(5):
+        # the auth header per attempt: a federated token may be re-exchanged (#1075)
+        req = urllib.request.Request(API, data=json.dumps(body).encode(), method="POST", headers={
+            **auth.headers(), "anthropic-version": "2023-06-01", "content-type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=180) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
+            if e.code == 401 and attempt < 4:
+                auth.invalidate()
+                continue
             if e.code in (429, 500, 502, 503, 529) and attempt < 4:
                 time.sleep(10 * (attempt + 1))
                 continue
@@ -66,7 +72,9 @@ def main():
     ap.add_argument("results")
     ap.add_argument("--data", required=True)
     a = ap.parse_args()
-    key = os.environ.get("ANTHROPIC_API_KEY") or sys.exit("ANTHROPIC_API_KEY is not set")
+    key = None
+    if not auth.available():
+        sys.exit("no Claude API credential: set ANTHROPIC_API_KEY, or the ANTHROPIC_FEDERATION_* variables (auth.py)")
     out = Path(a.results)
     tasks = {t["id"]: t for f in ("tasks.jsonl", "coverage.jsonl")
              for t in map(json.loads, (HERE / f).read_text().splitlines())}
