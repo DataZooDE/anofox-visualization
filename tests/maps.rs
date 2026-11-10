@@ -1584,7 +1584,9 @@ fn lat_lon_points_over_a_named_backdrop() {
         Column::new("b", Role::Basemap, strs(&["world", "world"])),
     ]);
     assert_eq!(s.matches("<path ").count(), 176, "{s}");
-    assert_eq!(attr(root(&s), "data-proj"), Some("equal-earth"));
+    // #1062: the backdrop is context — the frame fits the two points (20°
+    // apart), so the projection is the regional one, not a world one
+    assert_eq!(attr(root(&s), "data-proj"), Some("conic"));
 }
 
 #[test]

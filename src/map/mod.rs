@@ -595,7 +595,10 @@ impl<'a> Model<'a> {
                         false
                     }
                 });
-            let base_fitted = !flow_backdrop;
+            // #1062: a built-in layer (named, explicit or D4's) is an unfitted
+            // backdrop — the map fits its data; only a WKT backdrop of the
+            // dashboard's own (a floor plan, a site) frames it
+            let base_fitted = base_layer.is_none();
             let mut layers: Vec<String> = Vec::new();
             if let Some(l) = &raw.layer {
                 layers.push(l.clone());
@@ -720,7 +723,10 @@ impl<'a> Model<'a> {
                     false
                 }
             });
-        let base_fitted = !region_backdrop;
+        // #1062: a built-in layer (named, explicit or D4's) is an unfitted
+        // backdrop — the map fits its data; only a WKT backdrop of the
+        // dashboard's own (a floor plan, a site) frames it
+        let base_fitted = base_layer.is_none();
         let mut layers: Vec<String> = Vec::new();
         if let Some(l) = &inp.layer {
             layers.push(l.clone());
