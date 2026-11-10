@@ -1,6 +1,6 @@
 # #1075 (part of #1073): the AI evaluation — models answer data questions with
 # charts through anofox, a judge checks them against truth computed from the
-# data (bench/viz-tokens). Weekly (the full set, ≈ $8) and by hand (smoke ≈ $0.50
+# data (bench/viz-tokens). Weekly (the full set, ≈ $8–10) and by hand (smoke ≈ $0.50
 # or full). Never on a pull request. Accuracy first: the job summary leads with
 # the pass rate and the regressions against the previous run of the same set;
 # a regression opens (or comments on) an issue labelled ai-eval.
@@ -22,6 +22,10 @@ on:
         description: "The model answering (the judge stays claude-sonnet-5)"
         type: string
         default: claude-sonnet-5
+      arms:
+        description: "anofox-lean (the short reference), anofox (what the builder's assistant sends), or both: anofox,anofox-lean"
+        type: string
+        default: anofox-lean
 
 permissions:
   contents: read
@@ -41,6 +45,7 @@ jobs:
       DATAZOO_DISABLE_TELEMETRY: "1"
       SET: ${{ inputs.set || 'full' }}
       MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
+      ARMS: ${{ inputs.arms || 'anofox-lean' }}
       BENCH_RESULTS: ${{ github.workspace }}/target/bench
       BENCH_PYTHON: ${{ github.workspace }}/.venv/bin/python
     steps:
@@ -95,7 +100,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ASSIST_EVAL_ANTHROPIC_API_KEY }}
         run: |
           set +e
-          bench/viz-tokens/run.sh --set "$SET" --model "$MODEL"
+          bench/viz-tokens/run.sh --set "$SET" --model "$MODEL" --arms "$ARMS"
           status=$?
           set -e
           out=$(find "$BENCH_RESULTS" -maxdepth 1 -type d -name "$SET-*" | sort | tail -1)
