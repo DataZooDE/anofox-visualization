@@ -83,3 +83,20 @@ build for the role reference (default `web/pkg`). Needs `bwrap`,
 
 The harness counts each arm's prefix tokens and asks before it spends
 (`--yes` skips the question).
+
+## One command (#1074)
+
+```sh
+ANTHROPIC_API_KEY=… BENCH_PYTHON=.venv/bin/python bench/viz-tokens/run.sh --set smoke   # ≈ 14 questions × 1, ≈ $0.50
+ANTHROPIC_API_KEY=… BENCH_PYTHON=.venv/bin/python bench/viz-tokens/run.sh --set full    # 40 × 3, ≈ $8
+bench/viz-tokens/run.sh --dry                                                           # the plumbing, no API
+```
+
+It builds the release CLI and `web/pkg` (unless `$BENCH_DASHBOARD` / an existing
+build), the data (unless `$BENCH_DATA`), runs the anofox-lean arm, judges, writes
+`report.md` and `gaps.md`, then `compare.md`: pass rate per phase, family and task
+against `--baseline` (default: the previous run of the same set), with the
+regressions — a task down from ≥ 2 passes to ≤ 1, or a phase more than 10 points
+lower. One row per run goes to `$BENCH_RESULTS/history.csv` (default
+`target/bench/`). Exit status 2 on a regression. The sets are in `sets.json`;
+`compare.py` also runs on its own (`compare.py <run> --baseline <run>`).

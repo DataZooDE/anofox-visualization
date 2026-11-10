@@ -413,8 +413,11 @@ def load_refs(args):
     def anofox(*flags):
         return subprocess.run(["node", str(HERE / "anofox-reference.mjs"), "--pkg", args.pkg, *flags],
                               capture_output=True, text=True, check=True).stdout
-    return {"anofox": anofox(), "anofox-lean": anofox("--lean"),
-            "python": bundle(args.python_ref), "vegalite": bundle(args.vega_ref)}
+    # only the arms asked for (#1074: a CI runner has no ~/.claude skills)
+    make = {"anofox": lambda: anofox(), "anofox-lean": lambda: anofox("--lean"),
+            "python": lambda: bundle(args.python_ref), "vegalite": lambda: bundle(args.vega_ref)}
+    arms = [a.strip() for a in args.arms.split(",")]
+    return {a: make[a]() for a in arms if a in make}
 
 
 def main():
