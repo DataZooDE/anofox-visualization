@@ -231,7 +231,7 @@ pub(crate) fn needed_layers(cols: &[Column]) -> Vec<&'static str> {
                         Value::Str(s) => {
                             let t = s.trim();
                             if t.starts_with('{')
-                                || (t.len() >= 5 && t[..5].eq_ignore_ascii_case("POINT"))
+                                || t.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("POINT"))
                             {
                                 None
                             } else {
