@@ -198,7 +198,8 @@ class Tools:
         script = f"ATTACH '{self.db}' AS d (READ_ONLY);\nSET search_path = 'memory.main,d.main';\n{sql}\n"
         (d / "chart.sql").write_text(script)
         dash = self.cfg["dashboard"]
-        rc, out, err = sandboxed([dash, "--check", "chart.sql", "--json"], d)
+        extra = ["--boundaries", self.cfg["boundaries"]] if self.cfg.get("boundaries") else []
+        rc, out, err = sandboxed([dash, "--check", "chart.sql", "--json", *extra], d)
         try:
             diags = json.loads(out).get("diagnostics", [])
         except ValueError:
@@ -206,7 +207,7 @@ class Tools:
         errors = [x for x in diags if x.get("severity") == "error"]
         if errors:
             return False, clip("\n".join(f"statement {x.get('stmt', 0) - 2}: {x.get('code')}: {x.get('message')}" for x in errors))
-        rc, out, err = sandboxed([dash, "--svg", "chart.sql", "chart.svg", "--width", "900"], d)
+        rc, out, err = sandboxed([dash, "--svg", "chart.sql", "chart.svg", "--width", "900", *extra], d)
         if rc != 0 or not (d / "chart.svg").exists():
             return False, clip(f"render failed: {err or out}")
         # a script without a chart role draws an empty page: say so, as the
@@ -428,6 +429,7 @@ def main():
     ap.add_argument("--dashboard", default=str(ROOT / "target/release/dashboard"))
     ap.add_argument("--python", default=sys.executable, help="python with pandas/matplotlib/seaborn/vl-convert")
     ap.add_argument("--pkg", default=str(ROOT / "web/pkg"))
+    ap.add_argument("--boundaries", help="the optional map layers for the anofox CLI (#1057), e.g. web/data/boundaries")
     ap.add_argument("--python-ref", default="~/.claude/skills/matplotlib")
     ap.add_argument("--vega-ref", default="~/.claude/skills/altair")
     ap.add_argument("--out", required=True)
@@ -454,6 +456,7 @@ def main():
     out = Path(a.out)
     (out / "charts").mkdir(parents=True, exist_ok=True)
     cfg = {"data": str(Path(a.data).resolve()), "dashboard": str(Path(a.dashboard).resolve()), "python": a.python,
+           "boundaries": str(Path(a.boundaries).resolve()) if a.boundaries else None,
            "workdir": str((out / "work").resolve())}
     Path(cfg["workdir"]).mkdir(exist_ok=True)
     refs = load_refs(a)

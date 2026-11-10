@@ -45,7 +45,8 @@ def truth_rows(data, task, phase):
 
 
 def call(key, content):
-    body = {"model": JUDGE_MODEL, "max_tokens": 1000, "system": RUBRIC,
+    # #1044: 1000 tokens cut some replies off before the JSON (about 1 in 12)
+    body = {"model": JUDGE_MODEL, "max_tokens": 4000, "system": RUBRIC,
             "messages": [{"role": "user", "content": content}]}
     req = urllib.request.Request(API, data=json.dumps(body).encode(), method="POST", headers={
         "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
@@ -72,7 +73,11 @@ def main():
     done = set()
     jpath = out / "judgments.jsonl"
     if jpath.exists():
-        done = {(j["run"], j["phase"]) for j in map(json.loads, jpath.read_text().splitlines())}
+        # a reply that wasn't JSON is judged again (kept lines stay as they are)
+        keep = [l for l in jpath.read_text().splitlines()
+                if not json.loads(l).get("reason", "").startswith("judge reply not JSON")]
+        jpath.write_text("".join(l + "\n" for l in keep))
+        done = {(j["run"], j["phase"]) for j in map(json.loads, keep)}
     with open(jpath, "a") as f:
         for rec in map(json.loads, (out / "runs.jsonl").read_text().splitlines()):
             t = tasks[rec["task"]]

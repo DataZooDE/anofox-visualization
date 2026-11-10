@@ -24,7 +24,8 @@ COVERAGE = {
         CREATE TABLE ir_sales AS FROM read_csv('data/optimize-replenishment/ir_sales.csv');
         CREATE TABLE ir_forecast AS FROM read_csv('data/optimize-replenishment/ir_forecast.csv');
         CREATE TABLE ir_skus AS FROM read_csv('data/optimize-replenishment/ir_skus.csv');""",
-    "leads": "CREATE TABLE leads AS SELECT * EXCLUDE (message, model, team_pred) FROM read_csv('data/decide-leads/ld_scored.csv');",
+    # one row per lead: the CSV scores every lead with two models (#1044)
+    "leads": "CREATE TABLE leads AS SELECT * EXCLUDE (message, model, team_pred) FROM read_csv('data/decide-leads/ld_scored.csv') WHERE model = 'laya-typed-decisions';",
 }
 for ds in ["sales", "supply_chain", "lead_times", "claims", "m5"]:
     p = out / f"{ds}.duckdb"
