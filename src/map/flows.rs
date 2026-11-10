@@ -62,7 +62,7 @@ pub(super) fn end_of(v: &Value) -> End {
                 }
                 return End::Missing;
             }
-            if t.len() >= 5 && t[..5].eq_ignore_ascii_case("POINT") {
+            if t.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("POINT")) {
                 if let Some(ggplot_rs::spatial::Geometry::Point(p)) =
                     ggplot_rs::spatial::parse_wkt(t)
                 {
@@ -415,6 +415,14 @@ mod tests {
         match end_of(&Value::Str("DE-BY".to_string())) {
             End::Code(c) => assert_eq!(c, "DE-BY"),
             other => panic!("expected a code, got {other:?}"),
+        }
+        // #1055: a name with a multi-byte character in its first five bytes
+        // is a place name, not a crash (`t[..5]` cut inside 'ü')
+        for name in ["Lübeck", "Görlitz", "Ölbronn", "東京都"] {
+            match end_of(&Value::Str(name.to_string())) {
+                End::Code(c) => assert_eq!(c, name),
+                other => panic!("expected a code for {name}, got {other:?}"),
+            }
         }
         assert!(matches!(end_of(&Value::Na), End::Missing));
         match end_of(&Value::Float(9162.0)) {
