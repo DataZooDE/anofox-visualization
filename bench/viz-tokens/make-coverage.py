@@ -318,7 +318,7 @@ T = [
      "SELECT date_trunc('week', day) AS week, sum(qty) AS qty FROM order_lines GROUP BY 1 ORDER BY 1",
      "a readable daily line over 365 days (a trend or smoothing helps), not overplotted bars"),
     ("fc-stockout", "forecast", "replenish",
-     "Which SKUs will run out of stock within the next two forecast weeks?",
+     "Which SKUs (by name) will run out of stock within the next two forecast weeks, counting what is on hand and on order?",
      "WITH f AS (SELECT sku, sum(yhat) AS demand FROM ir_forecast WHERE week < (SELECT min(week) FROM ir_forecast) + INTERVAL 14 DAY GROUP BY 1) SELECT s.name, s.on_hand + s.on_order AS stock, f.demand FROM ir_skus s JOIN f USING (sku) WHERE f.demand > s.on_hand + s.on_order ORDER BY f.demand - (s.on_hand + s.on_order) DESC",
      "Show their forecast with the uncertainty for those weeks.",
      "SELECT s.name, f.week, f.yhat, f.band_lower, f.band_upper FROM ir_forecast f JOIN ir_skus s USING (sku) WHERE f.week < (SELECT min(week) FROM ir_forecast) + INTERVAL 14 DAY AND sku IN (SELECT sku FROM ir_forecast WHERE week < (SELECT min(week) FROM ir_forecast) + INTERVAL 14 DAY GROUP BY 1 HAVING sum(yhat) > (SELECT on_hand + on_order FROM ir_skus k WHERE k.sku = ir_forecast.sku)) ORDER BY 1, 2",
