@@ -50,7 +50,9 @@ A fourth arm, `anofox-lean`, is anofox with a lean reference
 (`anofox-reference.mjs --lean`, rules fixed before any results). It keeps one
 role source, the guide's Roles table without its dashboard-only rows, plus the
 guide's sections on design, tables, heatmaps and gotchas: ≈29 k characters,
-the size of the Vega-Lite reference.
+the size of the Vega-Lite reference. Since #1100 it keeps the inputs too (the
+Inputs rows and section, ≈8 k more): the dashboard questions ask for a filter,
+and without them the 'All' default never reached the model.
 
 ## The reference sizes differ
 

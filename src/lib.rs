@@ -2830,9 +2830,16 @@ fn render_inner(
     height: u32,
     o: &RenderOptions,
 ) -> Result<Panel, String> {
+    // A ::LABEL that varies by row labels the marks (a scatter point's
+    // tooltip, a treemap tile), not the chart: only a constant one is a
+    // title (#1100: a bubble chart was titled with its first district).
     let title = cols
         .iter()
         .find(|c| c.role == Role::Label)
+        .filter(|c| {
+            let mut set = c.values.iter().filter(|v| **v != Value::Na);
+            set.next().is_none_or(|first| set.all(|v| v == first))
+        })
         .and_then(|c| c.values.first())
         .map(value_str);
 
@@ -2894,6 +2901,21 @@ fn render_inner(
     }
     let value = cols.iter().find(|c| matches!(c.role, Role::Value(_)));
     let Some(value) = value else {
+        // ::XAXIS / ::YAXIS with no chart role: drawing the ::LABEL as a
+        // heading hid the mistake (#1100: a bubble chart showed one district
+        // name). Say which role is missing instead.
+        if cols.iter().any(|c| matches!(c.role, Role::X | Role::Y))
+            && !cols.iter().any(|c| {
+                matches!(
+                    c.role,
+                    Role::Table | Role::PagedTable | Role::Record | Role::Diagram
+                )
+            })
+        {
+            return Err("no chart role: cast the measure to a mark, e.g. ::SCATTER \
+                        (numeric x), ::LINECHART (dates), ::BARCHART (categories)"
+                .into());
+        }
         // Label-only → a heading element.
         return Ok(heading_svg(title.as_deref().unwrap_or(""), width));
     };
@@ -5099,14 +5121,12 @@ fn cartesian(
         }
     }
     if let Some(f) = facet {
-        // ggplot-rs (still 0.17) draws free y-axis labels only on the
-        // left-most panels, so free facets stack in one column unless
-        // ::FACET_NCOL says otherwise. TODO(ggplot-rs): drop the default once
-        // every free panel carries its own axis labels.
+        // ::FACET_NCOL, else ggplot-rs's own grid: free panels carry their
+        // own axis labels now, so they no longer stack in one column (#1100:
+        // eleven SKUs stacked in one card were slivers).
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
-            .map(|n| n.min(64.0) as usize)
-            .or((f.role == Role::FacetFree).then_some(1));
+            .map(|n| n.min(64.0) as usize);
         plot = if f.role == Role::FacetFree {
             // A discrete x is the same set of levels in every panel: free y only.
             let scales = if x_discrete {
@@ -5516,8 +5536,7 @@ fn render_histogram(
     if let Some(f) = facet {
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
-            .map(|n| n.min(64.0) as usize)
-            .or((f.role == Role::FacetFree).then_some(1));
+            .map(|n| n.min(64.0) as usize);
         plot = if f.role == Role::FacetFree {
             plot.facet_wrap_free("facet", ncol, FacetScales::Free)
         } else {
@@ -5854,8 +5873,7 @@ fn render_qq(
     if let Some(f) = facet {
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
-            .map(|n| n.min(64.0) as usize)
-            .or((f.role == Role::FacetFree).then_some(1));
+            .map(|n| n.min(64.0) as usize);
         plot = if f.role == Role::FacetFree {
             plot.facet_wrap_free("facet", ncol, FacetScales::Free)
         } else {
@@ -6045,8 +6063,7 @@ fn render_heatmap(
     if let Some(f) = facet {
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
-            .map(|n| n.min(64.0) as usize)
-            .or((f.role == Role::FacetFree).then_some(1));
+            .map(|n| n.min(64.0) as usize);
         plot = if f.role == Role::FacetFree {
             plot.facet_wrap_free("facet", ncol, FacetScales::Free)
         } else {
@@ -6127,8 +6144,7 @@ fn render_heatmap_categorical(
     if let Some(f) = facet {
         let ncol = role_num(cols, Role::FacetCols)
             .filter(|n| *n >= 1.0)
-            .map(|n| n.min(64.0) as usize)
-            .or((f.role == Role::FacetFree).then_some(1));
+            .map(|n| n.min(64.0) as usize);
         plot = if f.role == Role::FacetFree {
             plot.facet_wrap_free("facet", ncol, FacetScales::Free)
         } else {

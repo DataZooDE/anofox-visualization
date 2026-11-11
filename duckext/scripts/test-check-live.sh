@@ -90,7 +90,7 @@ VAR="$(query "SELECT getvariable('v') AS v")"
 [ "$VAR" = "[{\"v\":null}]" ] || fail "the checked script's SET VARIABLE leaked onto the live connection: $VAR"
 echo "OK: the checked script's SET VARIABLE never reached the live session"
 
-OUT="$(check '{"script": "SELECT amount::XAXIS FROM sales;"}')"
+OUT="$(check '{"script": "SELECT sum(amount)::METRIC FROM sales;"}')"
 [ "$(json_get "$OUT" 'v["ok"]')" = "true" ] || fail "a script reading the live session's own table should check ok: $OUT"
 echo "OK: /check can read the live session's own tables"
 

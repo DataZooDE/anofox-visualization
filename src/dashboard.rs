@@ -500,7 +500,9 @@ fn execute(
         // though neither ever draws a box itself (same comment as above).
         // A `::GUIDE_STEP` marker is kept too, so `render_inner` can draw its
         // "Step n of N · Label" heading (decision 8) — it never draws a box
-        // itself either.
+        // itself either. So is a ::TAB / ::SUBTAB marker: the static output
+        // draws every tab, each under its name (#1100: without the names two
+        // tabs read as one view).
         let layout = has(&|r| {
             matches!(
                 r,
@@ -516,6 +518,8 @@ fn execute(
                     | Role::FigureStart
                     | Role::FigureEnd
                     | Role::GuideStep
+                    | Role::Tab
+                    | Role::SubTab
             )
         });
         if roles::is_directive_panel(&panel.roles) && !layout {
@@ -936,16 +940,23 @@ fn render_inner(
             continue;
         }
 
-        // Heading (::LABEL alone, ::SECTION, a ::GUIDE_STEP marker) →
-        // full-width section title, own row (#516 decision 8: the static
-        // output flattens the stepper into a run of these headings).
+        // Heading (::LABEL alone, ::SECTION, a ::GUIDE_STEP or ::TAB marker)
+        // → full-width section title, own row (#516 decision 8: the static
+        // output flattens the stepper — and the tabs — into these headings).
         let step_n_of = panel.step.as_ref().filter(|s| s.marker).and_then(|_| {
             static_steps.step(panel).into_iter().find_map(|e| match e {
                 sql::steps::StaticEvent::Heading { n, of, .. } => Some((n, of)),
                 _ => None,
             })
         });
+        let tab = roles
+            .iter()
+            .find(|(_, r)| matches!(r, Role::Tab | Role::SubTab))
+            .and_then(|(i, _)| column_at(rows, *i))
+            .and_then(|(_, vals)| vals.first())
+            .map(value_str);
         if has(&|r| matches!(r, Role::Section))
+            || tab.is_some()
             || (roles.len() == 1 && matches!(roles[0].1, Role::Label))
             || step_n_of.is_some()
         {
@@ -968,7 +979,7 @@ fn render_inner(
                         format!("Step {n} of {of} · {label}")
                     }
                 }
-                None => first_text(rows).unwrap_or_default(),
+                None => tab.or_else(|| first_text(rows)).unwrap_or_default(),
             };
             if row_units > 0 {
                 new_row(&mut row_y, &mut row_h, &mut x, &mut row_units);
@@ -1328,7 +1339,25 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64, narrow: bool) -> Option
         tx = 52.0;
     }
     let font = esc(&t.font.display);
-    match (&b.name, &b.title) {
+    // a long title steps down in size, then ends in an ellipsis, beside the
+    // right-aligned ::ASOF chip when there is one (#1100: a question as the
+    // title ran off the page)
+    let avail = w
+        - tx
+        - if b.asof.is_some() && !asof_below {
+            180.0
+        } else {
+            0.0
+        };
+    let (title, ts) = match &b.title {
+        Some(ti) => {
+            let (fit, ts) = fit_header_title(ti, ts, avail);
+            (Some(fit), ts)
+        }
+        None => (None, ts),
+    };
+    let title = &title;
+    match (&b.name, title) {
         (Some(n), Some(ti)) => s.push_str(&format!(
             "<text x=\"{tx}\" y=\"18\" font-family=\"{font}\" font-size=\"11\" font-weight=\"700\" letter-spacing=\".05em\" fill=\"{m}\">{n}</text>\
              <text x=\"{tx}\" y=\"42\" font-family=\"{font}\" font-size=\"{ts}\" font-weight=\"800\" fill=\"{hd}\">{ti}</text>",
@@ -1367,6 +1396,20 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64, narrow: bool) -> Option
     }
     s.push_str("</svg>");
     Some((s, h))
+}
+
+/// `(text, font size)` of a header title in `avail` px: `ts` down to 16 px,
+/// then shortened with an ellipsis (its weight, 800, is wider than
+/// `text_width`'s regular face, hence the margin).
+fn fit_header_title(ti: &str, ts: u32, avail: f64) -> (String, u32) {
+    let fits = |size: u32| ggplot_rs::render::text::text_width(ti, size as f64) * 1.12 <= avail;
+    let mut size = ts;
+    while size > 16 && !fits(size) {
+        size -= 1;
+    }
+    let text =
+        truncate_header(ti, size as f64 * 1.12 / 1.08, avail).unwrap_or_else(|| ti.to_string());
+    (text, size)
 }
 
 /// A column result as JSON row maps keyed by output column name (`c{i}`).

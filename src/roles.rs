@@ -239,7 +239,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("CURRENCY_CODE", &["CURRENCYCODE", "ISO_CURRENCY"], R::CurrencyCode, "modifier", true,
       "the panel's currency as an ISO 4217 code beside the value: 'EUR', 'USD', 'GBP', 'CHF'… — ::MONEY KPIs and table columns, and a chart's y axis without its own ::YFORMAT; symbol and placement follow ::LOCALE (€1,234 / 1.234 €)"),
     e("Y2", &["SECONDARY_AXIS", "RIGHT_AXIS"], R::Y2, "modifier", true,
-      "the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line"),
+      "the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line; in the chart's own SELECT"),
     e("Y2FORMAT", &["Y2AXISFORMAT"], R::Y2Format, "modifier", true,
       "the ::Y2 axis' value format, like ::YFORMAT: 'percent', '€', ' kg'…"),
     e("XFORMAT", &["XAXISFORMAT", "XUNIT", "XCURRENCY"], R::XFormat, "modifier", true,
