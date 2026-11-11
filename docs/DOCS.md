@@ -2673,6 +2673,21 @@ cumulative line is the share of the rows shown, so for a top N draw
 `::BARCHART` bars and the share of the total, computed in SQL, as a
 `::LINECHART` on `::Y2`.
 
+**Numbers that can't be right** (#1120): `--check` also looks at the rows a
+chart gets. Shares computed in SQL — a `::PIE`, `::DONUTCHART` or
+`::BARCHART_STACKED_PERCENT` measure named like a share (`pct`, `percent`,
+`share`, `%`) with values 0–100 — that add up to far from 100 (or from 1, for
+fractions), for the whole pie or one stacked bar, are redrawn as 100 %
+(`chart/share-sum`): add the rest as an 'Other' row, or make the shares parts
+of one total that don't overlap. A pie or donut after a `LIMIT n` that
+returned n rows shows a top n as the whole (`chart/pie-limit`): fold the rest
+into an 'Other' row in SQL, or use `::BARCHART`. A `::BAND_LOWER` above its
+`::BAND_UPPER` in any row (`chart/band-swapped`) means the two columns are
+swapped; a band that misses its line in more than half the rows
+(`chart/band-off-line`, one measure only) is usually in another unit — a
+fraction band around a percent line. An actual outside its forecast band now
+and then is fine.
+
 **What a chart draws** (#1095): `dashboard --check --digest` adds a
 `chart/drawn` note per chart, with its numbers from the plotting engine's own
 build (ggplot-rs's `BuiltPlot::summary`): per layer and series the marks, the
