@@ -2147,11 +2147,15 @@ where
                 sql: short.clone(),
             });
         }
-        if let Some(message) = unused_measure_diag(&p.roles, &rows) {
+        if let Some(message) = opts
+            .design
+            .then(|| unused_measure_diag(&p.roles, &rows))
+            .flatten()
+        {
             diags.push(Diagnostic {
                 severity: Severity::Warning,
                 stmt,
-                code: "chart/unused-measure",
+                code: "design/unused-measure",
                 message,
                 sql: short.clone(),
             });
@@ -11098,12 +11102,12 @@ mod design_tests {
                 sql,
                 |_q| Ok(data.clone()),
                 LintOptions {
-                    design: false,
+                    design: true,
                     ..Default::default()
                 },
             )
             .into_iter()
-            .filter(|d| d.code == "chart/unused-measure")
+            .filter(|d| d.code == "design/unused-measure")
             .map(|d| d.message)
             .collect()
         };

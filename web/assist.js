@@ -1739,7 +1739,7 @@ export function quietError(msg, named = () => false) {
 // it names variables that ::DRILL / ::SELECT_AS take from row values.
 const SAFE_CODES = new Set(
   ("animate/reveal-no-xline annotation/unpaired callout/no-text chart/needs-xaxis colors/no-category design/many-series " +
-   "design/pie-slices design/raw-table design/remote-view design/too-many-panels design/ungrouped-inputs design/ungrouped-kpis design/unsorted-bars design/untitled-chart " +
+   "design/pie-slices design/raw-table design/remote-view design/too-many-panels design/ungrouped-inputs design/unused-measure design/ungrouped-kpis design/unsorted-bars design/untitled-chart " +
    "input/unused layout/filter-below-content layout/input-scope layout/mixed-input-row " +
    "header/bad-certified header/empty-group header/empty-nav header/empty-owner header/long-description header/long-group " +
    "header/long-nav header/too-many-tags " +
