@@ -27,6 +27,9 @@ differ:
   build); vegalite: the plotted rows by the spec's x / y / colour fields;
   python: the figure's own lines, points and bars. `--no-digest` turns it
   off (recorded in meta.json).
+- `--see-chart on` (#1118): every drawn chart comes back to the model as an image
+  (all arms alike), with an instruction to check it against the request and its
+  answer before answering. Off by default, so runs stay comparable; meta.json records it.
 - The claim check (#1116, `claims.py`): every number of an answer must appear in
   a tool's output, the model's own SQL or the request, within its rounding, or
   follow from two numbers of one row or column (difference, ratio, share, %
@@ -51,12 +54,25 @@ the truth rows, the written answer and the chart image. It grades
 `numbers_correct`, `chart_answers` and `readable` (1–5); `pass` = both true.
 
 **Report** (`report.py`):
-- per arm and phase: pass, first-try chart, median and p90 tokens, output
+- per arm and phase: pass with a 95 % CI (see below), first-try chart, median and p90 tokens, output
   tokens, cost, tokens and cost per pass, calls and repairs;
 - paired by task (anofox ÷ other): the geometric mean ratio with a bootstrap
-  CI, Wilcoxon, and McNemar for pass;
+  CI, Wilcoxon, McNemar for pass, and the pass-rate difference with a 95 %
+  CI and a verdict;
 - where the output went: exploration, chart, repair, answer, and the
   reference read per run.
+
+**Intervals** (`stats.py`, #1122). Repeats of one task are correlated, so
+the unit is the task. A pass rate's 95 % CI is a bootstrap that resamples
+tasks with all their repeats ("boot", the one to read); a Wilson interval
+over all runs is shown for reference ("Wilson": it counts each run as
+independent and is too narrow when repeats agree). A difference (two arms in
+one run, or a run against its baseline in `compare.md`) is paired by task:
+each task's pass rate over its repeats, now minus then, averaged over the
+tasks both have, with a bootstrap CI over those tasks. The verdict is
+**better** or **worse** only when the whole CI lies above or below 0, else
+**within noise**; `compare.py` counts "worse" as a regression. Claims of
+progress need `--reps 3`: at 50 tasks a CI is still about ±10 points.
 
 A fourth arm, `anofox-lean`, is anofox with a lean reference
 (`anofox-reference.mjs --lean`, rules fixed before any results). It keeps one
@@ -110,7 +126,8 @@ It builds the release CLI and `web/pkg` (unless `$BENCH_DASHBOARD` / an existing
 build), the data (unless `$BENCH_DATA`), runs the anofox-lean arm, judges, writes
 `report.md` and `gaps.md`, then `compare.md`: pass rate per phase, family and task
 against `--baseline` (default: the previous run of the same set), with the
-regressions — a task down from ≥ 2 passes to ≤ 1, or a phase more than 10 points
-lower. One row per run goes to `$BENCH_RESULTS/history.csv` (default
+regressions — a task down from ≥ 2 passes to ≤ 1, a phase more than 10 points
+lower, or a phase worse beyond noise (its difference's CI below 0). Each phase
+gets its CI and a verdict line: better / worse / within noise. One row per run goes to `$BENCH_RESULTS/history.csv` (default
 `target/bench/`). Exit status 2 on a regression. The sets are in `sets.json`;
 `compare.py` also runs on its own (`compare.py <run> --baseline <run>`).

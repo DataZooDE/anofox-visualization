@@ -4,8 +4,9 @@
 
 Writes <run>/compare.md: pass rate per arm and phase, per family, per task,
 then the regressions — a task that passed at least 2 of its repeats in the
-baseline and at most 1 now, or a phase whose pass rate fell by more than
-`--drop` points. Appends one row per arm to the history CSV. Exit status 2
+baseline and at most 1 now, a phase whose pass rate fell by more than
+`--drop` points, or a phase worse beyond noise (#1122: the 95 % CI of the
+difference, paired by task, below 0; see stats.py). Appends one row per arm to the history CSV. Exit status 2
 on a regression (so a scheduled run can open an issue), 0 otherwise.
 
 Pass rate comes first: correctness is what the bench is for (#1044); tokens
@@ -15,10 +16,14 @@ import argparse
 import csv
 import json
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from stats import diff_ci, fmt_diff, fmt_rate, rate_ci, verdict  # noqa: E402
+
 PHASES = ("first", "followup")
 
 
@@ -69,16 +74,36 @@ def compare(run, base, drop):
     L = [f"# Compare: {Path(run).name}" + (f" vs {Path(base).name}" if base else " (no baseline)"), ""]
     regressions = []
 
-    L += ["## Pass rate", "", "| arm | phase | now | baseline |", "|---|---|---|---|"]
+    L += ["## Pass rate", "",
+          "95 % CIs (#1122): **boot** = bootstrap over tasks, a task's repeats kept together (the one to read); "
+          "**Wilson** = every run counted as independent (for reference; too narrow when repeats agree). "
+          "**Δ** = now − baseline on the tasks both ran, each task's pass rate over its repeats, "
+          "averaged over tasks (each task weighs the same), with a bootstrap CI over those tasks. "
+          "**better / worse** only when the whole CI is above / below 0, else **within noise**. "
+          "Claims of progress need `--reps 3`.", "",
+          "| arm | phase | now | baseline (same tasks) | Δ now − baseline (95 % CI) | verdict |",
+          "|---|---|---|---|---|---|"]
+    verdicts = []
     for arm in arms:
         for ph in PHASES:
-            p, n = rate([v for (t, a, q), v in now.items() if a == arm and q == ph])
+            cur = {t: v for (t, a, q), v in now.items() if a == arm and q == ph}
             # the baseline on the same tasks only, so a smoke run compares like with like
-            tasks = {t for (t, a, q) in now if a == arm and q == ph}
-            bp, bn = rate([v for (t, a, q), v in was.items() if a == arm and q == ph and t in tasks])
-            L.append(f"| {arm} | {ph} | {pct(p, n)} | {pct(bp, bn)} |")
-            if n and bn and 100 * (bp / bn - p / n) > drop:
-                regressions.append(f"{arm} {ph}: {pct(bp, bn)} → {pct(p, n)}")
+            old = {t: v for (t, a, q), v in was.items() if a == arm and q == ph and t in cur}
+            rc, rb = rate_ci(cur), rate_ci(old)
+            if old:
+                d = diff_ci(cur, old)
+                v = verdict(d)
+                verdicts.append(f"{arm} {ph}: **{v}** ({fmt_diff(d)}, {d['tasks']} tasks)")
+                L.append(f"| {arm} | {ph} | {fmt_rate(rc)} | {fmt_rate(rb)} | {fmt_diff(d)} | {v} |")
+                if v == "worse":
+                    regressions.append(f"{arm} {ph}: worse beyond noise, {fmt_diff(d)}")
+            else:
+                L.append(f"| {arm} | {ph} | {fmt_rate(rc)} | – | – | – |")
+            n, bn = rc["runs"], rb["runs"]
+            if n and bn and 100 * (rb["rate"] - rc["rate"]) > drop:
+                regressions.append(f"{arm} {ph}: {pct(rb['pass'], bn)} → {pct(rc['pass'], n)}")
+    if base:
+        L += ["", "**Verdict:** " + ("; ".join(verdicts) if verdicts else "no task in common with the baseline")]
 
     L += ["", "## Per family (first + follow-up)", "", "| family | arm | now | baseline |", "|---|---|---|---|"]
     for f in sorted({fam.get(t, "?") for (t, _, _) in now}):
