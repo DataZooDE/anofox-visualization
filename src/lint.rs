@@ -2123,6 +2123,18 @@ where
                 }),
         );
 
+        diags.extend(
+            annotation_diags(&p.roles)
+                .into_iter()
+                .map(|(severity, code, message)| Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                }),
+        );
+
         diags.extend(y2_diags(&p.roles, &p.names, &rows).into_iter().map(
             |(severity, code, message)| Diagnostic {
                 severity,
@@ -6853,6 +6865,64 @@ fn digest_text(text: &str) -> String {
     }
 }
 
+/// 11-11 three-arm comparison: reference lines that draw nothing.
+/// - ts-event-line: `SELECT start_date::XLINE, what::XLINE_LABEL FROM
+///   disruptions;` after the chart — an annotation in a statement of its
+///   own belongs to no chart.
+/// - dist-mean-median: `mean::REFLINE` on a ::HISTOGRAM — a horizontal line
+///   (a count) that the histogram does not draw; its x is the value.
+fn annotation_diags(roles: &[(usize, Role)]) -> Vec<(Severity, &'static str, String)> {
+    let has = |f: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, r)| f(r));
+    let mut out = Vec::new();
+    let annotation = has(&|r| {
+        matches!(
+            r,
+            Role::RefLine | Role::VLine | Role::VLineLabel | Role::RefLineLabel
+        )
+    });
+    if !annotation {
+        return out;
+    }
+    let drawn_by_other = is_kpi(roles)
+        || crate::track::is_track(roles)
+        || has(&|r| {
+            matches!(
+                r,
+                Role::Value(_)
+                    | Role::Table
+                    | Role::Record
+                    | Role::PagedTable
+                    | Role::Diagram
+                    | Role::Geometry
+                    | Role::Region
+                    | Role::Lat
+                    | Role::Lon
+                    | Role::Q1
+                    | Role::Median
+                    | Role::Q3
+            )
+        });
+    if !drawn_by_other {
+        out.push((
+            Severity::Error,
+            "annotation/no-chart",
+            "::XLINE / ::REFLINE in a statement without a chart draws nothing — put them in the \
+             chart's own SELECT (one line per row: join the event dates onto the chart's rows), \
+             or draw events from another table as a ::TRACK right after the chart"
+                .to_string(),
+        ));
+    } else if chart_kind(roles) == Some(Kind::Histogram) && has(&|r| *r == Role::RefLine) {
+        out.push((
+            Severity::Warning,
+            "chart/refline-histogram",
+            "::REFLINE is a horizontal line (a count) a ::HISTOGRAM does not draw — mark a value \
+             (mean, median) on its x axis with ::XLINE + ::XLINE_LABEL"
+                .to_string(),
+        ));
+    }
+    out
+}
+
 /// `::Y2` (#919): it must name one of the chart's measures other than the
 /// first (that one is the left axis'), and it is ignored on a flipped or
 /// `::YSCALE`-transformed chart.
@@ -11191,6 +11261,40 @@ mod design_tests {
             vec!["chart/funnel-increase"]
         );
         assert!(codes(f, stages([300, 29, 13])).is_empty());
+    }
+
+    #[test]
+    fn reference_lines_that_draw_nothing_are_flagged() {
+        let data = vec![json!({ "c0": "2025-01-20", "c1": "shutdown", "c2": 7.5 })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let codes = |sql: &str| -> Vec<&'static str> {
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| matches!(*c, "annotation/no-chart" | "chart/refline-histogram"))
+            .collect()
+        };
+        assert_eq!(
+            codes("SELECT d::XLINE, w::XLINE_LABEL FROM t;"),
+            vec!["annotation/no-chart"]
+        );
+        assert_eq!(
+            codes("SELECT x::XAXIS, n::HISTOGRAM, m::REFLINE FROM t;"),
+            vec!["chart/refline-histogram"]
+        );
+        assert!(codes("SELECT x::XAXIS, n::HISTOGRAM, m::XLINE FROM t;").is_empty());
+        assert!(codes("SELECT m::XAXIS, v::LINECHART, d::XLINE FROM t;").is_empty());
+        // a KPI's goal
+        assert!(codes("SELECT v::METRIC, 100::REFLINE FROM t;").is_empty());
     }
 
     #[test]
