@@ -429,6 +429,18 @@ class Tools:
 
 # ---------------------------------------------------------------- model
 
+class AccountError(RuntimeError):
+    """The API refuses the account itself (no credit, no access): no run can
+    succeed, so the eval stops instead of judging 18 empty answers (11-11)."""
+
+
+def account_error(code, body):
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+    if code in (401, 403) or "credit balance" in text:
+        return AccountError(f"API {code}: {text[:500]}")
+    return None
+
+
 class Anthropic:
     def __init__(self, key, model, effort):
         self.key, self.model, self.effort = key, model, effort
@@ -451,7 +463,8 @@ class Anthropic:
                 if e.code in (429, 500, 502, 503, 529) and attempt < 4:
                     time.sleep(10 * (attempt + 1))
                     continue
-                raise RuntimeError(f"API {e.code}: {e.read()[:500]!r}")
+                body = e.read()
+                raise account_error(e.code, body) or RuntimeError(f"API {e.code}: {body[:500]!r}")
 
     def count(self, system, tools):
         """The prefix's input tokens, or None: only reported, so a failure
@@ -469,7 +482,10 @@ class Anthropic:
                 if e.code == 401 and attempt < 2:
                     auth.invalidate()
                     continue
-                print(f"count_tokens: API {e.code}: {e.read()[:500]!r} (prefix tokens not reported)", file=sys.stderr)
+                body = e.read()
+                if err := account_error(e.code, body):
+                    raise err
+                print(f"count_tokens: API {e.code}: {body[:500]!r} (prefix tokens not reported)", file=sys.stderr)
                 return None
             except (urllib.error.URLError, TimeoutError) as e:
                 print(f"count_tokens: {e} (prefix tokens not reported)", file=sys.stderr)
@@ -555,6 +571,8 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
         t0 = time.time()
         try:
             log["answer"] = phase(model, system, tools, messages, kit, log)
+        except AccountError:
+            raise
         except RuntimeError as e:
             log["answer"], log["error"] = None, str(e)
         log["seconds"] = round(time.time() - t0, 1)
@@ -653,7 +671,10 @@ def main():
             b = base(arm)
             sysblocks = [{"type": "text", "text": INSTRUCTIONS.format(chart_tool=CHART_TOOLS[b]["name"]) + "\n" + ARM_NOTES[b]},
                          {"type": "text", "text": refs[arm]}]
-            meta["prefix_tokens"][arm] = api.count(sysblocks, COMMON_TOOLS + [CHART_TOOLS[b]])
+            try:
+                meta["prefix_tokens"][arm] = api.count(sysblocks, COMMON_TOOLS + [CHART_TOOLS[b]])
+            except AccountError as e:
+                sys.exit(f"stopped before any run: the API refuses this account — {e}")
         n = len(tasks) * len(arms) * a.reps
         print(f"{n} runs ({len(tasks)} tasks × {len(arms)} arms × {a.reps}), prefix tokens {meta['prefix_tokens']}")
         if not a.yes and input("Spend on these runs? [y/N] ").strip().lower() != "y":
@@ -666,7 +687,10 @@ def main():
             for t in tasks:
                 for arm in arms:
                     model = Scripted(base(arm)) if a.dry else Anthropic(None, a.model, a.effort)
-                    rec = run_one(t, arm, rep, model, cfg, out, refs)
+                    try:
+                        rec = run_one(t, arm, rep, model, cfg, out, refs)
+                    except AccountError as e:
+                        sys.exit(f"stopped: the API refuses this account — {e}")
                     f.write(json.dumps(rec, default=str) + "\n")
                     f.flush()
                     p = rec["phases"]
