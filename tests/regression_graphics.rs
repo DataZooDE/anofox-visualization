@@ -3412,3 +3412,42 @@ fn density_and_histogram_draw_xlines_and_reverse() {
         assert_ne!(plain, s, "{kind:?}: annotations change the picture");
     }
 }
+
+// ── #1100: a per-point ::LABEL is not the title; no chart role is an error ─
+#[test]
+fn varying_label_is_not_a_title_and_axes_need_a_mark() {
+    let x = Column::new("x", Role::X, nums(&[1.0, 2.0, 3.0]));
+    let label = |v: &[&str]| Column::new("l", Role::Label, strs(v));
+    // a scatter's ::LABEL names its points (tooltips), not the chart
+    let s = svg(vec![
+        x.clone(),
+        Column::new("y", Role::Value(Kind::Point), nums(&[2.0, 3.0, 1.0])),
+        label(&["Kiel", "Lübeck", "Celle"]),
+    ]);
+    assert!(s.contains("data-label=\"Kiel\""));
+    assert!(!s.contains(">Kiel</text>"), "titled with the first point");
+    // a constant one still is the title
+    let s = svg(vec![
+        x.clone(),
+        Column::new("y", Role::Value(Kind::Point), nums(&[2.0, 3.0, 1.0])),
+        label(&["Districts", "Districts", "Districts"]),
+    ]);
+    assert!(s.contains(">Districts</text>"));
+    // ::XAXIS / ::YAXIS without a chart role: an error naming the fix, not
+    // the label drawn as a heading
+    let e = render(
+        &[
+            x,
+            Column::new("y", Role::Y, nums(&[2.0, 3.0, 1.0])),
+            label(&["Kiel", "Lübeck", "Celle"]),
+        ],
+        480,
+        320,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("no chart role") && e.contains("::SCATTER"),
+        "{e}"
+    );
+}

@@ -5,13 +5,15 @@
 // has its own.
 //
 // --lean: only what one chart answering a question needs, by rule (fixed
-// before any results). One role source, not two: the guide's Roles table
-// (grouped, with usage notes) without its rows for inputs, viewer answers,
-// chart interactions, layout / chrome and themes; the generated one-line-per-
-// role list is left out (`--check` still flags an unknown cast). Of the rest
-// of the guide: its introduction and the sections on design, tables, heatmaps
-// and gotchas. Left out: the worked examples (dashboard features), inputs,
-// diagrams, themes and templates.
+// before any results), plus the inputs the dashboard questions ask for
+// (#1100: without them the 'All' default never reached the model). One role
+// source, not two: the guide's Roles table (grouped, with usage notes)
+// without its rows for viewer answers, chart interactions, layout / chrome
+// and themes; the generated one-line-per-role list is left out (`--check`
+// still flags an unknown cast). Of the rest of the guide: its introduction
+// and the sections on inputs, design, tables, heatmaps and gotchas. Left
+// out: the worked examples (dashboard features), diagrams, themes and
+// templates.
 //
 //   node bench/viz-tokens/anofox-reference.mjs [--pkg web/pkg] [--lean] > ref.md
 import { readFileSync } from "node:fs";
@@ -25,8 +27,8 @@ const pkg = path.resolve(root, i > 0 ? process.argv[i + 1] : "web/pkg");
 const wasm = await import(path.join(pkg, "anofox_visualization.js"));
 wasm.initSync({ module: readFileSync(path.join(pkg, "anofox_visualization_bg.wasm")) });
 const guide = readFileSync(path.join(root, "web/assist/guide.md"), "utf8");
-const LEAN_GUIDE = ["Roles", "Design contract", "Tables", "Heatmaps", "Gotchas"];
-const DASHBOARD_ROWS = /^\| (Inputs|Recording|Chart interactions|Layout and chrome|Theme)/;
+const LEAN_GUIDE = ["Roles", "Inputs", "Design contract", "Tables", "Heatmaps", "Gotchas"];
+const DASHBOARD_ROWS = /^\| (Recording|Chart interactions|Layout and chrome|Theme)/;
 
 // The guide's text before its first "## " section, and the kept sections;
 // the Roles table without its dashboard-only rows.

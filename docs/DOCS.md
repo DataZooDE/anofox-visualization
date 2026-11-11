@@ -141,7 +141,7 @@ terminal.
 | `::FLIP` | `::COORD_FLIP`, `::HORIZONTAL` | modifier | swap the axes (horizontal bars; the first row on top) |
 | `::YFORMAT` | `::YAXISFORMAT`, `::YUNIT`, `::YCURRENCY` | modifier | value format — y ticks, tooltips, data labels, heatmap legend: '€', '$', 'percent' (values 0–100), 'comma', ' kg'… |
 | `::CURRENCY_CODE` | `::CURRENCYCODE`, `::ISO_CURRENCY` | modifier | the panel's currency as an ISO 4217 code beside the value: 'EUR', 'USD', 'GBP', 'CHF'… — ::MONEY KPIs and table columns, and a chart's y axis without its own ::YFORMAT; symbol and placement follow ::LOCALE (€1,234 / 1.234 €) |
-| `::Y2` | `::SECONDARY_AXIS`, `::RIGHT_AXIS` | modifier | the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line |
+| `::Y2` | `::SECONDARY_AXIS`, `::RIGHT_AXIS` | modifier | the measure column (its header) drawn on a right-hand axis of its own: 'margin_pct' — revenue bars with a margin line; in the chart's own SELECT |
 | `::Y2FORMAT` | `::Y2AXISFORMAT` | modifier | the ::Y2 axis' value format, like ::YFORMAT: 'percent', '€', ' kg'… |
 | `::XFORMAT` | `::XAXISFORMAT`, `::XUNIT`, `::XCURRENCY` | modifier | x-axis tick format (continuous x), like ::YFORMAT; on a date/timestamp x a strftime pattern: '%H:%M', '%-d %b', '%b %Y', '%a %H:%M' |
 | `::XSCALE` | `::XTRANS` | modifier | x-axis transform: 'log10', 'sqrt' or 'reverse' |
@@ -739,7 +739,7 @@ Roles for model output — coefficient forests, residual diagnostics, CV curves:
 | several models | `… , model::CATEGORY` | pointranges (and `::BARCHART` bars) on a discrete x are dodged side by side |
 | x interval | `x::XAXIS, y::SCATTER, a::XMIN, b::XMAX` | a horizontal error bar through each point (numeric x) |
 | straight lines | `'0.5,1'::ABLINE`, `1::IDENTITY` | `y = 0.5x + 1` (one per distinct value); `y = x` dashed grey — both drawn across the data box |
-| small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x) and stacks the panels in one column unless `::FACET_NCOL` is set |
+| small multiples | `g::FACET` / `g::FACET_FREE`, `3::FACET_NCOL` | one panel per value; `_FREE` gives every panel its own axes (y only on a discrete x); `::FACET_NCOL` sets the panels per row |
 | axis transform | `'log10'::XSCALE`, `'sqrt'::YSCALE`, `'reverse'::YSCALE` | combine freely with `::XFORMAT`/`::YFORMAT` |
 | date tick labels | `'%H:%M'::XFORMAT`, `'%-d %b'::XFORMAT`, `'%b %Y'::XFORMAT` | on a DATE/TIMESTAMP x, a value with `%` is a strftime pattern (`%Y %y %m %-m %b %B %d %-d %e %a %A %H %M %S`; names follow `::LOCALE`): a time-of-day profile reads `06:00`, not `1 Jan 2000 06:00`; monthly ticks read `Jan 2025`, not `2025-01`; any other `::XFORMAT` stays a number format |
 | axis titles | `'Residual load (GW)'::XTITLE`, `'Price (EUR/MWh)'::YTITLE` | what the axes are; the x title names the `::XAXIS` variable, so on a `::FLIP` chart it's drawn beside the (now vertical) category axis; none on pies, gauges, maps |
@@ -2660,8 +2660,18 @@ bars or areas start there, so both zeros line up) and reads off a right-hand
 axis in its own units, titled with its name; a combo legend marks it
 "(right axis)". Its points keep their own values on hover and for value
 filters. The first measure stays on the left; `::Y2` is ignored on a
-`::FLIP` or `::YSCALE` chart. `--check`: `chart/y2-unknown-measure`,
-`chart/y2-ignored`.
+`::FLIP` or `::YSCALE` chart. It goes in the chart's own SELECT: a
+statement of its own is an error (`chart/y2-no-chart`). `--check`:
+`chart/y2-unknown-measure`, `chart/y2-ignored`.
+
+**Columns a chart does not draw** (#1100): a bar, line, area, scatter or
+pie chart draws its role columns only. `--check` warns on a number column
+with no role beside the measure (`chart/unused-measure`): several measures
+per item belong in a `::TABLE`, a value for the tooltip takes `::TOOLTIP`.
+It also warns on a `::PARETO` after a `LIMIT` (`chart/pareto-limit`): the
+cumulative line is the share of the rows shown, so for a top N draw
+`::BARCHART` bars and the share of the total, computed in SQL, as a
+`::LINECHART` on `::Y2`.
 
 The toolbar also has an **auto-refresh** interval.
 

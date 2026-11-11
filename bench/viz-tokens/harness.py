@@ -87,7 +87,7 @@ COMMON_TOOLS = [
      "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
 ]
 CHART_TOOLS = {
-    "anofox": {"name": "render", "description": "Draw anofox-visualization SQL (SELECT statements with ::ROLE casts) as the chart. Returns ok or the errors.",
+    "anofox": {"name": "render", "description": "Draw anofox-visualization SQL (SELECT statements with ::ROLE casts) as the chart. Returns ok (with any lint warnings) or the errors.",
                "input_schema": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}},
     "python": {"name": "run_python", "description": "Run Python code that saves the chart to chart.png (`con` is an open read-only DuckDB connection). Returns stdout/stderr and whether chart.png exists.",
                "input_schema": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}},
@@ -244,6 +244,13 @@ class Tools:
         if rc != 0:
             return False, clip(f"render failed: {err}")
         self.chart = ((d / "chart.png").read_bytes(), sql)
+        # the lint's warnings too, as the builder's check tool returns them
+        # (#1100: a ::Y2 alone, numbers with no role were only warnings, and
+        # the model never heard of them)
+        warns = [x for x in diags if x.get("severity") == "warning"]
+        if warns:
+            return True, clip("ok: drawn, with warnings (fix the ones that apply):\n" + "\n".join(
+                f"statement {x.get('stmt', 0) - 2}: {x.get('code')}: {x.get('message')}" for x in warns))
         return True, "ok: drawn"
 
     def run_python(self, code):

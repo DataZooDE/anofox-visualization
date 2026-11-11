@@ -2127,6 +2127,30 @@ where
             },
         ));
 
+        // #1100: the cumulative line is the share of the rows it gets — of a
+        // top 20 of 1,500 products it climbed to 100 % (a quarter, really)
+        if chart_kind(&p.roles) == Some(Kind::Pareto) && has_top_level_limit(&p.sql) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "chart/pareto-limit",
+                message: "::PARETO after a LIMIT: its cumulative line is the share of the rows \
+                          shown, so it ends at 100 % — for a top N use ::BARCHART + the share \
+                          of the total from SQL as a ::LINECHART on ::Y2"
+                    .into(),
+                sql: short.clone(),
+            });
+        }
+        if let Some(message) = unused_measure_diag(&p.roles, &rows) {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "chart/unused-measure",
+                message,
+                sql: short.clone(),
+            });
+        }
+
         diags.extend(scatter_hexbin_diags(&p.roles, &rows).into_iter().map(
             |(severity, code, message)| Diagnostic {
                 severity,
@@ -6597,6 +6621,102 @@ fn frame_diags(
     out
 }
 
+/// A number cell: JSON's own, or a DECIMAL, which the rows carry as its text
+/// (`"11.4"`; a code such as `'01001'` has no point and stays text).
+fn is_number_cell(v: &Value) -> bool {
+    match v {
+        Value::Number(_) => true,
+        Value::String(s) => {
+            let t = s.strip_prefix('-').unwrap_or(s);
+            t.split_once('.').is_some_and(|(a, b)| {
+                !a.is_empty()
+                    && !b.is_empty()
+                    && a.bytes().all(|c| c.is_ascii_digit())
+                    && b.bytes().all(|c| c.is_ascii_digit())
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Does the statement have a `LIMIT` of its own (outside parentheses and
+/// quotes)?
+fn has_top_level_limit(sql: &str) -> bool {
+    let up = sql.to_ascii_uppercase();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let b = up.as_bytes();
+    let mut last = None;
+    for (i, c) in b.iter().enumerate() {
+        match (quote, c) {
+            (Some(q), _) if *c == q => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(*c),
+            (None, b'(') => depth += 1,
+            (None, b')') => depth -= 1,
+            (None, b'L')
+                if depth == 0
+                    && up[i..].starts_with("LIMIT")
+                    && (i == 0 || !b[i - 1].is_ascii_alphanumeric() && b[i - 1] != b'_')
+                    && b.get(i + 5)
+                        .is_none_or(|n| !n.is_ascii_alphanumeric() && *n != b'_') =>
+            {
+                last = Some(i)
+            }
+            _ => {}
+        }
+    }
+    last.is_some()
+}
+
+/// #1100: a bar / line / area / scatter / pie chart draws its role columns
+/// only — a number column with no role beside its measure (lead days and
+/// order lines next to on-time %) is dropped without a word.
+fn unused_measure_diag(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Option<String> {
+    use Kind::*;
+    if !matches!(
+        chart_kind(roles)?,
+        Bar | BarStacked
+            | BarPercent
+            | BarStackedPercent
+            | Line
+            | LinePercent
+            | Step
+            | Area
+            | AreaStacked
+            | Point
+            | Bubble
+            | Jitter
+            | Pie
+            | Donut
+    ) {
+        return None;
+    }
+    let first = rows.first()?;
+    // by SELECT position: a column without a role keeps no name in the plan
+    let mut unused: Vec<usize> = first
+        .iter()
+        .filter_map(|(k, v)| {
+            let i: usize = k.strip_prefix('c')?.parse().ok()?;
+            (is_number_cell(v) && !roles.iter().any(|(j, _)| *j == i)).then_some(i + 1)
+        })
+        .collect();
+    if unused.is_empty() {
+        return None;
+    }
+    unused.sort_unstable();
+    let list = unused
+        .iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "SELECT column{} {list}: a number with no role, not drawn — a chart shows its measure \
+         only: several measures per item → a ::TABLE; on hover only → ::TOOLTIP",
+        if unused.len() == 1 { "" } else { "s" }
+    ))
+}
+
 /// `::Y2` (#919): it must name one of the chart's measures other than the
 /// first (that one is the left axis'), and it is ignored on a flipped or
 /// `::YSCALE`-transformed chart.
@@ -6612,6 +6732,19 @@ fn y2_diags(
     let Some(want) = column_texts(rows, yi).into_iter().next() else {
         return out;
     };
+    // #1100: `SELECT 'avg_price'::Y2;` on its own line, before the chart —
+    // a modifier of no chart, so no right axis anywhere
+    if !roles.iter().any(|(_, r)| matches!(r, Role::Value(_))) {
+        out.push((
+            Severity::Error,
+            "chart/y2-no-chart",
+            format!(
+                "::Y2 '{want}' is in a statement without a chart — put it in the chart's own \
+                 SELECT, next to the measure it names"
+            ),
+        ));
+        return out;
+    }
     let name_of = |i: usize| names.iter().find(|(k, _)| *k == i).map(|(_, n)| n.clone());
     // by position: the first measure is the left axis' even when it has no
     // name (`sum(revenue)::BARCHART`)
@@ -10802,6 +10935,10 @@ mod design_tests {
         let ok = "SELECT m::XAXIS, revenue::BARCHART, margin::LINECHART, 'margin'::Y2 FROM t;";
         assert!(codes(ok).is_empty(), "{:?}", codes(ok));
         assert_eq!(
+            codes("SELECT 'margin'::Y2;"),
+            vec![(Severity::Error, "chart/y2-no-chart")]
+        );
+        assert_eq!(
             codes("SELECT m::XAXIS, revenue::BARCHART, margin::LINECHART, 'revenue'::Y2 FROM t;"),
             vec![(Severity::Warning, "chart/y2-unknown-measure")]
         );
@@ -10835,6 +10972,72 @@ mod design_tests {
             .map(|d| (d.severity, d.code))
             .collect();
         assert_eq!(codes, vec![(Severity::Note, "chart/hexbin-category")]);
+    }
+
+    #[test]
+    fn pareto_after_a_limit_is_flagged() {
+        let data = vec![json!({ "c0": "P-1", "c1": 26000.0 })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let codes = |sql: &str| -> Vec<&'static str> {
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| *c == "chart/pareto-limit")
+            .collect()
+        };
+        assert_eq!(
+            codes("SELECT p::XAXIS, q::PARETO FROM t ORDER BY q DESC LIMIT 20;"),
+            vec!["chart/pareto-limit"]
+        );
+        // a LIMIT inside a subquery, or a column named like it, is not one
+        assert!(codes("SELECT p::XAXIS, q::PARETO FROM (SELECT * FROM t LIMIT 5) s;").is_empty());
+        assert!(codes("SELECT p::XAXIS, credit_limit::PARETO FROM t;").is_empty());
+        assert!(codes("SELECT p::XAXIS, q::PARETO, 'Over the limit'::TITLE FROM t;").is_empty());
+    }
+
+    #[test]
+    fn chart_numbers_without_a_role_are_flagged() {
+        // #1100: lead days and order lines beside the on-time bars
+        let data = vec![
+            json!({ "c0": "Seals", "c1": 32.9, "c2": 11.4, "c3": 140, "c4": "x" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ];
+        let unused = |sql: &str| -> Vec<String> {
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code == "chart/unused-measure")
+            .map(|d| d.message)
+            .collect()
+        };
+        let m = unused("SELECT s::XAXIS, r::BARCHART, d AS \"Lead days\", n, 'x'::TITLE FROM t;");
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(
+            m[0].starts_with("SELECT columns 3, 4:") && m[0].contains("::TABLE"),
+            "{m:?}"
+        );
+        // a text column (a sort key) is not a measure; a table draws them all
+        assert!(
+            unused("SELECT s::XAXIS, r::BARCHART, d::TOOLTIP, n::TOOLTIP, k FROM t;").is_empty()
+        );
+        assert!(unused("SELECT s, r::PERCENT, d, n, k::TABLE FROM t;").is_empty());
     }
 
     #[test]
