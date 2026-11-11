@@ -50,6 +50,12 @@ QUERY_ROWS = 50
 EXEC_TIMEOUT = 60
 EXEC_MEM = 4 << 30
 
+# #1118
+SEE_CHART = ("\nEach chart you draw comes back as an image. Before you answer, look at it: does it show "
+             "what was asked (the measure, the breakdown, the period), is anything missing or misleading, "
+             "and does every claim in your answer match what the picture shows? If not, fix the chart or "
+             "the answer first.")
+
 INSTRUCTIONS = """You are a data analyst. The user asks a question about the data in a DuckDB database. Answer it with ONE chart and a short written answer.
 
 How to work:
@@ -295,6 +301,7 @@ class Tools:
         self.con = duckdb.connect(str(self.db), read_only=True,
                                   config={"enable_external_access": False, "lock_configuration": True})
         self.chart = None  # (png bytes, artifact text) of the last successful chart
+        self.fresh = None  # #1118: the png the last tool call drew, for --see-chart
         self.n = 0
 
     def run(self, name, inp):
@@ -369,6 +376,7 @@ class Tools:
         if rc != 0:
             return False, clip(f"render failed: {err}")
         self.chart = ((d / "chart.png").read_bytes(), sql)
+        self.fresh = self.chart[0]
         # the lint's warnings too, as the builder's check tool returns them
         # (#1100: a ::Y2 alone, numbers with no role were only warnings, and
         # the model never heard of them)
@@ -401,6 +409,7 @@ class Tools:
             msg += "\nstderr:\n" + err[-2500:]
         if rc == 0 and made:
             self.chart = (png.read_bytes(), code)
+            self.fresh = self.chart[0]
             drawn = d / "drawn.txt"
             if drawn.exists() and drawn.read_text().strip():
                 msg += "\n" + DRAWN_HEAD + "\n" + drawn.read_text().strip()
@@ -429,6 +438,7 @@ class Tools:
             return False, clip(f"render failed: {(err or out)[-2500:]}")
         art = json.dumps({"sql": sql, "spec": {k: v for k, v in spec.items() if k != "data"}})
         self.chart = (png.read_bytes(), art)
+        self.fresh = self.chart[0]
         text = vegalite_digest(spec, df) if self.cfg.get("digest") else ""
         return True, clip("ok: drawn" + (f"\n{DRAWN_HEAD}\n{text}" if text else ""))
 
@@ -565,7 +575,14 @@ def phase(model, system, tools, messages, kit, log, evidence=None, claim_mode="o
                                   "in_chars": len(json.dumps(u["input"])), "out_chars": len(text),
                                   # #1116: kept for checking the checker against the judge
                                   "out": text[:4000]})
-            results.append({"type": "tool_result", "tool_use_id": u["id"], "content": text, **({} if ok else {"is_error": True})})
+            content = text
+            # #1118: the model sees the chart it drew (every arm alike)
+            png, kit.fresh = getattr(kit, "fresh", None), None
+            if ok and png and kit.cfg.get("see_chart"):
+                content = [{"type": "text", "text": text},
+                           {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                         "data": base64.b64encode(trim(png)).decode()}}]
+            results.append({"type": "tool_result", "tool_use_id": u["id"], "content": content, **({} if ok else {"is_error": True})})
         messages.append({"role": "user", "content": results})
         if answer is not None:
             return answer
@@ -579,7 +596,8 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
     kit = Tools(arm, db, work, cfg)
     chart_tool = CHART_TOOLS[base(arm)]["name"]
     system = [
-        {"type": "text", "text": INSTRUCTIONS.format(chart_tool=chart_tool) + "\n" + ARM_NOTES[base(arm)]},
+        {"type": "text", "text": INSTRUCTIONS.format(chart_tool=chart_tool) + "\n" + ARM_NOTES[base(arm)]
+         + (SEE_CHART if cfg.get("see_chart") else "")},
         {"type": "text", "text": refs[arm], "cache_control": {"type": "ephemeral"}},
     ]
     tools = COMMON_TOOLS + [CHART_TOOLS[base(arm)]]
@@ -660,6 +678,8 @@ def main():
     ap.add_argument("--vega-ref", default="~/.claude/skills/altair")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dry", action="store_true", help="scripted turns, no API")
+    ap.add_argument("--see-chart", choices=["off", "on"], default="off",
+                    help="#1118: return each drawn chart to the model as an image (every arm)")
     ap.add_argument("--claim-check", choices=["off", "shadow", "on"], default="shadow",
                     help="#1116: log (shadow) or also send back (on) an answer's numbers nothing backs")
     ap.add_argument("--no-digest", action="store_true",
@@ -687,12 +707,12 @@ def main():
     (out / "charts").mkdir(parents=True, exist_ok=True)
     cfg = {"data": str(Path(a.data).resolve()), "dashboard": str(Path(a.dashboard).resolve()), "python": a.python,
            "boundaries": str(Path(a.boundaries).resolve()) if a.boundaries else None,
-           "workdir": str((out / "work").resolve()), "digest": not a.no_digest, "claim_check": a.claim_check}
+           "workdir": str((out / "work").resolve()), "digest": not a.no_digest, "claim_check": a.claim_check, "see_chart": a.see_chart == "on"}
     Path(cfg["workdir"]).mkdir(exist_ok=True)
     refs = load_refs(a)
 
     meta = {"model": a.model, "effort": a.effort, "reps": a.reps, "arms": arms, "tasks": [t["id"] for t in tasks],
-            "dry": a.dry, "digest": not a.no_digest, "claim_check": a.claim_check, "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "dry": a.dry, "digest": not a.no_digest, "claim_check": a.claim_check, "see_chart": a.see_chart == "on", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "ref_sha": {k: hashlib.sha256(v.encode()).hexdigest()[:12] for k, v in refs.items() if k in arms},
             "ref_chars": {k: len(v) for k, v in refs.items() if k in arms}}
     if not a.dry:
