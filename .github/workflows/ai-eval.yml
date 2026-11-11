@@ -118,6 +118,9 @@ jobs:
           key: ai-eval-${{ env.SET }}-${{ github.run_id }}
           restore-keys: ai-eval-${{ env.SET }}-
 
+      - name: Claim-check unit tests (#1116, no API)
+        run: python3 -m unittest bench/viz-tokens/test_claims.py
+
       - name: Run, judge, report, compare
         id: run
         run: |

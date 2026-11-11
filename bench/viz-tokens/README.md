@@ -27,6 +27,13 @@ differ:
   build); vegalite: the plotted rows by the spec's x / y / colour fields;
   python: the figure's own lines, points and bars. `--no-digest` turns it
   off (recorded in meta.json).
+- The claim check (#1116, `claims.py`): every number of an answer must appear in
+  a tool's output, the model's own SQL or the request, within its rounding, or
+  follow from two numbers of one row or column (difference, ratio, share, %
+  change) or a column's total, mean, median, min or max. `--claim-check shadow`
+  (the default) only logs what it would flag; report.md compares that with the
+  judge. `on` sends unsupported numbers back once. Tool outputs are kept in
+  runs.jsonl (4,000 characters each) for that comparison.
 - Model-written code runs in bubblewrap: read-only filesystem, a private
   `/tmp`, no network, 60 s, and a 4 GB cgroup cap. `query` runs with
   `enable_external_access = false`.
