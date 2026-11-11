@@ -564,9 +564,10 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
     rec = {"run": run_id, "task": task["id"], "dataset": task["dataset"], "arm": arm, "rep": rep,
            "model": getattr(model, "model", "?"), "phases": []}
     for ph, text in (("first", task["question"]), ("followup", task["followup"])):
+        prev = None
         if ph == "followup":
             messages.append({"role": "user", "content": text})
-            kit.chart = None  # the follow-up's chart is the one it draws
+            prev, kit.chart = kit.chart, None  # the follow-up's chart is the one it draws
         log = {"phase": ph, "calls": []}
         t0 = time.time()
         try:
@@ -576,6 +577,11 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
         except RuntimeError as e:
             log["answer"], log["error"] = None, str(e)
         log["seconds"] = round(time.time() - t0, 1)
+        # 11-11: a follow-up answered from the chart already on screen (it
+        # showed the percentages asked for) keeps that chart, as a user sees
+        # it — the judge grades it against the follow-up
+        if kit.chart is None and prev is not None and log.get("answer"):
+            kit.chart, log["chart_kept"] = prev, True
         if kit.chart:
             png = out_dir / "charts" / f"{run_id}__{ph}.png"
             png.write_bytes(trim(kit.chart[0]))
