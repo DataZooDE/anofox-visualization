@@ -1,7 +1,7 @@
 #!/bin/bash
 # #1074: one command for the AI evaluation — build, run, judge, report, compare, history.
 #
-#   bench/viz-tokens/run.sh [--set smoke|full] [--reps N] [--model M] [--arms A,B] [--baseline DIR] [--dry]
+#   bench/viz-tokens/run.sh [--set smoke|full] [--reps N] [--model M] [--arms A,B] [--baseline DIR] [--see-chart on] [--dry]
 #
 # --arms: anofox-lean (default, the short reference) or anofox (what the builder's assistant sends:
 # the role reference + web/assist/guide.md), or both; --model claude-haiku-4-5 for a weaker model (#1078).
@@ -17,7 +17,7 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-SET=smoke REPS="" MODEL=claude-sonnet-5 ARMS=anofox-lean BASE="" DRY=""
+SET=smoke REPS="" MODEL=claude-sonnet-5 ARMS=anofox-lean BASE="" DRY="" SEE=off
 while [ $# -gt 0 ]; do
   case "$1" in
     --set) SET=$2; shift 2 ;;
@@ -26,6 +26,7 @@ while [ $# -gt 0 ]; do
     --arms) ARMS=$2; shift 2 ;;
     --baseline) BASE=$2; shift 2 ;;
     --dry) DRY=1; shift ;;
+    --see-chart) SEE=$2; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -55,7 +56,7 @@ OUT=$RESULTS/$SET-$MODEL-$(date +%Y%m%d-%H%M%S)
 echo "engine $ENGINE · set $SET · $REPS repeat(s) · model $MODEL · arms $ARMS · baseline ${BASE:-none}"
 "$PY" "$HERE/harness.py" --tasks "$TASKS" --arms "$ARMS" --reps "$REPS" --model "$MODEL" --yes \
   --data "$DATA" --dashboard "$DASH" --pkg "$ROOT/web/pkg" --boundaries "$ROOT/web/data/boundaries" \
-  --out "$OUT" ${DRY:+--dry} 2>&1 | tee "$OUT.log"
+  --out "$OUT" --see-chart "$SEE" ${DRY:+--dry} 2>&1 | tee "$OUT.log"
 [ -n "$DRY" ] || "$PY" "$HERE/judge.py" --data "$DATA" "$OUT" 2>&1 | tee -a "$OUT.log"
 "$PY" "$HERE/report.py" "$OUT"
 "$PY" "$HERE/gaps.py" "$OUT" > "$OUT/gaps.md"

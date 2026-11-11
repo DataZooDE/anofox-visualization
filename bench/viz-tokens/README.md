@@ -27,6 +27,9 @@ differ:
   build); vegalite: the plotted rows by the spec's x / y / colour fields;
   python: the figure's own lines, points and bars. `--no-digest` turns it
   off (recorded in meta.json).
+- `--see-chart on` (#1118): every drawn chart comes back to the model as an image
+  (all arms alike), with an instruction to check it against the request and its
+  answer before answering. Off by default, so runs stay comparable; meta.json records it.
 - The claim check (#1116, `claims.py`): every number of an answer must appear in
   a tool's output, the model's own SQL or the request, within its rounding, or
   follow from two numbers of one row or column (difference, ratio, share, %
