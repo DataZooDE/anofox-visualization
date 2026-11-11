@@ -121,6 +121,9 @@ jobs:
       - name: Claim-check unit tests (#1116, no API)
         run: python3 -m unittest bench/viz-tokens/test_claims.py
 
+      - name: Interval unit tests (#1122, no API)
+        run: python3 -m unittest bench/viz-tokens/test_stats.py
+
       - name: Run, judge, report, compare
         id: run
         run: |

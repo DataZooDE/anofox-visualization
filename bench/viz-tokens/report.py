@@ -17,6 +17,9 @@ from statistics import median
 
 from scipy.stats import binomtest, wilcoxon
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stats import diff_ci, fmt_diff, rate_ci, verdict  # noqa: E402
+
 PHASES = ("first", "followup")
 
 
@@ -65,6 +68,14 @@ def geo_ci(ratios, n=4000, seed=1044):
     return math.exp(sum(logs) / len(logs)), math.exp(boots[int(0.025 * n)]), math.exp(boots[int(0.975 * n)])
 
 
+def by_task(R):
+    """{task: [pass, …]} over its repeats."""
+    out = defaultdict(list)
+    for x in R:
+        out[x["task"]].append(bool(x["pass"]))
+    return out
+
+
 def main():
     dirs = [Path(d) for d in sys.argv[1:]]
     out = dirs[0]
@@ -104,8 +115,12 @@ def main():
     summary = {"meta": meta, "arms": {}, "paired": {}}
     for phase in PHASES:
         L.append(f"\n## {'First answer' if phase == 'first' else 'Follow-up edit'}\n")
-        L.append("| | runs | pass | chart first try | median tokens (p90) | median output | median cost | tokens per pass | cost per pass | median calls | chart repairs | readable |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+        if judged:
+            L.append("Pass rate with a 95 % CI (#1122): **boot** = bootstrap over tasks, a task's repeats kept together "
+                     "(the one to read); **Wilson** = every run counted as independent (for reference; too narrow when "
+                     "repeats agree). Claims of progress need `--reps 3`.\n")
+        L.append("| | runs | pass | pass rate (95 % CI) | chart first try | median tokens (p90) | median output | median cost | tokens per pass | cost per pass | median calls | chart repairs | readable |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for arm in arms:
             R = [x for x in rows if x["arm"] == arm and x["phase"] == phase]
             if not R:
@@ -122,10 +137,16 @@ def main():
                  "tokens_per_pass": tot / npass if npass else None, "cost_per_pass": cst / npass if npass else None,
                  "median_calls": median(x["calls"] for x in R), "repairs": sum(x["chart_failed"] for x in R),
                  "readable": sum(rd) / len(rd) if rd else None}
+            ci = "–"
+            if judged:
+                rc = rate_ci(by_task(R))
+                s.update(pass_rate=rc["rate"], pass_ci_boot=rc["boot"], pass_ci_wilson=rc["wilson"], tasks=rc["tasks"])
+                ci = (f"{100 * rc['rate']:.0f} % (boot {100 * rc['boot'][0]:.0f}–{100 * rc['boot'][1]:.0f}, "
+                      f"Wilson {100 * rc['wilson'][0]:.0f}–{100 * rc['wilson'][1]:.0f})")
             summary["arms"].setdefault(arm, {})[phase] = s
             f = lambda v, d=0: "–" if v is None else f"{v:,.{d}f}"
             money = lambda v: "–" if v is None else f"${v:.3f}"
-            L.append(f"| {arm} | {s['runs']} | {f(s['pass']) if judged else '–'} | {s['first_try']} | {f(s['median_total'])} ({f(s['p90_total'])}) "
+            L.append(f"| {arm} | {s['runs']} | {f(s['pass']) if judged else '–'} | {ci} | {s['first_try']} | {f(s['median_total'])} ({f(s['p90_total'])}) "
                      f"| {f(s['median_output'])} | ${s['median_cost']:.3f} | {f(s['tokens_per_pass'])} | {money(s['cost_per_pass'])} "
                      f"| {f(s['median_calls'], 1)} | {s['repairs']} | {f(s['readable'], 1)} |")
 
@@ -157,6 +178,11 @@ def main():
                     p = binomtest(b, b + c).pvalue if b + c else float("nan")
                     cmp["mcnemar"] = {"ours_only": b, "other_only": c, "p": p}
                     L.append(f"| {other} | pass (McNemar) | {ours} only {b}, {other} only {c} | | {p:.3g} | {len(both)} pairs |")
+                    # #1122: the pass-rate difference, paired by task (each task's rate over its repeats)
+                    d = diff_ci(by_task([x for x in rows if x["arm"] == ours and x["phase"] == phase]),
+                                by_task([x for x in rows if x["arm"] == other and x["phase"] == phase]))
+                    cmp["pass_diff"] = {**d, "verdict": verdict(d)}
+                    L.append(f"| {other} | pass rate, {ours} − {other} (bootstrap over tasks) | {fmt_diff(d)} | | {verdict(d)} | {d['tasks']} tasks |")
 
         # where the output tokens went
         L.append("\n**Where the output went** (mean output tokens per run, by the tool each model call used; thinking included) and the reference read per run (cached prefix × calls):\n")

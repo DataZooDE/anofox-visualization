@@ -14,6 +14,10 @@
 # Needs ANTHROPIC_API_KEY (not with --dry), a python with requirements.txt ($BENCH_PYTHON), node,
 # wasm-pack, bubblewrap and the duckdb CLI. $BENCH_DASHBOARD skips the CLI build, $BENCH_DATA the
 # data build. Accuracy first (#1044): compare.md leads with the pass rate.
+#
+# Claims need --reps 3 (#1122). report.md and compare.md give each pass rate a 95 % CI (bootstrap
+# over tasks) and compare.md a verdict against the baseline: better / worse / within noise. A
+# 1-repeat smoke run is a plumbing and regression check; its intervals are too wide to claim a gain.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
