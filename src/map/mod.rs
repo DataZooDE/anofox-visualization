@@ -39,7 +39,7 @@ pub(crate) mod boundaries;
 pub(crate) mod classes;
 mod facets;
 mod fill;
-mod flows;
+pub(crate) mod flows;
 mod frames;
 pub(crate) use frames::frame_order;
 pub(crate) mod hexbin;

@@ -3494,3 +3494,39 @@ fn digest_compares_two_series() {
         "{t}"
     );
 }
+
+#[test]
+fn flow_digest_counts_links_per_origin() {
+    let end = |n: &str, lon: f64| {
+        Value::Str(format!(
+            "{{\"lon\": {lon}, \"lat\": 51.5, \"name\": \"{n}\"}}"
+        ))
+    };
+    let t = anofox_visualization::summarize(
+        &[
+            Column::new(
+                "o",
+                Role::Origin,
+                vec![
+                    end("Dortmund", 7.4),
+                    end("Dortmund", 7.4),
+                    end("Hamburg", 10.0),
+                ],
+            ),
+            Column::new(
+                "d",
+                Role::Dest,
+                vec![end("Essen", 7.0), end("Köln", 6.9), end("Kiel", 10.1)],
+            ),
+            Column::new("Deliveries", Role::Size, nums(&[600.0, 900.0, 300.0])),
+        ],
+        460,
+        300,
+        &Default::default(),
+    )
+    .expect("a digest");
+    assert_eq!(
+        t,
+        "flows: 3 links from 2 origins (Deliveries); per origin: Dortmund 2 links, 1500; Hamburg 1 links, 300; largest: Dortmund → Köln 900, Dortmund → Essen 600, Hamburg → Kiel 300"
+    );
+}
