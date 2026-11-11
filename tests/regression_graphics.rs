@@ -2818,6 +2818,142 @@ fn histogram_without_new_roles_is_unchanged() {
     assert!(!s.contains("Share"));
 }
 
+// ── #1127: ::HISTOGRAM takes the chart modifiers on its count axis ─────────
+
+/// Pixel heights of every `::HISTOGRAM` bar.
+fn histogram_bar_heights(svg: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(i) = rest.find("<rect ") {
+        let end = i + rest[i..].find('>').unwrap();
+        let tag = &rest[i..end];
+        if tag.contains("data-geom=\"histogram\"") {
+            let k = tag.find(" height=\"").unwrap() + 9;
+            out.push(tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap());
+        }
+        rest = &rest[end + 1..];
+    }
+    out
+}
+
+fn distinct_px(v: Vec<f64>) -> usize {
+    v.into_iter()
+        .map(|w| (w * 100.0).round() as i64)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// 13 rows at 1, 29 at 9, 4 at 6 — bins `0,5,10` count 13 and 33.
+fn hist_values() -> Vec<f64> {
+    let mut v = vec![1.0; 13];
+    v.extend(vec![9.0; 29]);
+    v.extend(vec![6.0; 4]);
+    v
+}
+
+#[test]
+fn histogram_flip_lies_on_its_side() {
+    let v: Vec<f64> = (0..60).map(|i| ((i * i) % 17) as f64).collect();
+    let hist = || Column::new("v", Role::Value(Kind::Histogram), nums(&v));
+    let up = svg(vec![hist()]);
+    let side = svg(vec![hist(), Column::new("f", Role::Flip, nums(&[1.0]))]);
+    // upright: every bar one bin wide, of varying height; on its side the
+    // other way round
+    assert_eq!(distinct_px(histogram_bar_widths(&up)), 1, "{up}");
+    assert!(distinct_px(histogram_bar_heights(&up)) > 1);
+    assert_eq!(distinct_px(histogram_bar_heights(&side)), 1, "{side}");
+    assert!(distinct_px(histogram_bar_widths(&side)) > 1, "{side}");
+    // binned here (::HIST_BINS) too
+    let side = svg(vec![
+        hist(),
+        Column::new("f", Role::Flip, nums(&[1.0])),
+        Column::new("b", Role::HistBins, strs(&["5"])),
+    ]);
+    assert_eq!(distinct_px(histogram_bar_heights(&side)), 1, "{side}");
+    // with ::FACET panels it stays upright (ggplot-rs facets keep their
+    // axis labels unswapped under coord_flip)
+    let g: Vec<&str> = (0..60).map(|i| if i < 30 { "a" } else { "b" }).collect();
+    let faceted = svg(vec![
+        hist(),
+        Column::new("f", Role::Flip, nums(&[1.0])),
+        Column::new("g", Role::Facet, strs(&g)),
+    ]);
+    assert_eq!(distinct_px(histogram_bar_widths(&faceted)), 1, "{faceted}");
+}
+
+#[test]
+fn histogram_yformat_and_yscale_set_the_count_axis() {
+    let v: Vec<f64> = (0..400).map(|i| ((i % 37) * (i % 11)) as f64).collect();
+    let hist = || Column::new("v", Role::Value(Kind::Histogram), nums(&v));
+    let plain = svg(vec![hist()]);
+    let money = svg(vec![hist(), Column::new("f", Role::YFormat, strs(&["€"]))]);
+    assert!(!plain.contains('€'));
+    assert!(money.contains('€'), "{money}");
+    for bins in [None, Some("10")] {
+        let mut cols = vec![hist(), Column::new("s", Role::YScale, strs(&["log10"]))];
+        if let Some(b) = bins {
+            cols.push(Column::new("b", Role::HistBins, strs(&[b])));
+        }
+        let log = svg(cols);
+        assert_ne!(plain, log);
+        // the ticks are counts (≤ 400 rows), not 10^count
+        let ticks: Vec<f64> = log
+            .split("</text>")
+            .filter_map(|t| t.rsplit('>').next()?.replace(',', "").parse::<f64>().ok())
+            .collect();
+        assert!(ticks.contains(&10.0), "{bins:?}: {ticks:?}");
+        assert!(ticks.iter().all(|t| *t <= 1e4), "{bins:?}: {ticks:?}");
+    }
+}
+
+#[test]
+fn histogram_datalabels_put_each_bins_count_on_it() {
+    let hist = || Column::new("v", Role::Value(Kind::Histogram), nums(&hist_values()));
+    let edges = || Column::new("b", Role::HistBins, strs(&["0,5,10"]));
+    let plain = svg(vec![hist(), edges()]);
+    assert!(!plain.contains(">33</text>"));
+    for flip in [false, true] {
+        let mut cols = vec![
+            hist(),
+            edges(),
+            Column::new("d", Role::DataLabels, nums(&[1.0])),
+        ];
+        if flip {
+            cols.push(Column::new("f", Role::Flip, nums(&[1.0])));
+        }
+        let s = svg(cols);
+        assert!(s.contains(">13</text>"), "flip {flip}: {s}");
+        assert!(s.contains(">33</text>"), "flip {flip}: {s}");
+    }
+    // without ::HIST_BINS too, and a share in percent
+    let s = svg(vec![
+        hist(),
+        edges(),
+        Column::new("n", Role::HistNorm, strs(&["share"])),
+        Column::new("d", Role::DataLabels, strs(&["inside"])),
+    ]);
+    assert!(s.contains("%</text>"), "{s}");
+    let s = svg(vec![
+        hist(),
+        Column::new("d", Role::DataLabels, nums(&[1.0])),
+    ]);
+    assert!(s.contains(">13</text>"), "{s}");
+}
+
+#[test]
+fn histogram_draws_ablines() {
+    let hist = || Column::new("v", Role::Value(Kind::Histogram), nums(&hist_values()));
+    assert!(!svg(vec![hist()]).contains("data-geom=\"abline\""));
+    let s = svg(vec![hist(), Column::new("a", Role::AbLine, strs(&["2,1"]))]);
+    assert!(s.contains("data-geom=\"abline\""), "{s}");
+    assert!(render(
+        &[hist(), Column::new("a", Role::AbLine, strs(&["nope"]))],
+        480,
+        320
+    )
+    .is_err());
+}
+
 #[test]
 fn qq_category_draws_one_series_per_group_with_its_own_line_and_band() {
     let n = 60;

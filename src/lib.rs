@@ -3469,6 +3469,34 @@ fn axis_transform(
     }
 }
 
+/// The `(slope, intercept)` of each distinct `::ABLINE 'slope,intercept'`
+/// value, in data units.
+fn ablines_of(cols: &[Column]) -> Result<Vec<(f64, f64)>, String> {
+    let mut lines = Vec::new();
+    let Some(ab) = find_role(cols, Role::AbLine) else {
+        return Ok(lines);
+    };
+    let mut seen = std::collections::HashSet::new();
+    for v in ab.values.iter().filter(|v| **v != Value::Na) {
+        let s = value_str(v);
+        if !seen.insert(s.clone()) {
+            continue;
+        }
+        let p: Vec<f64> = s
+            .trim_matches(|c| c == '[' || c == ']')
+            .split([',', ';'])
+            .filter_map(|t| t.trim().parse::<f64>().ok())
+            .collect();
+        match p.as_slice() {
+            [slope, intercept] if slope.is_finite() && intercept.is_finite() => {
+                lines.push((*slope, *intercept))
+            }
+            _ => return Err(format!("::ABLINE '{s}' must be 'slope,intercept'")),
+        }
+    }
+    Ok(lines)
+}
+
 /// Rows `idx` of a plot frame (for per-group / subset layers).
 fn subset(data: &[(String, Vec<Value>)], idx: &[usize]) -> Vec<(String, Vec<Value>)> {
     data.iter()
@@ -4945,28 +4973,8 @@ fn cartesian(
     }
     // Straight lines in data units, across the panel: `::ABLINE
     // 'slope,intercept'` and `::IDENTITY` (y = x, dashed).
-    let mut lines: Vec<(f64, f64)> = Vec::new();
+    let lines = ablines_of(cols)?;
     let mut ablines: Vec<(f64, f64)> = Vec::new();
-    if let Some(ab) = find_role(cols, Role::AbLine) {
-        let mut seen = std::collections::HashSet::new();
-        for v in ab.values.iter().filter(|v| **v != Value::Na) {
-            let s = value_str(v);
-            if !seen.insert(s.clone()) {
-                continue;
-            }
-            let p: Vec<f64> = s
-                .trim_matches(|c| c == '[' || c == ']')
-                .split([',', ';'])
-                .filter_map(|t| t.trim().parse::<f64>().ok())
-                .collect();
-            match p.as_slice() {
-                [slope, intercept] if slope.is_finite() && intercept.is_finite() => {
-                    lines.push((*slope, *intercept))
-                }
-                _ => return Err(format!("::ABLINE '{s}' must be 'slope,intercept'")),
-            }
-        }
-    }
     if !x_discrete {
         use ggplot_rs::render::backend::Linetype;
         let identity = find_role(cols, Role::Identity).is_some();
@@ -5462,12 +5470,15 @@ fn computed_top(kind: Kind, value: &Column) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// `top`: the highest bar / curve point when the caller already knows it
+/// (a histogram binned here), else [`computed_top`] estimates it.
 fn x_marks(
     mut plot: GGPlot,
     o: &RenderOptions,
     kind: Kind,
     cols: &[Column],
     value: &Column,
+    top: Option<f64>,
 ) -> Result<GGPlot, String> {
     let ink = o.theme.chart_text();
     for c in cols.iter().filter(|c| c.role == Role::VLine) {
@@ -5491,7 +5502,10 @@ fn x_marks(
     }
     // The labels: the y these charts draw is computed (bin counts, a
     // density), so data_annotations has no "top of the data" to put them at —
-    // they hang from the panel's top edge instead, beside their line.
+    // they hang from the panel's top edge instead, beside their line. A
+    // flipped histogram's top is the right edge: the label ends there, just
+    // above its (now horizontal) line.
+    let flipped = kind == Kind::Histogram && hist_flipped(cols);
     if let (Some(line), Some(lab)) = (
         find_role(cols, Role::VLine),
         find_role(cols, Role::VLineLabel),
@@ -5510,7 +5524,11 @@ fn x_marks(
             ) {
                 if xs.len() < 64 && seen.insert((value_str(v), l.clone())) {
                     xs.push(v.clone());
-                    ls.push(format!("\u{a0}{l}"));
+                    ls.push(if flipped {
+                        format!("{l}\u{a0}")
+                    } else {
+                        format!("\u{a0}{l}")
+                    });
                 }
             }
         }
@@ -5520,7 +5538,7 @@ fn x_marks(
                 .geom_text_with(GeomText {
                     size: 9.5,
                     color: o.theme.chart_label(),
-                    hjust: 0.0,
+                    hjust: if flipped { 1.0 } else { 0.0 },
                     vjust: 0.0,
                     check_overlap: true,
                     ..Default::default()
@@ -5529,7 +5547,7 @@ fn x_marks(
                     ("x".to_string(), xs),
                     (
                         "y".to_string(),
-                        vec![Value::Float(computed_top(kind, value)); k],
+                        vec![Value::Float(top.unwrap_or_else(|| computed_top(kind, value))); k],
                     ),
                     (
                         "label".to_string(),
@@ -5563,8 +5581,18 @@ fn render_histogram(
     let category = cols.iter().find(|c| c.role == Role::Category);
     let bins_spec = role_str(cols, Role::HistBins);
     let share = role_str(cols, Role::HistNorm).is_some_and(|s| s.eq_ignore_ascii_case("share"));
+    let datalabels = find_role(cols, Role::DataLabels);
 
-    if facet.is_none() && category.is_none() && bins_spec.is_none() && !share {
+    // `::DATALABELS` needs the counts, so it bins here too; so does
+    // `::YSCALE`: ggplot-rs's `StatBin` hands its counts to a transformed y
+    // scale untransformed (bars a raw count high on a log axis)
+    if facet.is_none()
+        && category.is_none()
+        && bins_spec.is_none()
+        && !share
+        && datalabels.is_none()
+        && find_role(cols, Role::YScale).is_none()
+    {
         let data = vec![("x".to_string(), value.values.clone())];
         let mut plot = GGPlot::new(data)
             .aes(Aes::new().x("x"))
@@ -5575,11 +5603,12 @@ fn render_histogram(
             })
             .house_theme(o)
             .primary_color(o.brand());
-        plot = x_marks(plot, o, Kind::Histogram, cols, value)?;
+        plot = x_marks(plot, o, Kind::Histogram, cols, value, None)?;
+        plot = hist_modifiers(plot, o, cols, false, None)?;
         if let Some(t) = title {
             plot = plot.title(t);
         }
-        return Ok(Panel::plot(shared_x_zoom(plot, o), width, height));
+        return Ok(Panel::plot(hist_zoom(plot, o, cols), width, height));
     }
 
     let edges = hist_edges(&value.values, bins_spec.as_deref());
@@ -5643,10 +5672,10 @@ fn render_histogram(
         }
     }
     let mut data: Vec<(String, Vec<Value>)> = vec![
-        ("x".to_string(), xmid),
+        ("x".to_string(), xmid.clone()),
         ("xmin".to_string(), xmin),
         ("xmax".to_string(), xmax),
-        ("y".to_string(), y),
+        ("y".to_string(), y.clone()),
     ];
     let mut aes = Aes::new().x("x").xmin("xmin").xmax("xmax").y("y");
     if category.is_some() {
@@ -5654,7 +5683,7 @@ fn render_histogram(
         aes = aes.fill("cat");
     }
     if facet.is_some() {
-        data.push(("facet".to_string(), fac));
+        data.push(("facet".to_string(), fac.clone()));
     }
     let mut plot = GGPlot::new(data)
         .aes(aes)
@@ -5691,14 +5720,177 @@ fn render_histogram(
     if share {
         plot = plot.ylab("Share");
     }
-    plot = x_marks(plot, o, Kind::Histogram, cols, value)?;
+    let top = y
+        .iter()
+        .filter_map(Value::as_f64)
+        .filter(|f| f.is_finite())
+        .reduce(f64::max);
+    plot = x_marks(plot, o, Kind::Histogram, cols, value, top)?;
+    // ::DATALABELS: each non-empty bin's count (share) just past its end
+    let labels = datalabels.map(|_| {
+        let ys: Vec<f64> = y.iter().map(|v| v.as_f64().unwrap_or(f64::NAN)).collect();
+        let keep: Vec<usize> = (0..ys.len()).filter(|&i| ys[i] > 0.0).collect();
+        let mut frame = vec![
+            (
+                "x".to_string(),
+                keep.iter().map(|&i| xmid[i].clone()).collect(),
+            ),
+            (
+                "y".to_string(),
+                keep.iter().map(|&i| y[i].clone()).collect(),
+            ),
+        ];
+        let fmt = if share && role_fmt(cols, Role::YFormat).is_none() {
+            format::ValueFmt::Share
+        } else {
+            value_fmt(cols, Kind::Histogram, &y)
+        };
+        let kept: Vec<f64> = keep.iter().map(|&i| ys[i]).collect();
+        let short = fmt.short_series(&kept, &o.locale);
+        frame.push((
+            "label".to_string(),
+            short.into_iter().map(Value::Str).collect(),
+        ));
+        if facet.is_some() {
+            frame.push((
+                "facet".to_string(),
+                keep.iter().map(|&i| fac[i].clone()).collect(),
+            ));
+        }
+        frame
+    });
+    plot = hist_modifiers(plot, o, cols, share, labels)?;
     if let Some(t) = title {
         plot = plot.title(t);
     }
     if facet.is_some() {
         return Ok(Panel::plot(plot, width, height));
     }
-    Ok(Panel::plot(shared_x_zoom(plot, o), width, height))
+    Ok(Panel::plot(hist_zoom(plot, o, cols), width, height))
+}
+
+/// #1127: the chart modifiers a `::HISTOGRAM` takes on its count axis —
+/// `::YFORMAT` / `::YSCALE` (+ `::YBREAKS`), `::ABLINE` lines, `::DATALABELS`
+/// (`labels`: the bins' x, count and text, already formatted) and `::FLIP`
+/// (a horizontal histogram; bins run down the side).
+fn hist_modifiers(
+    mut plot: GGPlot,
+    o: &RenderOptions,
+    cols: &[Column],
+    share: bool,
+    labels: Option<Vec<(String, Vec<Value>)>>,
+) -> Result<GGPlot, String> {
+    use ggplot_rs::scale::continuous::ScaleContinuous;
+    let flipped = hist_flipped(cols);
+    for (slope, intercept) in ablines_of(cols)? {
+        plot = plot.geom_abline_with(GeomAbline {
+            slope,
+            intercept,
+            color: (90, 98, 112),
+            width: 1.1,
+            linetype: Linetype::Solid,
+            alpha: 0.9,
+        });
+    }
+    let (at, size) = datalabel_spec(find_role(cols, Role::DataLabels));
+    let outside = labels.is_some() && !matches!(at, Some(LabelAt::Inside | LabelAt::Center));
+    if let Some(frame) = labels {
+        // as a bar chart's labels (#959): past the bar's end, or just within
+        // it ('inside'), or in its middle ('center')
+        let (hjust, vjust) = match (at.unwrap_or(LabelAt::Outside), flipped) {
+            (LabelAt::Center, _) => (0.5, 0.5),
+            (LabelAt::Outside, false) => (0.5, -0.4),
+            (LabelAt::Inside, false) => (0.5, 1.4),
+            (LabelAt::Outside, true) => (-0.15, 0.5),
+            (LabelAt::Inside, true) => (1.15, 0.5),
+        };
+        let frame = if matches!(at, Some(LabelAt::Center)) {
+            frame
+                .into_iter()
+                .map(|(k, v)| match k.as_str() {
+                    "y" => (
+                        k,
+                        v.iter()
+                            .map(|y| y.as_f64().map_or(Value::Na, |f| Value::Float(f / 2.0)))
+                            .collect(),
+                    ),
+                    _ => (k, v),
+                })
+                .collect()
+        } else {
+            frame
+        };
+        let ink = if matches!(at, Some(LabelAt::Inside | LabelAt::Center)) {
+            o.theme.text_on(o.brand())
+        } else {
+            o.theme.chart_label()
+        };
+        plot = plot
+            .geom_text_with(GeomText {
+                size: size.unwrap_or(10.0),
+                color: ink,
+                hjust,
+                vjust,
+                check_overlap: true,
+                ..Default::default()
+            })
+            .layer_data(frame)
+            .layer_aes(Aes::new().x("x").y("y").label("label"));
+    }
+    let y_fmt = role_fmt(cols, Role::YFormat).and_then(|s| axis_formatter(&s, &o.locale));
+    let y_tr = role_str(cols, Role::YScale)
+        .map(|s| axis_transform(&s, Role::YScale))
+        .transpose()?;
+    let y_breaks = role_breaks(cols, Role::YBreaks).map(|bs| match &y_tr {
+        Some(t) => bs.iter().map(|&v| t.apply(v)).collect::<Vec<_>>(),
+        None => bs,
+    });
+    let roomy = outside && y_tr.is_none();
+    if y_fmt.is_some() || y_tr.is_some() || y_breaks.is_some() || roomy {
+        let mut s = ScaleContinuous::new();
+        match y_fmt {
+            Some(f) => s = s.with_label_formatter(f),
+            None if share => {
+                s = s.with_label_formatter(Box::new(ggplot_rs::scale::format::label_percent))
+            }
+            None => {}
+        }
+        if let Some(t) = y_tr {
+            s = s.with_transform(t);
+        }
+        if let Some(bs) = y_breaks {
+            s = s.with_breaks(bs);
+        }
+        if roomy {
+            // room for the labels past the tallest bar (bars start at 0)
+            s = s.with_expand_sides(0.05, 0.0, 0.12, 0.0);
+        }
+        plot = plot.scale_y_continuous(s);
+    }
+    if flipped {
+        plot = plot.coord_flip();
+    }
+    Ok(plot)
+}
+
+/// Whether a `::HISTOGRAM` lies on its side: `::FLIP`, unless it has
+/// panels — ggplot-rs's `facet_wrap` under `coord_flip` keeps each panel's
+/// axis labels unswapped (the count's ticks on the value's axis), so a
+/// faceted histogram stays upright and `chart/role-ignored` says so.
+fn hist_flipped(cols: &[Column]) -> bool {
+    cols.iter().any(|c| c.role == Role::Flip)
+        && !cols
+            .iter()
+            .any(|c| matches!(c.role, Role::Facet | Role::FacetFree))
+}
+
+/// [`shared_x_zoom`], unless `::FLIP` already set the coordinates.
+fn hist_zoom(plot: GGPlot, o: &RenderOptions, cols: &[Column]) -> GGPlot {
+    if hist_flipped(cols) {
+        plot
+    } else {
+        shared_x_zoom(plot, o)
+    }
 }
 
 /// A histogram's / density's x under a shared zoom (#695): a `::FIGURE`
@@ -5819,7 +6011,7 @@ fn render_density(
             .house_theme(o)
             .primary_color(o.brand());
     }
-    plot = x_marks(plot, o, Kind::Density, cols, value)?;
+    plot = x_marks(plot, o, Kind::Density, cols, value, None)?;
     if let Some(t) = title {
         plot = plot.title(t);
     }
