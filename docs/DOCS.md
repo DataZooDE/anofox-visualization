@@ -2676,7 +2676,10 @@ cumulative line is the share of the rows shown, so for a top N draw
 **What a chart draws** (#1095): `dashboard --check --digest` adds a
 `chart/drawn` note per chart, with its numbers from the plotting engine's own
 build (ggplot-rs's `BuiltPlot::summary`): per layer and series the marks, the
-x range, first / last y, y min / max and where, a band's extent. The builder
+x range, first / last y, y min / max and where, a band's extent; two series
+over the same x (2025 against 2024) also get their difference per x, largest
+and smallest, absolute and in %. A `::REGION` map names its regions instead
+(`Dortmund (05913) 104`), the five highest and three lowest. The builder
 assistant's check asks for it, so a title or answer quotes the chart's own
 numbers; with sample rows off the note's message is withheld like any other
 data-bearing diagnostic.

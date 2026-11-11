@@ -3451,3 +3451,46 @@ fn varying_label_is_not_a_title_and_axes_need_a_mark() {
         "{e}"
     );
 }
+
+// ── #1107: a map's digest names its regions; series keep display names ──
+#[test]
+fn map_digest_names_regions_by_their_code() {
+    let t = anofox_visualization::summarize(
+        &[
+            Column::new("s", Role::Region, strs(&["DE-BY", "DE-BE", "DE-HH"])),
+            Column::new(
+                "Customers",
+                Role::Value(Kind::Bar),
+                nums(&[50.0, 104.0, 7.0]),
+            ),
+        ],
+        460,
+        300,
+        &Default::default(),
+    )
+    .expect("a digest");
+    assert!(
+        t.starts_with("map: 3 of 3 regions matched (Customers); highest: Berlin (DE-BE) 104"),
+        "{t}"
+    );
+}
+
+#[test]
+fn digest_compares_two_series() {
+    let x = Column::new("m", Role::X, nums(&[1.0, 2.0, 3.0]));
+    let t = anofox_visualization::summarize(
+        &[
+            x,
+            Column::new("2024", Role::Value(Kind::Line), nums(&[100.0, 200.0, 50.0])),
+            Column::new("2025", Role::Value(Kind::Line), nums(&[130.0, 220.0, 51.0])),
+        ],
+        460,
+        300,
+        &Default::default(),
+    )
+    .expect("a digest");
+    assert!(
+        t.contains("2025 — 3 marks") && t.contains("2025 − 2024: largest +30 (+30 %) at 1"),
+        "{t}"
+    );
+}

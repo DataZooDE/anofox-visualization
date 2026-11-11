@@ -2432,7 +2432,22 @@ where
                 }));
                 if let Some(text) = opts
                     .digest
-                    .then(|| crate::summarize(&cols, 460, 300, &RenderOptions::default()))
+                    .then(|| {
+                        // the measures by their display names (`"2024"`, not
+                        // `c1`), as the legend shows them (#1107)
+                        let named: Vec<crate::Column> = cols
+                            .iter()
+                            .map(|c| {
+                                match p.names.iter().find(|(i, _)| c.name == format!("c{i}")) {
+                                    Some((_, n)) => {
+                                        crate::Column::new(n.clone(), c.role, c.values.clone())
+                                    }
+                                    None => c.clone(),
+                                }
+                            })
+                            .collect();
+                        crate::summarize(&named, 460, 300, &RenderOptions::default())
+                    })
                     .flatten()
                 {
                     diags.push(Diagnostic {
