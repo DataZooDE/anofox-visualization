@@ -102,7 +102,7 @@ terminal.
 | `::PARETO` | `::PARETOCHART` | chart | XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis |
 | `::GANTT` | `::GANTTCHART`, `::TIMELINE_BARS` | chart | one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars |
 | `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual) |
-| `::HISTOGRAM` | `::HIST` | chart | histogram of the measure |
+| `::HISTOGRAM` | `::HIST` | chart | histogram of the measure; takes ::FLIP (horizontal, not with ::FACET), ::YFORMAT / ::YSCALE on its count axis, ::DATALABELS (each bin's count, or share under ::HIST_NORM), ::ABLINE, ::XLINE |
 | `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
 | `::RIDGELINE` | `::RIDGES`, `::JOYPLOT` | chart | one density of the measure per ::CATEGORY, stacked as overlapping ridges (distributions over time; the first category on top) |
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
@@ -2668,7 +2668,7 @@ statement of its own is an error (`chart/y2-no-chart`). `--check`:
 pie chart draws its role columns only. `--check` warns on a number column
 with no role beside the measure (`design/unused-measure`): several measures
 per item belong in a `::TABLE`, a value for the tooltip takes `::TOOLTIP`.
-`chart/role-ignored` (#1117) names a role the chart accepts but does nothing with — a map's ::CLASSES on a bar chart, a KPI's ::DELTA, ::FACET_NCOL without a facet, ::FLIP on a ::HISTOGRAM — and where it does work (`scripts/role-sweep.py` finds them by rendering every role with and without it). It also warns on a `::PARETO` after a `LIMIT` (`chart/pareto-limit`): the
+`chart/role-ignored` (#1117) names a role the chart accepts but does nothing with — a map's ::CLASSES on a bar chart, a KPI's ::DELTA, ::FACET_NCOL without a facet, ::ANNOTATE on a ::HISTOGRAM — and where it does work (`scripts/role-sweep.py` finds them by rendering every role with and without it). It also warns on a `::PARETO` after a `LIMIT` (`chart/pareto-limit`): the
 cumulative line is the share of the rows shown, so for a top N draw
 `::BARCHART` bars and the share of the total, computed in SQL, as a
 `::LINECHART` on `::Y2`.
