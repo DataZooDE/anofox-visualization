@@ -48,7 +48,9 @@ def truth_rows(data, task, phase):
 
 def call(key, content):
     # #1044: 1000 tokens cut some replies off before the JSON (about 1 in 12)
-    body = {"model": JUDGE_MODEL, "max_tokens": 4000, "system": RUBRIC,
+    # 11-11: 4000 still cut ~1 in 150 off mid-JSON — more room, and the
+    # caller asks again when the reply doesn't parse
+    body = {"model": JUDGE_MODEL, "max_tokens": 8000, "system": RUBRIC,
             "messages": [{"role": "user", "content": content}]}
     for attempt in range(5):
         # the auth header per attempt: a federated token may be re-exchanged (#1075)
@@ -108,12 +110,14 @@ def main():
                                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}]
                     else:
                         content = [{"type": "text", "text": head + "No chart was drawn."}]
-                    m = call(key, content)
-                    text = "".join(b.get("text", "") for b in m["content"] if b.get("type") == "text")
-                    try:
-                        v = json.loads(text[text.index("{"): text.rindex("}") + 1])
-                    except ValueError:
-                        v = {"numbers_correct": None, "chart_answers": None, "readable": None, "reason": "judge reply not JSON: " + text[:200]}
+                    for attempt in range(3):
+                        m = call(key, content)
+                        text = "".join(b.get("text", "") for b in m["content"] if b.get("type") == "text")
+                        try:
+                            v = json.loads(text[text.index("{"): text.rindex("}") + 1])
+                            break
+                        except ValueError:
+                            v = {"numbers_correct": None, "chart_answers": None, "readable": None, "reason": "judge reply not JSON: " + text[:200]}
                     j.update(v, usage=m.get("usage", {}))
                 j["pass"] = bool(j.get("numbers_correct") and j.get("chart_answers"))
                 f.write(json.dumps(j) + "\n")

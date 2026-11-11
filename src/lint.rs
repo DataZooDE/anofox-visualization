@@ -2123,6 +2123,18 @@ where
                 }),
         );
 
+        diags.extend(
+            annotation_diags(&p.roles)
+                .into_iter()
+                .map(|(severity, code, message)| Diagnostic {
+                    severity,
+                    stmt,
+                    code,
+                    message,
+                    sql: short.clone(),
+                }),
+        );
+
         diags.extend(y2_diags(&p.roles, &p.names, &rows).into_iter().map(
             |(severity, code, message)| Diagnostic {
                 severity,
@@ -2160,6 +2172,22 @@ where
                 sql: short.clone(),
             });
         }
+
+        diags.extend(
+            [
+                percent_fraction_diag(&p.roles, &rows),
+                funnel_increase_diag(&p.roles, &rows),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|(code, message)| Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code,
+                message,
+                sql: short.clone(),
+            }),
+        );
 
         diags.extend(scatter_hexbin_diags(&p.roles, &rows).into_iter().map(
             |(severity, code, message)| Diagnostic {
@@ -6711,6 +6739,73 @@ fn has_top_level_limit(sql: &str) -> bool {
     last.is_some()
 }
 
+/// The numbers of column `i` (JSON numbers and DECIMAL text), NULLs left out.
+fn column_numbers(rows: &[Map<String, Value>], i: usize) -> Vec<f64> {
+    rows.iter()
+        .filter_map(|r| r.get(&format!("c{i}")))
+        .filter_map(|v| match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) if is_number_cell(v) => s.parse().ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 11-11 full run (dash-tabs): `round(avg(on_time), 2)::PERCENT` showed
+/// "0.3 %" for a 33 % rate — ::PERCENT takes percent (0–100), and every
+/// value here is a fraction.
+fn percent_fraction_diag(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Option<(&'static str, String)> {
+    let (i, _) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Metric(crate::MetricFmt::Percent))?;
+    let v = column_numbers(rows, *i);
+    (!v.is_empty()
+        && v.iter().all(|x| x.abs() <= 1.0)
+        && v.iter().any(|x| x.abs() > 0.0 && x.abs() < 1.0))
+    .then(|| {
+        (
+            "format/percent-fraction",
+            "::PERCENT shows the value as percent (0.33 → 0.33 %), and every value here is \
+             between -1 and 1 — multiply a fraction by 100"
+                .to_string(),
+        )
+    })
+}
+
+/// 11-11 full run (funnel): each stage counted on its own (budget approved,
+/// buying this quarter, converted) — 17 → 20 → 16, no funnel. A stage is
+/// the leads that passed every stage before it.
+fn funnel_increase_diag(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Option<(&'static str, String)> {
+    let (i, _) = roles
+        .iter()
+        .find(|(_, r)| *r == Role::Value(Kind::Funnel))?;
+    let x = role_index(roles, Role::X);
+    let v = column_numbers(rows, *i);
+    let k = v.windows(2).position(|w| w[1] > w[0])?;
+    let name = |j: usize| {
+        x.and_then(|x| column_texts(rows, x).get(j).cloned())
+            .unwrap_or_else(|| format!("stage {}", j + 1))
+    };
+    Some((
+        "chart/funnel-increase",
+        format!(
+            "::FUNNEL stage '{}' ({}) is larger than '{}' before it ({}): a funnel's stages are \
+             nested — count each one among those that passed every stage before it \
+             (WHERE a AND b …), in stage order",
+            name(k + 1),
+            v[k + 1],
+            name(k),
+            v[k]
+        ),
+    ))
+}
+
 /// #1100: a bar / line / area / scatter / pie chart draws its role columns
 /// only — a number column with no role beside its measure (lead days and
 /// order lines next to on-time %) is dropped without a word.
@@ -6768,6 +6863,64 @@ fn digest_text(text: &str) -> String {
     } else {
         t
     }
+}
+
+/// 11-11 three-arm comparison: reference lines that draw nothing.
+/// - ts-event-line: `SELECT start_date::XLINE, what::XLINE_LABEL FROM
+///   disruptions;` after the chart — an annotation in a statement of its
+///   own belongs to no chart.
+/// - dist-mean-median: `mean::REFLINE` on a ::HISTOGRAM — a horizontal line
+///   (a count) that the histogram does not draw; its x is the value.
+fn annotation_diags(roles: &[(usize, Role)]) -> Vec<(Severity, &'static str, String)> {
+    let has = |f: &dyn Fn(&Role) -> bool| roles.iter().any(|(_, r)| f(r));
+    let mut out = Vec::new();
+    let annotation = has(&|r| {
+        matches!(
+            r,
+            Role::RefLine | Role::VLine | Role::VLineLabel | Role::RefLineLabel
+        )
+    });
+    if !annotation {
+        return out;
+    }
+    let drawn_by_other = is_kpi(roles)
+        || crate::track::is_track(roles)
+        || has(&|r| {
+            matches!(
+                r,
+                Role::Value(_)
+                    | Role::Table
+                    | Role::Record
+                    | Role::PagedTable
+                    | Role::Diagram
+                    | Role::Geometry
+                    | Role::Region
+                    | Role::Lat
+                    | Role::Lon
+                    | Role::Q1
+                    | Role::Median
+                    | Role::Q3
+            )
+        });
+    if !drawn_by_other {
+        out.push((
+            Severity::Error,
+            "annotation/no-chart",
+            "::XLINE / ::REFLINE in a statement without a chart draws nothing — put them in the \
+             chart's own SELECT (one line per row: join the event dates onto the chart's rows), \
+             or draw events from another table as a ::TRACK right after the chart"
+                .to_string(),
+        ));
+    } else if chart_kind(roles) == Some(Kind::Histogram) && has(&|r| *r == Role::RefLine) {
+        out.push((
+            Severity::Warning,
+            "chart/refline-histogram",
+            "::REFLINE is a horizontal line (a count) a ::HISTOGRAM does not draw — mark a value \
+             (mean, median) on its x axis with ::XLINE + ::XLINE_LABEL"
+                .to_string(),
+        ));
+    }
+    out
 }
 
 /// `::Y2` (#919): it must name one of the chart's measures other than the
@@ -11056,6 +11209,92 @@ mod design_tests {
             m[0].contains("3 marks, x EU … APAC") && m[0].contains("max 1800 at US"),
             "{m:?}"
         );
+    }
+
+    #[test]
+    fn percent_fractions_and_growing_funnels_are_flagged() {
+        let codes = |sql: &str, data: Vec<Value>| -> Vec<&'static str> {
+            let rows: Vec<Map<String, Value>> = data
+                .into_iter()
+                .map(|d| d.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(rows.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| matches!(*c, "format/percent-fraction" | "chart/funnel-increase"))
+            .collect()
+        };
+        let t = "SELECT s, r::PERCENT, 'x'::TABLE FROM t;";
+        assert_eq!(
+            codes(
+                t,
+                vec![
+                    json!({"c0": "Seals", "c1": 0.33}),
+                    json!({"c0": "Fasteners", "c1": 0.94})
+                ]
+            ),
+            vec!["format/percent-fraction"]
+        );
+        assert!(codes(t, vec![json!({"c0": "Seals", "c1": 32.9})]).is_empty());
+        // a DECIMAL arrives as text
+        assert_eq!(
+            codes(t, vec![json!({"c0": "Seals", "c1": "0.33"})]),
+            vec!["format/percent-fraction"]
+        );
+        let f = "SELECT stage::XAXIS, n::FUNNEL FROM t;";
+        let stages = |ns: [i64; 3]| {
+            ["all", "budget", "quarter"]
+                .iter()
+                .zip(ns)
+                .map(|(s, n)| json!({"c0": s, "c1": n}))
+                .collect()
+        };
+        assert_eq!(
+            codes(f, stages([300, 17, 20])),
+            vec!["chart/funnel-increase"]
+        );
+        assert!(codes(f, stages([300, 29, 13])).is_empty());
+    }
+
+    #[test]
+    fn reference_lines_that_draw_nothing_are_flagged() {
+        let data = vec![json!({ "c0": "2025-01-20", "c1": "shutdown", "c2": 7.5 })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let codes = |sql: &str| -> Vec<&'static str> {
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| matches!(*c, "annotation/no-chart" | "chart/refline-histogram"))
+            .collect()
+        };
+        assert_eq!(
+            codes("SELECT d::XLINE, w::XLINE_LABEL FROM t;"),
+            vec!["annotation/no-chart"]
+        );
+        assert_eq!(
+            codes("SELECT x::XAXIS, n::HISTOGRAM, m::REFLINE FROM t;"),
+            vec!["chart/refline-histogram"]
+        );
+        assert!(codes("SELECT x::XAXIS, n::HISTOGRAM, m::XLINE FROM t;").is_empty());
+        assert!(codes("SELECT m::XAXIS, v::LINECHART, d::XLINE FROM t;").is_empty());
+        // a KPI's goal
+        assert!(codes("SELECT v::METRIC, 100::REFLINE FROM t;").is_empty());
     }
 
     #[test]
