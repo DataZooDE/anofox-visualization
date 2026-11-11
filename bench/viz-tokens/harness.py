@@ -58,6 +58,7 @@ How to work:
 - Finish with answer(text): two to four sentences that answer the question with the key numbers. The last chart you made successfully is the one shown with it.
 - The chart must answer the question on its own: a clear title, readable labels, the right chart type.
 - Do not ask the user questions; make reasonable choices.
+- When a definition changes the answer (what counts as stock, which period, gross or net revenue, the top N or all), say the one you used in a short clause of the answer.
 
 When the user follows up, change the chart as asked (call {chart_tool} again) and answer again.
 """
