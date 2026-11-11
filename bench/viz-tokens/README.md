@@ -21,7 +21,12 @@ differ:
 | vegalite | `render(sql, spec)`: the query's rows become the spec's data, drawn by vl-convert | the `altair` skill + its style reference (Altair is Vega-Lite's Python API) |
 
 - Every chart tool answers in text only (ok, or the error). No arm sees its
-  picture.
+  picture. Since #1095 an "ok" also says what was drawn, in the same words
+  for every arm: per layer and series the marks, the x range, first / last y,
+  y min / max and where. anofox: `dashboard --check --digest` (ggplot-rs's
+  build); vegalite: the plotted rows by the spec's x / y / colour fields;
+  python: the figure's own lines, points and bars. `--no-digest` turns it
+  off (recorded in meta.json).
 - Model-written code runs in bubblewrap: read-only filesystem, a private
   `/tmp`, no network, 60 s, and a 4 GB cgroup cap. `query` runs with
   `enable_external_access = false`.

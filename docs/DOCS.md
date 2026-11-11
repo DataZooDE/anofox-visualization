@@ -2673,6 +2673,14 @@ cumulative line is the share of the rows shown, so for a top N draw
 `::BARCHART` bars and the share of the total, computed in SQL, as a
 `::LINECHART` on `::Y2`.
 
+**What a chart draws** (#1095): `dashboard --check --digest` adds a
+`chart/drawn` note per chart, with its numbers from the plotting engine's own
+build (ggplot-rs's `BuiltPlot::summary`): per layer and series the marks, the
+x range, first / last y, y min / max and where, a band's extent. The builder
+assistant's check asks for it, so a title or answer quotes the chart's own
+numbers; with sample rows off the note's message is withheld like any other
+data-bearing diagnostic.
+
 The toolbar also has an **auto-refresh** interval.
 
 ### Themes, dark mode, branding and locale

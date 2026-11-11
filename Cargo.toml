@@ -171,8 +171,10 @@ crate-type = ["cdylib", "rlib"]
 # (-45°/270°) tick labels instead of being drawn through them.
 # 0.42.2 (sipemu/ggplot-rs#484, #485, #1080): a flipped box keeps its median
 # and whiskers; the interval geoms read a mapped tooltip (#1065's box target).
+# 0.43.0 (sipemu/ggplot-rs#487, #1095): BuiltPlot::summary(), what a plot
+# draws as numbers — `dashboard --check --digest`'s chart/drawn notes.
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.42.2", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.43.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI

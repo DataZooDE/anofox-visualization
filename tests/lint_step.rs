@@ -75,6 +75,7 @@ fn lint_step_matches_the_native_lint() {
                     // the `cache`) to line up.
                     stateful_session: false,
                     image_root: None,
+                    digest: false,
                 },
             );
             let want: Vec<serde_json::Value> = native.iter().map(|d| d.to_json()).collect();

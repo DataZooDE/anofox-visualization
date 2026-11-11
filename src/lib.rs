@@ -2266,6 +2266,29 @@ pub struct Rendered {
     pub warnings: Vec<String>,
 }
 
+/// What the panel draws, as numbers (#1095): per layer and series the marks,
+/// the x range, first / last y, y min / max and where (ggplot-rs's
+/// [`BuiltPlot::summary`](ggplot_rs::build::BuiltPlot::summary)), from the
+/// same pipeline a render runs, so a model writes its title and answer from
+/// the chart's own numbers. `None` for a panel the extension draws itself
+/// (a KPI tile, a table, a heading) or one that does not render.
+pub fn summarize(cols: &[Column], width: u32, height: u32, o: &RenderOptions) -> Option<String> {
+    let indexed = with_row_index(cols);
+    let cols: &[Column] = &indexed;
+    let o = &*o.for_panel(cols);
+    let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+    let cols = downsample::prepare(cols, o);
+    let cols = boxstats::prepare(cols).ok()?;
+    let Panel::Plot { plot, .. } = render_inner(&cols, w, h, o).ok()?.localized(o, &cols) else {
+        return None;
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plot.try_build().ok()))
+        .ok()
+        .flatten()
+        .map(|b| b.summary_text())
+        .filter(|t| !t.is_empty())
+}
+
 /// [`render_with`], also returning the plotting engine's build warnings
 /// (`dashboard --check` reports them as `render-warning` diagnostics).
 pub fn render_with_warnings(

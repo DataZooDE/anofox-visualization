@@ -168,6 +168,124 @@ def sandboxed(cmd, workdir, extra_ro=()):
         return -1, "", f"timed out after {EXEC_TIMEOUT} s"
 
 
+# ---------------------------------------------------------------- digest
+# #1095: every chart tool says what it drew, in the same words — the anofox
+# CLI from ggplot-rs's BuiltPlot::summary, the others below from the plotted
+# rows (Vega-Lite) or the figure's own artists (matplotlib).
+
+DRAWN_HEAD = "what the chart shows (quote these numbers in the title and answer):"
+MAX_SERIES = 12
+
+
+def num(v):
+    if v != v:
+        return "NA"
+    if float(v).is_integer() and abs(v) < 1e15:
+        return str(int(v))
+    import math
+    digits = max(0, min(6, 4 - math.floor(math.log10(abs(v)))))
+    return f"{v:.{digits}f}".rstrip("0").rstrip(".")
+
+
+def series_text(key, xs, ys):
+    """One series as ggplot-rs's summary writes it: `xs` labels, `ys` numbers."""
+    pts = [(x, y) for x, y in zip(xs, ys) if y == y]
+    if not pts:
+        return None
+    lo = min(pts, key=lambda p: p[1])
+    hi = max(pts, key=lambda p: p[1])
+    n = len(pts)
+    return (f"{key + ' — ' if key is not None else ''}{n} mark{'' if n == 1 else 's'}, "
+            f"x {pts[0][0]} … {pts[-1][0]}; y first {num(pts[0][1])}, last {num(pts[-1][1])}, "
+            f"min {num(lo[1])} at {lo[0]}, max {num(hi[1])} at {hi[0]}")
+
+
+def layer_text(name, series):
+    shown = [t for t in series if t][:MAX_SERIES]
+    more = len([t for t in series if t]) - len(shown)
+    return f"{name}: " + "; ".join(shown) + (f"; +{more} more series" if more > 0 else "")
+
+
+def vegalite_digest(spec, df):
+    """Per layer: its x / y / colour fields, read off the rows it plotted."""
+    def layers(sp):
+        if "layer" in sp:
+            for l in sp["layer"]:
+                yield {**{k: v for k, v in sp.items() if k != "layer"}, **l,
+                       "encoding": {**sp.get("encoding", {}), **l.get("encoding", {})}}
+        else:
+            yield sp
+    out = []
+    for l in layers(spec):
+        enc = l.get("encoding", {})
+        mark = l.get("mark")
+        mark = mark.get("type") if isinstance(mark, dict) else mark
+        x, y = (enc.get(c, {}).get("field") for c in ("x", "y"))
+        key = (enc.get("color") or enc.get("fill") or {}).get("field")
+        if not (x in df.columns and y in df.columns):
+            continue
+        f = df.sort_values(x) if enc["x"].get("type") in ("temporal", "quantitative") else df
+        groups = f.groupby(key, sort=False) if key in df.columns else [(None, f)]
+        series = [series_text(None if k is None else str(k), [str(v)[:10] if enc["x"].get("type") == "temporal" else
+                              (num(v) if isinstance(v, (int, float)) else str(v)) for v in g[x]],
+                              [float(v) if v is not None else float("nan") for v in g[y]]) for k, g in groups]
+        out.append(layer_text(mark or "mark", series))
+    return "\n".join(out)
+
+
+# appended to the python arm's script: the figure's own artists, written to
+# drawn.txt (lines, scatter offsets, bars; a date axis read as dates)
+MPL_DIGEST = r'''
+def __digest():
+    import matplotlib.pyplot as plt, matplotlib.dates as mdates, math
+    from matplotlib.collections import PathCollection
+    from matplotlib.patches import Rectangle
+    def num(v):
+        if v != v: return "NA"
+        if float(v).is_integer() and abs(v) < 1e15: return str(int(v))
+        d = max(0, min(6, 4 - math.floor(math.log10(abs(v)))))
+        return f"{v:.{d}f}".rstrip("0").rstrip(".")
+    def series(key, xs, ys):
+        pts = [(x, y) for x, y in zip(xs, ys) if y == y]
+        if not pts: return None
+        lo = min(pts, key=lambda p: p[1]); hi = max(pts, key=lambda p: p[1]); n = len(pts)
+        return (f"{key + ' — ' if key else ''}{n} mark{'' if n == 1 else 's'}, x {pts[0][0]} … {pts[-1][0]}; "
+                f"y first {num(pts[0][1])}, last {num(pts[-1][1])}, min {num(lo[1])} at {lo[0]}, max {num(hi[1])} at {hi[0]}")
+    out = []
+    for i, ax in enumerate(plt.gcf().axes):
+        date = isinstance(ax.xaxis.get_major_formatter(), (mdates.DateFormatter, mdates.AutoDateFormatter, mdates.ConciseDateFormatter))
+        ticks = {round(t, 6): l.get_text() for t, l in zip(ax.get_xticks(), ax.get_xticklabels()) if l.get_text()}
+        def xl(v):
+            if date: return mdates.num2date(v).strftime("%Y-%m-%d")
+            return ticks.get(round(v, 6), num(v))
+        panel = f" [{ax.get_title()}]" if len(plt.gcf().axes) > 1 and ax.get_title() else ""
+        lines = [series(l.get_label() if not l.get_label().startswith("_") else None,
+                        [xl(float(p[0])) for p in l.get_xydata()], [float(p[1]) for p in l.get_xydata()])
+                 for l in ax.get_lines() if len(l.get_xdata()) > 1]
+        if [t for t in lines if t]: out.append(f"line{panel}: " + "; ".join(t for t in lines if t))
+        for c in ax.collections:
+            if isinstance(c, PathCollection) and len(c.get_offsets()):
+                o = sorted(c.get_offsets().tolist())
+                t = series(None if c.get_label().startswith("_") else c.get_label(), [xl(p[0]) for p in o], [p[1] for p in o])
+                if t: out.append(f"point{panel}: " + t)
+        bars = [p for p in ax.patches if isinstance(p, Rectangle) and p.get_height() and p.get_width()]
+        if bars:
+            # barh: all bars one thickness, the value is the width, the label on y
+            horiz = len({round(p.get_height(), 9) for p in bars}) == 1 and len({round(p.get_width(), 9) for p in bars}) > 1
+            yt = {round(t, 6): l.get_text() for t, l in zip(ax.get_yticks(), ax.get_yticklabels()) if l.get_text()}
+            if horiz:
+                t = series(None, [yt.get(round(p.get_y() + p.get_height() / 2, 6), num(p.get_y())) for p in bars], [p.get_width() for p in bars])
+            else:
+                t = series(None, [xl(p.get_x() + p.get_width() / 2) for p in bars], [p.get_height() for p in bars])
+            if t: out.append(f"bar{panel}: " + t)
+    open("drawn.txt", "w").write("\n".join(out))
+try:
+    __digest()
+except Exception:
+    pass
+'''
+
+
 # ---------------------------------------------------------------- tools
 
 class Tools:
@@ -218,7 +336,8 @@ class Tools:
         (d / "chart.sql").write_text(script)
         dash = self.cfg["dashboard"]
         extra = ["--boundaries", self.cfg["boundaries"]] if self.cfg.get("boundaries") else []
-        rc, out, err = sandboxed([dash, "--check", "chart.sql", "--json", *extra], d)
+        digest = ["--digest"] if self.cfg.get("digest") else []
+        rc, out, err = sandboxed([dash, "--check", "chart.sql", "--json", *digest, *extra], d)
         try:
             diags = json.loads(out).get("diagnostics", [])
         except ValueError:
@@ -248,17 +367,24 @@ class Tools:
         # (#1100: a ::Y2 alone, numbers with no role were only warnings, and
         # the model never heard of them)
         warns = [x for x in diags if x.get("severity") == "warning"]
+        msg = "ok: drawn"
         if warns:
-            return True, clip("ok: drawn, with warnings (fix the ones that apply):\n" + "\n".join(
-                f"statement {x.get('stmt', 0) - 2}: {x.get('code')}: {x.get('message')}" for x in warns))
-        return True, "ok: drawn"
+            msg += ", with warnings (fix the ones that apply):\n" + "\n".join(
+                f"statement {x.get('stmt', 0) - 2}: {x.get('code')}: {x.get('message')}" for x in warns)
+        # #1095: what each chart drew, from the plotting engine's own build
+        drawn = [x for x in diags if x.get("code") == "chart/drawn"]
+        if drawn:
+            msg += "\n" + DRAWN_HEAD + "\n" + "\n".join(
+                f"statement {x.get('stmt', 0) - 2}: {x.get('message')}" for x in drawn)
+        return True, clip(msg)
 
     def run_python(self, code):
         d = self.step_dir()
         pre = (f"import duckdb\ncon = duckdb.connect()\ncon.execute(\"ATTACH '{self.db}' AS d (READ_ONLY)\")\n"
                "con.execute(\"SET search_path = 'memory.main,d.main'\")\n"
                "import matplotlib\nmatplotlib.use('Agg')\n")
-        (d / "main.py").write_text(pre + code + "\n")
+        post = MPL_DIGEST if self.cfg.get("digest") else ""
+        (d / "main.py").write_text(pre + code + "\n" + post)
         rc, out, err = sandboxed([self.cfg["python"], "main.py"], d)
         png = d / "chart.png"
         made = png.exists() and png.stat().st_size > 0
@@ -269,6 +395,9 @@ class Tools:
             msg += "\nstderr:\n" + err[-2500:]
         if rc == 0 and made:
             self.chart = (png.read_bytes(), code)
+            drawn = d / "drawn.txt"
+            if drawn.exists() and drawn.read_text().strip():
+                msg += "\n" + DRAWN_HEAD + "\n" + drawn.read_text().strip()
             return True, clip(msg)
         return False, clip(msg)
 
@@ -294,7 +423,8 @@ class Tools:
             return False, clip(f"render failed: {(err or out)[-2500:]}")
         art = json.dumps({"sql": sql, "spec": {k: v for k, v in spec.items() if k != "data"}})
         self.chart = (png.read_bytes(), art)
-        return True, "ok: drawn"
+        text = vegalite_digest(spec, df) if self.cfg.get("digest") else ""
+        return True, clip("ok: drawn" + (f"\n{DRAWN_HEAD}\n{text}" if text else ""))
 
 
 # ---------------------------------------------------------------- model
@@ -481,6 +611,8 @@ def main():
     ap.add_argument("--vega-ref", default="~/.claude/skills/altair")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dry", action="store_true", help="scripted turns, no API")
+    ap.add_argument("--no-digest", action="store_true",
+                    help="the chart tools answer 'ok' only, not what they drew (#1095)")
     ap.add_argument("--yes", action="store_true", help="don't ask before spending")
     a = ap.parse_args()
 
@@ -504,12 +636,12 @@ def main():
     (out / "charts").mkdir(parents=True, exist_ok=True)
     cfg = {"data": str(Path(a.data).resolve()), "dashboard": str(Path(a.dashboard).resolve()), "python": a.python,
            "boundaries": str(Path(a.boundaries).resolve()) if a.boundaries else None,
-           "workdir": str((out / "work").resolve())}
+           "workdir": str((out / "work").resolve()), "digest": not a.no_digest}
     Path(cfg["workdir"]).mkdir(exist_ok=True)
     refs = load_refs(a)
 
     meta = {"model": a.model, "effort": a.effort, "reps": a.reps, "arms": arms, "tasks": [t["id"] for t in tasks],
-            "dry": a.dry, "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "dry": a.dry, "digest": not a.no_digest, "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "ref_sha": {k: hashlib.sha256(v.encode()).hexdigest()[:12] for k, v in refs.items() if k in arms},
             "ref_chars": {k: len(v) for k, v in refs.items() if k in arms}}
     if not a.dry:

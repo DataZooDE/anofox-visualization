@@ -37,7 +37,7 @@ export function ownOpts(o) {
 // Lint `script`. `step` is the wasm lint_step; `run(sql)` resolves to the
 // rows as JSON text (as render_panel takes them) or rejects with the DuckDB
 // error. `strict` and `design` are `--strict` and the inverse of
-// `--no-design`. `onStep(n, queries)` reports progress; `cancelled()` stops
+// `--no-design`; `digest` is `--digest` (#1095: a chart/drawn note per chart). `onStep(n, queries)` reports progress; `cancelled()` stops
 // before the next query. Resolves to {diagnostics, ok, summary, spans, steps,
 // queries, answers} (answers: query -> {rows} | {error}), or null when
 // cancelled.
@@ -46,8 +46,8 @@ export function ownOpts(o) {
 // properties too — a polluted `Object.prototype.strict`/`.design` would
 // apply to every caller. `ownOpts` first, as everywhere else.
 export async function lintScript(script, opts = {}) {
-  const { step, run, strict = false, design = true, onStep, cancelled } = ownOpts(opts);
-  const stepOpts = JSON.stringify({ strict, design });
+  const { step, run, strict = false, design = true, digest = false, onStep, cancelled } = ownOpts(opts);
+  const stepOpts = JSON.stringify({ strict, design, digest: digest === true });
   const known = new Map(); // query -> {rows} | {error}
   for (let n = 1; n <= MAX_STEPS; n++) {
     const res = JSON.parse(step(script, knownJson(known), stepOpts));
