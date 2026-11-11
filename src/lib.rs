@@ -2277,6 +2277,11 @@ pub fn summarize(cols: &[Column], width: u32, height: u32, o: &RenderOptions) ->
     let cols: &[Column] = &indexed;
     let o = &*o.for_panel(cols);
     let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
+    // a choropleth: its regions by name and value (#1107) — the names are
+    // the boundary layer's, which the plot itself never carries
+    if let Some(text) = map_digest(cols) {
+        return Some(text);
+    }
     let cols = downsample::prepare(cols, o);
     let cols = boxstats::prepare(cols).ok()?;
     let Panel::Plot { plot, .. } = render_inner(&cols, w, h, o).ok()?.localized(o, &cols) else {
@@ -2287,6 +2292,62 @@ pub fn summarize(cols: &[Column], width: u32, height: u32, o: &RenderOptions) ->
         .flatten()
         .map(|b| b.summary_text())
         .filter(|t| !t.is_empty())
+}
+
+/// A number as the digest writes it: whole, or 4 significant decimals.
+fn digest_num(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e15 {
+        return format!("{}", v as i64);
+    }
+    let d = (4 - v.abs().log10().floor() as i32).clamp(0, 6) as usize;
+    let t = format!("{v:.d$}");
+    t.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// A `::REGION` map's digest: how many rows matched a region, then the five
+/// highest and three lowest by the measure, each `name (code) value`.
+fn map_digest(cols: &[Column]) -> Option<String> {
+    let codes = map::region_codes(find_role(cols, Role::Region)?);
+    let value = cols.iter().find(|c| matches!(c.role, Role::Value(_)))?;
+    let names = map::region_names(cols, false)?;
+    let mut rows: Vec<(f64, String)> = codes
+        .iter()
+        .zip(&names)
+        .zip(&value.values)
+        .filter_map(|((c, n), v)| {
+            let v = v.as_f64().filter(|v| v.is_finite())?;
+            let c = c.clone()?;
+            (!n.is_empty()).then(|| (v, format!("{n} ({c})")))
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let fmt = |r: &[(f64, String)]| {
+        r.iter()
+            .map(|(v, l)| format!("{l} {}", digest_num(*v)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let n = rows.len();
+    let low: Vec<_> = rows
+        .iter()
+        .rev()
+        .take(3.min(n.saturating_sub(5)))
+        .cloned()
+        .collect();
+    Some(format!(
+        "map: {n} of {} regions matched ({}); highest: {}{}",
+        codes.len(),
+        value.name,
+        fmt(&rows[..n.min(5)]),
+        if low.is_empty() {
+            String::new()
+        } else {
+            format!("; lowest: {}", fmt(&low))
+        }
+    ))
 }
 
 /// [`render_with`], also returning the plotting engine's build warnings

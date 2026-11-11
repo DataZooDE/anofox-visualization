@@ -267,6 +267,14 @@ struct Input {
     layer: Option<String>,
 }
 
+/// #1107: each row's region name from its `::REGION` code ("" when it
+/// matches none) — the digest names a map's regions, so a model does not
+/// guess a district's name from its code.
+pub(crate) fn region_names(cols: &[Column], german: bool) -> Option<Vec<String>> {
+    find_role(cols, Role::Region)?;
+    input(cols, german).map(|i| i.names)
+}
+
 fn input(cols: &[Column], german: bool) -> Option<Input> {
     if let Some(g) = geometry(cols) {
         let n = g.values.len();
