@@ -29,6 +29,7 @@ RUBRIC = """You grade one answer of a data assistant: a chart (the image) and a 
 
 Judge:
 1. numbers_correct: every number and ranking the written answer states agrees with the ground truth (rounding is fine; a claim the truth can't check is fine if it doesn't contradict it). false if a key number or the main conclusion is wrong or missing.
+   A stated assumption: if the request is genuinely ambiguous (it leaves a definition open that changes the numbers, e.g. what counts as stock, which period, gross or net) and the answer names a reasonable definition the request allows, check its numbers against that definition, not the ground truth's: right under it is true. This never excuses a definition the request rules out, an unstated one, or numbers wrong under the stated one.
 2. chart_answers: the chart shows what the request asks for (the right measure, grouping and breakdown) and agrees with the ground truth. For a follow-up, the chart must show the requested change. When a good chart is described, a chart that serves the request clearly worse (a bar chart where a map was asked for, no uncertainty band where one was asked for) is false.
    With no ground-truth rows, the right answer says there is no such data; then no chart is needed (chart_answers true when the answer says so). Otherwise no chart drawn means chart_answers false.
 3. readable: 1-5, how quickly a business reader gets the answer from the chart (title, labels, number format, chart type, clutter). 5 = at a glance, 3 = works with effort, 1 = misleading or unreadable.

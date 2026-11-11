@@ -2189,9 +2189,12 @@ where
             [
                 percent_fraction_diag(&p.roles, &rows),
                 funnel_increase_diag(&p.roles, &rows),
+                share_sum_diag(&p.roles, &p.names, &rows),
+                pie_limit_diag(&p.roles, &p.sql, &rows),
             ]
             .into_iter()
             .flatten()
+            .chain(band_diags(&p.roles, &rows))
             .map(|(code, message)| Diagnostic {
                 severity: Severity::Warning,
                 stmt,
@@ -6724,6 +6727,21 @@ fn is_number_cell(v: &Value) -> bool {
 /// Does the statement have a `LIMIT` of its own (outside parentheses and
 /// quotes)?
 fn has_top_level_limit(sql: &str) -> bool {
+    top_level_limit_at(sql).is_some()
+}
+
+/// The number of a statement's own `LIMIT n` (none for `LIMIT getvariable(..)`).
+fn top_level_limit(sql: &str) -> Option<u64> {
+    let rest = sql[top_level_limit_at(sql)? + 5..].trim_start();
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Where the statement's own last `LIMIT` starts (outside parentheses and
+/// quotes).
+fn top_level_limit_at(sql: &str) -> Option<usize> {
     let up = sql.to_ascii_uppercase();
     let mut depth = 0i32;
     let mut quote: Option<u8> = None;
@@ -6748,7 +6766,7 @@ fn has_top_level_limit(sql: &str) -> bool {
             _ => {}
         }
     }
-    last.is_some()
+    last
 }
 
 /// The numbers of column `i` (JSON numbers and DECIMAL text), NULLs left out.
@@ -6816,6 +6834,172 @@ fn funnel_increase_diag(
             v[k]
         ),
     ))
+}
+
+/// #1120: shares computed in SQL (`… AS share_pct::PIE`) that don't add up to
+/// 100 — a pie / donut / ::BARCHART_STACKED_PERCENT draws each value as its
+/// share of the values shown, so 60 % of the whole, or overlapping shares
+/// that add up to 130, are silently redrawn as 100 %. Only a measure named
+/// like a share (pct, percent, share, %) whose values are all 0–100.
+fn share_sum_diag(
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+    rows: &[Map<String, Value>],
+) -> Option<(&'static str, String)> {
+    let kind = chart_kind(roles)?;
+    if !matches!(kind, Kind::Pie | Kind::Donut | Kind::BarStackedPercent) {
+        return None;
+    }
+    let (i, _) = roles.iter().find(|(_, r)| *r == Role::Value(kind))?;
+    let name = names.iter().find(|(k, _)| k == i)?.1.to_ascii_lowercase();
+    if !["pct", "percent", "share", "%"]
+        .iter()
+        .any(|w| name.contains(w))
+    {
+        return None;
+    }
+    let v = column_numbers(rows, *i);
+    if v.len() < 2 || v.len() != rows.len() || v.iter().any(|x| !(0.0..=100.0).contains(x)) {
+        return None;
+    }
+    // fractions (all ≤ 1) add up to 1, percent to 100
+    let whole = if v.iter().all(|x| *x <= 1.0) {
+        1.0
+    } else {
+        100.0
+    };
+    // groups: the whole pie, or one stacked bar per x
+    let x = role_index(roles, Role::X).filter(|_| kind == Kind::BarStackedPercent);
+    let mut groups: Vec<(String, f64, usize)> = Vec::new();
+    for (row, val) in rows.iter().zip(&v) {
+        let key = x
+            .and_then(|x| row.get(&format!("c{x}")))
+            .map(|k| match k {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default();
+        match groups.iter_mut().find(|(k, ..)| *k == key) {
+            Some(g) => {
+                g.1 += val;
+                g.2 += 1;
+            }
+            None => groups.push((key, *val, 1)),
+        }
+    }
+    // rounding: half a unit per slice, at least 2 % of the whole
+    let (key, sum, _) = groups.into_iter().find(|(_, s, n)| {
+        n > &1 && (s - whole).abs() > (0.02 * whole).max(*n as f64 * 0.005 * whole)
+    })?;
+    let unit = if whole == 1.0 { "" } else { " %" };
+    let at = if key.is_empty() {
+        String::new()
+    } else {
+        format!(" at '{key}'")
+    };
+    let fix = if sum < whole {
+        "add the rest as an 'Other' row (or chart the values with ::BARCHART)"
+    } else {
+        "make each share a part of one total that doesn't overlap"
+    };
+    Some((
+        "chart/share-sum",
+        format!(
+            "the shares '{name}' add up to {}{unit}{at}, not {whole}{unit}: the chart draws each \
+             as its part of the values shown, so the whole looks complete — {fix}",
+            (sum * 100.0).round() / 100.0
+        ),
+    ))
+}
+
+/// #1120: a ::PIE / ::DONUTCHART after a LIMIT that cut rows — its slices
+/// are shares of the top N shown, which reads as the whole.
+fn pie_limit_diag(
+    roles: &[(usize, Role)],
+    sql: &str,
+    rows: &[Map<String, Value>],
+) -> Option<(&'static str, String)> {
+    if !matches!(chart_kind(roles)?, Kind::Pie | Kind::Donut) {
+        return None;
+    }
+    let n = top_level_limit(sql)?;
+    (n > 0 && rows.len() as u64 == n).then(|| {
+        (
+            "chart/pie-limit",
+            format!(
+                "pie after a LIMIT {n}: its slices are shares of the {n} rows shown, so a top {n} \
+                 reads as the whole — fold the rest into an 'Other' row in SQL, or use ::BARCHART"
+            ),
+        )
+    })
+}
+
+/// #1120: a ::BAND_LOWER above its ::BAND_UPPER (swapped edges), or a band
+/// that misses its line in most rows (another unit or scale — a fraction
+/// band around a percent line). An actual outside its forecast band now and
+/// then is the point of such a chart, so only most rows count.
+fn band_diags(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let of = |want: Role| {
+        roles
+            .iter()
+            .filter(move |(_, r)| *r == want)
+            .map(|(i, _)| *i)
+    };
+    let pairs: Vec<(usize, usize)> = of(Role::BandLower).zip(of(Role::BandUpper)).collect();
+    if pairs.is_empty() {
+        return out;
+    }
+    let num = |row: &Map<String, Value>, i: usize| match row.get(&format!("c{i}"))? {
+        Value::Number(n) => n.as_f64(),
+        v @ Value::String(s) if is_number_cell(v) => s.parse().ok(),
+        _ => None,
+    };
+    let values: Vec<usize> = roles
+        .iter()
+        .filter(|(_, r)| matches!(r, Role::Value(_)))
+        .map(|(i, _)| *i)
+        .collect();
+    let line = (values.len() == 1).then(|| values[0]);
+    for (lo, hi) in pairs {
+        let swapped = rows
+            .iter()
+            .filter(|r| matches!((num(r, lo), num(r, hi)), (Some(a), Some(b)) if a > b + 1e-9 * b.abs().max(1.0)))
+            .count();
+        if swapped > 0 {
+            out.push((
+                "chart/band-swapped",
+                format!(
+                    "::BAND_LOWER is above ::BAND_UPPER in {swapped} of {} rows — swap the two \
+                     columns (or compute least()/greatest() of them)",
+                    rows.len()
+                ),
+            ));
+            continue;
+        }
+        let Some(y) = line else { continue };
+        let (mut both, mut off) = (0usize, 0usize);
+        for r in rows {
+            if let (Some(a), Some(b), Some(v)) = (num(r, lo), num(r, hi), num(r, y)) {
+                both += 1;
+                let tol = 1e-9 * v.abs().max(1.0);
+                if v < a - tol || v > b + tol {
+                    off += 1;
+                }
+            }
+        }
+        if both >= 3 && off * 2 > both {
+            out.push((
+                "chart/band-off-line",
+                format!(
+                    "the line is outside its ::BAND_LOWER / ::BAND_UPPER band in {off} of {both} \
+                     rows — compute the band from the same measure, in the same unit (percent \
+                     vs fraction), as the line"
+                ),
+            ));
+        }
+    }
+    out
 }
 
 /// #1100: a bar / line / area / scatter / pie chart draws its role columns
@@ -11412,6 +11596,117 @@ mod design_tests {
             vec!["chart/funnel-increase"]
         );
         assert!(codes(f, stages([300, 29, 13])).is_empty());
+    }
+
+    #[test]
+    fn implausible_shares_pies_and_bands_are_flagged() {
+        let codes = |sql: &str, data: Vec<Value>| -> Vec<&'static str> {
+            let rows: Vec<Map<String, Value>> = data
+                .into_iter()
+                .map(|d| d.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(rows.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| {
+                matches!(
+                    *c,
+                    "chart/share-sum"
+                        | "chart/pie-limit"
+                        | "chart/band-swapped"
+                        | "chart/band-off-line"
+                )
+            })
+            .collect()
+        };
+        let slices = |vs: &[f64]| -> Vec<Value> {
+            vs.iter()
+                .enumerate()
+                .map(|(i, v)| json!({"c0": format!("s{i}"), "c1": v}))
+                .collect()
+        };
+        // shares of the whole, top 3 only: 60 % drawn as 100 %
+        let pie = "SELECT seg::LABEL, share_pct::PIE FROM t;";
+        assert_eq!(
+            codes(pie, slices(&[30.0, 20.0, 10.0])),
+            vec!["chart/share-sum"]
+        );
+        assert_eq!(
+            codes(pie, slices(&[60.0, 50.0, 20.0])),
+            vec!["chart/share-sum"]
+        );
+        // complete (rounded), or fractions of 1: fine
+        assert!(codes(pie, slices(&[33.0, 33.0, 33.0])).is_empty());
+        assert!(codes(pie, slices(&[0.5, 0.3, 0.2])).is_empty());
+        // not named as a share: raw amounts, the pie makes the shares
+        assert!(codes(
+            "SELECT seg::LABEL, revenue::PIE FROM t;",
+            slices(&[30.0, 20.0])
+        )
+        .is_empty());
+        // a stacked percent bar per x
+        let st = "SELECT m::XAXIS, g::CATEGORY, pct::BARCHART_STACKED_PERCENT FROM t;";
+        let bars = |a: [f64; 4]| -> Vec<Value> {
+            vec![
+                json!({"c0": "Jan", "c1": "a", "c2": a[0]}),
+                json!({"c0": "Jan", "c1": "b", "c2": a[1]}),
+                json!({"c0": "Feb", "c1": "a", "c2": a[2]}),
+                json!({"c0": "Feb", "c1": "b", "c2": a[3]}),
+            ]
+        };
+        assert!(codes(st, bars([40.0, 60.0, 55.0, 45.0])).is_empty());
+        assert_eq!(
+            codes(st, bars([40.0, 60.0, 55.0, 25.0])),
+            vec!["chart/share-sum"]
+        );
+
+        // a pie after a LIMIT that cut rows
+        let top = "SELECT seg::LABEL, revenue::PIE FROM t ORDER BY 2 DESC LIMIT 3;";
+        assert_eq!(
+            codes(top, slices(&[5.0, 4.0, 3.0])),
+            vec!["chart/pie-limit"]
+        );
+        // fewer rows than the limit: nothing was cut
+        assert!(codes(top, slices(&[5.0, 4.0])).is_empty());
+        assert!(codes(
+            "SELECT seg::LABEL, revenue::PIE FROM (SELECT * FROM t LIMIT 2) s;",
+            slices(&[5.0, 4.0])
+        )
+        .is_empty());
+
+        // bands
+        let band = "SELECT d::XAXIS, y::LINECHART, lo::BAND_LOWER, hi::BAND_UPPER FROM t;";
+        let rows = |r: &[[f64; 3]]| -> Vec<Value> {
+            r.iter()
+                .enumerate()
+                .map(|(i, [y, lo, hi])| json!({"c0": i, "c1": y, "c2": lo, "c3": hi}))
+                .collect()
+        };
+        assert_eq!(
+            codes(band, rows(&[[10.0, 12.0, 8.0], [11.0, 9.0, 13.0]])),
+            vec!["chart/band-swapped"]
+        );
+        // a fraction band around a percent line
+        assert_eq!(
+            codes(
+                band,
+                rows(&[[40.0, 0.3, 0.5], [42.0, 0.3, 0.5], [41.0, 0.3, 0.5]])
+            ),
+            vec!["chart/band-off-line"]
+        );
+        // an actual outside its band now and then is the point
+        assert!(codes(
+            band,
+            rows(&[[10.0, 8.0, 12.0], [11.0, 9.0, 13.0], [20.0, 9.0, 13.0]])
+        )
+        .is_empty());
     }
 
     #[test]
