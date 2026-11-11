@@ -43,7 +43,7 @@ import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnos
   assert.equal(r.queries, 3);
   assert.deepEqual(ran, ["q1", "q2", "q3"]);
   assert.deepEqual(progress, [[1, 1], [2, 3]]);
-  assert.deepEqual(calls[0][1], { strict: true, design: true });
+  assert.deepEqual(calls[0][1], { strict: true, design: true, digest: false });
   assert.equal(r.diagnostics[0].message, "Binder Error: nope", "a failed query is answered with its error");
   // cancelled before the next query
   let n = 0;

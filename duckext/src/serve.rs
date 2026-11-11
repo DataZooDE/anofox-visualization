@@ -1065,6 +1065,8 @@ fn run_check(st: &Authoring, body: &str) -> Result<String, String> {
             // files to lint against — `image/missing-file` never fires
             // here, with or without that option set.
             image_root: None,
+            // the Check button: no chart/drawn notes (#1095, the assistant's)
+            digest: false,
         },
         Duration::from_millis(timeout_ms),
     )?;
