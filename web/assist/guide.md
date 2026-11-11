@@ -468,6 +468,7 @@ Full rationale: `docs/dashboard-design.md`. **[lint]** = checked by `--check` (`
 | how concentrated: the top N of many items (products, customers) | `::PARETO` over every item only (its line is the share of the rows it gets, so after a `LIMIT` it ends at 100 %); for a top N: `::BARCHART` + the share of the **total** from SQL, `100 * sum(v) OVER (ORDER BY v DESC) / sum(v) OVER ()`, as a `::LINECHART` on `::Y2` with `'percent'::Y2FORMAT`, then `LIMIT` |
 | several measures per item (on-time %, lead days, order count per supplier) | a `::TABLE`: one row per item, a format per column (`::PERCENT`, `::METRIC`, `::MONEY`), `::COLORSCALE` on the one to compare — a chart shows one measure (two on `::Y2`), so it would drop the others |
 | a distribution | `::HISTOGRAM`, or `::BOXPLOT` / `::VIOLIN` by a category; too many rows to send → a box from statistics (`::Q1` `::MEDIAN` `::Q3`, computed in SQL) |
+| some bars must stand out (below a target, the top 3) | a status column from SQL as `::CATEGORY` with a `::COLORS` level map: `CASE WHEN rate < 50 THEN 'below 50 %' ELSE '50 % or more' END::CATEGORY, 'below 50 %:bad; 50 % or more:#9aa3af'::COLORS` (`::THRESHOLDS` on a chart only draws lines) |
 | two numbers | `::SCATTER` (third as `::BUBBLE` / `::SIZE`) |
 | two categories + a measure | `::HEATMAP` |
 | a forecast with its uncertainty | `::LINECHART` + one `::BAND_LOWER` / `::BAND_UPPER` pair per level (pivot long quantiles with `max(lower) FILTER (WHERE level = 0.95)`) |

@@ -342,7 +342,12 @@ class Tools:
             diags = json.loads(out).get("diagnostics", [])
         except ValueError:
             return False, clip(f"check failed: {err or out}")
-        errors = [x for x in diags if x.get("severity") == "error"]
+        # what the builder's propose refuses (web/assist.js strictCode):
+        # errors, and design/* and requires/* warnings (11-11: the model shipped
+        # a chart that dropped two asked-for measures past a warning)
+        strict = lambda c: (c or "").startswith(("design/", "requires/"))
+        errors = [x for x in diags if x.get("severity") == "error"
+                  or (x.get("severity") == "warning" and strict(x.get("code")))]
         if errors:
             return False, clip("\n".join(f"statement {x.get('stmt', 0) - 2}: {x.get('code')}: {x.get('message')}" for x in errors))
         rc, out, err = sandboxed([dash, "--svg", "chart.sql", "chart.svg", "--width", "900", *extra], d)
