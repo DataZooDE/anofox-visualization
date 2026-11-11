@@ -2135,6 +2135,18 @@ where
                 }),
         );
 
+        diags.extend(
+            role_ignored_diags(&p.roles, &rows)
+                .into_iter()
+                .map(|message| Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "chart/role-ignored",
+                    message,
+                    sql: short.clone(),
+                }),
+        );
+
         diags.extend(y2_diags(&p.roles, &p.names, &rows).into_iter().map(
             |(severity, code, message)| Diagnostic {
                 severity,
@@ -6923,6 +6935,141 @@ fn annotation_diags(roles: &[(usize, Role)]) -> Vec<(Severity, &'static str, Str
     out
 }
 
+/// #1117: roles a chart accepts and then does nothing with — found by
+/// rendering every role on bar / line / scatter / histogram charts with and
+/// without it (an identical SVG, no diagnostic). Each names where the role
+/// works. Browser-only roles (tooltips, animation, downloads) are not here:
+/// a static render never shows them.
+fn role_ignored_diags(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> Vec<String> {
+    let Some(kind) = chart_kind(roles) else {
+        return Vec::new();
+    };
+    let has = |r: Role| roles.iter().any(|(_, x)| *x == r);
+    let is_map = roles.iter().any(|(_, r)| {
+        matches!(
+            r,
+            Role::Geometry | Role::Region | Role::Lat | Role::Lon | Role::Origin | Role::Dest
+        )
+    });
+    // a KPI tile's ::SPARKLINE trend is a chart kind too, but the tile takes
+    // its ::DELTA and the rest
+    if is_map || is_kpi(roles) || has(Role::Table) || has(Role::PagedTable) || has(Role::Record) {
+        return Vec::new();
+    }
+    use Kind::*;
+    let lines = matches!(
+        kind,
+        Line | LinePercent | Step | Smooth | Area | AreaStacked
+    );
+    let points = matches!(kind, Point | Bubble | Jitter);
+    // a categorical x: text that is not a date
+    let x_discrete = role_index(roles, Role::X).is_some_and(|i| {
+        let t = column_texts(rows, i);
+        !t.is_empty()
+            && t.iter()
+                .all(|v| v.parse::<f64>().is_err() && !v.starts_with(|c: char| c.is_ascii_digit()))
+    });
+    let mut out = Vec::new();
+    if lines {
+        if let Some(i) = role_index(roles, Role::Points) {
+            let first = rows
+                .first()
+                .and_then(|r| r.get(&format!("c{i}")))
+                .map(|v| match v {
+                    Value::String(t) => t.trim().to_string(),
+                    v => v.to_string(),
+                });
+            if let Some(v) = first.filter(|v| v != "null") {
+                if !matches!(v.to_ascii_lowercase().as_str(), "auto" | "none" | "always") {
+                    out.push(format!(
+                        "::POINTS '{v}' does nothing — use 'auto', 'none' or 'always'"
+                    ));
+                }
+            }
+        }
+    }
+    let mut ignored = |r: Role, why: &str| {
+        if has(r) {
+            out.push(format!("::{} does nothing here — {why}", r.token()));
+        }
+    };
+    for r in [
+        Role::Classes,
+        Role::Midpoint,
+        Role::Projection,
+        Role::MapTiles,
+        Role::NorthArrow,
+        Role::Boundaries,
+    ] {
+        ignored(r, "it styles a map (::REGION, ::MAP, ::LAT/::LON)");
+    }
+    for r in [
+        Role::Delta,
+        Role::DeltaFormat,
+        Role::DeltaLabel,
+        Role::DeltaLowerGood,
+    ] {
+        ignored(r, "it belongs to a KPI tile (::METRIC / ::MONEY / ::PERCENT); on a chart compare with a second measure or ::Y2");
+    }
+    if !matches!(kind, Gauge) {
+        ignored(Role::GaugeLabels, "it labels a ::GAUGE's zones");
+    }
+    if !matches!(kind, Gauge | Bullet) {
+        ignored(Role::Range, "it sets a ::GAUGE's domain or a ::BULLET's bands; on a chart use ::YBREAKS or ::YSCALE");
+    }
+    if !has(Role::Category) && !matches!(kind, Gauge) {
+        ignored(Role::GaugeColors, "on a chart it maps ::CATEGORY levels to colours ('below:bad; above:#9aa3af'); add the ::CATEGORY column");
+    }
+    ignored(Role::Direction, "it lays out a ::DIAGRAM");
+    if !has(Role::Facet) && !has(Role::FacetFree) {
+        ignored(
+            Role::FacetCols,
+            "it sets the panels per row of a ::FACET / ::FACET_FREE, and this chart has none",
+        );
+    }
+    if !has(Role::Y2) {
+        ignored(
+            Role::Y2Format,
+            "it formats the ::Y2 axis, and this chart has none",
+        );
+    }
+    if !points {
+        ignored(Role::Hexbin, "it bins a ::SCATTER's points (or a map's)");
+        ignored(
+            Role::Alpha,
+            "it sets a scatter's / bubble's / jitter's (or a map layer's) opacity",
+        );
+    }
+    if !lines {
+        ignored(Role::LineStyle, "it styles a line or area chart's lines");
+        ignored(Role::Points, "it sets a line or area chart's point markers");
+    }
+    if matches!(kind, Histogram) {
+        for r in [
+            Role::Flip,
+            Role::YFormat,
+            Role::YScale,
+            Role::DataLabels,
+            Role::AbLine,
+            Role::Annotate,
+            Role::MarkArea,
+            Role::LabelTop,
+            Role::Thresholds,
+        ] {
+            ignored(r, "a ::HISTOGRAM does not draw it (yet); for the counts themselves aggregate in SQL and use ::BARCHART");
+        }
+    }
+    if x_discrete {
+        for r in [Role::XFormat, Role::XScale, Role::XBreaks] {
+            ignored(
+                r,
+                "this chart's x is categories (text), not numbers or dates",
+            );
+        }
+    }
+    out
+}
+
 /// `::Y2` (#919): it must name one of the chart's measures other than the
 /// first (that one is the left axis'), and it is ignored on a flipped or
 /// `::YSCALE`-transformed chart.
@@ -11295,6 +11442,51 @@ mod design_tests {
         assert!(codes("SELECT m::XAXIS, v::LINECHART, d::XLINE FROM t;").is_empty());
         // a KPI's goal
         assert!(codes("SELECT v::METRIC, 100::REFLINE FROM t;").is_empty());
+    }
+
+    #[test]
+    fn roles_a_chart_ignores_are_named() {
+        let data = vec![json!({ "c0": "A", "c1": 10.0, "c2": 3.0, "c3": "x" })
+            .as_object()
+            .unwrap()
+            .clone()];
+        let msgs = |sql: &str| -> Vec<String> {
+            check_opts(
+                sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code == "chart/role-ignored")
+            .map(|d| d.message)
+            .collect()
+        };
+        let m = msgs("SELECT k::XAXIS, v::BARCHART, 5::DELTA, 'quantile 5'::CLASSES, 2::FACET_NCOL, '%b'::XFORMAT FROM t;");
+        assert_eq!(m.len(), 4, "{m:?}");
+        assert!(
+            m.iter().any(|x| x.starts_with("::DELTA does nothing here")),
+            "{m:?}"
+        );
+        assert!(
+            msgs("SELECT v::HISTOGRAM, 1::FLIP FROM t;")[0].starts_with("::FLIP does nothing here")
+        );
+        let p = msgs("SELECT k::XAXIS, v::LINECHART, 1::POINTS FROM t;");
+        assert!(
+            p.len() == 1
+                && p[0].starts_with("::POINTS '")
+                && p[0].ends_with("use 'auto', 'none' or 'always'"),
+            "{p:?}"
+        );
+        // where they work: nothing
+        assert!(msgs(
+            "SELECT k::XAXIS, v::LINECHART, g::CATEGORY, 'a:bad'::COLORS, 'none'::POINTS FROM t;"
+        )
+        .is_empty());
+        assert!(msgs("SELECT v::METRIC, 5::DELTA FROM t;").is_empty());
+        assert!(msgs("SELECT w::XAXIS, v::SCATTER, 0.5::ALPHA FROM t;").is_empty());
     }
 
     #[test]

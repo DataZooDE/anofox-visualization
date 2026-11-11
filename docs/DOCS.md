@@ -2668,7 +2668,7 @@ statement of its own is an error (`chart/y2-no-chart`). `--check`:
 pie chart draws its role columns only. `--check` warns on a number column
 with no role beside the measure (`design/unused-measure`): several measures
 per item belong in a `::TABLE`, a value for the tooltip takes `::TOOLTIP`.
-It also warns on a `::PARETO` after a `LIMIT` (`chart/pareto-limit`): the
+`chart/role-ignored` (#1117) names a role the chart accepts but does nothing with — a map's ::CLASSES on a bar chart, a KPI's ::DELTA, ::FACET_NCOL without a facet, ::FLIP on a ::HISTOGRAM — and where it does work (`scripts/role-sweep.py` finds them by rendering every role with and without it). It also warns on a `::PARETO` after a `LIMIT` (`chart/pareto-limit`): the
 cumulative line is the share of the rows shown, so for a top N draw
 `::BARCHART` bars and the share of the total, computed in SQL, as a
 `::LINECHART` on `::Y2`.
