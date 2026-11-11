@@ -32,6 +32,7 @@ import urllib.error
 import urllib.request
 
 import auth
+import claims
 from pathlib import Path
 
 import duckdb
@@ -521,9 +522,15 @@ class Scripted:
 
 # ---------------------------------------------------------------- one run
 
-def phase(model, system, tools, messages, kit, log):
-    """Model calls until answer() or MAX_ROUNDS; returns the answer text (or None)."""
+def phase(model, system, tools, messages, kit, log, evidence=None, claim_mode="off"):
+    """Model calls until answer() or MAX_ROUNDS; returns the answer text (or None).
+
+    #1116: `evidence` collects the request and every tool input and output of
+    the conversation; with claim_mode 'shadow' the answer's unsupported numbers
+    are logged, with 'on' they also go back to the model once."""
     failed_chart = False
+    evidence = [] if evidence is None else evidence
+    sent_back = False
     for _ in range(MAX_ROUNDS):
         t0 = time.time()
         msg = model(system, tools, messages)
@@ -537,16 +544,27 @@ def phase(model, system, tools, messages, kit, log):
         results, answer = [], None
         for u in uses:
             if u["name"] == "answer":
-                answer = u["input"].get("text", "")
+                text = u["input"].get("text", "")
+                bad = claims.unsupported(text, evidence) if claim_mode != "off" else []
+                log.setdefault("claim_check", []).append({"unsupported": bad, "sent_back": claim_mode == "on" and bool(bad) and not sent_back})
+                if claim_mode == "on" and bad and not sent_back:
+                    sent_back = True
+                    results.append({"type": "tool_result", "tool_use_id": u["id"], "content": claims.feedback(bad), "is_error": True})
+                    call["tools"].append({"name": "answer", "kind": "answer", "ok": False})
+                    continue
+                answer = text
                 results.append({"type": "tool_result", "tool_use_id": u["id"], "content": "ok"})
                 call["tools"].append({"name": "answer", "kind": "answer", "ok": True})
                 continue
             ok, text = kit.run(u["name"], u["input"])
+            evidence += [json.dumps(u["input"]), text]
             kind = "explore" if u["name"] in EXPLORE else ("repair" if failed_chart else "chart")
             if u["name"] not in EXPLORE:
                 failed_chart = not ok
             call["tools"].append({"name": u["name"], "kind": kind, "ok": ok,
-                                  "in_chars": len(json.dumps(u["input"])), "out_chars": len(text)})
+                                  "in_chars": len(json.dumps(u["input"])), "out_chars": len(text),
+                                  # #1116: kept for checking the checker against the judge
+                                  "out": text[:4000]})
             results.append({"type": "tool_result", "tool_use_id": u["id"], "content": text, **({} if ok else {"is_error": True})})
         messages.append({"role": "user", "content": results})
         if answer is not None:
@@ -568,15 +586,17 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
     messages = [{"role": "user", "content": task["question"]}]
     rec = {"run": run_id, "task": task["id"], "dataset": task["dataset"], "arm": arm, "rep": rep,
            "model": getattr(model, "model", "?"), "phases": []}
+    evidence = [task["question"]]  # #1116: the request and every tool's text
     for ph, text in (("first", task["question"]), ("followup", task["followup"])):
         prev = None
         if ph == "followup":
             messages.append({"role": "user", "content": text})
             prev, kit.chart = kit.chart, None  # the follow-up's chart is the one it draws
+            evidence.append(text)
         log = {"phase": ph, "calls": []}
         t0 = time.time()
         try:
-            log["answer"] = phase(model, system, tools, messages, kit, log)
+            log["answer"] = phase(model, system, tools, messages, kit, log, evidence, cfg.get("claim_check", "off"))
         except AccountError:
             raise
         except RuntimeError as e:
@@ -640,6 +660,8 @@ def main():
     ap.add_argument("--vega-ref", default="~/.claude/skills/altair")
     ap.add_argument("--out", required=True)
     ap.add_argument("--dry", action="store_true", help="scripted turns, no API")
+    ap.add_argument("--claim-check", choices=["off", "shadow", "on"], default="shadow",
+                    help="#1116: log (shadow) or also send back (on) an answer's numbers nothing backs")
     ap.add_argument("--no-digest", action="store_true",
                     help="the chart tools answer 'ok' only, not what they drew (#1095)")
     ap.add_argument("--yes", action="store_true", help="don't ask before spending")
@@ -665,12 +687,12 @@ def main():
     (out / "charts").mkdir(parents=True, exist_ok=True)
     cfg = {"data": str(Path(a.data).resolve()), "dashboard": str(Path(a.dashboard).resolve()), "python": a.python,
            "boundaries": str(Path(a.boundaries).resolve()) if a.boundaries else None,
-           "workdir": str((out / "work").resolve()), "digest": not a.no_digest}
+           "workdir": str((out / "work").resolve()), "digest": not a.no_digest, "claim_check": a.claim_check}
     Path(cfg["workdir"]).mkdir(exist_ok=True)
     refs = load_refs(a)
 
     meta = {"model": a.model, "effort": a.effort, "reps": a.reps, "arms": arms, "tasks": [t["id"] for t in tasks],
-            "dry": a.dry, "digest": not a.no_digest, "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "dry": a.dry, "digest": not a.no_digest, "claim_check": a.claim_check, "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "ref_sha": {k: hashlib.sha256(v.encode()).hexdigest()[:12] for k, v in refs.items() if k in arms},
             "ref_chars": {k: len(v) for k, v in refs.items() if k in arms}}
     if not a.dry:

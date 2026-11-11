@@ -203,6 +203,26 @@ def main():
                 cells.append(f"{median(x['total'] for x in R):,.0f}" + (f" ({ps}/{len(R)})" if judged else ""))
             L.append(f"| {t} | {phase} | " + " | ".join(cells) + " |")
 
+    # #1116: the claim check against the judge — how many answers it would
+    # flag (shadow) or sent back (on), among the judge's right and wrong ones
+    cc = [(r, ph) for r in runs for ph in r["phases"] if ph.get("claim_check")]
+    if cc and judged:
+        L.append("\n## Claim check (#1116)\n")
+        L.append(f"Mode `{meta.get('claim_check', '?')}`. An answer counts as flagged when its first answer call had numbers nothing backs.\n")
+        L.append("| arm | numbers right: flagged | numbers wrong: flagged |")
+        L.append("|---|---|---|")
+        for arm in arms:
+            c = {True: [0, 0], False: [0, 0]}
+            for r, ph in cc:
+                j = judg.get((r["run"], ph["phase"]))
+                if r["arm"] != arm or not j or j.get("numbers_correct") is None:
+                    continue
+                k = bool(j["numbers_correct"])
+                c[k][0] += bool(ph["claim_check"][0]["unsupported"])
+                c[k][1] += 1
+            L.append(f"| {arm} | {c[True][0]}/{c[True][1]} | {c[False][0]}/{c[False][1]} |")
+        summary["claim_check"] = meta.get("claim_check")
+
     (out / "report.md").write_text("\n".join(L) + "\n")
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
     print(out / "report.md")
