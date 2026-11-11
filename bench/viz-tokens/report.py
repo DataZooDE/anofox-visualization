@@ -167,7 +167,7 @@ def main():
             if not R:
                 continue
             m = lambda k: sum(x["split"].get(k, 0) for x in R) / len(R)
-            ref = sum(x["calls"] for x in R) / len(R) * prefix[arm] if arm in prefix else None
+            ref = sum(x["calls"] for x in R) / len(R) * prefix[arm] if prefix.get(arm) else None
             L.append(f"| {arm} | {m('explore'):,.0f} | {m('chart'):,.0f} | {m('repair'):,.0f} | {m('answer'):,.0f} | {m('none'):,.0f} "
                      f"| {'–' if ref is None else f'{ref:,.0f}'} | {sum(x['artifact_chars'] for x in R) / len(R):,.0f} |")
 

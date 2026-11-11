@@ -324,12 +324,26 @@ class Anthropic:
                 raise RuntimeError(f"API {e.code}: {e.read()[:500]!r}")
 
     def count(self, system, tools):
+        """The prefix's input tokens, or None: only reported, so a failure
+        (11-11: an unexplained 400) is logged with the API's own text and
+        the run goes on."""
         body = {"model": self.model, "system": system, "tools": tools,
                 "messages": [{"role": "user", "content": "x"}]}
-        req = urllib.request.Request(API + "/count_tokens", data=json.dumps(body).encode(), method="POST", headers={
-            **auth.headers(), "anthropic-version": "2023-06-01", "content-type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read())["input_tokens"]
+        for attempt in range(3):
+            req = urllib.request.Request(API + "/count_tokens", data=json.dumps(body).encode(), method="POST", headers={
+                **auth.headers(), "anthropic-version": "2023-06-01", "content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    return json.loads(r.read())["input_tokens"]
+            except urllib.error.HTTPError as e:
+                if e.code == 401 and attempt < 2:
+                    auth.invalidate()
+                    continue
+                print(f"count_tokens: API {e.code}: {e.read()[:500]!r} (prefix tokens not reported)", file=sys.stderr)
+                return None
+            except (urllib.error.URLError, TimeoutError) as e:
+                print(f"count_tokens: {e} (prefix tokens not reported)", file=sys.stderr)
+                return None
 
 
 class Scripted:
