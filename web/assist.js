@@ -799,7 +799,7 @@ export const TOOLS = [
   },
   {
     name: "check_dashboard",
-    description: "Check a whole dashboard script without showing it: every statement runs in a scratch session, as `dashboard --check --strict` does. Returns per statement its kind (setup, input, panel), its roles and its row count or error, and the lint diagnostics (errors, warnings, notes) with statement numbers. Fix every error and warning before proposing.",
+    description: "Check a whole dashboard script without showing it: every statement runs in a scratch session, as `dashboard --check --strict` does. Returns per statement its kind (setup, input, panel), its roles and its row count or error, and the lint diagnostics (errors, warnings, notes) with statement numbers. Fix every error and warning before proposing. A chart/drawn note says what a chart draws (per series its range, first / last, min / max): write titles and the summary from those numbers.",
     input_schema: obj({ sql: str("The complete dashboard script") }),
     strict: true,
   },
@@ -1579,7 +1579,10 @@ export function wasmTools(opts) {
       // dashboard uses: the lint may glob() it.
       const allowed = new Set([...known, ...planned.flatMap(requiresOf).filter((x) => !looksLikeUrl(x) && !x.includes("${"))]);
       const run = scratchRunner(db, { prepare: PREPARE, timeoutMs: checkQueryMs, guard: guardFor(allowed, await catalogNames()) });
-      const res = await lintScript(sql, { step: lintStep, run, strict: true, cancelled: () => !!signal?.aborted || Date.now() > until });
+      // #1095: what each chart draws (chart/drawn) — its numbers reach the
+      // model only with sample rows on (quietDiagnostic withholds the
+      // message otherwise: the code is not on SAFE_CODES)
+      const res = await lintScript(sql, { step: lintStep, run, strict: true, digest: true, cancelled: () => !!signal?.aborted || Date.now() > until });
       if (!res && signal?.aborted) return { ok: false, cancelled: true, text: "cancelled", issues: [], diagnostics: [], statements: [] };
       if (!res) throw new Error(`the check took longer than ${checkMs / 1000} s: make the setup lighter`);
       const named = await namesIn(sql);

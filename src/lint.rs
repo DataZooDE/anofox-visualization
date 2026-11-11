@@ -214,6 +214,11 @@ pub struct LintOptions {
     /// folder to check against) skips that one diagnostic entirely; every
     /// other image diagnostic is unaffected.
     pub image_root: Option<std::path::PathBuf>,
+    /// Also say what each chart draws (#1095): a `chart/drawn` note per
+    /// chart with its series' numbers ([`crate::summarize`]). Off by
+    /// default; `dashboard --check --digest` and the assistant's check turn
+    /// it on.
+    pub digest: bool,
 }
 
 impl Default for LintOptions {
@@ -222,6 +227,7 @@ impl Default for LintOptions {
             design: true,
             stateful_session: false,
             image_root: None,
+            digest: false,
         }
     }
 }
@@ -2416,13 +2422,28 @@ where
             }),
             // The plotting engine's build warnings: the panel renders, but some
             // data was dropped (non-finite positions, a layer with no data).
-            Ok(r) => diags.extend(r.warnings.iter().map(|w| Diagnostic {
-                severity: Severity::Warning,
-                stmt,
-                code: "render-warning",
-                message: one_line(w),
-                sql: short.clone(),
-            })),
+            Ok(r) => {
+                diags.extend(r.warnings.iter().map(|w| Diagnostic {
+                    severity: Severity::Warning,
+                    stmt,
+                    code: "render-warning",
+                    message: one_line(w),
+                    sql: short.clone(),
+                }));
+                if let Some(text) = opts
+                    .digest
+                    .then(|| crate::summarize(&cols, 460, 300, &RenderOptions::default()))
+                    .flatten()
+                {
+                    diags.push(Diagnostic {
+                        severity: Severity::Note,
+                        stmt,
+                        code: "chart/drawn",
+                        message: digest_text(&text),
+                        sql: short.clone(),
+                    });
+                }
+            }
         }
 
         // A diagram's ids, edges, direction, size and loops.
@@ -5376,6 +5397,8 @@ pub fn step_json(script: &str, known_json: &str, opts_json: &str) -> String {
             // The browser lint has no folder to check `assets/` against
             // (#514 PR B) — `image/missing-file` never fires here.
             image_root: None,
+            // #1095: the assistant's check asks for the chart/drawn notes
+            digest: flag("digest", false),
         },
     );
     serde_json::json!({
@@ -6715,6 +6738,17 @@ fn unused_measure_diag(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> 
          only: several measures per item → a ::TABLE; on hover only → ::TOOLTIP",
         if unused.len() == 1 { "" } else { "s" }
     ))
+}
+
+/// A chart's digest as one note: its lines joined, at most ~1,500 characters
+/// (the digest lists at most 12 series per layer already).
+fn digest_text(text: &str) -> String {
+    let t = text.lines().collect::<Vec<_>>().join(" | ");
+    if t.chars().count() > 1500 {
+        format!("{}…", t.chars().take(1499).collect::<String>())
+    } else {
+        t
+    }
 }
 
 /// `::Y2` (#919): it must name one of the chart's measures other than the
@@ -10972,6 +11006,37 @@ mod design_tests {
             .map(|d| (d.severity, d.code))
             .collect();
         assert_eq!(codes, vec![(Severity::Note, "chart/hexbin-category")]);
+    }
+
+    #[test]
+    fn digest_says_what_a_chart_draws() {
+        // #1095: with `digest`, a chart/drawn note quotes the chart's numbers
+        let data: Vec<_> = [("EU", 1200.0), ("US", 1800.0), ("APAC", 900.0)]
+            .iter()
+            .map(|(r, v)| json!({ "c0": r, "c1": v }).as_object().unwrap().clone())
+            .collect();
+        let drawn = |digest: bool| -> Vec<String> {
+            check_opts(
+                "SELECT region::XAXIS, revenue::BARCHART FROM t;",
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    digest,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .filter(|d| d.code == "chart/drawn")
+            .map(|d| d.message)
+            .collect()
+        };
+        assert!(drawn(false).is_empty());
+        let m = drawn(true);
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(
+            m[0].contains("3 marks, x EU … APAC") && m[0].contains("max 1800 at US"),
+            "{m:?}"
+        );
     }
 
     #[test]

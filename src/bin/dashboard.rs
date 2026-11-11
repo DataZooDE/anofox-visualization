@@ -56,7 +56,8 @@ const USAGE: &str = "usage:\n  \
                                              titles and file names the servers skip\n  \
                [--db f --policy policy.json]  …and what an access policy refuses / hides\n  \
                [--data <dir>]                 getvariable('anofox_data') = dir, as a locked server\n  \
-               [--agent]                      …and what publishing as an agent needs (#862)\n  \
+               [--agent]                      …and what publishing as an agent needs (#862)
+  [--digest]                     …and what each chart draws (chart/drawn notes, #1095)\n  \
      dashboard --publish <file.sql> --out d [--mapping v.sql --contract c.sql]  the agent bundle of its -- @question lines: agent.json,\n  \
                                              mcp-tools.json, capabilities.md, questions.jsonl, a copy\n  \
                                              of the .sql (and the mapping), and the digest to pin as\n  \
@@ -1433,10 +1434,13 @@ fn cmd_check(args: &[String]) {
     let mut options: Option<String> = None;
     // --agent (#862): also what publishing as an agent needs (agent/*).
     let mut agent = false;
+    // --digest (#1095): a chart/drawn note per chart, what it draws.
+    let mut digest = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--agent" => agent = true,
+            "--digest" => digest = true,
             "--db" => db = it.next().cloned(),
             "--data" => data = it.next().cloned(),
             "--policy" => policy = it.next().cloned(),
@@ -1534,6 +1538,7 @@ fn cmd_check(args: &[String]) {
                 design,
                 stateful_session: true,
                 image_root: image_root.clone(),
+                digest,
             },
         );
         if let (Some(p), Some(db)) = (&policy, db.as_deref()) {
@@ -2788,6 +2793,7 @@ fn cmd_site(args: &[String]) {
                     design: false,
                     stateful_session: true,
                     image_root: image_root.clone(),
+                    digest: false,
                 },
             );
             diags.extend(
