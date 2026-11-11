@@ -29,6 +29,40 @@ impl std::fmt::Debug for End {
     }
 }
 
+/// #1107: each `::ORIGIN` / `::DEST` cell as the digest names it — a
+/// point's own `name`, a region code's boundary name (else the code), else
+/// `lon,lat`; "" for a missing end.
+pub(crate) fn end_labels(values: &[Value]) -> Vec<String> {
+    let ends: Vec<End> = values.iter().map(end_of).collect();
+    let codes: Vec<Option<String>> = ends
+        .iter()
+        .map(|e| match e {
+            End::Code(c) => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+    let m = codes
+        .iter()
+        .any(|c| c.is_some())
+        .then(|| boundaries::match_codes(&codes, None))
+        .flatten();
+    ends.iter()
+        .enumerate()
+        .map(|(i, e)| match e {
+            End::Point(_, Some(n)) => n.clone(),
+            End::Point([lon, lat], None) => format!("{lon:.2},{lat:.2}"),
+            End::Code(c) => match m.as_ref().map(|m| m.rows[i].as_slice()) {
+                Some([r]) => format!(
+                    "{} ({c})",
+                    m.as_ref().unwrap().layer.regions[*r].name(false)
+                ),
+                _ => c.clone(),
+            },
+            End::Missing => String::new(),
+        })
+        .collect()
+}
+
 /// Parse one `::ORIGIN`/`::DEST` cell. The struct-as-JSON convention: a
 /// `Value::Str` is JSON when it starts with `{` (DuckDB structs arrive as
 /// serialized JSON text, see `src/sql.rs`).

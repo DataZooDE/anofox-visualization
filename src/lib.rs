@@ -2279,7 +2279,7 @@ pub fn summarize(cols: &[Column], width: u32, height: u32, o: &RenderOptions) ->
     let (w, h) = (clamp_dim(width as u64), clamp_dim(height as u64));
     // a choropleth: its regions by name and value (#1107) — the names are
     // the boundary layer's, which the plot itself never carries
-    if let Some(text) = map_digest(cols) {
+    if let Some(text) = map_digest(cols).or_else(|| flow_digest(cols)) {
         return Some(text);
     }
     let cols = downsample::prepare(cols, o);
@@ -2347,6 +2347,67 @@ fn map_digest(cols: &[Column]) -> Option<String> {
         } else {
             format!("; lowest: {}", fmt(&low))
         }
+    ))
+}
+
+/// A flow map's digest (#1107: an answer miscounted the links per centre):
+/// links per origin with their total, and the five largest links — sized by
+/// the measure, else `::SIZE`, else counted.
+fn flow_digest(cols: &[Column]) -> Option<String> {
+    let o = map::flows::end_labels(&find_role(cols, Role::Origin)?.values);
+    let d = map::flows::end_labels(&find_role(cols, Role::Dest)?.values);
+    let w = cols
+        .iter()
+        .find(|c| matches!(c.role, Role::Value(_)))
+        .or_else(|| find_role(cols, Role::Size));
+    let links: Vec<(String, String, f64)> = o
+        .into_iter()
+        .zip(d)
+        .enumerate()
+        .filter(|(_, (a, b))| !a.is_empty() && !b.is_empty())
+        .map(|(i, (a, b))| {
+            let v = w.map_or(Some(1.0), |w| w.values.get(i).and_then(cell_num));
+            (a, b, v.filter(|v| v.is_finite()).unwrap_or(0.0))
+        })
+        .collect();
+    if links.is_empty() {
+        return None;
+    }
+    let mut per: Vec<(String, usize, f64)> = Vec::new();
+    for (a, _, v) in &links {
+        match per.iter_mut().find(|p| p.0 == *a) {
+            Some(p) => {
+                p.1 += 1;
+                p.2 += v;
+            }
+            None => per.push((a.clone(), 1, *v)),
+        }
+    }
+    per.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let mut top = links.clone();
+    top.sort_by(|a, b| b.2.total_cmp(&a.2));
+    // an unnamed ::SIZE keeps its positional name (c2): say what it is
+    let unit = match w {
+        None => "counted".to_string(),
+        Some(w) if w.name.starts_with('c') && w.name[1..].bytes().all(|b| b.is_ascii_digit()) => {
+            "by size".to_string()
+        }
+        Some(w) => w.name.clone(),
+    };
+    Some(format!(
+        "flows: {} links from {} origins ({unit}); per origin: {}; largest: {}",
+        links.len(),
+        per.len(),
+        per.iter()
+            .take(12)
+            .map(|(a, n, v)| format!("{a} {n} links, {}", digest_num(*v)))
+            .collect::<Vec<_>>()
+            .join("; "),
+        top.iter()
+            .take(5)
+            .map(|(a, b, v)| format!("{a} → {b} {}", digest_num(*v)))
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
 }
 
