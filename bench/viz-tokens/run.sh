@@ -21,7 +21,7 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-SET=smoke REPS="" MODEL=claude-sonnet-5 ARMS=anofox-lean BASE="" DRY="" SEE=off
+SET=smoke REPS="" MODEL=claude-sonnet-5 ARMS=anofox-lean BASE="" DRY="" SEE=off RESUME=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --set) SET=$2; shift 2 ;;
@@ -29,6 +29,7 @@ while [ $# -gt 0 ]; do
     --model) MODEL=$2; shift 2 ;;
     --arms) ARMS=$2; shift 2 ;;
     --baseline) BASE=$2; shift 2 ;;
+    --resume) RESUME=$2; shift 2 ;;  # continue a stopped run in its own folder
     --dry) DRY=1; shift ;;
     --see-chart) SEE=$2; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
@@ -54,13 +55,13 @@ fi
 [ -f "$ROOT/web/pkg/anofox_visualization_bg.wasm" ] \
   || (cd "$ROOT" && wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm)
 [ -d "$DATA" ] || "$PY" "$HERE/make-data.py" "$DATA"
-OUT=$RESULTS/$SET-$MODEL-$(date +%Y%m%d-%H%M%S)
+OUT=${RESUME:-$RESULTS/$SET-$MODEL-$(date +%Y%m%d-%H%M%S)}
 # the previous run of this set with this model, before this one exists
-[ -n "$BASE" ] || BASE=$(find "$RESULTS" -maxdepth 1 -type d -name "$SET-$MODEL-*" | sort | tail -1)
+[ -n "$BASE" ] || BASE=$(find "$RESULTS" -maxdepth 1 -type d -name "$SET-$MODEL-*" ! -path "$OUT" | sort | tail -1)
 echo "engine $ENGINE · set $SET · $REPS repeat(s) · model $MODEL · arms $ARMS · baseline ${BASE:-none}"
 "$PY" "$HERE/harness.py" --tasks "$TASKS" --arms "$ARMS" --reps "$REPS" --model "$MODEL" --yes \
   --data "$DATA" --dashboard "$DASH" --pkg "$ROOT/web/pkg" --boundaries "$ROOT/web/data/boundaries" \
-  --out "$OUT" --see-chart "$SEE" ${DRY:+--dry} 2>&1 | tee "$OUT.log"
+  --out "$OUT" --see-chart "$SEE" ${DRY:+--dry} 2>&1 | tee -a "$OUT.log"
 # JUDGE_VOTES: judge calls per answer (#1121; the weekly CI eval uses 1 to stay in budget)
 [ -n "$DRY" ] || "$PY" "$HERE/judge.py" --data "$DATA" --votes "${JUDGE_VOTES:-3}" "$OUT" 2>&1 | tee -a "$OUT.log"
 "$PY" "$HERE/report.py" "$OUT"
