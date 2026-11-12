@@ -342,7 +342,7 @@ class Tools:
             if name == "render" and self.arm == "vegalite":
                 return self.render_vegalite(inp["sql"], inp.get("spec"))
             return False, f"unknown tool {name}"
-        except (duckdb.Error, KeyError, TypeError, ValueError) as e:
+        except Exception as e:  # 11-12: an AttributeError ended a whole run; the model gets it instead
             return False, f"{type(e).__name__}: {e}"
 
     def step_dir(self):
@@ -454,7 +454,10 @@ class Tools:
         art = json.dumps({"sql": sql, "spec": {k: v for k, v in spec.items() if k != "data"}})
         self.chart = (png.read_bytes(), art)
         self.fresh = self.chart[0]
-        text = vegalite_digest(spec, df) if self.cfg.get("digest") else ""
+        try:
+            text = vegalite_digest(spec, df) if self.cfg.get("digest") else ""
+        except Exception:  # 11-12: an encoding given as a string; a digest never fails a chart
+            text = ""
         return True, clip("ok: drawn" + (f"\n{DRAWN_HEAD}\n{text}" if text else ""))
 
 
@@ -751,6 +754,14 @@ def main():
         print(f"{n} runs ({len(tasks)} tasks × {len(arms)} arms × {a.reps}), prefix tokens {meta['prefix_tokens']}")
         if not a.yes and input("Spend on these runs? [y/N] ").strip().lower() != "y":
             sys.exit("stopped")
+    # 11-12: a run that stopped is continued into the same folder — the runs
+    # already in runs.jsonl are skipped, and the first start time is kept
+    done = set()
+    if (out / "runs.jsonl").exists():
+        done = {json.loads(l)["run"] for l in (out / "runs.jsonl").read_text().splitlines() if l.strip()}
+    if done and (out / "meta.json").exists():
+        meta["started"] = json.loads((out / "meta.json").read_text()).get("started", meta["started"])
+        print(f"resuming: {len(done)} runs already done", flush=True)
     (out / "meta.json").write_text(json.dumps(meta, indent=1))
 
     # interleave arms per task and rep, so drift over time hits every arm alike
@@ -758,6 +769,8 @@ def main():
         for rep in range(1, a.reps + 1):
             for t in tasks:
                 for arm in arms:
+                    if f"{t['id']}__{arm}__r{rep}" in done:
+                        continue
                     model = Scripted(base(arm)) if a.dry else Anthropic(None, a.model, a.effort)
                     try:
                         rec = run_one(t, arm, rep, model, cfg, out, refs)
