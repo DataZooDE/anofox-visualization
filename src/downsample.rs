@@ -303,6 +303,8 @@ fn aggregate(cols: Vec<Column>) -> Vec<Column> {
     let ci = cols.iter().position(|c| c.role == Role::Category);
     let mut group_of: HashMap<String, usize> = HashMap::new();
     let mut groups: Vec<Vec<usize>> = Vec::new();
+    // a row index into several row-aligned columns
+    #[allow(clippy::needless_range_loop)]
     for r in 0..n {
         let mut k = String::new();
         for idx in [xi, ci].into_iter().flatten() {
@@ -365,6 +367,7 @@ fn lttb_lines(cols: Vec<Column>, kind: Kind, max: usize) -> Vec<Column> {
     let ci = cols.iter().position(|c| c.role == Role::Category);
     let mut series: HashMap<String, Vec<usize>> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
+    #[allow(clippy::needless_range_loop)]
     for r in 0..n {
         let k = ci.map(|c| key(&cols[c].values[r])).unwrap_or_default();
         series
