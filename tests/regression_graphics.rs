@@ -2855,7 +2855,7 @@ fn hist_values() -> Vec<f64> {
 fn a_sparse_label_names_its_points_on_a_scatter() {
     // 11-11 bench (rel-label-outliers): `CASE WHEN rnk <= 5 THEN name END
     // ::LABEL` drew the names only into the tooltip
-    let xs: Vec<f64> = (0..40).map(|i| f64::from(i)).collect();
+    let xs: Vec<f64> = (0..40).map(f64::from).collect();
     let ys: Vec<f64> = (0..40).map(|i| f64::from(i * 7 % 13)).collect();
     let names = |every: bool| -> Vec<Value> {
         (0..40)
