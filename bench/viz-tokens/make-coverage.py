@@ -485,7 +485,11 @@ T = [
      "a normal Q-Q plot (sample against theoretical quantiles with a reference line); the answer says whether it is normal"),
     ("radar-suppliers", "comparison", "lead_times",
      "Give me a scorecard of the suppliers: on-time rate, average lead time, cancelled share and number of order lines, side by side.",
-     f"SELECT name, avg((first_at <= promised_at)::INT) AS on_time, avg(lead_days) AS lead_days, sum(cancelled_qty) / sum(ordered_qty) AS cancelled_share, count(*) AS lines FROM {LT} GROUP BY 1 ORDER BY 2 DESC",
+     # every order line: the receipts LEFT JOINed, so cancelled and open lines
+     # count in the cancelled share and the line count (#1121: an inner join
+     # dropped exactly the cancelled lines); on time and lead time over the
+     # received ones
+     f"SELECT s.name, avg((f.first_at <= h.promised_at)::INT) AS on_time, avg(f.first_at - h.ordered_at) AS lead_days, sum(coalesce(h.cancelled_qty, 0)) / sum(h.ordered_qty) AS cancelled_share, count(*) AS lines FROM po_history h LEFT JOIN {FIRST} f USING (po_id, line_id) JOIN suppliers s USING (supplier_id) GROUP BY 1 ORDER BY 2 DESC",
      "Only the three worst on time.",
      f"SELECT name, avg((first_at <= promised_at)::INT) AS on_time FROM {LT} GROUP BY 1 ORDER BY 2 LIMIT 3",
      "all four measures per supplier, comparable (a table with formats, a radar, or small bars per measure)"),
