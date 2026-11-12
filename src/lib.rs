@@ -798,6 +798,12 @@ pub enum Role {
     /// A `::DIAGRAM` node's swimlane (`::LANE`): nodes of one lane share a
     /// band across the layers.
     Lane,
+    /// A `::DIAGRAM` node's mark (`::SHAPE`, #1151): `box`, `circle`,
+    /// `filled-circle`, `square`, `filled-square`, `text`, or a factor
+    /// graph's kind (`factor`, `variable`, `data`, `equality`, `delta`,
+    /// `constant`). A shaped node makes the diagram a factor graph: its
+    /// lanes are straight bands and its edges undirected.
+    Shape,
     /// Hide or place a chart's legend / colourbar (`::LEGEND`): `'none'`,
     /// `'top'`, `'right'`, `'bottom'` or `'left'`. Without it, a chart's
     /// legend sits where it always has (unchanged). Read from the first value.

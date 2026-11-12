@@ -1,0 +1,14 @@
+id,kind,name,label,slice,layer,plate,deterministic
+v0,data,y[0],y_{0},0,obs,y,false
+v1,data,y[1],y_{1},1,obs,y,false
+v2,data,y[2],y_{2},2,obs,y,false
+v3,data,y[3],y_{3},3,obs,y,false
+v4,variable,theta,\theta,,param,,false
+v5,constant,2,2,,param,,false
+v6,constant,3,3,,param,,false
+f0,factor,Beta,Beta,,param,,false
+f1,factor,Bernoulli,Bernoulli,0,obs,y,false
+f2,factor,Bernoulli,Bernoulli,1,obs,y,false
+f3,factor,Bernoulli,Bernoulli,2,obs,y,false
+f4,factor,Bernoulli,Bernoulli,3,obs,y,false
+e4,equality,=,=,,param,,true

@@ -76,6 +76,7 @@ terminal.
 | `::CENSOR` | `::CENSORED`, `::N_CENSOR` | encoding | censoring marks (+) on a ::STEP curve where the value is > 0 / true (Kaplan-Meier) |
 | `::UPSTREAM` | `::PARENTS` | encoding | a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node |
 | `::LANE` | `::SWIMLANE` | encoding | a ::DIAGRAM node's swimlane: nodes of one lane share a labelled band |
+| `::SHAPE` | `::NODE_SHAPE` | encoding | a ::DIAGRAM node's mark: box, circle, filled-circle, square, filled-square, text — or a factor graph's kind (factor, variable, data, equality, delta, constant); shaped nodes make a factor graph: lanes as straight bands, undirected edges |
 | `::EDGES` |  | encoding | a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value, colour by status |
 | `::BARCHART` | `::BAR` | chart | bar chart (dodged by CATEGORY) |
 | `::BARCHART_STACKED` | `::BAR_STACKED`, `::STACKED_BAR` | chart | stacked bars (by CATEGORY) |
