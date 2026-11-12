@@ -61,7 +61,8 @@ echo "engine $ENGINE · set $SET · $REPS repeat(s) · model $MODEL · arms $ARM
 "$PY" "$HERE/harness.py" --tasks "$TASKS" --arms "$ARMS" --reps "$REPS" --model "$MODEL" --yes \
   --data "$DATA" --dashboard "$DASH" --pkg "$ROOT/web/pkg" --boundaries "$ROOT/web/data/boundaries" \
   --out "$OUT" --see-chart "$SEE" ${DRY:+--dry} 2>&1 | tee "$OUT.log"
-[ -n "$DRY" ] || "$PY" "$HERE/judge.py" --data "$DATA" "$OUT" 2>&1 | tee -a "$OUT.log"
+# JUDGE_VOTES: judge calls per answer (#1121; the weekly CI eval uses 1 to stay in budget)
+[ -n "$DRY" ] || "$PY" "$HERE/judge.py" --data "$DATA" --votes "${JUDGE_VOTES:-3}" "$OUT" 2>&1 | tee -a "$OUT.log"
 "$PY" "$HERE/report.py" "$OUT"
 "$PY" "$HERE/gaps.py" "$OUT" > "$OUT/gaps.md"
 "$PY" "$HERE/compare.py" "$OUT" ${BASE:+--baseline "$BASE"} --history "$RESULTS/history.csv" \

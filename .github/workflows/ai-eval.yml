@@ -51,6 +51,9 @@ jobs:
       SET: ${{ inputs.set || 'full' }}
       MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
       ARMS: ${{ inputs.arms || 'anofox-lean' }}
+      # one judge call per answer keeps the weekly run in the ~$35/month budget
+      # (#1073); full local runs judge 3 times and report the self-agreement (#1121)
+      JUDGE_VOTES: "1"
       BENCH_RESULTS: ${{ github.workspace }}/target/bench
       BENCH_PYTHON: ${{ github.workspace }}/.venv/bin/python
       ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
@@ -124,9 +127,9 @@ jobs:
       - name: Interval unit tests (#1122, no API)
         run: python3 -m unittest bench/viz-tokens/test_stats.py
 
-      - name: Ambiguity label unit tests (#1142, no API)
+      - name: Ambiguity label and judge vote unit tests (#1142, #1121, no API)
         working-directory: bench/viz-tokens
-        run: python3 -m unittest test_ambiguity.py
+        run: python3 -m unittest test_ambiguity.py test_votes.py
 
       - name: Run, judge, report, compare
         id: run

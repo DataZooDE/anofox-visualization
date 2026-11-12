@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 
 import auth
+from votes import majority
 from pathlib import Path
 
 import duckdb
@@ -29,7 +30,7 @@ RUBRIC = """You grade one answer of a data assistant: a chart (the image) and a 
 
 Judge:
 1. numbers_correct: every number, ranking and claim about the data that the written answer states agrees with the ground truth (rounding is fine; a claim the truth can't check is fine if it doesn't contradict it). false if any stated number, ranking or claim is wrong (a side remark too, e.g. the wrong peak month or date range), or a key number or the main conclusion is missing.
-   A stated assumption: if the request is genuinely ambiguous (it leaves a definition open that changes the numbers, e.g. what counts as stock, which period, gross or net) and the answer names a reasonable definition the request allows, check its numbers against that definition, not the ground truth's: right under it is true. This never excuses a definition the request rules out, an unstated one, or numbers wrong under the stated one.
+   A stated assumption: if the request is genuinely ambiguous (it leaves a definition open that changes the numbers, e.g. what counts as stock, which period, gross or net) and the answer names a reasonable definition the request allows, check its numbers against that definition, not the ground truth's: right under it is true. This never excuses a definition the request rules out, an unstated one, or numbers wrong under the stated one. It is about how numbers are computed only: it never excuses another kind of chart, a missing breakdown or a view the request asked for (separate totals where a grid was asked for are not a "definition").
 2. chart_answers: the chart shows what the request asks for (the right measure, grouping and breakdown) and agrees with the ground truth. For a follow-up, the chart must show the requested change. When a good chart is described, a chart that serves the request clearly worse (a bar chart where a map was asked for, no uncertainty band where one was asked for) is false.
    A chart whose axis or labels misstate the values (a share or ratio labelled 100x off, a wrong unit) does not answer the request. Interactive parts (a filter, a dropdown, a toggle) don't show in a static image: judge them from the chart's source, which you get next to the image.
    With no ground-truth rows, the right answer says there is no such data; then no chart is needed (chart_answers true when the answer says so). Otherwise no chart drawn means chart_answers false.
@@ -95,10 +96,30 @@ def call(key, content):
             raise
 
 
+def one_vote(key, content, usage):
+    """One judge call's verdict (asked again when the reply isn't JSON); its
+    token usage is added to `usage`."""
+    for attempt in range(3):
+        m = call(key, content)
+        for k, n in m.get("usage", {}).items():
+            if isinstance(n, int):
+                usage[k] = usage.get(k, 0) + n
+        text = "".join(b.get("text", "") for b in m["content"] if b.get("type") == "text")
+        try:
+            v = json.loads(text[text.index("{"): text.rindex("}") + 1])
+            return {k: v.get(k) for k in ("numbers_correct", "chart_answers", "readable", "reason")}
+        except ValueError:
+            pass
+    return {"numbers_correct": None, "chart_answers": None, "readable": None, "reason": "judge reply not JSON: " + text[:200]}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("results")
     ap.add_argument("--data", required=True)
+    # #1121: one call at the default temperature flipped 13 % of verdicts on a
+    # re-judge; the majority of several calls, and how often they disagree
+    ap.add_argument("--votes", type=int, default=3, help="judge calls per answer; the majority counts")
     a = ap.parse_args()
     key = None
     if not auth.available():
@@ -109,9 +130,13 @@ def main():
     done = set()
     jpath = out / "judgments.jsonl"
     if jpath.exists():
-        # a reply that wasn't JSON is judged again (kept lines stay as they are)
-        keep = [l for l in jpath.read_text().splitlines()
-                if not json.loads(l).get("reason", "").startswith("judge reply not JSON")]
+        # a reply that wasn't JSON is judged again (kept lines stay as they are),
+        # and so is one with fewer votes than asked for
+        def keep_line(j):
+            if j.get("reason", "").startswith("judge reply not JSON"):
+                return False
+            return j.get("reason") == "no answer" or len(j.get("votes", [None])) >= a.votes
+        keep = [l for l in jpath.read_text().splitlines() if keep_line(json.loads(l))]
         jpath.write_text("".join(l + "\n" for l in keep))
         done = {(j["run"], j["phase"]) for j in map(json.loads, keep)}
     with open(jpath, "a") as f:
@@ -141,15 +166,10 @@ def main():
                                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}]
                     else:
                         content = [{"type": "text", "text": head + "No chart was drawn."}]
-                    for attempt in range(3):
-                        m = call(key, content)
-                        text = "".join(b.get("text", "") for b in m["content"] if b.get("type") == "text")
-                        try:
-                            v = json.loads(text[text.index("{"): text.rindex("}") + 1])
-                            break
-                        except ValueError:
-                            v = {"numbers_correct": None, "chart_answers": None, "readable": None, "reason": "judge reply not JSON: " + text[:200]}
-                    j.update(v, usage=m.get("usage", {}))
+                    votes, usage = [], {}
+                    for _ in range(a.votes):
+                        votes.append(one_vote(key, content, usage))
+                    j.update(majority(votes), votes=votes, usage=usage)
                 j["pass"] = bool(j.get("numbers_correct") and j.get("chart_answers"))
                 f.write(json.dumps(j) + "\n")
                 f.flush()
