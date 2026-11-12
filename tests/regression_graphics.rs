@@ -2870,15 +2870,62 @@ fn histogram_flip_lies_on_its_side() {
         Column::new("b", Role::HistBins, strs(&["5"])),
     ]);
     assert_eq!(distinct_px(histogram_bar_heights(&side)), 1, "{side}");
-    // with ::FACET panels it stays upright (ggplot-rs facets keep their
-    // axis labels unswapped under coord_flip)
+    // with ::FACET panels too (#1135: ggplot-rs 0.45.1 swaps each panel's
+    // axes under coord_flip)
     let g: Vec<&str> = (0..60).map(|i| if i < 30 { "a" } else { "b" }).collect();
     let faceted = svg(vec![
         hist(),
         Column::new("f", Role::Flip, nums(&[1.0])),
         Column::new("g", Role::Facet, strs(&g)),
     ]);
-    assert_eq!(distinct_px(histogram_bar_widths(&faceted)), 1, "{faceted}");
+    assert_eq!(distinct_px(histogram_bar_heights(&faceted)), 1, "{faceted}");
+    assert!(distinct_px(histogram_bar_widths(&faceted)) > 1, "{faceted}");
+}
+
+#[test]
+fn flipped_faceted_bars_put_categories_on_the_left() {
+    // #1135 (ggplot-rs#491): under ::FLIP + ::FACET every panel's axes swap
+    // with its bars — categories down the left, counts along the bottom
+    let s = svg(vec![
+        Column::new(
+            "k",
+            Role::X,
+            strs(&["Retail", "Online", "Retail", "Online"]),
+        ),
+        Column::new("v", Role::Value(Kind::Bar), nums(&[60.0, 20.0, 40.0, 30.0])),
+        Column::new(
+            "g",
+            Role::Facet,
+            strs(&["North", "North", "South", "South"]),
+        ),
+        Column::new("f", Role::Flip, nums(&[1.0])),
+    ]);
+    let at = |label: &str| -> Vec<(f64, f64)> {
+        s.split("<text")
+            .skip(1)
+            .filter(|t| t[t.find('>').unwrap() + 1..].starts_with(&format!("{label}<")))
+            .map(|t| {
+                let num = |k: &str| {
+                    let i = t.find(&format!(" {k}=\"")).unwrap() + k.len() + 3;
+                    t[i..i + t[i..].find('"').unwrap()].parse::<f64>().unwrap()
+                };
+                (num("x"), num("y"))
+            })
+            .collect()
+    };
+    let (retail, online) = (at("Retail"), at("Online"));
+    // one column of category labels (the first panel's), stacked
+    assert_eq!(retail.len(), 1, "{s}");
+    assert!(
+        (retail[0].0 - online[0].0).abs() < 0.5,
+        "{retail:?} {online:?}"
+    );
+    assert!(
+        (retail[0].1 - online[0].1).abs() > 10.0,
+        "{retail:?} {online:?}"
+    );
+    // a count axis under each panel
+    assert_eq!(at("0").len(), 2, "{s}");
 }
 
 #[test]

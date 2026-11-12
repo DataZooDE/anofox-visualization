@@ -102,7 +102,7 @@ terminal.
 | `::PARETO` | `::PARETOCHART` | chart | XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis |
 | `::GANTT` | `::GANTTCHART`, `::TIMELINE_BARS` | chart | one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars |
 | `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual) |
-| `::HISTOGRAM` | `::HIST` | chart | histogram of the measure; takes ::FLIP (horizontal, not with ::FACET), ::YFORMAT / ::YSCALE on its count axis, ::DATALABELS (each bin's count, or share under ::HIST_NORM), ::ABLINE, ::XLINE |
+| `::HISTOGRAM` | `::HIST` | chart | histogram of the measure; takes ::FLIP (horizontal, with ::FACET panels too), ::YFORMAT / ::YSCALE on its count axis, ::DATALABELS (each bin's count, or share under ::HIST_NORM), ::ABLINE, ::XLINE |
 | `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
 | `::RIDGELINE` | `::RIDGES`, `::JOYPLOT` | chart | one density of the measure per ::CATEGORY, stacked as overlapping ridges (distributions over time; the first category on top) |
 | `::BOXPLOT` | `::BOX_PLOT` | chart | box plot — XAXIS groups, measure on y (raw rows) |
