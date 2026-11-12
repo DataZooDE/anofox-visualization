@@ -13,10 +13,15 @@ import sys
 
 import duckdb
 
+import ambiguity
+
 REV = "sum(units * price)"
 FIRST = "(SELECT po_id, line_id, min(received_at) AS first_at FROM po_receipt GROUP BY ALL)"
 LT = f"(SELECT h.*, s.name, s.promised_days, f.first_at, f.first_at - h.ordered_at AS lead_days FROM po_history h JOIN {FIRST} f USING (po_id, line_id) JOIN suppliers s USING (supplier_id))"
 LASTWK = "(SELECT max(week) FROM deliveries)"
+# #1142: the other reading of "lead time" / "late": to the line's last receipt
+# (fully delivered), not its first. Same column name, so a truth swaps FIRST.
+LAST = FIRST.replace("min(received_at)", "max(received_at)")
 
 # (id, family, dataset, question, truth, followup, followup truth, expect)
 T = [
@@ -357,7 +362,7 @@ T = [
      "SELECT region, date_trunc('quarter', month) AS q, 100 * sum(units) / first(sum(units)) OVER (PARTITION BY region ORDER BY date_trunc('quarter', month)) AS idx FROM sales GROUP BY 1, 2 ORDER BY 1, 2",
      "one line per region, all starting at 100, the fastest grower named"),
     ("ts-seasonality", "time", "m5",
-     "What is the typical seasonal pattern of our sales? Show each calendar month's total units, averaged across the years.",
+     "What is the typical seasonal pattern of our sales? Show the average units per calendar month across the years.",
      "SELECT month(month) AS m, avg(u) AS avg_units FROM (SELECT month, sum(units) AS u FROM m5 GROUP BY 1) GROUP BY 1 ORDER BY 1",
      "Show it per store.",
      "SELECT store, month(month) AS m, avg(u) AS avg_units FROM (SELECT store, month, sum(units) AS u FROM m5 GROUP BY 1, 2) GROUP BY 1, 2 ORDER BY 1, 2",
@@ -405,7 +410,7 @@ T = [
      f"SELECT channel, year(month) AS y, {REV} AS revenue, rank() OVER (PARTITION BY year(month) ORDER BY {REV} DESC) AS rnk FROM sales WHERE year(month) IN (2024, 2025) GROUP BY 1, 2 ORDER BY 2, 4",
      "each region's 2024 and 2025 position connected (a slope or bump chart, or a dumbbell), the changes readable"),
     ("rank-dumbbell", "ranking", "lead_times",
-     "Compare each supplier's promised lead time with its actual average lead time (order to first receipt).",
+     "Compare each supplier's promised lead time with its actual average lead time.",
      f"SELECT name, avg(promised_days) AS promised, avg(lead_days) AS actual FROM {LT} GROUP BY 1 ORDER BY 3 - 2 DESC",
      "Only for orders placed in 2026.",
      f"SELECT name, avg(promised_days) AS promised, avg(lead_days) AS actual FROM {LT} WHERE year(ordered_at) = 2026 GROUP BY 1 ORDER BY 3 DESC",
@@ -512,9 +517,9 @@ T = [
      "SELECT source, week, sum(sum(converted::INT)) OVER (PARTITION BY source ORDER BY week) AS cum_converted FROM leads GROUP BY 1, 2 ORDER BY 1, 2",
      "a running total that only steps up from week to week (a step or line chart)"),
     ("strip-points", "distribution", "lead_times",
-     "Show every order line's lead time (order to first receipt) per supplier as individual points, so we see each delivery.",
+     "Show every order line's lead time per supplier as individual points, so we see each delivery.",
      f"SELECT name, count(*) AS n, min(lead_days) AS lo, max(lead_days) AS hi FROM {LT} GROUP BY 1 ORDER BY 1",
-     "Highlight the lines whose first receipt came after the promised date.",
+     "Highlight the lines that were later than promised.",
      f"SELECT name, count(*) FILTER (WHERE first_at > promised_at) AS late, count(*) AS n FROM {LT} GROUP BY 1 ORDER BY 1",
      "one point per order line by supplier, spread so overlapping points stay visible (jitter / strip plot)"),
     ("pie-few", "part-of-whole", "leads",
@@ -538,19 +543,68 @@ T = [
 ]
 
 
+# #1142: the readings of a question that can be meant more than one way: the
+# default (the truth above) and the others, each with the user's reply that
+# picks it (the simulated user gives the default's reply when asked). Whether
+# the difference matters is not decided here: ambiguity.label() compares
+# the readings' results.
+LT_REPLIES = ("From the order to the first delivery that came in.",
+              "From the order until the line was completely delivered, so to its last delivery.")
+READINGS = {
+    "ts-seasonality": [
+        ("Each month's total units, averaged over the years.", None, None),
+        ("The average units per item and store in each calendar month.",
+         "SELECT month(month) AS m, avg(units) AS avg_units FROM m5 GROUP BY 1 ORDER BY 1",
+         "SELECT store, month(month) AS m, avg(units) AS avg_units FROM m5 GROUP BY 1, 2 ORDER BY 1, 2"),
+    ],
+    "vague-best": [
+        ("Best by revenue.", None, None),
+        ("Best by units sold.",
+         f"SELECT channel, sum(units) AS units, {REV} AS revenue FROM sales GROUP BY 1 ORDER BY 2 DESC",
+         f"SELECT month, sum(units) AS units FROM sales WHERE channel = (SELECT channel FROM sales GROUP BY 1 ORDER BY sum(units) DESC LIMIT 1) GROUP BY 1 ORDER BY 1"),
+    ],
+    "none-margin": [
+        ("Counting what is on hand and on order.", None, None),
+        ("Only what is on hand.", "SELECT NULL AS supplier WHERE false",
+         "SELECT s.name, s.on_hand / nullif(s.last4_avg, 0) AS weeks_of_cover FROM ir_skus s ORDER BY 2"),
+    ],
+}
+
+
+def readings(i, q, t, fu, ft):
+    """[(reply, truth, followup truth)] with the default first, or [] for one reading."""
+    if i in READINGS:
+        (r0, _, _), *rest = READINGS[i]
+        return [(r0, t, ft)] + [(r, a, b) for r, a, b in rest]
+    # every lead-time question, unless it says which receipt itself
+    if FIRST in t + ft and "first receipt" not in (q + fu).lower():
+        return [(LT_REPLIES[0], t, ft), (LT_REPLIES[1], t.replace(FIRST, LAST), ft.replace(FIRST, LAST))]
+    return []
+
+
 def main():
     data, out = sys.argv[1], sys.argv[2]
+    counts = {}
     with open(out, "w") as f:
         for (i, fam, ds, q, t, fu, ft, exp) in T:
             c = duckdb.connect(os.path.join(data, f"{ds}.duckdb"), read_only=True)
-            for s in (t, ft):
-                try:
-                    c.execute(s).fetchall()
-                except Exception as e:
-                    sys.exit(f"{i}: {e}")
-            f.write(json.dumps({"id": i, "family": fam, "dataset": ds, "pilot": False, "question": q, "truth_sql": t,
-                                "followup": fu, "followup_truth_sql": ft, "expect": exp}) + "\n")
-    print(len(T), "coverage tasks,", len({x[1] for x in T}), "families")
+            rs = readings(i, q, t, fu, ft)
+            res = {"first": [], "followup": []}
+            for r in rs or [(None, t, ft)]:
+                for ph, s in (("first", r[1]), ("followup", r[2])):
+                    try:
+                        res[ph].append(c.execute(s).fetchall())
+                    except Exception as e:
+                        sys.exit(f"{i}: {e}")
+            amb = {ph: ambiguity.label(res[ph]) for ph in res}
+            for v in amb.values():
+                counts[v] = counts.get(v, 0) + 1
+            rec = {"id": i, "family": fam, "dataset": ds, "pilot": False, "question": q, "truth_sql": t,
+                   "followup": fu, "followup_truth_sql": ft, "expect": exp, "ambiguity": amb}
+            if rs:
+                rec["readings"] = [{"reply": r, "truth_sql": a, "followup_truth_sql": b} for r, a, b in rs]
+            f.write(json.dumps(rec) + "\n")
+    print(len(T), "coverage tasks,", len({x[1] for x in T}), "families; phases:", counts)
 
 
 if __name__ == "__main__":
