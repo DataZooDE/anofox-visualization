@@ -52,6 +52,12 @@ has a ground-truth SQL and one follow-up edit with its own truth. 5 are marked
 **Judge** (`judge.py`, blind to the arm): `claude-sonnet-5` sees the request,
 the truth rows, the written answer and the chart image. It grades
 `numbers_correct`, `chart_answers` and `readable` (1–5); `pass` = both true.
+Each answer is judged `--votes 3` times. The majority counts, and an answer
+whose calls split on pass is marked `unsure` (#1121: one call flipped 13 % of
+verdicts on a re-judge). The report gives the judge's self-agreement. `unsure.py
+export <results> <data>` writes the unsure answers, blind, for a second look by
+a grader that recomputes from the data. `unsure.py apply <results>
+<grades.jsonl>` writes its verdicts back (`resolved_by`).
 
 **Asking back** (#1142). Customers ask vaguely, so the questions keep their
 vague wording. A coverage task that can be meant more than one way lists its

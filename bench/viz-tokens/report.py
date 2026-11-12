@@ -19,6 +19,7 @@ from scipy.stats import binomtest, wilcoxon
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stats import diff_ci, fmt_diff, rate_ci, verdict  # noqa: E402
+import votes  # noqa: E402
 
 PHASES = ("first", "followup")
 
@@ -229,6 +230,27 @@ def main():
                 ps = sum(bool(x["pass"]) for x in R)
                 cells.append(f"{median(x['total'] for x in R):,.0f}" + (f" ({ps}/{len(R)})" if judged else ""))
             L.append(f"| {t} | {phase} | " + " | ".join(cells) + " |")
+
+    # #1121: the judge's own noise — how often its calls on one answer agree,
+    # and the answers it was unsure about (a second look settles those)
+    voted = [j for j in judg.values() if len(j.get("votes") or []) > 1]
+    if voted:
+        sa = votes.self_agreement(voted)
+        n_votes = max(len(j["votes"]) for j in voted)
+        L.append("\n## Judge agreement (#1121)\n")
+        L.append(f"{n_votes} judge calls per answer; the majority counts. Self-agreement (all calls agree on pass): "
+                 f"**{100 * sa:.0f} %** of {len(voted)} answers. An **unsure** answer (the calls split) is counted by its "
+                 "majority above. `unsure.py` exports those answers for a second look, and its `apply` writes the result back.\n")
+        L.append("| arm | unsure | pass, sure answers only | resolved by a second look |")
+        L.append("|---|---|---|---|")
+        for arm in arms:
+            J = [judg[(x["run"], x["phase"])] for x in rows if x["arm"] == arm and (x["run"], x["phase"]) in judg]
+            uns = [j for j in J if j.get("unsure")]
+            sure = [j for j in J if not j.get("unsure")]
+            res = sum(1 for j in J if j.get("resolved_by"))
+            L.append(f"| {arm} | {len(uns)}/{len(J)} | "
+                     f"{sum(bool(j['pass']) for j in sure)}/{len(sure)} | {res} |")
+        summary["judge_self_agreement"] = sa
 
     # #1116: the claim check against the judge — how many answers it would
     # flag (shadow) or sent back (on), among the judge's right and wrong ones
