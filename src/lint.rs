@@ -6793,25 +6793,67 @@ fn column_numbers(rows: &[Map<String, Value>], i: usize) -> Vec<f64> {
 /// 11-11 full run (dash-tabs): `round(avg(on_time), 2)::PERCENT` showed
 /// "0.3 %" for a 33 % rate — ::PERCENT takes percent (0–100), and every
 /// value here is a fraction.
+///
+/// 11-11 21:32 run (rel-label-outliers, rank-long-labels): the same on a
+/// chart axis — `'percent'::YFORMAT` over a 0–1 rate read "0.9 %" for 90 %.
 fn percent_fraction_diag(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
 ) -> Option<(&'static str, String)> {
-    let (i, _) = roles
+    let fractions = |cols: &[usize]| {
+        let v: Vec<f64> = cols.iter().flat_map(|&i| column_numbers(rows, i)).collect();
+        !v.is_empty()
+            && v.iter().all(|x| x.abs() <= 1.0)
+            && v.iter().any(|x| x.abs() > 0.0 && x.abs() < 1.0)
+    };
+    if let Some((i, _)) = roles
         .iter()
-        .find(|(_, r)| *r == Role::Metric(crate::MetricFmt::Percent))?;
-    let v = column_numbers(rows, *i);
-    (!v.is_empty()
-        && v.iter().all(|x| x.abs() <= 1.0)
-        && v.iter().any(|x| x.abs() > 0.0 && x.abs() < 1.0))
-    .then(|| {
-        (
-            "format/percent-fraction",
-            "::PERCENT shows the value as percent (0.33 → 0.33 %), and every value here is \
-             between -1 and 1 — multiply a fraction by 100"
-                .to_string(),
-        )
-    })
+        .find(|(_, r)| *r == Role::Metric(crate::MetricFmt::Percent))
+    {
+        if fractions(&[*i]) {
+            return Some((
+                "format/percent-fraction",
+                "::PERCENT shows the value as percent (0.33 → 0.33 %), and every value here is \
+                 between -1 and 1 — multiply a fraction by 100"
+                    .to_string(),
+            ));
+        }
+    }
+    // an axis format: ::YFORMAT over the measures, ::XFORMAT over ::XAXIS
+    let spec = |role: Role| -> Option<String> {
+        let (i, _) = roles.iter().find(|(_, r)| *r == role)?;
+        rows.iter()
+            .find_map(|r| r.get(&format!("c{i}")).and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    let percent = |role: Role| {
+        spec(role)
+            .is_some_and(|s| crate::format::ValueFmt::parse(&s) == crate::format::ValueFmt::Percent)
+    };
+    let measures: Vec<usize> = roles
+        .iter()
+        .filter(|(_, r)| matches!(r, Role::Value(_)))
+        .map(|(i, _)| *i)
+        .collect();
+    let x: Vec<usize> = roles
+        .iter()
+        .filter(|(_, r)| *r == Role::X)
+        .map(|(i, _)| *i)
+        .collect();
+    let role = if percent(Role::YFormat) && fractions(&measures) {
+        "::YFORMAT"
+    } else if percent(Role::XFormat) && fractions(&x) {
+        "::XFORMAT"
+    } else {
+        return None;
+    };
+    Some((
+        "format/percent-fraction",
+        format!(
+            "'percent'{role} shows the value as percent (0.9 → 0.9 %), and every value on \
+             that axis is between -1 and 1 — multiply a fraction by 100"
+        ),
+    ))
 }
 
 /// 11-11 full run (funnel): each stage counted on its own (budget approved,
@@ -11712,6 +11754,18 @@ mod design_tests {
             codes(t, vec![json!({"c0": "Seals", "c1": "0.33"})]),
             vec!["format/percent-fraction"]
         );
+        // 11-11 21:32: the same on a chart axis
+        let ax = "SELECT k::XAXIS, rate::SCATTER, 'percent'::YFORMAT FROM t;";
+        let fr = vec![
+            json!({"c0": 200.0, "c1": 0.83, "c2": "percent"}),
+            json!({"c0": 300.0, "c1": 0.55, "c2": "percent"}),
+        ];
+        assert_eq!(codes(ax, fr), vec!["format/percent-fraction"]);
+        let pc = vec![
+            json!({"c0": 200.0, "c1": 83.0, "c2": "percent"}),
+            json!({"c0": 300.0, "c1": 55.0, "c2": "percent"}),
+        ];
+        assert!(codes(ax, pc).is_empty());
         let f = "SELECT stage::XAXIS, n::FUNNEL FROM t;";
         let stages = |ns: [i64; 3]| {
             ["all", "budget", "quarter"]

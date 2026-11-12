@@ -66,7 +66,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("CATEGORY", &["SERIES", "COLOR", "COLOUR"], R::Category, "encoding", true,
       "grouping / colour series (discrete)"),
     e("LABEL", &[], R::Label, "encoding", true,
-      "section heading when alone; chart title / per-mark or per-feature label otherwise"),
+      "section heading when alone; chart title / per-mark or per-feature label otherwise (on a scatter: the tooltip heading, drawn on the chart when only some rows, at most 20, carry one)"),
     e("TITLE", &["HEADING"], R::Title, "encoding", true, "a title bar above one panel"),
     e("ALT", &["ALT_TEXT"], R::Alt, "encoding", true,
       "an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL"),
