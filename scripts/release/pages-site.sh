@@ -50,6 +50,9 @@ fi
 mkdir -p "$app"
 cp -R "$web/." "$app/"
 rm -rf "$app/extensions"
+# owner 2026-11-12: the demo builders' dashboards in the website's colours
+scripts/release/site-theme.sh website/showcase/site-theme.json \
+  "$site/app/index.html" "$app/index.html"
 # the preview isn't the product: keep it out of search engines
 find "$site/next" -name '*.html' -exec sed -i 's|<head>|<head><meta name="robots" content="noindex">|' {} +
 echo "site: /next/ = master $(git rev-parse --short HEAD)${dist:+ (website, builder at /next/app/)}"
