@@ -20,7 +20,7 @@
 //! the browser's hover, selection and accessibility layers already read.
 
 use crate::format::{escape_xml as esc, format_number_l, Locale};
-use crate::theme::{hex, Rgb};
+use crate::theme::hex;
 use crate::thresholds::{Rules, Status};
 use crate::{key_text, svg_open, with_root_attr, Column, MetricFmt, Place, RenderOptions, Role};
 use ggplot_rs::prelude::Value;
@@ -707,157 +707,22 @@ fn quoted(v: &[String]) -> String {
 
 // ---- layout ----------------------------------------------------------------
 
-/// Box geometry constants (px).
-const LABEL_PX: f64 = 13.0;
-const VALUE_PX: f64 = 12.0;
-const BADGE_PX: f64 = 11.0;
-const LINE_H: f64 = 16.0;
-const BOX_PAD_X: f64 = 12.0;
-const BOX_PAD_Y: f64 = 9.0;
-const BOX_MIN_W: f64 = 92.0;
-const BOX_MAX_W: f64 = 208.0;
-const MARGIN: f64 = 10.0;
-const ARROW: f64 = 7.0;
-const LOOP: f64 = 16.0;
-/// A sparkline's strip in a box.
-const SPARK_H: f64 = 22.0;
-/// Extra space between swimlanes, and a lane's label strip.
-const LANE_GAP: f64 = 22.0;
-const LANE_HEAD: f64 = 16.0;
-
-/// Approximate rendered width of `s` at `px` (proportional sans-serif).
-fn text_w(s: &str, px: f64, bold: bool) -> f64 {
-    let per = if bold { 0.6 } else { 0.56 };
-    s.chars().count() as f64 * px * per
-}
-
-/// A node label's line limit; only beyond it is the last line cut with "…".
-const MAX_LINES: usize = 3;
-
-/// `s` wrapped into at most [`MAX_LINES`] lines of `max` px (the last cut
-/// with "…" when the label doesn't fit). Breaks at spaces; a word longer
-/// than a line breaks after a `/`, `-`, `_`, `.` or `,` in it (#753:
-/// `duckdb/community-` + `extensions`, not `community-ex` + `tensions`), and
-/// only mid-word when it has none.
-fn wrap(s: &str, max: f64) -> Vec<String> {
-    let cap = ((max / (LABEL_PX * 0.6)).floor() as usize).max(4);
-    // (piece, glued to the previous one) — a long word's pieces are glued
-    let mut pieces: Vec<(String, bool)> = Vec::new();
-    for word in s.split_whitespace() {
-        let chars: Vec<char> = word.chars().collect();
-        let mut start = 0;
-        let mut first = true;
-        while chars.len() - start > cap {
-            let window = &chars[start..start + cap];
-            let cut = window
-                .iter()
-                .rposition(|c| matches!(c, '/' | '-' | '_' | '.' | ','))
-                .filter(|&i| i + 1 >= cap / 3)
-                .map(|i| i + 1)
-                .unwrap_or(cap);
-            pieces.push((chars[start..start + cut].iter().collect(), !first));
-            first = false;
-            start += cut;
-        }
-        pieces.push((chars[start..].iter().collect(), !first));
-    }
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for (piece, glued) in pieces {
-        let sep = if glued || cur.is_empty() { 0 } else { 1 };
-        if !cur.is_empty() && cur.chars().count() + sep + piece.chars().count() > cap {
-            lines.push(std::mem::take(&mut cur));
-        } else if sep == 1 {
-            cur.push(' ');
-        }
-        cur.push_str(&piece);
-    }
-    if !cur.is_empty() {
-        lines.push(cur);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    if lines.len() > MAX_LINES {
-        let rest = lines[MAX_LINES - 1..].join(" ");
-        let mut last: String = rest.chars().take(cap.saturating_sub(1)).collect();
-        last = last.trim_end().to_string();
-        last.push('…');
-        lines.truncate(MAX_LINES - 1);
-        lines.push(last);
-    }
-    lines
-}
-
-struct Box_ {
-    w: f64,
-    h: f64,
-    lines: Vec<String>,
-}
-
-fn box_of(n: &Node) -> Box_ {
-    let lines = wrap(&n.label, BOX_MAX_W - 2.0 * BOX_PAD_X);
-    let mut w = lines
-        .iter()
-        .map(|l| text_w(l, LABEL_PX, true))
-        .fold(0.0, f64::max);
-    let mut h = 2.0 * BOX_PAD_Y + LINE_H * lines.len() as f64;
-    if let Some(v) = &n.fvalue {
-        w = w.max(text_w(v, VALUE_PX, true));
-        h += LINE_H;
-    }
-    if let Some(b) = &n.badge {
-        w = w.max(text_w(b, BADGE_PX, false) + 22.0);
-        h += 20.0;
-    }
-    if n.spark.len() >= 2 {
-        w = w.max(110.0);
-        h += SPARK_H;
-    }
-    Box_ {
-        w: (w + 2.0 * BOX_PAD_X).clamp(BOX_MIN_W, BOX_MAX_W),
-        h,
-        lines,
-    }
-}
-
-/// An edge as read, before its ids are resolved.
-#[derive(Default)]
-struct RawEdge {
-    from: String,
-    to: String,
-    value: Option<f64>,
-    label: Option<String>,
-    style: Option<EdgeStyle>,
-    status: Option<Status>,
-}
-
-/// A laid-out diagram, in px with the origin at the top-left margin.
+/// A laid-out diagram, in px with the origin at the top-left margin: the
+/// layered placement (`graph_layout`, #1153) and each node's label wrapped
+/// to fit its box.
 struct Placed {
-    w: f64,
-    h: f64,
-    /// Per node: centre, size, wrapped label, layer, rank in reading order.
-    nodes: Vec<PNode>,
-    /// Per edge (index as in [`Diagram::edges`]): its points, source → target.
-    edges: Vec<Vec<(f64, f64)>>,
-    back: Vec<bool>,
-    layers: usize,
-    /// Swimlane bands: (lane, x0, y0, x1, y1) in px.
-    bands: Vec<(usize, f64, f64, f64, f64)>,
+    g: ggplot_rs::graph_layout::GraphLayout,
+    lines: Vec<Vec<String>>,
 }
 
-struct PNode {
-    cx: f64,
-    cy: f64,
-    w: f64,
-    h: f64,
-    lines: Vec<String>,
-    layer: usize,
-    order: usize,
+impl std::ops::Deref for Placed {
+    type Target = ggplot_rs::graph_layout::GraphLayout;
+    fn deref(&self) -> &Self::Target {
+        &self.g
+    }
 }
 
-/// `keys` ordered by `(primary, secondary, index)`, as the indices. The one
-/// sort the layout uses: a single instantiation keeps the wasm build small.
+/// `keys` ordered by `(primary, secondary, index)`, as the indices.
 fn ordered(mut keys: Vec<(f64, f64, usize)>) -> Vec<usize> {
     keys.sort_unstable_by(|a, b| {
         a.0.total_cmp(&b.0)
@@ -867,11 +732,23 @@ fn ordered(mut keys: Vec<(f64, f64, usize)>) -> Vec<usize> {
     keys.into_iter().map(|k| k.2).collect()
 }
 
-/// The layout: box sizes here (the label wrapped, the value, badge and
-/// sparkline), the layered placement in ggplot-rs (`graph_layout`, #1153).
+/// The layout: box sizes (the label wrapped, the value, badge and
+/// sparkline) and the layered placement, both ggplot-rs's (#1153, #497).
 fn layout(d: &Diagram) -> Placed {
+    use ggplot_rs::graph::{edge_label_width, node_box};
     use ggplot_rs::graph_layout as gl;
-    let boxes: Vec<Box_> = d.nodes.iter().map(box_of).collect();
+    let boxes: Vec<_> = d
+        .nodes
+        .iter()
+        .map(|n| {
+            node_box(
+                &n.label,
+                n.fvalue.as_deref(),
+                n.badge.as_deref(),
+                n.spark.len() >= 2,
+            )
+        })
+        .collect();
     let nodes: Vec<gl::GraphNode> = d
         .nodes
         .iter()
@@ -889,11 +766,7 @@ fn layout(d: &Diagram) -> Placed {
         .map(|e| gl::GraphEdge {
             from: e.from,
             to: e.to,
-            label_w: e.label.as_deref().map(|l| {
-                l.split('\n')
-                    .map(|x| text_w(x, 11.0, false))
-                    .fold(0.0, f64::max)
-            }),
+            label_w: e.label.as_deref().map(edge_label_width),
         })
         .collect();
     let params = gl::LayeredParams {
@@ -902,35 +775,23 @@ fn layout(d: &Diagram) -> Placed {
             Dir::TB => gl::Direction::TopBottom,
         },
         lanes: d.lanes.len(),
-        margin: MARGIN,
-        arrow: ARROW,
-        loop_size: LOOP,
-        lane_gap: LANE_GAP,
-        lane_head: LANE_HEAD,
+        ..Default::default()
     };
-    let l = gl::layered(&nodes, &edges, &params);
     Placed {
-        w: l.w,
-        h: l.h,
-        nodes: l
-            .nodes
-            .into_iter()
-            .zip(boxes)
-            .map(|(q, b)| PNode {
-                cx: q.cx,
-                cy: q.cy,
-                w: q.w,
-                h: q.h,
-                lines: b.lines,
-                layer: q.layer,
-                order: q.order,
-            })
-            .collect(),
-        edges: l.edges,
-        back: l.back,
-        layers: l.layers,
-        bands: l.bands,
+        g: gl::layered(&nodes, &edges, &params),
+        lines: boxes.into_iter().map(|b| b.lines).collect(),
     }
+}
+
+/// An edge as read, before its ids are resolved.
+#[derive(Default)]
+struct RawEdge {
+    from: String,
+    to: String,
+    value: Option<f64>,
+    label: Option<String>,
+    style: Option<EdgeStyle>,
+    status: Option<Status>,
 }
 
 // ---- text alternative ------------------------------------------------------
@@ -1063,136 +924,15 @@ fn steps_text(d: &Diagram, p: &Placed) -> String {
 
 // ---- drawing (ggplot-rs) -----------------------------------------------------
 //
-// The layout above is ours (graph theory); the drawing is ggplot-rs's
-// (#318 step 5, #421): one `GGPlot` over the layout's own pixel space (x
-// right, y down, 1 data unit = 1 px, no margins), with a layer per mark
-// kind. The mark contract web/anim.js and web/app.js read stays as before:
-// `rect[data-node]` boxes and `polyline[data-edge]` edges with a `<title>`,
-// arrowheads (`polygon[data-from]`) and edge labels carrying
-// `data-from`/`data-to`, and a node's contents (accent, label, value,
-// badge, sparkline) inside one `<g data-of="<id>">`, inert
-// (`pointer-events="none"`, `aria-hidden="true"`) so hover, click and
-// screen readers reach the box below.
-
-/// A column-major frame for one layer; every row pushes every column.
-#[derive(Default)]
-struct Frame(Vec<(String, Vec<Value>)>);
-
-impl Frame {
-    fn col(&mut self, name: &str) -> &mut Vec<Value> {
-        let i = match self.0.iter().position(|(n, _)| n == name) {
-            Some(i) => i,
-            None => {
-                self.0.push((name.to_string(), Vec::new()));
-                self.0.len() - 1
-            }
-        };
-        &mut self.0[i].1
-    }
-    fn num(&mut self, name: &str, v: f64) -> &mut Self {
-        self.col(name).push(Value::Float(v));
-        self
-    }
-    fn txt(&mut self, name: &str, v: impl Into<String>) -> &mut Self {
-        self.col(name).push(Value::Str(v.into()));
-        self
-    }
-    fn opt(&mut self, name: &str, v: Option<String>) -> &mut Self {
-        self.col(name).push(v.map_or(Value::Na, Value::Str));
-        self
-    }
-    fn is_empty(&self) -> bool {
-        self.0.first().is_none_or(|(_, v)| v.is_empty())
-    }
-    /// The frame's columns, its pixel y (down) flipped to ggplot-rs's data
-    /// y (up) on a canvas `h` tall: `y` → `h - y`, and a rect's `y0`/`y1`
-    /// swapped as they flip so `y0` stays the low edge.
-    fn take(&mut self, h: f64) -> Vec<(String, Vec<Value>)> {
-        let flip = |v: Vec<Value>| -> Vec<Value> {
-            v.into_iter()
-                .map(|x| match x {
-                    Value::Float(y) => Value::Float(h - y),
-                    other => other,
-                })
-                .collect()
-        };
-        std::mem::take(&mut self.0)
-            .into_iter()
-            .map(|(n, v)| match n.as_str() {
-                "y" => (n, flip(v)),
-                "y0" => ("y1".to_string(), flip(v)),
-                "y1" => ("y0".to_string(), flip(v)),
-                _ => (n, v),
-            })
-            .collect()
-    }
-}
-
-/// Frames keyed by a colour a geom only takes as a fixed parameter (a
-/// rect's stroke), in first-seen order: one layer per colour.
-fn by_colour(v: &mut Vec<(Rgb, Frame)>, c: Rgb) -> &mut Frame {
-    let i = match v.iter().position(|(k, _)| *k == c) {
-        Some(i) => i,
-        None => {
-            v.push((c, Frame::default()));
-            v.len() - 1
-        }
-    };
-    &mut v[i].1
-}
-
-/// The point a fraction `t` (0..1) of the way along a polyline.
-fn point_at(pts: &[(f64, f64)], t: f64) -> (f64, f64) {
-    let seg = |i: usize| {
-        let (a, b) = (pts[i], pts[i + 1]);
-        ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
-    };
-    let total: f64 = (0..pts.len().saturating_sub(1)).map(seg).sum();
-    let mut left = total * t;
-    for i in 0..pts.len().saturating_sub(1) {
-        let l = seg(i);
-        if l >= left && l > 0.0 {
-            let t = left / l;
-            let (a, b) = (pts[i], pts[i + 1]);
-            return (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
-        }
-        left -= l;
-    }
-    pts.first().copied().unwrap_or((0.0, 0.0))
-}
-
-/// Where an edge's label goes (#753): the midpoint of the edge, else the
-/// nearest point along it where the label's box (`label`, 11 px lines drawn
-/// around `y - 4`) touches no node box — so a node doesn't cover it.
-fn edge_label_at(pts: &[(f64, f64)], label: &str, nodes: &[PNode]) -> (f64, f64) {
-    let lines: Vec<&str> = label.split('\n').collect();
-    let hw = lines
-        .iter()
-        .map(|l| text_w(l, 11.0, false))
-        .fold(0.0, f64::max)
-        / 2.0
-        + 3.0;
-    let hh = lines.len() as f64 * 6.6 + 3.0;
-    let clear = |(x, y): (f64, f64)| {
-        let cy = y - 4.0 - 0.36 * 11.0;
-        nodes
-            .iter()
-            .all(|n| (x - n.cx).abs() >= hw + n.w / 2.0 || (cy - n.cy).abs() >= hh + n.h / 2.0)
-    };
-    let mid = point_at(pts, 0.5);
-    [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.18, 0.82]
-        .into_iter()
-        .map(|t| point_at(pts, t))
-        .find(|&p| clear(p))
-        .unwrap_or(mid)
-}
-
-/// ggplot-rs centres text on its y (`dominant-baseline="middle"`); the
-/// layout places lines by their baseline. A cap-height-ish shift between
-/// the two.
-fn mid_of_baseline(baseline: f64, px: f64) -> f64 {
-    baseline - 0.36 * px
-}
+// ggplot-rs draws the laid-out graph (`ggplot_rs::graph`, #497); here is
+// what each mark says and what colour it takes. The mark contract
+// web/anim.js and web/app.js read stays as before: `rect[data-node]` boxes
+// and `polyline[data-edge]` edges with a `<title>`, arrowheads
+// (`polygon[data-from]`) and edge labels carrying `data-from`/`data-to`,
+// and a node's contents (accent, label, value, badge, sparkline) inside one
+// `<g data-of="<id>">`, inert (`pointer-events="none"`,
+// `aria-hidden="true"`) so hover, click and screen readers reach the box
+// below.
 
 /// `'flow-volume'`/`'flow-dots-volume'`: an edge's animation speed bucket
 /// from what it carries, on the same area-true sqrt scale as its width.
@@ -1214,491 +954,155 @@ fn speed_class(v: f64, vmax: f64) -> &'static str {
     }
 }
 
+/// `(name, value)` as a `data-*` attribute.
+fn attr(name: &str, v: Option<String>) -> ggplot_rs::graph::DataAttr {
+    (name.to_string(), v)
+}
+
 /// The drawing as a nested `<svg>` of `pw` × `ph` (the layout's own size).
 fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String {
-    use ggplot_rs::geom::arrow::arrow;
-    use ggplot_rs::prelude::*;
-    use ggplot_rs::render::backend::{LineEnd, Linetype};
-    use ggplot_rs::scale::linewidth::ScaleLinewidthContinuous;
+    use ggplot_rs::graph::{self, DrawEdge, DrawNode, EdgeLine, GraphStyle};
 
     let t = &o.theme;
-    let (muted, card, ink) = (t.colors.muted, t.colors.card, t.colors.ink);
-    let (w, h) = (pw as f64, ph as f64);
-    let mut th = crate::void_theme(o);
-    th.legend_position = ggplot_rs::theme::LegendPosition::None;
-    let mut plot = GGPlot::new(vec![
-        ("x".to_string(), vec![Value::Float(0.0), Value::Float(w)]),
-        ("y".to_string(), vec![Value::Float(0.0), Value::Float(h)]),
-    ])
-    .theme(th)
-    // the canvas is the view (a zoom, so a mark reaching past it is clipped
-    // rather than dropped); `Frame::take` flips the layout's y-down pixels
-    .scale_x_continuous(ScaleContinuous::new().with_expand(0.0, 0.0))
-    .scale_y_continuous(ScaleContinuous::new().with_expand(0.0, 0.0))
-    .coord_cartesian_zoom(Some((0.0, w)), Some((0.0, h)))
-    .scale_color_identity()
-    .scale_fill_identity()
-    .scale_linewidth(
-        ScaleLinewidthContinuous::new()
-            .with_limits(0.0, 16.0)
-            .with_range(0.0, 16.0),
-    )
-    .scale_linetype_manual(vec![
-        ("solid", Linetype::Solid),
-        ("dashed", Linetype::Custom(vec![(6.0, 4.0)])),
-        // round caps on a zero-length dash: moving dots
-        ("dots", Linetype::Custom(vec![(0.0, 10.0)])),
-    ]);
-    let rect_aes = || Aes::new().xmin("x0").xmax("x1").ymin("y0").ymax("y1");
-    let inert = [("pointer-events", "none")];
-
-    // swimlanes (under everything): a tinted band per lane, its name on top
-    let (mut even, mut odd, mut names) = (Frame::default(), Frame::default(), Frame::default());
-    for &(l, x0, y0, x1, y1) in &p.bands {
-        let f = if l % 2 == 0 { &mut even } else { &mut odd };
-        f.num("x0", x0).num("x1", x1).num("y0", y0).num("y1", y1);
-        f.txt("lane", d.lanes[l].clone());
-        names
-            .num("x", x0 + 8.0)
-            .num("y", mid_of_baseline(y0 + 13.0, 11.0));
-        names.txt("label", d.lanes[l].clone());
-    }
-    for (mut f, alpha) in [(even, 0.35), (odd, 0.18)] {
-        if f.is_empty() {
-            continue;
-        }
-        plot = plot
-            .geom_rect_with(
-                GeomRect {
-                    fill: t.colors.line,
-                    alpha,
-                    line_width: 0.0,
-                    ..Default::default()
-                }
-                .with_radius(6.0),
-            )
-            .layer_data(f.take(h))
-            .layer_aes(rect_aes().data_attr("lane", "lane"))
-            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-lane")]);
-    }
-    if !names.is_empty() {
-        plot = plot
-            .geom_text_with(GeomText {
-                size: 11.0,
-                color: muted,
-                hjust: 0.0,
-                // #228: lane names (dp-lane-label) render bold, matching
-                // web/theme-base.css for the same reason as dp-node-label
-                // below.
-                fontface: FontFace::Bold,
-                ..Default::default()
-            })
-            .layer_data(names.take(h))
-            .layer_aes(Aes::new().x("x").y("y").label("label"))
-            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-lane-label")]);
-    }
-
-    // edges (under the nodes): one path per edge, as wide as what it
-    // carries (area-true: sqrt), its style a linetype
+    let muted = t.colors.muted;
     let vmax = d.edges.iter().filter_map(|e| e.value).fold(0.0, f64::max);
-    let (mut ef, mut lf) = (Frame::default(), Frame::default());
-    for (k, e) in d.edges.iter().enumerate() {
-        let width = match e.value {
-            Some(v) if vmax > 0.0 => 1.4 + 5.6 * (v.max(0.0) / vmax).sqrt(),
-            _ => 1.6,
-        };
-        let width = match e.style {
-            EdgeStyle::Dots(_) => width.clamp(3.0, 6.0),
-            _ => width,
-        };
-        let width = (width * 10.0).round() / 10.0;
-        let mut pts = p.edges[k].clone();
-        if pts.len() < 2 {
-            continue;
-        }
-        // ggplot-rs puts the arrow's tip on the path's last point and
-        // strokes the head as wide as the line (its mitred tip reaching
-        // about one line width further): end the path one width short of
-        // the box so the tip lands on its edge.
-        let n = pts.len();
-        let ((fx, fy), (tx, ty)) = (pts[n - 2], pts[n - 1]);
-        let len = ((tx - fx).powi(2) + (ty - fy).powi(2)).sqrt().max(1e-6);
-        let pull = width.min(len / 2.0);
-        pts[n - 1] = (tx - (tx - fx) / len * pull, ty - (ty - fy) / len * pull);
-        // health first (warn / bad), else a flowing edge in the brand colour
-        let colour = match (e.status, e.style) {
-            (Some(st @ (Status::Bad | Status::Warn)), _) => st.color(t),
-            (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => t.color(0),
-            _ => muted,
-        };
-        let (lt, class) = match e.style {
-            EdgeStyle::Solid => ("solid", None),
-            EdgeStyle::Dashed => ("dashed", None),
-            EdgeStyle::Flow(_) => ("dashed", Some("dp-flow")),
-            EdgeStyle::Dots(_) => ("dots", Some("dp-flow dp-dots")),
-        };
-        let speed = match (e.style, e.value) {
-            (EdgeStyle::Flow(true) | EdgeStyle::Dots(true), Some(v)) if vmax > 0.0 => {
-                Some(speed_class(v, vmax))
-            }
-            _ => None,
-        };
-        let class = match (class, speed) {
-            (Some(c), Some(s)) => Some(format!("{c} {s}")),
-            (c, _) => c.map(str::to_string),
-        };
-        let (a, b) = (&d.nodes[e.from], &d.nodes[e.to]);
-        let name = format!("{} → {}", a.label, b.label);
-        let tip = match (&e.label, &e.fvalue) {
-            (Some(l), _) => format!("{name}: {l}"),
-            (None, Some(v)) => format!("{name}: {v}"),
-            _ => name.clone(),
-        };
-        for &(x, y) in &pts {
-            ef.num("x", x).num("y", y).txt("g", format!("e{k:04}"));
-            ef.txt("col", hex(colour)).num("lw", width).txt("lt", lt);
-            ef.opt("cls", class.clone()).txt("tip", tip.clone());
-            ef.txt("edge", format!("{}>{}", a.id, b.id));
-            ef.txt("from", a.id.clone()).txt("to", b.id.clone());
-            ef.txt("fx", name.clone());
-            ef.opt("value", e.value.map(|v| v.to_string()));
-            ef.opt(
-                "fvalue",
-                e.value.map(|_| e.fvalue.clone().unwrap_or_default()),
-            );
-            ef.opt("status", e.status.map(|s| s.as_str().to_string()));
-            ef.opt("back", p.back[k].then(|| "1".to_string()));
-        }
-        if let Some(l) = &e.label {
-            let (mx, my) = edge_label_at(&p.edges[k], l, &p.nodes);
-            // #519: ggplot-rs 0.31.0's geom_text honours an embedded "\n"
-            // natively (sipemu/ggplot-rs#249) — one halo-backed text row for
-            // the whole label, centred around the midpoint, instead of
-            // #229's hand-stacked row per line. Its block centring (size
-            // 11, line_height 1.2) lands each line exactly where the old
-            // per-line loop put it: both put line i's drawn y at
-            // `my - 7.96 + i * 13.2 - (n - 1) * 6.6`, so this is a
-            // byte-identical render, for any number of lines.
-            lf.num("x", mx).num("y", mid_of_baseline(my - 4.0, 11.0));
-            lf.txt("label", l.clone());
-            lf.txt("from", a.id.clone()).txt("to", b.id.clone());
-        }
-    }
-    if !ef.is_empty() {
-        plot = plot
-            .geom_path_with(
-                GeomPath::default()
-                    .lineend(LineEnd::Round)
-                    // the old 7 px + width head, ~29° half-angle
-                    .arrow(
-                        arrow()
-                            .closed()
-                            .angle(29.0)
-                            .length(ARROW + 1.0)
-                            .length_per_linewidth(1.2),
+    let edges: Vec<DrawEdge> = d
+        .edges
+        .iter()
+        .enumerate()
+        .map(|(k, e)| {
+            let line = match e.style {
+                EdgeStyle::Solid => EdgeLine::Solid,
+                EdgeStyle::Dashed | EdgeStyle::Flow(_) => EdgeLine::Dashed,
+                EdgeStyle::Dots(_) => EdgeLine::Dots,
+            };
+            // health first (warn / bad), else a flowing edge in the brand colour
+            let colour = match (e.status, e.style) {
+                (Some(st @ (Status::Bad | Status::Warn)), _) => st.color(t),
+                (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => t.color(0),
+                _ => muted,
+            };
+            let class = match e.style {
+                EdgeStyle::Solid | EdgeStyle::Dashed => None,
+                EdgeStyle::Flow(_) => Some("dp-flow"),
+                EdgeStyle::Dots(_) => Some("dp-flow dp-dots"),
+            };
+            let speed = match (e.style, e.value) {
+                (EdgeStyle::Flow(true) | EdgeStyle::Dots(true), Some(v)) if vmax > 0.0 => {
+                    Some(speed_class(v, vmax))
+                }
+                _ => None,
+            };
+            let class = match (class, speed) {
+                (Some(c), Some(s)) => Some(format!("{c} {s}")),
+                (c, _) => c.map(str::to_string),
+            };
+            let (a, b) = (&d.nodes[e.from], &d.nodes[e.to]);
+            let name = format!("{} → {}", a.label, b.label);
+            let tooltip = match (&e.label, &e.fvalue) {
+                (Some(l), _) => format!("{name}: {l}"),
+                (None, Some(v)) => format!("{name}: {v}"),
+                _ => name.clone(),
+            };
+            DrawEdge {
+                colour,
+                width: graph::flow_width(e.value, vmax, line),
+                line,
+                class,
+                tooltip,
+                label: e.label.clone(),
+                attrs: vec![
+                    attr("edge", Some(format!("{}>{}", a.id, b.id))),
+                    attr("from", Some(a.id.clone())),
+                    attr("to", Some(b.id.clone())),
+                    attr("xtext", Some(name)),
+                    attr("value", e.value.map(|v| v.to_string())),
+                    attr(
+                        "vtext",
+                        e.value.map(|_| e.fvalue.clone().unwrap_or_default()),
                     ),
-            )
-            .layer_data(ef.take(h))
-            .layer_aes(
-                Aes::new()
-                    .x("x")
-                    .y("y")
-                    .group("g")
-                    .color("col")
-                    .linewidth("lw")
-                    .linetype("lt")
-                    .class("cls")
-                    .tooltip("tip")
-                    .data_attr("edge", "edge")
-                    .data_attr("from", "from")
-                    .data_attr("to", "to")
-                    .data_attr("xtext", "fx")
-                    .data_attr("value", "value")
-                    .data_attr("vtext", "fvalue")
-                    .data_attr("status", "status")
-                    .data_attr("back", "back"),
-            )
-            .layer_svg_attr("class", "dp-edge");
-    }
-    if !lf.is_empty() {
-        // #229: text directly on the line with a card-coloured halo keeps
-        // it legible over the line, matching the old hand-written SVG's
-        // paint-order:stroke halo (replaces the boxed chip the GeomLabel
-        // port used before ggplot-rs grew a halo option).
-        plot = plot
-            .geom_text_with(
-                GeomText {
-                    size: 11.0,
-                    color: muted,
-                    ..Default::default()
-                }
-                .bg_colour(card)
-                .bg_r(2.0),
-            )
-            .layer_data(lf.take(h))
-            .layer_aes(
-                Aes::new()
-                    .x("x")
-                    .y("y")
-                    .label("label")
-                    .data_attr("from", "from")
-                    .data_attr("to", "to"),
-            )
-            .layer_svg_attrs(inert)
-            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-edge-label")]);
-    }
-
-    // nodes: the box (the hit target, outside any `data-of` group), then
-    // what it shows, grouped per node
-    let mut boxes: Vec<(Rgb, Frame)> = Vec::new();
-    let mut badges: Vec<(Rgb, Frame)> = Vec::new();
-    let (mut accent, mut lines, mut values) =
-        (Frame::default(), Frame::default(), Frame::default());
-    let (mut dots, mut btext, mut spark, mut ends) = (
-        Frame::default(),
-        Frame::default(),
-        Frame::default(),
-        Frame::default(),
-    );
-    for v in reading(p) {
-        let nd = &d.nodes[v];
-        let pn = &p.nodes[v];
-        let id = nd.id.clone();
-        let (x, y) = (pn.cx - pn.w / 2.0, pn.cy - pn.h / 2.0);
-        let stroke = nd
-            .status
-            .filter(|s| *s == Status::Bad || *s == Status::Warn)
-            .map(|s| s.color(t))
-            .unwrap_or(t.chart.line);
-        let mut tip = nd.label.clone();
-        if let Some(fv) = &nd.fvalue {
-            tip.push_str(&format!(": {fv}"));
-        }
-        if let Some(b) = &nd.badge {
-            tip.push_str(&format!(" ({b})"));
-        }
-        let f = by_colour(&mut boxes, stroke);
-        f.num("x0", x)
-            .num("x1", x + pn.w)
-            .num("y0", y)
-            .num("y1", y + pn.h);
-        f.txt("node", id.clone())
-            .txt("xk", id.clone())
-            .txt("series", id.clone());
-        f.txt("fx", nd.label.clone());
-        f.txt("layer", pn.layer.to_string())
-            .txt("order", pn.order.to_string());
-        f.opt("value", nd.value.map(|v| v.to_string()));
-        f.opt(
-            "fvalue",
-            nd.value.map(|_| nd.fvalue.clone().unwrap_or_default()),
-        );
-        f.opt("status", nd.status.map(|s| s.as_str().to_string()));
-        f.opt("badge", nd.badge.clone()).txt("tip", tip);
-
-        let accent_c = nd
-            .status
-            .filter(|s| *s != Status::Neutral)
-            .map(|s| s.color(t))
-            .or_else(|| {
-                nd.category
-                    .map(|c| match d.category_colors.get(c).copied().flatten() {
-                        Some(lc) => lc.rgb(t),
-                        None => t.color(c),
-                    })
-            });
-        if let Some(a) = accent_c {
-            accent.num("x0", x + 1.5).num("x1", x + 4.5);
-            accent
-                .num("y0", y + 6.0)
-                .num("y1", y + 6.0 + (pn.h - 12.0).max(4.0));
-            accent.txt("fill", hex(a)).txt("of", id.clone());
-        }
-        let mut base = y + BOX_PAD_Y + 12.0;
-        for line in &pn.lines {
-            lines
-                .num("x", pn.cx)
-                .num("y", mid_of_baseline(base, LABEL_PX));
-            lines.txt("label", line.clone()).txt("of", id.clone());
-            base += LINE_H;
-        }
-        if let Some(fv) = &nd.fvalue {
-            values
-                .num("x", pn.cx)
-                .num("y", mid_of_baseline(base, VALUE_PX));
-            values.txt("label", fv.clone()).txt("of", id.clone());
-            base += LINE_H;
-        }
-        if let Some(b) = &nd.badge {
-            let bw = text_w(b, BADGE_PX, false) + 20.0;
-            let dot = nd.status.map(|s| s.color(t)).unwrap_or(muted);
-            let (bx, by) = (pn.cx - bw / 2.0, base - 9.0);
-            let f = by_colour(&mut badges, dot);
-            f.num("x0", bx)
-                .num("x1", bx + bw)
-                .num("y0", by)
-                .num("y1", by + 16.0);
-            f.txt("of", id.clone());
-            dots.num("x", bx + 9.0).num("y", by + 8.0);
-            dots.txt("col", hex(dot)).txt("of", id.clone());
-            btext.num("x", bx + 15.0).num("y", by + 8.0);
-            btext.txt("label", b.clone()).txt("of", id.clone());
-            base += 20.0;
-        }
-        // a mini trend along the bottom of the box
-        if nd.spark.len() >= 2 {
-            let (lo, hi) = nd
-                .spark
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-                    (a.min(v), b.max(v))
-                });
-            let rng = if hi > lo { hi - lo } else { 1.0 };
-            let (sx0, sw) = (x + BOX_PAD_X, pn.w - 2.0 * BOX_PAD_X);
-            let (top, sh) = (base - 8.0, SPARK_H - 8.0);
-            let last = nd.spark.len() - 1;
-            let col = hex(nd
-                .status
-                .filter(|s| *s == Status::Bad || *s == Status::Warn)
-                .map(|s| s.color(t))
-                .unwrap_or_else(|| t.color(0)));
-            for (i, &sv) in nd.spark.iter().enumerate() {
-                let (px, py) = (
-                    sx0 + sw * i as f64 / last as f64,
-                    top + sh - (sv - lo) / rng * sh,
-                );
-                spark.num("x", px).num("y", py).txt("g", id.clone());
-                spark.txt("col", col.clone()).txt("of", id.clone());
-                if i == last {
-                    ends.num("x", px).num("y", py);
-                    ends.txt("col", col.clone()).txt("of", id.clone());
-                }
+                    attr("status", e.status.map(|s| s.as_str().to_string())),
+                    attr("back", p.back[k].then(|| "1".to_string())),
+                ],
+                label_attrs: vec![
+                    attr("from", Some(a.id.clone())),
+                    attr("to", Some(b.id.clone())),
+                ],
             }
-        }
-    }
-    for (stroke, mut f) in boxes {
-        plot = plot
-            .geom_rect_with(
-                GeomRect {
-                    fill: card,
-                    color: stroke,
-                    alpha: 1.0,
-                    line_width: 1.2,
-                    ..Default::default()
-                }
-                .with_radius(8.0),
-            )
-            .layer_data(f.take(h))
-            .layer_aes(
-                rect_aes()
-                    .tooltip("tip")
-                    .data_attr("node", "node")
-                    .data_attr("x", "xk")
-                    .data_attr("series", "series")
-                    .data_attr("xtext", "fx")
-                    .data_attr("layer", "layer")
-                    .data_attr("order", "order")
-                    .data_attr("value", "value")
-                    .data_attr("vtext", "fvalue")
-                    .data_attr("status", "status")
-                    .data_attr("badge", "badge"),
-            )
-            .layer_svg_attr("class", "dp-node");
-    }
-    // everything below: dims / lights with its node (`data-of`), inert
-    let of = |a: Aes| a.group_wrap("of", "of");
-    if !accent.is_empty() {
-        plot = plot
-            .geom_rect_with(
-                GeomRect {
-                    alpha: 1.0,
-                    line_width: 0.0,
-                    ..Default::default()
-                }
-                .with_radius(1.5),
-            )
-            .layer_data(accent.take(h))
-            .layer_aes(of(rect_aes().fill("fill")))
-            .decorative()
-            .layer_svg_attrs(inert);
-    }
-    for (mut f, size, colour, class) in [
-        (lines, LABEL_PX, t.colors.heading, "dp-node-label"),
-        (values, VALUE_PX, ink, "dp-node-value"),
-    ] {
-        if f.is_empty() {
-            continue;
-        }
-        plot = plot
-            .geom_text_with(GeomText {
-                size,
-                color: colour,
-                // #228: node names (dp-node-label) and values (dp-node-value)
-                // render bold — matches web/theme-base.css's font-weight on
-                // those classes, which the browser applies via CSS but a
-                // headless/static export needs baked into the SVG itself.
-                fontface: FontFace::Bold,
-                ..Default::default()
-            })
-            .layer_data(f.take(h))
-            .layer_aes(of(Aes::new().x("x").y("y").label("label")))
-            .layer_svg_attrs(inert)
-            .layer_svg_attrs([("aria-hidden", "true"), ("class", class)]);
-    }
-    for (dot, mut f) in badges {
-        plot = plot
-            .geom_rect_with(
-                GeomRect {
-                    fill: card,
-                    color: dot,
-                    alpha: 0.0,
-                    line_width: 1.0,
-                    ..Default::default()
-                }
-                .with_radius(8.0),
-            )
-            .layer_data(f.take(h))
-            .layer_aes(of(rect_aes()))
-            .decorative()
-            .layer_svg_attrs(inert);
-    }
-    for (mut f, size) in [(dots, 3.0), (ends, 2.2)] {
-        if f.is_empty() {
-            continue;
-        }
-        plot = plot
-            .geom_point_with(GeomPoint {
-                size,
-                ..Default::default()
-            })
-            .layer_data(f.take(h))
-            .layer_aes(of(Aes::new().x("x").y("y").color("col")))
-            .decorative()
-            .layer_svg_attrs(inert);
-    }
-    if !btext.is_empty() {
-        plot = plot
-            .geom_text_with(GeomText {
-                size: BADGE_PX,
-                color: ink,
-                hjust: 0.0,
-                ..Default::default()
-            })
-            .layer_data(btext.take(h))
-            .layer_aes(of(Aes::new().x("x").y("y").label("label")))
-            .layer_svg_attrs(inert)
-            .layer_svg_attrs([("aria-hidden", "true"), ("class", "dp-node-badge")]);
-    }
-    if !spark.is_empty() {
-        plot = plot
-            .geom_path_with(GeomPath::default().linewidth(1.4))
-            .layer_data(spark.take(h))
-            .layer_aes(of(Aes::new().x("x").y("y").group("g").color("col")))
-            .decorative()
-            .layer_svg_attrs(inert)
-            .layer_svg_attr("class", "dp-node-spark");
-    }
-    plot.render_svg_native_at(0.0, 0.0, pw, ph)
+        })
+        .collect();
+    let nodes: Vec<DrawNode> = d
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(v, nd)| {
+            let pn = &p.nodes[v];
+            let alarm = nd
+                .status
+                .filter(|s| *s == Status::Bad || *s == Status::Warn);
+            let mut tooltip = nd.label.clone();
+            if let Some(fv) = &nd.fvalue {
+                tooltip.push_str(&format!(": {fv}"));
+            }
+            if let Some(b) = &nd.badge {
+                tooltip.push_str(&format!(" ({b})"));
+            }
+            let accent = nd
+                .status
+                .filter(|s| *s != Status::Neutral)
+                .map(|s| s.color(t))
+                .or_else(|| {
+                    nd.category
+                        .map(|c| match d.category_colors.get(c).copied().flatten() {
+                            Some(lc) => lc.rgb(t),
+                            None => t.color(c),
+                        })
+                });
+            DrawNode {
+                id: nd.id.clone(),
+                lines: p.lines[v].clone(),
+                value: nd.fvalue.clone(),
+                badge: nd
+                    .badge
+                    .clone()
+                    .map(|b| (b, nd.status.map(|s| s.color(t)).unwrap_or(muted))),
+                stroke: alarm.map(|s| s.color(t)).unwrap_or(t.chart.line),
+                accent,
+                spark: (nd.spark.len() >= 2).then(|| {
+                    (
+                        nd.spark.clone(),
+                        alarm.map(|s| s.color(t)).unwrap_or_else(|| t.color(0)),
+                    )
+                }),
+                tooltip,
+                attrs: vec![
+                    attr("node", Some(nd.id.clone())),
+                    attr("x", Some(nd.id.clone())),
+                    attr("series", Some(nd.id.clone())),
+                    attr("xtext", Some(nd.label.clone())),
+                    attr("layer", Some(pn.layer.to_string())),
+                    attr("order", Some(pn.order.to_string())),
+                    attr("value", nd.value.map(|v| v.to_string())),
+                    attr(
+                        "vtext",
+                        nd.value.map(|_| nd.fvalue.clone().unwrap_or_default()),
+                    ),
+                    attr("status", nd.status.map(|s| s.as_str().to_string())),
+                    attr("badge", nd.badge.clone()),
+                ],
+            }
+        })
+        .collect();
+    let style = GraphStyle {
+        card: t.colors.card,
+        band: t.colors.line,
+        muted,
+        heading: t.colors.heading,
+        ink: t.colors.ink,
+        class_prefix: "dp-".to_string(),
+    };
+    graph::draw(&p.g, &d.lanes, &nodes, &edges, &style, crate::void_theme(o))
+        .render_svg_native_at(0.0, 0.0, pw, ph)
         .unwrap_or_default()
 }
 
@@ -2492,76 +1896,5 @@ mod tests {
         assert!(class("build>step").ends_with(" dp-flow dp-dots flow-speed-5"));
         assert!(!svg.contains("animation-duration"));
         assert_eq!(speed_class(0.5, 1.0), "flow-speed-2");
-    }
-
-    #[test]
-    fn wraps_long_labels_in_three_lines() {
-        let l = wrap(
-            "Recommend replenishment orders for every store and every week of the coming year",
-            152.0,
-        );
-        assert_eq!(l.len(), 3);
-        assert!(l[2].ends_with('…'));
-        assert_eq!(wrap("Ingest", 152.0), ["Ingest"]);
-    }
-
-    /// #753: no ellipsis while the label fits, breaks at word boundaries
-    /// and after `/` / `-`, never mid-word when there is a separator.
-    #[test]
-    fn wraps_at_word_boundaries() {
-        let max = BOX_MAX_W - 2.0 * BOX_PAD_X;
-        for label in [
-            "duckdb/community-extensions (descriptions)",
-            "Locked DuckDB server (anofox-visualization)",
-            "Parquet snapshot (downloads, extensions)",
-            "fetch.sh: download, file by ISO week, merge",
-        ] {
-            let l = wrap(label, max);
-            assert!(l.len() <= MAX_LINES, "{l:?}");
-            assert!(!l.iter().any(|x| x.contains('…')), "{label}: {l:?}");
-            // every line ends at a space or after a separator
-            let joined: String = l.concat();
-            assert_eq!(joined.replace(' ', ""), label.replace(' ', ""), "{l:?}");
-            for w in l.windows(2) {
-                let end = w[0].chars().last().unwrap();
-                let next = w[1].chars().next().unwrap();
-                let at_space = label.contains(&format!(
-                    "{} {}",
-                    w[0].split(' ').next_back().unwrap(),
-                    w[1].split(' ').next().unwrap()
-                ));
-                assert!(
-                    at_space || matches!(end, '/' | '-' | '_' | '.' | ','),
-                    "{l:?} breaks at {end}{next}"
-                );
-            }
-        }
-        assert_eq!(
-            wrap("duckdb/community-extensions (descriptions)", max),
-            ["duckdb/community-", "extensions", "(descriptions)"]
-        );
-    }
-
-    /// #753: an edge label a node box would cover moves along the edge.
-    #[test]
-    fn edge_label_keeps_clear_of_nodes() {
-        let node = |cx: f64, w: f64| PNode {
-            cx,
-            cy: 0.0,
-            w,
-            h: 40.0,
-            lines: Vec::new(),
-            layer: 0,
-            order: 0,
-        };
-        let pts = [(0.0, 0.0), (300.0, 0.0)];
-        // nothing in the way: the midpoint
-        assert_eq!(edge_label_at(&pts, "spikes flagged", &[]), (150.0, 0.0));
-        // a box over the middle: somewhere else along the edge, clear of it
-        let nodes = [node(150.0, 60.0)];
-        let (x, _) = edge_label_at(&pts, "spikes flagged", &nodes);
-        let hw = text_w("spikes flagged", 11.0, false) / 2.0 + 3.0;
-        assert!((x - 150.0).abs() >= hw + 30.0, "{x}");
-        assert_eq!(point_at(&pts, 0.25), (75.0, 0.0));
     }
 }
