@@ -20,10 +20,10 @@ Queries run through the `duckdb` CLI on your `PATH` (`--data <dir>` points relat
 The `check-dashboards` action runs the released `dashboard --check` on a folder of dashboards for every pull request:
 
 ```yaml
-- uses: DataZooDE/anofox-visualization/.github/actions/check-dashboards@v2026.11.10
+- uses: DataZooDE/anofox-visualization/.github/actions/check-dashboards@v2026.11.12
   with:
     folder: dashboards
-    version: v2026.11.10     # the release the server runs
+    version: v2026.11.12     # the release the server runs
 ```
 
 Details: [deployment.md](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/deployment.md), [DOCS § 2](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#2-three-ways-to-run-it).
