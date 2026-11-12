@@ -2649,12 +2649,21 @@ where
                     });
                 }
                 let has_cat = p.roles.iter().any(|(_, r)| matches!(r, Role::Category));
-                if matches!(k, Kind::Bar) && !has_cat && rows.len() >= 3 {
+                // several measures side by side (promised vs actual, 2024 vs
+                // 2025) are read pair by pair: ordered by name or by the gap
+                // is as good as by the first measure
+                let measures = p
+                    .roles
+                    .iter()
+                    .filter(|(_, r)| matches!(r, Role::Value(_)))
+                    .count();
+                if matches!(k, Kind::Bar) && !has_cat && measures == 1 && rows.len() >= 3 {
                     if let (Some(xi), Some(mi)) =
                         (role_index(&p.roles, Role::X), value_index(&p.roles))
                     {
                         if col_is_discrete(&rows, xi)
                             && !col_is_temporal(&rows, xi)
+                            && !col_is_calendar(&rows, xi)
                             && !col_is_monotonic(&rows, mi)
                         {
                             diags.push(Diagnostic {
@@ -7961,6 +7970,95 @@ fn col_is_temporal(rows: &[Map<String, Value>], col: usize) -> bool {
         .any(|v| matches!(v, Value::String(s) if looks_like_date(s)))
 }
 
+/// Calendar labels with an order of their own — month or weekday names
+/// (English or German, full or short) or quarters (`Q1`, `Q3 2025`): bars
+/// along them keep the calendar order, not a value ranking.
+fn col_is_calendar(rows: &[Map<String, Value>], col: usize) -> bool {
+    const NAMES: &[&str] = &[
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "sept",
+        "oct",
+        "nov",
+        "dec",
+        "januar",
+        "februar",
+        "märz",
+        "mai",
+        "juni",
+        "juli",
+        "oktober",
+        "dezember",
+        "mär",
+        "okt",
+        "dez",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
+        "montag",
+        "dienstag",
+        "mittwoch",
+        "donnerstag",
+        "freitag",
+        "samstag",
+        "sonntag",
+        "mo",
+        "di",
+        "mi",
+        "do",
+        "fr",
+        "sa",
+        "so",
+    ];
+    let key = format!("c{col}");
+    let mut seen = 0;
+    for v in rows.iter().filter_map(|r| r.get(&key)) {
+        let Value::String(s) = v else { return false };
+        let s = s.trim().trim_end_matches('.').to_lowercase();
+        let quarter = s.strip_prefix('q').is_some_and(|q| {
+            let mut it = q.split_whitespace();
+            matches!(it.next(), Some("1" | "2" | "3" | "4"))
+                && it
+                    .next()
+                    .is_none_or(|y| y.len() == 4 && y.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if !quarter && !NAMES.contains(&s.as_str()) {
+            return false;
+        }
+        seen += 1;
+    }
+    seen > 0
+}
+
 fn looks_like_date(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 8 && b[0..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
@@ -10326,6 +10424,44 @@ mod design_tests {
             sorted,
         );
         assert!(!has(&d2, "design/unsorted-bars"), "{d2:?}");
+    }
+
+    #[test]
+    fn calendar_and_paired_bars_are_not_flagged_unsorted() {
+        // 11-11 bench: month names in calendar order (ts-seasonality) and
+        // promised vs actual side by side (rank-dumbbell) were pushed to a
+        // value sort
+        let months = rows(
+            3,
+            |i| json!({ "c0": (["January", "February", "March"][i]), "c1": ([3.0, 1.0, 2.0][i]) }),
+        );
+        let d = lint_one(
+            "SELECT m::XAXIS, n::BARCHART, 'Seasonal'::TITLE FROM t;",
+            months,
+        );
+        assert!(!has(&d, "design/unsorted-bars"), "{d:?}");
+        let quarters = rows(
+            3,
+            |i| json!({ "c0": format!("Q{} 2025", i + 1), "c1": ([3.0, 1.0, 2.0][i]) }),
+        );
+        let d = lint_one("SELECT q::XAXIS, n::BARCHART, 'Q'::TITLE FROM t;", quarters);
+        assert!(!has(&d, "design/unsorted-bars"), "{d:?}");
+        let paired = rows(
+            3,
+            |i| json!({ "c0": format!("sup{i}"), "c1": ([3.0, 1.0, 2.0][i]), "c2": ([4.0, 1.5, 2.0][i]) }),
+        );
+        let d = lint_one(
+            "SELECT s::XAXIS, p::BARCHART AS \"Promised\", a::BARCHART AS \"Actual\", 'Gap'::TITLE FROM t;",
+            paired,
+        );
+        assert!(!has(&d, "design/unsorted-bars"), "{d:?}");
+        // a name that only looks like one ("May Corp") among others still warns
+        let mixed = rows(
+            3,
+            |i| json!({ "c0": (["May", "Acme", "Zeta"][i]), "c1": ([3.0, 1.0, 2.0][i]) }),
+        );
+        let d = lint_one("SELECT c::XAXIS, n::BARCHART, 'C'::TITLE FROM t;", mixed);
+        assert!(has(&d, "design/unsorted-bars"), "{d:?}");
     }
 
     #[test]

@@ -64,8 +64,9 @@ Pick the chart from the *question*, grounded in the column's cardinality
 | row-level detail | `::TABLE` (`::PAGED` when large) |
 
 - **Sort bars by value** (`ORDER BY <measure> DESC`) unless the x-axis is
-  temporal or a genuine ordinal — an unsorted ranking makes the reader do the
-  work. **[lint: unsorted-bars]**
+  temporal or a genuine ordinal (month or weekday names, quarters), or several
+  measures stand side by side (promised vs actual: order by name or gap) — an
+  unsorted ranking makes the reader do the work. **[lint: unsorted-bars]**
 - **No pie/donut past ~6 slices** — angles that close are impossible to compare;
   use a sorted bar. **[lint: pie-slices]**
 - **No 3D, no dual y-axes** — both distort comparison. Not offered by the
