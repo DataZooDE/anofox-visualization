@@ -5648,8 +5648,8 @@ fn render_histogram(
         std::collections::HashMap::new();
     let mut totals: std::collections::HashMap<(String, String), f64> =
         std::collections::HashMap::new();
-    for i in 0..value.values.len() {
-        let Some(v) = value.values[i].as_f64().filter(|f| f.is_finite()) else {
+    for (i, cell) in value.values.iter().enumerate() {
+        let Some(v) = cell.as_f64().filter(|f| f.is_finite()) else {
             continue;
         };
         let Some(bin) = hist_bin_of(v, &edges) else {

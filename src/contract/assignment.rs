@@ -72,11 +72,10 @@ fn num_of(t: &Table, key: &str, i: usize) -> Option<f64> {
 /// every kept row's key is a number, else lexicographic text), their axis
 /// labels in that order, and how many rows a NULL `key` dropped.
 fn ordered_rows(t: &Table, key: &str) -> (Vec<usize>, Vec<String>, usize) {
-    let n = t.rows.len();
     let mut kept: Vec<usize> = Vec::new();
     let mut dropped = 0usize;
-    for i in 0..n {
-        match t.rows[i].get(key) {
+    for (i, row) in t.rows.iter().enumerate() {
+        match row.get(key) {
             Some(v) if !v.is_null() => kept.push(i),
             _ => dropped += 1,
         }

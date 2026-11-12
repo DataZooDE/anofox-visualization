@@ -579,14 +579,12 @@ fn max_class_count(cols: &[Column], fr: &Frames, scale: &super::ValueScale) -> u
         return 0;
     };
     let mut max_count = 0usize;
-    for k in 0..fr.labels.len() {
+    for frame in &fr.row_in {
         let mut counts = vec![0usize; classes.len()];
-        for f in 0..fr.first_row.len() {
-            if let Some(row) = fr.row_in[k][f] {
-                if let Some(v) = measure.values.get(row).and_then(cell_num) {
-                    let idx = classes.index(v.clamp(scale.lo, scale.hi));
-                    counts[idx] += 1;
-                }
+        for &row in frame.iter().flatten() {
+            if let Some(v) = measure.values.get(row).and_then(cell_num) {
+                let idx = classes.index(v.clamp(scale.lo, scale.hi));
+                counts[idx] += 1;
             }
         }
         max_count = max_count.max(counts.into_iter().max().unwrap_or(0));
