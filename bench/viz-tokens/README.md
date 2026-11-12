@@ -52,7 +52,7 @@ has a ground-truth SQL and one follow-up edit with its own truth. 5 are marked
 **Judge** (`judge.py`, blind to the arm): `claude-sonnet-5` sees the request,
 the truth rows, the written answer and the chart image. It grades
 `numbers_correct`, `chart_answers` and `readable` (1–5); `pass` = both true.
-Each answer is judged `--votes 3` times. The majority counts, and an answer
+Each answer is judged `--votes 3` times (`JUDGE_VOTES`, run.sh; the weekly CI eval uses 1 to stay in budget). The majority counts, and an answer
 whose calls split on pass is marked `unsure` (#1121: one call flipped 13 % of
 verdicts on a re-judge). The report gives the judge's self-agreement. `unsure.py
 export <results> <data>` writes the unsure answers, blind, for a second look by

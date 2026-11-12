@@ -51,6 +51,9 @@ jobs:
       SET: ${{ inputs.set || 'full' }}
       MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
       ARMS: ${{ inputs.arms || 'anofox-lean' }}
+      # one judge call per answer keeps the weekly run in the ~$35/month budget
+      # (#1073); full local runs judge 3 times and report the self-agreement (#1121)
+      JUDGE_VOTES: "1"
       BENCH_RESULTS: ${{ github.workspace }}/target/bench
       BENCH_PYTHON: ${{ github.workspace }}/.venv/bin/python
       ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
