@@ -2852,6 +2852,67 @@ fn hist_values() -> Vec<f64> {
 }
 
 #[test]
+fn a_sparse_label_names_its_points_on_a_scatter() {
+    // 11-11 bench (rel-label-outliers): `CASE WHEN rnk <= 5 THEN name END
+    // ::LABEL` drew the names only into the tooltip
+    let xs: Vec<f64> = (0..40).map(f64::from).collect();
+    let ys: Vec<f64> = (0..40).map(|i| f64::from(i * 7 % 13)).collect();
+    let names = |every: bool| -> Vec<Value> {
+        (0..40)
+            .map(|i| {
+                if every || i < 3 {
+                    Value::Str(format!("Point {i}"))
+                } else {
+                    Value::Na
+                }
+            })
+            .collect()
+    };
+    let chart = |every: bool| {
+        svg(vec![
+            Column::new("x", Role::X, nums(&xs)),
+            Column::new("y", Role::Value(Kind::Point), nums(&ys)),
+            Column::new("l", Role::Label, names(every)),
+        ])
+    };
+    let sparse = chart(false);
+    for i in 0..3 {
+        assert!(sparse.contains(&format!(">Point {i}<")), "{sparse}");
+    }
+    // a label on every row stays the tooltip's heading
+    let every = chart(true);
+    assert!(!every.contains(">Point 0<"), "{every}");
+    assert!(every.contains("data-label=\"Point 0\""));
+}
+
+#[test]
+fn each_xline_label_names_its_own_xline() {
+    // 11-11 bench (dist-mean-median): a mean and a median ::XLINE, each with
+    // its ::XLINE_LABEL — the second label was never read
+    let v: Vec<f64> = (0..200).map(|i| f64::from(i % 50)).collect();
+    let n = v.len();
+    let s = svg(vec![
+        Column::new("v", Role::Value(Kind::Histogram), nums(&v)),
+        Column::new("m", Role::VLine, nums(&vec![2.0; n])),
+        Column::new("ml", Role::VLineLabel, strs(&vec!["Median"; n])),
+        Column::new("a", Role::VLine, nums(&vec![40.0; n])),
+        Column::new("al", Role::VLineLabel, strs(&vec!["Mean"; n])),
+    ]);
+    assert!(s.contains("Median<") && s.contains("Mean<"), "{s}");
+    let xs: Vec<f64> = (0..20).map(f64::from).collect();
+    let ys: Vec<f64> = (0..20).map(|i| f64::from(i % 7)).collect();
+    let s = svg(vec![
+        Column::new("x", Role::X, nums(&xs)),
+        Column::new("y", Role::Value(Kind::Line), nums(&ys)),
+        Column::new("m", Role::VLine, nums(&[2.0; 20])),
+        Column::new("ml", Role::VLineLabel, strs(&["Start"; 20])),
+        Column::new("a", Role::VLine, nums(&[16.0; 20])),
+        Column::new("al", Role::VLineLabel, strs(&["Launch"; 20])),
+    ]);
+    assert!(s.contains("Start<") && s.contains("Launch<"), "{s}");
+}
+
+#[test]
 fn histogram_flip_lies_on_its_side() {
     let v: Vec<f64> = (0..60).map(|i| ((i * i) % 17) as f64).collect();
     let hist = || Column::new("v", Role::Value(Kind::Histogram), nums(&v));

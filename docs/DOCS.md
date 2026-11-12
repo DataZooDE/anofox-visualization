@@ -49,7 +49,7 @@ terminal.
 | `::XAXIS` | `::X` | encoding | x position |
 | `::YAXIS` | `::Y` | encoding | y position (a heatmap's second axis) |
 | `::CATEGORY` | `::SERIES`, `::COLOR`, `::COLOUR` | encoding | grouping / colour series (discrete) |
-| `::LABEL` |  | encoding | section heading when alone; chart title / per-mark or per-feature label otherwise |
+| `::LABEL` |  | encoding | section heading when alone; chart title / per-mark or per-feature label otherwise (on a scatter: the tooltip heading, drawn on the chart when only some rows, at most 20, carry one) |
 | `::TITLE` | `::HEADING` | encoding | a title bar above one panel |
 | `::ALT` | `::ALT_TEXT` | encoding | an image's text alternative ('' = decorative); falls back to ::TITLE, then ::LABEL |
 | `::SUBTITLE` | `::SUBHEADING` | encoding | a line under the panel's title (smaller, muted) |

@@ -2649,12 +2649,21 @@ where
                     });
                 }
                 let has_cat = p.roles.iter().any(|(_, r)| matches!(r, Role::Category));
-                if matches!(k, Kind::Bar) && !has_cat && rows.len() >= 3 {
+                // several measures side by side (promised vs actual, 2024 vs
+                // 2025) are read pair by pair: ordered by name or by the gap
+                // is as good as by the first measure
+                let measures = p
+                    .roles
+                    .iter()
+                    .filter(|(_, r)| matches!(r, Role::Value(_)))
+                    .count();
+                if matches!(k, Kind::Bar) && !has_cat && measures == 1 && rows.len() >= 3 {
                     if let (Some(xi), Some(mi)) =
                         (role_index(&p.roles, Role::X), value_index(&p.roles))
                     {
                         if col_is_discrete(&rows, xi)
                             && !col_is_temporal(&rows, xi)
+                            && !col_is_calendar(&rows, xi)
                             && !col_is_monotonic(&rows, mi)
                         {
                             diags.push(Diagnostic {
@@ -6784,25 +6793,67 @@ fn column_numbers(rows: &[Map<String, Value>], i: usize) -> Vec<f64> {
 /// 11-11 full run (dash-tabs): `round(avg(on_time), 2)::PERCENT` showed
 /// "0.3 %" for a 33 % rate — ::PERCENT takes percent (0–100), and every
 /// value here is a fraction.
+///
+/// 11-11 21:32 run (rel-label-outliers, rank-long-labels): the same on a
+/// chart axis — `'percent'::YFORMAT` over a 0–1 rate read "0.9 %" for 90 %.
 fn percent_fraction_diag(
     roles: &[(usize, Role)],
     rows: &[Map<String, Value>],
 ) -> Option<(&'static str, String)> {
-    let (i, _) = roles
+    let fractions = |cols: &[usize]| {
+        let v: Vec<f64> = cols.iter().flat_map(|&i| column_numbers(rows, i)).collect();
+        !v.is_empty()
+            && v.iter().all(|x| x.abs() <= 1.0)
+            && v.iter().any(|x| x.abs() > 0.0 && x.abs() < 1.0)
+    };
+    if let Some((i, _)) = roles
         .iter()
-        .find(|(_, r)| *r == Role::Metric(crate::MetricFmt::Percent))?;
-    let v = column_numbers(rows, *i);
-    (!v.is_empty()
-        && v.iter().all(|x| x.abs() <= 1.0)
-        && v.iter().any(|x| x.abs() > 0.0 && x.abs() < 1.0))
-    .then(|| {
-        (
-            "format/percent-fraction",
-            "::PERCENT shows the value as percent (0.33 → 0.33 %), and every value here is \
-             between -1 and 1 — multiply a fraction by 100"
-                .to_string(),
-        )
-    })
+        .find(|(_, r)| *r == Role::Metric(crate::MetricFmt::Percent))
+    {
+        if fractions(&[*i]) {
+            return Some((
+                "format/percent-fraction",
+                "::PERCENT shows the value as percent (0.33 → 0.33 %), and every value here is \
+                 between -1 and 1 — multiply a fraction by 100"
+                    .to_string(),
+            ));
+        }
+    }
+    // an axis format: ::YFORMAT over the measures, ::XFORMAT over ::XAXIS
+    let spec = |role: Role| -> Option<String> {
+        let (i, _) = roles.iter().find(|(_, r)| *r == role)?;
+        rows.iter()
+            .find_map(|r| r.get(&format!("c{i}")).and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    let percent = |role: Role| {
+        spec(role)
+            .is_some_and(|s| crate::format::ValueFmt::parse(&s) == crate::format::ValueFmt::Percent)
+    };
+    let measures: Vec<usize> = roles
+        .iter()
+        .filter(|(_, r)| matches!(r, Role::Value(_)))
+        .map(|(i, _)| *i)
+        .collect();
+    let x: Vec<usize> = roles
+        .iter()
+        .filter(|(_, r)| *r == Role::X)
+        .map(|(i, _)| *i)
+        .collect();
+    let role = if percent(Role::YFormat) && fractions(&measures) {
+        "::YFORMAT"
+    } else if percent(Role::XFormat) && fractions(&x) {
+        "::XFORMAT"
+    } else {
+        return None;
+    };
+    Some((
+        "format/percent-fraction",
+        format!(
+            "'percent'{role} shows the value as percent (0.9 → 0.9 %), and every value on \
+             that axis is between -1 and 1 — multiply a fraction by 100"
+        ),
+    ))
 }
 
 /// 11-11 full run (funnel): each stage counted on its own (budget approved,
@@ -7959,6 +8010,95 @@ fn col_is_temporal(rows: &[Map<String, Value>], col: usize) -> bool {
         .filter_map(|r| r.get(&key))
         .take(4)
         .any(|v| matches!(v, Value::String(s) if looks_like_date(s)))
+}
+
+/// Calendar labels with an order of their own — month or weekday names
+/// (English or German, full or short) or quarters (`Q1`, `Q3 2025`): bars
+/// along them keep the calendar order, not a value ranking.
+fn col_is_calendar(rows: &[Map<String, Value>], col: usize) -> bool {
+    const NAMES: &[&str] = &[
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "sept",
+        "oct",
+        "nov",
+        "dec",
+        "januar",
+        "februar",
+        "märz",
+        "mai",
+        "juni",
+        "juli",
+        "oktober",
+        "dezember",
+        "mär",
+        "okt",
+        "dez",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
+        "montag",
+        "dienstag",
+        "mittwoch",
+        "donnerstag",
+        "freitag",
+        "samstag",
+        "sonntag",
+        "mo",
+        "di",
+        "mi",
+        "do",
+        "fr",
+        "sa",
+        "so",
+    ];
+    let key = format!("c{col}");
+    let mut seen = 0;
+    for v in rows.iter().filter_map(|r| r.get(&key)) {
+        let Value::String(s) = v else { return false };
+        let s = s.trim().trim_end_matches('.').to_lowercase();
+        let quarter = s.strip_prefix('q').is_some_and(|q| {
+            let mut it = q.split_whitespace();
+            matches!(it.next(), Some("1" | "2" | "3" | "4"))
+                && it
+                    .next()
+                    .is_none_or(|y| y.len() == 4 && y.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if !quarter && !NAMES.contains(&s.as_str()) {
+            return false;
+        }
+        seen += 1;
+    }
+    seen > 0
 }
 
 fn looks_like_date(s: &str) -> bool {
@@ -10329,6 +10469,44 @@ mod design_tests {
     }
 
     #[test]
+    fn calendar_and_paired_bars_are_not_flagged_unsorted() {
+        // 11-11 bench: month names in calendar order (ts-seasonality) and
+        // promised vs actual side by side (rank-dumbbell) were pushed to a
+        // value sort
+        let months = rows(
+            3,
+            |i| json!({ "c0": (["January", "February", "March"][i]), "c1": ([3.0, 1.0, 2.0][i]) }),
+        );
+        let d = lint_one(
+            "SELECT m::XAXIS, n::BARCHART, 'Seasonal'::TITLE FROM t;",
+            months,
+        );
+        assert!(!has(&d, "design/unsorted-bars"), "{d:?}");
+        let quarters = rows(
+            3,
+            |i| json!({ "c0": format!("Q{} 2025", i + 1), "c1": ([3.0, 1.0, 2.0][i]) }),
+        );
+        let d = lint_one("SELECT q::XAXIS, n::BARCHART, 'Q'::TITLE FROM t;", quarters);
+        assert!(!has(&d, "design/unsorted-bars"), "{d:?}");
+        let paired = rows(
+            3,
+            |i| json!({ "c0": format!("sup{i}"), "c1": ([3.0, 1.0, 2.0][i]), "c2": ([4.0, 1.5, 2.0][i]) }),
+        );
+        let d = lint_one(
+            "SELECT s::XAXIS, p::BARCHART AS \"Promised\", a::BARCHART AS \"Actual\", 'Gap'::TITLE FROM t;",
+            paired,
+        );
+        assert!(!has(&d, "design/unsorted-bars"), "{d:?}");
+        // a name that only looks like one ("May Corp") among others still warns
+        let mixed = rows(
+            3,
+            |i| json!({ "c0": (["May", "Acme", "Zeta"][i]), "c1": ([3.0, 1.0, 2.0][i]) }),
+        );
+        let d = lint_one("SELECT c::XAXIS, n::BARCHART, 'C'::TITLE FROM t;", mixed);
+        assert!(has(&d, "design/unsorted-bars"), "{d:?}");
+    }
+
+    #[test]
     fn temporal_bars_are_not_flagged_unsorted() {
         // Bars along a date axis are legitimately chronological, not value-sorted.
         let data = rows(3, |i| {
@@ -11576,6 +11754,18 @@ mod design_tests {
             codes(t, vec![json!({"c0": "Seals", "c1": "0.33"})]),
             vec!["format/percent-fraction"]
         );
+        // 11-11 21:32: the same on a chart axis
+        let ax = "SELECT k::XAXIS, rate::SCATTER, 'percent'::YFORMAT FROM t;";
+        let fr = vec![
+            json!({"c0": 200.0, "c1": 0.83, "c2": "percent"}),
+            json!({"c0": 300.0, "c1": 0.55, "c2": "percent"}),
+        ];
+        assert_eq!(codes(ax, fr), vec!["format/percent-fraction"]);
+        let pc = vec![
+            json!({"c0": 200.0, "c1": 83.0, "c2": "percent"}),
+            json!({"c0": 300.0, "c1": 55.0, "c2": "percent"}),
+        ];
+        assert!(codes(ax, pc).is_empty());
         let f = "SELECT stage::XAXIS, n::FUNNEL FROM t;";
         let stages = |ns: [i64; 3]| {
             ["all", "budget", "quarter"]

@@ -5001,7 +5001,20 @@ fn cartesian(
     // Top-k point labels (`::LABEL_TOP k` + `::LABEL`, ranked by `::RANK` or
     // |y|), repelled from each other, from every point and from the
     // straight lines; drawn after those lines so a label paints over them.
-    if let Some(k) = label_top {
+    // A sparse ::LABEL on a scatter — a name on a few rows, NULL on the rest
+    // (`CASE WHEN rnk <= 5 THEN district END`) — asks for those points to be
+    // named on the chart, not only in the tooltip (11-11 bench,
+    // rel-label-outliers). A label on every row stays the tooltip's heading.
+    let sparse_labels: Option<Vec<usize>> = (label_top.is_none() && point_kind)
+        .then(|| find_role(cols, Role::Label))
+        .flatten()
+        .map(|l| {
+            (0..n_rows)
+                .filter(|&i| l.values.get(i).is_some_and(|v| *v != Value::Na))
+                .collect::<Vec<usize>>()
+        })
+        .filter(|ix| !ix.is_empty() && ix.len() <= 20 && ix.len() < n_rows);
+    if let Some(k) = label_top.or(sparse_labels.as_ref().map(Vec::len)) {
         let xs = col_of(&data, "x");
         let ys = col_of(&data, "y");
         let rank = find_role(cols, Role::Rank);
@@ -5016,8 +5029,12 @@ fn cartesian(
         let mut idx: Vec<usize> = (0..n_rows)
             .filter(|&i| xs[i] != Value::Na && ys[i].as_f64().is_some_and(f64::is_finite))
             .collect();
-        idx.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
-        idx.truncate(k);
+        if let Some(chosen) = &sparse_labels {
+            idx.retain(|i| chosen.contains(i));
+        } else {
+            idx.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then(a.cmp(&b)));
+            idx.truncate(k);
+        }
         if !idx.is_empty() {
             let text = find_role(cols, Role::Label);
             // #753: every point goes in, unlabelled ones with an NA label, so
@@ -5050,6 +5067,12 @@ fn cartesian(
                     repel: RepelParams {
                         segment_color: Some((150, 156, 168)),
                         avoid_ablines: ablines.clone(),
+                        // names picked row by row are all drawn, crowded or not
+                        max_overlaps: if sparse_labels.is_some() {
+                            usize::MAX
+                        } else {
+                            RepelParams::default().max_overlaps
+                        },
                         ..Default::default()
                     },
                     ..Default::default()
@@ -5506,12 +5529,12 @@ fn x_marks(
     // flipped histogram's top is the right edge: the label ends there, just
     // above its (now horizontal) line.
     let flipped = kind == Kind::Histogram && hist_flipped(cols);
-    if let (Some(line), Some(lab)) = (
-        find_role(cols, Role::VLine),
-        find_role(cols, Role::VLineLabel),
-    ) {
-        let mut seen = std::collections::HashSet::new();
-        let (mut xs, mut ls) = (vec![], vec![]);
+    // the n-th ::XLINE_LABEL names the n-th ::XLINE (a mean and a median line)
+    let lines = cols.iter().filter(|c| c.role == Role::VLine);
+    let labels = cols.iter().filter(|c| c.role == Role::VLineLabel);
+    let mut seen = std::collections::HashSet::new();
+    let (mut xs, mut ls) = (vec![], vec![]);
+    for (line, lab) in lines.zip(labels) {
         for (i, v) in line.values.iter().enumerate() {
             let l = lab
                 .values
@@ -5532,30 +5555,30 @@ fn x_marks(
                 }
             }
         }
-        if !xs.is_empty() {
-            let k = xs.len();
-            plot = plot
-                .geom_text_with(GeomText {
-                    size: 9.5,
-                    color: o.theme.chart_label(),
-                    hjust: if flipped { 1.0 } else { 0.0 },
-                    vjust: 0.0,
-                    check_overlap: true,
-                    ..Default::default()
-                })
-                .layer_data(vec![
-                    ("x".to_string(), xs),
-                    (
-                        "y".to_string(),
-                        vec![Value::Float(top.unwrap_or_else(|| computed_top(kind, value))); k],
-                    ),
-                    (
-                        "label".to_string(),
-                        ls.into_iter().map(Value::Str).collect(),
-                    ),
-                ])
-                .layer_aes(Aes::new().x("x").y("y").label("label"));
-        }
+    }
+    if !xs.is_empty() {
+        let k = xs.len();
+        plot = plot
+            .geom_text_with(GeomText {
+                size: 9.5,
+                color: o.theme.chart_label(),
+                hjust: if flipped { 1.0 } else { 0.0 },
+                vjust: 0.0,
+                check_overlap: true,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                ("x".to_string(), xs),
+                (
+                    "y".to_string(),
+                    vec![Value::Float(top.unwrap_or_else(|| computed_top(kind, value))); k],
+                ),
+                (
+                    "label".to_string(),
+                    ls.into_iter().map(Value::Str).collect(),
+                ),
+            ])
+            .layer_aes(Aes::new().x("x").y("y").label("label"));
     }
 
     if let Some(t) = role_str(cols, Role::XScale)
@@ -7871,23 +7894,26 @@ fn data_annotations(
     }
 
     // Event labels at the top of their ::XLINE.
-    if let (false, Some(line), Some(lab)) = (
-        x_discrete,
-        find_role(cols, Role::VLine),
-        find_role(cols, Role::VLineLabel),
-    ) {
+    // (the n-th ::XLINE_LABEL names the n-th ::XLINE)
+    if !x_discrete {
         let mut seen = std::collections::HashSet::new();
         let (mut xs, mut ls) = (vec![], vec![]);
-        for (i, v) in line.values.iter().enumerate() {
-            let Some(l) = text_at(Some(lab), i).filter(|_| finite(v)) else {
-                continue;
-            };
-            if xs.len() < MAX_NOTES && seen.insert((value_str(v), l.clone())) {
-                xs.push(v.clone());
-                ls.push(format!("\u{a0}{l}"));
+        let lines = cols.iter().filter(|c| c.role == Role::VLine);
+        let labels = cols.iter().filter(|c| c.role == Role::VLineLabel);
+        for (line, lab) in lines.zip(labels) {
+            for (i, v) in line.values.iter().enumerate() {
+                let Some(l) = text_at(Some(lab), i).filter(|_| finite(v)) else {
+                    continue;
+                };
+                if xs.len() < MAX_NOTES && seen.insert((value_str(v), l.clone())) {
+                    xs.push(v.clone());
+                    ls.push(format!("\u{a0}{l}"));
+                }
             }
         }
-        plot = top_labels(plot, xs, ls);
+        if !xs.is_empty() {
+            plot = top_labels(plot, xs, ls);
+        }
     }
 
     // Reference-line labels above the line's right end. A statement can
