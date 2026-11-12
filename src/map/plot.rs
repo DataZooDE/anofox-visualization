@@ -194,6 +194,12 @@ pub(super) fn build(
     // would never draw a mark, only report `StatSf`'s own "removed N
     // rows" warning for every row.
     let mut any_feature_geometry = false;
+    // #1133: rows that draw nothing here *by design* — a row carrying only
+    // its `::BASEMAP` backdrop shape (drawn by the base layer), or one a
+    // symbol anchor takes over. They leave the features layer, so its
+    // `StatSf` "removed N rows" warning only counts rows whose own geometry
+    // is really missing.
+    let mut by_design: Vec<bool> = Vec::with_capacity(n);
     // M3b (#642): a `list(..)::SPARKLINE`/`::SPARKBAR` column → each
     // feature's one-line trend (`data-trend` + the `<title>`'s last line;
     // the browser draws the mini chart). On a frame map `cols` is already
@@ -226,6 +232,10 @@ pub(super) fn build(
             .symbols
             .as_ref()
             .is_some_and(|sym| !sym.anchors[i].is_empty());
+        let backdrop_only = m.features[i].is_empty()
+            && m.base_fitted
+            && m.base.get(i).is_some_and(|b| !b.is_empty());
+        by_design.push(suppressed_by_symbols || backdrop_only);
         geometry.push(if hexbin_takes_over || suppressed_by_symbols {
             Value::Na
         } else {
@@ -719,6 +729,16 @@ pub(super) fn build(
     // `GGData`, not the `0`-row kind `annotation_scale`/`annotation_
     // attribution` need to avoid, see their own comment below) — just
     // with no `geom_sf` layer of its own.
+    // (not on a faceted map: a panel of backdrop rows alone would lose its
+    // facet level)
+    if facet.is_none() && any_feature_geometry && by_design.contains(&true) {
+        for (_, v) in features_df.iter_mut() {
+            if v.len() == n {
+                let mut keep = by_design.iter().map(|d| !d);
+                v.retain(|_| keep.next().unwrap_or(true));
+            }
+        }
+    }
     let mut plot = if has_base {
         let base_df: Vec<(String, Vec<Value>)> = vec![("geometry".into(), base_wkt)];
         let mut p = begin(base_df, Aes::new()).geom_sf_with(GeomSf {

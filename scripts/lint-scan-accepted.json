@@ -1,0 +1,35 @@
+{
+  "_doc": "Lint hits scripts/lint-scan.py accepts on shipped dashboards (#1133): per code, the file globs it may fire on and why. A new code firing on a shipped dashboard fails the scan: fix the false positive, fix the dashboard, or add it here with the reason.",
+  "folder/setup-table": {
+    "why": "Browser examples and site pages: each page runs in its own DuckDB-Wasm, so the served-memory cost this warns about doesn't apply.",
+    "files": ["web/examples/*", "website/showcase/*", "examples/theming/*", "examples/dashboards/*", "dashboards/*"]
+  },
+  "layout/input-scope": {
+    "why": "The cost inputs sit on the Decision tab on purpose: there you set the costs, and the plan shown on the other tabs follows.",
+    "files": ["web/examples/optimize-delivery.sql"]
+  },
+  "layout/mixed-input-row": {
+    "why": "The delivery picker and the two check thresholds stay together in the filter bar, although the price-move threshold only changes the Volume & prices tab.",
+    "files": ["web/examples/tabular-feed.sql"]
+  },
+  "input/unused": {
+    "why": "The variable is read by sel_sector(), a macro init.sql defines in the served database; the lint reads the dashboard's text only (the browser's Check has no database), and its note says so.",
+    "files": ["examples/sp500-dashboard/dash/02_sectors.sql", "examples/sp500-dashboard/single/sp500.sql"]
+  },
+  "design/untitled-chart": {
+    "why": "The feature gallery shows bare chart kinds; sessions.sql is the minimal serve demo.",
+    "files": ["website/showcase/gallery/features.sql", "dashboards/sessions.sql"]
+  },
+  "design/too-many-panels": {
+    "why": "The feature gallery is one long page of tiles on purpose; m5_analytics is a serve demo of one comparison.",
+    "files": ["website/showcase/gallery/features.sql", "examples/serve-dashboards/dash/m5_analytics.sql"]
+  },
+  "design/ungrouped-kpis": {
+    "why": "The KPI gallery shows bare tiles; ops.sql is the load-test reference page, kept as measured.",
+    "files": ["website/showcase/gallery/kpis.sql", "examples/load-test/dash/ops.sql"]
+  },
+  "design/unsorted-bars": {
+    "why": "Bars in a fixed category order, not a ranking: channels, and model terms that must line up across the facets.",
+    "files": ["examples/regression/regression-dashboard.sql", "examples/serve-dashboards/dash/sales.sql"]
+  }
+}

@@ -1236,6 +1236,53 @@ fn fully_suppressed_features_draw_no_spurious_removed_rows_warning() {
 }
 
 #[test]
+fn backdrop_rows_draw_no_spurious_removed_rows_warning() {
+    // #1133: a `::BASEMAP` backdrop given as its own rows (geometry NULL,
+    // backdrop WKT set — optimize-delivery's street grid) draws through the
+    // base layer; the features layer must not count those rows as removed.
+    // A feature row whose geometry really is missing still warns.
+    let g = |v: &[Option<&str>]| -> Vec<Value> {
+        v.iter()
+            .map(|x| x.map_or(Value::Na, |s| Value::Str(s.into())))
+            .collect()
+    };
+    let cols = |feature: Vec<Value>| {
+        vec![
+            Column::new("g", Role::Geometry, feature),
+            Column::new(
+                "b",
+                Role::Basemap,
+                g(&[
+                    None,
+                    Some("LINESTRING(0 0, 4 0)"),
+                    Some("LINESTRING(0 2, 4 2)"),
+                    None,
+                ]),
+            ),
+            Column::new("p", Role::Projection, konst("none", 4)),
+        ]
+    };
+    let warns = |c: Vec<Column>| {
+        render_with_warnings(&c, 480, 320, &RenderOptions::default())
+            .unwrap()
+            .warnings
+            .into_iter()
+            .filter(|w| w.contains("containing missing values"))
+            .collect::<Vec<_>>()
+    };
+    let w = warns(cols(g(&[
+        Some("POINT(1 1)"),
+        None,
+        None,
+        Some("POINT(3 1)"),
+    ])));
+    assert!(w.is_empty(), "{w:?}");
+    // the last feature row lost its geometry: that one is reported
+    let w = warns(cols(g(&[Some("POINT(1 1)"), None, None, None])));
+    assert!(w.iter().any(|w| w.contains("removed 1 row")), "{w:?}");
+}
+
+#[test]
 fn no_geometry_is_no_data() {
     let s = svg(vec![Column::new(
         "g",
