@@ -7229,15 +7229,8 @@ fn role_ignored_diags(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> V
         ignored(Role::Points, "it sets a line or area chart's point markers");
     }
     if matches!(kind, Histogram) {
-        // #1127: ::FLIP, ::YFORMAT, ::YSCALE, ::DATALABELS and ::ABLINE
-        // work; a faceted histogram stays upright (ggplot-rs's facets under
-        // coord_flip keep their axis labels unswapped)
-        if has(Role::Facet) || has(Role::FacetFree) {
-            ignored(
-                Role::Flip,
-                "a ::HISTOGRAM with ::FACET panels stays upright; drop the ::FACET (or use ::CATEGORY) for a horizontal one",
-            );
-        }
+        // #1127: ::FLIP (with ::FACET panels too, #1135), ::YFORMAT,
+        // ::YSCALE, ::DATALABELS and ::ABLINE work
         for r in [
             Role::Annotate,
             Role::MarkArea,
@@ -11769,13 +11762,12 @@ mod design_tests {
             m.iter().any(|x| x.starts_with("::DELTA does nothing here")),
             "{m:?}"
         );
-        // #1127: a histogram takes these now; ::FLIP only without panels
+        // #1127: a histogram takes these now; ::FLIP with panels too (#1135)
         assert!(msgs(
             "SELECT v::HISTOGRAM, 1::FLIP, 'comma'::YFORMAT, 'log10'::YSCALE, 1::DATALABELS, '1,0'::ABLINE FROM t;"
         )
         .is_empty());
-        assert!(msgs("SELECT v::HISTOGRAM, 1::FLIP, k::FACET FROM t;")[0]
-            .starts_with("::FLIP does nothing here"));
+        assert!(msgs("SELECT v::HISTOGRAM, 1::FLIP, k::FACET FROM t;").is_empty());
         assert!(msgs("SELECT v::HISTOGRAM, 'x'::ANNOTATE FROM t;")[0]
             .starts_with("::ANNOTATE does nothing here"));
         let p = msgs("SELECT k::XAXIS, v::LINECHART, 1::POINTS FROM t;");

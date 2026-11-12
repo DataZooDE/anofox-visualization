@@ -5873,15 +5873,10 @@ fn hist_modifiers(
     Ok(plot)
 }
 
-/// Whether a `::HISTOGRAM` lies on its side: `::FLIP`, unless it has
-/// panels — ggplot-rs's `facet_wrap` under `coord_flip` keeps each panel's
-/// axis labels unswapped (the count's ticks on the value's axis), so a
-/// faceted histogram stays upright and `chart/role-ignored` says so.
+/// Whether a `::HISTOGRAM` lies on its side (`::FLIP`) — faceted too, since
+/// ggplot-rs 0.45.1 swaps each panel's axes under `coord_flip` (#1135).
 fn hist_flipped(cols: &[Column]) -> bool {
     cols.iter().any(|c| c.role == Role::Flip)
-        && !cols
-            .iter()
-            .any(|c| matches!(c.role, Role::Facet | Role::FacetFree))
 }
 
 /// [`shared_x_zoom`], unless `::FLIP` already set the coordinates.

@@ -160,7 +160,7 @@ pub static REGISTRY: &[RoleSpec] = &[
       "one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars"),
     e("DUMBBELL", &["DUMBBELLCHART", "SLOPE"], R::Value(Kind::Dumbbell), "chart", true,
       "two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual)"),
-    e("HISTOGRAM", &["HIST"], R::Value(Kind::Histogram), "chart", true, "histogram of the measure; takes ::FLIP (horizontal, not with ::FACET), ::YFORMAT / ::YSCALE on its count axis, ::DATALABELS (each bin's count, or share under ::HIST_NORM), ::ABLINE, ::XLINE"),
+    e("HISTOGRAM", &["HIST"], R::Value(Kind::Histogram), "chart", true, "histogram of the measure; takes ::FLIP (horizontal, with ::FACET panels too), ::YFORMAT / ::YSCALE on its count axis, ::DATALABELS (each bin's count, or share under ::HIST_NORM), ::ABLINE, ::XLINE"),
     e("DENSITY", &["KDE"], R::Value(Kind::Density), "chart", true,
       "kernel density curve (one per CATEGORY)"),
     e("RIDGELINE", &["RIDGES", "JOYPLOT"], R::Value(Kind::Ridgeline), "chart", true,
