@@ -1531,6 +1531,21 @@ fn cmd_check(args: &[String]) {
         if !data_set.is_empty() {
             let _ = session.run(&data_set);
         }
+        // #1133: as `serve --dashboards` opens each page — its `-- @load`
+        // extensions loaded and its `-- @param` defaults bound — so a panel
+        // filtered by a param isn't reported empty, nor an extension's
+        // function missing.
+        let meta = sv::parse_dashboard_meta("", script);
+        for ext in &meta.loads {
+            let _ = session.run(&format!("LOAD {ext};")); // identifier-validated by the parser
+        }
+        for p in &meta.params {
+            let _ = session.run(&format!(
+                "SET VARIABLE {} = {};",
+                p.name,
+                sv::sql_string_literal(&p.default)
+            ));
+        }
         let mut diags = lint::check_opts(
             script,
             |sql| session.run(sql),

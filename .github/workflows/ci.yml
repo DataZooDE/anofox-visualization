@@ -578,6 +578,17 @@ jobs:
           done
           exit $status
 
+      # #1133: every shipped dashboard linted as it really runs (data read
+      # from its own folder, served folders against their init database,
+      # the extensions they load), so no panel errors before the checks
+      # reach it. A lint code firing where scripts/lint-scan-accepted.json
+      # doesn't accept it fails here. One shard runs it.
+      - name: Lint scan of the shipped dashboards
+        if: matrix.shard == 0
+        run: |
+          for i in 1 2 3; do duckdb -c "INSTALL anofox_forecast FROM community; INSTALL anofox_statistics FROM community" && break; echo "install attempt $i failed; retrying"; sleep 10; done
+          python3 scripts/lint-scan.py --dashboard target/debug/dashboard
+
   web-e2e:
     # The browser e2e scripts (scripts/*-e2e.mjs): kept in one job (#464) —
     # they share the :8947 server and Chromium, and splitting them by area
