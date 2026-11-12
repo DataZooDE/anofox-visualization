@@ -578,10 +578,12 @@ impl Diagram {
 
     /// The edges drawn against the flow (one per cycle the layout breaks).
     pub fn back_edges(&self) -> Vec<usize> {
-        let (dag, _) = break_cycles(self);
-        dag.iter()
-            .filter(|(_, _, _, rev)| *rev)
-            .map(|(_, _, k, _)| *k)
+        layout(self)
+            .back
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b)
+            .map(|(k, _)| k)
             .collect()
     }
 
@@ -819,8 +821,6 @@ fn box_of(n: &Node) -> Box_ {
     }
 }
 
-/// A DAG edge: `(u, v, edge index, reversed)`.
-type DagEdge = (usize, usize, usize, bool);
 /// An edge as read, before its ids are resolved.
 #[derive(Default)]
 struct RawEdge {
@@ -830,63 +830,6 @@ struct RawEdge {
     label: Option<String>,
     style: Option<EdgeStyle>,
     status: Option<Status>,
-}
-
-/// DAG edges `(u, v, edge index, reversed)` — the cycle-free orientation:
-/// a DFS in row order reverses every edge that closes a cycle — and the
-/// self-loops (edge indices).
-fn break_cycles(d: &Diagram) -> (Vec<DagEdge>, Vec<usize>) {
-    let n = d.nodes.len();
-    let mut out: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
-    let mut loops = Vec::new();
-    for (k, e) in d.edges.iter().enumerate() {
-        if e.from == e.to {
-            loops.push(k);
-        } else {
-            out[e.from].push((e.to, k));
-        }
-    }
-    let mut state = vec![0u8; n]; // 0 new, 1 on the DFS stack, 2 done
-    let mut rev = vec![false; d.edges.len()];
-    for s in 0..n {
-        if state[s] != 0 {
-            continue;
-        }
-        state[s] = 1;
-        let mut stack = vec![(s, 0usize)];
-        while let Some(top) = stack.last_mut() {
-            let v = top.0;
-            if top.1 < out[v].len() {
-                let (w, k) = out[v][top.1];
-                top.1 += 1;
-                match state[w] {
-                    0 => {
-                        state[w] = 1;
-                        stack.push((w, 0));
-                    }
-                    1 => rev[k] = true,
-                    _ => {}
-                }
-            } else {
-                state[v] = 2;
-                stack.pop();
-            }
-        }
-    }
-    let dag = d
-        .edges
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.from != e.to)
-        .map(|(k, e)| {
-            if rev[k] {
-                (e.to, e.from, k, true)
-            } else {
-                (e.from, e.to, k, false)
-            }
-        })
-        .collect();
-    (dag, loops)
 }
 
 /// A laid-out diagram, in px with the origin at the top-left margin.
@@ -924,710 +867,69 @@ fn ordered(mut keys: Vec<(f64, f64, usize)>) -> Vec<usize> {
     keys.into_iter().map(|k| k.2).collect()
 }
 
-/// Number of crossings between two adjacent layers (Barth–Mutzel–Jünger:
-/// sort the edges by their upper end, count inversions of the lower ends
-/// with a Fenwick tree).
-fn layer_crossings(upper: &[usize], succ: &[Vec<usize>], pos: &[usize], lower_len: usize) -> u64 {
-    let mut ends: Vec<(usize, usize)> = Vec::new();
-    for &u in upper {
-        for &v in &succ[u] {
-            ends.push((pos[u], pos[v]));
-        }
-    }
-    let lower: Vec<usize> = ordered(
-        ends.iter()
-            .enumerate()
-            .map(|(i, &(u, v))| (u as f64, v as f64, i))
-            .collect(),
-    )
-    .into_iter()
-    .map(|i| ends[i].1)
-    .collect();
-    let mut tree = vec![0u64; lower_len + 1];
-    let mut c = 0u64;
-    for (seen, &p) in lower.iter().enumerate() {
-        // already seen ends strictly right of p
-        let mut i = p + 1;
-        let mut le = 0u64;
-        while i > 0 {
-            le += tree[i];
-            i -= 1 << i.trailing_zeros();
-        }
-        c += seen as u64 - le;
-        let mut i = p + 1;
-        while i <= lower_len {
-            tree[i] += 1;
-            i += 1 << i.trailing_zeros();
-        }
-    }
-    c
-}
-
-/// Isotonic placement: positions as close as possible (weighted least
-/// squares) to `want`, in the given order, at least `gap[i]` apart from the
-/// previous one.
-fn place(want: &[f64], weight: &[f64], gap: &[f64]) -> Vec<f64> {
-    let n = want.len();
-    let mut off = vec![0.0; n];
-    for i in 1..n {
-        off[i] = off[i - 1] + gap[i];
-    }
-    // blocks of (weighted sum, weight, count), merged while out of order
-    let mut blocks: Vec<(f64, f64, usize)> = Vec::new();
-    for i in 0..n {
-        blocks.push((weight[i] * (want[i] - off[i]), weight[i], 1));
-        while blocks.len() >= 2 {
-            let (b, a) = (blocks[blocks.len() - 1], blocks[blocks.len() - 2]);
-            if a.0 / a.1 > b.0 / b.1 {
-                blocks.pop();
-                let last = blocks.last_mut().expect("two blocks");
-                *last = (a.0 + b.0, a.1 + b.1, a.2 + b.2);
-            } else {
-                break;
-            }
-        }
-    }
-    let mut out = Vec::with_capacity(n);
-    for (s, w, c) in blocks {
-        for _ in 0..c {
-            let i = out.len();
-            out.push(s / w + off[i]);
-        }
-    }
-    out
-}
-
-/// Where a line from a box's centre towards `to` leaves the box: the port of
-/// a straight edge (pinned nodes, edges against the pinned stages).
-fn exit(p: &PNode, to: (f64, f64)) -> (f64, f64) {
-    let (dx, dy) = (to.0 - p.cx, to.1 - p.cy);
-    let sx = if dx != 0.0 {
-        p.w / 2.0 / dx.abs()
-    } else {
-        f64::INFINITY
-    };
-    let sy = if dy != 0.0 {
-        p.h / 2.0 / dy.abs()
-    } else {
-        f64::INFINITY
-    };
-    let k = sx.min(sy);
-    if k.is_finite() {
-        (p.cx + dx * k, p.cy + dy * k)
-    } else {
-        (p.cx, p.cy)
-    }
-}
-
-/// A straight edge between two placed boxes.
-fn straight(pn: &[PNode], u: usize, v: usize) -> Vec<(f64, f64)> {
-    let (a, b) = (&pn[u], &pn[v]);
-    vec![exit(a, (b.cx, b.cy)), exit(b, (a.cx, a.cy))]
-}
-
-/// A self-loop over (LR) or beside (TB) its box.
-fn self_loop(p: &PNode, lr: bool) -> Vec<(f64, f64)> {
-    if lr {
-        let top = p.cy - p.h / 2.0;
-        vec![
-            (p.cx + p.w / 4.0, top),
-            (p.cx + p.w / 4.0, top - LOOP),
-            (p.cx - p.w / 4.0, top - LOOP),
-            (p.cx - p.w / 4.0, top),
-        ]
-    } else {
-        let right = p.cx + p.w / 2.0;
-        vec![
-            (right, p.cy - p.h / 4.0),
-            (right + LOOP, p.cy - p.h / 4.0),
-            (right + LOOP, p.cy + p.h / 4.0),
-            (right, p.cy + p.h / 4.0),
-        ]
-    }
-}
-
-/// Every node pinned (`::XAXIS` + `::YAXIS`): boxes on a grid of the widest
-/// / tallest box, `x` across and `y` down, edges straight.
-fn layout_explicit(d: &Diagram) -> Placed {
+/// The layout: box sizes here (the label wrapped, the value, badge and
+/// sparkline), the layered placement in ggplot-rs (`graph_layout`, #1153).
+fn layout(d: &Diagram) -> Placed {
+    use ggplot_rs::graph_layout as gl;
     let boxes: Vec<Box_> = d.nodes.iter().map(box_of).collect();
-    let sx = boxes.iter().map(|b| b.w).fold(0.0, f64::max) + 48.0;
-    let sy = boxes.iter().map(|b| b.h).fold(0.0, f64::max) + 24.0;
-    let pin = |v: usize| {
-        (
-            d.nodes[v].pin.0.unwrap_or(0.0),
-            d.nodes[v].pin.1.unwrap_or(0.0),
-        )
-    };
-    let mut xs: Vec<f64> = (0..d.nodes.len()).map(|v| pin(v).0).collect();
-    xs.sort_by(f64::total_cmp);
-    xs.dedup();
-    let reading = ordered(
-        (0..d.nodes.len())
-            .map(|v| (pin(v).0, pin(v).1, v))
-            .collect(),
-    );
-    let mut pn: Vec<PNode> = boxes
-        .into_iter()
-        .enumerate()
-        .map(|(v, b)| PNode {
-            cx: pin(v).0 * sx,
-            cy: pin(v).1 * sy,
+    let nodes: Vec<gl::GraphNode> = d
+        .nodes
+        .iter()
+        .zip(&boxes)
+        .map(|(n, b)| gl::GraphNode {
             w: b.w,
             h: b.h,
-            lines: b.lines,
-            layer: xs.iter().position(|&x| x == pin(v).0).unwrap_or(0),
-            order: 0,
+            lane: n.lane,
+            pin: n.pin,
         })
         .collect();
-    for (i, &v) in reading.iter().enumerate() {
-        pn[v].order = i;
-    }
-    let edges = d
+    let edges: Vec<gl::GraphEdge> = d
         .edges
         .iter()
-        .map(|e| {
-            if e.from == e.to {
-                self_loop(&pn[e.from], d.dir == Dir::LR)
-            } else {
-                straight(&pn, e.from, e.to)
-            }
-        })
-        .collect();
-    finish(
-        pn,
-        edges,
-        vec![false; d.edges.len()],
-        xs.len().max(1),
-        Vec::new(),
-    )
-}
-
-fn layout(d: &Diagram) -> Placed {
-    if d.explicit {
-        return layout_explicit(d);
-    }
-    let n = d.nodes.len();
-    let boxes: Vec<Box_> = d.nodes.iter().map(box_of).collect();
-    let (dag, loops) = break_cycles(d);
-    let lr = d.dir == Dir::LR;
-    // extent along the rank axis / the order axis
-    let along = |b: &Box_| if lr { b.w } else { b.h };
-    let across = |b: &Box_| if lr { b.h } else { b.w };
-    let (rank_gap, node_gap) = if lr { (64.0, 20.0) } else { (48.0, 28.0) };
-
-    // ranks: longest path in topological order (smallest row first), then
-    // sources pulled up to just before their nearest successor
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for &(u, v, _, _) in &dag {
-        preds[v].push(u);
-        succs[u].push(v);
-    }
-    let mut indeg: Vec<usize> = preds.iter().map(Vec::len).collect();
-    let mut done = vec![false; n];
-    let mut topo = Vec::with_capacity(n);
-    // the first ready node in row order, each time (n ≤ MAX_NODES)
-    while let Some(v) = (0..n).find(|&v| !done[v] && indeg[v] == 0) {
-        done[v] = true;
-        topo.push(v);
-        for &w in &succs[v] {
-            indeg[w] -= 1;
-        }
-    }
-    // a pinned stage (`::XAXIS`) wins over the longest path
-    let pinned = |v: usize| {
-        d.nodes[v]
-            .pin
-            .0
-            .map(|x| x.round().clamp(0.0, 1000.0) as usize)
-    };
-    let any_pin = (0..n).any(|v| pinned(v).is_some());
-    let mut rank = vec![0usize; n];
-    for &v in &topo {
-        rank[v] =
-            pinned(v).unwrap_or_else(|| preds[v].iter().map(|&p| rank[p] + 1).max().unwrap_or(0));
-    }
-    for &v in topo.iter().rev() {
-        if preds[v].is_empty() && pinned(v).is_none() {
-            if let Some(m) = succs[v].iter().map(|&s| rank[s]).min() {
-                rank[v] = rank[v].max(m.saturating_sub(1));
-            }
-        }
-    }
-    // drop empty ranks (pinned stages keep their numbers)
-    let mut used = vec![false; rank.iter().max().map_or(1, |m| m + 1)];
-    for &r in &rank {
-        used[r] = true;
-    }
-    let mut renumber = vec![0usize; used.len()];
-    let mut nl = 0;
-    for (r, u) in used.iter().enumerate() {
-        renumber[r] = nl;
-        nl += usize::from(*u || any_pin);
-    }
-    for r in &mut rank {
-        *r = renumber[*r];
-    }
-    let nl = nl.max(1);
-    // edges the pins make run within or against the stages: drawn straight
-    let (dag, free): (Vec<DagEdge>, Vec<DagEdge>) =
-        dag.into_iter().partition(|&(u, v, _, _)| rank[v] > rank[u]);
-
-    // vertices: the nodes, then one dummy per layer an edge passes
-    let mut vrank: Vec<usize> = rank.clone();
-    let mut vsucc: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut vpred: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut chains: Vec<Vec<usize>> = Vec::with_capacity(dag.len());
-    for &(u, v, _, _) in &dag {
-        let mut chain = vec![u];
-        let mut prev = u;
-        for r in rank[u] + 1..rank[v] {
-            let dmy = vrank.len();
-            vrank.push(r);
-            vsucc.push(Vec::new());
-            vpred.push(Vec::new());
-            vsucc[prev].push(dmy);
-            vpred[dmy].push(prev);
-            chain.push(dmy);
-            prev = dmy;
-        }
-        vsucc[prev].push(v);
-        vpred[v].push(prev);
-        chain.push(v);
-        chains.push(chain);
-    }
-    let nv = vrank.len();
-    let dummy = |v: usize| v >= n;
-    // a vertex's swimlane (unlaned nodes last; a dummy runs in its source's)
-    let mut vlane: Vec<usize> = (0..n)
-        .map(|v| d.nodes[v].lane.unwrap_or(d.lanes.len()))
-        .collect();
-    vlane.resize(nv, 0);
-    for ch in &chains {
-        for &dm in &ch[1..ch.len() - 1] {
-            vlane[dm] = vlane[ch[0]];
-        }
-    }
-    let laned = !d.lanes.is_empty();
-
-    // initial order: DFS from the vertices by (rank, index)
-    let mut layers: Vec<Vec<usize>> = vec![Vec::new(); nl];
-    let mut seen = vec![false; nv];
-    for s in ordered((0..nv).map(|v| (vrank[v] as f64, 0.0, v)).collect()) {
-        if seen[s] {
-            continue;
-        }
-        let mut stack = vec![s];
-        while let Some(v) = stack.pop() {
-            if seen[v] {
-                continue;
-            }
-            seen[v] = true;
-            layers[vrank[v]].push(v);
-            for &w in vsucc[v].iter().rev() {
-                if !seen[w] {
-                    stack.push(w);
-                }
-            }
-        }
-    }
-    if laned {
-        for l in &mut layers {
-            *l = ordered(
-                l.iter()
-                    .enumerate()
-                    .map(|(i, &v)| (vlane[v] as f64, i as f64, v))
-                    .collect(),
-            );
-        }
-    }
-    let mut pos = vec![0usize; nv];
-    let index = |layers: &[Vec<usize>], pos: &mut [usize]| {
-        for l in layers {
-            for (i, &v) in l.iter().enumerate() {
-                pos[v] = i;
-            }
-        }
-    };
-    index(&layers, &mut pos);
-    let crossings = |layers: &[Vec<usize>], pos: &[usize]| -> u64 {
-        (0..layers.len().saturating_sub(1))
-            .map(|r| layer_crossings(&layers[r], &vsucc, pos, layers[r + 1].len()))
-            .sum()
-    };
-
-    // crossing reduction: barycenter sweeps + adjacent transposition, best kept
-    let mut best = layers.clone();
-    let mut best_c = crossings(&layers, &pos);
-    for it in 0..8 {
-        if best_c == 0 {
-            break;
-        }
-        let down = it % 2 == 0;
-        let rs: Vec<usize> = if down {
-            (1..nl).collect()
-        } else {
-            (0..nl.saturating_sub(1)).rev().collect()
-        };
-        for r in rs {
-            let nb = if down { &vpred } else { &vsucc };
-            let keyed: Vec<(f64, f64, usize)> = layers[r]
-                .iter()
-                .map(|&v| {
-                    let k = if nb[v].is_empty() {
-                        pos[v] as f64
-                    } else {
-                        nb[v].iter().map(|&w| pos[w] as f64).sum::<f64>() / nb[v].len() as f64
-                    };
-                    (vlane[v] as f64 * 1e6 + k, pos[v] as f64, v)
-                })
-                .collect();
-            layers[r] = ordered(keyed);
-            for (i, &v) in layers[r].iter().enumerate() {
-                pos[v] = i;
-            }
-        }
-        // transposition
-        for _ in 0..4 {
-            let mut better = false;
-            for layer in layers.iter_mut() {
-                for i in 0..layer.len().saturating_sub(1) {
-                    let (a, b) = (layer[i], layer[i + 1]);
-                    if vlane[a] != vlane[b] {
-                        continue;
-                    }
-                    let pair = |x: usize, y: usize| -> usize {
-                        let c = |l: &[Vec<usize>]| {
-                            l[x].iter()
-                                .flat_map(|&p| l[y].iter().map(move |&q| (p, q)))
-                                .filter(|&(p, q)| pos[p] > pos[q])
-                                .count()
-                        };
-                        c(&vpred) + c(&vsucc)
-                    };
-                    if pair(b, a) < pair(a, b) {
-                        layer.swap(i, i + 1);
-                        pos[a] = i + 1;
-                        pos[b] = i;
-                        better = true;
-                    }
-                }
-            }
-            if !better {
-                break;
-            }
-        }
-        let c = crossings(&layers, &pos);
-        if c < best_c {
-            best_c = c;
-            best = layers.clone();
-        }
-    }
-    let layers = best;
-    index(&layers, &mut pos);
-
-    // positions along each layer
-    let size = |v: usize| if dummy(v) { 0.0 } else { across(&boxes[v]) };
-    let gap_between = |a: usize, b: usize| -> f64 {
-        let g = match (dummy(a), dummy(b)) {
-            (true, true) => 8.0,
-            (false, false) => node_gap,
-            _ => 12.0,
-        };
-        let lane = if vlane[a] != vlane[b] {
-            LANE_GAP + LANE_HEAD
-        } else {
-            0.0
-        };
-        size(a) / 2.0 + g + lane + size(b) / 2.0
-    };
-    let mut y = vec![0.0f64; nv];
-    for l in &layers {
-        let mut at = 0.0;
-        for (i, &v) in l.iter().enumerate() {
-            if i > 0 {
-                at += gap_between(l[i - 1], v);
-            }
-            y[v] = at;
-        }
-        let mid = at / 2.0;
-        for &v in l {
-            y[v] -= mid;
-        }
-    }
-    let relax = |y: &mut Vec<f64>, r: usize, up: bool, down: bool| {
-        let l = &layers[r];
-        if l.is_empty() {
-            return;
-        }
-        let want: Vec<f64> = l
-            .iter()
-            .map(|&v| {
-                let mut nb: Vec<usize> = Vec::new();
-                if up {
-                    nb.extend(&vpred[v]);
-                }
-                if down {
-                    nb.extend(&vsucc[v]);
-                }
-                if nb.is_empty() {
-                    y[v]
-                } else {
-                    nb.iter().map(|&w| y[w]).sum::<f64>() / nb.len() as f64
-                }
-            })
-            .collect();
-        let weight: Vec<f64> = l
-            .iter()
-            .map(|&v| if dummy(v) { 2.0 } else { 1.0 })
-            .collect();
-        let gaps: Vec<f64> = (0..l.len())
-            .map(|i| {
-                if i == 0 {
-                    0.0
-                } else {
-                    gap_between(l[i - 1], l[i])
-                }
-            })
-            .collect();
-        for (&v, p) in l.iter().zip(place(&want, &weight, &gaps)) {
-            y[v] = p;
-        }
-    };
-    for _ in 0..6 {
-        for r in 1..nl {
-            relax(&mut y, r, true, false);
-        }
-        for r in (0..nl.saturating_sub(1)).rev() {
-            relax(&mut y, r, false, true);
-        }
-    }
-    for r in 0..nl {
-        relax(&mut y, r, true, true);
-    }
-    // swimlanes: shift each lane clear of the one before (across all stages)
-    let mut lane_span: Vec<(f64, f64)> = Vec::new();
-    if laned {
-        let nlanes = d.lanes.len() + 1;
-        let span = |y: &[f64], l: usize| {
-            (0..nv)
-                .filter(|&v| vlane[v] == l)
-                .map(|v| (y[v] - size(v) / 2.0, y[v] + size(v) / 2.0))
-                .fold(None, |acc: Option<(f64, f64)>, (a, b)| match acc {
-                    None => Some((a, b)),
-                    Some((x, z)) => Some((x.min(a), z.max(b))),
-                })
-        };
-        let mut floor: Option<f64> = None;
-        for l in 0..nlanes {
-            let Some((lo, _)) = span(&y, l) else {
-                lane_span.push((f64::NAN, f64::NAN));
-                continue;
-            };
-            if let Some(f) = floor {
-                let need = f + LANE_GAP + LANE_HEAD - lo;
-                if need > 0.0 {
-                    for v in 0..nv {
-                        if vlane[v] == l {
-                            y[v] += need;
-                        }
-                    }
-                }
-            }
-            let (lo, hi) = span(&y, l).expect("lane has vertices");
-            lane_span.push((lo, hi));
-            floor = Some(hi);
-        }
-    }
-
-    // positions along the rank axis: each layer as thick as its widest node
-    let mut thick = vec![0.0f64; nl];
-    for v in 0..n {
-        thick[rank[v]] = thick[rank[v]].max(along(&boxes[v]));
-    }
-    // #753: left to right, a gap is at least as wide as the edge labels
-    // that cross it (plus the arrow and some air), so a node box never
-    // covers one.
-    let mut gap: Vec<f64> = vec![rank_gap; nl];
-    if lr {
-        for e in &d.edges {
-            let (a, b) = (rank[e.from].min(rank[e.to]), rank[e.from].max(rank[e.to]));
-            if b != a + 1 {
-                continue;
-            }
-            if let Some(l) = e.label.as_deref() {
-                let w = l
-                    .split('\n')
+        .map(|e| gl::GraphEdge {
+            from: e.from,
+            to: e.to,
+            label_w: e.label.as_deref().map(|l| {
+                l.split('\n')
                     .map(|x| text_w(x, 11.0, false))
-                    .fold(0.0, f64::max);
-                gap[a] = gap[a].max(w + 2.0 * ARROW + 18.0);
-            }
-        }
-    }
-    let mut start_at = vec![0.0f64; nl];
-    for r in 1..nl {
-        start_at[r] = start_at[r - 1] + thick[r - 1] + gap[r - 1];
-    }
-    let centre = |r: usize| start_at[r] + thick[r] / 2.0;
-    let xy = |rk: f64, o: f64| if lr { (rk, o) } else { (o, rk) };
-
-    let mut pn: Vec<PNode> = Vec::with_capacity(n);
-    for (v, b) in boxes.into_iter().enumerate() {
-        let (cx, cy) = xy(centre(rank[v]), y[v]);
-        pn.push(PNode {
-            cx,
-            cy,
-            w: b.w,
-            h: b.h,
-            lines: b.lines,
-            layer: rank[v],
-            order: 0,
-        });
-    }
-    // reading order: layer, then position along it
-    let reading = ordered((0..n).map(|v| (rank[v] as f64, y[v], v)).collect());
-    for (i, &v) in reading.iter().enumerate() {
-        pn[v].order = i;
-    }
-
-    // ports: a node's outgoing (incoming) chains spread along its out (in)
-    // side, sorted by where they go (come from)
-    let half_along = |v: usize| if lr { pn[v].w / 2.0 } else { pn[v].h / 2.0 };
-    let side = |v: usize| if lr { pn[v].h } else { pn[v].w };
-    let mut out_ports: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut in_ports: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (c, ch) in chains.iter().enumerate() {
-        out_ports[ch[0]].push(c);
-        in_ports[ch[ch.len() - 1]].push(c);
-    }
-    for ports in &mut out_ports {
-        *ports = ordered(ports.iter().map(|&c| (y[chains[c][1]], 0.0, c)).collect());
-    }
-    for ports in &mut in_ports {
-        *ports = ordered(
-            ports
-                .iter()
-                .map(|&c| (y[chains[c][chains[c].len() - 2]], 0.0, c))
-                .collect(),
-        );
-    }
-    let spread = |list: &[usize], c: usize, v: usize| -> f64 {
-        let m = list.len();
-        if m <= 1 {
-            return 0.0;
-        }
-        let k = list.iter().position(|&x| x == c).unwrap_or(0);
-        let span = (side(v) * 0.6).min(14.0 * (m - 1) as f64);
-        -span / 2.0 + span * k as f64 / (m - 1) as f64
-    };
-    let mut edge_pts: Vec<Vec<(f64, f64)>> = vec![Vec::new(); d.edges.len()];
-    let mut back = vec![false; d.edges.len()];
-    for (c, ch) in chains.iter().enumerate() {
-        let (u, v, k, rev) = dag[c];
-        let mut pts = Vec::with_capacity(ch.len() * 2);
-        pts.push(xy(
-            centre(rank[u]) + half_along(u),
-            y[u] + spread(&out_ports[u], c, u),
-        ));
-        for &dm in &ch[1..ch.len() - 1] {
-            let r = vrank[dm];
-            pts.push(xy(start_at[r], y[dm]));
-            pts.push(xy(start_at[r] + thick[r], y[dm]));
-        }
-        pts.push(xy(
-            centre(rank[v]) - half_along(v),
-            y[v] + spread(&in_ports[v], c, v),
-        ));
-        if rev {
-            pts.reverse();
-        }
-        edge_pts[k] = pts;
-        back[k] = rev;
-    }
-    for k in loops {
-        edge_pts[k] = self_loop(&pn[d.edges[k].from], lr);
-    }
-    for &(u, v, k, rev) in &free {
-        let mut pts = straight(&pn, u, v);
-        if rev {
-            pts.reverse();
-        }
-        edge_pts[k] = pts;
-        back[k] = rev;
-    }
-    // swimlane bands across every stage: the lane's span along the stages'
-    // axis, its label strip before it
-    let total = start_at[nl - 1] + thick[nl - 1];
-    let bands = lane_span
-        .iter()
-        .enumerate()
-        .filter(|(l, (lo, _))| *l < d.lanes.len() && lo.is_finite())
-        .map(|(l, &(lo, hi))| {
-            // the label strip: before the lane (LR), before the stages (TB)
-            let (a, b) = if lr {
-                xy(-12.0, lo - LANE_HEAD - 6.0)
-            } else {
-                xy(-LANE_HEAD - 10.0, lo - 8.0)
-            };
-            let (c, e) = xy(total + 12.0, hi + 8.0);
-            (l, a, b, c, e)
+                    .fold(0.0, f64::max)
+            }),
         })
         .collect();
-    finish(pn, edge_pts, back, nl, bands)
-}
-
-/// Move a layout to the margin and round it to half pixels.
-fn finish(
-    mut pn: Vec<PNode>,
-    mut edge_pts: Vec<Vec<(f64, f64)>>,
-    back: Vec<bool>,
-    layers: usize,
-    mut bands: Vec<(usize, f64, f64, f64, f64)>,
-) -> Placed {
-    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for p in &pn {
-        x0 = x0.min(p.cx - p.w / 2.0);
-        x1 = x1.max(p.cx + p.w / 2.0);
-        y0 = y0.min(p.cy - p.h / 2.0);
-        y1 = y1.max(p.cy + p.h / 2.0);
-    }
-    for &(px, py) in edge_pts.iter().flatten() {
-        x0 = x0.min(px);
-        x1 = x1.max(px);
-        y0 = y0.min(py);
-        y1 = y1.max(py);
-    }
-    for &(_, a, b, c, e) in &bands {
-        x0 = x0.min(a.min(c));
-        x1 = x1.max(a.max(c));
-        y0 = y0.min(b.min(e));
-        y1 = y1.max(b.max(e));
-    }
-    if pn.is_empty() {
-        (x0, y0, x1, y1) = (0.0, 0.0, 0.0, 0.0);
-    }
-    let r = |v: f64| (v * 2.0).round() / 2.0;
-    let (dx, dy) = (MARGIN - x0, MARGIN - y0);
-    for p in &mut pn {
-        p.cx = r(p.cx + dx);
-        p.cy = r(p.cy + dy);
-    }
-    for pts in &mut edge_pts {
-        for pt in pts.iter_mut() {
-            *pt = (r(pt.0 + dx), r(pt.1 + dy));
-        }
-    }
-    for b in &mut bands {
-        *b = (b.0, r(b.1 + dx), r(b.2 + dy), r(b.3 + dx), r(b.4 + dy));
-    }
+    let params = gl::LayeredParams {
+        direction: match d.dir {
+            Dir::LR => gl::Direction::LeftRight,
+            Dir::TB => gl::Direction::TopBottom,
+        },
+        lanes: d.lanes.len(),
+        margin: MARGIN,
+        arrow: ARROW,
+        loop_size: LOOP,
+        lane_gap: LANE_GAP,
+        lane_head: LANE_HEAD,
+    };
+    let l = gl::layered(&nodes, &edges, &params);
     Placed {
-        w: r(x1 - x0 + 2.0 * MARGIN),
-        h: r(y1 - y0 + 2.0 * MARGIN),
-        nodes: pn,
-        edges: edge_pts,
-        back,
-        layers,
-        bands,
+        w: l.w,
+        h: l.h,
+        nodes: l
+            .nodes
+            .into_iter()
+            .zip(boxes)
+            .map(|(q, b)| PNode {
+                cx: q.cx,
+                cy: q.cy,
+                w: q.w,
+                h: q.h,
+                lines: b.lines,
+                layer: q.layer,
+                order: q.order,
+            })
+            .collect(),
+        edges: l.edges,
+        back: l.back,
+        layers: l.layers,
+        bands: l.bands,
     }
 }
 
@@ -3238,14 +2540,6 @@ mod tests {
             wrap("duckdb/community-extensions (descriptions)", max),
             ["duckdb/community-", "extensions", "(descriptions)"]
         );
-    }
-
-    #[test]
-    fn isotonic_placement_keeps_order_and_gaps() {
-        let y = place(&[10.0, 0.0, 5.0], &[1.0, 1.0, 1.0], &[0.0, 10.0, 10.0]);
-        assert!(y[1] - y[0] >= 10.0 - 1e-9 && y[2] - y[1] >= 10.0 - 1e-9);
-        let y = place(&[0.0, 50.0], &[1.0, 1.0], &[0.0, 10.0]);
-        assert_eq!(y, [0.0, 50.0]);
     }
 
     /// #753: an edge label a node box would cover moves along the edge.

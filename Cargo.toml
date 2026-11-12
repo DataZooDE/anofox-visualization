@@ -176,7 +176,7 @@ crate-type = ["cdylib", "rlib"]
 # 0.44.0 (sipemu/ggplot-rs#488, #1107): the summary compares two series per x.
 # 0.45.0 (sipemu/ggplot-rs#489, #1107): a band's width, widens / narrows.
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.45.1", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.46.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
