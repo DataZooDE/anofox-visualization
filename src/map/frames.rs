@@ -579,9 +579,9 @@ fn max_class_count(cols: &[Column], fr: &Frames, scale: &super::ValueScale) -> u
         return 0;
     };
     let mut max_count = 0usize;
-    for k in 0..fr.labels.len() {
+    for frame in &fr.row_in {
         let mut counts = vec![0usize; classes.len()];
-        for &row in fr.row_in[k].iter().flatten() {
+        for &row in frame.iter().flatten() {
             if let Some(v) = measure.values.get(row).and_then(cell_num) {
                 let idx = classes.index(v.clamp(scale.lo, scale.hi));
                 counts[idx] += 1;
