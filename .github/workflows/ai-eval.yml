@@ -124,6 +124,10 @@ jobs:
       - name: Interval unit tests (#1122, no API)
         run: python3 -m unittest bench/viz-tokens/test_stats.py
 
+      - name: Ambiguity label unit tests (#1142, no API)
+        working-directory: bench/viz-tokens
+        run: python3 -m unittest test_ambiguity.py
+
       - name: Run, judge, report, compare
         id: run
         run: |

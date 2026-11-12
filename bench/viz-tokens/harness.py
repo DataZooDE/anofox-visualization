@@ -45,6 +45,8 @@ PRICE = {  # per MTok, as scripts/assist-eval.mjs
     "claude-opus-5-5": {"in": 4, "out": 20, "read": 0.2, "write": 5},
 }
 MAX_ROUNDS = 12  # model calls per phase
+SENSIBLE = "Go ahead with what you think is sensible."
+MAX_ASKS = 2  # per phase; more get a go-ahead
 TOOL_TEXT_MAX = 4000
 QUERY_ROWS = 50
 EXEC_TIMEOUT = 60
@@ -63,7 +65,7 @@ How to work:
 - Then make the chart with {chart_tool}. It answers "ok" or the error; you do not see the picture. Fix errors and call it again.
 - Finish with answer(text): two to four sentences that answer the question with the key numbers. The last chart you made successfully is the one shown with it.
 - The chart must answer the question on its own: a clear title, readable labels, the right chart type.
-- Do not ask the user questions; make reasonable choices.
+- If the question can be read in ways that give clearly different answers (different numbers, another ranking or winner), ask the user first with ask_user: one short question naming the readings. Otherwise do not ask; make reasonable choices.
 - When a definition changes the answer (what counts as stock, which period, gross or net revenue, the top N or all), say the one you used in a short clause of the answer.
 
 When the user follows up, change the chart as asked (call {chart_tool} again) and answer again.
@@ -91,6 +93,9 @@ COMMON_TOOLS = [
      "input_schema": {"type": "object", "properties": {"table": {"type": "string"}}, "required": ["table"]}},
     {"name": "query", "description": "Run one read-only DuckDB SELECT; at most 50 rows come back, as CSV.",
      "input_schema": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}},
+    # #1142: asking back is an answer too, when the question really splits
+    {"name": "ask_user", "description": "Ask the user one short question before answering, when the request can be read in ways that give clearly different answers. Returns the user's reply.",
+     "input_schema": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}},
     {"name": "answer", "description": "The final written answer (2-4 sentences, with the key numbers). Ends this turn.",
      "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
 ]
@@ -304,9 +309,18 @@ class Tools:
         self.chart = None  # (png bytes, artifact text) of the last successful chart
         self.fresh = None  # #1118: the png the last tool call drew, for --see-chart
         self.n = 0
+        # #1142: the simulated user — the default reading's reply on a task
+        # with readings, else a go-ahead; every question is logged
+        self.user_reply = SENSIBLE
+        self.asks = []
 
     def run(self, name, inp):
         try:
+            if name == "ask_user":
+                self.asks.append(inp.get("question", ""))
+                if len(self.asks) > MAX_ASKS:
+                    return True, "Please go ahead now with what you have."
+                return True, self.user_reply
             if name == "list_tables":
                 rows = self.con.execute("SELECT table_name, estimated_size FROM duckdb_tables() ORDER BY 1").fetchall()
                 return True, "\n".join(f"{t} ({n} rows)" for t, n in rows)
@@ -522,7 +536,7 @@ class Scripted:
             "python": ("run_python", {"code": "import matplotlib.pyplot as plt\ndf = con.sql('SELECT region, sum(units*price) AS revenue FROM sales GROUP BY 1 ORDER BY 2 DESC').df()\nplt.bar(df.region, df.revenue); plt.title('Revenue by region')\nplt.savefig('chart.png')"}),
             "vegalite": ("render", {"sql": "SELECT region, sum(units*price) AS revenue FROM sales GROUP BY 1", "spec": {"mark": "bar", "encoding": {"x": {"field": "region", "type": "nominal", "sort": "-y"}, "y": {"field": "revenue", "type": "quantitative"}}, "title": "Revenue by region"}}),
         }[self.arm]
-        steps = [("list_tables", {}), ("query", {"sql": "SELECT region, sum(units*price) FROM sales GROUP BY 1"}),
+        steps = [("list_tables", {}), ("ask_user", {"question": "Which reading do you mean?"}), ("query", {"sql": "SELECT region, sum(units*price) FROM sales GROUP BY 1"}),
                  ("render" if self.arm != "python" else "run_python", {"sql": "SELECT nope"} if self.arm != "python" else {"code": "raise SystemExit('boom')"}),
                  chart, ("answer", {"text": "EU leads."})]
         name, inp = steps[self.i % len(steps)]
@@ -569,8 +583,9 @@ def phase(model, system, tools, messages, kit, log, evidence=None, claim_mode="o
                 continue
             ok, text = kit.run(u["name"], u["input"])
             evidence += [json.dumps(u["input"]), text]
-            kind = "explore" if u["name"] in EXPLORE else ("repair" if failed_chart else "chart")
-            if u["name"] not in EXPLORE:
+            kind = ("ask" if u["name"] == "ask_user" else
+                    "explore" if u["name"] in EXPLORE else ("repair" if failed_chart else "chart"))
+            if u["name"] not in EXPLORE and u["name"] != "ask_user":
                 failed_chart = not ok
             call["tools"].append({"name": u["name"], "kind": kind, "ok": ok,
                                   "in_chars": len(json.dumps(u["input"])), "out_chars": len(text),
@@ -595,6 +610,8 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
     work = Path(tempfile.mkdtemp(prefix=run_id + "-", dir=cfg["workdir"]))
     db = Path(cfg["data"]) / f"{task['dataset']}.duckdb"
     kit = Tools(arm, db, work, cfg)
+    if task.get("readings"):
+        kit.user_reply = task["readings"][0]["reply"]
     chart_tool = CHART_TOOLS[base(arm)]["name"]
     system = [
         {"type": "text", "text": INSTRUCTIONS.format(chart_tool=chart_tool) + "\n" + ARM_NOTES[base(arm)]
@@ -621,6 +638,7 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
         except RuntimeError as e:
             log["answer"], log["error"] = None, str(e)
         log["seconds"] = round(time.time() - t0, 1)
+        log["asked"], kit.asks = kit.asks, []
         # 11-11: a follow-up answered from the chart already on screen (it
         # showed the percentages asked for) keeps that chart, as a user sees
         # it — the judge grades it against the follow-up

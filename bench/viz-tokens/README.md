@@ -53,6 +53,20 @@ has a ground-truth SQL and one follow-up edit with its own truth. 5 are marked
 the truth rows, the written answer and the chart image. It grades
 `numbers_correct`, `chart_answers` and `readable` (1–5); `pass` = both true.
 
+**Asking back** (#1142). Customers ask vaguely, so the questions keep their
+vague wording. A coverage task that can be meant more than one way lists its
+**readings** (`make-coverage.py` `READINGS`: lead time to the first or the last
+receipt, the best channel by revenue or by units, …), each with its truth SQL
+and the user's reply that picks it. `ambiguity.py` labels every task phase from
+how far the readings' results diverge: `clear` (one reading), `harmless` (same
+rows, same order, numbers within 10 %) or `ambiguous` (another ranking, another
+winner, numbers further apart). Every arm has an `ask_user` tool. The simulated
+user answers with the default reading's reply, or with a go-ahead on a task
+without readings. The judge grades against the reading the conversation settled
+on, or else the one the answer states (the default if none). The report adds
+**detection** (asked on ambiguous), **false asks** (asked on clear or
+harmless) and the pass rate on ambiguous phases.
+
 **Report** (`report.py`):
 - per arm and phase: pass with a 95 % CI (see below), first-try chart, median and p90 tokens, output
   tokens, cost, tokens and cost per pass, calls and repairs;

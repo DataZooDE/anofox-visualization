@@ -197,12 +197,13 @@ def main():
             L.append(f"| {arm} | {m('explore'):,.0f} | {m('chart'):,.0f} | {m('repair'):,.0f} | {m('answer'):,.0f} | {m('none'):,.0f} "
                      f"| {'–' if ref is None else f'{ref:,.0f}'} | {sum(x['artifact_chars'] for x in R) / len(R):,.0f} |")
 
-    fam = {}
+    fam, amb = {}, {}
     here = Path(__file__).resolve().parent
     for f in ("tasks.jsonl", "coverage.jsonl"):
         for t in map(json.loads, (here / f).read_text().splitlines()):
             if "family" in t:
                 fam[t["id"]] = t["family"]
+            amb[t["id"]] = t.get("ambiguity", {})
     if judged and any(x["task"] in fam for x in rows):
         L.append("\n## Per family (pass / runs, first answer + follow-up)\n")
         L.append("| family | " + " | ".join(arms) + " |")
@@ -248,6 +249,41 @@ def main():
                 c[k][1] += 1
             L.append(f"| {arm} | {c[True][0]}/{c[True][1]} | {c[False][0]}/{c[False][1]} |")
         summary["claim_check"] = meta.get("claim_check")
+
+    # #1142: asking back. A phase is where the question is decided: the first
+    # phase, or the follow-up when only the follow-up can be read two ways
+    # (after a first answer the reading is settled).
+    if any("asked" in ph for r in runs for ph in r["phases"]):
+        L.append("\n## Asking back (#1142)\n")
+        L.append("Per task phase, from how far its readings' results diverge (ambiguity.py): **ambiguous** = the "
+                 "readings lead to different answers, so the right move is to ask first; **clear / harmless** = "
+                 "answer directly. Detection = asked on ambiguous; false asks = asked on clear or harmless.\n")
+        L.append("| arm | detection | false asks | pass on ambiguous (after asking or not) |")
+        L.append("|---|---|---|---|")
+        kpi = {}
+        for arm in arms:
+            det, fa, ok = [0, 0], [0, 0], [0, 0]
+            for r in runs:
+                if r["arm"] != arm:
+                    continue
+                a = amb.get(r["task"], {})
+                decides = "first" if a.get("first") == "ambiguous" or a.get("followup") != "ambiguous" else "followup"
+                for ph in r["phases"]:
+                    asked = bool(ph.get("asked"))
+                    if a.get(ph["phase"]) == "ambiguous" and ph["phase"] == decides:
+                        det[0] += asked
+                        det[1] += 1
+                        j = judg.get((r["run"], ph["phase"]))
+                        if j:
+                            ok[0] += bool(j.get("pass"))
+                            ok[1] += 1
+                    elif a.get(ph["phase"], "clear") != "ambiguous":
+                        fa[0] += asked
+                        fa[1] += 1
+            share = lambda c: f"{c[0]}/{c[1]} ({100 * c[0] / c[1]:.0f} %)" if c[1] else "–"
+            L.append(f"| {arm} | {share(det)} | {share(fa)} | {share(ok)} |")
+            kpi[arm] = {"detection": det, "false_asks": fa, "pass_ambiguous": ok}
+        summary["asking_back"] = kpi
 
     (out / "report.md").write_text("\n".join(L) + "\n")
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str))

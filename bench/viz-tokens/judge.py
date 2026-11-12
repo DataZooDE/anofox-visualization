@@ -35,17 +35,41 @@ Judge:
    With no ground-truth rows, the right answer says there is no such data; then no chart is needed (chart_answers true when the answer says so). Otherwise no chart drawn means chart_answers false.
 3. readable: 1-5, how quickly a business reader gets the answer from the chart (title, labels, number format, chart type, clutter). 5 = at a glance, 3 = works with effort, 1 = misleading or unreadable.
 
+When the ground truth comes in several readings (the request can be meant more than one way): if the user was asked and replied, grade against the reading that reply picks. Otherwise grade against the reading the answer says it used, and if it says none, against reading A. Whether the assistant should have asked is measured separately; don't grade it here.
+
 Reply with JSON only: {"numbers_correct": true|false, "chart_answers": true|false, "readable": 1-5, "reason": "one or two sentences"}"""
 
 
-def truth_rows(data, task, phase):
-    sql = task["truth_sql"] if phase == "first" else task["followup_truth_sql"]
+def rows_csv(data, task, sql):
     c = duckdb.connect(str(Path(data) / f"{task['dataset']}.duckdb"), read_only=True)
     df = c.execute(sql).df()
     # all of it up to 300 rows (#1044 pilot: a 60-row cut hid the answer's
     # rows from the judge, which then marked right answers wrong)
     more = f"\n({len(df)} rows, first 300 shown)" if len(df) > 300 else ""
     return df.head(300).to_csv(index=False) + more
+
+
+def truth_rows(data, task, phase):
+    key = "truth_sql" if phase == "first" else "followup_truth_sql"
+    rs = task.get("readings")
+    if not rs:
+        return "Ground truth rows (CSV):\n" + rows_csv(data, task, task[key])
+    # #1142: every reading, each with the reply a user gives to pick it
+    return "Ground truth, one table per reading:\n" + "".join(
+        f"\nReading {chr(65 + i)} (the user's reply that picks it: \"{r['reply']}\"):\n{rows_csv(data, task, r[key])}"
+        for i, r in enumerate(rs))
+
+
+def asked_text(phases, upto):
+    """The questions the assistant asked the user, and the replies, up to this phase."""
+    lines = []
+    for ph in phases:
+        for q in ph.get("asked") or []:
+            lines.append(f"- The assistant asked: {q}")
+        if ph["phase"] == upto:
+            break
+    return ("The assistant asked the user before answering (each question got the reading A reply above, "
+            "or a go-ahead when there is one reading):\n" + "\n".join(lines) + "\n\n") if lines else ""
 
 
 def call(key, content):
@@ -107,7 +131,8 @@ def main():
                     # filter, an input); capped so a big spec doesn't crowd out the rest
                     src = (ph.get("artifact") or "")[:8000]
                     src = f"The chart's source (what the assistant wrote):\n{src}\n\n" if src else ""
-                    head = f"Request:\n{req}\n{expect}\nGround truth rows (CSV):\n{truth_rows(a.data, t, ph['phase'])}\nWritten answer:\n{ph['answer']}\n\n{src}"
+                    head = (f"Request:\n{req}\n{expect}\n{truth_rows(a.data, t, ph['phase'])}\n"
+                            f"{asked_text(rec['phases'], ph['phase'])}Written answer:\n{ph['answer']}\n\n{src}")
                     # 11-11: no chart is judged too — right for a question the
                     # data can't answer, chart_answers false for any other
                     if ph.get("chart"):
