@@ -388,7 +388,7 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
     };
     // #1166: the belief per iteration (scalar marginals): a range covering
     // every iteration's mean ± 3 sd, and (iteration, mean, sd)
-    let belief = |id: &str, prior: Option<(f64, f64)>| -> Option<String> {
+    let belief = |id: &str, prior: Option<(f64, f64)>, n: usize| -> Option<String> {
         let mut its: Vec<(f64, f64, f64)> = marginals
             .iter()
             .filter(|m| get(m, &["variable"]).as_deref() == Some(id))
@@ -429,6 +429,9 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         let mut b = serde_json::json!({ "lo": lo, "hi": hi, "its": its.iter().map(|t| [t.0, t.1, t.2]).collect::<Vec<_>>() });
         if let Some((m, sd)) = prior {
             b["prior"] = serde_json::json!([m, sd]);
+        }
+        if n > 0 {
+            b["n"] = n.into();
         }
         Some(b.to_string())
     };
@@ -510,12 +513,15 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             .flatten()
             .collect();
         let prior = prior_of(&touch);
-        beliefs.push(belief(var.as_deref().unwrap_or(&id), prior).map_or(Value::Na, Value::Str));
+        let n_obs = observed(&touch);
+        beliefs.push(
+            belief(var.as_deref().unwrap_or(&id), prior, n_obs).map_or(Value::Na, Value::Str),
+        );
         // #1172: what the data did to the prior, in words
         let num = |v: f64| {
             crate::format::format_number_l(v, MetricFmt::Plain, &crate::format::Locale::default())
         };
-        learned.push(match (prior, m, observed(&touch)) {
+        learned.push(match (prior, m, n_obs) {
             (Some((pm, psd)), Some((mean, Some(sd))), n) if n > 0 => Some(format!(
                 "{} {} {} {} from {} ± {} to {} ± {}.",
                 n,

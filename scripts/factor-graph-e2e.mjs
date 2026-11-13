@@ -87,6 +87,14 @@ const prior = await page.evaluate(() => {
 });
 check(prior && prior.dashed && prior.of === "e4", "θ's prior is a dashed outline behind its belief", prior);
 
+// …and under the graph, what it learned in one sentence, also its label (#1172)
+const lead = await page.evaluate(() => {
+  const svg = document.querySelector("svg[data-diagram]");
+  return { text: [...svg.querySelectorAll(":scope > text")].map((t) => t.textContent).join(" "), aria: svg.getAttribute("aria-label") || "" };
+});
+const said = "After 4 observations, θ is 0.56 ± 0.16 (prior 0.4 ± 0.2).";
+check(lead.text.includes(said) && lead.aria.includes(said), "the graph says what the model learned", lead);
+
 // A variable's tooltip draws its posterior mean over the iterations (#1152).
 const v = page.locator("rect[data-node][data-spark]").first();
 await v.scrollIntoViewIfNeeded();
