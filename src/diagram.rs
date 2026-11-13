@@ -109,6 +109,9 @@ pub struct Node {
     pub pin: (Option<f64>, Option<f64>),
     /// A mini trend in the box (`list(v)::SPARKLINE`).
     pub spark: Vec<f64>,
+    /// The node's belief (`::BELIEF`, #1166): a value range and per
+    /// iteration (iteration, mean, sd).
+    pub belief: Option<Belief>,
     /// The node's mark (`::SHAPE`, #1151); `None` is a box.
     pub shape: Option<ggplot_rs::graph::NodeShape>,
 }
@@ -158,6 +161,49 @@ pub struct Diagram {
     pub messages: Vec<Message>,
 }
 
+/// A node's belief over the iterations (#1166).
+#[derive(Clone, Debug)]
+pub struct Belief {
+    pub lo: f64,
+    pub hi: f64,
+    /// (iteration, mean, sd), in iteration order.
+    pub its: Vec<(f64, f64, f64)>,
+}
+
+impl Belief {
+    fn parse(s: &str) -> Option<Belief> {
+        let v: J = serde_json::from_str(s).ok()?;
+        let (lo, hi) = (v.get("lo")?.as_f64()?, v.get("hi")?.as_f64()?);
+        let its: Vec<(f64, f64, f64)> = v
+            .get("its")?
+            .as_array()?
+            .iter()
+            .filter_map(|t| {
+                let a = t.as_array()?;
+                Some((
+                    a.first()?.as_f64()?,
+                    a.get(1)?.as_f64()?,
+                    a.get(2)?.as_f64()?,
+                ))
+            })
+            .filter(|t| t.2 > 0.0 && t.1.is_finite())
+            .collect();
+        (hi > lo && !its.is_empty()).then_some(Belief { lo, hi, its })
+    }
+    /// The curve of iteration `k` (a normal density over `lo..hi`), 0..=1
+    /// against the sharpest iteration's peak, at 25 points.
+    pub fn heights(&self, k: usize) -> Vec<f64> {
+        let min_sd = self.its.iter().map(|t| t.2).fold(f64::INFINITY, f64::min);
+        let (_, m, sd) = self.its[k.min(self.its.len() - 1)];
+        (0..25)
+            .map(|i| {
+                let x = self.lo + (self.hi - self.lo) * i as f64 / 24.0;
+                min_sd / sd * (-0.5 * ((x - m) / sd).powi(2)).exp()
+            })
+            .collect()
+    }
+}
+
 /// One edge story step: the edge (index into [`Diagram::edges`]), whether
 /// it runs against the edge's drawn direction, and its caption.
 #[derive(Clone, Debug)]
@@ -165,6 +211,8 @@ pub struct Message {
     pub edge: usize,
     pub back: bool,
     pub text: String,
+    /// The iteration the step belongs to (a factor graph's schedule).
+    pub iteration: Option<f64>,
 }
 
 /// At most this many edge steps (a long schedule is cut).
@@ -290,6 +338,7 @@ impl Diagram {
         let line_style = col(Role::LineStyle);
         let lane_col = col(Role::Lane);
         let shape_col = col(Role::Shape);
+        let belief_col = col(Role::Belief);
         let mut bad_shapes: Vec<String> = Vec::new();
         let (xcol, ycol) = (col(Role::X), col(Role::Y));
         let spark_col = col(Role::Value(crate::Kind::Sparkline));
@@ -375,6 +424,9 @@ impl Diagram {
                     };
                     (pin(xcol), pin(ycol))
                 },
+                belief: cell(belief_col)
+                    .and_then(text)
+                    .and_then(|b| Belief::parse(&b)),
                 shape: cell(shape_col).and_then(text).and_then(|s| {
                     let shape = shape_of(&s);
                     if shape.is_none() && !bad_shapes.contains(&s) {
@@ -548,7 +600,7 @@ impl Diagram {
         let mut styles: Vec<Option<EdgeStyle>> = Vec::new(); // as given in ::EDGES
         let mut unknown: Vec<String> = Vec::new();
         let mut total_edges = 0usize;
-        let mut steps: Vec<(f64, usize, String, bool)> = Vec::new(); // (order, edge, caption, back)
+        let mut steps: Vec<(f64, usize, String, bool, Option<f64>)> = Vec::new(); // (order, edge, caption, back, iteration)
         for RawEdge {
             from,
             to,
@@ -574,7 +626,7 @@ impl Diagram {
             let at = edges.iter().position(|e| e.from == f && e.to == t);
             let k = at.unwrap_or(edges.len());
             if k < MAX_EDGES {
-                steps.extend(edge_steps.into_iter().map(|(n, t, b)| (n, k, t, b)));
+                steps.extend(edge_steps.into_iter().map(|(n, t, b, i)| (n, k, t, b, i)));
             }
             match at {
                 Some(k) => {
@@ -644,7 +696,12 @@ impl Diagram {
             .into_iter()
             .filter(|s| s.1 < edges.len())
             .take(MAX_MESSAGES)
-            .map(|(_, edge, text, back)| Message { edge, back, text })
+            .map(|(_, edge, text, back, iteration)| Message {
+                edge,
+                back,
+                text,
+                iteration,
+            })
             .collect();
         let category_colors = cats
             .iter()
@@ -873,7 +930,12 @@ fn layout(d: &Diagram) -> Placed {
         // row, a branch dropping into its band)
         let banded = gl::BandedParams {
             bands: d.lanes.len(),
-            margin: params.margin,
+            // room for a belief curve over a top-row node (#1166)
+            margin: if d.nodes.iter().any(|n| n.belief.is_some()) {
+                params.margin + 26.0
+            } else {
+                params.margin
+            },
             ..Default::default()
         };
         gl::banded(&nodes, &edges, &banded)
@@ -895,13 +957,14 @@ struct RawEdge {
     label: Option<String>,
     style: Option<EdgeStyle>,
     status: Option<Status>,
-    /// Story steps along the edge: (order, caption, against the edge).
-    steps: Vec<(f64, String, bool)>,
+    /// Story steps along the edge: (order, caption, against the edge,
+    /// iteration).
+    steps: Vec<(f64, String, bool, Option<f64>)>,
 }
 
 /// An `::EDGES` item's `steps`: a list of `{n, t, dir}` (order, caption,
 /// `'back'` for a step against the edge's direction).
-fn edge_steps(v: Option<&J>) -> Vec<(f64, String, bool)> {
+fn edge_steps(v: Option<&J>) -> Vec<(f64, String, bool, Option<f64>)> {
     let Some(J::Array(items)) = v else {
         return Vec::new();
     };
@@ -922,7 +985,8 @@ fn edge_steps(v: Option<&J>) -> Vec<(f64, String, bool)> {
                 .is_some_and(|d| {
                     d.eq_ignore_ascii_case("back") || d.eq_ignore_ascii_case("reverse")
                 });
-            n.is_finite().then_some((n, t, back))
+            let it = field(o, &["i", "iteration"]).and_then(J::as_f64);
+            n.is_finite().then_some((n, t, back, it))
         })
         .collect()
 }
@@ -1301,6 +1365,9 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     .map(|b| (b, nd.status.map(|s| s.color(t)).unwrap_or(muted))),
                 stroke: alarm.map(|s| s.color(t)).unwrap_or(t.chart.line),
                 accent,
+                // #1166: the final belief as a curve over the node, a
+                // colour of its own
+                belief: nd.belief.as_ref().map(|b| (b.heights(b.its.len() - 1), t.color(v))),
                 spark: (nd.spark.len() >= 2).then(|| {
                     (
                         nd.spark.clone(),
@@ -1340,6 +1407,16 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                                 )
                             };
                             [
+                                attr(
+                                    "beliefs",
+                                    nd.belief.as_ref().map(|b| {
+                                        serde_json::json!({
+                                            "its": b.its.iter().map(|t| t.0).collect::<Vec<_>>(),
+                                            "h": (0..b.its.len()).map(|k| b.heights(k)).collect::<Vec<_>>(),
+                                        })
+                                        .to_string()
+                                    }),
+                                ),
                                 attr("spark", sp.map(|s| J::from(s.clone()).to_string())),
                                 attr(
                                     "trend",
@@ -1464,11 +1541,17 @@ pub(crate) fn render(
             .iter()
             .map(|m| {
                 let e = &d.edges[m.edge];
-                serde_json::json!({
-                    "e": format!("{}>{}", d.nodes[e.from].id, d.nodes[e.to].id),
-                    "d": if m.back { -1 } else { 1 },
-                    "t": m.text,
-                })
+                {
+                    let mut o = serde_json::json!({
+                        "e": format!("{}>{}", d.nodes[e.from].id, d.nodes[e.to].id),
+                        "d": if m.back { -1 } else { 1 },
+                        "t": m.text,
+                    });
+                    if let Some(i) = m.iteration {
+                        o["i"] = J::from(i);
+                    }
+                    o
+                }
             })
             .collect()
     };

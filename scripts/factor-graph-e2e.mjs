@@ -62,6 +62,23 @@ s = await state();
 check(!s.msg.length && /Overview/.test(s.pos), "back at the overview, no message lit", s);
 check(!(await page.locator("svg[data-diagram] .dp-msg-dot").count()), "the overview has no message dot");
 
+// A belief curve re-shapes to the step's iteration and back (#1166): the
+// cycle-time graph (the second) has six iterations.
+const curve = () =>
+  page.evaluate(() => {
+    const svg = document.querySelectorAll("svg[data-diagram]")[1];
+    const p = svg && [...svg.querySelectorAll("polygon")].find((e) => e.classList.contains("dp-node-belief"));
+    return p ? p.getAttribute("points") : null;
+  });
+const finalCurve = await curve();
+await page.evaluate(() => document.querySelectorAll(".dp-story")[1].querySelector(".dp-story-next").click());
+const firstCurve = await curve();
+await page.evaluate(() => {
+  const b = document.querySelectorAll(".dp-story")[1];
+  b.querySelector(".dp-story-prev").click();
+});
+check(finalCurve && firstCurve && firstCurve !== finalCurve && (await curve()) === finalCurve, "a belief curve shows the step's iteration, the final one at the overview", { finalCurve: !!finalCurve });
+
 // A variable's tooltip draws its posterior mean over the iterations (#1152).
 const v = page.locator("rect[data-node][data-spark]").first();
 await v.scrollIntoViewIfNeeded();
