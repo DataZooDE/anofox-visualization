@@ -20653,12 +20653,13 @@ function attachHover() {
       // A map feature's ::LABEL may run over several lines: the first is the
       // heading, the rest follow as they are.
       const [head, ...lines] = isMapMark ? info.x.split("\n") : [info.x];
-      const ct = isMapMark ? null : customTip(el, info, fill) || pointTip(el, info, fill); // #751, #752
+      const ct = isMapMark ? null : nodeCard(el) || customTip(el, info, fill) || pointTip(el, info, fill); // #751, #752
+      tip.classList.toggle("dp-tip-card", !!ct?.card);
       tip.innerHTML =
         (ct?.head ?? (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "")) +
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
         (ct ? ct.body : tipRow(info, fill)) +
-        (isMapMark ? mapTipSpark(el) : markTipSpark(el));
+        (isMapMark ? mapTipSpark(el) : ct?.card ? "" : markTipSpark(el));
       tip.classList.add("show");
       if (isMapMark) mapHoverEmph(series);
       // M2f-A (#149): a time map's own value changes under the pointer at
@@ -21241,6 +21242,40 @@ function tipMode(panel) {
 // #751: the tooltip of a mark from its panel's spec — {head, body} HTML, or
 // null for the default tooltip. Every value is wasm-filled plain text,
 // escaped here.
+// #1166: a factor graph node's card — a kicker (what kind of node, its
+// role), a title, its value with the trend over the iterations, and the
+// sentence (data-note) that says what it does. Like rxinfer.com's cards.
+function nodeCard(el) {
+  const note = el.getAttribute("data-note");
+  if (!note) return null;
+  const cls = el.getAttribute("class") || "";
+  const shape = (cls.match(/dp-node-([a-z-]+)/) || [])[1] || "box";
+  const label = el.getAttribute("data-xtext") || el.getAttribute("data-node") || "";
+  const kinds = { glyph: "Factor", box: "Factor", circle: "Variable", "filled-circle": "Observed", square: "Variable", "filled-square": "Deterministic", text: "Constant" };
+  let kicker = kinds[shape] || "Node";
+  let title = label;
+  let body = note;
+  const m = note.match(/^([A-Z][a-z]+) \(([^)]+)\): (.*)$/);
+  if (m) {
+    kicker += " · " + m[1];
+    title = m[2];
+    body = m[3];
+  } else if (kicker === "Variable" || kicker === "Observed") {
+    title = (kicker === "Observed" ? "The observation " : "The variable ") + label;
+  }
+  // "θ, a hidden quantity …" under the title "The variable θ": no repeat
+  if (body.startsWith(label + ", ")) body = body.slice(label.length + 2);
+  body = body.charAt(0).toUpperCase() + body.slice(1);
+  const v = el.getAttribute("data-vtext");
+  const sd = el.getAttribute("data-badge");
+  const value = v && kicker !== "Factor" && !kicker.startsWith("Factor") ? `<div class="tip-card-value">${escapeHtml(v)}${sd && sd.startsWith("±") ? ` <span>${escapeHtml(sd)}</span>` : ""}</div>` : "";
+  return {
+    card: true,
+    head: `<div class="tip-kicker">${escapeHtml(kicker)}</div><div class="tip-card-title">${escapeHtml(title)}</div>`,
+    body: value + markTipSpark(el).replace('<div class="tip-trend">', '<div class="tip-trend">mean by iteration: ') + `<p class="tip-note">${escapeHtml(body)}</p>`,
+  };
+}
+
 function customTip(el, info, fill) {
   const spec = tipSpec(el.closest(".panel"));
   if (!spec) return null;

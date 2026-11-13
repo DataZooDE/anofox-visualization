@@ -89,6 +89,12 @@ const tip = await page.evaluate(() => {
   return t ? { spark: !!t.querySelector(".tip-spark svg"), trend: t.querySelector(".tip-trend")?.textContent || "" } : null;
 });
 check(tip && tip.spark && / over 6 values$/.test(tip.trend), "a variable's tooltip draws its posterior over the iterations", tip);
+// …in a node card: a kicker, a title and the sentence of what it does (#1166)
+const card = await page.evaluate(() => {
+  const t = document.querySelector(".dp-tip-card.show");
+  return t ? { kicker: t.querySelector(".tip-kicker")?.textContent, title: t.querySelector(".tip-card-title")?.textContent, note: t.querySelector(".tip-note")?.textContent || "" } : null;
+});
+check(card && card.kicker === "Variable" && /^The variable /.test(card.title) && /^A hidden quantity/.test(card.note), "a variable's hover is a node card", card);
 
 // A ::SELECT_AS before the macro names what a click on a node sets (#1152).
 const sql = `

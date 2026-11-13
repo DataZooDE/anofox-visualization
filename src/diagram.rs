@@ -1340,9 +1340,8 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             if let Some(b) = &nd.badge {
                 tooltip.push_str(&format!(" ({b})"));
             }
-            if let Some(n) = &nd.note {
-                tooltip.push_str(&format!(" — {n}"));
-            }
+            // #1166: the note goes to the browser's node card (data-note), not
+            // into the plain title
             let accent = nd
                 .status
                 .filter(|s| *s != Status::Neutral)
@@ -1407,6 +1406,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                                 )
                             };
                             [
+                                attr("note", nd.note.clone()),
                                 attr(
                                     "beliefs",
                                     nd.belief.as_ref().map(|b| {
