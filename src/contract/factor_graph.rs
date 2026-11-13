@@ -320,6 +320,21 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         .filter(|r| get(r, &["id"]).is_some_and(|id| !is_folded(&id)))
         .collect();
     order.sort_by_key(|r| layer_rank(r));
+    // the posterior mean over the iterations (scalar marginals), oldest first
+    let trend = |id: &str| -> Vec<f64> {
+        let mut pts: Vec<(f64, f64)> = marginals
+            .iter()
+            .filter(|m| get(m, &["variable"]).as_deref() == Some(id))
+            .filter(|m| get(m, &["component"]).is_none())
+            .filter_map(|m| {
+                let n = |k: &str| get(m, &[k]).and_then(|s| s.parse::<f64>().ok());
+                Some((n("iteration").unwrap_or(0.0), n("mean")?))
+            })
+            .collect();
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        pts.into_iter().map(|p| p.1).collect()
+    };
+    let mut sparks = vec![];
     let (mut ids, mut labels, mut shapes, mut lanes, mut values, mut badges) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
     for r in &order {
@@ -331,6 +346,12 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             None => label_of(r),
         };
         let m = latest(var.as_deref().unwrap_or(&id));
+        let tr = trend(var.as_deref().unwrap_or(&id));
+        sparks.push(if tr.len() >= 2 {
+            Value::Str(J::from(tr).to_string())
+        } else {
+            Value::Na
+        });
         ids.push(Value::Str(id));
         labels.push(Value::Str(label));
         shapes.push(kind(r).map_or(Value::Na, Value::Str));
@@ -354,6 +375,13 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         Column::new("shape", Role::Shape, shapes),
         Column::new("layer", Role::Lane, lanes),
     ];
+    if sparks.iter().any(|v| !matches!(v, Value::Na)) {
+        cols.push(Column::new(
+            "trend",
+            Role::Value(crate::Kind::Sparkline),
+            sparks,
+        ));
+    }
     if values.iter().any(|v| !matches!(v, Value::Na)) {
         cols.push(Column::new("mean", Role::Metric(MetricFmt::Plain), values));
         cols.push(Column::new("sd", Role::Badge, badges));
@@ -597,6 +625,11 @@ mod tests {
         assert_eq!(
             col(&cols, Role::Metric(MetricFmt::Plain))[at("e4")],
             Value::Float(0.5)
+        );
+        // #1152: θ's posterior mean over the iterations, oldest first
+        assert_eq!(
+            col(&cols, Role::Value(crate::Kind::Sparkline))[at("e4")],
+            Value::Str("[0.4,0.5]".into())
         );
         let edges = crate::value_text(&col(&cols, Role::Edges)[0]);
         assert!(

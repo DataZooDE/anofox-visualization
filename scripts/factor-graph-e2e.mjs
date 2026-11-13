@@ -1,6 +1,6 @@
 // #1152: a factor graph's message schedule steps in a real browser
 // (DuckDB-Wasm): the example "How does the model reason from our
-// inspections?" draws two factor graphs with `schedule :=`; Step lights the
+// inspections?" draws three factor graphs with `schedule :=`; Step lights the
 // edge carrying the message (`.dp-msg`, `.dp-msg-back` against the edge),
 // its two ends stay lit, the caption names the message, and stepping back to
 // the overview clears it. A ::SELECT_AS before the macro names the variable
@@ -26,7 +26,7 @@ const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 await page.goto(base + "?dashboard=how-does-the-model-reason-from-our-inspections");
-await page.waitForFunction(() => document.querySelectorAll("svg[data-diagram]").length >= 2, null, { timeout: 120000 });
+await page.waitForFunction(() => document.querySelectorAll("svg[data-diagram]").length >= 3, null, { timeout: 120000 });
 await page.waitForTimeout(500);
 
 const state = () =>
@@ -40,7 +40,7 @@ const state = () =>
 const step = (cls) =>
   page.evaluate((c) => [...document.querySelectorAll(".panel")].find((x) => x.querySelector("svg[data-diagram]")).querySelector(c).click(), cls);
 
-check((await page.locator(".dp-story").count()) === 2, "both factor graphs have a stepper");
+check((await page.locator(".dp-story").count()) === 3, "all three factor graphs have a stepper");
 let s = await state();
 check(/Overview · 5 steps/.test(s.pos) && !s.msg.length, "starts at the overview, no message", s);
 await step(".dp-story-next");
@@ -55,6 +55,17 @@ await step(".dp-story-prev");
 await step(".dp-story-prev");
 s = await state();
 check(!s.msg.length && /Overview/.test(s.pos), "back at the overview, no message lit", s);
+
+// A variable's tooltip draws its posterior mean over the iterations (#1152).
+const v = page.locator("rect[data-node][data-spark]").first();
+await v.scrollIntoViewIfNeeded();
+await v.hover({ force: true });
+await page.waitForTimeout(300);
+const tip = await page.evaluate(() => {
+  const t = [...document.querySelectorAll(".show")].find((e) => e.querySelector(".tip-spark"));
+  return t ? { spark: !!t.querySelector(".tip-spark svg"), trend: t.querySelector(".tip-trend")?.textContent || "" } : null;
+});
+check(tip && tip.spark && / over 6 values$/.test(tip.trend), "a variable's tooltip draws its posterior over the iterations", tip);
 
 // A ::SELECT_AS before the macro names what a click on a node sets (#1152).
 const sql = `

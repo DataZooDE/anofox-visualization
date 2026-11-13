@@ -1228,7 +1228,42 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     ),
                     attr("status", nd.status.map(|s| s.as_str().to_string())),
                     attr("badge", nd.badge.clone()),
-                ],
+                ]
+                .into_iter()
+                // #1152: a factor graph's shaped node has no box for its
+                // ::SPARKLINE — the tooltip draws it (data-spark), its first
+                // and last value under it (data-trend)
+                .chain(
+                    d.factor_graph()
+                        .then(|| {
+                            let shaped = !matches!(nd.shape, None | Some(graph::NodeShape::Box));
+                            let sp = (shaped && nd.spark.len() >= 2).then_some(&nd.spark);
+                            let f = |v: f64| {
+                                crate::format::format_number_l(
+                                    v,
+                                    crate::MetricFmt::Plain,
+                                    &crate::format::Locale::default(),
+                                )
+                            };
+                            [
+                                attr("spark", sp.map(|s| J::from(s.clone()).to_string())),
+                                attr(
+                                    "trend",
+                                    sp.map(|s| {
+                                        format!(
+                                            "{} → {} over {} values",
+                                            f(s[0]),
+                                            f(s[s.len() - 1]),
+                                            s.len()
+                                        )
+                                    }),
+                                ),
+                            ]
+                        })
+                        .into_iter()
+                        .flatten(),
+                )
+                .collect(),
             }
         })
         .collect();

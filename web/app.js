@@ -20386,6 +20386,21 @@ function mapTipSpark(el) {
   );
 }
 
+// #1152: a mark's own `data-spark` (a JSON list: a factor graph variable's
+// posterior mean over the iterations) → the same mini chart in its tooltip,
+// its `data-trend` line under it.
+function markTipSpark(el) {
+  const s = el.getAttribute("data-spark");
+  if (!s) return "";
+  let chart = cellSpark(s);
+  if (chart.startsWith("<span")) chart = "";
+  const trend = el.getAttribute("data-trend");
+  return (
+    (chart ? `<div class="tip-spark">${chart.replace(/^<svg class="spark/, '<svg class="tip-spark-svg spark')}</div>` : "") +
+    (trend ? `<div class="tip-trend">${escapeHtml(trend)}</div>` : "")
+  );
+}
+
 function mapMarkInfo(attr, tip) {
   const series = attr("data-series") || "";
   const label = attr("data-label") || "";
@@ -20643,7 +20658,7 @@ function attachHover() {
         (ct?.head ?? (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "")) +
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
         (ct ? ct.body : tipRow(info, fill)) +
-        (isMapMark ? mapTipSpark(el) : "");
+        (isMapMark ? mapTipSpark(el) : markTipSpark(el));
       tip.classList.add("show");
       if (isMapMark) mapHoverEmph(series);
       // M2f-A (#149): a time map's own value changes under the pointer at
