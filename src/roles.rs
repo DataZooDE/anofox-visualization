@@ -113,7 +113,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("BELIEF", &["NODE_BELIEF"], R::Belief, "encoding", true,
       "a ::DIAGRAM node's belief: JSON {lo, hi, its: [[iteration, mean, sd], …], prior: [mean, sd]} — a density curve over the node, re-shaped per iteration by the message steps; the optional prior a dashed outline behind it"),
     e("SHAPE", &["NODE_SHAPE"], R::Shape, "encoding", true,
-      "a ::DIAGRAM node's mark: box, circle, filled-circle, square, filled-square, text — or a factor graph's kind (factor, variable, data, equality, delta, constant); shaped nodes make a factor graph: lanes as straight bands, undirected edges"),
+      "a ::DIAGRAM node's mark: box, circle, filled-circle, square, filled-square, terminal, text — or a factor graph's kind (factor, variable, data, equality, delta, constant); shaped nodes make a factor graph: lanes as straight bands, undirected edges"),
     e("EDGES", &[], R::Edges, "encoding", true,
       "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value, colour by status"),
     // ── charts (cast the measure column) ───────────────────────────────────

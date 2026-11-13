@@ -339,8 +339,37 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             }
         }
     }
+    // #1172 Forney style: a variable on exactly two factors, with no
+    // marginals of its own, is the edge between them — (variable, from, to),
+    // from the factor whose `out` it is
+    let mut forney: Vec<(String, String, String)> = Vec::new();
+    for (id, k) in &id_kind {
+        if k.as_deref() != Some("variable") {
+            continue;
+        }
+        let mine: Vec<&Row> = edges
+            .iter()
+            .filter(|e| get(e, &["variable"]).as_deref() == Some(id.as_str()))
+            .collect();
+        let factors: Vec<(String, bool)> = mine
+            .iter()
+            .filter_map(|e| {
+                let f = get(e, &["factor"])?;
+                (kind_of(&f).as_deref() == Some("factor"))
+                    .then(|| (f, get(e, &["interface"]).as_deref() == Some("out")))
+            })
+            .collect();
+        let has_marginals = marginals
+            .iter()
+            .any(|m| get(m, &["variable"]).as_deref() == Some(id.as_str()));
+        if let ([a, b], 2, false) = (&factors[..], mine.len(), has_marginals) {
+            let (from, to) = if b.1 && !a.1 { (b, a) } else { (a, b) };
+            forney.push((id.clone(), from.0.clone(), to.0.clone()));
+        }
+    }
+    let forney_of = |v: &str| forney.iter().find(|(x, _, _)| x == v);
     let folded_into = |eq: &str| folded.iter().find(|(_, e)| e == eq).map(|(v, _)| v.clone());
-    let is_folded = |id: &str| folded.iter().any(|(v, _)| v == id);
+    let is_folded = |id: &str| folded.iter().any(|(v, _)| v == id) || forney_of(id).is_some();
     let row_of = |id: &str| rows.iter().find(|r| get(r, &["id"]).as_deref() == Some(id));
     let label_of = |r: &Row| {
         get(r, &["label", "name", "id"])
@@ -728,18 +757,24 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         let (Some(v), Some(f)) = (get(r, &["variable"]), get(r, &["factor"])) else {
             continue;
         };
-        if is_folded(&v) {
-            continue;
-        }
         let iface = get(r, &["interface"]).unwrap_or_default();
-        let drawn = if iface == "out" {
-            (f.clone(), v.clone())
-        } else {
-            (v.clone(), f.clone())
-        };
         let to_factor = get(r, &["direction"]).is_some_and(|d| d.eq_ignore_ascii_case("to_factor"));
         let (src, dst) = if to_factor { (&v, &f) } else { (&f, &v) };
-        let back = *src != drawn.0;
+        let (drawn, back) = if let Some((_, from, to)) = forney_of(&v) {
+            // along the variable's edge: forward when it runs from → to
+            let forward = if to_factor { f == *to } else { f == *from };
+            ((from.clone(), to.clone()), !forward)
+        } else if is_folded(&v) {
+            continue;
+        } else {
+            let drawn = if iface == "out" {
+                (f.clone(), v.clone())
+            } else {
+                (v.clone(), f.clone())
+            };
+            let back = *src != drawn.0;
+            (drawn, back)
+        };
         let it = num(r, "iteration").unwrap_or(0.0);
         let mut t = format!(
             "Iteration {} · message {}: {} → {}",
@@ -796,6 +831,18 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             }
             Some(J::Object(o))
         })
+        .chain(forney.iter().map(|(v, from, to)| {
+            // the variable's edge, labelled with its name as mathematics
+            let mut o = Map::new();
+            if let Some((_, st)) = steps_of.iter().find(|(k, _)| k.0 == *from && k.1 == *to) {
+                o.insert("steps".into(), J::Array(st.clone()));
+            }
+            o.insert("from".into(), J::String(from.clone()));
+            o.insert("to".into(), J::String(to.clone()));
+            o.insert("label".into(), J::String(shown(v)));
+            o.insert("math".into(), J::Bool(true));
+            J::Object(o)
+        }))
         .collect();
     if !list.is_empty() {
         let mut v = vec![Value::Na; n];
@@ -1059,6 +1106,86 @@ mod tests {
         assert!(close(moments("Gamma", &[4.0, 2.0]), (8.0, 4.0)));
         assert_eq!(moments("Beta", &[0.0, 1.0]), None);
         assert_eq!(moments("Wishart", &[1.0, 1.0]), None);
+    }
+
+    /// #1172 Forney style: a variable on two factors with no marginals is
+    /// the edge between them, labelled with its name as mathematics, its
+    /// messages along it; one with marginals stays a node.
+    #[test]
+    fn a_two_factor_variable_is_an_edge() {
+        let nodes = vec![
+            row(&[
+                ("id", "f0"),
+                ("kind", "factor"),
+                ("name", "Categorical"),
+                ("layer", "state"),
+            ]),
+            row(&[
+                ("id", "f1"),
+                ("kind", "factor"),
+                ("name", "DiscreteTransition"),
+                ("layer", "state"),
+            ]),
+            row(&[
+                ("id", "s0"),
+                ("kind", "variable"),
+                ("label", "s_{0}"),
+                ("layer", "state"),
+            ]),
+            row(&[
+                ("id", "s1"),
+                ("kind", "variable"),
+                ("label", "s_{1}"),
+                ("layer", "state"),
+            ]),
+        ];
+        let mut options = Row::new();
+        options.insert(
+            "edges".into(),
+            serde_json::json!([
+                {"variable": "s0", "factor": "f0", "interface": "out"},
+                {"variable": "s0", "factor": "f1", "interface": "in"},
+                {"variable": "s1", "factor": "f1", "interface": "out"}
+            ]),
+        );
+        options.insert(
+            "marginals".into(),
+            serde_json::json!([{"variable": "s1", "iteration": 1, "mean": 0.5, "sd": 0.1}]),
+        );
+        options.insert(
+            "schedule".into(),
+            serde_json::json!([
+                {"iteration": 1, "step": 1, "variable": "s0", "factor": "f0", "interface": "out", "direction": "to_variable"},
+                {"iteration": 1, "step": 2, "variable": "s0", "factor": "f1", "interface": "in", "direction": "to_factor"},
+                {"iteration": 1, "step": 3, "variable": "s0", "factor": "f1", "interface": "in", "direction": "to_variable"}
+            ]),
+        );
+        let cols = columns(&nodes, &options).unwrap();
+        let ids: Vec<String> = col(&cols, Role::Diagram)
+            .iter()
+            .map(crate::value_text)
+            .collect();
+        assert!(!ids.contains(&"s0".to_string()), "s₀ is an edge: {ids:?}");
+        assert!(ids.contains(&"s1".to_string()), "s₁ has marginals: a node");
+        let edges: J =
+            serde_json::from_str(&crate::value_text(&col(&cols, Role::Edges)[0])).unwrap();
+        let e = edges
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["from"] == "f0" && e["to"] == "f1")
+            .expect("the edge f0 → f1");
+        assert_eq!(
+            (e["label"].clone(), e["math"].clone()),
+            (J::from("s₀"), J::from(true))
+        );
+        let dirs: Vec<&str> = e["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["dir"].as_str().unwrap())
+            .collect();
+        assert_eq!(dirs, ["forward", "forward", "back"]);
     }
 
     #[test]
