@@ -168,6 +168,10 @@ pub struct Belief {
     pub hi: f64,
     /// (iteration, mean, sd), in iteration order.
     pub its: Vec<(f64, f64, f64)>,
+    /// The prior's (mean, sd) (#1172).
+    pub prior: Option<(f64, f64)>,
+    /// How many observations reach the node (#1172).
+    pub obs: usize,
 }
 
 impl Belief {
@@ -188,19 +192,46 @@ impl Belief {
             })
             .filter(|t| t.2 > 0.0 && t.1.is_finite())
             .collect();
-        (hi > lo && !its.is_empty()).then_some(Belief { lo, hi, its })
+        let prior = v
+            .get("prior")
+            .and_then(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?)))
+            .filter(|p| p.0.is_finite() && p.1 > 0.0);
+        let obs = v.get("n").and_then(J::as_u64).unwrap_or(0) as usize;
+        (hi > lo && !its.is_empty()).then_some(Belief {
+            lo,
+            hi,
+            its,
+            prior,
+            obs,
+        })
     }
-    /// The curve of iteration `k` (a normal density over `lo..hi`), 0..=1
-    /// against the sharpest iteration's peak, at 25 points.
-    pub fn heights(&self, k: usize) -> Vec<f64> {
-        let min_sd = self.its.iter().map(|t| t.2).fold(f64::INFINITY, f64::min);
-        let (_, m, sd) = self.its[k.min(self.its.len() - 1)];
+    /// The sharpest sd, prior included: every curve's peak against it.
+    fn min_sd(&self) -> f64 {
+        self.its
+            .iter()
+            .map(|t| t.2)
+            .chain(self.prior.map(|p| p.1))
+            .fold(f64::INFINITY, f64::min)
+    }
+    fn curve(&self, m: f64, sd: f64, peak: f64) -> Vec<f64> {
         (0..25)
             .map(|i| {
                 let x = self.lo + (self.hi - self.lo) * i as f64 / 24.0;
-                min_sd / sd * (-0.5 * ((x - m) / sd).powi(2)).exp()
+                peak * (-0.5 * ((x - m) / sd).powi(2)).exp()
             })
             .collect()
+    }
+    /// The prior's curve on the same scale, its peak at least 0.3 (a vague
+    /// prior still reads as a flat line, not as nothing).
+    pub fn prior_heights(&self) -> Option<Vec<f64>> {
+        let (m, sd) = self.prior?;
+        Some(self.curve(m, sd, (self.min_sd() / sd).max(0.3)))
+    }
+    /// The curve of iteration `k` (a normal density over `lo..hi`), 0..=1
+    /// against the sharpest curve's peak, at 25 points.
+    pub fn heights(&self, k: usize) -> Vec<f64> {
+        let (_, m, sd) = self.its[k.min(self.its.len() - 1)];
+        self.curve(m, sd, self.min_sd() / sd)
     }
 }
 
@@ -1022,7 +1053,10 @@ fn list_names(names: &[String]) -> String {
 /// connections, loops and the largest value.
 fn summary(d: &Diagram, p: &Placed) -> String {
     if d.factor_graph() {
-        return factor_graph_summary(d);
+        return match learned(d) {
+            Some(l) => format!("{l} {}", factor_graph_summary(d)),
+            None => factor_graph_summary(d),
+        };
     }
     let n = d.nodes.len();
     let order = reading(p);
@@ -1082,6 +1116,50 @@ fn summary(d: &Diagram, p: &Placed) -> String {
         parts.push(format!("showing {n} of {} nodes", d.total_nodes));
     }
     parts.join("; ")
+}
+
+/// #1172: what the model learned, in one plain sentence: "After 4
+/// observations, θ is 0.56 ± 0.16 (prior 0.4 ± 0.2)." — the variables that
+/// observations reach, grouped by how many.
+fn learned(d: &Diagram) -> Option<String> {
+    let num = |v: f64| {
+        crate::format::format_number_l(
+            v,
+            crate::MetricFmt::Plain,
+            &crate::format::Locale::default(),
+        )
+    };
+    let mut groups: Vec<(usize, Vec<String>)> = vec![];
+    for n in &d.nodes {
+        let (Some(b), Some(v)) = (n.belief.as_ref(), n.fvalue.as_ref()) else {
+            continue;
+        };
+        if b.obs == 0 {
+            continue;
+        }
+        let mut s = format!("{} is {v}", n.label);
+        if let Some(sd) = n.badge.as_ref().filter(|b| b.starts_with('±')) {
+            s.push_str(&format!(" {sd}"));
+        }
+        if let Some((m, sd)) = b.prior {
+            s.push_str(&format!(" (prior {} ± {})", num(m), num(sd)));
+        }
+        match groups.iter_mut().find(|g| g.0 == b.obs) {
+            Some(g) => g.1.push(s),
+            None => groups.push((b.obs, vec![s])),
+        }
+    }
+    let parts: Vec<String> = groups
+        .into_iter()
+        .map(|(k, v)| {
+            format!(
+                "After {k} observation{}, {}",
+                if k == 1 { "" } else { "s" },
+                list_names(&v)
+            )
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("{}.", parts.join("; ")))
 }
 
 /// A factor graph's sentence (#1152): its nodes by kind, its layers, its
@@ -1367,6 +1445,8 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 // #1166: the final belief as a curve over the node, a
                 // colour of its own
                 belief: nd.belief.as_ref().map(|b| (b.heights(b.its.len() - 1), t.color(v))),
+                // #1172: the prior, faint behind it
+                prior: nd.belief.as_ref().and_then(|b| b.prior_heights()).map(|h| (h, muted)),
                 spark: (nd.spark.len() >= 2).then(|| {
                     (
                         nd.spark.clone(),
@@ -1494,6 +1574,12 @@ pub(crate) fn render(
             d.total_edges
         )
     });
+    // #1172: what the model learned, a line under the graph
+    let lead = d.factor_graph().then(|| learned(d)).flatten();
+    let note = match (lead, note) {
+        (Some(l), Some(n)) => Some(format!("{l} {n}")),
+        (l, n) => l.or(n),
+    };
     let note_h = if note.is_some() { 18.0 } else { 0.0 };
     // the drawing's own canvas: whole px, so a data unit stays a pixel
     let (pw, ph) = (p.w.ceil().max(1.0), p.h.ceil().max(1.0));
@@ -2133,6 +2219,48 @@ mod tests {
             &svg[..svg.find('>').unwrap()]
         );
         assert!(svg.contains(&format!("<desc>{sum}. Nodes: ")));
+    }
+
+    /// #1172: what the model learned leads the sentence and shows under
+    /// the graph; the prior is a dashed outline behind the belief.
+    #[test]
+    fn a_factor_graph_says_what_it_learned() {
+        let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
+        let belief =
+            r#"{"lo": -0.2, "hi": 1.0, "its": [[1, 0.56, 0.16]], "prior": [0.4, 0.2], "n": 4}"#;
+        let cols = vec![
+            Column::new("id", Role::Diagram, v(&["f", "t", "y"])),
+            Column::new("l", Role::Label, v(&["Beta", "θ", "y"])),
+            Column::new("k", Role::Shape, v(&["factor", "variable", "data"])),
+            Column::new(
+                "m",
+                Role::Metric(MetricFmt::Plain),
+                vec![Value::Na, Value::Float(0.56), Value::Na],
+            ),
+            Column::new("sd", Role::Badge, vec![Value::Na, s("± 0.16"), Value::Na]),
+            Column::new("b", Role::Belief, vec![Value::Na, s(belief), Value::Na]),
+            Column::new(
+                "e",
+                Role::Edges,
+                vec![
+                    s(r#"[{"from": "f", "to": "t"}, {"from": "t", "to": "y"}]"#),
+                    Value::Na,
+                    Value::Na,
+                ],
+            ),
+        ];
+        let svg = render_with(&cols, 600, 300, &RenderOptions::default()).unwrap();
+        let lead = "After 4 observations, θ is 0.56 ± 0.16 (prior 0.4 ± 0.2).";
+        assert!(
+            svg.contains(&format!(r#"data-summary="{lead} Factor graph: "#)),
+            "{}",
+            &svg[..svg.find('>').unwrap()]
+        );
+        assert!(
+            svg.contains(&format!(">{lead}</text>")),
+            "the line under the graph"
+        );
+        assert!(svg.contains("dp-node-prior"), "the prior's outline");
     }
 
     /// #1152: `steps` on ::EDGES items become edge story steps, in their

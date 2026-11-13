@@ -284,6 +284,23 @@ pub(super) fn lint(rows: &[Row], options: &Row) -> Vec<String> {
     }
 }
 
+/// #1172: a prior's mean and sd from its family and its constant
+/// parameters (in interface order), for the families with closed forms.
+fn moments(family: &str, p: &[f64]) -> Option<(f64, f64)> {
+    let (m, var) = match (family, p) {
+        ("Beta", [a, b]) if *a > 0.0 && *b > 0.0 => {
+            (a / (a + b), a * b / ((a + b).powi(2) * (a + b + 1.0)))
+        }
+        ("Normal" | "NormalMeanVariance", [m, v]) if *v > 0.0 => (*m, *v),
+        ("NormalMeanPrecision", [m, w]) if *w > 0.0 => (*m, 1.0 / w),
+        ("GammaShapeRate", [a, b]) if *a > 0.0 && *b > 0.0 => (a / b, a / (b * b)),
+        ("Gamma" | "GammaShapeScale", [a, t]) if *a > 0.0 && *t > 0.0 => (a * t, a * t * t),
+        ("Uniform", [a, b]) if b > a => ((a + b) / 2.0, (b - a).powi(2) / 12.0),
+        _ => return None,
+    };
+    Some((m, var.sqrt()))
+}
+
 pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String> {
     if rows.iter().all(|r| get(r, &["id"]).is_none()) {
         return Err(format!(
@@ -371,7 +388,7 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
     };
     // #1166: the belief per iteration (scalar marginals): a range covering
     // every iteration's mean ± 3 sd, and (iteration, mean, sd)
-    let belief = |id: &str| -> Option<String> {
+    let belief = |id: &str, prior: Option<(f64, f64)>, n: usize| -> Option<String> {
         let mut its: Vec<(f64, f64, f64)> = marginals
             .iter()
             .filter(|m| get(m, &["variable"]).as_deref() == Some(id))
@@ -397,12 +414,85 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             .iter()
             .map(|t| t.1 + 3.0 * t.2)
             .fold(f64::NEG_INFINITY, f64::max);
-        Some(
-            serde_json::json!({ "lo": lo, "hi": hi, "its": its.iter().map(|t| [t.0, t.1, t.2]).collect::<Vec<_>>() })
-                .to_string(),
-        )
+        // #1172: the range takes in the prior, at most three times the
+        // posterior's width (a vague prior is a flat line across it)
+        let (lo, hi) = match prior {
+            Some((m, sd)) => {
+                let (c, w) = ((lo + hi) / 2.0, 1.5 * (hi - lo));
+                (
+                    (m - 3.0 * sd).min(lo).max(c - w),
+                    (m + 3.0 * sd).max(hi).min(c + w),
+                )
+            }
+            None => (lo, hi),
+        };
+        let mut b = serde_json::json!({ "lo": lo, "hi": hi, "its": its.iter().map(|t| [t.0, t.1, t.2]).collect::<Vec<_>>() });
+        if let Some((m, sd)) = prior {
+            b["prior"] = serde_json::json!([m, sd]);
+        }
+        if n > 0 {
+            b["n"] = n.into();
+        }
+        Some(b.to_string())
+    };
+    // #1172: the edges at a variable — its own and, folded, its equality
+    // node's
+    let at = |touch: &[&str]| -> Vec<&Row> {
+        edges
+            .iter()
+            .filter(|e| get(e, &["variable"]).is_some_and(|v| touch.contains(&v.as_str())))
+            .collect()
+    };
+    let factor_edges = |f: &str| -> Vec<&Row> {
+        let mut v: Vec<&Row> = edges
+            .iter()
+            .filter(|e| get(e, &["factor"]).as_deref() == Some(f))
+            .collect();
+        v.sort_by_key(|e| {
+            get(e, &["seq"])
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0)
+        });
+        v
+    };
+    // the prior: the factor whose `out` is the variable and whose inputs
+    // are all constants, its mean and sd from the constants' values
+    let prior_of = |touch: &[&str]| -> Option<(f64, f64)> {
+        at(touch).into_iter().find_map(|e| {
+            if get(e, &["interface"]).as_deref() != Some("out") {
+                return None;
+            }
+            let f = get(e, &["factor"])?;
+            let family = row_of(&f).and_then(|r| get(r, &["name", "label"]))?;
+            let params: Option<Vec<f64>> = factor_edges(&f)
+                .into_iter()
+                .filter(|e| get(e, &["interface"]).as_deref() != Some("out"))
+                .map(|e| {
+                    let r = row_of(&get(e, &["variable"])?)?;
+                    (kind(r).as_deref() == Some("constant"))
+                        .then(|| get(r, &["name", "label"])?.parse::<f64>().ok())
+                        .flatten()
+                })
+                .collect();
+            moments(&family, &params?)
+        })
+    };
+    // how many observations reach the variable: data on its factors
+    let observed = |touch: &[&str]| -> usize {
+        let mut seen: Vec<String> = vec![];
+        for e in at(touch) {
+            for d in factor_edges(&get(e, &["factor"]).unwrap_or_default()) {
+                if let Some(v) = get(d, &["variable"]) {
+                    if row_of(&v).and_then(kind).as_deref() == Some("data") && !seen.contains(&v) {
+                        seen.push(v);
+                    }
+                }
+            }
+        }
+        seen.len()
     };
     let mut beliefs = vec![];
+    let mut learned: Vec<Option<String>> = vec![];
     let mut sparks = vec![];
     let (mut ids, mut labels, mut shapes, mut lanes, mut values, mut badges) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
@@ -418,7 +508,37 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         };
         let m = latest(var.as_deref().unwrap_or(&id));
         let tr = trend(var.as_deref().unwrap_or(&id));
-        beliefs.push(belief(var.as_deref().unwrap_or(&id)).map_or(Value::Na, Value::Str));
+        let touch: Vec<&str> = [Some(id.as_str()), var.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let prior = prior_of(&touch);
+        let n_obs = observed(&touch);
+        beliefs.push(
+            belief(var.as_deref().unwrap_or(&id), prior, n_obs).map_or(Value::Na, Value::Str),
+        );
+        // #1172: what the data did to the prior, in words
+        let num = |v: f64| {
+            crate::format::format_number_l(v, MetricFmt::Plain, &crate::format::Locale::default())
+        };
+        learned.push(match (prior, m, n_obs) {
+            (Some((pm, psd)), Some((mean, Some(sd))), n) if n > 0 => Some(format!(
+                "{} {} {} {} from {} ± {} to {} ± {}.",
+                n,
+                if n == 1 {
+                    "observation"
+                } else {
+                    "observations"
+                },
+                if sd < psd { "narrowed" } else { "moved" },
+                label,
+                num(pm),
+                num(psd),
+                num(mean),
+                num(sd)
+            )),
+            _ => None,
+        });
         sparks.push(if tr.len() >= 2 {
             Value::Str(J::from(tr).to_string())
         } else {
@@ -524,6 +644,11 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
                 _ => String::new(),
             };
             if note.is_empty() { Value::Na } else { Value::Str(note) }
+        })
+        .zip(&learned)
+        .map(|(note, l)| match (note, l) {
+            (Value::Str(n), Some(l)) => Value::Str(format!("{n} {l}")),
+            (note, _) => note,
         })
         .collect();
     let n = ids.len();
@@ -879,6 +1004,61 @@ mod tests {
                 .ends_with("; θ after iteration 1: 0.4 ± 0.2"),
             "{p}"
         );
+    }
+
+    /// #1172: θ's Beta(2, 3) prior from its constants, in the belief and
+    /// in words on θ's card.
+    #[test]
+    fn the_prior_comes_from_the_constants() {
+        let (mut nodes, mut options) = coin();
+        nodes.push(row(&[("id", "c0"), ("kind", "constant"), ("name", "2")]));
+        nodes.push(row(&[("id", "c1"), ("kind", "constant"), ("name", "3")]));
+        let edges = options.get_mut("edges").unwrap().as_array_mut().unwrap();
+        edges.push(
+            serde_json::json!({"variable": "c1", "factor": "f0", "interface": "b", "seq": 2}),
+        );
+        edges.push(
+            serde_json::json!({"variable": "c0", "factor": "f0", "interface": "a", "seq": 1}),
+        );
+        let cols = columns(&nodes, &options).unwrap();
+        let ids: Vec<String> = col(&cols, Role::Diagram)
+            .iter()
+            .map(crate::value_text)
+            .collect();
+        let at = ids.iter().position(|i| i == "e4").unwrap();
+        let b: J = serde_json::from_str(&crate::value_text(&col(&cols, Role::Belief)[at])).unwrap();
+        let (m, sd) = (
+            b["prior"][0].as_f64().unwrap(),
+            b["prior"][1].as_f64().unwrap(),
+        );
+        assert!((m - 0.4).abs() < 1e-12 && (sd - 0.2).abs() < 1e-12, "{b}");
+        // the range takes in the prior's ± 3 sd (−0.2), the posterior's
+        assert!((b["lo"].as_f64().unwrap() + 0.2).abs() < 1e-9, "{b}");
+        let note = crate::value_text(&col(&cols, Role::Tooltip)[at]);
+        assert!(
+            note.ends_with("2 observations narrowed θ from 0.4 ± 0.2 to 0.5 ± 0.1."),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn prior_moments_by_family() {
+        let close = |a: Option<(f64, f64)>, b: (f64, f64)| {
+            let a = a.unwrap();
+            (a.0 - b.0).abs() < 1e-12 && (a.1 - b.1).abs() < 1e-12
+        };
+        assert!(close(
+            moments("NormalMeanVariance", &[0.0, 100.0]),
+            (0.0, 10.0)
+        ));
+        assert!(close(
+            moments("NormalMeanPrecision", &[1.0, 4.0]),
+            (1.0, 0.5)
+        ));
+        assert!(close(moments("GammaShapeRate", &[4.0, 2.0]), (2.0, 1.0)));
+        assert!(close(moments("Gamma", &[4.0, 2.0]), (8.0, 4.0)));
+        assert_eq!(moments("Beta", &[0.0, 1.0]), None);
+        assert_eq!(moments("Wishart", &[1.0, 1.0]), None);
     }
 
     #[test]
