@@ -3,6 +3,7 @@
 //   renders each panel to SVG. No server, no DuckDB extension.
 import init, {
   plan,
+  missing_modules,
   tooltip_fill,
   render_panel,
   render_cell,
@@ -7585,7 +7586,7 @@ let INPUTS = ["DROPDOWN", "NUMBER", "DATE", "TEXT", "MULTISELECT", "DATERANGE", 
 let METRICS = ["METRIC", "MONEY", "PERCENT", "COMPACT"];
 // #950: what ends a bar of automatically placed inputs (with any panel)
 const AUTOBAR_ENDS = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "GUIDE_STEP"];
-let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP"];
+let DIRECTIVES = ["COLUMNS", "GROUP", "ENDGROUP", "FIGURE", "ENDFIGURE", "SPAN", "HEIGHT", "ROWSELECT", "EMPTY", "TOTALS", "COLGROUP", "FLAG", "HIGHLIGHT", "SUBTOTAL", "TOOLBAR", "TAB", "SUBTAB", "PLACEHOLDER", "VIEW", "ENDVIEW", "FIT", "SHOW_IF", "GUIDE_STEP", "REQUIRES"];
 let TFMT = ["MONEY", "PERCENT", "COMPACT", "METRIC", "TREND", "PVALUE", "SCIENTIFIC", "COLORSCALE", "COLORSCALE_HIGH_GOOD", "COLORSCALE_DIVERGING", "BADGE", "SPARKLINE", "SPARKBAR", "PLAIN"];
 let TEXT_SIZES = ["TEXT_SMALL", "TEXT_MEDIUM", "TEXT_LARGE"];
 // Chart kinds whose panel honours a zoom window (plain cartesian charts).
@@ -10657,6 +10658,9 @@ async function runOnce(fresh = true, pv = preview) {
     // #244: the only render read of the editor — while a proposal is
     // previewed, the plan is built from its SQL instead, never the editor's.
     // `pv`, not the live `preview` (sec-review-272-rereview H-1R): see above.
+    // #1156: a module this build lacks (::REQUIRES) — say so, run nothing
+    const needs = missing_modules(pv ? pv.sql : $("sql").value);
+    if (needs) throw new Error(needs);
     stmts = JSON.parse(plan(pv ? pv.sql : $("sql").value));
     stmts.forEach((s, i) => (s.i = i)); // the plan index (served requests name it)
     dpRanScript = pv ? null : $("sql").value; // #195 M2-5: what Ask asks about
@@ -12093,6 +12097,8 @@ async function runOnce(fresh = true, pv = preview) {
       } else if (d === "SHOW_IF") {
         // A condition: evaluated above (`shownBy`) by whatever it governs,
         // never drawn or queried again here.
+      } else if (d === "REQUIRES") {
+        // #1156: checked before the run (missing_modules); nothing to draw
       } else if (d === "ROWSELECT") {
         nextRowSelect = String((await firstValue(s)) ?? "")
           .replace(/^"|"$/g, "")

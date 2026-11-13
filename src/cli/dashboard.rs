@@ -667,6 +667,11 @@ fn cmd_render(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.html".to_string());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    // #1156: a module this build lacks — say so, run nothing
+    if let Some(m) = crate::module::missing_message(&script) {
+        eprintln!("{path}: {m}");
+        std::process::exit(2);
+    }
     let asset_root = dashboard_assets_root(Path::new(&path));
 
     let (html, n) = render_dashboard_html(
@@ -1329,6 +1334,11 @@ fn cmd_svg(args: &[String]) {
         .cloned()
         .unwrap_or_else(|| "dashboard.svg".into());
     let script = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    // #1156: a module this build lacks — say so, run nothing
+    if let Some(m) = crate::module::missing_message(&script) {
+        eprintln!("{path}: {m}");
+        std::process::exit(2);
+    }
     // #514 PR B: a relative `::IMAGE` source means `assets/` next to the
     // .sql file; missing (no such folder) is not an error — every relative
     // source just draws its placeholder, as before PR B.

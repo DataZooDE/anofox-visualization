@@ -273,6 +273,7 @@ terminal.
 | `::GUIDE_STEP` | `::TUTORIAL_STEP`, `::WIZARD_STEP` | layout | a step of a guided sequence (onboarding, tutorials): Back / Next, 'Step 2 of 5', ?v.<name>=n; the alias names the step variable (default 'step') |
 | `::GATE` | `::STEP_GATE`, `::NEXT_IF` | layout | on a ::GUIDE_STEP: Next stays disabled until this BOOLEAN is TRUE |
 | `::GATE_MESSAGE` | `::GATE_HINT` | layout | on a ::GUIDE_STEP: why Next is disabled |
+| `::REQUIRES` | `::REQUIRES_MODULE` | layout | a module the dashboard needs: 'name' (or 'a, b'); a build without it says so instead of failing on the module's roles |
 | `::VIEW` | `::ALT_VIEW` | layout | one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`) |
 | `::ENDVIEW` | `::END_VIEW` | layout | close a `::VIEW` group (`::TAB`, `::SUBTAB`, `::SECTION` also close it) |
 | `::VIEW_PLACEMENT` |  | layout | a ::VIEW group's switcher placement: 'row' (default, its own row above the card) or 'header' (right-aligned, compact, in the card's title row — folds into a dropdown below a minimum card width; only when every alternative is exactly one panel, else --check warns and it falls back to 'row'); set directly before the group's first ::VIEW marker, like ::COL/::SPAN |

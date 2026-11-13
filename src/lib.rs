@@ -833,6 +833,9 @@ pub enum Role {
     /// is disabled while `::GATE` is not `TRUE` — "Finish this step to
     /// continue" without one.
     GateMessage,
+    /// `'name'::REQUIRES` (#1156): a module the dashboard needs; without it
+    /// the dashboard says so instead of failing on the module's roles.
+    Requires,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.

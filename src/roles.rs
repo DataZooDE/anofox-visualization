@@ -485,6 +485,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "on a ::GUIDE_STEP: Next stays disabled until this BOOLEAN is TRUE"),
     e("GATE_MESSAGE", &["GATE_HINT"], R::GateMessage, "layout", false,
       "on a ::GUIDE_STEP: why Next is disabled"),
+    e("REQUIRES", &["REQUIRES_MODULE"], R::Requires, "layout", false,
+      "a module the dashboard needs: 'name' (or 'a, b'); a build without it says so instead of failing on the module's roles"),
     e("VIEW", &["ALT_VIEW"], R::View, "layout", false,
       "one of several alternative views of one panel: consecutive `::VIEW` sections share a segmented switcher; `'Lines' AS name ::VIEW` names the group (`?view.name=`)"),
     e("ENDVIEW", &["END_VIEW"], R::ViewEnd, "layout", false,
@@ -825,6 +827,7 @@ pub fn roles_json() -> String {
                 | Role::RowSelect | Role::TableOpt(_) | Role::Tab | Role::SubTab | Role::Placeholder
                 | Role::SelectAs | Role::Drill | Role::Empty | Role::ShowIf | Role::View | Role::ViewEnd
                 | Role::ViewPlacement | Role::Fit | Role::GuideStep | Role::Gate | Role::GateMessage
+                | Role::Requires
         )),
         // Dashboard-level chrome directives (theme, locale, title, branding).
         "chrome": tokens(&|r| is_chrome_directive(r)),
@@ -1407,6 +1410,7 @@ mod tests {
             Role::GuideStep,
             Role::Gate,
             Role::GateMessage,
+            Role::Requires,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -1595,7 +1599,8 @@ mod tests {
                 | Role::Legend
                 | Role::GuideStep
                 | Role::Gate
-                | Role::GateMessage => {}
+                | Role::GateMessage
+                | Role::Requires => {}
                 // a module's roles live in the module registry, not here (#1156)
                 Role::Module(_) => unreachable!("no module role among the built-ins"),
             }

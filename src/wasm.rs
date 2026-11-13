@@ -41,6 +41,13 @@ pub fn version() -> String {
     crate::BUILD_VERSION.to_string()
 }
 
+/// #1156: what to tell the viewer when `script` needs modules (`::REQUIRES`)
+/// this build lacks; empty when it has them all.
+#[wasm_bindgen]
+pub fn missing_modules(script: &str) -> String {
+    guard(|| Ok(crate::module::missing_message(script).unwrap_or_default())).unwrap_or_default()
+}
+
 #[wasm_bindgen]
 pub fn plan(script: &str) -> String {
     guard(|| Ok(plan_json(script))).unwrap_or_else(|_| "[]".into())

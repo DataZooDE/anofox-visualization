@@ -48,6 +48,12 @@ fn web_contract_plot_glue() {
     run_node("contract_test.mjs");
 }
 
+/// #1156: a dashboard needing a module this build lacks says so.
+#[test]
+fn web_module_requires() {
+    run_node("module_requires_test.mjs");
+}
+
 /// Loads the fetched anofox wasm extensions in DuckDB-Wasm (Node); skips
 /// itself unless `scripts/fetch-wasm-extensions.sh` and
 /// `npm install --prefix tests/web` have been run.
