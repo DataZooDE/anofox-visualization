@@ -392,6 +392,17 @@ export function animKit(win) {
     const diagram = svg.hasAttribute("data-diagram");
     const lit = (el) => {
       const st = steps[k - 1];
+      // a ::DIAGRAM edge step (#1152, `e` = "from>to") lights that edge, its
+      // label and its two ends
+      if (diagram && st.e != null) {
+        const [a, b] = st.e.split(">");
+        const edge = el.getAttribute("data-edge");
+        if (edge != null) return edge === st.e;
+        const id = el.getAttribute("data-node") ?? el.getAttribute("data-of");
+        if (id != null) return id === a || id === b;
+        const from = el.getAttribute("data-from");
+        return from == null ? null : from === a && el.getAttribute("data-to") === b;
+      }
       // a ::DIAGRAM step lights its node and every edge touching it
       if (diagram) {
         const id = el.getAttribute("data-node") ?? el.getAttribute("data-of");
@@ -514,6 +525,16 @@ export function animKit(win) {
     const show = (i) => {
       k = (i + steps.length + 1) % (steps.length + 1);
       emph(svg, "story", k ? (el) => (lit(el) === false ? (el.tagName === "polyline" || el.tagName === "polygon" ? 0.35 : 0.2) : null) : null);
+      // an edge step shows its message moving along the edge (`d` -1: against it)
+      svg.querySelectorAll(".dp-msg").forEach((e) => e.classList.remove("dp-msg", "dp-msg-back"));
+      const st = k ? steps[k - 1] : null;
+      if (st && st.e != null) {
+        for (const e of svg.querySelectorAll("[data-edge]")) {
+          if (e.getAttribute("data-edge") !== st.e) continue;
+          e.classList.add("dp-msg");
+          if (st.d === -1) e.classList.add("dp-msg-back");
+        }
+      }
       cap.textContent = k ? steps[k - 1].t : "";
       cap.hidden = !k;
       pos.textContent = k ? `Step ${k} of ${steps.length}` : `Overview · ${steps.length} steps`;

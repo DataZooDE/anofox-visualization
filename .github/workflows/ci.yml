@@ -895,6 +895,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/setvar-order-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/factor-graph-e2e.mjs (#1152): a factor graph's message
+      # schedule steps — Step lights the edge carrying the message, moving its
+      # way, with its caption. Reuses the :8947 server and Chromium above.
+      - name: Factor graph message steps e2e (#1152)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/factor-graph-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/image-e2e.mjs (#514): ::IMAGE / ::IMAGE_DARK / markdown
       # ![alt](src) images — a data: SVG panel's alt/caption, the dashboard's
       # own dark toggle (not the OS setting) swapping ::IMAGE_DARK in, an

@@ -151,7 +151,22 @@ pub struct Diagram {
     /// `'supplier:#2a9d8f; stock:good'`) — a type keeps its colour however
     /// the rows (or an edit) order the types; `None` = the theme palette.
     pub category_colors: Vec<Option<crate::thresholds::LevelColor>>,
+    /// Story steps along edges (`::EDGES` `steps`, #1152), in step order: a
+    /// message passed along an edge, lit with its direction.
+    pub messages: Vec<Message>,
 }
+
+/// One edge story step: the edge (index into [`Diagram::edges`]), whether
+/// it runs against the edge's drawn direction, and its caption.
+#[derive(Clone, Debug)]
+pub struct Message {
+    pub edge: usize,
+    pub back: bool,
+    pub text: String,
+}
+
+/// At most this many edge steps (a long schedule is cut).
+pub const MAX_MESSAGES: usize = 500;
 
 impl Diagram {
     /// A factor graph (#1151): some node has a `::SHAPE` — lanes become
@@ -468,6 +483,7 @@ impl Diagram {
                                 label,
                                 style,
                                 status,
+                                steps: edge_steps(field(o, &["steps"])),
                             });
                         }
                         if missing > 0 {
@@ -526,6 +542,7 @@ impl Diagram {
         let mut styles: Vec<Option<EdgeStyle>> = Vec::new(); // as given in ::EDGES
         let mut unknown: Vec<String> = Vec::new();
         let mut total_edges = 0usize;
+        let mut steps: Vec<(f64, usize, String, bool)> = Vec::new(); // (order, edge, caption, back)
         for RawEdge {
             from,
             to,
@@ -533,6 +550,7 @@ impl Diagram {
             label,
             style,
             status,
+            steps: edge_steps,
         } in raw
         {
             let (Some(f), Some(t)) = (index(&from, &nodes), index(&to, &nodes)) else {
@@ -547,7 +565,12 @@ impl Diagram {
                 }
                 continue;
             };
-            match edges.iter().position(|e| e.from == f && e.to == t) {
+            let at = edges.iter().position(|e| e.from == f && e.to == t);
+            let k = at.unwrap_or(edges.len());
+            if k < MAX_EDGES {
+                steps.extend(edge_steps.into_iter().map(|(n, t, b)| (n, k, t, b)));
+            }
+            match at {
                 Some(k) => {
                     let e = &mut edges[k];
                     e.value = e.value.or(value);
@@ -601,6 +624,22 @@ impl Diagram {
             .filter(|s| crate::thresholds::is_level_map(s))
             .and_then(|s| crate::thresholds::parse_level_colors(&s).ok())
             .unwrap_or_default();
+        steps.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if steps.len() > MAX_MESSAGES {
+            problem(
+                "diagram/too-many-steps",
+                format!(
+                    "{} edge steps — a diagram steps through at most {MAX_MESSAGES} (the first ones)",
+                    steps.len()
+                ),
+            );
+        }
+        let messages = steps
+            .into_iter()
+            .filter(|s| s.1 < edges.len())
+            .take(MAX_MESSAGES)
+            .map(|(_, edge, text, back)| Message { edge, back, text })
+            .collect();
         let category_colors = cats
             .iter()
             .map(|c| level_map.iter().find(|(l, _)| l == c).map(|(_, lc)| *lc))
@@ -617,6 +656,7 @@ impl Diagram {
             total_edges,
             problems,
             category_colors,
+            messages,
         })
     }
 
@@ -849,6 +889,36 @@ struct RawEdge {
     label: Option<String>,
     style: Option<EdgeStyle>,
     status: Option<Status>,
+    /// Story steps along the edge: (order, caption, against the edge).
+    steps: Vec<(f64, String, bool)>,
+}
+
+/// An `::EDGES` item's `steps`: a list of `{n, t, dir}` (order, caption,
+/// `'back'` for a step against the edge's direction).
+fn edge_steps(v: Option<&J>) -> Vec<(f64, String, bool)> {
+    let Some(J::Array(items)) = v else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|it| {
+            let o = it.as_object()?;
+            let n = match field(o, &["n", "step", "order"])? {
+                J::Number(n) => n.as_f64()?,
+                J::String(s) => s.trim().parse().ok()?,
+                _ => return None,
+            };
+            let t = field(o, &["t", "text", "caption"])
+                .and_then(json_id)
+                .unwrap_or_default();
+            let back = field(o, &["dir", "direction"])
+                .and_then(|d| d.as_str())
+                .is_some_and(|d| {
+                    d.eq_ignore_ascii_case("back") || d.eq_ignore_ascii_case("reverse")
+                });
+            n.is_finite().then_some((n, t, back))
+        })
+        .collect()
 }
 
 // ---- text alternative ------------------------------------------------------
@@ -1249,12 +1319,26 @@ pub(crate) fn render(
     }
     out.push_str("</svg>");
     let mut out = with_root_attr(out, "data-summary", &summary);
-    // motion (web/anim.js): steps keyed by node id, the entrance mode
-    let steps: Vec<J> = d
-        .nodes
-        .iter()
-        .filter_map(|n| Some(serde_json::json!({ "k": n.id, "t": n.story.as_ref()? })))
-        .collect();
+    // motion (web/anim.js): steps keyed by node id, or along edges (#1152:
+    // `e` the edge's data-edge, `d` -1 against it), the entrance mode
+    let steps: Vec<J> = if d.messages.is_empty() {
+        d.nodes
+            .iter()
+            .filter_map(|n| Some(serde_json::json!({ "k": n.id, "t": n.story.as_ref()? })))
+            .collect()
+    } else {
+        d.messages
+            .iter()
+            .map(|m| {
+                let e = &d.edges[m.edge];
+                serde_json::json!({
+                    "e": format!("{}>{}", d.nodes[e.from].id, d.nodes[e.to].id),
+                    "d": if m.back { -1 } else { 1 },
+                    "t": m.text,
+                })
+            })
+            .collect()
+    };
     if !steps.is_empty() {
         out = with_root_attr(out, "data-story-by", "x");
         out = with_root_attr(out, "data-story", &J::Array(steps).to_string());
@@ -1791,6 +1875,22 @@ mod tests {
         // no story, no animate: no motion attributes
         let plain = render_with(&pipeline(), 900, 320, &RenderOptions::default()).unwrap();
         assert!(!plain.contains("data-story") && !plain.contains("data-animate"));
+    }
+
+    /// #1152: `steps` on ::EDGES items become edge story steps, in their
+    /// order across edges, with the direction.
+    #[test]
+    fn edge_steps_become_the_story() {
+        let ids = vec![s("a"), s("b"), s("c")];
+        let edges = r#"[{"from": "a", "to": "b", "steps": [{"n": 2, "t": "second", "dir": "back"}]},
+                        {"from": "b", "to": "c", "steps": [{"n": 1, "t": "first"}]}]"#;
+        let cols = vec![
+            Column::new("id", Role::Diagram, ids),
+            Column::new("e", Role::Edges, vec![s(edges), Value::Na, Value::Na]),
+        ];
+        let svg = render_with(&cols, 600, 240, &RenderOptions::default()).unwrap();
+        let story = r#"data-story="[{&quot;e&quot;:&quot;b&gt;c&quot;,&quot;d&quot;:1,&quot;t&quot;:&quot;first&quot;},{&quot;e&quot;:&quot;a&gt;b&quot;,&quot;d&quot;:-1,&quot;t&quot;:&quot;second&quot;}]""#;
+        assert!(svg.contains(story), "{}", &svg[..svg.find('>').unwrap()]);
     }
 
     /// Edges are as wide as what they carry (sqrt, 1.4–7 px) and take their

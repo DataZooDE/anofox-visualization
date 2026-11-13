@@ -398,8 +398,8 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
     MacroSpec {
         name: "anofox_plot_factor_graph",
         params: &["tbl"],
-        named: &[("edges", "NULL"), ("marginals", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "900"), ("height", "420")],
-        body: contract_body!("factor_graph", "'edges', edges, 'marginals', marginals"),
+        named: &[("edges", "NULL"), ("marginals", "NULL"), ("schedule", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "900"), ("height", "420")],
+        body: contract_body!("factor_graph", "'edges', edges, 'marginals', marginals, 'schedule', schedule"),
         description: "A factor graph (Forney style) from a `factor_graph` table, one row per node (id, kind: factor | \
 variable | data | constant | equality | delta, name, label, slice, layer, plate), with edges := a LIST of edge STRUCTs \
 (variable, factor, interface, seq) and optionally marginals := a LIST of (variable, iteration, mean, sd, family). \
@@ -407,7 +407,9 @@ Factors are boxes, variables circles (filled when observed), equality nodes smal
 squares, constants plain text. Layers (control, param, state, obs, pref, …) are horizontal bands: a chain stays one \
 straight row, an observation drops below its state. Edges are undirected, labelled with the interface at the \
 factor. A variable whose only edge is its equality node is drawn as that node; TeX-ish labels (\\theta, y_{0}) \
-read as θ, y₀; the latest marginal is the variable's value (mean, ± sd).",
+read as θ, y₀; the latest marginal is the variable's value (mean, ± sd). schedule := a LIST of (iteration, step, \
+variable, factor, interface, direction: to_factor | to_variable) steps through the messages: Step / Play light each \
+message's edge, moving its way, with the receiving variable's marginal after that iteration.",
         example: "SELECT anofox_plot_factor_graph(n, edges := [{'variable': 'v0', 'factor': 'f0', 'interface': 'out'}, \
 {'variable': 'v1', 'factor': 'f0', 'interface': 'p'}]) FROM (VALUES ('v0', 'data', 'y', 'obs'), ('v1', 'variable', \
 '\\theta', 'param'), ('f0', 'factor', 'Bernoulli', 'obs')) n(id, kind, label, layer)",
