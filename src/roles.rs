@@ -538,13 +538,20 @@ pub fn is_sql_type_token(token: &str) -> bool {
 /// Look up a token or alias (case-insensitive).
 pub fn lookup(token: &str) -> Option<&'static RoleSpec> {
     let t = token.trim();
-    REGISTRY.iter().find(|s| {
-        s.token.eq_ignore_ascii_case(t) || s.aliases.iter().any(|a| a.eq_ignore_ascii_case(t))
-    })
+    REGISTRY
+        .iter()
+        .find(|s| {
+            s.token.eq_ignore_ascii_case(t) || s.aliases.iter().any(|a| a.eq_ignore_ascii_case(t))
+        })
+        // #1156: then the registered modules' roles
+        .or_else(|| crate::module::lookup(t))
 }
 
 /// The registry entry for a parsed role.
 pub fn spec_of(role: Role) -> &'static RoleSpec {
+    if let Role::Module(id) = role {
+        return crate::module::spec(id).expect("a module role comes from the module registry");
+    }
     REGISTRY
         .iter()
         .find(|s| s.role == role)
@@ -588,7 +595,9 @@ pub fn catalog() -> &'static [RoleSpec] {
 pub fn text() -> String {
     let mut out = String::new();
     let mut cat = "";
-    for d in REGISTRY {
+    // the built-in roles, then the registered modules' (#1156)
+    let modules = crate::module::roles();
+    for d in REGISTRY.iter().chain(modules) {
         if d.category != cat {
             cat = d.category;
             out.push_str(&format!("\n[{cat}]\n"));
@@ -786,8 +795,10 @@ pub fn markdown_figure_attrs(
 /// `metrics`, `directives` (layout statements), `table_formats` (per-column
 /// table formatting roles) and `text_sizes`.
 pub fn roles_json() -> String {
+    let modules = crate::module::roles();
     let roles: Vec<serde_json::Value> = REGISTRY
         .iter()
+        .chain(modules)
         .map(|d| {
             serde_json::json!({
                 "token": d.token,
@@ -1585,6 +1596,8 @@ mod tests {
                 | Role::GuideStep
                 | Role::Gate
                 | Role::GateMessage => {}
+                // a module's roles live in the module registry, not here (#1156)
+                Role::Module(_) => unreachable!("no module role among the built-ins"),
             }
         }
         v

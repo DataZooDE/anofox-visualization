@@ -45,6 +45,8 @@ pub mod lint;
 pub mod macros;
 pub(crate) mod map;
 pub mod math;
+#[doc(hidden)]
+pub mod module;
 pub mod page;
 pub mod period;
 pub mod roles;
@@ -809,6 +811,9 @@ pub enum Role {
     /// the message steps go through the iterations; an optional `prior:
     /// [mean, sd]` is drawn as a dashed outline behind it (#1172).
     Belief,
+    /// A role a registered module brings (#1156): its index in the module
+    /// registry ([`module`]).
+    Module(u16),
     /// Hide or place a chart's legend / colourbar (`::LEGEND`): `'none'`,
     /// `'top'`, `'right'`, `'bottom'` or `'left'`. Without it, a chart's
     /// legend sits where it always has (unchanged). Read from the first value.
@@ -2999,6 +3004,10 @@ fn render_inner(
         .and_then(|c| c.values.first())
         .map(value_str);
 
+    // #1156: a panel carrying a module's role is the module's to draw
+    if let Some(m) = module::for_columns(cols) {
+        return Ok(Panel::own(width, height, m.render(cols, width, height, o)?));
+    }
     // A thin panel under a chart, sharing its x axis.
     if find_role(cols, Role::Track).is_some() {
         return track::render(o, cols, width, height);
