@@ -721,12 +721,30 @@ unsafe fn init(
     Ok(())
 }
 
+/// The C-API types an extension's entry point takes (#1156).
+pub use ffi::{duckdb_extension_access, duckdb_extension_info};
+
 /// DuckDB calls `<extension_name>_init_c_api` on LOAD.
 ///
 /// # Safety
 /// Called by DuckDB with a valid `info` handle and `access` table.
 #[no_mangle]
 pub unsafe extern "C" fn anofox_visualization_init_c_api(
+    info: duckdb_extension_info,
+    access: *const duckdb_extension_access,
+) -> bool {
+    init_c_api(info, access)
+}
+
+/// The extension's load (#1156): what `anofox_visualization_init_c_api` does.
+/// A distribution's own extension registers its modules
+/// ([`anofox_visualization::module::register`]) and calls this from its
+/// `<name>_init_c_api`.
+///
+/// # Safety
+/// As [`anofox_visualization_init_c_api`]: a valid `info` handle and
+/// `access` table from DuckDB.
+pub unsafe fn init_c_api(
     info: duckdb_extension_info,
     access: *const duckdb_extension_access,
 ) -> bool {

@@ -11,6 +11,12 @@ description = "DuckDB C-API extension — SELECT anofox_render(...) → SVG via 
 
 [lib]
 name = "anofox_visualization_ext"
+# rlib too (#1156): a distribution's own extension links it and calls
+# init_c_api after registering its modules
+crate-type = ["cdylib", "rlib"]
+
+[[example]]
+name = "hello_ext"
 crate-type = ["cdylib"]
 
 [dependencies]
