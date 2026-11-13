@@ -411,12 +411,93 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             }
         }
     }
+    // #1166: what each node does, one plain sentence for its tooltip
+    let shown_id = |id: &str| -> String {
+        let id = folded
+            .iter()
+            .find(|(_, e)| e == id)
+            .map_or(id, |(v, _)| v.as_str());
+        row_of(id).map(label_of).unwrap_or_else(|| id.to_string())
+    };
+    let kind_of_id = |id: &str| row_of(id).and_then(kind).unwrap_or_default();
+    let layer_of = |id: &str| row_of(id).and_then(|r| get(r, &["layer"]));
+    let names = |v: &[String]| match v {
+        [] => String::new(),
+        [a] => a.clone(),
+        _ => format!("{} and {}", v[..v.len() - 1].join(", "), v[v.len() - 1]),
+    };
+    let notes: Vec<Value> = ids
+        .iter()
+        .map(|idv| {
+            let id = crate::value_text(idv);
+            let k = kind_of_id(&id);
+            let label = shown_id(&id);
+            let mine: Vec<&Row> = edges
+                .iter()
+                .filter(|e| get(e, &["factor"]).as_deref() == Some(id.as_str()))
+                .collect();
+            let note = match k.as_str() {
+                "data" => "Observed: a measured value, entering the model here.".to_string(),
+                "constant" => "A fixed number given to the model.".to_string(),
+                "delta" => "Deterministic: computes its output exactly from its inputs.".to_string(),
+                "variable" => "A hidden quantity the model infers: its belief combines the messages from its factors.".to_string(),
+                "equality" => {
+                    let n = edges
+                        .iter()
+                        .filter(|e| get(e, &["variable"]).as_deref() == Some(id.as_str()))
+                        .count();
+                    if folded.iter().any(|(_, e)| *e == id) {
+                        format!("{label}, a hidden quantity shared by {n} factors: their messages meet here and combine into its belief.")
+                    } else {
+                        format!("Equality node: {n} factors share one variable; their messages meet here.")
+                    }
+                }
+                "factor" => {
+                    let name = row_of(&id).and_then(|r| get(r, &["name", "label"])).unwrap_or_default();
+                    let out = mine
+                        .iter()
+                        .find(|e| get(e, &["interface"]).as_deref() == Some("out"))
+                        .and_then(|e| get(e, &["variable"]));
+                    let ins: Vec<String> = mine
+                        .iter()
+                        .filter(|e| get(e, &["interface"]).as_deref() != Some("out"))
+                        .filter_map(|e| get(e, &["variable"]))
+                        .collect();
+                    let in_labels: Vec<String> = ins.iter().map(|i| shown_id(i)).collect();
+                    let all_const = ins.iter().all(|i| kind_of_id(i) == "constant");
+                    match out {
+                        Some(o) if kind_of_id(&o) == "data" => format!(
+                            "Likelihood ({name}): connects {} to what we measure, {}. Observations enter the model here.",
+                            names(&in_labels),
+                            shown_id(&o)
+                        ),
+                        Some(o) if all_const => format!(
+                            "Prior ({name}): what we believe about {} before any data arrives.",
+                            shown_id(&o)
+                        ),
+                        Some(o) => match ins.iter().find(|i| kind_of_id(i) != "constant" && layer_of(i) == layer_of(&o)) {
+                            Some(prev) => format!(
+                                "Dynamics ({name}): how {} follows from {}.",
+                                shown_id(&o),
+                                shown_id(prev)
+                            ),
+                            None => format!("Factor ({name}): relates {} to {}.", names(&in_labels), shown_id(&o)),
+                        },
+                        None => format!("Factor ({name})."),
+                    }
+                }
+                _ => String::new(),
+            };
+            if note.is_empty() { Value::Na } else { Value::Str(note) }
+        })
+        .collect();
     let n = ids.len();
     let mut cols = vec![
         Column::new("id", Role::Diagram, ids),
         Column::new("label", Role::Label, labels),
         Column::new("shape", Role::Shape, shapes),
         Column::new("layer", Role::Lane, lanes),
+        Column::new("note", Role::Tooltip, notes),
     ];
     if sparks.iter().any(|v| !matches!(v, Value::Na)) {
         cols.push(Column::new(
@@ -668,6 +749,26 @@ mod tests {
         assert_eq!(
             col(&cols, Role::Metric(MetricFmt::Plain))[at("e4")],
             Value::Float(0.5)
+        );
+        // #1166: each node's role in one sentence (its tooltip)
+        let note = |id: &str| crate::value_text(&col(&cols, Role::Tooltip)[at(id)]);
+        assert_eq!(
+            note("f0"),
+            "Prior (Beta): what we believe about θ before any data arrives."
+        );
+        assert!(
+            note("f1").starts_with("Likelihood (Bernoulli): connects θ to what we measure, y₀."),
+            "{}",
+            note("f1")
+        );
+        assert!(
+            note("e4").starts_with("θ, a hidden quantity shared by 3 factors"),
+            "{}",
+            note("e4")
+        );
+        assert_eq!(
+            note("v0"),
+            "Observed: a measured value, entering the model here."
         );
         // #1152: θ's posterior mean over the iterations, oldest first
         assert_eq!(
