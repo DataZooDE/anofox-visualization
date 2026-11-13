@@ -110,6 +110,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node"),
     e("LANE", &["SWIMLANE"], R::Lane, "encoding", true,
       "a ::DIAGRAM node's swimlane: nodes of one lane share a labelled band"),
+    e("SHAPE", &["NODE_SHAPE"], R::Shape, "encoding", true,
+      "a ::DIAGRAM node's mark: box, circle, filled-circle, square, filled-square, text — or a factor graph's kind (factor, variable, data, equality, delta, constant); shaped nodes make a factor graph: lanes as straight bands, undirected edges"),
     e("EDGES", &[], R::Edges, "encoding", true,
       "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value, colour by status"),
     // ── charts (cast the measure column) ───────────────────────────────────
@@ -1386,6 +1388,7 @@ mod tests {
             Role::Edges,
             Role::Direction,
             Role::Lane,
+            Role::Shape,
             Role::Legend,
             Role::GuideStep,
             Role::Gate,
@@ -1573,6 +1576,7 @@ mod tests {
                 | Role::Edges
                 | Role::Direction
                 | Role::Lane
+                | Role::Shape
                 | Role::Legend
                 | Role::GuideStep
                 | Role::Gate

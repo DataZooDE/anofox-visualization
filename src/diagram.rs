@@ -107,6 +107,8 @@ pub struct Node {
     pub pin: (Option<f64>, Option<f64>),
     /// A mini trend in the box (`list(v)::SPARKLINE`).
     pub spark: Vec<f64>,
+    /// The node's mark (`::SHAPE`, #1151); `None` is a box.
+    pub shape: Option<ggplot_rs::graph::NodeShape>,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +151,30 @@ pub struct Diagram {
     /// `'supplier:#2a9d8f; stock:good'`) — a type keeps its colour however
     /// the rows (or an edit) order the types; `None` = the theme palette.
     pub category_colors: Vec<Option<crate::thresholds::LevelColor>>,
+}
+
+impl Diagram {
+    /// A factor graph (#1151): some node has a `::SHAPE` — lanes become
+    /// straight bands, edges undirected with their label at the factor.
+    pub fn factor_graph(&self) -> bool {
+        self.nodes.iter().any(|n| n.shape.is_some())
+    }
+}
+
+/// A `::SHAPE` value as a mark: a shape name or a factor graph's node kind.
+fn shape_of(s: &str) -> Option<ggplot_rs::graph::NodeShape> {
+    use ggplot_rs::graph::NodeShape as S;
+    Some(
+        match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "box" | "factor" => S::Box,
+            "circle" | "variable" | "random" => S::Circle,
+            "filled-circle" | "data" | "observed" => S::FilledCircle,
+            "square" | "equality" | "=" => S::Square,
+            "filled-square" | "delta" | "deterministic" => S::FilledSquare,
+            "text" | "constant" => S::Text,
+            _ => return None,
+        },
+    )
 }
 
 /// A cell as an id: text, or a number written without a trailing `.0`.
@@ -243,6 +269,8 @@ impl Diagram {
         let story = col(Role::Story);
         let line_style = col(Role::LineStyle);
         let lane_col = col(Role::Lane);
+        let shape_col = col(Role::Shape);
+        let mut bad_shapes: Vec<String> = Vec::new();
         let (xcol, ycol) = (col(Role::X), col(Role::Y));
         let spark_col = col(Role::Value(crate::Kind::Sparkline));
         let first_text = |r: Role| col(r).and_then(|c| c.values.iter().find_map(text));
@@ -326,6 +354,13 @@ impl Diagram {
                     };
                     (pin(xcol), pin(ycol))
                 },
+                shape: cell(shape_col).and_then(text).and_then(|s| {
+                    let shape = shape_of(&s);
+                    if shape.is_none() && !bad_shapes.contains(&s) {
+                        bad_shapes.push(s);
+                    }
+                    shape
+                }),
                 spark: cell(spark_col)
                     .map(crate::kpi::spark_values)
                     .unwrap_or_default(),
@@ -344,6 +379,15 @@ impl Diagram {
                 format!(
                     "node id(s) {} appear more than once — the first row is drawn",
                     quoted(&dups)
+                ),
+            );
+        }
+        if !bad_shapes.is_empty() {
+            problem(
+                "diagram/bad-shape",
+                format!(
+                    "::SHAPE {} is not box, circle, filled-circle, square, filled-square, text or a factor graph kind — drawn as a box",
+                    quoted(&bad_shapes)
                 ),
             );
         }
@@ -735,18 +779,19 @@ fn ordered(mut keys: Vec<(f64, f64, usize)>) -> Vec<usize> {
 /// The layout: box sizes (the label wrapped, the value, badge and
 /// sparkline) and the layered placement, both ggplot-rs's (#1153, #497).
 fn layout(d: &Diagram) -> Placed {
-    use ggplot_rs::graph::{edge_label_width, node_box};
+    use ggplot_rs::graph::{edge_label_width, node_box, node_size, NodeShape};
     use ggplot_rs::graph_layout as gl;
     let boxes: Vec<_> = d
         .nodes
         .iter()
-        .map(|n| {
-            node_box(
+        .map(|n| match n.shape {
+            Some(shape) if shape != NodeShape::Box => node_size(shape, &n.label),
+            _ => node_box(
                 &n.label,
                 n.fvalue.as_deref(),
                 n.badge.as_deref(),
                 n.spark.len() >= 2,
-            )
+            ),
         })
         .collect();
     let nodes: Vec<gl::GraphNode> = d
@@ -777,8 +822,20 @@ fn layout(d: &Diagram) -> Placed {
         lanes: d.lanes.len(),
         ..Default::default()
     };
+    let g = if d.factor_graph() {
+        // #1151: a factor graph's layers as straight bands (a chain on one
+        // row, a branch dropping into its band)
+        let banded = gl::BandedParams {
+            bands: d.lanes.len(),
+            margin: params.margin,
+            ..Default::default()
+        };
+        gl::banded(&nodes, &edges, &banded)
+    } else {
+        gl::layered(&nodes, &edges, &params)
+    };
     Placed {
-        g: gl::layered(&nodes, &edges, &params),
+        g,
         lines: boxes.into_iter().map(|b| b.lines).collect(),
     }
 }
@@ -1004,7 +1061,18 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 (None, Some(v)) => format!("{name}: {v}"),
                 _ => name.clone(),
             };
+            // #1151: a factor graph's edges are undirected, their label (the
+            // interface) at the factor's end
+            let factor_graph = d.factor_graph();
+            let is_factor = |n: &Node| matches!(n.shape, None | Some(graph::NodeShape::Box));
+            let label_at = factor_graph.then(|| match (is_factor(a), is_factor(b)) {
+                (false, true) => 0.8,
+                (true, false) => 0.2,
+                _ => 0.5,
+            });
             DrawEdge {
+                undirected: factor_graph,
+                label_at,
                 colour,
                 width: graph::flow_width(e.value, vmax, line),
                 line,
@@ -1028,7 +1096,6 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     attr("from", Some(a.id.clone())),
                     attr("to", Some(b.id.clone())),
                 ],
-                ..Default::default()
             }
         })
         .collect();
@@ -1061,6 +1128,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 });
             DrawNode {
                 id: nd.id.clone(),
+                shape: nd.shape.unwrap_or_default(),
                 lines: p.lines[v].clone(),
                 value: nd.fvalue.clone(),
                 badge: nd
@@ -1091,7 +1159,6 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     attr("status", nd.status.map(|s| s.as_str().to_string())),
                     attr("badge", nd.badge.clone()),
                 ],
-                ..Default::default()
             }
         })
         .collect();

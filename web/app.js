@@ -1095,6 +1095,7 @@ const FILE_SAMPLES = [
   "examples/tabular-dedup.sql",
   "examples/tabular-showcase.sql",
   "examples/diagram-pipeline.sql",
+  "examples/factor-graphs.sql",
   "examples/onboarding-quiz.sql",
   "examples/onboarding-tutorial.sql",
   "examples/theming-branded.sql",
