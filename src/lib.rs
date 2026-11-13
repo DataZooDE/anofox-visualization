@@ -8509,8 +8509,13 @@ fn render_pie(
                 .with_value_formatter(move |n: f64| vfmt.full(n, &locale))
         })
         .coord_polar_with(
+            // the stack puts the first legend level at the top of the value
+            // range: theta running the other way draws it first, clockwise
+            // from 12 o'clock, the rest following in legend order (owner,
+            // 2026-11-13)
             ggplot_rs::coord::polar::CoordPolar::new()
                 .theta("y")
+                .direction(-1.0)
                 .inner_radius(inner)
                 .expand(false),
         )
