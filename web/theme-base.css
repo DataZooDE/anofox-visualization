@@ -206,9 +206,10 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .panel svg .dp-flow.flow-speed-5{animation-duration:2.4s}
 /* #1152: an edge story step's message, moving along the edge (dp-msg-back:
    against its drawn direction) */
-.panel svg .dp-msg{stroke-dasharray:6 4;stroke-width:3px;animation:dp-flow .9s linear infinite}
-.panel svg .dp-msg.dp-msg-back{animation-direction:reverse}
-@media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg [data-linestyle="flow"],.panel svg .dp-flow.dp-dots,.panel svg .dp-msg{animation:none}}
+.panel svg .dp-msg{stroke:var(--ax-accent);stroke-width:2.5px}
+/* #1166: the message itself, a glowing dot running along the edge */
+.panel svg .dp-msg-dot{fill:var(--ax-accent);stroke:var(--ax-card);stroke-width:1.5px;filter:drop-shadow(0 0 4px var(--ax-accent))}
+@media (prefers-reduced-motion: reduce){.panel svg .dp-flow,.panel svg [data-linestyle="flow"],.panel svg .dp-flow.dp-dots}
 /* ::STORY: step controls under the chart, the caption + connector over it */
 .dp-story{display:flex;align-items:center;gap:.4rem;margin-top:.55rem;flex-wrap:wrap}
 .dp-story-btn{font:inherit;font-size:.78rem;font-weight:600;line-height:1;padding:.38rem .62rem;border-radius:var(--ax-radius-sm);border:1px solid var(--ax-tool-border);background:var(--ax-btn2-bg);color:var(--ax-ink);cursor:pointer}
