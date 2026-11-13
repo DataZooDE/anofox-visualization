@@ -196,7 +196,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
    ggplot-rs's geom_text fontface (#228), so a headless --svg export draws
    them bold too; this class is the browser's own belt-and-suspenders path
    (also covers any future non-ggplot-rs rendering of the same markup) */
-.panel svg .dp-node-label,.panel svg .dp-lane-label{font-weight:600}
+.panel svg .dp-node-label:not([font-style=italic]),.panel svg .dp-lane-label{font-weight:600}
 .panel svg .dp-node-value{font-weight:700}
 /* 'flow-volume' / 'flow-dots-volume': the busier the edge, the faster it
    flows — five fixed buckets of sqrt(value / max) (src/diagram.rs
@@ -739,9 +739,10 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-tip-split .tip-row{display:flex;gap:.5rem;justify-content:space-between}
 .dp-tip .tip-rule{display:inline-block;width:.75rem;border-top:2px dashed currentColor;margin-right:.45rem;vertical-align:middle}
 /* #1166: a factor graph node's card (kicker, title, value, a sentence) */
-.dp-tip.dp-tip-card{white-space:normal;max-width:300px;min-width:220px;padding:.65rem .8rem;border-top:3px solid var(--ax-accent)}
-.dp-tip-card .tip-kicker{font-size:.64rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--ax-accent)}
-.dp-tip-card .tip-kicker::before{content:"";display:inline-block;width:.5rem;height:.5rem;border-radius:50%;background:var(--ax-accent);margin-right:.4rem;vertical-align:.05rem}
+/* #1172: a factor graph's card in the graph's one teal (reads on light and dark) */
+.dp-tip.dp-tip-card{--fg-accent:#14b8a6;white-space:normal;max-width:300px;min-width:220px;padding:.65rem .8rem;border-top:3px solid var(--fg-accent)}
+.dp-tip-card .tip-kicker{font-size:.64rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--fg-accent)}
+.dp-tip-card .tip-kicker::before{content:"";display:inline-block;width:.5rem;height:.5rem;border-radius:50%;background:var(--fg-accent);margin-right:.4rem;vertical-align:.05rem}
 .dp-tip-card .tip-card-title{font-weight:700;font-size:.92rem;margin:.2rem 0 .35rem;color:var(--ax-tip-head)}
 .dp-tip-card .tip-card-value{font-weight:700;font-size:.95rem}
 .dp-tip-card .tip-card-value span{font-weight:500;color:var(--ax-muted)}

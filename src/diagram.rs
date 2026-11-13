@@ -1314,12 +1314,39 @@ fn attr(name: &str, v: Option<String>) -> ggplot_rs::graph::DataAttr {
     (name.to_string(), v)
 }
 
+/// #1172: a factor graph's one hue (teal, lighter on a dark theme), its
+/// dark shade for observations and its tint for factor boxes, and the math
+/// font its labels are set in.
+struct FgLook {
+    line: crate::theme::Rgb,
+    observed: crate::theme::Rgb,
+    tint: crate::theme::Rgb,
+}
+
+const MATH_FONT: &str =
+    "KaTeX_Math, 'Latin Modern Math', 'STIX Two Math', 'Cambria Math', 'Times New Roman', serif";
+
+fn fg_look(t: &crate::theme::ResolvedTheme) -> FgLook {
+    let dark = matches!(t.variant, crate::theme::Variant::Dark);
+    let line = if dark { (45, 212, 191) } else { (13, 148, 136) };
+    let mix = |a: crate::theme::Rgb, b: crate::theme::Rgb, k: f64| {
+        let m = |x: u8, y: u8| (x as f64 * (1.0 - k) + y as f64 * k).round() as u8;
+        (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+    };
+    FgLook {
+        line,
+        observed: if dark { (94, 234, 212) } else { (17, 94, 89) },
+        tint: mix(t.colors.card, line, 0.08),
+    }
+}
+
 /// The drawing as a nested `<svg>` of `pw` × `ph` (the layout's own size).
 fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String {
     use ggplot_rs::graph::{self, DrawEdge, DrawNode, EdgeLine, GraphStyle};
 
     let t = &o.theme;
     let muted = t.colors.muted;
+    let fg = d.factor_graph().then(|| fg_look(t));
     let vmax = d.edges.iter().filter_map(|e| e.value).fold(0.0, f64::max);
     let edges: Vec<DrawEdge> = d
         .edges
@@ -1335,7 +1362,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             let colour = match (e.status, e.style) {
                 (Some(st @ (Status::Bad | Status::Warn)), _) => st.color(t),
                 (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => t.color(0),
-                _ => muted,
+                _ => fg.as_ref().map_or(muted, |f| f.line),
             };
             let class = match e.style {
                 EdgeStyle::Solid | EdgeStyle::Dashed => None,
@@ -1440,7 +1467,10 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     .badge
                     .clone()
                     .map(|b| (b, nd.status.map(|s| s.color(t)).unwrap_or(muted))),
-                stroke: alarm.map(|s| s.color(t)).unwrap_or(t.chart.line),
+                stroke: alarm
+                    .map(|s| s.color(t))
+                    .or(fg.as_ref().map(|f| f.line))
+                    .unwrap_or(t.chart.line),
                 accent,
                 // #1166: the final belief as a curve over the node, a
                 // colour of its own
@@ -1518,7 +1548,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             }
         })
         .collect();
-    let style = GraphStyle {
+    let mut style = GraphStyle {
         card: t.colors.card,
         band: t.colors.line,
         muted,
@@ -1527,6 +1557,14 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
         class_prefix: "dp-".to_string(),
         ..Default::default()
     };
+    // #1172: a factor graph in one hue, its labels as mathematics
+    if let Some(f) = &fg {
+        style.observed_fill = f.observed;
+        style.variable_fill = f.tint;
+        style.glyph_fill = Some(f.tint);
+        style.glyph_ink = Some(f.line);
+        style.math_font = Some(MATH_FONT.to_string());
+    }
     graph::draw(
         &p.g,
         &d.lanes,
