@@ -1028,6 +1028,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     attr("from", Some(a.id.clone())),
                     attr("to", Some(b.id.clone())),
                 ],
+                ..Default::default()
             }
         })
         .collect();
@@ -1090,6 +1091,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     attr("status", nd.status.map(|s| s.as_str().to_string())),
                     attr("badge", nd.badge.clone()),
                 ],
+                ..Default::default()
             }
         })
         .collect();
@@ -1100,10 +1102,19 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
         heading: t.colors.heading,
         ink: t.colors.ink,
         class_prefix: "dp-".to_string(),
+        ..Default::default()
     };
-    graph::draw(&p.g, &d.lanes, &nodes, &edges, &style, crate::void_theme(o))
-        .render_svg_native_at(0.0, 0.0, pw, ph)
-        .unwrap_or_default()
+    graph::draw(
+        &p.g,
+        &d.lanes,
+        &[],
+        &nodes,
+        &edges,
+        &style,
+        crate::void_theme(o),
+    )
+    .render_svg_native_at(0.0, 0.0, pw, ph)
+    .unwrap_or_default()
 }
 
 /// Render the diagram as a whole `<svg>` (or a nested fragment at `place`)
