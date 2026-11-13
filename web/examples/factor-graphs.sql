@@ -78,7 +78,7 @@ $$m \sim \mathcal{N}(0,\,100), \qquad \tau \sim \Gamma(1,\,1), \qquad y_i \mid m
 
 $$q(m) = \mathcal{N}\!\left(\frac{\mathbb{E}[\tau] \sum_i y_i}{0.01 + 6\,\mathbb{E}[\tau]},\ \frac{1}{0.01 + 6\,\mathbb{E}[\tau]}\right), \qquad q(\tau) = \Gamma\!\left(1 + \tfrac{6}{2},\ 1 + \tfrac{1}{2} \sum_i \mathbb{E}\big[(y_i - m)^2\big]\right)$$
 
-**What comes out.** After six rounds: a cycle takes $m = 4.03 \pm 0.24$ min on average; $\mathbb{E}[\tau] = 2.85$, so one cycle varies by about $\tau^{-1/2} \approx \pm 0.6$ min.'::MARKDOWN,
+**What comes out.** After six rounds: a cycle takes $m = 4.03 \pm 0.24$ min on average; $\mathbb{E}[\tau] = 2.85$, so one cycle varies by about $1/\sqrt{\tau} \approx \pm 0.6$ min.'::MARKDOWN,
        'What this graph solves'::TITLE;
 
 -- The priors as the model states them: m ~ N(0, variance 100), τ ~ Γ(shape 1, rate 1).
