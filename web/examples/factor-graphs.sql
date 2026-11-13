@@ -1,7 +1,7 @@
 -- @title How does the model reason from our inspections?
 -- @group How it works
 -- @tags  diagram, factor graph, bayesian
--- @description Three Bayesian models drawn as factor graphs: a defect rate after four inspections, a machine's cycle time, and which state a machine was in.
+-- @description Three Bayesian models as factor graphs, each with the problem it solves: a defect share, a cycle time, when a machine's condition changed.
 --
 -- How does the model reason from our inspections? Three models as an
 -- inference library writes them (nodes, edges and posterior marginals),
@@ -39,6 +39,10 @@ CREATE OR REPLACE TABLE fg_cycle_schedule AS FROM read_csv('data/factor-graphs/c
 SELECT 'The defect rate after four inspections'::SECTION;
 
 SELECT 12::SPAN;
+SELECT '**The problem.** Customers sent back units of a new product. Before we claim against the supplier we need to know what share of returned units has a real defect (not "no fault found") — and how sure we can be. **What goes in:** what earlier products taught us, about 40 % but loosely (the Beta(2, 3) prior), and four returns checked in the lab, three of them defective. **What comes out:** the defect share θ, 56 % ± 16 %. Four checks moved it but left it wide: check more returns before claiming.'::MARKDOWN,
+       'What this graph solves'::TITLE;
+
+SELECT 12::SPAN;
 
 SELECT anofox_plot_factor_graph(n,
          edges := (SELECT list(e) FROM fg_coin_edges e),
@@ -48,6 +52,10 @@ SELECT anofox_plot_factor_graph(n,
 FROM fg_coin_nodes n;
 
 SELECT 'A machine''s cycle time: mean and spread, learned together'::SECTION;
+
+SELECT 12::SPAN;
+SELECT '**The problem.** To plan a shift we need to know how long one cycle on a machine takes and how much it varies: the mean sets the output per shift, the spread the buffer to plan in and the limit at which a slow cycle should raise an alarm. **What goes in:** six timed cycles (minutes) and next to no prior knowledge (m ~ N(0, 100), τ ~ Γ(1, 1)). **What comes out:** a cycle takes 4.03 ± 0.24 min on average; τ is the precision, 2.85 means one cycle varies by about ± 0.6 min (1 / √τ). The mean and the spread depend on each other, so the messages go round six times until both settle.'::MARKDOWN,
+       'What this graph solves'::TITLE;
 
 -- The priors as the model states them: m ~ N(0, variance 100), τ ~ Γ(shape 1, rate 1).
 CREATE OR REPLACE TABLE fg_cycle_priors AS
@@ -104,6 +112,10 @@ SELECT iteration::XAXIS, round(mean, 4)::LINECHART,
 FROM fg_cycle_marginals WHERE variable = fg_pick() ORDER BY iteration;
 
 SELECT 'A machine''s hidden state over five shifts'::SECTION;
+
+SELECT 12::SPAN;
+SELECT '**The problem.** A machine wears without telling us: per shift we only see a coarse reading (one of three levels), not its condition. Maintenance wants to know in which shift the condition changed, to service the machine before it fails. **What goes in:** five shift readings; the model learns how conditions follow one another (the transition matrix A) and what each condition tends to read (B). **What comes out:** the condition per shift — here the model is at least 94 % sure of state 0 in shifts 1–2, state 1 in shift 3 and state 2 in shifts 4–5: a change step by step, the cue to plan the service. The model only numbers the states; calling them good, worn and faulty is our reading.'::MARKDOWN,
+       'What this graph solves'::TITLE;
 
 SELECT 12::SPAN;
 
