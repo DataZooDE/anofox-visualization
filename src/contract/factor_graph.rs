@@ -369,6 +369,40 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         pts.sort_by(|a, b| a.0.total_cmp(&b.0));
         pts.into_iter().map(|p| p.1).collect()
     };
+    // #1166: the belief per iteration (scalar marginals): a range covering
+    // every iteration's mean ± 3 sd, and (iteration, mean, sd)
+    let belief = |id: &str| -> Option<String> {
+        let mut its: Vec<(f64, f64, f64)> = marginals
+            .iter()
+            .filter(|m| get(m, &["variable"]).as_deref() == Some(id))
+            .filter(|m| get(m, &["component"]).is_none())
+            .filter_map(|m| {
+                let n = |k: &str| get(m, &[k]).and_then(|s| s.parse::<f64>().ok());
+                Some((
+                    n("iteration").unwrap_or(0.0),
+                    n("mean")?,
+                    n("sd").filter(|v| *v > 0.0)?,
+                ))
+            })
+            .collect();
+        if its.is_empty() {
+            return None;
+        }
+        its.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let lo = its
+            .iter()
+            .map(|t| t.1 - 3.0 * t.2)
+            .fold(f64::INFINITY, f64::min);
+        let hi = its
+            .iter()
+            .map(|t| t.1 + 3.0 * t.2)
+            .fold(f64::NEG_INFINITY, f64::max);
+        Some(
+            serde_json::json!({ "lo": lo, "hi": hi, "its": its.iter().map(|t| [t.0, t.1, t.2]).collect::<Vec<_>>() })
+                .to_string(),
+        )
+    };
+    let mut beliefs = vec![];
     let mut sparks = vec![];
     let (mut ids, mut labels, mut shapes, mut lanes, mut values, mut badges) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
@@ -384,6 +418,7 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         };
         let m = latest(var.as_deref().unwrap_or(&id));
         let tr = trend(var.as_deref().unwrap_or(&id));
+        beliefs.push(belief(var.as_deref().unwrap_or(&id)).map_or(Value::Na, Value::Str));
         sparks.push(if tr.len() >= 2 {
             Value::Str(J::from(tr).to_string())
         } else {
@@ -499,6 +534,9 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         Column::new("layer", Role::Lane, lanes),
         Column::new("note", Role::Tooltip, notes),
     ];
+    if beliefs.iter().any(|v| !matches!(v, Value::Na)) {
+        cols.push(Column::new("belief", Role::Belief, beliefs));
+    }
     if sparks.iter().any(|v| !matches!(v, Value::Na)) {
         cols.push(Column::new(
             "trend",
@@ -607,8 +645,7 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
                 ));
             }
         }
-        let step =
-            serde_json::json!({ "n": i, "t": t, "dir": if back { "back" } else { "forward" } });
+        let step = serde_json::json!({ "n": i, "t": t, "dir": if back { "back" } else { "forward" }, "i": it });
         match steps_of.iter_mut().find(|(k, _)| *k == drawn) {
             Some((_, v)) => v.push(step),
             None => steps_of.push((drawn, vec![step])),

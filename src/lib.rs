@@ -804,6 +804,10 @@ pub enum Role {
     /// `constant`). A shaped node makes the diagram a factor graph: its
     /// lanes are straight bands and its edges undirected.
     Shape,
+    /// A `::DIAGRAM` node's belief (`::BELIEF`, #1166): JSON `{lo, hi, its:
+    /// [[iteration, mean, sd], …]}` — a curve over the node that sharpens as
+    /// the message steps go through the iterations.
+    Belief,
     /// Hide or place a chart's legend / colourbar (`::LEGEND`): `'none'`,
     /// `'top'`, `'right'`, `'bottom'` or `'left'`. Without it, a chart's
     /// legend sits where it always has (unchanged). Read from the first value.

@@ -345,6 +345,38 @@ export function animKit(win) {
     const b = el.getBoundingClientRect();
     return b.width || b.height ? [[b.left - hb.left, b.top - hb.top, b.right - hb.left, b.bottom - hb.top]] : [];
   }
+  // #1166: each node's belief curve (data-beliefs: its iterations and, per
+  // iteration, the curve's heights 0..1) re-shaped to the last iteration
+  // up to `it` — `null`: the final belief, as the static chart draws it.
+  // The curve's own points give its width and baseline; 16 px tall.
+  function beliefsAt(svg, it) {
+    for (const node of svg.querySelectorAll("[data-beliefs]")) {
+      let b;
+      try {
+        b = JSON.parse(node.getAttribute("data-beliefs"));
+      } catch (_) {
+        continue;
+      }
+      const g = svg.querySelector(`[data-of="${CSS.escape(node.getAttribute("data-node"))}"]`);
+      const poly = g && [...g.querySelectorAll("polygon")].find((p) => p.closest(".dp-node-belief") || p.classList.contains("dp-node-belief"));
+      if (!poly || !b.h || !b.h.length) continue;
+      if (!poly._pts) poly._pts = (poly.getAttribute("points") || "").trim().split(/\s+/).map((p) => p.split(",").map(Number));
+      const pts = poly._pts;
+      if (pts.length < 3) continue;
+      let j = b.h.length - 1;
+      if (it != null) {
+        j = 0;
+        b.its.forEach((x, n) => {
+          if (x <= it) j = n;
+        });
+      }
+      const base = pts[pts.length - 1][1];
+      const out = b.h[j].map((v, n) => `${pts[n][0]},${(base - v * 16).toFixed(2)}`);
+      out.push(`${pts[pts.length - 2][0]},${base}`, `${pts[pts.length - 1][0]},${base}`);
+      poly.setAttribute("points", out.join(" "));
+    }
+  }
+
   // #1166: a message as a glowing dot running along its edge (the edge's
   // own geometry, sampled; `back` against its drawn direction), in the
   // edge's coordinate system. With reduced motion it rests at the middle.
@@ -564,6 +596,7 @@ export function animKit(win) {
           msgDot(e, st.d === -1);
         }
       }
+      beliefsAt(svg, st && st.i != null ? st.i : null);
       cap.textContent = k ? steps[k - 1].t : "";
       cap.hidden = !k;
       pos.textContent = k ? `Step ${k} of ${steps.length}` : `Overview · ${steps.length} steps`;

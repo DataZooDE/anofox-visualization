@@ -110,6 +110,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "a ::DIAGRAM node's input(s): an id or a list of ids → edges into the row's node"),
     e("LANE", &["SWIMLANE"], R::Lane, "encoding", true,
       "a ::DIAGRAM node's swimlane: nodes of one lane share a labelled band"),
+    e("BELIEF", &["NODE_BELIEF"], R::Belief, "encoding", true,
+      "a ::DIAGRAM node's belief: JSON {lo, hi, its: [[iteration, mean, sd], …]} — a density curve over the node, re-shaped per iteration by the message steps"),
     e("SHAPE", &["NODE_SHAPE"], R::Shape, "encoding", true,
       "a ::DIAGRAM node's mark: box, circle, filled-circle, square, filled-square, text — or a factor graph's kind (factor, variable, data, equality, delta, constant); shaped nodes make a factor graph: lanes as straight bands, undirected edges"),
     e("EDGES", &[], R::Edges, "encoding", true,
@@ -1389,6 +1391,7 @@ mod tests {
             Role::Direction,
             Role::Lane,
             Role::Shape,
+            Role::Belief,
             Role::Legend,
             Role::GuideStep,
             Role::Gate,
@@ -1577,6 +1580,7 @@ mod tests {
                 | Role::Direction
                 | Role::Lane
                 | Role::Shape
+                | Role::Belief
                 | Role::Legend
                 | Role::GuideStep
                 | Role::Gate
