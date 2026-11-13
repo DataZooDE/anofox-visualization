@@ -39,7 +39,19 @@ CREATE OR REPLACE TABLE fg_cycle_schedule AS FROM read_csv('data/factor-graphs/c
 SELECT 'The defect rate after four inspections'::SECTION;
 
 SELECT 12::SPAN;
-SELECT '**The problem.** Customers sent back units of a new product. Before we claim against the supplier we need to know what share of returned units has a real defect (not "no fault found") — and how sure we can be. **What goes in:** what earlier products taught us, about 40 % but loosely (the Beta(2, 3) prior), and four returns checked in the lab, three of them defective. **What comes out:** the defect share θ, 56 % ± 16 %. Four checks moved it but left it wide: check more returns before claiming.'::MARKDOWN,
+SELECT '**The problem.** Customers sent back units of a new product. Before we claim against the supplier we need to know what share of returned units has a real defect (not "no fault found") — and how sure we can be.
+
+**The model.** θ is the defect share; each checked return $y_i$ is 1 (defective) or 0:
+
+$$\theta \sim \mathrm{Beta}(2,\,3), \qquad y_i \mid \theta \sim \mathrm{Bernoulli}(\theta), \quad i = 1, \dots, 4$$
+
+**Why this prior.** A Beta prior is *conjugate* to the Bernoulli: the posterior is again a Beta, so the messages are exact and the counts simply add. Its two numbers read as earlier evidence — 2 defective and 3 fine units, as if from earlier products: about 40 %, but weighted like only five checks, so loose (90 % between 10 % and 75 %). Unlike a flat Beta(1, 1) it rules out "never" and "always".
+
+**What comes out.** Three of the four returns were defective ($k = 3$ of $n = 4$):
+
+$$\theta \mid y \sim \mathrm{Beta}(2 + k,\; 3 + n - k) = \mathrm{Beta}(5,\,4), \qquad \mathbb{E}[\theta \mid y] = \tfrac{5}{9} \approx 56\,\%, \quad \mathrm{sd} \approx 16\,\%$$
+
+Five checks'' worth of prior and four of data: the answer lands between the prior''s 40 % and the data''s 75 %, still wide — check more returns before claiming.'::MARKDOWN,
        'What this graph solves'::TITLE;
 
 SELECT 12::SPAN;
@@ -54,7 +66,19 @@ FROM fg_coin_nodes n;
 SELECT 'A machine''s cycle time: mean and spread, learned together'::SECTION;
 
 SELECT 12::SPAN;
-SELECT '**The problem.** To plan a shift we need to know how long one cycle on a machine takes and how much it varies: the mean sets the output per shift, the spread the buffer to plan in and the limit at which a slow cycle should raise an alarm. **What goes in:** six timed cycles (minutes) and next to no prior knowledge (m ~ N(0, 100), τ ~ Γ(1, 1)). **What comes out:** a cycle takes 4.03 ± 0.24 min on average; τ is the precision, 2.85 means one cycle varies by about ± 0.6 min (1 / √τ). The mean and the spread depend on each other, so the messages go round six times until both settle.'::MARKDOWN,
+SELECT '**The problem.** To plan a shift we need to know how long one cycle on a machine takes and how much it varies: the mean sets the output per shift, the spread the buffer to plan in and the limit at which a slow cycle should raise an alarm.
+
+**The model.** Six timed cycles $y_i$ (minutes: 4.1, 3.8, 4.4, 4.0, 3.6, 4.3) around a mean $m$ with precision $\tau$ (one over the variance):
+
+$$m \sim \mathcal{N}(0,\,100), \qquad \tau \sim \Gamma(1,\,1), \qquad y_i \mid m, \tau \sim \mathcal{N}(m,\,\tau^{-1}), \quad i = 1, \dots, 6$$
+
+**Why these priors.** Both are *vague*: we want the six cycles to decide. $\mathcal{N}(0, 100)$ has an sd of 10 min — nearly flat over any plausible cycle time, its precision 0.01 against the data''s $6\,\mathbb{E}[\tau] \approx 17$; and $\Gamma(1, 1)$ (shape, rate) on the precision says "a spread of about a minute", worth only two observations. Both are conjugate (Normal for a mean, Gamma for a precision), so each update has a closed form. The price of the simple choice: $\mathcal{N}(0, 100)$ also allows negative times — harmless here, a log-normal would be stricter.
+
+**How it is solved.** Mean-field, $q(m, \tau) = q(m)\,q(\tau)$: each factor is updated from the other''s current estimate, round after round:
+
+$$q(m) = \mathcal{N}\!\left(\frac{\mathbb{E}[\tau] \sum_i y_i}{0.01 + 6\,\mathbb{E}[\tau]},\ \frac{1}{0.01 + 6\,\mathbb{E}[\tau]}\right), \qquad q(\tau) = \Gamma\!\left(1 + \tfrac{6}{2},\ 1 + \tfrac{1}{2} \sum_i \mathbb{E}\big[(y_i - m)^2\big]\right)$$
+
+**What comes out.** After six rounds: a cycle takes $m = 4.03 \pm 0.24$ min on average; $\mathbb{E}[\tau] = 2.85$, so one cycle varies by about $\tau^{-1/2} \approx \pm 0.6$ min.'::MARKDOWN,
        'What this graph solves'::TITLE;
 
 -- The priors as the model states them: m ~ N(0, variance 100), τ ~ Γ(shape 1, rate 1).
@@ -114,7 +138,17 @@ FROM fg_cycle_marginals WHERE variable = fg_pick() ORDER BY iteration;
 SELECT 'A machine''s hidden state over five shifts'::SECTION;
 
 SELECT 12::SPAN;
-SELECT '**The problem.** A machine wears without telling us: per shift we only see a coarse reading (one of three levels), not its condition. Maintenance wants to know in which shift the condition changed, to service the machine before it fails. **What goes in:** five shift readings; the model learns how conditions follow one another (the transition matrix A) and what each condition tends to read (B). **What comes out:** the condition per shift — here the model is at least 94 % sure of state 0 in shifts 1–2, state 1 in shift 3 and state 2 in shifts 4–5: a change step by step, the cue to plan the service. The model only numbers the states; calling them good, worn and faulty is our reading.'::MARKDOWN,
+SELECT '**The problem.** A machine wears without telling us: per shift we only see a coarse reading (one of three levels), not its condition. Maintenance wants to know in which shift the condition changed, to service the machine before it fails.
+
+**The model.** A hidden condition $s_t$ (one of three) per shift, the reading $x_t$ (here 0, 0, 1, 2, 2) drawn from it; $A$ says how conditions follow one another, $B$ what each condition reads:
+
+$$s_0 \sim \mathrm{Cat}\big(\tfrac13, \tfrac13, \tfrac13\big), \qquad s_t \mid s_{t-1} \sim \mathrm{Cat}(A\,s_{t-1}), \qquad x_t \mid s_t \sim \mathrm{Cat}(B\,s_t), \quad t = 1, \dots, 5$$
+
+$$A \sim \mathrm{MatrixDirichlet}\begin{pmatrix} 1 & 1 & 1 \\ 1 & 1 & 1 \\ 1 & 1 & 1 \end{pmatrix}, \qquad B \sim \mathrm{MatrixDirichlet}\begin{pmatrix} 10 & 1 & 1 \\ 1 & 10 & 1 \\ 1 & 1 & 10 \end{pmatrix}$$
+
+**Why these priors.** The start $s_0$ is uniform: we do not know the condition before the first shift. $A$ is flat (all ones): no opinion on how conditions move — the data learns it. $B$ is the strong one: each condition mostly shows "its" reading level (10 against 1, about 83 %). That gives the states their meaning — without it the three states are interchangeable, and five readings cannot pin down $A$ and $B$ at once. Dirichlet priors are conjugate to the categorical, so counts add; the updates run mean-field, $q(s)\,q(A)\,q(B)$, three rounds.
+
+**What comes out.** The condition per shift: the model is at least 94 % sure of state 0 in shifts 1–2, state 1 in shift 3 and state 2 in shifts 4–5 — a change step by step, the cue to plan the service. Read it with the prior in mind: with five readings, $B$''s prior largely decides that the states follow the readings. The model only numbers the states; calling them good, worn and faulty is our reading.'::MARKDOWN,
        'What this graph solves'::TITLE;
 
 SELECT 12::SPAN;
