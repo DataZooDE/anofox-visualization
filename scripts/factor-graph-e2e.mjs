@@ -3,7 +3,8 @@
 // inspections?" draws two factor graphs with `schedule :=`; Step lights the
 // edge carrying the message (`.dp-msg`, `.dp-msg-back` against the edge),
 // its two ends stay lit, the caption names the message, and stepping back to
-// the overview clears it.
+// the overview clears it. A ::SELECT_AS before the macro names the variable
+// a click on a node sets.
 //
 //   wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 //   python3 serve_nocache.py 8947 &
@@ -54,6 +55,21 @@ await step(".dp-story-prev");
 await step(".dp-story-prev");
 s = await state();
 check(!s.msg.length && /Overview/.test(s.pos), "back at the overview, no message lit", s);
+
+// A ::SELECT_AS before the macro names what a click on a node sets (#1152).
+const sql = `
+SELECT 'node'::SELECT_AS;
+SELECT anofox_plot_factor_graph(n, edges := [{'variable': 'v0', 'factor': 'f1', 'interface': 'out'}, {'variable': 'v1', 'factor': 'f1', 'interface': 'p'}]) AS "Graph"
+FROM (VALUES ('v0', 'data', 'y', 'obs'), ('v1', 'variable', 'theta', 'param'), ('f1', 'factor', 'Bernoulli', 'obs')) n(id, kind, label, layer);
+SELECT 'picked: ' || coalesce(getvariable('node'), '-') AS m::MARKDOWN;
+`;
+await page.goto("about:blank");
+await page.goto(`${base}?embed=1#sql=${Buffer.from(sql, "utf8").toString("base64")}`);
+await page.waitForFunction(() => document.querySelector("svg[data-diagram]"), null, { timeout: 120000 });
+await page.locator('svg[data-diagram] rect[data-node="f1"]').first().click({ force: true });
+await page.waitForFunction(() => /picked: f1/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
+const picked = await page.evaluate(() => (document.body.innerText.match(/picked: \S+/) || [""])[0]);
+check(picked === "picked: f1" && /[?&]v\.node=f1/.test(page.url()), "a click on a node sets the ::SELECT_AS variable", { picked, url: page.url() });
 check(!errors.length, "no page errors", errors);
 await browser.close();
 if (bad) {

@@ -11135,6 +11135,9 @@ async function runOnce(fresh = true, pv = preview) {
         const mk = (caption) => {
           const fig = document.createElement("figure");
           fig.className = "panel contract-panel";
+          // #1152: a ::SELECT_AS / ::DRILL before it names what a click sets,
+          // as for any chart (a factor graph's node → getvariable('<name>'))
+          fig._ia = nextIa;
           if (container === curGrid) fig.style.gridColumn = `span ${span}`;
           if (nextHeight) fig.style.minHeight = nextHeight + "px";
           if (caption) fig.appendChild(mkTitle(caption));
