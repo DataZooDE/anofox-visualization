@@ -26,6 +26,8 @@ pub mod agent;
 mod boxstats;
 pub mod canonical;
 mod chart_frames;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cli;
 pub mod contract;
 pub mod dashboard;
 pub mod diagram;
