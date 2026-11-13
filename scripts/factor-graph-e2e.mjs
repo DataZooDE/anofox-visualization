@@ -46,6 +46,11 @@ check(/Overview · 5 steps/.test(s.pos) && !s.msg.length, "starts at the overvie
 await step(".dp-story-next");
 s = await state();
 check(s.msg.join() === "f0>e4", "step 1 lights Beta's out edge", s);
+const dot = await page.evaluate(() => {
+  const d = document.querySelector("svg[data-diagram] .dp-msg-dot");
+  return d ? { motion: !!d.querySelector("animateMotion"), after: d.previousElementSibling?.getAttribute("data-edge") } : null;
+});
+check(dot && dot.motion && dot.after === "f0>e4", "a message dot runs along that edge (#1166)", dot);
 check(s.lit.includes("f0") && s.lit.includes("e4") && !s.lit.includes("f1"), "its two ends stay lit, the rest dims", s);
 check(/^Iteration 1 · message 1: Beta → θ \(out\); θ after iteration 1: /.test(s.cap), "the caption names the message and θ's marginal", s);
 await step(".dp-story-next");
@@ -55,6 +60,7 @@ await step(".dp-story-prev");
 await step(".dp-story-prev");
 s = await state();
 check(!s.msg.length && /Overview/.test(s.pos), "back at the overview, no message lit", s);
+check(!(await page.locator("svg[data-diagram] .dp-msg-dot").count()), "the overview has no message dot");
 
 // A variable's tooltip draws its posterior mean over the iterations (#1152).
 const v = page.locator("rect[data-node][data-spark]").first();

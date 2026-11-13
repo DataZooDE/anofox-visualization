@@ -345,6 +345,33 @@ export function animKit(win) {
     const b = el.getBoundingClientRect();
     return b.width || b.height ? [[b.left - hb.left, b.top - hb.top, b.right - hb.left, b.bottom - hb.top]] : [];
   }
+  // #1166: a message as a glowing dot running along its edge (the edge's
+  // own geometry, sampled; `back` against its drawn direction), in the
+  // edge's coordinate system. With reduced motion it rests at the middle.
+  function msgDot(edge, back) {
+    if (typeof edge.getTotalLength !== "function") return;
+    let len = 0;
+    try {
+      len = edge.getTotalLength();
+    } catch (_) {}
+    if (!(len > 0)) return;
+    const pts = [];
+    for (let i = 0; i <= 16; i++) {
+      const p = edge.getPointAtLength((len * i) / 16);
+      pts.push(`${p.x.toFixed(1)},${p.y.toFixed(1)}`);
+    }
+    if (back) pts.reverse();
+    const dot = svgEl("circle", { class: "dp-msg-dot", r: "4.5", "aria-hidden": "true", "pointer-events": "none" });
+    if (still()) {
+      const [x, y] = pts[8].split(",");
+      dot.setAttribute("cx", x);
+      dot.setAttribute("cy", y);
+    } else {
+      dot.append(svgEl("animateMotion", { path: "M" + pts.join(" L"), dur: Math.min(1.6, Math.max(0.6, len / 160)).toFixed(2) + "s", repeatCount: "indefinite" }));
+    }
+    edge.after(dot);
+  }
+
   // Build the stepper for a chart whose root <svg> carries data-story
   // ([{k, t}, …]) and data-story-by ("x" | "series"). Step 0 is the overview;
   // each step dims the other marks, shows its caption (an aria-live region)
@@ -527,12 +554,14 @@ export function animKit(win) {
       emph(svg, "story", k ? (el) => (lit(el) === false ? (el.tagName === "polyline" || el.tagName === "polygon" ? 0.35 : 0.2) : null) : null);
       // an edge step shows its message moving along the edge (`d` -1: against it)
       svg.querySelectorAll(".dp-msg").forEach((e) => e.classList.remove("dp-msg", "dp-msg-back"));
+      svg.querySelectorAll(".dp-msg-dot").forEach((e) => e.remove());
       const st = k ? steps[k - 1] : null;
       if (st && st.e != null) {
         for (const e of svg.querySelectorAll("[data-edge]")) {
           if (e.getAttribute("data-edge") !== st.e) continue;
           e.classList.add("dp-msg");
           if (st.d === -1) e.classList.add("dp-msg-back");
+          msgDot(e, st.d === -1);
         }
       }
       cap.textContent = k ? steps[k - 1].t : "";
