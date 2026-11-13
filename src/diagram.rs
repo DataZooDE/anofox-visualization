@@ -181,7 +181,9 @@ fn shape_of(s: &str) -> Option<ggplot_rs::graph::NodeShape> {
     use ggplot_rs::graph::NodeShape as S;
     Some(
         match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-            "box" | "factor" => S::Box,
+            "box" => S::Box,
+            // #1166: a factor graph's factor is a compact glyph square
+            "factor" | "glyph" => S::Glyph,
             "circle" | "variable" | "random" => S::Circle,
             "filled-circle" | "data" | "observed" => S::FilledCircle,
             "square" | "equality" | "=" => S::Square,
@@ -1023,7 +1025,7 @@ fn factor_graph_summary(d: &Diagram) -> String {
     let count = |f: &dyn Fn(Option<S>) -> bool| d.nodes.iter().filter(|n| f(n.shape)).count();
     let kinds: Vec<String> = [
         (
-            count(&|s| matches!(s, None | Some(S::Box))),
+            count(&|s| matches!(s, None | Some(S::Box | S::Glyph))),
             "factor",
             "factors",
         ),
@@ -1214,7 +1216,12 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             // #1151: a factor graph's edges are undirected, their label (the
             // interface) at the factor's end
             let factor_graph = d.factor_graph();
-            let is_factor = |n: &Node| matches!(n.shape, None | Some(graph::NodeShape::Box));
+            let is_factor = |n: &Node| {
+                matches!(
+                    n.shape,
+                    None | Some(graph::NodeShape::Box | graph::NodeShape::Glyph)
+                )
+            };
             let label_at = factor_graph.then(|| match (is_factor(a), is_factor(b)) {
                 (false, true) => 0.8,
                 (true, false) => 0.2,

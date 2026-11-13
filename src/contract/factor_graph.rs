@@ -160,6 +160,41 @@ pub(crate) fn tex_lite(s: &str) -> String {
     out
 }
 
+/// A factor's glyph (#1166): the usual symbol of its distribution, else its
+/// capitals (`NormalMixture` → `NM`), else the name cut to four letters.
+pub(crate) fn glyph(name: &str) -> String {
+    let n = name.trim();
+    let l = n.to_ascii_lowercase();
+    let known: &[(&str, &str)] = &[
+        ("mvnormal", "𝒩"),
+        ("normalmixture", "NM"),
+        ("normal", "𝒩"),
+        ("gaussian", "𝒩"),
+        ("gamma", "Γ"),
+        ("beta", "Beta"),
+        ("bernoulli", "Ber"),
+        ("binomial", "Bin"),
+        ("categorical", "Cat"),
+        ("matrixdirichlet", "Dir"),
+        ("dirichlet", "Dir"),
+        ("discretetransition", "T"),
+        ("transition", "T"),
+        ("poisson", "Poi"),
+        ("exponential", "Exp"),
+        ("uniform", "U"),
+        ("wishart", "𝒲"),
+        ("probit", "Φ"),
+    ];
+    if let Some((_, g)) = known.iter().find(|(k, _)| l.starts_with(k)) {
+        return g.to_string();
+    }
+    let caps: String = n.chars().filter(|c| c.is_ascii_uppercase()).collect();
+    if (2..=3).contains(&caps.len()) {
+        return caps;
+    }
+    n.chars().take(4).collect()
+}
+
 /// A list-of-structs option (`edges :=`, `marginals :=`) as rows.
 fn list(options: &Row, name: &str) -> Result<Vec<Row>, String> {
     let v = match options.get(name) {
@@ -341,8 +376,10 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         let id = get(r, &["id"]).unwrap_or_default();
         // an equality node with a folded variable shows (and is) that variable
         let var = folded_into(&id);
+        let is_factor = kind(r).as_deref() == Some("factor");
         let label = match var.as_deref().and_then(row_of) {
             Some(v) => label_of(v),
+            None if is_factor => glyph(&get(r, &["name", "label"]).unwrap_or_default()),
             None => label_of(r),
         };
         let m = latest(var.as_deref().unwrap_or(&id));
@@ -367,6 +404,12 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
                 )
             ))
         }));
+        // a factor's full name goes with its glyph (in the tooltip)
+        if let Some(name) = is_factor.then(|| get(r, &["name", "label"])).flatten() {
+            if let Some(b) = badges.last_mut() {
+                *b = Value::Str(name);
+            }
+        }
     }
     let n = ids.len();
     let mut cols = vec![
@@ -724,6 +767,17 @@ mod tests {
             p.contains("factor_graph/no-equality: variable v4 meets 3"),
             "{p}"
         );
+    }
+
+    #[test]
+    fn factors_read_as_glyphs() {
+        assert_eq!(glyph("NormalMeanPrecision"), "𝒩");
+        assert_eq!(glyph("GammaShapeRate"), "Γ");
+        assert_eq!(glyph("DiscreteTransition"), "T");
+        assert_eq!(glyph("MatrixDirichlet"), "Dir");
+        assert_eq!(glyph("NormalMixture"), "NM");
+        assert_eq!(glyph("SoftMaxGate"), "SMG");
+        assert_eq!(glyph("Foo"), "Foo");
     }
 
     #[test]
