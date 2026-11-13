@@ -360,6 +360,108 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
     }
     // edges: factor → variable on `out`, variable → factor otherwise; a
     // folded variable's edge to its equality node goes
+    // #1152: the message schedule as story steps along the edges, in
+    // (iteration, step) order
+    let schedule = list(options, "schedule")?;
+    let num = |r: &Row, k: &str| get(r, &[k]).and_then(|s| s.parse::<f64>().ok());
+    let mut order: Vec<&Row> = schedule.iter().collect();
+    order.sort_by(|a, b| {
+        let key = |r: &Row| {
+            (
+                num(r, "iteration").unwrap_or(0.0),
+                num(r, "step").unwrap_or(0.0),
+            )
+        };
+        let (ka, kb) = (key(a), key(b));
+        ka.0.total_cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+    });
+    let shown = |id: &str| -> String {
+        // a node's label as drawn (a folded variable shows on its equality node)
+        let id = folded
+            .iter()
+            .find(|(_, e)| e == id)
+            .map_or(id, |(v, _)| v.as_str());
+        row_of(id).map(label_of).unwrap_or_else(|| id.to_string())
+    };
+    let at_iteration = |id: &str, it: f64| -> Option<String> {
+        let id = folded
+            .iter()
+            .find(|(_, e)| e == id)
+            .map_or(id, |(v, _)| v.as_str());
+        marginals
+            .iter()
+            .filter(|m| get(m, &["variable"]).as_deref() == Some(id))
+            .filter(|m| get(m, &["component"]).is_none())
+            .find(|m| num(m, "iteration") == Some(it))
+            .and_then(|m| {
+                let mean = num(m, "mean")?;
+                let f = |x: f64| {
+                    crate::format::format_number_l(
+                        x,
+                        MetricFmt::Plain,
+                        &crate::format::Locale::default(),
+                    )
+                };
+                Some(match num(m, "sd") {
+                    Some(sd) => format!("{} ± {}", f(mean), f(sd)),
+                    None => f(mean),
+                })
+            })
+    };
+    let mut steps_of: Vec<((String, String), Vec<J>)> = Vec::new();
+    for (i, r) in order.iter().enumerate() {
+        let (Some(v), Some(f)) = (get(r, &["variable"]), get(r, &["factor"])) else {
+            continue;
+        };
+        if is_folded(&v) {
+            continue;
+        }
+        let iface = get(r, &["interface"]).unwrap_or_default();
+        let drawn = if iface == "out" {
+            (f.clone(), v.clone())
+        } else {
+            (v.clone(), f.clone())
+        };
+        let to_factor = get(r, &["direction"]).is_some_and(|d| d.eq_ignore_ascii_case("to_factor"));
+        let (src, dst) = if to_factor { (&v, &f) } else { (&f, &v) };
+        let back = *src != drawn.0;
+        let it = num(r, "iteration").unwrap_or(0.0);
+        let mut t = format!(
+            "Iteration {} · message {}: {} → {}",
+            crate::format::format_number_l(it, MetricFmt::Plain, &crate::format::Locale::default()),
+            num(r, "step").map_or(String::new(), |s| {
+                crate::format::format_number_l(
+                    s,
+                    MetricFmt::Plain,
+                    &crate::format::Locale::default(),
+                )
+            }),
+            shown(src),
+            shown(dst)
+        );
+        if !iface.is_empty() {
+            t.push_str(&format!(" ({})", tex_lite(&iface)));
+        }
+        if !to_factor {
+            if let Some(m) = at_iteration(dst, it) {
+                t.push_str(&format!(
+                    "; {} after iteration {}: {m}",
+                    shown(dst),
+                    crate::format::format_number_l(
+                        it,
+                        MetricFmt::Plain,
+                        &crate::format::Locale::default()
+                    )
+                ));
+            }
+        }
+        let step =
+            serde_json::json!({ "n": i, "t": t, "dir": if back { "back" } else { "forward" } });
+        match steps_of.iter_mut().find(|(k, _)| *k == drawn) {
+            Some((_, v)) => v.push(step),
+            None => steps_of.push((drawn, vec![step])),
+        }
+    }
     let list: Vec<J> = edges
         .iter()
         .filter_map(|e| {
@@ -370,6 +472,9 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             let iface = get(e, &["interface"]).unwrap_or_default();
             let (from, to) = if iface == "out" { (f, v) } else { (v, f) };
             let mut o = Map::new();
+            if let Some((_, st)) = steps_of.iter().find(|(k, _)| k.0 == from && k.1 == to) {
+                o.insert("steps".into(), J::Array(st.clone()));
+            }
             o.insert("from".into(), J::String(from));
             o.insert("to".into(), J::String(to));
             if !iface.is_empty() {
@@ -503,6 +608,63 @@ mod tests {
             "{edges}"
         );
         assert!(!edges.contains("v4"), "the folded edge is gone: {edges}");
+    }
+
+    /// #1152: the schedule becomes story steps on the drawn edges, in
+    /// (iteration, step) order, `back` for a message against the drawn
+    /// direction, the receiving variable's marginal in the caption.
+    #[test]
+    fn a_schedule_steps_along_the_edges() {
+        let (nodes, mut options) = coin();
+        options.insert(
+            "schedule".into(),
+            serde_json::json!([
+                {"iteration": 2, "step": 1, "variable": "e4", "factor": "f1", "interface": "p", "direction": "to_factor"},
+                {"iteration": 1, "step": 2, "variable": "e4", "factor": "f1", "interface": "p", "direction": "to_variable"},
+                {"iteration": 1, "step": 1, "variable": "e4", "factor": "f0", "interface": "out", "direction": "to_variable"}
+            ]),
+        );
+        let cols = columns(&nodes, &options).unwrap();
+        let edges: J =
+            serde_json::from_str(&crate::value_text(&col(&cols, Role::Edges)[0])).unwrap();
+        let steps = |from: &str, to: &str| {
+            edges
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["from"] == from && e["to"] == to)
+                .map(|e| e["steps"].clone())
+                .unwrap()
+        };
+        // Beta's out: drawn f0 → e4, the message runs that way: step 0
+        let beta = steps("f0", "e4");
+        assert_eq!(beta[0]["n"], 0);
+        assert_eq!(beta[0]["dir"], "forward");
+        assert!(
+            beta[0]["t"]
+                .as_str()
+                .unwrap()
+                .starts_with("Iteration 1 · message 1: Beta → θ (out)"),
+            "{beta}"
+        );
+        // e4 → f1 drawn; to_variable runs back, iteration 1 step 2 is n 1
+        let p = steps("e4", "f1");
+        assert_eq!(
+            (p[0]["n"].clone(), p[0]["dir"].clone()),
+            (J::from(1), J::from("back"))
+        );
+        assert_eq!(
+            (p[1]["n"].clone(), p[1]["dir"].clone()),
+            (J::from(2), J::from("forward"))
+        );
+        // θ (folded into e4) gets iteration 1's marginal
+        assert!(
+            p[0]["t"]
+                .as_str()
+                .unwrap()
+                .ends_with("; θ after iteration 1: 0.4 ± 0.2"),
+            "{p}"
+        );
     }
 
     #[test]
