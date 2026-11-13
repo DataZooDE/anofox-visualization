@@ -3,3 +3,5 @@
 //! modules registered first ([`crate::module::register`]).
 
 pub mod dashboard;
+#[cfg(feature = "serve")]
+pub mod serve;
