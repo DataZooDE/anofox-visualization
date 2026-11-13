@@ -101,6 +101,8 @@ pub struct Node {
     pub category: Option<usize>,
     /// The node's `::STORY` caption: a story step that lights it up.
     pub story: Option<String>,
+    /// A sentence for the node's tooltip (`::TOOLTIP`, #1166).
+    pub note: Option<String>,
     /// The node's swimlane (`::LANE`), an index into [`Diagram::lanes`].
     pub lane: Option<usize>,
     /// A pinned layer (`::XAXIS`) and, with `::YAXIS`, a pinned position.
@@ -282,6 +284,7 @@ impl Diagram {
         let upstream = col(Role::Upstream);
         let edges_col = col(Role::Edges);
         let story = col(Role::Story);
+        let note = col(Role::Tooltip);
         let line_style = col(Role::LineStyle);
         let lane_col = col(Role::Lane);
         let shape_col = col(Role::Shape);
@@ -353,6 +356,7 @@ impl Diagram {
                 status,
                 category,
                 story: cell(story).and_then(text),
+                note: cell(note).and_then(text),
                 lane: cell(lane_col).and_then(text).map(|k| {
                     lanes.iter().position(|c| *c == k).unwrap_or_else(|| {
                         lanes.push(k);
@@ -1264,6 +1268,9 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             }
             if let Some(b) = &nd.badge {
                 tooltip.push_str(&format!(" ({b})"));
+            }
+            if let Some(n) = &nd.note {
+                tooltip.push_str(&format!(" — {n}"));
             }
             let accent = nd
                 .status
