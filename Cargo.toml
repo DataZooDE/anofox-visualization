@@ -176,12 +176,13 @@ crate-type = ["cdylib", "rlib"]
 # 0.44.0 (sipemu/ggplot-rs#488, #1107): the summary compares two series per x.
 # 0.45.0 (sipemu/ggplot-rs#489, #1107): a band's width, widens / narrows.
 # 0.47.0 (sipemu/ggplot-rs#497, #1153): `graph::draw` — `::DIAGRAM`'s drawing.
+# 0.49.0 (sipemu/ggplot-rs#506, #1166): glyph factors; bus edges labelled by tooltip.
 # 0.48.1 (sipemu/ggplot-rs#505): a factor graph's parameter edges run as a bus.
 # 0.48.0 (sipemu/ggplot-rs#493–#497): stacks follow the fill levels; an
 # unmapped column named like an aesthetic changes nothing; factor-graph shapes
 # and the banded layout (#1151).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.48.1", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.49.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
