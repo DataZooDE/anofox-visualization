@@ -20550,6 +20550,82 @@ function placeTip(tip, x, y) {
   tip.style.left = Math.max(pad, Math.min(left, innerWidth - pad - w)) + "px";
   tip.style.top = Math.max(pad, Math.min(top, innerHeight - pad - h)) + "px";
 }
+// #1172: a factor graph's hover focus — hovering a node keeps it, its edges
+// and its neighbours, hovering an edge its two ends; the rest fades. Its own
+// layer ("hoverfocus"), so a click's selection or a story step still owns
+// the dimming when set.
+const isFactorGraph = (svg) => {
+  if (svg._dpFg === undefined) svg._dpFg = !!svg?.hasAttribute("data-diagram") && !!svg.querySelector("[data-note]");
+  return svg._dpFg;
+};
+function fgFocus(svg, el) {
+  const st = svg._dpEmph;
+  if (el && st && (st.has("select") || st.has("filter") || st.has("story"))) el = null;
+  let keep = null;
+  if (el) {
+    const node = el.getAttribute("data-node");
+    const edge = el.getAttribute("data-edge");
+    const ends = new Set();
+    let onEdge;
+    if (edge != null) {
+      ends.add(el.getAttribute("data-from")).add(el.getAttribute("data-to"));
+      onEdge = (a, b) => a + ">" + b === edge;
+    } else if (node != null) {
+      ends.add(node);
+      for (const e of svg.querySelectorAll("[data-edge]")) {
+        const [a, b] = [e.getAttribute("data-from"), e.getAttribute("data-to")];
+        if (a === node) ends.add(b);
+        if (b === node) ends.add(a);
+      }
+      onEdge = (a, b) => a === node || b === node;
+    }
+    if (onEdge)
+      keep = (e) => {
+        const id = e.getAttribute("data-node") ?? e.getAttribute("data-of");
+        if (id != null) return ends.has(id);
+        const a = e.getAttribute("data-from");
+        return a == null ? null : onEdge(a, e.getAttribute("data-to"));
+      };
+  }
+  dpAnim.emph(svg, "hoverfocus", keep ? (e) => (keep(e) === false ? (e.tagName === "polyline" ? 0.3 : 0.2) : null) : null);
+}
+
+// #1172: a factor graph edge's card — the variable and factor it joins, the
+// interface, what its messages mean, how many the schedule passes along it.
+function edgeCard(el) {
+  const edge = el.getAttribute("data-edge");
+  const svg = edge != null && rootSvg(el);
+  if (!svg || !isFactorGraph(svg)) return null;
+  const nodeOf = (id) => svg.querySelector(`rect[data-node="${CSS.escape(id)}"]`);
+  const shapeOf = (n) => ((n?.getAttribute("class") || "").match(/dp-node-([a-z-]+)/) || [])[1] || "box";
+  const ends = [el.getAttribute("data-from"), el.getAttribute("data-to")].map(nodeOf);
+  const isFactor = (n) => ["glyph", "box"].includes(shapeOf(n));
+  const f = ends.find(isFactor);
+  const v = ends.find((n) => n !== f);
+  if (!f || !v) return null;
+  const name = (n) => n.getAttribute("data-xtext") || n.getAttribute("data-node") || "";
+  const fname = f.getAttribute("data-badge") || name(f);
+  const vname = name(v);
+  const tipText = el.getAttribute("data-tip") || "";
+  const iface = tipText.includes(": ") ? tipText.slice(tipText.lastIndexOf(": ") + 2) : "";
+  const kind = shapeOf(v);
+  const body =
+    kind === "text"
+      ? `The constant ${vname} is a fixed parameter of ${fname}${iface ? ` (its ${iface})` : ""}; nothing flows back.`
+      : kind === "filled-circle"
+      ? `The observation ${vname} enters the model here: ${fname} turns the measured value into a message about the quantities behind it.`
+      : `Messages run both ways here: ${fname} → ${vname} says what this factor implies about ${vname}; ${vname} → ${fname} what the rest of the graph believes about it.`;
+  let n = 0;
+  try {
+    n = JSON.parse(svg.getAttribute("data-story") || "[]").filter((s) => s.e === edge).length;
+  } catch (_) {}
+  return {
+    card: true,
+    head: `<div class="tip-kicker">${escapeHtml("Edge" + (iface ? " · " + iface : ""))}</div><div class="tip-card-title">${escapeHtml(vname + " — " + fname)}</div>`,
+    body: `<p class="tip-note">${escapeHtml(body)}</p>` + (n ? `<p class="tip-note">${n} message${n === 1 ? "" : "s"} in the schedule pass along it — Step walks through them.</p>` : ""),
+  };
+}
+
 function attachHover() {
   const tip = $("dp-tip");
   // Only the charts not seen yet (a lazily rendered tab adds some): a wired
@@ -20645,6 +20721,7 @@ function attachHover() {
         const svg = rootSvg(el);
         if (hoverFocusOn(svg)) hoverFocus(svg, series);
       }
+      if (!isMapMark && !(Date.now() - dpTouchAt < 1000) && isFactorGraph(rootSvg(el))) fgFocus(rootSvg(el), el);
       // The crosshair shows the tooltip — except for a mark focused from the
       // keyboard (a11y), which has no pointer to drive the crosshair.
       if (pointered() && document.activeElement !== el) return;
@@ -20653,7 +20730,7 @@ function attachHover() {
       // A map feature's ::LABEL may run over several lines: the first is the
       // heading, the rest follow as they are.
       const [head, ...lines] = isMapMark ? info.x.split("\n") : [info.x];
-      const ct = isMapMark ? null : nodeCard(el) || customTip(el, info, fill) || pointTip(el, info, fill); // #751, #752
+      const ct = isMapMark ? null : nodeCard(el) || edgeCard(el) || customTip(el, info, fill) || pointTip(el, info, fill); // #751, #752
       tip.classList.toggle("dp-tip-card", !!ct?.card);
       tip.innerHTML =
         (ct?.head ?? (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "")) +
@@ -20674,6 +20751,7 @@ function attachHover() {
     el.addEventListener("mouseleave", () => {
       if (isMapMark) mapHoverEmph(null);
       else if (!rule && rootSvg(el)._dpHf) hoverFocus(rootSvg(el), null);
+      if (!isMapMark && isFactorGraph(rootSvg(el))) fgFocus(rootSvg(el), null);
       if (isMapMark && dpTipMark && dpTipMark.x === el.getAttribute("data-x")) dpTipMark = null;
       if (pointered()) return;
       tip.classList.remove("show");

@@ -114,6 +114,38 @@ check(card && card.kicker === "Variable" && /^The variable /.test(card.title) &&
 // …and says what the data did to the prior (#1172)
 check(card && /6 observations moved τ from 1 ± 1 to 2\.85 ± 1\.43\.$/.test(card.note), "the card says what the observations did to the prior", card);
 
+// #1172: one teal, labels as mathematics (italic), hover focus on the
+// neighbourhood, and a card on an edge.
+const look = await page.evaluate(() => {
+  const svg = document.querySelector("svg[data-diagram]");
+  return {
+    italic: [...svg.querySelectorAll("text")].some((t) => t.textContent === "θ" && t.getAttribute("font-style") === "italic"),
+    teal: [...svg.querySelectorAll("polyline[data-edge]")].every((e) => (e.getAttribute("stroke") || "").toUpperCase() === "#0D9488"),
+  };
+});
+check(look.italic && look.teal, "a factor graph in one teal, its labels in the math italic", look);
+const focus = await page.evaluate(async () => {
+  const svg = document.querySelector("svg[data-diagram]");
+  const theta = svg.querySelector('rect[data-node="e4"]');
+  theta.dispatchEvent(new MouseEvent("mouseenter"));
+  const op = (id) => svg.querySelector(`rect[data-node="${id}"]`).style.opacity;
+  const r = { f1: op("f1"), v0: op("v0") };
+  theta.dispatchEvent(new MouseEvent("mouseleave"));
+  r.after = op("v0");
+  return r;
+});
+check(focus.f1 === "" && Number(focus.v0) < 1 && focus.after === "", "hovering θ keeps its factors and fades the rest", focus);
+const edgeCard = await page.evaluate(async () => {
+  const e = document.querySelector('svg[data-diagram] polyline[data-edge="f1>v0"]');
+  e.dispatchEvent(new MouseEvent("mouseenter"));
+  await new Promise((r) => setTimeout(r, 50));
+  const t = document.querySelector(".dp-tip-card.show");
+  const out = t ? { kicker: t.querySelector(".tip-kicker")?.textContent, title: t.querySelector(".tip-card-title")?.textContent, note: t.querySelector(".tip-note")?.textContent } : null;
+  e.dispatchEvent(new MouseEvent("mouseleave"));
+  return out;
+});
+check(edgeCard && edgeCard.kicker === "Edge · out" && edgeCard.title === "y₀ — Bernoulli" && /^The observation y₀ enters the model here/.test(edgeCard.note), "an edge's hover is a card", edgeCard);
+
 // A ::SELECT_AS before the macro names what a click on a node sets (#1152).
 const sql = `
 SELECT 'node'::SELECT_AS;
