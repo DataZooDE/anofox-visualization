@@ -951,6 +951,9 @@ fn list_names(names: &[String]) -> String {
 /// trailing full stop): steps, stages, where it starts and ends, the
 /// connections, loops and the largest value.
 fn summary(d: &Diagram, p: &Placed) -> String {
+    if d.factor_graph() {
+        return factor_graph_summary(d);
+    }
     let n = d.nodes.len();
     let order = reading(p);
     let has_in = |v: usize| d.edges.iter().any(|e| e.to == v && e.from != v);
@@ -1007,6 +1010,83 @@ fn summary(d: &Diagram, p: &Placed) -> String {
     }
     if d.total_nodes > n {
         parts.push(format!("showing {n} of {} nodes", d.total_nodes));
+    }
+    parts.join("; ")
+}
+
+/// A factor graph's sentence (#1152): its nodes by kind, its layers, its
+/// connections and what the variables are estimated at: "Factor graph: 6
+/// factors, 1 variable, 4 observed, 1 equality node and 2 constants in 2
+/// layers (param, obs); 11 connections; θ 0.56 (± 0.16)".
+fn factor_graph_summary(d: &Diagram) -> String {
+    use ggplot_rs::graph::NodeShape as S;
+    let count = |f: &dyn Fn(Option<S>) -> bool| d.nodes.iter().filter(|n| f(n.shape)).count();
+    let kinds: Vec<String> = [
+        (
+            count(&|s| matches!(s, None | Some(S::Box))),
+            "factor",
+            "factors",
+        ),
+        (count(&|s| s == Some(S::Circle)), "variable", "variables"),
+        (
+            count(&|s| s == Some(S::FilledCircle)),
+            "observed",
+            "observed",
+        ),
+        (
+            count(&|s| s == Some(S::Square)),
+            "equality node",
+            "equality nodes",
+        ),
+        (
+            count(&|s| s == Some(S::FilledSquare)),
+            "deterministic node",
+            "deterministic nodes",
+        ),
+        (count(&|s| s == Some(S::Text)), "constant", "constants"),
+    ]
+    .into_iter()
+    .filter(|(n, _, _)| *n > 0)
+    .map(|(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
+    .collect();
+    // every kind, "a, b and c"
+    let all = match kinds.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => kinds.join(""),
+    };
+    let mut first = format!("Factor graph: {all}");
+    if d.lanes.len() > 1 {
+        first.push_str(&format!(
+            " in {} layers ({})",
+            d.lanes.len(),
+            d.lanes.join(", ")
+        ));
+    }
+    let mut parts = vec![first];
+    let m = d.edges.len();
+    if m > 0 {
+        parts.push(format!("{m} connection{}", if m == 1 { "" } else { "s" }));
+    }
+    let estimates: Vec<String> = d
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let v = n.fvalue.as_ref()?;
+            Some(match &n.badge {
+                Some(b) => format!("{} {v} ({b})", n.label),
+                None => format!("{} {v}", n.label),
+            })
+        })
+        .collect();
+    if !estimates.is_empty() {
+        parts.push(list_names(&estimates));
+    }
+    if d.total_nodes > d.nodes.len() {
+        parts.push(format!(
+            "showing {} of {} nodes",
+            d.nodes.len(),
+            d.total_nodes
+        ));
     }
     parts.join("; ")
 }
@@ -1335,7 +1415,11 @@ pub(crate) fn render(
     let mut out = svg_open(place, width, height);
     out.push_str(&format!(
         "<desc>{}</desc>",
-        esc(&format!("Diagram: {summary}. Steps: {}", steps_text(d, &p)))
+        esc(&if d.factor_graph() {
+            format!("{summary}. Nodes: {}", steps_text(d, &p))
+        } else {
+            format!("Diagram: {summary}. Steps: {}", steps_text(d, &p))
+        })
     ));
     out.push_str(&format!(
         "<g class=\"dp-diagram\" transform=\"translate({:.1},{:.1}) scale({})\" font-family=\"{font}\">",
@@ -1910,6 +1994,48 @@ mod tests {
         // no story, no animate: no motion attributes
         let plain = render_with(&pipeline(), 900, 320, &RenderOptions::default()).unwrap();
         assert!(!plain.contains("data-story") && !plain.contains("data-animate"));
+    }
+
+    /// #1152: a factor graph's sentence names its kinds, layers and
+    /// estimates, not "steps in stages".
+    #[test]
+    fn a_factor_graph_reads_as_one() {
+        let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
+        let cols = vec![
+            Column::new("id", Role::Diagram, v(&["f", "t", "y", "c"])),
+            Column::new("l", Role::Label, v(&["Beta", "θ", "y", "2"])),
+            Column::new(
+                "k",
+                Role::Shape,
+                v(&["factor", "variable", "data", "constant"]),
+            ),
+            Column::new("b", Role::Lane, v(&["param", "param", "obs", "param"])),
+            Column::new(
+                "m",
+                Role::Metric(MetricFmt::Plain),
+                vec![Value::Na, Value::Float(0.56), Value::Na, Value::Na],
+            ),
+            Column::new(
+                "e",
+                Role::Edges,
+                vec![
+                    s(
+                        r#"[{"from": "f", "to": "t"}, {"from": "t", "to": "y"}, {"from": "c", "to": "f"}]"#,
+                    ),
+                    Value::Na,
+                    Value::Na,
+                    Value::Na,
+                ],
+            ),
+        ];
+        let svg = render_with(&cols, 600, 300, &RenderOptions::default()).unwrap();
+        let sum = "Factor graph: 1 factor, 1 variable, 1 observed and 1 constant in 2 layers (param, obs); 3 connections; θ 0.56";
+        assert!(
+            svg.contains(&format!(r#"data-summary="{sum}""#)),
+            "{}",
+            &svg[..svg.find('>').unwrap()]
+        );
+        assert!(svg.contains(&format!("<desc>{sum}. Nodes: ")));
     }
 
     /// #1152: `steps` on ::EDGES items become edge story steps, in their
