@@ -1,7 +1,7 @@
 -- @title How does the model reason from our inspections?
 -- @group How it works
 -- @tags  diagram, factor graph, bayesian
--- @description Three Bayesian models drawn as factor graphs, each with the practical problem it solves: the defect share of returned units, a machine's cycle time for shift planning, and in which shift a machine's condition changed.
+-- @description Three Bayesian models as factor graphs, each with the problem it solves: a defect share, a cycle time, when a machine's condition changed.
 --
 -- How does the model reason from our inspections? Three models as an
 -- inference library writes them (nodes, edges and posterior marginals),
