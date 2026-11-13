@@ -43,7 +43,7 @@ WHERE function_name LIKE 'anofox_plot%'
   AND list_contains(map_keys(tags), 'anofox.consumes')
   AND list_contains(map_keys(tags), 'anofox.contract');
 ----
-22
+23
 
 query I
 SELECT parameters FROM duckdb_functions() WHERE function_name = 'anofox_plot_prediction';
