@@ -168,6 +168,8 @@ pub struct Belief {
     pub hi: f64,
     /// (iteration, mean, sd), in iteration order.
     pub its: Vec<(f64, f64, f64)>,
+    /// The prior's (mean, sd) (#1172).
+    pub prior: Option<(f64, f64)>,
 }
 
 impl Belief {
@@ -188,19 +190,39 @@ impl Belief {
             })
             .filter(|t| t.2 > 0.0 && t.1.is_finite())
             .collect();
-        (hi > lo && !its.is_empty()).then_some(Belief { lo, hi, its })
+        let prior = v
+            .get("prior")
+            .and_then(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?)))
+            .filter(|p| p.0.is_finite() && p.1 > 0.0);
+        (hi > lo && !its.is_empty()).then_some(Belief { lo, hi, its, prior })
     }
-    /// The curve of iteration `k` (a normal density over `lo..hi`), 0..=1
-    /// against the sharpest iteration's peak, at 25 points.
-    pub fn heights(&self, k: usize) -> Vec<f64> {
-        let min_sd = self.its.iter().map(|t| t.2).fold(f64::INFINITY, f64::min);
-        let (_, m, sd) = self.its[k.min(self.its.len() - 1)];
+    /// The sharpest sd, prior included: every curve's peak against it.
+    fn min_sd(&self) -> f64 {
+        self.its
+            .iter()
+            .map(|t| t.2)
+            .chain(self.prior.map(|p| p.1))
+            .fold(f64::INFINITY, f64::min)
+    }
+    fn curve(&self, m: f64, sd: f64, peak: f64) -> Vec<f64> {
         (0..25)
             .map(|i| {
                 let x = self.lo + (self.hi - self.lo) * i as f64 / 24.0;
-                min_sd / sd * (-0.5 * ((x - m) / sd).powi(2)).exp()
+                peak * (-0.5 * ((x - m) / sd).powi(2)).exp()
             })
             .collect()
+    }
+    /// The prior's curve on the same scale, its peak at least 0.3 (a vague
+    /// prior still reads as a flat line, not as nothing).
+    pub fn prior_heights(&self) -> Option<Vec<f64>> {
+        let (m, sd) = self.prior?;
+        Some(self.curve(m, sd, (self.min_sd() / sd).max(0.3)))
+    }
+    /// The curve of iteration `k` (a normal density over `lo..hi`), 0..=1
+    /// against the sharpest curve's peak, at 25 points.
+    pub fn heights(&self, k: usize) -> Vec<f64> {
+        let (_, m, sd) = self.its[k.min(self.its.len() - 1)];
+        self.curve(m, sd, self.min_sd() / sd)
     }
 }
 
@@ -1367,6 +1389,8 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 // #1166: the final belief as a curve over the node, a
                 // colour of its own
                 belief: nd.belief.as_ref().map(|b| (b.heights(b.its.len() - 1), t.color(v))),
+                // #1172: the prior, faint behind it
+                prior: nd.belief.as_ref().and_then(|b| b.prior_heights()).map(|h| (h, muted)),
                 spark: (nd.spark.len() >= 2).then(|| {
                     (
                         nd.spark.clone(),

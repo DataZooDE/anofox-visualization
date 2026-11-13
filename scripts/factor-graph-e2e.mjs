@@ -79,6 +79,14 @@ await page.evaluate(() => {
 });
 check(finalCurve && firstCurve && firstCurve !== finalCurve && (await curve()) === finalCurve, "a belief curve shows the step's iteration, the final one at the overview", { finalCurve: !!finalCurve });
 
+// θ's prior sits behind its belief as a dashed outline (#1172).
+const prior = await page.evaluate(() => {
+  const svg = document.querySelector("svg[data-diagram]");
+  const p = svg && svg.querySelector(".dp-node-prior");
+  return p ? { dashed: !!p.getAttribute("stroke-dasharray"), of: p.closest("[data-of]")?.getAttribute("data-of") } : null;
+});
+check(prior && prior.dashed && prior.of === "e4", "θ's prior is a dashed outline behind its belief", prior);
+
 // A variable's tooltip draws its posterior mean over the iterations (#1152).
 const v = page.locator("rect[data-node][data-spark]").first();
 await v.scrollIntoViewIfNeeded();
@@ -95,6 +103,8 @@ const card = await page.evaluate(() => {
   return t ? { kicker: t.querySelector(".tip-kicker")?.textContent, title: t.querySelector(".tip-card-title")?.textContent, note: t.querySelector(".tip-note")?.textContent || "" } : null;
 });
 check(card && card.kicker === "Variable" && /^The variable /.test(card.title) && /^A hidden quantity/.test(card.note), "a variable's hover is a node card", card);
+// …and says what the data did to the prior (#1172)
+check(card && /6 observations moved τ from 1 ± 1 to 2\.85 ± 1\.43\.$/.test(card.note), "the card says what the observations did to the prior", card);
 
 // A ::SELECT_AS before the macro names what a click on a node sets (#1152).
 const sql = `

@@ -806,7 +806,8 @@ pub enum Role {
     Shape,
     /// A `::DIAGRAM` node's belief (`::BELIEF`, #1166): JSON `{lo, hi, its:
     /// [[iteration, mean, sd], …]}` — a curve over the node that sharpens as
-    /// the message steps go through the iterations.
+    /// the message steps go through the iterations; an optional `prior:
+    /// [mean, sd]` is drawn as a dashed outline behind it (#1172).
     Belief,
     /// Hide or place a chart's legend / colourbar (`::LEGEND`): `'none'`,
     /// `'top'`, `'right'`, `'bottom'` or `'left'`. Without it, a chart's
