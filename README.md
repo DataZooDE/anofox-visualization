@@ -335,6 +335,10 @@ The `dashboard` CLI and the standalone `serve` binary come from the core crate:
 | plot model results from Python or R | `anofox_plot_*` from pandas / polars / R | no | [Python & R](docs/python-r.md) |
 | use the anofox extensions' results | statistics, forecast, tabular, optimize, decide → `anofox_plot(...)` | no | [the conformance sections below](#conformance-with-anofox-statistics), [integration contract](docs/plans/integration-contract.md) |
 
+## Why SQL for AI-made charts
+
+When an AI answers a data question with a chart, annotated SQL is one statement where generated Python is 15–40 lines, so it needs fewer output tokens. Edits are one more column, and there is no code to sandbox. The same SQL goes through the server's policies and limits, and the answer can become a dashboard panel, a report or an alert. Python still wins on range and familiarity. The [full comparison](https://datazoode.github.io/anofox-visualization/next/start/why-sql/) lists where each one wins; a benchmark with the same model, data and questions for both is under way ([#1044](https://github.com/DataZooDE/anofox-visualization/issues/1044)).
+
 ## Documentation
 
 - **[Annotation model & role reference](docs/DOCS.md)** — every `::ROLE`, layout, and serving mode.
