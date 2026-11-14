@@ -4816,7 +4816,14 @@ fn cartesian(
                 // rescaled one it is drawn at
                 lay = lay.data_attr("value", "y2raw").data_attr("vtext", "y2text");
             }
-            if !combo_names.is_empty() {
+            let trend_per_series = category.is_some() && matches!(ekind, Kind::Smooth);
+            if trend_per_series {
+                // a trend per ::CATEGORY series, in that series' colour —
+                // coloured by the measure's name instead, every series' fit
+                // was one path in one colour, zigzagging from series to
+                // series (#1121 sample 3)
+                lay = lay.color("cat");
+            } else if !combo_names.is_empty() {
                 let s = format!("__s{}", k + 1);
                 lay = if pure_bar_combo {
                     lay.fill(&s)
@@ -4872,6 +4879,10 @@ fn cartesian(
                 _ => plot.geom_col_with(card_col(o)),
             }
             .layer_aes(lay);
+            if trend_per_series {
+                // the series' own keys name it already
+                plot = plot.show_legend(false);
+            }
             if on_y2 {
                 let name = y2.as_ref().map(|p| p.name.as_str()).unwrap_or_default();
                 let tip = format!(
