@@ -192,6 +192,78 @@ await page.locator('svg[data-diagram] rect[data-node="f1"]').first().click({ for
 await page.waitForFunction(() => /picked: f1/.test(document.body.innerText), null, { timeout: 20000 }).catch(() => {});
 const picked = await page.evaluate(() => (document.body.innerText.match(/picked: \S+/) || [""])[0]);
 check(picked === "picked: f1" && /[?&]v\.node=f1/.test(page.url()), "a click on a node sets the ::SELECT_AS variable", { picked, url: page.url() });
+// …and so does the keyboard: Tab to the graph, Home to a node, Enter (#1152)
+await page.evaluate(() => document.querySelector("svg[data-diagram]").focus());
+await page.keyboard.press("Home");
+const keyed = await page.evaluate(() => document.activeElement?.getAttribute("data-node"));
+await page.keyboard.press("Enter");
+await page.waitForFunction((id) => document.body.innerText.includes("picked: " + id), keyed, { timeout: 20000 }).catch(() => {});
+const kpicked = await page.evaluate(() => (document.body.innerText.match(/picked: \S+/) || [""])[0]);
+check(keyed && keyed !== "f1" && kpicked === "picked: " + keyed, "Enter on a focused node selects it", { keyed, kpicked });
+// A diagram shrunk to fit a narrow panel zooms and pans in place (#1152).
+const narrow = await browser.newPage({ viewport: { width: 600, height: 900 } });
+narrow.on("pageerror", (e) => errors.push(String(e)));
+await narrow.goto(base + "?dashboard=how-does-the-model-reason-from-our-inspections");
+await narrow.waitForFunction(() => document.querySelectorAll("svg[data-diagram]").length >= 3, null, { timeout: 120000 });
+await narrow.waitForTimeout(500);
+const zv = () =>
+  narrow.evaluate(() => {
+    const h = [...document.querySelectorAll(".panel-svg")].find((x) => x._dpDz);
+    if (!h) return null;
+    const r = h.getBoundingClientRect();
+    return {
+      t: h.querySelector("svg > g.dp-diagram").getAttribute("transform"),
+      k: h._dpDz.k,
+      fit: h._dpDz.fit,
+      chip: !h.querySelector(".dp-diagram-reset").hidden,
+      box: { x: r.left, y: r.top, w: r.width, h: r.height },
+    };
+  });
+let z = await zv();
+check(z && z.fit < 1 && z.k === 1 && !z.chip, "a factor graph shrunk to fit has zoom, at home", z);
+const home = z.t;
+await narrow.evaluate(() => [...document.querySelectorAll(".panel-svg")].find((x) => x._dpDz).scrollIntoView({ block: "center" }));
+z = await zv();
+await narrow.mouse.move(z.box.x + z.box.w / 2, z.box.y + z.box.h / 2);
+await narrow.mouse.wheel(0, -200);
+check((await zv()).t === home, "a plain wheel scrolls, it doesn't zoom");
+await narrow.waitForTimeout(400);
+z = await zv(); // the page scrolled under the pointer
+await narrow.mouse.move(z.box.x + z.box.w / 2, z.box.y + z.box.h / 2);
+await narrow.keyboard.down("Control");
+await narrow.mouse.wheel(0, -200);
+await narrow.keyboard.up("Control");
+z = await zv();
+check(z.k > 1 && z.chip && z.t !== home && z.t.endsWith(home), "Ctrl + wheel zooms the drawing, the reset chip shows", z);
+const before = z.t;
+const url0 = narrow.url();
+await narrow.mouse.move(z.box.x + 8, z.box.y + z.box.h - 8);
+await narrow.mouse.down();
+await narrow.mouse.move(z.box.x + 60, z.box.y + z.box.h - 40, { steps: 5 });
+await narrow.mouse.up();
+z = await zv();
+check(z.t !== before && narrow.url() === url0, "a drag on the background pans, and selects nothing", { t: z.t, url: narrow.url() });
+// the keyboard: + zooms further, a node moved to off screen comes into view, 0 goes home
+await narrow.evaluate(() => [...document.querySelectorAll(".panel-svg")].find((x) => x._dpDz).querySelector("svg").focus());
+for (let i = 0; i < 4; i++) await narrow.keyboard.press("+");
+const seen = await narrow.evaluate(() => {
+  const h = [...document.querySelectorAll(".panel-svg")].find((x) => x._dpDz);
+  const hr = h.getBoundingClientRect();
+  const inside = (n) => {
+    const r = n.getBoundingClientRect();
+    return r.left >= hr.left - 1 && r.right <= hr.right + 1 && r.top >= hr.top - 1 && r.bottom <= hr.bottom + 1;
+  };
+  const off = [...h.querySelectorAll("[data-node][tabindex]")].find((n) => !inside(n));
+  if (!off) return null;
+  off.focus();
+  return inside(off);
+});
+check(seen === true, "a node focused off screen pans into view", seen);
+await narrow.keyboard.press("0");
+z = await zv();
+check(z.k === 1 && z.t === home && !z.chip, "0 goes back to the whole diagram", z);
+await narrow.close();
+
 check(!errors.length, "no page errors", errors);
 await browser.close();
 if (bad) {

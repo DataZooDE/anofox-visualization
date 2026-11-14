@@ -888,6 +888,8 @@ body.dp-fit-measuring,body.dp-fit-measuring *{transition:none !important}
 .panel-svg .dp-map-reset{position:absolute;top:6px;left:6px;z-index:2;min-width:28px;height:28px;padding:0 .4rem;border-radius:999px;border:1px solid var(--ax-line);background:var(--ax-card);color:var(--ax-ink);font-size:.9rem;cursor:pointer;box-shadow:var(--ax-shadow)}
 .panel-svg .dp-map-reset:hover{background:var(--ax-bg)}
 .panel-svg .dp-map-reset:focus-visible{outline:2px solid var(--ax-accent);outline-offset:2px}
+.panel-svg.dp-zoomed{cursor:grab;touch-action:none}.panel-svg.dp-zoomed.dp-panning{cursor:grabbing}
+.panel-svg .dp-diagram-reset{left:auto;right:6px}
 .dp-map-find{margin:.2rem 0 .4rem}
 .dp-map-find input{width:100%;max-width:280px;padding:.3rem .5rem;border:1px solid var(--ax-line);border-radius:6px;background:var(--ax-card);color:var(--ax-ink);font:inherit;font-size:.85rem}
 .dp-map-find input:focus-visible{outline:2px solid var(--ax-accent);outline-offset:1px}
