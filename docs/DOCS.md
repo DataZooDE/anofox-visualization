@@ -828,7 +828,7 @@ ORDER BY s.day;
 
 | Role | Draws |
 |------|-------|
-| `::XLINE` + `::XLINE_LABEL` | a dashed event line with its label at the top, one per row |
+| `::XLINE` + `::XLINE_LABEL` | a dashed event line with its label at the top, one per row; labels too close to fit side by side stack downwards in x order (none is dropped), one at the right edge is shifted inside the panel |
 | `::XBAND_FROM` + `::XBAND_TO` (+ `::XBAND_LABEL`) | a shaded x-range per row, labelled at its start |
 | `::REFLINE` + `::REFLINE_LABEL` | the reference line's label above its right end |
 | `::ANNOTATE` | a text callout at the row's (x, y), with a ring on the mark |
