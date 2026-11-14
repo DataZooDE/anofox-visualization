@@ -558,6 +558,17 @@ pub fn dashboard_files(dir: &std::path::Path, folders: bool) -> Result<Vec<DashF
         };
         let sql = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        // #1156: a dashboard needing a module this server lacks is not served
+        // (its module roles would only fail as unknown types); the operator
+        // is told which
+        if let Some(m) = crate::module::missing_message(&sql) {
+            eprintln!(
+                "  {}: {} — not served",
+                path.display(),
+                m.trim_end_matches('.')
+            );
+            continue;
+        }
         let mut meta = parse_dashboard_meta(&stem, &sql);
         let id = match &meta.id {
             None => stem,

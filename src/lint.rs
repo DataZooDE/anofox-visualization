@@ -38,7 +38,8 @@ pub struct Diagnostic {
     pub severity: Severity,
     /// 1-based statement index in the script.
     pub stmt: usize,
-    /// Stable machine code. Correctness: `sql-error` | `silent-setup` |
+    /// Stable machine code. Correctness: `module/missing` (a `::REQUIRES`
+    /// module this build lacks, #1156) | `sql-error` | `silent-setup` |
     /// `render-error` | `render-warning` (the plotting engine dropped data,
     /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
     /// `unknown-cast` | `theme/unknown` | `theme/multiple` | `locale/unknown`
@@ -337,6 +338,17 @@ pub fn check_opts<F>(script: &str, mut run_query: F, opts: LintOptions) -> Vec<D
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
 {
+    // #1156: a dashboard that needs a module this build lacks says that —
+    // and only that: its module roles would only show up as unknown casts
+    if let Some(message) = crate::module::missing_message(script) {
+        return vec![Diagnostic {
+            severity: Severity::Error,
+            stmt: 0,
+            code: "module/missing",
+            message,
+            sql: String::new(),
+        }];
+    }
     let mut diags = header_diags(script);
     // Replayed before each statement when `!opts.stateful_session` (a fresh
     // session each call); left empty (and never grown) when
