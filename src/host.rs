@@ -156,7 +156,7 @@ pub fn render_spec_checked(spec_json: &str, limits: &RenderLimits) -> Result<Str
     // A contract plot (`"plot": "terms"`, …) names its columns; no roles.
     let roles: &[serde_json::Value] = match obj.get("plot") {
         Some(serde_json::Value::String(p)) => {
-            if !crate::contract::PLOTS.contains(&p.as_str()) {
+            if !crate::contract::is_plot(p) {
                 return Err(format!(
                     "anofox_render: unknown plot '{p}' (one of {})",
                     crate::contract::PLOTS.join(", ")

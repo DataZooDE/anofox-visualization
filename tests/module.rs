@@ -109,3 +109,52 @@ fn a_module_lints_its_panel() {
     let d = anofox_visualization::lint::check("SELECT 'world'::HELLO;", run);
     assert!(!d.iter().any(|x| x.code == "module/lint"), "{d:?}");
 }
+
+/// Step 3b (D4a): a module's macros join the built-in table; a call of its
+/// contract macro plans like a built-in one and the module draws the plot.
+#[test]
+fn a_module_brings_a_contract_macro() {
+    setup();
+    let all = anofox_visualization::macros::all();
+    assert!(
+        all.iter().any(|m| m.name == "anofox_plot_hello"),
+        "listed with the built-ins"
+    );
+    assert!(all.iter().any(|m| m.name == "anofox_plot_terms"));
+    let (plot, binding) =
+        anofox_visualization::sql::contract_call::macro_binding("anofox_plot_hello");
+    assert_eq!(plot, "hello");
+    assert!(binding
+        .unwrap()
+        .contains(&("greeting".into(), "greeting".into())));
+    let svg = anofox_visualization::render_spec_checked(
+        r#"{"plot":"hello","rows":[{"name":"Ada"},{"name":"<Max>"}],"options":{"greeting":"Hi"}}"#,
+    )
+    .unwrap();
+    assert!(svg.contains(">Hi, Ada and &lt;Max&gt;</text>"), "{svg}");
+    // a macro name that exists is refused
+    struct Dup;
+    impl Module for Dup {
+        fn name(&self) -> &'static str {
+            "dup"
+        }
+        fn roles(&self) -> &'static [ModuleRole] {
+            &[]
+        }
+        fn render(
+            &self,
+            _: &[Column],
+            _: u32,
+            _: u32,
+            _: &RenderOptions,
+        ) -> Result<String, String> {
+            Ok(String::new())
+        }
+        fn macros(&self) -> &'static [anofox_visualization::macros::MacroSpec] {
+            &anofox_visualization::macros::MACROS[..1]
+        }
+    }
+    static DUP: Dup = Dup;
+    let e = module::register(&DUP).unwrap_err();
+    assert!(e.contains("exists already"), "{e}");
+}
