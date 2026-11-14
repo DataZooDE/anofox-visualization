@@ -2206,6 +2206,8 @@ where
                 percent_fraction_diag(&p.roles, &rows),
                 funnel_increase_diag(&p.roles, &rows),
                 share_sum_diag(&p.roles, &p.names, &rows),
+                negative_count_diag(&p.roles, &p.names, &rows),
+                stated_total_diag(&p.roles, &rows),
                 pie_limit_diag(&p.roles, &p.sql, &rows),
             ]
             .into_iter()
@@ -6987,6 +6989,198 @@ fn share_sum_diag(
             (sum * 100.0).round() / 100.0
         ),
     ))
+}
+
+/// #1120: a measure named like a count (`n`, `count`, `cnt`, `num_…`,
+/// `number_of_…`) with a negative value — usually a difference computed the
+/// wrong way round, or a join that subtracted. A name that says it is a
+/// change (`net`, `delta`, `diff`, `change`) is left alone.
+fn negative_count_diag(
+    roles: &[(usize, Role)],
+    names: &[(usize, String)],
+    rows: &[Map<String, Value>],
+) -> Option<(&'static str, String)> {
+    for (i, r) in roles {
+        if !matches!(r, Role::Value(_) | Role::Metric(_)) {
+            continue;
+        }
+        let Some((_, name)) = names.iter().find(|(k, _)| k == i) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        let words: Vec<&str> = lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let countish = |w: &&str| {
+            matches!(*w, "n" | "count" | "cnt" | "num" | "number" | "headcount")
+                || w.ends_with("count")
+        };
+        let change = |w: &&str| {
+            matches!(
+                *w,
+                "net" | "delta" | "diff" | "difference" | "change" | "growth" | "variance"
+            )
+        };
+        if !words.iter().any(countish) || words.iter().any(change) {
+            continue;
+        }
+        if let Some(v) = column_numbers(rows, *i).into_iter().find(|v| *v < 0.0) {
+            return Some((
+                "chart/negative-count",
+                format!(
+                    "'{name}' reads as a count, but one value is {v} — a count can't be \
+                     negative: check a difference taken the wrong way round or a join that \
+                     subtracted (if it is a change, name it so, e.g. {name}_change)"
+                ),
+            ));
+        }
+    }
+    None
+}
+
+/// The number a text states right after "total" ("Total: 1,234",
+/// "total €1.2M"), as every value it can be read as (a lone `1.234` is
+/// 1.234 or 1234), each with half its last digit's step. A bare year and a
+/// percent are not totals.
+fn stated_totals(text: &str) -> Vec<(f64, f64)> {
+    let lower = text.to_lowercase();
+    let Some(at) = lower.find("total") else {
+        return Vec::new();
+    };
+    let rest = &lower[at + 5..];
+    let Some(start) = rest
+        .char_indices()
+        .take(20)
+        .find(|(_, c)| c.is_ascii_digit())
+        .map(|(k, _)| k)
+    else {
+        return Vec::new();
+    };
+    // nothing that ends a clause in between ("total revenue, 2024")
+    if rest[..start].contains([',', ';', '(', '|', '—', '–', '-']) {
+        return Vec::new();
+    }
+    let num: String = rest[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, ',' | '.' | '\u{a0}' | '\u{202f}' | '\''))
+        .collect();
+    let num = num.trim_end_matches(['.', ',']);
+    let after = rest[start + num.len()..].trim_start();
+    if after.starts_with('%') || after.starts_with("percent") {
+        return Vec::new();
+    }
+    let mult = match after.chars().next() {
+        Some('k') if !after.starts_with("kg") && !after.starts_with("km") => 1e3,
+        Some('m')
+            if after.starts_with("mio")
+                || after.chars().nth(1).is_none_or(|c| !c.is_alphabetic()) =>
+        {
+            1e6
+        }
+        Some('b')
+            if after.starts_with("bn")
+                || after.chars().nth(1).is_none_or(|c| !c.is_alphabetic()) =>
+        {
+            1e9
+        }
+        _ => 1.0,
+    };
+    let digits: String = num
+        .chars()
+        .filter(|c| !matches!(c, '\u{a0}' | '\u{202f}' | '\''))
+        .collect();
+    if mult == 1.0 && digits.len() == 4 && digits.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(y) = digits.parse::<u32>() {
+            if (1900..=2100).contains(&y) {
+                return Vec::new();
+            }
+        }
+    }
+    // read with `dec` as the decimal mark, the other mark grouping thousands
+    let read = |dec: char| -> Option<(f64, f64)> {
+        let mut t = String::new();
+        let mut decimals = 0usize;
+        let mut seen = false;
+        for c in digits.chars() {
+            if c == dec {
+                if seen {
+                    return None;
+                }
+                seen = true;
+                t.push('.');
+            } else if c.is_ascii_digit() {
+                if seen {
+                    decimals += 1;
+                }
+                t.push(c);
+            }
+        }
+        let v: f64 = t.parse().ok()?;
+        Some((v * mult, 0.5 * 10f64.powi(-(decimals as i32)) * mult))
+    };
+    let mut out: Vec<(f64, f64)> = ['.', ','].into_iter().filter_map(read).collect();
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// #1120: a ::TITLE / ::SUBTITLE that states a total ("Total: 1,234") the
+/// chart's values don't add up to — the model wrote the number from a
+/// different query, or the chart lost rows to a filter or a LIMIT. Pies,
+/// donuts and bar charts (stacked too), where the drawn values are parts
+/// of that total.
+fn stated_total_diag(
+    roles: &[(usize, Role)],
+    rows: &[Map<String, Value>],
+) -> Option<(&'static str, String)> {
+    let kind = chart_kind(roles)?;
+    if !matches!(kind, Kind::Pie | Kind::Donut | Kind::Bar | Kind::BarStacked) {
+        return None;
+    }
+    let values: Vec<f64> = roles
+        .iter()
+        .filter(|(_, r)| *r == Role::Value(kind))
+        .flat_map(|(i, _)| column_numbers(rows, *i))
+        .collect();
+    if values.len() < 2 {
+        return None;
+    }
+    let sum: f64 = values.iter().sum();
+    for role in [Role::Title, Role::Subtitle] {
+        let Some(i) = role_index(roles, role) else {
+            continue;
+        };
+        let Some(text) = column_texts(rows, i).into_iter().next() else {
+            continue;
+        };
+        let read = stated_totals(&text);
+        if read.is_empty() {
+            continue;
+        }
+        let near =
+            |(v, step): &(f64, f64)| (sum - v).abs() <= step + 0.005 * v.abs().max(sum.abs());
+        if !read.iter().any(near) {
+            let role = if role == Role::Title {
+                "::TITLE"
+            } else {
+                "::SUBTITLE"
+            };
+            return Some((
+                "chart/stated-total",
+                format!(
+                    "the {role} states a total ({text:?}), but the chart's values add up to {} — \
+                     compute the number from the same rows (e.g. sum(x) OVER ()), or say what \
+                     the chart leaves out",
+                    if sum.fract() == 0.0 {
+                        format!("{sum:.0}")
+                    } else {
+                        format!("{sum:.2}")
+                    }
+                ),
+            ));
+        }
+    }
+    None
 }
 
 /// #1120: a ::PIE / ::DONUTCHART after a LIMIT that cut rows — its slices
@@ -11805,6 +11999,87 @@ mod design_tests {
             vec!["chart/funnel-increase"]
         );
         assert!(codes(f, stages([300, 29, 13])).is_empty());
+    }
+
+    #[test]
+    fn negative_counts_and_wrong_stated_totals_are_flagged() {
+        let codes = |sql: &str, data: Vec<Value>| -> Vec<&'static str> {
+            let rows: Vec<Map<String, Value>> = data
+                .into_iter()
+                .map(|d| d.as_object().unwrap().clone())
+                .collect();
+            check_opts(
+                sql,
+                |_q| Ok(rows.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            )
+            .into_iter()
+            .map(|d| d.code)
+            .filter(|c| matches!(*c, "chart/negative-count" | "chart/stated-total"))
+            .collect()
+        };
+        let bars = |vs: &[f64]| -> Vec<Value> {
+            vs.iter()
+                .enumerate()
+                .map(|(i, v)| json!({"c0": format!("r{i}"), "c1": v}))
+                .collect()
+        };
+        // a count below zero; a change named so is fine, a plain measure too
+        let neg = [5.0, -3.0, 2.0];
+        for sql in [
+            "SELECT region::XAXIS, n_orders::BARCHART FROM t;",
+            "SELECT region::XAXIS, order_count::BARCHART FROM t;",
+        ] {
+            assert_eq!(
+                codes(sql, bars(&neg)),
+                vec!["chart/negative-count"],
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SELECT region::XAXIS, order_count_change::BARCHART FROM t;",
+            "SELECT region::XAXIS, profit::BARCHART FROM t;",
+            "SELECT region::XAXIS, net_count::BARCHART FROM t;",
+        ] {
+            assert!(codes(sql, bars(&neg)).is_empty(), "{sql}");
+        }
+        assert!(codes(
+            "SELECT region::XAXIS, n_orders::BARCHART FROM t;",
+            bars(&[5.0, 3.0])
+        )
+        .is_empty());
+
+        // a stated total against the drawn values (sum 1,234.5)
+        let titled = |title: &str| -> Vec<Value> {
+            [600.0, 400.0, 234.5]
+                .iter()
+                .enumerate()
+                .map(|(i, v)| json!({"c0": format!("s{i}"), "c1": v, "c2": title}))
+                .collect()
+        };
+        let pie = "SELECT seg::LABEL, revenue::PIE, t::TITLE FROM t;";
+        for ok in [
+            "Revenue by segment — total 1,234.5",
+            "Total: 1.2K",
+            "Total revenue 1.234,5",
+            "Total 1,235",
+            "Total revenue by segment, 2024",
+            "Revenue by segment",
+            "Total share 100 %",
+        ] {
+            assert!(codes(pie, titled(ok)).is_empty(), "{ok}");
+        }
+        for bad in ["Total: 1,500", "Revenue (total 2.1K)", "total €980"] {
+            assert_eq!(codes(pie, titled(bad)), vec!["chart/stated-total"], "{bad}");
+        }
+        // on a subtitle too, and not on a line chart (no parts of a whole)
+        let sub = "SELECT seg::XAXIS, revenue::BARCHART_STACKED, t::SUBTITLE FROM t;";
+        assert_eq!(codes(sub, titled("Total 900")), vec!["chart/stated-total"]);
+        let line = "SELECT seg::XAXIS, revenue::LINECHART, t::TITLE FROM t;";
+        assert!(codes(line, titled("Total 900")).is_empty());
     }
 
     #[test]
