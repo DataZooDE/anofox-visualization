@@ -1,5 +1,5 @@
 -- @page Interactions and special features
--- @lead Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams — each a few lines of SQL.
+-- @lead Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs — each a few lines of SQL.
 CREATE TABLE geo AS SELECT * FROM (VALUES
   ('EU','Germany','Berlin'),('EU','Germany','Munich'),('EU','France','Paris'),('EU','France','Lyon'),
   ('Americas','USA','New York'),('Americas','USA','Chicago'),('Americas','Canada','Toronto'),
@@ -94,3 +94,24 @@ SELECT id ::DIAGRAM, label ::LABEL, up ::UPSTREAM, lane ::LANE, 'From the order 
 FROM (VALUES ('feed', 'Order feed', []::VARCHAR[], 'Ingest'), ('clean', 'Clean and dedupe', ['feed'], 'Ingest'),
              ('fx', 'FX rates', []::VARCHAR[], 'Ingest'), ('model', 'Revenue model', ['clean', 'fx'], 'Model'),
              ('fc', 'Forecast', ['model'], 'Model'), ('dash', 'Dashboard', ['model', 'fc'], 'Serve')) t(id, label, up, lane);
+
+-- @tile A factor graph | `anofox_plot_factor_graph` draws a Bayesian model as a Forney-style factor graph — factors as boxes, variables as circles, observations filled — with what the model learned. Hover θ; Step walks the messages.
+SELECT 12::COL;
+CREATE TABLE fg_nodes AS
+SELECT * FROM (VALUES ('th', 'variable', 'theta', '\theta', NULL, 'param', NULL), ('eq', 'equality', '=', '=', NULL, 'param', NULL),
+                      ('pr', 'factor', 'Beta', 'Beta', NULL, 'param', NULL), ('a', 'constant', '2', '2', NULL, 'param', NULL),
+                      ('b', 'constant', '3', '3', NULL, 'param', NULL)) t(id, kind, name, label, slice, layer, plate)
+UNION ALL SELECT 'y' || i, 'data', 'y[' || i || ']', 'y_{' || i || '}', i::VARCHAR, 'obs', 'y' FROM range(4) r(i)
+UNION ALL SELECT 'f' || i, 'factor', 'Bernoulli', 'Bernoulli', i::VARCHAR, 'obs', 'y' FROM range(4) r(i);
+CREATE TABLE fg_edges AS
+SELECT * FROM (VALUES ('th', 'eq', NULL, 0), ('eq', 'pr', 'out', 0), ('a', 'pr', 'a', 1), ('b', 'pr', 'b', 2)) t(variable, factor, interface, seq)
+UNION ALL SELECT 'y' || i, 'f' || i, 'out', 0 FROM range(4) r(i)
+UNION ALL SELECT 'eq', 'f' || i, 'p', 1 FROM range(4) r(i);
+-- θ ~ Beta(2, 3); three of four returns defective → Beta(5, 4)
+SELECT anofox_plot_factor_graph(n,
+         edges := (SELECT list(e) FROM fg_edges e),
+         marginals := [{'variable': 'th', 'iteration': 1, 'mean': 5 / 9, 'sd': 0.1571, 'family': 'Beta'}],
+         schedule := (SELECT list({'iteration': 1, 'step': i + 1, 'variable': 'eq', 'factor': f, 'interface': 'p', 'direction': 'to_variable'})
+                      FROM (SELECT 'pr' AS f, 0 AS i UNION ALL SELECT 'f' || i, i + 1 FROM range(4) r(i))))
+       AS "What share of returned units is defective?"
+FROM fg_nodes n;

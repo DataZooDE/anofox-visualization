@@ -1,6 +1,6 @@
 ---
 title: "Interactions and special features"
-description: "Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams — each a few lines of SQL."
+description: "Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs — each a few lines of SQL."
 tableOfContents: false
 sidebar:
   order: 50
@@ -30,8 +30,10 @@ import t11l from "../../../assets/gallery/features/11-light.webp";
 import t11d from "../../../assets/gallery/features/11-dark.webp";
 import t12l from "../../../assets/gallery/features/12-light.webp";
 import t12d from "../../../assets/gallery/features/12-dark.webp";
+import t13l from "../../../assets/gallery/features/13-light.webp";
+import t13d from "../../../assets/gallery/features/13-dark.webp";
 
-Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams — each a few lines of SQL.
+Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs — each a few lines of SQL.
 
 <details class="gal-data">
 <summary>The sample data every tile on this page uses</summary>
@@ -301,6 +303,41 @@ FROM (VALUES ('feed', 'Order feed', []::VARCHAR[], 'Ingest'), ('clean', 'Clean a
 ```
 
 <a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCBpZCA6OkRJQUdSQU0sIGxhYmVsIDo6TEFCRUwsIHVwIDo6VVBTVFJFQU0sIGxhbmUgOjpMQU5FLCAnRnJvbSB0aGUgb3JkZXIgZmVlZCB0byB0aGUgZGFzaGJvYXJkJzo6VElUTEUKRlJPTSAoVkFMVUVTICgnZmVlZCcsICdPcmRlciBmZWVkJywgW106OlZBUkNIQVJbXSwgJ0luZ2VzdCcpLCAoJ2NsZWFuJywgJ0NsZWFuIGFuZCBkZWR1cGUnLCBbJ2ZlZWQnXSwgJ0luZ2VzdCcpLAogICAgICAgICAgICAgKCdmeCcsICdGWCByYXRlcycsIFtdOjpWQVJDSEFSW10sICdJbmdlc3QnKSwgKCdtb2RlbCcsICdSZXZlbnVlIG1vZGVsJywgWydjbGVhbicsICdmeCddLCAnTW9kZWwnKSwKICAgICAgICAgICAgICgnZmMnLCAnRm9yZWNhc3QnLCBbJ21vZGVsJ10sICdNb2RlbCcpLCAoJ2Rhc2gnLCAnRGFzaGJvYXJkJywgWydtb2RlbCcsICdmYyddLCAnU2VydmUnKSkgdChpZCwgbGFiZWwsIHVwLCBsYW5lKTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t13l.src} alt="" loading="lazy" /><img class="lp-dark" src={t13d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A factor graph
+
+`anofox_plot_factor_graph` draws a Bayesian model as a Forney-style factor graph — factors as boxes, variables as circles, observations filled — with what the model learned. Hover θ; Step walks the messages.
+
+```sql
+SELECT 12::COL;
+CREATE TABLE fg_nodes AS
+SELECT * FROM (VALUES ('th', 'variable', 'theta', '\theta', NULL, 'param', NULL), ('eq', 'equality', '=', '=', NULL, 'param', NULL),
+                      ('pr', 'factor', 'Beta', 'Beta', NULL, 'param', NULL), ('a', 'constant', '2', '2', NULL, 'param', NULL),
+                      ('b', 'constant', '3', '3', NULL, 'param', NULL)) t(id, kind, name, label, slice, layer, plate)
+UNION ALL SELECT 'y' || i, 'data', 'y[' || i || ']', 'y_{' || i || '}', i::VARCHAR, 'obs', 'y' FROM range(4) r(i)
+UNION ALL SELECT 'f' || i, 'factor', 'Bernoulli', 'Bernoulli', i::VARCHAR, 'obs', 'y' FROM range(4) r(i);
+CREATE TABLE fg_edges AS
+SELECT * FROM (VALUES ('th', 'eq', NULL, 0), ('eq', 'pr', 'out', 0), ('a', 'pr', 'a', 1), ('b', 'pr', 'b', 2)) t(variable, factor, interface, seq)
+UNION ALL SELECT 'y' || i, 'f' || i, 'out', 0 FROM range(4) r(i)
+UNION ALL SELECT 'eq', 'f' || i, 'p', 1 FROM range(4) r(i);
+-- θ ~ Beta(2, 3); three of four returns defective → Beta(5, 4)
+SELECT anofox_plot_factor_graph(n,
+         edges := (SELECT list(e) FROM fg_edges e),
+         marginals := [{'variable': 'th', 'iteration': 1, 'mean': 5 / 9, 'sd': 0.1571, 'family': 'Beta'}],
+         schedule := (SELECT list({'iteration': 1, 'step': i + 1, 'variable': 'eq', 'factor': f, 'interface': 'p', 'direction': 'to_variable'})
+                      FROM (SELECT 'pr' AS f, 0 AS i UNION ALL SELECT 'f' || i, i + 1 FROM range(4) r(i))))
+       AS "What share of returned units is defective?"
+FROM fg_nodes n;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBmZ19ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCd0aCcsICd2YXJpYWJsZScsICd0aGV0YScsICdcdGhldGEnLCBOVUxMLCAncGFyYW0nLCBOVUxMKSwgKCdlcScsICdlcXVhbGl0eScsICc9JywgJz0nLCBOVUxMLCAncGFyYW0nLCBOVUxMKSwKICAgICAgICAgICAgICAgICAgICAgICgncHInLCAnZmFjdG9yJywgJ0JldGEnLCAnQmV0YScsIE5VTEwsICdwYXJhbScsIE5VTEwpLCAoJ2EnLCAnY29uc3RhbnQnLCAnMicsICcyJywgTlVMTCwgJ3BhcmFtJywgTlVMTCksCiAgICAgICAgICAgICAgICAgICAgICAoJ2InLCAnY29uc3RhbnQnLCAnMycsICczJywgTlVMTCwgJ3BhcmFtJywgTlVMTCkpIHQoaWQsIGtpbmQsIG5hbWUsIGxhYmVsLCBzbGljZSwgbGF5ZXIsIHBsYXRlKQpVTklPTiBBTEwgU0VMRUNUICd5JyB8fCBpLCAnZGF0YScsICd5WycgfHwgaSB8fCAnXScsICd5X3snIHx8IGkgfHwgJ30nLCBpOjpWQVJDSEFSLCAnb2JzJywgJ3knIEZST00gcmFuZ2UoNCkgcihpKQpVTklPTiBBTEwgU0VMRUNUICdmJyB8fCBpLCAnZmFjdG9yJywgJ0Jlcm5vdWxsaScsICdCZXJub3VsbGknLCBpOjpWQVJDSEFSLCAnb2JzJywgJ3knIEZST00gcmFuZ2UoNCkgcihpKTsKQ1JFQVRFIFRBQkxFIGZnX2VkZ2VzIEFTClNFTEVDVCAqIEZST00gKFZBTFVFUyAoJ3RoJywgJ2VxJywgTlVMTCwgMCksICgnZXEnLCAncHInLCAnb3V0JywgMCksICgnYScsICdwcicsICdhJywgMSksICgnYicsICdwcicsICdiJywgMikpIHQodmFyaWFibGUsIGZhY3RvciwgaW50ZXJmYWNlLCBzZXEpClVOSU9OIEFMTCBTRUxFQ1QgJ3knIHx8IGksICdmJyB8fCBpLCAnb3V0JywgMCBGUk9NIHJhbmdlKDQpIHIoaSkKVU5JT04gQUxMIFNFTEVDVCAnZXEnLCAnZicgfHwgaSwgJ3AnLCAxIEZST00gcmFuZ2UoNCkgcihpKTsKLS0gzrggfiBCZXRhKDIsIDMpOyB0aHJlZSBvZiBmb3VyIHJldHVybnMgZGVmZWN0aXZlIOKGkiBCZXRhKDUsIDQpClNFTEVDVCBhbm9mb3hfcGxvdF9mYWN0b3JfZ3JhcGgobiwKICAgICAgICAgZWRnZXMgOj0gKFNFTEVDVCBsaXN0KGUpIEZST00gZmdfZWRnZXMgZSksCiAgICAgICAgIG1hcmdpbmFscyA6PSBbeyd2YXJpYWJsZSc6ICd0aCcsICdpdGVyYXRpb24nOiAxLCAnbWVhbic6IDUgLyA5LCAnc2QnOiAwLjE1NzEsICdmYW1pbHknOiAnQmV0YSd9XSwKICAgICAgICAgc2NoZWR1bGUgOj0gKFNFTEVDVCBsaXN0KHsnaXRlcmF0aW9uJzogMSwgJ3N0ZXAnOiBpICsgMSwgJ3ZhcmlhYmxlJzogJ2VxJywgJ2ZhY3Rvcic6IGYsICdpbnRlcmZhY2UnOiAncCcsICdkaXJlY3Rpb24nOiAndG9fdmFyaWFibGUnfSkKICAgICAgICAgICAgICAgICAgICAgIEZST00gKFNFTEVDVCAncHInIEFTIGYsIDAgQVMgaSBVTklPTiBBTEwgU0VMRUNUICdmJyB8fCBpLCBpICsgMSBGUk9NIHJhbmdlKDQpIHIoaSkpKSkKICAgICAgIEFTICJXaGF0IHNoYXJlIG9mIHJldHVybmVkIHVuaXRzIGlzIGRlZmVjdGl2ZT8iCkZST00gZmdfbm9kZXMgbjsK">Edit it in the builder ↗</a>
 
 </div>
 </div>

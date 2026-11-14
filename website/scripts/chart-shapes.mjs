@@ -211,5 +211,11 @@ FROM ${v("('DE-HH','DE-BY',40),('DE-HH','DE-BE',25),('DE-NW','DE-BY',30)", "a, b
     shape: "One row per node: this column is its id, `::LABEL` its text, `::UPSTREAM` its input id(s) — or all edges at once with `::EDGES`; `::LANE` groups nodes in swimlanes.",
     sql: `SELECT id ::DIAGRAM, label ::LABEL, up ::UPSTREAM
 FROM ${v("('src','Orders CSV',NULL),('clean','Clean','src'),('agg','Daily totals','clean'),('dash','Dashboard','agg')", "id, label, up")}`,
+    // #1208: the factor-graph mode, reached through a macro (no `::DIAGRAM` in its SQL)
+    more: `## Factor graphs
+
+\`anofox_plot_factor_graph(nodes, edges := …, marginals := …, schedule := …)\` draws a Bayesian model as a Forney-style factor graph through \`::DIAGRAM\`: factors as boxes, variables as circles, observations filled, layers as bands, and what the model learned under the graph. Hovering a variable shows its posterior; Step / Play walk the messages the inference passed. The tables are what an inference library exports: one row per node, one per edge.
+
+[A small one in the gallery ↗](../../../gallery/features/#a-factor-graph) · [three models in the builder ↗](../../../app/?dashboard=how-does-the-model-reason-from-our-inspections)`,
   },
 };

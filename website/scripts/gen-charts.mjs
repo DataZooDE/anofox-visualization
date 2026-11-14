@@ -158,6 +158,8 @@ for (const k of kinds) {
     "",
     ex.length > 1 ? `Also in: ${ex.slice(1, 7).map((e) => `[${e.title}](${app}?dashboard=${e.id})`).join(" · ")}` : "",
     "",
+    s.more || "",
+    "",
     related.length ? `## Related\n\n${related.map((o) => `[${shapes[o.name]?.title ? "`" + shapes[o.name].title + "`" : "`::" + o.name + "`"}](../${slug(o.name)}/)`).join(" · ")}` : "",
     "",
   ].join("\n");
