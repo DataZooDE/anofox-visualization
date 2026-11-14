@@ -79,6 +79,11 @@ pub const PLOTS: &[&str] = &[
     "auto",
 ];
 
+/// Is `plot` a contract plot: built in, or a registered module's (#1156)?
+pub fn is_plot(plot: &str) -> bool {
+    PLOTS.contains(&plot) || crate::module::has_plot(plot)
+}
+
 /// The `obs` panel kinds (`options.kind`).
 pub const OBS_KINDS: &[&str] = &["resid_fitted", "qq", "scale_location", "leverage", "cooks"];
 
@@ -155,6 +160,26 @@ fn render_plot(
         "auto" if rows.is_empty() => "auto",
         "auto" => detect(rows)?,
         p if PLOTS.contains(&p) => p,
+        // #1156 D4a: a plot of a registered module's ("No data" below
+        // when it has no rows)
+        p if crate::module::has_plot(p) && rows.is_empty() => p,
+        p if crate::module::has_plot(p) => {
+            match crate::module::render_contract(p, rows, options, width, height, o) {
+                Some(Ok(body)) => {
+                    return Ok((
+                        format!("{}{body}</svg>", crate::svg_open(place, width, height)),
+                        Vec::new(),
+                    ))
+                }
+                Some(Err(e)) => return Err(RenderError::Render(e)),
+                None => {
+                    return Err(RenderError::BadSpec(format!(
+                        "unknown plot '{p}' (one of {})",
+                        PLOTS.join(", ")
+                    )))
+                }
+            }
+        }
         p => {
             return Err(RenderError::BadSpec(format!(
                 "unknown plot '{p}' (one of {})",

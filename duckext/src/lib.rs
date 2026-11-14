@@ -447,8 +447,9 @@ pub(crate) fn register_policy_hash(
 /// and is shared with the C++ build, which reads it through the FFI crate — the
 /// bodies cannot drift between the builds.
 fn macros() -> Vec<(&'static str, String)> {
-    anofox_visualization::macros::MACROS
-        .iter()
+    // the built-in macros and the registered modules' (#1156)
+    anofox_visualization::macros::all()
+        .into_iter()
         .map(|m| (m.name, m.create_sql()))
         .collect()
 }

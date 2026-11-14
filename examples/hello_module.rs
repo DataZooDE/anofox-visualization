@@ -3,6 +3,7 @@
 //! a statement carrying one of a module's roles is then drawn by it.
 //!
 //!     cargo run --example hello_module
+use anofox_visualization::macros::MacroSpec;
 use anofox_visualization::module::{self, Module, ModuleRole};
 use anofox_visualization::{parse_role, render, value_text, Column, RenderOptions, Value};
 
@@ -38,6 +39,56 @@ impl Module for Hello {
             height / 2,
             anofox_visualization::format::escape_xml(&who)
         ))
+    }
+    /// A contract macro: `SELECT anofox_plot_hello(t, greeting := 'Hi') FROM
+    /// people t` greets every row's `name`.
+    fn macros(&self) -> &'static [MacroSpec] {
+        &[MacroSpec {
+            name: "anofox_plot_hello",
+            params: &["tbl"],
+            named: &[
+                ("greeting", "'Hello'"),
+                ("theme", "NULL"),
+                ("locale", "NULL"),
+                ("width", "640"),
+                ("height", "200"),
+            ],
+            body: anofox_visualization::contract_body!("hello", "'greeting', greeting"),
+            description: "Greets every row's name.",
+            example: "SELECT anofox_plot_hello(t) FROM (VALUES ('Ada'), ('Max')) t(name)",
+            tags: &[],
+        }]
+    }
+    fn render_contract(
+        &self,
+        plot: &str,
+        rows: &[serde_json::Map<String, serde_json::Value>],
+        options: &serde_json::Map<String, serde_json::Value>,
+        width: u32,
+        height: u32,
+        _o: &RenderOptions,
+    ) -> Option<Result<String, String>> {
+        if plot != "hello" {
+            return None;
+        }
+        let names: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        if names.is_empty() {
+            return Some(Err("anofox_plot_hello needs a name column".into()));
+        }
+        let greeting = options
+            .get("greeting")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Hello");
+        Some(Ok(format!(
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"18\">{}, {}</text>",
+            width / 2,
+            height / 2,
+            anofox_visualization::format::escape_xml(greeting),
+            anofox_visualization::format::escape_xml(&names.join(" and "))
+        )))
     }
     /// `--check` warns about a greeting to nobody.
     fn lint(&self, cols: &[Column]) -> Vec<String> {

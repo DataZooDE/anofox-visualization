@@ -79,6 +79,10 @@ const XYC: &str = "anofox_render(json_object('rows', to_json(list({c0: x, c1: y,
 
 const CONTRACT_TAG: (&str, &str) = ("anofox.contract", "1");
 
+// exported (hidden) so a module (#1156) builds its contract macros' bodies
+// the same way
+#[doc(hidden)]
+#[macro_export]
 macro_rules! contract_body {
     ($plot:literal) => {
         concat!(
@@ -96,6 +100,12 @@ macro_rules! contract_body {
             "), 'theme', coalesce(theme, getvariable('anofox_theme')), 'locale', coalesce(locale, getvariable('anofox_locale')), 'width', width, 'height', height))"
         )
     };
+}
+
+/// The built-in macros and the registered modules' (#1156 D4a), built-in
+/// first: what the extension creates and the planners read.
+pub fn all() -> Vec<&'static MacroSpec> {
+    MACROS.iter().chain(crate::module::macros()).collect()
 }
 
 /// Every bundled macro.

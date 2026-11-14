@@ -243,13 +243,14 @@ pub(crate) fn plan_contract(stmt: &str) -> Option<(super::Panel, ContractCall)> 
 
 /// How a macro's named parameters land in the renderer spec: the `plot` name
 /// and `(parameter, options key)` pairs, read from the macro table
-/// ([`crate::macros::MACROS`] bodies built by `contract_body!`). A macro not
+/// ([`crate::macros::all`]: built-in and module bodies built by
+/// `contract_body!`). A macro not
 /// (yet) in the table renders as plot `<name without anofox_plot_>` with every
 /// parameter passed under its own name.
 pub fn macro_binding(macro_name: &str) -> (String, Option<Vec<(String, String)>>) {
     let m = macro_name.to_ascii_lowercase();
     let fallback = || m.strip_prefix("anofox_plot_").unwrap_or("auto").to_string();
-    let Some(spec) = crate::macros::MACROS.iter().find(|s| s.name == m) else {
+    let Some(spec) = crate::macros::all().into_iter().find(|s| s.name == m) else {
         return (fallback(), None);
     };
     let body = spec.body;
@@ -380,7 +381,7 @@ fn render_values_opts(
         _ => return Err(RenderError::BadSpec("args must be a JSON object".into())),
     };
     let (plot, binding) = macro_binding(macro_name);
-    if !crate::contract::PLOTS.contains(&plot.as_str()) {
+    if !crate::contract::is_plot(&plot) {
         let note = format!("{macro_name}() ships with the next anofox-visualization release");
         return crate::note_svg(None, &note, width, height)
             .finish(crate::Place::Doc)

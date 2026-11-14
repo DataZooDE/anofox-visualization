@@ -56,6 +56,29 @@ pub trait Module: Send + Sync {
         let _ = cols;
         Vec::new()
     }
+    /// SQL macros the module brings (D4a, #1156), alongside the built-in
+    /// `anofox_plot_*` ones: the extension creates them at LOAD, and the
+    /// CLI, the servers and the browser plan their calls the same way. A
+    /// contract macro (`anofox_plot_<x>`, its body built like the built-in
+    /// ones) names a plot the module draws in [`Module::render_contract`].
+    fn macros(&self) -> &'static [crate::macros::MacroSpec] {
+        &[]
+    }
+    /// Draw contract plot `plot` (one of the module's) from its rows and
+    /// named arguments: the SVG body inside a `width` × `height` `<svg>`.
+    /// `None`: not the module's plot.
+    fn render_contract(
+        &self,
+        plot: &str,
+        rows: &[serde_json::Map<String, serde_json::Value>],
+        options: &serde_json::Map<String, serde_json::Value>,
+        width: u32,
+        height: u32,
+        o: &RenderOptions,
+    ) -> Option<Result<String, String>> {
+        let _ = (plot, rows, options, width, height, o);
+        None
+    }
 }
 
 struct Entry {
@@ -66,14 +89,76 @@ struct Entry {
 /// The registered roles, in registration order: `Role::Module(i)` is entry
 /// `i`.
 static REGISTRY: RwLock<Vec<Entry>> = RwLock::new(Vec::new());
+/// Modules with no roles of their own (macros only).
+static MODULES: RwLock<Vec<&'static dyn Module>> = RwLock::new(Vec::new());
+
+/// Every registered module, once each, in registration order.
+fn modules_of(reg: &[Entry]) -> Vec<&'static dyn Module> {
+    let mut out: Vec<&'static dyn Module> = Vec::new();
+    let more = MODULES.read().map(|m| m.clone()).unwrap_or_default();
+    for m in reg.iter().map(|e| e.module).chain(more) {
+        if !out.iter().any(|o| o.name() == m.name()) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+fn modules() -> Vec<&'static dyn Module> {
+    REGISTRY.read().map(|r| modules_of(&r)).unwrap_or_default()
+}
+
+/// The registered modules' macros, in registration order.
+pub fn macros() -> Vec<&'static crate::macros::MacroSpec> {
+    modules().into_iter().flat_map(|m| m.macros()).collect()
+}
+
+/// Does a registered module bring contract plot `plot` (one of its contract
+/// macros names it)?
+pub fn has_plot(plot: &str) -> bool {
+    macros()
+        .iter()
+        .any(|m| crate::sql::contract_call::macro_binding(m.name).0 == plot)
+}
+
+/// A module's drawing of contract plot `plot`; `None` when no module draws it.
+pub(crate) fn render_contract(
+    plot: &str,
+    rows: &[serde_json::Map<String, serde_json::Value>],
+    options: &serde_json::Map<String, serde_json::Value>,
+    width: u32,
+    height: u32,
+    o: &RenderOptions,
+) -> Option<Result<String, String>> {
+    modules()
+        .into_iter()
+        .find_map(|m| m.render_contract(plot, rows, options, width, height, o))
+}
 
 /// Register `module` (once, at start-up). Refused when its name is taken or
 /// one of its tokens or aliases is already a role (built in or a module's).
 #[doc(hidden)]
 pub fn register(module: &'static dyn Module) -> Result<(), String> {
     let mut reg = REGISTRY.write().map_err(|_| "module registry poisoned")?;
-    if reg.iter().any(|e| e.module.name() == module.name()) {
+    if modules_of(&reg).iter().any(|m| m.name() == module.name()) {
         return Err(format!("module {} is registered already", module.name()));
+    }
+    // its macros: no name the built-in table or another module has
+    for m in module.macros() {
+        let taken = crate::macros::MACROS
+            .iter()
+            .any(|b| b.name.eq_ignore_ascii_case(m.name))
+            || modules_of(&reg)
+                .iter()
+                .flat_map(|x| x.macros())
+                .any(|b| b.name.eq_ignore_ascii_case(m.name));
+        if taken {
+            return Err(format!(
+                "module {}: macro {} exists already",
+                module.name(),
+                m.name
+            ));
+        }
     }
     let mut seen: Vec<&str> = vec![];
     for r in module.roles() {
@@ -88,6 +173,14 @@ pub fn register(module: &'static dyn Module) -> Result<(), String> {
             }
             seen.push(t);
         }
+    }
+    if module.roles().is_empty() {
+        // a module of macros only: still registered (no role entry)
+        MODULES
+            .write()
+            .map_err(|_| "module registry poisoned")?
+            .push(module);
+        return Ok(());
     }
     for r in module.roles() {
         let id = u16::try_from(reg.len()).map_err(|_| "too many module roles")?;
@@ -131,15 +224,7 @@ pub fn roles() -> Vec<&'static RoleSpec> {
 
 /// The names of the registered modules.
 pub fn names() -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = vec![];
-    if let Ok(r) = REGISTRY.read() {
-        for e in r.iter() {
-            if !out.contains(&e.module.name()) {
-                out.push(e.module.name());
-            }
-        }
-    }
-    out
+    modules().into_iter().map(|m| m.name()).collect()
 }
 
 /// The module that draws a panel with these columns: the first column with
