@@ -146,6 +146,23 @@ const edgeCard = await page.evaluate(async () => {
 });
 check(edgeCard && edgeCard.kicker === "Edge · out" && edgeCard.title === "y₀ — Bernoulli" && /^The observation y₀ enters the model here/.test(edgeCard.note), "an edge's hover is a card", edgeCard);
 
+// Forney style (#1172): observations are terminal squares labelled beside
+// them; the hidden-state graph's s₀ (on two factors, no marginals) is the
+// edge between them, its card a variable's.
+const forney = await page.evaluate(async () => {
+  const svgs = document.querySelectorAll("svg[data-diagram]");
+  const terminals = svgs[0].querySelectorAll("rect.dp-node-terminal").length;
+  const e = svgs[2].querySelector('polyline[data-var="s₀"]');
+  if (!e) return { terminals, edge: false };
+  e.dispatchEvent(new MouseEvent("mouseenter"));
+  await new Promise((r) => setTimeout(r, 50));
+  const t = document.querySelector(".dp-tip-card.show");
+  const card = t ? t.querySelector(".tip-card-title")?.textContent : null;
+  e.dispatchEvent(new MouseEvent("mouseleave"));
+  return { terminals, edge: true, node: !!svgs[2].querySelector('rect[data-node="v0"]'), card };
+});
+check(forney.terminals === 4 && forney.edge && !forney.node && forney.card === "The variable s₀", "Forney style: terminals, a variable as its edge", forney);
+
 // A ::SELECT_AS before the macro names what a click on a node sets (#1152).
 const sql = `
 SELECT 'node'::SELECT_AS;

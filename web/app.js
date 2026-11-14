@@ -20600,10 +20600,20 @@ function edgeCard(el) {
   const shapeOf = (n) => ((n?.getAttribute("class") || "").match(/dp-node-([a-z-]+)/) || [])[1] || "box";
   const ends = [el.getAttribute("data-from"), el.getAttribute("data-to")].map(nodeOf);
   const isFactor = (n) => ["glyph", "box"].includes(shapeOf(n));
+  const name = (n) => n.getAttribute("data-xtext") || n.getAttribute("data-node") || "";
+  // Forney style: the edge is a variable between two factors
+  const vr = el.getAttribute("data-var");
+  if (vr && ends.every((n) => n && isFactor(n))) {
+    const [a, b] = ends.map((n) => n.getAttribute("data-badge") || name(n));
+    return {
+      card: true,
+      head: `<div class="tip-kicker">Variable</div><div class="tip-card-title">${escapeHtml("The variable " + vr)}</div>`,
+      body: `<p class="tip-note">${escapeHtml(`A hidden quantity between two factors, drawn as their edge: ${a} → ${vr} says what ${a} implies about it, ${b} answers with what it implies.`)}</p>`,
+    };
+  }
   const f = ends.find(isFactor);
   const v = ends.find((n) => n !== f);
   if (!f || !v) return null;
-  const name = (n) => n.getAttribute("data-xtext") || n.getAttribute("data-node") || "";
   const fname = f.getAttribute("data-badge") || name(f);
   const vname = name(v);
   const tipText = el.getAttribute("data-tip") || "";
@@ -20612,7 +20622,7 @@ function edgeCard(el) {
   const body =
     kind === "text"
       ? `The constant ${vname} is a fixed parameter of ${fname}${iface ? ` (its ${iface})` : ""}; nothing flows back.`
-      : kind === "filled-circle"
+      : kind === "filled-circle" || kind === "terminal"
       ? `The observation ${vname} enters the model here: ${fname} turns the measured value into a message about the quantities behind it.`
       : `Messages run both ways here: ${fname} → ${vname} says what this factor implies about ${vname}; ${vname} → ${fname} what the rest of the graph believes about it.`;
   let n = 0;
@@ -21329,7 +21339,7 @@ function nodeCard(el) {
   const cls = el.getAttribute("class") || "";
   const shape = (cls.match(/dp-node-([a-z-]+)/) || [])[1] || "box";
   const label = el.getAttribute("data-xtext") || el.getAttribute("data-node") || "";
-  const kinds = { glyph: "Factor", box: "Factor", circle: "Variable", "filled-circle": "Observed", square: "Variable", "filled-square": "Deterministic", text: "Constant" };
+  const kinds = { glyph: "Factor", box: "Factor", circle: "Variable", "filled-circle": "Observed", terminal: "Observed", square: "Variable", "filled-square": "Deterministic", text: "Constant" };
   let kicker = kinds[shape] || "Node";
   let title = label;
   let body = note;

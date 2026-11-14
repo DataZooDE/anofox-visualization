@@ -126,6 +126,9 @@ pub struct Edge {
     pub style: EdgeStyle,
     /// The edge's health (`::EDGES` `status`): warn / bad colour the edge.
     pub status: Option<Status>,
+    /// The label names a variable (`::EDGES` `math`, #1172: Forney style,
+    /// the edge is the variable): set as mathematics.
+    pub math: bool,
 }
 
 /// Something the author should know (`dashboard --check`: `diagram/*`).
@@ -266,7 +269,10 @@ fn shape_of(s: &str) -> Option<ggplot_rs::graph::NodeShape> {
             // #1166: a factor graph's factor is a compact glyph square
             "factor" | "glyph" => S::Glyph,
             "circle" | "variable" | "random" => S::Circle,
-            "filled-circle" | "data" | "observed" => S::FilledCircle,
+            "filled-circle" => S::FilledCircle,
+            // #1172: an observation in Forney style, a terminal square at the
+            // end of its edge, labelled beside it
+            "terminal" | "data" | "observed" => S::Terminal,
             "square" | "equality" | "=" => S::Square,
             "filled-square" | "delta" | "deterministic" => S::FilledSquare,
             "text" | "constant" => S::Text,
@@ -490,7 +496,7 @@ impl Diagram {
             problem(
                 "diagram/bad-shape",
                 format!(
-                    "::SHAPE {} is not box, circle, filled-circle, square, filled-square, text or a factor graph kind — drawn as a box",
+                    "::SHAPE {} is not box, circle, filled-circle, square, filled-square, terminal, text or a factor graph kind — drawn as a box",
                     quoted(&bad_shapes)
                 ),
             );
@@ -572,6 +578,7 @@ impl Diagram {
                                 label,
                                 style,
                                 status,
+                                math: field(o, &["math"]).and_then(J::as_bool).unwrap_or(false),
                                 steps: edge_steps(field(o, &["steps"])),
                             });
                         }
@@ -639,6 +646,7 @@ impl Diagram {
             label,
             style,
             status,
+            math,
             steps: edge_steps,
         } in raw
         {
@@ -665,6 +673,7 @@ impl Diagram {
                     e.value = e.value.or(value);
                     e.label = e.label.take().or(label);
                     e.status = e.status.or(status);
+                    e.math |= math;
                     styles[k] = styles[k].or(style);
                 }
                 None => {
@@ -678,6 +687,7 @@ impl Diagram {
                             label,
                             style: EdgeStyle::Solid,
                             status,
+                            math,
                         });
                         styles.push(style);
                     }
@@ -988,6 +998,7 @@ struct RawEdge {
     label: Option<String>,
     style: Option<EdgeStyle>,
     status: Option<Status>,
+    math: bool,
     /// Story steps along the edge: (order, caption, against the edge,
     /// iteration).
     steps: Vec<(f64, String, bool, Option<f64>)>,
@@ -1175,9 +1186,14 @@ fn factor_graph_summary(d: &Diagram) -> String {
             "factor",
             "factors",
         ),
-        (count(&|s| s == Some(S::Circle)), "variable", "variables"),
         (
-            count(&|s| s == Some(S::FilledCircle)),
+            // a Forney edge is a variable too (#1172)
+            count(&|s| s == Some(S::Circle)) + d.edges.iter().filter(|e| e.math).count(),
+            "variable",
+            "variables",
+        ),
+        (
+            count(&|s| matches!(s, Some(S::FilledCircle | S::Terminal))),
             "observed",
             "observed",
         ),
@@ -1409,8 +1425,11 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 class,
                 tooltip,
                 label: e.label.clone(),
+                label_math: e.math,
                 attrs: vec![
                     attr("edge", Some(format!("{}>{}", a.id, b.id))),
+                    // #1172: the variable a Forney edge stands for (its card)
+                    attr("var", e.math.then(|| e.label.clone()).flatten()),
                     attr("from", Some(a.id.clone())),
                     attr("to", Some(b.id.clone())),
                     attr("xtext", Some(name)),
