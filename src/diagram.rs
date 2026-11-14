@@ -175,6 +175,9 @@ pub struct Belief {
     pub prior: Option<(f64, f64)>,
     /// How many observations reach the node (#1172).
     pub obs: usize,
+    /// Each observation's influence on the node, 0..=1 against the largest
+    /// (#1172): the browser widens its edge while the node is hovered.
+    pub infl: Option<String>,
 }
 
 impl Belief {
@@ -200,12 +203,17 @@ impl Belief {
             .and_then(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?)))
             .filter(|p| p.0.is_finite() && p.1 > 0.0);
         let obs = v.get("n").and_then(J::as_u64).unwrap_or(0) as usize;
+        let infl = v
+            .get("infl")
+            .filter(|i| i.is_object())
+            .map(|i| i.to_string());
         (hi > lo && !its.is_empty()).then_some(Belief {
             lo,
             hi,
             its,
             prior,
             obs,
+            infl,
         })
     }
     /// The sharpest sd, prior included: every curve's peak against it.
@@ -1536,6 +1544,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                             };
                             [
                                 attr("note", nd.note.clone()),
+                                attr("influence", nd.belief.as_ref().and_then(|b| b.infl.clone())),
                                 attr(
                                     "beliefs",
                                     nd.belief.as_ref().map(|b| {

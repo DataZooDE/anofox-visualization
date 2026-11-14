@@ -20609,7 +20609,14 @@ function fgFocus(svg, el) {
         if (a === node) ends.add(b);
         if (b === node) ends.add(a);
       }
-      onEdge = (a, b) => a === node || b === node;
+      // #1172: the observations it is influenced by stay in focus, with
+      // their edges (fgInfluence widens them)
+      let infl = null;
+      try {
+        infl = JSON.parse(el.getAttribute("data-influence") || "null");
+      } catch (_) {}
+      for (const o of Object.keys(infl || {})) ends.add(o);
+      onEdge = (a, b) => a === node || b === node || (infl != null && (a in infl || b in infl));
     }
     if (onEdge)
       keep = (e) => {
@@ -20620,6 +20627,29 @@ function fgFocus(svg, el) {
       };
   }
   dpAnim.emph(svg, "hoverfocus", keep ? (e) => (keep(e) === false ? (e.tagName === "polyline" ? 0.3 : 0.2) : null) : null);
+  fgInfluence(svg, el);
+}
+
+// #1172: while a variable is hovered, each observation's edge is as wide as
+// its influence on it (data-influence: observation id → 0..1 against the
+// largest, from the library's leave-one-out); off again on leave.
+function fgInfluence(svg, el) {
+  for (const e of svg.querySelectorAll("polyline[data-edge].dp-infl")) {
+    e.style.strokeWidth = "";
+    e.classList.remove("dp-infl");
+  }
+  let w = null;
+  try {
+    w = el && JSON.parse(el.getAttribute("data-influence") || "null");
+  } catch (_) {}
+  if (!w) return;
+  for (const e of svg.querySelectorAll("polyline[data-edge]")) {
+    const k = w[e.getAttribute("data-to")] ?? w[e.getAttribute("data-from")];
+    if (k == null) continue;
+    const base = parseFloat(e.getAttribute("stroke-width")) || 1.2;
+    e.style.strokeWidth = String(base + 5 * k);
+    e.classList.add("dp-infl");
+  }
 }
 
 // #1172: a factor graph edge's card — the variable and factor it joins, the

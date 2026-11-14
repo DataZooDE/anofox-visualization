@@ -700,6 +700,33 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             })
             .collect();
         drivers.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // #1172: the same influence for the edges — each observation's
+        // shift against the largest, in the belief (the browser widens the
+        // observation's edge while the variable is hovered)
+        let weights: Map<String, J> = influence
+            .iter()
+            .filter(|r| get(r, &["target"]).as_deref() == Some(target.as_str()) && scalar(r))
+            .filter_map(|r| {
+                let shift = (fnum(r, "mean")? - fnum(r, "loo_mean")?).abs();
+                Some((get(r, &["observation"])?, shift))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(o, w)| {
+                (
+                    o,
+                    J::from(w / drivers.first().map_or(1.0, |d| d.0).max(f64::MIN_POSITIVE)),
+                )
+            })
+            .collect();
+        if !weights.is_empty() {
+            if let Some(Value::Str(b)) = beliefs.last_mut() {
+                if let Ok(mut v) = serde_json::from_str::<J>(b) {
+                    v["infl"] = J::Object(weights);
+                    *b = v.to_string();
+                }
+            }
+        }
         if let Some(first) = drivers.first() {
             let rest: Vec<String> = drivers[1..]
                 .iter()
