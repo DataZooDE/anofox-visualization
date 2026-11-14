@@ -50,6 +50,12 @@ pub trait Module: Send + Sync {
         height: u32,
         o: &RenderOptions,
     ) -> Result<String, String>;
+    /// Browser files the module brings (D5a, #1156): `(path, bytes)`, served
+    /// at `/modules/<name>/<path>`; the page loads each `.js` (as a module
+    /// script) and `.css` after app.js.
+    fn assets(&self) -> &'static [(&'static str, &'static [u8])] {
+        &[]
+    }
     /// What `--check` should warn about a panel of the module's (step 3,
     /// #1156): one plain sentence each. None by default.
     fn lint(&self, cols: &[Column]) -> Vec<String> {
@@ -212,6 +218,28 @@ pub(crate) fn lookup(token: &str) -> Option<&'static RoleSpec> {
 /// The spec of module role `id`.
 pub(crate) fn spec(id: u16) -> Option<&'static RoleSpec> {
     REGISTRY.read().ok()?.get(id as usize).map(|e| e.spec)
+}
+
+/// A module's file by its served path, `modules/<name>/<path>` (a leading
+/// `/` is ignored): the bytes, or `None`.
+pub fn asset(path: &str) -> Option<&'static [u8]> {
+    let rest = path.trim_start_matches('/').strip_prefix("modules/")?;
+    let (name, file) = rest.split_once('/')?;
+    let m = modules().into_iter().find(|m| m.name() == name)?;
+    m.assets().iter().find(|(p, _)| *p == file).map(|(_, b)| *b)
+}
+
+/// Every module file's served path (`modules/<name>/<path>`), for the page
+/// to load its `.js` and `.css`.
+pub fn asset_paths() -> Vec<String> {
+    modules()
+        .into_iter()
+        .flat_map(|m| {
+            m.assets()
+                .iter()
+                .map(move |(p, _)| format!("modules/{}/{p}", m.name()))
+        })
+        .collect()
 }
 
 /// Every registered module role, in registration order.

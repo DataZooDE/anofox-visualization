@@ -48,6 +48,14 @@ pub fn missing_modules(script: &str) -> String {
     guard(|| Ok(crate::module::missing_message(script).unwrap_or_default())).unwrap_or_default()
 }
 
+/// #1156 D5a: the registered modules' browser files to load
+/// (`modules/<name>/<path>`), as a JSON array.
+#[wasm_bindgen]
+pub fn module_assets() -> String {
+    guard(|| Ok(serde_json::to_string(&crate::module::asset_paths()).unwrap_or_default()))
+        .unwrap_or_else(|_| "[]".into())
+}
+
 #[wasm_bindgen]
 pub fn plan(script: &str) -> String {
     guard(|| Ok(plan_json(script))).unwrap_or_else(|_| "[]".into())

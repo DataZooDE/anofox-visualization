@@ -90,6 +90,13 @@ impl Module for Hello {
             anofox_visualization::format::escape_xml(&names.join(" and "))
         )))
     }
+    /// Its browser files, served at `/modules/hello/…`.
+    fn assets(&self) -> &'static [(&'static str, &'static [u8])] {
+        &[
+            ("hello.js", include_bytes!("hello_assets/hello.js")),
+            ("hello.css", include_bytes!("hello_assets/hello.css")),
+        ]
+    }
     /// `--check` warns about a greeting to nobody.
     fn lint(&self, cols: &[Column]) -> Vec<String> {
         let empty = cols

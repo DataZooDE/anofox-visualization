@@ -158,3 +158,28 @@ fn a_module_brings_a_contract_macro() {
     let e = module::register(&DUP).unwrap_err();
     assert!(e.contains("exists already"), "{e}");
 }
+
+/// Step 3c (D5a): a module's files by their served path, and the list the
+/// page loads.
+#[test]
+fn a_module_brings_browser_files() {
+    setup();
+    let js = module::asset("/modules/hello/hello.js").expect("served");
+    assert!(std::str::from_utf8(js).unwrap().contains("helloModule"));
+    assert!(module::asset("modules/hello/hello.css").is_some());
+    assert!(
+        module::asset("modules/hello/../hello.js").is_none(),
+        "exact paths only"
+    );
+    assert!(module::asset("modules/nobody/hello.js").is_none());
+    assert!(module::asset("index.html").is_none());
+    let paths = module::asset_paths();
+    assert!(
+        paths.contains(&"modules/hello/hello.js".to_string()),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&"modules/hello/hello.css".to_string()),
+        "{paths:?}"
+    );
+}
