@@ -89,6 +89,7 @@ impl Module for Hello {
             anofox_visualization::format::escape_xml(greeting),
             anofox_visualization::format::escape_xml(&names.join(" and "))
         )))
+    }
     /// Its browser files, served at `/modules/hello/…`.
     fn assets(&self) -> &'static [(&'static str, &'static [u8])] {
         &[

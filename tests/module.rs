@@ -157,6 +157,8 @@ fn a_module_brings_a_contract_macro() {
     static DUP: Dup = Dup;
     let e = module::register(&DUP).unwrap_err();
     assert!(e.contains("exists already"), "{e}");
+}
+
 /// Step 3c (D5a): a module's files by their served path, and the list the
 /// page loads.
 #[test]
