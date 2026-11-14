@@ -343,7 +343,14 @@ impl OneProcessSession {
                         })
                     }
                     Ok(_) => {
-                        if line.trim_end_matches(['\r', '\n']) == marker_line {
+                        // #1148: matched as the line's suffix, as serve.rs's
+                        // marker is (#275 L1) — DuckDB 2.0's JSON mode prints
+                        // a result's opening `[` before a row fails to
+                        // convert and never closes it, so the marker arrives
+                        // glued to it (`[[{"__anofox_sep":…}]`)
+                        let l = line.trim_end_matches(['\r', '\n']);
+                        if let Some(head) = l.strip_suffix(marker_line.as_str()) {
+                            text.push_str(head);
                             break;
                         }
                         text.push_str(&line);
@@ -653,6 +660,31 @@ mod tests {
             RoundOutcome::Ok(text) => {
                 let rows = crate::sql::parse_rows_json(&text).unwrap();
                 assert_eq!(rows[0]["v"], 1, "x is still set after the earlier error");
+            }
+            other => panic!("expected rows, got {}", outcome_label(&other)),
+        }
+    }
+
+    /// #1148: an error raised while the rows stream (a cast that fails on a
+    /// value, not at bind time) ends its round with that error. DuckDB 2.0's
+    /// JSON mode has printed the result's `[` by then, so the sentinel's line
+    /// comes glued to it; the round must still find it, not time out.
+    #[test]
+    fn a_conversion_error_mid_result_ends_its_round() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut s = OneProcessSession::spawn(None).unwrap();
+        let sql = "SELECT CAST(t AS DOUBLE) AS v FROM (VALUES ('1'), ('All leads')) x(t);";
+        match s.round_timeout(sql, Duration::from_secs(20)) {
+            RoundOutcome::Sql(e) => assert!(e.contains("All leads"), "{e}"),
+            other => panic!("expected a SQL error, got {}", outcome_label(&other)),
+        }
+        match s.round("SELECT 2 AS v;") {
+            RoundOutcome::Ok(text) => {
+                let rows = crate::sql::parse_rows_json(&text).unwrap();
+                assert_eq!(rows[0]["v"], 2, "the next round reads its own rows");
             }
             other => panic!("expected rows, got {}", outcome_label(&other)),
         }
