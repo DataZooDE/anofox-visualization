@@ -809,6 +809,12 @@ pub(crate) fn render_pareto(
             fill: o.theme.color(0),
             color: o.theme.color(0),
             line_color: o.theme.color(1),
+            // #1101: a top N's share of the grand total, not of itself
+            total: cols
+                .iter()
+                .find(|c| c.role == Role::ParetoTotal)
+                .and_then(|c| c.values.iter().find_map(|v| v.as_f64()))
+                .filter(|t| t.is_finite() && *t > 0.0),
             ..Default::default()
         })
         .xlab("")

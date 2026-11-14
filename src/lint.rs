@@ -2172,14 +2172,17 @@ where
 
         // #1100: the cumulative line is the share of the rows it gets — of a
         // top 20 of 1,500 products it climbed to 100 % (a quarter, really)
-        if chart_kind(&p.roles) == Some(Kind::Pareto) && has_top_level_limit(&p.sql) {
+        if chart_kind(&p.roles) == Some(Kind::Pareto)
+            && has_top_level_limit(&p.sql)
+            && !p.roles.iter().any(|(_, r)| *r == Role::ParetoTotal)
+        {
             diags.push(Diagnostic {
                 severity: Severity::Warning,
                 stmt,
                 code: "chart/pareto-limit",
                 message: "::PARETO after a LIMIT: its cumulative line is the share of the rows \
-                          shown, so it ends at 100 % — for a top N use ::BARCHART + the share \
-                          of the total from SQL as a ::LINECHART on ::Y2"
+                          shown, so it ends at 100 % — give the grand total: \
+                          (SELECT sum(units) FROM sales)::PARETO_TOTAL"
                     .into(),
                 sql: short.clone(),
             });
@@ -12025,6 +12028,11 @@ mod design_tests {
         );
         // a LIMIT inside a subquery, or a column named like it, is not one
         assert!(codes("SELECT p::XAXIS, q::PARETO FROM (SELECT * FROM t LIMIT 5) s;").is_empty());
+        // #1101: with the grand total given, the line is the share of it
+        assert!(codes(
+            "SELECT p::XAXIS, q::PARETO, 1500000::PARETO_TOTAL FROM t ORDER BY q DESC LIMIT 20;"
+        )
+        .is_empty());
         assert!(codes("SELECT p::XAXIS, credit_limit::PARETO FROM t;").is_empty());
         assert!(codes("SELECT p::XAXIS, q::PARETO, 'Over the limit'::TITLE FROM t;").is_empty());
     }
