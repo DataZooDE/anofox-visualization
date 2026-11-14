@@ -57,15 +57,16 @@ the axes and colour series.
 
 | Family | Roles |
 |--------|-------|
-| Bars | `::BARCHART`, `_STACKED`, `_PERCENT`, `_STACKED_PERCENT`, `::FLIP` (horizontal) |
+| Bars | `::BARCHART`, `_STACKED`, `_PERCENT`, `_STACKED_PERCENT`, `::FLIP` (horizontal), `::DUMBBELL`, `::PARETO` (+ `::PARETO_TOTAL`) |
 | Lines & areas | `::LINECHART`, `_PERCENT`, `::STEP`, `::SMOOTH` (trend), `::AREACHART`, `_STACKED` |
 | Points | `::SCATTER`, `::BUBBLE` (sized), `::JITTER`, `::HEXBIN` (bins a planar scatter into a 2D count density) |
-| Part-to-whole | `::PIE`, `::DONUTCHART` |
-| Distribution | `::HISTOGRAM`, `::DENSITY`, `::BOXPLOT`, `::VIOLIN`, `::QQ` — histogram and QQ take `::CATEGORY` / `::FACET`; `::HIST_BINS` (count or edges), `'share'::HIST_NORM` |
-| Matrix / geo | `::HEATMAP`, calendar heatmap, maps: `::MAP`/`::REGION` choropleth (WKT geometry or a region code against the built-in boundaries), `::LAT`/`::LON` points, graduated symbols, flow maps (`::ORIGIN`/`::DEST`), `::HEXBIN` density |
-| Finance | `::CANDLESTICK`, `::OHLC`, `::SPARKLINE` |
-| Gauge / radar | `::GAUGE` (+ `::RANGE`, `::COLORS` zones), `::RADAR` |
-| Annotations | `::REFLINE`/`::XLINE` reference lines, `::BAND_LOWER`/`::BAND_UPPER` bands |
+| Part-to-whole & flows | `::PIE`, `::DONUTCHART`, `::TREEMAP`, `::WATERFALL`, `::FUNNEL`, `::SANKEY` |
+| Distribution | `::HISTOGRAM`, `::DENSITY`, `::RIDGELINE`, `::BOXPLOT`, `::VIOLIN`, `::QQ` — histogram and QQ take `::CATEGORY` / `::FACET`; `::HIST_BINS` (count or edges), `'share'::HIST_NORM` |
+| Matrix / geo | `::HEATMAP`, `::CALENDAR` heatmap, maps: `::MAP`/`::REGION` choropleth (WKT geometry or a region code against the built-in boundaries), `::LAT`/`::LON` points, graduated symbols, flow maps (`::ORIGIN`/`::DEST`), `::HEXBIN` density |
+| Finance | `::CANDLESTICK`, `::OHLC`, `::SPARKLINE`, `::SPARKBAR` |
+| Gauge / radar | `::GAUGE` (+ `::RANGE`, `::COLORS` zones), `::BULLET`, `::RADAR` |
+| Plans & diagrams | `::GANTT` (tasks per resource), `::DIAGRAM` (pipelines, lineage, processes, factor graphs; `::UPSTREAM` / `::EDGES`, laid out in layers) |
+| Annotations | `::REFLINE`/`::XLINE` reference lines, `::BAND_LOWER`/`::BAND_UPPER` bands, `::MARKAREA`, `::ANNOTATE`, `::ABLINE`, `::DATALABELS`, `::THRESHOLDS` |
 | Small multiples & axes | `::FACET` (one panel per value, shared axes), `::XSCALE`/`::YSCALE` (`'log10'`, `'sqrt'`, `'reverse'`, with round-number ticks), `::XBREAKS`/`::YBREAKS` (explicit ticks) |
 
 ### KPIs, text & tables
@@ -88,13 +89,17 @@ the axes and colour series.
 
 ### Contract plots
 
-Model/test output from anofox-statistics and anofox-forecast, and data-quality
-output from anofox-tabular, plotted straight from their result tables:
+Model/test output from anofox-statistics and anofox-forecast, data-quality
+output from anofox-tabular, and decisions from anofox-optimize and
+anofox-decide, plotted straight from their result tables:
 `anofox_plot_terms`/`_prediction`/`_curve`/`_summary`/`_obs`/`_diagnostics`/
 `_tests`/`_compare`/`_partial`/`_events`/`_diagram`, plus the newer
 `_decomposition` (time-series decomposition), `_cv` (cross-validation fold
 timeline, provisional), `_checks` (data-quality checks) and `_matrix`
-(correlation / confusion heatmap). `anofox_plot(tbl)` picks the right one from
+(correlation / confusion heatmap); for decisions `_assignment`, `_selection`,
+`_sequence`, `_schedule`, `_weights` and `_distribution`; and
+`_factor_graph` (a Bayesian model as an interactive Forney-style factor
+graph). `anofox_plot(tbl)` picks the right one from
 the table's columns. See the
 [statistics-plots skill](plugins/anofox-visualization/skills/anofox-visualization-statistics-plots/)
 and [docs/DOCS.md](docs/DOCS.md). Building your own features into a private build: [Writing a module](docs/modules.md).
@@ -187,14 +192,11 @@ INSTALL anofox_visualization FROM community;
 LOAD anofox_visualization;
 ```
 
-Community Extensions now builds every extension, this one included, against
-**DuckDB 2.0** by default; a build against another version (e.g. the
-**v1.5.6** this repository is pinned to) needs the separate `variegata`
-field. An open PR bumps this extension to v2026.10.21 with `variegata` set
-for a 1.5.6 build alongside the 2.0 one
-([duckdb/community-extensions#3228](https://github.com/duckdb/community-extensions/pull/3228),
-not yet merged) — until it lands, `INSTALL … FROM community` serves the
-last merged version.
+The listing is built for **DuckDB 2.0** and, through its `variegata` field,
+for the **v1.5.6** this repository is pinned to. It follows the GitHub
+releases with a short delay (a PR to duckdb/community-extensions per
+release); the version it serves is in its
+[description.yml](https://github.com/duckdb/community-extensions/blob/main/extensions/anofox_visualization/description.yml).
 
 **Provides: rendering only** — `anofox_render` and the `anofox_bar/_line/_scatter/_area/_xy/_xyc`
 macros (SQL → SVG). Serving and the builder are not included (see below).
@@ -224,7 +226,7 @@ The extensions are **unsigned**: start DuckDB with `-unsigned` (or
 `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python).
 
 ```sh
-TAG=v2026.10.21 PLATFORM=linux_amd64      # linux_arm64, osx_arm64, osx_amd64, windows_amd64
+TAG=v2026.11.12 PLATFORM=linux_amd64      # linux_arm64, osx_arm64, osx_amd64, windows_amd64
 EXT=anofox_visualization.$TAG.duckdb-v1.5.6.$PLATFORM.duckdb_extension
 curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/$EXT
 curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/SHA256SUMS
@@ -234,7 +236,7 @@ duckdb -unsigned -c "LOAD './$EXT'; SELECT anofox_contract_version();"
 
 ```sql
 -- in `duckdb -unsigned`
-LOAD './anofox_visualization.v2026.10.21.duckdb-v1.5.6.linux_amd64.duckdb_extension';
+LOAD './anofox_visualization.v2026.11.12.duckdb-v1.5.6.linux_amd64.duckdb_extension';
 SELECT anofox_serve(8080);      -- the builder UI on the live session
 ```
 
@@ -256,7 +258,7 @@ Both run queries through a `duckdb` CLI on your `PATH`:
 ```sh
 tar xzf anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu.tar.gz
 cd anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu
-./dashboard --version                     # dashboard v2026.10.21
+./dashboard --version                     # dashboard v2026.11.12
 ./dashboard my_dashboard.sql out.html     # static interactive HTML
 ./dashboard --check my_dashboard.sql      # which panels error / are empty
 ./serve my.duckdb                         # builder on http://127.0.0.1:8080
