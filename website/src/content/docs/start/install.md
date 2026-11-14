@@ -37,4 +37,4 @@ INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualizat
 
 ## From source
 
-See [Installation → From source](https://github.com/DataZooDE/anofox-visualization/blob/master/README.md#from-source): a Rust toolchain and `duckext/scripts/build-native.sh`.
+See [BUILD.md](https://github.com/DataZooDE/anofox-visualization/blob/master/BUILD.md): the render-only `make` build (the community binary) and the full toolkit with `duckext/scripts/build-native.sh` (Rust, libclang, wasm-bindgen + wasm-opt, Python 3 and a `duckdb` CLI).

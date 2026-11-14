@@ -33,8 +33,8 @@ Two ways to get the table to the renderer:
 
 The extension is unsigned, so the connection must allow unsigned
 extensions **before** the first `LOAD`. Use the extension file of a
-[release](../README.md#from-a-release-full-toolkit) (or a
-[source build](../README.md#from-source)); any `duckdb` Python package
+[release](https://github.com/DataZooDE/anofox-visualization/releases) (or a
+[source build](../BUILD.md)); any `duckdb` Python package
 ≥ 1.2 loads it (the release is built against DuckDB v1.5.6).
 
 ```python

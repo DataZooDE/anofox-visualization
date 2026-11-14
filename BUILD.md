@@ -20,6 +20,13 @@ One Cargo workspace (root `Cargo.toml`):
 | Ships as | the DuckDB community extension (signed) | GitHub release assets + a DuckDB extension repository on Pages (`.github/workflows/extension.yml`, unsigned) |
 | Tests | `make test` → `test/sql/*.test` | `cargo test -p anofox-visualization-duckdb`, smoke test in `build-native.sh` |
 
+**DuckDB 2.0.** The render-only build also compiles and runs its
+sqllogictests against v2.0.0 in a non-blocking CI job, and the community
+listing is built for 2.0 and (through `variegata`) for 1.5.6. The full toolkit
+is version-portable (C-API v1.2.0+). This repository's pin (`.duckdb-version`,
+v1.5.6) moves to the 2.0 line around 2.0.1, once duckdb-wasm and the other
+anofox extensions have 2.0 builds (#352).
+
 ```sh
 # render-only (needs submodules, CMake, a C++ toolchain, Rust; GEN=ninja recommended)
 git submodule update --init --recursive
