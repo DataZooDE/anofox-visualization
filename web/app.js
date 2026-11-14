@@ -9355,8 +9355,19 @@ function decorateSelections() {
     const keys = new Set(Array.isArray(cur) ? cur : cur ? [cur] : []);
     const r = dpRange[sel.name];
     const kind = r ? xKindOf([...marksOf(panel)].map((el) => el.getAttribute("data-x") || "")) : null;
+    // #1172: a selected factor-graph variable keeps the observations it is
+    // influenced by in focus, with their edges (fgInfluence widens them)
+    const fg = panel.querySelector(".panel-svg > svg[data-diagram]");
+    const infl = fg && isFactorGraph(fg) ? fgInflOf(fgSelectedNode(fg)) : null;
+    const inInfl = (el) => {
+      const id = el.getAttribute("data-node");
+      if (id != null) return id in infl;
+      const a = el.getAttribute("data-from");
+      return a != null && (a in infl || el.getAttribute("data-to") in infl);
+    };
     if (keys.size || (r && kind)) {
       filterMarks(panel, (el) => {
+        if (infl && inInfl(el)) return true;
         if (keys.size && !keys.has(el.getAttribute("data-series"))) return false;
         if (!r || !kind) return true;
         const x = xVal(el.getAttribute("data-x") || "", kind);
@@ -20778,18 +20789,16 @@ function fgFocus(svg, el) {
   fgInfluence(svg, el);
 }
 
-// #1172: while a variable is hovered, each observation's edge is as wide as
-// its influence on it (data-influence: observation id → 0..1 against the
-// largest, from the library's leave-one-out); off again on leave.
+// #1172: while a variable is hovered or selected, each observation's edge is
+// as wide as its influence on it (data-influence: observation id → 0..1
+// against the largest, from the library's leave-one-out). The hovered
+// variable wins; on leave the selected one's stay.
 function fgInfluence(svg, el) {
   for (const e of svg.querySelectorAll("polyline[data-edge].dp-infl")) {
     e.style.strokeWidth = "";
     e.classList.remove("dp-infl");
   }
-  let w = null;
-  try {
-    w = el && JSON.parse(el.getAttribute("data-influence") || "null");
-  } catch (_) {}
+  const w = fgInflOf(el) || fgInflOf(fgSelectedNode(svg));
   if (!w) return;
   for (const e of svg.querySelectorAll("polyline[data-edge]")) {
     const k = w[e.getAttribute("data-to")] ?? w[e.getAttribute("data-from")];
@@ -20798,6 +20807,23 @@ function fgInfluence(svg, el) {
     e.style.strokeWidth = String(base + 5 * k);
     e.classList.add("dp-infl");
   }
+}
+
+// A variable's data-influence (observation id → 0..1), or null.
+function fgInflOf(n) {
+  try {
+    return (n && JSON.parse(n.getAttribute("data-influence") || "null")) || null;
+  } catch (_) {
+    return null;
+  }
+}
+// The factor graph's selected node: its panel's ::SELECT_AS value, else the
+// cross-filter's `selected` — one value only.
+function fgSelectedNode(svg) {
+  const sel = svg.closest(".panel")?._ia?.select;
+  let cur = sel ? dpXf[sel.name] : dpSelected;
+  if (Array.isArray(cur)) cur = cur.length === 1 ? cur[0] : null;
+  return cur == null || cur === "" ? null : svg.querySelector(`rect[data-node="${CSS.escape(String(cur))}"]`);
 }
 
 // #1172: a factor graph edge's card — the variable and factor it joins, the
@@ -21015,6 +21041,8 @@ function attachHover() {
   });
   apply();
   decorateSelections();
+  // #1172: a selected variable's influence stays drawn on its edges
+  document.querySelectorAll(".dash .panel svg[data-diagram]").forEach((svg) => isFactorGraph(svg) && fgInfluence(svg, null));
   attachAxisPointer();
   attachLegendToggle();
   attachToolbox();
