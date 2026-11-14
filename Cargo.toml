@@ -249,6 +249,11 @@ required-features = ["serve"]
 name = "hello_serve"
 required-features = ["serve"]
 
+[[example]]
+name = "hello_wasm"
+crate-type = ["cdylib"]
+required-features = ["wasm"]
+
 # tiny_http 0.12.0 with a lost wake-up fix in its worker pool (#86) and the
 # security fixes backported from tiny_http_dh 0.12.2. Every crate in the
 # workspace (core `serve`, the DuckDB extension, the FFI build) picks it up.
