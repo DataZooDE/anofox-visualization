@@ -3774,3 +3774,39 @@ fn flow_digest_counts_links_per_origin() {
         "flows: 3 links from 2 origins (Deliveries); per origin: Dortmund 2 links, 1500; Hamburg 1 links, 300; largest: Dortmund → Köln 900, Dortmund → Essen 600, Hamburg → Kiel 300"
     );
 }
+
+/// #1121 sample 3: `y::LINECHART, y::SMOOTH` with a `::CATEGORY` draws one
+/// trend per series, in that series' colour — it was one orange path
+/// zigzagging from series to series (ggplot-rs 0.56.1 keeps a stat's group
+/// columns; the trend is coloured by the category, not the measure's name).
+#[test]
+fn a_trend_per_category_series() {
+    let x = [
+        1.0, 2.0, 3.0, 4.0, 5.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1.0, 2.0, 3.0, 4.0, 5.0,
+    ];
+    let y = [
+        10., 12., 11., 14., 13., 100., 90., 95., 80., 85., 50., 52., 51., 55., 54.,
+    ];
+    let item = [
+        "a", "a", "a", "a", "a", "b", "b", "b", "b", "b", "c", "c", "c", "c", "c",
+    ];
+    for m in ["lm", "loess"] {
+        let s = svg(vec![
+            Column::new("x", Role::X, nums(&x)),
+            Column::new("item", Role::Category, strs(&item)),
+            Column::new("y", Role::Value(Kind::Line), nums(&y)),
+            Column::new("t", Role::Value(Kind::Smooth), nums(&y)),
+            Column::new("m", Role::SmoothMethod, strs(&[m])),
+        ]);
+        let mut strokes: Vec<String> = s
+            .split("<polyline")
+            .skip(1)
+            .filter(|p| p.contains("data-geom=\"smooth\""))
+            .map(|p| p.split("stroke=\"").nth(1).unwrap_or("")[..7].to_string())
+            .collect();
+        assert_eq!(strokes.len(), 3, "{m}: one trend per series");
+        strokes.sort();
+        strokes.dedup();
+        assert_eq!(strokes.len(), 3, "{m}: each in its series' colour");
+    }
+}
