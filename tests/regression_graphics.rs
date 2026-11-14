@@ -3810,3 +3810,51 @@ fn a_trend_per_category_series() {
         assert_eq!(strokes.len(), 3, "{m}: each in its series' colour");
     }
 }
+
+#[test]
+fn crowded_xline_labels_stack_instead_of_dropping() {
+    // #1140 (11-11 bench, ts-event-line): seven event lines in a narrow
+    // panel — every label is drawn (stacked downwards), none past the right
+    // edge.
+    let names = [
+        "Port strike",
+        "Typhoon Haikui",
+        "Canal closure",
+        "Plant fire",
+        "Rail outage",
+        "Customs backlog",
+        "Typhoon Koinu",
+    ];
+    let xs: Vec<f64> = (0..24).map(f64::from).collect();
+    let ys: Vec<f64> = (0..24).map(|i| f64::from(10 + i % 5)).collect();
+    let at = [3.0, 5.0, 8.0, 10.0, 13.0, 17.0, 22.0];
+    let n = xs.len();
+    let line: Vec<f64> = (0..n).map(|i| at[i % 7]).collect();
+    let label: Vec<&str> = (0..n).map(|i| names[i % 7]).collect();
+    let width = 260;
+    let s = render(
+        &[
+            Column::new("x", Role::X, nums(&xs)),
+            Column::new("y", Role::Value(Kind::Bar), nums(&ys)),
+            Column::new("e", Role::VLine, nums(&line)),
+            Column::new("n", Role::VLineLabel, strs(&label)),
+        ],
+        width,
+        320,
+    )
+    .expect("renders");
+    for name in names {
+        let end = s
+            .find(&format!("\u{a0}{name}<"))
+            .unwrap_or_else(|| panic!("{name} drawn: {s}"));
+        let tag = &s[s[..end].rfind("<text").unwrap()..end];
+        let k = tag.find(" x=\"").unwrap() + 4;
+        let x: f64 = tag[k..k + tag[k..].find('"').unwrap()].parse().unwrap();
+        // the label's centre, half its estimated width (0.6 em per char) inside
+        let half = (name.chars().count() + 1) as f64 * 9.5 * 0.3;
+        assert!(
+            x + half <= f64::from(width) + 1.0,
+            "{name} at {x} clipped: {s}"
+        );
+    }
+}

@@ -5534,6 +5534,33 @@ fn computed_top(kind: Kind, value: &Column) -> f64 {
 
 /// `top`: the highest bar / curve point when the caller already knows it
 /// (a histogram binned here), else [`computed_top`] estimates it.
+/// Labels hanging from the top of the data beside their x (event lines,
+/// shaded ranges): each starts right of its x; crowded ones stack downwards
+/// in x order instead of being dropped, and one near the right edge is
+/// shifted left to stay inside the panel; a halo in the panel's colour keeps
+/// a label stacked over bars readable (#1140, sipemu/ggplot-rs#513).
+fn top_label_repel(theme: &theme::ResolvedTheme) -> GeomTextRepel {
+    GeomTextRepel {
+        size: 9.5,
+        color: theme.chart_label(),
+        repel: RepelParams {
+            bg_colour: Some(theme.colors.card),
+            bg_r: 2.0,
+            direction: RepelDirection::Down,
+            hjust: 0.0,
+            vjust: 0.0,
+            max_overlaps: usize::MAX,
+            min_segment_length: f64::INFINITY,
+            // the anchors are the labels' own x, not data to keep clear of
+            point_size: 0.0,
+            point_padding: 0.0,
+            box_padding: 1.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 fn x_marks(
     mut plot: GGPlot,
     o: &RenderOptions,
@@ -5597,15 +5624,19 @@ fn x_marks(
     }
     if !xs.is_empty() {
         let k = xs.len();
-        plot = plot
-            .geom_text_with(GeomText {
+        plot = if flipped {
+            plot.geom_text_with(GeomText {
                 size: 9.5,
                 color: o.theme.chart_label(),
-                hjust: if flipped { 1.0 } else { 0.0 },
+                hjust: 1.0,
                 vjust: 0.0,
                 check_overlap: true,
                 ..Default::default()
             })
+        } else {
+            plot.geom_text_repel_with(top_label_repel(&o.theme))
+        };
+        plot = plot
             .layer_data(vec![
                 ("x".to_string(), xs),
                 (
@@ -7864,20 +7895,13 @@ fn data_annotations(
             return plot;
         };
         let k = xs.len();
-        plot.geom_text_with(GeomText {
-            size: 9.5,
-            color: ink,
-            hjust: 0.0,
-            vjust: 0.0,
-            check_overlap: true,
-            ..Default::default()
-        })
-        .layer_data(vec![
-            ("x".to_string(), xs),
-            ("y".to_string(), num(vec![y; k])),
-            ("label".to_string(), text(labels)),
-        ])
-        .layer_aes(Aes::new().x("x").y("y").label("label"))
+        plot.geom_text_repel_with(top_label_repel(&o.theme))
+            .layer_data(vec![
+                ("x".to_string(), xs),
+                ("y".to_string(), num(vec![y; k])),
+                ("label".to_string(), text(labels)),
+            ])
+            .layer_aes(Aes::new().x("x").y("y").label("label"))
     };
 
     // Labelled shaded ranges, one per distinct (from, to, label) row.
