@@ -5634,15 +5634,14 @@ fn render_histogram(
     let share = role_str(cols, Role::HistNorm).is_some_and(|s| s.eq_ignore_ascii_case("share"));
     let datalabels = find_role(cols, Role::DataLabels);
 
-    // `::DATALABELS` needs the counts, so it bins here too; so does
-    // `::YSCALE`: ggplot-rs's `StatBin` hands its counts to a transformed y
-    // scale untransformed (bars a raw count high on a log axis)
+    // `::DATALABELS` needs the counts, so it bins here too (a `::YSCALE`
+    // stays on `StatBin`: its counts go through the y transform since
+    // ggplot-rs 0.45.1, sipemu/ggplot-rs#490)
     if facet.is_none()
         && category.is_none()
         && bins_spec.is_none()
         && !share
         && datalabels.is_none()
-        && find_role(cols, Role::YScale).is_none()
     {
         let data = vec![("x".to_string(), value.values.clone())];
         let mut plot = GGPlot::new(data)
