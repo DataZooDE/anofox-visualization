@@ -163,6 +163,21 @@ const forney = await page.evaluate(async () => {
 });
 check(forney.terminals === 4 && forney.edge && !forney.node && forney.card === "The variable s₀", "Forney style: terminals, a variable as its edge", forney);
 
+// #1172: hovering m widens each cycle's edge by its influence on m (y₄ the
+// most, from the library's leave-one-out), and its observations stay in
+// focus; leaving resets them.
+const infl = await page.evaluate(() => {
+  const svg = document.querySelectorAll("svg[data-diagram]")[1];
+  const m = svg.querySelector('rect[data-node="e6"]');
+  m.dispatchEvent(new MouseEvent("mouseenter"));
+  const w = (to) => parseFloat(svg.querySelector(`polyline[data-to="${to}"]`).style.strokeWidth || "0");
+  const r = { y4: w("v4"), y3: w("v3"), y4Opacity: svg.querySelector('rect[data-node="v4"]').style.opacity };
+  m.dispatchEvent(new MouseEvent("mouseleave"));
+  r.after = svg.querySelector('polyline[data-to="v4"]').style.strokeWidth;
+  return r;
+});
+check(infl.y4 > infl.y3 && infl.y3 > 0 && infl.y4Opacity === "" && infl.after === "", "hovering m widens each cycle's edge by its influence", infl);
+
 // A ::SELECT_AS before the macro names what a click on a node sets (#1152).
 const sql = `
 SELECT 'node'::SELECT_AS;
