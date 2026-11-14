@@ -121,6 +121,46 @@ FROM (SELECT anofox_plot_factor_graph(n, edges := [
 ----
 true
 
+# #1152: a long model is collapsed (data-slices="collapsed"); the viewer's
+# anofox_fg_slices = 'all' (set by a click on ⋯) draws every slice, and an
+# explicit slices := wins over it.
+statement ok
+CREATE TABLE fg_chain AS
+SELECT 's' || t AS id, 'variable' AS kind, 's_{' || t || '}' AS label, 'state' AS layer, t AS slice FROM range(8) r(t)
+UNION ALL
+SELECT 'f' || t, 'factor', 'Normal', 'state', t FROM range(1, 8) r(t);
+
+statement ok
+CREATE TABLE fg_edges AS
+SELECT list(e) AS edges FROM (
+  SELECT {'variable': 's' || (t - 1), 'factor': 'f' || t, 'interface': 'mean'} AS e FROM range(1, 8) r(t)
+  UNION ALL
+  SELECT {'variable': 's' || t, 'factor': 'f' || t, 'interface': 'out'} FROM range(1, 8) r(t));
+
+query I
+SELECT svg LIKE '%data-slices="collapsed"%' AND svg LIKE '%more%'
+FROM (SELECT anofox_plot_factor_graph(n, edges := (SELECT edges FROM fg_edges)) AS svg FROM fg_chain n);
+----
+true
+
+statement ok
+SET VARIABLE anofox_fg_slices = 'all';
+
+query I
+SELECT svg LIKE '%data-slices="all"%' AND svg NOT LIKE '%⋯%'
+FROM (SELECT anofox_plot_factor_graph(n, edges := (SELECT edges FROM fg_edges)) AS svg FROM fg_chain n);
+----
+true
+
+query I
+SELECT svg LIKE '%data-slices="collapsed"%'
+FROM (SELECT anofox_plot_factor_graph(n, edges := (SELECT edges FROM fg_edges), slices := 'auto') AS svg FROM fg_chain n);
+----
+true
+
+statement ok
+RESET VARIABLE anofox_fg_slices;
+
 statement error
 SELECT anofox_plot_factor_graph(n) FROM (VALUES (1, 2)) n(what, ever);
 ----

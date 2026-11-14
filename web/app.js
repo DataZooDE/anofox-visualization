@@ -13502,7 +13502,32 @@ function wireCharts() {
   mountStories();
   mountFrames();
   mountDiagramZoom();
+  mountFgFewer();
   resumeLinkReturn();
+}
+
+// #1152: a factor graph a ⋯ click expanded (root data-slices="all") offers
+// *Fewer slices*, which collapses it again (Esc does too: it clears every
+// selection, this one included).
+function mountFgFewer() {
+  document.querySelectorAll(".dash .panel > .panel-svg").forEach((holder) => {
+    const all = holder.querySelector(':scope > svg[data-slices="all"]') && dpXf.anofox_fg_slices === "all";
+    let chip = holder.querySelector(":scope > .dp-fg-fewer");
+    if (!all) return chip?.remove();
+    if (chip) return;
+    chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "dp-map-reset dp-fg-fewer";
+    chip.textContent = "⋯ Fewer slices";
+    chip.title = "Collapse the long model again (Esc)";
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      dpXf.anofox_fg_slices = "";
+      run(false);
+    });
+    chip.addEventListener("pointerdown", (e) => e.stopPropagation());
+    holder.appendChild(chip);
+  });
 }
 
 // #1152: a ::DIAGRAM the server shrank to fit its panel (a long factor graph)
@@ -21005,6 +21030,13 @@ function attachHover() {
     el.addEventListener("click", (e) => {
       e.stopPropagation();
       if (rule) return;
+      // #1152: a collapsed factor graph's `⋯ n more` draws every slice (the
+      // macro's `slices` defaults to this variable; the share link keeps it)
+      if (/^__more_/.test(el.getAttribute("data-node") || "") && rootSvg(el).getAttribute("data-slices") === "collapsed") {
+        dpXf.anofox_fg_slices = "all";
+        run(false);
+        return;
+      }
       const trackSvg = el.closest(".panel-tracks") && el.closest("svg");
       const track = trackSvg && trackSvg._track;
       // A ::TRACK lane's own ::LINK (declared on the track's own statement,
