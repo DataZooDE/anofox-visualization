@@ -11938,6 +11938,44 @@ mod design_tests {
     }
 
     #[test]
+    fn digest_says_how_a_bubble_chart_trends() {
+        // #1107: 'populous districts sit closer' — the digest now says how y
+        // and the bubble size go with x (ggplot-rs 0.56)
+        let data: Vec<_> = [
+            (120.0, 2.1, 900.0),
+            (300.0, 3.5, 700.0),
+            (80.0, 1.2, 950.0),
+            (510.0, 4.8, 300.0),
+            (220.0, 2.9, 600.0),
+            (410.0, 4.1, 400.0),
+        ]
+        .iter()
+        .map(|(x, y, s)| {
+            json!({ "c0": x, "c1": y, "c2": s })
+                .as_object()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+        let m: Vec<String> = check_opts(
+            "SELECT population::XAXIS, distance::BUBBLE, size::SIZE FROM t;",
+            |_q| Ok(data.clone()),
+            LintOptions {
+                design: false,
+                digest: true,
+                ..Default::default()
+            },
+        )
+        .into_iter()
+        .filter(|d| d.code == "chart/drawn")
+        .map(|d| d.message)
+        .collect();
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(m[0].contains("y rises strongly with x"), "{m:?}");
+        assert!(m[0].contains("size falls strongly with x"), "{m:?}");
+    }
+
+    #[test]
     fn percent_fractions_and_growing_funnels_are_flagged() {
         let codes = |sql: &str, data: Vec<Value>| -> Vec<&'static str> {
             let rows: Vec<Map<String, Value>> = data
