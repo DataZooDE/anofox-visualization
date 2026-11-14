@@ -244,6 +244,10 @@ auth = ["dep:jsonwebtoken", "dep:aws-lc-rs", "dep:rustls", "dep:ureq", "dep:base
 name = "serve"
 required-features = ["serve"]
 
+[[example]]
+name = "hello_serve"
+required-features = ["serve"]
+
 # tiny_http 0.12.0 with a lost wake-up fix in its worker pool (#86) and the
 # security fixes backported from tiny_http_dh 0.12.2. Every crate in the
 # workspace (core `serve`, the DuckDB extension, the FFI build) picks it up.
