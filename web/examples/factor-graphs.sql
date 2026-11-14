@@ -142,7 +142,10 @@ FROM (SELECT x, 'before (prior)' AS k, fg_density(pri.family, x, pri.mean, pri.s
 ORDER BY k, x;
 
 -- Under them, how it settled: the mean ± sd per iteration.
-SELECT 6::SPAN;
+-- Under them, the clicked variable in three views: how it settled, which
+-- cycles drove it, and whether the iterations converged.
+SELECT 'How it settled' AS fg_more ::VIEW;
+SELECT 12::SPAN;
 SELECT 220::HEIGHT;
 SELECT iteration::XAXIS, round(mean, 4)::LINECHART,
        round(mean - sd, 4)::BAND_LOWER, round(mean + sd, 4)::BAND_UPPER,
@@ -150,9 +153,10 @@ SELECT iteration::XAXIS, round(mean, 4)::LINECHART,
         || ' by iteration: its mean and ± 1 sd as the messages go round')::TITLE
 FROM fg_cycle_marginals WHERE variable = fg_pick() ORDER BY iteration;
 
--- Beside it, which cycles drove the clicked variable: how far it moves
--- without each one (leave-one-out, from the library).
-SELECT 6::SPAN;
+-- Which cycles drove the clicked variable: how far it moves without each
+-- one (leave-one-out, from the library).
+SELECT 'What drove it' AS fg_more ::VIEW;
+SELECT 12::SPAN;
 SELECT 220::HEIGHT;
 SELECT replace(replace(n.label, '_{', ''), '}', '')::XAXIS,
        round(i.mean - i.loo_mean, 4)::BARCHART,
@@ -160,16 +164,18 @@ SELECT replace(replace(n.label, '_{', ''), '}', '')::XAXIS,
         || ' with each cycle minus without it: which cycles moved it most')::TITLE,
        'Each bar: the posterior mean with all six cycles minus the mean without that one. A long bar is a cycle the estimate leans on.'::INFO
 FROM fg_cycle_influence i JOIN fg_cycle_nodes n ON n.id = i.observation
-WHERE i.target = fg_pick() ORDER BY n.id;
+WHERE i.target = fg_pick() ORDER BY 2 DESC;
 
--- Under them, whether the iterations settled: the free energy per iteration
--- (lower is a better fit; flat means converged).
+-- Whether the iterations settled: the free energy per iteration (lower is
+-- a better fit; flat means converged).
+SELECT 'Converged?' AS fg_more ::VIEW;
 SELECT 12::SPAN;
-SELECT 180::HEIGHT;
+SELECT 220::HEIGHT;
 SELECT iteration::XAXIS, round(free_energy, 4)::LINECHART,
        'Free energy per iteration: the mean-field updates settle within three rounds'::TITLE,
        'The Bethe free energy the message passing minimises. When it stops falling, more iterations change nothing.'::INFO
 FROM fg_cycle_free_energy ORDER BY iteration;
+SELECT 1::ENDVIEW;
 
 SELECT 'A machine''s hidden state over five shifts'::SECTION;
 
