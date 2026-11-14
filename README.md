@@ -97,7 +97,7 @@ timeline, provisional), `_checks` (data-quality checks) and `_matrix`
 (correlation / confusion heatmap). `anofox_plot(tbl)` picks the right one from
 the table's columns. See the
 [statistics-plots skill](plugins/anofox-visualization/skills/anofox-visualization-statistics-plots/)
-and [docs/DOCS.md](docs/DOCS.md).
+and [docs/DOCS.md](docs/DOCS.md). Building your own features into a private build: [Writing a module](docs/modules.md).
 
 ### Key capabilities
 - **Three surfaces, one renderer** — a core library (annotated result → SVG, wasm-compatible), a **DuckDB extension** (render + serve), and a browser builder on DuckDB-Wasm.
