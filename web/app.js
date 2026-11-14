@@ -4,6 +4,7 @@
 import init, {
   plan,
   missing_modules,
+  module_assets,
   tooltip_fill,
   render_panel,
   render_cell,
@@ -2790,6 +2791,7 @@ async function boot() {
   const sideVer = document.getElementById("side-ver");
   if (sideVer) sideVer.textContent = wasmVersion(); // "v2026.10.18" or "v2026.10.18+37 · 739aba4" (#216)
   loadRoleSets();
+  loadModuleAssets();
 
   // Prefer a live DuckDB bridge (served by `anofox-visualization serve`); else DuckDB-Wasm.
   // A locked served dashboard always uses its server (/api/panel, no SQL) —
@@ -7607,6 +7609,30 @@ let ZOOMABLE = [
   "BOXPLOT",
   "VIOLIN",
 ];
+// #1156 D5a: the registered modules' browser files (a distribution's wasm
+// build lists them; the public build has none): each .js as a module
+// script, each .css as a stylesheet, from the same origin (/modules/…).
+function loadModuleAssets() {
+  let paths = [];
+  try {
+    paths = JSON.parse(module_assets());
+  } catch (_) {
+    return;
+  }
+  for (const p of paths) {
+    if (/\.css$/i.test(p)) {
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = p;
+      document.head.appendChild(l);
+    } else if (/\.m?js$/i.test(p)) {
+      const sc = document.createElement("script");
+      sc.type = "module";
+      sc.src = p;
+      document.head.appendChild(sc);
+    }
+  }
+}
 function loadRoleSets() {
   try {
     const sets = JSON.parse(roles_json()).sets;

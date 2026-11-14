@@ -427,6 +427,10 @@ fn read_body(req: &mut Request, limit: usize) -> Result<String, (u16, String)> {
 
 /// `head`: markup put before `</head>` of index.html (the authoring app bar).
 fn serve_asset(req: Request, path: &str, head: &str, duckdb_esm: bool) {
+    // #1156 D5a: a registered module's file
+    if let Some(bytes) = anofox_visualization::module::asset(path) {
+        return respond(req, 200, content_type(path), bytes.to_vec());
+    }
     let asset = path.trim_start_matches('/');
     let asset = if asset.is_empty() {
         "index.html"
@@ -8786,7 +8790,9 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
             }
         }
         (&Method::Get, p) => {
-            let found = WEB.get_file(p.trim_start_matches('/')).is_some() || p == "/";
+            let found = WEB.get_file(p.trim_start_matches('/')).is_some()
+                || p == "/"
+                || anofox_visualization::module::asset(p).is_some();
             serve_asset(req, p, "", false);
             if found {
                 200

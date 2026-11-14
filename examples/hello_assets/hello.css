@@ -1,0 +1,2 @@
+/* #1156 D5a: a module's stylesheet — loaded by the page after app.js. */
+:root { --hello-module: 1; }

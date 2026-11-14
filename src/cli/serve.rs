@@ -973,6 +973,10 @@ fn handle_authoring(
     if req.method() != &Method::Get {
         return text(req, 405, "method not allowed");
     }
+    // #1156 D5a: a registered module's file
+    if let Some(bytes) = crate::module::asset(&path) {
+        return respond(req, 200, sv::content_type(&path), bytes.to_vec());
+    }
     let asset = path.trim_start_matches('/');
     let asset = if asset.is_empty() {
         "index.html"
