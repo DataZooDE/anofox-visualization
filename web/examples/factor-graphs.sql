@@ -34,6 +34,15 @@ CREATE OR REPLACE TABLE fg_hmm_schedule AS FROM read_csv('data/factor-graphs/hmm
 CREATE OR REPLACE TABLE fg_cycle_nodes AS FROM read_csv('data/factor-graphs/cycle-nodes.csv', all_varchar = true);
 CREATE OR REPLACE TABLE fg_cycle_edges AS FROM read_csv('data/factor-graphs/cycle-edges.csv', all_varchar = true);
 CREATE OR REPLACE TABLE fg_cycle_marginals AS FROM read_csv('data/factor-graphs/cycle-marginals.csv');
+-- #1172: what the library adds — each message's value, the prediction at
+-- each observation, each observation's influence, the free energy
+CREATE OR REPLACE TABLE fg_coin_messages AS FROM read_csv('data/factor-graphs/coin-messages.csv');
+CREATE OR REPLACE TABLE fg_coin_predictive AS FROM read_csv('data/factor-graphs/coin-predictive.csv');
+CREATE OR REPLACE TABLE fg_coin_influence AS FROM read_csv('data/factor-graphs/coin-influence.csv');
+CREATE OR REPLACE TABLE fg_cycle_messages AS FROM read_csv('data/factor-graphs/cycle-messages.csv');
+CREATE OR REPLACE TABLE fg_cycle_predictive AS FROM read_csv('data/factor-graphs/cycle-predictive.csv');
+CREATE OR REPLACE TABLE fg_cycle_influence AS FROM read_csv('data/factor-graphs/cycle-influence.csv');
+CREATE OR REPLACE TABLE fg_cycle_free_energy AS FROM read_csv('data/factor-graphs/cycle-free_energy.csv');
 CREATE OR REPLACE TABLE fg_cycle_schedule AS FROM read_csv('data/factor-graphs/cycle-schedule.csv', all_varchar = true);
 
 SELECT 'The defect rate after four inspections'::SECTION;
@@ -59,7 +68,10 @@ SELECT 12::SPAN;
 SELECT anofox_plot_factor_graph(n,
          edges := (SELECT list(e) FROM fg_coin_edges e),
          marginals := (SELECT list(m) FROM fg_coin_marginals m),
-         schedule := (SELECT list(s) FROM fg_coin_schedule s))
+         schedule := (SELECT list(s) FROM fg_coin_schedule s),
+         messages := (SELECT list(m) FROM fg_coin_messages m),
+         predictive := (SELECT list(p) FROM fg_coin_predictive p),
+         influence := (SELECT list(i) FROM fg_coin_influence i))
        AS "What is the defect rate?"
 FROM fg_coin_nodes n;
 
@@ -102,7 +114,10 @@ SELECT 'fg_node'::SELECT_AS;
 SELECT anofox_plot_factor_graph(n,
          edges := (SELECT list(e) FROM fg_cycle_edges e),
          marginals := (SELECT list(m) FROM fg_cycle_marginals m),
-         schedule := (SELECT list(s) FROM fg_cycle_schedule s))
+         schedule := (SELECT list(s) FROM fg_cycle_schedule s),
+         messages := (SELECT list(m) FROM fg_cycle_messages m),
+         predictive := (SELECT list(p) FROM fg_cycle_predictive p),
+         influence := (SELECT list(i) FROM fg_cycle_influence i))
        AS "How long does a cycle take, and how steady is it? (click m or τ)"
 FROM fg_cycle_nodes n;
 
@@ -127,6 +142,9 @@ FROM (SELECT x, 'before (prior)' AS k, fg_density(pri.family, x, pri.mean, pri.s
 ORDER BY k, x;
 
 -- Under them, how it settled: the mean ± sd per iteration.
+-- Under them, the clicked variable in three views: how it settled, which
+-- cycles drove it, and whether the iterations converged.
+SELECT 'How it settled' AS fg_more ::VIEW;
 SELECT 12::SPAN;
 SELECT 220::HEIGHT;
 SELECT iteration::XAXIS, round(mean, 4)::LINECHART,
@@ -134,6 +152,30 @@ SELECT iteration::XAXIS, round(mean, 4)::LINECHART,
        ((SELECT replace(replace(label, '\tau', 'τ'), '\', '') FROM fg_cycle_nodes WHERE id = fg_pick())
         || ' by iteration: its mean and ± 1 sd as the messages go round')::TITLE
 FROM fg_cycle_marginals WHERE variable = fg_pick() ORDER BY iteration;
+
+-- Which cycles drove the clicked variable: how far it moves without each
+-- one (leave-one-out, from the library).
+SELECT 'What drove it' AS fg_more ::VIEW;
+SELECT 12::SPAN;
+SELECT 220::HEIGHT;
+SELECT replace(replace(n.label, '_{', ''), '}', '')::XAXIS,
+       round(i.mean - i.loo_mean, 4)::BARCHART,
+       ((SELECT replace(replace(label, '\tau', 'τ'), '\', '') FROM fg_cycle_nodes WHERE id = fg_pick())
+        || ' with each cycle minus without it: which cycles moved it most')::TITLE,
+       'Each bar: the posterior mean with all six cycles minus the mean without that one. A long bar is a cycle the estimate leans on.'::INFO
+FROM fg_cycle_influence i JOIN fg_cycle_nodes n ON n.id = i.observation
+WHERE i.target = fg_pick() ORDER BY 2 DESC;
+
+-- Whether the iterations settled: the free energy per iteration (lower is
+-- a better fit; flat means converged).
+SELECT 'Converged?' AS fg_more ::VIEW;
+SELECT 12::SPAN;
+SELECT 220::HEIGHT;
+SELECT iteration::XAXIS, round(free_energy, 4)::LINECHART,
+       'Free energy per iteration: the mean-field updates settle within three rounds'::TITLE,
+       'The Bethe free energy the message passing minimises. When it stops falling, more iterations change nothing.'::INFO
+FROM fg_cycle_free_energy ORDER BY iteration;
+SELECT 1::ENDVIEW;
 
 SELECT 'A machine''s hidden state over five shifts'::SECTION;
 
