@@ -1,4 +1,4 @@
-# Anofox Visualization - DuckDB Extension
+# Anofox Visualization — charts & dashboards for DuckDB, from SQL
 
 <a href="https://datazoode.github.io/anofox-visualization/">
   <picture>
@@ -7,12 +7,11 @@
   </picture>
 </a>
 
-Charts & dashboards for DuckDB — the grammar of graphics, straight from SQL. You
-write ordinary DuckDB SQL and tag output columns with `::ROLE` casts; each
-annotated `SELECT` becomes a panel (chart / KPI / table / input), rendered to
-SVG by [ggplot-rs](https://github.com/sipemu/ggplot-rs), a
-grammar-of-graphics engine. No JS charting library, no bespoke config — the
-SQL *is* the dashboard.
+You write ordinary DuckDB SQL and tag result columns with `::ROLE` casts. Each
+annotated `SELECT` becomes a chart, a KPI, a table or an input, rendered to SVG
+by [ggplot-rs](https://github.com/sipemu/ggplot-rs), a grammar-of-graphics
+engine. There is no JavaScript charting library and no config file: the SQL is
+the dashboard.
 
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
 [![DuckDB Version](https://img.shields.io/badge/DuckDB-v1.5.6%20%7C%202.0-brightgreen.svg)](https://duckdb.org)
@@ -20,546 +19,116 @@ SQL *is* the dashboard.
 [![Claude Code skills](https://img.shields.io/badge/Claude_Code-plugin_%C2%B7_5_skills-8A2BE2)](#claude-code-plugin)
 
 > [!IMPORTANT]
-> This extension is in early development, so bugs and breaking changes are expected.
-> Please use the [issues page](https://github.com/DataZooDE/anofox-visualization/issues) to report bugs or request features.
+> Early development: expect bugs and breaking changes. Please report them on the
+> [issues page](https://github.com/DataZooDE/anofox-visualization/issues).
 
 ```sql
-LOAD anofox_visualization;
-
--- Convenience macros: pass columns, get one SVG per group.
-WITH sales AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
-SELECT anofox_bar(ch, n) FROM sales;                 -- <svg> bar chart
+SELECT week::XAXIS, channel::CATEGORY, sum(revenue)::BARCHART_STACKED, 'Revenue by channel'::TITLE
+FROM sales GROUP BY ALL ORDER BY ALL;
 ```
 
-**[▶ Live demo](https://datazoode.github.io/anofox-visualization/app/)** — the full
-builder running in your browser on DuckDB-Wasm. Its sidebar keeps your own
-dashboards first, then one **Examples** library grouped by business area (start
-here, demand & stock, logistics & production, sales & customers, service &
-operations, data quality, and the feature tours under *how it works*). Each
-example places itself with `-- @group` / `-- @tags` header comments. Among
-them: [statistics](examples/statistics-showcase/) and forecast computed **live**
-in the browser by their wasm builds; [tabular](examples/tabular-showcase/)
-(a data-quality report), [optimize](examples/optimize-showcase/)
-(decisions at a distribution centre) and [decide](examples/decide-showcase/)
-(support-ticket triage with a decision model) read results computed natively,
-because those extensions can't run in DuckDB-Wasm yet; and an
-[inventory digital twin](examples/inventory-twin/) (stock, risk, drift
-monitoring, calibration and replay of inventory-rs twins) with a
-[supplier lead-time](examples/supplier-lead-times/) companion (reliability,
-drift and what lead-time variability costs in safety stock).
+**[▶ Try it in the browser](https://datazoode.github.io/anofox-visualization/app/)**: the
+builder runs on DuckDB-Wasm, nothing to install.
 
-## Features
+## What you can do
 
-### Chart kinds
+- **Draw charts in SQL.** 36 chart kinds (bars, lines, scatter, heatmaps, waterfalls, Sankey, Gantt, diagrams and factor graphs …) and maps (countries and regions built in, or your own geometry), as SVG from any query. [Chart catalogue](https://datazoode.github.io/anofox-visualization/build/charts/)
+- **Build dashboards from a `.sql` file.** KPI tiles, tables, inputs (`getvariable`), tabs, cross-filtering, drill-down and share links. [Building dashboards](https://datazoode.github.io/anofox-visualization/build/)
+- **Author in the browser.** The builder edits and renders on DuckDB-Wasm or against your own database (`anofox_serve`). [Authoring](https://datazoode.github.io/anofox-visualization/deploy/authoring/)
+- **Publish without a server.** Static HTML, one SVG, or a whole static site (`dashboard --site`). [Static site](https://datazoode.github.io/anofox-visualization/deploy/static-site/)
+- **Serve dashboards to others.** A locked, read-only server with login (OIDC, JWT, proxy, API keys), row and column policies, scheduled reports and alerts. [Locked server](https://datazoode.github.io/anofox-visualization/deploy/locked-server/)
+- **Embed them** in your own app (a web component, or signed embed links). [Embedding](https://datazoode.github.io/anofox-visualization/deploy/embedding/)
+- **Plot results from the anofox extensions.** statistics, forecast, tabular, optimize and decide: `anofox_plot(t)` picks the plot. From Python and R too. [Integrations](https://datazoode.github.io/anofox-visualization/integrate/)
+- **Check dashboards in CI.** `dashboard --check` finds broken panels, design problems and implausible numbers. [CLI](https://datazoode.github.io/anofox-visualization/deploy/cli/)
+- **Add your own features as modules.** Your own roles, panels, SQL macros and browser files from a separate (also private) crate, built into your own distribution. [Writing a module](docs/modules.md)
 
-Cast the **measure** column with the chart role; add `::XAXIS` / `::CATEGORY` for
-the axes and colour series.
+## What it doesn't do (yet)
 
-| Family | Roles |
-|--------|-------|
-| Bars | `::BARCHART`, `_STACKED`, `_PERCENT`, `_STACKED_PERCENT`, `::FLIP` (horizontal), `::DUMBBELL`, `::PARETO` (+ `::PARETO_TOTAL`) |
-| Lines & areas | `::LINECHART`, `_PERCENT`, `::STEP`, `::SMOOTH` (trend), `::AREACHART`, `_STACKED` |
-| Points | `::SCATTER`, `::BUBBLE` (sized), `::JITTER`, `::HEXBIN` (bins a planar scatter into a 2D count density) |
-| Part-to-whole & flows | `::PIE`, `::DONUTCHART`, `::TREEMAP`, `::WATERFALL`, `::FUNNEL`, `::SANKEY` |
-| Distribution | `::HISTOGRAM`, `::DENSITY`, `::RIDGELINE`, `::BOXPLOT`, `::VIOLIN`, `::QQ` — histogram and QQ take `::CATEGORY` / `::FACET`; `::HIST_BINS` (count or edges), `'share'::HIST_NORM` |
-| Matrix / geo | `::HEATMAP`, `::CALENDAR` heatmap, maps: `::MAP`/`::REGION` choropleth (WKT geometry or a region code against the built-in boundaries), `::LAT`/`::LON` points, graduated symbols, flow maps (`::ORIGIN`/`::DEST`), `::HEXBIN` density |
-| Finance | `::CANDLESTICK`, `::OHLC`, `::SPARKLINE`, `::SPARKBAR` |
-| Gauge / radar | `::GAUGE` (+ `::RANGE`, `::COLORS` zones), `::BULLET`, `::RADAR` |
-| Plans & diagrams | `::GANTT` (tasks per resource), `::DIAGRAM` (pipelines, lineage, processes, factor graphs; `::UPSTREAM` / `::EDGES`, laid out in layers) |
-| Annotations | `::REFLINE`/`::XLINE` reference lines, `::BAND_LOWER`/`::BAND_UPPER` bands, `::MARKAREA`, `::ANNOTATE`, `::ABLINE`, `::DATALABELS`, `::THRESHOLDS` |
-| Small multiples & axes | `::FACET` (one panel per value, shared axes), `::XSCALE`/`::YSCALE` (`'log10'`, `'sqrt'`, `'reverse'`, with round-number ticks), `::XBREAKS`/`::YBREAKS` (explicit ticks) |
+- **The community extension only renders.** `INSTALL … FROM community` gives SQL → SVG. The server, the builder and the `dashboard` / `serve` CLIs come with a [GitHub release](https://github.com/DataZooDE/anofox-visualization/releases) or a source build.
+- **Release files are unsigned.** Load them with `duckdb -unsigned`; each release has checksums and build attestations.
+- **DuckDB 1.5.6 is the release target.** 2.0 is built and tested in CI (non-blocking); the pin moves with 2.0.1.
+- **No drag-and-drop.** Dashboards are SQL. The builder helps you write it; it doesn't hide it.
+- **The AI assistant is off** unless an installation turns it on, and it then uses your own Claude API key. It is still being evaluated.
+- **Modules are linked at build time.** There are no runtime plug-ins, the public builds contain none, and the module interface may still change.
 
-### KPIs, text & tables
-
-| Group | Roles |
-|-------|-------|
-| KPI tiles | `::METRIC`, `::MONEY`, `::PERCENT`, `::COMPACT` (+ `::LABEL` caption, `::DELTA` arrow), `'compact'::KPI_SIZE` for a dense one-line strip |
-| Text | `::TEXT_SMALL`/`_MEDIUM`/`_LARGE`, `::MARKDOWN` (GFM tables), `::SUBTITLE` under a panel's title, `::INFO` (a Markdown popover on the title) |
-| Tables | `::TABLE`, `::PAGED` (SQL-paginated), `::COLORSCALE`, `::BADGE`, `::TREND`, `::SPARKLINE`, `::RECORD` (one record as a key/value card), `::DOWNLOAD_CSV`/`_XLSX`/`_PDF`/`_JSON`; a bare `DESCRIBE` / `SUMMARIZE` / `SHOW` is a table panel |
-
-### Inputs, layout & interactivity
-
-| Group | Roles / behaviour |
-|-------|-------------------|
-| Inputs | `::DROPDOWN` (searchable for long option lists; `::DROPDOWN_STYLE` forces it), `::MULTISELECT`, `::NUMBER`, `::DATE`, `::TEXT`, `::DATERANGE` → each is a DuckDB variable read with `getvariable('name')` |
-| Collect & write back | `::SUBMIT` records a viewer's answers (append-only, per viewer); `::SAVE` writes a `::FORM`'s values or an edited graph into `::SAVE_TABLES`, with conflict checks and an audit trail. On a locked server, its options must enable both; in the builder, a save stays in the tab |
-| Layout | 12-column grid (`::COLUMNS`/`::COL`/`::HEIGHT`), `::GROUP` boxes, tabs (`::TAB`/`::SUBTAB`), alternative views of one panel (`::VIEW`/`::ENDVIEW` — a Lines/Bars/Table switcher), fit-to-screen tabs (`'fit'::FIT`, no page scroll), `::TRACK` strips under a chart that share its x axis, `::FIGURE`/`::ENDFIGURE` (several charts as one patchwork picture with aligned axes) |
-| Interactivity | hover tooltips (extra columns with `::TOOLTIP`, templates with `::TOOLTIP_FORMAT` / `::TOOLTIP_HEADER`), **click-to-cross-filter**, range zoom, brush/value filters, dark mode, share links — pure DOM, so it works on exported HTML too |
-| Formatting | ggplot2-style axis formatters (`::YFORMAT '€'`, `::XFORMAT '$'`, percent, compact) |
-
-### Contract plots
-
-Model/test output from anofox-statistics and anofox-forecast, data-quality
-output from anofox-tabular, and decisions from anofox-optimize and
-anofox-decide, plotted straight from their result tables:
-`anofox_plot_terms`/`_prediction`/`_curve`/`_summary`/`_obs`/`_diagnostics`/
-`_tests`/`_compare`/`_partial`/`_events`/`_diagram`, plus the newer
-`_decomposition` (time-series decomposition), `_cv` (cross-validation fold
-timeline, provisional), `_checks` (data-quality checks) and `_matrix`
-(correlation / confusion heatmap); for decisions `_assignment`, `_selection`,
-`_sequence`, `_schedule`, `_weights` and `_distribution`; and
-`_factor_graph` (a Bayesian model as an interactive Forney-style factor
-graph). `anofox_plot(tbl)` picks the right one from
-the table's columns. See the
-[statistics-plots skill](plugins/anofox-visualization/skills/anofox-visualization-statistics-plots/)
-and [docs/DOCS.md](docs/DOCS.md). Building your own features into a private build: [Writing a module](docs/modules.md).
-
-### Key capabilities
-- **Three surfaces, one renderer** — a core library (annotated result → SVG, wasm-compatible), a **DuckDB extension** (render + serve), and a browser builder on DuckDB-Wasm.
-- **Serve locked, read-only dashboards** *(from-source build)* — hand a folder of `.sql` files to untrusted consumers; the server owns the SQL (the client sends only panel ids + variable values) over a locked, read-only snapshot. The folder groups itself from header comments (`-- @group`, `-- @tags`, `-- @description`, `-- @owner`, `-- @certified`, `-- @order N` for nav/start-page ordering, `-- @nav` for a short nav/card label distinct from `-- @title`): a grouped nav (a searchable menu above 8 dashboards) and a `/` landing page of cards with descriptions, owners and a ✓ certified badge.
-- **Run a locked server for others** *(full toolkit)* — see [Secure serving](docs/secure-serving.md):
-  - **Logins:** an auth proxy, OIDC / JWT, signed embed links, API keys, and share links (public or password-protected). Row and column access policies are keyed on the viewer's claims.
-  - **Exports:** `GET /api/export/<dashboard>.svg|png|pdf` (a dashboard or one tab), and a named panel's rows as CSV or JSON.
-  - **Schedules:** scheduled tasks (`tasks/*.task.sql` with `::SCHEDULE`). Reports and alerts go out by e-mail, signed webhooks, Slack or Teams.
-  - **Operations:** Prometheus `/metrics`, and `-- @materialize` for a heavy setup step that runs once per input instead of once per panel.
-- **Publish as a static site** *(full toolkit CLI)* — `dashboard --site <folder> <out-dir> [--data …]` turns a dashboard folder into plain files (HTML, the DuckDB-Wasm renderer, the `.sql`, the data) for GitHub Pages, S3 or any web server; nothing to run. `dashboard --svg` and static HTML export render a dashboard headless — see [Secure serving](docs/secure-serving.md#c-publish-as-a-static-site--dashboard---site-417).
-- **Any DuckDB source** — CSV / Parquet / JSON / Arrow, MotherDuck, Postgres / MySQL / SQLite via `ATTACH`, remote HTTP, and spatial layers (`ST_AsText` → WKT → `::MAP`). A locked server can also snapshot a live **Quack** source (DuckDB 2.0 host, opt-in) instead of a local database — see [Secure serving](docs/secure-serving.md#quack-source-prototype-352).
-- **Authoring aids** — a `dashboard --check` linter (structure + `design/*` quality checks), a `build-dashboard` agent skill that writes dashboards from a prompt, and a per-query timeout for authoring `serve` (`--query-timeout`, default 120s) that ends a hung query and starts a fresh session.
-- **AI assistant in the browser builder** *(off unless an installation enables it in `app-config.json`)* — a plain-language request becomes a dashboard, or follow-up edits to one, via *"new from question"* or the assistant panel; every proposal is previewed in a locked, network-free DuckDB-Wasm sandbox on a capped copy of your tables and only runs on the page's own database after you choose *Apply*. In the browser app it calls Claude with your own API key. On an authoring `serve`, it goes through the server's `/assist` proxy, so the key stays on the server. It never goes through a DataZooDE server ([docs](docs/DOCS.md)).
-
-## Quick Start
-
-All rendering functions use the `anofox_` prefix.
-
-```sql
-LOAD anofox_visualization;
-
--- 1) Convenience macros — pass columns, get one SVG per group.
-WITH sales AS (SELECT * FROM (VALUES ('app',30),('web',22),('api',12)) t(ch,n))
-SELECT anofox_bar(ch, n) FROM sales;                 -- <svg> bar chart
---   also anofox_line / _scatter / _area(x, y),
---        anofox_xy(x, y, kind := 'VIOLIN', width := 640, height := 400),
---        anofox_xyc(x, y, series)   -- coloured by series
-
--- 1b) Model output: pass the whole row of an anofox-statistics/-forecast table.
-SELECT anofox_plot_terms(c) FROM coefficients c;     -- coefficient forest
---   also anofox_plot_prediction / _curve / _summary / _obs / _diagnostics,
---        anofox_plot(tbl) picks one from the columns (docs/DOCS.md)
-
--- 2) The raw spec (rows + role annotations) — the same JSON the browser uses:
-SELECT anofox_render('{"rows":[{"c0":"a","c1":3}],"roles":[[0,"XAXIS"],[1,"BARCHART"]]}');
-
--- 3) A dashboard panel — annotate the SELECT list with ::ROLE casts:
-SELECT week::XAXIS, channel::CATEGORY, sum(n)::BARCHART_STACKED, 'Sessions'::TITLE
-FROM sessions GROUP BY ALL ORDER BY ALL;
-```
-
-### What's in the extension vs. the full toolkit
-
-> [!NOTE]
-> The **community extension** you install (below) provides **rendering only** —
-> `anofox_render`, the `anofox_bar/_line/_scatter/_area/_xy/_xyc` macros and the
-> `anofox_plot_*` model-output macros that
-> turn SQL into SVG. The **serving and builder features** below embed a web UI +
-> HTTP server and are **not** in the community binary — they come with the
-> **full toolkit**: prebuilt on every GitHub release (see
-> [Installation → From a release](#from-a-release-full-toolkit)) or a
-> [from-source build](#from-source).
-
-With the full toolkit you also get an **in-browser builder** and **locked,
-read-only serving**:
-
-```sql
--- Interactive builder wired to THIS database, DuckDB-UI style (loopback only;
--- the printed URL carries a per-server token):
-SELECT anofox_serve(8080);              -- http://127.0.0.1:8080/?token=…
-
--- Serve a folder of .sql dashboards locked + read-only to consumers:
-SELECT anofox_serve_dashboards('dashboards', 8095);
--- http://127.0.0.1:8095/           a list of the folder's dashboards
--- http://127.0.0.1:8095/d/<name>   one dashboard — full UI, editor removed
-SELECT anofox_serve_refresh(8095);      -- re-snapshot now (or options.refresh_s)
-SELECT anofox_serve_reload(8095);       -- re-read the dashboards folder after a deploy
-SELECT anofox_serve_report(8095, 'weekly');  -- send a scheduled report (or check an alert) now
-SELECT anofox_serve_stop(8095);         -- stop a server (and delete its snapshot)
-```
-
-…plus a `dashboard` CLI (in the release CLI archive, or `cargo run --bin dashboard -- file.sql`) and the
-standalone browser app (`web/`).
-
-A runnable example of a served setup — result cache, refresh without a restart,
-a live data folder with the run picked by a variable, and a login proxy — is in
-[`examples/served/`](examples/served/): `examples/served/serve.sh start`.
-
-## Installation
-
-### Community Extension
-
-Listed in [DuckDB Community Extensions](https://community-extensions.duckdb.org):
+## Quick start
 
 ```sql
 INSTALL anofox_visualization FROM community;
 LOAD anofox_visualization;
+
+-- one SVG per group, from columns
+WITH sales AS (SELECT * FROM (VALUES ('app', 30), ('web', 22), ('api', 12)) t(ch, n))
+SELECT anofox_bar(ch, n) FROM sales;
+
+-- model output from an anofox extension: the plot is picked from the table
+SELECT anofox_plot(c) FROM coefficients c;
 ```
 
-The listing is built for **DuckDB 2.0** and, through its `variegata` field,
-for the **v1.5.6** this repository is pinned to. It follows the GitHub
-releases with a short delay (a PR to duckdb/community-extensions per
-release); the version it serves is in its
-[description.yml](https://github.com/duckdb/community-extensions/blob/main/extensions/anofox_visualization/description.yml).
+With the full toolkit (a release or a source build):
 
-**Provides: rendering only** — `anofox_render` and the `anofox_bar/_line/_scatter/_area/_xy/_xyc`
-macros (SQL → SVG). Serving and the builder are not included (see below).
+```sql
+SELECT anofox_serve(8080);                              -- the builder on this database (loopback)
+SELECT anofox_serve_dashboards('dashboards', 8095);     -- serve a folder of .sql dashboards, locked
+```
 
-### From a release (full toolkit)
+```sh
+dashboard my_dashboard.sql out.html     # a static, interactive HTML file
+dashboard --check my_dashboard.sql      # lint it
+```
 
-Every [GitHub release](https://github.com/DataZooDE/anofox-visualization/releases)
-carries the **full toolkit** — rendering **plus** `anofox_serve`,
-`anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_reload`, `anofox_serve_report`, `anofox_serve_stop` with the browser builder
-embedded — prebuilt for each platform, together with the `dashboard` / `serve`
-CLIs and a `SHA256SUMS` file:
+## Install
 
-| Platform | Extension asset | CLI asset |
+| You want | Get | |
 |---|---|---|
-| Linux x86_64 (glibc ≥ 2.35) | `anofox_visualization.<tag>.duckdb-v1.5.6.linux_amd64.duckdb_extension` | `anofox-visualization-cli-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 (glibc ≥ 2.35) | `anofox_visualization.<tag>.duckdb-v1.5.6.linux_arm64.duckdb_extension` | `anofox-visualization-cli-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS Apple silicon | `anofox_visualization.<tag>.duckdb-v1.5.6.osx_arm64.duckdb_extension` | `anofox-visualization-cli-<tag>-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `anofox_visualization.<tag>.duckdb-v1.5.6.osx_amd64.duckdb_extension` | `anofox-visualization-cli-<tag>-x86_64-apple-darwin.tar.gz` |
-| Windows x64 | `anofox_visualization.<tag>.duckdb-v1.5.6.windows_amd64.duckdb_extension` | `anofox-visualization-cli-<tag>-x86_64-pc-windows-msvc.zip` |
+| SQL → SVG in any DuckDB | `INSTALL anofox_visualization FROM community` | render only |
+| The full toolkit: builder, server, CLIs | the [latest release](https://github.com/DataZooDE/anofox-visualization/releases) (Linux, macOS, Windows) | [install guide](https://datazoode.github.io/anofox-visualization/start/install/) |
+| To build it yourself | `duckext/scripts/build-native.sh` (Rust stable) | [BUILD.md](BUILD.md) |
 
-`duckdb-v1.5.6` is the DuckDB release each file is built and smoke-tested
-against; the extension uses DuckDB's stable C extension API (v1.2.0), so it
-also loads in other DuckDB versions ≥ v1.2 for the same platform.
+## Where to go next
 
-The extensions are **unsigned**: start DuckDB with `-unsigned` (or
-`SET allow_unsigned_extensions = true` before the first `LOAD`, e.g.
-`duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python).
+- **[Website](https://datazoode.github.io/anofox-visualization/)**: getting started, the chart catalogue, the gallery, deployment guides.
+- **[docs/DOCS.md](docs/DOCS.md)**: the full reference (every role, the CLI, serving, telemetry of the anofox extensions).
+- **[Dashboard design](docs/dashboard-design.md)**: what `--check` enforces, and why.
+- **[Secure serving](docs/secure-serving.md)** and **[deployment](docs/deployment.md)**: the trust model, logins, Docker, reverse proxies.
+- **[Python & R](docs/python-r.md)**: plot statsmodels, scikit-learn or broom results.
+- **[Integration CI](docs/integrations.md)**: how every anofox extension's output is rendered on every push.
+- **[Writing a module](docs/modules.md)**.
 
-```sh
-TAG=v2026.11.14 PLATFORM=linux_amd64      # linux_arm64, osx_arm64, osx_amd64, windows_amd64
-EXT=anofox_visualization.$TAG.duckdb-v1.5.6.$PLATFORM.duckdb_extension
-curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/$EXT
-curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/SHA256SUMS
-sha256sum --check --ignore-missing SHA256SUMS      # macOS: shasum -a 256 -c --ignore-missing
-duckdb -unsigned -c "LOAD './$EXT'; SELECT anofox_contract_version();"
-```
+### Claude Code plugin
 
-```sql
--- in `duckdb -unsigned`
-LOAD './anofox_visualization.v2026.11.14.duckdb-v1.5.6.linux_amd64.duckdb_extension';
-SELECT anofox_serve(8080);      -- the builder UI on the live session
-```
-
-Keep the file name's `anofox_visualization.` prefix when renaming: DuckDB
-derives the extension's name (and entry point) from the file name up to the
-first dot. Or install it like any other extension from the project's DuckDB
-extension repository on GitHub Pages (latest release; DuckDB v1.5.6):
-
-```sql
--- duckdb -unsigned
-INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualization/extensions';
-LOAD anofox_visualization;
-```
-
-The CLI archives contain `dashboard` (render an annotated `.sql` file to HTML,
-or lint it) and `serve` (the builder / locked dashboard server, UI embedded).
-Both run queries through a `duckdb` CLI on your `PATH`:
-
-```sh
-tar xzf anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu.tar.gz
-cd anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu
-./dashboard --version                     # dashboard v2026.11.14
-./dashboard my_dashboard.sql out.html     # static interactive HTML
-./dashboard --check my_dashboard.sql      # which panels error / are empty
-./serve my.duckdb                         # builder on http://127.0.0.1:8080
-./serve --dashboards dashboards/ --db my.duckdb   # locked serving
-```
-
-On macOS, downloads from a browser are quarantined; clear it with
-`xattr -d com.apple.quarantine <file>` (not needed with `curl`).
-
-### From source
-
-There are two native builds (see [BUILD.md](BUILD.md) for why):
-
-| | `make` (CMake, C++ shell) | `duckext/scripts/build-native.sh` (C-API) |
-|---|---|---|
-| Provides | rendering: `anofox_render` + macros | **full toolkit**: rendering + `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` (embedded web builder) |
-| Same as | the community binary | — |
-| DuckDB | exactly the pinned version (v1.5.6) | any DuckDB with C-API v1.2.0+ (v1.2 or newer) |
-| Needs | submodules, CMake, a C++ toolchain, Rust | Rust, libclang (bindgen), `wasm-bindgen` + `wasm-opt` (not `wasm-pack`, #552), Python 3, a `duckdb` CLI |
-
-Both binaries are unsigned: start DuckDB with `-unsigned` (or set
-`allow_unsigned_extensions`).
-
-**DuckDB 2.0.** DuckDB 2.0.0 LTS (2026-10-21) is supported now: the CMake /
-community (`make`) build also compiles and runs its sqllogictests against
-v2.0.0 (`extension-ci-tools@v2.0-cyanoptera`), checked by a non-blocking CI
-job alongside the pinned v1.5.6 build. The C-API full-toolkit build
-(`duckext/`) is unaffected either way — it is version-portable (C-API
-v1.2.0+). This repository's own pin (`.duckdb-version`, v1.5.6) moves to the
-2.0 line around 2.0.1 (~2026-11-18), once duckdb-wasm and the other anofox_*
-extensions have 2.0 builds; see `docs/DOCS.md` and issue #352 for details.
-
-**Render-only (`make`)**
-
-```sh
-git clone --recurse-submodules https://github.com/DataZooDE/anofox-visualization
-cd anofox-visualization
-make                 # → build/release/extension/anofox_visualization/anofox_visualization.duckdb_extension
-make test            # sqllogictests in test/sql
-```
-
-```sql
-LOAD './build/release/extension/anofox_visualization/anofox_visualization.duckdb_extension';
-```
-
-**Full toolkit (`build-native.sh`)**
-
-```sh
-git clone https://github.com/DataZooDE/anofox-visualization
-cd anofox-visualization
-duckext/scripts/build-native.sh --release   # builds web/pkg, the extension, packages + smoke-tests it
-# → /tmp/anofox_visualization.duckdb_extension   (OUT=… to change; LOAD needs a name starting anofox_visualization.)
-```
-
-```sql
-LOAD '/tmp/anofox_visualization.duckdb_extension';
-SELECT anofox_serve(8080);
-```
-
-The `dashboard` CLI and the standalone `serve` binary come from the core crate:
-`cargo run --bin dashboard -- file.sql`, `cargo run --features serve --bin serve -- my.duckdb`.
-
-## Ways to run it
-
-| You want to … | Use | Server? | Docs |
-|---|---|---|---|
-| render a chart as SVG inside any DuckDB query | the community extension: `INSTALL anofox_visualization FROM community` | no | [Installation](#installation) |
-| try it, or build a dashboard in the browser | the [live builder](https://datazoode.github.io/anofox-visualization/app/) (DuckDB-Wasm, nothing to install) | no | [DOCS § 2](docs/DOCS.md#2-three-ways-to-run-it) |
-| render dashboards to SVG / HTML, check them in CI | the `dashboard` CLI (`--svg`, `out.html`, `--check`) and the [`check-dashboards` action](docs/deployment.md) | no | [DOCS § 2](docs/DOCS.md#2-three-ways-to-run-it) |
-| publish dashboards as a static website (GitHub Pages, S3, any web host) | `dashboard --site` | no | [Static site](docs/secure-serving.md#c-publish-as-a-static-site--dashboard---site-417) |
-| author against your own database | `anofox_serve(port)` / `serve <db>` (loopback only) | yes, local | [Authoring](docs/secure-serving.md#authoring--anofox_serveport-and-serve-db) |
-| serve dashboards to others: login, row policies, refresh, write-back | the locked server `anofox_serve_dashboards(dir, port, options)` (one process, a container, behind a reverse proxy, several replicas) | yes | [Locked serving](docs/secure-serving.md#a-locked-full-ui--anofox_serve_dashboardsdir-port-options), [Deployment](docs/deployment.md) |
-| serve server-rendered pages with no data API at all | `serve --dashboards <dir>` | yes | [Static render](docs/secure-serving.md#b-static-render--serve---dashboards-dir) |
-| put a dashboard into your own app | `<anofox-dashboard>` (web component, React) or signed embed links | yes (locked server) | [Embedding](docs/secure-serving.md#embedding-with-anofox-dashboard-771) |
-| answer a dashboard's questions for agents (REST, MCP) | agent mode: `-- @question`, `dashboard --publish`, `options.agent` | yes | [Agent mode](docs/secure-serving.md#agent-mode-declared-questions-only-optionsagent-863) |
-| plot model results from Python or R | `anofox_plot_*` from pandas / polars / R | no | [Python & R](docs/python-r.md) |
-| use the anofox extensions' results | statistics, forecast, tabular, optimize, decide → `anofox_plot(...)` | no | [the conformance sections below](#conformance-with-anofox-statistics), [integration contract](docs/plans/integration-contract.md) |
-
-## Documentation
-
-- **[Annotation model & role reference](docs/DOCS.md)** — every `::ROLE`, layout, and serving mode.
-- **[Plotting results from Python and R](docs/python-r.md)** — statsmodels, scikit-learn, scipy, broom, … into the `anofox_plot_*` macros; the [`anofox_viz`](python/) helper package and an [example notebook](examples/python/plot-results.ipynb).
-- **[Dashboard design principles](docs/dashboard-design.md)** — what makes a dashboard good (enforced by `dashboard --check`).
-- **[Visual review rubric](docs/dashboard-visual-review.md)** — the appearance gate.
-- **[Secure serving](docs/secure-serving.md)** — the trust model for locked serving; [`examples/served/`](examples/served/) runs it end to end.
-- **[Claude Code plugin](#claude-code-plugin)** — five skills that document the SQL API for Claude Code, including the dashboard-authoring workflow (it starts by clarifying what the dashboard is for) (also available in this checkout as the project skill [`build-dashboard`](.claude/skills/build-dashboard/SKILL.md)).
-
-### Conformance with anofox-statistics
-
-`scripts/statistics_conformance.py` calls **every** contract producer of the
-[anofox-statistics](https://github.com/DataZooDE/anofox-statistics) extension
-(the 141 functions tagged `anofox.contract = '1'`: table macros directly, the
-`*_agg` test aggregates through `unnest`), hands each output to
-`anofox_plot(...)` and to its specific macro, and fails on a SQL error, a
-missing SVG or an unexpected render warning. It writes every SVG (and a PNG
-montage when `rsvg-convert` and Pillow are installed) to `--out`:
-
-```bash
-duckdb -unsigned -c "INSTALL anofox_statistics FROM 'https://get.erpl.io'"   # DuckDB v1.5.6
-SKIP_WASM=1 OUT=/tmp/anofox_visualization.duckdb_extension duckext/scripts/build-native.sh --release
-python3 scripts/statistics_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/stats-viz
-```
-
-CI runs it on every push (`.github/workflows/ci.yml`, job *anofox-statistics
-conformance*).
-
-### Conformance with anofox-decide
-
-[anofox-decide](https://github.com/DataZooDE/anofox-decide) tags no contract
-producer yet: its answers are per-row probabilities, choices and scores, its
-quality metrics single numbers. `scripts/decide_conformance.py` runs every
-decide output through the SQL that makes it a contract table (metrics →
-`summary`, probabilities → ROC / PR / calibration `curve`, also through
-anofox-statistics' `roc_curve_by` / `pr_curve_by` / `calibration_curve_by`),
-hands it to `anofox_plot(...)` and to the specific macro, and fails on a SQL
-error, a missing SVG or an unexpected render warning. The raw outputs no schema
-takes (`decide_table`, `decide_answers`) must fail with the clean "match no
-plottable schema" error, and a tagged decide producer without a recipe fails
-the run. The answers come from decide's built-in `stub` model (offline);
-`--model laya-multilingual` adds a real local model:
-
-```bash
-duckdb -c "INSTALL anofox_decide FROM community"                             # DuckDB v1.5.6
-python3 scripts/decide_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/decide-viz
-```
-
-CI runs it on every push (job *anofox-decide conformance*).
-
-### Conformance with anofox-tabular
-
-[anofox-tabular](https://github.com/DataZooDE/anofox-tabular) does not tag its
-functions for the contract yet, and none of its outputs matches a contract
-schema as it comes. `scripts/tabular_conformance.py` calls **every** result
-producer anyway (the 30 `anofox_tab_*` table functions other than the
-config/status ones) on small deterministic tables. It reshapes each output into
-the nearest schema (check results and profiles → `summary`, the time-aware checks
-→ `events`, `outlier_tree` → `terms`) or a generic chart (diffs, PII counts,
-anomaly scores), and hands it to `anofox_plot(...)` and the specific macro. It
-fails on a SQL error, a missing SVG, an unexpected render warning or a
-producer without a recipe. It also reports when a raw output starts to match a
-schema:
-
-```bash
-duckdb -c "INSTALL anofox_tabular FROM community"   # signed, DuckDB v1.5.6
-python3 scripts/tabular_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/tabular-viz
-```
-
-CI job *anofox-tabular conformance*.
-
-### Conformance with anofox-forecast
-
-`scripts/forecast_conformance.py` does the same for
-[anofox-forecast](https://github.com/DataZooDE/anofox-forecast). That extension
-does not tag its functions yet, so the producers are a curated registry: every
-`ts_*` table macro and aggregate of the loaded build is either a producer (51
-today: forecasts, backtests, conformal intervals, decompositions, changepoints,
-peaks, periods, metrics, residual tests, features) or listed as out of scope
-with a reason (fills, drops, CV splits, validators); an unlisted function fails
-the run. A producer is *direct* when its output plots as returned and an
-*adapter* when the harness reshapes it first (the reshaping SQL is in the
-script — what you would write today). It runs on a three-series daily panel
-(weekly season, a level shift, an exogenous driver) and accepts both builds:
-
-```bash
-duckdb -c "INSTALL anofox_forecast FROM community"                                  # the release
-duckdb -unsigned -c "FORCE INSTALL anofox_forecast FROM 'https://get.erpl.io'"      # or main
-python3 scripts/forecast_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/forecast-viz
-```
-
-Producer bugs of a released build are listed in the script (`KNOWN`) and
-reported `XFAIL`. CI runs both builds (job *anofox-forecast conformance*).
-
-### Conformance with anofox-optimize
-
-[anofox-optimize](https://github.com/DataZooDE/anofox-optimize)'s solvers are
-scalar functions that return a STRUCT of lists, so none of them is a contract
-table. `scripts/optimize_conformance.py` treats every `anofox_optimize_*`
-solver as a producer (38 in 8 families) and carries one recipe per family. It
-calls each solver on a small deterministic instance and checks the solution
-itself: bins and waves within capacity, and the objective recomputed from the
-returned order or selection. The objectives then go through `anofox_plot(...)`
-and `anofox_plot_summary(...)`, and the family's decision view is drawn: a
-Gantt for schedules, stacked bins and waves, the route on a `::MAP`, and
-selections and weights as bars. A solver without a recipe fails the run:
-
-```bash
-duckdb -unsigned -c "INSTALL anofox_optimize FROM 'https://get.erpl.io'"   # DuckDB v1.5.6
-python3 scripts/optimize_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/optimize-viz
-```
-
-CI job *anofox-optimize conformance*.
-
-## Claude Code plugin
-
-The repository ships a [Claude Code](https://claude.com/claude-code) plugin with five skills. Each skill documents a part of the SQL API — function signatures, option names, role tokens and lint codes — so that Claude Code can write charts and dashboards for this extension from a plain-language request such as *"build a dashboard of weekly revenue by channel with a region filter"*.
-
-Install it in a Claude Code session:
+Five skills that document the SQL API, so Claude Code can write charts and dashboards from a plain request:
 
 ```
 /plugin marketplace add DataZooDE/anofox-visualization
 /plugin install anofox-visualization@anofox-visualization
 ```
 
-| Skill | Covers |
-|-------|--------|
-| `anofox-visualization-charts` | SQL → SVG: `anofox_render(spec)` (rows + roles JSON, size, brand colour, limits), the column macros `anofox_bar/_line/_scatter/_area/_xy/_xyc` and their `kind :=` values, one SVG per group, saving SVGs, errors, the community (render-only) vs full-toolkit build |
-| `anofox-visualization-dashboards` | Authoring `::ROLE` dashboards (the `build-dashboard` workflow): every role, layout and tabs, KPIs with delta / sparkline / goal, `::PERIOD`, tables, inputs and `getvariable()`, cross-filter, drill-down and URL state, annotations, forecast fans and strips, thresholds, waterfall / bullet / funnel, `::DIAGRAM` and factor graphs (`anofox_plot_factor_graph`), motion, Markdown values and formulas, contract plots as panels, Explore data, `dashboard --describe` / `--check` and its lint codes, the design contract, templates and gotchas |
-| `anofox-visualization-statistics-plots` | The contract macros `anofox_plot_terms/_summary/_obs/_diagnostics/_prediction/_curve/_tests/_compare/_partial/_events/_diagram`, the newer `_decomposition`/`_cv`/`_checks` (provisional) and `_matrix`, the decision macros `_assignment`/`_selection`/`_sequence`/`_schedule`/`_weights`/`_distribution` (anofox-optimize, anofox-decide), and `anofox_plot` with all options, column aliases, `anofox_contract_version()`, the producer → macro table for anofox-statistics v0.11, anofox-forecast and anofox-tabular, results from Python (the `anofox_viz` package) and R, use in dashboards and the browser builder |
-| `anofox-visualization-serving` | `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` and the `serve` / `dashboard` binaries: which mode to use, the trust model, every option and limit, cache and refresh, a data folder, header comments, deployment (systemd, Docker, reverse proxy, replicas) |
-| `anofox-visualization-access-control` | Login on a locked server (auth proxy, JWT, OIDC, signed embed links, API keys), the `__claim_*` variables, row and column access policies, `dashboard --check --policy`, request and audit logs |
-
-The skills live in [`plugins/anofox-visualization/`](plugins/anofox-visualization/). To use a local checkout instead of the marketplace, start Claude Code with `claude --plugin-dir ./plugins/anofox-visualization`. Every `sql` block in the skills is executed in CI against the built extension (`scripts/validate_skills_sql.py`; dashboard scripts are linted with `dashboard --check --strict`).
-
-## Dependencies
-
-- **DuckDB**: v1.5.x for the CMake / community build (pinned to v1.5.6 in this repo; also builds and runs sqllogictests on v2.0.0 in a non-blocking CI job — see [DuckDB 2.0](#from-source)); C-API v1.2.0+ (DuckDB v1.2 or newer, including 2.0) for the `duckext` full-toolkit build
-- **Rust**: stable toolchain (for building from source)
-- **[ggplot-rs](https://github.com/sipemu/ggplot-rs)** (version pinned in `Cargo.toml`): the grammar-of-graphics rendering engine — all chart rendering lives here, not in this repository
-- **plotters / image / ab_glyph**: SVG & raster backends (via Cargo)
+The skills live in [`plugins/anofox-visualization/`](plugins/anofox-visualization/); every SQL block in them runs in CI.
 
 ## Telemetry
 
-This extension collects **no telemetry** — no usage data, no query contents,
-nothing leaves your machine.
-
-The anofox extensions it plots (statistics, forecast, tabular, optimize,
-decide) send pseudonymous usage telemetry by default, but it is **off by
-default wherever anofox-visualization runs** (#333): the `dashboard`/`serve`
-binaries and the `anofox_visualization` extension itself default
-`DATAZOO_DISABLE_TELEMETRY` to `1` for the process whenever it is unset *or
-empty* (a templated `VAR=${VAR}` left blank is not a choice), before any
-anofox extension they load can send anything — `SET
-anofox_telemetry_enabled = false` alone misses the load event and, with
-several loaded, all but the first. To opt back in, set
-`DATAZOO_DISABLE_TELEMETRY=0` (or `false`/`no`) yourself before anofox-
-visualization loads.
-
-**Windows:** the default is written to both the OS environment and the C
-runtime (#348), so it also holds for any other anofox extension sharing the
-same C runtime. An anofox extension loaded *before* anofox_visualization is
-only reached through the best-effort `SET anofox_telemetry_enabled = false`
-— load `anofox_visualization` first, or set the variable yourself.
-
-The browser demo's DuckDB-Wasm builds send nothing. See
-[Telemetry of the anofox extensions](docs/DOCS.md#telemetry-of-the-anofox-extensions).
+This extension sends **nothing**. It also switches off the usage telemetry of the
+anofox extensions it loads, unless you set `DATAZOO_DISABLE_TELEMETRY=0`
+([details](docs/DOCS.md#telemetry-of-the-anofox-extensions)).
 
 ## License
 
-This project is licensed under the **Business Source License 1.1** (BSL 1.1).
+[Business Source License 1.1](LICENSE): free for development, testing, research
+and internal use; hosted or embedded use for third parties needs a commercial
+license until the Change Date (five years after publication), when it becomes
+MPL 2.0. Contact **contact@datazoo.de**.
 
-### Key Terms
+## Contributing & support
 
-- **Usage Grant**: free to use, modify, and distribute for development, testing, research, and internal use
-- **Production Use**: hosted / embedded redistribution to third parties requires a commercial license until the Change Date
-- **Change Date**: five years after first publication
-- **Change License**: Mozilla Public License 2.0
+Pull requests are welcome (`cargo test`, and `dashboard --check` for example
+dashboards). Questions and bugs: [issues](https://github.com/DataZooDE/anofox-visualization/issues),
+[discussions](https://github.com/DataZooDE/anofox-visualization/discussions), or
+contact@datazoo.de. If a chart renders wrong, the SQL (or the spec you passed)
+is the fastest path to a fix.
 
-See [LICENSE](LICENSE) for full terms.
-
-### Why BSL?
-
-The BSL keeps the source open for development, research, and internal use, and
-converts to a fully open licence over time — while protecting the project's
-long-term viability. For commercial hosted/embedded use before the Change Date,
-contact **contact@datazoo.de**.
-
-## Contributing
-
-Contributions are welcome:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with tests (`cargo test`; `dashboard --check` for example dashboards)
-4. Submit a pull request
-
-### Areas for Contribution
-- New chart kinds and roles
-- Additional `design/*` lint checks and the visual-review loop
-- Documentation, guides, and example dashboards
-- Bug reports and fixes; performance work
-
-## Feedback
-
-If a chart renders wrong, or `anofox_render` returns something you did not expect,
-please [open an issue](https://github.com/DataZooDE/anofox-visualization/issues).
-Rendering depends on your data shape, roles and dimensions in ways we cannot
-reproduce here, so a report with the spec you passed is the fastest path to a fix.
-
-If it saved you time, a star on the repo helps other people find it.
-
-The first time you load the extension in an interactive terminal each day, a small
-banner says the same thing. It never prints when output is piped, in notebooks, or in
-CI. Silence it with `SET datazoo_banner = false;` or `DATAZOO_NO_BANNER=1`.
-
-## Support
-
-- **Documentation**: [docs/](docs/)
-- **Issues**: [GitHub Issues](https://github.com/DataZooDE/anofox-visualization/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/DataZooDE/anofox-visualization/discussions)
-- **Email**: contact@datazoo.de
-
-## Citation
+A daily banner in interactive terminals asks for a star; silence it with
+`SET datazoo_banner = false;` or `DATAZOO_NO_BANNER=1`.
 
 ```bibtex
 @software{anofox_visualization,
@@ -570,10 +139,4 @@ CI. Silence it with `SET datazoo_banner = false;` or `DATAZOO_NO_BANNER=1`.
 }
 ```
 
-## Acknowledgments
-
-- **DuckDB Team** — the database and extension framework
-- **[ggplot-rs](https://github.com/sipemu/ggplot-rs)** — the grammar-of-graphics rendering engine
-- **Open Source Community** — for contributions and feedback
-
-© DataZoo GmbH.
+Built on [DuckDB](https://duckdb.org) and [ggplot-rs](https://github.com/sipemu/ggplot-rs). © DataZoo GmbH.
