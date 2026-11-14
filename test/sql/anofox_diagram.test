@@ -105,9 +105,10 @@ SELECT anofox_plot_diagram(n) FROM (VALUES (1, 2)) n(what, ever);
 an id column
 
 # The `factor_graph` contract (#1151): shapes, an undirected edge with the
-# interface as its label, θ folded into its equality node.
+# interface as its label, θ folded into its equality node, the observation a
+# terminal square (#1172).
 query I
-SELECT svg LIKE '%data-diagram%' AND svg LIKE '%dp-node-circle%' AND svg LIKE '%dp-node-filled-circle%'
+SELECT svg LIKE '%data-diagram%' AND svg LIKE '%dp-node-circle%' AND svg LIKE '%dp-node-terminal%'
    AND svg LIKE '%>θ<%' AND svg NOT LIKE '%<polygon%'
 FROM (SELECT anofox_plot_factor_graph(n, edges := [
         {'variable': 'v0', 'factor': 'f1', 'interface': 'out'},
