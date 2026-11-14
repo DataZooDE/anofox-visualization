@@ -226,7 +226,7 @@ The extensions are **unsigned**: start DuckDB with `-unsigned` (or
 `duckdb.connect(config={"allow_unsigned_extensions": "true"})` in Python).
 
 ```sh
-TAG=v2026.11.12 PLATFORM=linux_amd64      # linux_arm64, osx_arm64, osx_amd64, windows_amd64
+TAG=v2026.11.14 PLATFORM=linux_amd64      # linux_arm64, osx_arm64, osx_amd64, windows_amd64
 EXT=anofox_visualization.$TAG.duckdb-v1.5.6.$PLATFORM.duckdb_extension
 curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/$EXT
 curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/SHA256SUMS
@@ -236,7 +236,7 @@ duckdb -unsigned -c "LOAD './$EXT'; SELECT anofox_contract_version();"
 
 ```sql
 -- in `duckdb -unsigned`
-LOAD './anofox_visualization.v2026.11.12.duckdb-v1.5.6.linux_amd64.duckdb_extension';
+LOAD './anofox_visualization.v2026.11.14.duckdb-v1.5.6.linux_amd64.duckdb_extension';
 SELECT anofox_serve(8080);      -- the builder UI on the live session
 ```
 
@@ -258,7 +258,7 @@ Both run queries through a `duckdb` CLI on your `PATH`:
 ```sh
 tar xzf anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu.tar.gz
 cd anofox-visualization-cli-$TAG-x86_64-unknown-linux-gnu
-./dashboard --version                     # dashboard v2026.11.12
+./dashboard --version                     # dashboard v2026.11.14
 ./dashboard my_dashboard.sql out.html     # static interactive HTML
 ./dashboard --check my_dashboard.sql      # which panels error / are empty
 ./serve my.duckdb                         # builder on http://127.0.0.1:8080
