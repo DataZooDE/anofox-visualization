@@ -431,6 +431,26 @@ python3 scripts/forecast_conformance.py --duckdb duckdb --ext /tmp/anofox_visual
 Producer bugs of a released build are listed in the script (`KNOWN`) and
 reported `XFAIL`. CI runs both builds (job *anofox-forecast conformance*).
 
+### Conformance with anofox-optimize
+
+[anofox-optimize](https://github.com/DataZooDE/anofox-optimize)'s solvers are
+scalar functions that return a STRUCT of lists, so none of them is a contract
+table. `scripts/optimize_conformance.py` treats every `anofox_optimize_*`
+solver as a producer (38 in 8 families) and carries one recipe per family. It
+calls each solver on a small deterministic instance and checks the solution
+itself: bins and waves within capacity, and the objective recomputed from the
+returned order or selection. The objectives then go through `anofox_plot(...)`
+and `anofox_plot_summary(...)`, and the family's decision view is drawn: a
+Gantt for schedules, stacked bins and waves, the route on a `::MAP`, and
+selections and weights as bars. A solver without a recipe fails the run:
+
+```bash
+duckdb -unsigned -c "INSTALL anofox_optimize FROM 'https://get.erpl.io'"   # DuckDB v1.5.6
+python3 scripts/optimize_conformance.py --duckdb duckdb --ext /tmp/anofox_visualization.duckdb_extension --out /tmp/optimize-viz
+```
+
+CI job *anofox-optimize conformance*.
+
 ## Claude Code plugin
 
 The repository ships a [Claude Code](https://claude.com/claude-code) plugin with five skills. Each skill documents a part of the SQL API — function signatures, option names, role tokens and lint codes — so that Claude Code can write charts and dashboards for this extension from a plain-language request such as *"build a dashboard of weekly revenue by channel with a region filter"*.
@@ -445,8 +465,8 @@ Install it in a Claude Code session:
 | Skill | Covers |
 |-------|--------|
 | `anofox-visualization-charts` | SQL → SVG: `anofox_render(spec)` (rows + roles JSON, size, brand colour, limits), the column macros `anofox_bar/_line/_scatter/_area/_xy/_xyc` and their `kind :=` values, one SVG per group, saving SVGs, errors, the community (render-only) vs full-toolkit build |
-| `anofox-visualization-dashboards` | Authoring `::ROLE` dashboards (the `build-dashboard` workflow): every role, layout and tabs, KPIs with delta / sparkline / goal, `::PERIOD`, tables, inputs and `getvariable()`, cross-filter, drill-down and URL state, annotations, forecast fans and strips, thresholds, waterfall / bullet / funnel, `::DIAGRAM`, motion, Markdown values and formulas, contract plots as panels, Explore data, `dashboard --describe` / `--check` and its lint codes, the design contract, templates and gotchas |
-| `anofox-visualization-statistics-plots` | The contract macros `anofox_plot_terms/_summary/_obs/_diagnostics/_prediction/_curve/_tests/_compare/_partial/_events/_diagram`, the newer `_decomposition`/`_cv`/`_checks` (provisional) and `_matrix`, and `anofox_plot` with all options, column aliases, `anofox_contract_version()`, the producer → macro table for anofox-statistics v0.11, anofox-forecast and anofox-tabular, results from Python (the `anofox_viz` package) and R, use in dashboards and the browser builder |
+| `anofox-visualization-dashboards` | Authoring `::ROLE` dashboards (the `build-dashboard` workflow): every role, layout and tabs, KPIs with delta / sparkline / goal, `::PERIOD`, tables, inputs and `getvariable()`, cross-filter, drill-down and URL state, annotations, forecast fans and strips, thresholds, waterfall / bullet / funnel, `::DIAGRAM` and factor graphs (`anofox_plot_factor_graph`), motion, Markdown values and formulas, contract plots as panels, Explore data, `dashboard --describe` / `--check` and its lint codes, the design contract, templates and gotchas |
+| `anofox-visualization-statistics-plots` | The contract macros `anofox_plot_terms/_summary/_obs/_diagnostics/_prediction/_curve/_tests/_compare/_partial/_events/_diagram`, the newer `_decomposition`/`_cv`/`_checks` (provisional) and `_matrix`, the decision macros `_assignment`/`_selection`/`_sequence`/`_schedule`/`_weights`/`_distribution` (anofox-optimize, anofox-decide), and `anofox_plot` with all options, column aliases, `anofox_contract_version()`, the producer → macro table for anofox-statistics v0.11, anofox-forecast and anofox-tabular, results from Python (the `anofox_viz` package) and R, use in dashboards and the browser builder |
 | `anofox-visualization-serving` | `anofox_serve`, `anofox_serve_dashboards`, `anofox_serve_refresh`, `anofox_serve_stop` and the `serve` / `dashboard` binaries: which mode to use, the trust model, every option and limit, cache and refresh, a data folder, header comments, deployment (systemd, Docker, reverse proxy, replicas) |
 | `anofox-visualization-access-control` | Login on a locked server (auth proxy, JWT, OIDC, signed embed links, API keys), the `__claim_*` variables, row and column access policies, `dashboard --check --policy`, request and audit logs |
 
