@@ -50,6 +50,12 @@ pub trait Module: Send + Sync {
         height: u32,
         o: &RenderOptions,
     ) -> Result<String, String>;
+    /// What `--check` should warn about a panel of the module's (step 3,
+    /// #1156): one plain sentence each. None by default.
+    fn lint(&self, cols: &[Column]) -> Vec<String> {
+        let _ = cols;
+        Vec::new()
+    }
 }
 
 struct Entry {
@@ -138,7 +144,7 @@ pub fn names() -> Vec<&'static str> {
 
 /// The module that draws a panel with these columns: the first column with
 /// a module role.
-pub(crate) fn for_columns(cols: &[Column]) -> Option<&'static dyn Module> {
+pub fn for_columns(cols: &[Column]) -> Option<&'static dyn Module> {
     let id = cols.iter().find_map(|c| match c.role {
         Role::Module(id) => Some(id),
         _ => None,

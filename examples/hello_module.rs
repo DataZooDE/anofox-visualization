@@ -39,6 +39,19 @@ impl Module for Hello {
             anofox_visualization::format::escape_xml(&who)
         ))
     }
+    /// `--check` warns about a greeting to nobody.
+    fn lint(&self, cols: &[Column]) -> Vec<String> {
+        let empty = cols
+            .iter()
+            .filter(|c| c.role == parse_role("HELLO").unwrap())
+            .flat_map(|c| c.values.first())
+            .any(|v| value_text(v).trim().is_empty());
+        if empty {
+            vec!["the ::HELLO value is empty — it greets nobody".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 pub static HELLO: Hello = Hello;
