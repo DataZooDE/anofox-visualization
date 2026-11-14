@@ -39,7 +39,8 @@ pub struct Diagnostic {
     /// 1-based statement index in the script.
     pub stmt: usize,
     /// Stable machine code. Correctness: `module/missing` (a `::REQUIRES`
-    /// module this build lacks, #1156) | `sql-error` | `silent-setup` |
+    /// module this build lacks, #1156) | `module/lint` (a module's own
+    /// warning about its panel) | `sql-error` | `silent-setup` |
     /// `render-error` | `render-warning` (the plotting engine dropped data,
     /// e.g. non-finite rows or an empty stat layer) | `empty-panel` |
     /// `unknown-cast` | `theme/unknown` | `theme/multiple` | `locale/unknown`
@@ -2489,6 +2490,16 @@ where
                     message: one_line(w),
                     sql: short.clone(),
                 }));
+                // #1156: a module's panel — what the module itself warns about
+                if let Some(m) = crate::module::for_columns(&cols) {
+                    diags.extend(m.lint(&cols).iter().map(|w| Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code: "module/lint",
+                        message: format!("{}: {}", m.name(), one_line(w)),
+                        sql: short.clone(),
+                    }));
+                }
                 if let Some(text) = opts
                     .digest
                     .then(|| {

@@ -88,3 +88,24 @@ fn clashes_are_refused() {
         "a refused module adds nothing"
     );
 }
+
+/// Step 3: `--check` passes on what a module warns about its panel.
+#[test]
+fn a_module_lints_its_panel() {
+    setup();
+    let run = |sql: &str| -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+        let v = if sql.contains("''") { "" } else { "world" };
+        let mut row = serde_json::Map::new();
+        row.insert("c0".into(), serde_json::Value::String(v.into()));
+        Ok(vec![row])
+    };
+    let d = anofox_visualization::lint::check("SELECT ''::HELLO;", run);
+    let w: Vec<_> = d.iter().filter(|x| x.code == "module/lint").collect();
+    assert_eq!(w.len(), 1, "{d:?}");
+    assert_eq!(
+        w[0].message,
+        "hello: the ::HELLO value is empty — it greets nobody"
+    );
+    let d = anofox_visualization::lint::check("SELECT 'world'::HELLO;", run);
+    assert!(!d.iter().any(|x| x.code == "module/lint"), "{d:?}");
+}
