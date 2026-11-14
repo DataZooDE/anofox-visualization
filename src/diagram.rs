@@ -10,14 +10,12 @@
 //! scalar subquery — `source`/`target` are accepted for `from`/`to`).
 //! `::DIRECTION` picks `'LR'` (default) or `'TB'`.
 //!
-//! The layout is a small layered (Sugiyama) layout of our own, deterministic
-//! by construction (no hash iteration; ties are broken by row order):
-//! cycle breaking (DFS in row order, back edges reversed), longest-path
-//! ranking, dummy nodes on long edges, barycenter + transposition ordering,
-//! and a least-squares placement (isotonic regression) along each layer.
-//! The SVG is written here (not by ggplot-rs): node boxes are `<rect>` marks
-//! and edges `<polyline>` marks, both with a `<title>` — the mark contract
-//! the browser's hover, selection and accessibility layers already read.
+//! The layout and the drawing are ggplot-rs's (`graph_layout::layered`,
+//! `graph::draw`; #1153): a deterministic layered (Sugiyama) layout, ties
+//! broken by row order, then node boxes and edges as `<rect>` / `<polyline>`
+//! marks with a `<title>` — the mark contract the browser's hover, selection
+//! and accessibility layers read. This module prepares the data (roles →
+//! nodes and edges, lints) and decides what each mark says and its colour.
 
 use crate::format::{escape_xml as esc, format_number_l, Locale};
 use crate::theme::hex;
