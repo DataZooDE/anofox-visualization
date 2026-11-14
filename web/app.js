@@ -13490,7 +13490,155 @@ function wireCharts() {
   attachHover();
   mountStories();
   mountFrames();
+  mountDiagramZoom();
   resumeLinkReturn();
+}
+
+// #1152: a ::DIAGRAM the server shrank to fit its panel (a long factor graph)
+// zooms and pans in place — a transform on its drawing (`g.dp-diagram`), no
+// re-render. Ctrl/⌘ + wheel or a pinch zooms about the pointer (the plain
+// wheel still scrolls the page), a drag on the background pans once zoomed,
+// + / − / 0 on the focused diagram, and the ⟳ chip goes back. A node the
+// keyboard moves to comes into view. Not while the diagram is edited (#682).
+const DIAGRAM_ZOOM_MAX = 8;
+function mountDiagramZoom() {
+  document.querySelectorAll(".dash .panel > .panel-svg").forEach((holder) => {
+    const svg = holder.querySelector(":scope > svg[data-diagram]");
+    const g = svg && svg.querySelector(":scope > g.dp-diagram");
+    const base = g && /scale\(([\d.]+)\)/.exec(g.getAttribute("transform") || "");
+    const fit = base ? +base[1] : 1;
+    if (!g || fit >= 1 || holder.classList.contains("dp-editing")) {
+      holder.querySelector(":scope > .dp-diagram-reset")?.remove();
+      holder._dpDz = null;
+      return;
+    }
+    if (!g._dpBase) g._dpBase = g.getAttribute("transform");
+    // a re-render of the same layout keeps the view; a new layout starts over
+    if (!holder._dpDz || holder._dpDz.base !== g._dpBase) holder._dpDz = { k: 1, x: 0, y: 0, base: g._dpBase, fit };
+    if (!holder._dpDzWired) wireDiagramZoom(holder);
+    applyDiagramZoom(holder);
+  });
+}
+function applyDiagramZoom(holder) {
+  const z = holder._dpDz;
+  const svg = holder.querySelector(":scope > svg[data-diagram]");
+  const g = svg && svg.querySelector(":scope > g.dp-diagram");
+  if (!z || !g) return;
+  const vb = svg.viewBox.baseVal;
+  // the view stays on the zoomed canvas: no empty margin past its edges
+  z.x = Math.min(0, Math.max(vb.width * (1 - z.k), z.x));
+  z.y = Math.min(0, Math.max(vb.height * (1 - z.k), z.y));
+  if (z.k <= 1) Object.assign(z, { k: 1, x: 0, y: 0 });
+  g.setAttribute("transform", z.k === 1 ? z.base : `translate(${z.x.toFixed(1)},${z.y.toFixed(1)}) scale(${+z.k.toFixed(4)}) ${z.base}`);
+  holder.classList.toggle("dp-zoomed", z.k > 1);
+  let chip = holder.querySelector(":scope > .dp-diagram-reset");
+  if (!chip) {
+    chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "dp-map-reset dp-diagram-reset";
+    chip.textContent = "⟳";
+    chip.title = "Reset zoom (0)";
+    chip.setAttribute("aria-label", "Reset diagram zoom");
+    chip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      zoomDiagram(holder, 1 / DIAGRAM_ZOOM_MAX);
+    });
+    chip.addEventListener("pointerdown", (e) => e.stopPropagation());
+    holder.appendChild(chip);
+  }
+  chip.hidden = z.k === 1;
+}
+// Zoom by the factor `f` about the root-svg point (ux, uy), the centre by default.
+function zoomDiagram(holder, f, ux, uy) {
+  const z = holder._dpDz;
+  const svg = holder.querySelector(":scope > svg[data-diagram]");
+  if (!z || !svg) return;
+  const vb = svg.viewBox.baseVal;
+  if (ux == null) [ux, uy] = [vb.x + vb.width / 2, vb.y + vb.height / 2];
+  // never past the drawing's own size times the cap
+  const k = Math.max(1, Math.min(DIAGRAM_ZOOM_MAX / z.fit, z.k * f));
+  z.x = ux - ((ux - z.x) * k) / z.k;
+  z.y = uy - ((uy - z.y) * k) / z.k;
+  z.k = k;
+  applyDiagramZoom(holder);
+}
+function wireDiagramZoom(holder) {
+  holder._dpDzWired = true;
+  const on = () => holder._dpDz && !holder.classList.contains("dp-editing");
+  const svgNow = () => holder.querySelector(":scope > svg[data-diagram]");
+  const toUser = (cx, cy) => {
+    const m = svgNow()?.getScreenCTM();
+    return m ? new DOMPoint(cx, cy).matrixTransform(m.inverse()) : null;
+  };
+  holder.addEventListener(
+    "wheel",
+    (e) => {
+      if (!on() || !(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      const u = toUser(e.clientX, e.clientY);
+      if (u) zoomDiagram(holder, Math.exp(-Math.max(-50, Math.min(50, e.deltaY)) / 120), u.x, u.y);
+    },
+    { passive: false }
+  );
+  let drag = null;
+  holder.addEventListener("pointerdown", (e) => {
+    if (!on() || holder._dpDz.k === 1 || e.button !== 0 || e.target.closest?.("[data-node], .dp-diagram-reset")) return;
+    drag = { cx: e.clientX, cy: e.clientY, u: toUser(e.clientX, e.clientY), x: holder._dpDz.x, y: holder._dpDz.y, moved: false, id: e.pointerId };
+  });
+  holder.addEventListener("pointermove", (e) => {
+    if (!drag || !drag.u) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy) < 4) return;
+    if (!drag.moved) holder.setPointerCapture?.(drag.id);
+    drag.moved = true;
+    holder.classList.add("dp-panning");
+    const u = toUser(e.clientX, e.clientY);
+    if (!u) return;
+    holder._dpDz.x = drag.x + (u.x - drag.u.x);
+    holder._dpDz.y = drag.y + (u.y - drag.u.y);
+    applyDiagramZoom(holder);
+  });
+  const end = () => {
+    if (drag?.moved) holder._dpPanned = true;
+    holder.classList.remove("dp-panning");
+    drag = null;
+  };
+  holder.addEventListener("pointerup", end);
+  holder.addEventListener("pointercancel", end);
+  // the click that ends a pan is not a selection
+  holder.addEventListener(
+    "click",
+    (e) => {
+      if (!holder._dpPanned) return;
+      holder._dpPanned = false;
+      e.stopPropagation();
+    },
+    true
+  );
+  holder.addEventListener("keydown", (e) => {
+    if (!on() || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    if (k === "+" || k === "=") zoomDiagram(holder, 1.25);
+    else if (k === "-" || k === "_") zoomDiagram(holder, 0.8);
+    else if (k === "0") zoomDiagram(holder, 1 / DIAGRAM_ZOOM_MAX);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  // a node reached by the keyboard (or a story step) comes into view
+  holder.addEventListener("focusin", (e) => {
+    const z = holder._dpDz;
+    const node = on() && z.k > 1 && e.target.closest?.("[data-node]");
+    if (!node) return;
+    const r = node.getBoundingClientRect();
+    const h = holder.getBoundingClientRect();
+    if (r.left >= h.left && r.right <= h.right && r.top >= h.top && r.bottom <= h.bottom) return;
+    const c = toUser(r.left + r.width / 2, r.top + r.height / 2);
+    const m = toUser(h.left + h.width / 2, h.top + h.height / 2);
+    if (!c || !m) return;
+    z.x += m.x - c.x;
+    z.y += m.y - c.y;
+    applyDiagramZoom(holder);
+  });
 }
 
 // ::STORY steppers (web/anim.js) under every chart that has steps. A chart
