@@ -262,6 +262,10 @@ fn render_plot(
         "factor_graph" => {
             let cols = factor_graph::columns(rows, options).map_err(fail)?;
             let (svg, mut warnings) = crate::render_placed(&cols, place, w, h, o)?;
+            let svg = match factor_graph::slices_state(rows, options) {
+                Some(st) => crate::with_root_attr(svg, "data-slices", st),
+                None => svg,
+            };
             warnings.extend(factor_graph::lint(rows, options));
             return Ok((svg, warnings));
         }

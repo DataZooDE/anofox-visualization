@@ -307,6 +307,25 @@ fn moments(family: &str, p: &[f64]) -> Option<(f64, f64)> {
 /// `slices := 'all'` draws every slice.
 const SLICES_SHOWN: usize = 4;
 
+/// Whether the model is long enough to collapse: `Some("collapsed")` when
+/// it is drawn collapsed, `Some("all")` when `slices := 'all'` (or the
+/// viewer's `anofox_fg_slices`) draws every slice of one that would; the
+/// browser's `⋯` click and *Fewer slices* chip read it from the root's
+/// `data-slices` (#1152).
+pub(super) fn slices_state(rows: &[Row], options: &Row) -> Option<&'static str> {
+    let mut slices: Vec<i64> = rows
+        .iter()
+        .filter_map(|r| get(r, &["slice"]).and_then(|s| s.trim().parse::<i64>().ok()))
+        .collect();
+    slices.sort_unstable();
+    slices.dedup();
+    if slices.len() <= SLICES_SHOWN + 2 {
+        return None;
+    }
+    let all = get(options, &["slices"]).is_some_and(|v| v.eq_ignore_ascii_case("all"));
+    Some(if all { "all" } else { "collapsed" })
+}
+
 fn collapse(rows: &[Row], edges: Vec<Row>, options: &Row) -> (Vec<Row>, Vec<Row>) {
     let all = get(options, &["slices"]).is_some_and(|v| v.eq_ignore_ascii_case("all"));
     let slice = |r: &Row| get(r, &["slice"]).and_then(|s| s.trim().parse::<i64>().ok());
@@ -915,6 +934,8 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             let note = match k.as_str() {
                 "data" => "Observed: a measured value, entering the model here.".to_string(),
                 "constant" => "A fixed number given to the model.".to_string(),
+                // #1152: a click shows every slice (the browser sets anofox_fg_slices)
+                "more" => "Slices not drawn, to keep a long model readable. Click to show every slice.".to_string(),
                 "delta" => "Deterministic: computes its output exactly from its inputs.".to_string(),
                 "variable" => "A hidden quantity the model infers: its belief combines the messages from its factors.".to_string(),
                 "equality" => {
@@ -1678,6 +1699,18 @@ mod tests {
             .map(crate::value_text)
             .collect();
         assert!(ids.contains(&"s5".to_string()) && !ids.iter().any(|i| i.starts_with("__more")));
+        // the browser's ⋯ click and Fewer chip read this (#1152)
+        assert_eq!(slices_state(&nodes, &options), Some("all"));
+        options.remove("slices");
+        assert_eq!(slices_state(&nodes, &options), Some("collapsed"));
+        let short: Vec<Row> = nodes
+            .iter()
+            .filter(|r| get(r, &["slice"]).is_some_and(|s| s.parse::<i64>().unwrap() < 4))
+            .cloned()
+            .collect();
+        assert_eq!(slices_state(&short, &options), None);
+        let notes = col(&cols, Role::Tooltip);
+        assert!(crate::value_text(&notes[at]).contains("Click to show every slice"));
     }
 
     #[test]

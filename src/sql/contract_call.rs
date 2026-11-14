@@ -167,11 +167,23 @@ pub fn split_contract(stmt: &str) -> Option<(String, ContractCall, usize)> {
         .enumerate()
         .find_map(|(i, it)| parse_call(it).map(|c| (i, c)))?;
     let a = ident(&call.alias);
-    let args = if call.args.is_empty() {
+    // a default the macro reads from a variable, mirrored here (#1152: a
+    // factor graph's `slices`, which a click on ⋯ sets for the viewer)
+    let mut args = call.args.clone();
+    if call.macro_name == "anofox_plot_factor_graph" {
+        const VAR: &str = "getvariable('anofox_fg_slices')";
+        match args
+            .iter_mut()
+            .find(|(k, _)| k.eq_ignore_ascii_case("slices"))
+        {
+            Some((_, v)) => *v = format!("coalesce({v}, {VAR})"),
+            None => args.push(("slices".to_string(), VAR.to_string())),
+        }
+    }
+    let args = if args.is_empty() {
         "json_object()".to_string()
     } else {
-        let kv: Vec<String> = call
-            .args
+        let kv: Vec<String> = args
             .iter()
             .map(|(k, v)| format!("{}, {v}", quote(k)))
             .collect();
@@ -558,6 +570,25 @@ mod tests {
         ] {
             assert!(split_contract(s).is_none(), "{s}");
         }
+    }
+
+    #[test]
+    fn a_factor_graph_reads_the_viewers_slices() {
+        // #1152: the macro's default, `getvariable('anofox_fg_slices')`,
+        // reaches the browser's rewrite too; an explicit slices := wins
+        let (sql, ..) = split_contract("SELECT anofox_plot_factor_graph(n) FROM t n").unwrap();
+        assert!(
+            sql.contains("json_object('slices', getvariable('anofox_fg_slices'))"),
+            "{sql}"
+        );
+        let (sql, ..) =
+            split_contract("SELECT anofox_plot_factor_graph(n, slices := 'all') FROM t n").unwrap();
+        assert!(
+            sql.contains("coalesce('all', getvariable('anofox_fg_slices'))"),
+            "{sql}"
+        );
+        let (sql, ..) = split_contract("SELECT anofox_plot_terms(t) FROM x t").unwrap();
+        assert!(!sql.contains("anofox_fg_slices"), "{sql}");
     }
 
     #[test]

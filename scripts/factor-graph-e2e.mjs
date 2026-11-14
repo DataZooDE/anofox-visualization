@@ -284,6 +284,35 @@ z = await zv();
 check(z.k === 1 && z.t === home && !z.chip, "0 goes back to the whole diagram", z);
 await narrow.close();
 
+// #1152 (owner 11-14, option A): a click on a collapsed model's ⋯ draws
+// every slice (anofox_fg_slices = 'all', kept in the share link); the
+// *Fewer slices* chip collapses it again.
+const chain = `
+SELECT anofox_plot_factor_graph(n, edges := (
+  SELECT list(e) FROM (
+    SELECT {'variable': 's' || (t - 1), 'factor': 'f' || t, 'interface': 'mean'} AS e FROM range(1, 10) r(t)
+    UNION ALL SELECT {'variable': 's' || t, 'factor': 'f' || t, 'interface': 'out'} FROM range(1, 10) r(t)))) AS "Chain"
+FROM (SELECT 's' || t AS id, 'variable' AS kind, 's_{' || t || '}' AS label, 'state' AS layer, t AS slice FROM range(10) r(t)
+      UNION ALL SELECT 'f' || t, 'factor', 'Normal', 'state', t FROM range(1, 10) r(t)) n;
+`;
+const fg = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+fg.on("pageerror", (e) => errors.push(String(e)));
+await fg.goto(`${base}?embed=1#sql=${Buffer.from(chain, "utf8").toString("base64")}`);
+await fg.waitForFunction(() => document.querySelector('svg[data-slices="collapsed"] [data-node^="__more_"]'), null, { timeout: 120000 });
+await fg.locator('svg[data-diagram] [data-node="__more_state"]').first().click({ force: true });
+await fg.waitForFunction(() => document.querySelector('svg[data-slices="all"]'), null, { timeout: 30000 }).catch(() => {});
+const open = await fg.evaluate(() => ({
+  more: document.querySelectorAll('svg[data-diagram] [data-node^="__more_"]').length,
+  f5: !!document.querySelector('svg[data-diagram] [data-node="f5"]'),
+  chip: !!document.querySelector(".dp-fg-fewer"),
+}));
+check(!open.more && open.f5 && open.chip && /[?&]v\.anofox_fg_slices=all/.test(fg.url()), "a click on ⋯ draws every slice, with a Fewer chip and the state in the link", { ...open, url: fg.url() });
+await fg.locator(".dp-fg-fewer").click();
+await fg.waitForFunction(() => document.querySelector('svg[data-slices="collapsed"]'), null, { timeout: 30000 }).catch(() => {});
+const shut = await fg.evaluate(() => ({ more: document.querySelectorAll('svg[data-diagram] [data-node^="__more_"]').length, chip: !!document.querySelector(".dp-fg-fewer") }));
+check(shut.more > 0 && !shut.chip && !/anofox_fg_slices=all/.test(fg.url()), "Fewer slices collapses it again", { ...shut, url: fg.url() });
+await fg.close();
+
 check(!errors.length, "no page errors", errors);
 await browser.close();
 if (bad) {
