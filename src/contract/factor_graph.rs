@@ -310,6 +310,11 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
     }
     let edges = list(options, "edges")?;
     let marginals = list(options, "marginals")?;
+    // #1172: what the producer adds — each message's value, the predictive
+    // at the data, each observation's influence on a variable
+    let messages = list(options, "messages")?;
+    let predictive = list(options, "predictive")?;
+    let influence = list(options, "influence")?;
     let kind = |r: &Row| get(r, &["kind"]).map(|k| k.to_ascii_lowercase());
     let id_kind: Vec<(String, Option<String>)> = rows
         .iter()
@@ -522,6 +527,7 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
     };
     let mut beliefs = vec![];
     let mut learned: Vec<Option<String>> = vec![];
+    let mut checks: Vec<Value> = vec![];
     let mut sparks = vec![];
     let (mut ids, mut labels, mut shapes, mut lanes, mut values, mut badges) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
@@ -568,6 +574,178 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             )),
             _ => None,
         });
+        // #1172: what the producer's tables say about this node
+        let target = var.clone().unwrap_or_else(|| id.clone());
+        let fnum = |r: &Row, k: &str| {
+            get(r, &[k])
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+        };
+        let scalar = |r: &Row| get(r, &["component"]).is_none();
+        let mut more: Vec<String> = Vec::new();
+        let mut check = Value::Na;
+        // an observation: what the rest of the model expected — a surprise
+        // more than 2 sd off is flagged (warn), more than 3 (bad)
+        if kind(r).as_deref() == Some("data") {
+            if let Some(p) = predictive
+                .iter()
+                .find(|p| get(p, &["variable"]).as_deref() == Some(id.as_str()) && scalar(p))
+            {
+                if let (Some(o), Some(mu)) = (fnum(p, "observed"), fnum(p, "mean")) {
+                    match fnum(p, "sd").filter(|v| *v > 0.0) {
+                        Some(sd) => {
+                            let z = (o - mu).abs() / sd;
+                            more.push(format!(
+                                "Expected {} ± {}, measured {}{}.",
+                                num(mu),
+                                num(sd),
+                                num(o),
+                                if z > 2.0 {
+                                    format!(
+                                        ": {} sd off, a surprise",
+                                        num((z * 10.0).round() / 10.0)
+                                    )
+                                } else {
+                                    String::new()
+                                }
+                            ));
+                            if z > 3.0 {
+                                check = Value::Str("bad".into());
+                            } else if z > 2.0 {
+                                check = Value::Str("warn".into());
+                            }
+                        }
+                        None => more.push(format!("Expected {}, measured {}.", num(mu), num(o))),
+                    }
+                }
+            }
+        }
+        // a variable: the share of its certainty from its prior, from the
+        // latest message each factor sent it (a prior's may only go out in
+        // the first iteration). Precisions (1/sd²) add only for normal
+        // messages: for any other family no share is given.
+        let mut latest_in: Vec<(String, f64, f64)> = Vec::new(); // (factor, iteration, precision)
+        let mut all_normal = true;
+        for m in messages
+            .iter()
+            .filter(|m| get(m, &["variable"]).is_some_and(|v| touch.contains(&v.as_str())))
+            .filter(|m| scalar(m))
+            .filter(|m| {
+                get(m, &["direction"]).is_some_and(|d| d.eq_ignore_ascii_case("to_variable"))
+            })
+        {
+            let (Some(f), Some(sd)) = (get(m, &["factor"]), fnum(m, "sd").filter(|v| *v > 0.0))
+            else {
+                continue;
+            };
+            all_normal &= get(m, &["family"]).is_some_and(|fam| {
+                matches!(
+                    fam.as_str(),
+                    "Normal" | "NormalMeanVariance" | "NormalMeanPrecision" | "Gaussian"
+                )
+            });
+            let it = fnum(m, "iteration").unwrap_or(0.0);
+            match latest_in.iter_mut().find(|x| x.0 == f) {
+                Some(x) if it >= x.1 => *x = (f, it, 1.0 / (sd * sd)),
+                Some(_) => {}
+                None => latest_in.push((f, it, 1.0 / (sd * sd))),
+            }
+        }
+        let incoming: Vec<(String, f64)> = latest_in.into_iter().map(|(f, _, p)| (f, p)).collect();
+        let is_prior = |f: &str| {
+            let ins: Vec<&Row> = factor_edges(f)
+                .into_iter()
+                .filter(|e| get(e, &["interface"]).as_deref() != Some("out"))
+                .collect();
+            !ins.is_empty()
+                && ins.iter().all(|e| {
+                    get(e, &["variable"])
+                        .and_then(|v| row_of(&v))
+                        .and_then(kind)
+                        .as_deref()
+                        == Some("constant")
+                })
+        };
+        let total: f64 = incoming.iter().map(|x| x.1).sum();
+        let from_prior: f64 = incoming
+            .iter()
+            .filter(|x| is_prior(&x.0))
+            .map(|x| x.1)
+            .sum();
+        if all_normal && incoming.len() >= 2 && total > 0.0 && from_prior > 0.0 {
+            let p = (100.0 * from_prior / total).round();
+            more.push(if p < 1.0 {
+                "Almost all of its certainty comes from the data (under 1 % from the prior)."
+                    .to_string()
+            } else {
+                format!(
+                    "About {} % of its certainty comes from the prior, {} % from the data.",
+                    num(p),
+                    num(100.0 - p)
+                )
+            });
+        }
+        // which observations moved it most: its mean without each
+        let mut drivers: Vec<(f64, String, f64)> = influence
+            .iter()
+            .filter(|r| get(r, &["target"]).as_deref() == Some(target.as_str()) && scalar(r))
+            .filter_map(|r| {
+                let (mean, loo) = (fnum(r, "mean")?, fnum(r, "loo_mean")?);
+                let o = get(r, &["observation"])?;
+                Some((
+                    (mean - loo).abs(),
+                    row_of(&o).map(label_of).unwrap_or(o),
+                    loo,
+                ))
+            })
+            .collect();
+        drivers.sort_by(|a, b| b.0.total_cmp(&a.0));
+        if let Some(first) = drivers.first() {
+            let rest: Vec<String> = drivers[1..]
+                .iter()
+                .take(2)
+                .map(|(_, o, loo)| format!("{o} ({})", num(*loo)))
+                .collect();
+            more.push(format!(
+                "Most influential: {} (without it {}){}.",
+                first.1,
+                num(first.2),
+                if rest.is_empty() {
+                    String::new()
+                } else {
+                    format!(", then {}", rest.join(", "))
+                }
+            ));
+        }
+        // still moving: the last iteration changed its mean by over 1 % of
+        // its sd
+        {
+            let its = marginals
+                .iter()
+                .filter(|m| get(m, &["variable"]).as_deref() == Some(target.as_str()) && scalar(m))
+                .filter_map(|m| Some((fnum(m, "iteration")?, fnum(m, "mean")?, fnum(m, "sd"))))
+                .collect::<Vec<_>>();
+            let mut its = its;
+            its.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if let [.., a, b] = its[..] {
+                let ch = (b.1 - a.1).abs();
+                if b.2.is_some_and(|sd| ch > 0.01 * sd) {
+                    more.push(format!(
+                        "Still moving: the last iteration changed it by {}.",
+                        num(ch)
+                    ));
+                }
+            }
+        }
+        checks.push(check);
+        if !more.is_empty() {
+            let l = learned.last_mut().expect("pushed above");
+            let joined = more.join(" ");
+            *l = Some(match l.take() {
+                Some(x) => format!("{x} {joined}"),
+                None => joined,
+            });
+        }
         sparks.push(if tr.len() >= 2 {
             Value::Str(J::from(tr).to_string())
         } else {
@@ -691,6 +869,10 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
     if beliefs.iter().any(|v| !matches!(v, Value::Na)) {
         cols.push(Column::new("belief", Role::Belief, beliefs));
     }
+    // #1172: a surprising observation's status (warn / bad)
+    if checks.iter().any(|v| !matches!(v, Value::Na)) {
+        cols.push(Column::new("check", Role::DiagramCheck, checks));
+    }
     if sparks.iter().any(|v| !matches!(v, Value::Na)) {
         cols.push(Column::new(
             "trend",
@@ -791,6 +973,32 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
         );
         if !iface.is_empty() {
             t.push_str(&format!(" ({})", tex_lite(&iface)));
+        }
+        // #1172: what the message carries
+        if let Some(m) = messages.iter().find(|m| {
+            num(m, "iteration") == Some(it)
+                && num(m, "step") == num(r, "step")
+                && get(m, &["component"]).is_none()
+        }) {
+            let f = |x: f64| {
+                crate::format::format_number_l(
+                    x,
+                    MetricFmt::Plain,
+                    &crate::format::Locale::default(),
+                )
+            };
+            if let Some(mean) = num(m, "mean").filter(|v| v.is_finite()) {
+                t.push_str(&format!(
+                    ", carrying {}{}",
+                    get(m, &["family"])
+                        .map(|fam| format!("{fam} "))
+                        .unwrap_or_default(),
+                    match num(m, "sd").filter(|v| v.is_finite()) {
+                        Some(sd) => format!("{} ± {}", f(mean), f(sd)),
+                        None => f(mean),
+                    }
+                ));
+            }
         }
         if !to_factor {
             if let Some(m) = at_iteration(dst, it) {
@@ -1083,7 +1291,12 @@ mod tests {
         assert!((b["lo"].as_f64().unwrap() + 0.2).abs() < 1e-9, "{b}");
         let note = crate::value_text(&col(&cols, Role::Tooltip)[at]);
         assert!(
-            note.ends_with("2 observations narrowed θ from 0.4 ± 0.2 to 0.5 ± 0.1."),
+            note.contains("2 observations narrowed θ from 0.4 ± 0.2 to 0.5 ± 0.1."),
+            "{note}"
+        );
+        // #1172: the fixture's last iteration moved θ by 0.1 (sd 0.1)
+        assert!(
+            note.ends_with("Still moving: the last iteration changed it by 0.1."),
             "{note}"
         );
     }
@@ -1186,6 +1399,90 @@ mod tests {
             .map(|s| s["dir"].as_str().unwrap())
             .collect();
         assert_eq!(dirs, ["forward", "forward", "back"]);
+    }
+
+    /// #1172: the producer's tables in the cards — an observation far from
+    /// its prediction is flagged, a variable's drivers are ranked, its share
+    /// from the prior given for normal messages only, and a step says what
+    /// its message carries.
+    #[test]
+    fn predictive_influence_and_messages_reach_the_cards() {
+        let (mut nodes, mut options) = coin();
+        // the Beta prior's constants
+        nodes.push(row(&[("id", "c0"), ("kind", "constant"), ("name", "2")]));
+        nodes.push(row(&[("id", "c1"), ("kind", "constant"), ("name", "3")]));
+        let edges = options.get_mut("edges").unwrap().as_array_mut().unwrap();
+        edges.push(
+            serde_json::json!({"variable": "c0", "factor": "f0", "interface": "a", "seq": 1}),
+        );
+        edges.push(
+            serde_json::json!({"variable": "c1", "factor": "f0", "interface": "b", "seq": 2}),
+        );
+        options.insert(
+            "predictive".into(),
+            serde_json::json!([
+                {"variable": "v0", "observed": 1, "mean": 0.6, "sd": 0.49, "family": "Bernoulli"},
+                {"variable": "v1", "observed": 9, "mean": 4.0, "sd": 1.0, "family": "Normal"}
+            ]),
+        );
+        options.insert(
+            "influence".into(),
+            serde_json::json!([
+                {"target": "v4", "observation": "v0", "mean": 0.5, "sd": 0.1, "loo_mean": 0.45, "loo_sd": 0.12},
+                {"target": "v4", "observation": "v1", "mean": 0.5, "sd": 0.1, "loo_mean": 0.6, "loo_sd": 0.12}
+            ]),
+        );
+        options.insert(
+            "messages".into(),
+            serde_json::json!([
+                {"iteration": 1, "step": 1, "variable": "e4", "factor": "f0", "direction": "to_variable", "family": "Normal", "mean": 0.4, "sd": 0.2},
+                {"iteration": 1, "step": 2, "variable": "e4", "factor": "f1", "direction": "to_variable", "family": "Normal", "mean": 1.0, "sd": 0.1},
+                {"iteration": 1, "step": 3, "variable": "e4", "factor": "f2", "direction": "to_variable", "family": "Normal", "mean": 0.0, "sd": 0.1}
+            ]),
+        );
+        options.insert(
+            "schedule".into(),
+            serde_json::json!([
+                {"iteration": 1, "step": 2, "variable": "e4", "factor": "f1", "interface": "p", "direction": "to_variable"}
+            ]),
+        );
+        let cols = columns(&nodes, &options).unwrap();
+        let ids: Vec<String> = col(&cols, Role::Diagram)
+            .iter()
+            .map(crate::value_text)
+            .collect();
+        let at = |id: &str| ids.iter().position(|i| i == id).unwrap();
+        let note = |id: &str| crate::value_text(&col(&cols, Role::Tooltip)[at(id)]);
+        assert!(
+            note("v0").ends_with("Expected 0.6 ± 0.49, measured 1."),
+            "{}",
+            note("v0")
+        );
+        assert!(
+            note("v1").ends_with("Expected 4 ± 1, measured 9: 5 sd off, a surprise."),
+            "{}",
+            note("v1")
+        );
+        let check = |id: &str| crate::value_text(&col(&cols, Role::DiagramCheck)[at(id)]);
+        assert_eq!(
+            (check("v0"), check("v1")),
+            (String::new(), "bad".to_string())
+        );
+        // θ: precisions 25 (the Beta prior f0) against 100 + 100
+        let theta = note("e4");
+        assert!(
+            theta.contains("About 11 % of its certainty comes from the prior, 89 % from the data."),
+            "{theta}"
+        );
+        assert!(
+            theta.contains("Most influential: y₁ (without it 0.6), then y₀ (0.45)."),
+            "{theta}"
+        );
+        let edges = crate::value_text(&col(&cols, Role::Edges)[0]);
+        assert!(
+            edges.contains("Bernoulli → θ (p), carrying Normal 1 ± 0.1"),
+            "{edges}"
+        );
     }
 
     #[test]

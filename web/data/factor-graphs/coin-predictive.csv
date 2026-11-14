@@ -1,0 +1,5 @@
+variable,observed,mean,sd,family,component,log_density
+v0,1,0.5,0.5,Bernoulli,,-0.6931471805599453
+v1,0,0.625,0.4841229182759271,Bernoulli,,-0.9808292530117262
+v2,1,0.5,0.5,Bernoulli,,-0.6931471805599453
+v3,1,0.5,0.5,Bernoulli,,-0.6931471805599453

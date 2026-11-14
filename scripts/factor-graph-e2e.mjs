@@ -52,7 +52,7 @@ const dot = await page.evaluate(() => {
 });
 check(dot && dot.motion && dot.after === "f0>e4", "a message dot runs along that edge (#1166)", dot);
 check(s.lit.includes("f0") && s.lit.includes("e4") && !s.lit.includes("f1"), "its two ends stay lit, the rest dims", s);
-check(/^Iteration 1 · message 1: Beta → θ \(out\); θ after iteration 1: /.test(s.cap), "the caption names the message and θ's marginal", s);
+check(/^Iteration 1 · message 1: Beta → θ \(out\), carrying Beta 0\.4 ± 0\.2; θ after iteration 1: /.test(s.cap), "the caption names the message, what it carries (#1172) and θ's marginal", s);
 await step(".dp-story-next");
 s = await state();
 check(s.msg.join() === "e4>f1 back", "step 2: a message against the drawn edge", s);
@@ -112,7 +112,7 @@ const card = await page.evaluate(() => {
 });
 check(card && card.kicker === "Variable" && /^The variable /.test(card.title) && /^A hidden quantity/.test(card.note), "a variable's hover is a node card", card);
 // …and says what the data did to the prior (#1172)
-check(card && /6 observations moved τ from 1 ± 1 to 2\.85 ± 1\.43\.$/.test(card.note), "the card says what the observations did to the prior", card);
+check(card && /6 observations moved τ from 1 ± 1 to 2\.85 ± 1\.43\. Most influential: y₃ \(without it 2\.45\)/.test(card.note), "the card says what the observations did to the prior, and which one moved it most (#1172)", card);
 
 // #1172: one teal, labels as mathematics (italic), hover focus on the
 // neighbourhood, and a card on an edge.
