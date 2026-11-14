@@ -177,6 +177,26 @@ const infl = await page.evaluate(() => {
   return r;
 });
 check(infl.y4 > infl.y3 && infl.y3 > 0 && infl.y4Opacity === "" && infl.after === "", "hovering m widens each cycle's edge by its influence", infl);
+// …and with m selected (a click), they stay wide after the pointer leaves;
+// a second click clears it (owner, 11-14)
+const widths = () =>
+  page.evaluate(() => {
+    const svg = document.querySelectorAll("svg[data-diagram]")[1];
+    const w = (to) => parseFloat(svg.querySelector(`polyline[data-to="${to}"]`)?.style.strokeWidth || "0");
+    return { y4: w("v4"), y3: w("v3"), y4Opacity: svg.querySelector('rect[data-node="v4"]').style.opacity };
+  });
+await page.locator('svg[data-diagram] rect[data-node="e6"]').nth(0).click({ force: true });
+await page.waitForFunction(() => /[?&]v\.\w+=e6/.test(location.search), null, { timeout: 20000 }).catch(() => {});
+await page.waitForTimeout(500);
+await page.mouse.move(2, 2);
+const sel = await widths();
+check(sel.y4 > sel.y3 && sel.y3 > 0 && sel.y4Opacity === "", "a selected variable keeps its observations' edges wide, and in focus", sel);
+await page.locator('svg[data-diagram] rect[data-node="e6"]').nth(0).click({ force: true });
+await page.waitForFunction(() => !/[?&]v\.\w+=e6/.test(location.search), null, { timeout: 20000 }).catch(() => {});
+await page.waitForTimeout(500);
+await page.mouse.move(2, 2);
+const cleared = await widths();
+check(cleared.y4 === 0 && cleared.y3 === 0, "unselected, the edges go back", cleared);
 
 // A ::SELECT_AS before the macro names what a click on a node sets (#1152).
 const sql = `
