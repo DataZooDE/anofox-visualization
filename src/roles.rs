@@ -158,6 +158,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "flows between stages: ::ORIGIN → ::DEST, link width by the measure; nodes stack in columns"),
     e("TREEMAP", &["TREE_MAP"], R::Value(Kind::Treemap), "chart", true,
       "part-to-whole tiles, area by the measure: ::XAXIS names a tile (its key; a ::LABEL then shows a name instead), ::CATEGORY nests tiles in groups"),
+    e("PARETO_TOTAL", &[], R::ParetoTotal, "modifier", true,
+      "the grand total a ::PARETO's cumulative share is of, for a top N of a longer list: the line ends at the top N's share, not 100 %"),
     e("PARETO", &["PARETOCHART"], R::Value(Kind::Pareto), "chart", true,
       "XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis"),
     e("GANTT", &["GANTTCHART", "TIMELINE_BARS"], R::Value(Kind::Gantt), "chart", true,
@@ -1411,6 +1413,7 @@ mod tests {
             Role::Gate,
             Role::GateMessage,
             Role::Requires,
+            Role::ParetoTotal,
         ]);
         for r in &v {
             // Exhaustiveness guard (no `_` arm).
@@ -1600,7 +1603,8 @@ mod tests {
                 | Role::GuideStep
                 | Role::Gate
                 | Role::GateMessage
-                | Role::Requires => {}
+                | Role::Requires
+                | Role::ParetoTotal => {}
                 // a module's roles live in the module registry, not here (#1156)
                 Role::Module(_) => unreachable!("no module role among the built-ins"),
             }

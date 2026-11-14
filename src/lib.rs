@@ -836,6 +836,9 @@ pub enum Role {
     /// `'name'::REQUIRES` (#1156): a module the dashboard needs; without it
     /// the dashboard says so instead of failing on the module's roles.
     Requires,
+    /// `n::PARETO_TOTAL` (#1101): the grand total a `::PARETO`'s cumulative
+    /// share is of, when its bars are a top N of a longer list.
+    ParetoTotal,
 }
 
 /// A single annotated result column: a name, its [`Role`], and its values.

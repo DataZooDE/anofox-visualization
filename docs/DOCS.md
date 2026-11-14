@@ -101,6 +101,7 @@ terminal.
 | `::FUNNEL` | `::FUNNELCHART` | chart | ordered XAXIS stages, widths by value, conversion % from the previous stage |
 | `::SANKEY` | `::SANKEYCHART` | chart | flows between stages: ::ORIGIN → ::DEST, link width by the measure; nodes stack in columns |
 | `::TREEMAP` | `::TREE_MAP` | chart | part-to-whole tiles, area by the measure: ::XAXIS names a tile (its key; a ::LABEL then shows a name instead), ::CATEGORY nests tiles in groups |
+| `::PARETO_TOTAL` |  | modifier | the grand total a ::PARETO's cumulative share is of, for a top N of a longer list: the line ends at the top N's share, not 100 % |
 | `::PARETO` | `::PARETOCHART` | chart | XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis |
 | `::GANTT` | `::GANTTCHART`, `::TIMELINE_BARS` | chart | one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars |
 | `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual) |
