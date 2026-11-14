@@ -283,7 +283,8 @@ fn shape_of(s: &str) -> Option<ggplot_rs::graph::NodeShape> {
             "terminal" | "data" | "observed" => S::Terminal,
             "square" | "equality" | "=" => S::Square,
             "filled-square" | "delta" | "deterministic" => S::FilledSquare,
-            "text" | "constant" => S::Text,
+            // #1152: a collapsed run of slices (`⋯ n more`)
+            "text" | "constant" | "more" => S::Text,
             _ => return None,
         },
     )

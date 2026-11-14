@@ -301,6 +301,92 @@ fn moments(family: &str, p: &[f64]) -> Option<(f64, f64)> {
     Some((m, var.sqrt()))
 }
 
+/// #1152: a long model collapsed — with more than [`SLICES_SHOWN`] + 2
+/// slices, only the first and last two are drawn; the hidden ones become
+/// one `⋯ n more` node per band, which every edge into them goes to.
+/// `slices := 'all'` draws every slice.
+const SLICES_SHOWN: usize = 4;
+
+fn collapse(rows: &[Row], edges: Vec<Row>, options: &Row) -> (Vec<Row>, Vec<Row>) {
+    let all = get(options, &["slices"]).is_some_and(|v| v.eq_ignore_ascii_case("all"));
+    let slice = |r: &Row| get(r, &["slice"]).and_then(|s| s.trim().parse::<i64>().ok());
+    let mut slices: Vec<i64> = rows.iter().filter_map(slice).collect();
+    slices.sort_unstable();
+    slices.dedup();
+    if all || slices.len() <= SLICES_SHOWN + 2 {
+        return (rows.to_vec(), edges);
+    }
+    let half = SLICES_SHOWN / 2;
+    let hidden: Vec<i64> = slices[half..slices.len() - half].to_vec();
+    let n = hidden.len();
+    let id_of = |r: &Row| get(r, &["id"]).unwrap_or_default();
+    // the hidden nodes, each mapped to its band's `⋯` node
+    let mut more: Vec<(String, Row)> = Vec::new(); // (layer, node)
+    let mut to_more: Vec<(String, String)> = Vec::new(); // (hidden id, ⋯ id)
+    let mut kept: Vec<Row> = Vec::new();
+    for r in rows {
+        if slice(r).is_some_and(|s| hidden.contains(&s)) {
+            let layer = get(r, &["layer"]).unwrap_or_default();
+            let mid = format!("__more_{layer}");
+            if !more.iter().any(|(l, _)| *l == layer) {
+                let mut m = Row::new();
+                m.insert("id".into(), J::String(mid.clone()));
+                m.insert("kind".into(), J::String("more".into()));
+                m.insert("label".into(), J::String(format!("⋯ {n} more")));
+                m.insert("layer".into(), J::String(layer.clone()));
+                m.insert("slice".into(), J::from(hidden[0]));
+                more.push((layer, m));
+            }
+            to_more.push((id_of(r), mid));
+        } else {
+            kept.push(r.clone());
+        }
+    }
+    // a band's ⋯ sits where its hidden slices were (rows keep slice order)
+    let at = kept
+        .iter()
+        .position(|r| slice(r).is_some_and(|s| s > hidden[n - 1]))
+        .unwrap_or(kept.len());
+    for (i, (_, m)) in more.into_iter().enumerate() {
+        kept.insert(at + i, m);
+    }
+    let redirect = |id: String| -> String {
+        to_more
+            .iter()
+            .find(|(h, _)| *h == id)
+            .map_or(id, |(_, m)| m.clone())
+    };
+    let mut out: Vec<Row> = Vec::new();
+    for e in edges {
+        let (Some(v), Some(f)) = (get(&e, &["variable"]), get(&e, &["factor"])) else {
+            continue;
+        };
+        let (v2, f2) = (redirect(v.clone()), redirect(f.clone()));
+        // inside one band's hidden run: dropped; between two bands' runs:
+        // one edge, so the bands' ⋯ line up
+        if v2 == f2 {
+            continue;
+        }
+        if (v2 != v || f2 != f)
+            && out.iter().any(|o| {
+                get(o, &["variable"]).as_deref() == Some(v2.as_str())
+                    && get(o, &["factor"]).as_deref() == Some(f2.as_str())
+            })
+        {
+            continue;
+        }
+        let mut e2 = e.clone();
+        // the link between two bands' ⋯ is no interface of anything
+        if v2.starts_with("__more_") && f2.starts_with("__more_") {
+            e2.insert("interface".into(), J::String(String::new()));
+        }
+        e2.insert("variable".into(), J::String(v2));
+        e2.insert("factor".into(), J::String(f2));
+        out.push(e2);
+    }
+    (kept, out)
+}
+
 pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String> {
     if rows.iter().all(|r| get(r, &["id"]).is_none()) {
         return Err(format!(
@@ -308,7 +394,8 @@ pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             super::NEEDS
         ));
     }
-    let edges = list(options, "edges")?;
+    let (collapsed, edges) = collapse(rows, list(options, "edges")?, options);
+    let rows: &[Row] = &collapsed;
     let marginals = list(options, "marginals")?;
     // #1172: what the producer adds — each message's value, the predictive
     // at the data, each observation's influence on a variable
@@ -1510,6 +1597,87 @@ mod tests {
             edges.contains("Bernoulli → θ (p), carrying Normal 1 ± 0.1"),
             "{edges}"
         );
+    }
+
+    /// #1152: a chain of 10 slices draws the first and last two, the six
+    /// between as one `⋯ 6 more` per band; `slices := 'all'` draws them all.
+    #[test]
+    fn a_long_chain_collapses() {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for t in 0..10 {
+            let s = t.to_string();
+            nodes.push(row(&[
+                ("id", &format!("s{t}")),
+                ("kind", "variable"),
+                ("label", &format!("s_{{{t}}}")),
+                ("layer", "state"),
+                ("slice", &s),
+            ]));
+            nodes.push(row(&[
+                ("id", &format!("x{t}")),
+                ("kind", "data"),
+                ("label", &format!("x_{{{t}}}")),
+                ("layer", "obs"),
+                ("slice", &s),
+            ]));
+            nodes.push(row(&[
+                ("id", &format!("g{t}")),
+                ("kind", "factor"),
+                ("name", "Normal"),
+                ("layer", "obs"),
+                ("slice", &s),
+            ]));
+            edges.push(serde_json::json!({"variable": format!("x{t}"), "factor": format!("g{t}"), "interface": "out"}));
+            edges.push(serde_json::json!({"variable": format!("s{t}"), "factor": format!("g{t}"), "interface": "mean"}));
+            if t > 0 {
+                nodes.push(row(&[
+                    ("id", &format!("f{t}")),
+                    ("kind", "factor"),
+                    ("name", "Normal"),
+                    ("layer", "state"),
+                    ("slice", &s),
+                ]));
+                edges.push(serde_json::json!({"variable": format!("s{}", t - 1), "factor": format!("f{t}"), "interface": "mean"}));
+                edges.push(serde_json::json!({"variable": format!("s{t}"), "factor": format!("f{t}"), "interface": "out"}));
+            }
+        }
+        let mut options = Row::new();
+        options.insert("edges".into(), J::Array(edges));
+        let cols = columns(&nodes, &options).unwrap();
+        let ids: Vec<String> = col(&cols, Role::Diagram)
+            .iter()
+            .map(crate::value_text)
+            .collect();
+        // (s₀ and s₉ sit on two factors: Forney edges, not nodes)
+        for kept in ["s1", "s8", "x0", "x1", "x8", "x9"] {
+            assert!(ids.contains(&kept.to_string()), "{kept}: {ids:?}");
+        }
+        for gone in ["s2", "s5", "s7", "x4", "g6"] {
+            assert!(!ids.contains(&gone.to_string()), "{gone}: {ids:?}");
+        }
+        let at = ids
+            .iter()
+            .position(|i| i == "__more_state")
+            .expect("a ⋯ in the state band");
+        assert_eq!(col(&cols, Role::Label)[at], Value::Str("⋯ 6 more".into()));
+        assert!(ids.contains(&"__more_obs".to_string()));
+        let edges = crate::value_text(&col(&cols, Role::Edges)[0]);
+        // the chain runs on through the ⋯: s1 into it, it into s8's factor
+        assert!(
+            edges.contains(r#""from":"s1","to":"__more_state""#)
+                || edges.contains(r#""from":"__more_state","to":"s1""#),
+            "{edges}"
+        );
+        assert!(edges.contains("f8"), "{edges}");
+        assert!(!edges.contains(r#""s5""#), "{edges}");
+        options.insert("slices".into(), J::String("all".into()));
+        let all = columns(&nodes, &options).unwrap();
+        let ids: Vec<String> = col(&all, Role::Diagram)
+            .iter()
+            .map(crate::value_text)
+            .collect();
+        assert!(ids.contains(&"s5".to_string()) && !ids.iter().any(|i| i.starts_with("__more")));
     }
 
     #[test]

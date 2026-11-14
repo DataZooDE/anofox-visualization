@@ -408,8 +408,8 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
     MacroSpec {
         name: "anofox_plot_factor_graph",
         params: &["tbl"],
-        named: &[("edges", "NULL"), ("marginals", "NULL"), ("schedule", "NULL"), ("messages", "NULL"), ("predictive", "NULL"), ("influence", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "900"), ("height", "420")],
-        body: contract_body!("factor_graph", "'edges', edges, 'marginals', marginals, 'schedule', schedule, 'messages', messages, 'predictive', predictive, 'influence', influence"),
+        named: &[("edges", "NULL"), ("marginals", "NULL"), ("schedule", "NULL"), ("messages", "NULL"), ("predictive", "NULL"), ("influence", "NULL"), ("slices", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "900"), ("height", "420")],
+        body: contract_body!("factor_graph", "'edges', edges, 'marginals', marginals, 'schedule', schedule, 'messages', messages, 'predictive', predictive, 'influence', influence, 'slices', slices"),
         description: "A factor graph (Forney style) from a `factor_graph` table, one row per node (id, kind: factor | \
 variable | data | constant | equality | delta, name, label, slice, layer, plate), with edges := a LIST of edge STRUCTs \
 (variable, factor, interface, seq) and optionally marginals := a LIST of (variable, iteration, mean, sd, family). \
