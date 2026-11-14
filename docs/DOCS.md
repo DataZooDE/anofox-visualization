@@ -2697,7 +2697,15 @@ into an 'Other' row in SQL, or use `::BARCHART`. A `::BAND_LOWER` above its
 swapped; a band that misses its line in more than half the rows
 (`chart/band-off-line`, one measure only) is usually in another unit — a
 fraction band around a percent line. An actual outside its forecast band now
-and then is fine.
+and then is fine. A measure named like a count (`n`, `count`, `cnt`, `num_…`)
+with a negative value (`chart/negative-count`) is usually a difference taken
+the wrong way round; a name that says it's a change (`net`, `delta`, `diff`,
+`change`) is left alone. A `::TITLE` or `::SUBTITLE` that states a total
+("Total: 1,234", "total €1.2M") on a pie, donut or bar chart whose values add
+up to something else, beyond the stated rounding (`chart/stated-total`), was
+written from another query: compute it from the same rows (`sum(x) OVER ()`),
+or say what the chart leaves out. A year or a percent after "total" is not
+read as one, and `1.234` counts as either reading.
 
 **What a chart draws** (#1095): `dashboard --check --digest` adds a
 `chart/drawn` note per chart, with its numbers from the plotting engine's own
