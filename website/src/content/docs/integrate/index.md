@@ -22,4 +22,6 @@ SELECT anofox_plot(t) FROM ols_tidy_by('sales', region, revenue, [price, promo])
 
 Every producer of every extension is rendered in CI against the extension's latest build (`*-conformance` jobs), so a contract change is caught the day it lands.
 
+anofox-forecast and anofox-optimize also ship Claude Code plugins, whose skills write the extension's SQL from a plain request ([forecast](forecast/#with-claude-code), [optimize](optimize/#with-claude-code)).
+
 One page per extension: [anofox-statistics](statistics/) · [anofox-forecast](forecast/) · [anofox-tabular](tabular/) · [anofox-optimize](optimize/) · [anofox-decide](decide/). From Python and R: [python-r.md](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/python-r.md). The schemas: the [integration contract](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/plans/integration-contract.md).

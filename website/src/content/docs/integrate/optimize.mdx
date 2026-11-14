@@ -35,6 +35,15 @@ The solvers return a STRUCT of lists per instance. Unnest the plan into one row 
 - [Which van serves which stop tomorrow?](../../app/?dashboard=which-van-serves-which-stop-tomorrow)
 - [What should we order this week to sell the most?](../../app/?dashboard=what-should-we-order-this-week-to-sell-the-most)
 
+## With Claude Code
+
+anofox-optimize ships a [Claude Code plugin](https://github.com/DataZooDE/anofox-optimize#claude-code-skills) with five skills, one per stage: formulate, prepare the data, solve, evaluate, visualize. The visualize skill ends at `anofox_plot(t)` over the solver's results, so the assistant's last step is a chart from this extension, with no reshaping.
+
+```text
+/plugin marketplace add DataZooDE/anofox-optimize
+/plugin install anofox-optimize@anofox-optimize
+```
+
 ## Checked in CI
 
 Every producer of the extension's latest build is plotted on every push ([`scripts/optimize_conformance.py`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/optimize_conformance.py)): a SQL error, a missing SVG or a producer without a recipe fails the run. [Reference →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#plotting-model-output-contract-macros)

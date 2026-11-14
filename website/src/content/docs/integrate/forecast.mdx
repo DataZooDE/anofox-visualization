@@ -45,6 +45,15 @@ In a dashboard, draw the same forecast with roles: `ds ::XAXIS, y ::SCATTER, yha
 - [How many agents do we need per half-hour?](../../app/?dashboard=how-many-agents-do-we-need-per-half-hour)
 - [Which materials will run short next quarter?](../../app/?dashboard=which-materials-will-run-short-next-quarter)
 
+## With Claude Code
+
+anofox-forecast ships a [Claude Code plugin](https://github.com/DataZooDE/anofox-forecast#-claude-code-skills-ai-pair-programming): skills that know its SQL API, so an assistant writes the `ts_forecast_by`, backtest and diagnostics queries from a plain request. The results then plot as above.
+
+```text
+/plugin marketplace add DataZooDE/anofox-forecast
+/plugin install anofox-forecast@anofox-forecast
+```
+
 ## Checked in CI
 
 Every producer of the extension's latest build is plotted on every push ([`scripts/forecast_conformance.py`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/forecast_conformance.py)): a SQL error, a missing SVG or a producer without a recipe fails the run. [Reference →](https://github.com/DataZooDE/anofox-visualization/blob/master/docs/DOCS.md#plotting-model-output-contract-macros)
