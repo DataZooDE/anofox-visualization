@@ -49,7 +49,7 @@ builder runs on DuckDB-Wasm, nothing to install.
 - **DuckDB 1.5.6 is the release target.** 2.0 is built and tested in CI (non-blocking); the pin moves with 2.0.1.
 - **No drag-and-drop.** Dashboards are SQL. The builder helps you write it; it doesn't hide it.
 - **The AI assistant is off** unless an installation turns it on, and it then uses your own Claude API key. It is still being evaluated.
-- **Plugins are new.** The `dashboard` CLI and `serve` load them in builds with the `plugins` feature; the browser builder and the DuckDB extension follow ([#1213](https://github.com/DataZooDE/anofox-visualization/issues/1213)). The release builds don't enable them yet, and the interface may still change.
+- **Plugins are new.** The `dashboard` CLI, `serve` (builds with the `plugins` feature) and the browser builder load them; the DuckDB extension follows ([#1213](https://github.com/DataZooDE/anofox-visualization/issues/1213)). The release builds don't enable them yet, and the interface may still change.
 
 ## Quick start
 

@@ -1017,6 +1017,21 @@ fn handle_authoring(
     if let Some(bytes) = crate::module::asset(&path) {
         return respond(req, 200, sv::content_type(&path), bytes.to_vec());
     }
+    // #1213 step 3: the runtime plugins, for the builder to run in the page
+    #[cfg(feature = "plugins")]
+    {
+        if path == "/plugins.json" {
+            return respond(
+                req,
+                200,
+                "application/json",
+                crate::plugin::browser_list().into_bytes(),
+            );
+        }
+        if let Some(bytes) = crate::plugin::browser_wasm(&path) {
+            return respond(req, 200, "application/wasm", bytes.to_vec());
+        }
+    }
     let asset = path.trim_start_matches('/');
     let asset = if asset.is_empty() {
         "index.html"

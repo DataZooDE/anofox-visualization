@@ -5,6 +5,7 @@ import init, {
   plan,
   missing_modules,
   module_assets,
+  register_plugin,
   tooltip_fill,
   render_panel,
   render_cell,
@@ -41,6 +42,7 @@ import init, {
   version as wasmVersion,
   AskSession,
 } from "./pkg/anofox_visualization.js";
+import { loadPlugins } from "./plugins.js";
 import { animKit } from "./anim.js";
 import * as xp from "./explore.js";
 import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnostics, splitStatements, wasmSql } from "./lint.js";
@@ -2790,6 +2792,8 @@ async function boot() {
   await init(); // anofox-visualization wasm (plan + render_panel — used in both modes)
   const sideVer = document.getElementById("side-ver");
   if (sideVer) sideVer.textContent = wasmVersion(); // "v2026.10.18" or "v2026.10.18+37 · 739aba4" (#216)
+  // #1213: runtime plugins (plugins.json) before the roles are read
+  await loadPlugins(register_plugin);
   loadRoleSets();
   loadModuleAssets();
 

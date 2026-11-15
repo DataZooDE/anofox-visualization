@@ -50,6 +50,19 @@ pub fn missing_modules(script: &str) -> String {
 
 /// #1156 D5a: the registered modules' browser files to load
 /// (`modules/<name>/<path>`), as a JSON array.
+/// #1213 step 3: register a runtime plugin the page instantiated (no
+/// imports), from its manifest JSON: `""` when registered, else why not.
+/// Drawing calls go back through `globalThis.anofoxPlugins.call`.
+#[wasm_bindgen]
+pub fn register_plugin(manifest_json: &str) -> String {
+    guard(|| {
+        Ok(crate::plugin::register_manifest(manifest_json)
+            .err()
+            .unwrap_or_default())
+    })
+    .unwrap_or_else(|e| e.to_string())
+}
+
 #[wasm_bindgen]
 pub fn module_assets() -> String {
     guard(|| Ok(serde_json::to_string(&crate::module::asset_paths()).unwrap_or_default()))
