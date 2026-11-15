@@ -4887,6 +4887,8 @@ pub fn check_policy(
         &[]
     };
     let mut diags = Vec::new();
+    // #1217: per statement, the policy tables it reads (None: refused)
+    let mut reads_tables: Vec<Option<std::collections::BTreeSet<usize>>> = Vec::new();
     for (i, r) in enf
         .rewrite_each(duck, &stmts, server_temps)
         .into_iter()
@@ -4907,6 +4909,8 @@ pub fn check_policy(
             }
             Ok((_, tables, cols)) => (tables, cols),
         };
+        reads_tables.resize(i, None);
+        reads_tables.push(Some(uses.0.clone()));
         for (t, c) in enf.restricted_columns(&uses) {
             let who = c.audience();
             let (severity, code, message) = match c.otherwise {
@@ -4952,7 +4956,153 @@ pub fn check_policy(
             });
         }
     }
+    reads_tables.resize(stmts.len(), None);
+    diags.extend(input_options_restricted(&plan, enf, &reads_tables));
     diags
+}
+
+/// #1217: an input whose options come from a policy table with a row filter
+/// (directly, or through a TEMP table built from one) has different options
+/// — and so a different default — per viewer; a panel reading only tables
+/// without a row filter that reads its variable then shows numbers that
+/// differ per viewer without saying so ("club" numbers that are a parent's
+/// age groups). One warning per such input, naming those panels.
+fn input_options_restricted(
+    plan: &[sql::Panel],
+    enf: &crate::host::policy::Enforcer,
+    reads_tables: &[Option<std::collections::BTreeSet<usize>>],
+) -> Vec<Diagnostic> {
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    let filtered = |t: &usize| enf.policy.tables.get(*t).is_some_and(|t| t.rows.is_some());
+    // TEMP tables / views built from a filtered table (in order: a later one
+    // built from an earlier one counts too)
+    let mut tainted: HashSet<String> = HashSet::new();
+    let words = |sql: &str| -> HashSet<String> {
+        sql::lex::tokenize(sql)
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.kind,
+                    sql::lex::TokKind::Word | sql::lex::TokKind::QuotedIdent
+                )
+            })
+            .map(|t| t.text(sql).trim_matches('"').to_ascii_lowercase())
+            .collect()
+    };
+    let mut restricted = vec![false; plan.len()];
+    for (i, p) in plan.iter().enumerate() {
+        let w = words(&p.sql);
+        let r = reads_tables
+            .get(i)
+            .and_then(Option::as_ref)
+            .is_some_and(|t| t.iter().any(&filtered))
+            || w.iter().any(|x| tainted.contains(x));
+        restricted[i] = r;
+        if r && p.setup {
+            if let Some(n) = created_temp(&p.sql) {
+                tainted.insert(n);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        let Some(kind) = crate::inputs::input_kind(&p.roles) else {
+            continue;
+        };
+        if !restricted[i] {
+            continue;
+        }
+        let from: BTreeSet<String> = reads_tables
+            .get(i)
+            .and_then(Option::as_ref)
+            .map(|t| {
+                t.iter()
+                    .filter(|t| filtered(t))
+                    .map(|t| format!("`{}`", enf.policy.tables[*t].name()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let empty = HashMap::new();
+        for var in sql::vars::input_names(p, kind) {
+            let var = var.to_ascii_lowercase();
+            let panels: Vec<usize> = plan
+                .iter()
+                .enumerate()
+                .filter(|(j, q)| {
+                    *j != i
+                        && !q.setup
+                        && !restricted[*j]
+                        && crate::inputs::input_kind(&q.roles).is_none()
+                        && reads_tables
+                            .get(*j)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|t| !t.is_empty())
+                        && matches!(sql::deps::reads(&q.sql, &empty), sql::deps::Deps::Vars(v) if v.contains(&var))
+                })
+                .map(|(j, _)| j + 1)
+                .collect();
+            if panels.is_empty() {
+                continue;
+            }
+            let src = if from.is_empty() {
+                "a TEMP table built from a policy table with a row filter".to_string()
+            } else {
+                format!(
+                    "policy table {} with a row filter",
+                    from.iter().cloned().collect::<Vec<_>>().join(", ")
+                )
+            };
+            let list = panels
+                .iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "policy/input-options-restricted",
+                message: format!(
+                    "the options of input `{var}` come from {src}, so they — and its default — differ per viewer; \
+                     statement(s) {list} read `{var}` but only tables without a row filter, so their numbers \
+                     change per viewer without saying so. Take the options from an unrestricted table"
+                ),
+                sql: one_line(p.sql.trim()),
+            });
+        }
+    }
+    out
+}
+
+/// The name a `CREATE [OR REPLACE] TEMP[ORARY] TABLE|VIEW <name>` creates
+/// (lower case), else `None`.
+fn created_temp(sql: &str) -> Option<String> {
+    let toks = sql::lex::tokenize(sql);
+    let w: Vec<String> = toks
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.kind,
+                sql::lex::TokKind::Word | sql::lex::TokKind::QuotedIdent
+            )
+        })
+        .take(7)
+        .map(|t| t.text(sql).trim_matches('"').to_ascii_lowercase())
+        .collect();
+    let mut it = w.iter().map(String::as_str).peekable();
+    (it.next()? == "create").then_some(())?;
+    if it.peek() == Some(&"or") {
+        it.next();
+        (it.next()? == "replace").then_some(())?;
+    }
+    matches!(it.next()?, "temp" | "temporary").then_some(())?;
+    matches!(it.next()?, "table" | "view").then_some(())?;
+    let mut name = it.next()?;
+    if name == "if" {
+        it.next();
+        it.next();
+        name = it.next()?;
+    }
+    Some(name.to_string())
 }
 
 /// The longest `-- @description` (characters, its lines joined) the linter

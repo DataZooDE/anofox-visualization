@@ -3204,7 +3204,11 @@ all work, and all read the viewer's views. A viewer request that sets a
 --policy policy.json` reports what the server would refuse
 (`policy/refused`), panels that use a column some viewers can't see
 (`policy/denied-column`: a warning, an error when nobody may see it — the
-panel then always fails) and masked columns (`policy/masked-column`, a note).
+panel then always fails), masked columns (`policy/masked-column`, a note)
+and inputs whose options come from a table with a row filter while panels
+on tables without one read their variable (`policy/input-options-restricted`,
+#1217: those panels' numbers then change per viewer, with each viewer's
+default — take the options from an unrestricted table).
 It uses the server's classifier and function list; it runs the `duckdb` CLI
 on PATH to parse, and warns (`policy/duckdb-version`) when that is not the
 pinned 1.5.6. The server checks again at start and fails closed either way.

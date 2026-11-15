@@ -4374,7 +4374,7 @@ dashboard --check mydash.sql            # (add --json for machine output)
 #   render-warning  the chart renders but the engine dropped data (non-finite rows, empty stat layer, legend entries that don't fit)
 # With an access policy (locked server): what it refuses, which panels use hidden columns.
 dashboard --check mydash.sql --db data.duckdb --policy policy.json
-#   policy/refused  policy/denied-column  policy/masked-column
+#   policy/refused  policy/denied-column  policy/masked-column  policy/input-options-restricted
 
 # Ground on the data before writing SQL: types, cardinality, min/max, null %.
 dashboard --describe 'sales.parquet'    # or a table name, read_csv(...), --db file.db
