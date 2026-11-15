@@ -904,6 +904,19 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/factor-graph-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/plugins-browser-e2e.mjs (#1213 step 3): runtime plugins in
+      # the browser builder — the example plugin draws a panel and its
+      # contract macro, a plugin with an import is refused. Its own copies
+      # of web/ (with and without plugins.json), its own ports.
+      - name: Plugins in the browser e2e (#1213)
+        timeout-minutes: 10
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release --target wasm32-unknown-unknown \
+            --manifest-path examples/plugins/hello/Cargo.toml --target-dir "$RUNNER_TEMP/plugin-target"
+          NODE_PATH="$PWD/tests/web/node_modules" node scripts/plugins-browser-e2e.mjs \
+            --plugin "$RUNNER_TEMP/plugin-target/wasm32-unknown-unknown/release/hello_plugin.wasm"
+
       # scripts/image-e2e.mjs (#514): ::IMAGE / ::IMAGE_DARK / markdown
       # ![alt](src) images — a data: SVG panel's alt/caption, the dashboard's
       # own dark toggle (not the OS setting) swapping ::IMAGE_DARK in, an

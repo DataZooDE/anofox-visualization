@@ -116,7 +116,11 @@ The extension is packaged like the public one (`duckext/scripts/append_extension
 
 A **plugin** is a module compiled to one WebAssembly file and loaded at run time, with no distribution build (#1213). It registers through the same registry as a linked module, so its roles, `::REQUIRES` and `--check` work the same way.
 
-**Status (steps 1, 2 and 4 of #1213):** the `dashboard` CLI and the `serve` command (builder and `--dashboards`) load plugins with `--plugin <file.wasm>` in builds with the `plugins` feature; the public release builds do not enable it yet. `serve --plugin-assets` also serves their browser files. Plugins can bring roles, panels, lint warnings, contract macros with their plots, and browser files. The browser (DuckDB-Wasm builder) and the DuckDB extension come in later steps.
+**Status (steps 1–4 of #1213):** the `dashboard` CLI and the `serve` command (builder and `--dashboards`) load plugins with `--plugin <file.wasm>` in builds with the `plugins` feature; the public release builds do not enable it yet. `serve --plugin-assets` also serves their browser files. The browser builder (DuckDB-Wasm) runs the plugins its `plugins.json` lists. Plugins can bring roles, panels, lint warnings, contract macros with their plots, and browser files. The DuckDB extension comes in a later step.
+
+### In the browser
+
+The builder reads `plugins.json` next to the page: a list of same-origin URLs of plugin files (`["modules/hello/plugin.wasm"]`). `serve --plugin` writes it and serves each plugin's file at `modules/<name>/plugin.wasm`; on a static host, put both next to `index.html`. The page compiles each plugin with **no imports** (one that imports anything is refused and reported on the console), checks its interface version and registers its manifest in the core, which checks the manifest, writes its macros and holds its SVG to the same allow-list as the servers. Differences from the servers: the browser has no fuel metering, so a plugin that loops stalls the viewer's tab (it still reaches nothing outside its own memory); memory is checked after every call (64 MiB).
 
 ### Writing one
 
