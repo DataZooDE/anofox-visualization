@@ -41,7 +41,7 @@ fn hello() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         assert_eq!(
-            plugin::register(hello_wasm(), Limits::default()).unwrap(),
+            plugin::register_with(hello_wasm(), Limits::default(), true).unwrap(),
             "hello"
         );
     });
@@ -270,4 +270,145 @@ fn a_plugin_cannot_take_a_built_in_role() {
     )
     .unwrap_err();
     assert!(e.contains("::BARCHART is a role already"), "{e}");
+}
+
+#[test]
+fn a_plugin_brings_a_contract_macro_the_host_writes() {
+    // step 4: the plugin names the macro's parts; the host writes its SQL
+    hello();
+    let m = anofox_visualization::macros::all()
+        .into_iter()
+        .find(|m| m.name == "anofox_plot_hello")
+        .expect("the plugin's macro is listed");
+    assert_eq!(m.params, ["tbl"]);
+    assert!(m.named.contains(&("greeting", "'Hello'")) && m.named.contains(&("height", "200")));
+    assert!(
+        m.named.contains(&("theme", "NULL")) && m.named.contains(&("width", "640")),
+        "the template's own"
+    );
+    assert!(
+        m.body
+            .starts_with("anofox_render(json_object('plot', 'hello'"),
+        "{}",
+        m.body
+    );
+    assert!(
+        m.body
+            .contains("'options', json_object('greeting', greeting)"),
+        "{}",
+        m.body
+    );
+    // anofox_render(…) of its plot draws through the plugin
+    let svg = anofox_visualization::render_spec(
+        r#"{"plot": "hello", "rows": [{"name": "<Ada>"}], "options": {"greeting": "Hi"}, "width": 300, "height": 120}"#,
+    );
+    assert!(svg.contains(">Hi, &lt;Ada&gt;!</text>"), "{svg}");
+}
+
+#[test]
+fn a_plugin_s_browser_files_load_only_when_allowed() {
+    hello();
+    assert_eq!(
+        anofox_visualization::module::asset("modules/hello/hello.css"),
+        Some(&b".hello { font-style: italic; }\n"[..])
+    );
+    // the same plugin without the operator's leave: none
+    use anofox_visualization::module::Module;
+    let p = plugin::load(hello_wasm(), Limits::default()).unwrap();
+    assert!(p.assets().is_empty());
+}
+
+/// A WAT plugin with this manifest (and a render_contract export unless
+/// `contract` is false).
+fn wat_manifest(manifest: &str, contract: bool) -> Vec<u8> {
+    let data = manifest.replace('\\', "\\5c").replace('"', "\\22");
+    let n = manifest.len();
+    let rc = if contract {
+        r#"(func (export "anofox_plugin_render_contract") (param i32 i32) (result i64) (i64.const 0))"#
+    } else {
+        ""
+    };
+    wat::parse_str(format!(
+        r#"(module
+          (memory (export "memory") 2)
+          (global $next (mut i32) (i32.const 8192))
+          (data (i32.const 16) "{data}")
+          (func (export "anofox_plugin_abi") (result i32) (i32.const 1))
+          (func (export "anofox_plugin_alloc") (param $n i32) (result i32)
+            (local $p i32)
+            (local.set $p (global.get $next))
+            (global.set $next (i32.add (global.get $next) (local.get $n)))
+            (local.get $p))
+          (func (export "anofox_plugin_dealloc") (param i32 i32))
+          (func (export "anofox_plugin_manifest") (result i64)
+            (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const {n})))
+          (func (export "anofox_plugin_render") (param i32 i32) (result i64) (i64.const 0))
+          {rc})"#
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_plugin_ships_no_sql() {
+    let load = |macros: &str, contract: bool| {
+        let m = format!(r#"{{"name": "m", "roles": [], "macros": [{macros}]}}"#);
+        plugin::load(&wat_manifest(&m, contract), Limits::default()).map(|_| ())
+    };
+    let ok = r#"{"plot": "p", "named": [["n", "NULL"]], "options": [{"key": "n", "param": "n"}]}"#;
+    assert!(load(ok, true).is_ok());
+    for (macros, why) in [
+        // a default that is SQL, not a literal
+        (
+            r#"{"plot": "p", "named": [["n", "(SELECT secret FROM t)"]]}"#,
+            "must be a literal",
+        ),
+        (
+            r#"{"plot": "p", "named": [["n", "read_text('/etc/passwd')"]]}"#,
+            "must be a literal",
+        ),
+        (
+            r#"{"plot": "p", "named": [["n", "getvariable('__claim_user')"]]}"#,
+            "must be a literal",
+        ),
+        (
+            r#"{"plot": "p", "named": [["n", "'a' || 'b'"]]}"#,
+            "must be a literal",
+        ),
+        // names written into SQL: identifiers only
+        (r#"{"plot": "p'); DROP TABLE t; --"}"#, "macro plot"),
+        (r#"{"plot": "p", "named": [["n x", "NULL"]]}"#, "parameter"),
+        (
+            r#"{"plot": "p", "options": [{"key": "k", "param": "nope"}]}"#,
+            "names no parameter",
+        ),
+        (
+            r#"{"plot": "p", "named": [["n", "NULL"]], "options": [{"key": "k", "param": "n", "fallback_var": "__claim_user"}]}"#,
+            "fallback variable",
+        ),
+    ] {
+        let e = load(macros, true).unwrap_err();
+        assert!(e.contains(why), "{macros}: {e}");
+    }
+    // macros without the export that draws them
+    assert!(load(ok, false)
+        .unwrap_err()
+        .contains("exports no anofox_plugin_render_contract"));
+}
+
+#[test]
+fn a_plugin_s_asset_paths_are_checked() {
+    for path in [
+        "../x.js",
+        "/abs.js",
+        "a/.hidden.js",
+        "x.html",
+        "x.exe",
+        "a//b.js",
+    ] {
+        let m = format!(r#"{{"name": "m", "roles": [], "assets": ["{path}"]}}"#);
+        let e = plugin::load(&wat_manifest(&m, false), Limits::default())
+            .map(|_| ())
+            .unwrap_err();
+        assert!(e.contains("asset path"), "{path}: {e}");
+    }
 }
