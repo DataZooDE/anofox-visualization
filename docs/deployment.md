@@ -362,10 +362,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: DataZooDE/anofox-visualization/.github/actions/check-dashboards@v2026.11.15
+      - uses: DataZooDE/anofox-visualization/.github/actions/check-dashboards@v2026.11.16
         with:
           folder: dashboards
-          version: v2026.11.15     # the release the server runs
+          version: v2026.11.16     # the release the server runs
           # db: test/sample.duckdb # optional: tables the panels query
           # options: locked.json   # optional: the server's options file
 ```
