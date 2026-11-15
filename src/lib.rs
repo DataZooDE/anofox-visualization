@@ -51,6 +51,8 @@ pub mod math;
 pub mod module;
 pub mod page;
 pub mod period;
+#[cfg(all(feature = "plugins", not(target_arch = "wasm32")))]
+pub mod plugin;
 pub mod roles;
 pub mod sql;
 pub mod table;

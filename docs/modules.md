@@ -2,7 +2,7 @@
 
 A **module** is a feature built in its own crate, public or private, that plugs into anofox-visualization without being part of this repository (#1156). It brings roles (`::MY_PANEL`), the panels they draw, SQL macros, `--check` warnings and browser files.
 
-Modules are linked at build time. There is no runtime plug-in loading. A **distribution** is a small crate that depends on `anofox-visualization` and its modules. It registers the modules once at start-up and builds its own dashboard CLI, server, DuckDB extension and browser bundle. The public builds include no modules.
+Modules are linked at build time, or loaded at run time as a sandboxed WebAssembly **plugin** (see *Plugins* below, #1213). A **distribution** is a small crate that depends on `anofox-visualization` and its modules. It registers the modules once at start-up and builds its own dashboard CLI, server, DuckDB extension and browser bundle. The public builds include no modules.
 
 > **Unstable.** The module interface is `#[doc(hidden)]` and may change without a semver bump until a first real module exists.
 
@@ -111,3 +111,67 @@ Each public binary is a thin wrapper around a library function, so a distributio
 | browser (`web/pkg`) | a `#[wasm_bindgen(start)]` that registers; build for wasm32, bind with `wasm-bindgen --out-name anofox_visualization` | `examples/hello_wasm.rs` |
 
 The extension is packaged like the public one (`duckext/scripts/append_extension_metadata.py`) under the distribution's own name. The DuckDB entry point is `<name>_init_c_api`. The C++/FFI community build takes no modules.
+
+## Plugins
+
+A **plugin** is a module compiled to one WebAssembly file and loaded at run time, with no distribution build (#1213). It registers through the same registry as a linked module, so its roles, `::REQUIRES` and `--check` work the same way.
+
+**Status (step 1 of #1213):** the `dashboard` CLI loads plugins in builds with the `plugins` feature; the public release builds do not enable it yet. Plugins can bring roles, panels and lint warnings. Servers, the browser, the DuckDB extension, macros, contract plots and browser files come in later steps.
+
+### Writing one
+
+A plugin is a `cdylib` crate built for `wasm32-unknown-unknown` with the `anofox-viz-plugin` crate (`crates/anofox-viz-plugin`). It does not depend on anofox-visualization. `examples/plugins/hello` is complete:
+
+```rust
+use anofox_viz_plugin::{escape, export_plugin, Manifest, Plugin, RenderInput, Role};
+
+struct Hello;
+
+impl Plugin for Hello {
+    const MANIFEST: Manifest = Manifest {
+        name: "hello",
+        roles: &[Role { token: "HELLO", aliases: &["GREETING"], summary: "a greeting per row" }],
+    };
+    fn render(input: &RenderInput) -> Result<String, String> {
+        let who = input.role("HELLO").ok_or("no ::HELLO column")?;
+        Ok(format!("<text x=\"16\" y=\"32\" fill=\"{}\">Hello, {}!</text>",
+                   escape(&input.theme.accent), escape(who.str(0).unwrap_or("world"))))
+    }
+}
+
+export_plugin!(Hello);
+```
+
+```sh
+cargo build --release --target wasm32-unknown-unknown --manifest-path examples/plugins/hello/Cargo.toml
+dashboard --plugin examples/plugins/hello/target/wasm32-unknown-unknown/release/hello_plugin.wasm --svg hello.sql
+```
+
+`render` gets the statement's columns (name, role token, one JSON value per row; a timestamp is `{"datetime": seconds}`), the panel's size and the theme (dark or light, the palette, ink, muted, card and accent colours as `#RRGGBB`). `lint` (optional) returns `--check` warnings. A plugin that draws charts can depend on ggplot-rs itself.
+
+### The sandbox
+
+| What | How |
+|---|---|
+| No access to the machine | the plugin gets **no imports**: no file system, network, clock or randomness. A module that imports anything is refused at load. |
+| CPU | each call runs on a fuel budget (about 2·10⁹ instructions); running out ends the call with an error |
+| Memory | capped at 64 MiB |
+| Failure | a trap, a panic, a buffer outside its memory or malformed JSON gives the panel an error; the instance is replaced for the next call |
+| Output | the SVG may only draw: the allow-list `--site` checks published SVGs with (no script, event handlers, `foreignObject` or external references) |
+| Loading | only files the operator names (`--plugin`); a dashboard names modules (`::REQUIRES`), never files |
+
+### The interface (version 1)
+
+The host speaks to these exports. Byte buffers are `(ptr, len)` in the plugin's memory; a returned buffer is one `i64`, `ptr << 32 | len`, which the host frees with `anofox_plugin_dealloc`. The plugin frees the input it is given.
+
+| Export | Signature | |
+|---|---|---|
+| `memory` | memory | |
+| `anofox_plugin_abi` | `() -> i32` | `1` |
+| `anofox_plugin_alloc` | `(len) -> ptr` | |
+| `anofox_plugin_dealloc` | `(ptr, len)` | |
+| `anofox_plugin_manifest` | `() -> i64` | `{"name", "roles": [{"token", "aliases", "summary"}]}` |
+| `anofox_plugin_render` | `(ptr, len) -> i64` | `{"abi", "columns", "width", "height", "theme"}` → `{"ok": svg}` or `{"err": message}` |
+| `anofox_plugin_lint` | `(ptr, len) -> i64` | `{"abi", "columns"}` → `["warning", …]` (optional) |
+
+`export_plugin!` writes all of them. A host refuses a plugin of another interface version.
