@@ -130,6 +130,27 @@ pub struct ContractInput {
     pub theme: Theme,
 }
 
+/// One column of a [`ContractOutput::Columns`] answer: a role token the
+/// host knows (`"XAXIS"`, `"BARCHART"`, `"DIAGRAM"`, …) and one value per row.
+pub struct OutColumn {
+    pub name: String,
+    pub role: String,
+    pub values: Vec<Json>,
+}
+
+/// What [`Plugin::render_contract`] answers: an SVG body, or columns the
+/// host draws itself with its own renderer and the viewer's theme — the
+/// way to reuse a built-in panel (a `::DIAGRAM`, a chart) from a plugin.
+pub enum ContractOutput {
+    Svg(String),
+    Columns {
+        columns: Vec<OutColumn>,
+        /// `data-…` attributes for the panel's root `<svg>`.
+        root_attrs: Vec<(String, String)>,
+        warnings: Vec<String>,
+    },
+}
+
 /// A plugin. Export it with [`export_plugin!`].
 pub trait Plugin {
     const MANIFEST: Manifest;
@@ -145,7 +166,7 @@ pub trait Plugin {
     const MACROS: &'static [ContractMacro] = &[];
     /// Draw contract plot `input.plot` (one of [`Plugin::MACROS`]): the SVG
     /// body inside a `width` × `height` `<svg>`.
-    fn render_contract(input: &ContractInput) -> Result<String, String> {
+    fn render_contract(input: &ContractInput) -> Result<ContractOutput, String> {
         Err(format!("no contract plot {}", input.plot))
     }
     /// Browser files `(path, bytes)`, served at `/modules/<name>/<path>`
@@ -259,7 +280,18 @@ pub mod __rt {
                     theme: theme(&v["theme"]),
                 };
                 match P::render_contract(&input) {
-                    Ok(svg) => serde_json::json!({ "ok": svg }),
+                    Ok(ContractOutput::Svg(svg)) => serde_json::json!({ "ok": svg }),
+                    Ok(ContractOutput::Columns {
+                        columns,
+                        root_attrs,
+                        warnings,
+                    }) => serde_json::json!({
+                        "columns": columns.into_iter().map(|c| serde_json::json!({
+                            "name": c.name, "role": c.role, "values": c.values,
+                        })).collect::<Vec<_>>(),
+                        "root_attrs": root_attrs.into_iter().map(|(k, v)| (k, Json::String(v))).collect::<serde_json::Map<String, Json>>(),
+                        "warnings": warnings,
+                    }),
                     Err(e) => serde_json::json!({ "err": e }),
                 }
             }
