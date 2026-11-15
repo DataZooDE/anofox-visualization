@@ -99,6 +99,37 @@ impl RenderInput {
     }
 }
 
+/// One option a contract macro passes to [`Plugin::render_contract`]:
+/// `key` ← the macro's parameter `param`, else `getvariable(fallback_var)`.
+pub struct ContractOption {
+    pub key: &'static str,
+    pub param: &'static str,
+    pub fallback_var: Option<&'static str>,
+}
+
+/// A contract macro, `anofox_plot_<plot>(tbl, <named> …)`. The host writes
+/// its SQL; a plugin only names its parts. A default is a literal (`NULL`,
+/// a number, `'text'`, `true`/`false`) or `getvariable('name')`; `theme`,
+/// `locale`, `width` and `height` are added when not named.
+pub struct ContractMacro {
+    pub plot: &'static str,
+    pub named: &'static [(&'static str, &'static str)],
+    pub options: &'static [ContractOption],
+    pub description: &'static str,
+    pub example: &'static str,
+}
+
+/// What [`Plugin::render_contract`] draws from: the table's rows as JSON
+/// objects and the macro's options.
+pub struct ContractInput {
+    pub plot: String,
+    pub rows: Vec<serde_json::Map<String, Json>>,
+    pub options: serde_json::Map<String, Json>,
+    pub width: u32,
+    pub height: u32,
+    pub theme: Theme,
+}
+
 /// A plugin. Export it with [`export_plugin!`].
 pub trait Plugin {
     const MANIFEST: Manifest;
@@ -110,6 +141,18 @@ pub trait Plugin {
         let _ = columns;
         Vec::new()
     }
+    /// The contract macros it brings, drawn by [`Plugin::render_contract`].
+    const MACROS: &'static [ContractMacro] = &[];
+    /// Draw contract plot `input.plot` (one of [`Plugin::MACROS`]): the SVG
+    /// body inside a `width` × `height` `<svg>`.
+    fn render_contract(input: &ContractInput) -> Result<String, String> {
+        Err(format!("no contract plot {}", input.plot))
+    }
+    /// Browser files `(path, bytes)`, served at `/modules/<name>/<path>`
+    /// only where the operator allows a plugin's browser files (they run in
+    /// the page, outside the sandbox): `.js`, `.css`, `.json`, `.svg`,
+    /// `.png`, `.woff2`.
+    const ASSETS: &'static [(&'static str, &'static [u8])] = &[];
 }
 
 /// Escape text for SVG.
@@ -158,17 +201,84 @@ pub mod __rt {
         ((ptr << 32) | len) as i64
     }
 
-    pub fn manifest(m: &Manifest) -> i64 {
+    pub fn manifest<P: Plugin>() -> i64 {
+        let m = &P::MANIFEST;
         let roles: Vec<Json> = m
             .roles
             .iter()
             .map(|r| serde_json::json!({ "token": r.token, "aliases": r.aliases, "summary": r.summary }))
             .collect();
+        let macros: Vec<Json> = P::MACROS
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "plot": c.plot,
+                    "named": c.named.iter().map(|(n, d)| [n, d]).collect::<Vec<_>>(),
+                    "options": c.options.iter().map(|o| serde_json::json!({
+                        "key": o.key, "param": o.param, "fallback_var": o.fallback_var,
+                    })).collect::<Vec<_>>(),
+                    "description": c.description,
+                    "example": c.example,
+                })
+            })
+            .collect();
+        let assets: Vec<&str> = P::ASSETS.iter().map(|(p, _)| *p).collect();
         give(
-            serde_json::json!({ "name": m.name, "roles": roles })
+            serde_json::json!({ "name": m.name, "roles": roles, "macros": macros, "assets": assets })
                 .to_string()
                 .into_bytes(),
         )
+    }
+
+    fn theme(t: &Json) -> Theme {
+        Theme {
+            dark: t["dark"].as_bool().unwrap_or(false),
+            palette: t["palette"]
+                .as_array()
+                .map(|a| a.iter().map(s).collect())
+                .unwrap_or_default(),
+            ink: s(&t["ink"]),
+            muted: s(&t["muted"]),
+            card: s(&t["card"]),
+            accent: s(&t["accent"]),
+        }
+    }
+
+    pub fn render_contract<P: Plugin>(input: &[u8]) -> i64 {
+        let out = match serde_json::from_slice::<Json>(input) {
+            Ok(v) => {
+                let input = ContractInput {
+                    plot: s(&v["plot"]),
+                    rows: v["rows"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|r| r.as_object().cloned()).collect())
+                        .unwrap_or_default(),
+                    options: v["options"].as_object().cloned().unwrap_or_default(),
+                    width: v["width"].as_u64().unwrap_or(0) as u32,
+                    height: v["height"].as_u64().unwrap_or(0) as u32,
+                    theme: theme(&v["theme"]),
+                };
+                match P::render_contract(&input) {
+                    Ok(svg) => serde_json::json!({ "ok": svg }),
+                    Err(e) => serde_json::json!({ "err": e }),
+                }
+            }
+            Err(e) => serde_json::json!({ "err": format!("bad input: {e}") }),
+        };
+        give(out.to_string().into_bytes())
+    }
+
+    pub fn asset<P: Plugin>(input: &[u8]) -> i64 {
+        let path = serde_json::from_slice::<Json>(input)
+            .ok()
+            .and_then(|v| v["path"].as_str().map(String::from))
+            .unwrap_or_default();
+        let bytes = P::ASSETS
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, b)| b.to_vec())
+            .unwrap_or_default();
+        give(bytes)
     }
 
     fn s(v: &Json) -> String {
@@ -192,22 +302,11 @@ pub mod __rt {
     pub fn render<P: Plugin>(input: &[u8]) -> i64 {
         let out = match serde_json::from_slice::<Json>(input) {
             Ok(v) => {
-                let t = &v["theme"];
                 let input = RenderInput {
                     columns: columns(&v["columns"]),
                     width: v["width"].as_u64().unwrap_or(0) as u32,
                     height: v["height"].as_u64().unwrap_or(0) as u32,
-                    theme: Theme {
-                        dark: t["dark"].as_bool().unwrap_or(false),
-                        palette: t["palette"]
-                            .as_array()
-                            .map(|a| a.iter().map(s).collect())
-                            .unwrap_or_default(),
-                        ink: s(&t["ink"]),
-                        muted: s(&t["muted"]),
-                        card: s(&t["card"]),
-                        accent: s(&t["accent"]),
-                    },
+                    theme: theme(&v["theme"]),
                 };
                 match P::render(&input) {
                     Ok(svg) => serde_json::json!({ "ok": svg }),
@@ -246,7 +345,15 @@ macro_rules! export_plugin {
         }
         #[no_mangle]
         pub extern "C" fn anofox_plugin_manifest() -> i64 {
-            $crate::__rt::manifest(&<$p as $crate::Plugin>::MANIFEST)
+            $crate::__rt::manifest::<$p>()
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn anofox_plugin_render_contract(ptr: i32, len: i32) -> i64 {
+            $crate::__rt::render_contract::<$p>(&$crate::__rt::take(ptr, len))
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn anofox_plugin_asset(ptr: i32, len: i32) -> i64 {
+            $crate::__rt::asset::<$p>(&$crate::__rt::take(ptr, len))
         }
         #[no_mangle]
         pub unsafe extern "C" fn anofox_plugin_render(ptr: i32, len: i32) -> i64 {

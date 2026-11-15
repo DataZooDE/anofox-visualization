@@ -116,7 +116,7 @@ The extension is packaged like the public one (`duckext/scripts/append_extension
 
 A **plugin** is a module compiled to one WebAssembly file and loaded at run time, with no distribution build (#1213). It registers through the same registry as a linked module, so its roles, `::REQUIRES` and `--check` work the same way.
 
-**Status (step 1 of #1213):** the `dashboard` CLI loads plugins in builds with the `plugins` feature; the public release builds do not enable it yet. Plugins can bring roles, panels and lint warnings. Servers, the browser, the DuckDB extension, macros, contract plots and browser files come in later steps.
+**Status (steps 1 and 4 of #1213):** the `dashboard` CLI loads plugins in builds with the `plugins` feature; the public release builds do not enable it yet. Plugins can bring roles, panels, lint warnings, contract macros with their plots, and browser files. Servers, the browser and the DuckDB extension come in later steps.
 
 ### Writing one
 
@@ -149,6 +149,30 @@ dashboard --plugin examples/plugins/hello/target/wasm32-unknown-unknown/release/
 
 `render` gets the statement's columns (name, role token, one JSON value per row; a timestamp is `{"datetime": seconds}`), the panel's size and the theme (dark or light, the palette, ink, muted, card and accent colours as `#RRGGBB`). `lint` (optional) returns `--check` warnings. A plugin that draws charts can depend on ggplot-rs itself.
 
+### Contract macros
+
+A plugin can bring `anofox_plot_<plot>(tbl, …)` macros like the built-in ones. **It ships no SQL**: it names the macro's parts and the host writes the body, the same `anofox_render(json_object('plot', …))` call a built-in contract macro has:
+
+```rust
+const MACROS: &'static [ContractMacro] = &[ContractMacro {
+    plot: "hello",
+    named: &[("greeting", "'Hello'"), ("height", "200")],
+    options: &[ContractOption { key: "greeting", param: "greeting", fallback_var: None }],
+    description: "Greets every row's name.",
+    example: "SELECT anofox_plot_hello(t) FROM (VALUES ('Ada'), ('Max')) t(name)",
+}];
+
+fn render_contract(input: &ContractInput) -> Result<String, String> {
+    // input.rows: the table's rows as JSON objects; input.options: {"greeting": …}
+}
+```
+
+A parameter's default is a literal (`NULL`, a number, `'text'`, `true`/`false`) or `getvariable('name')`; an option is a parameter, optionally falling back to `getvariable('name')` (never a `__` name). `theme`, `locale`, `width` and `height` are added when not named. Anything else is refused at load.
+
+### Browser files
+
+`ASSETS` (`(path, bytes)`, `.js`, `.css`, `.json`, `.svg`, `.png`, `.woff2`, together at most 8 MiB) are served at `/modules/<name>/<path>` like a linked module's. **They run in the page, outside the sandbox**, so a host takes them only when the operator allows it (`plugin::register_with(…, assets: true)`); otherwise the plugin loads without them.
+
 ### The sandbox
 
 | What | How |
@@ -158,6 +182,8 @@ dashboard --plugin examples/plugins/hello/target/wasm32-unknown-unknown/release/
 | Memory | capped at 64 MiB |
 | Failure | a trap, a panic, a buffer outside its memory or malformed JSON gives the panel an error; the instance is replaced for the next call |
 | Output | the SVG may only draw: the allow-list `--site` checks published SVGs with (no script, event handlers, `foreignObject` or external references) |
+| SQL | a plugin ships none: the host writes its macros' bodies from a fixed template; defaults and names are checked |
+| Browser files | not sandboxed (they run in the page): loaded only when the operator allows them |
 | Loading | only files the operator names (`--plugin`); a dashboard names modules (`::REQUIRES`), never files |
 
 ### The interface (version 1)
@@ -173,5 +199,9 @@ The host speaks to these exports. Byte buffers are `(ptr, len)` in the plugin's 
 | `anofox_plugin_manifest` | `() -> i64` | `{"name", "roles": [{"token", "aliases", "summary"}]}` |
 | `anofox_plugin_render` | `(ptr, len) -> i64` | `{"abi", "columns", "width", "height", "theme"}` → `{"ok": svg}` or `{"err": message}` |
 | `anofox_plugin_lint` | `(ptr, len) -> i64` | `{"abi", "columns"}` → `["warning", …]` (optional) |
+| `anofox_plugin_render_contract` | `(ptr, len) -> i64` | `{"abi", "plot", "rows", "options", "width", "height", "theme"}` → `{"ok": svg}` or `{"err"}` (needed when the manifest has `"macros"`) |
+| `anofox_plugin_asset` | `(ptr, len) -> i64` | `{"path"}` → the file's bytes (needed when the manifest has `"assets"`) |
+
+The manifest's `"macros"` are `{"plot", "named": [[name, default], …], "options": [{"key", "param", "fallback_var"}], "description", "example"}`, its `"assets"` the files' paths.
 
 `export_plugin!` writes all of them. A host refuses a plugin of another interface version.

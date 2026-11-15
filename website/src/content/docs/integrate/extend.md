@@ -18,7 +18,7 @@ A build without the module stops with *This dashboard needs the module 'hello'* 
 |---|---|---|
 | What it is | a Rust crate in your own distribution build | one `.wasm` file, loaded at run time |
 | How it's loaded | built in: your own `dashboard`, `serve`, DuckDB extension and browser bundle | `dashboard --plugin hello.wasm` |
-| Can bring | roles, panels, `--check` warnings, SQL macros, contract plots, browser files | roles, panels, `--check` warnings (macros, contract plots and browser files follow) |
+| Can bring | roles, panels, `--check` warnings, SQL macros, contract plots, browser files | roles, panels, `--check` warnings, contract macros (the host writes their SQL), browser files (only where the operator allows them: they run in the page) |
 | Runs | with the rights of the program | in a sandbox: no files, network, clock or randomness; a CPU budget per call; 64 MiB of memory |
 | Licence of the kit | — | the plugin SDK is MIT OR Apache-2.0: ship your plugin under any licence |
 | Status | available, interface may change | new: the `dashboard` CLI in builds with the `plugins` feature; servers, the browser and the DuckDB extension follow ([#1213](https://github.com/DataZooDE/anofox-visualization/issues/1213)) |

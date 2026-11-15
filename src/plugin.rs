@@ -24,6 +24,20 @@
 //! | `anofox_plugin_manifest` | `() -> i64` | `{"name", "roles": [{"token", "aliases", "summary"}]}` |
 //! | `anofox_plugin_render` | `(ptr: i32, len: i32) -> i64` | in: [`render_input`]; out: `{"ok": svg_body}` or `{"err": message}` |
 //! | `anofox_plugin_lint` | `(ptr: i32, len: i32) -> i64` | in: `{"abi", "columns"}`; out: `["warning", …]` |
+//! | `anofox_plugin_render_contract` | `(ptr: i32, len: i32) -> i64` | optional; in: `{"abi", "plot", "rows", "options", "width", "height", "theme"}`; out: `{"ok"}` / `{"err"}` |
+//! | `anofox_plugin_asset` | `(ptr: i32, len: i32) -> i64` | optional; in: `{"path"}`; out: the file's bytes |
+//!
+//! **Macros** (step 4): the manifest's `"macros"` declare contract macros —
+//! `{"plot", "named": [[name, default], …], "options": [{"key", "param",
+//! "fallback_var"?}], "description", "example"}`. The host writes every
+//! macro's body itself, `anofox_plot_<plot>(tbl, …)` calling
+//! `anofox_render(json_object('plot', …, 'options', json_object(…)))` like a
+//! built-in contract macro: a plugin never ships SQL. A default is a literal
+//! (`NULL`, a number, `'text'`, `true`/`false`) or `getvariable('name')`.
+//!
+//! **Browser files** (`"assets"`: their paths): run in the page, outside
+//! the sandbox, so they load only when the operator allows them
+//! ([`register_with`]'s `assets`).
 //!
 //! The plugin owns (and frees) the input buffer it is given.
 //!
@@ -65,6 +79,9 @@ const MAX_FILE: usize = 32 << 20;
 pub struct Plugin {
     name: &'static str,
     roles: &'static [ModuleRole],
+    macros: &'static [crate::macros::MacroSpec],
+    plots: Vec<&'static str>,
+    assets: &'static [(&'static str, &'static [u8])],
     engine: Engine,
     module: wasmi::Module,
     limits: Limits,
@@ -78,6 +95,8 @@ struct Live {
     dealloc: TypedFunc<(i32, i32), ()>,
     render: TypedFunc<(i32, i32), i64>,
     lint: Option<TypedFunc<(i32, i32), i64>>,
+    render_contract: Option<TypedFunc<(i32, i32), i64>>,
+    asset: Option<TypedFunc<(i32, i32), i64>>,
 }
 
 impl Plugin {
@@ -112,6 +131,9 @@ impl Plugin {
                     Some(f) => f,
                     None => return Ok(Json::Array(vec![])),
                 },
+                Call::RenderContract => live
+                    .render_contract
+                    .ok_or("exports no anofox_plugin_render_contract")?,
             };
             let out = call_bytes(live, f, &bytes).map_err(|e| format!("plugin {name}: {e}"))?;
             serde_json::from_slice(&out)
@@ -124,6 +146,7 @@ impl Plugin {
 enum Call {
     Render,
     Lint,
+    RenderContract,
 }
 
 fn instantiate(
@@ -172,6 +195,12 @@ fn instantiate(
     let lint = instance
         .get_typed_func::<(i32, i32), i64>(&store, "anofox_plugin_lint")
         .ok();
+    let render_contract = instance
+        .get_typed_func::<(i32, i32), i64>(&store, "anofox_plugin_render_contract")
+        .ok();
+    let asset = instance
+        .get_typed_func::<(i32, i32), i64>(&store, "anofox_plugin_asset")
+        .ok();
     Ok((
         Live {
             store,
@@ -180,6 +209,8 @@ fn instantiate(
             dealloc,
             render,
             lint,
+            render_contract,
+            asset,
         },
         instance,
     ))
@@ -251,8 +282,201 @@ fn leak(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
+/// A checked manifest.
+struct Manifest {
+    name: &'static str,
+    roles: &'static [ModuleRole],
+    macros: &'static [crate::macros::MacroSpec],
+    plots: Vec<&'static str>,
+    asset_paths: Vec<String>,
+}
+
+/// An identifier the host writes into SQL: a–z, 0–9 and `_`, not first a digit.
+fn ident_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 40
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !s.as_bytes()[0].is_ascii_digit()
+}
+
+/// A macro parameter's default: a literal or `getvariable('name')` (a name
+/// a dashboard sets, never a claim or a server variable).
+fn default_ok(d: &str) -> bool {
+    let d = d.trim();
+    let lower = d.to_ascii_lowercase();
+    if matches!(lower.as_str(), "null" | "true" | "false") {
+        return true;
+    }
+    let num = d.strip_prefix('-').unwrap_or(d);
+    if !num.is_empty()
+        && num.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && num.bytes().filter(|b| *b == b'.').count() <= 1
+        && num.as_bytes()[0].is_ascii_digit()
+    {
+        return true;
+    }
+    if let Some(inner) = d.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')) {
+        return d.len() >= 2 && !inner.replace("''", "").contains('\'') && inner.len() <= 200;
+    }
+    lower
+        .strip_prefix("getvariable('")
+        .and_then(|x| x.strip_suffix("')"))
+        .is_some_and(|v| ident_ok(v) && !v.starts_with("__"))
+}
+
+/// The body of contract macro `plot`, as `contract_body!` writes it.
+fn contract_body(plot: &str, opts: &[(String, String)]) -> String {
+    let mut s = format!(
+        "anofox_render(json_object('plot', '{plot}', 'rows', to_json(list(tbl ORDER BY tbl))"
+    );
+    if !opts.is_empty() {
+        let o: Vec<String> = opts.iter().map(|(k, e)| format!("'{k}', {e}")).collect();
+        s.push_str(&format!(", 'options', json_object({})", o.join(", ")));
+    }
+    s.push_str(
+        ", 'theme', coalesce(theme, getvariable('anofox_theme')), 'locale', coalesce(locale, \
+         getvariable('anofox_locale')), 'width', width, 'height', height))",
+    );
+    s
+}
+
+/// The manifest's contract macros, as the host writes them.
+fn macros(list: &[Json]) -> Result<(Vec<crate::macros::MacroSpec>, Vec<&'static str>), String> {
+    if list.len() > 16 {
+        return Err("manifest: more than 16 macros".into());
+    }
+    let (mut out, mut plots) = (Vec::new(), Vec::new());
+    for m in list {
+        let plot = m["plot"].as_str().unwrap_or("");
+        if !ident_ok(plot) {
+            return Err(format!("manifest: macro plot {plot:?} (a–z, 0–9 and _)"));
+        }
+        let mut named: Vec<(&'static str, &'static str)> = Vec::new();
+        for n in m["named"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let (Some(k), Some(d)) = (n[0].as_str(), n[1].as_str()) else {
+                return Err(format!(
+                    "manifest: anofox_plot_{plot}: a named parameter isn't [name, default]"
+                ));
+            };
+            if !ident_ok(k) || k == "tbl" || named.iter().any(|(x, _)| *x == k) {
+                return Err(format!("manifest: anofox_plot_{plot}: parameter {k:?}"));
+            }
+            if !default_ok(d) {
+                return Err(format!(
+                    "manifest: anofox_plot_{plot}: default of {k} ({d:?}) must be a literal or getvariable('name')"
+                ));
+            }
+            named.push((leak(k), leak(d.trim())));
+        }
+        for (k, d) in [
+            ("theme", "NULL"),
+            ("locale", "NULL"),
+            ("width", "640"),
+            ("height", "400"),
+        ] {
+            if !named.iter().any(|(x, _)| *x == k) {
+                named.push((k, d));
+            }
+        }
+        if named.len() > 40 {
+            return Err(format!("manifest: anofox_plot_{plot}: too many parameters"));
+        }
+        let mut opts = Vec::new();
+        for o in m["options"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let key = o["key"].as_str().unwrap_or("");
+            let param = o["param"].as_str().unwrap_or("");
+            if !ident_ok(key) || !named.iter().any(|(x, _)| *x == param) {
+                return Err(format!(
+                    "manifest: anofox_plot_{plot}: option {key:?} names no parameter of the macro"
+                ));
+            }
+            let expr = match o["fallback_var"].as_str() {
+                None => param.to_string(),
+                Some(v) if ident_ok(v) && !v.starts_with("__") => {
+                    format!("coalesce({param}, getvariable('{v}'))")
+                }
+                Some(v) => {
+                    return Err(format!(
+                        "manifest: anofox_plot_{plot}: fallback variable {v:?}"
+                    ))
+                }
+            };
+            opts.push((key.to_string(), expr));
+        }
+        let text = |k: &str, max: usize| -> &'static str {
+            leak(
+                &m[k]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(max)
+                    .collect::<String>(),
+            )
+        };
+        let plot: &'static str = leak(plot);
+        plots.push(plot);
+        out.push(crate::macros::MacroSpec {
+            name: leak(&format!("anofox_plot_{plot}")),
+            params: &["tbl"],
+            named: Box::leak(named.into_boxed_slice()),
+            body: leak(&contract_body(plot, &opts)),
+            description: text("description", 2000),
+            example: text("example", 1000),
+            tags: &[],
+        });
+    }
+    Ok((out, plots))
+}
+
+/// A browser file's path: `a-z0-9_-./`, no `..`, one of the page's types.
+fn asset_path_ok(p: &str) -> bool {
+    !p.is_empty()
+        && p.len() <= 120
+        && !p.starts_with('/')
+        && !p
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == ".." || s.starts_with('.'))
+        && p.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-./".contains(&b))
+        && [".js", ".css", ".json", ".svg", ".png", ".woff2"]
+            .iter()
+            .any(|e| p.ends_with(e))
+}
+
+/// The browser files of a plugin, at most this many bytes together.
+const MAX_ASSETS: usize = 8 << 20;
+
 /// Parse and check a manifest.
-fn manifest(m: &Json) -> Result<(&'static str, &'static [ModuleRole]), String> {
+fn manifest(m: &Json) -> Result<Manifest, String> {
+    let (name, roles) = manifest_roles(m)?;
+    let (macros, plots) = macros(m["macros"].as_array().map(Vec::as_slice).unwrap_or(&[]))?;
+    let asset_paths: Vec<String> = m["assets"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Json::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(p) = asset_paths.iter().find(|p| !asset_path_ok(p)) {
+        return Err(format!("manifest: asset path {p:?}"));
+    }
+    if asset_paths.len() > 64 {
+        return Err("manifest: more than 64 assets".into());
+    }
+    Ok(Manifest {
+        name,
+        roles,
+        macros: Box::leak(macros.into_boxed_slice()),
+        plots,
+        asset_paths,
+    })
+}
+
+/// Parse and check a manifest's name and roles.
+fn manifest_roles(m: &Json) -> Result<(&'static str, &'static [ModuleRole]), String> {
     let name = m["name"].as_str().ok_or("manifest: no name")?;
     if !name_ok(name) {
         return Err(format!("manifest: name {name:?} (a–z, 0–9, - and _)"));
@@ -290,8 +514,15 @@ fn manifest(m: &Json) -> Result<(&'static str, &'static [ModuleRole]), String> {
     Ok((leak(name), Box::leak(roles.into_boxed_slice())))
 }
 
-/// Load a plugin from its bytes (not registered yet; see [`register`]).
+/// Load a plugin from its bytes (not registered yet; see [`register`]),
+/// without its browser files.
 pub fn load(wasm: &[u8], limits: Limits) -> Result<&'static Plugin, String> {
+    load_with(wasm, limits, false)
+}
+
+/// [`load`]; `assets`: also take its browser files — they run in the page,
+/// outside the sandbox, so only when the operator allows it.
+pub fn load_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static Plugin, String> {
     if wasm.len() > MAX_FILE {
         return Err(format!("larger than {} MiB", MAX_FILE >> 20));
     }
@@ -316,11 +547,35 @@ pub fn load(wasm: &[u8], limits: Limits) -> Result<&'static Plugin, String> {
     let (at, n) = unpack(&live, man)?;
     let m: Json = serde_json::from_slice(&live.memory.data(&live.store)[at..at + n])
         .map_err(|e| format!("manifest: malformed JSON ({e})"))?;
-    let (name, roles) = manifest(&m)?;
+    let man = manifest(&m)?;
+    if !man.macros.is_empty() && live.render_contract.is_none() {
+        return Err("declares macros but exports no anofox_plugin_render_contract".into());
+    }
+    let mut files: Vec<(&'static str, &'static [u8])> = Vec::new();
+    if assets && !man.asset_paths.is_empty() {
+        let f = live
+            .asset
+            .ok_or("declares assets but exports no anofox_plugin_asset")?;
+        let mut total = 0usize;
+        for p in &man.asset_paths {
+            refuel(&mut live, limits.fuel)?;
+            let bytes = call_bytes(&mut live, f, json!({ "path": p }).to_string().as_bytes())
+                .map_err(|e| format!("asset {p}: {e}"))?;
+            total += bytes.len();
+            if total > MAX_ASSETS {
+                return Err(format!("assets larger than {} MiB", MAX_ASSETS >> 20));
+            }
+            files.push((leak(p), Box::leak(bytes.into_boxed_slice())));
+        }
+    }
     refuel(&mut live, limits.fuel)?;
+    let (name, roles) = (man.name, man.roles);
     Ok(Box::leak(Box::new(Plugin {
         name,
         roles,
+        macros: man.macros,
+        plots: man.plots,
+        assets: Box::leak(files.into_boxed_slice()),
         engine,
         module,
         limits,
@@ -328,9 +583,14 @@ pub fn load(wasm: &[u8], limits: Limits) -> Result<&'static Plugin, String> {
     })))
 }
 
-/// Load a plugin and register it as a module.
+/// Load a plugin and register it as a module (without its browser files).
 pub fn register(wasm: &[u8], limits: Limits) -> Result<&'static str, String> {
-    let p = load(wasm, limits)?;
+    register_with(wasm, limits, false)
+}
+
+/// [`register`]; `assets`: with its browser files (see [`load_with`]).
+pub fn register_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static str, String> {
+    let p = load_with(wasm, limits, assets)?;
     crate::module::register(p)?;
     Ok(p.name)
 }
@@ -408,6 +668,56 @@ impl Module for Plugin {
         o: &RenderOptions,
     ) -> Result<String, String> {
         let out = self.call_json(Call::Render, &render_input(cols, width, height, o))?;
+        self.checked_svg(&out)
+    }
+    fn lint(&self, cols: &[Column]) -> Vec<String> {
+        let input = json!({ "abi": ABI, "columns": columns(cols) });
+        match self.call_json(Call::Lint, &input) {
+            Ok(Json::Array(a)) => a
+                .iter()
+                .take(50)
+                .filter_map(Json::as_str)
+                .map(|s| s.chars().take(500).collect())
+                .collect(),
+            Ok(_) => vec![format!("plugin {}: lint answered no list", self.name)],
+            Err(e) => vec![e],
+        }
+    }
+    fn macros(&self) -> &'static [crate::macros::MacroSpec] {
+        self.macros
+    }
+    fn assets(&self) -> &'static [(&'static str, &'static [u8])] {
+        self.assets
+    }
+    fn render_contract(
+        &self,
+        plot: &str,
+        rows: &[Map<String, Json>],
+        options: &Map<String, Json>,
+        width: u32,
+        height: u32,
+        o: &RenderOptions,
+    ) -> Option<Result<String, String>> {
+        if !self.plots.contains(&plot) {
+            return None;
+        }
+        let mut input = render_input(&[], width, height, o);
+        input["plot"] = json!(plot);
+        input["rows"] = json!(rows);
+        input["options"] = json!(options);
+        if let Some(m) = input.as_object_mut() {
+            m.remove("columns");
+        }
+        Some(
+            self.call_json(Call::RenderContract, &input)
+                .and_then(|out| self.checked_svg(&out)),
+        )
+    }
+}
+
+impl Plugin {
+    /// `{"ok": svg}` → the SVG, held to the drawing-only allow-list.
+    fn checked_svg(&self, out: &Json) -> Result<String, String> {
         match (&out["ok"], &out["err"]) {
             (Json::String(svg), _) => {
                 // The body goes into the page: only drawing markup, never
@@ -424,19 +734,6 @@ impl Module for Plugin {
             }
             (_, Json::String(e)) => Err(format!("{}: {e}", self.name)),
             _ => Err(format!("plugin {}: answered neither ok nor err", self.name)),
-        }
-    }
-    fn lint(&self, cols: &[Column]) -> Vec<String> {
-        let input = json!({ "abi": ABI, "columns": columns(cols) });
-        match self.call_json(Call::Lint, &input) {
-            Ok(Json::Array(a)) => a
-                .iter()
-                .take(50)
-                .filter_map(Json::as_str)
-                .map(|s| s.chars().take(500).collect())
-                .collect(),
-            Ok(_) => vec![format!("plugin {}: lint answered no list", self.name)],
-            Err(e) => vec![e],
         }
     }
 }
