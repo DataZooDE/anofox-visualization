@@ -13,6 +13,8 @@
 // #726: under an access policy on another table the saved rows still show.
 // #736: a policy naming a saved table filters its saved rows per viewer, a
 // writer may only save rows (and columns) the policy lets them see.
+// #1220: another table's row filter that reads a saved table reads its
+// saved rows too — a save changes what a viewer of that table sees, at once.
 // Slice 4, two writers: a save made on an older generation over someone
 // else's newer save of the same row (or a replaced graph) is refused,
 // naming who saved what; the panels then show theirs, the edits stay, and
@@ -417,6 +419,43 @@ try {
     refused = String(e.message);
   }
   check(/names 'plan_params' in schema 'other'/.test(refused), `(n) a policy on the saved table's name in another schema refuses the start (${refused.split("\n").find((l) => /writeback/.test(l)) || refused.slice(0, 200)})`);
+  if (srv) stop(srv);
+  srv = null;
+  await sleep(300);
+  // (o) #1220: a row filter of another table reads a saved table — the
+  // permissions kept in a table admins edit. bob (no writer) reads orders
+  // only, through a filter on plan_params; carol saves the row that grants
+  // alice's order, and bob's next page shows it (cache and warm keys follow
+  // the change log's generation), without folding the log by hand.
+  writeFileSync(
+    path.join(dashDir, "orders.sql"),
+    "-- @title Orders\nSELECT coalesce(string_agg(owner, ',' ORDER BY owner), 'none') AS o ::TEXT_SMALL FROM orders;\n"
+  );
+  srv = await serve(ORDERS, {
+    ...opts,
+    policy: policyFile({ plan_params: { rows: true }, orders: { rows: "owner IN (SELECT id FROM plan_params WHERE lead_time > 100)" } }),
+  });
+  {
+    // a read-only dashboard: no Save button to wait for
+    const orders = async (user) => {
+      const ctx = await browser.newContext({ viewport: { width: 1300, height: 1000 }, reducedMotion: "reduce" });
+      await ctx.setExtraHTTPHeaders({ "X-Anofox-Proxy-Secret": sec, "X-Forwarded-User": user });
+      const page = await ctx.newPage();
+      await page.goto(`http://127.0.0.1:${port}/d/orders`);
+      await page.waitForSelector(".textcard .text-value", { timeout: 30000 });
+      await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 15000 });
+      const p = await params(page);
+      await ctx.close();
+      return p;
+    };
+    check((await orders("bob")) === "none", `(o) before the save the filter grants nothing (${await orders("bob")})`);
+    const r = await saveAs("carol", { lead_time: 500 }, "alice", "0e01");
+    check(r.status === 201, `(o) carol saves the granting row (${r.status} ${r.text})`);
+    check((await orders("bob")) === "alice", `(o) …and bob's orders follow at once: the filter reads the saved row (${await orders("bob")})`);
+  }
+  stop(srv);
+  srv = null;
+  rmSync(path.join(dashDir, "orders.sql"));
 } finally {
   if (srv) stop(srv);
   if (browser) await browser.close();
