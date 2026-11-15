@@ -1,0 +1,26 @@
+# A complete, trivial runtime plugin (#1213): `::HELLO` draws a greeting.
+#   cargo build --release --target wasm32-unknown-unknown \
+#     --manifest-path examples/plugins/hello/Cargo.toml
+#   dashboard --plugin target/wasm32-unknown-unknown/release/hello_plugin.wasm hello.sql
+[package]
+name = "hello-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anofox-viz-plugin = { path = "../../../crates/anofox-viz-plugin" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Not part of the main workspace: built for wasm32 only.
+[workspace]

@@ -108,6 +108,8 @@ const USAGE: &str = "usage:\n  \
      dashboard --themes                      list the built-in themes\n  \
      dashboard --theme-css <T> [--dark]      print a theme's CSS design tokens\n  \
      dashboard --version                     print the version\n\n\
+     Any command takes --plugin <file.wasm> (repeatable): a runtime plugin's roles\n  \
+     and panels, sandboxed (builds with the `plugins` feature, #1213).\n\n\
      Queries run through the `duckdb` CLI on PATH. The render, --svg and --check\n  \
      each run a whole script in one `duckdb` process (#435), so DuckDB session\n  \
      semantics across statements (SET VARIABLE, TEMP views/tables, and other\n  \
@@ -129,6 +131,18 @@ fn boundary_file(name: &str) -> Option<&'static str> {
             .ok()
             .map(|s| &*Box::leak(s.into_boxed_str()))
     })
+}
+
+#[cfg(feature = "plugins")]
+fn load_plugin(file: &str) -> Result<(), String> {
+    crate::plugin::register_file(std::path::Path::new(file)).map(|_| ())
+}
+
+#[cfg(not(feature = "plugins"))]
+fn load_plugin(file: &str) -> Result<(), String> {
+    Err(format!(
+        "{file}: this build has no plugin support (feature `plugins`)"
+    ))
 }
 
 /// The `dashboard` command: reads its arguments from the process and exits
@@ -157,6 +171,20 @@ pub fn main() {
     if let Some(d) = dir {
         let _ = BOUNDARY_DIR.set(std::path::PathBuf::from(d));
         crate::set_boundary_source(boundary_file);
+    }
+    // #1213: `--plugin <file.wasm>` (repeatable): runtime plugins, loaded
+    // and registered before anything parses a role
+    while let Some(i) = args.iter().position(|a| a == "--plugin") {
+        if i + 1 >= args.len() {
+            eprintln!("--plugin needs a .wasm file");
+            std::process::exit(2);
+        }
+        let file = args.remove(i + 1);
+        args.remove(i);
+        if let Err(e) = load_plugin(&file) {
+            eprintln!("--plugin {e}");
+            std::process::exit(2);
+        }
     }
     match args.first().map(String::as_str) {
         Some("--check") => cmd_check(&args[1..]),
@@ -2463,7 +2491,7 @@ fn truncate_for_message(s: &str) -> String {
 /// Returns the reason, or `None` if none of this matched (still just pixels
 /// and markup, not a reason this file is safe in some deeper sense this
 /// scan can't see).
-fn svg_active_reason(bytes: &[u8]) -> Option<String> {
+pub(crate) fn svg_active_reason(bytes: &[u8]) -> Option<String> {
     let text = match std::str::from_utf8(bytes) {
         Ok(t) => t,
         Err(_) => return Some("is not valid UTF-8 (can't be parsed as XML)".to_string()),

@@ -145,6 +145,8 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+          # tests/plugins.rs builds the example plugin (#1213)
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
@@ -162,8 +164,8 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all --check
 
-      - name: clippy (core incl. serve, ffi, duckext)
-        run: cargo clippy --locked --workspace --all-targets --features anofox-visualization/serve -- -D warnings
+      - name: clippy (core incl. serve and plugins, ffi, duckext)
+        run: cargo clippy --locked --workspace --all-targets --features anofox-visualization/serve,anofox-visualization/plugins -- -D warnings
 
       # Before the tests: tests that run SQL through DuckDB (the paged SQL, the
       # locked server's data-folder statement check) use this CLI; the latter
@@ -189,8 +191,8 @@ jobs:
       # cargo-nextest doesn't run doctests (#464); `cargo test --doc` alongside
       # it covers those (src/boxstats.rs, period.rs, thresholds.rs, theme.rs,
       # lib.rs, and vendor/tiny_http's).
-      - name: test (core incl. serve)
-        run: cargo nextest run --locked --features serve
+      - name: test (core incl. serve and plugins)
+        run: cargo nextest run --locked --features serve,plugins
       - name: test (core incl. serve) — doctests
         run: cargo test --doc --locked --features serve
 

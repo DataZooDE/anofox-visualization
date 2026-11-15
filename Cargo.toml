@@ -2,7 +2,8 @@
 # extension crates share the core's version via `version.workspace = true`, so
 # this is the single version source of truth (CalVer YYYY.M.D) — see BUILD.md.
 [workspace]
-members = [".", "duckext", "crates/anofox-viz-ffi", "vendor/tiny_http"]
+members = [".", "duckext", "crates/anofox-viz-ffi", "crates/anofox-viz-plugin", "vendor/tiny_http"]
+exclude = ["examples/plugins"]
 # `cargo build`/`cargo test` at the root keep meaning "the core crate"; the
 # extension crates are built explicitly (-p …), duckext needs libclang (bindgen).
 default-members = ["."]
@@ -193,6 +194,9 @@ crate-type = ["cdylib", "rlib"]
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
 ggplot-rs = { version = "0.57.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# Runtime WebAssembly plugins (#1213): an interpreter, pure Rust, no
+# imports given to a plugin. Native only (the browser has its own).
+wasmi = { version = "2", optional = true, default-features = false, features = ["std", "stable", "validate", "auto-dispatch"] }
 wasm-bindgen = { version = "0.2", optional = true }
 # `serve` feature (native only): local HTTP server that launches the browser UI
 # against a live DuckDB, incl. from the extension later.
@@ -236,6 +240,8 @@ roxmltree = "0.21"
 
 [dev-dependencies]
 roxmltree = "0.21"
+# Misbehaving plugins for tests/plugins.rs, written as WebAssembly text (#1213).
+wat = "1"
 
 [features]
 default = []
@@ -245,6 +251,9 @@ wasm = ["dep:wasm-bindgen"]
 serve = ["dep:tiny_http", "dep:include_dir", "dep:open", "auth"]
 # Built-in authentication for the dashboard servers (no HTTP server of its own).
 auth = ["dep:jsonwebtoken", "dep:aws-lc-rs", "dep:rustls", "dep:ureq", "dep:base64", "dep:webpki-roots"]
+# Runtime WebAssembly plugins (#1213): `module::plugin::load` and the
+# `--plugin` flag.
+plugins = ["dep:wasmi"]
 
 [[bin]]
 name = "serve"

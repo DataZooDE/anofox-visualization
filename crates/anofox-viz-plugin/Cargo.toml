@@ -1,0 +1,10 @@
+[package]
+name = "anofox-viz-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+description = "Write an anofox-visualization runtime plugin: a module compiled to one WebAssembly file (#1213)."
+publish = false
+
+[dependencies]
+serde_json = "1"
