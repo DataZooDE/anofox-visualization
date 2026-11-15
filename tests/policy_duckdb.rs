@@ -995,3 +995,51 @@ fn an_agents_panels_are_classified_without_a_policy() {
     // a CTE that reads a later sibling's name reads the table, not the CTE
     assert!(with(&["WITH a AS (FROM emp), emp AS (FROM sales) FROM a"]).is_err());
 }
+
+#[test]
+fn an_input_from_a_filtered_table_feeding_unrestricted_panels_is_flagged() {
+    // #1217: `sales` has a row filter, `ref.regions` none. An input taking
+    // its options from `sales` has different options (and default) per
+    // viewer, so a panel on `ref.regions` reading it changes per viewer.
+    let Some(f) = fx() else { return };
+    let file = f.db.file.clone();
+    let lint = |script: &str| {
+        anofox_visualization::lint::check_policy(script, &f.enf, &mut |sql: &str| {
+            rows_as_text(&file, sql)
+        })
+        .into_iter()
+        .filter(|d| d.code == "policy/input-options-restricted")
+        .map(|d| (d.stmt, d.message))
+        .collect::<Vec<_>>()
+    };
+    let got = lint(
+        "SELECT DISTINCT region AS region ::MULTISELECT FROM sales ORDER BY 1;\n\
+         SELECT count(*)::METRIC FROM ref.regions WHERE len(getvariable('region')) = 0 OR list_contains(getvariable('region'), region);\n\
+         SELECT sum(amount)::METRIC FROM sales WHERE list_contains(getvariable('region'), region);",
+    );
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, 1);
+    assert!(
+        got[0].1.contains("`sales`") && got[0].1.contains("#2") && !got[0].1.contains("#3"),
+        "{}",
+        got[0].1
+    );
+    // options from the unrestricted table: nothing to say
+    assert!(lint(
+        "SELECT DISTINCT region AS region ::MULTISELECT FROM ref.regions ORDER BY 1;\n\
+         SELECT count(*)::METRIC FROM ref.regions WHERE list_contains(getvariable('region'), region);",
+    )
+    .is_empty());
+    // through a TEMP table built from the filtered one
+    let got = lint(
+        "CREATE TEMP TABLE r AS SELECT DISTINCT region FROM sales;\n\
+         SELECT region AS region ::DROPDOWN FROM r ORDER BY 1;\n\
+         SELECT count(*)::METRIC FROM ref.regions WHERE region = getvariable('region');",
+    );
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(
+        got[0].1.contains("TEMP table") && got[0].1.contains("#3"),
+        "{}",
+        got[0].1
+    );
+}

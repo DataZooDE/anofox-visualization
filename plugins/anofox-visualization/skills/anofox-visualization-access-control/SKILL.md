@@ -141,7 +141,7 @@ Server option `"policy_key_env": "ANOFOX_POLICY_KEY"` keeps `hash` values stable
 dashboard --check dash.sql --db snapshot.duckdb --policy policy.json
 ```
 
-`policy/refused` (the server would not start), `policy/denied-column` (some viewers can't see a column the panel uses; an error when nobody can), `policy/masked-column` (note), `policy/invalid`, `policy/duckdb-version` (the `duckdb` on PATH is not the pinned 1.5.6).
+`policy/refused` (the server would not start), `policy/denied-column` (some viewers can't see a column the panel uses; an error when nobody can), `policy/masked-column` (note), `policy/input-options-restricted` (an input's options come from a row-filtered table, but panels on unrestricted tables read its variable: their numbers silently differ per viewer — take the options from the unrestricted table), `policy/invalid`, `policy/duckdb-version` (the `duckdb` on PATH is not the pinned 1.5.6).
 
 ## Logs
 
