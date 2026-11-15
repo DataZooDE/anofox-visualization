@@ -118,6 +118,7 @@ export default defineConfig({
           { label: "anofox-tabular", slug: "integrate/tabular" },
           { label: "anofox-optimize", slug: "integrate/optimize" },
           { label: "anofox-decide", slug: "integrate/decide" },
+          { label: "Your own features", slug: "integrate/extend" },
         ] },
         { label: "Reference", items: [
           { label: "Overview and CLI", slug: "reference" },
