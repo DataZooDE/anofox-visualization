@@ -46,3 +46,8 @@ bindgen = "0.72"
 # `catch_unwind` and turns a panic into a SQL error, which requires unwinding.
 # Profiles live in the workspace root (Cargo ignores member profiles). For the
 # experimental wasm side-module build pass `-C panic=abort` via RUSTFLAGS.
+
+[features]
+# #1213 step 5: the locked server loads runtime WebAssembly plugins
+# (options.plugins).
+plugins = ["anofox-visualization/plugins"]

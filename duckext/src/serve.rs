@@ -425,11 +425,58 @@ fn read_body(req: &mut Request, limit: usize) -> Result<String, (u16, String)> {
     String::from_utf8(buf).map_err(|_| (400, "request body is not UTF-8".to_string()))
 }
 
+/// #1213 step 5: load `options.plugins` once per process (a server
+/// restarted in the same session finds them registered already).
+#[cfg(feature = "plugins")]
+fn load_plugins(paths: &[String], assets: bool) -> Result<(), String> {
+    static LOADED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut loaded = LOADED.lock().map_err(|_| "plugin registry poisoned")?;
+    for p in paths {
+        if loaded.contains(p) {
+            continue;
+        }
+        anofox_visualization::plugin::register_file_with(std::path::Path::new(p), assets)
+            .map_err(|e| format!("options.plugins: {e}"))?;
+        loaded.push(p.clone());
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "plugins"))]
+fn load_plugins(paths: &[String], _assets: bool) -> Result<(), String> {
+    if paths.is_empty() {
+        Ok(())
+    } else {
+        Err("options.plugins: this build has no plugin support (feature `plugins`)".into())
+    }
+}
+
+/// #1213: the runtime plugins for the page to run (`plugins.json`, the
+/// `.wasm` files) — sandboxed, so served without `plugin_assets`.
+#[cfg(feature = "plugins")]
+fn plugin_file(path: &str) -> Option<(&'static str, Vec<u8>)> {
+    if path == "/plugins.json" {
+        return Some((
+            "application/json",
+            anofox_visualization::plugin::browser_list().into_bytes(),
+        ));
+    }
+    anofox_visualization::plugin::browser_wasm(path).map(|b| ("application/wasm", b.to_vec()))
+}
+
+#[cfg(not(feature = "plugins"))]
+fn plugin_file(_path: &str) -> Option<(&'static str, Vec<u8>)> {
+    None
+}
+
 /// `head`: markup put before `</head>` of index.html (the authoring app bar).
 fn serve_asset(req: Request, path: &str, head: &str, duckdb_esm: bool) {
     // #1156 D5a: a registered module's file
     if let Some(bytes) = anofox_visualization::module::asset(path) {
         return respond(req, 200, content_type(path), bytes.to_vec());
+    }
+    if let Some((ctype, bytes)) = plugin_file(path) {
+        return respond(req, 200, ctype, bytes);
     }
     let asset = path.trim_start_matches('/');
     let asset = if asset.is_empty() {
@@ -1310,6 +1357,10 @@ pub struct LockedOptions {
     /// `css_file` (#773): the operator's stylesheet, read and checked at
     /// start ([`site_css::check`]), served at [`site_css::PATH`].
     pub site_css: Option<Arc<str>>,
+    /// `plugins` (#1213 step 5): runtime plugin files, loaded at start;
+    /// `plugin_assets`: also serve their browser files.
+    pub plugins: Vec<String>,
+    pub plugin_assets: bool,
     /// `folders` (#772): serve the `*.sql` files one level down too, each
     /// folder a group of the nav and the `/` list.
     pub folders: bool,
@@ -1729,6 +1780,8 @@ impl Default for LockedOptions {
             search_path: Vec::new(),
             app: None,
             site_css: None,
+            plugins: Vec::new(),
+            plugin_assets: false,
             folders: false,
             ingest: None,
             ask: None,
@@ -2024,6 +2077,17 @@ impl LockedOptions {
                     site_css::check(&css).map_err(|e| format!("options.css_file {f}: {e}"))?;
                     o.site_css = Some(Arc::from(css));
                 }
+                "plugins" => {
+                    o.plugins = val
+                        .as_array()
+                        .and_then(|a| a.iter().map(|v| v.as_str().map(String::from)).collect())
+                        .ok_or("options.plugins must be a list of .wasm file paths")?;
+                }
+                "plugin_assets" => {
+                    o.plugin_assets = val
+                        .as_bool()
+                        .ok_or("options.plugin_assets must be true or false")?;
+                }
                 "home" => {
                     let h = val
                         .as_str()
@@ -2062,6 +2126,7 @@ impl LockedOptions {
                 }
             }
         }
+        load_plugins(&o.plugins, o.plugin_assets)?;
         // A response larger than the in-flight budget could never be sent.
         o.max_response = o
             .max_response
@@ -8846,7 +8911,8 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
         (&Method::Get, p) => {
             let found = WEB.get_file(p.trim_start_matches('/')).is_some()
                 || p == "/"
-                || anofox_visualization::module::asset(p).is_some();
+                || anofox_visualization::module::asset(p).is_some()
+                || plugin_file(p).is_some();
             serve_asset(req, p, "", false);
             if found {
                 200
@@ -13560,6 +13626,24 @@ mod tests {
         // its own, so a request for its panel (1) is gated on index 0 but
         // trivially met (`met()` is `true` when `reqs.is_empty()`).
         assert_eq!(tabs[1], vec![0]);
+    }
+
+    #[test]
+    fn plugin_options() {
+        // #1213 step 5: a list of .wasm paths and a bool; nothing else
+        let e = |j: &str| LockedOptions::parse(Some(j)).map(|_| ()).unwrap_err();
+        assert!(e(r#"{"plugins": "x.wasm"}"#).contains("list of .wasm file paths"));
+        assert!(e(r#"{"plugin_assets": "yes"}"#).contains("true or false"));
+        assert!(LockedOptions::parse(Some(r#"{"plugins": []}"#)).is_ok());
+        let missing = e(r#"{"plugins": ["/nonexistent/x.wasm"]}"#);
+        if cfg!(feature = "plugins") {
+            assert!(
+                missing.contains("options.plugins: /nonexistent/x.wasm"),
+                "{missing}"
+            );
+        } else {
+            assert!(missing.contains("no plugin support"), "{missing}");
+        }
     }
 
     #[test]

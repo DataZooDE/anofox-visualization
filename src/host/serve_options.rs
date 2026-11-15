@@ -82,6 +82,10 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     // #773: linked into the server's pages only; a static site doesn't
     // carry it (yet).
     ("css_file", SiteOptionKind::ServerOnly),
+    // #1213 step 5: runtime plugins (paths), and the leave to serve their
+    // browser files
+    ("plugins", SiteOptionKind::ServerOnly),
+    ("plugin_assets", SiteOptionKind::ServerOnly),
     // #772: a published site reads the same subfolders.
     ("folders", SiteOptionKind::Site),
     // #769: a write path; nothing to publish.

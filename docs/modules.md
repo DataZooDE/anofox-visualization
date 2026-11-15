@@ -116,7 +116,7 @@ The extension is packaged like the public one (`duckext/scripts/append_extension
 
 A **plugin** is a module compiled to one WebAssembly file and loaded at run time, with no distribution build (#1213). It registers through the same registry as a linked module, so its roles, `::REQUIRES` and `--check` work the same way.
 
-**Status (steps 1–4 of #1213):** the `dashboard` CLI and the `serve` command (builder and `--dashboards`) load plugins with `--plugin <file.wasm>` in builds with the `plugins` feature; the public release builds do not enable it yet. `serve --plugin-assets` also serves their browser files. The browser builder (DuckDB-Wasm) runs the plugins its `plugins.json` lists. Plugins can bring roles, panels, lint warnings, contract macros with their plots, and browser files. The DuckDB extension comes in a later step.
+**Status (steps 1–5 of #1213):** the `dashboard` CLI and the `serve` command (builder and `--dashboards`) load plugins with `--plugin <file.wasm>` in builds with the `plugins` feature; the public release builds do not enable it yet. `serve --plugin-assets` also serves their browser files. The browser builder (DuckDB-Wasm) runs the plugins its `plugins.json` lists. The DuckDB extension's locked server (`anofox_serve_dashboards`) loads them from `options.plugins` (a list of paths) in extension builds with the `plugins` feature, `options.plugin_assets` serving their browser files; plugins are loaded only from the options, never from a SQL function, so `enable_external_access`, `allowed_directories` and a locked configuration can't be worked around from SQL. Plugins can bring roles, panels, lint warnings, contract macros with their plots, and browser files.
 
 ### In the browser
 
