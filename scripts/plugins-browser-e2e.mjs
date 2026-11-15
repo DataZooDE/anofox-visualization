@@ -37,7 +37,9 @@ const W = mkdtempSync(path.join(os.tmpdir(), "plugins-browser-e2e-"));
 const site = (name, list) => {
   const d = path.join(W, name);
   cpSync(web, d, { recursive: true });
-  if (!existsSync(path.join(d, "vendor", "duckdb-wasm"))) cpSync(path.join(vendor, "duckdb-wasm"), path.join(d, "vendor", "duckdb-wasm"), { recursive: true });
+  // a local DuckDB-Wasm, when there is one (else the page loads its own)
+  const dw = path.join(vendor, "duckdb-wasm");
+  if (!existsSync(path.join(d, "vendor", "duckdb-wasm")) && existsSync(dw)) cpSync(dw, path.join(d, "vendor", "duckdb-wasm"), { recursive: true });
   if (list) writeFileSync(path.join(d, "plugins.json"), JSON.stringify(list));
   return d;
 };
