@@ -40,7 +40,7 @@ builder runs on DuckDB-Wasm, nothing to install.
 - **Embed them** in your own app (a web component, or signed embed links). [Embedding](https://datazoode.github.io/anofox-visualization/deploy/embedding/)
 - **Plot results from the anofox extensions.** statistics, forecast, tabular, optimize and decide: `anofox_plot(t)` picks the plot. From Python and R too. [Integrations](https://datazoode.github.io/anofox-visualization/integrate/)
 - **Check dashboards in CI.** `dashboard --check` finds broken panels, design problems and implausible numbers. [CLI](https://datazoode.github.io/anofox-visualization/deploy/cli/)
-- **Add your own features as modules.** Your own roles, panels, SQL macros and browser files from a separate (also private) crate, built into your own distribution. [Writing a module](docs/modules.md)
+- **Add your own features as modules or plugins.** Your own roles, panels, SQL macros and browser files from a separate (also private) crate: built into your own distribution, or compiled to one sandboxed `.wasm` plugin and loaded with `--plugin`. [Modules and plugins](https://datazoode.github.io/anofox-visualization/integrate/extend/)
 
 ## What it doesn't do (yet)
 
@@ -49,7 +49,7 @@ builder runs on DuckDB-Wasm, nothing to install.
 - **DuckDB 1.5.6 is the release target.** 2.0 is built and tested in CI (non-blocking); the pin moves with 2.0.1.
 - **No drag-and-drop.** Dashboards are SQL. The builder helps you write it; it doesn't hide it.
 - **The AI assistant is off** unless an installation turns it on, and it then uses your own Claude API key. It is still being evaluated.
-- **Modules are linked at build time.** There are no runtime plug-ins, the public builds contain none, and the module interface may still change.
+- **Plugins are new.** The `dashboard` CLI loads them in builds with the `plugins` feature; servers, the browser and the DuckDB extension follow ([#1213](https://github.com/DataZooDE/anofox-visualization/issues/1213)). The release builds don't enable them yet, and the interface may still change.
 
 ## Quick start
 
@@ -93,7 +93,7 @@ dashboard --check my_dashboard.sql      # lint it
 - **[Secure serving](docs/secure-serving.md)** and **[deployment](docs/deployment.md)**: the trust model, logins, Docker, reverse proxies.
 - **[Python & R](docs/python-r.md)**: plot statsmodels, scikit-learn or broom results.
 - **[Integration CI](docs/integrations.md)**: how every anofox extension's output is rendered on every push.
-- **[Writing a module](docs/modules.md)**.
+- **[Writing a module or a plugin](docs/modules.md)**.
 
 ### Claude Code plugin
 
