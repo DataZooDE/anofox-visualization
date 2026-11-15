@@ -3858,3 +3858,55 @@ fn crowded_xline_labels_stack_instead_of_dropping() {
         );
     }
 }
+
+#[test]
+fn landmark_points_are_not_buried_under_many_small_ones() {
+    // #1202 (#1121 sample 3): 3 depots at ::SIZE 30 among 1,000 customers at
+    // ::SIZE 1 — largest-first drew the depots at the bottom, buried. Now
+    // they come after every customer, each over a halo.
+    use anofox_visualization::parse_role;
+    let n = 1000;
+    let mut lat: Vec<f64> = (0..n).map(|i| 48.0 + f64::from(i % 50) * 0.12).collect();
+    let mut lon: Vec<f64> = (0..n).map(|i| 7.0 + f64::from(i / 50) * 0.35).collect();
+    let mut cat: Vec<&str> = vec!["N"; n as usize];
+    let mut size: Vec<f64> = vec![1.0; n as usize];
+    for (a, o) in [(53.5, 10.0), (51.5, 7.5), (49.0, 12.0)] {
+        lat.push(a);
+        lon.push(o);
+        cat.push("DC");
+        size.push(30.0);
+    }
+    let s = render(
+        &[
+            Column::new("lat", parse_role("LAT").unwrap(), nums(&lat)),
+            Column::new("lon", parse_role("LON").unwrap(), nums(&lon)),
+            Column::new("c", Role::Category, strs(&cat)),
+            Column::new("s", parse_role("SIZE").unwrap(), nums(&size)),
+        ],
+        640,
+        480,
+    )
+    .expect("renders");
+    let r: Vec<f64> = s
+        .split("<circle")
+        .skip(1)
+        .filter_map(|c| {
+            let k = c.find(" r=\"")? + 4;
+            c[k..k + c[k..].find('"')?].parse().ok()
+        })
+        .collect();
+    let small = r.iter().cloned().fold(f64::INFINITY, f64::min);
+    let last_small = r.iter().rposition(|x| *x == small).expect("customers");
+    let halos: Vec<usize> = (0..r.len() - 1)
+        .filter(|&i| r[i] > 2.0 * small && (r[i] - r[i + 1] - 1.5).abs() < 1e-6)
+        .collect();
+    assert!(
+        halos.len() >= 3,
+        "three depots, each with a halo: {:?}",
+        &r[r.len().saturating_sub(12)..]
+    );
+    assert!(
+        halos.iter().all(|&i| i > last_small),
+        "depots after every customer"
+    );
+}
