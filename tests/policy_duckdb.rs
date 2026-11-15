@@ -46,6 +46,15 @@ CREATE MACRO leak() AS (SELECT max(bonus) FROM payroll);
 CREATE MACRO leak2() AS leak() + 0;
 CREATE MACRO t_leak() AS TABLE SELECT * FROM payroll;
 CREATE MACRO fmt(x) AS x * 2;
+CREATE MACRO vergleich_bis(saison) AS CASE WHEN saison = year(current_date)
+  THEN (current_date - INTERVAL 1 YEAR)::DATE ELSE make_date(saison - 1, 12, 31) END;
+CREATE MACRO im_filter(ab, sel) AS len(coalesce(sel, []::VARCHAR[])) = 0 OR list_contains(sel, ab);
+CREATE MACRO twice_fmt(x) AS fmt(x) + fmt(x);
+CREATE MACRO calls_leak(x) AS x + leak();
+CREATE MACRO setting(x) AS current_setting(x);
+CREATE MACRO dflt(a, b := current_setting('threads')) AS a || b;
+CREATE MACRO over(a) AS a, (a, b) AS (SELECT max(bonus) FROM payroll);
+CREATE MACRO reads_qualified(x) AS x + (SELECT count(*) FROM ref.regions);
 ";
 
 const POLICY: &str = r#"{"tables": {
@@ -643,6 +652,9 @@ fn a_row_filter_reads_only_claims() {
         ),
         ("region IN (SELECT * FROM query('SELECT 1'))", "not allowed"),
         ("region = 'EU' OR leak() > 0", "macro"),
+        // #1216: a table-free macro is still refused in a row filter (its
+        // body isn't held to the claims-only rule there)
+        ("fmt(1) > 0", "macro"),
         ("nope = 1", "nope"),
         ("region = 'EU'; DROP TABLE x", "parse"),
         (
@@ -704,10 +716,49 @@ fn reserved_names_in_the_snapshot_stop_the_start() {
 #[test]
 fn macros_are_refused_but_columns_named_like_them_are_fine() {
     let Some(f) = fx() else { return };
-    // A user macro without a table is still refused: its body is not checked.
-    f.refused(&["SELECT fmt(id) FROM sales"], "macro");
     let s = f.rewrite(&["SELECT id AS leak FROM sales"]).unwrap();
     assert_eq!(f.run(&s, &viewer("alice", &[])).unwrap().len(), 2);
+}
+
+#[test]
+fn scalar_macros_that_read_no_table_are_allowed() {
+    // #1216: a macro whose body reads no table runs as written — it can't
+    // get around the views.
+    let Some(f) = fx() else { return };
+    let s = f
+        .rewrite(&["SELECT sum(fmt(amount)) AS v, twice_fmt(1) AS t, \
+                    vergleich_bis(2020) AS d, im_filter('EU', ['EU']) AS k FROM sales"])
+        .unwrap();
+    let r = f.run(&s, &viewer("alice", &[])).unwrap();
+    // alice sees the EU rows only (100 + 200), doubled
+    assert_eq!(r[0]["v"], "600.0");
+    assert_eq!(r[0]["t"], 4);
+    assert_eq!(r[0]["d"], "2019-12-31");
+    assert_eq!(r[0]["k"], true);
+    // every argument passed: a default (not in the catalog) never runs
+    let s = f.rewrite(&["SELECT dflt('x', 'y') AS v"]).unwrap();
+    assert_eq!(f.run(&s, &viewer("alice", &[])).unwrap()[0]["v"], "xy");
+}
+
+#[test]
+fn macros_that_read_tables_or_hide_a_call_are_refused() {
+    let Some(f) = fx() else { return };
+    for (q, why) in [
+        // a table in its body, directly or through another macro
+        ("SELECT leak()", "macro"),
+        ("SELECT calls_leak(1)", "macro"),
+        ("SELECT reads_qualified(1)", "macro"),
+        // a function the policy refuses
+        ("SELECT setting('threads')", "macro"),
+        // one overload reads a table: the name is refused
+        ("SELECT over(1)", "macro"),
+        // a table macro
+        ("SELECT * FROM t_leak()", "not allowed"),
+        // a default would run: it isn't in the catalog, so not checked
+        ("SELECT dflt('x')", "pass all 2 of its arguments"),
+    ] {
+        f.refused(&[q], why);
+    }
 }
 
 #[test]

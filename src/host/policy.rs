@@ -527,6 +527,10 @@ enum Mode {
     /// contract, only its tables, the dashboard's TEMP objects and CTEs
     /// (`agent/non-canonical-read`).
     Panel,
+    /// A scalar macro's body (#1216): it runs as written, outside the
+    /// policy's views, so it may read no table and call no table function;
+    /// its functions are checked as a dashboard's are.
+    Macro,
 }
 
 /// The table functions a mapping view may call (plan §4).
@@ -808,6 +812,9 @@ impl Walker<'_> {
             o.remove("qualified_name");
         };
         match self.mode {
+            Mode::Macro => {
+                return Err(format!("it reads table '{shown}'"));
+            }
             Mode::Panel => {
                 let none = HashSet::new();
                 let (schemas, contract) = self.panel.unwrap_or((&none, None));
@@ -902,6 +909,9 @@ impl Walker<'_> {
             .to_ascii_lowercase();
         let qualified =
             f.is_some_and(|f| !s(f, "schema").is_empty() || !s(f, "catalog").is_empty());
+        if self.mode == Mode::Macro {
+            return Err(format!("it calls table function '{name}()'"));
+        }
         if self.mode == Mode::Mapping {
             return if !qualified && MAPPING_TABLE_FUNCTIONS.contains(&name.as_str()) {
                 Ok(())
@@ -930,6 +940,24 @@ impl Walker<'_> {
             return Err(format!(
                 "'{name}()' is a macro: its body would run outside the access policy"
             ));
+        }
+        // #1216: a scalar macro whose body reads no table runs as written —
+        // in a dashboard's statements only, and with every argument passed:
+        // a parameter's default isn't in the catalog, so it can't be checked.
+        if let Some(&params) = self.enf.user_macros.get(&lower) {
+            if !matches!(self.mode, Mode::Rewrite | Mode::Verify | Mode::Macro) {
+                return Err(format!("'{name}()' is a macro: not allowed here"));
+            }
+            let given = ["children", "arguments"]
+                .iter()
+                .find_map(|k| o.get(*k).and_then(Value::as_array))
+                .map_or(0, Vec::len);
+            if given < params {
+                return Err(format!(
+                    "'{name}()' is a macro: pass all {params} of its arguments under the access policy (a parameter's default value can't be checked)"
+                ));
+            }
+            return Ok(());
         }
         match functions().get(false, &lower) {
             Some((true, _)) => {}
@@ -979,6 +1007,9 @@ pub struct Enforcer {
     bodies: Vec<String>,
     /// Lower-case names of macros whose body reads tables.
     denied_functions: HashSet<String>,
+    /// Scalar macros of the snapshot a dashboard statement may call (#1216):
+    /// lower-case name → the most parameters of its overloads.
+    user_macros: HashMap<String, usize>,
 }
 
 /// One dashboard, rewritten.
@@ -1124,6 +1155,7 @@ pub fn check_mapping(duck: &mut dyn Duck, query: &str) -> Result<Value, String> 
         default_db: String::new(),
         bodies: Vec::new(),
         denied_functions: denied_macros(duck)?,
+        user_macros: HashMap::new(),
     };
     let tree = serialize(duck, query)?;
     let mut ast = tree.clone();
@@ -1153,6 +1185,7 @@ pub fn check_panels(
         default_db: default_db.to_string(),
         bodies: Vec::new(),
         denied_functions: denied_macros(duck).map_err(|e| (0, e))?,
+        user_macros: HashMap::new(),
     };
     let schemas: HashSet<String> = duck
         .rows(&format!(
@@ -1242,8 +1275,9 @@ impl Enforcer {
             default_db: default_db.to_string(),
             bodies: Vec::new(),
             denied_functions: HashSet::new(),
+            user_macros: HashMap::new(),
         };
-        enf.denied_functions = denied_macros(duck)?;
+        (enf.denied_functions, enf.user_macros) = classify_macros(duck, &enf)?;
         let reserved = duck.rows(&format!(
             "SELECT (database_name || '.' || schema_name || '.' || table_name)::VARCHAR FROM duckdb_tables() \
              WHERE lower(table_name) LIKE '{RESERVED_PREFIX}%' UNION ALL \
@@ -1583,6 +1617,89 @@ fn denied_macros(duck: &mut dyn Duck) -> Result<HashSet<String>, String> {
     }
 }
 
+const USER_MACROS_SQL: &str = "SELECT lower(function_name)::VARCHAR, function_type::VARCHAR, \
+     len(parameters)::VARCHAR, coalesce(macro_definition, '')::VARCHAR FROM duckdb_functions() \
+     WHERE NOT internal AND function_type IN ('macro', 'table_macro')";
+
+/// #1216: which of the snapshot's own macros a dashboard statement may call,
+/// and the rest of [`denied_macros`]. A macro is allowed when it is a scalar
+/// macro, its name is no built-in function's or internal macro's, and every
+/// overload's body passes [`Mode::Macro`]: no table, no table function, only
+/// allowed functions and allowed macros (found by a fixpoint, so a macro may
+/// call another). Returns (denied, allowed name → most parameters).
+fn classify_macros(
+    duck: &mut dyn Duck,
+    enf: &Enforcer,
+) -> Result<(HashSet<String>, HashMap<String, usize>), String> {
+    let denied_all = denied_macros(duck)?;
+    let internal: HashSet<String> = duck
+        .rows(&format!("{MACROS_SQL} AND internal"))?
+        .into_iter()
+        .filter_map(|r| r.into_iter().next().flatten())
+        .collect();
+    // name → (a table macro among its overloads, most parameters, bodies)
+    let mut groups: HashMap<String, (bool, usize, Vec<String>)> = HashMap::new();
+    for r in duck.rows(USER_MACROS_SQL)? {
+        let col = |k: usize| r.get(k).cloned().flatten().unwrap_or_default();
+        let g = groups.entry(col(0)).or_default();
+        g.0 |= col(1) != "macro";
+        g.1 = g.1.max(col(2).parse().unwrap_or(usize::MAX));
+        g.2.push(col(3));
+    }
+    let mut allowed: HashMap<String, usize> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for (name, (table_macro, params, bodies)) in &groups {
+            if *table_macro
+                || allowed.contains_key(name)
+                || internal.contains(name)
+                || functions().get(false, name).is_some()
+                || functions().get(true, name).is_some()
+            {
+                continue;
+            }
+            let mut probe = enf.clone();
+            probe.denied_functions = denied_all
+                .iter()
+                .filter(|d| !allowed.contains_key(*d) && *d != name)
+                .cloned()
+                .collect();
+            // itself: allowed while its own body is checked (DuckDB refuses
+            // a recursive macro at bind time anyway)
+            probe.user_macros = allowed.clone();
+            probe.user_macros.insert(name.clone(), 0);
+            if bodies
+                .iter()
+                .all(|b| macro_body_ok(duck, &probe, b).is_ok())
+            {
+                allowed.insert(name.clone(), *params);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let denied = denied_all
+        .into_iter()
+        .filter(|d| !allowed.contains_key(d))
+        .collect();
+    Ok((denied, allowed))
+}
+
+/// A scalar macro's body (as the catalog prints it) through [`Mode::Macro`].
+fn macro_body_ok(duck: &mut dyn Duck, enf: &Enforcer, body: &str) -> Result<(), String> {
+    if body.trim().is_empty() {
+        return Err("no body".into());
+    }
+    let mut ast = serialize(duck, &format!("SELECT {body}"))?;
+    if ast["statements"].as_array().map_or(0, Vec::len) != 1 {
+        return Err("not one expression".into());
+    }
+    let temps = HashSet::new();
+    Walker::new(Mode::Macro, enf, &temps).walk(&mut ast["statements"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1706,6 +1823,7 @@ mod tests {
             default_db: "db".into(),
             bodies: Vec::new(),
             denied_functions: ["pg_get_viewdef".to_string()].into_iter().collect(),
+            user_macros: HashMap::new(),
         }
     }
 

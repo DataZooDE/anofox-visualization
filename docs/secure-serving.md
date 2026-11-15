@@ -3169,7 +3169,12 @@ start (the error names the dashboard and statement), when it:
   the policy's `table_functions` — so `query()`, `query_table()`,
   `json_execute_serialized_sql()`, the `duckdb_*()` / `pragma_*()` catalog
   functions, `sql_auto_complete()`, table macros and file readers;
-- calls a user macro (its body is not checked);
+- calls a user macro whose body reads a table, calls a table function or
+  calls a function or macro the policy refuses; calls a user macro without
+  passing every argument (a parameter's default isn't in the catalog, so it
+  can't be checked); calls a user macro in a row filter. A scalar macro whose
+  body passes these checks (`CASE`, arithmetic, `getvariable()`,
+  `current_date`, other such macros) may be called (#1216);
 - calls a function that is not on the **allowlist**
   (`src/host/policy_functions.txt`: every function of the pinned DuckDB
   1.5.6, classified `allow` or `deny`) or in the policy's `functions`. Denied:
@@ -3220,7 +3225,7 @@ could show it (`duckdb_views()`, `current_query()`, `json_serialize_plan`,
 | A CTE named like a table (`WITH payroll AS (…)`), or a table named like a CTE | CTEs are renamed; a reference the rewrite takes for a CTE can only bind to that CTE, everything else goes through a view or is refused. A non-recursive CTE's own name inside its body is the table, as in DuckDB |
 | `snapshot.main.t`, `temp.main.__anofox_rls_0`, `information_schema`, `duckdb_tables()`, `pragma_table_info()` | Database-qualified names and catalog functions are refused |
 | String-built SQL: `query('SELECT … ' \|\| getvariable('x'))`, `query_table(…)`, `json_execute_serialized_sql(…)` | Refused (table functions outside the allowlist) |
-| A macro (or a built-in macro) whose body reads a table | Macros are refused; `CREATE MACRO` in setup is refused |
+| A macro (or a built-in macro) whose body reads a table | Refused: a user macro is allowed only when its body (every overload) reads no table, calls no table function and only allowed functions and macros, and the call passes every argument, so no unchecked default runs (#1216); table macros, macros in row filters and `CREATE MACRO` in setup are refused |
 | A view in the snapshot whose body reads a protected table | A view needs its own rule; the view's rule is what applies to it |
 | Setup overwrites the claims (`SET VARIABLE __claim_groups = ['admins']`) or the views | Refused at start; views are created after the claims and before any dashboard SQL, and their names are reserved |
 | A viewer sets `__claim_*` / `__anofox…` (`vars`, `?v.*`, `@param`) | `400` / ignored (P1) |
