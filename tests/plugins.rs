@@ -412,3 +412,158 @@ fn a_plugin_s_asset_paths_are_checked() {
         assert!(e.contains("asset path"), "{path}: {e}");
     }
 }
+
+#[test]
+fn parallel_calls_use_several_instances() {
+    // #1213 step 2: a server renders in parallel; each call gets an
+    // instance of its own (or waits for one), and every answer is right.
+    hello();
+    let role = parse_role("HELLO").unwrap();
+    let threads: Vec<_> = (0..8)
+        .map(|t| {
+            std::thread::spawn(move || {
+                for i in 0..10 {
+                    let who = format!("t{t}i{i}");
+                    let svg = render(
+                        &[Column::new("who", role, vec![Value::Str(who.clone())])],
+                        200,
+                        80,
+                    )
+                    .unwrap();
+                    assert!(svg.contains(&format!(">Hello, {who}!</text>")), "{svg}");
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
+/// GET `path` from 127.0.0.1:`port`: (status, body), retried while the
+/// server starts.
+#[cfg(feature = "serve")]
+fn get(port: u16, path: &str, tok: Option<&str>) -> (u16, String) {
+    use std::io::{Read, Write};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let r = (|| -> std::io::Result<String> {
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port))?;
+            c.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
+            let t = tok
+                .map(|t| format!("X-Anofox-Token: {t}\r\n"))
+                .unwrap_or_default();
+            write!(
+                c,
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{t}Connection: close\r\n\r\n"
+            )?;
+            let mut s = String::new();
+            c.read_to_string(&mut s)?;
+            Ok(s)
+        })();
+        match r {
+            Ok(s) if !s.is_empty() => {
+                let status = s
+                    .split(' ')
+                    .nth(1)
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or(0);
+                let body = s
+                    .split_once("\r\n\r\n")
+                    .map(|(_, b)| b.to_string())
+                    .unwrap_or_default();
+                return (status, body);
+            }
+            _ if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(200))
+            }
+            _ => panic!("no answer from the server on {port}"),
+        }
+    }
+}
+
+#[cfg(feature = "serve")]
+#[test]
+fn serve_loads_a_plugin_and_its_browser_files_only_when_allowed() {
+    if std::process::Command::new("duckdb")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipped: no duckdb on PATH");
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("plugin-serve-{}", std::process::id()));
+    let dash = dir.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    let wasm = dir.join("hello.wasm");
+    std::fs::write(&wasm, hello_wasm()).unwrap();
+    std::fs::write(
+        dash.join("hi.sql"),
+        "-- @title Hi\nSELECT 'hello'::REQUIRES;\nSELECT 'Ada' AS who ::HELLO, 'Greeting'::TITLE;\n",
+    )
+    .unwrap();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill(); // our own child, by handle
+            let _ = self.0.wait();
+        }
+    }
+    // `--dashboards`: the static pages (no module files there); else the
+    // builder, which serves them at /modules/<name>/
+    let serve = |dashboards: bool, assets: bool| -> (Kill, u16, Option<String>) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_serve"));
+        if dashboards {
+            c.arg("--dashboards").arg(&dash);
+        } else {
+            c.arg(dir.join("b.duckdb"));
+        }
+        c.arg("--plugin").arg(&wasm);
+        if assets {
+            c.arg("--plugin-assets");
+        }
+        c.args(["--port", &port.to_string(), "--no-open"]);
+        if dashboards {
+            return (Kill(c.spawn().unwrap()), port, None);
+        }
+        // the builder prints its URL with the session token first
+        c.stdout(std::process::Stdio::piped());
+        let mut child = c.spawn().unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        let tok = line.split("token=").nth(1).map(|t| t.trim().to_string());
+        assert!(tok.is_some(), "no token in {line:?}");
+        (Kill(child), port, tok)
+    };
+    let (_s, port, _) = serve(true, false);
+    let (status, page) = get(port, "/d/hi", None);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains("Hello, Ada!"),
+        "the plugin draws the panel: {page}"
+    );
+    let (_b, port, tok) = serve(false, true);
+    let (status, css) = get(port, "/modules/hello/hello.css", tok.as_deref());
+    assert_eq!(
+        (status, css.as_str()),
+        (200, ".hello { font-style: italic; }\n")
+    );
+    let (_b2, port2, tok2) = serve(false, false);
+    assert_eq!(
+        get(port2, "/modules/hello/hello.css", tok2.as_deref()).0,
+        404,
+        "no browser files without --plugin-assets"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

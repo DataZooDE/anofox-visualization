@@ -116,7 +116,7 @@ The extension is packaged like the public one (`duckext/scripts/append_extension
 
 A **plugin** is a module compiled to one WebAssembly file and loaded at run time, with no distribution build (#1213). It registers through the same registry as a linked module, so its roles, `::REQUIRES` and `--check` work the same way.
 
-**Status (steps 1 and 4 of #1213):** the `dashboard` CLI loads plugins in builds with the `plugins` feature; the public release builds do not enable it yet. Plugins can bring roles, panels, lint warnings, contract macros with their plots, and browser files. Servers, the browser and the DuckDB extension come in later steps.
+**Status (steps 1, 2 and 4 of #1213):** the `dashboard` CLI and the `serve` command (builder and `--dashboards`) load plugins with `--plugin <file.wasm>` in builds with the `plugins` feature; the public release builds do not enable it yet. `serve --plugin-assets` also serves their browser files. Plugins can bring roles, panels, lint warnings, contract macros with their plots, and browser files. The browser (DuckDB-Wasm builder) and the DuckDB extension come in later steps.
 
 ### Writing one
 
@@ -184,7 +184,8 @@ A parameter's default is a literal (`NULL`, a number, `'text'`, `true`/`false`) 
 | Output | the SVG may only draw: the allow-list `--site` checks published SVGs with (no script, event handlers, `foreignObject` or external references) |
 | SQL | a plugin ships none: the host writes its macros' bodies from a fixed template; defaults and names are checked |
 | Browser files | not sandboxed (they run in the page): loaded only when the operator allows them |
-| Loading | only files the operator names (`--plugin`); a dashboard names modules (`::REQUIRES`), never files |
+| Loading | only files the operator names (`--plugin`); a dashboard names modules (`::REQUIRES`), never files. Browser files only with `serve --plugin-assets` |
+| Parallel requests | up to 4 instances per plugin (by the machine's cores), each with its own memory cap and fuel; a call waits for a free one |
 
 ### The interface (version 1)
 

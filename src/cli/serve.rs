@@ -125,7 +125,10 @@ static ASSIST_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// with an `embed` login, whose links are meant to be framed.
 static FRAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist] [--assist-key-file FILE]   (the builder assistant's /assist proxy: opt-in, off unless --assist;\n                                       its key from ANTHROPIC_API_KEY or a 0600 key file; it never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-provider anthropic|openai]   (openai: an OpenAI-compatible endpoint at --assist-base-url,\n                                       a local model or a gateway; its key, if any, from OPENAI_API_KEY or the key file)\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--ask JSON|@file.json]  (Ask: questions about a dashboard, answered by a model; needs --auth)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--scopes S,…] [--expires-days N] [--note TEXT] [--audit PATH]\n             (S: ingest:<table> | preview | embed | admin; none = read dashboards only)\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\nQueries run through the `duckdb` CLI on PATH.";
+const USAGE: &str = "usage: serve [--db] <db> [--port N] [--no-open] [--theme T]    (authoring, loopback only)\n             [--app-name TEXT] [--app-tagline TEXT] [--app-logo FILE|URL]\n             [--app-logo-dark FILE|URL] [--app-link URL] [--app-favicon FILE|URL] [--app-hide-name]\n             [--app-charts-as-tables]   (the builder's app bar; the last turns \"Charts as tables\" on by default for every viewer who hasn't chosen their own)\n             [--query-timeout SECS]   (default 120; a round that doesn't finish in time restarts the session)\n             [--assets DIR]   (opt-in: serve relative ::IMAGE/markdown image sources from DIR at /assets/<path>; off by default)\n             [--assist] [--assist-key-file FILE]   (the builder assistant's /assist proxy: opt-in, off unless --assist;\n                                       its key from ANTHROPIC_API_KEY or a 0600 key file; it never reaches the browser)\n             [--assist-models a,b] [--assist-base-url URL] [--assist-max-tokens N]\n             [--assist-provider anthropic|openai]   (openai: an OpenAI-compatible endpoint at --assist-base-url,\n                                       a local model or a gateway; its key, if any, from OPENAI_API_KEY or the key file)\n             [--assist-budget-tokens-per-hour N] [--assist-log PATH|stderr] [--assist-log-content]\n       serve --dashboards <dir> [--db <db>] [--init setup.sql] [--bind ADDR] [--port N]\n             [--cache SECS] [--max-rows N] [--timeout SECS] [--threads N] [--theme T]\n             [--allow-host NAME]...   (Host names served besides loopback; * = any)\n             [--auth JSON|@file.json] (login: auth proxy, JWT/OIDC, embed links, API keys, share links —\n                                       see docs/secure-serving.md)\n             [--audit PATH|stderr]    (JSON-lines audit log of logins and refusals)\n             [--log PATH|stderr] [--log-vars none|names|values]   (JSON-lines request log)\n             [--home ID]              (/ redirects to that dashboard instead of the landing page)\n             [--ask JSON|@file.json]  (Ask: questions about a dashboard, answered by a model; needs --auth)\n             [--app-name …] [--app-tagline …] [--app-logo …] [--app-logo-dark …] [--app-favicon …]   (the landing page's header)\n       (T: light | dark | print | colorblind | high-contrast | 'acme+dark' | theme.json;\n        a dashboard's own ::THEME wins)\n       serve api-key new --file KEYS.json --user U [--groups a,b] [--claim k=v]...\n             [--dashboards a,b] [--scopes S,…] [--expires-days N] [--note TEXT] [--audit PATH]\n             (S: ingest:<table> | preview | embed | admin; none = read dashboards only)\n       serve api-key revoke --file KEYS.json --id ID [--audit PATH]\n       serve api-key list --file KEYS.json\n       serve share-password [--generate]   (a shared dashboard's password_hash; the password on stdin)\n       serve --version\n\
+       Both modes take --plugin <file.wasm> (repeatable): a runtime plugin's roles, panels and\n\
+       macros, sandboxed (builds with the `plugins` feature, #1213); --plugin-assets also serves\n\
+       its browser files, which run in the page outside the sandbox.\n\nQueries run through the `duckdb` CLI on PATH.";
 
 fn usage(msg: &str) -> ! {
     eprintln!("error: {msg}\n\n{USAGE}");
@@ -169,6 +172,8 @@ fn parse_args() -> Opts {
     let mut assist_switch = false;
     let (mut log, mut log_vars, mut audit) = (None, None, None);
     let mut query_timeout_given = false;
+    // #1213: runtime plugins, loaded once the flags are read
+    let (mut plugins, mut plugin_assets) = (Vec::<String>::new(), false);
     let mut args = std::env::args().skip(1);
     let num = |v: Option<String>, what: &str| -> u64 {
         v.and_then(|v| v.parse().ok())
@@ -220,6 +225,11 @@ fn parse_args() -> Opts {
                 )
             }
             "--db" => o.db = args.next().unwrap_or_else(|| usage("--db needs a path")),
+            "--plugin" => plugins.push(
+                args.next()
+                    .unwrap_or_else(|| usage("--plugin needs a .wasm file")),
+            ),
+            "--plugin-assets" => plugin_assets = true,
             "--theme" => {
                 let v = args
                     .next()
@@ -419,7 +429,37 @@ fn parse_args() -> Opts {
         (None, Some(_)) => usage("--audit needs --auth"),
         _ => {}
     }
+    if plugin_assets && plugins.is_empty() {
+        usage("--plugin-assets applies to --plugin");
+    }
+    for p in &plugins {
+        match load_plugin(p, plugin_assets) {
+            Ok(name) => eprintln!(
+                "plugin {name} from {p}{}",
+                if plugin_assets {
+                    " (with its browser files: they run in the page, outside the sandbox)"
+                } else {
+                    ""
+                }
+            ),
+            Err(e) => usage(&format!("--plugin {e}")),
+        }
+    }
     o
+}
+
+/// Load and register a runtime plugin (#1213); `assets`: with its browser
+/// files (the operator's `--plugin-assets`).
+#[cfg(feature = "plugins")]
+fn load_plugin(file: &str, assets: bool) -> Result<&'static str, String> {
+    crate::plugin::register_file_with(std::path::Path::new(file), assets)
+}
+
+#[cfg(not(feature = "plugins"))]
+fn load_plugin(file: &str, _assets: bool) -> Result<&'static str, String> {
+    Err(format!(
+        "{file}: this build has no plugin support (feature `plugins`)"
+    ))
 }
 
 /// The `serve` command: reads its arguments from the process and exits

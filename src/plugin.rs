@@ -85,8 +85,14 @@ pub struct Plugin {
     engine: Engine,
     module: wasmi::Module,
     limits: Limits,
-    live: Mutex<Option<Live>>,
+    /// Instances, made when first needed: a server's parallel requests use
+    /// several (#1213 step 2), each with its own memory and fuel.
+    pool: Vec<Mutex<Option<Live>>>,
+    next: std::sync::atomic::AtomicUsize,
 }
+
+/// At most this many instances of one plugin (each up to its memory cap).
+const MAX_INSTANCES: usize = 4;
 
 struct Live {
     store: Store<StoreLimits>,
@@ -107,7 +113,16 @@ impl Plugin {
     /// Call `f` on the live instance (made fresh when there is none); on any
     /// error the instance is dropped, so a trap never leaves a broken one.
     fn with_live<R>(&self, f: impl FnOnce(&mut Live) -> Result<R, String>) -> Result<R, String> {
-        let mut slot = self.live.lock().map_err(|_| "plugin lock poisoned")?;
+        // a free instance if there is one, else wait for the next in turn
+        let mut slot = match self.pool.iter().find_map(|m| m.try_lock().ok()) {
+            Some(s) => s,
+            None => {
+                let i = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.pool[i % self.pool.len()]
+                    .lock()
+                    .map_err(|_| "plugin lock poisoned")?
+            }
+        };
         if slot.is_none() {
             *slot = Some(self.instantiate()?.0);
         }
@@ -579,7 +594,15 @@ pub fn load_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static P
         engine,
         module,
         limits,
-        live: Mutex::new(Some(live)),
+        pool: {
+            let n = std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .clamp(1, MAX_INSTANCES);
+            let mut pool = vec![Mutex::new(Some(live))];
+            pool.extend((1..n).map(|_| Mutex::new(None)));
+            pool
+        },
+        next: std::sync::atomic::AtomicUsize::new(0),
     })))
 }
 
@@ -595,10 +618,15 @@ pub fn register_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'stat
     Ok(p.name)
 }
 
-/// Load the plugin file at `path` and register it.
+/// Load the plugin file at `path` and register it (without its browser files).
 pub fn register_file(path: &std::path::Path) -> Result<&'static str, String> {
+    register_file_with(path, false)
+}
+
+/// [`register_file`]; `assets`: with its browser files (see [`load_with`]).
+pub fn register_file_with(path: &std::path::Path, assets: bool) -> Result<&'static str, String> {
     let wasm = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    register(&wasm, Limits::default()).map_err(|e| format!("{}: {e}", path.display()))
+    register_with(&wasm, Limits::default(), assets).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn value(v: &crate::Value) -> Json {
