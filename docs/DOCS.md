@@ -1534,7 +1534,10 @@ inaccessibility — scaled so its **area** is proportional to the value:
 `::SIZE` (e.g. `4::SIZE`) sets every symbol to that fixed radius in px, with
 no size legend. Symbols are drawn **largest first** (so small ones stay
 visible), which is the one place a map breaks row order — `data-row` still
-holds the row.
+holds the row. One exception (#1202): a `::CATEGORY` of few, large symbols
+among many small ones — landmarks, e.g. 3 depots among 5,000 customers (at
+most 2 % of the rows, each at least twice the others' median size) — is
+drawn last, over a halo in the panel's colour, so the crowd doesn't bury it.
 
 Colour follows the same rule as a choropleth: the measure through the
 sequential/diverging ramp (classes, `::RANGE` and `::MIDPOINT` all work),
