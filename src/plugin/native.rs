@@ -374,7 +374,7 @@ impl Module for Plugin {
     fn assets(&self) -> &'static [(&'static str, &'static [u8])] {
         self.assets
     }
-    fn render_contract(
+    fn contract_answer(
         &self,
         plot: &str,
         rows: &[Map<String, Json>],
@@ -382,7 +382,7 @@ impl Module for Plugin {
         width: u32,
         height: u32,
         o: &RenderOptions,
-    ) -> Option<Result<String, String>> {
+    ) -> Option<Result<crate::module::ContractAnswer, String>> {
         if !self.plots.contains(&plot) {
             return None;
         }
@@ -395,7 +395,7 @@ impl Module for Plugin {
         }
         Some(
             self.call_json(Call::RenderContract, &input)
-                .and_then(|out| super::checked_svg(self.name, &out)),
+                .and_then(|out| super::contract_answer(self.name, &out)),
         )
     }
 }

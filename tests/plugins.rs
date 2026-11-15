@@ -567,3 +567,50 @@ fn serve_loads_a_plugin_and_its_browser_files_only_when_allowed() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_plugin_can_answer_with_columns_the_host_draws() {
+    // #1218: hello_bars answers with ::XAXIS + ::BARCHART columns; the host
+    // draws them as its own bar chart (its renderer, the viewer's theme)
+    hello();
+    let svg = anofox_visualization::render_spec(
+        r#"{"plot": "hello_bars", "rows": [{"name": "Ada"}, {"name": "Maximilian"}], "width": 400, "height": 200}"#,
+    );
+    assert!(
+        svg.contains("data-hello=\"bars\""),
+        "the root attribute: {svg}"
+    );
+    assert!(
+        svg.contains("data-x=\"Ada\"") && svg.contains("data-x=\"Maximilian\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("data-value=\"10\""),
+        "Maximilian's bar is 10 long: {svg}"
+    );
+}
+
+#[test]
+fn a_columns_answer_needs_known_roles() {
+    use anofox_visualization::module::ContractAnswer;
+    let bad = serde_json::json!({"columns": [{"name": "x", "role": "NOT_A_ROLE", "values": [1]}]});
+    let e = anofox_visualization::plugin::contract_answer_for_test("p", &bad)
+        .err()
+        .unwrap();
+    assert!(e.contains("no known role"), "{e}");
+    let ok = serde_json::json!({"columns": [{"name": "x", "role": "XAXIS", "values": ["a"]}, {"name": "y", "role": "BARCHART", "values": [2]}],
+                                "root_attrs": {"data-ok": "1", "onload": "x", "data-BAD": "y"}});
+    match anofox_visualization::plugin::contract_answer_for_test("p", &ok).unwrap() {
+        ContractAnswer::Columns {
+            cols, root_attrs, ..
+        } => {
+            assert_eq!(cols.len(), 2);
+            assert_eq!(
+                root_attrs,
+                vec![("data-ok".to_string(), "1".to_string())],
+                "only data-… attributes"
+            );
+        }
+        _ => panic!("columns"),
+    }
+}

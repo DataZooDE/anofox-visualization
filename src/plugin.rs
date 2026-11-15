@@ -384,3 +384,99 @@ pub(crate) fn checked_svg(name: &str, out: &Json) -> Result<String, String> {
         _ => Err(format!("plugin {name}: answered neither ok nor err")),
     }
 }
+
+/// A plugin's answer for a contract plot: `{"ok": svg}` (held to the
+/// allow-list) or `{"columns": [{"name", "role", "values"}], "root_attrs",
+/// "warnings"}` (#1218) — columns the host draws itself, each with a role
+/// token the host knows (no SVG from the plugin at all).
+pub(crate) fn contract_answer(
+    name: &str,
+    out: &Json,
+) -> Result<crate::module::ContractAnswer, String> {
+    use crate::module::ContractAnswer;
+    let Some(cols) = out["columns"].as_array() else {
+        return checked_svg(name, out).map(ContractAnswer::Svg);
+    };
+    if cols.len() > 64 {
+        return Err(format!("plugin {name}: more than 64 columns"));
+    }
+    let mut parsed = Vec::with_capacity(cols.len());
+    for c in cols {
+        let col = c["name"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let token = c["role"].as_str().unwrap_or("");
+        let role = crate::parse_role(token).ok_or_else(|| {
+            format!("plugin {name}: column {col:?} has no known role ({token:?})")
+        })?;
+        let values: Vec<crate::Value> = c["values"]
+            .as_array()
+            .map(|v| v.iter().map(json_value).collect())
+            .unwrap_or_default();
+        parsed.push(Column::new(col, role, values));
+    }
+    let root_attrs = out["root_attrs"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter(|(k, _)| {
+                    k.starts_with("data-")
+                        && k.len() <= 40
+                        && k.bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                })
+                .filter_map(|(k, v)| {
+                    v.as_str()
+                        .map(|v| (k.clone(), v.chars().take(200).collect()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let warnings = out["warnings"]
+        .as_array()
+        .map(|w| {
+            w.iter()
+                .take(50)
+                .filter_map(Json::as_str)
+                .map(|s| s.chars().take(500).collect())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ContractAnswer::Columns {
+        cols: parsed,
+        root_attrs,
+        warnings,
+    })
+}
+
+/// A JSON value as a cell: numbers, text, bools, `null`, `{"datetime": s}`.
+fn json_value(v: &Json) -> crate::Value {
+    use crate::Value as V;
+    match v {
+        Json::Null => V::Na,
+        Json::Bool(b) => V::Bool(*b),
+        Json::Number(n) => n
+            .as_i64()
+            .map(V::Integer)
+            .or_else(|| n.as_f64().map(V::Float))
+            .unwrap_or(V::Na),
+        Json::String(s) => V::Str(s.clone()),
+        Json::Object(o) => o
+            .get("datetime")
+            .and_then(Json::as_i64)
+            .map(V::DateTime)
+            .unwrap_or(V::Na),
+        Json::Array(_) => V::Na,
+    }
+}
+
+#[doc(hidden)]
+pub fn contract_answer_for_test(
+    name: &str,
+    out: &Json,
+) -> Result<crate::module::ContractAnswer, String> {
+    contract_answer(name, out)
+}

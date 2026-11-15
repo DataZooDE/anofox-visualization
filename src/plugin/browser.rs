@@ -74,7 +74,7 @@ impl Module for JsPlugin {
     fn macros(&self) -> &'static [crate::macros::MacroSpec] {
         self.macros
     }
-    fn render_contract(
+    fn contract_answer(
         &self,
         plot: &str,
         rows: &[Map<String, Json>],
@@ -82,7 +82,7 @@ impl Module for JsPlugin {
         width: u32,
         height: u32,
         o: &RenderOptions,
-    ) -> Option<Result<String, String>> {
+    ) -> Option<Result<crate::module::ContractAnswer, String>> {
         if !self.plots.contains(&plot) {
             return None;
         }
@@ -95,7 +95,7 @@ impl Module for JsPlugin {
         }
         Some(
             self.call("render_contract", &input)
-                .and_then(|out| checked_svg(self.name, &out)),
+                .and_then(|out| super::contract_answer(self.name, &out)),
         )
     }
 }

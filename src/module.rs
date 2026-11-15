@@ -85,6 +85,20 @@ pub trait Module: Send + Sync {
         let _ = (plot, rows, options, width, height, o);
         None
     }
+    /// The answer for contract plot `plot`: by default [`Module::render_contract`]'s
+    /// SVG; a module may answer with columns instead (#1218).
+    fn contract_answer(
+        &self,
+        plot: &str,
+        rows: &[serde_json::Map<String, serde_json::Value>],
+        options: &serde_json::Map<String, serde_json::Value>,
+        width: u32,
+        height: u32,
+        o: &RenderOptions,
+    ) -> Option<Result<ContractAnswer, String>> {
+        self.render_contract(plot, rows, options, width, height, o)
+            .map(|r| r.map(ContractAnswer::Svg))
+    }
 }
 
 struct Entry {
@@ -127,7 +141,7 @@ pub fn has_plot(plot: &str) -> bool {
         .any(|m| crate::sql::contract_call::macro_binding(m.name).0 == plot)
 }
 
-/// A module's drawing of contract plot `plot`; `None` when no module draws it.
+/// A module's answer for contract plot `plot`; `None` when no module draws it.
 pub(crate) fn render_contract(
     plot: &str,
     rows: &[serde_json::Map<String, serde_json::Value>],
@@ -135,10 +149,23 @@ pub(crate) fn render_contract(
     width: u32,
     height: u32,
     o: &RenderOptions,
-) -> Option<Result<String, String>> {
+) -> Option<Result<ContractAnswer, String>> {
     modules()
         .into_iter()
-        .find_map(|m| m.render_contract(plot, rows, options, width, height, o))
+        .find_map(|m| m.contract_answer(plot, rows, options, width, height, o))
+}
+
+/// What a module answers for a contract plot (#1218): the drawn SVG body,
+/// or columns the host draws itself — with its own renderer and the
+/// viewer's theme, as a built-in contract plot's.
+pub enum ContractAnswer {
+    Svg(String),
+    Columns {
+        cols: Vec<Column>,
+        /// Attributes put on the panel's root `<svg>` (`data-…` only).
+        root_attrs: Vec<(String, String)>,
+        warnings: Vec<String>,
+    },
 }
 
 /// Register `module` (once, at start-up). Refused when its name is taken or

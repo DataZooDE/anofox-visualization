@@ -165,11 +165,25 @@ fn render_plot(
         p if crate::module::has_plot(p) && rows.is_empty() => p,
         p if crate::module::has_plot(p) => {
             match crate::module::render_contract(p, rows, options, width, height, o) {
-                Some(Ok(body)) => {
+                Some(Ok(crate::module::ContractAnswer::Svg(body))) => {
                     return Ok((
                         format!("{}{body}</svg>", crate::svg_open(place, width, height)),
                         Vec::new(),
                     ))
+                }
+                // #1218: columns the module computed, drawn here like a
+                // built-in contract plot's (the viewer's theme, this renderer)
+                Some(Ok(crate::module::ContractAnswer::Columns {
+                    cols,
+                    root_attrs,
+                    warnings,
+                })) => {
+                    let (mut svg, mut w) = crate::render_placed(&cols, place, width, height, o)?;
+                    for (k, v) in root_attrs.iter().filter(|(k, _)| k.starts_with("data-")) {
+                        svg = crate::with_root_attr(svg, k, v);
+                    }
+                    w.extend(warnings);
+                    return Ok((svg, w));
                 }
                 Some(Err(e)) => return Err(RenderError::Render(e)),
                 None => {

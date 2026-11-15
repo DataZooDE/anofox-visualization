@@ -171,6 +171,8 @@ fn render_contract(input: &ContractInput) -> Result<String, String> {
 }
 ```
 
+**Answering with columns.** Instead of SVG, `render_contract` may return `ContractOutput::Columns`: columns with role tokens the host knows (`XAXIS`, `BARCHART`, `DIAGRAM`, `SHAPE`, …), drawn by the host with its own renderer and the viewer's theme, like a built-in contract plot. This is how a plugin reuses a built-in panel (the example's `anofox_plot_hello_bars`; factor graphs, #1218). A column with an unknown role is refused, and only `data-…` root attributes are kept.
+
 A parameter's default is a literal (`NULL`, a number, `'text'`, `true`/`false`) or `getvariable('name')`; an option is a parameter, optionally falling back to `getvariable('name')` (never a `__` name). `theme`, `locale`, `width` and `height` are added when not named. Anything else is refused at load.
 
 ### Browser files
@@ -204,7 +206,7 @@ The host speaks to these exports. Byte buffers are `(ptr, len)` in the plugin's 
 | `anofox_plugin_manifest` | `() -> i64` | `{"name", "roles": [{"token", "aliases", "summary"}]}` |
 | `anofox_plugin_render` | `(ptr, len) -> i64` | `{"abi", "columns", "width", "height", "theme"}` → `{"ok": svg}` or `{"err": message}` |
 | `anofox_plugin_lint` | `(ptr, len) -> i64` | `{"abi", "columns"}` → `["warning", …]` (optional) |
-| `anofox_plugin_render_contract` | `(ptr, len) -> i64` | `{"abi", "plot", "rows", "options", "width", "height", "theme"}` → `{"ok": svg}` or `{"err"}` (needed when the manifest has `"macros"`) |
+| `anofox_plugin_render_contract` | `(ptr, len) -> i64` | `{"abi", "plot", "rows", "options", "width", "height", "theme"}` → `{"ok": svg}`, `{"columns": [{"name", "role", "values"}], "root_attrs", "warnings"}` or `{"err"}` (needed when the manifest has `"macros"`) |
 | `anofox_plugin_asset` | `(ptr, len) -> i64` | `{"path"}` → the file's bytes (needed when the manifest has `"assets"`) |
 
 The manifest's `"macros"` are `{"plot", "named": [[name, default], …], "options": [{"key", "param", "fallback_var"}], "description", "example"}`, its `"assets"` the files' paths.
