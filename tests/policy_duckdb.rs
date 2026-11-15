@@ -993,6 +993,28 @@ fn a_row_filter_reads_a_redirected_table_s_temp_table() {
         v.contains("__anofox_wb_user_regions") && !v.contains("main.user_regions"),
         "{v}"
     );
+    // a correlated EXISTS with an alias (the shape the issue's club uses:
+    // `EXISTS (SELECT 1 FROM nutzer n WHERE n.id = … AND … nummer …)`)
+    let c = Policy::parse(
+        r#"{"tables": {"sales": {"rows": "EXISTS (SELECT 1 FROM user_regions n WHERE n.\"user\" = getvariable('__claim_user') AND n.region = sales.region)"}}}"#,
+    )
+    .unwrap();
+    let enf = Enforcer::compile_with(
+        &c,
+        &mut |sql: &str| rows_as_text(&file, sql),
+        "snap",
+        &redirect,
+    )
+    .unwrap();
+    let v = enf.view_statements(&[0], &alice).join("\n");
+    assert!(
+        v.contains("__anofox_wb_user_regions") && !v.contains("main.user_regions"),
+        "correlated, aliased: {v}"
+    );
+    assert!(
+        v.contains(" n") || v.contains("AS n"),
+        "the alias stays: {v}"
+    );
 }
 
 #[test]
