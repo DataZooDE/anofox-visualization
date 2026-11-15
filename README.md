@@ -119,6 +119,10 @@ and internal use; hosted or embedded use for third parties needs a commercial
 license until the Change Date (five years after publication), when it becomes
 MPL 2.0. Contact **contact@datazoo.de**.
 
+The plugin SDK (`crates/anofox-viz-plugin`) and the example plugin
+(`examples/plugins/hello`) are under **MIT OR Apache-2.0**, so a plugin built
+with them can be shipped under any licence.
+
 ## Contributing & support
 
 Pull requests are welcome (`cargo test`, and `dashboard --check` for example

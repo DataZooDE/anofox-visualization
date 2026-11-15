@@ -120,7 +120,7 @@ A **plugin** is a module compiled to one WebAssembly file and loaded at run time
 
 ### Writing one
 
-A plugin is a `cdylib` crate built for `wasm32-unknown-unknown` with the `anofox-viz-plugin` crate (`crates/anofox-viz-plugin`). It does not depend on anofox-visualization. `examples/plugins/hello` is complete:
+A plugin is a `cdylib` crate built for `wasm32-unknown-unknown` with the `anofox-viz-plugin` crate (`crates/anofox-viz-plugin`). It does not depend on anofox-visualization. The SDK and the example are under MIT OR Apache-2.0 (unlike the rest of this repository), so a plugin built with them can be shipped under any licence. `examples/plugins/hello` is complete:
 
 ```rust
 use anofox_viz_plugin::{escape, export_plugin, Manifest, Plugin, RenderInput, Role};
