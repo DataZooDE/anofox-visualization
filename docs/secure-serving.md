@@ -1858,6 +1858,19 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   rows and columns (the declaration names every column; the start line
   lists these tables) — a TEMP table the policy's rewrite accepts like
   `viewer_state`. Keep anything per-viewer in tables the policy names.
+- **Permissions kept in a saved table** (#1220). A row filter that reads a
+  saved table the policy names (`"athleten": {"rows": "nummer IN (SELECT
+  nummer FROM nutzer WHERE email = getvariable('__claim_user'))"}`) reads
+  that table's base ⊕ saved rows, unfiltered, as row filters read tables:
+  a save to `nutzer` changes what `athleten`'s viewers see at once. Every
+  dashboard reading such a table gets the saved table built on its
+  connections and keys its cache and warm connections on the change log's
+  generation, and a save's own check builds the saved tables the touched
+  table's filter reads as they are now. **This makes the saved table part
+  of the access policy: whoever may save to it decides who sees what.** Keep
+  it to admins — `options.writeback.writers`, its `::SAVE` only on an
+  admin dashboard, and a row filter on it that shows its rows only to
+  admins (a save may only touch rows the writer can see).
 - **Conflicts (optimistic).** A save carries `base`, the change log
   generation its page loaded at (moved on only by that page's own saves).
   If a newer save would be silently overwritten — any later change to a

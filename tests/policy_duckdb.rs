@@ -933,6 +933,69 @@ fn a_redirected_table_s_view_reads_the_server_s_temp_table() {
 }
 
 #[test]
+fn a_row_filter_reads_a_redirected_table_s_temp_table() {
+    // #1220: sales' row filter reads user_regions; with user_regions saved
+    // (redirected), the filter reads its TEMP table (base ⊕ saved rows), so
+    // a saved assignment reaches sales right away.
+    if !have_duckdb() {
+        return;
+    }
+    let db = db();
+    let p = Policy::parse(POLICY).unwrap();
+    let file = db.file.clone();
+    let i = p.find("main", "sales").unwrap();
+    let alice = viewer("alice", &[]);
+    let plain = Enforcer::compile(&p, &mut |sql: &str| rows_as_text(&file, sql), "snap").unwrap();
+    let v = plain.view_statements(&[i], &alice).join("\n");
+    assert!(
+        v.contains("main.user_regions"),
+        "without write-back, the snapshot's: {v}"
+    );
+    let redirect: std::collections::HashMap<String, String> = [(
+        "main.user_regions".to_string(),
+        "__anofox_wb_user_regions".to_string(),
+    )]
+    .into();
+    let enf = Enforcer::compile_with(
+        &p,
+        &mut |sql: &str| rows_as_text(&file, sql),
+        "snap",
+        &redirect,
+    )
+    .unwrap();
+    let v = enf.view_statements(&[i], &alice).join("\n");
+    assert!(
+        v.contains("__anofox_wb_user_regions"),
+        "the filter reads the server's TEMP table: {v}"
+    );
+    assert!(
+        !v.contains("main.user_regions"),
+        "not the snapshot's user_regions: {v}"
+    );
+    assert!(
+        v.contains("snap.main.sales"),
+        "sales itself isn't redirected: {v}"
+    );
+    // spelled with the snapshot's database, the same table
+    let q = Policy::parse(
+        r#"{"tables": {"sales": {"rows": "region IN (SELECT region FROM snap.main.user_regions)"}}}"#,
+    )
+    .unwrap();
+    let enf = Enforcer::compile_with(
+        &q,
+        &mut |sql: &str| rows_as_text(&file, sql),
+        "snap",
+        &redirect,
+    )
+    .unwrap();
+    let v = enf.view_statements(&[0], &alice).join("\n");
+    assert!(
+        v.contains("__anofox_wb_user_regions") && !v.contains("main.user_regions"),
+        "{v}"
+    );
+}
+
+#[test]
 fn an_agents_panels_are_classified_without_a_policy() {
     // #982 (plan §4 R6): `"policy": "none"` never turns the classifier off
     if !have_duckdb() {

@@ -2435,12 +2435,28 @@ fn load_dash_set(dir: &Path, opts: &LockedOptions) -> Result<DashSet, String> {
         Some(wb_opts) => list
             .iter()
             .map(|d| {
-                let ts = wb_opts
+                let mut ts: Vec<String> = wb_opts
                     .tables
                     .keys()
                     .filter(|t| wb::references(&d.sql, t))
                     .cloned()
                     .collect();
+                // #1220: and those a row filter of a policy table it reads
+                // names — that filter reads their TEMP tables.
+                if let Some(p) = &opts.policy {
+                    for tp in p
+                        .tables
+                        .iter()
+                        .filter(|tp| wb::references(&d.sql, &tp.table))
+                    {
+                        for t in filter_reads_saved(tp, p, wb_opts, writeback_schema(opts)) {
+                            if !ts.contains(&t) {
+                                ts.push(t);
+                            }
+                        }
+                    }
+                    ts.sort();
+                }
                 (d.id.clone(), ts)
             })
             .collect(),
@@ -3331,6 +3347,27 @@ fn writeback_policy_cover(
     Ok(out)
 }
 
+/// The saved tables `tp`'s row filter names that the policy names too
+/// (#1220): the filter reads their TEMP tables (base ⊕ saved rows), so they
+/// must be built wherever `tp`'s view is. A word match, like
+/// [`wb::references`]: a false positive only costs a materialisation.
+fn filter_reads_saved(
+    tp: &policy::TablePolicy,
+    policy: &Policy,
+    wb_opts: &WritebackOptions,
+    schema: &str,
+) -> Vec<String> {
+    let Some(cond) = tp.rows.as_deref() else {
+        return Vec::new();
+    };
+    wb_opts
+        .tables
+        .keys()
+        .filter(|t| wb::references(cond, t) && policy.find(schema, t).is_some())
+        .cloned()
+        .collect()
+}
+
 /// The schema unqualified (and so saved) table names resolve in: the
 /// `search_path`'s first entry's, else `main`.
 fn writeback_schema(opts: &LockedOptions) -> &str {
@@ -3524,6 +3561,23 @@ fn check_save_under_policy(
     for (t, i, op, rows) in row_checks {
         let decl = &w.opts.tables[&t];
         let internal = &p.saved[&t];
+        // #1220: the other saved tables this table's row filter reads, as
+        // they are now (the saved one itself is built below, before and after).
+        let tp = &p.enf.policy.tables[i];
+        let others: Vec<String> = filter_reads_saved(tp, &p.enf.policy, &w.opts, schema)
+            .into_iter()
+            .filter(|u| *u != t && p.saved.contains_key(u))
+            .collect();
+        for u in &others {
+            c.exec(&format!(
+                "DROP TABLE IF EXISTS temp.main.\"{}\"",
+                p.saved[u]
+            ))
+            .map_err(failed)?;
+        }
+        if !others.is_empty() {
+            seed_writeback(&c, &w.opts, &folded, &others, &p.saved).map_err(failed)?;
+        }
         // The keys this save touches, staged through an Appender (never SQL text).
         c.exec("CREATE OR REPLACE TEMP TABLE __anofox_wb_keys (\"row\" VARCHAR)")
             .map_err(failed)?;

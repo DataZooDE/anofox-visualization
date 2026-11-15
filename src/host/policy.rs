@@ -553,6 +553,11 @@ struct Walker<'a> {
     /// `Mode::Panel`: the default database's schemas, and the contract's
     /// tables when the dashboard reads only those (lower case).
     panel: Option<(&'a HashSet<String>, Option<&'a HashSet<String>>)>,
+    /// `Mode::Rows` (#1220): policy tables whose rows the server builds per
+    /// connection (lower-case `schema.table` → the TEMP table, base ⊕ saved
+    /// rows) — a row filter reading one reads that TEMP table instead of
+    /// the snapshot's, so a save reaches every filter that reads it.
+    rows_redirect: Option<&'a HashMap<String, String>>,
 }
 
 fn s<'v>(o: &'v Map<String, Value>, k: &str) -> &'v str {
@@ -598,6 +603,7 @@ impl Walker<'_> {
             used: BTreeSet::new(),
             columns: BTreeSet::new(),
             panel: None,
+            rows_redirect: None,
         }
     }
 
@@ -870,8 +876,16 @@ impl Walker<'_> {
                         return Ok(());
                     }
                 }
-                if catalog.is_empty() {
-                    let schema = if schema.is_empty() { "main" } else { &schema };
+                let in_snapshot =
+                    catalog.is_empty() || catalog.eq_ignore_ascii_case(&self.enf.default_db);
+                let schema = if schema.is_empty() { "main" } else { &schema };
+                let internal = self
+                    .rows_redirect
+                    .filter(|_| in_snapshot)
+                    .and_then(|r| r.get(&format!("{schema}.{name}").to_ascii_lowercase()));
+                if let Some(n) = internal {
+                    set(o, "temp", "main", n);
+                } else if catalog.is_empty() {
                     set(o, &self.enf.default_db, schema, &name);
                 }
             }
@@ -1264,6 +1278,8 @@ impl Enforcer {
     /// instead of the snapshot's (`temp.main.<name>`, base ⊕ saved rows),
     /// so its row filter and column rules apply to those rows. The filter is
     /// checked against the snapshot's table (the TEMP one has its columns).
+    /// Any row filter that reads a redirected table reads its TEMP table
+    /// too (#1220): the server must build it wherever such a view is made.
     pub fn compile_with(
         policy: &Policy,
         duck: &mut dyn Duck,
@@ -1329,7 +1345,13 @@ impl Enforcer {
                     return Err(format!("policy: '{n}' is not a server name"));
                 }
             }
-            let body_for = |duck: &mut dyn Duck, target: &str| -> Result<String, String> {
+            // `redirected`: the condition's own reads of redirected tables
+            // go to their TEMP tables too (#1220) — not for the bind check,
+            // which runs before any TEMP table exists.
+            let body_for = |duck: &mut dyn Duck,
+                            target: &str,
+                            redirected: bool|
+             -> Result<String, String> {
                 Ok(match &t.rows {
                     None => format!("SELECT * FROM {target}"),
                     Some(cond) => {
@@ -1346,6 +1368,9 @@ impl Enforcer {
                         // The target is already qualified, so only the
                         // condition can change.
                         let mut w = Walker::new(Mode::Rows, &enf, &none);
+                        if redirected {
+                            w.rows_redirect = Some(redirect);
+                        }
                         w.walk(&mut ast["statements"])
                             .map_err(|e| format!("policy: rows of '{}': {e}", t.name()))?;
                         deserialize(duck, &ast)?
@@ -1354,15 +1379,16 @@ impl Enforcer {
             };
             // Binds? Against the snapshot's table (claims are unset here:
             // getvariable() is NULL); a redirected table has its columns.
-            let checked = body_for(duck, &base)?;
+            let checked = body_for(duck, &base, false)?;
             duck.rows(&format!(
                 "SELECT count(*)::VARCHAR FROM ({checked}) AS {} LIMIT 0",
                 quote_ident(&t.table)
             ))
             .map_err(|e| format!("policy: rows of '{}': {e}", t.name()))?;
             let body = match internal {
-                Some(n) => body_for(duck, &format!("temp.main.{}", quote_ident(n)))?,
-                None => checked,
+                Some(n) => body_for(duck, &format!("temp.main.{}", quote_ident(n)), true)?,
+                None if redirect.is_empty() => checked,
+                None => body_for(duck, &base, true)?,
             };
             enf.bodies.push(body);
         }
