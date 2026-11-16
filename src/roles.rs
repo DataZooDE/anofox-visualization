@@ -405,12 +405,14 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TOGGLE", &["SWITCH", "CHECKBOX"], R::Input(InputKind::Toggle), "input", false,
       "on/off switch → a BOOLEAN variable (value = default)"),
     e("FORM", &["PARAM_FORM", "PARAMETERS"], R::Input(InputKind::Form), "input", false,
-      "a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/toggle/date/text), value, options, min, max, step, label, unit, help, show_if ('model=normal'), source; the values come back as one JSON object: getvariable('name')->>'field'"),
+      "a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/toggle/date/text/preset), value, options, min, max, step, label, unit, help, show_if ('model=normal', 'a=x & b=y | c=z'), source, section, advanced, width (half/full); ::TITLE / ::SUBTITLE / ::FORM_LAYOUT columns style the card; the values come back as one JSON object: getvariable('name')->>'field'"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
     e("DEFAULT", &["IS_DEFAULT"], R::InputDefault, "input", true, "true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all"),
     e("DROPDOWN_STYLE", &[], R::DropdownStyle, "input", false,
       "forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold"),
+    e("FORM_LAYOUT", &[], R::FormLayout, "input", false,
+      "how a ::FORM's sections show, a column of the form's statement: 'list' (headings, the default), 'tabs' or 'accordion' (the first open)"),
     e("SUBMIT", &[], R::Submit, "input", false,
       "a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server)"),
     e("SUBMIT_VARS", &[], R::SubmitVars, "input", false,
@@ -1280,6 +1282,7 @@ mod tests {
             Role::OptionLabel,
             Role::InputDefault,
             Role::DropdownStyle,
+            Role::FormLayout,
             Role::Submit,
             Role::SubmitVars,
             Role::SubmitDone,
@@ -1468,6 +1471,7 @@ mod tests {
                 | Role::OptionLabel
                 | Role::InputDefault
                 | Role::DropdownStyle
+                | Role::FormLayout
                 | Role::Submit
                 | Role::SubmitVars
                 | Role::SubmitDone

@@ -95,9 +95,11 @@ pub struct Diagnostic {
     /// `folder/setup-table` (a setup `CREATE TABLE … AS`, rebuilt on every
     /// new server connection when served).
     /// `::FORM` fields ([`crate::form::fields`], #683): `form/no-value` |
-    /// `form/unknown-type` | `form/no-options` | `form/bad-show-if` (errors)
-    /// | `form/bad-value` | `form/bad-range` | `form/slider-range` |
-    /// `form/duplicate-field` | `form/no-key` | `form/too-many-fields`
+    /// `form/unknown-type` | `form/no-options` | `form/bad-show-if` |
+    /// `form/bad-preset` (errors) | `form/bad-value` | `form/bad-range` |
+    /// `form/slider-range` | `form/duplicate-field` | `form/no-key` |
+    /// `form/too-many-fields` | `form/bad-width` | `form/partial-sections` |
+    /// `form/unknown-layout` (#1233)
     /// (warnings).
     /// `::FIGURE` blocks ([`figure_diags`], #661): `figure/unclosed` |
     /// `figure/nested` | `figure/not-a-chart` | `figure/bad-option` |
@@ -881,10 +883,33 @@ where
                     // #683: a ::FORM's own rows are its fields.
                     if kind == InputKind::Form {
                         let key = names.first().map(String::as_str).unwrap_or("");
+                        // #1233: how its sections show
+                        if let Some((idx, _)) = p.roles.iter().find(|(_, r)| *r == Role::FormLayout)
+                        {
+                            if let Some(v) = rows
+                                .first()
+                                .and_then(|r| r.values().nth(*idx))
+                                .and_then(|v| v.as_str())
+                            {
+                                let lv = v.trim().to_ascii_lowercase();
+                                if !crate::form::LAYOUTS.contains(&lv.as_str()) {
+                                    diags.push(Diagnostic {
+                                        severity: Severity::Warning,
+                                        stmt,
+                                        code: "form/unknown-layout",
+                                        message: format!(
+                                            "::FORM_LAYOUT `{lv}` is not one of {} — drawn as 'list'",
+                                            crate::form::LAYOUTS.join(", ")
+                                        ),
+                                        sql: short.clone(),
+                                    });
+                                }
+                            }
+                        }
                         for (code, message) in crate::form::fields(key, &rows).1 {
                             let severity = match code {
                                 "form/no-value" | "form/unknown-type" | "form/no-options"
-                                | "form/bad-show-if" => Severity::Error,
+                                | "form/bad-show-if" | "form/bad-preset" => Severity::Error,
                                 _ => Severity::Warning,
                             };
                             diags.push(Diagnostic {
@@ -12849,6 +12874,35 @@ mod design_tests {
             !d.iter().any(|x| x.code == "dropdown-style/unknown"),
             "{d:?}"
         );
+    }
+
+    #[test]
+    fn form_layout_is_checked() {
+        // #1233: a ::FORM_LAYOUT column of the form's own statement
+        for (layout, bad) in [("zigzag", true), ("Tabs", false)] {
+            let data = vec![
+                json!({ "cmp": "a", "value": 1, "section": "S", "layout": layout })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ];
+            let sql = format!(
+                "SELECT 'a' AS cmp ::FORM, 1 AS value, 'S' AS section, '{layout}' AS layout ::FORM_LAYOUT FROM t;"
+            );
+            let d = check_opts(
+                &sql,
+                |_q| Ok(data.clone()),
+                LintOptions {
+                    design: false,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                d.iter().any(|x| x.code == "form/unknown-layout"),
+                bad,
+                "{layout}: {d:?}"
+            );
+        }
     }
 
     #[test]

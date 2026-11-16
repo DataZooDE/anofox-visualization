@@ -1580,7 +1580,11 @@ fn rewrite_list(list: &str) -> Rewritten {
                     // number format, colour scale, badge, sparkline) by output
                     // position so the browser can render each.
                     if let Some(rr) = parse_role(tok) {
-                        if crate::roles::is_table_chrome(rr) || crate::roles::is_table_format(rr) {
+                        if crate::roles::is_table_chrome(rr)
+                            || crate::roles::is_table_format(rr)
+                            // #1233: how a form's sections show
+                            || (role == Role::Input(InputKind::Form) && rr == Role::FormLayout)
+                        {
                             roles.push((idx, rr));
                         }
                         if rr == Role::Info && role == Role::PagedTable {

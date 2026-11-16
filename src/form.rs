@@ -16,8 +16,16 @@
 //! list, or a comma-separated text, for a dropdown), `min` / `max` / `step`,
 //! `label`, `unit`, `help`, `show_if` (`'model=normal'`,
 //! `'model=normal|fitted'`: shown only while that other field has one of
-//! those values) and `source` (provenance, shown beside the field: "fitted
-//! from 214 POs", "manual").
+//! those values; `&` and `|` join conditions, `'capex=true & fin=loan'`) and
+//! `source` (provenance, shown beside the field: "fitted from 214 POs",
+//! "manual").
+//!
+//! Long forms (#1233): `section` groups fields under a heading (shown as a
+//! list, tabs or an accordion: `::FORM_LAYOUT`), `advanced` (boolean) puts a
+//! field in its section's collapsed "More" part, `width` (`half` / `full`)
+//! lets two short fields share a row, and a `preset` row (its `options` a
+//! JSON object, one entry per choice: `{"Flat": {"use_kwh": 2000}}`) sets
+//! several fields at once — it is no key of the variable.
 //!
 //! A JSON object text is the variable's value everywhere: the browser sets
 //! it, `dashboard --check` and the static renderers bind the rows' own
@@ -36,11 +44,14 @@ pub enum FieldType {
     Toggle,
     Date,
     Text,
+    /// Sets several fields at once (#1233); not a key of the variable.
+    Preset,
 }
 
 impl FieldType {
-    pub const NAMES: &'static [&'static str] =
-        &["number", "slider", "dropdown", "toggle", "date", "text"];
+    pub const NAMES: &'static [&'static str] = &[
+        "number", "slider", "dropdown", "toggle", "date", "text", "preset",
+    ];
 
     fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
@@ -50,6 +61,7 @@ impl FieldType {
             "toggle" | "switch" | "checkbox" | "boolean" | "bool" => FieldType::Toggle,
             "date" => FieldType::Date,
             "text" | "string" | "varchar" => FieldType::Text,
+            "preset" | "presets" => FieldType::Preset,
             _ => return None,
         })
     }
@@ -62,6 +74,7 @@ impl FieldType {
             FieldType::Toggle => "toggle",
             FieldType::Date => "date",
             FieldType::Text => "text",
+            FieldType::Preset => "preset",
         }
     }
 
@@ -84,10 +97,26 @@ pub struct Field {
     pub label: Option<String>,
     pub unit: Option<String>,
     pub help: Option<String>,
-    /// `(other field, allowed values)`.
-    pub show_if: Option<(String, Vec<String>)>,
+    /// When the field shows: any of these groups holds, a group when every
+    /// `(other field, allowed values)` in it does (`a=1 & b=x | c=y`).
+    pub show_if: ShowIf,
     pub source: Option<String>,
+    /// The heading it sits under (#1233).
+    pub section: Option<String>,
+    /// In its section's collapsed "More" part.
+    pub advanced: bool,
+    /// `half`: two such fields share a row; `full` (the default) a row alone.
+    pub half: bool,
+    /// A preset's choices: `(label, field → value)`.
+    pub presets: Vec<(String, Map<String, Json>)>,
 }
+
+/// A `show_if`: any group holds when every `(field, allowed values)` in it
+/// does.
+pub type ShowIf = Vec<Vec<(String, Vec<String>)>>;
+
+/// The `::FORM_LAYOUT` values: how a form's sections show (#1233).
+pub const LAYOUTS: &[&str] = &["list", "tabs", "accordion"];
 
 impl Field {
     pub fn to_json(&self) -> Json {
@@ -102,8 +131,21 @@ impl Field {
             "label": self.label,
             "unit": self.unit,
             "help": self.help,
-            "show_if": self.show_if.as_ref().map(|(f, vs)| serde_json::json!({"field": f, "values": vs})),
+            "show_if": (!self.show_if.is_empty()).then(|| {
+                self.show_if
+                    .iter()
+                    .map(|g| {
+                        g.iter()
+                            .map(|(f, vs)| serde_json::json!({"field": f, "values": vs}))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            }),
             "source": self.source,
+            "section": self.section,
+            "advanced": self.advanced,
+            "width": if self.half { "half" } else { "full" },
+            "presets": self.presets.iter().map(|(l, v)| serde_json::json!({"label": l, "values": v})).collect::<Vec<_>>(),
         })
     }
 }
@@ -161,16 +203,68 @@ fn options_of(v: Option<&Json>) -> Vec<String> {
     }
 }
 
-/// `'model=normal'` / `'model=normal|fitted'` → `(model, [normal, fitted])`.
-fn parse_show_if(s: &str) -> Option<(String, Vec<String>)> {
-    let (f, vs) = s.split_once('=')?;
-    let f = f.trim();
-    let vs: Vec<String> = vs
-        .split('|')
-        .map(|v| v.trim().trim_matches('\'').to_string())
-        .filter(|v| !v.is_empty())
-        .collect();
-    (!f.is_empty() && !vs.is_empty()).then(|| (f.to_string(), vs))
+/// `'model=normal'` / `'model=normal|fitted'` → `[[(model, [normal, fitted])]]`;
+/// `&` joins conditions, `|` before another `field=` starts an alternative
+/// group (#1233): `'capex=true & fin=loan|lease | profile=home'` →
+/// `[[(capex, [true]), (fin, [loan, lease])], [(profile, [home])]]`.
+fn parse_show_if(s: &str) -> Option<ShowIf> {
+    let mut groups: ShowIf = vec![Vec::new()];
+    // (operator before it, token)
+    let mut toks: Vec<(char, &str)> = Vec::new();
+    let mut op = '&';
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        if c == '&' || c == '|' {
+            toks.push((op, &s[start..i]));
+            op = c;
+            start = i + 1;
+        }
+    }
+    toks.push((op, &s[start..]));
+    for (op, t) in toks {
+        let t = t.trim();
+        match t.split_once('=') {
+            Some((f, v)) => {
+                let (f, v) = (f.trim(), v.trim().trim_matches('\'').to_string());
+                if f.is_empty() || v.is_empty() {
+                    return None;
+                }
+                if op == '|' {
+                    groups.push(Vec::new());
+                }
+                groups.last_mut()?.push((f.to_string(), vec![v]));
+            }
+            // `|b` after `a=x`: another value of that condition
+            None if op == '|' => {
+                let v = t.trim_matches('\'').to_string();
+                if v.is_empty() {
+                    return None;
+                }
+                groups.last_mut()?.last_mut()?.1.push(v);
+            }
+            None => return None,
+        }
+    }
+    groups.iter().all(|g| !g.is_empty()).then_some(groups)
+}
+
+/// A preset's `options`: a JSON object (or its text), one entry per
+/// choice, each an object of field values.
+fn presets_of(v: Option<&Json>) -> Option<Vec<(String, Map<String, Json>)>> {
+    let obj = match v? {
+        Json::Object(o) => o.clone(),
+        Json::String(s) => match serde_json::from_str::<Json>(s).ok()? {
+            Json::Object(o) => o,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    obj.into_iter()
+        .map(|(k, v)| match v {
+            Json::Object(o) => Some((k, o)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A row's value for `name`, the column matched case-insensitively.
@@ -229,7 +323,23 @@ pub fn fields(
             ));
             FieldType::Text
         });
-        let options = options_of(col(row, "options"));
+        let presets = if kind == FieldType::Preset {
+            let p = presets_of(col(row, "options"));
+            if p.as_ref().is_none_or(Vec::is_empty) {
+                issues.push((
+                    "form/bad-preset",
+                    format!("field `{key}`: a preset's `options` is a JSON object, one entry per choice: '{{\"Flat\": {{\"use_kwh\": 2000}}}}'"),
+                ));
+            }
+            p.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let options = if kind == FieldType::Preset {
+            presets.iter().map(|(l, _)| l.clone()).collect()
+        } else {
+            options_of(col(row, "options"))
+        };
         let (min, max, step) = (
             num(col(row, "min")),
             num(col(row, "max")),
@@ -249,6 +359,7 @@ pub fn fields(
                 }
             },
             FieldType::Toggle => Json::Bool(raw.is_some_and(truthy)),
+            FieldType::Preset => Json::Null,
             _ => text(raw).map_or(Json::Null, Json::String),
         };
         if kind == FieldType::Dropdown {
@@ -295,7 +406,14 @@ pub fn fields(
         if let (Some(t), None) = (&show_if_text, &show_if) {
             issues.push((
                 "form/bad-show-if",
-                format!("field `{key}`: show_if `{t}` — write it as 'field=value' or 'field=a|b'"),
+                format!("field `{key}`: show_if `{t}` — write it as 'field=value', 'field=a|b' or 'a=x & b=y | c=z'"),
+            ));
+        }
+        let width = text(col(row, "width")).map(|w| w.to_ascii_lowercase());
+        if let Some(w) = width.as_deref().filter(|w| *w != "half" && *w != "full") {
+            issues.push((
+                "form/bad-width",
+                format!("field `{key}`: width `{w}` — 'half' or 'full' (drawn full)"),
             ));
         }
         out.push(Field {
@@ -309,12 +427,16 @@ pub fn fields(
             label: text(col(row, "label")),
             unit: text(col(row, "unit")),
             help: text(col(row, "help")),
-            show_if,
+            show_if: show_if.unwrap_or_default(),
             source: text(col(row, "source")),
+            section: text(col(row, "section")),
+            advanced: col(row, "advanced").is_some_and(truthy),
+            half: width.as_deref() == Some("half"),
+            presets,
         });
     }
     for f in &out {
-        if let Some((other, _)) = &f.show_if {
+        for (other, _) in f.show_if.iter().flatten() {
             if !out.iter().any(|g| &g.key == other) {
                 issues.push((
                     "form/bad-show-if",
@@ -325,15 +447,67 @@ pub fn fields(
                 ));
             }
         }
+        for (label, vals) in &f.presets {
+            for (k, v) in vals {
+                match out.iter().find(|g| &g.key == k && g.kind != FieldType::Preset) {
+                    None => issues.push((
+                        "form/bad-preset",
+                        format!(
+                            "field `{}`: preset `{label}` sets `{k}`, which is no field of this form",
+                            f.key
+                        ),
+                    )),
+                    Some(g) if !value_fits(g, v) => issues.push((
+                        "form/bad-preset",
+                        format!(
+                            "field `{}`: preset `{label}` sets `{k}` to {v}, which that field doesn't take",
+                            f.key
+                        ),
+                    )),
+                    _ => {}
+                }
+            }
+        }
+    }
+    // a section on some rows only: the rest go under an untitled heading
+    let sectioned = out.iter().filter(|f| f.section.is_some()).count();
+    if sectioned > 0 && sectioned < out.len() {
+        let bare: Vec<&str> = out
+            .iter()
+            .filter(|f| f.section.is_none())
+            .map(|f| f.key.as_str())
+            .take(5)
+            .collect();
+        issues.push((
+            "form/partial-sections",
+            format!(
+                "some fields have a `section` and some don't ({}) — those are drawn first, under no heading",
+                bare.join(", ")
+            ),
+        ));
     }
     (out, issues)
 }
 
+/// Does field `f` take value `v` (a preset's): the right type, inside
+/// min/max, one of a dropdown's options.
+fn value_fits(f: &Field, v: &Json) -> bool {
+    match f.kind {
+        FieldType::Number | FieldType::Slider => v
+            .as_f64()
+            .is_some_and(|x| f.min.is_none_or(|lo| x >= lo) && f.max.is_none_or(|hi| x <= hi)),
+        FieldType::Toggle => v.is_boolean(),
+        FieldType::Dropdown => v.as_str().is_some_and(|s| f.options.iter().any(|o| o == s)),
+        FieldType::Date | FieldType::Text => v.is_string() || v.is_null(),
+        FieldType::Preset => false,
+    }
+}
+
 /// The variable's value from the fields' own values: a JSON object text,
-/// keys in field order.
+/// keys in field order (a preset is no key).
 pub fn default_json(fields: &[Field]) -> String {
     let mut m = Map::new();
-    for f in fields {
+    for f in fields.iter().filter(|f| f.kind != FieldType::Preset) {
         m.insert(f.key.clone(), f.value.clone());
     }
     Json::Object(m).to_string()
@@ -341,7 +515,9 @@ pub fn default_json(fields: &[Field]) -> String {
 
 /// [`fields`] + [`default_json`] as JSON for the browser (wasm
 /// `form_fields`): `{"fields": [{key, type, value, options, min, max, step,
-/// label, unit, help, show_if: {field, values} | null, source}], "default":
+/// label, unit, help, show_if: [[{field, values}]] | null (any group, every
+/// condition in it), source, section, advanced, width: half | full, presets:
+/// [{label, values}]}], "default":
 /// "<json text>", "issues": ["…"]}`.
 pub fn fields_json(key_col: &str, rows: &[Map<String, Json>]) -> String {
     let (fs, issues) = fields(key_col, rows);
@@ -379,7 +555,10 @@ mod tests {
         assert_eq!(f[2].kind, FieldType::Slider);
         assert_eq!(
             f[1].show_if,
-            Some(("model".into(), vec!["normal".into(), "fixed".into()]))
+            vec![vec![(
+                "model".into(),
+                vec!["normal".into(), "fixed".into()]
+            )]]
         );
         assert_eq!(
             default_json(&f),
@@ -416,5 +595,82 @@ mod tests {
             3,
             "{codes:?}"
         );
+    }
+
+    #[test]
+    fn show_if_joins_conditions() {
+        let c = |f: &str, vs: &[&str]| {
+            (
+                f.to_string(),
+                vs.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            parse_show_if("capex=true & fin=loan|lease | profile=One measured home"),
+            Some(vec![
+                vec![c("capex", &["true"]), c("fin", &["loan", "lease"])],
+                vec![c("profile", &["One measured home"])],
+            ])
+        );
+        assert_eq!(
+            parse_show_if("a=1|b=2"),
+            Some(vec![vec![c("a", &["1"])], vec![c("b", &["2"])]])
+        );
+        for bad in ["", "a", "a=1 &", "a=1 & b", "=1", "a="] {
+            assert_eq!(parse_show_if(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn sections_advanced_width_presets() {
+        let r = rows(serde_json::json!([
+            {"c": "size", "type": "preset", "value": null, "section": "Household",
+             "options": "{\"Flat\": {\"use\": 2000, \"heat\": \"gas\"}, \"House\": {\"use\": 5000}}"},
+            {"c": "use", "value": 4000, "min": 500, "max": 20000, "section": "Household", "width": "half"},
+            {"c": "heat", "type": "dropdown", "options": ["gas", "pump"], "value": "gas", "section": "Household", "advanced": true},
+            {"c": "loan", "value": 5, "section": "Money", "show_if": "heat=pump & use=4000 | heat=gas"},
+        ]));
+        let (f, issues) = fields("c", &r);
+        assert!(issues.is_empty(), "{issues:?}");
+        assert_eq!(f[0].kind, FieldType::Preset);
+        assert_eq!(f[0].options, ["Flat", "House"]);
+        assert_eq!(f[0].presets[0].1["heat"], "gas");
+        assert!(f[1].half && !f[2].half && f[2].advanced);
+        assert_eq!(f[3].section.as_deref(), Some("Money"));
+        assert_eq!(f[3].show_if.len(), 2);
+        // a preset is no key of the variable
+        assert_eq!(
+            default_json(&f),
+            r#"{"use":4000.0,"heat":"gas","loan":5.0}"#
+        );
+        let j: Json = serde_json::from_str(&fields_json("c", &r)).unwrap();
+        assert_eq!(j["fields"][1]["width"], "half");
+        assert_eq!(j["fields"][0]["presets"][1]["label"], "House");
+        assert_eq!(j["fields"][3]["show_if"][1][0]["field"], "heat");
+    }
+
+    #[test]
+    fn long_form_problems() {
+        let r = rows(serde_json::json!([
+            {"c": "p", "type": "preset", "value": null, "options": "{\"A\": {\"x\": 99, \"nope\": 1}}"},
+            {"c": "q", "type": "preset", "value": null, "options": "not json"},
+            {"c": "x", "value": 1, "max": 10, "section": "S", "width": "third"},
+            {"c": "y", "value": 1, "show_if": "x=1 & zz=2"},
+        ]));
+        let (_, issues) = fields("c", &r);
+        let msgs: Vec<String> = issues.iter().map(|(c, m)| format!("{c}: {m}")).collect();
+        for want in [
+            "form/bad-preset: field `p`: preset `A` sets `x` to 99",
+            "form/bad-preset: field `p`: preset `A` sets `nope`",
+            "form/bad-preset: field `q`",
+            "form/bad-width: field `x`",
+            "form/bad-show-if: field `y`: show_if names `zz`",
+            "form/partial-sections:",
+        ] {
+            assert!(
+                msgs.iter().any(|m| m.starts_with(want)),
+                "{want}: {msgs:#?}"
+            );
+        }
     }
 }

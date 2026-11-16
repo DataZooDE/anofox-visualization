@@ -407,6 +407,9 @@ pub enum Role {
     /// searchable combobox) or `'native'` (a plain `<select>`), overriding
     /// the option-count threshold the browser otherwise switches on (#411).
     DropdownStyle,
+    /// How a `::FORM`'s sections show (`::FORM_LAYOUT`, #1233): `'list'`
+    /// (headings, the default), `'tabs'` or `'accordion'` (the first open).
+    FormLayout,
     /// A button that records this viewer's answers (`::SUBMIT`, #517): the
     /// value is the button's label. **Requires a server with
     /// `options.state`; not active until that server-side support lands

@@ -1098,6 +1098,7 @@ const FILE_SAMPLES = [
   "examples/tabular-feed.sql",
   "examples/tabular-dedup.sql",
   "examples/tabular-showcase.sql",
+  "examples/household-energy.sql",
   "examples/diagram-pipeline.sql",
   "examples/factor-graphs.sql",
   "examples/onboarding-quiz.sql",
@@ -7916,9 +7917,9 @@ function watchMoreRight(el) {
 // #996: the few words the inputs write themselves, in the dashboard's
 // language (::LOCALE); English otherwise.
 const UI_WORDS = {
-  de: { all: "Alle", none: "Keine", of: "von" },
-  fr: { all: "Tous", none: "Aucun", of: "sur" },
-  es: { all: "Todos", none: "Ninguno", of: "de" },
+  de: { all: "Alle", none: "Keine", of: "von", more: "Mehr", custom: "Eigene Werte" },
+  fr: { all: "Tous", none: "Aucun", of: "sur", more: "Plus", custom: "Personnalisé" },
+  es: { all: "Todos", none: "Ninguno", of: "de", more: "Más", custom: "Personalizado" },
 };
 function uiWord(key, en) {
   const lang = (dashLocale() || "").slice(0, 2).toLowerCase();
@@ -8766,9 +8767,10 @@ function syncUrlState() {
   if (preview) return; // #244: the URL never carries the preview's state
   try {
     const u = new URL(location.href);
-    for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.") || k.startsWith("frame.")) u.searchParams.delete(k);
+    for (const k of [...u.searchParams.keys()]) if (k.startsWith("v.") || k.startsWith("frame.") || k.startsWith("form.")) u.searchParams.delete(k);
     for (const [k, v] of urlStateParams()) u.searchParams.append(k, v);
     for (const [name, label] of frameUrlParams()) u.searchParams.append("frame." + name, label);
+    for (const [k, v] of formUiParams()) u.searchParams.append(k, v); // #1233
     if (u.href !== location.href) history.replaceState(null, "", u);
   } catch (_) {}
   embedState();
@@ -10876,11 +10878,32 @@ async function runOnce(fresh = true, pv = preview) {
           try {
             parsed = JSON.parse(form_fields(JSON.stringify(rows), varname));
           } catch (_) {}
-          dpVarDefault[varname] = JSON.stringify(parsed.default);
+          // the same JSON text the browser writes (`4000`, not Rust's `4000.0`),
+          // so an untouched form stays out of the URL
+          let def = parsed.default;
+          try {
+            def = JSON.stringify(JSON.parse(parsed.default));
+          } catch (_) {}
+          dpVarDefault[varname] = JSON.stringify(def);
           const seed = dpUrlSeed[varname];
           delete dpUrlSeed[varname];
           dpVars[varname] = formValue(varname, parsed, seed && seed.length === 1 ? seed[0] : undefined);
-          dd[i] = { kind, varname, fields: parsed.fields, caption };
+          // #1233: ::TITLE / ::SUBTITLE / ::FORM_LAYOUT columns of the form's
+          // own statement (its columns stay as they are: read by position)
+          const roleCell = (tok) => {
+            const r = s.roles.find((x) => x[1] === tok);
+            const v = r ? Object.values(rows[0])[r[0]] : null;
+            return v == null ? "" : String(v).trim();
+          };
+          const layout = roleCell("FORM_LAYOUT").toLowerCase();
+          dd[i] = {
+            kind,
+            varname,
+            fields: parsed.fields,
+            caption: roleCell("TITLE") || caption,
+            subtitle: roleCell("SUBTITLE"),
+            layout: FORM_LAYOUTS.includes(layout) ? layout : "list",
+          };
           await runSql(`SET VARIABLE ${varname} = '${dpVars[varname].replace(/'/g, "''")}'`);
           continue;
         }
@@ -14297,97 +14320,203 @@ function formValue(varname, parsed, seed) {
   } catch (_) {}
   const out = {};
   for (const f of parsed.fields) {
+    if (f.type === "preset") continue; // #1233: no key of the variable
     const v = mine && typeof mine === "object" && Object.prototype.hasOwnProperty.call(mine, f.key) ? mine[f.key] : undefined;
     out[f.key] = v !== undefined && formFieldOk(f, v) ? v : f.value;
   }
   return JSON.stringify(out);
 }
-// Is field `f` shown under the current values (its show_if)?
+// Is field `f` shown under the current values? Its show_if is a list of
+// groups: any group holds when every condition in it does (#1233).
 function formFieldShown(f, vals) {
-  if (!f.show_if) return true;
-  const v = vals[f.show_if.field];
-  return f.show_if.values.includes(v == null ? "" : String(v));
+  if (!f.show_if || !f.show_if.length) return true;
+  return f.show_if.some((g) =>
+    g.every((c) => {
+      const v = vals[c.field];
+      return c.values.includes(v == null ? "" : String(v));
+    })
+  );
 }
-// The form card: a label, input, unit, ⓘ help and provenance per field.
-function makeFormPanel(meta) {
-  const fig = document.createElement("section");
-  fig.className = "panel dp-form";
-  fig.dataset.varname = meta.varname;
-  // A re-run keeps a panel whose markup is unchanged (patchSlots) — input
-  // values are properties, not markup, so the value goes on the card too.
-  fig.dataset.value = dpVars[meta.varname] ?? "";
-  if (meta.caption) fig.appendChild(mkTitle(meta.caption));
-  let vals = {};
+// #1233: how a form's sections show (::FORM_LAYOUT; src/form.rs LAYOUTS).
+const FORM_LAYOUTS = ["list", "tabs", "accordion"];
+// A form's open tab, open accordion sections and open "More" parts, by
+// variable — only once the viewer changed them — kept in the URL as
+// `?form.<var>={"tab": …, "open": […], "more": […]}`.
+function readFormUiSeed(search = location.search) {
+  const seed = Object.create(null);
+  const names = (a) => (Array.isArray(a) ? a.filter((x) => typeof x === "string" && x.length <= 100).slice(0, 64) : undefined);
   try {
-    vals = JSON.parse(dpVars[meta.varname]);
-  } catch (_) {}
-  const commit = (key, v, el) => {
-    vals[key] = v;
-    dpVars[meta.varname] = JSON.stringify(vals);
-    if (document.activeElement === el) dpRefocus = `form:${meta.varname}:${key}`;
-    run(false);
-  };
-  const list = document.createElement("div");
-  list.className = "dp-form-fields";
-  for (const f of meta.fields) {
-    if (!formFieldShown(f, vals)) continue;
-    const row = document.createElement("div");
-    row.className = "dp-form-field";
-    row.dataset.field = f.key;
-    const id = `dp-form-${meta.varname}-${f.key}`.replace(/[^\w-]/g, "_");
-    const lab = document.createElement("label");
-    lab.className = "dp-form-label";
-    lab.htmlFor = id;
-    lab.textContent = f.label || f.key;
-    row.appendChild(lab);
-    const cur = vals[f.key];
-    let input;
-    if (f.type === "dropdown") {
-      input = document.createElement("select");
-      for (const o of f.options) {
-        const opt = document.createElement("option");
-        opt.value = opt.textContent = o;
-        if (o === cur) opt.selected = true;
-        input.appendChild(opt);
-      }
-      input.onchange = () => commit(f.key, input.value, input);
-    } else if (f.type === "toggle") {
-      input = document.createElement("input");
-      input.type = "checkbox";
-      input.setAttribute("role", "switch");
-      input.checked = cur === true;
-      input.onchange = () => commit(f.key, input.checked, input);
-    } else if (f.type === "number" || f.type === "slider") {
-      input = document.createElement("input");
-      input.type = f.type === "slider" ? "range" : "number";
-      if (f.min != null) input.min = f.min;
-      if (f.max != null) input.max = f.max;
-      input.step = f.step != null ? f.step : "any";
-      input.value = cur == null ? "" : String(cur);
-      if (f.type === "slider") {
-        const out = document.createElement("output");
-        out.className = "dp-form-out";
-        out.textContent = input.value;
-        input.oninput = () => (out.textContent = input.value);
-        row.dataset.out = "1";
-        input._out = out;
-      }
-      input.onchange = () => {
-        const n = input.value === "" ? null : Number(input.value);
-        if (n === null || formFieldOk(f, n)) commit(f.key, n, input);
-        else input.value = cur == null ? "" : String(cur);
-      };
-    } else {
-      input = document.createElement("input");
-      input.type = f.type === "date" ? "date" : "text";
-      input.value = cur == null ? "" : String(cur);
-      input.onchange = () => commit(f.key, input.value === "" ? null : input.value, input);
+    for (const [k, v] of new URLSearchParams(search)) {
+      if (!k.startsWith("form.") || String(v).length > 2000) continue;
+      const name = k.slice(5);
+      if (!URL_VAR_RE.test(name) || Object.keys(seed).length >= 32) continue;
+      const o = JSON.parse(v);
+      if (!o || typeof o !== "object" || Array.isArray(o)) continue;
+      const st = {};
+      if (typeof o.tab === "string" && o.tab.length <= 100) st.tab = o.tab;
+      if (names(o.open)) st.open = names(o.open);
+      if (names(o.more)) st.more = names(o.more);
+      seed[name] = st;
     }
-    input.id = id;
-    input.className = "dp-form-input";
-    refocus(`form:${meta.varname}:${f.key}`, input);
-    const box = document.createElement("div");
-    box.className = "dp-form-control";
+  } catch (_) {}
+  return seed;
+}
+let dpFormUi = readFormUiSeed();
+function formUiParams() {
+  const out = [];
+  for (const [k, st] of Object.entries(dpFormUi)) if (Object.keys(st).length) out.push(["form." + k, JSON.stringify(st)]);
+  return out;
+}
+// Numbers in the dashboard's ::LOCALE (#1233): shown without grouping, its
+// decimal mark; read back with that mark or a dot.
+function formDecimal() {
+  try {
+    return new Intl.NumberFormat(dashLocale() || NUM_LOCALE).formatToParts(1.5).find((p) => p.type === "decimal")?.value || ".";
+  } catch (_) {
+    return ".";
+  }
+}
+function formNumText(n) {
+  if (n == null || !Number.isFinite(n)) return "";
+  try {
+    return n.toLocaleString(dashLocale() || NUM_LOCALE, { useGrouping: false, maximumFractionDigits: 10 });
+  } catch (_) {
+    return String(n);
+  }
+}
+function formNumParse(t) {
+  let x = String(t).replace(/[\s  ']/g, "").replace(/−/g, "-");
+  if (x === "") return null;
+  const dec = formDecimal();
+  if (dec !== "." && x.includes(dec)) x = x.split(".").join("").replace(dec, ".");
+  return /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(x) ? Number(x) : NaN;
+}
+// A field's row: label, input (unit inside it), ⓘ help and provenance.
+function makeFormField(meta, f, vals, commit, commitMany) {
+  const row = document.createElement("div");
+  row.className = "dp-form-field" + (f.width === "half" ? " half" : "");
+  row.dataset.field = f.key;
+  const id = `dp-form-${meta.varname}-${f.key}`.replace(/[^\w-]/g, "_");
+  const lab = document.createElement("label");
+  lab.className = "dp-form-label";
+  lab.htmlFor = id;
+  lab.textContent = f.label || f.key;
+  row.appendChild(lab);
+  const cur = vals[f.key];
+  let input;
+  if (f.type === "preset") {
+    // #1233: one choice sets several fields; "Custom" when no preset matches
+    input = document.createElement("select");
+    const custom = document.createElement("option");
+    custom.value = "";
+    custom.textContent = uiWord("custom", "Custom");
+    input.appendChild(custom);
+    const matches = (p) => Object.entries(p.values).every(([k, v]) => vals[k] === v);
+    const hit = (f.presets || []).find(matches);
+    for (const p of f.presets || []) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = p.label;
+      if (p === hit) opt.selected = true;
+      input.appendChild(opt);
+    }
+    custom.disabled = !!hit;
+    input.onchange = () => {
+      const p = (f.presets || []).find((x) => x.label === input.value);
+      if (!p) return;
+      const patch = {};
+      for (const [k, v] of Object.entries(p.values)) {
+        const g = meta.fields.find((x) => x.key === k && x.type !== "preset");
+        if (g && formFieldOk(g, v)) patch[k] = v;
+      }
+      commitMany(patch, input, f.key);
+    };
+  } else if (f.type === "dropdown") {
+    input = document.createElement("select");
+    for (const o of f.options) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = o;
+      if (o === cur) opt.selected = true;
+      input.appendChild(opt);
+    }
+    input.onchange = () => commit(f.key, input.value, input);
+  } else if (f.type === "toggle") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.setAttribute("role", "switch");
+    input.checked = cur === true;
+    input.onchange = () => commit(f.key, input.checked, input);
+  } else if (f.type === "slider") {
+    input = document.createElement("input");
+    input.type = "range";
+    if (f.min != null) input.min = f.min;
+    if (f.max != null) input.max = f.max;
+    input.step = f.step != null ? f.step : "any";
+    input.value = cur == null ? "" : String(cur);
+    const out = document.createElement("output");
+    out.className = "dp-form-out";
+    out.textContent = formNumText(cur);
+    input.oninput = () => (out.textContent = formNumText(Number(input.value)));
+    row.dataset.out = "1";
+    input._out = out;
+    input.onchange = () => {
+      const n = input.value === "" ? null : Number(input.value);
+      if (n === null || formFieldOk(f, n)) commit(f.key, n, input);
+      else input.value = cur == null ? "" : String(cur);
+    };
+  } else if (f.type === "number") {
+    // a text field in the page's ::LOCALE (a number field shows the
+    // browser's own decimal mark); ↑ / ↓ step it
+    input = document.createElement("input");
+    input.type = "text";
+    input.inputMode = "decimal";
+    input.autocomplete = "off";
+    input.value = formNumText(cur);
+    if (f.min != null) input.setAttribute("aria-valuemin", f.min);
+    if (f.max != null) input.setAttribute("aria-valuemax", f.max);
+    const take = (n) => {
+      if (n === null || formFieldOk(f, n)) {
+        input.removeAttribute("aria-invalid");
+        commit(f.key, n, input);
+      } else {
+        input.setAttribute("aria-invalid", "true");
+        input.value = formNumText(cur);
+        setTimeout(() => input.removeAttribute("aria-invalid"), 1500);
+      }
+    };
+    input.onchange = () => take(formNumParse(input.value));
+    input.onkeydown = (e) => {
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      e.preventDefault();
+      const now = formNumParse(input.value);
+      const step = f.step != null ? f.step : 1;
+      let n = (Number.isFinite(now) ? now : 0) + (e.key === "ArrowUp" ? step : -step);
+      n = Number(n.toFixed(10));
+      if (f.min != null) n = Math.max(f.min, n);
+      if (f.max != null) n = Math.min(f.max, n);
+      input.value = formNumText(n);
+    };
+  } else {
+    input = document.createElement("input");
+    input.type = f.type === "date" ? "date" : "text";
+    input.value = cur == null ? "" : String(cur);
+    input.onchange = () => commit(f.key, input.value === "" ? null : input.value, input);
+  }
+  input.id = id;
+  input.className = "dp-form-input";
+  refocus(`form:${meta.varname}:${f.key}`, input);
+  const box = document.createElement("div");
+  box.className = "dp-form-control";
+  if (f.unit && f.type !== "toggle" && f.type !== "slider") {
+    // the unit inside the field, as a suffix
+    const wrap = document.createElement("span");
+    wrap.className = "dp-form-box";
+    wrap.appendChild(input);
+    const u = document.createElement("span");
+    u.className = "dp-form-unit";
+    u.textContent = f.unit;
+    wrap.appendChild(u);
+    box.appendChild(wrap);
+  } else {
     box.appendChild(input);
     if (input._out) box.appendChild(input._out);
     if (f.unit) {
@@ -14396,20 +14525,159 @@ function makeFormPanel(meta) {
       u.textContent = f.unit;
       box.appendChild(u);
     }
-    row.appendChild(box);
-    if (f.help) {
-      addInfo(lab, f.help);
-      lab.querySelector(".dp-info")?.classList.remove("corner"); // beside its label
-    }
-    if (f.source) {
-      const src = document.createElement("div");
-      src.className = "dp-form-source";
-      src.textContent = f.source;
-      row.appendChild(src);
-    }
-    list.appendChild(row);
   }
-  fig.appendChild(list);
+  row.appendChild(box);
+  if (f.help) {
+    addInfo(lab, f.help);
+    lab.querySelector(".dp-info")?.classList.remove("corner"); // beside its label
+  }
+  if (f.source) {
+    const src = document.createElement("div");
+    src.className = "dp-form-source";
+    src.textContent = f.source;
+    row.appendChild(src);
+  }
+  return row;
+}
+// The form card: its title / subtitle, then its fields — grouped by
+// `section` (#1233) as headings, tabs or an accordion, each section's
+// `advanced` fields in a collapsed "More" part.
+function makeFormPanel(meta) {
+  const fig = document.createElement("section");
+  fig.className = "panel dp-form";
+  fig.dataset.varname = meta.varname;
+  // A re-run keeps a panel whose markup is unchanged (patchSlots) — input
+  // values are properties, not markup, so the value goes on the card too.
+  fig.dataset.value = dpVars[meta.varname] ?? "";
+  if (meta.caption) fig.appendChild(mkTitle(meta.caption));
+  if (meta.subtitle) fig.appendChild(mkSubtitle(meta.subtitle));
+  let vals = {};
+  try {
+    vals = JSON.parse(dpVars[meta.varname]);
+  } catch (_) {}
+  const commitMany = (patch, el, key) => {
+    Object.assign(vals, patch);
+    dpVars[meta.varname] = JSON.stringify(vals);
+    if (document.activeElement === el) dpRefocus = `form:${meta.varname}:${key}`;
+    run(false);
+  };
+  const commit = (key, v, el) => commitMany({ [key]: v }, el, key);
+  const ui = (dpFormUi[meta.varname] ||= {});
+  const saveUi = () => syncUrlState();
+  // sections in first-seen order; fields without one first, under no heading
+  const order = [];
+  const by = new Map();
+  for (const f of meta.fields) {
+    const k = f.section || "";
+    if (!by.has(k)) by.set(k, []), order.push(k);
+    by.get(k).push(f);
+  }
+  if (order.includes("") && order[0] !== "") order.splice(order.indexOf(""), 1), order.unshift("");
+  const compact = order.some((k) => k) || meta.fields.some((f) => f.width === "half");
+  if (compact) fig.classList.add("dp-form-compact");
+  const layout = order.some((k) => k) ? meta.layout || "list" : "list";
+  fig.dataset.layout = layout;
+  const grid = (fields) => {
+    const list = document.createElement("div");
+    list.className = "dp-form-fields";
+    for (const f of fields) if (formFieldShown(f, vals)) list.appendChild(makeFormField(meta, f, vals, commit, commitMany));
+    return list;
+  };
+  // a section's body: its fields, then its advanced ones under "More"
+  const body = (k) => {
+    const frag = document.createElement("div");
+    frag.className = "dp-form-sec-body";
+    const fs = by.get(k);
+    frag.appendChild(grid(fs.filter((f) => !f.advanced)));
+    const adv = fs.filter((f) => f.advanced && formFieldShown(f, vals));
+    if (adv.length) {
+      const more = document.createElement("details");
+      more.className = "dp-form-more";
+      more.dataset.section = k;
+      more.open = (ui.more || []).includes(k);
+      const sum = document.createElement("summary");
+      sum.textContent = `${uiWord("more", "More")} (${adv.length})`;
+      more.appendChild(sum);
+      more.appendChild(grid(adv));
+      more.ontoggle = () => {
+        const set = new Set(ui.more || []);
+        more.open ? set.add(k) : set.delete(k);
+        ui.more = [...set];
+        saveUi();
+      };
+      frag.appendChild(more);
+    }
+    return frag;
+  };
+  const titled = order.filter((k) => k);
+  if (order[0] === "") fig.appendChild(body(""));
+  if (layout === "tabs" && titled.length) {
+    const active = titled.includes(ui.tab) ? ui.tab : titled[0];
+    const bar = document.createElement("div");
+    bar.className = "dp-form-tabs";
+    bar.setAttribute("role", "tablist");
+    const panes = [];
+    titled.forEach((k, n) => {
+      const id = `dp-form-${meta.varname}-tab${n}`.replace(/[^\w-]/g, "_");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "dp-form-tab" + (k === active ? " active" : "");
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-selected", String(k === active));
+      b.setAttribute("aria-controls", id);
+      b.textContent = k;
+      const pane = body(k);
+      pane.id = id;
+      pane.setAttribute("role", "tabpanel");
+      pane.dataset.section = k;
+      pane.hidden = k !== active;
+      panes.push(pane);
+      b.onclick = () => {
+        ui.tab = k;
+        bar.querySelectorAll(".dp-form-tab").forEach((x) => {
+          const on = x === b;
+          x.classList.toggle("active", on);
+          x.setAttribute("aria-selected", String(on));
+        });
+        panes.forEach((p) => (p.hidden = p !== pane));
+        saveUi();
+      };
+      bar.appendChild(b);
+    });
+    fig.appendChild(bar);
+    panes.forEach((p) => fig.appendChild(p));
+  } else {
+    titled.forEach((k, n) => {
+      if (layout === "accordion") {
+        const d = document.createElement("details");
+        d.className = "dp-form-sec";
+        d.dataset.section = k;
+        d.open = ui.open ? ui.open.includes(k) : n === 0;
+        const sum = document.createElement("summary");
+        sum.className = "dp-form-sec-title";
+        sum.textContent = k;
+        d.appendChild(sum);
+        d.appendChild(body(k));
+        d.ontoggle = () => {
+          const set = new Set(ui.open || titled.slice(0, 1));
+          d.open ? set.add(k) : set.delete(k);
+          ui.open = titled.filter((x) => set.has(x));
+          saveUi();
+        };
+        fig.appendChild(d);
+      } else {
+        const sec = document.createElement("fieldset");
+        sec.className = "dp-form-sec";
+        sec.dataset.section = k;
+        const lg = document.createElement("legend");
+        lg.className = "dp-form-sec-title";
+        lg.textContent = k;
+        sec.appendChild(lg);
+        sec.appendChild(body(k));
+        fig.appendChild(sec);
+      }
+    });
+  }
   return fig;
 }
 

@@ -4,7 +4,8 @@
 // wire), and the panels reading it with getvariable('lt')->>'mean' follow
 // an edit. A ?v.lt= seed restores it on a hard reload; a seed that isn't a
 // JSON object, or carries quotes and SQL, is just text: the form falls back
-// to its rows' values and nothing errors.
+// to its rows' values and nothing errors. #1233: the card's ::TITLE, its
+// sections as tabs and a preset work the same served.
 // Needs a native extension build with the real UI embedded (CI's `web-e2e`
 // job builds it, #590).
 //
@@ -41,10 +42,13 @@ const dashDir = path.join(dir, "dash");
 mkdirSync(dashDir, { recursive: true });
 writeFileSync(
   path.join(dashDir, "form.sql"),
-  `SELECT field AS lt ::FORM, type, value, options, min, max, unit FROM (VALUES
-  (1, 'model', 'dropdown', 'normal', ['fixed', 'normal'], NULL, NULL, NULL),
-  (2, 'mean', 'number', '12', NULL, 0, 90, 'days')
-) v(ord, field, type, value, options, min, max, unit) ORDER BY ord;
+  `SELECT field AS lt ::FORM, section, type, value, options, min, max, unit, advanced,
+       'Lead time' ::TITLE, 'tabs' ::FORM_LAYOUT FROM (VALUES
+  (1, 'Model', 'model', 'dropdown', 'normal', 'fixed, normal', NULL, NULL, NULL, false),
+  (2, 'Model', 'mean', 'number', '12', NULL, 0, 90, 'days', false),
+  (3, 'Model', 'speed', 'preset', NULL, '{"Slow": {"mean": 60, "model": "normal"}}', NULL, NULL, NULL, false),
+  (4, 'Extra', 'sd', 'number', '3', NULL, 0, 20, 'days', true)
+) v(ord, section, field, type, value, options, min, max, unit, advanced) ORDER BY ord;
 
 SELECT (getvariable('lt')->>'mean')::DOUBLE AS m ::METRIC, 'Mean lead time' ::LABEL;
 SELECT 'Model: ' || coalesce(getvariable('lt')->>'model', '-') AS t ::TITLE;
@@ -103,6 +107,17 @@ try {
   await page.waitForFunction(() => document.querySelector(".metric-value")?.textContent === "25", null, { timeout: 15000 }).catch(() => {});
   check((await kpi()) === "25", "served: an edit travels to the server and back");
 
+  const form = () =>
+    page.evaluate(() => ({
+      title: document.querySelector(".dp-form .panel-title")?.textContent,
+      tabs: [...document.querySelectorAll(".dp-form-tab")].map((t) => t.textContent).join(),
+    }));
+  const f = await form();
+  check(f.title === "Lead time" && f.tabs === "Model,Extra", `served: the card's ::TITLE and its sections as tabs (${f.title}; ${f.tabs})`);
+  await page.selectOption('.dp-form-field[data-field="speed"] select', "Slow");
+  await settled();
+  await page.waitForFunction(() => document.querySelector(".metric-value")?.textContent === "60", null, { timeout: 15000 }).catch(() => {});
+  check((await kpi()) === "60", "served: a preset sets its fields on the server");
   await page.goto(`http://127.0.0.1:${port}/d/form?v.lt=${encodeURIComponent(JSON.stringify({ model: "fixed", mean: 40 }))}`);
   await settled();
   check((await kpi()) === "40" && (await grid()).includes("Model: fixed"), "served: a ?v.lt= seed restores the form on a hard reload");
