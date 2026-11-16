@@ -3611,7 +3611,12 @@ fn run_duckdb(db: &str, flags: &[&str], sql: &str, timeout: Duration) -> Result<
         t_err.join().unwrap_or_default(),
     );
     if status.success() {
-        Ok(String::from_utf8_lossy(&stdout).to_string())
+        // #1244: with several statements in `-c`, the CLI prints a WARNING
+        // block (a deprecated `->` lambda) on stdout, before the JSON.
+        let (out, warnings) =
+            crate::host::duckdb_cli::split_cli_warnings(&String::from_utf8_lossy(&stdout));
+        crate::host::duckdb_cli::warn_once(&warnings);
+        Ok(out)
     } else {
         Err(String::from_utf8_lossy(&stderr).to_string())
     }

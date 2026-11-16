@@ -415,6 +415,64 @@ impl Drop for OneProcessSession {
     }
 }
 
+/// #1244: the DuckDB CLI prints a `WARNING:` block (DuckDB 1.5's deprecated
+/// `->` lambda, for one) on **stdout** when its script arrives on stdin, as
+/// here, right in front of the statement's JSON. Split such blocks off: the
+/// statement's own output, and each warning's text. The block is coloured
+/// (`ESC[90m` … `ESC[00m`); a raw ESC never occurs in DuckDB's JSON (it
+/// would be written `\u001b`), so the colour codes are dropped first.
+pub(crate) fn split_cli_warnings(text: &str) -> (String, Vec<String>) {
+    if !text.contains("WARNING:") {
+        return (text.to_string(), Vec::new());
+    }
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            for d in chars.by_ref() {
+                if d.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push(c);
+    }
+    let mut warnings = Vec::new();
+    let mut rest = plain.as_str();
+    while let Some(body) = rest.trim_start().strip_prefix("WARNING:") {
+        let (msg, after) = body.split_once("\n\n").unwrap_or((body, ""));
+        warnings.push(msg.trim().to_string());
+        rest = after;
+    }
+    if warnings.is_empty() {
+        return (text.to_string(), warnings);
+    }
+    (rest.to_string(), warnings)
+}
+
+/// Say each distinct DuckDB warning once per process (on stderr: `--check`
+/// and `serve` show it), by its first line.
+pub(crate) fn warn_once(warnings: &[String]) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    for w in warnings {
+        let first = w.lines().next().unwrap_or("").trim().to_string();
+        let Ok(mut seen) = SEEN.lock() else { return };
+        if !first.is_empty() && !seen.contains(&first) {
+            eprintln!("warning: duckdb: {first}");
+            seen.push(first);
+        }
+    }
+}
+
+/// A statement's rows from its raw output, its CLI warnings split off.
+fn rows_of(text: &str) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+    let (rows, warnings) = split_cli_warnings(text);
+    warn_once(&warnings);
+    crate::sql::parse_rows_json(&rows)
+}
+
 /// [`OneProcessSession`], returning parsed rows and handling the rare case
 /// of the child process ending unexpectedly (a crash — not an ordinary SQL
 /// error, which the session already isolates per statement on its own):
@@ -454,7 +512,7 @@ impl SessionRunner {
             RoundOutcome::Ok(text) => {
                 self.sent.push_str(sql);
                 self.sent.push('\n');
-                crate::sql::parse_rows_json(&text)
+                rows_of(&text)
             }
             RoundOutcome::Sql(e) => {
                 self.sent.push_str(sql);
@@ -494,7 +552,7 @@ impl SessionRunner {
             RoundOutcome::Ok(text) => {
                 self.sent.push_str(sql);
                 self.sent.push('\n');
-                crate::sql::parse_rows_json(&text)
+                rows_of(&text)
             }
             RoundOutcome::Sql(e) => {
                 self.sent.push_str(sql);
@@ -513,6 +571,47 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn an_arrow_lambda_runs_or_names_the_new_syntax_1244() {
+        if no_duckdb_on_path() {
+            eprintln!("skipped: no `duckdb` on PATH");
+            return;
+        }
+        let mut r = SessionRunner::spawn(None).unwrap();
+        let out = r.run("SELECT list_filter([1, 2, 3], x -> x > 1) AS a;");
+        match detect_major_version("duckdb") {
+            // 1.x warns on stdout, before the JSON: the rows still come back
+            Some(1) => assert_eq!(out.unwrap()[0]["a"], serde_json::json!([2, 3])),
+            // 2.0 refuses it, naming `lambda x: …`
+            _ => assert!(
+                out.is_ok() || out.as_ref().unwrap_err().contains("lambda"),
+                "{out:?}"
+            ),
+        }
+        // the session is fine afterwards
+        assert_eq!(
+            r.run("SELECT 2 AS b;").unwrap()[0]["b"],
+            serde_json::json!(2)
+        );
+    }
+
+    #[test]
+    fn cli_warnings_are_split_off_the_json_1244() {
+        // DuckDB 1.5.6, a `->` lambda, script on stdin: stdout as printed
+        let out = "\u{1b}[90mWARNING:\n\u{1b}[00m\u{1b}[90mDeprecated lambda arrow (->) detected. \
+                   Please transition to the new lambda syntax.\nUse SET lambda_syntax='ENABLE_SINGLE_ARROW' \
+                   to revert.\n\n\u{1b}[00m[{\"a\":[2,3]}]\n";
+        let (rows, w) = split_cli_warnings(out);
+        assert_eq!(rows.trim(), "[{\"a\":[2,3]}]");
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("Deprecated lambda arrow (->)"), "{w:?}");
+        assert_eq!(rows_of(out).unwrap()[0]["a"], serde_json::json!([2, 3]));
+        // plain output, and JSON that merely holds the word, are untouched
+        assert_eq!(split_cli_warnings("[{\"b\":2}]\n").0, "[{\"b\":2}]\n");
+        let j = "[{\"note\":\"WARNING: hot\"}]\n";
+        assert_eq!(split_cli_warnings(j), (j.to_string(), vec![]));
+    }
 
     #[test]
     fn parses_plain_and_banner_prefixed_output() {
