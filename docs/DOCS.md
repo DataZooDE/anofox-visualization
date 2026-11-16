@@ -228,11 +228,12 @@ terminal.
 | `::PERIOD` | `::PERIOD_PICKER`, `::DATE_PERIOD` | input | date presets + grain + comparison → <name>_from/_to/_prev_from/_prev_to/_grain/_compare/_label/_prev_label |
 | `::BUTTONS` | `::BUTTON_GROUP`, `::SEGMENTED` | input | segmented button group: one of a few options → a DuckDB variable (a metric / dimension switcher) |
 | `::TOGGLE` | `::SWITCH`, `::CHECKBOX` | input | on/off switch → a BOOLEAN variable (value = default) |
-| `::FORM` | `::PARAM_FORM`, `::PARAMETERS` | input | a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/toggle/date/text), value, options, min, max, step, label, unit, help, show_if ('model=normal'), source; the values come back as one JSON object: getvariable('name')->>'field' |
+| `::FORM` | `::PARAM_FORM`, `::PARAMETERS` | input | a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/toggle/date/text/preset), value, options, min, max, step, label, unit, help, show_if ('model=normal', 'a=x & b=y \| c=z'), source, section, advanced, width (half/full); ::TITLE / ::SUBTITLE / ::FORM_LAYOUT columns style the card; the values come back as one JSON object: getvariable('name')->>'field' |
 | `::HINT` |  | input | per-option hint next to a dropdown option |
 | `::OPTION_LABEL` |  | input | the shown text of a dropdown / button / multiselect option (the variable keeps the value) |
 | `::DEFAULT` | `::IS_DEFAULT` | input | true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all |
 | `::DROPDOWN_STYLE` |  | input | forces a ::DROPDOWN's widget: 'search' (searchable combobox) or 'native' (plain <select>), overriding the option-count threshold |
+| `::FORM_LAYOUT` |  | input | how a ::FORM's sections show, a column of the form's statement: 'list' (headings, the default), 'tabs' or 'accordion' (the first open) |
 | `::SUBMIT` |  | input | a button (value = its label) that records SUBMIT_VARS for this viewer, append-only — requires a locked server with options.state naming this dashboard (#517); disabled, with a visible reason, on a published static site, a server without options.state, or the wasm/live-authoring builder's own preview session (preview submissions stay in the tab, never reach a server) |
 | `::SUBMIT_VARS` |  | input | comma-separated variable names the preceding ::SUBMIT records, each declared by one of this dashboard's own input statements |
 | `::SUBMIT_DONE` |  | input | optional confirmation text shown after a successful ::SUBMIT |
@@ -490,8 +491,45 @@ SELECT (getvariable('lead_time')->>'mean')::DOUBLE AS mean ::METRIC, 'Mean' ::LA
 | `min` / `max` / `step` | A number's / slider's range and step. |
 | `label`, `unit` | Shown left of / right of the control (default label: the key). |
 | `help` | An ⓘ beside the label with this text. |
-| `show_if` | `'model=normal'` or `'model=normal\|fitted'`: the field shows only while that other field has one of those values. |
+| `show_if` | `'model=normal'` or `'model=normal\|fitted'`: the field shows only while that other field has one of those values. `&` joins conditions, and a `\|` before another `field=` starts an alternative: `'capex=true & fin=loan'`, `'profile=home \| heating=heat pump'` (`&` binds first). |
 | `source` | Provenance under the control: "fitted 2026-10-20 from 214 POs", "manual". |
+| `section` | The heading the field sits under (#1233). Sections show in the order they first appear; fields without one come first. |
+| `advanced` | `true`: the field waits in its section's collapsed **More** part. |
+| `width` | `'half'`: two such fields share a row; `'full'` (default): a row alone. |
+
+**Long forms (#1233).** A simulation with 30 inputs needs structure, not a
+wall of fields:
+
+```sql
+SELECT field AS cmp ::FORM, section, type, value, options, min, max, step, label, unit, show_if, advanced, width,
+       'Your household and the options' ::TITLE,   -- the card's title / subtitle
+       'Start from a preset' ::SUBTITLE,
+       'tabs' ::FORM_LAYOUT                        -- 'list' (headings) | 'tabs' | 'accordion'
+FROM (VALUES
+  ('Household', 'size', 'preset', NULL,
+   '{"Flat": {"use_kwh": 2000, "people": 1}, "House": {"use_kwh": 5000, "people": 4}}',
+   NULL, NULL, NULL, 'Preset', NULL, NULL, false, 'full'),
+  ('Household', 'use_kwh', 'number', '4000', NULL, 500, 20000, 100, 'Use', 'kWh/yr', NULL, false, 'half'),
+  ('Money', 'loan_pct', 'number', '5', NULL, 0, 15, 0.1, 'Loan interest', '%/yr', 'capex=true & fin=loan', true, 'half')
+  -- …
+) t(section, field, type, value, options, min, max, step, label, unit, show_if, advanced, width);
+```
+
+- **`::FORM_LAYOUT`** shows the sections as headings (`'list'`, the
+  default), as **tabs** or as an **accordion** (the first section open).
+  The open tab, the open sections and the open *More* parts are kept in the
+  URL (`?form.cmp={"tab": "Money"}`), next to the values.
+- **A `preset` row** sets several fields at once: its `options` is a JSON
+  object, one entry per choice, each an object of field values. It is no
+  key of the variable: choosing one writes those fields, editing a field
+  afterwards keeps the edit, and the preset shows *Custom* until the values
+  match one of its choices again.
+- With sections or `'half'` fields the card switches to a compact grid:
+  labels above their fields, every field one height, the unit inside the
+  field. Numbers show in the dashboard's `::LOCALE` (`3,2` under `de-DE`;
+  typing `3,5` or `3.5` both read as 3.5), and ↑ / ↓ step them.
+- The example *Which energy setup pays off for our household?* has 32
+  fields in four tabs.
 
 Only the `::FORM` column and `value` are required; the others are read by
 name (any case). Numbers and toggles are JSON numbers / booleans in the
@@ -503,8 +541,11 @@ from the new rows.
 
 The form is a card in the grid (`::COL` before it sets its width). `--check`
 reports an unknown `type`, a dropdown without `options`, a `show_if` naming
-no field or written wrongly, a missing `value` column (errors) and a value
-outside its options or min/max, a slider without a range, a repeated key
+no field or written wrongly, a preset that isn't a JSON object of field
+values or sets an unknown field or a value that field doesn't take, a
+missing `value` column (errors) and a value outside its options or
+min/max, a slider without a range, a repeated key, a `width` that isn't
+half/full, a `section` on some rows only, an unknown `::FORM_LAYOUT`
 (warnings). The static outputs bind the rows' own values, like any input's
 default.
 

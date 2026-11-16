@@ -293,6 +293,38 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-form-out{min-width:2.5em;text-align:right;font-variant-numeric:tabular-nums}
 .dp-form-source{grid-column:2;font-size:.72rem;color:var(--ax-muted)}
 @media(max-width:520px){.dp-form-field{grid-template-columns:1fr}.dp-form-source{grid-column:1}}
+/* #1233: one height and width for a form's fields; the unit inside the field */
+.dp-form{--dp-form-h:2.15rem}
+.dp-form select.dp-form-input,.dp-form input.dp-form-input:not([type=checkbox]):not([type=range]){width:100%;height:var(--dp-form-h);box-sizing:border-box;border:1px solid var(--ax-line);border-radius:7px;background:var(--ax-input-bg);color:var(--ax-ink);font:inherit;font-size:.85rem;padding:0 .55rem}
+.dp-form input.dp-form-input:not([type=checkbox]):not([type=range]):focus,.dp-form select.dp-form-input:focus{outline:2px solid var(--ax-accent);outline-offset:1px}
+.dp-form-box{display:flex;align-items:center;flex:1 1 auto;min-width:0;height:var(--dp-form-h);box-sizing:border-box;border:1px solid var(--ax-line);border-radius:7px;background:var(--ax-input-bg);padding-right:.55rem}
+.dp-form-box:focus-within{outline:2px solid var(--ax-accent);outline-offset:1px}
+.dp-form .dp-form-box>input.dp-form-input:not([type=checkbox]){border:0;background:transparent;outline:none;box-shadow:none;height:100%;flex:1 1 auto;min-width:0}
+.dp-form input.dp-form-input[inputmode=decimal]{text-align:right;font-variant-numeric:tabular-nums}
+.dp-form-box>.dp-form-unit{padding-left:.35rem}
+/* #1233: sections (list / tabs / accordion), "More", half-width fields */
+.dp-form-compact .dp-form-fields{grid-template-columns:repeat(2,minmax(0,1fr));column-gap:1rem;row-gap:.65rem}
+.dp-form-compact .dp-form-field{grid-column:1/-1;grid-template-columns:1fr;row-gap:.25rem}
+.dp-form-compact .dp-form-field.half{grid-column:auto}
+.dp-form-compact .dp-form-source{grid-column:1}
+.dp-form-compact .dp-form-label{font-size:.8rem}
+fieldset.dp-form-sec{border:0;margin:0;padding:0;min-width:0}
+fieldset.dp-form-sec+fieldset.dp-form-sec,.dp-form-sec-body+fieldset.dp-form-sec{margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--ax-line)}
+fieldset.dp-form-sec>legend{float:left;width:100%}
+fieldset.dp-form-sec>.dp-form-sec-body{clear:both}
+.dp-form-sec-title{font-size:.78rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--ax-muted);padding:0;margin:0 0 .55rem}
+details.dp-form-sec{border-top:1px solid var(--ax-line);padding:.5rem 0}
+details.dp-form-sec>summary{cursor:pointer;margin:0;list-style-position:inside}
+details.dp-form-sec[open]>summary{margin-bottom:.6rem}
+.dp-form-tabs{display:flex;flex-wrap:wrap;gap:.2rem;border-bottom:1px solid var(--ax-line);margin:0 0 .8rem}
+.dp-form-tab{background:none;border:0;border-radius:7px 7px 0 0;padding:.4rem .75rem;font-size:.85rem;font-weight:600;color:var(--ax-tab-ink);cursor:pointer;position:relative;box-shadow:none}
+.dp-form-tab:hover{color:var(--ax-ink);background:var(--ax-tab-hover-bg);transform:none;filter:none}
+.dp-form-tab.active{color:var(--ax-tab-active)}
+.dp-form-tab.active::after{content:"";position:absolute;left:.5rem;right:.5rem;bottom:-1px;height:2px;background:var(--ax-accent-bar);border-radius:2px}
+.dp-form-more{margin-top:.7rem}
+.dp-form-more>summary{cursor:pointer;font-size:.8rem;font-weight:600;color:var(--ax-muted)}
+.dp-form-more[open]>summary{margin-bottom:.6rem}
+@media(max-width:520px){.dp-form-compact .dp-form-fields{grid-template-columns:1fr}.dp-form-compact .dp-form-field.half{grid-column:1/-1}}
 /* ::MARKDOWN_TONE (#659) on a 'card': a thin accent bar (a background layer,
    so it follows the rounded corner and leaves the theme's shadow alone) and
    a small label from data-tone-label — quiet, no tint, so it never reads as
