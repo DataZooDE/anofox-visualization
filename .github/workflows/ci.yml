@@ -1149,6 +1149,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/site-e2e.mjs --dashboard target/debug/dashboard
 
+      # scripts/static-stepper-e2e.mjs (#1248): a chart with steps (::STORY,
+      # a ::DIAGRAM, a factor graph's schedule) rendered by `dashboard` to
+      # static HTML gets its Step / Play controls, in the chart's panel; a
+      # page without steps carries no stepper. Reuses the CLIs above.
+      - name: Static page stepper e2e (#1248)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/static-stepper-e2e.mjs --dashboard target/debug/dashboard
+
       # scripts/site-ask-e2e.mjs (#941): Ask on a published site through the
       # site's own endpoint (a fake model on the script's server): only on an
       # `-- @ask on` dashboard, the viewer's cookie along, no key, nothing

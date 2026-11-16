@@ -107,6 +107,25 @@ body.dp-fit .dp-fit-grid>.panel>svg{flex:none}\
 body.dp-fit .dp-fit-grid>.panel>svg:last-child{flex:1 1 0;min-height:0;width:100%;height:100%}\
 body.dp-fit .dp-fit-grid>h2.section{grid-column:1/-1;align-self:end}";
 
+/// #1248: the Step / Play controls of a chart with steps (`data-story`: a
+/// `::STORY` chart, a `::DIAGRAM` or a factor graph's message schedule).
+/// The app builds them with `web/anim.js`'s kit; a static or served page
+/// embeds the same source (one implementation, as the app's own HTML export
+/// does) and starts each stepper at its overview. The kit puts its controls
+/// after the chart's holder, which on these pages is wrapped in the app's
+/// `.panel-svg` first. Only pages with such a chart carry it.
+fn stepper_script() -> String {
+    let kit =
+        include_str!("../web/anim.js").replacen("export function animKit", "function animKit", 1);
+    format!(
+        "(function(){{{kit}\nvar K=animKit(window);\
+document.querySelectorAll('.panel svg[data-story]').forEach(function(s){{\
+var p=s.closest('.panel');if(!p)return;\
+if(s.parentElement===p){{var h=document.createElement('div');h.className='panel-svg';s.before(h);h.append(s);}}\
+K.story(p,s);}});}})();"
+    )
+}
+
 /// Render a static page.
 pub fn render(p: &StaticPage) -> String {
     let t = p.theme;
@@ -127,7 +146,7 @@ pub fn render(p: &StaticPage) -> String {
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
 <style>{css}{fit_css}</style></head>\
 <body class=\"dp-static{fit_class}\"><div class=\"grid\">{header}{sub}{controls}{panels}</div>\
-<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}</script></body></html>",
+<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}{stepper}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
         variant = t.variant.as_str(),
@@ -143,6 +162,7 @@ pub fn render(p: &StaticPage) -> String {
         controls = p.controls_html,
         fit_css = if p.fit { FIT_CSS } else { "" },
         fit_class = if p.fit { " dp-fit" } else { "" },
+        stepper = if p.panels_html.contains("data-story=") { stepper_script() } else { String::new() },
         panels = if p.fit {
             format!("<div class=\"dp-fit-grid\">{}</div>", p.panels_html)
         } else {
@@ -504,6 +524,37 @@ mod tests {
                 })
                 .collect(),
         })
+    }
+
+    fn static_page(panels: &str) -> String {
+        let set = theme::resolve("").unwrap();
+        render(&StaticPage {
+            theme: set.pick(theme::Variant::Light),
+            fallback_title: "t",
+            subtitle_html: String::new(),
+            head_extra: String::new(),
+            controls_html: String::new(),
+            panels_html: panels.into(),
+            fit: false,
+        })
+    }
+
+    #[test]
+    fn a_chart_with_steps_gets_the_stepper_1248() {
+        let html = static_page(
+            r#"<div class="panel"><svg data-story="[{&quot;k&quot;:&quot;a&quot;}]"></svg></div>"#,
+        );
+        let script = &html[html.rfind("<script>").unwrap()..];
+        assert!(
+            script.contains("function animKit") && script.contains("K.story(p,s)"),
+            "{script}"
+        );
+        // a classic script: the module's `export` would be a syntax error
+        assert!(!script.contains("export function"));
+        assert!(!script.contains("</script>") || script.matches("</script>").count() == 1);
+        // without steps, the page stays small
+        let plain = static_page(r#"<div class="panel"><svg></svg></div>"#);
+        assert!(!plain.contains("animKit"));
     }
 
     #[test]
