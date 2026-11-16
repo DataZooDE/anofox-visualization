@@ -289,6 +289,8 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-form-control{display:flex;align-items:center;gap:.45rem;min-width:0}
 .dp-form-input{min-width:0;flex:1 1 auto}
 .dp-form-input[type=checkbox]{flex:0 0 auto}
+/* the theme's accent on a form's slider and switch (the browser's blue otherwise) */
+.dp-form input[type=range],.dp-form input[type=checkbox],.control input[type=range],.control input[type=checkbox]{accent-color:var(--ax-accent)}
 .dp-form-unit,.dp-form-out{font-size:.8rem;color:var(--ax-muted);white-space:nowrap}
 .dp-form-out{min-width:2.5em;text-align:right;font-variant-numeric:tabular-nums}
 .dp-form-source{grid-column:2;font-size:.72rem;color:var(--ax-muted)}
