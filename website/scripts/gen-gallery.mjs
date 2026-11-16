@@ -6,7 +6,8 @@
 //
 //   node scripts/gen-gallery.mjs           write the pages (src/content/docs/gallery/, not committed)
 //   node scripts/gen-gallery.mjs --check   every tile lints without an error (DASHBOARD, else
-//                                          target/debug/dashboard) and has its pictures
+//                                          target/debug/dashboard, with web/modules/*/plugin.wasm)
+//                                          and has its pictures
 //   node scripts/gen-gallery.mjs --shots [page,…]   screenshot the tiles in the builder (BUILDER,
 //       default `npm run dev`'s …/next/app/) → src/assets/gallery/<page>/<n>-light|dark.webp
 //   node scripts/gen-gallery.mjs --plots   copy the extension plots from a conformance run
@@ -49,6 +50,11 @@ const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
 
 if (mode === "--check") {
   const bin = process.env.DASHBOARD || path.join(root, "target", "debug", "dashboard");
+  // #1218: the plugins a web build ships (scripts/web-plugins.sh), e.g. factor graphs
+  const mods = path.join(root, "web", "modules");
+  const plugins = existsSync(mods)
+    ? readdirSync(mods).map((m) => path.join(mods, m, "plugin.wasm")).filter(existsSync).flatMap((f) => ["--plugin", f])
+    : [];
   const tmp = mkdtempSync(path.join(os.tmpdir(), "gallery-"));
   const bad = [];
   for (const p of pages)
@@ -56,7 +62,7 @@ if (mode === "--check") {
       const f = path.join(tmp, `${p.slug}-${t.n}.sql`);
       writeFileSync(f, full(p, t));
       let r;
-      try { r = JSON.parse(execFileSync(bin, ["--check", f, "--json"], { encoding: "utf8" })); }
+      try { r = JSON.parse(execFileSync(bin, [...plugins, "--check", f, "--json"], { encoding: "utf8" })); }
       catch (e) { r = JSON.parse(e.stdout || '{"diagnostics":[{"severity":"error","message":"no output"}]}'); }
       for (const d of r.diagnostics || []) if (d.severity === "error") bad.push(`${p.slug} › ${t.title}: ${d.code} — ${d.message.split("\n")[0]}`);
       for (const s of ["light", "dark"]) if (!existsSync(path.join(pics, p.slug, `${t.n}-${s}.webp`))) bad.push(`${p.slug} › ${t.title}: no ${s} picture (--shots)`);

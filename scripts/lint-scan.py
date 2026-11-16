@@ -11,11 +11,14 @@ served folder against a database built from its own init script, and any
 
   python3 scripts/lint-scan.py [--dashboard target/release/dashboard]
                                [--duckdb duckdb] [--unsigned] [--json out.json]
+                               [--plugin file.wasm …]
 
 The `duckdb` CLI must be 1.5.6 with anofox_forecast and anofox_statistics
 installed (signed, from community):
   duckdb -c "INSTALL anofox_forecast FROM community; INSTALL anofox_statistics FROM community"
 --unsigned starts it -unsigned, for locally installed unsigned builds.
+--plugin (repeatable) loads a runtime plugin, as `dashboard --plugin` (#1218:
+factor graphs, scripts/web-plugins.sh); the dashboard CLI needs `plugins`.
 
 Accepted hits live in scripts/lint-scan-accepted.json: per code, the file
 globs it may fire on and why. Exit 1 when a hit is not accepted (a new false
@@ -68,11 +71,12 @@ def duckdb_wrapper(tmp, duckdb, unsigned):
     return d
 
 
-def check(target, dashboard, env, tmp):
+def check(target, dashboard, plugins, env, tmp):
     """The --check --json result of one target, with paths relative to ROOT."""
     cwd = os.path.join(ROOT, target.get("cwd", "."))
     src = os.path.join(ROOT, target["path"])
-    args = [dashboard, "--check", os.path.relpath(src, cwd), "--json"]
+    args = [dashboard] + [x for p in plugins for x in ("--plugin", p)]
+    args += ["--check", os.path.relpath(src, cwd), "--json"]
     if "init" in target:
         db = os.path.join(tmp, target["path"].replace("/", "_") + ".duckdb")
         init_cwd = os.path.join(ROOT, target.get("init_cwd", "."))
@@ -105,14 +109,16 @@ def main():
     ap.add_argument("--unsigned", action="store_true")
     ap.add_argument("--accepted", default=os.path.join(ROOT, "scripts/lint-scan-accepted.json"))
     ap.add_argument("--json", help="write every hit here")
+    ap.add_argument("--plugin", action="append", default=[], help="a runtime plugin (.wasm), repeatable")
     a = ap.parse_args()
     dashboard = os.path.abspath(a.dashboard)
+    plugins = [os.path.abspath(p) for p in a.plugin]
     with open(a.accepted) as f:
         accepted = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
 
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, PATH=duckdb_wrapper(tmp, a.duckdb, a.unsigned) + os.pathsep + os.environ["PATH"])
-        hits = [h for t in TARGETS for h in check(t, dashboard, env, tmp)]
+        hits = [h for t in TARGETS for h in check(t, dashboard, plugins, env, tmp)]
     if a.json:
         with open(a.json, "w") as f:
             json.dump(hits, f, indent=1)

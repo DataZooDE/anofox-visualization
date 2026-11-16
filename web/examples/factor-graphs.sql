@@ -24,6 +24,9 @@
 -- The tables are stored in data/factor-graphs/ (CSV, as the library wrote
 -- them).
 
+-- Factor graphs are a plugin (#1218): a build without it says so.
+SELECT 'factor-graph'::REQUIRES;
+
 CREATE OR REPLACE TABLE fg_coin_nodes AS FROM read_csv('data/factor-graphs/coin-nodes.csv', all_varchar = true);
 CREATE OR REPLACE TABLE fg_coin_edges AS FROM read_csv('data/factor-graphs/coin-edges.csv', all_varchar = true);
 CREATE OR REPLACE TABLE fg_coin_marginals AS FROM read_csv('data/factor-graphs/coin-marginals.csv');

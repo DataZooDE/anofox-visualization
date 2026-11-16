@@ -17,7 +17,7 @@ if command -v cygpath >/dev/null 2>&1; then TARGET_DIR="$(cygpath -m "$TARGET_DI
 echo "== build dashboard + serve ($TARGET) =="
 ensure_web_pkg
 touch "$ROOT/src/bin/serve.rs"   # re-embed the current web/ (include_dir!)
-( cd "$ROOT" && cargo build --locked --release --features serve --bin dashboard --bin serve )
+( cd "$ROOT" && cargo build --locked --release --features serve,plugins --bin dashboard --bin serve )
 BIN="$TARGET_DIR/release"
 
 echo "== smoke =="

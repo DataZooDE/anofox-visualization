@@ -1,0 +1,28 @@
+# Factor graphs as a runtime plugin (#1218): `anofox_plot_factor_graph`
+# answers with ::DIAGRAM columns the host draws.
+#   cargo build --release --target wasm32-unknown-unknown \
+#     --manifest-path modules/factor-graph/Cargo.toml
+#   dashboard --plugin target/wasm32-unknown-unknown/release/factor_graph_plugin.wasm …
+[package]
+name = "factor-graph-plugin"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anofox-viz-plugin = { path = "../../crates/anofox-viz-plugin" }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Not part of the main workspace: built for wasm32 only (tests run natively).
+[workspace]

@@ -9,32 +9,35 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// A plugin crate built to wasm32 for this test run.
+fn build_plugin(manifest: &str, wasm: &str) -> Vec<u8> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plugin-target");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = Command::new(cargo)
+        .args([
+            "build",
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--manifest-path",
+        ])
+        .arg(root.join(manifest))
+        .arg("--target-dir")
+        .arg(&target)
+        .status()
+        .expect("cargo runs");
+    assert!(
+        status.success(),
+        "building {manifest} (needs `rustup target add wasm32-unknown-unknown`)"
+    );
+    std::fs::read(target.join("wasm32-unknown-unknown/release").join(wasm)).unwrap()
+}
+
 /// The example plugin, built to wasm32 for this test run.
 fn hello_wasm() -> &'static [u8] {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
-    WASM.get_or_init(|| {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plugin-hello");
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let status = Command::new(cargo)
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "wasm32-unknown-unknown",
-                "--manifest-path",
-            ])
-            .arg(root.join("examples/plugins/hello/Cargo.toml"))
-            .arg("--target-dir")
-            .arg(&target)
-            .status()
-            .expect("cargo runs");
-        assert!(
-            status.success(),
-            "building the example plugin (needs `rustup target add wasm32-unknown-unknown`)"
-        );
-        std::fs::read(target.join("wasm32-unknown-unknown/release/hello_plugin.wasm")).unwrap()
-    })
+    WASM.get_or_init(|| build_plugin("examples/plugins/hello/Cargo.toml", "hello_plugin.wasm"))
 }
 
 fn hello() {
@@ -613,4 +616,97 @@ fn a_columns_answer_needs_known_roles() {
         }
         _ => panic!("columns"),
     }
+}
+
+/// #1218: factor graphs are a plugin (modules/factor-graph), built and
+/// registered once.
+fn factor_graph() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let wasm = build_plugin(
+            "modules/factor-graph/Cargo.toml",
+            "factor_graph_plugin.wasm",
+        );
+        assert_eq!(
+            plugin::register_with(&wasm, Limits::default(), true).unwrap(),
+            "factor-graph"
+        );
+    });
+}
+
+fn factor_graph_svg(rows: serde_json::Value, options: serde_json::Value) -> String {
+    factor_graph();
+    anofox_visualization::render_spec(
+        &serde_json::json!({"plot": "factor_graph", "rows": rows, "options": options,
+                            "width": 900, "height": 420})
+        .to_string(),
+    )
+}
+
+#[test]
+fn the_factor_graph_plugin_draws_through_the_hosts_diagram() {
+    // shapes, an undirected edge with the interface as its label, θ folded
+    // into its equality node, the observation a terminal square (#1172)
+    let node = |id: &str, kind: &str, label: &str, layer: &str| serde_json::json!({"id": id, "kind": kind, "label": label, "layer": layer});
+    let edge =
+        |v: &str, f: &str, i: &str| serde_json::json!({"variable": v, "factor": f, "interface": i});
+    let svg = factor_graph_svg(
+        serde_json::json!([
+            node("v0", "data", "y_{0}", "obs"),
+            node("v1", "variable", "\\theta", "param"),
+            node("e1", "equality", "=", "param"),
+            node("f0", "factor", "Beta", "param"),
+            node("f1", "factor", "Bernoulli", "obs"),
+            node("v2", "variable", "z", "param"),
+        ]),
+        serde_json::json!({"edges": [
+            edge("v0", "f1", "out"),
+            edge("e1", "f1", "p"),
+            edge("v1", "e1", ""),
+            edge("e1", "f0", "out"),
+        ]}),
+    );
+    for want in ["data-diagram", "dp-node-circle", "dp-node-terminal", ">θ<"] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+    assert!(!svg.contains("<polygon"), "{svg}");
+}
+
+#[test]
+fn a_long_factor_graph_collapses_unless_all_slices_are_asked_for() {
+    // #1152: data-slices="collapsed"; slices := 'all' draws every slice
+    let mut rows = Vec::new();
+    let mut edges = Vec::new();
+    for t in 0..8 {
+        rows.push(
+            serde_json::json!({"id": format!("s{t}"), "kind": "variable",
+            "label": format!("s_{{{t}}}"), "layer": "state", "slice": t}),
+        );
+    }
+    for t in 1..8 {
+        rows.push(serde_json::json!({"id": format!("f{t}"), "kind": "factor",
+            "label": "Normal", "layer": "state", "slice": t}));
+        edges.push(serde_json::json!({"variable": format!("s{}", t - 1), "factor": format!("f{t}"), "interface": "mean"}));
+        edges.push(serde_json::json!({"variable": format!("s{t}"), "factor": format!("f{t}"), "interface": "out"}));
+    }
+    let rows = serde_json::Value::Array(rows);
+    let svg = factor_graph_svg(rows.clone(), serde_json::json!({"edges": edges}));
+    assert!(
+        svg.contains("data-slices=\"collapsed\"") && svg.contains("more"),
+        "{svg}"
+    );
+    let svg = factor_graph_svg(rows, serde_json::json!({"edges": edges, "slices": "all"}));
+    assert!(
+        svg.contains("data-slices=\"all\"") && !svg.contains('⋯'),
+        "{svg}"
+    );
+}
+
+#[test]
+fn a_factor_graph_needs_node_ids() {
+    let svg = factor_graph_svg(
+        serde_json::json!([{"what": 1, "ever": 2}]),
+        serde_json::json!({}),
+    );
+    assert!(svg.contains("an id column"), "{svg}");
 }

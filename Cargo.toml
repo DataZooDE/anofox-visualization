@@ -3,7 +3,7 @@
 # this is the single version source of truth (CalVer YYYY.M.D) — see BUILD.md.
 [workspace]
 members = [".", "duckext", "crates/anofox-viz-ffi", "crates/anofox-viz-plugin", "vendor/tiny_http"]
-exclude = ["examples/plugins"]
+exclude = ["examples/plugins", "modules"]
 # `cargo build`/`cargo test` at the root keep meaning "the core crate"; the
 # extension crates are built explicitly (-p …), duckext needs libclang (bindgen).
 default-members = ["."]

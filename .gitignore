@@ -30,3 +30,6 @@ web/data/boundaries/nuts*.csv
 /.build-describe.txt
 /web/vendor/duckdb-wasm
 /examples/plugins/*/target
+# #1218: scripts/web-plugins.sh (static web builds only)
+/web/plugins.json
+/web/modules/
