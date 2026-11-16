@@ -411,7 +411,10 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             crate::NEEDS
         ));
     }
-    let (collapsed, edges) = collapse(rows, list(options, "edges")?, options);
+    let all_edges = list(options, "edges")?;
+    // #1237: the whole model, before collapsing, for what counts all of it
+    let (all_rows, all_edges) = (rows, all_edges);
+    let (collapsed, edges) = collapse(all_rows, all_edges.clone(), options);
     let rows: &[Row] = &collapsed;
     let marginals = list(options, "marginals")?;
     // #1172: what the producer adds — each message's value, the predictive
@@ -615,13 +618,29 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String
             moments(&family, &params?)
         })
     };
-    // how many observations reach the variable: data on its factors
+    // how many observations reach the variable: data on its factors, in the
+    // whole model — not just the slices a long one draws (#1237)
     let observed = |touch: &[&str]| -> usize {
+        let is_data = |id: &str| {
+            all_rows
+                .iter()
+                .find(|r| get(r, &["id"]).as_deref() == Some(id))
+                .and_then(kind)
+                .as_deref()
+                == Some("data")
+        };
         let mut seen: Vec<String> = vec![];
-        for e in at(touch) {
-            for d in factor_edges(&get(e, &["factor"]).unwrap_or_default()) {
+        for e in all_edges
+            .iter()
+            .filter(|e| get(e, &["variable"]).is_some_and(|v| touch.contains(&v.as_str())))
+        {
+            let f = get(e, &["factor"]).unwrap_or_default();
+            for d in all_edges
+                .iter()
+                .filter(|d| get(d, &["factor"]).as_deref() == Some(&f))
+            {
                 if let Some(v) = get(d, &["variable"]) {
-                    if row_of(&v).and_then(kind).as_deref() == Some("data") && !seen.contains(&v) {
+                    if is_data(&v) && !seen.contains(&v) {
                         seen.push(v);
                     }
                 }
@@ -1620,6 +1639,84 @@ mod tests {
 
     /// #1152: a chain of 10 slices draws the first and last two, the six
     /// between as one `⋯ 6 more` per band; `slices := 'all'` draws them all.
+    /// #1237: a collapsed model still counts every observation it has.
+    #[test]
+    fn a_collapsed_model_counts_all_its_observations() {
+        let mut nodes = vec![
+            row(&[
+                ("id", "th"),
+                ("kind", "variable"),
+                ("label", "\\theta"),
+                ("layer", "param"),
+            ]),
+            row(&[
+                ("id", "eq"),
+                ("kind", "equality"),
+                ("label", "="),
+                ("layer", "param"),
+            ]),
+            row(&[
+                ("id", "pr"),
+                ("kind", "factor"),
+                ("name", "Beta"),
+                ("layer", "param"),
+            ]),
+            row(&[
+                ("id", "a"),
+                ("kind", "constant"),
+                ("name", "2"),
+                ("layer", "param"),
+            ]),
+            row(&[
+                ("id", "b"),
+                ("kind", "constant"),
+                ("name", "3"),
+                ("layer", "param"),
+            ]),
+        ];
+        let mut edges = vec![
+            serde_json::json!({"variable": "th", "factor": "eq"}),
+            serde_json::json!({"variable": "eq", "factor": "pr", "interface": "out"}),
+            serde_json::json!({"variable": "a", "factor": "pr", "interface": "a", "seq": 1}),
+            serde_json::json!({"variable": "b", "factor": "pr", "interface": "b", "seq": 2}),
+        ];
+        for i in 0..8 {
+            let s = i.to_string();
+            nodes.push(row(&[
+                ("id", &format!("y{i}")),
+                ("kind", "data"),
+                ("layer", "obs"),
+                ("slice", &s),
+            ]));
+            nodes.push(row(&[
+                ("id", &format!("f{i}")),
+                ("kind", "factor"),
+                ("name", "Bernoulli"),
+                ("layer", "obs"),
+                ("slice", &s),
+            ]));
+            edges.push(serde_json::json!({"variable": format!("y{i}"), "factor": format!("f{i}"), "interface": "out"}));
+            edges.push(serde_json::json!({"variable": "eq", "factor": format!("f{i}"), "interface": "p", "seq": 1}));
+        }
+        let mut options = Row::new();
+        options.insert("edges".into(), J::Array(edges.into_iter().collect()));
+        options.insert(
+            "marginals".into(),
+            serde_json::json!([{"variable": "th", "iteration": 1, "mean": 0.5, "sd": 0.12, "family": "Beta"}]),
+        );
+        assert_eq!(slices_state(&nodes, &options), Some("collapsed"));
+        let cols = columns(&nodes, &options).unwrap();
+        let ids: Vec<String> = col(&cols, Role::Diagram)
+            .iter()
+            .map(crate::value_text)
+            .collect();
+        let at = ids.iter().position(|i| i == "eq").unwrap();
+        let b: J = serde_json::from_str(&crate::value_text(&col(&cols, Role::Belief)[at])).unwrap();
+        assert_eq!(b["n"], 8, "{b}");
+        let note = crate::value_text(&col(&cols, Role::Tooltip)[at]);
+        assert!(note.contains("8 observations"), "{note}");
+    }
+
     #[test]
     fn a_long_chain_collapses() {
         let mut nodes = Vec::new();
