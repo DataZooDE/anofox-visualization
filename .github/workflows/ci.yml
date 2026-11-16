@@ -1103,6 +1103,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/frames-export-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/nocase-e2e.mjs (#1240), its app part: uppercased labels keep
+      # their Greek letters (μ, not M) — a KPI label and a ::FORM section.
+      # Reuses the :8947 server and Chromium above.
+      - name: Greek letters in uppercased labels e2e (#1240)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/nocase-e2e.mjs --url http://127.0.0.1:8947/
+
       - name: Stop the web/ server
         if: always()
         run: |
@@ -1156,6 +1163,12 @@ jobs:
       - name: Static page stepper e2e (#1248)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/static-stepper-e2e.mjs --dashboard target/debug/dashboard
+
+      # scripts/nocase-e2e.mjs (#1240), its static part: a KPI label on a
+      # page from `dashboard` keeps its Greek letter. Reuses the CLIs above.
+      - name: Greek letters in uppercased labels, static page e2e (#1240)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/nocase-e2e.mjs --dashboard target/debug/dashboard
 
       # scripts/site-ask-e2e.mjs (#941): Ask on a published site through the
       # site's own endpoint (a fake model on the script's server): only on an

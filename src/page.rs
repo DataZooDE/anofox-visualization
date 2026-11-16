@@ -126,6 +126,43 @@ K.story(p,s);}});}})();"
     )
 }
 
+/// #1240: uppercased labels keep their Greek letters as written (μ, not M).
+/// The page embeds `web/nocase.js` (the app's own function) and runs it
+/// once; only pages with Greek letters carry it.
+fn nocase_script() -> String {
+    let f = include_str!("../web/nocase.js").replacen(
+        "export function keepMathCase",
+        "function keepMathCase",
+        1,
+    );
+    format!("(function(){{{f}\nkeepMathCase(document.body);}})();")
+}
+
+/// Whether `s` has a Greek letter (the Greek and Coptic, and Greek Extended
+/// blocks): the letters CSS `text-transform: uppercase` turns into Latin-looking
+/// capitals.
+pub(crate) fn has_greek(s: &str) -> bool {
+    s.chars().any(is_greek)
+}
+
+fn is_greek(c: char) -> bool {
+    matches!(c, '\u{0370}'..='\u{03ff}' | '\u{1f00}'..='\u{1fff}')
+}
+
+/// `s` in capitals, its Greek letters as written (#1240): for labels the
+/// renderer uppercases itself (an SVG has no `text-transform`).
+pub(crate) fn upper_keep_greek(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| -> Box<dyn Iterator<Item = char>> {
+            if is_greek(c) {
+                Box::new(std::iter::once(c))
+            } else {
+                Box::new(c.to_uppercase())
+            }
+        })
+        .collect()
+}
+
 /// Render a static page.
 pub fn render(p: &StaticPage) -> String {
     let t = p.theme;
@@ -146,7 +183,7 @@ pub fn render(p: &StaticPage) -> String {
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
 <style>{css}{fit_css}</style></head>\
 <body class=\"dp-static{fit_class}\"><div class=\"grid\">{header}{sub}{controls}{panels}</div>\
-<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}{stepper}</script></body></html>",
+<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}{stepper}{nocase}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
         variant = t.variant.as_str(),
@@ -163,6 +200,11 @@ pub fn render(p: &StaticPage) -> String {
         fit_css = if p.fit { FIT_CSS } else { "" },
         fit_class = if p.fit { " dp-fit" } else { "" },
         stepper = if p.panels_html.contains("data-story=") { stepper_script() } else { String::new() },
+        nocase = if [&header, p.controls_html.as_str(), p.panels_html.as_str()].iter().any(|h| has_greek(h)) {
+            nocase_script()
+        } else {
+            String::new()
+        },
         panels = if p.fit {
             format!("<div class=\"dp-fit-grid\">{}</div>", p.panels_html)
         } else {
@@ -555,6 +597,36 @@ mod tests {
         // without steps, the page stays small
         let plain = static_page(r#"<div class="panel"><svg></svg></div>"#);
         assert!(!plain.contains("animKit"));
+    }
+
+    #[test]
+    fn greek_letters_keep_their_case_1240() {
+        assert_eq!(
+            upper_keep_greek("Average cycle μ, min"),
+            "AVERAGE CYCLE μ, MIN"
+        );
+        assert_eq!(
+            upper_keep_greek("How much a job varies (τ)"),
+            "HOW MUCH A JOB VARIES (τ)"
+        );
+        assert_eq!(upper_keep_greek("straße"), "STRASSE");
+        let set = theme::resolve("").unwrap();
+        let page = |panels: &str| {
+            render(&StaticPage {
+                theme: set.pick(theme::Variant::Light),
+                fallback_title: "t",
+                subtitle_html: String::new(),
+                head_extra: String::new(),
+                controls_html: String::new(),
+                panels_html: panels.into(),
+                fit: false,
+            })
+        };
+        let greek =
+            page(r#"<div class="panel"><div class="metric-cap">Average cycle μ</div></div>"#);
+        let script = &greek[greek.rfind("<script>").unwrap()..];
+        assert!(script.contains("function keepMathCase") && !script.contains("export function"));
+        assert!(!page(r#"<div class="panel">Plain</div>"#).contains("keepMathCase"));
     }
 
     #[test]
