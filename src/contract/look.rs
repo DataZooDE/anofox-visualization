@@ -12,7 +12,7 @@
 use super::{opt_str, Row};
 use crate::{RenderOptions, DZ_COLORS};
 use ggplot_rs::prelude::*;
-use ggplot_rs::theme::{ElementText, ThemeUpdate};
+use ggplot_rs::theme::ThemeUpdate;
 
 /// Base font size (ggplot2's default 11 pt × 1.2).
 pub(super) const BASE_SIZE: f64 = 13.2;
@@ -61,17 +61,14 @@ pub(super) fn humanize(name: &str) -> String {
 
 /// The house theme (the dashboard's chart tokens, see [`crate::chart_theme`])
 /// at the contract plots' base size. `small` (a grid cell) shrinks titles a
-/// little but keeps tick labels at ≥ 10 px. Axis titles are quiet labels,
-/// not headings: a little larger than the tick labels, in the muted ink.
+/// little; tick labels keep the house floor ([`crate::CHART_TEXT_PX`]). Axis
+/// titles are quiet labels, not headings: a little larger than the tick
+/// labels, in the muted ink.
 pub(super) fn theme(o: &RenderOptions, small: bool) -> Theme {
     let base = if small { BASE_SIZE * 0.9 } else { BASE_SIZE };
     let mut th = crate::chart_theme(o, base);
-    let floor = |e: &mut ElementText, min: f64| e.size = e.size.max(min);
-    floor(&mut th.axis_text_x, 10.0);
-    floor(&mut th.axis_text_y, 10.0);
-    floor(&mut th.legend_text, 10.5);
-    th.axis_title_x.size = (base * 0.85).max(10.5);
-    th.axis_title_y.size = (base * 0.85).max(10.5);
+    th.axis_title_x.size = (base * 0.85).max(crate::CHART_TITLE_PX);
+    th.axis_title_y.size = (base * 0.85).max(crate::CHART_TITLE_PX);
     th.legend_title.size = th.legend_text.size;
     th.strip_text.face = ggplot_rs::render::backend::FontFace::Bold;
     th.strip_text.size = th.strip_text.size.max(11.0);

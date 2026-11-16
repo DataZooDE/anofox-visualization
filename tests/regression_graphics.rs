@@ -2597,7 +2597,8 @@ fn top_legend_wraps_inside_the_chart() {
                     "{n} cartons: a one-line legend's band is unchanged"
                 );
             }
-            12 => assert_eq!(rows, 2, "12 cartons: two rows"),
+            // three rows since the legend text grew to 11.5 px (#1246)
+            12 => assert_eq!(rows, 3, "12 cartons: three rows"),
             _ => assert!(rows >= 4, "30 cartons: {rows} rows"),
         }
     }

@@ -942,6 +942,7 @@ pub(crate) fn dz_palette(o: &RenderOptions) -> Vec<ggplot_rs::scale::color::RGBA
 pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
     let mut th = ggplot_rs::theme::presets::theme_minimal_base(base);
     paint_theme(&mut th, o);
+    readable_text(&mut th);
     th.panel_grid_major = ggplot_rs::theme::ElementLine {
         color: o.theme.chart_grid(),
         width: 0.6,
@@ -971,7 +972,30 @@ pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
 pub(crate) fn void_theme(o: &RenderOptions) -> Theme {
     let mut th = ggplot_rs::theme::presets::theme_void();
     paint_theme(&mut th, o);
+    readable_text(&mut th);
     th
+}
+
+/// The smallest on-screen size of tick labels, legend entries and facet
+/// strips (px; the app draws a chart at its card's real width, so SVG units
+/// are screen pixels).
+pub(crate) const CHART_TEXT_PX: f64 = 11.5;
+/// The smallest size of axis and legend titles (px).
+pub(crate) const CHART_TITLE_PX: f64 = 12.5;
+
+/// #1246: ggplot's `rel(0.8)` of an 11 pt base left tick labels and legend
+/// entries at 8.8 px — too small to read on a dashboard. Raise them (and the
+/// axis titles, kept a step larger) to a floor; a larger base keeps its own
+/// sizes.
+fn readable_text(th: &mut Theme) {
+    let floor = |e: &mut ggplot_rs::theme::ElementText, min: f64| e.size = e.size.max(min);
+    floor(&mut th.axis_text_x, CHART_TEXT_PX);
+    floor(&mut th.axis_text_y, CHART_TEXT_PX);
+    floor(&mut th.legend_text, CHART_TEXT_PX);
+    floor(&mut th.strip_text, CHART_TEXT_PX);
+    floor(&mut th.axis_title_x, CHART_TITLE_PX);
+    floor(&mut th.axis_title_y, CHART_TITLE_PX);
+    floor(&mut th.legend_title, CHART_TITLE_PX);
 }
 
 /// Paint a theme's text with the dashboard's tokens.
