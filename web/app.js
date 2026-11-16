@@ -45,6 +45,7 @@ import init, {
 import { loadPlugins } from "./plugins.js";
 import { animKit } from "./anim.js";
 import { keepMathCase } from "./nocase.js";
+import { addCopyButtons, wireCopyButtons } from "./copycode.js";
 import * as xp from "./explore.js";
 import { countsText, lintScript, liveCheck, rowsJson, scratchRunner, sortDiagnostics, splitStatements, wasmSql } from "./lint.js";
 // #204: the tab-wide CSP (whenever an assistant key is stored) and the
@@ -71,11 +72,14 @@ import {
 } from "./assist.js";
 
 const dpAnim = animKit(window); // chart motion (web/anim.js)
-// #1240: Greek letters in uppercased labels stay as written (web/nocase.js),
-// for every label the page draws now or later; one pass per animation frame.
+// Passes over everything the page draws, now or later (one per animation
+// frame): #1240 Greek letters in uppercased labels stay as written
+// (web/nocase.js); #1253 Markdown code blocks get a Copy button
+// (web/copycode.js).
+wireCopyButtons(document);
 {
   let queued = false;
-  const pass = () => ((queued = false), keepMathCase(document.body));
+  const pass = () => ((queued = false), keepMathCase(document.body), addCopyButtons(document.body));
   new MutationObserver(() => queued || ((queued = true), requestAnimationFrame(pass))).observe(document.documentElement, {
     childList: true,
     subtree: true,
