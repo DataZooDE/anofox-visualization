@@ -1423,7 +1423,7 @@ pub(super) fn build(
 /// Gap between small-multiple maps, px (M3a-1).
 pub(super) const FACET_GAP: f64 = 12.0;
 /// Strip (facet label) text size on small multiples, px.
-pub(super) const FACET_STRIP: f64 = 11.0;
+pub(super) const FACET_STRIP: f64 = crate::CHART_TEXT_PX;
 /// The narrowest a small-multiple map gets before it wraps to a new row.
 pub(super) const FACET_MIN_PANEL: f64 = 160.0;
 
