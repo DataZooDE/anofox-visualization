@@ -406,31 +406,6 @@ FROM (VALUES ('a', 'Load', 10), ('b', 'Clean', 8)) n(id, title, mainstat)",
         tags: &[("anofox.consumes", "graph"), CONTRACT_TAG],
     },
     MacroSpec {
-        name: "anofox_plot_factor_graph",
-        params: &["tbl"],
-        named: &[("edges", "NULL"), ("marginals", "NULL"), ("schedule", "NULL"), ("messages", "NULL"), ("predictive", "NULL"), ("influence", "NULL"), ("slices", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "900"), ("height", "420")],
-        body: contract_body!("factor_graph", "'edges', edges, 'marginals', marginals, 'schedule', schedule, 'messages', messages, 'predictive', predictive, 'influence', influence, 'slices', coalesce(slices, getvariable('anofox_fg_slices'))"),
-        description: "A factor graph (Forney style) from a `factor_graph` table, one row per node (id, kind: factor | \
-variable | data | constant | equality | delta, name, label, slice, layer, plate), with edges := a LIST of edge STRUCTs \
-(variable, factor, interface, seq) and optionally marginals := a LIST of (variable, iteration, mean, sd, family). \
-Factors are glyph squares, variables circles, observations filled squares at the end of their edge, equality \
-nodes small squares, delta nodes filled squares, constants plain text; a variable on exactly two factors with no \
-marginals is the edge between them. Layers (control, param, state, obs, pref, …) are horizontal bands: a chain stays one \
-straight row, an observation drops below its state. Edges are undirected, labelled with the interface at the \
-factor. A variable whose only edge is its equality node is drawn as that node; TeX-ish labels (\\theta, y_{0}) \
-read as θ, y₀; the latest marginal is the variable's value (mean, ± sd). schedule := a LIST of (iteration, step, \
-variable, factor, interface, direction: to_factor | to_variable) steps through the messages: Step / Play light each \
-message's edge, moving its way, with the receiving variable's marginal after that iteration. From the inference \
-library, messages := (iteration, step, …, family, mean, sd) says what each message carries; predictive := (variable, \
-observed, mean, sd) what the rest of the model expected at each observation (more than 2 sd off is flagged); \
-influence := (target, observation, mean, loo_mean) ranks the observations by how far a variable moves without \
-each.",
-        example: "SELECT anofox_plot_factor_graph(n, edges := [{'variable': 'v0', 'factor': 'f0', 'interface': 'out'}, \
-{'variable': 'v1', 'factor': 'f0', 'interface': 'p'}]) FROM (VALUES ('v0', 'data', 'y', 'obs'), ('v1', 'variable', \
-'\\theta', 'param'), ('f0', 'factor', 'Bernoulli', 'obs')) n(id, kind, label, layer)",
-        tags: &[("anofox.consumes", "factor_graph"), CONTRACT_TAG],
-    },
-    MacroSpec {
         name: "anofox_plot_assignment",
         params: &["tbl"],
         named: &[("x", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "640"), ("height", "400")],

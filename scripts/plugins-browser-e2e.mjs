@@ -37,6 +37,9 @@ const W = mkdtempSync(path.join(os.tmpdir(), "plugins-browser-e2e-"));
 const site = (name, list) => {
   const d = path.join(W, name);
   cpSync(web, d, { recursive: true });
+  // only the plugins this check lists (not web/'s bundled ones, #1218)
+  rmSync(path.join(d, "plugins.json"), { force: true });
+  rmSync(path.join(d, "modules"), { recursive: true, force: true });
   // a local DuckDB-Wasm, when there is one (else the page loads its own)
   const dw = path.join(vendor, "duckdb-wasm");
   if (!existsSync(path.join(d, "vendor", "duckdb-wasm")) && existsSync(dw)) cpSync(dw, path.join(d, "vendor", "duckdb-wasm"), { recursive: true });

@@ -35,7 +35,6 @@ mod cv;
 mod decomposition;
 mod distribution;
 mod events;
-mod factor_graph;
 mod graph;
 mod look;
 mod matrix;
@@ -70,7 +69,6 @@ pub const PLOTS: &[&str] = &[
     "checks",
     "matrix",
     "diagram",
-    "factor_graph",
     "assignment",
     "selection",
     "sequence",
@@ -117,7 +115,7 @@ fn render_plot(
     let mut renamed = Vec::new();
     let mut rename = |rows: &[Row]| match plot {
         // `compare` reads its rows as given, `diagram` with its own names
-        "compare" | "diagram" | "factor_graph" => None,
+        "compare" | "diagram" => None,
         _ => names::normalize(rows, options, &mut renamed),
     };
     let normed;
@@ -272,16 +270,6 @@ fn render_plot(
         "diagram" => {
             let cols = graph::columns(rows, options).map_err(fail)?;
             return crate::render_placed(&cols, place, w, h, o);
-        }
-        "factor_graph" => {
-            let cols = factor_graph::columns(rows, options).map_err(fail)?;
-            let (svg, mut warnings) = crate::render_placed(&cols, place, w, h, o)?;
-            let svg = match factor_graph::slices_state(rows, options) {
-                Some(st) => crate::with_root_attr(svg, "data-slices", st),
-                None => svg,
-            };
-            warnings.extend(factor_graph::lint(rows, options));
-            return Ok((svg, warnings));
         }
         "events" => return direct(&|| events::events(&t, options, w, h, o, place)),
         "checks" => return direct(&|| checks::checks(&t, options, w, h, o, place)),

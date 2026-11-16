@@ -15,5 +15,5 @@ mkdir -p "$DIST"
 OUT="$DIST/$(ext_asset_name)"
 echo "== $OUT =="
 DUCKDB="$DUCKDB" PLATFORM="$PLATFORM" OUT="$OUT" PYTHON="$PYTHON" \
-  "$ROOT/duckext/scripts/build-native.sh" --release
+  "$ROOT/duckext/scripts/build-native.sh" --release --features plugins
 DUCKDB="$DUCKDB" "$ROOT/scripts/release/smoke-extension.sh" "$OUT"

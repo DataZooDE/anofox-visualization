@@ -214,7 +214,7 @@ FROM ${v("('src','Orders CSV',NULL),('clean','Clean','src'),('agg','Daily totals
     // #1208: the factor-graph mode, reached through a macro (no `::DIAGRAM` in its SQL)
     more: `## Factor graphs
 
-\`anofox_plot_factor_graph(nodes, edges := …, marginals := …, schedule := …)\` draws a Bayesian model as a Forney-style factor graph through \`::DIAGRAM\`: factors as boxes, variables as circles, observations filled, layers as bands, and what the model learned under the graph. Hovering a variable shows its posterior; Step / Play walk the messages the inference passed. The tables are what an inference library exports: one row per node, one per edge.
+\`anofox_plot_factor_graph(nodes, edges := …, marginals := …, schedule := …)\` draws a Bayesian model as a Forney-style factor graph through \`::DIAGRAM\`: factors as boxes, variables as circles, observations filled, layers as bands, and what the model learned under the graph. Hovering a variable shows its posterior; Step / Play walk the messages the inference passed. The tables are what an inference library exports: one row per node, one per edge. Factor graphs are a plugin that the builder and the release ship: a dashboard that draws one starts with \`SELECT 'factor-graph'::REQUIRES;\`.
 
 [A small one in the gallery ↗](../../../gallery/features/#a-factor-graph) · [three models in the builder ↗](../../../app/?dashboard=how-does-the-model-reason-from-our-inspections)`,
   },

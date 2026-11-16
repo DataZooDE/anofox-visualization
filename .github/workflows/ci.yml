@@ -195,6 +195,14 @@ jobs:
         run: cargo nextest run --locked --features serve,plugins
       - name: test (core incl. serve) — doctests
         run: cargo test --doc --locked --features serve
+      # #1218: the bundled plugins (modules/*, outside the workspace)
+      - name: bundled plugins (modules/*) — fmt, clippy, tests
+        run: |
+          for m in modules/*/Cargo.toml; do
+            cargo fmt --check --manifest-path "$m"
+            cargo clippy --locked --all-targets --manifest-path "$m" -- -D warnings
+            cargo test --locked --manifest-path "$m"
+          done
 
       # No separate doctest step here: anofox_viz_ffi/anofox-visualization-duckdb
       # are staticlib/cdylib only (doctests aren't supported for those crate
@@ -485,8 +493,16 @@ jobs:
       - name: The assistant's function lists are current
         run: node scripts/gen-assist-functions.mjs --check
 
+      # with runtime plugins: the shipped factor-graph examples need theirs
+      # (#1218, `--plugin web/modules/factor-graph/plugin.wasm`)
       - name: Build the dashboard CLI
-        run: cargo build --locked --bin dashboard
+        run: cargo build --locked --bin dashboard --features plugins
+
+      # #1218: factor graphs are a plugin; the static web builds ship it
+      # (web/plugins.json + web/modules/factor-graph/plugin.wasm), and so
+      # does the artifact the browser e2e checks serve
+      - name: The bundled plugins (web/modules, web/plugins.json)
+        run: scripts/web-plugins.sh web
 
       - name: Upload web/pkg, web/localext, the dashboard CLI and the build describe
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -495,6 +511,8 @@ jobs:
           path: |
             web/pkg
             web/localext
+            web/modules
+            web/plugins.json
             target/debug/dashboard
             .build-describe.txt
           retention-days: 1
@@ -589,7 +607,7 @@ jobs:
         if: matrix.shard == 0
         run: |
           for i in 1 2 3; do duckdb -c "INSTALL anofox_forecast FROM community; INSTALL anofox_statistics FROM community" && break; echo "install attempt $i failed; retrying"; sleep 10; done
-          python3 scripts/lint-scan.py --dashboard target/debug/dashboard
+          python3 scripts/lint-scan.py --dashboard target/debug/dashboard --plugin web/modules/factor-graph/plugin.wasm
 
   web-e2e:
     # The browser e2e scripts (scripts/*-e2e.mjs): kept in one job (#464) —
@@ -1149,6 +1167,8 @@ jobs:
       # above.
       - name: Build the native extension with the real UI embedded (#590)
         run: |
+          # the servers list their own plugins (--plugin); web/ embeds none
+          rm -rf web/plugins.json web/modules
           touch duckext/src/serve.rs   # force include_dir! to re-embed the downloaded web/pkg
           SKIP_WASM=1 OUT="$RUNNER_TEMP/anofox_visualization.duckdb_extension" duckext/scripts/build-native.sh
 

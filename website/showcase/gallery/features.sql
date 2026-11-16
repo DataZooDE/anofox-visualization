@@ -96,6 +96,7 @@ FROM (VALUES ('feed', 'Order feed', []::VARCHAR[], 'Ingest'), ('clean', 'Clean a
              ('fc', 'Forecast', ['model'], 'Model'), ('dash', 'Dashboard', ['model', 'fc'], 'Serve')) t(id, label, up, lane);
 
 -- @tile A factor graph | `anofox_plot_factor_graph` draws a Bayesian model as a Forney-style factor graph — factors as boxes, variables as circles, observations filled — with what the model learned. Hover θ; Step walks the messages.
+SELECT 'factor-graph'::REQUIRES;
 SELECT 12::COL;
 CREATE TABLE fg_nodes AS
 SELECT * FROM (VALUES ('th', 'variable', 'theta', '\theta', NULL, 'param', NULL), ('eq', 'equality', '=', '=', NULL, 'param', NULL),

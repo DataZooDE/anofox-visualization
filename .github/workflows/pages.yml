@@ -62,6 +62,10 @@ jobs:
       - name: Build wasm module (→ web/pkg)
         run: wasm-pack build --target web --out-dir web/pkg --profile wasm --no-default-features --features wasm
 
+      # #1218: the plugins the demo ships (factor graphs)
+      - name: Bundled plugins (→ web/modules, web/plugins.json)
+        run: scripts/web-plugins.sh web
+
       # The anofox DuckDB-Wasm extensions, served same-origin from
       # web/localext/ (get.erpl.io has no CORS + needs a signature fix, #192).
       # Pinned (scripts/wasm-extensions.lock, #235), so this is now the same

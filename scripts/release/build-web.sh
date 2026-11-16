@@ -6,7 +6,8 @@
 # web/pkg (wasm-pack) + web/localext/ (the pinned DuckDB-Wasm extensions,
 # scripts/fetch-wasm-extensions.sh) + web/vendor/duckdb-wasm/ (#832, DuckDB-Wasm
 # itself, scripts/fetch-duckdb-wasm.sh: a published site loads it from its own
-# origin; the builder and Pages still use jsdelivr) + the rest of web/.
+# origin; the builder and Pages still use jsdelivr) + the bundled plugins
+# (scripts/web-plugins.sh, #1218) + the rest of web/.
 #   output: $DIST/anofox-visualization-web-<tag>.tar.gz
 set -euo pipefail
 # shellcheck source=scripts/release/common.sh
@@ -26,6 +27,14 @@ NAME="anofox-visualization-web-$TAG"
 STAGE="$DIST/stage/$NAME"
 rm -rf "$STAGE"; mkdir -p "$(dirname "$STAGE")"
 cp -R "$ROOT/web" "$STAGE"
+echo "== bundled plugins (modules/, plugins.json, #1218) =="
+"$ROOT/scripts/web-plugins.sh" "$STAGE"
+# … and each on its own, for `dashboard`/`serve --plugin` and the
+# extension's options.plugins
+for f in "$STAGE"/modules/*/plugin.wasm; do
+  n="$(basename "$(dirname "$f")")"
+  cp -f "$f" "$DIST/anofox-visualization-plugin-$n-$TAG.wasm"
+done
 cd "$DIST/stage"
 tar -czf "$DIST/$NAME.tar.gz" "$NAME"
 cd "$ROOT"; rm -rf "$DIST/stage"

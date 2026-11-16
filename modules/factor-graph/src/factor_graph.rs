@@ -15,9 +15,7 @@
 //! - TeX-ish labels (`\theta`, `y_{0}`) read as text (`θ`, `y₀`);
 //! - the latest marginal is the variable's value (its mean) and badge (`± sd`).
 
-use super::Row;
-use crate::{Column, MetricFmt, Role};
-use ggplot_rs::prelude::Value;
+use crate::{Column, MetricFmt, Role, Row, Value};
 use serde_json::{Map, Value as J};
 
 /// The node kinds the contract knows.
@@ -277,7 +275,7 @@ fn problems(nodes: &[Row], edges: &[Row]) -> Vec<String> {
 }
 
 /// [`problems`] for the macro's own arguments.
-pub(super) fn lint(rows: &[Row], options: &Row) -> Vec<String> {
+pub(crate) fn lint(rows: &[Row], options: &Row) -> Vec<String> {
     match list(options, "edges") {
         Ok(edges) => problems(rows, &edges),
         Err(e) => vec![e],
@@ -312,7 +310,7 @@ const SLICES_SHOWN: usize = 4;
 /// viewer's `anofox_fg_slices`) draws every slice of one that would; the
 /// browser's `⋯` click and *Fewer slices* chip read it from the root's
 /// `data-slices` (#1152).
-pub(super) fn slices_state(rows: &[Row], options: &Row) -> Option<&'static str> {
+pub(crate) fn slices_state(rows: &[Row], options: &Row) -> Option<&'static str> {
     let mut slices: Vec<i64> = rows
         .iter()
         .filter_map(|r| get(r, &["slice"]).and_then(|s| s.trim().parse::<i64>().ok()))
@@ -406,11 +404,11 @@ fn collapse(rows: &[Row], edges: Vec<Row>, options: &Row) -> (Vec<Row>, Vec<Row>
     (kept, out)
 }
 
-pub(super) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String> {
+pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<Column>, String> {
     if rows.iter().all(|r| get(r, &["id"]).is_none()) {
         return Err(format!(
             "{} nodes with an id column (and kind, label, layer)",
-            super::NEEDS
+            crate::NEEDS
         ));
     }
     let (collapsed, edges) = collapse(rows, list(options, "edges")?, options);
