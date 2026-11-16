@@ -112,7 +112,7 @@ FROM co WHERE (sel_sector() IS NULL OR sector = sel_sector())
 SELECT 320 ::HEIGHT;
 SELECT 12 ::COL;
 SELECT round(log10(market_cap), 2) ::XAXIS, pe ::SCATTER,
-       (CASE WHEN sel_sector() IS NULL THEN sector ELSE sub_industry END) ::CATEGORY,
+       (CASE WHEN sel_sector() IS NULL THEN sector ELSE sub_industry END) ::CATEGORY, 'right' ::LEGEND,
        'log10(market cap) vs P/E (P/E < 80)' ::TITLE
 FROM co WHERE (sel_sector() IS NULL OR sector = sel_sector())
   AND sector <> 'Other' AND pe IS NOT NULL AND pe < 80 AND market_cap > 0;

@@ -15,7 +15,7 @@ FROM co WHERE sector <> 'Other' AND div_yield IS NOT NULL;
 -- The multi-series scatter wants the full width to breathe.
 SELECT 'Size vs valuation' ::LABEL;
 SELECT 12 ::COL;
-SELECT round(log10(market_cap), 2) ::XAXIS, pe ::SCATTER, sector ::CATEGORY,
+SELECT round(log10(market_cap), 2) ::XAXIS, pe ::SCATTER, sector ::CATEGORY, 'right' ::LEGEND,
        'log10(market cap) vs P/E, coloured by sector (P/E < 80)' ::TITLE
 FROM co WHERE sector <> 'Other' AND pe IS NOT NULL AND pe < 80 AND market_cap > 0;
 
