@@ -37,6 +37,19 @@ differ:
   (the default) only logs what it would flag; report.md compares that with the
   judge. `on` sends unsupported numbers back once. Tool outputs are kept in
   runs.jsonl (4,000 characters each) for that comparison.
+- The word check (#1263, `claims.word_problems`): an answer's wording against
+  the last chart's digest — "rises steadily" / "steady growth" over a fall
+  against the trend that is long (≥ 20 % of the x span) or deep (≥ 30 % of
+  the range); "one peak" / "falls back … for the rest" when a series has
+  more peaks; "X is consistently the highest" when X leads at fewer than all
+  shared x (also across facet panels). It reads the digest's shape parts
+  (ggplot-rs ≥ 0.60), so other arms' digests don't trigger it.
+  `--word-check shadow` (default) logs, `on` sends back once (with the
+  number check's list, if any).
+- `replay.py <run dir>` scores both checks on a finished run against the
+  judge, offline; `--dashboard … --data … --boundaries …` re-draws each
+  final chart with that build first (a new digest on old answers). Use it
+  before paying for a run to try a check change.
 - Model-written code runs in bubblewrap: read-only filesystem, a private
   `/tmp`, no network, 60 s, and a 4 GB cgroup cap. `query` runs with
   `enable_external_access = false`.

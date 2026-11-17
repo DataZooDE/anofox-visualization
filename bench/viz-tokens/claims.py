@@ -5,7 +5,10 @@ rounding: directly, or as a difference, ratio, share or % change of two
 numbers from the same tool output. Deterministic, no LLM.
 
     unsupported(answer, evidence)  -> the claims (as written) nothing backs
+    word_problems(answer, digest)  -> trend / peak / 'consistently highest'
+                                      words the chart's digest contradicts (#1263)
 """
+import datetime
 import re
 
 # a number as written: 1,234.5 · 12.5 · −3 · 8.3M · €2.8 M · 26.6 % · 1.2k
@@ -143,3 +146,143 @@ def feedback(bad):
             "summary or the request (nor as a difference, ratio, share or % change of two such "
             f"numbers): {', '.join(bad)}. Check them — query the data if you need to — and call "
             "answer again. A number you computed yourself is fine if it is right; say how.")
+
+
+# ------------------------------------------------------------------ words
+# #1263: the words around the numbers — "rises steadily", "falls back to zero
+# for the rest of the year", "WI_1 is consistently the highest" — checked
+# against what the chart drew: the digest (ggplot-rs summary ≥ 0.60) names a
+# series' largest move against its trend, its peaks, and who is highest at
+# each shared x. Every rule fires only on a phrase it knows and a digest that
+# contradicts it, so an answer it can't read passes.
+
+DNUM = r"-?[\d.]+(?:e[-+]?\d+)?"
+SERIES = re.compile(
+    r"(?:(?P<key>[^;|:]+?) — )?(?P<n>\d+) marks?, x (?P<x0>.+?) … (?P<x1>.+?); y first (?P<first>" + DNUM + r"), last (?P<last>" + DNUM + r"), "
+    r"min (?P<min>" + DNUM + r") at (?P<minx>[^,;|]+), max (?P<max>" + DNUM + r") at (?P<maxx>[^;|\n]+?)"
+    r"(?:, band [^;|]*)?"
+    r"(?:; against the trend: largest (?P<mv>fall|rise) (?P<a>" + DNUM + r") at (?P<ax>.+?) → (?P<b>" + DNUM + r") at (?P<bx>[^;|\n]+?))?"
+    r"(?:; (?P<np>\d+) peaks: (?P<peaks>[^;|\n]+))?(?=;|\||$|\n)")
+LEADERS = re.compile(r"highest at each of (?P<shared>\d+) shared x: (?P<list>[^;|\n]+)")
+
+
+def parse_digest(digest):
+    """The digest's line / area / col series (not points: a scatter has no path)."""
+    out, leaders = [], []
+    for layer in re.split(r"\s\|\s|\n", digest or ""):
+        geom = re.match(r"(?:statement \d+: )?(\w[\w+]*)(?: \[[^\]]*\])?:", layer)
+        if not geom or geom.group(1).startswith("point"):
+            continue
+        for m in SERIES.finditer(layer):
+            d = m.groupdict()
+            out.append({"x0": d["x0"], "x1": d["x1"], "minx": d["minx"].strip(), "maxx": d["maxx"].strip(),
+                        "key": (d["key"] or "").strip() or None, "first": float(d["first"]), "last": float(d["last"]),
+                        "min": float(d["min"]), "max": float(d["max"]), "geom": geom.group(1),
+                        "move": (d["mv"], float(d["a"]), d["ax"], float(d["b"]), d["bx"]) if d["mv"] else None,
+                        "peaks": int(d["np"] or 1)})
+    # per layer, and across facet panels ('line across panels: highest …')
+    for m in LEADERS.finditer(digest or ""):
+        counts = {}
+        for part in m.group("list").split(", "):
+            k, _, c = part.rpartition(" ")
+            if c.isdigit():
+                counts[k] = int(c)
+        leaders.append((counts, int(m.group("shared"))))
+    return out, leaders
+
+
+STEADY = re.compile(
+    r"\b(?:(?:rises?|rising|grows?|growing|increas\w*|climbs?|climbing|declin\w*|falls?|falling|decreas\w*|drops?|dropping)"
+    r"\s+(?:steadily|consistently|continuously|monotonically|without (?:a )?(?:dip|break|pause))"
+    r"|steady\s+(?:growth|rise|increase|climb|decline|decrease|fall|upward|downward)"
+    r"|(?:steadily|consistently|continuously)\s+(?:rising|growing|increasing|declining|falling|decreasing|upward|downward))\b",
+    re.I)
+AFTER_PEAK = re.compile(
+    r"\b(?:single|one|only one|lone)\s+(?:sharp\s+)?(?:peak|spike)\b"
+    r"|\b(?:falls?|drops?|returns?|goes|comes|settles?|clears?)\s+back\s+(?:to|near|down)[^.;]{0,60}?\b(?:rest of|remainder|thereafter|afterwards|after that)\b"
+    r"|\b(?:near|close to|around)\s+zero\s+(?:for|during)\s+the\s+rest\b", re.I)
+ALWAYS = re.compile(r"\b(?:consistently|always|every (?:month|week|year|day|quarter)|throughout|in (?:every|each) (?:month|week|year|period))\b", re.I)
+TOP = re.compile(r"\b(?:highest|lead(?:s|ing)?|top|most|largest|biggest|ahead)\b", re.I)
+BOTTOM = re.compile(r"\b(?:lowest|least|smallest|fewest|last|behind)\b", re.I)
+
+
+def at(x):
+    """An x label as a number (a date as days) or None."""
+    x = x.strip()
+    try:
+        return float(x)
+    except ValueError:
+        pass
+    try:
+        return datetime.date.fromisoformat(x[:10]).toordinal()
+    except ValueError:
+        return None
+
+
+def span(x0, x1, a, b):
+    """The share of the x extent between a and b (None for a discrete x)."""
+    v = [at(x) for x in (x0, x1, a, b)]
+    if None in v or v[1] == v[0]:
+        return None
+    return abs(v[3] - v[2]) / abs(v[1] - v[0])
+
+
+def clauses(text):
+    """Sentences, and the parts of one split by a dash."""
+    return [c for c in re.split(r"(?<=[.;!?])\s+|\s+—\s+", text) if c.strip()]
+
+
+def named(clause, series):
+    """The series a clause names by their key."""
+    return [s for s in series if s["key"] and re.search(r"(?<!\w)" + re.escape(s["key"]) + r"(?!\w)", clause, re.I)]
+
+
+def word_problems(answer, digest):
+    """(the phrase, what the digest says instead) for each contradicted word claim."""
+    series, leaders = parse_digest(digest)
+    if not series:
+        return []
+    out = []
+    for cl in clauses(answer):
+        # 1. a steady rise / fall against a sizeable counter move
+        if STEADY.search(cl):
+            cands = named(cl, series) or (series if len({s["key"] for s in series}) == 1 else [])
+            for s in cands:
+                mv = s["move"]
+                rng = s["max"] - s["min"]
+                if mv and rng > 0 and abs(mv[1] - mv[3]) >= 0.1 * rng and (
+                        abs(mv[1] - mv[3]) >= 0.3 * rng or (span(s["x0"], s["x1"], mv[2], mv[4]) or 0) >= 0.2):
+                    out.append((STEADY.search(cl).group(), f"{s['key'] or 'the series'}: {mv[0]} {mv[1]:g} at {mv[2]} → {mv[3]:g} at {mv[4]}"))
+                    break
+        # 2. one peak / back to the baseline for good, but another peak stands out
+        if AFTER_PEAK.search(cl):
+            cands = named(cl, series) or series
+            more = [s for s in cands if s["peaks"] > 1]
+            # said of a named series, or of most of the chart's series
+            if more and (named(cl, series) or 2 * len(more) >= len(cands)):
+                out.append((AFTER_PEAK.search(cl).group(), f"{more[0]['key'] or 'the series'} has {more[0]['peaks']} peaks"))
+        # 3. 'X is consistently the highest' against who is highest per x
+        if ALWAYS.search(cl) and leaders:
+            for counts, shared in leaders:
+                ks = [k for k in counts if re.search(r"(?<!\w)" + re.escape(k) + r"(?!\w)", cl, re.I)]
+                if len(ks) != 1 or not TOP.search(cl) or BOTTOM.search(cl):
+                    continue
+                k = ks[0]
+                if counts.get(k, 0) < shared:
+                    out.append((ALWAYS.search(cl).group(), f"{k} is highest at {counts.get(k, 0)} of {shared} x"))
+                    break
+    return out
+
+
+def latest_digest(evidence):
+    """The digest of the last chart drawn so far (the one shown with the answer)."""
+    for e in reversed(evidence):
+        if e and "what the chart shows" in e:
+            return e
+    return ""
+
+
+def word_feedback(bad):
+    said = "; ".join(f"'{p}' — but {why}" for p, why in bad)
+    return ("Not accepted yet: your answer's wording contradicts what the chart drew "
+            f"({said}). Reword it to match the chart, or check the data, and call answer again.")

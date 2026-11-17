@@ -200,7 +200,13 @@ def num(v):
     return f"{v:.{digits}f}".rstrip("0").rstrip(".")
 
 
-def series_text(key, xs, ys):
+# #1263: the series' shape and who leads per x come from shape.py, shared
+# with the matplotlib digest (MPL_DIGEST carries its text)
+SHAPE_PY = (Path(__file__).resolve().parent / "shape.py").read_text()
+from shape import leaders_suffix, shape_suffix  # noqa: E402
+
+
+def series_text(key, xs, ys, shape=True):
     """One series as ggplot-rs's summary writes it: `xs` labels, `ys` numbers."""
     pts = [(x, y) for x, y in zip(xs, ys) if y == y]
     if not pts:
@@ -210,13 +216,14 @@ def series_text(key, xs, ys):
     n = len(pts)
     return (f"{key + ' — ' if key is not None else ''}{n} mark{'' if n == 1 else 's'}, "
             f"x {pts[0][0]} … {pts[-1][0]}; y first {num(pts[0][1])}, last {num(pts[-1][1])}, "
-            f"min {num(lo[1])} at {lo[0]}, max {num(hi[1])} at {hi[0]}")
+            f"min {num(lo[1])} at {lo[0]}, max {num(hi[1])} at {hi[0]}"
+            + (shape_suffix(pts, num) if shape else ""))
 
 
-def layer_text(name, series):
+def layer_text(name, series, lead=""):
     shown = [t for t in series if t][:MAX_SERIES]
     more = len([t for t in series if t]) - len(shown)
-    return f"{name}: " + "; ".join(shown) + (f"; +{more} more series" if more > 0 else "")
+    return f"{name}: " + "; ".join(shown) + (f"; +{more} more series" if more > 0 else "") + lead
 
 
 def vegalite_digest(spec, df):
@@ -239,16 +246,19 @@ def vegalite_digest(spec, df):
             continue
         f = df.sort_values(x) if enc["x"].get("type") in ("temporal", "quantitative") else df
         groups = f.groupby(key, sort=False) if key in df.columns else [(None, f)]
-        series = [series_text(None if k is None else str(k), [str(v)[:10] if enc["x"].get("type") == "temporal" else
-                              (num(v) if isinstance(v, (int, float)) else str(v)) for v in g[x]],
-                              [float(v) if v is not None else float("nan") for v in g[y]]) for k, g in groups]
-        out.append(layer_text(mark or "mark", series))
+        xl = lambda v: str(v)[:10] if enc["x"].get("type") == "temporal" else (num(v) if isinstance(v, (int, float)) else str(v))
+        keyed = [(None if k is None else str(k), [(xl(a), float(b)) for a, b in zip(g[x], g[y]) if b is not None and b == b])
+                 for k, g in groups]
+        # a scatter has no path along x: no shape, as in ggplot-rs
+        line_like = mark not in ("point", "circle", "square", "tick", "text")
+        series = [series_text(k, [a for a, _ in p], [b for _, b in p], shape=line_like) for k, p in keyed]
+        out.append(layer_text(mark or "mark", series, leaders_suffix(keyed)))
     return "\n".join(out)
 
 
 # appended to the python arm's script: the figure's own artists, written to
 # drawn.txt (lines, scatter offsets, bars; a date axis read as dates)
-MPL_DIGEST = r'''
+MPL_DIGEST = SHAPE_PY + r'''
 def __digest():
     import matplotlib.pyplot as plt, matplotlib.dates as mdates, math
     from matplotlib.collections import PathCollection
@@ -258,13 +268,15 @@ def __digest():
         if float(v).is_integer() and abs(v) < 1e15: return str(int(v))
         d = max(0, min(6, 4 - math.floor(math.log10(abs(v)))))
         return f"{v:.{d}f}".rstrip("0").rstrip(".")
-    def series(key, xs, ys):
+    def series(key, xs, ys, shape=True):
         pts = [(x, y) for x, y in zip(xs, ys) if y == y]
         if not pts: return None
         lo = min(pts, key=lambda p: p[1]); hi = max(pts, key=lambda p: p[1]); n = len(pts)
         return (f"{key + ' — ' if key else ''}{n} mark{'' if n == 1 else 's'}, x {pts[0][0]} … {pts[-1][0]}; "
-                f"y first {num(pts[0][1])}, last {num(pts[-1][1])}, min {num(lo[1])} at {lo[0]}, max {num(hi[1])} at {hi[0]}")
+                f"y first {num(pts[0][1])}, last {num(pts[-1][1])}, min {num(lo[1])} at {lo[0]}, max {num(hi[1])} at {hi[0]}"
+                + (shape_suffix(pts, num) if shape else ""))
     out = []
+    panels = []  # (panel title, its one line's points) for the across-panels leaders
     for i, ax in enumerate(plt.gcf().axes):
         date = isinstance(ax.xaxis.get_major_formatter(), (mdates.DateFormatter, mdates.AutoDateFormatter, mdates.ConciseDateFormatter))
         ticks = {round(t, 6): l.get_text() for t, l in zip(ax.get_xticks(), ax.get_xticklabels()) if l.get_text()}
@@ -272,14 +284,16 @@ def __digest():
             if date: return mdates.num2date(v).strftime("%Y-%m-%d")
             return ticks.get(round(v, 6), num(v))
         panel = f" [{ax.get_title()}]" if len(plt.gcf().axes) > 1 and ax.get_title() else ""
-        lines = [series(l.get_label() if not l.get_label().startswith("_") else None,
-                        [xl(float(p[0])) for p in l.get_xydata()], [float(p[1]) for p in l.get_xydata()])
+        drawn = [(l.get_label() if not l.get_label().startswith("_") else None,
+                  [(xl(float(p[0])), float(p[1])) for p in l.get_xydata() if p[1] == p[1]])
                  for l in ax.get_lines() if len(l.get_xdata()) > 1]
-        if [t for t in lines if t]: out.append(f"line{panel}: " + "; ".join(t for t in lines if t))
+        lines = [series(k, [a for a, _ in p], [b for _, b in p]) for k, p in drawn]
+        if [t for t in lines if t]: out.append(f"line{panel}: " + "; ".join(t for t in lines if t) + leaders_suffix(drawn))
+        if len(drawn) == 1 and panel: panels.append((ax.get_title(), drawn[0][1]))
         for c in ax.collections:
             if isinstance(c, PathCollection) and len(c.get_offsets()):
                 o = sorted(c.get_offsets().tolist())
-                t = series(None if c.get_label().startswith("_") else c.get_label(), [xl(p[0]) for p in o], [p[1] for p in o])
+                t = series(None if c.get_label().startswith("_") else c.get_label(), [xl(p[0]) for p in o], [p[1] for p in o], shape=False)
                 if t: out.append(f"point{panel}: " + t)
         bars = [p for p in ax.patches if isinstance(p, Rectangle) and p.get_height() and p.get_width()]
         if bars:
@@ -291,6 +305,9 @@ def __digest():
             else:
                 t = series(None, [xl(p.get_x() + p.get_width() / 2) for p in bars], [p.get_height() for p in bars])
             if t: out.append(f"bar{panel}: " + t)
+    if len(panels) > 1 and len(panels) == len(plt.gcf().axes):
+        lead = leaders_suffix(panels)
+        if lead: out.append("line across panels: " + lead[2:])
     open("drawn.txt", "w").write("\n".join(out))
 try:
     __digest()
@@ -550,12 +567,14 @@ class Scripted:
 
 # ---------------------------------------------------------------- one run
 
-def phase(model, system, tools, messages, kit, log, evidence=None, claim_mode="off"):
+def phase(model, system, tools, messages, kit, log, evidence=None, claim_mode="off", word_mode="off"):
     """Model calls until answer() or MAX_ROUNDS; returns the answer text (or None).
 
     #1116: `evidence` collects the request and every tool input and output of
     the conversation; with claim_mode 'shadow' the answer's unsupported numbers
-    are logged, with 'on' they also go back to the model once."""
+    are logged, with 'on' they also go back to the model once. word_mode does
+    the same for wording the last chart's digest contradicts (#1263); an
+    answer goes back at most once, for both."""
     failed_chart = False
     evidence = [] if evidence is None else evidence
     sent_back = False
@@ -574,10 +593,14 @@ def phase(model, system, tools, messages, kit, log, evidence=None, claim_mode="o
             if u["name"] == "answer":
                 text = u["input"].get("text", "")
                 bad = claims.unsupported(text, evidence) if claim_mode != "off" else []
-                log.setdefault("claim_check", []).append({"unsupported": bad, "sent_back": claim_mode == "on" and bool(bad) and not sent_back})
-                if claim_mode == "on" and bad and not sent_back:
+                words = claims.word_problems(text, claims.latest_digest(evidence)) if word_mode != "off" else []
+                back = [claims.feedback(bad)] if claim_mode == "on" and bad else []
+                back += [claims.word_feedback(words)] if word_mode == "on" and words else []
+                log.setdefault("claim_check", []).append({"unsupported": bad, "words": words,
+                                                          "sent_back": bool(back) and not sent_back})
+                if back and not sent_back:
                     sent_back = True
-                    results.append({"type": "tool_result", "tool_use_id": u["id"], "content": claims.feedback(bad), "is_error": True})
+                    results.append({"type": "tool_result", "tool_use_id": u["id"], "content": "\n".join(back), "is_error": True})
                     call["tools"].append({"name": "answer", "kind": "answer", "ok": False})
                     continue
                 answer = text
@@ -635,7 +658,8 @@ def run_one(task, arm, rep, model, cfg, out_dir, refs):
         log = {"phase": ph, "calls": []}
         t0 = time.time()
         try:
-            log["answer"] = phase(model, system, tools, messages, kit, log, evidence, cfg.get("claim_check", "off"))
+            log["answer"] = phase(model, system, tools, messages, kit, log, evidence, cfg.get("claim_check", "off"),
+                                  cfg.get("word_check", "off"))
         except AccountError:
             raise
         except RuntimeError as e:
@@ -704,6 +728,8 @@ def main():
                     help="#1118: return each drawn chart to the model as an image (every arm)")
     ap.add_argument("--claim-check", choices=["off", "shadow", "on"], default="shadow",
                     help="#1116: log (shadow) or also send back (on) an answer's numbers nothing backs")
+    ap.add_argument("--word-check", choices=["off", "shadow", "on"], default="shadow",
+                    help="#1263: log (shadow) or also send back (on) wording the chart's digest contradicts")
     ap.add_argument("--no-digest", action="store_true",
                     help="the chart tools answer 'ok' only, not what they drew (#1095)")
     ap.add_argument("--yes", action="store_true", help="don't ask before spending")
@@ -729,12 +755,12 @@ def main():
     (out / "charts").mkdir(parents=True, exist_ok=True)
     cfg = {"data": str(Path(a.data).resolve()), "dashboard": str(Path(a.dashboard).resolve()), "python": a.python,
            "boundaries": str(Path(a.boundaries).resolve()) if a.boundaries else None,
-           "workdir": str((out / "work").resolve()), "digest": not a.no_digest, "claim_check": a.claim_check, "see_chart": a.see_chart == "on"}
+           "workdir": str((out / "work").resolve()), "digest": not a.no_digest, "claim_check": a.claim_check, "word_check": a.word_check, "see_chart": a.see_chart == "on"}
     Path(cfg["workdir"]).mkdir(exist_ok=True)
     refs = load_refs(a)
 
     meta = {"model": a.model, "effort": a.effort, "reps": a.reps, "arms": arms, "tasks": [t["id"] for t in tasks],
-            "dry": a.dry, "digest": not a.no_digest, "claim_check": a.claim_check, "see_chart": a.see_chart == "on", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "dry": a.dry, "digest": not a.no_digest, "claim_check": a.claim_check, "word_check": a.word_check, "see_chart": a.see_chart == "on", "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "ref_sha": {k: hashlib.sha256(v.encode()).hexdigest()[:12] for k, v in refs.items() if k in arms},
             "ref_chars": {k: len(v) for k, v in refs.items() if k in arms}}
     if not a.dry:
