@@ -475,28 +475,68 @@ fn described(d: &Dist, miss: Option<f64>) -> String {
 
 /// The field's preview (wasm `dist_preview`): the density in the theme's
 /// first colour, its central 90 % shaded stronger, no axes.
-pub fn preview_svg(value: &str, o: &crate::RenderOptions, width: u32, height: u32) -> Result<String, String> {
+pub fn preview_svg(
+    value: &str,
+    o: &crate::RenderOptions,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
     use ggplot_rs::data::Value as V;
     use ggplot_rs::prelude::*;
     let v: Json = serde_json::from_str(value).unwrap_or_else(|_| Json::String(value.to_string()));
     let d = Dist::parse(&v)?;
-    let pts: Vec<(f64, f64)> = d.curve(120).into_iter().filter(|p| p.1.is_finite()).collect();
+    let pts: Vec<(f64, f64)> = d
+        .curve(120)
+        .into_iter()
+        .filter(|p| p.1.is_finite())
+        .collect();
     let s = d.summary();
-    let inner: Vec<(f64, f64)> = pts.iter().copied().filter(|p| p.0 >= s.lo && p.0 <= s.hi).collect();
-    let col = |v: &[(f64, f64)], i: usize| v.iter().map(|p| V::Float(if i == 0 { p.0 } else { p.1 })).collect::<Vec<_>>();
+    let inner: Vec<(f64, f64)> = pts
+        .iter()
+        .copied()
+        .filter(|p| p.0 >= s.lo && p.0 <= s.hi)
+        .collect();
+    let col = |v: &[(f64, f64)], i: usize| {
+        v.iter()
+            .map(|p| V::Float(if i == 0 { p.0 } else { p.1 }))
+            .collect::<Vec<_>>()
+    };
     let brand = o.brand();
-    let mut plot = GGPlot::new(vec![("x".to_string(), col(&pts, 0)), ("y".to_string(), col(&pts, 1))])
-        .aes(Aes::new().x("x").y("y"))
-        .geom_area_with(GeomArea { fill: brand, color: brand, alpha: 0.18, line_width: 1.4, ..Default::default() })
-        .position(ggplot_rs::position::identity::PositionIdentity);
+    let mut plot = GGPlot::new(vec![
+        ("x".to_string(), col(&pts, 0)),
+        ("y".to_string(), col(&pts, 1)),
+    ])
+    .aes(Aes::new().x("x").y("y"))
+    .geom_area_with(GeomArea {
+        fill: brand,
+        color: brand,
+        alpha: 0.18,
+        line_width: 1.4,
+        ..Default::default()
+    })
+    .position(ggplot_rs::position::identity::PositionIdentity);
     if inner.len() >= 2 {
         plot = plot
-            .geom_area_with(GeomArea { fill: brand, color: brand, alpha: 0.32, line_width: 0.0, ..Default::default() })
-            .layer_data(vec![("x".to_string(), col(&inner, 0)), ("y".to_string(), col(&inner, 1))])
+            .geom_area_with(GeomArea {
+                fill: brand,
+                color: brand,
+                alpha: 0.32,
+                line_width: 0.0,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                ("x".to_string(), col(&inner, 0)),
+                ("y".to_string(), col(&inner, 1)),
+            ])
             .position(ggplot_rs::position::identity::PositionIdentity);
     }
     let mut th = crate::void_theme(o);
-    th.plot_margin = ggplot_rs::theme::Margin { top: 2.0, right: 2.0, bottom: 2.0, left: 2.0 };
+    th.plot_margin = ggplot_rs::theme::Margin {
+        top: 2.0,
+        right: 2.0,
+        bottom: 2.0,
+        left: 2.0,
+    };
     plot.theme(th)
         .render_svg_native_with_size(width, height)
         .map_err(|e| e.to_string())
@@ -673,7 +713,9 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["value"], json!({"family": "Beta", "a": 2.0, "b": 3.0}));
         assert_eq!(v["likely"], json!(0.3333));
-        let e: Json = serde_json::from_str(&info_json("{\"family\": \"Beta\", \"a\": -1, \"b\": 3}")).unwrap();
+        let e: Json =
+            serde_json::from_str(&info_json("{\"family\": \"Beta\", \"a\": -1, \"b\": 3}"))
+                .unwrap();
         assert!(e["ok"] == false && e["error"].as_str().unwrap().contains("> 0"));
         let r: Json = serde_json::from_str(&from_range_json("gamma", 12.0, 8.0, 20.0)).unwrap();
         assert_eq!(r["value"]["family"], "Gamma");

@@ -365,7 +365,10 @@ pub fn fields(
                     }
                 }
                 if fams.is_empty() {
-                    fams = crate::distfield::FAMILIES.iter().map(|f| f.to_string()).collect();
+                    fams = crate::distfield::FAMILIES
+                        .iter()
+                        .map(|f| f.to_string())
+                        .collect();
                 }
                 fams
             }
@@ -592,6 +595,60 @@ mod tests {
             .iter()
             .map(|r| r.as_object().unwrap().clone())
             .collect()
+    }
+
+    #[test]
+    fn distribution_fields() {
+        let r = rows(serde_json::json!([
+            {"p": "share", "type": "distribution", "value": "Beta(2, 3)", "options": "Beta, Normal"},
+            {"p": "cycle", "type": "dist", "value": {"family": "Gamma", "shape": 12, "rate": 1}},
+            {"p": "bad", "type": "distribution", "value": "Beta(0, 3)"},
+            {"p": "off", "type": "distribution", "value": "Gamma(2, 1)", "options": ["Beta", "Weibull"]},
+        ]));
+        let (f, issues) = fields("p", &r);
+        assert_eq!(f[0].kind, FieldType::Distribution);
+        assert_eq!(
+            f[0].value,
+            serde_json::json!({"family": "Beta", "a": 2.0, "b": 3.0})
+        );
+        assert_eq!(f[0].options, ["Beta", "Normal"]);
+        assert_eq!(
+            f[1].options.len(),
+            crate::distfield::FAMILIES.len(),
+            "all families by default"
+        );
+        assert_eq!(f[2].value, Json::Null);
+        let msgs: Vec<&str> = issues
+            .iter()
+            .filter(|(c, _)| *c == "form/bad-distribution")
+            .map(|(_, m)| m.as_str())
+            .collect();
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`bad`") && m.contains("> 0")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`off`") && m.contains("Weibull")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`off`") && m.contains("not among its options")),
+            "{msgs:?}"
+        );
+        let d: Json = serde_json::from_str(&default_json(&f)).unwrap();
+        assert_eq!(d["cycle"]["shape"], 12.0);
+        // a preset may set one
+        assert!(value_fits(
+            &f[0],
+            &serde_json::json!({"family": "Normal", "mean": 0.3, "variance": 0.01})
+        ));
+        assert!(!value_fits(
+            &f[0],
+            &serde_json::json!({"family": "Gamma", "shape": 2, "rate": 1})
+        ));
     }
 
     #[test]

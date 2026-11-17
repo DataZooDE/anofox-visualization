@@ -96,7 +96,8 @@ pub struct Diagnostic {
     /// new server connection when served).
     /// `::FORM` fields ([`crate::form::fields`], #683): `form/no-value` |
     /// `form/unknown-type` | `form/no-options` | `form/bad-show-if` |
-    /// `form/bad-preset` (errors) | `form/bad-value` | `form/bad-range` |
+    /// `form/bad-preset` | `form/bad-distribution` (#1235) (errors) |
+    /// `form/bad-value` | `form/bad-range` |
     /// `form/slider-range` | `form/duplicate-field` | `form/no-key` |
     /// `form/too-many-fields` | `form/bad-width` | `form/partial-sections` |
     /// `form/unknown-layout` (#1233)
@@ -908,8 +909,12 @@ where
                         }
                         for (code, message) in crate::form::fields(key, &rows).1 {
                             let severity = match code {
-                                "form/no-value" | "form/unknown-type" | "form/no-options"
-                                | "form/bad-show-if" | "form/bad-preset" => Severity::Error,
+                                "form/no-value"
+                                | "form/unknown-type"
+                                | "form/no-options"
+                                | "form/bad-show-if"
+                                | "form/bad-preset"
+                                | "form/bad-distribution" => Severity::Error,
                                 _ => Severity::Warning,
                             };
                             diags.push(Diagnostic {
