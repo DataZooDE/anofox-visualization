@@ -192,6 +192,26 @@ FROM orders GROUP BY week ORDER BY week;
 <div class="gal-pic"><img class="lp-light" src={t7l.src} alt="" loading="lazy" /><img class="lp-dark" src={t7d.src} alt="" loading="lazy" /></div>
 <div class="gal-text">
 
+### Above and below a line
+
+`::SIGN_SPLIT` colours one line, area or density red below a threshold and green above, cut exactly where it crosses — gains and losses, above or below a target.
+
+```sql
+SELECT 12::COL;
+SELECT week ::XAXIS, sum(revenue) - 2400 AS "Revenue against the 2,400 target" ::AREACHART, 0 ::SIGN_SPLIT,
+       'Weeks above and below target'::TITLE
+FROM orders GROUP BY week ORDER BY week;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCB3ZWVrIDo6WEFYSVMsIHN1bShyZXZlbnVlKSAtIDI0MDAgQVMgIlJldmVudWUgYWdhaW5zdCB0aGUgMiw0MDAgdGFyZ2V0IiA6OkFSRUFDSEFSVCwgMCA6OlNJR05fU1BMSVQsCiAgICAgICAnV2Vla3MgYWJvdmUgYW5kIGJlbG93IHRhcmdldCc6OlRJVExFCkZST00gb3JkZXJzIEdST1VQIEJZIHdlZWsgT1JERVIgQlkgd2VlazsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t8l.src} alt="" loading="lazy" /><img class="lp-dark" src={t8d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
 ### Small multiples
 
 `::FACET` draws one panel per value on shared axes.
@@ -208,7 +228,7 @@ FROM orders GROUP BY ALL ORDER BY 1;
 </div>
 
 <div class="gal-tile">
-<div class="gal-pic"><img class="lp-light" src={t8l.src} alt="" loading="lazy" /><img class="lp-dark" src={t8d.src} alt="" loading="lazy" /></div>
+<div class="gal-pic"><img class="lp-light" src={t9l.src} alt="" loading="lazy" /><img class="lp-dark" src={t9d.src} alt="" loading="lazy" /></div>
 <div class="gal-text">
 
 ### A strip under a chart
@@ -227,7 +247,7 @@ SELECT week ::XAXIS, 'Campaigns' ::TRACK, 'campaign' ::LABEL FROM orders WHERE w
 </div>
 
 <div class="gal-tile">
-<div class="gal-pic"><img class="lp-light" src={t9l.src} alt="" loading="lazy" /><img class="lp-dark" src={t9d.src} alt="" loading="lazy" /></div>
+<div class="gal-pic"><img class="lp-light" src={t10l.src} alt="" loading="lazy" /><img class="lp-dark" src={t10d.src} alt="" loading="lazy" /></div>
 <div class="gal-text">
 
 ### Guided steps
@@ -249,7 +269,7 @@ SELECT channel ::XAXIS, sum(revenue) ::BARCHART FROM orders GROUP BY 1 ORDER BY 
 </div>
 
 <div class="gal-tile">
-<div class="gal-pic"><img class="lp-light" src={t10l.src} alt="" loading="lazy" /><img class="lp-dark" src={t10d.src} alt="" loading="lazy" /></div>
+<div class="gal-pic"><img class="lp-light" src={t11l.src} alt="" loading="lazy" /><img class="lp-dark" src={t11d.src} alt="" loading="lazy" /></div>
 <div class="gal-text">
 
 ### Show a panel only when …
@@ -268,7 +288,7 @@ SELECT city ::TABLE, sum(revenue) AS "Revenue" ::MONEY FROM orders GROUP BY 1 OR
 </div>
 
 <div class="gal-tile">
-<div class="gal-pic"><img class="lp-light" src={t11l.src} alt="" loading="lazy" /><img class="lp-dark" src={t11d.src} alt="" loading="lazy" /></div>
+<div class="gal-pic"><img class="lp-light" src={t12l.src} alt="" loading="lazy" /><img class="lp-dark" src={t12d.src} alt="" loading="lazy" /></div>
 <div class="gal-text">
 
 ### Text with live values
@@ -287,7 +307,7 @@ SELECT 'Revenue so far is **{{total:money}}**, {{share:percent}} of it from the 
 </div>
 
 <div class="gal-tile">
-<div class="gal-pic"><img class="lp-light" src={t12l.src} alt="" loading="lazy" /><img class="lp-dark" src={t12d.src} alt="" loading="lazy" /></div>
+<div class="gal-pic"><img class="lp-light" src={t13l.src} alt="" loading="lazy" /><img class="lp-dark" src={t13d.src} alt="" loading="lazy" /></div>
 <div class="gal-text">
 
 ### A process diagram
@@ -308,7 +328,7 @@ FROM (VALUES ('feed', 'Order feed', []::VARCHAR[], 'Ingest'), ('clean', 'Clean a
 </div>
 
 <div class="gal-tile">
-<div class="gal-pic"><img class="lp-light" src={t13l.src} alt="" loading="lazy" /><img class="lp-dark" src={t13d.src} alt="" loading="lazy" /></div>
+
 <div class="gal-text">
 
 ### A factor graph

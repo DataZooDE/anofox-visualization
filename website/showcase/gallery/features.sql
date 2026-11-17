@@ -60,6 +60,12 @@ SELECT week ::XAXIS, sum(revenue) ::LINECHART,
        2400 ::REFLINE, 'target' ::REFLINE_LABEL, 'The launch lifted revenue; the promotion held it'::TITLE
 FROM orders GROUP BY week ORDER BY week;
 
+-- @tile Above and below a line | `::SIGN_SPLIT` colours one line, area or density red below a threshold and green above, cut exactly where it crosses — gains and losses, above or below a target.
+SELECT 12::COL;
+SELECT week ::XAXIS, sum(revenue) - 2400 AS "Revenue against the 2,400 target" ::AREACHART, 0 ::SIGN_SPLIT,
+       'Weeks above and below target'::TITLE
+FROM orders GROUP BY week ORDER BY week;
+
 -- @tile Small multiples | `::FACET` draws one panel per value on shared axes.
 SELECT 12::COL;
 SELECT week ::XAXIS, channel ::CATEGORY, sum(revenue) ::AREACHART_STACKED, region ::FACET, 'Revenue by channel, per region'::TITLE

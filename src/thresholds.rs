@@ -423,6 +423,15 @@ pub fn parse_level_colors(spec: &str) -> Result<Vec<(String, LevelColor)>, Strin
     Ok(out)
 }
 
+/// A colour word as `::COLORS` reads it: a status (`good`, `warn`, `bad`,
+/// `neutral` and their aliases) or `#rrggbb`.
+pub fn level_color(c: &str) -> Option<LevelColor> {
+    let c = c.trim();
+    Status::parse(c)
+        .map(LevelColor::Status)
+        .or_else(|| hex(c).map(LevelColor::Hex))
+}
+
 fn hex(s: &str) -> Option<Rgb> {
     let h = s.strip_prefix('#')?;
     if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
