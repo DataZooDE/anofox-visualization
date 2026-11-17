@@ -574,8 +574,14 @@ assert b["kind"] == "alert" and b["status"] == "FIRING" and b["detail"] == "1 ro
 assert [f["name"] for f in b["files"]] == ["stock-below_safety.csv"], b["files"]
 assert base64.b64decode(b["files"][0]["base64"]).decode().splitlines() == ['"item","qty"', '"bolt","2"'], b["files"]
 PY
-curl -s -H "Authorization: Bearer $MTOKEN" "http://127.0.0.1:$PORT/metrics" | grep -qF 'anofox_alert_firing{alert="low"} 1' \
-  || fail "alerts: /metrics firing"
+# #1257: scraped up to 5 times, the last reply kept for the failure message
+ok=
+for _ in $(seq 5); do
+  code="$(curl -s -o "$T/met" -w "%{http_code}" -H "Authorization: Bearer $MTOKEN" "http://127.0.0.1:$PORT/metrics" || true)"
+  grep -qF 'anofox_alert_firing{alert="low"} 1' "$T/met" 2>/dev/null && { ok=1; break; }
+  sleep 0.4
+done
+[ -n "$ok" ] || fail "alerts: /metrics firing (HTTP ${code:-none}): $({ grep -E '^anofox_alert' "$T/met" || head -c 300 "$T/met"; } 2>/dev/null | head -5)"
 stop
 # a restart doesn't send it again (the state file)
 start "$T/al.duckdb" "" "SELECT anofox_serve_dashboards($(q "$T/aldash"), $PORT, $(q "$alopts"));" || fail "alerts server (restart)"
