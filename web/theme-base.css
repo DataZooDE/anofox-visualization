@@ -295,7 +295,7 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-dist-nums label{display:flex;flex-direction:column;gap:.15rem;flex:1 1 6rem;min-width:5.5rem;font-size:.75rem;color:var(--ax-muted)}
 .dp-dist-preview svg{display:block;width:100%;max-width:240px;height:56px}
 .dp-dist-msg{font-size:.78rem;color:var(--ax-muted)}
-.dp-dist-msg.bad{color:var(--ax-negative,#b42318)}
+.dp-dist-msg.bad{color:var(--ax-negative)}
 .dp-form-input{min-width:0;flex:1 1 auto}
 .dp-form-input[type=checkbox]{flex:0 0 auto}
 /* the theme's accent on a form's slider and switch (the browser's blue otherwise) */
