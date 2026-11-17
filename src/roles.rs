@@ -283,6 +283,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class"),
     e("MIDPOINT", &[], R::Midpoint, "modifier", true,
       "centre of a map's diverging colour ramp (default 0 when the values span it)"),
+    e("SIGN_SPLIT", &["SPLIT_AT"], R::SignSplit, "modifier", true,
+      "colour a single-series ::LINECHART, ::AREACHART or ::DENSITY by the side of a threshold, red below and green above, cut exactly at the crossing: a number (default 0; along y, along x for a density), 'x 0' / 'y 100', and 'below:bad; above:good' (status or #rrggbb)"),
     e("BOUNDARIES", &["REGION_SET"], R::Boundaries, "modifier", true,
       "the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'world-states', 'de-states', 'de-districts' (default: the layer most codes match)"),
     e("HEXBIN", &["HEX"], R::Hexbin, "modifier", true,
@@ -1310,6 +1312,7 @@ mod tests {
             Role::MapTiles,
             Role::Classes,
             Role::Midpoint,
+            Role::SignSplit,
             Role::Hexbin,
             Role::Frame,
             Role::Region,
@@ -1502,6 +1505,7 @@ mod tests {
                 | Role::MapTiles
                 | Role::Classes
                 | Role::Midpoint
+                | Role::SignSplit
                 | Role::Hexbin
                 | Role::Frame
                 | Role::Region

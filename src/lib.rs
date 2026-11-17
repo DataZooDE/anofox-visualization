@@ -496,6 +496,10 @@ pub enum Role {
     Classes,
     /// The centre of a map's diverging colour ramp (`::MIDPOINT`).
     Midpoint,
+    /// `::SIGN_SPLIT` (#1256): colour a line, area or density by the side of
+    /// a threshold — red below, green above — cut at the crossing. A number
+    /// (default 0), `'x 0'` / `'y 100'`, `'below:bad; above:good'`.
+    SignSplit,
     /// A map's hexagonal density-bin width (`::HEXBIN`, M2c): `'auto'` or a
     /// width across (`'25 km'`; planar: a bare number) — sums `::Value`
     /// when present, else counts points per hexagon.
@@ -3373,6 +3377,78 @@ fn narrow_continuous_legend(width: u32) -> Option<ggplot_rs::theme::LegendPositi
     (width as f64 <= NARROW_PANEL_PX).then_some(ggplot_rs::theme::LegendPosition::Bottom)
 }
 
+/// `::SIGN_SPLIT` (#1256): `None` without the role; else the split — a
+/// threshold (a number, default 0), its axis (`'x …'` / `'y …'`; default x
+/// for a density, else y) and the colours (`'below:…; above:…'`, a status
+/// or `#rrggbb`; default the theme's negative / positive), `;` between the
+/// parts: `'y 100; below:warn'`.
+fn sign_split_of(
+    o: &RenderOptions,
+    cols: &[Column],
+    density: bool,
+) -> Result<Option<ggplot_rs::prelude::SignSplit>, String> {
+    use ggplot_rs::prelude::{SignSplit, SplitAxis};
+    let Some(col) = find_role(cols, Role::SignSplit) else {
+        return Ok(None);
+    };
+    let t = &o.theme;
+    let mut sp = SignSplit::new(t.colors.negative, t.colors.positive).axis(if density {
+        SplitAxis::X
+    } else {
+        SplitAxis::Y
+    });
+    let spec = match col.values.iter().find(|v| !matches!(v, Value::Na)) {
+        None => return Ok(Some(sp)),
+        Some(Value::Str(s)) => s.trim().to_string(),
+        Some(v) => return Ok(Some(v.as_f64().map_or(sp, |n| sp.at(n)))),
+    };
+    let num = |s: &str| {
+        s.trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .ok_or_else(|| format!("::SIGN_SPLIT '{spec}': '{}' is no number", s.trim()))
+    };
+    for part in spec.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let lower = part.to_ascii_lowercase();
+        if let Some((side, c)) = lower.split_once(':') {
+            let colour = thresholds::level_color(c)
+                .ok_or_else(|| {
+                    format!("::SIGN_SPLIT '{spec}': '{}' is no status (good, warn, bad, neutral) or #rrggbb", c.trim())
+                })?
+                .rgb(t);
+            match side.trim() {
+                "below" => sp.below = colour,
+                "above" => sp.above = colour,
+                s => {
+                    return Err(format!(
+                        "::SIGN_SPLIT '{spec}': '{s}' is neither 'below' nor 'above'"
+                    ))
+                }
+            }
+        } else if let Some(rest) = lower
+            .strip_prefix('x')
+            .filter(|r| r.is_empty() || r.starts_with(' '))
+        {
+            sp.axis = SplitAxis::X;
+            if !rest.trim().is_empty() {
+                sp.at = num(rest)?;
+            }
+        } else if let Some(rest) = lower
+            .strip_prefix('y')
+            .filter(|r| r.is_empty() || r.starts_with(' '))
+        {
+            sp.axis = SplitAxis::Y;
+            if !rest.trim().is_empty() {
+                sp.at = num(rest)?;
+            }
+        } else {
+            sp.at = num(part)?;
+        }
+    }
+    Ok(Some(sp))
+}
+
 /// The first finite numeric value of a `role` column.
 fn role_num(cols: &[Column], role: Role) -> Option<f64> {
     find_role(cols, role).and_then(|c| {
@@ -4381,21 +4457,33 @@ fn cartesian(
                 .show_legend(false);
         }
     }
+    // `::SIGN_SPLIT` (#1256): one series, each side of the threshold in its
+    // own colour (with a ::CATEGORY the series keep theirs; --check says so)
+    let split = match category {
+        None if matches!(kind, Kind::Line | Kind::LinePercent | Kind::Area) => {
+            sign_split_of(o, cols, false)?
+        }
+        _ => None,
+    };
     // Slimmer line + smaller markers so dense series (e.g. a monthly forecast)
     // don't get swamped by the dots.
     let thin_line = || GeomLine {
         color: brand,
-        width: 1.0,
+        width: if split.is_some() { 1.6 } else { 1.0 },
+        split,
         ..Default::default()
     };
     // `::POINTS`: on a dense series the markers swamp the line, so by
-    // default ggplot-rs leaves them uninked (still hover/click targets).
+    // default ggplot-rs leaves them uninked (still hover/click targets);
+    // a split line's markers too, they would carry one colour across both
+    // sides
     let visibility = match role_str(cols, Role::Points)
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
         Some("none") => PointVisibility::Hidden,
         Some("always") => PointVisibility::Visible,
+        _ if split.is_some() => PointVisibility::Hidden,
         _ => PointVisibility::AUTO,
     };
     let small_point = || GeomPoint {
@@ -4494,6 +4582,14 @@ fn cartesian(
         // opposed to `::AREA_STACKED`. ggplot-rs 0.24's new `geom_area()`
         // default (`position_stack()`, same parity gap as #169) would
         // silently stack those bands; keep the documented overlap look.
+        Kind::Area if split.is_some() => plot
+            .geom_area_with(GeomArea {
+                alpha: 0.55,
+                split,
+                ..Default::default()
+            })
+            .position(PositionIdentity)
+            .geom_point_with(small_point()),
         Kind::Area => plot
             .geom_area()
             .position(PositionIdentity)
@@ -6122,6 +6218,18 @@ fn render_density(
             .legend_position(
                 legend_position_of(cols).unwrap_or(ggplot_rs::theme::LegendPosition::Top),
             );
+    } else if let Some(split) = sign_split_of(o, cols, true)? {
+        // #1256: a distribution of outcomes, each side of the threshold in
+        // its own colour
+        plot = GGPlot::new(data)
+            .aes(aes)
+            .geom_density_with(GeomDensity {
+                alpha: 0.55,
+                split: Some(split),
+                ..Default::default()
+            })
+            .house_theme(o)
+            .primary_color(o.brand());
     } else {
         plot = GGPlot::new(data)
             .aes(aes)

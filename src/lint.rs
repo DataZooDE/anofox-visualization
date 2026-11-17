@@ -7651,6 +7651,18 @@ fn role_ignored_diags(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> V
         ignored(Role::GaugeColors, "on a chart it maps ::CATEGORY levels to colours ('below:bad; above:#9aa3af'); add the ::CATEGORY column");
     }
     ignored(Role::Direction, "it lays out a ::DIAGRAM");
+    // #1256
+    if !matches!(kind, Line | LinePercent | Area | Density) {
+        ignored(
+            Role::SignSplit,
+            "it colours a ::LINECHART, ::AREACHART or ::DENSITY by the side of a threshold",
+        );
+    } else if has(Role::Category) {
+        ignored(
+            Role::SignSplit,
+            "with a ::CATEGORY each series keeps its colour; split a single series",
+        );
+    }
     if !has(Role::Facet) && !has(Role::FacetFree) {
         ignored(
             Role::FacetCols,
@@ -12488,6 +12500,17 @@ mod design_tests {
         .is_empty());
         assert!(msgs("SELECT v::METRIC, 5::DELTA FROM t;").is_empty());
         assert!(msgs("SELECT w::XAXIS, v::SCATTER, 0.5::ALPHA FROM t;").is_empty());
+        // #1256: ::SIGN_SPLIT on a line / area / density of one series only
+        assert!(msgs("SELECT k::XAXIS, v::LINECHART, 0::SIGN_SPLIT FROM t;").is_empty());
+        assert!(msgs("SELECT v::DENSITY, 0::SIGN_SPLIT FROM t;").is_empty());
+        assert!(
+            msgs("SELECT k::XAXIS, v::BARCHART, 0::SIGN_SPLIT FROM t;")[0]
+                .starts_with("::SIGN_SPLIT does nothing here — it colours")
+        );
+        assert!(
+            msgs("SELECT k::XAXIS, v::AREACHART, g::CATEGORY, 0::SIGN_SPLIT FROM t;")[0]
+                .contains("each series keeps its colour")
+        );
     }
 
     #[test]

@@ -164,6 +164,7 @@ terminal.
 | `::PROJECTION` | `::PROJ` | modifier | map projection: 'auto' (default, by the data's extent), 'equal-earth', 'mercator', 'albers-europe', 'conic', 'utm', 'none' (planar x/y) |
 | `::CLASSES` | `::CLASS_BREAKS`, `::BINS` | modifier | map colour classes: 'quantile 5', 'jenks 5', 'equal 5' or edges '0,10,50,100' — a stepped legend with a count per class |
 | `::MIDPOINT` |  | modifier | centre of a map's diverging colour ramp (default 0 when the values span it) |
+| `::SIGN_SPLIT` | `::SPLIT_AT` | modifier | colour a single-series ::LINECHART, ::AREACHART or ::DENSITY by the side of a threshold, red below and green above, cut exactly at the crossing: a number (default 0; along y, along x for a density), 'x 0' / 'y 100', and 'below:bad; above:good' (status or #rrggbb) |
 | `::BOUNDARIES` | `::REGION_SET` | modifier | the built-in layer a ::REGION is looked up in: 'world', 'world-50m', 'world-states', 'de-states', 'de-districts' (default: the layer most codes match) |
 | `::HEXBIN` | `::HEX` | modifier | aggregate a map's points into hexagons ('auto' or a width across, '25 km'; planar: '2.5'; sums the measure, else counts rows) or, on a planar ::SCATTER, bin the points into a 2D count density ('auto' or a bin count across each axis) |
 | `::FRAME` | `::PLAY_BY`, `::TIME_FRAME` | encoding | a time map's (or a bar/line/area/scatter chart's) frame key (a week, a date): one result holds every frame; Play steps through them with shared colours, classes, sizes and axes; static output shows the last frame |
@@ -1010,6 +1011,31 @@ FROM items;
 `dashboard --check` reports `colors/bad-map` (an entry without a status) and
 `colors/no-category` (a level map on a chart without a `::CATEGORY`). Without
 a `:` the value is still a gauge's comma-separated zone colours.
+
+#### Below and above a threshold (`::SIGN_SPLIT`)
+
+One `::LINECHART`, `::AREACHART` or `::DENSITY` series in two colours: the
+part below a threshold in the theme's `negative`, the part above in its
+`positive` (dark mode and the colour-blind theme follow). The shape is cut
+exactly where it crosses, so the parts meet without a gap or an overlap; an
+area or density keeps one outline, a line changes colour without a break. An
+area fills between the curve and the threshold.
+
+```sql
+-- what each decision leaves you after 25 years, against staying as now
+SELECT outcome ::DENSITY, 0 ::SIGN_SPLIT FROM simulated;
+-- weeks above and below target
+SELECT week::XAXIS, revenue - 2400 ::AREACHART, 0 ::SIGN_SPLIT FROM weekly;
+-- OEE against an 85 % target, below in amber
+SELECT week::XAXIS, oee ::LINECHART, 'y 85; below:warn' ::SIGN_SPLIT FROM plant;
+```
+
+The value is a threshold (a number, default 0) or a spec of `;`-separated
+parts: `'x …'` / `'y …'` (the axis, and a threshold on it — a density splits
+along x, a line or area along y), `'below:…'` / `'above:…'` (a status or
+`#rrggbb`). With a `::CATEGORY` the series keep their own colours and
+`dashboard --check` says the split does nothing, as it does on other chart
+kinds.
 
 ### Plotting model output (contract macros)
 
