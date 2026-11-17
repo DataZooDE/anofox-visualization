@@ -1116,6 +1116,13 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/copycode-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/localext-e2e.mjs (#1236): an extension listed in app-config.json
+      # loads from localext/ on a dashboard's LOAD; an unlisted one never asks
+      # localext/. Its own server (it serves its own app-config.json).
+      - name: Operator extensions from localext/ e2e (#1236)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/localext-e2e.mjs --pkg web/pkg
+
       - name: Stop the web/ server
         if: always()
         run: |
