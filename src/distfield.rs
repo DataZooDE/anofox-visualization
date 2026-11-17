@@ -436,6 +436,72 @@ fn nelder_mead(f: impl Fn([f64; 2]) -> f64, x0: [f64; 2]) -> [f64; 2] {
     s[i]
 }
 
+/// The browser's calls (wasm `dist_info`): a value's text, checked, with
+/// its summary — `{"ok": true, "value": {…}, "text": "Beta(2, 3)",
+/// "likely", "lo", "hi"}` or `{"ok": false, "error"}`.
+pub fn info_json(value: &str) -> String {
+    let v: Json = serde_json::from_str(value).unwrap_or_else(|_| Json::String(value.to_string()));
+    match Dist::parse(&v) {
+        Ok(d) => described(&d, None),
+        Err(e) => json!({"ok": false, "error": e}).to_string(),
+    }
+}
+
+/// wasm `dist_from_range`: likely value + 90 % range → the family's
+/// parameters, as [`info_json`] plus `miss`.
+pub fn from_range_json(family: &str, likely: f64, lo: f64, hi: f64) -> String {
+    let r = Family::parse(family)
+        .ok_or_else(|| unknown(family))
+        .and_then(|f| from_range(f, likely, lo, hi));
+    match r {
+        Ok(fit) => described(&fit.dist, Some(fit.miss)),
+        Err(e) => json!({"ok": false, "error": e}).to_string(),
+    }
+}
+
+fn described(d: &Dist, miss: Option<f64>) -> String {
+    let s = d.summary();
+    json!({
+        "ok": true,
+        "value": d.to_json(),
+        "text": d.text(),
+        "likely": round_sig(s.likely),
+        "lo": round_sig(s.lo),
+        "hi": round_sig(s.hi),
+        "miss": miss,
+    })
+    .to_string()
+}
+
+/// The field's preview (wasm `dist_preview`): the density in the theme's
+/// first colour, its central 90 % shaded stronger, no axes.
+pub fn preview_svg(value: &str, o: &crate::RenderOptions, width: u32, height: u32) -> Result<String, String> {
+    use ggplot_rs::data::Value as V;
+    use ggplot_rs::prelude::*;
+    let v: Json = serde_json::from_str(value).unwrap_or_else(|_| Json::String(value.to_string()));
+    let d = Dist::parse(&v)?;
+    let pts: Vec<(f64, f64)> = d.curve(120).into_iter().filter(|p| p.1.is_finite()).collect();
+    let s = d.summary();
+    let inner: Vec<(f64, f64)> = pts.iter().copied().filter(|p| p.0 >= s.lo && p.0 <= s.hi).collect();
+    let col = |v: &[(f64, f64)], i: usize| v.iter().map(|p| V::Float(if i == 0 { p.0 } else { p.1 })).collect::<Vec<_>>();
+    let brand = o.brand();
+    let mut plot = GGPlot::new(vec![("x".to_string(), col(&pts, 0)), ("y".to_string(), col(&pts, 1))])
+        .aes(Aes::new().x("x").y("y"))
+        .geom_area_with(GeomArea { fill: brand, color: brand, alpha: 0.18, line_width: 1.4, ..Default::default() })
+        .position(ggplot_rs::position::identity::PositionIdentity);
+    if inner.len() >= 2 {
+        plot = plot
+            .geom_area_with(GeomArea { fill: brand, color: brand, alpha: 0.32, line_width: 0.0, ..Default::default() })
+            .layer_data(vec![("x".to_string(), col(&inner, 0)), ("y".to_string(), col(&inner, 1))])
+            .position(ggplot_rs::position::identity::PositionIdentity);
+    }
+    let mut th = crate::void_theme(o);
+    th.plot_margin = ggplot_rs::theme::Margin { top: 2.0, right: 2.0, bottom: 2.0, left: 2.0 };
+    plot.theme(th)
+        .render_svg_native_with_size(width, height)
+        .map_err(|e| e.to_string())
+}
+
 fn unknown(fam: &str) -> String {
     format!(
         "'{}' is no distribution family ({})",
@@ -599,5 +665,21 @@ mod tests {
             .cloned()
             .fold((0.0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
         assert!((peak.0 - 1.0).abs() < 0.2, "mode near (3-1)/2: {peak:?}");
+    }
+
+    #[test]
+    fn the_browser_calls() {
+        let v: Json = serde_json::from_str(&info_json("Beta(2, 3)")).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["value"], json!({"family": "Beta", "a": 2.0, "b": 3.0}));
+        assert_eq!(v["likely"], json!(0.3333));
+        let e: Json = serde_json::from_str(&info_json("{\"family\": \"Beta\", \"a\": -1, \"b\": 3}")).unwrap();
+        assert!(e["ok"] == false && e["error"].as_str().unwrap().contains("> 0"));
+        let r: Json = serde_json::from_str(&from_range_json("gamma", 12.0, 8.0, 20.0)).unwrap();
+        assert_eq!(r["value"]["family"], "Gamma");
+        assert!(r["miss"].as_f64().unwrap() < MAX_MISS);
+        let svg = preview_svg("Normal(0, 1)", &crate::RenderOptions::default(), 160, 48).unwrap();
+        assert!(svg.starts_with("<svg") && svg.contains("<polygon"), "{svg}");
+        assert!(preview_svg("Weibull(1, 2)", &crate::RenderOptions::default(), 160, 48).is_err());
     }
 }

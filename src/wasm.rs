@@ -386,6 +386,33 @@ pub fn form_fields(rows_json: &str, key_col: &str) -> String {
     crate::form::fields_json(key_col, &rows)
 }
 
+/// #1235: a distribution field's value (its JSON object, or a text such as
+/// `'Beta(2, 3)'`) checked and summarised — see [`crate::distfield::info_json`].
+#[wasm_bindgen]
+pub fn dist_info(value: &str) -> String {
+    guard(|| Ok(crate::distfield::info_json(value)))
+        .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e.to_string()}).to_string())
+}
+
+/// #1235: a likely value and a 90 % range turned into the family's
+/// parameters — see [`crate::distfield::from_range_json`].
+#[wasm_bindgen]
+pub fn dist_from_range(family: &str, likely: f64, lo: f64, hi: f64) -> String {
+    guard(|| Ok(crate::distfield::from_range_json(family, likely, lo, hi)))
+        .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e.to_string()}).to_string())
+}
+
+/// #1235: a distribution field's preview curve as SVG (empty when the value
+/// is no distribution).
+#[wasm_bindgen]
+pub fn dist_preview(value: &str, primary: &str, width: u32, height: u32) -> String {
+    guard(|| {
+        let opts = RenderOptions::from_primary_arg(primary).map_err(RenderError::BadSpec)?;
+        Ok(crate::distfield::preview_svg(value, &opts, width, height).unwrap_or_default())
+    })
+    .unwrap_or_default()
+}
+
 /// Render a `::FIGURE` (#661, [`crate::figure`]): its cells composed into
 /// one picture. `figure_json` = `{"figure": {"rows", "roles"}, "cells":
 /// [{"rows", "roles", "name"}, …]}` — `figure` the `::FIGURE` statement's
