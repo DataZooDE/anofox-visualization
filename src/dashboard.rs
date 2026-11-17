@@ -1363,7 +1363,7 @@ fn header_svg(t: &ResolvedTheme, x: f64, y: f64, w: f64, narrow: bool) -> Option
              <text x=\"{tx}\" y=\"42\" font-family=\"{font}\" font-size=\"{ts}\" font-weight=\"800\" fill=\"{hd}\">{ti}</text>",
             m = hex(t.colors.muted),
             hd = hex(t.colors.heading),
-            n = esc(&n.to_uppercase()),
+            n = esc(&crate::page::upper_keep_greek(n)),
             ti = esc(ti),
         )),
         (None, Some(ti)) | (Some(ti), None) => s.push_str(&format!(
