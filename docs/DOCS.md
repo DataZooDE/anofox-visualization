@@ -4547,6 +4547,31 @@ The live extensions are fetched by `scripts/fetch-wasm-extensions.sh` into
 `'data/<ext>/<file>.csv'` gets that file fetched and registered with
 DuckDB-Wasm first.
 
+#### Hosting the builder with your own DuckDB-Wasm extensions (#1236)
+
+An installation can offer further DuckDB-Wasm extensions — its own, a
+private one. Put the build for the builder's DuckDB version and platform
+next to the anofox ones, and list its name in `app-config.json`:
+
+```text
+web/localext/v1.5.6/wasm_eh/my_ext.duckdb_extension.wasm
+web/localext/v1.5.6/wasm_mvp/my_ext.duckdb_extension.wasm
+```
+
+```json
+{ "extensions": ["my_ext"] }
+```
+
+A dashboard's `LOAD my_ext;` (or `INSTALL my_ext;`) then loads it from the
+app's own `localext/`, same-origin, before the statement runs. Only listed
+names do: a dashboard can't make the page fetch a file the installation
+didn't put there, and any other `LOAD` behaves as before. A missing file is
+an error card naming the URL it was expected at. A serving process can set
+the list instead (its `window.__anofoxApp`, which wins), and
+`dashboard --site` copies `localext/` and `app-config.json` with the app, so
+a published site loads the same extensions. The list is the installation's,
+never the URL's or a dashboard's.
+
 #### Your name and logo in the app bar
 
 The bar at the top of the builder shows **anofox-visualization** and

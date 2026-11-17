@@ -2149,6 +2149,31 @@ async function ensureGeo() {
 // Each extension loads once, on first use by a statement (memoised; a failure
 // is remembered so we don't re-hammer the server for every panel).
 const extReady = {};
+// #1236: further DuckDB-Wasm extensions the operator hosts in localext/ —
+// only names listed in the installation's config (app-config.json's or the
+// serving process's `"extensions": ["my_ext"]`), never one a dashboard
+// names on its own, so a shared dashboard can't make the page fetch files.
+let extraExtensions = new Set();
+const EXT_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+function extensionList(v) {
+  return Array.isArray(v) ? v.filter((x) => typeof x === "string" && EXT_NAME_RE.test(x)).map((x) => x.toLowerCase()) : [];
+}
+// The listed extensions a statement installs or loads.
+function extraExtNames(sql) {
+  const out = new Set();
+  for (const m of sqlCode(sql).matchAll(/\b(?:INSTALL|LOAD)\s+["']?([A-Za-z_]\w{0,63})["']?/gi)) {
+    const n = m[1].toLowerCase();
+    if (extraExtensions.has(n)) out.add(n);
+  }
+  return [...out];
+}
+// A statement that only installs or loads one listed extension: done once
+// ensureExtension() has loaded it from localext/ (DuckDB-Wasm would look for
+// it in the default repository).
+function extOnlyStatement(sql) {
+  const m = /^\s*(?:FORCE\s+)?(?:INSTALL|LOAD)\s+["']?([A-Za-z_]\w{0,63})["']?\s*;?\s*$/i.exec(sqlCode(sql));
+  return !!m && extraExtensions.has(m[1].toLowerCase());
+}
 async function ensureExtension(name) {
   if (backend === "live") return; // the native backend brings its own extensions
   if (!conn) throw new Error("in-browser DuckDB not ready");
@@ -2174,10 +2199,12 @@ async function ensureExtension(name) {
         await pageConn().query("RESET custom_extension_repository;");
       }
     })().catch((e) => {
+      const where = new URL(`localext/<version>/<platform>/${name}.duckdb_extension.wasm`, import.meta.url).href;
       throw new Error(
         `Couldn't load the ${name} wasm extension in the browser (expected at ` +
-          `localext/<version>/<platform>/${name}.duckdb_extension.wasm — run ` +
-          `scripts/fetch-wasm-extensions.sh). Underlying error: ` +
+          `${where} — ` +
+          (extraExtensions.has(name) ? "put the build for this DuckDB version there" : "run scripts/fetch-wasm-extensions.sh") +
+          `). Underlying error: ` +
           (e.message || e)
       );
     });
@@ -2476,6 +2503,7 @@ async function runSqlInner(sql, page, kind, setup, at, pv) {
     if (!r.ok) throw new Error(await r.text());
     return (await r.text()) || "[]";
   }
+  if (extOnlyStatement(sql)) return "[]"; // #1236: prepareSql loaded it
   // (DATE / TIMESTAMP / DECIMAL back to what the CLI's JSON reads: web/lint.js)
   return rowsJson(await pageConn().query(wasmSql(sql)));
 }
@@ -2524,6 +2552,12 @@ function neededExtensions(sql) {
 // on a live backend).
 async function prepareSql(sql) {
   const need = neededExtensions(sql);
+  // #1236: an operator-listed extension, from localext/ (the list arrives
+  // with the installation config)
+  if (backend !== "live" && !servedMode && /\b(?:INSTALL|LOAD)\b/i.test(sql)) {
+    if (appBrandReady) await appBrandReady;
+    for (const n of extraExtNames(sql)) await ensureExtension(n);
+  }
   if (need.includes("spatial")) await ensureGeo();
   if (need.includes("anofox_forecast")) await ensureForecast(sql);
   if (need.includes("anofox_statistics")) await ensureExtension("anofox_statistics");
@@ -18343,6 +18377,9 @@ async function appBrandLoad() {
   // assistantRememberOptIn, but `charts_as_tables` sits at the top level
   // (it rides the app bar's own config objects, not a nested block).
   installChartsAsTables = (ownAppBool(window.__anofoxApp, ["charts_as_tables"]) ?? ownAppBool(file, ["charts_as_tables"])) === true;
+  // #1236: the operator's extra localext/ extensions (own property, the
+  // serving process's list wins when it has one)
+  extraExtensions = new Set(extensionList(ownAppBool(window.__anofoxApp, ["extensions"]) ?? ownAppBool(file, ["extensions"])));
   return cfg; // #204: boot() keeps this as appBrandReady, for the CSP's imgOrigins
 }
 // #204: the https: origins (I-R2-3(a): the exact logo/favicon URL, narrower
