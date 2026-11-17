@@ -3674,7 +3674,10 @@ fn run_query_rw(
     if !status.success() {
         return Err(String::from_utf8_lossy(&stderr).to_string());
     }
-    let s = String::from_utf8_lossy(&stdout);
+    // #1244: a WARNING block (a deprecated `->` lambda) can precede the JSON
+    let (s, warnings) =
+        crate::host::duckdb_cli::split_cli_warnings(&String::from_utf8_lossy(&stdout));
+    crate::host::duckdb_cli::warn_once(&warnings);
     let s = s.trim();
     if s.is_empty() {
         return Ok(Vec::new());
