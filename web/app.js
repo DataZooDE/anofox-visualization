@@ -18,6 +18,9 @@ import init, {
   diagram_palette,
   diagram_checks,
   form_fields,
+  dist_info,
+  dist_from_range,
+  dist_preview,
   render_contract,
   map_bounds,
   map_natural_height,
@@ -7967,9 +7970,21 @@ function watchMoreRight(el) {
 // #996: the few words the inputs write themselves, in the dashboard's
 // language (::LOCALE); English otherwise.
 const UI_WORDS = {
-  de: { all: "Alle", none: "Keine", of: "von", more: "Mehr", custom: "Eigene Werte" },
-  fr: { all: "Tous", none: "Aucun", of: "sur", more: "Plus", custom: "Personnalisé" },
-  es: { all: "Todos", none: "Ninguno", of: "de", more: "Más", custom: "Personalizado" },
+  de: {
+    all: "Alle", none: "Keine", of: "von", more: "Mehr", custom: "Eigene Werte",
+    likely_range: "Wahrscheinlich + Bereich", parameters: "Parameter", most_likely: "Am wahrscheinlichsten",
+    between_90: "Zu 90 % zwischen", and: "und", numbers_needed: "Bitte alle Zahlen eingeben.",
+  },
+  fr: {
+    all: "Tous", none: "Aucun", of: "sur", more: "Plus", custom: "Personnalisé",
+    likely_range: "Probable + plage", parameters: "Paramètres", most_likely: "Le plus probable",
+    between_90: "À 90 % entre", and: "et", numbers_needed: "Saisissez tous les nombres.",
+  },
+  es: {
+    all: "Todos", none: "Ninguno", of: "de", more: "Más", custom: "Personalizado",
+    likely_range: "Probable + rango", parameters: "Parámetros", most_likely: "Lo más probable",
+    between_90: "Al 90 % entre", and: "y", numbers_needed: "Introduzca todos los números.",
+  },
 };
 function uiWord(key, en) {
   const lang = (dashLocale() || "").slice(0, 2).toLowerCase();
@@ -14352,10 +14367,138 @@ function formFieldOk(f, v) {
   if (f.type === "number" || f.type === "slider")
     return typeof v === "number" && Number.isFinite(v) && (f.min == null || v >= f.min) && (f.max == null || v <= f.max);
   if (f.type === "toggle") return typeof v === "boolean";
+  if (f.type === "distribution") return distOk(f, v);
   if (typeof v !== "string" || v.length > 500) return false;
   if (f.type === "dropdown") return f.options.includes(v);
   if (f.type === "date") return isIsoDate(v);
   return true;
+}
+// #1235: a distribution field's value — a checked family among its options.
+function distOk(f, v) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  try {
+    const r = JSON.parse(dist_info(JSON.stringify(v)));
+    return r.ok && f.options.includes(r.value.family);
+  } catch (_) {
+    return false;
+  }
+}
+// Which view a distribution field shows, by `var.key`: "range" (likely value
+// and a 90 % range, the default) or "params".
+const dpDistView = Object.create(null);
+// The range a viewer typed, by `var.key`, with the value it gave: the inputs
+// keep the typed numbers while the value is still that one (the fit's own
+// numbers show in the line below).
+const dpDistTyped = Object.create(null);
+const DIST_PARAMS = { Normal: ["mean", "variance"], LogNormal: ["meanlog", "sdlog"], Beta: ["a", "b"], Gamma: ["shape", "rate"], Uniform: ["lo", "hi"] };
+// The field's body under its family dropdown: the view switch, the numbers,
+// the preview curve and what the numbers mean (or why they're refused).
+function makeDistBody(meta, f, cur, family, commit) {
+  const body = document.createElement("div");
+  body.className = "dp-dist";
+  const key = meta.varname + "." + f.key;
+  const view = dpDistView[key] || "range";
+  const info = cur ? JSON.parse(dist_info(JSON.stringify(cur))) : { ok: false };
+  const sw = document.createElement("div");
+  sw.className = "dp-dist-switch";
+  sw.setAttribute("role", "group");
+  for (const [v, word] of [["range", uiWord("likely_range", "Likely + range")], ["params", uiWord("parameters", "Parameters")]]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = word;
+    b.setAttribute("aria-pressed", String(v === view));
+    b.onclick = () => {
+      dpDistView[key] = v;
+      body.replaceWith(makeDistBody(meta, f, cur, family, commit));
+    };
+    sw.appendChild(b);
+  }
+  body.appendChild(sw);
+  const nums = document.createElement("div");
+  nums.className = "dp-dist-nums";
+  const msg = document.createElement("div");
+  msg.className = "dp-dist-msg";
+  // the numbers commit together: on Enter, or when focus leaves them — not
+  // field by field while the viewer is still typing the next one
+  let onset = null;
+  let dirty = false;
+  const fire = () => {
+    if (!dirty || !onset) return;
+    dirty = false;
+    onset();
+  };
+  nums.addEventListener("focusout", (e) => {
+    if (!nums.contains(e.relatedTarget)) fire();
+  });
+  const num = (label, val) => {
+    const l = document.createElement("label");
+    const t = document.createElement("span");
+    t.textContent = label;
+    const i = document.createElement("input");
+    i.type = "text";
+    i.inputMode = "decimal";
+    i.autocomplete = "off";
+    i.className = "dp-form-input";
+    i.value = formNumText(val);
+    i.oninput = () => (dirty = true);
+    i.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        dirty = true;
+        fire();
+      }
+    };
+    l.append(t, i);
+    nums.appendChild(l);
+    return i;
+  };
+  const refuse = (e) => {
+    msg.textContent = e;
+    msg.classList.add("bad");
+    for (const i of nums.querySelectorAll("input")) i.setAttribute("aria-invalid", "true");
+  };
+  const take = (r, typed) => {
+    if (!r.ok) return refuse(r.error);
+    if (typed) dpDistTyped[key] = { typed, value: JSON.stringify(r.value) };
+    commit(f.key, r.value, sel());
+  };
+  const sel = () => body.closest(".dp-form-field")?.querySelector("select.dp-form-input");
+  if (view === "params") {
+    const names = DIST_PARAMS[family] || ["", ""];
+    const p = info.ok && info.value.family === family ? info.value : {};
+    const ins = names.map((n) => num(n, p[n]));
+    onset = () => {
+      const v = { family };
+      names.forEach((m, k) => (v[m] = formNumParse(ins[k].value)));
+      if (names.some((m) => !Number.isFinite(v[m]))) return refuse(uiWord("numbers_needed", "Enter both numbers."));
+      take(JSON.parse(dist_info(JSON.stringify(v))));
+    };
+  } else {
+    const unit = f.unit ? ` (${f.unit})` : "";
+    const was = dpDistTyped[key];
+    const vals = was && info.ok && was.value === JSON.stringify(info.value) ? was.typed : info.ok ? [info.likely, info.lo, info.hi] : [null, null, null];
+    const ins = [
+      num(uiWord("most_likely", "Most likely") + unit, vals[0]),
+      num(uiWord("between_90", "90 % sure between"), vals[1]),
+      num(uiWord("and", "and"), vals[2]),
+    ];
+    onset = () => {
+      const [m, lo, hi] = ins.map((i) => formNumParse(i.value));
+      if (![m, lo, hi].every(Number.isFinite)) return refuse(uiWord("numbers_needed", "Enter all three numbers."));
+      take(JSON.parse(dist_from_range(family, m, lo, hi)), [m, lo, hi]);
+    };
+  }
+  body.appendChild(nums);
+  if (info.ok) {
+    const pic = document.createElement("div");
+    pic.className = "dp-dist-preview";
+    pic.setAttribute("aria-hidden", "true");
+    pic.innerHTML = dist_preview(JSON.stringify(info.value), renderCtx(), 240, 56);
+    body.appendChild(pic);
+    const fmt = (x) => formNumText(x) + (f.unit ? " " + f.unit : "");
+    msg.textContent = `${info.text}: ${uiWord("most_likely", "most likely").toLowerCase()} ${fmt(info.likely)}, 90 % ${fmt(info.lo)} – ${fmt(info.hi)}`;
+  }
+  body.appendChild(msg);
+  return body;
 }
 // The form variable's JSON text for this run: the rows' own values, with the
 // viewer's still-valid edits (the last run's, else a `?v.<name>=` seed) on top.
@@ -14480,6 +14623,31 @@ function makeFormField(meta, f, vals, commit, commitMany) {
       }
       commitMany(patch, input, f.key);
     };
+  } else if (f.type === "distribution") {
+    // #1235: the family here, the numbers and the preview below
+    input = document.createElement("select");
+    const fam = cur && typeof cur === "object" && cur.family ? cur.family : f.options[0];
+    for (const o of f.options) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = o;
+      if (o === fam) opt.selected = true;
+      input.appendChild(opt);
+    }
+    // another family keeps what the value says (likely value, 90 % range)
+    input.onchange = () => {
+      const was = cur ? JSON.parse(dist_info(JSON.stringify(cur))) : { ok: false };
+      const r = was.ok ? JSON.parse(dist_from_range(input.value, was.likely, was.lo, was.hi)) : { ok: false };
+      if (r.ok) commit(f.key, r.value, input);
+      else {
+        row.querySelector(".dp-dist")?.replaceWith(makeDistBody(meta, f, null, input.value, commit));
+        const m = row.querySelector(".dp-dist-msg");
+        if (m && was.ok) {
+          m.textContent = r.error;
+          m.classList.add("bad");
+        }
+      }
+    };
+    row._distBody = makeDistBody(meta, f, cur, fam, commit);
   } else if (f.type === "dropdown") {
     input = document.createElement("select");
     for (const o of f.options) {
@@ -14556,7 +14724,7 @@ function makeFormField(meta, f, vals, commit, commitMany) {
   refocus(`form:${meta.varname}:${f.key}`, input);
   const box = document.createElement("div");
   box.className = "dp-form-control";
-  if (f.unit && f.type !== "toggle" && f.type !== "slider") {
+  if (f.unit && f.type !== "toggle" && f.type !== "slider" && f.type !== "distribution") {
     // the unit inside the field, as a suffix
     const wrap = document.createElement("span");
     wrap.className = "dp-form-box";
@@ -14577,6 +14745,7 @@ function makeFormField(meta, f, vals, commit, commitMany) {
     }
   }
   row.appendChild(box);
+  if (row._distBody) row.appendChild(row._distBody);
   if (f.help) {
     addInfo(lab, f.help);
     lab.querySelector(".dp-info")?.classList.remove("corner"); // beside its label

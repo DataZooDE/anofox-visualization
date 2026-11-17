@@ -14,6 +14,11 @@
 // one height; show_if with & and |; a preset fills several fields (and
 // shows "Custom" once one is edited), round-tripped through ?v.<var>=;
 // numbers in the dashboard's ::LOCALE (de-DE: "3,2", typing "3,5").
+// #1235, a distribution field: a family among its options, a likely value
+// and a 90 % range fitted to the family's parameters (an inconsistent one
+// refused), or the parameters themselves; a preview; another family keeps
+// the range; the value round-trips through ?v.<var>= (an invalid seed is
+// ignored); decimal commas under de-DE.
 //
 //   scripts/build-wasm-pkg.sh
 //   python3 serve_nocache.py 8947 &
@@ -301,6 +306,101 @@ const lst = (page) =>
   const page = await openLong(LONG("tabs"), "", { width: 390, height: 1200 });
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
   check(!overflow, "a long form: no horizontal overflow at 390px");
+  await page.close();
+}
+
+// ---- #1235: a distribution field -------------------------------------
+const DIST = (locale = "") => `-- @title Distribution field e2e (#1235)
+${locale ? `SELECT '${locale}'::LOCALE;` : ""}
+SELECT field AS pr ::FORM, type, value, options, label, unit
+FROM (VALUES
+ (1, 'share', 'distribution', 'Beta(2, 3)', 'Beta, Normal', 'Defect share', NULL),
+ (2, 'cycle', 'distribution', '{"family": "Gamma", "shape": 12, "rate": 1}', NULL, 'Cycle time', 'min')
+) t(ord, field, type, value, options, label, unit) ORDER BY ord;
+SELECT getvariable('pr')->'share'->>'family' AS fam ::TEXT_MEDIUM, 'Family' ::LABEL;
+SELECT round((getvariable('pr')->'share'->>'a')::DOUBLE, 2) AS a ::METRIC, 'a' ::LABEL;
+`;
+const openDist = async (sql, query = "", viewport = { width: 1440, height: 1000 }) => {
+  const page = await browser.newPage({ viewport, reducedMotion: "reduce" });
+  page.on("pageerror", (e) => errs.push(String(e)));
+  await page.goto(`${base}?mode=view${query}#sql=${b64(sql)}`);
+  await ready(page);
+  return page;
+};
+const dst = (page) =>
+  page.evaluate(() => {
+    const f = (k) => document.querySelector(`.dp-form-field[data-field="${k}"]`);
+    return {
+      fam: document.querySelector(".text-value")?.textContent,
+      a: document.querySelector(".metric-value")?.textContent,
+      nums: [...(f("share")?.querySelectorAll(".dp-dist-nums input") || [])].map((i) => i.value),
+      msg: f("share")?.querySelector(".dp-dist-msg")?.textContent || "",
+      bad: !!f("share")?.querySelector(".dp-dist-msg.bad"),
+      preview: !!f("share")?.querySelector(".dp-dist-preview svg polygon"),
+      families: [...(f("share")?.querySelectorAll("select option") || [])].map((o) => o.value),
+      url: decodeURIComponent(location.search),
+    };
+  });
+const typeRange = async (page, key, vals) => {
+  const ins = page.locator(`.dp-form-field[data-field="${key}"] .dp-dist-nums input`);
+  for (let k = 0; k < vals.length; k++) await ins.nth(k).fill(vals[k]);
+  // one change commits all three (the others are filled already)
+  await ins.nth(vals.length - 1).press("Enter");
+  await settle(page);
+};
+{
+  const page = await openDist(DIST());
+  let s = await dst(page);
+  check(s.fam === "Beta" && s.a === "2", `a 'Beta(2, 3)' row is the JSON object (${s.fam}, a ${s.a})`);
+  check(s.families.join() === "Beta,Normal" && s.preview && /Beta\(2, 3\)/.test(s.msg), `families from options, a preview, what it means (${s.families}; ${s.msg})`);
+  await typeRange(page, "share", ["0.3", "0.1", "0.6"]);
+  s = await dst(page);
+  check(Math.abs(Number(s.a) - 3) < 0.3 && s.nums.join() === "0.3,0.1,0.6", `likely 0.3, 90 % 0.1 – 0.6 → a Beta, the typed numbers kept (a ${s.a}; ${s.nums})`);
+  check(/v\.pr=\{"share":\{"family":"Beta","a":/.test(s.url), `the value in ?v.pr= (${s.url})`);
+  const before = s.a;
+  await typeRange(page, "share", ["0.8", "0.1", "0.6"]);
+  s = await dst(page);
+  check(s.bad && /inside the range/.test(s.msg) && s.a === before, `a likely value outside its range is refused (${s.msg}; a ${s.a})`);
+  await page.click('.dp-form-field[data-field="share"] .dp-dist-switch button:nth-child(2)');
+  const ins = page.locator('.dp-form-field[data-field="share"] .dp-dist-nums input');
+  await ins.nth(0).fill("4");
+  await ins.nth(1).fill("6");
+  await ins.nth(1).press("Enter");
+  await settle(page);
+  s = await dst(page);
+  check(s.a === "4" && /Beta\(4, 6\)/.test(s.msg), `the parameters view sets a and b (a ${s.a}; ${s.msg})`);
+  await page.selectOption('.dp-form-field[data-field="share"] select', "Normal");
+  await settle(page);
+  s = await dst(page);
+  // a symmetric Normal only approximates the Beta's skewed range (within 10 % of its width)
+  const [lo, hi] = (s.msg.match(/90 % ([\d.]+) – ([\d.]+)/) || []).slice(1).map(Number);
+  check(s.fam === "Normal" && /most likely 0\.375,/.test(s.msg) && Math.abs(lo - 0.1688) < 0.05 && Math.abs(hi - 0.6551) < 0.05, `another family keeps the likely value and, roughly, the range (${s.fam}; ${s.msg})`);
+  await page.close();
+}
+{
+  const seed = encodeURIComponent(JSON.stringify({ share: { family: "Beta", a: 7, b: 3 } }));
+  let page = await openDist(DIST(), `&v.pr=${seed}`);
+  let s = await dst(page);
+  check(s.a === "7", `a ?v.pr= seed restores the distribution (a ${s.a})`);
+  await page.close();
+  const bad = encodeURIComponent(JSON.stringify({ share: { family: "Beta", a: -1, b: 3 } }));
+  page = await openDist(DIST(), `&v.pr=${bad}`);
+  s = await dst(page);
+  check(s.a === "2", `an invalid seeded distribution keeps the row's value (a ${s.a})`);
+  await page.close();
+}
+{
+  const page = await openDist(DIST("de-DE"));
+  await typeRange(page, "share", ["0,3", "0,1", "0,6"]);
+  const s = await dst(page);
+  check(s.nums.join("|") === "0,3|0,1|0,6" && Math.abs(Number(s.a.replace(",", ".")) - 3) < 0.3, `de-DE: decimal commas in and out (${s.nums}; a ${s.a})`);
+  await page.close();
+}
+{
+  const page = await openDist(DIST(), "", { width: 390, height: 1200 });
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+  check(!overflow, "a distribution field: no horizontal overflow at 390px");
+  if (shots) await page.screenshot({ path: `${shots}/form-dist-390.png`, fullPage: true });
   await page.close();
 }
 

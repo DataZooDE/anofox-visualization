@@ -4,7 +4,8 @@
 // wire), and the panels reading it with getvariable('lt')->>'mean' follow
 // an edit. A ?v.lt= seed restores it on a hard reload; a seed that isn't a
 // JSON object, or carries quotes and SQL, is just text: the form falls back
-// to its rows' values and nothing errors. #1233: the card's ::TITLE, its
+// to its rows' values and nothing errors. #1235: a distribution field's
+// value, edit and seed the same. #1233: the card's ::TITLE, its
 // sections as tabs and a preset work the same served.
 // Needs a native extension build with the real UI embedded (CI's `web-e2e`
 // job builds it, #590).
@@ -47,10 +48,12 @@ writeFileSync(
   (1, 'Model', 'model', 'dropdown', 'normal', 'fixed, normal', NULL, NULL, NULL, false),
   (2, 'Model', 'mean', 'number', '12', NULL, 0, 90, 'days', false),
   (3, 'Model', 'speed', 'preset', NULL, '{"Slow": {"mean": 60, "model": "normal"}}', NULL, NULL, NULL, false),
-  (4, 'Extra', 'sd', 'number', '3', NULL, 0, 20, 'days', true)
+  (4, 'Model', 'share', 'distribution', 'Beta(2, 3)', 'Beta, Normal', NULL, NULL, NULL, false),
+  (5, 'Extra', 'sd', 'number', '3', NULL, 0, 20, 'days', true)
 ) v(ord, section, field, type, value, options, min, max, unit, advanced) ORDER BY ord;
 
 SELECT (getvariable('lt')->>'mean')::DOUBLE AS m ::METRIC, 'Mean lead time' ::LABEL;
+SELECT round((getvariable('lt')->'share'->>'a')::DOUBLE, 2) AS a ::METRIC, 'Share a' ::LABEL;
 SELECT 'Model: ' || coalesce(getvariable('lt')->>'model', '-') AS t ::TITLE;
 `
 );
@@ -94,12 +97,14 @@ try {
     );
   };
   const kpi = () => page.locator(".metric-value").first().textContent();
+  const shareA = () => page.locator(".metric-value").nth(1).textContent();
   const grid = () => page.locator(".grid").first().textContent();
 
   await page.goto(`http://127.0.0.1:${port}/d/form`);
   await settled();
   check((await kpi()) === "12", "served: the form's row value reaches the panels");
   check((await grid()).includes("Model: normal"), "served: a string field reads with ->>");
+  check((await shareA()) === "2", "served: a 'Beta(2, 3)' distribution row is a JSON object (#1235)");
 
   await page.fill('.dp-form-field[data-field="mean"] input', "25");
   await page.keyboard.press("Enter");
@@ -118,9 +123,19 @@ try {
   await settled();
   await page.waitForFunction(() => document.querySelector(".metric-value")?.textContent === "60", null, { timeout: 15000 }).catch(() => {});
   check((await kpi()) === "60", "served: a preset sets its fields on the server");
-  await page.goto(`http://127.0.0.1:${port}/d/form?v.lt=${encodeURIComponent(JSON.stringify({ model: "fixed", mean: 40 }))}`);
+  // #1235: the distribution field's parameters view sets a and b on the server
+  await page.click('.dp-form-field[data-field="share"] .dp-dist-switch button:nth-child(2)');
+  const dist = page.locator('.dp-form-field[data-field="share"] .dp-dist-nums input');
+  await dist.nth(0).fill("4");
+  await dist.nth(1).fill("6");
+  await dist.nth(1).press("Enter");
+  await settled();
+  await page.waitForFunction(() => document.querySelectorAll(".metric-value")[1]?.textContent === "4", null, { timeout: 15000 }).catch(() => {});
+  check((await shareA()) === "4", `served: a distribution edit travels to the server and back (a ${await shareA()})`);
+  await page.goto(`http://127.0.0.1:${port}/d/form?v.lt=${encodeURIComponent(JSON.stringify({ model: "fixed", mean: 40, share: { family: "Beta", a: 7, b: 3 } }))}`);
   await settled();
   check((await kpi()) === "40" && (await grid()).includes("Model: fixed"), "served: a ?v.lt= seed restores the form on a hard reload");
+  check((await shareA()) === "7", `served: the seed restores the distribution (a ${await shareA()})`);
 
   await page.goto(`http://127.0.0.1:${port}/d/form?v.lt=${encodeURIComponent("x'); DROP TABLE t; --")}`);
   await settled();

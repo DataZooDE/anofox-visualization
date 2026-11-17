@@ -46,11 +46,21 @@ pub enum FieldType {
     Text,
     /// Sets several fields at once (#1233); not a key of the variable.
     Preset,
+    /// A family and its parameters, or a likely value and a 90 % range
+    /// (#1235): one JSON object, `{"family": "Beta", "a": 2, "b": 3}`.
+    Distribution,
 }
 
 impl FieldType {
     pub const NAMES: &'static [&'static str] = &[
-        "number", "slider", "dropdown", "toggle", "date", "text", "preset",
+        "number",
+        "slider",
+        "dropdown",
+        "toggle",
+        "date",
+        "text",
+        "preset",
+        "distribution",
     ];
 
     fn parse(s: &str) -> Option<Self> {
@@ -62,6 +72,7 @@ impl FieldType {
             "date" => FieldType::Date,
             "text" | "string" | "varchar" => FieldType::Text,
             "preset" | "presets" => FieldType::Preset,
+            "distribution" | "dist" | "prior" => FieldType::Distribution,
             _ => return None,
         })
     }
@@ -75,6 +86,7 @@ impl FieldType {
             FieldType::Date => "date",
             FieldType::Text => "text",
             FieldType::Preset => "preset",
+            FieldType::Distribution => "distribution",
         }
     }
 
@@ -335,10 +347,32 @@ pub fn fields(
         } else {
             Vec::new()
         };
-        let options = if kind == FieldType::Preset {
-            presets.iter().map(|(l, _)| l.clone()).collect()
-        } else {
-            options_of(col(row, "options"))
+        let options = match kind {
+            FieldType::Preset => presets.iter().map(|(l, _)| l.clone()).collect(),
+            // the families it offers: its options, else all of them
+            FieldType::Distribution => {
+                let mut fams = Vec::new();
+                for o in options_of(col(row, "options")) {
+                    match crate::distfield::Family::parse(&o) {
+                        Some(f) => fams.push(f.name().to_string()),
+                        None => issues.push((
+                            "form/bad-distribution",
+                            format!(
+                                "field `{key}`: option `{o}` is no distribution family ({})",
+                                crate::distfield::FAMILIES.join(", ")
+                            ),
+                        )),
+                    }
+                }
+                if fams.is_empty() {
+                    fams = crate::distfield::FAMILIES
+                        .iter()
+                        .map(|f| f.to_string())
+                        .collect();
+                }
+                fams
+            }
+            _ => options_of(col(row, "options")),
         };
         let (min, max, step) = (
             num(col(row, "min")),
@@ -360,6 +394,26 @@ pub fn fields(
             },
             FieldType::Toggle => Json::Bool(raw.is_some_and(truthy)),
             FieldType::Preset => Json::Null,
+            // stored as the object, also when the row gave 'Beta(2, 3)'
+            FieldType::Distribution => match crate::distfield::Dist::parse(raw.unwrap()) {
+                Ok(d) if options.iter().any(|o| o == d.family.name()) => d.to_json(),
+                Ok(d) => {
+                    issues.push((
+                        "form/bad-distribution",
+                        format!(
+                            "field `{key}`: value {} is a {}, which is not among its options ({})",
+                            d.text(),
+                            d.family.name(),
+                            options.join(", ")
+                        ),
+                    ));
+                    d.to_json()
+                }
+                Err(e) => {
+                    issues.push(("form/bad-distribution", format!("field `{key}`: {e}")));
+                    Json::Null
+                }
+            },
             _ => text(raw).map_or(Json::Null, Json::String),
         };
         if kind == FieldType::Dropdown {
@@ -500,6 +554,8 @@ fn value_fits(f: &Field, v: &Json) -> bool {
         FieldType::Dropdown => v.as_str().is_some_and(|s| f.options.iter().any(|o| o == s)),
         FieldType::Date | FieldType::Text => v.is_string() || v.is_null(),
         FieldType::Preset => false,
+        FieldType::Distribution => crate::distfield::Dist::parse(v)
+            .is_ok_and(|d| f.options.iter().any(|o| o == d.family.name())),
     }
 }
 
@@ -539,6 +595,60 @@ mod tests {
             .iter()
             .map(|r| r.as_object().unwrap().clone())
             .collect()
+    }
+
+    #[test]
+    fn distribution_fields() {
+        let r = rows(serde_json::json!([
+            {"p": "share", "type": "distribution", "value": "Beta(2, 3)", "options": "Beta, Normal"},
+            {"p": "cycle", "type": "dist", "value": {"family": "Gamma", "shape": 12, "rate": 1}},
+            {"p": "bad", "type": "distribution", "value": "Beta(0, 3)"},
+            {"p": "off", "type": "distribution", "value": "Gamma(2, 1)", "options": ["Beta", "Weibull"]},
+        ]));
+        let (f, issues) = fields("p", &r);
+        assert_eq!(f[0].kind, FieldType::Distribution);
+        assert_eq!(
+            f[0].value,
+            serde_json::json!({"family": "Beta", "a": 2.0, "b": 3.0})
+        );
+        assert_eq!(f[0].options, ["Beta", "Normal"]);
+        assert_eq!(
+            f[1].options.len(),
+            crate::distfield::FAMILIES.len(),
+            "all families by default"
+        );
+        assert_eq!(f[2].value, Json::Null);
+        let msgs: Vec<&str> = issues
+            .iter()
+            .filter(|(c, _)| *c == "form/bad-distribution")
+            .map(|(_, m)| m.as_str())
+            .collect();
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`bad`") && m.contains("> 0")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`off`") && m.contains("Weibull")),
+            "{msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("`off`") && m.contains("not among its options")),
+            "{msgs:?}"
+        );
+        let d: Json = serde_json::from_str(&default_json(&f)).unwrap();
+        assert_eq!(d["cycle"]["shape"], 12.0);
+        // a preset may set one
+        assert!(value_fits(
+            &f[0],
+            &serde_json::json!({"family": "Normal", "mean": 0.3, "variance": 0.01})
+        ));
+        assert!(!value_fits(
+            &f[0],
+            &serde_json::json!({"family": "Gamma", "shape": 2, "rate": 1})
+        ));
     }
 
     #[test]

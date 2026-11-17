@@ -532,6 +532,46 @@ FROM (VALUES
 - The example *Which energy setup pays off for our household?* has 32
   fields in four tabs.
 
+#### A distribution field (`type = 'distribution'`, #1235)
+
+A field for a prior or an uncertain input: a **family and its parameters**,
+one JSON object in the variable.
+
+```sql
+SELECT field AS pr ::FORM, type, value, options, label, unit
+FROM (VALUES
+  (1, 'share', 'distribution', 'Beta(2, 3)', 'Beta, Normal', 'Defect share', NULL),
+  (2, 'cycle', 'distribution', '{"family": "Gamma", "shape": 12, "rate": 1}', NULL, 'Cycle time', 'min')
+) t(ord, field, type, value, options, label, unit) ORDER BY ord;
+-- getvariable('pr')->'share' = {"family": "Beta", "a": 2, "b": 3}
+```
+
+- **Families:** `options` lists the ones offered (default all: Normal,
+  LogNormal, Beta, Gamma, Uniform). Parameter names follow common usage, so
+  the object can go to an inference library as it is: Normal
+  `mean`/`variance`, LogNormal `meanlog`/`sdlog`, Gamma `shape`/`rate`,
+  Beta `a`/`b`, Uniform `lo`/`hi`.
+- **`value`:** that JSON object, or a text such as `'Beta(2, 3)'` or
+  `'Gamma(rate = 1, shape = 12)'`; stored as the object.
+- **Two ways to enter it.** *Likely + range* (the default): "most likely
+  10 min, 90 % sure between 7 and 16". The field finds the family's
+  parameters whose mode and 5 % / 95 % quantiles come closest, keeps the
+  typed numbers and says what it fitted (*Gamma(15.4, 1.40): most likely
+  10.2 min, 90 % 6.8 – 15.9 min*). A range no member of the family meets
+  within 10 % of its width is refused, naming the closest one; so is a
+  likely value outside its range, a Beta range outside 0 – 1 (enter a share
+  as 0.3, not 30) or a LogNormal / Gamma range below 0. *Parameters* takes
+  them directly, checked against each family's domain (a, b > 0, variance
+  > 0, lo < hi). The numbers commit together, on Enter or when focus leaves
+  them, in the dashboard's `::LOCALE`.
+- **Another family** keeps what the value says: its likely value and range
+  are refitted in the new family.
+- **A preview** of the density under the numbers, its central 90 % shaded.
+- The fit, the checks and the preview are the same Rust code in the
+  browser (wasm), the servers and `--check`, which reports an unknown
+  family, invalid parameters or a value whose family isn't offered
+  (`form/bad-distribution`, an error).
+
 Only the `::FORM` column and `value` are required; the others are read by
 name (any case). Numbers and toggles are JSON numbers / booleans in the
 variable, everything else text: read them with `->>` and cast,
@@ -547,7 +587,8 @@ values or sets an unknown field or a value that field doesn't take, a
 missing `value` column (errors) and a value outside its options or
 min/max, a slider without a range, a repeated key, a `width` that isn't
 half/full, a `section` on some rows only, an unknown `::FORM_LAYOUT`
-(warnings). The static outputs bind the rows' own values, like any input's
+(warnings), and a distribution it can't read or whose family isn't
+offered (`form/bad-distribution`, an error). The static outputs bind the rows' own values, like any input's
 default.
 
 **On a locked server** the variable travels like any other string variable
