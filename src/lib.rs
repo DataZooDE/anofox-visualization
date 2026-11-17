@@ -32,6 +32,7 @@ pub mod contract;
 pub mod dashboard;
 pub mod diagram;
 pub mod diagram_edit;
+pub mod distfield;
 mod downsample;
 pub mod figure;
 pub mod form;
