@@ -287,6 +287,15 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-form-field{display:grid;grid-template-columns:minmax(7rem,38%) 1fr;align-items:center;column-gap:.8rem;row-gap:.15rem}
 .dp-form-label{font-size:.85rem;font-weight:600;color:var(--ax-ink);display:flex;align-items:center;gap:.3rem}
 .dp-form-control{display:flex;align-items:center;gap:.45rem;min-width:0}
+.dp-dist{grid-column:1/-1;display:flex;flex-direction:column;gap:.4rem;margin-top:.4rem}
+.dp-dist-switch{display:inline-flex;align-self:flex-start;border:1px solid var(--ax-line);border-radius:7px;overflow:hidden}
+.dp-dist-switch button{font:inherit;font-size:.78rem;padding:.2rem .6rem;border:0;background:transparent;color:var(--ax-muted);cursor:pointer}
+.dp-dist-switch button[aria-pressed=true]{background:var(--ax-accent);color:var(--ax-card)}
+.dp-dist-nums{display:flex;flex-wrap:wrap;gap:.4rem .6rem}
+.dp-dist-nums label{display:flex;flex-direction:column;gap:.15rem;flex:1 1 6rem;min-width:5.5rem;font-size:.75rem;color:var(--ax-muted)}
+.dp-dist-preview svg{display:block;width:100%;max-width:240px;height:56px}
+.dp-dist-msg{font-size:.78rem;color:var(--ax-muted)}
+.dp-dist-msg.bad{color:var(--ax-negative,#b42318)}
 .dp-form-input{min-width:0;flex:1 1 auto}
 .dp-form-input[type=checkbox]{flex:0 0 auto}
 /* the theme's accent on a form's slider and switch (the browser's blue otherwise) */
