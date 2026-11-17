@@ -257,20 +257,24 @@ def main():
     cc = [(r, ph) for r in runs for ph in r["phases"] if ph.get("claim_check")]
     if cc and judged:
         L.append("\n## Claim check (#1116)\n")
-        L.append(f"Mode `{meta.get('claim_check', '?')}`. An answer counts as flagged when its first answer call had numbers nothing backs.\n")
-        L.append("| arm | numbers right: flagged | numbers wrong: flagged |")
-        L.append("|---|---|---|")
+        L.append(f"Numbers mode `{meta.get('claim_check', '?')}`, words mode `{meta.get('word_check', 'off')}` (#1263). "
+                 "An answer counts as flagged when its first answer call had numbers nothing backs (numbers) or "
+                 "wording the chart's digest contradicts (words).\n")
+        L.append("| arm | check | numbers right: flagged | numbers wrong: flagged |")
+        L.append("|---|---|---|---|")
         for arm in arms:
-            c = {True: [0, 0], False: [0, 0]}
-            for r, ph in cc:
-                j = judg.get((r["run"], ph["phase"]))
-                if r["arm"] != arm or not j or j.get("numbers_correct") is None:
-                    continue
-                k = bool(j["numbers_correct"])
-                c[k][0] += bool(ph["claim_check"][0]["unsupported"])
-                c[k][1] += 1
-            L.append(f"| {arm} | {c[True][0]}/{c[True][1]} | {c[False][0]}/{c[False][1]} |")
+            for check, field in (("numbers", "unsupported"), ("words", "words")):
+                c = {True: [0, 0], False: [0, 0]}
+                for r, ph in cc:
+                    j = judg.get((r["run"], ph["phase"]))
+                    if r["arm"] != arm or not j or j.get("numbers_correct") is None:
+                        continue
+                    k = bool(j["numbers_correct"])
+                    c[k][0] += bool(ph["claim_check"][0].get(field))
+                    c[k][1] += 1
+                L.append(f"| {arm} | {check} | {c[True][0]}/{c[True][1]} | {c[False][0]}/{c[False][1]} |")
         summary["claim_check"] = meta.get("claim_check")
+        summary["word_check"] = meta.get("word_check")
 
     # #1142: asking back. A phase is where the question is decided: the first
     # phase, or the follow-up when only the follow-up can be read two ways
