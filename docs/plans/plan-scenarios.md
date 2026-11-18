@@ -240,6 +240,8 @@ An example dashboard per slice, served e2e like `form-served-e2e.mjs`.
 
 ## 9. Decisions for the owner
 
+**Decided (owner, 2026-11-19): D1–D6 as recommended.**
+
 - **D1:** server-owned operations on a writable connection plus snapshot
   refresh (proposed), rather than the browser or a request running scenario
   SQL. *Recommendation: yes. It is the only form that keeps the locked
