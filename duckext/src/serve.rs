@@ -2218,6 +2218,14 @@ impl LockedOptions {
                     .into(),
             );
         }
+        // #1243 security review: a preview key's SQL runs on the shared
+        // snapshot and can build a scenario write call at run time
+        // (`query('…' || chr(95) || 'merge(…)')`), which no text check sees;
+        // on a read-only host such a call still changes what every viewer
+        // reads (anofox-scenario#66). Not together until that is fixed.
+        if o.preview.is_some() && o.scenarios_opts.is_some() {
+            return Err("options.preview and options.scenarios can't be combined yet: a preview's SQL could change the scenarios every viewer reads (DataZooDE/anofox-scenario#66)".into());
+        }
         if o.preview.is_some() && !o.auth.as_ref().is_some_and(|a| a.keys.is_some()) {
             return Err("options.preview needs auth with API keys ({\"mode\": \"api_keys\", …}): only an API key with the preview scope may create one".into());
         }
@@ -13804,6 +13812,15 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(e.contains("options.scenarios.database is required"), "{e}");
+        let e = LockedOptions::parse(Some(
+            r#"{"preview": {}, "scenarios": {"database": "w", "tables": ["plan"]}}"#,
+        ))
+        .map(|_| ())
+        .unwrap_err();
+        assert!(
+            e.contains("options.preview and options.scenarios can't be combined"),
+            "{e}"
+        );
     }
 
     #[test]

@@ -2072,7 +2072,9 @@ FROM anofox_scenario_diff('demand_up', 'plan');                     -- what chan
 - Not yet: a `::SCENARIO` picker that switches what unqualified names read,
   saving into a scenario, approving one (plan:
   [plan-scenarios.md](plans/plan-scenarios.md)), and combining
-  `options.scenarios` with an access policy or an agent mapping.
+  `options.scenarios` with an access policy, an agent mapping or
+  `options.preview` (a preview key's SQL could build a write call at run
+  time; anofox-scenario#66).
 
 ## B. Static render — `serve --dashboards <dir>`
 
