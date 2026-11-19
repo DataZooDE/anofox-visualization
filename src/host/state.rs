@@ -754,6 +754,8 @@ enum StoreKind {
     Views,
     /// `options.notes` (#889): viewers' notes on charts.
     Notes,
+    /// `options.scenarios` (#1243 S2): the scenario operations' log.
+    Scenarios,
 }
 
 /// Bytes accounted per line beyond its own length (the `\n`).
@@ -938,6 +940,15 @@ impl Store {
             .map_err(|e| e.replace("options.state.path", "options.notes.path"))
     }
 
+    /// Open (creating if absent) the scenario log (#1243 S2,
+    /// `options.scenarios.path`): the same file discipline, its header
+    /// marked `"kind":"scenarios"`. One record per create or write.
+    #[cfg(unix)]
+    pub fn open_scenarios(path: &Path, max_mb: u64) -> Result<Store, String> {
+        Self::open_impl(path, max_mb, false, StoreKind::Scenarios)
+            .map_err(|e| e.replace("options.state.path", "options.scenarios.path"))
+    }
+
     #[cfg(unix)]
     pub fn open_existing(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
         use std::io::{BufRead, Read};
@@ -953,6 +964,7 @@ impl Store {
             Some(k) if k.as_str() == Some("writeback") => StoreKind::Writeback,
             Some(k) if k.as_str() == Some("views") => StoreKind::Views,
             Some(k) if k.as_str() == Some("notes") => StoreKind::Notes,
+            Some(k) if k.as_str() == Some("scenarios") => StoreKind::Scenarios,
             _ => StoreKind::State,
         };
         Self::open_impl(path, max_mb, read_only, kind)
@@ -1131,6 +1143,9 @@ impl Store {
                 StoreKind::Notes => format!(
                     "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\",\"kind\":\"notes\"}}"
                 ),
+                StoreKind::Scenarios => format!(
+                    "{{\"anofox_state\":{CURRENT_VERSION},\"created\":\"{created}\",\"kind\":\"scenarios\"}}"
+                ),
             };
             let mut header = header_body.clone();
             header.push('\n');
@@ -1181,6 +1196,12 @@ impl Store {
     pub fn open_existing(path: &Path, max_mb: u64, read_only: bool) -> Result<Store, String> {
         let _ = (path, max_mb, read_only);
         Err("the state store needs a Unix host (flock)".into())
+    }
+
+    #[cfg(not(unix))]
+    pub fn open_scenarios(path: &Path, max_mb: u64) -> Result<Store, String> {
+        let _ = (path, max_mb);
+        Err("the scenario log needs a Unix host (flock)".into())
     }
 
     #[cfg(not(unix))]
@@ -1855,6 +1876,7 @@ fn validate_lines(clean: &str, max_bytes: u64, kind: StoreKind) -> Result<Index,
         Some(k) if k.as_str() == Some("writeback") => StoreKind::Writeback,
         Some(k) if k.as_str() == Some("views") => StoreKind::Views,
         Some(k) if k.as_str() == Some("notes") => StoreKind::Notes,
+        Some(k) if k.as_str() == Some("scenarios") => StoreKind::Scenarios,
         Some(_) => return Err("state file: header line has an unknown 'kind'".into()),
     };
     if file_kind != kind {
@@ -1863,6 +1885,7 @@ fn validate_lines(clean: &str, max_bytes: u64, kind: StoreKind) -> Result<Index,
             StoreKind::Writeback => "a write-back change log",
             StoreKind::Views => "an options.views file",
             StoreKind::Notes => "an options.notes file",
+            StoreKind::Scenarios => "an options.scenarios log",
         };
         return Err(format!("this is {}, not {}", what(file_kind), what(kind)));
     }

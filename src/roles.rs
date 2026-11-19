@@ -430,7 +430,11 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SAVE_TABLES", &[], R::SaveTables, "input", false,
       "the table(s) a ::SAVE writes: 'nodes, edges' for a graph, one table for a form — plain names"),
     e("SAVE_KEY", &[], R::SaveKey, "input", false,
-      "the variable holding a ::SAVE_FORM row's key (default 'selected', the clicked diagram node)"),
+      "the variable holding a ::SAVE_FORM row's key (default 'selected', the clicked diagram node); with ::SAVE_ACTION 'create', the new scenario's name"),
+    e("SAVE_SCENARIO", &[], R::SaveScenario, "input", false,
+      "the variable (usually the ::SCENARIO picker's) naming the scenario a ::SAVE writes its ::FORM row into, or creates the new one from; on a locked server it needs options.scenarios with writers (#1243)"),
+    e("SAVE_ACTION", &[], R::SaveAction, "input", false,
+      "what a ::SAVE_SCENARIO save does: 'write' (default) the form's row into the picked scenario, or 'create' a scenario named by ::SAVE_KEY from the picked one"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),
@@ -1293,6 +1297,8 @@ mod tests {
             Role::SaveForm,
             Role::SaveTables,
             Role::SaveKey,
+            Role::SaveScenario,
+            Role::SaveAction,
             Role::Placeholder,
             Role::HeaderImage,
             Role::FooterLink,
@@ -1483,6 +1489,8 @@ mod tests {
                 | Role::SaveForm
                 | Role::SaveTables
                 | Role::SaveKey
+                | Role::SaveScenario
+                | Role::SaveAction
                 | Role::Text(_)
                 | Role::KpiSize
                 | Role::Placeholder

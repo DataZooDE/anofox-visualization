@@ -2420,7 +2420,11 @@ struct SaveSpec {
     name: String,
     graph_col: Option<usize>,
     form_col: Option<usize>,
-    tables_col: usize,
+    tables_col: Option<usize>,
+    /// #1243 S2: `::SAVE_SCENARIO` — a scenario save, not write-back.
+    scenario_col: Option<usize>,
+    action_col: Option<usize>,
+    key_col: Option<usize>,
 }
 
 /// One `::SUBMIT` statement's shape (#517 S2, plan §3/§4): the button's own
@@ -3230,6 +3234,8 @@ struct Locked {
     submit: Option<Arc<SubmitRuntime>>,
     /// `options.writeback`'s live runtime (#684) — `None` unless configured.
     writeback: Option<Arc<WritebackRuntime>>,
+    /// `options.scenarios`' writes (#1243 S2) — `None` unless it has writers.
+    scenario_writes: Option<Arc<ScenarioRuntime>>,
     /// `options.views`' live runtime (#913) — `None` unless configured.
     views: Option<Arc<ViewsRuntime>>,
     /// `options.notes`' live runtime (#889) — `None` unless configured.
@@ -3323,6 +3329,23 @@ struct WritebackRuntime {
     /// Never held across SQL or while a response is written: the check is
     /// in memory, the append one fdatasync.
     commit: Mutex<()>,
+}
+
+/// Live runtime for `options.scenarios`' writes (#1243 S2).
+struct ScenarioRuntime {
+    opts: anofox_visualization::host::scenarios::WriteOptions,
+    /// The operations' log (`options.scenarios.path`).
+    store: Store,
+    rate: RateLimiter,
+    global: Mutex<GlobalBucket>,
+    writer_locks: Mutex<ViewerLocks>,
+    recent: Mutex<RecentIds>,
+    full: AtomicBool,
+    /// Bumped after each committed operation.
+    written: AtomicU64,
+    /// The `written` count the serving snapshot has: held across the
+    /// refresh after a write, so a burst of writes gives one refresh.
+    refreshed: Mutex<u64>,
 }
 
 /// Live runtime for `options.views` (#913).
@@ -4144,6 +4167,25 @@ fn check_dash_set(
             state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
         })?;
     }
+    // #1243 S2: scenario writes, like write-back's.
+    if let Some(w) = opts.scenarios_opts.as_ref().and_then(|o| o.write.as_ref()) {
+        let known_dashboards: Vec<String> = set.list.iter().map(|d| d.id.clone()).collect();
+        w.validate_start(
+            &wb::StartContext {
+                has_auth: opts.auth.is_some(),
+                embed_without_frame_ancestors: opts
+                    .auth
+                    .as_ref()
+                    .is_some_and(|a| a.embed.is_some())
+                    && opts.frame_ancestors.is_none(),
+                data_dir: opts.data.as_deref(),
+                dashboard_dir: dir,
+                known_dashboards: &known_dashboards,
+                state_path: opts.state_opts.as_ref().map(|s| s.path.as_path()),
+            },
+            opts.writeback_opts.as_ref().map(|w| w.path.as_path()),
+        )?;
+    }
     // #913: saved views belong to a signed-in viewer; their file is its own.
     if let Some(v) = &opts.views_opts {
         if opts.auth.is_none() {
@@ -4571,6 +4613,28 @@ pub fn start_locked(
             }))
         }
     };
+    // #1243 S2: scenario writes go to the live database: it must be
+    // writable, and every declared table must be there with its columns.
+    let scenario_writes = match opts.scenarios_opts.as_ref().map(|o| (o, o.write.as_ref())) {
+        Some((o, Some(w))) => {
+            {
+                let conn = ctx.conn.lock().unwrap_or_else(|p| p.into_inner());
+                check_scenario_tables(&conn, &o.database, w)?;
+            }
+            Some(Arc::new(ScenarioRuntime {
+                store: Store::open_scenarios(&w.path, w.max_mb)?,
+                rate: RateLimiter::new(w.rate_per_minute, w.rate_burst, SUBMIT_BOUNDED_USERS),
+                global: Mutex::new(GlobalBucket::new()),
+                writer_locks: Mutex::new(ViewerLocks::new()),
+                recent: Mutex::new(RecentIds::new()),
+                full: AtomicBool::new(false),
+                written: AtomicU64::new(0),
+                refreshed: Mutex::new(0),
+                opts: w.clone(),
+            }))
+        }
+        _ => None,
+    };
     // #913: saved views.
     let views = match &opts.views_opts {
         None => None,
@@ -4696,6 +4760,7 @@ pub fn start_locked(
         source_build: SourceBuildState::new(),
         submit,
         writeback,
+        scenario_writes,
         views,
         notes,
         tiles,
@@ -5966,6 +6031,9 @@ fn durable_files(opts: &LockedOptions) -> Vec<(&'static str, PathBuf)> {
     if let Some(n) = &opts.notes_opts {
         v.push(("notes", n.path.clone()));
     }
+    if let Some(w) = opts.scenarios_opts.as_ref().and_then(|o| o.write.as_ref()) {
+        v.push(("scenarios", w.path.clone()));
+    }
     v
 }
 
@@ -6038,6 +6106,7 @@ fn durable_snapshot(st: &Locked) {
         st.writeback.as_ref().map(|w| ("writeback", &w.store)),
         st.views.as_ref().map(|v| ("views", &v.store)),
         st.notes.as_ref().map(|n| ("notes", &n.store)),
+        st.scenario_writes.as_ref().map(|s| ("scenarios", &s.store)),
     ]
     .into_iter()
     .flatten()
@@ -7358,7 +7427,11 @@ fn plan_dash(id: String, sql: String, meta: sv::DashboardMeta, updated: Option<S
     let mut saves: HashMap<usize, SaveSpec> = HashMap::new();
     for (i, p) in planned.iter().enumerate() {
         let col = |role: Role| p.roles.iter().find(|(_, r)| *r == role).map(|(j, _)| *j);
-        if let (Some(save_idx), Some(tables_col)) = (col(Role::Save), col(Role::SaveTables)) {
+        let (tables_col, scenario_col) = (col(Role::SaveTables), col(Role::SaveScenario));
+        if let (Some(save_idx), true) = (
+            col(Role::Save),
+            tables_col.is_some() || scenario_col.is_some(),
+        ) {
             let name = p
                 .names
                 .iter()
@@ -7372,6 +7445,9 @@ fn plan_dash(id: String, sql: String, meta: sv::DashboardMeta, updated: Option<S
                     graph_col: col(Role::SaveGraph),
                     form_col: col(Role::SaveForm),
                     tables_col,
+                    scenario_col,
+                    action_col: col(Role::SaveAction),
+                    key_col: col(Role::SaveKey),
                 },
             );
         }
@@ -7466,6 +7542,66 @@ fn load_dashboards(dir: &Path, folders: bool) -> Result<(Vec<Dash>, Vec<String>)
     loads.sort();
     loads.dedup();
     Ok((out, loads))
+}
+
+/// #1243 S2: before a server writes scenarios — `database` is attached
+/// read-write in the serving session, and every declared table is in its
+/// `main` schema with the declared columns.
+fn check_scenario_tables(
+    live: &Conn,
+    database: &str,
+    w: &anofox_visualization::host::scenarios::WriteOptions,
+) -> Result<(), String> {
+    let ro = live
+        .execute_prepared(
+            "SELECT readonly::VARCHAR FROM duckdb_databases() WHERE database_name = ?",
+            &[database],
+        )?
+        .string_rows(1)?;
+    match ro.first().and_then(|r| r[0].as_deref()) {
+        None => {
+            return Err(format!(
+                "options.scenarios.database '{database}' is not attached"
+            ))
+        }
+        Some("true") => {
+            return Err(format!(
+                "options.scenarios.writers: '{database}' is attached read-only — scenario \
+                 writes need it read-write"
+            ))
+        }
+        Some(_) => {}
+    }
+    for (t, decl) in &w.tables {
+        let cols: Vec<String> = live
+            .execute_prepared(
+                "SELECT column_name::VARCHAR FROM duckdb_columns() \
+                 WHERE database_name = ? AND schema_name = 'main' AND table_name = ?",
+                &[database, t],
+            )?
+            .string_rows(10_000)?
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .collect();
+        if cols.is_empty() {
+            return Err(format!(
+                "options.scenarios.tables.{t}: no table '{t}' in '{database}'.main"
+            ));
+        }
+        let missing: Vec<&str> = decl
+            .columns
+            .iter()
+            .map(|(c, _)| c.as_str())
+            .filter(|c| !cols.iter().any(|b| b == c))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "options.scenarios.tables.{t}: the table has no column {}",
+                missing.join(", ")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// #1243 S1: with `options.scenarios`, attach every scenario of its database
@@ -8846,6 +8982,18 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     );
                 }
             }
+            // #1243 S2: the scenario log, same meaning as `state` above.
+            if let Some(w) = &st.scenario_writes {
+                if let Some(map) = body.as_object_mut() {
+                    map.insert(
+                        "scenarios".into(),
+                        serde_json::json!({
+                            "ok": !w.store.is_failed(),
+                            "full": w.full.load(Ordering::Relaxed),
+                        }),
+                    );
+                }
+            }
             // #352: only with a Quack source configured — numbers/booleans
             // only, never the source's URI, its token env/file name or any
             // error text (those stay in the server's own stderr).
@@ -8946,7 +9094,15 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                     info.dashboard = Some(id.to_string());
                     let session = ident.as_ref().and_then(|i| i.page_session.as_deref());
                     let html = String::from_utf8_lossy(&served_index(
-                        st, &pv.dash, scope, session, false, false, false, false, false,
+                        st,
+                        &pv.dash,
+                        scope,
+                        session,
+                        (false, false),
+                        false,
+                        false,
+                        false,
+                        false,
                     ))
                     .into_owned();
                     // The link is the preview's only name: never sent on.
@@ -9082,6 +9238,14 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                                     && w.opts.is_writer(&c.user, &c.groups)
                             })
                     });
+                    // #1243 S2: and write scenarios?
+                    let scenario_writer = st.scenario_writes.as_ref().is_some_and(|w| {
+                        ident.as_ref().map(|i| i.method) != Some("api_key")
+                            && claims.as_ref().is_some_and(|c| {
+                                !access::is_reserved_user(&c.user)
+                                    && w.opts.is_writer(&c.user, &c.groups)
+                            })
+                    });
                     // #195: offer Ask where /api/ask would take this viewer.
                     let ask = st.ask.as_ref().is_some_and(|rt| {
                         let v = ask_viewer(ident.as_ref());
@@ -9116,7 +9280,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                         d,
                         scope,
                         page,
-                        writer,
+                        (writer, scenario_writer),
                         ask,
                         views,
                         notes_writer,
@@ -12280,7 +12444,7 @@ fn handle_save(
         info.deny = Some("not_writer");
         return send(req, r);
     }
-    let Some(w) = &st.writeback else {
+    if st.writeback.is_none() && st.scenario_writes.is_none() {
         info.deny = Some("not_enabled");
         audit("deny", Some("not_enabled"), None, None);
         return reply(
@@ -12288,7 +12452,7 @@ fn handle_save(
             403,
             "forbidden: this server does not accept saves (no options.writeback)",
         );
-    };
+    }
 
     // The same CSRF gate as `/api/submit` (plan-517 §4.3), the same header.
     if !sv::origin_required_and_matches_host(origin, host) {
@@ -12327,7 +12491,17 @@ fn handle_save(
         return reply(req, 403, "forbidden: saving needs a personal sign-in");
     }
     info.user = Some(claims.user.clone());
-    if !w.opts.is_writer(&claims.user, &claims.groups) {
+    // A writer of either kind reads on; which one the save needs is known
+    // once its ::SAVE statement is (#1243 S2).
+    let wb_writer = st
+        .writeback
+        .as_ref()
+        .is_some_and(|w| w.opts.is_writer(&claims.user, &claims.groups));
+    let scn_writer = st
+        .scenario_writes
+        .as_ref()
+        .is_some_and(|w| w.opts.is_writer(&claims.user, &claims.groups));
+    if !wb_writer && !scn_writer {
         info.deny = Some("not_writer");
         audit("deny", Some("not_writer"), None, None);
         return reply(req, 403, "forbidden: you may not save on this server");
@@ -12356,6 +12530,30 @@ fn handle_save(
             return reply(req, 403, "forbidden: not in this credential's scope");
         }
     }
+    // #1243 S2: a ::SAVE_SCENARIO statement writes a scenario instead.
+    if dash
+        .saves
+        .get(&sub.panel)
+        .is_some_and(|s| s.scenario_col.is_some())
+    {
+        return handle_scenario_save(
+            st,
+            req,
+            dash,
+            &sub,
+            &body,
+            claims,
+            scope,
+            auth_method,
+            info,
+            &audit,
+        );
+    }
+    let Some(w) = st.writeback.as_ref().filter(|_| wb_writer) else {
+        info.deny = Some("not_writer");
+        audit("deny", Some("not_writer"), Some(&dash.id), None);
+        return reply(req, 403, "forbidden: you may not save on this server");
+    };
     if !w.opts.enabled_for(&dash.id) {
         info.deny = Some("not_enabled");
         audit("deny", Some("not_enabled"), Some(&dash.id), None);
@@ -12472,7 +12670,7 @@ fn handle_save(
         &w.opts,
         cell(spec.graph_col),
         cell(spec.form_col),
-        cell(Some(spec.tables_col)),
+        cell(spec.tables_col),
     )
     .and_then(|target| wb::build_changes(&w.opts, &target, &sub));
     let changes = match changes {
@@ -12602,6 +12800,595 @@ fn handle_save(
     info.bytes = Some(body_json.len());
     respond(req, 201, "application/json", body_json.into_bytes());
     201
+}
+
+/// `handle_save`'s audit line: outcome, reason, dashboard, detail.
+type SaveAudit<'a> = dyn Fn(&'static str, Option<&'static str>, Option<&str>, Option<&str>) + 'a;
+
+/// #1243 S2: `POST /api/save` for a `::SAVE_SCENARIO` statement — create a
+/// scenario, or write a `::FORM`'s row into one, on the server's own
+/// connection to the live database (never a request's SQL: names checked,
+/// values bound), log it (`fdatasync`'d before the commit), then refresh the
+/// snapshot so the panels read it. The caller has run the CSRF, sign-in,
+/// body and scope gates.
+#[allow(clippy::too_many_arguments)]
+fn handle_scenario_save(
+    st: &Locked,
+    req: Request,
+    dash: &Dash,
+    sub: &wb::SaveRequest,
+    body: &str,
+    claims: &Claims,
+    scope: Option<&Scope>,
+    auth_method: Option<&'static str>,
+    info: &mut LogInfo,
+    audit: &SaveAudit<'_>,
+) -> u16 {
+    use anofox_visualization::host::scenarios as scn;
+    let spec = &dash.saves[&sub.panel];
+    let deny = |info: &mut LogInfo, reason: &'static str| {
+        info.deny = Some(reason);
+        audit("deny", Some(reason), Some(&dash.id), Some(&spec.name));
+    };
+    let Some(rt) = st.scenario_writes.as_ref() else {
+        deny(info, "not_enabled");
+        return reply(
+            req,
+            403,
+            "forbidden: this server does not write scenarios (no writers in options.scenarios)",
+        );
+    };
+    if !rt.opts.is_writer(&claims.user, &claims.groups) {
+        deny(info, "not_writer");
+        return reply(
+            req,
+            403,
+            "forbidden: you may not write scenarios on this server",
+        );
+    }
+    if !rt.opts.enabled_for(&dash.id) {
+        deny(info, "not_enabled");
+        return reply(
+            req,
+            403,
+            "forbidden: this dashboard does not write scenarios",
+        );
+    }
+    if rt.store.is_failed() {
+        audit("error", Some("store_error"), Some(&dash.id), None);
+        return reply(
+            req,
+            503,
+            "service unavailable: the scenario log is unavailable",
+        );
+    }
+    let now = Instant::now();
+    let replay = || {
+        rt.recent.lock().unwrap_or_else(|p| p.into_inner()).get(
+            &claims.user,
+            &dash.id,
+            &sub.id,
+            now,
+        )
+    };
+    if let Some(prior) = replay() {
+        respond(req, 201, "application/json", prior.into_bytes());
+        return 201;
+    }
+    if let Err(retry_after) = rt.rate.check(&claims.user, now) {
+        audit("deny", Some("rate_limited"), Some(&dash.id), None);
+        return rate_limited(req, retry_after);
+    }
+    if !rt
+        .global
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take(GLOBAL_SUBMITS_PER_SEC, now)
+    {
+        audit("deny", Some("rate_limited"), Some(&dash.id), None);
+        return rate_limited(req, 1);
+    }
+    let lock = rt
+        .writer_locks
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&claims.user);
+    let _guard = match lock.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            audit("deny", Some("in_progress"), Some(&dash.id), None);
+            return submission_in_progress(req);
+        }
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+    };
+    if let Some(prior) = replay() {
+        respond(req, 201, "application/json", prior.into_bytes());
+        return 201;
+    }
+
+    // The ::SAVE statement, as the viewer: what it does and with which variables.
+    let raw_vars: Value = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("vars").cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let panel_body = serde_json::json!({
+        "dashboard": sub.dashboard,
+        "panel": sub.panel,
+        "vars": raw_vars,
+    })
+    .to_string();
+    let mut scratch = LogInfo::default();
+    let mut charge = st.inflight.charge();
+    let rows_json = match locked_panel(
+        st,
+        &panel_body,
+        None,
+        Some(claims),
+        scope,
+        auth_method,
+        &mut scratch,
+        &mut charge,
+    ) {
+        Ok((json, _etag, _deps)) => json,
+        Err((code, _)) => {
+            deny(info, "not_available");
+            return reply(req, if code == 404 { 400 } else { 409 }, "not available");
+        }
+    };
+    let rows: Vec<Map<String, Value>> = serde_json::from_str(&rows_json).unwrap_or_default();
+    let [row] = rows.as_slice() else {
+        deny(info, "not_available");
+        return reply(req, 409, "not available");
+    };
+    let cell = |c: Option<usize>| -> String {
+        c.and_then(|c| row.values().nth(c))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    // A variable's value as the server would SET it (allow-list, locks).
+    let var = |name: &str| -> Result<Option<String>, String> {
+        if name.is_empty() {
+            return Ok(None);
+        }
+        match effective_value(name, dash, scope, &raw_vars) {
+            Err(()) => Err(format!("'{name}' is not one of this dashboard's variables")),
+            Ok(None) | Ok(Some(Value::Null)) => Ok(None),
+            Ok(Some(Value::String(v))) => Ok(Some(v.trim().to_string()).filter(|v| !v.is_empty())),
+            Ok(Some(_)) => Err(format!("'{name}' must hold a scenario name")),
+        }
+    };
+    let bad = |info: &mut LogInfo, req: Request, e: &str| {
+        deny(info, "invalid_value");
+        reply(req, 400, e)
+    };
+    let action = match scn::parse_action(&cell(spec.action_col)) {
+        Ok(a) => a,
+        Err(e) => return bad(info, req, &e),
+    };
+    let picked = match var(&cell(spec.scenario_col)) {
+        Ok(p) => p.filter(|p| !p.eq_ignore_ascii_case("main")),
+        Err(e) => return bad(info, req, &e),
+    };
+    if picked.as_deref().is_some_and(|p| !scn::valid_name(p)) {
+        return bad(info, req, "the picked scenario isn't one this server knows");
+    }
+    // What to do, checked before the live connection is touched.
+    use ScenarioOp as Op;
+    let op = match action {
+        scn::Action::Create => {
+            let name = match var(&cell(spec.key_col)) {
+                Ok(Some(n)) => n,
+                Ok(None) => return bad(info, req, "name the new scenario first"),
+                Err(e) => return bad(info, req, &e),
+            };
+            if !scn::valid_name(&name) {
+                return bad(
+                    info,
+                    req,
+                    "a scenario name is letters, digits and _ (at most 64), and not 'main'",
+                );
+            }
+            Op::Create {
+                name,
+                parent: picked,
+            }
+        }
+        scn::Action::Write => {
+            let Some(name) = picked else {
+                return bad(
+                    info,
+                    req,
+                    "pick or create a scenario first: a save never writes main",
+                );
+            };
+            if spec.form_col.is_none() || cell(spec.form_col).is_empty() {
+                return bad(
+                    info,
+                    req,
+                    "a scenario save writes a ::FORM's row (::SAVE_FORM)",
+                );
+            }
+            let tables = cell(spec.tables_col);
+            let table = tables.trim();
+            if table.is_empty() || table.contains(',') {
+                return bad(info, req, "a form saves into one table");
+            }
+            let Some(form) = sub.form.as_ref() else {
+                return bad(info, req, "this ::SAVE saves a form: 'form' is missing");
+            };
+            match scn::form_row(&rt.opts, table, form, sub.key.as_deref()) {
+                Ok(row) => Op::Write {
+                    name,
+                    table: table.to_string(),
+                    row,
+                },
+                Err(e) => return bad(info, req, &e),
+            }
+        }
+    };
+    let (what, scenario) = match &op {
+        Op::Create { name, .. } => ("create", name.clone()),
+        Op::Write { name, .. } => ("write", name.clone()),
+    };
+    let mut record = Map::new();
+    record.insert("action".into(), what.into());
+    record.insert("scenario".into(), scenario.clone().into());
+    match &op {
+        Op::Create { parent, .. } => {
+            record.insert(
+                "parent".into(),
+                parent.clone().map_or(Value::Null, Value::from),
+            );
+            record.insert("mode".into(), rt.opts.mode.sql().into());
+        }
+        Op::Write { table, row, .. } => {
+            record.insert("table".into(), table.clone().into());
+            record.insert("row".into(), Value::Object(row.clone()));
+        }
+    }
+
+    // On the live connection: check, write, log, commit.
+    let Some(conn) = lock_live(&st.ctx, Duration::from_secs(10)) else {
+        audit("error", Some("busy"), Some(&dash.id), Some(&spec.name));
+        return reply(
+            req,
+            503,
+            "service unavailable: the database is busy, try again",
+        );
+    };
+    let append = |vars: Map<String, Value>| {
+        rt.store
+            .append(NewRecord {
+                user: claims.user.clone(),
+                auth: auth_method.unwrap_or("").to_string(),
+                dashboard: dash.id.clone(),
+                submit: spec.name.clone(),
+                id: sub.id.clone(),
+                vars,
+            })
+            .map_err(|e| {
+                if e.contains("full") {
+                    rt.full.store(true, Ordering::Relaxed);
+                }
+                ScenarioFail::Log(e)
+            })
+    };
+    let (database, max_scenarios) = st
+        .opts
+        .scenarios_opts
+        .as_ref()
+        .map_or((String::new(), scn::DEFAULT_MAX_SCENARIOS), |o| {
+            (o.database.clone(), o.max_scenarios)
+        });
+    let outcome = scenario_op(
+        &conn,
+        &database,
+        &rt.opts,
+        max_scenarios,
+        &op,
+        record,
+        &append,
+    );
+    drop(conn);
+    let rec = match outcome {
+        Ok(r) => r,
+        Err(ScenarioFail::Refused(code, e)) => {
+            deny(info, "refused");
+            return reply(req, code, &e);
+        }
+        Err(ScenarioFail::Log(e)) => {
+            audit(
+                "error",
+                Some("store_error"),
+                Some(&dash.id),
+                Some(&spec.name),
+            );
+            eprintln!(
+                "[anofox-serve] scenario log append failed: {}",
+                access::diag(&e)
+            );
+            return if e.contains("full") {
+                reply(req, 507, "insufficient storage: the scenario log is full")
+            } else {
+                reply(req, 503, "service unavailable: could not record the change")
+            };
+        }
+        Err(ScenarioFail::Db(e)) => {
+            audit("error", Some("db_error"), Some(&dash.id), Some(&spec.name));
+            eprintln!(
+                "[anofox-serve] scenario {what} '{scenario}' failed: {}",
+                access::diag(&e)
+            );
+            return reply(
+                req,
+                409,
+                "the scenario couldn't be changed (see the server log)",
+            );
+        }
+    };
+
+    // The panels read the snapshot: bring it to this write (a burst of
+    // writes waits for one refresh).
+    let mine = rt.written.fetch_add(1, Ordering::SeqCst) + 1;
+    let refreshed = {
+        let mut done = rt.refreshed.lock().unwrap_or_else(|p| p.into_inner());
+        if *done >= mine {
+            true
+        } else {
+            let upto = rt.written.load(Ordering::SeqCst);
+            match st.refresh(true) {
+                Ok(_) => {
+                    *done = upto;
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    };
+    let epoch = st.current.get().epoch;
+    let body_json = serde_json::json!({
+        "seq": rec.seq,
+        "ts": rec.ts,
+        "action": what,
+        "scenario": scenario,
+        "epoch": epoch,
+        "refreshed": refreshed,
+    })
+    .to_string();
+    rt.recent.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        &claims.user,
+        &dash.id,
+        &sub.id,
+        body_json.clone(),
+        now,
+    );
+    audit(
+        "ok",
+        None,
+        Some(&dash.id),
+        Some(&format!("{} seq={} {what} {scenario}", spec.name, rec.seq)),
+    );
+    info.bytes = Some(body_json.len());
+    respond(req, 201, "application/json", body_json.into_bytes());
+    201
+}
+
+/// Why a scenario operation didn't happen.
+enum ScenarioFail {
+    /// A refusal to show the writer: status and reason.
+    Refused(u16, String),
+    /// The log couldn't take the record (nothing was committed).
+    Log(String),
+    /// The database refused (nothing was committed).
+    Db(String),
+}
+
+/// A checked scenario operation (#1243 S2).
+enum ScenarioOp {
+    Create {
+        name: String,
+        parent: Option<String>,
+    },
+    Write {
+        name: String,
+        table: String,
+        row: Map<String, Value>,
+    },
+}
+
+/// Run `op` on the live connection in one transaction: check the scenario
+/// against `scenario_list()`, write, `append` the log record (`fdatasync`'d),
+/// then commit — a failed append rolls the write back, so every committed
+/// operation is in the log. A write attaches the scenario under a fresh
+/// alias and detaches it after. anofox-scenario finds a database's
+/// scenarios through the search path's first catalog: the connection's
+/// search path is `database` for the operation, and restored after.
+fn scenario_op(
+    live: &Conn,
+    database: &str,
+    opts: &anofox_visualization::host::scenarios::WriteOptions,
+    max_scenarios: usize,
+    op: &ScenarioOp,
+    record: Map<String, Value>,
+    append: &dyn Fn(Map<String, Value>) -> Result<Record, ScenarioFail>,
+) -> Result<Record, ScenarioFail> {
+    let before = live
+        .query("SELECT current_setting('search_path')::VARCHAR")
+        .and_then(|mut r| r.string_rows(1))
+        .map_err(ScenarioFail::Db)?
+        .first()
+        .and_then(|r| r[0].clone())
+        .unwrap_or_default();
+    live.exec(&format!(
+        "SET search_path = {}",
+        sql_string_literal(&quote_ident(database))
+    ))
+    .map_err(ScenarioFail::Db)?;
+    let out = scenario_op_in(live, database, opts, max_scenarios, op, record, append);
+    let restore = if before.is_empty() {
+        live.exec("RESET search_path")
+    } else {
+        live.exec(&format!(
+            "SET search_path = {}",
+            sql_string_literal(&before)
+        ))
+    };
+    if let Err(e) = restore {
+        eprintln!("[anofox-serve] could not restore the search path after a scenario write: {e}");
+    }
+    out
+}
+
+fn scenario_op_in(
+    live: &Conn,
+    database: &str,
+    opts: &anofox_visualization::host::scenarios::WriteOptions,
+    max_scenarios: usize,
+    op: &ScenarioOp,
+    record: Map<String, Value>,
+    append: &dyn Fn(Map<String, Value>) -> Result<Record, ScenarioFail>,
+) -> Result<Record, ScenarioFail> {
+    use anofox_visualization::host::scenarios as scn;
+    let list = live
+        .query("SELECT name::VARCHAR, frozen::VARCHAR FROM scenario_list()")
+        .and_then(|mut r| r.string_rows(100_000))
+        .map_err(ScenarioFail::Db)?;
+    // Some(frozen) for an existing scenario
+    let find = |n: &str| {
+        list.iter()
+            .find(|r| r[0].as_deref() == Some(n))
+            .map(|r| r[1].as_deref() == Some("true"))
+    };
+    let run = |b: &scn::Bound| -> Result<crate::db::QueryResult, String> {
+        let p: Vec<&str> = b.params.iter().map(String::as_str).collect();
+        live.execute_prepared(&b.sql, &p)
+    };
+    // the transaction around `work`, the log line before the commit
+    let commit = |work: &dyn Fn() -> Result<(), String>| -> Result<Record, ScenarioFail> {
+        live.exec("BEGIN TRANSACTION").map_err(ScenarioFail::Db)?;
+        if let Err(e) = work() {
+            let _ = live.exec("ROLLBACK");
+            return Err(ScenarioFail::Db(e));
+        }
+        let rec = match append(record.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = live.exec("ROLLBACK");
+                return Err(e);
+            }
+        };
+        if let Err(e) = live.exec("COMMIT") {
+            let _ = live.exec("ROLLBACK");
+            // logged, not committed: say so in the log
+            let mut undo = Map::new();
+            undo.insert("action".into(), "rolled_back".into());
+            undo.insert("of".into(), rec.seq.into());
+            let _ = append(undo);
+            return Err(ScenarioFail::Db(e));
+        }
+        Ok(rec)
+    };
+    match op {
+        ScenarioOp::Create { name, parent } => {
+            if find(name).is_some() {
+                return Err(ScenarioFail::Refused(
+                    409,
+                    format!("a scenario named '{name}' exists already"),
+                ));
+            }
+            if let Some(p) = parent {
+                if find(p).is_none() {
+                    return Err(ScenarioFail::Refused(
+                        409,
+                        format!("the picked scenario '{p}' doesn't exist (any more)"),
+                    ));
+                }
+            }
+            if list.len() >= max_scenarios {
+                return Err(ScenarioFail::Refused(
+                    409,
+                    format!("this server keeps at most {max_scenarios} scenarios"),
+                ));
+            }
+            // anofox-scenario takes the key of a table without a primary key
+            // from key_columns, and refuses one for a table with a key
+            let with_pk = live
+                .execute_prepared(
+                    "SELECT DISTINCT table_name::VARCHAR FROM duckdb_constraints() \
+                     WHERE database_name = ? AND schema_name = 'main' \
+                     AND constraint_type = 'PRIMARY KEY'",
+                    &[database],
+                )
+                .and_then(|mut r| r.string_rows(100_000))
+                .map_err(ScenarioFail::Db)?;
+            let no_pk: Vec<String> = opts
+                .tables
+                .keys()
+                .filter(|t| !with_pk.iter().any(|r| r[0].as_deref() == Some(t.as_str())))
+                .cloned()
+                .collect();
+            let b = scn::create_sql(name, parent.as_deref(), opts.mode, &opts.tables, &no_pk);
+            commit(&|| run(&b).map(drop))
+        }
+        ScenarioOp::Write { name, table, row } => {
+            match find(name) {
+                None => {
+                    return Err(ScenarioFail::Refused(
+                        409,
+                        format!("there is no scenario '{name}' (any more)"),
+                    ))
+                }
+                Some(true) => {
+                    return Err(ScenarioFail::Refused(
+                        409,
+                        format!("'{name}' is frozen: it can't be changed"),
+                    ))
+                }
+                Some(false) => {}
+            }
+            let alias = format!("__anofox_scn_w_{}", &sv::random_token()[..12]);
+            live.exec(&format!(
+                "ATTACH {} AS {} (TYPE scenario)",
+                sql_string_literal(name),
+                quote_ident(&alias)
+            ))
+            .map_err(ScenarioFail::Db)?;
+            let sql = scn::row_sql(&alias, table, &opts.tables[table.as_str()], row);
+            let out = commit(&|| {
+                let there = run(&sql.exists)?
+                    .string_rows(1)?
+                    .first()
+                    .and_then(|r| r.first().cloned().flatten())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                match (&sql.update, there) {
+                    (_, 0) => run(&sql.insert).map(drop),
+                    (Some(u), _) => run(u).map(drop),
+                    (None, _) => Ok(()),
+                }
+            });
+            let _ = live.exec(&format!("DETACH {}", quote_ident(&alias)));
+            out
+        }
+    }
+}
+
+/// The live connection, waiting at most `wait` (a refresh holds it while it
+/// copies the databases).
+fn lock_live(ctx: &DbCtx, wait: Duration) -> Option<std::sync::MutexGuard<'_, Conn>> {
+    let until = Instant::now() + wait;
+    loop {
+        match ctx.conn.try_lock() {
+            Ok(g) => return Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        }
+    }
 }
 
 /// A recorded variable's *effective* value — after the same `-- @vars`
@@ -13381,7 +14168,7 @@ fn served_index(
     dash: &Dash,
     scope: Option<&Scope>,
     session: Option<&str>,
-    writer: bool,
+    (writer, scenario_writer): (bool, bool),
     ask: bool,
     views: bool,
     notes_writer: bool,
@@ -13450,10 +14237,13 @@ fn served_index(
             // #1243 S1: on a ::SCENARIO picker dashboard every statement
             // reads the picked scenario (through the search path), so the
             // page re-requests — and keys its own cache on — the picker too
+            // (S2: also before the first scenario exists — a writer adds one
+            // from this page)
+            let picks = !gen.snap.scenarios.is_empty() || st.opts.scenarios_opts.is_some();
             let picker: Option<Deps> = dash
                 .scenario_var
                 .as_ref()
-                .filter(|_| !gen.snap.scenarios.is_empty())
+                .filter(|_| picks)
                 .map(|v| Deps::Vars([v.to_ascii_lowercase()].into_iter().collect()));
             let ds: Vec<serde_json::Value> = ds
                 .iter()
@@ -13467,11 +14257,7 @@ fn served_index(
                 .collect();
             cfg["deps"] = serde_json::json!(ds);
             // #1271: the page keys and re-runs every statement on the picker
-            if let Some(v) = dash
-                .scenario_var
-                .as_ref()
-                .filter(|_| !gen.snap.scenarios.is_empty())
-            {
+            if let Some(v) = dash.scenario_var.as_ref().filter(|_| picks) {
                 cfg["scenarioVar"] = serde_json::json!(v);
             }
             cfg["depsTag"] = serde_json::json!(h.deps_tag(&gen));
@@ -13496,6 +14282,12 @@ fn served_index(
         // #684 slice 4: the generation the page loads at — its saves'
         // `base`, moved on only by its own saves and a 409's answer.
         "gen": st.writeback.as_ref().map(|w| w.store.global_seq()),
+    });
+    // #1243 S2: whether this dashboard writes scenarios here, and whether
+    // this viewer may (the scenario ::SAVE buttons say why not).
+    cfg["scenarios"] = serde_json::json!({
+        "enabled": st.scenario_writes.as_ref().is_some_and(|w| w.opts.enabled_for(&dash.id)),
+        "writer": scenario_writer,
     });
     // #913: this viewer's views are kept on the server (a personal sign-in).
     cfg["views"] = serde_json::json!({ "server": views });

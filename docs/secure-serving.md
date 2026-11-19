@@ -2031,7 +2031,7 @@ the tiles. A static `dashboard --site` doesn't yet: it has no server to ask.
   timing can show at most that *someone* on this server looked at an area.
   Set `cache_mb: 0` if that matters.
 
-### Scenarios, read-only (`options.scenarios`, #1243 S1)
+### Scenarios (`options.scenarios`, #1243 S1)
 
 [anofox-scenario](https://github.com/DataZooDE/anofox-scenario) keeps
 Git-like branches of a database inside its file. With the extension loaded
@@ -2083,11 +2083,72 @@ FROM anofox_scenario_diff('demand_up', 'plan');                     -- what chan
   picker's name (`scenarioVar`), so a pick re-runs every panel and a
   `?v.scenario=` link opens the same scenario.
   Without `options.scenarios` it's an ordinary dropdown.
-- Not yet: saving into a scenario, approving one (plan:
+- Not yet: approving a scenario (freeze, merge, drop; plan:
   [plan-scenarios.md](plans/plan-scenarios.md)), and combining
   `options.scenarios` with an access policy, an agent mapping or
   `options.preview` (a preview key's SQL could build a write call at run
   time; anofox-scenario#66).
+
+### Scenario writes (`options.scenarios.writers`, #1243 S2)
+
+With `writers`, a writer adds scenarios and saves a `::FORM`'s row into
+one from the page. The server does it on its own connection to the live
+database; a request never runs `ATTACH`, `scenario_*` or a write as SQL.
+
+```json
+"scenarios": {
+  "database": "warehouse",
+  "path": "/var/lib/anofox/scenarios.jsonl",
+  "dashboards": ["sop"],
+  "writers": {"groups": ["planners"]},
+  "tables": {
+    "capacity": {"key": ["line"], "columns": {"line": "VARCHAR", "per_shift": "DOUBLE"}},
+    "plan": {"key": ["sku", "week"], "columns": {"sku": "VARCHAR", "week": "DATE", "qty": "DOUBLE"}}
+  },
+  "mode": "delta",
+  "rate": {"per_minute": 12, "burst": 5}
+}
+```
+
+```sql
+SELECT name AS scenario ::SCENARIO FROM anofox_scenarios();
+SELECT 'second_shift' AS new_name ::TEXT;
+SELECT 'Add scenario' ::SAVE, 'create' ::SAVE_ACTION, 'new_name' ::SAVE_KEY, 'scenario' ::SAVE_SCENARIO;
+SELECT field AS cap ::FORM, type, value, options FROM capacity_fields;
+SELECT 'Save capacity' ::SAVE, 'cap' ::SAVE_FORM, 'capacity' ::SAVE_TABLES, 'scenario' ::SAVE_SCENARIO;
+```
+
+- **`'create'::SAVE_ACTION`** makes a scenario named by the `::SAVE_KEY`
+  variable from the picked one (or `main`), in `mode` (`delta`, the
+  default, or `materialized`), and the page picks it. Names are letters,
+  digits and `_` (at most 64; anofox-scenario's rule), never `main`; at
+  most `max_scenarios`. Tables without a primary key get their declared
+  key as anofox-scenario's `key_columns`.
+- **A write** (`::SAVE_ACTION` `'write'`, the default) saves the form's row
+  into the picked scenario: the form's fields (plus the table's single key
+  column from `::SAVE_KEY`'s variable, when the form doesn't carry it),
+  each declared in `tables` and coerced to its type, upserted by the
+  declared key. An existing row keeps the columns the form doesn't carry.
+  Saves never write `main`; a frozen or unknown scenario is refused (`409`).
+- **Who:** a personal sign-in listed in `writers` (no API keys, no shared
+  embed identity), on a dashboard in `dashboards`, with the same CSRF gate,
+  body cap, rate limit and retry id as write-back's `/api/save`. The
+  scenario and the new name come from the request's variables after the
+  dashboard's `-- @vars` allow-list and credential locks.
+- **How:** checked against `scenario_list()`, then in one transaction on the
+  live connection (its search path set to `database` for the operation):
+  `scenario_create(?, …)` with bound names, or `ATTACH '<name>' AS
+  __anofox_scn_w_<random> (TYPE scenario)` and a bound `UPDATE` / `INSERT`;
+  the log line is appended (`fdatasync`) before the commit, so every
+  committed operation is in the log (a failed append rolls back). Then the
+  snapshot is refreshed (a burst of writes waits for one refresh) and the
+  answer carries its `epoch`.
+- **Start checks:** `options.auth` is required (an embed login needs
+  `options.frame_ancestors`); `database` must be attached read-write; every
+  declared table must be in its `main` schema with the declared columns;
+  `path` follows `options.state.path`'s rules and isn't another store's.
+  `/healthz` reports the log as `scenarios: {ok, full}`;
+  `options.durability` keeps it with the other stores.
 
 ## B. Static render — `serve --dashboards <dir>`
 
