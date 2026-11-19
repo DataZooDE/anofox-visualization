@@ -2075,7 +2075,8 @@ FROM anofox_scenario_diff('demand_up', 'plan');                     -- what chan
   `search_path` to its catalog (followed by `options.search_path`'s further
   entries), so unqualified names (`FROM plan`) read the branch and the
   dashboard's SQL doesn't change. `main`, no value or any other value read
-  the base. Such a dashboard always gets a fresh connection (no warm reuse).
+  the base. Such a dashboard always gets a fresh connection (no warm reuse),
+  and its `-- @materialize` statements run per request (no shared result).
   Without `options.scenarios` it's an ordinary dropdown.
 - Not yet: saving into a scenario, approving one (plan:
   [plan-scenarios.md](plans/plan-scenarios.md)), and combining

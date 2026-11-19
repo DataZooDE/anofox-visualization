@@ -1553,6 +1553,7 @@ SELECT sum(qty)::BIGINT AS q ::METRIC FROM plan;
 SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_rows('secret');
 SQL
   # the picker: unqualified names read the picked scenario
+  printf "SELECT name AS scenario ::SCENARIO FROM anofox_scenarios();\n-- @materialize\nCREATE TEMP TABLE agg AS SELECT sum(qty)::BIGINT AS q FROM plan;\nSELECT q ::METRIC FROM agg;\n" > "$T/scdash/sm.sql"
   printf "SELECT name AS scenario ::SCENARIO FROM anofox_scenarios();\nSELECT sum(qty)::BIGINT AS q ::METRIC FROM plan;\n" > "$T/scdash/sp.sql"
   scserve() { echo "LOAD anofox_scenario; ATTACH $(q "$T/sc.duckdb") AS warehouse; SELECT anofox_serve_dashboards($(q "$T/scdash"), $PORT, $(q "$1"));"; }
   export DATAZOO_DISABLE_TELEMETRY=1
@@ -1565,6 +1566,9 @@ SQL
   [ "$(panel 1 '{"scenario":"demand_up"}' sp)" = 200 ] && grep -qE '"c0":66(\.0)?[,}]' "$T/body" || fail "the picked scenario: $(cat "$T/body")"
   [ "$(panel 1 '{"scenario":"main"}' sp)" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body" || fail "main: $(cat "$T/body")"
   [ "$(panel 1 '' sp)" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body" || fail "no pick reads main: $(cat "$T/body")"
+  # a shared -- @materialize result isn't reused across scenarios (security review)
+  [ "$(panel 2 '{"scenario":"demand_up"}' sm)" = 200 ] && grep -qE '"c0":66(\.0)?[,}]' "$T/body" || fail "materialize on the picked scenario: $(cat "$T/body")"
+  [ "$(panel 2 '{"scenario":"main"}' sm)" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body" || fail "materialize on main after a scenario: $(cat "$T/body")"
   code=$(panel 1 '{"scenario":"x.main; DROP"}' sp)
   [ "$code" = 400 ] || { [ "$code" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body"; } || fail "an unknown scenario reads main or is refused: $code $(cat "$T/body")"
   stop

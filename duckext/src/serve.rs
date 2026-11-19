@@ -11041,7 +11041,12 @@ fn locked_panel_req(
         warm = warm.map(|w| format!("{w}/wb{g}"));
     }
     // #727: the `-- @materialize` statements before the panel, with their keys.
+    // #1243 S1 (security review): not on a dashboard with a ::SCENARIO
+    // picker — a shared result built on one scenario's search path would be
+    // served for every other; there each request runs them itself.
+    let picker = dash.scenario_var.is_some() && !gen.snap.scenarios.is_empty();
     let mats: Vec<(usize, String)> = (0..r.panel)
+        .filter(|_| !picker)
         .filter(|&i| dash.materialize.get(i) == Some(&true))
         .filter_map(|i| {
             let k = mat_key(
