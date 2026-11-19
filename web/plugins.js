@@ -84,7 +84,26 @@ globalThis.anofoxPlugins = {
   },
 };
 
-// Load one plugin from `url`: its name, or throws why not.
+// A module's or plugin's browser files (paths, relative to the page): each
+// .css as a stylesheet, each .js/.mjs as a module script (#1156 D5a).
+export function loadAssetFiles(paths) {
+  for (const p of paths) {
+    if (typeof p !== "string") continue;
+    if (/\.css$/i.test(p)) {
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = p;
+      document.head.appendChild(l);
+    } else if (/\.m?js$/i.test(p)) {
+      const sc = document.createElement("script");
+      sc.type = "module";
+      sc.src = p;
+      document.head.appendChild(sc);
+    }
+  }
+}
+
+// Load one plugin from `url`: its name and manifest, or throws why not.
 async function loadOne(url, register) {
   const res = await fetch(url, { credentials: "same-origin" });
   if (!res.ok) throw new Error(`${res.status}`);
@@ -99,8 +118,11 @@ async function loadOne(url, register) {
   const [at, n] = unpack(instance, needs(instance, "anofox_plugin_manifest")());
   const manifest = dec.decode(new Uint8Array(instance.exports.memory.buffer, at, n).slice());
   let name = "";
+  let assets = [];
   try {
-    name = JSON.parse(manifest).name;
+    const m = JSON.parse(manifest);
+    name = m.name;
+    if (Array.isArray(m.assets)) assets = m.assets;
   } catch (_) {
     throw new Error("manifest: malformed JSON");
   }
@@ -111,13 +133,16 @@ async function loadOne(url, register) {
     plugins.delete(name);
     throw new Error(why);
   }
-  return name;
+  return { name, assets };
 }
 
 // The plugins plugins.json lists (same origin only), before the page reads
-// its roles. No plugins.json (404) means none. `register`: the core's
-// register_plugin. Returns the names loaded; a refused plugin is reported on
-// the console and skipped.
+// its roles. No plugins.json (404) means none. An entry is the plugin's
+// URL, or {url, assets: true} when the server serves its browser files
+// (the operator's --plugin-assets / options.plugin_assets, #1290): then its
+// manifest's `assets` load from modules/<name>/, like a linked module's.
+// `register`: the core's register_plugin. Returns the names loaded; a
+// refused plugin is reported on the console and skipped.
 export async function loadPlugins(register, listUrl = "plugins.json") {
   let urls = [];
   try {
@@ -129,8 +154,10 @@ export async function loadPlugins(register, listUrl = "plugins.json") {
   }
   if (!Array.isArray(urls)) return [];
   const loaded = [];
-  for (const u of urls) {
-    if (typeof u !== "string") continue;
+  for (const entry of urls) {
+    const u = typeof entry === "string" ? entry : entry && typeof entry.url === "string" ? entry.url : null;
+    if (u === null) continue;
+    const withAssets = typeof entry === "object" && entry.assets === true;
     let url;
     try {
       url = new URL(u, document.baseURI);
@@ -142,7 +169,19 @@ export async function loadPlugins(register, listUrl = "plugins.json") {
       continue;
     }
     try {
-      loaded.push(await loadOne(url.href, register));
+      const { name, assets } = await loadOne(url.href, register);
+      loaded.push(name);
+      if (withAssets && assets.length) {
+        const base = new URL(`modules/${encodeURIComponent(name)}/`, document.baseURI);
+        const files = [];
+        for (const a of assets) {
+          if (typeof a !== "string") continue;
+          const f = new URL(a, base);
+          // the core checked the paths (no "..", no scheme); stay under base anyway
+          if (f.origin === location.origin && f.href.startsWith(base.href)) files.push(f.href);
+        }
+        loadAssetFiles(files);
+      }
     } catch (e) {
       console.warn(`plugin ${u}: ${e.message || e}`);
     }

@@ -562,11 +562,27 @@ fn serve_loads_a_plugin_and_its_browser_files_only_when_allowed() {
         (status, css.as_str()),
         (200, ".hello { font-style: italic; }\n")
     );
+    assert_eq!(get(port, "/modules/hello/hello.js", tok.as_deref()).0, 200);
+    // #1290: plugins.json tells the page to load the plugin's browser files
+    let (status, list) = get(port, "/plugins.json", tok.as_deref());
+    assert_eq!(status, 200, "{list}");
+    let list: serde_json::Value = serde_json::from_str(&list).unwrap();
+    assert_eq!(
+        list,
+        serde_json::json!([{"url": "modules/hello/plugin.wasm", "assets": true}])
+    );
     let (_b2, port2, tok2) = serve(false, false);
     assert_eq!(
         get(port2, "/modules/hello/hello.css", tok2.as_deref()).0,
         404,
         "no browser files without --plugin-assets"
+    );
+    let (status, list) = get(port2, "/plugins.json", tok2.as_deref());
+    assert_eq!(status, 200, "{list}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&list).unwrap(),
+        serde_json::json!(["modules/hello/plugin.wasm"]),
+        "without --plugin-assets the page loads none"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
