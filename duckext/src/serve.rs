@@ -6323,6 +6323,10 @@ fn preview_from_json(text: &str) -> Option<Preview> {
         return None;
     }
     let sql = v.get("sql")?.as_str()?.to_string();
+    // #1243: a kept preview gets the same scenario-write check as a new one
+    if !anofox_visualization::host::scenarios::write_calls(&sql).is_empty() {
+        return None;
+    }
     let claims = Claims {
         user: v.get("user")?.as_str()?.to_string(),
         groups: v
@@ -6601,6 +6605,10 @@ fn handle_preview_create(
         .is_some_and(|w| w.tables.keys().any(|t| wb::references(&dash.sql, t)))
     {
         Some("a preview may not read the saved (write-back) tables")
+    } else if !anofox_visualization::host::scenarios::write_calls(&dash.sql).is_empty() {
+        // #1243: it would run on the shared snapshot (anofox-scenario#66),
+        // as the dashboards folder's check refuses for a file
+        Some("a preview may not call anofox-scenario's write functions (scenario_create, scenario_merge, …)")
     } else if dash.stmts.iter().all(|(setup, _)| *setup) {
         Some("no panels: the SQL has no annotated SELECT")
     } else {
@@ -15610,6 +15618,13 @@ mod tests {
         // a file that names anything but a preview id is not one
         let forged = preview_to_json(&p).replace(&id, "sales");
         assert!(preview_from_json(&forged).is_none());
+        // #1243: a kept preview that calls a scenario write function is dropped
+        let merging = preview_to_json(&p).replace(
+            &serde_json::to_string(&sql).unwrap()[1..sql.len() + 1],
+            "SELECT n ::METRIC FROM (SELECT tables_changed AS n FROM scenario_merge('x'))",
+        );
+        assert!(merging.contains("scenario_merge"), "{merging}");
+        assert!(preview_from_json(&merging).is_none());
     }
 
     // #769: options.ingest is only for API keys, so it needs them.
