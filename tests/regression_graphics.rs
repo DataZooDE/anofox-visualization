@@ -3539,6 +3539,62 @@ fn dumbbell_two_values_per_item() {
     assert!(s.matches("<circle").count() >= 4, "two dots per item");
 }
 
+// #1277: a dumbbell's legend names its two ends by their columns, a ::LABEL
+// is written past each item's right-hand dot, ::YFORMAT formats the axis.
+#[test]
+fn dumbbell_names_its_ends_and_labels_items() {
+    let s = svg(vec![
+        Column::new(
+            "i",
+            Role::Value(Kind::Dumbbell),
+            strs(&["contract = monthly", "usage = falling"]),
+        ),
+        Column::new("stayed", Role::XMin, nums(&[47.0, 17.0])),
+        Column::new("churned", Role::XMax, nums(&[86.0, 58.0])),
+        Column::new("lift", Role::Label, strs(&["×1.6", "×2.4"])),
+        Column::new("f", Role::YFormat, strs(&["percent", "percent"])),
+    ]);
+    for l in ["stayed", "churned", "×1.6", "×2.4"] {
+        assert!(s.contains(&format!(">{l}<")), "{l} drawn");
+    }
+    assert!(s.contains(">50%<") || s.contains(">60%<"), "a percent axis");
+}
+
+// #1277: a line over a scatter joins the rows that have a value — an
+// efficiency frontier through some of the points.
+#[test]
+fn a_line_over_a_scatter_joins_its_rows_across_gaps() {
+    let s = svg(vec![
+        Column::new("cost", Role::X, nums(&[1.0, 2.0, 3.0, 4.0, 5.0])),
+        Column::new(
+            "question",
+            Role::Value(Kind::Point),
+            nums(&[1.0, 0.5, 2.0, 1.0, 3.0]),
+        ),
+        Column::new(
+            "frontier",
+            Role::Value(Kind::Line),
+            vec![
+                Value::Float(1.0),
+                Value::Na,
+                Value::Float(2.0),
+                Value::Na,
+                Value::Float(3.0),
+            ],
+        ),
+    ]);
+    let line = s
+        .split("<polyline")
+        .find(|p| p.contains("data-series=\"frontier\""))
+        .expect("the frontier is drawn");
+    let points = line.split('"').nth(1).unwrap_or("");
+    assert_eq!(
+        points.split_whitespace().count(),
+        3,
+        "one line through the three frontier points: {points}"
+    );
+}
+
 // ── #970: grouped boxplots / violins dodge (ggplot-rs 0.40, position_dodge2) ──
 #[test]
 fn grouped_boxplots_stand_side_by_side_in_legend_order() {

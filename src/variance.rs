@@ -926,6 +926,9 @@ pub(crate) fn render_gantt(
 /// `::DUMBBELL` (#883): per item (the `::DUMBBELL` column) two values,
 /// `::XMIN` and `::XMAX`, as two dots joined by a line, items top down in
 /// row order (ggplot-rs `geom_dumbbell`, flipped). Before/after, plan/actual.
+/// A legend names the two ends by their column headers (#1277: "stayed" /
+/// "churned"); a `::LABEL` column writes its text past each item's
+/// right-hand dot (a lift, "×2.4"); `::YFORMAT` formats the value axis.
 pub(crate) fn render_dumbbell(
     o: &RenderOptions,
     value: &Column,
@@ -958,19 +961,12 @@ pub(crate) fn render_dumbbell(
             height,
         ));
     }
+    let at = |c: &Column, i: usize| c.values[i].as_f64().unwrap_or(0.0);
+    let item = || strs(keep.iter().map(|&i| items[i].clone()));
     let data = vec![
-        (
-            "item".to_string(),
-            strs(keep.iter().map(|&i| items[i].clone())),
-        ),
-        (
-            "lo".to_string(),
-            nums(keep.iter().map(|&i| a.values[i].as_f64().unwrap_or(0.0))),
-        ),
-        (
-            "hi".to_string(),
-            nums(keep.iter().map(|&i| b.values[i].as_f64().unwrap_or(0.0))),
-        ),
+        ("item".to_string(), item()),
+        ("lo".to_string(), nums(keep.iter().map(|&i| at(a, i)))),
+        ("hi".to_string(), nums(keep.iter().map(|&i| at(b, i)))),
     ];
     let mut order: Vec<String> = Vec::new();
     for &i in &keep {
@@ -979,17 +975,97 @@ pub(crate) fn render_dumbbell(
         }
     }
     order.reverse();
+    // The two ends' names: the column headers, the low end's in a neutral grey
+    // and the high end's in the brand colour, as the dots are drawn.
+    let name = |c: &Column, d: &str| {
+        let n = c.name.trim();
+        if n.is_empty() { d } else { n }.to_string()
+    };
+    let (lo_name, hi_name) = (name(a, "from"), name(b, "to"));
+    let (lo_color, hi_color) = (neutral(0.63), o.brand());
+    let rgba = |(r, g, b): (u8, u8, u8)| ggplot_rs::scale::color::RGBAColor::new(r, g, b);
     let mut plot = GGPlot::new(data)
         .aes(Aes::new().x("item").ymin("lo").ymax("hi"))
-        .geom_dumbbell()
+        .geom_dumbbell_with(ggplot_rs::geom::lollipop::GeomDumbbell {
+            low_color: lo_color,
+            high_color: hi_color,
+            line_color: neutral(0.8),
+            ..Default::default()
+        });
+    // The legend: the same dots once more, coloured by their end's name.
+    if lo_name != hi_name {
+        let n = keep.len();
+        let ends = strs(
+            std::iter::repeat_n(lo_name.clone(), n).chain(std::iter::repeat_n(hi_name.clone(), n)),
+        );
+        plot = plot
+            .geom_point_with(GeomPoint {
+                size: 5.0,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                (
+                    "item".to_string(),
+                    strs(item().into_iter().chain(item()).map(|v| value_str(&v))),
+                ),
+                (
+                    "v".to_string(),
+                    nums(
+                        keep.iter()
+                            .map(|&i| at(a, i))
+                            .chain(keep.iter().map(|&i| at(b, i))),
+                    ),
+                ),
+                ("end".to_string(), ends),
+            ])
+            .layer_aes(Aes::new().x("item").y("v").color("end"))
+            .scale_color_manual(vec![
+                (lo_name.as_str(), rgba(lo_color)),
+                (hi_name.as_str(), rgba(hi_color)),
+            ]);
+    }
+    // A label past each item's right-hand dot.
+    if let Some(l) = col(Role::Label) {
+        let th = &o.theme;
+        plot = plot
+            .geom_text_with(GeomText {
+                size: 10.0,
+                color: th.chart_label(),
+                hjust: -0.35,
+                ..Default::default()
+            })
+            .layer_data(vec![
+                ("item".to_string(), item()),
+                (
+                    "top".to_string(),
+                    nums(keep.iter().map(|&i| at(a, i).max(at(b, i)))),
+                ),
+                (
+                    "lab".to_string(),
+                    strs(
+                        keep.iter()
+                            .map(|&i| l.values.get(i).map(value_str).unwrap_or_default()),
+                    ),
+                ),
+            ])
+            .layer_aes(Aes::new().x("item").y("top").label("lab"));
+    }
+    let values: Vec<Value> = keep
+        .iter()
+        .flat_map(|&i| [a.values[i].clone(), b.values[i].clone()])
+        .collect();
+    plot = plot
         .scale_x_discrete(
             ScaleDiscrete::new().with_limits(order.iter().map(String::as_str).collect()),
         )
+        .scale_y_continuous(value_scale(cols, Kind::Dumbbell, &values, o))
         .coord_flip()
         .xlab("")
         .ylab("")
-        .theme(chart_theme(o, 11.0))
-        .legend_position(LegendPosition::None);
+        .theme(chart_theme(o, 11.0));
+    if lo_name == hi_name {
+        plot = plot.legend_position(LegendPosition::None);
+    }
     if let Some(t) = title {
         plot = plot.title(t);
     }

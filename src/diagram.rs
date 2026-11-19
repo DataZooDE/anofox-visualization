@@ -1503,6 +1503,10 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 belief: nd.belief.as_ref().map(|b| (b.heights(b.its.len() - 1), t.color(v))),
                 // #1172: the prior, faint behind it
                 prior: nd.belief.as_ref().and_then(|b| b.prior_heights()).map(|h| (h, muted)),
+                // ggplot-rs 0.61's discrete states and shaded fill (Bayesian
+                // network nodes, #1275) — not drawn by ::DIAGRAM
+                states: None,
+                fill: None,
                 spark: (nd.spark.len() >= 2).then(|| {
                     (
                         nd.spark.clone(),

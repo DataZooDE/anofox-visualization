@@ -1,5 +1,5 @@
 -- @page Interactions and special features
--- @lead Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs — each a few lines of SQL.
+-- @lead Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, a Bayesian network's automatic analysis — each a few lines of SQL.
 CREATE TABLE geo AS SELECT * FROM (VALUES
   ('EU','Germany','Berlin'),('EU','Germany','Munich'),('EU','France','Paris'),('EU','France','Lyon'),
   ('Americas','USA','New York'),('Americas','USA','Chicago'),('Americas','Canada','Toronto'),
@@ -122,3 +122,36 @@ SELECT anofox_plot_factor_graph(n,
                       FROM (SELECT 'pr' AS f, 0 AS i UNION ALL SELECT 'f' || i, i + 1 FROM range(4) r(i))))
        AS "What share of returned units is defective?"
 FROM fg_nodes n;
+
+-- @tile What drives a target | A Bayesian network's automatic analysis: how common each state is among churners and the rest, as a `::DUMBBELL` named by its two columns, the lift as a `::LABEL`.
+SELECT 12::COL;
+SELECT node || ' = ' || state ::DUMBBELL, 100 * p_not AS "stayed" ::XMIN, 100 * p_churn AS "churned" ::XMAX,
+       '×' || printf('%.1f', p_churn / (0.18 * p_churn + 0.82 * p_not)) ::LABEL, 'percent'::YFORMAT,
+       'What sets churners apart'::TITLE
+FROM (VALUES ('payment failed', 'yes', 0.21, 0.05), ('support tickets', '3 or more', 0.45, 0.12),
+             ('usage', 'falling', 0.58, 0.17), ('tenure', 'under 1 year', 0.52, 0.21),
+             ('contract', 'monthly', 0.86, 0.47), ('onboarded', 'yes', 0.51, 0.73),
+             ('usage', 'rising', 0.11, 0.28), ('contract', 'annual', 0.14, 0.53)) t(node, state, p_churn, p_not)
+ORDER BY p_churn / (0.18 * p_churn + 0.82 * p_not) DESC;
+
+-- @tile Variables that hang together | `anofox_plot_matrix(…, cluster := true)` orders a heatmap by hierarchical clustering: related variables sit side by side.
+SELECT 12::COL;
+SELECT anofox_plot_matrix(t, row := 'a', col := 'b', value := 'mi', cluster := true, domain := [0, 1]),
+       'Which variables hang together'::TITLE
+FROM (VALUES ('churned', 'usage', 0.57), ('churned', 'tickets', 0.47), ('churned', 'contract', 0.35),
+             ('churned', 'tenure', 0.24), ('churned', 'plan', 0.02), ('usage', 'tickets', 0.66),
+             ('usage', 'contract', 0.07), ('usage', 'tenure', 0.05), ('usage', 'plan', 0.04),
+             ('tickets', 'contract', 0.04), ('tickets', 'tenure', 0.03), ('tickets', 'plan', 0.16),
+             ('contract', 'tenure', 0.82), ('contract', 'plan', 0.52), ('tenure', 'plan', 0.38)) t(a, b, mi);
+
+-- @tile The next question | Information against cost: a `::LINECHART` over a `::SCATTER` joins the rows that have a value — the efficient frontier.
+SELECT 12::COL;
+WITH v AS (
+    SELECT *, mi > coalesce(max(mi) OVER (ORDER BY cost, mi DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), -1) AS efficient
+    FROM (VALUES ('usage', 0.142, 2.0), ('support tickets', 0.118, 1.0), ('contract', 0.087, 0.5), ('tenure', 0.061, 0.5),
+                 ('payment failed', 0.032, 1.0), ('onboarded', 0.024, 5.0), ('plan', 0.006, 0.5),
+                 ('exit survey', 0.171, 15.0), ('review call', 0.158, 30.0)) t(test, mi, cost))
+SELECT cost ::XAXIS, mi AS "question" ::SCATTER, CASE WHEN efficient THEN mi END AS "efficient frontier" ::LINECHART,
+       CASE WHEN efficient THEN test END ::LABEL, 'log10'::XSCALE, 'cost (minutes)'::XTITLE, 'information (bits)'::YTITLE,
+       'Which question to ask next'::TITLE
+FROM v ORDER BY cost;

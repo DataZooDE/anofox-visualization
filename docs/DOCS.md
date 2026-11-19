@@ -104,7 +104,7 @@ terminal.
 | `::PARETO_TOTAL` |  | modifier | the grand total a ::PARETO's cumulative share is of, for a top N of a longer list: the line ends at the top N's share, not 100 % |
 | `::PARETO` | `::PARETOCHART` | chart | XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis |
 | `::GANTT` | `::GANTTCHART`, `::TIMELINE_BARS` | chart | one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars |
-| `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual) |
+| `::DUMBBELL` | `::DUMBBELLCHART`, `::SLOPE` | chart | two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual), the legend naming both by their columns; a ::LABEL past each item (a lift, ×2.4); ::YFORMAT on the value axis |
 | `::HISTOGRAM` | `::HIST` | chart | histogram of the measure; takes ::FLIP (horizontal, with ::FACET panels too), ::YFORMAT / ::YSCALE on its count axis, ::DATALABELS (each bin's count, or share under ::HIST_NORM), ::ABLINE, ::XLINE |
 | `::DENSITY` | `::KDE` | chart | kernel density curve (one per CATEGORY) |
 | `::RIDGELINE` | `::RIDGES`, `::JOYPLOT` | chart | one density of the measure per ::CATEGORY, stacked as overlapping ridges (distributions over time; the first category on top) |
@@ -1116,7 +1116,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_events(tbl, x := NULL)` | **ds \| period**, kind, label, severity, value, threshold, model_id, series \| id | a timeline: one lane per series (else per kind), a dot per event coloured by severity (alarm red, warning amber, else grey; a legend when there are several), kind · label · value (threshold …) on hover. Width 640, height 260 |
 | `anofox_plot_checks(tbl, x := NULL, kind := NULL)` | **check_name, status, value**, lower_threshold, upper_threshold, identifier, message, run_ts \| ds, check_type, table_name, column_name | a data-quality check band (default): one panel per check (own x scale, sorted), the value as a dot coloured by status (fail red, warn amber, pass green, else muted) against the lower_threshold..upper_threshold acceptance band (light green), one lane per `identifier`; over several `run_ts` / `ds` values (or `kind := 'strip'`) a status strip instead, one lane per check, a dot per run. The status, check label, identifier and message are on hover; `x :=` names the time column (default `run_ts`, else `ds`) |
 | `anofox_plot_decomposition(tbl, x := NULL, components := NULL)` *(provisional)* | **ds \| period, component, value** (long), or wide **observed \| y, level, trend, seasonal, seasonal_<period>, remainder \| residual** columns, or anofox-forecast's list outputs; optional `id`, `model_id` \| `model_name` \| `method` | stacked panels sharing one x axis, each with its own y scale: observed, level, trend, each seasonal component, the remainder/residual as points (drawn last); `components := ['trend', 'seasonal_7']` picks and orders the panels; several models (model_id / model_name / method) are coloured. One series per call (`GROUP BY id`) |
-| `anofox_plot_matrix(tbl, row := NULL, col := NULL, value := NULL, domain := NULL, mirror := NULL, labels := NULL)` | **row, col, value** — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`); value also read from `pearson` \| `spearman` \| `kendall` \| `correlation` \| `corr` \| `count` \| `n`; optional `model_id` | a heatmap, one tile per cell: a diverging fill scale around 0, `−1..1` for a correlation measure (`domain :=` overrides); a pair list (anofox-tabular's `profile_correlations` as it comes) is mirrored to the full matrix with a diagonal of 1 (`mirror := false` keeps it as given); cell values are written when there are at most 144 cells (`labels :=` overrides); `value := 'spearman'` picks another measure. Width 520, height 440 |
+| `anofox_plot_matrix(tbl, row := NULL, col := NULL, value := NULL, domain := NULL, mirror := NULL, labels := NULL, cluster := NULL)` | **row, col, value** — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`); value also read from `pearson` \| `spearman` \| `kendall` \| `correlation` \| `corr` \| `count` \| `n`; optional `model_id` | a heatmap, one tile per cell: a diverging fill scale around 0, `−1..1` for a correlation measure (`domain :=` overrides); a pair list (anofox-tabular's `profile_correlations` as it comes) is mirrored to the full matrix with a diagonal of 1 (`mirror := false` keeps it as given); cell values are written when there are at most 144 cells (`labels :=` overrides); `value := 'spearman'` picks another measure; `cluster := true` orders a square matrix's rows and columns by hierarchical clustering (\|value\| as the similarity, average linkage), so variables that hang together sit side by side (a pair list needs no mirrored half); a matrix that isn't square is an error. Width 520, height 440 |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
 | `anofox_plot_factor_graph(tbl, edges := NULL, marginals := NULL, schedule := NULL)` — the **factor-graph plugin** (#1218; `SELECT 'factor-graph'::REQUIRES;`, see below) | `factor_graph`: one row per node — **id, kind** (`factor`, `variable`, `data`, `constant`, `equality`, `delta`), name, label, slice, layer, plate; `edges :=` a LIST of **variable, factor**, interface, seq; `marginals :=` a LIST of variable, iteration, mean, sd, family; `schedule :=` a LIST of iteration, step, **variable, factor**, interface, direction (`to_factor` / `to_variable`) | a Forney-style factor graph through `::DIAGRAM` + `::SHAPE`, in one teal with its labels as mathematics: factors as glyph squares (𝒩, Γ, Ber, …), variables as circles, observations as filled terminal squares at the end of their edge (labelled beside), equality nodes small squares, delta nodes filled squares, constants text; a variable on exactly two factors with no marginals is drawn as the edge between them, labelled with its name; layers (control, param, state, obs, pref, …) as straight bands; undirected edges labelled with the interface at the factor; a variable whose only edge is its equality node is drawn as that node; TeX-ish labels (`\theta`, `y_{0}`) as text; the latest marginal as the value (mean, ± sd), a variable's tooltip draws its posterior mean over the iterations and a belief curve over it sharpens as Step goes through the iterations (`::BELIEF`); a prior whose parameters are constants (Beta, Normal, NormalMeanVariance, NormalMeanPrecision, Gamma, GammaShapeRate, GammaShapeScale, Uniform) is drawn as a dashed outline behind it, and the variable's card says what the observations did to it ("4 observations narrowed θ from 0.4 ± 0.2 to 0.56 ± 0.16."); a line under the graph (and its screen-reader text) says what the model learned ("After 4 observations, θ is 0.56 ± 0.16 (prior 0.4 ± 0.2)."); a model with more than 6 slices (`slice`) draws the first and last two, the run between as one `⋯ n more` per band (`slices := 'all'` draws every slice; in the browser a click or Enter on a `⋯` draws them all, kept in the share link as `v.anofox_fg_slices=all`, and *Fewer slices* or Esc collapses it again — the macro's `slices` defaults to `getvariable('anofox_fg_slices')`; a dashboard with `-- @vars` lists `anofox_fg_slices` to allow it on a locked server); with `influence :=`, hovering or selecting a variable widens each observation's edge by how far the variable moves without it (a selection keeps those observations in focus); with `schedule :=`, Step / Play walk the messages in order — each lights its edge, moving the message's way, captioned with the receiving variable's marginal after that iteration; a click or Enter on a node sets `getvariable('selected')` (or a `::SELECT_AS` name), and a graph shrunk to fit zooms with Ctrl/⌘ + wheel (see `::DIAGRAM`'s *Zoom*). Lint: unknown kinds, unknown ids, a variable on more than two factors without an equality node. Width 900, height 420 |
 | `anofox_plot_assignment(tbl, x := NULL)` | one row per item: **bin \| wave, item, size**, capacity, model_id | an optimizer's item → bin/wave assignment (anofox-optimize's `pack_*` / `wave_*`): items stacked per bin/wave (`::CATEGORY` = item, `::BARCHART_STACKED` = size), the capacity as a quiet reference line so the fill level is visible; `x :=` names the bin/wave column when both are present; several `model_id`s are faceted to compare algorithms; a `group_col` (`pack_by`/`wave_by`'s own instance split, kept under its own name) facets too, so two groups' bin 1 never stack into one over-capacity bar — alone, or combined into one `"group · model_id"` facet title when both vary |
@@ -2171,6 +2171,58 @@ FROM funnel ORDER BY i;
   values are skipped; the value axis is hidden (widths read relative to the
   first stage).
 - Each needs an `::XAXIS` — `--check` reports `chart/needs-xaxis` otherwise.
+
+### Automatic analysis of a Bayesian network
+
+A Bayesian network's automatic exploratory analysis (#1277) is a set of plain
+tables any producer can write — pgmpy, bnlearn, a DuckDB extension — and a
+handful of recipes over them. The example *What sets churners apart?*
+(`web/examples/bayes-auto-eda.sql`) is the template: replace its tables with
+your producer's.
+
+| Table | Columns | Chart |
+|---|---|---|
+| insight | target, target_state, node, state, p_state, p_given_target, p_given_not_target, p_target_given_state, difference, lift, distance, rank | **drivers**: `::DUMBBELL` from P(state \| not target) to P(state \| target), the lift as its `::LABEL`, sorted by lift or distance |
+| associations | a, b, mutual_information, normalized (optional given) | **which variables hang together**: `anofox_plot_matrix(…, cluster := true)` |
+| value_of_information | hypothesis, test, mutual_information, cost, score | **next question**: bars of the information, or information against cost as a `::SCATTER` with the efficient frontier as a `::LINECHART` |
+| explanations | rank, probability, explanation (a LIST of {node, state}) | **most probable explanations**: a `::TABLE`, the probability as an in-cell bar |
+| retracted | node, observed_state, p_observed_given_rest, surprise | **which observation does not fit**: bars ranked by surprise |
+| conflict | subset, conflict | a `::GAUGE` around 0 |
+| impact | hypothesis_state, evidence_subset, p_without, p_with | **the hypothesis as evidence comes in**: a `::WATERFALL` |
+
+```sql
+-- Drivers: how common each state is in the target and outside it
+SELECT node || ' = ' || state ::DUMBBELL,
+       100 * p_given_not_target AS "not in the target" ::XMIN,
+       100 * p_given_target AS "in the target" ::XMAX,
+       '×' || printf('%.1f', lift) ::LABEL, 'percent'::YFORMAT
+FROM insight WHERE target = 'churned' AND rank <= 14 ORDER BY lift DESC;
+
+-- Which variables hang together, related ones side by side
+SELECT anofox_plot_matrix(t, row := 'a', col := 'b', value := 'normalized',
+                          cluster := true, domain := [0, 1])
+FROM associations t;
+
+-- Information against cost: a question is efficient when nothing cheaper
+-- tells more; the frontier joins the efficient ones
+WITH v AS (
+    SELECT *, mutual_information > coalesce(max(mutual_information) OVER (
+        ORDER BY cost, mutual_information DESC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), -1) AS efficient
+    FROM value_of_information WHERE hypothesis = 'churned = yes')
+SELECT cost ::XAXIS, mutual_information AS "question" ::SCATTER,
+       CASE WHEN efficient THEN mutual_information END AS "efficient frontier" ::LINECHART,
+       CASE WHEN efficient THEN test END ::LABEL, 'log10'::XSCALE
+FROM v ORDER BY cost;
+```
+
+- **`::DUMBBELL`**'s legend names its two ends by the `::XMIN` / `::XMAX`
+  columns; a `::LABEL` column is written past each item's right-hand dot;
+  `::YFORMAT` formats the value axis.
+- **A `::LINECHART` over a `::SCATTER`** joins the rows that have a value
+  (NULL elsewhere) into one line — a frontier through some of the points —
+  where a line chart alone breaks at a missing value.
+- The learned network itself is the `bayes_net` plugin's drawing (#1275).
 
 ### Diagrams: pipelines, lineage and processes (`::DIAGRAM`)
 

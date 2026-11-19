@@ -1622,6 +1622,11 @@ fn rewrite_list(list: &str) -> Rewritten {
     let gantt_stmt = split.iter().any(|it| {
         item_role(it.trim(), inputs_ok).is_some_and(|(_, r)| r == Role::Value(Kind::Gantt))
     });
+    // #1277: a ::DUMBBELL's legend names its two ends by the ::XMIN / ::XMAX
+    // columns' names
+    let dumbbell_stmt = split.iter().any(|it| {
+        item_role(it.trim(), inputs_ok).is_some_and(|(_, r)| r == Role::Value(Kind::Dumbbell))
+    });
     for (i, item) in split.into_iter().enumerate() {
         let item = item.trim();
         if let Some((expr, role)) = item_role(item, inputs_ok) {
@@ -1726,7 +1731,9 @@ fn rewrite_list(list: &str) -> Rewritten {
                     // bivariate legend's "{B} →" caption and tooltip read it
                     // the same way `value_scale` reads a measure's.
                     let (core, alias) = trailing_alias(expr);
-                    if matches!(role, Role::Value(_) | Role::Bivariate) {
+                    if matches!(role, Role::Value(_) | Role::Bivariate)
+                        || (dumbbell_stmt && matches!(role, Role::XMin | Role::XMax))
+                    {
                         if let Some(nm) = alias.or_else(|| lex::simple_ident(core)) {
                             names.push((i, nm));
                         }

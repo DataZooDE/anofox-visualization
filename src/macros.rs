@@ -377,13 +377,14 @@ FROM range(20) r(i) UNION ALL SELECT i, 'seasonal', sin(i) FROM range(20) r(i)) 
         // the C-API build override it as `"row" := …`. The FFI/C++ build
         // registers the bare name directly (bypassing the SQL parser), and
         // the body's bare `row` reference parses fine as an expression.
-        named: &[("row", "NULL"), ("col", "NULL"), ("value", "NULL"), ("domain", "NULL"), ("mirror", "NULL"), ("labels", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "520"), ("height", "440")],
-        body: contract_body!("matrix", "'row', row, 'col', col, 'value', value, 'domain', domain, 'mirror', mirror, 'labels', labels, 'title', title, 'x_label', x_label, 'y_label', y_label"),
+        named: &[("row", "NULL"), ("col", "NULL"), ("value", "NULL"), ("domain", "NULL"), ("mirror", "NULL"), ("labels", "NULL"), ("cluster", "NULL"), ("title", "NULL"), ("x_label", "NULL"), ("y_label", "NULL"), ("theme", "NULL"), ("locale", "NULL"), ("width", "520"), ("height", "440")],
+        body: contract_body!("matrix", "'row', row, 'col', col, 'value', value, 'domain', domain, 'mirror', mirror, 'labels', labels, 'cluster', cluster, 'title', title, 'x_label', x_label, 'y_label', y_label"),
         description: "Heatmap of a `matrix` table (row, col, value; anofox-tabular profile_correlations as it \
 comes: column_a x column_b, pearson): one tile per cell, a diverging scale around 0, -1..1 for correlations \
 (domain := [lo, hi] overrides), a pair list mirrored to the full matrix with a diagonal of 1 (mirror := false \
 keeps it as given). Cell values are written when there are at most 144 cells (labels := overrides). value := \
-picks another measure (value := 'spearman'). Confusion and setup matrices (row, col already the full grid) are \
+picks another measure (value := 'spearman'). cluster := true orders the rows and cols by hierarchical clustering \
+(|value| as the similarity), so related variables sit side by side. Confusion and setup matrices (row, col already the full grid) are \
 drawn the same way, without mirroring.",
         example: "SELECT anofox_plot_matrix(m) FROM (VALUES ('a', 'b', 0.4), ('a', 'c', -0.2), ('b', 'c', 0.7)) \
 m(row, col, value)",
@@ -543,7 +544,7 @@ mod tests {
             assert!(!m.description.is_empty() && m.example.contains(m.name));
             // The C++ build registers macros without DuckDB's fixed-size
             // DefaultMacro arrays (see csrc/), so this is a readability cap.
-            assert!(m.params.len() + m.named.len() <= 14, "{}", m.name);
+            assert!(m.params.len() + m.named.len() <= 15, "{}", m.name);
         }
     }
 }

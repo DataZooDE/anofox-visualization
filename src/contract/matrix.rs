@@ -7,7 +7,10 @@
 //! false` keeps it as given). Drawn entirely through the role heatmap
 //! renderer ([`crate::render_heatmap`]): `geom_tile`, a diverging fill scale
 //! around 0 (−1..1 for correlations, `domain :=` overrides), `geom_text` cell
-//! labels when there are at most 144 cells (`labels :=`).
+//! labels when there are at most 144 cells (`labels :=`). `cluster := true`
+//! orders a square matrix's rows and columns by hierarchical clustering
+//! (ggplot-rs `similarity_order`: |value| as the similarity, average
+//! linkage), so variables that hang together sit side by side (#1277).
 
 use super::look::Labels;
 use super::stats::{fin, text_of, Out};
@@ -100,6 +103,29 @@ fn levels_for(cells: &[(String, String, f64)], mirrored: bool) -> (Vec<String>, 
     }
 }
 
+/// `levels` in clustering order: the similarity of two levels is the
+/// larger |value| of their two cells (a pair list need not be mirrored), a
+/// missing pair the least similar.
+fn cluster_order(levels: &[String], cells: &[(String, String, f64)]) -> Vec<String> {
+    let at = |l: &String| levels.iter().position(|x| x == l);
+    let n = levels.len();
+    let mut sim = vec![vec![f64::NAN; n]; n];
+    for (r, c, v) in cells {
+        if let (Some(i), Some(j)) = (at(r), at(c)) {
+            let v = v.abs();
+            for (a, b) in [(i, j), (j, i)] {
+                if sim[a][b].is_nan() || sim[a][b] < v {
+                    sim[a][b] = v;
+                }
+            }
+        }
+    }
+    similarity_order(&sim)
+        .into_iter()
+        .map(|i| levels[i].clone())
+        .collect()
+}
+
 /// `domain := [lo, hi]`: a two-element numeric array, `lo < hi`.
 fn parse_domain(options: &Row) -> Result<Option<(f64, f64)>, String> {
     match options.get("domain") {
@@ -179,7 +205,16 @@ pub(super) fn build(t: &Table, options: &Row) -> Result<Matrix, String> {
             }
         }
     }
-    let (levels_r, levels_c) = levels_for(&cells, mirrored);
+    let (mut levels_r, mut levels_c) = levels_for(&cells, mirrored);
+    if matches!(options.get("cluster"), Some(J::Bool(true))) {
+        if levels_r != levels_c {
+            return Err(
+                "cluster := true needs a square matrix (the same levels on rows and cols)".into(),
+            );
+        }
+        levels_r = cluster_order(&levels_r, &cells);
+        levels_c = levels_r.clone();
+    }
     cells.sort_by_key(|(r, c, _)| {
         (
             levels_r.iter().position(|x| x == r).unwrap_or(usize::MAX),
@@ -359,6 +394,35 @@ mod tests {
         let t = table(&r);
         let e = build(&t, &Row::new()).unwrap_err();
         assert!(e.contains("GROUP BY model_id"), "{e}");
+    }
+
+    #[test]
+    fn cluster_puts_associated_levels_side_by_side() {
+        // a–c and b–d hang together; by name they interleave
+        let r = rows(
+            r#"[{"row":"a","col":"b","value":0.1},{"row":"a","col":"c","value":0.9},
+                {"row":"a","col":"d","value":0.05},{"row":"b","col":"c","value":0.1},
+                {"row":"b","col":"d","value":0.8},{"row":"c","col":"d","value":0.2}]"#,
+        );
+        let t = table(&r);
+        let by_name = build(&t, &Row::new()).unwrap();
+        assert_eq!(by_name.levels_r, vec!["a", "b", "c", "d"]);
+        let opts: Row = serde_json::from_str(r#"{"cluster": true}"#).unwrap();
+        let m = build(&t, &opts).unwrap();
+        let pos = |l: &str| m.levels_r.iter().position(|x| x == l).unwrap() as i64;
+        assert_eq!((pos("a") - pos("c")).abs(), 1, "{:?}", m.levels_r);
+        assert_eq!((pos("b") - pos("d")).abs(), 1, "{:?}", m.levels_r);
+        assert_eq!(m.levels_r, m.levels_c);
+        // cells follow the new order
+        assert_eq!(m.cells[0].0, m.levels_r[0]);
+    }
+
+    #[test]
+    fn cluster_needs_a_square_matrix() {
+        let r = rows(r#"[{"row":"a","col":"x","value":1},{"row":"b","col":"y","value":2}]"#);
+        let t = table(&r);
+        let opts: Row = serde_json::from_str(r#"{"cluster": true}"#).unwrap();
+        assert!(build(&t, &opts).unwrap_err().contains("square"));
     }
 
     #[test]
