@@ -131,6 +131,12 @@ pub struct ChartColors {
     pub muted: Rgb,
     /// Card stroke / table rules in the headless SVG.
     pub line: Rgb,
+    /// #1268: the chart's gridlines — `None` = a hairline a step quieter
+    /// than the card border ([`ResolvedTheme::chart_grid`]).
+    pub grid: Option<Rgb>,
+    /// #1268: the chart's axis lines and ticks — `None` = none drawn (the
+    /// default look has no axis lines).
+    pub axis: Option<Rgb>,
     /// Error text.
     pub error: Rgb,
     /// Low end of a sequential fill (heatmap, calendar) — `None` = the
@@ -335,7 +341,8 @@ fn light_json() -> J {
         },
         "chart": {
             "heading": "#0a0a0a", "note": "#9ca3af", "ink": "#111827", "muted": "#6b7280",
-            "line": "#eceef1", "error": "#b42318", "seq_low": null
+            "line": "#eceef1", "error": "#b42318", "seq_low": null,
+            "grid": null, "axis": null
         },
         "font": {
             "family": "'Hanken Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif",
@@ -566,9 +573,29 @@ pub fn resolve_json(def: &J) -> Result<ThemeSet, String> {
         if d.get("palette").is_none() && !custom_palette {
             d["palette"] = json!(hexs(&DEFAULT_PALETTE_DARK));
         }
+        // #1268: a top-level `chart.grid` / `chart.axis` is picked for the
+        // light card — the dark variant of a theme that follows the viewer
+        // takes them from its own `dark.chart` only (else the defaults).
+        if mode == Mode::Auto {
+            if let Some(c) = dark_def.get_mut("chart").and_then(J::as_object_mut) {
+                c.remove("grid");
+                c.remove("axis");
+            }
+        }
         merge(&mut dark_def, &d);
     }
-    let dark = build(&dark_def, &name, Variant::Dark)?;
+    let mut dark = build(&dark_def, &name, Variant::Dark)?;
+    let mut light = light;
+    // #1268: `"lift": true` raises the host's colours to WCAG contrast on
+    // the card (see [`ResolvedTheme::lift`]).
+    match full.get("lift") {
+        None | Some(J::Null) | Some(J::Bool(false)) => {}
+        Some(J::Bool(true)) => {
+            light.lift();
+            dark.lift();
+        }
+        Some(v) => return Err(format!("theme `lift` must be true/false, got {v}")),
+    }
     Ok(ThemeSet {
         name,
         mode,
@@ -591,6 +618,7 @@ const KEYS: &[&str] = &[
     "chrome",
     "brand",
     "locale",
+    "lift",
     "dark",
 ];
 
@@ -598,7 +626,9 @@ const KEYS: &[&str] = &[
 fn check_keys(def: &J, prefix: &str) -> Result<(), String> {
     if let J::Object(m) = def {
         for k in m.keys() {
-            if !KEYS.contains(&k.as_str()) || (!prefix.is_empty() && k == "dark") {
+            if !KEYS.contains(&k.as_str())
+                || (!prefix.is_empty() && matches!(k.as_str(), "dark" | "lift"))
+            {
                 return Err(format!(
                     "unknown theme key `{prefix}{k}` (known: {})",
                     KEYS.join(", ")
@@ -739,6 +769,8 @@ fn build(full: &J, name: &str, variant: Variant) -> Result<ResolvedTheme, String
             ink: col(&chart, "ink")?,
             muted: col(&chart, "muted")?,
             line: col(&chart, "line")?,
+            grid: opt_col(&chart, "grid")?,
+            axis: opt_col(&chart, "axis")?,
             error: col(&chart, "error")?,
             seq_low: opt_col(&chart, "seq_low")?,
         },
@@ -960,6 +992,195 @@ pub fn contrast(a: Rgb, b: Rgb) -> f64 {
     (hi + 0.05) / (lo + 0.05)
 }
 
+// ───────────────────────── contrast (#1268) ───────────────────────────────
+
+/// WCAG AA contrast for text on the card.
+pub const MIN_TEXT_CONTRAST: f64 = 4.5;
+/// WCAG AA contrast for graphics (marks, accents, axis lines) on the card.
+pub const MIN_GRAPHIC_CONTRAST: f64 = 3.0;
+/// How far apart (RGB distance) two palette colours must stay to read as
+/// two series.
+pub const MIN_SERIES_DISTANCE: f64 = 24.0;
+
+/// A colour of a resolved theme that is hard to see ([`check`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContrastIssue {
+    /// `token` (`colors.muted`, `palette[2]`, …) is below `min` against the
+    /// card.
+    LowContrast {
+        token: String,
+        color: Rgb,
+        card: Rgb,
+        ratio: f64,
+        min: f64,
+    },
+    /// Two palette colours are too close to tell apart.
+    TooClose {
+        a: String,
+        b: String,
+        distance: f64,
+        min: f64,
+    },
+}
+
+impl std::fmt::Display for ContrastIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContrastIssue::LowContrast {
+                token,
+                color,
+                card,
+                ratio,
+                min,
+            } => write!(
+                f,
+                "{token} {} has contrast {ratio:.2} on the card {} (needs {min})",
+                hex(*color),
+                hex(*card)
+            ),
+            ContrastIssue::TooClose {
+                a,
+                b,
+                distance,
+                min,
+            } => write!(
+                f,
+                "{a} and {b} are {distance:.0} RGB units apart (needs {min})"
+            ),
+        }
+    }
+}
+
+/// Euclidean distance of two colours in RGB.
+fn rgb_distance(a: Rgb, b: Rgb) -> f64 {
+    let d = |x: u8, y: u8| (x as f64 - y as f64).powi(2);
+    (d(a.0, b.0) + d(a.1, b.1) + d(a.2, b.2)).sqrt()
+}
+
+impl ResolvedTheme {
+    /// The colours drawn on the card that must stand out from it, each with
+    /// its token name and minimum contrast: text at
+    /// [`MIN_TEXT_CONTRAST`], marks at [`MIN_GRAPHIC_CONTRAST`]. The grid
+    /// and hairlines are quiet on purpose and not checked.
+    fn contrast_slots(&mut self) -> Vec<(String, &mut Rgb, f64)> {
+        let c = &mut self.colors;
+        let mut out: Vec<(String, &mut Rgb, f64)> = vec![
+            ("colors.ink".into(), &mut c.ink, MIN_TEXT_CONTRAST),
+            ("colors.muted".into(), &mut c.muted, MIN_TEXT_CONTRAST),
+            ("colors.heading".into(), &mut c.heading, MIN_TEXT_CONTRAST),
+            ("colors.link".into(), &mut c.link, MIN_TEXT_CONTRAST),
+            ("colors.accent".into(), &mut c.accent, MIN_GRAPHIC_CONTRAST),
+            (
+                "colors.positive".into(),
+                &mut c.positive,
+                MIN_GRAPHIC_CONTRAST,
+            ),
+            (
+                "colors.negative".into(),
+                &mut c.negative,
+                MIN_GRAPHIC_CONTRAST,
+            ),
+            (
+                "colors.warning".into(),
+                &mut c.warning,
+                MIN_GRAPHIC_CONTRAST,
+            ),
+        ];
+        if let Some(a) = self.chart.axis.as_mut() {
+            out.push(("chart.axis".into(), a, MIN_GRAPHIC_CONTRAST));
+        }
+        for (i, p) in self.palette.iter_mut().enumerate() {
+            out.push((format!("palette[{i}]"), p, MIN_GRAPHIC_CONTRAST));
+        }
+        out
+    }
+
+    /// Raise every colour [`check`] would flag to its contrast on the card
+    /// (#1268, a theme's `"lift": true`): it moves towards white on a dark
+    /// card (black on a light one) just far enough, keeping its hue. Palette
+    /// colours that end up closer than [`MIN_SERIES_DISTANCE`] to an earlier
+    /// one move on until they are apart again (two dark shades of one hue
+    /// can lift onto the same colour), as far as the card's extreme allows.
+    pub fn lift(&mut self) {
+        let card = self.colors.card;
+        let to = if contrast((255, 255, 255), card) >= contrast((0, 0, 0), card) {
+            (255, 255, 255)
+        } else {
+            (0, 0, 0)
+        };
+        // the smallest step towards `to` that reaches `min` (bisection)
+        let lifted = |c: Rgb, min: f64| -> Rgb {
+            if contrast(c, card) >= min {
+                return c;
+            }
+            let (mut lo, mut hi) = (0.0, 1.0);
+            for _ in 0..24 {
+                let mid = (lo + hi) / 2.0;
+                if contrast(mix(c, to, mid), card) >= min {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            mix(c, to, hi)
+        };
+        for (_, c, min) in self.contrast_slots() {
+            *c = lifted(*c, min);
+        }
+        for i in 1..self.palette.len() {
+            let mut c = self.palette[i];
+            let mut t = 0.0;
+            while t < 1.0
+                && self.palette[..i]
+                    .iter()
+                    .any(|p| rgb_distance(*p, c) < MIN_SERIES_DISTANCE)
+            {
+                t += 0.05;
+                c = mix(self.palette[i], to, t);
+            }
+            self.palette[i] = c;
+        }
+    }
+}
+
+/// The colours of `t` that are hard to see on its card (#1268): text below
+/// [`MIN_TEXT_CONTRAST`], accents, status colours, the axis and palette
+/// colours below [`MIN_GRAPHIC_CONTRAST`], and palette colours closer than
+/// [`MIN_SERIES_DISTANCE`] to an earlier one. Empty for a readable theme;
+/// a theme's `"lift": true` fixes what it can.
+pub fn check(t: &ResolvedTheme) -> Vec<ContrastIssue> {
+    let card = t.colors.card;
+    let mut probe = t.clone();
+    let mut out: Vec<ContrastIssue> = probe
+        .contrast_slots()
+        .into_iter()
+        .filter_map(|(token, c, min)| {
+            let ratio = contrast(*c, card);
+            (ratio < min).then_some(ContrastIssue::LowContrast {
+                token,
+                color: *c,
+                card,
+                ratio,
+                min,
+            })
+        })
+        .collect();
+    for (i, a) in t.palette.iter().enumerate() {
+        for (j, b) in t.palette.iter().enumerate().skip(i + 1) {
+            let distance = rgb_distance(*a, *b);
+            if distance < MIN_SERIES_DISTANCE {
+                out.push(ContrastIssue::TooClose {
+                    a: format!("palette[{i}]"),
+                    b: format!("palette[{j}]"),
+                    distance,
+                    min: MIN_SERIES_DISTANCE,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The cached default theme set (`light`, mode auto).
 pub fn default_set() -> &'static ThemeSet {
     static D: OnceLock<ThemeSet> = OnceLock::new();
@@ -1046,9 +1267,18 @@ impl ResolvedTheme {
         mix(self.colors.ink, self.colors.muted, 0.35)
     }
 
-    /// The chart grid: a hairline a step quieter than the card border.
+    /// The chart grid: the theme's `chart.grid`, else a hairline a step
+    /// quieter than the card border.
     pub fn chart_grid(&self) -> Rgb {
-        mix(self.colors.line, self.colors.card, 0.25)
+        self.chart
+            .grid
+            .unwrap_or_else(|| mix(self.colors.line, self.colors.card, 0.25))
+    }
+
+    /// The chart's axis lines and ticks (#1268): the theme's `chart.axis`;
+    /// `None` draws none.
+    pub fn chart_axis(&self) -> Option<Rgb> {
+        self.chart.axis
     }
 
     /// The tile fills of a status colour scale (a heatmap / calendar / track
@@ -1127,6 +1357,7 @@ impl ResolvedTheme {
             self.diverging_ramp()[1],
         ]
         .contains(&c)
+            || self.chart_axis() == Some(c)
     }
 
     /// Post-process a rendered chart SVG for this variant. The light variant
@@ -1782,8 +2013,20 @@ impl DashboardChrome {
     /// Resolve the theme (`::THEME`, else `fallback` — e.g. `--theme`), then
     /// apply the branding and locale directives over it.
     pub fn resolve(&self, fallback: Option<&str>) -> Result<ThemeSet, String> {
-        let spec = self.theme.as_deref().or(fallback).unwrap_or("");
-        let mut set = resolve(spec)?;
+        self.resolve_over(None, fallback)
+    }
+
+    /// [`resolve`](Self::resolve) with a theme the host resolved once
+    /// (#1268): used when the dashboard sets no `::THEME`, before `fallback`.
+    pub fn resolve_over(
+        &self,
+        resolved: Option<&ThemeSet>,
+        fallback: Option<&str>,
+    ) -> Result<ThemeSet, String> {
+        let mut set = match (&self.theme, resolved) {
+            (None, Some(set)) => set.clone(),
+            _ => resolve(self.theme.as_deref().or(fallback).unwrap_or(""))?,
+        };
         if let Some(l) = &self.locale {
             if crate::format::Locale::from_tag(l).is_none() {
                 return Err(format!(

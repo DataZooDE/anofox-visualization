@@ -960,6 +960,17 @@ pub(crate) fn chart_theme(o: &RenderOptions, base: f64) -> Theme {
         ..Default::default()
     };
     th.panel_grid_minor = ggplot_rs::theme::ElementLine::blank();
+    // #1268: a theme's `chart.axis` draws axis lines and ticks (none by
+    // default), apart from the grid's own colour
+    if let Some(axis) = o.theme.chart_axis() {
+        let line = ggplot_rs::theme::ElementLine {
+            color: axis,
+            width: 0.8,
+            ..Default::default()
+        };
+        th.axis_line = line.clone();
+        th.axis_ticks = line;
+    }
     // a colourbar (heatmap, calendar) framed in the quiet card line
     th.legend_bar_border = Some(ggplot_rs::theme::ElementLine {
         color: o.theme.colors.line,
@@ -1322,6 +1333,17 @@ impl RenderOptions {
     /// `"primary"`. Unknown themes are an error; an absent key keeps the
     /// current value.
     pub fn apply_context(&mut self, ctx: &serde_json::Value) -> Result<(), String> {
+        self.apply_context_with(ctx, theme::default_set())
+    }
+
+    /// [`apply_context`](Self::apply_context) over the host's own resolved
+    /// theme (#1268): a context without a `"theme"` draws `themes`' variant
+    /// instead of the default look — no theme JSON parsed per render.
+    pub fn apply_context_with(
+        &mut self,
+        ctx: &serde_json::Value,
+        themes: &theme::ThemeSet,
+    ) -> Result<(), String> {
         let theme = match ctx.get("theme") {
             None | Some(serde_json::Value::Null) => None,
             Some(serde_json::Value::String(t)) => Some(theme::resolve(t)?),
@@ -1332,11 +1354,9 @@ impl RenderOptions {
             .get("variant")
             .and_then(|v| v.as_str())
             .map(theme::Variant::parse);
-        if theme.is_some() || variant.is_some() {
-            let set = match theme {
-                Some(s) => s,
-                None => theme::default_set().clone(),
-            };
+        let own = !std::ptr::eq(themes, theme::default_set());
+        if theme.is_some() || variant.is_some() || own {
+            let set = theme.as_ref().unwrap_or(themes);
             let t = set.pick(variant.unwrap_or(theme::Variant::Light)).clone();
             if self.locale.is_default() {
                 if let Some(l) = t.locale.as_deref().and_then(format::Locale::from_tag) {
@@ -1789,6 +1809,20 @@ pub fn clamp_dim(v: u64) -> u32 {
 /// Never panics (a caught panic becomes [`RenderError::Panic`]). Bare
 /// `NaN`/`Infinity` tokens (as DuckDB's JSON may emit) are read as `null`.
 pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
+    render_spec_inner(spec_json, theme::default_set())
+}
+
+/// [`render_spec_checked`] in a theme the host resolved once (#1268, e.g.
+/// one per tenant with [`theme::resolve_json`]): a spec without its own
+/// `"theme"` draws in `themes` (its `"variant"` picks light or dark).
+pub fn render_spec_checked_themed(
+    spec_json: &str,
+    themes: &theme::ThemeSet,
+) -> Result<String, RenderError> {
+    render_spec_inner(spec_json, themes)
+}
+
+fn render_spec_inner(spec_json: &str, themes: &theme::ThemeSet) -> Result<String, RenderError> {
     guard(|| {
         let clean = sql::sanitize_json_numbers(spec_json);
         let spec: serde_json::Value =
@@ -1833,7 +1867,8 @@ pub fn render_spec_checked(spec_json: &str) -> Result<String, RenderError> {
             max_line_points: count("max_line_points", DEFAULT_MAX_LINE_POINTS),
             ..RenderOptions::default()
         };
-        opts.apply_context(&spec).map_err(RenderError::BadSpec)?;
+        opts.apply_context_with(&spec, themes)
+            .map_err(RenderError::BadSpec)?;
         if let Some(plot) = plot {
             // A contract plot (`terms`, `prediction`, …) over named columns.
             let options = match spec.get("options") {

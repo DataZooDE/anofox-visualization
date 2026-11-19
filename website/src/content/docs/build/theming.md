@@ -15,7 +15,7 @@ SELECT 'ACME Analytics'::BRAND;
 SELECT 'assets/acme.svg'::LOGO;
 ```
 
-A theme file sets colours (brand, palette, sequential and diverging ramps, positive / negative), fonts and the page chrome. A viewer's dark-mode preference picks the dark variant. A locked server can set one theme for every dashboard and add an operator stylesheet (`::CLASS` hooks into it).
+A theme file sets colours (brand, palette, sequential and diverging ramps, positive / negative, the chart's grid and axis apart), fonts and the page chrome. `"lift": true` raises brand colours that are hard to see on the card to WCAG contrast. A viewer's dark-mode preference picks the dark variant. A locked server can set one theme for every dashboard and add an operator stylesheet (`::CLASS` hooks into it).
 
 Locales: `en-US`, `en-GB`, `en-IE`, `de-DE`, `fr-FR`. Axis and value formats: `'€'::YFORMAT`, `'percent'::YFORMAT`, `'%b %Y'::XFORMAT`, and `::MONEY` / `::COMPACT` on tiles and table columns.
 
