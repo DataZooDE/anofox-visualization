@@ -663,7 +663,9 @@ mod tests {
             "{arcs}"
         );
         assert!(
-            arcs.contains(r#"{"from":"rain","to":"grass","value":0.99,"width":2.8,"tip":"strength 0.99"}"#),
+            arcs.contains(
+                r#"{"from":"rain","to":"grass","value":0.99,"width":2.8,"tip":"strength 0.99"}"#
+            ),
             "{arcs}"
         );
         assert!(
@@ -703,7 +705,9 @@ mod tests {
         assert!(col(&cols, "BELIEF")[1].is_null());
         let arcs = col(&cols, "EDGES")[0].as_str().unwrap();
         assert!(
-            arcs.contains(r#"{"from":"d","to":"u","value":0.2,"width":1.5,"tip":"strength 0.2, required"}"#),
+            arcs.contains(
+                r#"{"from":"d","to":"u","value":0.2,"width":1.5,"tip":"strength 0.2, required"}"#
+            ),
             "{arcs}"
         );
         assert!(
