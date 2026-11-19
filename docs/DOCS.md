@@ -2926,6 +2926,28 @@ default), `"red"` (−5 in the negative colour) or `"parens"` (accounting: (5)) 
 and `chrome.zero` shows zero as a muted `"muted"` 0 (default) or a `"dash"` (–).
 Zebra rows (`table_zebra`) are left out of a table that draws in-cell bars.
 
+`chart.grid` and `chart.axis` colour a chart's gridlines and its axis lines
+and ticks apart, e.g. `"chart": {"grid": "#f1f2f4", "axis": "#6b7280"}` for
+faint gridlines under a stronger axis. Without `chart.grid` the grid is a
+hairline a step quieter than `colors.line`; without `chart.axis` no axis line
+is drawn. In a theme that follows the viewer, top-level values are for the
+light card — set the dark ones in `dark.chart`.
+
+**Contrast.** `"lift": true` raises every colour that is hard to see on the
+card, in both variants: text (`ink`, `muted`, `heading`, `link`) to WCAG AA
+4.5:1, the palette, `accent`, the status colours and `chart.axis` to 3:1 —
+each moves towards white on a dark card (black on a light one) just far
+enough, keeping its hue — and keeps palette colours at least 24 RGB units
+apart, since two dark shades of one hue can lift onto the same colour. Hosts
+that build themes from their own brand tokens can call `theme::check` on a
+resolved variant for the same rules as a list of issues, and resolve a theme
+once (`theme::resolve_json`) to pass it to `render_spec_checked_themed` or
+`DashboardOptions::theme_set` instead of a theme string per render.
+
+Rendered SVG keeps a transparent background, so the card shows through; to
+rasterise a dark chart on its own (PNG), paint the theme's `colors.card`
+first.
+
 Theme JSON is data: colours must be `#rgb`/`#rrggbb`, fonts plain font-family
 lists, logos relative paths, `https:` or `data:image/` URIs; anything else (and
 unknown keys) is an error. `?theme=` only switches light/dark — a URL never

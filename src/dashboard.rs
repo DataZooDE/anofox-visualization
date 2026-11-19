@@ -22,7 +22,7 @@
 use crate::format::escape_xml as esc;
 use crate::format::Locale;
 use crate::sql::contract_call;
-use crate::theme::{hex, luminance, mix, DashboardChrome, ResolvedTheme, Rgb, Variant};
+use crate::theme::{hex, luminance, mix, DashboardChrome, ResolvedTheme, Rgb, ThemeSet, Variant};
 use crate::{
     error_svg_at, render_with_at, roles, sql, svg_open, value_str, Column, Kind, Place,
     RenderOptions, Role, TableOpt,
@@ -57,6 +57,10 @@ pub struct DashboardOptions {
     /// Theme spec used when the script sets no `::THEME` (a built-in name,
     /// `a+b`, or JSON — e.g. from `dashboard --theme`). `None` = `light`.
     pub theme: Option<String>,
+    /// #1268: a theme the host resolved once (e.g. per tenant, with
+    /// [`crate::theme::resolve_json`]) — used when the script sets no
+    /// `::THEME`, instead of parsing `theme` on every render.
+    pub theme_set: Option<Arc<ThemeSet>>,
     /// Which variant to draw when the theme follows the viewer (`auto`).
     pub variant: Variant,
     /// The dashboard's own `assets/` folder, canonicalized (#514 PR B) — a
@@ -85,6 +89,7 @@ impl Default for DashboardOptions {
             gap: 16,
             brand: None,
             theme: None,
+            theme_set: None,
             variant: Variant::Light,
             asset_root: None,
             only: None,
@@ -650,7 +655,7 @@ fn render_inner(
     // statement.
     let shown_panels: Vec<&sql::Panel> = steps.iter().map(|s| &s.panel).collect();
     let mut static_steps = sql::steps::StaticSteps::new(&shown_panels);
-    let set = chrome.resolve(opts.theme.as_deref())?;
+    let set = chrome.resolve_over(opts.theme_set.as_deref(), opts.theme.as_deref())?;
     let theme = set.pick(opts.variant).clone();
     let locale = theme
         .locale
