@@ -1121,6 +1121,7 @@ const FILE_SAMPLES = [
   "examples/household-energy.sql",
   "examples/diagram-pipeline.sql",
   "examples/factor-graphs.sql",
+  "examples/bayes-nets.sql",
   "examples/onboarding-quiz.sql",
   "examples/onboarding-tutorial.sql",
   "examples/theming-branded.sql",
@@ -21574,8 +21575,9 @@ function attachHover() {
       // A map feature's ::LABEL may run over several lines: the first is the
       // heading, the rest follow as they are.
       const [head, ...lines] = isMapMark ? info.x.split("\n") : [info.x];
-      const ct = isMapMark ? null : nodeCard(el) || edgeCard(el) || customTip(el, info, fill) || pointTip(el, info, fill); // #751, #752
+      const ct = isMapMark ? null : nodeCard(el) || bnCard(el) || edgeCard(el) || customTip(el, info, fill) || pointTip(el, info, fill); // #751, #752, #1275
       tip.classList.toggle("dp-tip-card", !!ct?.card);
+      tip.classList.toggle("dp-tip-bn", !!ct?.bn);
       tip.innerHTML =
         (ct?.head ?? (head ? `<div class="tip-head">${escapeHtml(head)}</div>` : "")) +
         (lines.length ? `<div class="tip-lines">${escapeHtml(lines.join("\n"))}</div>` : "") +
@@ -22204,6 +22206,85 @@ function nodeCard(el) {
     card: true,
     head: `<div class="tip-kicker">${escapeHtml(kicker)}</div><div class="tip-card-title">${escapeHtml(title)}</div>`,
     body: value + markTipSpark(el).replace('<div class="tip-trend">', '<div class="tip-trend">mean by iteration: ') + `<p class="tip-note">${escapeHtml(body)}</p>`,
+  };
+}
+
+// #1275: a Bayesian network node's card — its kind and the evidence on it,
+// its belief per state against the prior, and its conditional probability
+// table as a heat table (parent configurations × states), from data-bn.
+function bnPercent(p) {
+  if (p == null || !Number.isFinite(p)) return "";
+  p = Math.min(1, Math.max(0, p));
+  return p > 0 && p < 0.005 ? "<1%" : p < 1 && p > 0.995 ? ">99%" : Math.round(p * 100) + "%";
+}
+function bnCard(el) {
+  let bn = null;
+  try {
+    bn = JSON.parse(el.getAttribute("data-bn") || "null");
+  } catch (_) {}
+  if (!bn || !Array.isArray(bn.states)) return null;
+  const id = el.getAttribute("data-node") || "";
+  const svg = rootSvg(el);
+  const q = CSS.escape(id);
+  const bar = svg?.querySelector(`[data-of="${q}"] rect.dp-node-state-bar`);
+  const colour = bar?.getAttribute("fill") || "#2563eb";
+  const kinds = { chance: "Chance node", observed: "Observed node", latent: "Latent node", decision: "Decision", deterministic: "Deterministic node", utility: "Utility" };
+  const ev = bn.evidence || null;
+  let kicker = kinds[bn.kind] || "Node";
+  let evText = "";
+  if (ev && ev.mode === "do" && ev.state != null) evText = `Set to ${ev.state} (an intervention): its causes no longer explain it.`;
+  else if (ev && ev.state != null) evText = `Observed: ${ev.state}.`;
+  else if (ev && ev.likelihood) evText = "Soft evidence: likelihood " + Object.entries(ev.likelihood).map(([s, l]) => `${s} ${l}`).join(", ") + ".";
+  const hasPrior = bn.states.some((r) => r.prior != null);
+  const rows = bn.states
+    .map((r) => {
+      const p = r.p != null ? Math.min(1, Math.max(0, r.p)) : null;
+      const w = p == null ? 0 : p * 100;
+      const pr = r.prior != null ? Math.min(1, Math.max(0, r.prior)) * 100 : null;
+      const range = r.lo != null && r.hi != null ? ` <span class="tip-bn-range">${escapeHtml(bnPercent(r.lo))}–${escapeHtml(bnPercent(r.hi))}</span>` : "";
+      const seen = ev && ev.state === r.state;
+      return (
+        `<tr${seen ? ' class="tip-bn-seen"' : ""}><th>${escapeHtml(r.state)}</th>` +
+        `<td class="tip-bn-bar"><span class="tip-bn-track">${pr != null ? `<span class="tip-bn-prior" style="width:${pr.toFixed(1)}%"></span>` : ""}<span class="tip-bn-fill" style="width:${w.toFixed(1)}%;background:${escapeHtml(colour)}"></span></span></td>` +
+        `<td class="tip-bn-num">${escapeHtml(bnPercent(p))}${range}</td>` +
+        (hasPrior ? `<td class="tip-bn-num tip-bn-was">${escapeHtml(bnPercent(r.prior))}</td>` : "") +
+        "</tr>"
+      );
+    })
+    .join("");
+  const beliefs = `<table class="tip-bn-states"><thead><tr><th></th><th></th><th>belief</th>${hasPrior ? "<th>prior</th>" : ""}</tr></thead><tbody>${rows}</tbody></table>`;
+  let table = "";
+  const cpt = bn.cpt;
+  if (cpt && Array.isArray(cpt.rows) && cpt.rows.length) {
+    const parents = Array.isArray(cpt.parents) ? cpt.parents : [];
+    const shown = cpt.rows.slice(0, 12);
+    const width = Math.max(parents.length, ...shown.map((r) => (r.parents || []).length));
+    const head = Array.from({ length: width }, (_, i) => `<th>${escapeHtml(parents[i] ?? "")}</th>`).join("") + bn.states.map((r) => `<th class="tip-bn-num">${escapeHtml(r.state)}</th>`).join("");
+    const body = shown
+      .map((r) => {
+        const ps = r.parents || [];
+        const cells = Array.from({ length: width }, (_, i) => `<td>${escapeHtml(ps[i] ?? "")}</td>`).join("");
+        const probs = bn.states
+          .map((_, k) => {
+            const p = Array.isArray(r.p) ? r.p[k] : null;
+            const a = p == null ? 0 : Math.min(1, Math.max(0, p));
+            return `<td class="tip-bn-num tip-bn-heat" style="--p:${(a * 70).toFixed(0)}%">${escapeHtml(p == null ? "" : String(Math.round(p * 1000) / 1000))}</td>`;
+          })
+          .join("");
+        return `<tr>${cells}${probs}</tr>`;
+      })
+      .join("");
+    const more = (cpt.total || cpt.rows.length) - shown.length;
+    table =
+      `<div class="tip-bn-caption">${parents.length ? "Given its parents" : "Its prior table"}</div>` +
+      `<table class="tip-bn-cpt" style="--bn:${escapeHtml(colour)}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
+      (more > 0 ? `<div class="tip-trend">and ${more} more parent configurations</div>` : "");
+  }
+  return {
+    card: true,
+    bn: true,
+    head: `<div class="tip-kicker">${escapeHtml(kicker)}</div><div class="tip-card-title">${escapeHtml(el.getAttribute("data-xtext") || id)}</div>`,
+    body: (evText ? `<p class="tip-note tip-bn-ev">${escapeHtml(evText)}</p>` : "") + beliefs + table,
   };
 }
 

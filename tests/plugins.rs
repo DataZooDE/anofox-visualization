@@ -710,3 +710,100 @@ fn a_factor_graph_needs_node_ids() {
     );
     assert!(svg.contains("an id column"), "{svg}");
 }
+
+/// #1275: Bayesian networks are a plugin (modules/bayes-net), built and
+/// registered once.
+fn bayes_net_svg(rows: serde_json::Value, options: serde_json::Value) -> String {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let wasm = build_plugin("modules/bayes-net/Cargo.toml", "bayes_net_plugin.wasm");
+        assert_eq!(
+            plugin::register_with(&wasm, Limits::default(), true).unwrap(),
+            "bayes-net"
+        );
+    });
+    anofox_visualization::render_spec(
+        &serde_json::json!({"plot": "bayes_net", "rows": rows, "options": options,
+                            "width": 900, "height": 480})
+        .to_string(),
+    )
+}
+
+#[test]
+fn the_bayes_net_plugin_draws_through_the_hosts_diagram() {
+    // directed top to bottom, a bar per state, the observed node's state,
+    // the weak arc dashed with its strength on hover, the card's data
+    let node = |id: &str, label: &str, kind: &str| serde_json::json!({"id": id, "label": label, "kind": kind, "states": ["yes", "no"]});
+    let b = |n: &str, s: &str, p: f64| serde_json::json!({"node": n, "state": s, "probability": p, "prior": 0.5});
+    let svg = bayes_net_svg(
+        serde_json::json!([
+            node("rain", "Rain", "chance"),
+            node("sprinkler", "Sprinkler", "chance"),
+            node("grass", "Wet grass", "observed"),
+        ]),
+        serde_json::json!({
+            "arcs": [{"from": "rain", "to": "grass", "strength": 0.95},
+                     {"from": "sprinkler", "to": "grass", "strength": 0.3}],
+            "beliefs": [b("rain", "yes", 0.7), b("rain", "no", 0.3),
+                        b("sprinkler", "yes", 0.4), b("sprinkler", "no", 0.6),
+                        b("grass", "yes", 1.0), b("grass", "no", 0.0)],
+            "evidence": [{"node": "grass", "state": "yes"}],
+            "tables": [{"node": "grass", "parent_states": ["yes", "yes"], "state": "yes", "probability": 0.99}],
+        }),
+    );
+    for want in [
+        "data-diagram=\"TB\"",
+        "dp-node-state-bar",
+        ">70%<",
+        "data-part=\"arrow\"",
+        "Sprinkler → Wet grass: strength 0.3",
+        "stroke-dasharray",
+        "data-bn=",
+        "data-summary=\"Bayesian network: 3 nodes, 2 arcs; evidence: Wet grass = yes;",
+    ] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+}
+
+#[test]
+fn a_bayes_net_needs_node_ids() {
+    let svg = bayes_net_svg(serde_json::json!([{"what": 1}]), serde_json::json!({}));
+    assert!(svg.contains("an id column"), "{svg}");
+}
+
+/// #1275: `--check` names what a plugin's contract plot warns about (a
+/// cycle, beliefs that don't sum to 1) as `module/lint`.
+#[test]
+fn a_bayes_net_lints_through_check() {
+    bayes_net_svg(serde_json::json!([{"id": "a"}]), serde_json::json!({}));
+    let run = |sql: &str| -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
+        let mut row = serde_json::Map::new();
+        if sql.contains("anofox_plot_bayes_net") || sql.contains("to_json(list(") {
+            row.insert(
+                "c0".into(),
+                serde_json::json!([{"id": "a", "states": ["yes", "no"]}, {"id": "b", "states": ["yes", "no"]}]),
+            );
+            row.insert(
+                "c1".into(),
+                serde_json::json!({"arcs": [{"from": "a", "to": "b"}, {"from": "b", "to": "a"}],
+                                   "beliefs": [{"node": "a", "state": "yes", "probability": 0.5}]}),
+            );
+        }
+        Ok(vec![row])
+    };
+    let d = anofox_visualization::lint::check(
+        "SELECT 'bayes-net'::REQUIRES;\nSELECT anofox_plot_bayes_net(n, arcs := [{'from': 'a', 'to': 'b'}]) FROM n;",
+        run,
+    );
+    let w: Vec<&str> = d
+        .iter()
+        .filter(|x| x.code == "module/lint")
+        .map(|x| x.message.as_str())
+        .collect();
+    assert_eq!(w.len(), 2, "{d:?}");
+    assert!(
+        w[0].starts_with("anofox_plot_bayes_net: bayes_net/cycle: the arcs a → b → a"),
+        "{w:?}"
+    );
+    assert!(w[1].contains("bayes_net/beliefs-sum"), "{w:?}");
+}

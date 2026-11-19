@@ -607,7 +607,7 @@ jobs:
         if: matrix.shard == 0
         run: |
           for i in 1 2 3; do duckdb -c "INSTALL anofox_forecast FROM community; INSTALL anofox_statistics FROM community" && break; echo "install attempt $i failed; retrying"; sleep 10; done
-          python3 scripts/lint-scan.py --dashboard target/debug/dashboard --plugin web/modules/factor-graph/plugin.wasm
+          python3 scripts/lint-scan.py --dashboard target/debug/dashboard --plugin web/modules/factor-graph/plugin.wasm --plugin web/modules/bayes-net/plugin.wasm
 
   web-e2e:
     # The browser e2e scripts (scripts/*-e2e.mjs): kept in one job (#464) —
@@ -921,6 +921,13 @@ jobs:
       - name: Factor graph message steps e2e (#1152)
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/factor-graph-e2e.mjs --url http://127.0.0.1:8947/
+
+      # scripts/bayes-net-e2e.mjs (#1275): Bayesian networks from the
+      # bayes-net plugin — a bar per state, the observed node shaded, a
+      # node's card with its table. Reuses the :8947 server and Chromium above.
+      - name: Bayesian network e2e (#1275)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/bayes-net-e2e.mjs --url http://127.0.0.1:8947/
 
       # scripts/plugins-browser-e2e.mjs (#1213 step 3): runtime plugins in
       # the browser builder — the example plugin draws a panel and its

@@ -798,6 +798,23 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-tip-card .tip-card-value{font-weight:700;font-size:.95rem}
 .dp-tip-card .tip-card-value span{font-weight:500;color:var(--ax-muted)}
 .dp-tip-card .tip-note{margin:.4rem 0 0;line-height:1.45;font-weight:400;font-size:.8rem}
+/* #1275: a Bayesian network node's card — belief against prior, its table as a heat table */
+.dp-tip.dp-tip-bn{--fg-accent:#3b82f6;max-width:360px}
+.dp-tip-bn table{border-collapse:collapse;font-size:.74rem;margin-top:.35rem;width:100%}
+.dp-tip-bn th,.dp-tip-bn td{padding:.08rem .3rem;text-align:left;font-weight:500;white-space:nowrap}
+.dp-tip-bn thead th{font-size:.64rem;color:var(--ax-muted);font-weight:600}
+.dp-tip-bn .tip-bn-num{text-align:right;font-variant-numeric:tabular-nums}
+.dp-tip-bn .tip-bn-was{color:var(--ax-muted)}
+.dp-tip-bn .tip-bn-seen th{font-weight:800}
+.dp-tip-bn .tip-bn-bar{width:45%}
+.dp-tip-bn .tip-bn-track{position:relative;display:block;height:.55rem;border-radius:2px;background:color-mix(in srgb,var(--ax-muted) 12%,transparent)}
+.dp-tip-bn .tip-bn-prior{position:absolute;left:0;top:-.1rem;bottom:-.1rem;border-right:2px solid var(--ax-muted);opacity:.7}
+.dp-tip-bn .tip-bn-fill{position:absolute;left:0;top:.08rem;bottom:.08rem;border-radius:2px;opacity:.9}
+.dp-tip-bn .tip-bn-range{color:var(--ax-muted);font-size:.66rem}
+.dp-tip-bn .tip-bn-caption{margin-top:.5rem;font-size:.64rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--ax-muted)}
+.dp-tip-bn .tip-bn-cpt td{border-top:1px solid color-mix(in srgb,var(--ax-muted) 18%,transparent)}
+.dp-tip-bn .tip-bn-heat{background:color-mix(in srgb,var(--bn) var(--p),transparent)}
+.dp-tip-bn .tip-bn-ev{margin:0 0 .2rem}
 .dp-tip .tip-head{font-weight:700;margin-bottom:.35rem;color:var(--ax-tip-head);font-size:.78rem}
 .dp-tip .tip-lines{white-space:pre-line;line-height:1.4;margin:-.2rem 0 .4rem}
 .dp-tip .tip-spark{margin-top:.35rem;line-height:0}.dp-tip .tip-spark svg{width:120px;height:28px}

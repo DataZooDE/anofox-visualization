@@ -2294,13 +2294,28 @@ where
                     sql: short.clone(),
                 });
             }
+            // #1275: a module's plot — what the module itself warns about
+            // (its contract answer's warnings, on the SVG's data-warnings)
+            let module_plot = cp
+                .macro_name
+                .strip_prefix("anofox_plot_")
+                .is_some_and(crate::module::has_plot);
             for (label, r) in sql::contract_call::render_rows(cp, &rows, 460, 300, "") {
+                let at = if label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{label}]")
+                };
+                if let (Ok(svg), true) = (&r, module_plot) {
+                    diags.extend(svg_warnings(svg).into_iter().map(|w| Diagnostic {
+                        severity: Severity::Warning,
+                        stmt,
+                        code: "module/lint",
+                        message: one_line(&format!("{}{at}: {w}", cp.macro_name)),
+                        sql: short.clone(),
+                    }));
+                }
                 if let Err(e) = r {
-                    let at = if label.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [{label}]")
-                    };
                     diags.push(Diagnostic {
                         severity: Severity::Error,
                         stmt,
@@ -8128,6 +8143,18 @@ fn one_line(s: &str) -> String {
     } else {
         s
     }
+}
+
+/// The warnings a render recorded on the SVG root (`data-warnings`, a JSON
+/// list of text).
+fn svg_warnings(svg: &str) -> Vec<String> {
+    roxmltree::Document::parse(svg)
+        .ok()
+        .and_then(|d| {
+            let list = d.root_element().attribute("data-warnings")?;
+            serde_json::from_str::<Vec<String>>(list).ok()
+        })
+        .unwrap_or_default()
 }
 
 // ---- design-lint helpers -------------------------------------------------
