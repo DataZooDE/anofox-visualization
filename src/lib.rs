@@ -435,6 +435,12 @@ pub enum Role {
     SaveForm,
     SaveTables,
     SaveKey,
+    /// The variable naming the scenario a `::SAVE` writes into or creates
+    /// from (`::SAVE_SCENARIO`, #1243 S2).
+    SaveScenario,
+    /// What a scenario `::SAVE` does: `'write'` (default) or `'create'`
+    /// (`::SAVE_ACTION`, #1243 S2).
+    SaveAction,
     /// A single-value text card (`::TEXT_SMALL`/`_MEDIUM`/`_LARGE`).
     Text(TextSize),
     /// A KPI tile's density (`::KPI_SIZE`): `'compact'` (single-line

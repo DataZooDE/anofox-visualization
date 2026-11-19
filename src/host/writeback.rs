@@ -170,7 +170,8 @@ impl WritebackOptions {
                          {\"key\": […], \"columns\": {name: type}}",
                     )?;
                     for (name, decl) in tm {
-                        o.tables.insert(name.clone(), parse_table(name, decl)?);
+                        o.tables
+                            .insert(name.clone(), parse_table("options.writeback", name, decl)?);
                     }
                 }
                 "max_rows" => o.max_rows = (pos(val, "max_rows")? as usize).min(MAX_MAX_ROWS),
@@ -263,37 +264,35 @@ impl WritebackOptions {
     }
 }
 
-fn parse_table(name: &str, decl: &Value) -> Result<TableDecl, String> {
+pub fn parse_table(section: &str, name: &str, decl: &Value) -> Result<TableDecl, String> {
     if !valid_ident(name) {
         return Err(format!(
-            "options.writeback.tables: '{name}' is not a plain table name"
+            "{section}.tables: '{name}' is not a plain table name"
         ));
     }
     let o = decl.as_object().ok_or_else(|| {
-        format!("options.writeback.tables.{name} must be {{\"key\": […], \"columns\": {{…}}}}")
+        format!("{section}.tables.{name} must be {{\"key\": […], \"columns\": {{…}}}}")
     })?;
     if let Some(other) = o.keys().find(|k| !matches!(k.as_str(), "key" | "columns")) {
         return Err(format!(
-            "options.writeback.tables.{name}: unknown key '{other}' (key, columns)"
+            "{section}.tables.{name}: unknown key '{other}' (key, columns)"
         ));
     }
     let cm = o
         .get("columns")
         .and_then(Value::as_object)
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| {
-            format!("options.writeback.tables.{name}.columns must map column names to types")
-        })?;
+        .ok_or_else(|| format!("{section}.tables.{name}.columns must map column names to types"))?;
     let mut columns = Vec::with_capacity(cm.len());
     for (c, t) in cm {
         if !valid_ident(c) {
             return Err(format!(
-                "options.writeback.tables.{name}: '{c}' is not a plain column name"
+                "{section}.tables.{name}: '{c}' is not a plain column name"
             ));
         }
         let ty = t.as_str().and_then(ColType::parse).ok_or_else(|| {
             format!(
-                "options.writeback.tables.{name}.columns.{c}: the type must be one of \
+                "{section}.tables.{name}.columns.{c}: the type must be one of \
                  VARCHAR, INTEGER, BIGINT, DOUBLE, BOOLEAN, DATE"
             )
         })?;
@@ -302,24 +301,20 @@ fn parse_table(name: &str, decl: &Value) -> Result<TableDecl, String> {
     let key: Vec<String> = o
         .get("key")
         .and_then(Value::as_array)
-        .ok_or_else(|| {
-            format!("options.writeback.tables.{name}.key must be an array of column names")
-        })?
+        .ok_or_else(|| format!("{section}.tables.{name}.key must be an array of column names"))?
         .iter()
         .map(|k| k.as_str().map(str::to_string))
         .collect::<Option<_>>()
-        .ok_or_else(|| {
-            format!("options.writeback.tables.{name}.key must be an array of column names")
-        })?;
+        .ok_or_else(|| format!("{section}.tables.{name}.key must be an array of column names"))?;
     if key.is_empty() {
         return Err(format!(
-            "options.writeback.tables.{name}.key must name at least one column"
+            "{section}.tables.{name}.key must name at least one column"
         ));
     }
     for k in &key {
         if !columns.iter().any(|(c, _)| c == k) {
             return Err(format!(
-                "options.writeback.tables.{name}.key: '{k}' is not one of its columns"
+                "{section}.tables.{name}.key: '{k}' is not one of its columns"
             ));
         }
     }
@@ -551,7 +546,7 @@ fn change(table: &str, op: &str, rows: Vec<Value>) -> Value {
 }
 
 /// One row: every field declared and coerced, every key column non-null.
-fn typed_row(
+pub fn typed_row(
     table: &str,
     decl: &TableDecl,
     fields: &Map<String, Value>,

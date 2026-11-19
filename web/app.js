@@ -19630,7 +19630,16 @@ function saveSawGen(g) {
   if (Number.isFinite(g) && (saveGen === null || g > saveGen)) saveGen = g;
 }
 let saveForms = {}; // per table: {key → form values}, this tab's saved rows
-function saveDisabledReason() {
+function saveDisabledReason(spec) {
+  // #1243 S2: a scenario save — the server writes the branch
+  if (spec && spec.scenario) {
+    if (!servedMode) return "Scenarios are saved on the dashboard server (options.scenarios)";
+    const s = (window.__served && window.__served.scenarios) || {};
+    if (!s.enabled) return "Scenarios can't be changed on this server";
+    if (!s.writer) return "Only this dashboard's scenario writers can save";
+    if (spec.action !== "create" && !scenarioPicked(spec)) return "Pick or create a scenario first — a save never changes main";
+    return null;
+  }
   if (servedMode) {
     // #684 slice 2: the server says whether this dashboard saves, and whether this viewer is a writer
     const w = (window.__served && window.__served.writeback) || {};
@@ -19651,7 +19660,10 @@ function mkSave(s, i, rowsJson) {
   const spec = {
     graph: cell("SAVE_GRAPH"),
     form: cell("SAVE_FORM"),
-    key: cell("SAVE_KEY") || "selected",
+    // #1243 S2: the variable naming the scenario, and what the save does
+    scenario: cell("SAVE_SCENARIO"),
+    action: cell("SAVE_ACTION").toLowerCase() || "write",
+    key: cell("SAVE_KEY") || (cell("SAVE_SCENARIO") ? "" : "selected"),
     tables: cell("SAVE_TABLES")
       .split(",")
       .map((t) => t.trim())
@@ -19665,6 +19677,9 @@ function mkSave(s, i, rowsJson) {
   btn.type = "button";
   btn.className = "submit-btn";
   btn.textContent = cell("SAVE") || "Save";
+  // #1243 S2: say which scenario a write goes into
+  const into = spec.scenario && spec.action !== "create" ? scenarioPicked(spec) : null;
+  if (into) btn.textContent += " → " + into;
   const statusEl = document.createElement("div");
   statusEl.className = "submit-status";
   statusEl.setAttribute("role", "status");
@@ -19673,7 +19688,7 @@ function mkSave(s, i, rowsJson) {
   errEl.className = "submit-error";
   errEl.setAttribute("role", "alert");
   fig.append(btn, statusEl, errEl);
-  const reason = saveDisabledReason();
+  const reason = saveDisabledReason(spec);
   if (reason) return mkSubmitDisabled(fig, btn, errEl, "save-" + i, reason);
   const st = saveStatus[i];
   if (st) requestAnimationFrame(() => ((st.err ? errEl : statusEl).textContent = st.text));
@@ -19687,6 +19702,12 @@ function mkSave(s, i, rowsJson) {
   fig.insertBefore(note, btn);
   btn.onclick = () => doSavePreview(i, spec, btn, statusEl, errEl);
   return fig;
+}
+// #1243 S2: the scenario the ::SAVE_SCENARIO variable picks (null: main or none).
+function scenarioPicked(spec) {
+  const v = dpVarCI(spec.scenario);
+  const s = v === undefined || v === null ? "" : String(v).trim();
+  return s && s.toLowerCase() !== "main" ? s : null;
 }
 // The form row's key: the ::SAVE_KEY variable, by default the clicked diagram node.
 function saveKey(spec) {
@@ -19704,8 +19725,12 @@ async function doSave(i, spec, btn, statusEl, errEl) {
   };
   saveSawGen(Number(window.__served.writeback?.gen ?? 0));
   const body = { dashboard: window.__served.id, panel: i, vars: { ...servedVars }, base: saveGen };
+  const create = spec.scenario && spec.action === "create";
+  if (create && !String(dpVarCI(spec.key) ?? "").trim()) return fail("Name the new scenario first");
   try {
-    if (spec.graph) body.graph = JSON.parse(dpVars[spec.graph] ?? "null");
+    if (create) {
+      // the server reads the name and the picked scenario from the variables
+    } else if (spec.graph) body.graph = JSON.parse(dpVars[spec.graph] ?? "null");
     else if (spec.form) {
       body.form = JSON.parse(dpVars[spec.form] ?? "null");
       const key = saveKey(spec);
@@ -19716,7 +19741,8 @@ async function doSave(i, spec, btn, statusEl, errEl) {
   }
   if (spec.graph && !body.graph) return fail("Nothing to save yet — edit the graph first");
   if (spec.form && !body.form) return fail("Nothing to save yet — fill in the form first");
-  if (spec.form && body.key === undefined) return fail(`Pick the row to save first ('${spec.key}' is empty)`);
+  // (a scenario form may carry its whole key in its fields; the server checks)
+  if (spec.form && !spec.scenario && body.key === undefined) return fail(`Pick the row to save first ('${spec.key}' is empty)`);
   const sent = JSON.stringify(body);
   const prev = saveStatus[i];
   body.id = prev && prev.retryId && prev.retrySent === sent ? prev.retryId : newSubmitId();
@@ -19741,9 +19767,19 @@ async function doSave(i, spec, btn, statusEl, errEl) {
   }
   done();
   if (r.status === 201) {
-    saveSawGen(Number((await r.json().catch(() => ({}))).gen));
+    const j = await r.json().catch(() => ({}));
+    saveSawGen(Number(j.gen));
     const hhmm = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     saveStatus[i] = { text: "Saved at " + hhmm + "." };
+    if (spec.scenario && j.scenario) {
+      // #1243 S2: a new scenario becomes the picked one
+      if (create) {
+        const k = Object.keys(dpVars).find((x) => x.toLowerCase() === spec.scenario.toLowerCase()) ?? spec.scenario;
+        dpVars[k] = j.scenario;
+        saveStatus[i] = { text: `Created ${j.scenario} at ${hhmm}.` };
+      } else saveStatus[i] = { text: `Saved to ${j.scenario} at ${hhmm}.` };
+      if (j.refreshed === false) saveStatus[i].text += " The charts show it after the next refresh.";
+    }
     statusEl.textContent = saveStatus[i].text;
     servedCache.clear();
     run(true);

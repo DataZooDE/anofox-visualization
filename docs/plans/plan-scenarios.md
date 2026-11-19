@@ -1,7 +1,7 @@
 # Plan: scenarios with anofox-scenario
 
-Status: **design note, waiting for the owner's decisions (§9)**, based on
-master `a49fd18`. No product code yet. Refs #1243.
+Status: decisions taken (§9, 2026-11-19). S1 (read-only) shipped; S2
+(create and write) in progress — see docs/secure-serving.md. Refs #1243.
 
 **Goal.** A planner opens a dashboard, starts a scenario ("demand +10 %",
 "second shift in March") from the current plan, changes it in a form or an
@@ -203,7 +203,7 @@ connection:
 
 | Threat | Mitigation |
 |---|---|
-| SQL injection through a scenario name or value | Names: `^[A-Za-z0-9 _.+%-]{1,64}$`, bound as parameters, never spliced; the attach alias is fixed (`w`). Values: coerced to the declared types and bound. |
+| SQL injection through a scenario name or value | Names: `^[A-Za-z0-9_]{1,64}$` (anofox-scenario's own rule), bound as parameters where DuckDB takes one (`scenario_create`), a quoted literal where it doesn't (`ATTACH`); the attach alias is server-made (`__anofox_scn_w_<random>`). Values: coerced to the declared types and bound. |
 | Writing an undeclared table, or the internal `__anofox_scenario` schema | Only `options.scenarios.tables`. Writes go through the scenario `ATTACH`, which anofox-scenario keeps away from its internal schema. |
 | A viewer escalating to approval | Separate `approvers` list. Freeze/merge/drop refused (`403`) otherwise, and the buttons disabled with the reason. |
 | Merging over someone else's change | `on_conflict := 'abort'` only; conflicts are shown, never auto-resolved. |

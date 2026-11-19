@@ -1243,6 +1243,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/scenarios-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/scenarios-write-served-e2e.mjs (#1243 S2): a writer adds a
+      # scenario from the page and saves a form's row into it; main stays,
+      # a child starts from its parent; refusals (main, unknown, a hostile
+      # name, a non-writer, CSRF) and one log line per operation.
+      - name: Scenario writes on a locked server e2e (#1243)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/scenarios-write-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # scripts/ask-served-e2e.mjs (#195): Ask on a locked server with a fake
       # model — the notice, an answer rendered inert, a verified chip opening
       # its tab and panel, Esc, the phone layout.

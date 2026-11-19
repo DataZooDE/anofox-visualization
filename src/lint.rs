@@ -1060,6 +1060,31 @@ where
                             sql: short.clone(),
                         })
                     };
+                    // #1243 S2: a scenario save — create needs no source or table
+                    let scenario = cell(Role::SaveScenario).filter(|v| !v.is_empty());
+                    let action = cell(Role::SaveAction).filter(|v| !v.is_empty());
+                    if let Some(a) = &action {
+                        if scenario.is_none() {
+                            err("save/action-needs-scenario", "::SAVE_ACTION goes with ::SAVE_SCENARIO: the variable naming the scenario ('scenario'::SAVE_SCENARIO)".into());
+                            continue;
+                        }
+                        match crate::host::scenarios::parse_action(a) {
+                            Err(e) => {
+                                err("save/bad-action", e);
+                                continue;
+                            }
+                            Ok(crate::host::scenarios::Action::Create) => {
+                                if cell(Role::SaveKey).filter(|v| !v.is_empty()).is_none() {
+                                    err("save/create-needs-name", "a 'create'::SAVE_ACTION needs the variable holding the new scenario's name: 'new_name'::SAVE_KEY".into());
+                                }
+                                continue;
+                            }
+                            Ok(crate::host::scenarios::Action::Write) => {}
+                        }
+                    }
+                    if scenario.is_some() && graph.is_some() {
+                        err("save/scenario-graph", "a ::SAVE_SCENARIO save writes a ::FORM's row ('lt'::SAVE_FORM), not a graph".into());
+                    }
                     match (&graph, &form) {
                         (None, None) => err(
                             "save/no-source",
@@ -13242,6 +13267,46 @@ mod design_tests {
             codes(json!({"c0": "Save", "c1": "a"}), none),
             ["save/no-source"]
         );
+        // #1243 S2: scenario saves
+        let create = "SELECT 'Add' ::SAVE, 'create' ::SAVE_ACTION, 'new_name' ::SAVE_KEY, 'scenario' ::SAVE_SCENARIO;";
+        assert!(codes(
+            json!({"c0": "Add", "c1": "create", "c2": "new_name", "c3": "scenario"}),
+            create
+        )
+        .is_empty());
+        assert_eq!(
+            codes(
+                json!({"c0": "Add", "c1": "create", "c2": "", "c3": "scenario"}),
+                create
+            ),
+            ["save/create-needs-name"]
+        );
+        assert_eq!(
+            codes(
+                json!({"c0": "Add", "c1": "merge", "c2": "n", "c3": "scenario"}),
+                create
+            ),
+            ["save/bad-action"]
+        );
+        let lone = "SELECT 'Add' ::SAVE, 'create' ::SAVE_ACTION;";
+        assert_eq!(
+            codes(json!({"c0": "Add", "c1": "create"}), lone),
+            ["save/action-needs-scenario"]
+        );
+        let write = "SELECT 'Save' ::SAVE, 'g' ::SAVE_GRAPH, 'a, b' ::SAVE_TABLES, 'scenario' ::SAVE_SCENARIO;";
+        assert_eq!(
+            codes(
+                json!({"c0": "Save", "c1": "g", "c2": "a, b", "c3": "scenario"}),
+                write
+            ),
+            ["save/scenario-graph"]
+        );
+        let form = "SELECT 'Save' ::SAVE, 'cap' ::SAVE_FORM, 'capacity' ::SAVE_TABLES, 'scenario' ::SAVE_SCENARIO;";
+        assert!(codes(
+            json!({"c0": "Save", "c1": "cap", "c2": "capacity", "c3": "scenario"}),
+            form
+        )
+        .is_empty());
     }
 
     /// #692: a 'caption'::MARKDOWN_STYLE needs a chart right before it (its
