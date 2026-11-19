@@ -511,7 +511,10 @@ pub fn row_sql(alias: &str, table: &str, decl: &TableDecl, row: &Map<String, Val
     };
     let mut cp = Vec::new();
     let exists = Bound {
-        sql: format!("SELECT count(*)::VARCHAR FROM {target} WHERE {}", key_cond(&mut cp)),
+        sql: format!(
+            "SELECT count(*)::VARCHAR FROM {target} WHERE {}",
+            key_cond(&mut cp)
+        ),
         params: cp,
     };
     let mut up = Vec::new();
