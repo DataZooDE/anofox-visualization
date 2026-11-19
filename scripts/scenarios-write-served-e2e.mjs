@@ -66,6 +66,10 @@ SELECT field AS cap ::FORM, type, value, options FROM (VALUES
 SELECT 'Save capacity' ::SAVE, 'cap' ::SAVE_FORM, 'capacity' ::SAVE_TABLES, 'scenario' ::SAVE_SCENARIO;
 SELECT sum(per_shift)::BIGINT AS c ::METRIC, 'Capacity' ::LABEL FROM capacity;
 SELECT string_agg(line || '=' || per_shift::BIGINT || ':' || coalesce(note, '-'), ' ' ORDER BY line) AS t ::TEXT_SMALL FROM capacity;
+SELECT 'Freeze' ::SAVE, 'freeze' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
+SELECT 'Unfreeze' ::SAVE, 'unfreeze' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
+SELECT 'Make official' ::SAVE, 'merge' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
+SELECT 'Drop' ::SAVE, 'drop' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
 `
 );
 const sec = crypto.randomBytes(24).toString("hex");
@@ -79,6 +83,7 @@ const opts = {
     path: logPath,
     dashboards: ["sop"],
     writers: { users: ["alice"] },
+    approvers: { users: ["carol"] },
     rate: { per_minute: 600, burst: 50 },
     tables: {
       capacity: { key: ["line"], columns: { line: "VARCHAR", per_shift: "DOUBLE" } },
@@ -226,7 +231,84 @@ try {
   check(acts === "create:second_shift write:second_shift write:second_shift create:third", `the log (${acts})`);
   check(lines.every((l) => l.user === "alice") && lines[3].vars.parent === "second_shift", "… each by alice, the child with its parent");
 
-  check(errs.length === 0 && bob.errs.length === 0, `no page errors${errs.length ? ": " + errs.join("; ") : ""}`);
+  // S3, approvers: (h) a writer can't approve; an approver can't write
+  check(await btn(page, "Freeze").isDisabled(), "alice (a writer) can't freeze");
+  check(/Only approvers/.test(await panel(page, "Freeze").innerText()), "… saying why");
+  const carol = await as("carol");
+  const cp = carol.page;
+  const cSettled = async () => {
+    await sleep(300);
+    await cp.waitForFunction(() => !document.body.classList.contains("loading") && !!document.querySelector(".metric-value"), null, { timeout: 15000 });
+  };
+  const cKpiIs = async (v) => {
+    await cp.waitForFunction((v) => document.querySelector(".metric-value")?.textContent === v, v, { timeout: 15000 }).catch(() => {});
+    return (await cp.locator(".metric-value").first().textContent()) === v;
+  };
+  const cPick = async (v) => {
+    await cp.selectOption(".dash select[aria-label=scenario]", v);
+    await cSettled();
+  };
+  const cSays = async (label, re) => {
+    await cp.waitForFunction(([l, r]) => [...document.querySelectorAll(".save-panel")].some((p) => p.innerText.startsWith(l) && new RegExp(r).test(p.innerText)), [label, re.source], { timeout: 15000 }).catch(() => {});
+    return re.test(await panel(cp, label).innerText());
+  };
+  await cp.goto(`http://127.0.0.1:${port}/d/sop?v.scenario=second_shift`);
+  await cSettled();
+  check(await btn(cp, "Save capacity").isDisabled(), "carol (an approver) can't save into a scenario");
+
+  // (i) a scenario others branch from can't be merged; drop the child
+  await btn(cp, "Make official").click();
+  check(await cSays("Make official", /branch from 'second_shift' \(third\)/), "a merge waits for the scenarios branching from it");
+  await cPick("third");
+  await btn(cp, "Drop").click();
+  await cp.waitForFunction(() => document.querySelector(".dash select[aria-label=scenario]")?.value === "main", null, { timeout: 15000 }).catch(() => {});
+  const cOpts = await cp.locator(".dash select[aria-label=scenario] option").allTextContents();
+  check(!cOpts.includes("third") && (await cp.locator(".dash select[aria-label=scenario]").inputValue()) === "main", `a dropped scenario is gone, the page is back on main (${cOpts})`);
+
+  // (j) freeze stops writes, unfreeze allows them again
+  await cPick("second_shift");
+  await btn(cp, "Freeze").click();
+  check(await cSays("Freeze", /Froze second_shift/), "carol froze second_shift");
+  [st, msg] = await post({ dashboard: "sop", panel: 4, id: id(), vars: { scenario: "second_shift" }, form: { line: "L1", per_shift: 1 } });
+  check(st === 409 && /frozen/.test(msg), `a write into a frozen scenario is refused (${st} ${msg})`);
+  await btn(cp, "Unfreeze").click();
+  check(await cSays("Unfreeze", /Unfroze second_shift/), "carol unfroze it");
+
+  // (k) a sibling that changes the same row; merge previews, then merges
+  [st] = await post({ dashboard: "sop", panel: 2, id: id(), vars: { scenario: "main", new_name: "night_shift" } });
+  check(st === 201, `alice adds night_shift (${st})`);
+  [st] = await post({ dashboard: "sop", panel: 4, id: id(), vars: { scenario: "night_shift" }, form: { line: "L1", per_shift: 170 } });
+  check(st === 201, `… and changes L1 in it (${st})`);
+  await btn(cp, "Make official").click();
+  check(await cSays("Make official", /changes 2 in capacity\. Click again to confirm/), "a merge says what it changes first");
+  await btn(cp, "Make official").click();
+  check(await cSays("Make official", /Made official: second_shift/), "… and merges on the second click");
+  await cPick("main");
+  check(await cKpiIs("250"), `main has the merged changes (${await cp.locator(".metric-value").first().textContent()})`);
+  await cp.reload();
+  await cSettled();
+  await cPick("night_shift");
+  await btn(cp, "Make official").click();
+  check(await cSays("Make official", /main changed meanwhile \(capacity L1\)/), "a conflicting merge is refused, naming the row");
+  [st, msg] = await post({ dashboard: "sop", panel: 8, id: id(), vars: { scenario: "second_shift" } });
+  check(st === 403, `alice may not unfreeze (${st})`);
+  const cPost = (body) =>
+    cp.evaluate(async (b) => {
+      const res = await fetch("/api/save", { method: "POST", headers: { "Content-Type": "application/json", "X-Anofox-Submit": "1" }, body: JSON.stringify(b) });
+      return [res.status, await res.text()];
+    }, body);
+  [st, msg] = await cPost({ dashboard: "sop", panel: 8, id: id(), vars: { scenario: "second_shift" } });
+  check(st === 409 && /official/.test(msg), `a merged scenario stays frozen (${st} ${msg})`);
+  [st, msg] = await cPost({ dashboard: "sop", panel: 9, id: id(), vars: { scenario: "night_shift" } });
+  check(st === 409 && /"conflicts"/.test(msg), `a direct merge with conflicts is refused (${st})`);
+  const all = readFileSync(logPath, "utf8").trim().split("\n").slice(1).map((l) => JSON.parse(l));
+  const later = all.slice(4).map((l) => `${l.user}:${l.vars.action}:${l.vars.scenario}`).join(" ");
+  check(
+    later === "carol:drop:third carol:freeze:second_shift carol:unfreeze:second_shift alice:create:night_shift alice:write:night_shift carol:merge:second_shift",
+    `the approvals are logged (${later})`
+  );
+
+  check(errs.length === 0 && bob.errs.length === 0 && carol.errs.length === 0, `no page errors${errs.length ? ": " + errs.join("; ") : ""}`);
 } catch (e) {
   bad++;
   console.error("FAIL " + (e && e.stack ? e.stack : e));

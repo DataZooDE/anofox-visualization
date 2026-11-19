@@ -19636,6 +19636,12 @@ function saveDisabledReason(spec) {
     if (!servedMode) return "Scenarios are saved on the dashboard server (options.scenarios)";
     const s = (window.__served && window.__served.scenarios) || {};
     if (!s.enabled) return "Scenarios can't be changed on this server";
+    // #1243 S3: approving is its own right
+    if (SCENARIO_APPROVE.has(spec.action)) {
+      if (!s.approver) return "Only approvers can freeze, merge or drop a scenario";
+      if (!scenarioPicked(spec)) return "Pick a scenario first";
+      return null;
+    }
     if (!s.writer) return "Only this dashboard's scenario writers can save";
     if (spec.action !== "create" && !scenarioPicked(spec)) return "Pick or create a scenario first — a save never changes main";
     return null;
@@ -19703,11 +19709,19 @@ function mkSave(s, i, rowsJson) {
   btn.onclick = () => doSavePreview(i, spec, btn, statusEl, errEl);
   return fig;
 }
+// #1243 S3: the ::SAVE_ACTIONs only approvers may run.
+const SCENARIO_APPROVE = new Set(["freeze", "unfreeze", "merge", "drop"]);
 // #1243 S2: the scenario the ::SAVE_SCENARIO variable picks (null: main or none).
 function scenarioPicked(spec) {
   const v = dpVarCI(spec.scenario);
   const s = v === undefined || v === null ? "" : String(v).trim();
   return s && s.toLowerCase() !== "main" ? s : null;
+}
+// #1243 S3: a merge's conflicts, said plainly.
+function scenarioConflicts(rows) {
+  const c = rows.filter((x) => x.conflict);
+  const keys = c.slice(0, 5).map((x) => `${x.table} ${x.key}`).join("; ");
+  return `Can't make it official: main changed meanwhile (${keys}${c.length > 5 ? "; …" : ""}). Nothing was merged.`;
 }
 // The form row's key: the ::SAVE_KEY variable, by default the clicked diagram node.
 function saveKey(spec) {
@@ -19726,9 +19740,13 @@ async function doSave(i, spec, btn, statusEl, errEl) {
   saveSawGen(Number(window.__served.writeback?.gen ?? 0));
   const body = { dashboard: window.__served.id, panel: i, vars: { ...servedVars }, base: saveGen };
   const create = spec.scenario && spec.action === "create";
+  const approve = spec.scenario && SCENARIO_APPROVE.has(spec.action);
   if (create && !String(dpVarCI(spec.key) ?? "").trim()) return fail("Name the new scenario first");
+  // #1243 S3: a merge is previewed first; the next click (same scenario) merges
+  const picked = spec.scenario ? scenarioPicked(spec) : null;
+  if (spec.action === "merge" && !(saveStatus[i] && saveStatus[i].confirm === picked)) body.preview = true;
   try {
-    if (create) {
+    if (create || approve) {
       // the server reads the name and the picked scenario from the variables
     } else if (spec.graph) body.graph = JSON.parse(dpVars[spec.graph] ?? "null");
     else if (spec.form) {
@@ -19766,6 +19784,19 @@ async function doSave(i, spec, btn, statusEl, errEl) {
     return;
   }
   done();
+  // #1243 S3: what a merge would do — confirm with a second click
+  if (r.status === 200 && body.preview) {
+    const j = await r.json().catch(() => ({}));
+    const rows = j.changes || [];
+    if (j.conflicts) return fail(scenarioConflicts(rows));
+    const per = {};
+    for (const c of rows) per[c.table] = (per[c.table] || 0) + 1;
+    const what = Object.entries(per).map(([t, n]) => `${n} in ${t}`).join(", ") || "no rows";
+    saveStatus[i] = { text: `Making ${picked} official changes ${what}. Click again to confirm.`, confirm: picked };
+    statusEl.textContent = saveStatus[i].text;
+    errEl.textContent = "";
+    return;
+  }
   if (r.status === 201) {
     const j = await r.json().catch(() => ({}));
     saveSawGen(Number(j.gen));
@@ -19773,11 +19804,11 @@ async function doSave(i, spec, btn, statusEl, errEl) {
     saveStatus[i] = { text: "Saved at " + hhmm + "." };
     if (spec.scenario && j.scenario) {
       // #1243 S2: a new scenario becomes the picked one
-      if (create) {
-        const k = Object.keys(dpVars).find((x) => x.toLowerCase() === spec.scenario.toLowerCase()) ?? spec.scenario;
-        dpVars[k] = j.scenario;
-        saveStatus[i] = { text: `Created ${j.scenario} at ${hhmm}.` };
-      } else saveStatus[i] = { text: `Saved to ${j.scenario} at ${hhmm}.` };
+      const k = Object.keys(dpVars).find((x) => x.toLowerCase() === spec.scenario.toLowerCase()) ?? spec.scenario;
+      const done = { create: "Created", freeze: "Froze", unfreeze: "Unfroze", merge: "Made official:", drop: "Dropped" }[spec.action];
+      if (create) dpVars[k] = j.scenario;
+      if (spec.action === "drop") dpVars[k] = "main"; // it is gone: back to the base
+      saveStatus[i] = { text: done ? `${done} ${j.scenario} at ${hhmm}.` : `Saved to ${j.scenario} at ${hhmm}.` };
       if (j.refreshed === false) saveStatus[i].text += " The charts show it after the next refresh.";
     }
     statusEl.textContent = saveStatus[i].text;
@@ -19786,6 +19817,13 @@ async function doSave(i, spec, btn, statusEl, errEl) {
     return;
   }
   const msg = await r.text().catch(() => "");
+  // #1243 S3: a merge over changes made to main meanwhile is refused, never resolved
+  if (r.status === 409 && approve) {
+    try {
+      const j = JSON.parse(msg);
+      if (j && j.error === "conflicts") return fail(scenarioConflicts(j.changes || []));
+    } catch {}
+  }
   // #684 slice 4: someone saved the same rows since this page loaded them —
   // say who and what; the panels re-run on theirs, the edits stay, and a
   // second Save (now on the newer generation) keeps this one.

@@ -434,7 +434,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SAVE_SCENARIO", &[], R::SaveScenario, "input", false,
       "the variable (usually the ::SCENARIO picker's) naming the scenario a ::SAVE writes its ::FORM row into, or creates the new one from; on a locked server it needs options.scenarios with writers (#1243)"),
     e("SAVE_ACTION", &[], R::SaveAction, "input", false,
-      "what a ::SAVE_SCENARIO save does: 'write' (default) the form's row into the picked scenario, or 'create' a scenario named by ::SAVE_KEY from the picked one"),
+      "what a ::SAVE_SCENARIO save does: 'write' (default) the form's row into the picked scenario, 'create' a scenario named by ::SAVE_KEY from the picked one; for approvers 'freeze', 'unfreeze', 'merge' (make it official: previewed, conflicts refused) or 'drop' the picked one"),
     // ── layout ─────────────────────────────────────────────────────────────
     e("COLUMNS", &["COLS"], R::Columns, "layout", false, "default panels per row"),
     e("SPAN", &["COL", "WIDTH"], R::Span, "layout", false, "next panel's width (of 12)"),

@@ -244,7 +244,7 @@ terminal.
 | `::SAVE_TABLES` |  | input | the table(s) a ::SAVE writes: 'nodes, edges' for a graph, one table for a form — plain names |
 | `::SAVE_KEY` |  | input | the variable holding a ::SAVE_FORM row's key (default 'selected', the clicked diagram node); with ::SAVE_ACTION 'create', the new scenario's name |
 | `::SAVE_SCENARIO` |  | input | the variable (usually the ::SCENARIO picker's) naming the scenario a ::SAVE writes its ::FORM row into, or creates the new one from; on a locked server it needs options.scenarios with writers (#1243) |
-| `::SAVE_ACTION` |  | input | what a ::SAVE_SCENARIO save does: 'write' (default) the form's row into the picked scenario, or 'create' a scenario named by ::SAVE_KEY from the picked one |
+| `::SAVE_ACTION` |  | input | what a ::SAVE_SCENARIO save does: 'write' (default) the form's row into the picked scenario, 'create' a scenario named by ::SAVE_KEY from the picked one; for approvers 'freeze', 'unfreeze', 'merge' (make it official: previewed, conflicts refused) or 'drop' the picked one |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
 | `::HEIGHT` | `::TALL` | layout | next panel's height: px (320), a ratio of its width ('16:9', '0.5') or a share of the window ('40vh') |

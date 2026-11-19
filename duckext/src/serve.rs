@@ -9098,7 +9098,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                         &pv.dash,
                         scope,
                         session,
-                        (false, false),
+                        (false, false, false),
                         false,
                         false,
                         false,
@@ -9238,14 +9238,22 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                                     && w.opts.is_writer(&c.user, &c.groups)
                             })
                     });
-                    // #1243 S2: and write scenarios?
-                    let scenario_writer = st.scenario_writes.as_ref().is_some_and(|w| {
-                        ident.as_ref().map(|i| i.method) != Some("api_key")
-                            && claims.as_ref().is_some_and(|c| {
-                                !access::is_reserved_user(&c.user)
-                                    && w.opts.is_writer(&c.user, &c.groups)
-                            })
-                    });
+                    // #1243 S2/S3: and write or approve scenarios?
+                    let scenario_rights = |f: fn(
+                        &anofox_visualization::host::scenarios::WriteOptions,
+                        &str,
+                        &[String],
+                    ) -> bool| {
+                        st.scenario_writes.as_ref().is_some_and(|w| {
+                            ident.as_ref().map(|i| i.method) != Some("api_key")
+                                && claims.as_ref().is_some_and(|c| {
+                                    !access::is_reserved_user(&c.user)
+                                        && f(&w.opts, &c.user, &c.groups)
+                                })
+                        })
+                    };
+                    let scenario_writer = scenario_rights(|o, u, g| o.is_writer(u, g));
+                    let scenario_approver = scenario_rights(|o, u, g| o.is_approver(u, g));
                     // #195: offer Ask where /api/ask would take this viewer.
                     let ask = st.ask.as_ref().is_some_and(|rt| {
                         let v = ask_viewer(ident.as_ref());
@@ -9280,7 +9288,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                         d,
                         scope,
                         page,
-                        (writer, scenario_writer),
+                        (writer, scenario_writer, scenario_approver),
                         ask,
                         views,
                         notes_writer,
@@ -12497,10 +12505,10 @@ fn handle_save(
         .writeback
         .as_ref()
         .is_some_and(|w| w.opts.is_writer(&claims.user, &claims.groups));
-    let scn_writer = st
-        .scenario_writes
-        .as_ref()
-        .is_some_and(|w| w.opts.is_writer(&claims.user, &claims.groups));
+    let scn_writer = st.scenario_writes.as_ref().is_some_and(|w| {
+        w.opts.is_writer(&claims.user, &claims.groups)
+            || w.opts.is_approver(&claims.user, &claims.groups)
+    });
     if !wb_writer && !scn_writer {
         info.deny = Some("not_writer");
         audit("deny", Some("not_writer"), None, None);
@@ -12838,7 +12846,11 @@ fn handle_scenario_save(
             "forbidden: this server does not write scenarios (no writers in options.scenarios)",
         );
     };
-    if !rt.opts.is_writer(&claims.user, &claims.groups) {
+    let (writer, approver) = (
+        rt.opts.is_writer(&claims.user, &claims.groups),
+        rt.opts.is_approver(&claims.user, &claims.groups),
+    );
+    if !writer && !approver {
         deny(info, "not_writer");
         return reply(
             req,
@@ -12967,6 +12979,23 @@ fn handle_scenario_save(
         Ok(a) => a,
         Err(e) => return bad(info, req, &e),
     };
+    // S3: approving is a separate, narrower right than writing
+    if action.approves() && !approver {
+        deny(info, "not_approver");
+        return reply(
+            req,
+            403,
+            "forbidden: only approvers may freeze, unfreeze, merge or drop a scenario",
+        );
+    }
+    if !action.approves() && !writer {
+        deny(info, "not_writer");
+        return reply(
+            req,
+            403,
+            "forbidden: you may not write scenarios on this server",
+        );
+    }
     let picked = match var(&cell(spec.scenario_col)) {
         Ok(p) => p.filter(|p| !p.eq_ignore_ascii_case("main")),
         Err(e) => return bad(info, req, &e),
@@ -13027,10 +13056,22 @@ fn handle_scenario_save(
                 Err(e) => return bad(info, req, &e),
             }
         }
+        _ => {
+            let Some(name) = picked else {
+                return bad(info, req, "pick a scenario first");
+            };
+            if action == scn::Action::Merge && sub.preview {
+                Op::Preview { name }
+            } else {
+                Op::Approve { action, name }
+            }
+        }
     };
     let (what, scenario) = match &op {
         Op::Create { name, .. } => ("create", name.clone()),
         Op::Write { name, .. } => ("write", name.clone()),
+        Op::Approve { action, name } => (action.name(), name.clone()),
+        Op::Preview { name } => ("merge_preview", name.clone()),
     };
     let mut record = Map::new();
     record.insert("action".into(), what.into());
@@ -13047,6 +13088,7 @@ fn handle_scenario_save(
             record.insert("table".into(), table.clone().into());
             record.insert("row".into(), Value::Object(row.clone()));
         }
+        Op::Approve { .. } | Op::Preview { .. } => {}
     }
 
     // On the live connection: check, write, log, commit.
@@ -13093,10 +13135,33 @@ fn handle_scenario_save(
     );
     drop(conn);
     let rec = match outcome {
-        Ok(r) => r,
+        Ok(ScenarioDone::Logged(r)) => *r,
+        // nothing changed: what a merge would do
+        Ok(ScenarioDone::Preview(rows)) => {
+            let conflicts = rows.iter().filter(|r| r["conflict"] == true).count();
+            let body =
+                serde_json::json!({"scenario": scenario, "changes": rows, "conflicts": conflicts})
+                    .to_string();
+            info.bytes = Some(body.len());
+            respond(req, 200, "application/json", body.into_bytes());
+            return 200;
+        }
         Err(ScenarioFail::Refused(code, e)) => {
             deny(info, "refused");
             return reply(req, code, &e);
+        }
+        Err(ScenarioFail::Conflicts(rows)) => {
+            deny(info, "conflict");
+            let body =
+                serde_json::json!({"error": "conflicts", "scenario": scenario, "changes": rows})
+                    .to_string();
+            let resp = Response::from_data(body.into_bytes())
+                .with_status_code(409)
+                .with_header(header("Content-Type", "application/json"))
+                .with_header(header("X-Content-Type-Options", "nosniff"))
+                .with_header(header("Cache-Control", "no-store"));
+            let _ = req.respond(resp);
+            return 409;
         }
         Err(ScenarioFail::Log(e)) => {
             audit(
@@ -13175,10 +13240,21 @@ fn handle_scenario_save(
     201
 }
 
+/// What a scenario operation did.
+enum ScenarioDone {
+    /// Changed and logged.
+    Logged(Box<Record>),
+    /// A merge preview: `{table, key, action, conflict}` per row; nothing changed.
+    Preview(Vec<Value>),
+}
+
 /// Why a scenario operation didn't happen.
 enum ScenarioFail {
     /// A refusal to show the writer: status and reason.
     Refused(u16, String),
+    /// A merge that would overwrite changes made to main meanwhile: the
+    /// preview's rows (never resolved automatically).
+    Conflicts(Vec<Value>),
     /// The log couldn't take the record (nothing was committed).
     Log(String),
     /// The database refused (nothing was committed).
@@ -13196,6 +13272,13 @@ enum ScenarioOp {
         table: String,
         row: Map<String, Value>,
     },
+    /// S3: freeze, unfreeze, merge or drop (approvers).
+    Approve {
+        action: anofox_visualization::host::scenarios::Action,
+        name: String,
+    },
+    /// S3: what a merge would do, changing nothing.
+    Preview { name: String },
 }
 
 /// Run `op` on the live connection in one transaction: check the scenario
@@ -13213,7 +13296,7 @@ fn scenario_op(
     op: &ScenarioOp,
     record: Map<String, Value>,
     append: &dyn Fn(Map<String, Value>) -> Result<Record, ScenarioFail>,
-) -> Result<Record, ScenarioFail> {
+) -> Result<ScenarioDone, ScenarioFail> {
     let before = live
         .query("SELECT current_setting('search_path')::VARCHAR")
         .and_then(|mut r| r.string_rows(1))
@@ -13249,12 +13332,19 @@ fn scenario_op_in(
     op: &ScenarioOp,
     record: Map<String, Value>,
     append: &dyn Fn(Map<String, Value>) -> Result<Record, ScenarioFail>,
-) -> Result<Record, ScenarioFail> {
+) -> Result<ScenarioDone, ScenarioFail> {
     use anofox_visualization::host::scenarios as scn;
     let list = live
-        .query("SELECT name::VARCHAR, frozen::VARCHAR FROM scenario_list()")
+        .query(
+            "SELECT name::VARCHAR, frozen::VARCHAR, (merged_at IS NOT NULL)::VARCHAR, \
+             parent::VARCHAR FROM scenario_list()",
+        )
         .and_then(|mut r| r.string_rows(100_000))
         .map_err(ScenarioFail::Db)?;
+    let merged = |n: &str| {
+        list.iter()
+            .any(|r| r[0].as_deref() == Some(n) && r[2].as_deref() == Some("true"))
+    };
     // Some(frozen) for an existing scenario
     let find = |n: &str| {
         list.iter()
@@ -13330,7 +13420,70 @@ fn scenario_op_in(
                 .cloned()
                 .collect();
             let b = scn::create_sql(name, parent.as_deref(), opts.mode, &opts.tables, &no_pk);
-            commit(&|| run(&b).map(drop))
+            commit(&|| run(&b).map(drop)).map(|r| ScenarioDone::Logged(Box::new(r)))
+        }
+        ScenarioOp::Preview { name } | ScenarioOp::Approve { name, .. } => {
+            let frozen = find(name).ok_or_else(|| {
+                ScenarioFail::Refused(409, format!("there is no scenario '{name}' (any more)"))
+            })?;
+            let action = match op {
+                ScenarioOp::Approve { action, .. } => *action,
+                _ => scn::Action::Merge,
+            };
+            let refuse = |m: String| Err(ScenarioFail::Refused(409, m));
+            match action {
+                scn::Action::Freeze if frozen => {
+                    return refuse(format!("'{name}' is frozen already"))
+                }
+                scn::Action::Unfreeze if merged(name) => {
+                    return refuse(format!(
+                        "'{name}' was made official (merged): it stays frozen"
+                    ))
+                }
+                scn::Action::Unfreeze if !frozen => {
+                    return refuse(format!("'{name}' isn't frozen"))
+                }
+                scn::Action::Merge if merged(name) => {
+                    return refuse(format!("'{name}' was made official already"))
+                }
+                _ => {}
+            }
+            // anofox-scenario refuses to merge or drop a scenario others branch from
+            if matches!(action, scn::Action::Merge | scn::Action::Drop) {
+                let children: Vec<&str> = list
+                    .iter()
+                    .filter(|r| r[3].as_deref() == Some(name.as_str()))
+                    .filter_map(|r| r[0].as_deref())
+                    .collect();
+                if !children.is_empty() {
+                    return refuse(format!(
+                        "other scenarios branch from '{name}' ({}): drop them first",
+                        children.join(", ")
+                    ));
+                }
+            }
+            if action == scn::Action::Merge {
+                // what it would do; a conflict is never resolved here
+                let rows: Vec<Value> = run(&scn::merge_preview_sql(name))
+                    .and_then(|mut r| r.string_rows(100_000))
+                    .map_err(ScenarioFail::Db)?
+                    .into_iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "table": r[0], "key": r[1], "action": r[2],
+                            "conflict": r[3].as_deref() == Some("true"),
+                        })
+                    })
+                    .collect();
+                if matches!(op, ScenarioOp::Preview { .. }) {
+                    return Ok(ScenarioDone::Preview(rows));
+                }
+                if rows.iter().any(|r| r["conflict"] == true) {
+                    return Err(ScenarioFail::Conflicts(rows));
+                }
+            }
+            let b = scn::approve_sql(action, name).expect("an approving action");
+            commit(&|| run(&b).map(drop)).map(|r| ScenarioDone::Logged(Box::new(r)))
         }
         ScenarioOp::Write { name, table, row } => {
             match find(name) {
@@ -13370,7 +13523,7 @@ fn scenario_op_in(
                 }
             });
             let _ = live.exec(&format!("DETACH {}", quote_ident(&alias)));
-            out
+            out.map(|r| ScenarioDone::Logged(Box::new(r)))
         }
     }
 }
@@ -14168,7 +14321,7 @@ fn served_index(
     dash: &Dash,
     scope: Option<&Scope>,
     session: Option<&str>,
-    (writer, scenario_writer): (bool, bool),
+    (writer, scenario_writer, scenario_approver): (bool, bool, bool),
     ask: bool,
     views: bool,
     notes_writer: bool,
@@ -14288,6 +14441,7 @@ fn served_index(
     cfg["scenarios"] = serde_json::json!({
         "enabled": st.scenario_writes.as_ref().is_some_and(|w| w.opts.enabled_for(&dash.id)),
         "writer": scenario_writer,
+        "approver": scenario_approver,
     });
     // #913: this viewer's views are kept on the server (a personal sign-in).
     cfg["views"] = serde_json::json!({ "server": views });

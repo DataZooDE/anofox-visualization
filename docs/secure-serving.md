@@ -2083,8 +2083,7 @@ FROM anofox_scenario_diff('demand_up', 'plan');                     -- what chan
   picker's name (`scenarioVar`), so a pick re-runs every panel and a
   `?v.scenario=` link opens the same scenario.
   Without `options.scenarios` it's an ordinary dropdown.
-- Not yet: approving a scenario (freeze, merge, drop; plan:
-  [plan-scenarios.md](plans/plan-scenarios.md)), and combining
+- Not yet (plan: [plan-scenarios.md](plans/plan-scenarios.md)): combining
   `options.scenarios` with an access policy, an agent mapping or
   `options.preview` (a preview key's SQL could build a write call at run
   time; anofox-scenario#66).
@@ -2149,6 +2148,34 @@ SELECT 'Save capacity' ::SAVE, 'cap' ::SAVE_FORM, 'capacity' ::SAVE_TABLES, 'sce
   `path` follows `options.state.path`'s rules and isn't another store's.
   `/healthz` reports the log as `scenarios: {ok, full}`;
   `options.durability` keeps it with the other stores.
+
+### Approving scenarios (`options.scenarios.approvers`, #1243 S3)
+
+`approvers` (`{"groups": […], "users": […]}`) may freeze, unfreeze, merge
+and drop the picked scenario — a separate right from `writers` (an
+approver needn't be a writer, and a writer can't approve). Either list is
+enough to enable the endpoint.
+
+```sql
+SELECT 'Freeze' ::SAVE, 'freeze' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
+SELECT 'Unfreeze' ::SAVE, 'unfreeze' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
+SELECT 'Make official' ::SAVE, 'merge' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
+SELECT 'Drop' ::SAVE, 'drop' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;
+```
+
+- **Freeze** locks a scenario (writes are refused); **unfreeze** unlocks it,
+  except one that was merged.
+- **Merge** ("make official") is two steps in the page: the first click
+  asks for a preview (`"preview": true`: rows per table, nothing changes),
+  the second merges. It runs `scenario_merge(name, on_conflict := 'abort')`
+  after checking `scenario_merge_preview`: when `main` changed a row the
+  scenario changed too, it is refused (`409`, `{"error": "conflicts",
+  "changes": […]}`) and nothing is merged — conflicts are never resolved
+  automatically. A merged scenario ends frozen.
+- **Drop** deletes the scenario; the page goes back to `main`.
+- A scenario that others branch from can't be merged or dropped (drop
+  those first). Every approval is a log line like a write, in the same
+  transaction rule (log before commit).
 
 ## B. Static render — `serve --dashboards <dir>`
 
