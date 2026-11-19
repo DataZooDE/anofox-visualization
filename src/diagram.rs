@@ -112,6 +112,9 @@ pub struct Node {
     pub belief: Option<Belief>,
     /// The node's mark (`::SHAPE`, #1151); `None` is a box.
     pub shape: Option<ggplot_rs::graph::NodeShape>,
+    /// A discrete node's states (`::BELIEF` with `states`, #1275): a
+    /// Bayesian network's node, its belief per state as bars in the box.
+    pub states: Option<States>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +130,12 @@ pub struct Edge {
     /// The label names a variable (`::EDGES` `math`, #1172: Forney style,
     /// the edge is the variable): set as mathematics.
     pub math: bool,
+    /// What its tooltip says after its name (`::EDGES` `tip`, #1275), in
+    /// place of its label or value: a label on hover only.
+    pub tip: Option<String>,
+    /// Its line width in px (`::EDGES` `width`, #1275), in place of the
+    /// width by value.
+    pub width: Option<f64>,
 }
 
 /// Something the author should know (`dashboard --check`: `diagram/*`).
@@ -244,6 +253,109 @@ impl Belief {
     }
 }
 
+/// A discrete node's belief (#1275, a Bayesian network): `::BELIEF` JSON
+/// `{kind, states: [{state, p, prior, lo, hi}], evidence: {state, mode,
+/// likelihood}, cpt: {parents, states, rows: [{parents, p}]}}`. Only
+/// `states` (with a `state` each) is needed.
+#[derive(Clone, Debug)]
+pub struct States {
+    /// The node's kind (`chance`, `observed`, `latent`, `decision`,
+    /// `utility`, `deterministic`), for its card.
+    pub kind: Option<String>,
+    /// (state, belief, prior, lo, hi), in the given order.
+    pub rows: Vec<StateRow>,
+    /// The evidence on the node: the state (hard), and the mode
+    /// (`observe`, `do`, `soft` for a likelihood).
+    pub evidence: Option<(Option<String>, String)>,
+    /// The JSON the browser's card reads (states, evidence, the CPT), as given.
+    pub card: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StateRow {
+    pub state: String,
+    pub p: Option<f64>,
+    pub prior: Option<f64>,
+    pub lo: Option<f64>,
+    pub hi: Option<f64>,
+}
+
+impl States {
+    fn parse(s: &str) -> Option<States> {
+        let v: J = serde_json::from_str(s).ok()?;
+        let o = v.as_object()?;
+        let fnum = |o: &serde_json::Map<String, J>, k: &[&str]| {
+            field(o, k)
+                .and_then(|v| match v {
+                    J::Number(n) => n.as_f64(),
+                    J::String(s) => s.trim().parse().ok(),
+                    _ => None,
+                })
+                .filter(|f: &f64| f.is_finite())
+        };
+        let rows: Vec<StateRow> = field(o, &["states"])?
+            .as_array()?
+            .iter()
+            .filter_map(|r| {
+                let r = r.as_object()?;
+                Some(StateRow {
+                    state: field(r, &["state", "name"]).and_then(json_id)?,
+                    p: fnum(r, &["p", "probability"]),
+                    prior: fnum(r, &["prior"]),
+                    lo: fnum(r, &["lo"]),
+                    hi: fnum(r, &["hi"]),
+                })
+            })
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let evidence = field(o, &["evidence"]).and_then(J::as_object).map(|e| {
+            let state = field(e, &["state"]).and_then(json_id);
+            let mode = field(e, &["mode"])
+                .and_then(json_id)
+                .map(|m| m.to_ascii_lowercase())
+                .unwrap_or_else(|| if state.is_some() { "observe" } else { "soft" }.into());
+            (state, mode)
+        });
+        Some(States {
+            kind: field(o, &["kind"]).and_then(json_id),
+            rows,
+            evidence,
+            card: v.to_string(),
+        })
+    }
+
+    /// The observed state (hard evidence, observed or set).
+    pub fn observed(&self) -> Option<&str> {
+        self.evidence.as_ref().and_then(|e| e.0.as_deref())
+    }
+
+    /// The most likely state and its belief.
+    fn top(&self) -> Option<(&str, f64)> {
+        self.rows
+            .iter()
+            .filter_map(|r| Some((r.state.as_str(), r.p?)))
+            .fold(None, |best: Option<(&str, f64)>, (s, p)| match best {
+                Some((_, b)) if b >= p => best,
+                _ => Some((s, p)),
+            })
+    }
+}
+
+/// A probability as a state row shows it: whole percent, `<1%` / `>99%`
+/// near the ends.
+pub fn percent(p: f64) -> String {
+    let p = p.clamp(0.0, 1.0);
+    if p > 0.0 && p < 0.005 {
+        "<1%".into()
+    } else if p < 1.0 && p > 0.995 {
+        ">99%".into()
+    } else {
+        format!("{:.0}%", p * 100.0)
+    }
+}
+
 /// One edge story step: the edge (index into [`Diagram::edges`]), whether
 /// it runs against the edge's drawn direction, and its caption.
 #[derive(Clone, Debug)]
@@ -259,10 +371,21 @@ pub struct Message {
 pub const MAX_MESSAGES: usize = 500;
 
 impl Diagram {
-    /// A factor graph (#1151): some node has a `::SHAPE` — lanes become
-    /// straight bands, edges undirected with their label at the factor.
+    /// A factor graph (#1151): some node has a factor graph's `::SHAPE`
+    /// (anything but a box, a rect, a diamond or a double box) — lanes
+    /// become straight bands, edges undirected with their label at the
+    /// factor.
     pub fn factor_graph(&self) -> bool {
-        self.nodes.iter().any(|n| n.shape.is_some())
+        self.nodes.iter().any(|n| {
+            n.shape
+                .is_some_and(|s| !s.boxed() && s != ggplot_rs::graph::NodeShape::Diamond)
+        })
+    }
+
+    /// A Bayesian network (#1275): some node has states (`::BELIEF` with
+    /// `states`), and it is not a factor graph.
+    pub fn bayes_net(&self) -> bool {
+        !self.factor_graph() && self.nodes.iter().any(|n| n.states.is_some())
     }
 }
 
@@ -271,7 +394,11 @@ fn shape_of(s: &str) -> Option<ggplot_rs::graph::NodeShape> {
     use ggplot_rs::graph::NodeShape as S;
     Some(
         match s.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-            "box" => S::Box,
+            // #1275: a Bayesian network's (influence diagram's) kinds
+            "box" | "chance" | "latent" => S::Box,
+            "rect" | "rectangle" | "decision" => S::Rect,
+            "diamond" | "utility" => S::Diamond,
+            "double-box" | "double" => S::DoubleBox,
             // #1166: a factor graph's factor is a compact glyph square
             "factor" | "glyph" => S::Glyph,
             "circle" | "variable" | "random" => S::Circle,
@@ -471,6 +598,9 @@ impl Diagram {
                 belief: cell(belief_col)
                     .and_then(text)
                     .and_then(|b| Belief::parse(&b)),
+                states: cell(belief_col)
+                    .and_then(text)
+                    .and_then(|b| States::parse(&b)),
                 shape: cell(shape_col).and_then(text).and_then(|s| {
                     let shape = shape_of(&s);
                     if shape.is_none() && !bad_shapes.contains(&s) {
@@ -503,7 +633,7 @@ impl Diagram {
             problem(
                 "diagram/bad-shape",
                 format!(
-                    "::SHAPE {} is not box, circle, filled-circle, square, filled-square, terminal, text or a factor graph kind — drawn as a box",
+                    "::SHAPE {} is not box, rect, diamond, double-box, circle, filled-circle, square, filled-square, terminal, text, a factor graph kind or a Bayesian network kind — drawn as a box",
                     quoted(&bad_shapes)
                 ),
             );
@@ -579,6 +709,11 @@ impl Diagram {
                             // a health word (`ok`, `delayed`, `failed`, …) colours the edge
                             let status = field(o, &["status"]).and_then(json_id).and_then(|w| badge_status(&w));
                             raw.push(RawEdge {
+                                tip: field(o, &["tip", "tooltip"]).and_then(json_id),
+                                width: field(o, &["width"])
+                                    .and_then(J::as_f64)
+                                    .filter(|w| w.is_finite())
+                                    .map(|w| w.clamp(0.5, 12.0)),
                                 from,
                                 to,
                                 value: value.filter(|v| v.is_finite()),
@@ -655,6 +790,8 @@ impl Diagram {
             status,
             math,
             steps: edge_steps,
+            tip,
+            width,
         } in raw
         {
             let (Some(f), Some(t)) = (index(&from, &nodes), index(&to, &nodes)) else {
@@ -681,6 +818,8 @@ impl Diagram {
                     e.label = e.label.take().or(label);
                     e.status = e.status.or(status);
                     e.math |= math;
+                    e.tip = e.tip.take().or(tip);
+                    e.width = e.width.or(width);
                     styles[k] = styles[k].or(style);
                 }
                 None => {
@@ -695,6 +834,8 @@ impl Diagram {
                             style: EdgeStyle::Solid,
                             status,
                             math,
+                            tip,
+                            width,
                         });
                         styles.push(style);
                     }
@@ -930,13 +1071,23 @@ fn ordered(mut keys: Vec<(f64, f64, usize)>) -> Vec<usize> {
 /// The layout: box sizes (the label wrapped, the value, badge and
 /// sparkline) and the layered placement, both ggplot-rs's (#1153, #497).
 fn layout(d: &Diagram) -> Placed {
-    use ggplot_rs::graph::{edge_label_width, node_box, node_size, NodeShape};
+    use ggplot_rs::graph::{
+        diamond_box, edge_label_width, node_box, node_size, states_box, NodeShape,
+    };
     use ggplot_rs::graph_layout as gl;
     let boxes: Vec<_> = d
         .nodes
         .iter()
-        .map(|n| match n.shape {
-            Some(shape) if shape != NodeShape::Box => node_size(shape, &n.label),
+        .map(|n| match (n.shape, &n.states) {
+            (Some(NodeShape::Diamond), _) => diamond_box(&n.label, n.fvalue.as_deref()),
+            (Some(shape), _) if !shape.boxed() => node_size(shape, &n.label),
+            // #1275: a discrete node's states, a row each
+            (_, Some(st)) => states_box(
+                &n.label,
+                n.fvalue.as_deref(),
+                n.badge.as_deref(),
+                &st.rows.iter().map(|r| r.state.clone()).collect::<Vec<_>>(),
+            ),
             _ => node_box(
                 &n.label,
                 n.fvalue.as_deref(),
@@ -1006,6 +1157,8 @@ struct RawEdge {
     style: Option<EdgeStyle>,
     status: Option<Status>,
     math: bool,
+    tip: Option<String>,
+    width: Option<f64>,
     /// Story steps along the edge: (order, caption, against the edge,
     /// iteration).
     steps: Vec<(f64, String, bool, Option<f64>)>,
@@ -1070,6 +1223,9 @@ fn list_names(names: &[String]) -> String {
 /// trailing full stop): steps, stages, where it starts and ends, the
 /// connections, loops and the largest value.
 fn summary(d: &Diagram, p: &Placed) -> String {
+    if d.bayes_net() {
+        return bayes_net_summary(d);
+    }
     if d.factor_graph() {
         return match learned(d) {
             Some(l) => format!("{l} {}", factor_graph_summary(d)),
@@ -1262,6 +1418,58 @@ fn factor_graph_summary(d: &Diagram) -> String {
     parts.join("; ")
 }
 
+/// A Bayesian network's sentence (#1275): its nodes and arcs, the
+/// evidence, and each node's most likely state: "Bayesian network: 4
+/// nodes, 4 arcs; evidence: Wet grass = yes; Cloudy most likely yes (58%,
+/// prior 50%), Rain yes (71%, prior 50%), …".
+fn bayes_net_summary(d: &Diagram) -> String {
+    let (n, m) = (d.nodes.len(), d.edges.len());
+    let mut parts = vec![format!(
+        "Bayesian network: {n} node{}, {m} arc{}",
+        if n == 1 { "" } else { "s" },
+        if m == 1 { "" } else { "s" }
+    )];
+    let evidence: Vec<String> = d
+        .nodes
+        .iter()
+        .filter_map(|nd| {
+            let (state, mode) = nd.states.as_ref()?.evidence.as_ref()?;
+            Some(match (state, mode.as_str()) {
+                (Some(s), "do") => format!("{} set to {s}", nd.label),
+                (Some(s), _) => format!("{} = {s}", nd.label),
+                (None, _) => format!("{} (soft evidence)", nd.label),
+            })
+        })
+        .collect();
+    if !evidence.is_empty() {
+        parts.push(format!("evidence: {}", list_names(&evidence)));
+    }
+    let beliefs: Vec<String> = d
+        .nodes
+        .iter()
+        .filter(|nd| nd.states.as_ref().is_some_and(|st| st.observed().is_none()))
+        .filter_map(|nd| {
+            let st = nd.states.as_ref()?;
+            let (s, p) = st.top()?;
+            let prior = st
+                .rows
+                .iter()
+                .find(|r| r.state == s)
+                .and_then(|r| r.prior)
+                .map(|q| format!(", prior {}", percent(q)))
+                .unwrap_or_default();
+            Some(format!("{} {s} ({}{prior})", nd.label, percent(p)))
+        })
+        .collect();
+    if !beliefs.is_empty() {
+        parts.push(format!("most likely: {}", beliefs.join(", ")));
+    }
+    if d.total_nodes > n {
+        parts.push(format!("showing {n} of {} nodes", d.total_nodes));
+    }
+    parts.join("; ")
+}
+
 /// The steps in reading order, each with its value, status and where it
 /// leads: "1. Ingest (10K) → Build twin, Replay."
 fn steps_text(d: &Diagram, p: &Placed) -> String {
@@ -1349,13 +1557,15 @@ struct FgLook {
 const MATH_FONT: &str =
     "KaTeX_Math, 'Latin Modern Math', 'STIX Two Math', 'Cambria Math', 'Times New Roman', serif";
 
+/// `a` mixed with a share `k` of `b`.
+fn mix(a: crate::theme::Rgb, b: crate::theme::Rgb, k: f64) -> crate::theme::Rgb {
+    let m = |x: u8, y: u8| (x as f64 * (1.0 - k) + y as f64 * k).round() as u8;
+    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+}
+
 fn fg_look(t: &crate::theme::ResolvedTheme) -> FgLook {
     let dark = matches!(t.variant, crate::theme::Variant::Dark);
     let line = if dark { (45, 212, 191) } else { (13, 148, 136) };
-    let mix = |a: crate::theme::Rgb, b: crate::theme::Rgb, k: f64| {
-        let m = |x: u8, y: u8| (x as f64 * (1.0 - k) + y as f64 * k).round() as u8;
-        (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
-    };
     FgLook {
         line,
         observed: if dark { (94, 234, 212) } else { (17, 94, 89) },
@@ -1404,9 +1614,10 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             };
             let (a, b) = (&d.nodes[e.from], &d.nodes[e.to]);
             let name = format!("{} → {}", a.label, b.label);
-            let tooltip = match (&e.label, &e.fvalue) {
-                (Some(l), _) => format!("{name}: {l}"),
-                (None, Some(v)) => format!("{name}: {v}"),
+            let tooltip = match (&e.tip, &e.label, &e.fvalue) {
+                (Some(tip), _, _) => format!("{name}: {tip}"),
+                (None, Some(l), _) => format!("{name}: {l}"),
+                (None, None, Some(v)) => format!("{name}: {v}"),
                 _ => name.clone(),
             };
             // #1151: a factor graph's edges are undirected, their label (the
@@ -1427,7 +1638,9 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 undirected: factor_graph,
                 label_at,
                 colour,
-                width: graph::flow_width(e.value, vmax, line),
+                width: e
+                    .width
+                    .unwrap_or_else(|| graph::flow_width(e.value, vmax, line)),
                 line,
                 class,
                 tooltip,
@@ -1468,6 +1681,17 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             if let Some(fv) = &nd.fvalue {
                 tooltip.push_str(&format!(": {fv}"));
             }
+            // #1275: a discrete node's belief per state
+            if let Some(st) = nd.states.as_ref().filter(|_| nd.fvalue.is_none()) {
+                let rows: Vec<String> = st
+                    .rows
+                    .iter()
+                    .filter_map(|r| Some(format!("{} {}", r.state, percent(r.p?))))
+                    .collect();
+                if !rows.is_empty() {
+                    tooltip.push_str(&format!(": {}", rows.join(", ")));
+                }
+            }
             if let Some(b) = &nd.badge {
                 tooltip.push_str(&format!(" ({b})"));
             }
@@ -1496,6 +1720,9 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 stroke: alarm
                     .map(|s| s.color(t))
                     .or(fg.as_ref().map(|f| f.line))
+                    // #1275: a Bayesian network's outlines read (a
+                    // deterministic node's double one)
+                    .or(d.bayes_net().then(|| mix(t.colors.card, muted, 0.55)))
                     .unwrap_or(t.chart.line),
                 accent,
                 // #1166: the final belief as a curve over the node, a
@@ -1503,10 +1730,27 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 belief: nd.belief.as_ref().map(|b| (b.heights(b.its.len() - 1), t.color(v))),
                 // #1172: the prior, faint behind it
                 prior: nd.belief.as_ref().and_then(|b| b.prior_heights()).map(|h| (h, muted)),
-                // ggplot-rs 0.61's discrete states and shaded fill (Bayesian
-                // network nodes, #1275) — not drawn by ::DIAGRAM
-                states: None,
-                fill: None,
+                // #1275: a discrete node's states as bars, the prior behind
+                // each; a node with evidence shaded
+                states: nd.states.as_ref().map(|st| {
+                    let rows = st
+                        .rows
+                        .iter()
+                        .map(|r| graph::StateBar {
+                            name: r.state.clone(),
+                            p: r.p.unwrap_or(0.0),
+                            prior: r.prior,
+                            text: r.p.map(percent).unwrap_or_default(),
+                            observed: st.observed() == Some(r.state.as_str()),
+                        })
+                        .collect();
+                    (rows, t.color(0))
+                }),
+                fill: nd
+                    .states
+                    .as_ref()
+                    .filter(|st| st.evidence.is_some() || st.kind.as_deref() == Some("observed"))
+                    .map(|_| mix(t.colors.card, t.color(0), 0.16)),
                 spark: (nd.spark.len() >= 2).then(|| {
                     (
                         nd.spark.clone(),
@@ -1528,6 +1772,9 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     ),
                     attr("status", nd.status.map(|s| s.as_str().to_string())),
                     attr("badge", nd.badge.clone()),
+                    // #1275: what the browser's card shows (states, evidence,
+                    // the CPT)
+                    attr("bn", nd.states.as_ref().map(|st| st.card.clone())),
                 ]
                 .into_iter()
                 // #1152: a factor graph's shaped node has no box for its
@@ -1661,7 +1908,7 @@ pub(crate) fn render(
     let mut out = svg_open(place, width, height);
     out.push_str(&format!(
         "<desc>{}</desc>",
-        esc(&if d.factor_graph() {
+        esc(&if d.factor_graph() || d.bayes_net() {
             format!("{summary}. Nodes: {}", steps_text(d, &p))
         } else {
             format!("Diagram: {summary}. Steps: {}", steps_text(d, &p))
@@ -2288,6 +2535,122 @@ mod tests {
             &svg[..svg.find('>').unwrap()]
         );
         assert!(svg.contains(&format!("<desc>{sum}. Nodes: ")));
+    }
+
+    /// #1275: a Bayesian network — states as bars in the box (the
+    /// observed one bold, its node shaded), the influence diagram's shapes,
+    /// a directed layout (not a factor graph's bands), arcs with a width
+    /// and a hover text of their own, the card's JSON on the box.
+    #[test]
+    fn a_bayes_net_draws_states_and_shapes() {
+        let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
+        let st = |states: &str, extra: &str| {
+            s(&format!(
+                r#"{{"kind": "chance", "states": [{states}]{extra}}}"#
+            ))
+        };
+        let cols = vec![
+            Column::new(
+                "id",
+                Role::Diagram,
+                v(&["rain", "grass", "act", "cost", "either"]),
+            ),
+            Column::new(
+                "l",
+                Role::Label,
+                v(&["Rain", "Wet grass", "Water?", "Cost", "Either"]),
+            ),
+            Column::new(
+                "k",
+                Role::Shape,
+                v(&["chance", "chance", "decision", "utility", "double-box"]),
+            ),
+            Column::new(
+                "b",
+                Role::Belief,
+                vec![
+                    st(
+                        r#"{"state": "yes", "p": 0.7079, "prior": 0.5}, {"state": "no", "p": 0.2921, "prior": 0.5}"#,
+                        "",
+                    ),
+                    st(
+                        r#"{"state": "yes", "p": 1.0, "prior": 0.65}, {"state": "no", "p": 0.0, "prior": 0.35}"#,
+                        r#", "evidence": {"state": "yes", "mode": "observe"}"#,
+                    ),
+                    Value::Na,
+                    Value::Na,
+                    st(r#"{"state": "yes"}, {"state": "no"}"#, ""),
+                ],
+            ),
+            Column::new(
+                "e",
+                Role::Edges,
+                vec![
+                    s(
+                        r#"[{"from": "rain", "to": "grass", "value": 0.4, "width": 1.8, "style": "dashed", "tip": "strength 0.4"},
+                            {"from": "act", "to": "cost"}, {"from": "grass", "to": "cost"}]"#,
+                    ),
+                    Value::Na,
+                    Value::Na,
+                    Value::Na,
+                    Value::Na,
+                ],
+            ),
+            Column::new("d", Role::Direction, v(&["TB", "", "", "", ""])),
+        ];
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert!(d.bayes_net() && !d.factor_graph(), "a network, directed");
+        assert!(d.problems.is_empty(), "{:?}", d.problems);
+        assert_eq!(d.nodes[1].states.as_ref().unwrap().observed(), Some("yes"));
+        assert_eq!(d.edges[0].tip.as_deref(), Some("strength 0.4"));
+        let svg = render_with(&cols, 900, 500, &RenderOptions::default()).unwrap();
+        roxmltree::Document::parse(&svg).expect("well-formed");
+        for want in [
+            "dp-node-rect",
+            "dp-node-diamond",
+            "dp-node-double-box",
+            "dp-node-state-bar",
+            "dp-node-state-prior",
+            ">71%<",
+            ">100%<",
+            "data-part=\"arrow\"",
+            "<title>Rain → Wet grass: strength 0.4</title>",
+            "<title>Rain: yes 71%, no 29%</title>",
+            "stroke-width=\"1.80\"",
+            "data-bn=\"{&quot;kind&quot;:&quot;chance&quot;",
+        ] {
+            assert!(svg.contains(want), "{want}");
+        }
+        let sum = "Bayesian network: 5 nodes, 3 arcs; evidence: Wet grass = yes; most likely: Rain yes (71%, prior 50%)";
+        assert!(
+            svg.contains(&format!(r#"data-summary="{sum}""#)),
+            "{}",
+            &svg[..svg.find('>').unwrap()]
+        );
+        // the observed node shaded: its box is not the card colour
+        let fill_of = |id: &str| {
+            let at = svg.find(&format!("data-node=\"{id}\"")).unwrap();
+            let tag = &svg[svg[..at].rfind("<rect").unwrap()..at];
+            tag.split("fill=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_ne!(fill_of("grass"), fill_of("rain"));
+        // the states without beliefs: names, no bars' percentages
+        assert!(svg.contains("data-xtext=\"Either\""));
+    }
+
+    #[test]
+    fn percent_keeps_the_ends_apart() {
+        assert_eq!(percent(0.0), "0%");
+        assert_eq!(percent(0.004), "<1%");
+        assert_eq!(percent(0.5), "50%");
+        assert_eq!(percent(0.996), ">99%");
+        assert_eq!(percent(1.0), "100%");
     }
 
     /// #1172: what the model learned leads the sentence and shows under

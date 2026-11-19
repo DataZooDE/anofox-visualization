@@ -216,6 +216,12 @@ FROM ${v("('src','Orders CSV',NULL),('clean','Clean','src'),('agg','Daily totals
 
 \`anofox_plot_factor_graph(nodes, edges := …, marginals := …, schedule := …)\` draws a Bayesian model as a Forney-style factor graph through \`::DIAGRAM\`: factors as boxes, variables as circles, observations filled, layers as bands, and what the model learned under the graph. Hovering a variable shows its posterior; Step / Play walk the messages the inference passed. The tables are what an inference library exports: one row per node, one per edge. Factor graphs are a plugin that the builder and the release ship: a dashboard that draws one starts with \`SELECT 'factor-graph'::REQUIRES;\`.
 
-[A small one in the gallery ↗](../../../gallery/features/#a-factor-graph) · [three models in the builder ↗](../../../app/?dashboard=how-does-the-model-reason-from-our-inspections)`,
+[A small one in the gallery ↗](../../../gallery/features/#a-factor-graph) · [three models in the builder ↗](../../../app/?dashboard=how-does-the-model-reason-from-our-inspections)
+
+## Bayesian networks
+
+\`anofox_plot_bayes_net(nodes, arcs := …, beliefs := …, evidence := …, tables := …)\` draws a Bayesian network through \`::DIAGRAM\`, top to bottom with arrows at the child: a box per node with a bar per state for what the network believes, the prior as a faint bar behind it, observed nodes shaded with their state in bold; decisions as square boxes, utilities as diamonds, deterministic nodes with a double outline. Arcs are wider the stronger they are and dashed when weak. Hovering a node shows its belief against the prior and its conditional probability table. The tables are what an engine exports (pgmpy, bnlearn, a DuckDB extension); \`--check\` names cycles, unknown ids and beliefs that don't sum to 1. Bayesian networks are a plugin like factor graphs: a dashboard that draws one starts with \`SELECT 'bayes-net'::REQUIRES;\`.
+
+[A small one in the gallery ↗](../../../gallery/features/#a-bayesian-network) · [two networks in the builder ↗](../../../app/?dashboard=what-does-the-evidence-say-about-the-cause)`,
   },
 };
