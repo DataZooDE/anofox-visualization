@@ -347,6 +347,8 @@ pub struct SaveRequest {
     pub graph: Option<Value>,
     pub form: Option<Map<String, Value>>,
     pub key: Option<String>,
+    /// #1243 S3: a scenario merge's preview — what it would do, changing nothing.
+    pub preview: bool,
 }
 
 pub fn parse_save_request(body: &str) -> Result<SaveRequest, String> {
@@ -355,7 +357,7 @@ pub fn parse_save_request(body: &str) -> Result<SaveRequest, String> {
     for k in o.keys() {
         if !matches!(
             k.as_str(),
-            "dashboard" | "panel" | "id" | "vars" | "base" | "graph" | "form" | "key"
+            "dashboard" | "panel" | "id" | "vars" | "base" | "graph" | "form" | "key" | "preview"
         ) {
             return Err(format!("unknown request field '{k}'"));
         }
@@ -393,7 +395,13 @@ pub fn parse_save_request(body: &str) -> Result<SaveRequest, String> {
         Some(Value::Number(n)) => Some(n.to_string()),
         Some(_) => return Err("'key' must be a string".into()),
     };
+    let preview = match o.get("preview") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("'preview' must be true or false".into()),
+    };
     Ok(SaveRequest {
+        preview,
         dashboard,
         panel,
         id,

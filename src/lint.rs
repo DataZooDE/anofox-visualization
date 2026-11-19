@@ -1080,6 +1080,8 @@ where
                                 continue;
                             }
                             Ok(crate::host::scenarios::Action::Write) => {}
+                            // S3: approvals act on the picked scenario only
+                            Ok(_) => continue,
                         }
                     }
                     if scenario.is_some() && graph.is_some() {
@@ -13283,11 +13285,17 @@ mod design_tests {
         );
         assert_eq!(
             codes(
-                json!({"c0": "Add", "c1": "merge", "c2": "n", "c3": "scenario"}),
+                json!({"c0": "Add", "c1": "merged", "c2": "n", "c3": "scenario"}),
                 create
             ),
             ["save/bad-action"]
         );
+        let freeze = "SELECT 'Freeze' ::SAVE, 'freeze' ::SAVE_ACTION, 'scenario' ::SAVE_SCENARIO;";
+        assert!(codes(
+            json!({"c0": "Freeze", "c1": "freeze", "c2": "scenario"}),
+            freeze
+        )
+        .is_empty());
         let lone = "SELECT 'Add' ::SAVE, 'create' ::SAVE_ACTION;";
         assert_eq!(
             codes(json!({"c0": "Add", "c1": "create"}), lone),

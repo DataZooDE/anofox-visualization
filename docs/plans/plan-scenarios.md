@@ -1,7 +1,8 @@
 # Plan: scenarios with anofox-scenario
 
-Status: decisions taken (§9, 2026-11-19). S1 (read-only) shipped; S2
-(create and write) in progress — see docs/secure-serving.md. Refs #1243.
+Status: decisions taken (§9, 2026-11-19). S1 (read-only) and S2
+(create and write) shipped; S3 (approve) in progress — see
+docs/secure-serving.md. Refs #1243.
 
 **Goal.** A planner opens a dashboard, starts a scenario ("demand +10 %",
 "second shift in March") from the current plan, changes it in a form or an

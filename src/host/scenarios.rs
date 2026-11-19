@@ -92,6 +92,9 @@ pub struct WriteOptions {
     pub dashboards: Vec<String>,
     pub writer_groups: Vec<String>,
     pub writer_users: Vec<String>,
+    /// Who may freeze, unfreeze, merge and drop (S3); distinct from writers.
+    pub approver_groups: Vec<String>,
+    pub approver_users: Vec<String>,
     /// The only tables (and columns) a save may write, with their key.
     pub tables: BTreeMap<String, TableDecl>,
     pub mode: Mode,
@@ -110,6 +113,14 @@ impl WriteOptions {
             || groups
                 .iter()
                 .any(|g| self.writer_groups.iter().any(|w| w == g))
+    }
+
+    /// May this signed-in user approve (freeze, unfreeze, merge, drop)?
+    pub fn is_approver(&self, user: &str, groups: &[String]) -> bool {
+        self.approver_users.iter().any(|u| u == user)
+            || groups
+                .iter()
+                .any(|g| self.approver_groups.iter().any(|w| w == g))
     }
 
     pub fn enabled_for(&self, dashboard: &str) -> bool {
@@ -155,10 +166,11 @@ impl WriteOptions {
     }
 }
 
-const WRITE_KEYS: [&str; 7] = [
+const WRITE_KEYS: [&str; 8] = [
     "path",
     "dashboards",
     "writers",
+    "approvers",
     "mode",
     "max_rows_per_save",
     "rate",
@@ -223,10 +235,6 @@ impl ScenarioOptions {
                     )? as usize;
                 }
                 k if WRITE_KEYS.contains(&k) => {}
-                // S3 (freeze, merge, drop)
-                "approvers" => {
-                    return Err("options.scenarios.approvers: approving scenarios (freeze, merge, drop) isn't available yet (#1243 S3)".into())
-                }
                 other => return Err(format!("options.scenarios: unknown key '{other}'")),
             }
         }
@@ -273,6 +281,8 @@ fn parse_write(
         dashboards: Vec::new(),
         writer_groups: Vec::new(),
         writer_users: Vec::new(),
+        approver_groups: Vec::new(),
+        approver_users: Vec::new(),
         tables,
         mode: Mode::Delta,
         max_rows_per_save: wb::DEFAULT_MAX_ROWS,
@@ -301,25 +311,42 @@ fn parse_write(
             "options.scenarios.dashboards must name the dashboards that write scenarios".into(),
         );
     }
-    let wm = m.get("writers").and_then(Value::as_object).ok_or(
-        "options.scenarios.writers must be an object like {\"groups\": […], \"users\": […]}",
-    )?;
-    if let Some(other) = wm
-        .keys()
-        .find(|k| !matches!(k.as_str(), "groups" | "users"))
-    {
-        return Err(format!(
-            "options.scenarios.writers: unknown key '{other}' (groups, users)"
-        ));
-    }
-    if let Some(g) = wm.get("groups") {
-        o.writer_groups = str_list(g, "writers.groups")?;
-    }
-    if let Some(u) = wm.get("users") {
-        o.writer_users = str_list(u, "writers.users")?;
-    }
-    if o.writer_groups.is_empty() && o.writer_users.is_empty() {
-        return Err("options.scenarios.writers needs groups or users".into());
+    // {"groups": […], "users": […]} → (groups, users)
+    let who = |key: &str| -> Result<(Vec<String>, Vec<String>), String> {
+        let Some(v) = m.get(key) else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let wm = v.as_object().ok_or_else(|| {
+            format!("options.scenarios.{key} must be an object like {{\"groups\": […], \"users\": […]}}")
+        })?;
+        if let Some(other) = wm
+            .keys()
+            .find(|k| !matches!(k.as_str(), "groups" | "users"))
+        {
+            return Err(format!(
+                "options.scenarios.{key}: unknown key '{other}' (groups, users)"
+            ));
+        }
+        let g = wm
+            .get("groups")
+            .map(|g| str_list(g, &format!("{key}.groups")))
+            .transpose()?;
+        let u = wm
+            .get("users")
+            .map(|u| str_list(u, &format!("{key}.users")))
+            .transpose()?;
+        let (g, u) = (g.unwrap_or_default(), u.unwrap_or_default());
+        if g.is_empty() && u.is_empty() {
+            return Err(format!("options.scenarios.{key} needs groups or users"));
+        }
+        Ok((g, u))
+    };
+    (o.writer_groups, o.writer_users) = who("writers")?;
+    (o.approver_groups, o.approver_users) = who("approvers")?;
+    if !m.contains_key("writers") && !m.contains_key("approvers") {
+        return Err(
+            "options.scenarios.writers (or approvers) must say who may change scenarios".into(),
+        );
     }
     if let Some(v) = m.get("mode") {
         o.mode = match v.as_str() {
@@ -373,22 +400,81 @@ pub enum Action {
     Write,
     /// Create a scenario from the picked one (or `main`).
     Create,
+    /// Approvers only (S3): lock the picked scenario against changes …
+    Freeze,
+    /// … unlock it …
+    Unfreeze,
+    /// … make it the official plan (`scenario_merge`, conflicts abort; it
+    /// ends frozen) …
+    Merge,
+    /// … or delete it.
+    Drop,
 }
 
-/// A `::SAVE_ACTION` cell: empty or `write`, `create`; S3's actions are
-/// refused with the reason.
+impl Action {
+    pub fn name(self) -> &'static str {
+        match self {
+            Action::Write => "write",
+            Action::Create => "create",
+            Action::Freeze => "freeze",
+            Action::Unfreeze => "unfreeze",
+            Action::Merge => "merge",
+            Action::Drop => "drop",
+        }
+    }
+
+    /// Needs `approvers` rather than `writers`.
+    pub fn approves(self) -> bool {
+        matches!(
+            self,
+            Action::Freeze | Action::Unfreeze | Action::Merge | Action::Drop
+        )
+    }
+}
+
+/// A `::SAVE_ACTION` cell: empty or `write`, `create`, `freeze`,
+/// `unfreeze`, `merge`, `drop`.
 pub fn parse_action(cell: &str) -> Result<Action, String> {
-    match cell.trim().to_ascii_lowercase().as_str() {
-        "" | "write" => Ok(Action::Write),
-        "create" => Ok(Action::Create),
-        "freeze" | "unfreeze" | "merge" | "drop" => Err(format!(
-            "::SAVE_ACTION '{}' (approving scenarios) isn't available yet",
+    Ok(match cell.trim().to_ascii_lowercase().as_str() {
+        "" | "write" => Action::Write,
+        "create" => Action::Create,
+        "freeze" => Action::Freeze,
+        "unfreeze" => Action::Unfreeze,
+        "merge" => Action::Merge,
+        "drop" => Action::Drop,
+        _ => {
+            return Err(format!(
+            "::SAVE_ACTION must be one of write, create, freeze, unfreeze, merge, drop — not '{}'",
             cell.trim()
-        )),
-        _ => Err(format!(
-            "::SAVE_ACTION must be 'write' or 'create', not '{}'",
-            cell.trim()
-        )),
+        ))
+        }
+    })
+}
+
+/// An approver's operation on scenario `name`, bound. A merge never
+/// resolves a conflict (`on_conflict := 'abort'`); [`merge_preview_sql`]
+/// lists them first.
+pub fn approve_sql(action: Action, name: &str) -> Option<Bound> {
+    let f = match action {
+        Action::Freeze => "scenario_freeze(?)",
+        Action::Unfreeze => "scenario_unfreeze(?)",
+        Action::Merge => "scenario_merge(?, on_conflict := 'abort')",
+        Action::Drop => "scenario_drop(?)",
+        Action::Write | Action::Create => return None,
+    };
+    Some(Bound {
+        sql: format!("SELECT * FROM {f}"),
+        params: vec![name.to_string()],
+    })
+}
+
+/// What a merge of `name` would do: `table_name, key, action, conflict`.
+pub fn merge_preview_sql(name: &str) -> Bound {
+    Bound {
+        sql: "SELECT table_name::VARCHAR, key::VARCHAR, action::VARCHAR, conflict::VARCHAR \
+              FROM scenario_merge_preview(?)"
+            .into(),
+        params: vec![name.to_string()],
     }
 }
 
@@ -871,7 +957,7 @@ mod tests {
             ("dashboards", json!([]), "name the dashboards"),
             ("dashboards", json!(["../x"]), "name the dashboards"),
             ("mode", json!("copy"), "'delta' or 'materialized'"),
-            ("approvers", json!({"users": ["a"]}), "S3"),
+            ("approvers", json!({}), "approvers needs groups or users"),
             (
                 "tables",
                 json!({"plan": {"key": ["nope"], "columns": {"item": "VARCHAR"}}}),
@@ -906,12 +992,19 @@ mod tests {
         }
         assert_eq!(parse_action(""), Ok(Action::Write));
         assert_eq!(parse_action(" Create "), Ok(Action::Create));
-        assert!(parse_action("merge")
-            .unwrap_err()
-            .contains("isn't available yet"));
+        assert_eq!(parse_action("Merge"), Ok(Action::Merge));
+        assert!(parse_action("drop").unwrap().approves() && !Action::Create.approves());
         assert!(parse_action("delete")
             .unwrap_err()
-            .contains("'write' or 'create'"));
+            .contains("one of write, create"));
+        let m = approve_sql(Action::Merge, "s1").unwrap();
+        assert_eq!(
+            m.sql,
+            "SELECT * FROM scenario_merge(?, on_conflict := 'abort')"
+        );
+        assert_eq!(m.params, ["s1"]);
+        assert!(approve_sql(Action::Write, "s1").is_none());
+        assert_eq!(merge_preview_sql("s1").params, ["s1"]);
     }
 
     #[test]
