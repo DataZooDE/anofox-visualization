@@ -5013,6 +5013,29 @@ fn cartesian(
                 _ => plot.geom_col_with(card_col(o)),
             }
             .layer_aes(lay);
+            // #1277: a line over a scatter joins the rows that have a value
+            // (an efficiency frontier through some of the points) — a gap
+            // per missing row would leave no segment at all.
+            if kind == Kind::Point && ekind == Kind::Line {
+                let keep: Vec<bool> = col_of(&data, &yk)
+                    .iter()
+                    .map(|v| v.as_f64().is_some_and(f64::is_finite))
+                    .collect();
+                if keep.iter().any(|k| !k) {
+                    let rows: Vec<(String, Vec<Value>)> = data
+                        .iter()
+                        .map(|(n, v)| {
+                            let v = v
+                                .iter()
+                                .zip(&keep)
+                                .filter(|(_, k)| **k)
+                                .map(|(v, _)| v.clone());
+                            (n.clone(), v.collect())
+                        })
+                        .collect();
+                    plot = plot.layer_data(rows);
+                }
+            }
             if trend_per_series {
                 // the series' own keys name it already
                 plot = plot.show_legend(false);

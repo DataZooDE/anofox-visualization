@@ -165,7 +165,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("GANTT", &["GANTTCHART", "TIMELINE_BARS"], R::Value(Kind::Gantt), "chart", true,
       "one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars"),
     e("DUMBBELL", &["DUMBBELLCHART", "SLOPE"], R::Value(Kind::Dumbbell), "chart", true,
-      "two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual)"),
+      "two values per item (this column names it) joined by a line: ::XMIN → ::XMAX (before/after, plan/actual), the legend naming both by their columns; a ::LABEL past each item (a lift, ×2.4); ::YFORMAT on the value axis"),
     e("HISTOGRAM", &["HIST"], R::Value(Kind::Histogram), "chart", true, "histogram of the measure; takes ::FLIP (horizontal, with ::FACET panels too), ::YFORMAT / ::YSCALE on its count axis, ::DATALABELS (each bin's count, or share under ::HIST_NORM), ::ABLINE, ::XLINE"),
     e("DENSITY", &["KDE"], R::Value(Kind::Density), "chart", true,
       "kernel density curve (one per CATEGORY)"),
