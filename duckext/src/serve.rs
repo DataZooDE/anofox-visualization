@@ -1405,6 +1405,9 @@ pub struct LockedOptions {
     /// `basemap` (#760): the installation's map tiles behind
     /// `GET /api/tiles/{z}/{x}/{y}`; [`start_locked`] opens its cache.
     pub basemap_opts: Option<BasemapOptions>,
+    /// `options.scenarios` (#1243 S1): the scenarios of one database,
+    /// attached read-only to the snapshot, with read helpers per request.
+    pub scenarios_opts: Option<anofox_visualization::host::scenarios::ScenarioOptions>,
     /// `max_asset_bytes` (#514 PR B): the cap on one file served from
     /// `<dashboards dir>/assets/` (`GET /d/<id>/assets/<rest>`, [`locked_asset`]).
     pub max_asset_bytes: usize,
@@ -1795,6 +1798,7 @@ impl Default for LockedOptions {
             views_opts: None,
             notes_opts: None,
             basemap_opts: None,
+            scenarios_opts: None,
             max_asset_bytes: anofox_visualization::image::DEFAULT_MAX_ASSET_BYTES as usize,
             metrics_token: None,
             tasks: None,
@@ -2118,6 +2122,10 @@ impl LockedOptions {
                 "basemap" => {
                     o.basemap_opts = Some(BasemapOptions::parse(val)?);
                 }
+                "scenarios" => {
+                    o.scenarios_opts =
+                        Some(anofox_visualization::host::scenarios::ScenarioOptions::parse(val)?);
+                }
                 // The key list is generated, not copied by hand, so it can't
                 // drift from `--site`'s own `SERVER_OPTION_KEYS` (#501).
                 other => {
@@ -2222,6 +2230,9 @@ impl LockedOptions {
         }
         if o.mapping().is_some() && !o.search_path.is_empty() {
             return Err("options.agent.mapping and options.search_path can't be combined: the snapshot holds only the mapping's canonical tables".into());
+        }
+        if o.mapping().is_some() && o.scenarios_opts.is_some() {
+            return Err("options.agent.mapping and options.scenarios can't be combined: the snapshot holds only the mapping's canonical tables".into());
         }
         if o.agent.is_some() {
             // #863: answers per caller (M1, H3); no model text (D5); no
@@ -4304,6 +4315,11 @@ pub fn start_locked(
         }
     }
     if opts.policy.is_some() {
+        // #1243 S1: the scenario helpers read every branch's declared tables
+        // directly, outside the policy's views — not combined yet.
+        if opts.scenarios_opts.is_some() {
+            return Err("anofox-visualization: options.scenarios can't be combined with an access policy yet (#1243)".into());
+        }
         // The policy resolves unqualified names in one database's `main`
         // schema: a search path must not send them anywhere else.
         if opts.search_path.len() > 1
@@ -7425,6 +7441,129 @@ fn load_dashboards(dir: &Path, folders: bool) -> Result<(Vec<Dash>, Vec<String>)
     Ok((out, loads))
 }
 
+/// #1243 S1: with `options.scenarios`, attach every scenario of its database
+/// (up to `max_scenarios`, by id) to the snapshot connection `c` as
+/// `scn_<id>`, read-only because the host is; returns the statements each
+/// request connection runs after `enter` (the read helpers). Also refuses a
+/// dashboard that calls one of anofox-scenario's write functions whenever
+/// the extension is loaded here (DataZooDE/anofox-scenario#66: on a
+/// read-only host they still change what this long-lived session reads).
+fn attach_scenarios(
+    c: &Conn,
+    opts: &LockedOptions,
+    dashes: &DashSet,
+    default_db: &str,
+) -> Result<Vec<String>, String> {
+    use anofox_visualization::host::scenarios as scn;
+    let loaded = c
+        .query(
+            "SELECT count(*)::VARCHAR FROM duckdb_extensions() \
+             WHERE loaded AND extension_name = 'anofox_scenario'",
+        )?
+        .string_rows(1)?
+        .into_iter()
+        .next()
+        .and_then(|r| r.into_iter().next().flatten())
+        .is_some_and(|n| n != "0");
+    if loaded {
+        for d in &dashes.list {
+            for (i, (_, sql)) in d.stmts.iter().enumerate() {
+                let calls = scn::write_calls(sql);
+                if !calls.is_empty() {
+                    return Err(format!(
+                        "dashboard '{}' statement {i} calls {}: a dashboard may only read \
+                         scenarios (on a locked server a write would change what every \
+                         viewer reads; DataZooDE/anofox-scenario#66)",
+                        d.id,
+                        calls.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    let Some(o) = &opts.scenarios_opts else {
+        return Ok(Vec::new());
+    };
+    if !loaded {
+        return Err(
+            "options.scenarios needs the anofox_scenario extension: INSTALL anofox_scenario \
+             FROM community, then LOAD it in the serving session"
+                .into(),
+        );
+    }
+    if !o.database.eq_ignore_ascii_case(default_db) {
+        return Err(format!(
+            "options.scenarios.database '{}' must be the dashboards' default database \
+             ('{default_db}', the current one or options.search_path's first)",
+            o.database
+        ));
+    }
+    c.exec(&format!("USE {}", quote_ident(&o.database)))?;
+    let rows = c
+        .query(&format!(
+            "SELECT scenario_id::VARCHAR, name::VARCHAR FROM scenario_list() \
+             ORDER BY scenario_id LIMIT {}",
+            o.max_scenarios
+        ))?
+        .string_rows(o.max_scenarios)?;
+    let mut attached = Vec::new();
+    for r in rows {
+        let (Some(id), Some(name)) = (
+            r[0].as_deref().and_then(|v| v.parse::<i64>().ok()),
+            r[1].clone(),
+        ) else {
+            continue;
+        };
+        let a = scn::Attached {
+            name,
+            alias: scn::alias(id),
+        };
+        c.exec(&scn::attach_sql(&a))
+            .map_err(|e| format!("scenario '{}': {}", a.name, e.lines().next().unwrap_or("")))?;
+        attached.push(a);
+    }
+    Ok(scn::helpers_sql(&o.database, &o.tables, &attached))
+}
+
+/// [`copy_database`], allowing anofox-scenario's internal schema to be copied
+/// (#1243): with the extension loaded, `__anofox_scenario` is read-only for
+/// SQL, so a database holding scenarios couldn't be snapshotted at all. The
+/// setting is on for this copy only, on the live session (never the
+/// snapshot), and reset even when the copy fails.
+fn copy_with_scenarios(
+    live: &Conn,
+    src: &str,
+    dst: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    use anofox_visualization::host::scenarios::INTERNAL_SCHEMA;
+    let count = |sql: String| -> Result<bool, String> {
+        Ok(live
+            .query(&sql)?
+            .string_rows(1)?
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next().flatten())
+            .is_some_and(|n| n != "0"))
+    };
+    let guarded = count(
+        "SELECT count(*)::VARCHAR FROM duckdb_extensions() \
+         WHERE loaded AND extension_name = 'anofox_scenario'"
+            .into(),
+    )? && count(format!(
+        "SELECT count(*)::VARCHAR FROM duckdb_schemas() WHERE database_name = {} AND schema_name = {}",
+        sql_string_literal(src),
+        sql_string_literal(INTERNAL_SCHEMA)
+    ))?;
+    if !guarded {
+        return copy_database(live, src, dst, warnings);
+    }
+    live.exec("SET anofox_scenario_allow_internal_writes = true")?;
+    let r = copy_database(live, src, dst, warnings);
+    let reset = live.exec("RESET anofox_scenario_allow_internal_writes");
+    r.and(reset)
+}
+
 /// Copy the DuckDB database `src` into the empty, attached `dst` (#283).
 /// Without foreign keys: `COPY FROM DATABASE`. With them, DuckDB inserts every
 /// table in one plan and a child's FK check doesn't see its parent's rows
@@ -7891,7 +8030,7 @@ fn build_snapshot(
             sql_string_literal(&f),
             quote_ident(&alias)
         ))?;
-        let r = copy_database(live, &name, &alias, &mut warnings);
+        let r = copy_with_scenarios(live, &name, &alias, &mut warnings);
         let d = live.exec(&format!("DETACH {}", quote_ident(&alias)));
         r.and(d)
             .map_err(|e| format!("snapshot of '{name}' failed: {e}"))?;
@@ -7932,7 +8071,7 @@ fn build_snapshot(
         }
         copied.push((name, file));
     }
-    let enter = match opts.search_path.split_first() {
+    let mut enter = match opts.search_path.split_first() {
         None => format!("USE {}", quote_ident(&default_db)),
         Some(((db, schema), rest)) => {
             let qualified = |db: &String, schema: &Option<String>| match schema {
@@ -7996,6 +8135,7 @@ fn build_snapshot(
     // catalog is called "memory", which only matters if a source has that name.)
     let db = Database::open(":memory:", &cfg)?;
     let nav_picker_snapshots;
+    let scenario_enter: Vec<String>;
     {
         let c = db.connect()?;
         if copied
@@ -8027,6 +8167,11 @@ fn build_snapshot(
         if opts.data.is_some() || opts.agent.is_some() {
             exts.push(&json);
         }
+        // #1243: the scenarios need anofox-scenario in the snapshot
+        let scenario_ext = "anofox_scenario".to_string();
+        if opts.scenarios_opts.is_some() {
+            exts.push(&scenario_ext);
+        }
         exts.sort();
         exts.dedup();
         for e in exts {
@@ -8051,6 +8196,9 @@ fn build_snapshot(
                 warnings.push(format!("LOAD {e}: {first}"));
             }
         }
+        // #1243 S1: the scenarios, attached read-only before the lockdown;
+        // each request connection gets the read helpers with `enter`
+        scenario_enter = attach_scenarios(&c, opts, dashes, &default_db)?;
         if let Some(data) = &opts.data {
             let d = data.to_string_lossy();
             c.exec(&format!(
@@ -8085,9 +8233,17 @@ fn build_snapshot(
         c.exec(&format!("ATTACH ':memory:' AS {MAT_DB}"))?;
         c.exec("SET enable_external_access = false")?;
         c.exec("SET lock_configuration = true")?;
+        if !scenario_enter.is_empty() {
+            enter = format!("{enter}; {}", scenario_enter.join("; "));
+        }
         // Fail now, not on every request (e.g. a schema that doesn't exist).
+        let what = if scenario_enter.is_empty() {
+            "options.search_path"
+        } else {
+            "options.search_path / options.scenarios"
+        };
         c.exec(&enter)
-            .map_err(|e| format!("options.search_path: {}", e.lines().next().unwrap_or("")))?;
+            .map_err(|e| format!("{what}: {}", e.lines().next().unwrap_or("")))?;
         nav_picker_snapshots = opts
             .nav_pickers
             .iter()
@@ -13626,6 +13782,20 @@ mod tests {
         // its own, so a request for its panel (1) is gated on index 0 but
         // trivially met (`met()` is `true` when `reqs.is_empty()`).
         assert_eq!(tabs[1], vec![0]);
+    }
+
+    #[test]
+    fn scenario_options() {
+        // #1243 S1
+        let o = LockedOptions::parse(Some(
+            r#"{"scenarios": {"database": "warehouse", "tables": ["plan"]}}"#,
+        ))
+        .unwrap();
+        assert_eq!(o.scenarios_opts.unwrap().tables, ["plan"]);
+        let e = LockedOptions::parse(Some(r#"{"scenarios": {"tables": ["plan"]}}"#))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(e.contains("options.scenarios.database is required"), "{e}");
     }
 
     #[test]

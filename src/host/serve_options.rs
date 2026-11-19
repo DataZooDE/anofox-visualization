@@ -109,6 +109,7 @@ pub const SERVER_OPTION_KEYS: &[(&str, SiteOptionKind)] = &[
     // #760: tiles come through the server's /api/tiles; a site gets them
     // embedded at build time (`dashboard --site --basemap`), not this key.
     ("basemap", SiteOptionKind::ServerOnly),
+    ("scenarios", SiteOptionKind::Refused),
 ];
 
 /// `None` for a key that isn't one of `anofox_serve_dashboards`'s options at

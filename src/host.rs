@@ -47,6 +47,7 @@ pub mod notes;
 pub mod notify;
 pub mod openai;
 pub mod policy;
+pub mod scenarios;
 pub mod serve_options;
 pub mod serving;
 pub mod site_css;
