@@ -10976,6 +10976,13 @@ fn locked_panel_req(
     // would otherwise poison requests that only share that panel's real
     // inputs), and a miss in the analysis gives NULL for that variable to
     // every viewer instead of leaking a value computed for another one.
+    // #1243 S1: on a dashboard with a ::SCENARIO picker every panel reads
+    // the picked scenario (through the search path, not getvariable), so the
+    // picker's variable is part of every key — or a branch's request could
+    // be answered with main's cached rows, and its SET would be dropped.
+    if let (Some(v), false) = (&dash.scenario_var, gen.snap.scenarios.is_empty()) {
+        key_deps.extend(&Deps::Vars([v.to_ascii_lowercase()].into_iter().collect()));
+    }
     if !key_deps.is_all() {
         r.vars.retain(|(n, _)| key_deps.contains(n));
     }
