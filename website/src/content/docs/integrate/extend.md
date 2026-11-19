@@ -21,7 +21,7 @@ A build without the module stops with *This dashboard needs the module 'hello'* 
 | Can bring | roles, panels, `--check` warnings, SQL macros, contract plots, browser files | roles, panels, `--check` warnings, contract macros (the host writes their SQL), browser files (only where the operator allows them: they run in the page) |
 | Runs | with the rights of the program | in a sandbox: no files, network, clock or randomness; a CPU budget per call; 64 MiB of memory |
 | Licence of the kit | — | the plugin SDK is MIT OR Apache-2.0: ship your plugin under any licence |
-| Status | available, interface may change | new: the `dashboard` CLI, `serve`, the browser builder (`plugins.json`) and the DuckDB extension's `anofox_serve_dashboards` (`options.plugins`). Factor graphs ship as one ([#1218](https://github.com/DataZooDE/anofox-visualization/issues/1218)) |
+| Status | available, interface may change | new: the `dashboard` CLI, `serve`, the browser builder (`plugins.json`) and the DuckDB extension's `anofox_serve_dashboards` (`options.plugins`). Factor graphs ship as one ([#1218](https://github.com/DataZooDE/anofox-visualization/issues/1218)), Bayesian networks too ([#1275](https://github.com/DataZooDE/anofox-visualization/issues/1275)) |
 
 ## A plugin in a few lines
 

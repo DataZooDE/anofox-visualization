@@ -1,5 +1,5 @@
 -- @page Interactions and special features
--- @lead Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, a Bayesian network's automatic analysis — each a few lines of SQL.
+-- @lead Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, Bayesian networks and their automatic analysis — each a few lines of SQL.
 CREATE TABLE geo AS SELECT * FROM (VALUES
   ('EU','Germany','Berlin'),('EU','Germany','Munich'),('EU','France','Paris'),('EU','France','Lyon'),
   ('Americas','USA','New York'),('Americas','USA','Chicago'),('Americas','Canada','Toronto'),
@@ -155,3 +155,26 @@ SELECT cost ::XAXIS, mi AS "question" ::SCATTER, CASE WHEN efficient THEN mi END
        CASE WHEN efficient THEN test END ::LABEL, 'log10'::XSCALE, 'cost (minutes)'::XTITLE, 'information (bits)'::YTITLE,
        'Which question to ask next'::TITLE
 FROM v ORDER BY cost;
+
+-- @tile A Bayesian network | `anofox_plot_bayes_net` draws a Bayesian network from an engine's tables — a bar per state, the prior faint behind it, the observed node shaded. Hover a node for its probability table.
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE bn_nodes AS
+SELECT * FROM (VALUES ('cloudy', 'Cloudy', 'chance'), ('sprinkler', 'Sprinkler on', 'chance'),
+                      ('rain', 'Rain', 'chance'), ('grass', 'Wet grass', 'observed')) t(id, label, kind), (SELECT ['yes', 'no'] AS states);
+-- exact beliefs with the grass seen wet, and before (prior)
+CREATE TABLE bn_beliefs AS
+SELECT node, s.state, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS probability, CASE s.state WHEN 'yes' THEN q ELSE 1 - q END AS prior
+FROM (VALUES ('cloudy', 0.5758, 0.5), ('sprinkler', 0.4298, 0.3), ('rain', 0.7079, 0.5), ('grass', 1.0, 0.6471)) t(node, p, q),
+     (VALUES ('yes'), ('no')) s(state);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'cloudy', 'to': 'sprinkler'}, {'from': 'cloudy', 'to': 'rain'},
+                  {'from': 'sprinkler', 'to': 'grass'}, {'from': 'rain', 'to': 'grass'}],
+         beliefs := (SELECT list(b) FROM bn_beliefs b),
+         evidence := [{'node': 'grass', 'state': 'yes'}],
+         tables := [{'node': 'rain', 'parent_states': ['yes'], 'state': 'yes', 'probability': 0.8},
+                    {'node': 'rain', 'parent_states': ['yes'], 'state': 'no', 'probability': 0.2},
+                    {'node': 'rain', 'parent_states': ['no'], 'state': 'yes', 'probability': 0.2},
+                    {'node': 'rain', 'parent_states': ['no'], 'state': 'no', 'probability': 0.8}])
+       AS "The grass is wet: did it rain?"
+FROM bn_nodes n;
