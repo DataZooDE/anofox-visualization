@@ -1108,6 +1108,7 @@ const FILE_SAMPLES = [
   "examples/drill-revenue-map.sql",
   "examples/statistics-ab-test.sql",
   "examples/statistics-churn-drivers.sql",
+  "examples/bayes-auto-eda.sql",
   "examples/decide-leads.sql",
   "examples/statistics-showcase.sql",
   "examples/forecast-callcentre-staffing.sql",

@@ -1,6 +1,6 @@
 ---
 title: "Interactions and special features"
-description: "Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs — each a few lines of SQL."
+description: "Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, a Bayesian network's automatic analysis — each a few lines of SQL."
 tableOfContents: false
 sidebar:
   order: 50
@@ -32,8 +32,16 @@ import t12l from "../../../assets/gallery/features/12-light.webp";
 import t12d from "../../../assets/gallery/features/12-dark.webp";
 import t13l from "../../../assets/gallery/features/13-light.webp";
 import t13d from "../../../assets/gallery/features/13-dark.webp";
+import t14l from "../../../assets/gallery/features/14-light.webp";
+import t14d from "../../../assets/gallery/features/14-dark.webp";
+import t15l from "../../../assets/gallery/features/15-light.webp";
+import t15d from "../../../assets/gallery/features/15-dark.webp";
+import t16l from "../../../assets/gallery/features/16-light.webp";
+import t16d from "../../../assets/gallery/features/16-dark.webp";
+import t17l from "../../../assets/gallery/features/17-light.webp";
+import t17d from "../../../assets/gallery/features/17-dark.webp";
 
-Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs — each a few lines of SQL.
+Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, a Bayesian network's automatic analysis — each a few lines of SQL.
 
 <details class="gal-data">
 <summary>The sample data every tile on this page uses</summary>
@@ -328,7 +336,7 @@ FROM (VALUES ('feed', 'Order feed', []::VARCHAR[], 'Ingest'), ('clean', 'Clean a
 </div>
 
 <div class="gal-tile">
-
+<div class="gal-pic"><img class="lp-light" src={t14l.src} alt="" loading="lazy" /><img class="lp-dark" src={t14d.src} alt="" loading="lazy" /></div>
 <div class="gal-text">
 
 ### A factor graph
@@ -359,6 +367,81 @@ FROM fg_nodes n;
 ```
 
 <a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdmYWN0b3ItZ3JhcGgnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBmZ19ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCd0aCcsICd2YXJpYWJsZScsICd0aGV0YScsICdcdGhldGEnLCBOVUxMLCAncGFyYW0nLCBOVUxMKSwgKCdlcScsICdlcXVhbGl0eScsICc9JywgJz0nLCBOVUxMLCAncGFyYW0nLCBOVUxMKSwKICAgICAgICAgICAgICAgICAgICAgICgncHInLCAnZmFjdG9yJywgJ0JldGEnLCAnQmV0YScsIE5VTEwsICdwYXJhbScsIE5VTEwpLCAoJ2EnLCAnY29uc3RhbnQnLCAnMicsICcyJywgTlVMTCwgJ3BhcmFtJywgTlVMTCksCiAgICAgICAgICAgICAgICAgICAgICAoJ2InLCAnY29uc3RhbnQnLCAnMycsICczJywgTlVMTCwgJ3BhcmFtJywgTlVMTCkpIHQoaWQsIGtpbmQsIG5hbWUsIGxhYmVsLCBzbGljZSwgbGF5ZXIsIHBsYXRlKQpVTklPTiBBTEwgU0VMRUNUICd5JyB8fCBpLCAnZGF0YScsICd5WycgfHwgaSB8fCAnXScsICd5X3snIHx8IGkgfHwgJ30nLCBpOjpWQVJDSEFSLCAnb2JzJywgJ3knIEZST00gcmFuZ2UoNCkgcihpKQpVTklPTiBBTEwgU0VMRUNUICdmJyB8fCBpLCAnZmFjdG9yJywgJ0Jlcm5vdWxsaScsICdCZXJub3VsbGknLCBpOjpWQVJDSEFSLCAnb2JzJywgJ3knIEZST00gcmFuZ2UoNCkgcihpKTsKQ1JFQVRFIFRBQkxFIGZnX2VkZ2VzIEFTClNFTEVDVCAqIEZST00gKFZBTFVFUyAoJ3RoJywgJ2VxJywgTlVMTCwgMCksICgnZXEnLCAncHInLCAnb3V0JywgMCksICgnYScsICdwcicsICdhJywgMSksICgnYicsICdwcicsICdiJywgMikpIHQodmFyaWFibGUsIGZhY3RvciwgaW50ZXJmYWNlLCBzZXEpClVOSU9OIEFMTCBTRUxFQ1QgJ3knIHx8IGksICdmJyB8fCBpLCAnb3V0JywgMCBGUk9NIHJhbmdlKDQpIHIoaSkKVU5JT04gQUxMIFNFTEVDVCAnZXEnLCAnZicgfHwgaSwgJ3AnLCAxIEZST00gcmFuZ2UoNCkgcihpKTsKLS0gzrggfiBCZXRhKDIsIDMpOyB0aHJlZSBvZiBmb3VyIHJldHVybnMgZGVmZWN0aXZlIOKGkiBCZXRhKDUsIDQpClNFTEVDVCBhbm9mb3hfcGxvdF9mYWN0b3JfZ3JhcGgobiwKICAgICAgICAgZWRnZXMgOj0gKFNFTEVDVCBsaXN0KGUpIEZST00gZmdfZWRnZXMgZSksCiAgICAgICAgIG1hcmdpbmFscyA6PSBbeyd2YXJpYWJsZSc6ICd0aCcsICdpdGVyYXRpb24nOiAxLCAnbWVhbic6IDUgLyA5LCAnc2QnOiAwLjE1NzEsICdmYW1pbHknOiAnQmV0YSd9XSwKICAgICAgICAgc2NoZWR1bGUgOj0gKFNFTEVDVCBsaXN0KHsnaXRlcmF0aW9uJzogMSwgJ3N0ZXAnOiBpICsgMSwgJ3ZhcmlhYmxlJzogJ2VxJywgJ2ZhY3Rvcic6IGYsICdpbnRlcmZhY2UnOiAncCcsICdkaXJlY3Rpb24nOiAndG9fdmFyaWFibGUnfSkKICAgICAgICAgICAgICAgICAgICAgIEZST00gKFNFTEVDVCAncHInIEFTIGYsIDAgQVMgaSBVTklPTiBBTEwgU0VMRUNUICdmJyB8fCBpLCBpICsgMSBGUk9NIHJhbmdlKDQpIHIoaSkpKSkKICAgICAgIEFTICJXaGF0IHNoYXJlIG9mIHJldHVybmVkIHVuaXRzIGlzIGRlZmVjdGl2ZT8iCkZST00gZmdfbm9kZXMgbjsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t15l.src} alt="" loading="lazy" /><img class="lp-dark" src={t15d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### What drives a target
+
+A Bayesian network's automatic analysis: how common each state is among churners and the rest, as a `::DUMBBELL` named by its two columns, the lift as a `::LABEL`.
+
+```sql
+SELECT 12::COL;
+SELECT node || ' = ' || state ::DUMBBELL, 100 * p_not AS "stayed" ::XMIN, 100 * p_churn AS "churned" ::XMAX,
+       '×' || printf('%.1f', p_churn / (0.18 * p_churn + 0.82 * p_not)) ::LABEL, 'percent'::YFORMAT,
+       'What sets churners apart'::TITLE
+FROM (VALUES ('payment failed', 'yes', 0.21, 0.05), ('support tickets', '3 or more', 0.45, 0.12),
+             ('usage', 'falling', 0.58, 0.17), ('tenure', 'under 1 year', 0.52, 0.21),
+             ('contract', 'monthly', 0.86, 0.47), ('onboarded', 'yes', 0.51, 0.73),
+             ('usage', 'rising', 0.11, 0.28), ('contract', 'annual', 0.14, 0.53)) t(node, state, p_churn, p_not)
+ORDER BY p_churn / (0.18 * p_churn + 0.82 * p_not) DESC;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCBub2RlIHx8ICcgPSAnIHx8IHN0YXRlIDo6RFVNQkJFTEwsIDEwMCAqIHBfbm90IEFTICJzdGF5ZWQiIDo6WE1JTiwgMTAwICogcF9jaHVybiBBUyAiY2h1cm5lZCIgOjpYTUFYLAogICAgICAgJ8OXJyB8fCBwcmludGYoJyUuMWYnLCBwX2NodXJuIC8gKDAuMTggKiBwX2NodXJuICsgMC44MiAqIHBfbm90KSkgOjpMQUJFTCwgJ3BlcmNlbnQnOjpZRk9STUFULAogICAgICAgJ1doYXQgc2V0cyBjaHVybmVycyBhcGFydCc6OlRJVExFCkZST00gKFZBTFVFUyAoJ3BheW1lbnQgZmFpbGVkJywgJ3llcycsIDAuMjEsIDAuMDUpLCAoJ3N1cHBvcnQgdGlja2V0cycsICczIG9yIG1vcmUnLCAwLjQ1LCAwLjEyKSwKICAgICAgICAgICAgICgndXNhZ2UnLCAnZmFsbGluZycsIDAuNTgsIDAuMTcpLCAoJ3RlbnVyZScsICd1bmRlciAxIHllYXInLCAwLjUyLCAwLjIxKSwKICAgICAgICAgICAgICgnY29udHJhY3QnLCAnbW9udGhseScsIDAuODYsIDAuNDcpLCAoJ29uYm9hcmRlZCcsICd5ZXMnLCAwLjUxLCAwLjczKSwKICAgICAgICAgICAgICgndXNhZ2UnLCAncmlzaW5nJywgMC4xMSwgMC4yOCksICgnY29udHJhY3QnLCAnYW5udWFsJywgMC4xNCwgMC41MykpIHQobm9kZSwgc3RhdGUsIHBfY2h1cm4sIHBfbm90KQpPUkRFUiBCWSBwX2NodXJuIC8gKDAuMTggKiBwX2NodXJuICsgMC44MiAqIHBfbm90KSBERVNDOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t16l.src} alt="" loading="lazy" /><img class="lp-dark" src={t16d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Variables that hang together
+
+`anofox_plot_matrix(…, cluster := true)` orders a heatmap by hierarchical clustering: related variables sit side by side.
+
+```sql
+SELECT 12::COL;
+SELECT anofox_plot_matrix(t, row := 'a', col := 'b', value := 'mi', cluster := true, domain := [0, 1]),
+       'Which variables hang together'::TITLE
+FROM (VALUES ('churned', 'usage', 0.57), ('churned', 'tickets', 0.47), ('churned', 'contract', 0.35),
+             ('churned', 'tenure', 0.24), ('churned', 'plan', 0.02), ('usage', 'tickets', 0.66),
+             ('usage', 'contract', 0.07), ('usage', 'tenure', 0.05), ('usage', 'plan', 0.04),
+             ('tickets', 'contract', 0.04), ('tickets', 'tenure', 0.03), ('tickets', 'plan', 0.16),
+             ('contract', 'tenure', 0.82), ('contract', 'plan', 0.52), ('tenure', 'plan', 0.38)) t(a, b, mi);
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCBhbm9mb3hfcGxvdF9tYXRyaXgodCwgcm93IDo9ICdhJywgY29sIDo9ICdiJywgdmFsdWUgOj0gJ21pJywgY2x1c3RlciA6PSB0cnVlLCBkb21haW4gOj0gWzAsIDFdKSwKICAgICAgICdXaGljaCB2YXJpYWJsZXMgaGFuZyB0b2dldGhlcic6OlRJVExFCkZST00gKFZBTFVFUyAoJ2NodXJuZWQnLCAndXNhZ2UnLCAwLjU3KSwgKCdjaHVybmVkJywgJ3RpY2tldHMnLCAwLjQ3KSwgKCdjaHVybmVkJywgJ2NvbnRyYWN0JywgMC4zNSksCiAgICAgICAgICAgICAoJ2NodXJuZWQnLCAndGVudXJlJywgMC4yNCksICgnY2h1cm5lZCcsICdwbGFuJywgMC4wMiksICgndXNhZ2UnLCAndGlja2V0cycsIDAuNjYpLAogICAgICAgICAgICAgKCd1c2FnZScsICdjb250cmFjdCcsIDAuMDcpLCAoJ3VzYWdlJywgJ3RlbnVyZScsIDAuMDUpLCAoJ3VzYWdlJywgJ3BsYW4nLCAwLjA0KSwKICAgICAgICAgICAgICgndGlja2V0cycsICdjb250cmFjdCcsIDAuMDQpLCAoJ3RpY2tldHMnLCAndGVudXJlJywgMC4wMyksICgndGlja2V0cycsICdwbGFuJywgMC4xNiksCiAgICAgICAgICAgICAoJ2NvbnRyYWN0JywgJ3RlbnVyZScsIDAuODIpLCAoJ2NvbnRyYWN0JywgJ3BsYW4nLCAwLjUyKSwgKCd0ZW51cmUnLCAncGxhbicsIDAuMzgpKSB0KGEsIGIsIG1pKTsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t17l.src} alt="" loading="lazy" /><img class="lp-dark" src={t17d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### The next question
+
+Information against cost: a `::LINECHART` over a `::SCATTER` joins the rows that have a value — the efficient frontier.
+
+```sql
+SELECT 12::COL;
+WITH v AS (
+    SELECT *, mi > coalesce(max(mi) OVER (ORDER BY cost, mi DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), -1) AS efficient
+    FROM (VALUES ('usage', 0.142, 2.0), ('support tickets', 0.118, 1.0), ('contract', 0.087, 0.5), ('tenure', 0.061, 0.5),
+                 ('payment failed', 0.032, 1.0), ('onboarded', 0.024, 5.0), ('plan', 0.006, 0.5),
+                 ('exit survey', 0.171, 15.0), ('review call', 0.158, 30.0)) t(test, mi, cost))
+SELECT cost ::XAXIS, mi AS "question" ::SCATTER, CASE WHEN efficient THEN mi END AS "efficient frontier" ::LINECHART,
+       CASE WHEN efficient THEN test END ::LABEL, 'log10'::XSCALE, 'cost (minutes)'::XTITLE, 'information (bits)'::YTITLE,
+       'Which question to ask next'::TITLE
+FROM v ORDER BY cost;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUIDEyOjpDT0w7CldJVEggdiBBUyAoCiAgICBTRUxFQ1QgKiwgbWkgPiBjb2FsZXNjZShtYXgobWkpIE9WRVIgKE9SREVSIEJZIGNvc3QsIG1pIERFU0MgUk9XUyBCRVRXRUVOIFVOQk9VTkRFRCBQUkVDRURJTkcgQU5EIDEgUFJFQ0VESU5HKSwgLTEpIEFTIGVmZmljaWVudAogICAgRlJPTSAoVkFMVUVTICgndXNhZ2UnLCAwLjE0MiwgMi4wKSwgKCdzdXBwb3J0IHRpY2tldHMnLCAwLjExOCwgMS4wKSwgKCdjb250cmFjdCcsIDAuMDg3LCAwLjUpLCAoJ3RlbnVyZScsIDAuMDYxLCAwLjUpLAogICAgICAgICAgICAgICAgICgncGF5bWVudCBmYWlsZWQnLCAwLjAzMiwgMS4wKSwgKCdvbmJvYXJkZWQnLCAwLjAyNCwgNS4wKSwgKCdwbGFuJywgMC4wMDYsIDAuNSksCiAgICAgICAgICAgICAgICAgKCdleGl0IHN1cnZleScsIDAuMTcxLCAxNS4wKSwgKCdyZXZpZXcgY2FsbCcsIDAuMTU4LCAzMC4wKSkgdCh0ZXN0LCBtaSwgY29zdCkpClNFTEVDVCBjb3N0IDo6WEFYSVMsIG1pIEFTICJxdWVzdGlvbiIgOjpTQ0FUVEVSLCBDQVNFIFdIRU4gZWZmaWNpZW50IFRIRU4gbWkgRU5EIEFTICJlZmZpY2llbnQgZnJvbnRpZXIiIDo6TElORUNIQVJULAogICAgICAgQ0FTRSBXSEVOIGVmZmljaWVudCBUSEVOIHRlc3QgRU5EIDo6TEFCRUwsICdsb2cxMCc6OlhTQ0FMRSwgJ2Nvc3QgKG1pbnV0ZXMpJzo6WFRJVExFLCAnaW5mb3JtYXRpb24gKGJpdHMpJzo6WVRJVExFLAogICAgICAgJ1doaWNoIHF1ZXN0aW9uIHRvIGFzayBuZXh0Jzo6VElUTEUKRlJPTSB2IE9SREVSIEJZIGNvc3Q7Cg==">Edit it in the builder ↗</a>
 
 </div>
 </div>
