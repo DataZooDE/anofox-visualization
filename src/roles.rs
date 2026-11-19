@@ -592,6 +592,34 @@ pub fn is_directive_panel(roles: &[(usize, Role)]) -> bool {
     roles.iter().any(|(_, r)| !r.renders()) || is_table_thresholds(roles)
 }
 
+/// #685: a layout role (`n::COL`, `n::HEIGHT`, `n::COLUMNS`) makes its whole
+/// statement a layout directive — written inside a panel's own SELECT, the
+/// panel is never drawn. The message saying so, or `None` when the statement
+/// carries no such pair (shared by the linter and the headless render, #1267).
+pub fn inline_layout_message(roles: &[(usize, Role)]) -> Option<String> {
+    let is_layout = |r: &Role| matches!(r, Role::Span | Role::Height | Role::Columns);
+    let lr = roles.iter().map(|(_, r)| *r).find(is_layout)?;
+    let others: Vec<Role> = roles
+        .iter()
+        .map(|(_, r)| *r)
+        .filter(|r| !is_layout(r))
+        .collect();
+    // name the role that would draw the panel (else any other)
+    let other = others
+        .iter()
+        .find(|r| matches!(spec_of(**r).category, "chart" | "kpi" | "table"))
+        .or(others.first())?;
+    // `::COL` is how the docs write the width (::SPAN's alias)
+    let layout = match lr {
+        Role::Span => "::COL".to_string(),
+        r => format!("::{}", r.token()),
+    };
+    Some(format!(
+        "{layout} makes this whole statement a layout directive, so its ::{} is never drawn — put `SELECT n{layout};` on its own line before the panel",
+        other.token()
+    ))
+}
+
 /// A lone `::THRESHOLDS` statement: the next table's per-column rules (a
 /// directive), not a panel. Beside other roles it modifies that panel.
 pub fn is_table_thresholds(roles: &[(usize, Role)]) -> bool {

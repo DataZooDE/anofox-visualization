@@ -541,36 +541,14 @@ where
         // #685: a layout role (`n::COL`, `n::HEIGHT`, `n::COLUMNS`) makes its
         // whole statement a layout directive — written inside a chart's own
         // SELECT, the chart is never drawn (an error: it's always lost).
-        let is_layout = |r: &Role| matches!(r, Role::Span | Role::Height | Role::Columns);
-        if let Some(lr) = p.roles.iter().map(|(_, r)| *r).find(is_layout) {
-            let others: Vec<Role> = p
-                .roles
-                .iter()
-                .map(|(_, r)| *r)
-                .filter(|r| !is_layout(r))
-                .collect();
-            // name the role that would draw the panel (else any other)
-            let shown = others
-                .iter()
-                .find(|r| matches!(roles::spec_of(**r).category, "chart" | "kpi" | "table"))
-                .or(others.first());
-            if let Some(other) = shown {
-                // `::COL` is how the docs write the width (::SPAN's alias)
-                let layout = match lr {
-                    Role::Span => "::COL".to_string(),
-                    r => format!("::{}", r.token()),
-                };
-                diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    stmt,
-                    code: "layout/inline-layout-role",
-                    message: format!(
-                        "{layout} makes this whole statement a layout directive, so its ::{} is never drawn — put `SELECT n{layout};` on its own line before the panel",
-                        other.token()
-                    ),
-                    sql: short.clone(),
-                });
-            }
+        if let Some(message) = roles::inline_layout_message(&p.roles) {
+            diags.push(Diagnostic {
+                severity: Severity::Error,
+                stmt,
+                code: "layout/inline-layout-role",
+                message,
+                sql: short.clone(),
+            });
         }
 
         // This statement closes the open step (the next marker, or having
