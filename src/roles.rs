@@ -388,8 +388,8 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("DOWNLOAD_JSON", &[], R::Download(DownloadFmt::Json), "table", false,
       "JSON export button (the rows as an array of objects)"),
     // ── inputs (the column name becomes getvariable('<name>')) ─────────────
-    e("DROPDOWN", &["OPTIONS", "SELECT_INPUT"], R::Input(InputKind::Dropdown), "input", false,
-      "single-select → a DuckDB variable"),
+    e("DROPDOWN", &["OPTIONS", "SELECT_INPUT", "SCENARIO"], R::Input(InputKind::Dropdown), "input", false,
+      "single-select → a DuckDB variable; as ::SCENARIO (anofox-scenario) on a locked server with options.scenarios, unqualified table names read the picked scenario"),
     e("MULTISELECT", &["MULTI"], R::Input(InputKind::Multiselect), "input", false,
       "multi-select → a list variable"),
     e("NUMBER", &["SLIDER", "NUMERIC"], R::Input(InputKind::Number), "input", false,

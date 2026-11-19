@@ -2045,7 +2045,8 @@ helpers:
 ```
 
 ```sql
-SELECT name AS scenario ::DROPDOWN FROM anofox_scenarios();          -- main + every scenario
+SELECT name AS scenario ::SCENARIO FROM anofox_scenarios();          -- the picker: main + every scenario
+SELECT week ::XAXIS, sum(qty) AS "Planned" ::BARCHART FROM plan GROUP BY 1;  -- reads the picked one
 SELECT scenario ::XAXIS, sum(qty) AS "Planned" ::BARCHART
 FROM anofox_scenario_rows('plan') GROUP BY 1;                       -- the table per scenario
 SELECT sku ::TABLE, change_type, old_value, new_value
@@ -2069,8 +2070,15 @@ FROM anofox_scenario_diff('demand_up', 'plan');                     -- what chan
 - A database holding scenarios is snapshotted with the extension's
   internal schema (the copy allows it for its own duration only), with or
   without `options.scenarios`.
-- Not yet: a `::SCENARIO` picker that switches what unqualified names read,
-  saving into a scenario, approving one (plan:
+- **The picker.** `::SCENARIO` is a `::DROPDOWN`; when a request's value is
+  exactly the name of an attached scenario, the server sets that request's
+  `search_path` to its catalog (followed by `options.search_path`'s further
+  entries), so unqualified names (`FROM plan`) read the branch and the
+  dashboard's SQL doesn't change. `main`, no value or any other value read
+  the base. Such a dashboard always gets a fresh connection (no warm reuse),
+  and its `-- @materialize` statements run per request (no shared result).
+  Without `options.scenarios` it's an ordinary dropdown.
+- Not yet: saving into a scenario, approving one (plan:
   [plan-scenarios.md](plans/plan-scenarios.md)), and combining
   `options.scenarios` with an access policy, an agent mapping or
   `options.preview` (a preview key's SQL could build a write call at run
