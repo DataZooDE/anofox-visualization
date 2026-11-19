@@ -1541,14 +1541,14 @@ if DATAZOO_DISABLE_TELEMETRY=1 "$DUCKDB" -c "INSTALL anofox_scenario FROM commun
   DATAZOO_DISABLE_TELEMETRY=1 "$DUCKDB" "$T/sc.duckdb" -c "LOAD anofox_scenario;
     CREATE TABLE plan (sku VARCHAR PRIMARY KEY, qty INTEGER);
     INSERT INTO plan VALUES ('A', 10), ('B', 20), ('C', 30);
-    CALL scenario_create('demand up', 'demand +10 %');
-    ATTACH 'demand up' AS s (TYPE scenario);
+    CALL scenario_create('demand_up', 'demand +10 %');
+    ATTACH 'demand_up' AS s (TYPE scenario);
     UPDATE s.plan SET qty = qty + 1 WHERE sku = 'A';
     INSERT INTO s.plan VALUES ('D', 5);" >/dev/null
   cat > "$T/scdash/sc.sql" <<'SQL'
 SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenarios();
-SELECT sum(qty)::BIGINT AS q ::METRIC FROM anofox_scenario_rows('plan') WHERE scenario = 'demand up';
-SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_diff('demand up', 'plan');
+SELECT sum(qty)::BIGINT AS q ::METRIC FROM anofox_scenario_rows('plan') WHERE scenario = 'demand_up';
+SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_diff('demand_up', 'plan');
 SELECT sum(qty)::BIGINT AS q ::METRIC FROM plan;
 SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_rows('secret');
 SQL
@@ -1565,7 +1565,7 @@ SQL
   start ":memory:" "" "$(scserve '{"search_path": "warehouse"}')" || fail "a database with scenarios, no options.scenarios: start"
   [ "$(panel 3 '' sc)" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body" || fail "base read without options.scenarios: $(cat "$T/body")"
   stop
-  printf "SELECT n ::METRIC FROM (SELECT tables_changed AS n FROM scenario_merge('demand up', on_conflict := 'ours'));\n" > "$T/scdash/w.sql"
+  printf "SELECT n ::METRIC FROM (SELECT tables_changed AS n FROM scenario_merge('demand_up', on_conflict := 'ours'));\n" > "$T/scdash/w.sql"
   QUIET=1 start ":memory:" "" "$(scserve '{"search_path": "warehouse"}')" && fail "a dashboard calling scenario_merge must not be served"
   grep -q "calls scenario_merge" "$T/out" || fail "the write-function refusal: $(cat "$T/out")"
   exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'

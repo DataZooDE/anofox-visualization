@@ -2049,7 +2049,7 @@ SELECT name AS scenario ::DROPDOWN FROM anofox_scenarios();          -- main + e
 SELECT scenario ::XAXIS, sum(qty) AS "Planned" ::BARCHART
 FROM anofox_scenario_rows('plan') GROUP BY 1;                       -- the table per scenario
 SELECT sku ::TABLE, change_type, old_value, new_value
-FROM anofox_scenario_diff('demand up', 'plan');                     -- what changed (against := 'main')
+FROM anofox_scenario_diff('demand_up', 'plan');                     -- what changed (against := 'main')
 ```
 
 - **`database`** must be the dashboards' default database
@@ -2059,10 +2059,13 @@ FROM anofox_scenario_diff('demand up', 'plan');                     -- what chan
 - **Read-only.** The host is attached read-only, so a write through a
   scenario is refused. A dashboard that calls one of anofox-scenario's
   write functions (`scenario_create`, `_drop`, `_freeze`, `_unfreeze`,
-  `_merge`, `_migrate`, `_refresh`) is refused at start whenever the
-  extension is loaded: on a read-only host they still change what the
-  long-lived snapshot reads
+  `_merge`, `_migrate`, `_refresh`), directly or as SQL text in a string
+  (`query('…')`), is refused at start whenever the extension is loaded: on
+  a read-only host they still change what the long-lived snapshot reads
   ([anofox-scenario#66](https://github.com/DataZooDE/anofox-scenario/issues/66)).
+  That check is a stopgap until #66 is fixed: SQL text built at run time
+  isn't seen, so don't serve dashboards that run `query()` on text a
+  viewer can set while anofox-scenario is loaded.
 - A database holding scenarios is snapshotted with the extension's
   internal schema (the copy allows it for its own duration only), with or
   without `options.scenarios`.

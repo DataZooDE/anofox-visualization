@@ -180,24 +180,47 @@ pub fn helpers_sql(db: &str, tables: &[String], attached: &[Attached]) -> Vec<St
 }
 
 /// The write functions (see [`WRITE_FUNCTIONS`]) `sql` calls: a word that is
-/// one of them, followed by `(`, outside strings and comments.
+/// one of them followed by `(`, or such a call inside a string (SQL text
+/// run with `query('…')`). Comments don't count. A stopgap until
+/// anofox-scenario#66: text built at run time (`'scenario_' || 'merge('`)
+/// isn't seen.
 pub fn write_calls(sql: &str) -> Vec<String> {
-    let toks: Vec<_> = lex::tokenize(sql)
-        .into_iter()
-        .filter(|t| !t.is_trivia())
-        .collect();
-    let mut out = Vec::new();
+    let all: Vec<_> = lex::tokenize(sql);
+    let toks: Vec<_> = all.iter().filter(|t| !t.is_trivia()).collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |name: &str| {
+        if !out.iter().any(|o| o == name) {
+            out.push(name.to_string());
+        }
+    };
     for (i, t) in toks.iter().enumerate() {
-        let name = match t.kind {
-            TokKind::Word => t.text(sql).to_ascii_lowercase(),
-            TokKind::QuotedIdent => t.text(sql).trim_matches('"').to_ascii_lowercase(),
-            _ => continue,
-        };
-        if WRITE_FUNCTIONS.contains(&name.as_str())
-            && toks.get(i + 1).is_some_and(|n| n.is_punct(sql, '('))
-            && !out.contains(&name)
-        {
-            out.push(name);
+        match t.kind {
+            TokKind::Word | TokKind::QuotedIdent => {
+                let name = t.text(sql).trim_matches('"').to_ascii_lowercase();
+                if WRITE_FUNCTIONS.contains(&name.as_str())
+                    && toks.get(i + 1).is_some_and(|n| n.is_punct(sql, '('))
+                {
+                    add(&name);
+                }
+            }
+            TokKind::String | TokKind::DollarString => {
+                let text = t.text(sql).to_ascii_lowercase();
+                for f in WRITE_FUNCTIONS {
+                    let mut rest = text.as_str();
+                    while let Some(k) = rest.find(f) {
+                        let before = rest[..k].chars().next_back();
+                        let after = rest[k + f.len()..].trim_start();
+                        if !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                            && after.starts_with('(')
+                        {
+                            add(f);
+                            break;
+                        }
+                        rest = &rest[k + f.len()..];
+                    }
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -301,7 +324,15 @@ mod tests {
             write_calls("CALL Scenario_Create('x'); SELECT \"scenario_drop\"('y')"),
             ["scenario_create", "scenario_drop"]
         );
-        assert!(write_calls("SELECT 'scenario_merge(' AS t -- scenario_freeze(\n").is_empty());
+        // as SQL text for query(), too; a comment or a longer name is not a call
+        assert_eq!(
+            write_calls("SELECT * FROM query('SELECT * FROM scenario_merge (''x'')')"),
+            ["scenario_merge"]
+        );
+        assert!(
+            write_calls("SELECT 'see scenario_merge_preview(' AS t -- scenario_freeze(\n")
+                .is_empty()
+        );
         assert!(
             write_calls("SELECT * FROM scenario_diff('a', 'plan'), scenario_list()").is_empty()
         );
