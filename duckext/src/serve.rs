@@ -13466,6 +13466,14 @@ fn served_index(
                 })
                 .collect();
             cfg["deps"] = serde_json::json!(ds);
+            // #1271: the page keys and re-runs every statement on the picker
+            if let Some(v) = dash
+                .scenario_var
+                .as_ref()
+                .filter(|_| !gen.snap.scenarios.is_empty())
+            {
+                cfg["scenarioVar"] = serde_json::json!(v);
+            }
             cfg["depsTag"] = serde_json::json!(h.deps_tag(&gen));
         }
     }

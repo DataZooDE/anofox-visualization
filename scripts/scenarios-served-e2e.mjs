@@ -1,7 +1,7 @@
 // Scenarios on a real locked server (#1243 S1): anofox-scenario's branches
 // attached read-only, the ::SCENARIO picker in the page (main + every
 // scenario), a ?v.scenario= seed that makes unqualified names read the
-// branch (picking in the page: #1271), the per-scenario rows and the diff helpers, and a hard reload on
+// branch, picking in the page (#1271), the per-scenario rows and the diff helpers, and a hard reload on
 // main. Needs a native extension build with the real UI embedded (CI's
 // `web-e2e` job builds it, #590) and anofox_scenario from the community
 // repository (skipped, exit 0, when it can't be installed).
@@ -109,8 +109,13 @@ try {
   const grid = await page.locator(".grid").first().textContent();
   check(/demand_up/.test(grid) && /Dadded|D\s+added/.test(grid) && /modified/.test(grid), `rows per scenario and the diff (D added) are drawn (${grid.slice(0, 300)})`);
 
-  // Picking in the page doesn't re-run the panels yet (#1271): the seed below
-  // is what reads the branch.
+  // #1271: picking re-runs the panels on the branch, and back on main
+  await page.selectOption(".dash select[aria-label=scenario]", { label: "demand_up" });
+  await page.waitForFunction(() => document.querySelector(".metric-value")?.textContent === "66", null, { timeout: 15000 }).catch(() => {});
+  check((await kpi()) === "66", `picking demand_up reads the branch (${await kpi()})`);
+  await page.selectOption(".dash select[aria-label=scenario]", { label: "main" });
+  await page.waitForFunction(() => document.querySelector(".metric-value")?.textContent === "60", null, { timeout: 15000 }).catch(() => {});
+  check((await kpi()) === "60", `picking main again reads the base (${await kpi()})`);
 
   await page.goto(`http://127.0.0.1:${port}/d/plan?v.scenario=demand_up`);
   await settled();

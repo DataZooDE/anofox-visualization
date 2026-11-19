@@ -9586,7 +9586,11 @@ function patchSlots(roots, newRoots, swaps) {
 // fresh run) get a placeholder shimmer + aria-busy; the rest stay untouched.
 // The first run, with nothing on screen yet, draws skeleton cards instead (a
 // tabbed dashboard's panels live in .tabwrap, outside the grid).
-const varsOf = (sql) => [...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]);
+// #1271: on a locked server with scenarios, every statement reads the
+// ::SCENARIO picker's choice through the search path, so its value is part of
+// every statement's signature (cache key, re-run), not only of those naming it
+// with getvariable(). One line: tests/web lift this declaration as it is.
+const varsOf = (sql) => ((own, pick) => (pick && !own.some((v) => v.toLowerCase() === String(pick).toLowerCase()) ? [...own, pick] : own))([...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]), typeof window !== "undefined" && window.__served && window.__served.scenarioVar);
 
 // #416: the dashboard's own `SET VARIABLE` setup statements that need a
 // corrective re-run once every viewer value (an input's pick, a URL seed, a
