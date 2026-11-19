@@ -8324,6 +8324,14 @@ fn build_snapshot(
 /// the base). The value must match an attached name exactly.
 fn scenario_path(gen: &Generation<Snapshot>, dash: &Dash, r: &sv::PanelRequest) -> Option<String> {
     let var = dash.scenario_var.as_deref()?;
+    // a statement that names scenarios itself keeps the base (see names_scenarios)
+    if dash
+        .stmts
+        .get(r.panel)
+        .is_some_and(|(_, sql)| anofox_visualization::host::scenarios::names_scenarios(sql))
+    {
+        return None;
+    }
     let lit = r
         .vars
         .iter()
@@ -13439,7 +13447,25 @@ fn served_index(
     // A file's or a preview's (#770).
     if let Ok(h) = DashHeld::resolve(st, &gen, &dash.id) {
         if let Some(ds) = h.deps(&gen) {
-            cfg["deps"] = serde_json::json!(ds.iter().map(Deps::to_json).collect::<Vec<_>>());
+            // #1243 S1: on a ::SCENARIO picker dashboard every statement
+            // reads the picked scenario (through the search path), so the
+            // page re-requests — and keys its own cache on — the picker too
+            let picker: Option<Deps> = dash
+                .scenario_var
+                .as_ref()
+                .filter(|_| !gen.snap.scenarios.is_empty())
+                .map(|v| Deps::Vars([v.to_ascii_lowercase()].into_iter().collect()));
+            let ds: Vec<serde_json::Value> = ds
+                .iter()
+                .map(|d| {
+                    let mut d = d.clone();
+                    if let Some(p) = &picker {
+                        d.extend(p);
+                    }
+                    d.to_json()
+                })
+                .collect();
+            cfg["deps"] = serde_json::json!(ds);
             cfg["depsTag"] = serde_json::json!(h.deps_tag(&gen));
         }
     }

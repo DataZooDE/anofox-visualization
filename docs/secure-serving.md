@@ -2077,6 +2077,11 @@ FROM anofox_scenario_diff('demand_up', 'plan');                     -- what chan
   dashboard's SQL doesn't change. `main`, no value or any other value read
   the base. Such a dashboard always gets a fresh connection (no warm reuse),
   and its `-- @materialize` statements run per request (no shared result).
+  A statement that names scenarios itself (`anofox_scenarios()`, the
+  helpers, `scenario_*`) keeps the base path: anofox-scenario finds its
+  registry through the search path's first catalog. Picking in the page
+  doesn't re-run the panels yet ([#1271](https://github.com/DataZooDE/anofox-visualization/issues/1271)); a
+  `?v.scenario=` link does.
   Without `options.scenarios` it's an ordinary dropdown.
 - Not yet: saving into a scenario, approving one (plan:
   [plan-scenarios.md](plans/plan-scenarios.md)), and combining

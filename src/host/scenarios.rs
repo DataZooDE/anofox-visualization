@@ -273,6 +273,20 @@ pub fn search_path_sql(
     ))
 }
 
+/// Whether a statement works with scenarios explicitly (the helpers or
+/// anofox-scenario's own functions). Such a statement keeps the base search
+/// path: anofox-scenario finds its registry through the search path's first
+/// catalog, so on a branch's `scenario_list()` is empty and `scenario_diff`
+/// fails — and it names its branches itself anyway.
+pub fn names_scenarios(sql: &str) -> bool {
+    lex::tokenize(sql).iter().any(|t| {
+        matches!(t.kind, TokKind::Word | TokKind::QuotedIdent) && {
+            let w = t.text(sql).trim_matches('"').to_ascii_lowercase();
+            w.starts_with("anofox_scenario") || w.starts_with("scenario_")
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +326,21 @@ mod tests {
         for v in [Some("main"), Some("Demand_up"), Some("x'; DROP"), None] {
             assert_eq!(search_path_sql(v, &a, &[]), None, "{v:?}");
         }
+    }
+
+    #[test]
+    fn statements_that_name_scenarios_keep_the_base() {
+        assert!(names_scenarios(
+            "SELECT name AS s ::SCENARIO FROM anofox_scenarios()"
+        ));
+        assert!(names_scenarios(
+            "SELECT * FROM anofox_scenario_diff('a', 'plan')"
+        ));
+        assert!(names_scenarios("SELECT * FROM scenario_list()"));
+        assert!(!names_scenarios("SELECT sum(qty) ::METRIC FROM plan"));
+        assert!(!names_scenarios(
+            "SELECT 'anofox_scenarios()' AS t ::TEXT FROM plan"
+        ));
     }
 
     #[test]
