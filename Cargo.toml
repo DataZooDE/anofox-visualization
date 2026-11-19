@@ -278,6 +278,9 @@ required-features = ["wasm"]
 # What changed and why: vendor/tiny_http/PATCHES.md.
 [patch.crates-io]
 tiny_http = { path = "vendor/tiny_http" }
+# #1277: hclust (sipemu/ggplot-rs#526) until ggplot-rs 0.61.0 is released —
+# then drop this line and bump the dependency above.
+ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", branch = "feat/hclust-order" }
 
 # The wasm build only (web/pkg, `wasm-pack build --profile wasm …`, #312).
 # Separate from [profile.release] (native DuckDB extension + the `serve`/
