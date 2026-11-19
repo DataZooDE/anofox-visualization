@@ -501,8 +501,9 @@ dependencies = [
 
 [[package]]
 name = "ggplot-rs"
-version = "0.60.0"
-source = "git+https://github.com/sipemu/ggplot-rs?branch=feat%2Fhclust-order#78e49094607a6af7801d1beeac7812d6910cf4ac"
+version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2fc27b47c1971bfc9c0d4c57cff5fedf3db3daff2167768f0d2e5776e750d3a"
 dependencies = [
  "indexmap",
 ]

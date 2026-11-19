@@ -189,13 +189,14 @@ crate-type = ["cdylib", "rlib"]
 # 0.58.0 (sipemu/ggplot-rs#518, #1202): landmark points (few, large, one category) drawn last over a halo.
 # 0.59.0 (sipemu/ggplot-rs#520, #1256, #1235): SignSplit on line/area/density; distribution d/p/q.
 # 0.60.0 (sipemu/ggplot-rs#524, #1263): the digest names a series' counter move, peaks, who leads per x.
+# 0.61.0 (sipemu/ggplot-rs#526, #1277): hclust — a heatmap's clustering order.
 # 0.49.0 (sipemu/ggplot-rs#506, #1166): glyph factors; bus edges labelled by tooltip.
 # 0.48.1 (sipemu/ggplot-rs#505): a factor graph's parameter edges run as a bus.
 # 0.48.0 (sipemu/ggplot-rs#493–#497): stacks follow the fill levels; an
 # unmapped column named like an aesthetic changes nothing; factor-graph shapes
 # and the banded layout (#1151).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.60.0", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.61.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # The drawing-only SVG check (src/svg_safe.rs): `--site`'s assets and runtime
 # plugins' panels, natively and in the browser build (#1213).
@@ -278,9 +279,6 @@ required-features = ["wasm"]
 # What changed and why: vendor/tiny_http/PATCHES.md.
 [patch.crates-io]
 tiny_http = { path = "vendor/tiny_http" }
-# #1277: hclust (sipemu/ggplot-rs#526) until ggplot-rs 0.61.0 is released —
-# then drop this line and bump the dependency above.
-ggplot-rs = { git = "https://github.com/sipemu/ggplot-rs", branch = "feat/hclust-order" }
 
 # The wasm build only (web/pkg, `wasm-pack build --profile wasm …`, #312).
 # Separate from [profile.release] (native DuckDB extension + the `serve`/
