@@ -1552,6 +1552,8 @@ SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_diff('demand_up', 'pl
 SELECT sum(qty)::BIGINT AS q ::METRIC FROM plan;
 SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_rows('secret');
 SQL
+  # the picker: unqualified names read the picked scenario
+  printf "SELECT name AS scenario ::SCENARIO FROM anofox_scenarios();\nSELECT sum(qty)::BIGINT AS q ::METRIC FROM plan;\n" > "$T/scdash/sp.sql"
   scserve() { echo "LOAD anofox_scenario; ATTACH $(q "$T/sc.duckdb") AS warehouse; SELECT anofox_serve_dashboards($(q "$T/scdash"), $PORT, $(q "$1"));"; }
   export DATAZOO_DISABLE_TELEMETRY=1
   start ":memory:" "" "$(scserve '{"search_path": "warehouse", "scenarios": {"database": "warehouse", "tables": ["plan"]}}')" || fail "scenarios: start"
@@ -1560,6 +1562,11 @@ SQL
     [ "$(panel "$i" '' sc)" = 200 ] && grep -qE "\"c0\":$want(\.0)?[,}]" "$T/body" || fail "scenarios panel $i: want $want: $(cat "$T/body")"
   done
   [ "$(panel 4 '' sc)" = 400 ] && grep -q "is not one of options.scenarios.tables" "$T/body" || fail "an undeclared table: $(cat "$T/body")"
+  [ "$(panel 1 '{"scenario":"demand_up"}' sp)" = 200 ] && grep -qE '"c0":66(\.0)?[,}]' "$T/body" || fail "the picked scenario: $(cat "$T/body")"
+  [ "$(panel 1 '{"scenario":"main"}' sp)" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body" || fail "main: $(cat "$T/body")"
+  [ "$(panel 1 '' sp)" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body" || fail "no pick reads main: $(cat "$T/body")"
+  code=$(panel 1 '{"scenario":"x.main; DROP"}' sp)
+  [ "$code" = 400 ] || { [ "$code" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body"; } || fail "an unknown scenario reads main or is refused: $code $(cat "$T/body")"
   stop
   # without options.scenarios the database still snapshots (the copy used to be refused)
   start ":memory:" "" "$(scserve '{"search_path": "warehouse"}')" || fail "a database with scenarios, no options.scenarios: start"
@@ -1569,7 +1576,7 @@ SQL
   QUIET=1 start ":memory:" "" "$(scserve '{"search_path": "warehouse"}')" && fail "a dashboard calling scenario_merge must not be served"
   grep -q "calls scenario_merge" "$T/out" || fail "the write-function refusal: $(cat "$T/out")"
   exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
-  echo "OK: #1243: scenarios — snapshot copy, branches attached read-only, helpers, undeclared table refused, write functions refused"
+  echo "OK: #1243: scenarios — snapshot copy, branches attached read-only, helpers, the ::SCENARIO picker, undeclared table refused, write functions refused"
 else
   echo "NOTE: anofox_scenario could not be installed from the community repository; the scenarios checks (#1243) were skipped"
 fi

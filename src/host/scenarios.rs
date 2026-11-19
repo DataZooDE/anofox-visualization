@@ -12,7 +12,10 @@
 //!   anofox-scenario's `scenario_diff`.
 //!
 //! The helpers read only the tables listed in `options.scenarios.tables`; any
-//! other name is an error. Writes (S2) aren't here.
+//! other name is an error. A `::SCENARIO` picker (a dropdown) chooses the
+//! branch a request reads: the server sets that request's `search_path` to
+//! the scenario's catalog, so unqualified names read the branch. Writes (S2)
+//! aren't here.
 //!
 //! Pure: the server runs the SQL this module writes.
 
@@ -226,10 +229,90 @@ pub fn write_calls(sql: &str) -> Vec<String> {
     out
 }
 
+/// The variable a dashboard's `::SCENARIO` picker sets: the column name
+/// right before `::SCENARIO` (`name AS scenario ::SCENARIO` → `scenario`),
+/// in the first statement that has one.
+pub fn picker_var(stmts: &[(bool, String)]) -> Option<String> {
+    for (_, sql) in stmts {
+        let toks: Vec<_> = lex::tokenize(sql)
+            .into_iter()
+            .filter(|t| !t.is_trivia())
+            .collect();
+        for w in toks.windows(4) {
+            let [name, c1, c2, role] = w else { continue };
+            if c1.is_punct(sql, ':') && c2.is_punct(sql, ':') && role.is_word(sql, "SCENARIO") {
+                let n = match name.kind {
+                    TokKind::Word => name.text(sql).to_string(),
+                    TokKind::QuotedIdent => name.text(sql).trim_matches('"').replace("\"\"", "\""),
+                    _ => continue,
+                };
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// The statement that makes a request read scenario `value` (the picker's
+/// value, as text): `SET search_path` to its catalog when it is exactly one
+/// of the `attached` names; `None` (the base) for `main`, nothing, or any
+/// other value. `rest` are the operator's further search path entries
+/// (`options.search_path` after its first, the scenarios' database).
+pub fn search_path_sql(
+    value: Option<&str>,
+    attached: &[Attached],
+    rest: &[String],
+) -> Option<String> {
+    let v = value?;
+    let a = attached.iter().find(|a| a.name == v)?;
+    let mut path = vec![format!("{}.main", quote_ident(&a.alias))];
+    path.extend(rest.iter().cloned());
+    Some(format!(
+        "SET search_path = {}",
+        sql_string_literal(&path.join(","))
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_picker_and_what_it_switches() {
+        let stmts = vec![
+            (false, "SELECT 1 AS n ::METRIC".to_string()),
+            (
+                false,
+                "SELECT name AS scenario ::SCENARIO FROM anofox_scenarios()".to_string(),
+            ),
+        ];
+        assert_eq!(picker_var(&stmts).as_deref(), Some("scenario"));
+        let quoted = vec![(
+            false,
+            "SELECT name AS \"Plan\"::scenario FROM t".to_string(),
+        )];
+        assert_eq!(picker_var(&quoted).as_deref(), Some("Plan"));
+        assert_eq!(
+            picker_var(&[(false, "SELECT '::SCENARIO' AS x ::TEXT".into())]),
+            None
+        );
+        let a = [Attached {
+            name: "demand_up".into(),
+            alias: alias(4),
+        }];
+        assert_eq!(
+            search_path_sql(Some("demand_up"), &a, &[]).as_deref(),
+            Some("SET search_path = '\"scn_4\".main'")
+        );
+        assert_eq!(
+            search_path_sql(Some("demand_up"), &a, &["ref.lookup".into()]).as_deref(),
+            Some("SET search_path = '\"scn_4\".main,ref.lookup'")
+        );
+        for v in [Some("main"), Some("Demand_up"), Some("x'; DROP"), None] {
+            assert_eq!(search_path_sql(v, &a, &[]), None, "{v:?}");
+        }
+    }
 
     #[test]
     fn options_parse_and_refuse() {

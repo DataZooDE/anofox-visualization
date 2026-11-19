@@ -220,7 +220,7 @@ terminal.
 | `::DOWNLOAD_XLSX` | `::DOWNLOAD_EXCEL` | table | Excel export button |
 | `::DOWNLOAD_PDF` |  | table | print-to-PDF button |
 | `::DOWNLOAD_JSON` |  | table | JSON export button (the rows as an array of objects) |
-| `::DROPDOWN` | `::OPTIONS`, `::SELECT_INPUT` | input | single-select → a DuckDB variable |
+| `::DROPDOWN` | `::OPTIONS`, `::SELECT_INPUT`, `::SCENARIO` | input | single-select → a DuckDB variable; as ::SCENARIO (anofox-scenario) on a locked server with options.scenarios, unqualified table names read the picked scenario |
 | `::MULTISELECT` | `::MULTI` | input | multi-select → a list variable |
 | `::NUMBER` | `::SLIDER`, `::NUMERIC` | input | numeric input (value = default) |
 | `::DATE` | `::DATEPICKER` | input | date picker (value = default) |

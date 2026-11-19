@@ -2408,6 +2408,9 @@ struct Dash {
     /// #684: every `::SAVE` statement's own output columns, by plan index —
     /// `/api/save`'s `panel` must name one of these.
     saves: HashMap<usize, SaveSpec>,
+    /// #1243 S1: the variable its `::SCENARIO` picker sets (with
+    /// `options.scenarios`, a request reads the picked scenario).
+    scenario_var: Option<String>,
 }
 
 /// One `::SAVE` statement's shape (#684): the button's own column name (for
@@ -2585,6 +2588,11 @@ struct Snapshot {
     /// and value-validated ([`build_nav_picker`]). Recomputed on every
     /// refresh; empty without any pickers.
     nav_picker_snapshots: Vec<PickerSnapshot>,
+    /// #1243 S1: the scenarios attached to this snapshot (`options.scenarios`).
+    scenarios: Vec<anofox_visualization::host::scenarios::Attached>,
+    /// `options.search_path` after its first entry, as `db[.schema]` text:
+    /// what follows a picked scenario's catalog on the search path.
+    scenario_rest: Vec<String>,
     /// Which of the catalog's macros and views read variables (for a
     /// preview's deps, #770).
     implicit: HashMap<String, Deps>,
@@ -7320,6 +7328,8 @@ fn build_nav_picker(
 /// preview's (#770), the same way.
 fn plan_dash(id: String, sql: String, meta: sv::DashboardMeta, updated: Option<String>) -> Dash {
     let planned = anofox_visualization::sql::plan(&sql);
+    // the original text: the plan's SQL no longer carries the casts
+    let scenario_var = anofox_visualization::host::scenarios::picker_var(&[(false, sql.clone())]);
     let info = planned
         .iter()
         .map(|p| {
@@ -7436,6 +7446,7 @@ fn plan_dash(id: String, sql: String, meta: sv::DashboardMeta, updated: Option<S
         inputs,
         submits,
         saves,
+        scenario_var,
     }
 }
 
@@ -7469,7 +7480,13 @@ fn attach_scenarios(
     opts: &LockedOptions,
     dashes: &DashSet,
     default_db: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<
+    (
+        Vec<String>,
+        Vec<anofox_visualization::host::scenarios::Attached>,
+    ),
+    String,
+> {
     use anofox_visualization::host::scenarios as scn;
     let loaded = c
         .query(
@@ -7498,7 +7515,7 @@ fn attach_scenarios(
         }
     }
     let Some(o) = &opts.scenarios_opts else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     if !loaded {
         return Err(
@@ -7538,7 +7555,10 @@ fn attach_scenarios(
             .map_err(|e| format!("scenario '{}': {}", a.name, e.lines().next().unwrap_or("")))?;
         attached.push(a);
     }
-    Ok(scn::helpers_sql(&o.database, &o.tables, &attached))
+    Ok((
+        scn::helpers_sql(&o.database, &o.tables, &attached),
+        attached,
+    ))
 }
 
 /// [`copy_database`], allowing anofox-scenario's internal schema to be copied
@@ -8152,6 +8172,7 @@ fn build_snapshot(
     let db = Database::open(":memory:", &cfg)?;
     let nav_picker_snapshots;
     let scenario_enter: Vec<String>;
+    let scenario_attached: Vec<anofox_visualization::host::scenarios::Attached>;
     {
         let c = db.connect()?;
         if copied
@@ -8214,7 +8235,7 @@ fn build_snapshot(
         }
         // #1243 S1: the scenarios, attached read-only before the lockdown;
         // each request connection gets the read helpers with `enter`
-        scenario_enter = attach_scenarios(&c, opts, dashes, &default_db)?;
+        (scenario_enter, scenario_attached) = attach_scenarios(&c, opts, dashes, &default_db)?;
         if let Some(data) = &opts.data {
             let d = data.to_string_lossy();
             c.exec(&format!(
@@ -8278,6 +8299,16 @@ fn build_snapshot(
             deps_tags: Vec::new(),
             warm_deps: Vec::new(),
             nav_picker_snapshots,
+            scenarios: scenario_attached,
+            scenario_rest: opts
+                .search_path
+                .iter()
+                .skip(1)
+                .map(|(d, sc)| match sc {
+                    Some(sc) => format!("{}.{}", quote_ident(d), quote_ident(sc)),
+                    None => quote_ident(d),
+                })
+                .collect(),
             implicit: HashMap::new(),
             previews: Mutex::new(HashMap::new()),
             dashes: dashes.clone(),
@@ -8286,6 +8317,23 @@ fn build_snapshot(
         },
         warnings,
     ))
+}
+
+/// #1243 S1: `SET search_path` to the scenario a request's `::SCENARIO`
+/// picker names, when it is one attached to this snapshot (else `None`:
+/// the base). The value must match an attached name exactly.
+fn scenario_path(gen: &Generation<Snapshot>, dash: &Dash, r: &sv::PanelRequest) -> Option<String> {
+    let var = dash.scenario_var.as_deref()?;
+    let lit = r
+        .vars
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(var))
+        .map(|(_, v)| v.as_str())?;
+    anofox_visualization::host::scenarios::search_path_sql(
+        literal_text(lit),
+        &gen.snap.scenarios,
+        &gen.snap.scenario_rest,
+    )
 }
 
 /// What the request log records about one request beyond method/path/status.
@@ -10974,6 +11022,11 @@ fn locked_panel_req(
     }
     let t0 = std::time::Instant::now();
     let mut warm = warm_key(dash, held.warm_deps(&gen), stmts, &r, claims, scope);
+    // #1243 S1: a scenario picker's search path isn't part of a warm
+    // connection's reset; such a dashboard always gets a fresh one
+    if dash.scenario_var.is_some() && !gen.snap.scenarios.is_empty() {
+        warm = None;
+    }
     if let Some(g) = sgen {
         warm = warm.map(|w| format!("{w}/state{g}"));
     }
@@ -12936,6 +12989,10 @@ fn run_panel(
         for (_, set) in &sets {
             c.exec(set)?;
         }
+        // #1243 S1: the picked scenario's catalog first on the search path
+        if let Some(sp) = scenario_path(gen, dash, r) {
+            c.exec(&sp)?;
+        }
         // #517 S3, plan §5: viewer_state/viewer_state_latest, before the
         // policy's views and any setup statement, so every later statement
         // (setup, the policy's own row filters, the panel itself) can read
@@ -13667,6 +13724,7 @@ mod tests {
             inputs: HashMap::new(),
             submits: HashMap::new(),
             saves: HashMap::new(),
+            scenario_var: None,
         }
     }
 
