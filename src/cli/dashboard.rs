@@ -1383,11 +1383,18 @@ fn cmd_svg(args: &[String]) {
             std::process::exit(1);
         }
     }
-    let svg = dashboard::render_dashboard_svg(&script, &mut p, &o);
-    match svg {
-        Ok(svg) => {
-            std::fs::write(&out, svg).unwrap_or_else(|e| panic!("write {out}: {e}"));
+    match dashboard::render_dashboard(&script, &mut p, &o) {
+        Ok(r) => {
+            std::fs::write(&out, r.svg).unwrap_or_else(|e| panic!("write {out}: {e}"));
             println!("wrote {out}");
+            // #1267: say which panels are missing from the picture
+            for d in &r.dropped {
+                eprintln!(
+                    "warning: {path}: statement {} not drawn: {}",
+                    d.stmt + 1,
+                    d.reason
+                );
+            }
         }
         Err(e) => {
             eprintln!("error: {e}");

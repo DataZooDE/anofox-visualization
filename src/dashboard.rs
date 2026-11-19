@@ -206,11 +206,46 @@ fn subtitle_svg(sub: &str, x: f64, w: f64, ropts: &RenderOptions) -> String {
 }
 
 /// Render a whole annotated SQL script to one composed SVG dashboard.
+/// A statement that should draw a panel but draws nothing is left out
+/// quietly; [`render_dashboard`] also says which ones (#1267).
 pub fn render_dashboard_svg(
     script: &str,
     provider: &mut dyn DataProvider,
     opts: &DashboardOptions,
 ) -> Result<String, String> {
+    render_dashboard(script, provider, opts).map(|r| r.svg)
+}
+
+/// A statement that should have drawn a panel and drew nothing (#1267).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedPanel {
+    /// The statement's 0-based plan index (as [`DashboardOptions::only`]
+    /// counts; `dashboard --lint` numbers it one higher).
+    pub stmt: usize,
+    /// Why it was left out: its query failed (the provider's error), or a
+    /// layout role inside its SELECT made it a layout directive (#685).
+    pub reason: String,
+}
+
+/// What [`render_dashboard`] drew, and what it left out.
+#[derive(Debug, Clone)]
+pub struct RenderOutput {
+    pub svg: String,
+    /// Panels that are missing from `svg`, in script order — empty when every
+    /// drawn statement got its panel. Statements hidden on purpose (another
+    /// tab under [`DashboardOptions::only`], a false `::SHOW_IF`, a missing
+    /// `-- @requires` input, a `::VIEW` alternative) are not listed.
+    pub dropped: Vec<DroppedPanel>,
+}
+
+/// [`render_dashboard_svg`], plus the panels it couldn't draw — so a host
+/// can log them or fail the render instead of shipping fewer panels than the
+/// script has (#1267).
+pub fn render_dashboard(
+    script: &str,
+    provider: &mut dyn DataProvider,
+    opts: &DashboardOptions,
+) -> Result<RenderOutput, String> {
     render_inner(script, provider, opts)
 }
 
@@ -239,6 +274,8 @@ fn filter_of(set: &str) -> Option<(String, String)> {
 
 /// One executed statement of the script (phase 1).
 struct Step {
+    /// The statement's plan index.
+    idx: usize,
     panel: sql::Panel,
     rows: Result<Vec<(String, Vec<Value>)>, String>,
 }
@@ -547,7 +584,7 @@ fn execute(
                 provider.execute(&set).ok();
             }
         }
-        steps.push(Step { panel, rows });
+        steps.push(Step { idx, panel, rows });
     }
     (steps, chrome, filters)
 }
@@ -578,12 +615,34 @@ fn compact_flags(steps: &[Step]) -> Vec<bool> {
         .collect()
 }
 
+/// The steps that should draw a panel and won't (#1267): a panel whose query
+/// failed, or one whose own SELECT carries a layout role (`render_inner`
+/// takes it for that directive, #685). A failed directive is not a panel.
+fn dropped_panels(steps: &[Step]) -> Vec<DroppedPanel> {
+    steps
+        .iter()
+        .filter_map(|st| {
+            let reason = match &st.rows {
+                Err(e) if !roles::is_directive_panel(&st.panel.roles) => {
+                    format!("query failed: {e}")
+                }
+                _ => roles::inline_layout_message(&st.panel.roles)?,
+            };
+            Some(DroppedPanel {
+                stmt: st.idx,
+                reason,
+            })
+        })
+        .collect()
+}
+
 fn render_inner(
     script: &str,
     provider: &mut dyn DataProvider,
     opts: &DashboardOptions,
-) -> Result<String, String> {
+) -> Result<RenderOutput, String> {
     let (steps, chrome, filters) = execute(script, provider, opts.only.as_deref());
+    let dropped = dropped_panels(&steps);
     let compact = compact_flags(&steps);
     // `::GUIDE_STEP` (#516): `steps` only ever holds what `execute()` kept
     // shown, so its total marker count per group ("of N") is known now —
@@ -1307,7 +1366,7 @@ fn render_inner(
         out.push_str(h);
     }
     out.push_str("</svg>");
-    Ok(out)
+    Ok(RenderOutput { svg: out, dropped })
 }
 
 /// The header strip (logo, brand, title), or `None` when the dashboard sets
