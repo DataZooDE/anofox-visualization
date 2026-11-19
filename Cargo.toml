@@ -248,7 +248,10 @@ roxmltree = "0.21"
 wat = "1"
 
 [features]
-default = []
+# Runtime plugins are on by default (#1213): every build loads `--plugin` /
+# `options.plugins`. The browser build (`--no-default-features --features wasm`)
+# and the render-only community extension (anofox_viz_ffi) turn defaults off.
+default = ["plugins"]
 # Browser build (DuckDB-Wasm + the renderer). `wasm-pack build --features wasm`.
 wasm = ["dep:wasm-bindgen"]
 # `anofox-visualization serve <db>` — serve the builder UI wired to a live DuckDB.

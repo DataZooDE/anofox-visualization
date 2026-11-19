@@ -49,5 +49,7 @@ bindgen = "0.72"
 
 [features]
 # #1213 step 5: the locked server loads runtime WebAssembly plugins
-# (options.plugins).
+# (options.plugins) — on by default, so every native build (build-native.sh,
+# the Docker image, plain `cargo build`) takes them.
+default = ["plugins"]
 plugins = ["anofox-visualization/plugins"]
