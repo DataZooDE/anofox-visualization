@@ -1530,3 +1530,46 @@ start "$T/main.duckdb" "" "$(pserve "{\"dir\": \"$T/pv\"}")" || fail "preview (r
 [ "$(pget "/p/$PID1")" = 200 ] || fail "a kept preview after a restart: $(cat "$T/pbody")"
 stop
 echo "OK: #770: previews — scope, checks (a broken panel is a 400), runs as its key, /p/ only, limit, DELETE, kept on disk"
+
+# #1243 S1: scenarios (anofox-scenario, from the community repository; skipped
+# with a note when it can't be installed). The snapshot copies a database that
+# holds scenarios (its internal schema is read-only for SQL while the extension
+# is loaded), attaches each scenario read-only, and gives every request the
+# read helpers; a dashboard that calls a write function stops the server.
+if DATAZOO_DISABLE_TELEMETRY=1 "$DUCKDB" -c "INSTALL anofox_scenario FROM community; LOAD anofox_scenario;" >/dev/null 2>&1; then
+  mkdir "$T/scdash"
+  DATAZOO_DISABLE_TELEMETRY=1 "$DUCKDB" "$T/sc.duckdb" -c "LOAD anofox_scenario;
+    CREATE TABLE plan (sku VARCHAR PRIMARY KEY, qty INTEGER);
+    INSERT INTO plan VALUES ('A', 10), ('B', 20), ('C', 30);
+    CALL scenario_create('demand_up', 'demand +10 %');
+    ATTACH 'demand_up' AS s (TYPE scenario);
+    UPDATE s.plan SET qty = qty + 1 WHERE sku = 'A';
+    INSERT INTO s.plan VALUES ('D', 5);" >/dev/null
+  cat > "$T/scdash/sc.sql" <<'SQL'
+SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenarios();
+SELECT sum(qty)::BIGINT AS q ::METRIC FROM anofox_scenario_rows('plan') WHERE scenario = 'demand_up';
+SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_diff('demand_up', 'plan');
+SELECT sum(qty)::BIGINT AS q ::METRIC FROM plan;
+SELECT count(*)::BIGINT AS n ::METRIC FROM anofox_scenario_rows('secret');
+SQL
+  scserve() { echo "LOAD anofox_scenario; ATTACH $(q "$T/sc.duckdb") AS warehouse; SELECT anofox_serve_dashboards($(q "$T/scdash"), $PORT, $(q "$1"));"; }
+  export DATAZOO_DISABLE_TELEMETRY=1
+  start ":memory:" "" "$(scserve '{"search_path": "warehouse", "scenarios": {"database": "warehouse", "tables": ["plan"]}}')" || fail "scenarios: start"
+  for i_want in "0:2" "1:66" "2:2" "3:60"; do
+    i=${i_want%%:*}; want=${i_want#*:}
+    [ "$(panel "$i" '' sc)" = 200 ] && grep -qE "\"c0\":$want(\.0)?[,}]" "$T/body" || fail "scenarios panel $i: want $want: $(cat "$T/body")"
+  done
+  [ "$(panel 4 '' sc)" = 400 ] && grep -q "is not one of options.scenarios.tables" "$T/body" || fail "an undeclared table: $(cat "$T/body")"
+  stop
+  # without options.scenarios the database still snapshots (the copy used to be refused)
+  start ":memory:" "" "$(scserve '{"search_path": "warehouse"}')" || fail "a database with scenarios, no options.scenarios: start"
+  [ "$(panel 3 '' sc)" = 200 ] && grep -qE '"c0":60(\.0)?[,}]' "$T/body" || fail "base read without options.scenarios: $(cat "$T/body")"
+  stop
+  printf "SELECT n ::METRIC FROM (SELECT tables_changed AS n FROM scenario_merge('demand_up', on_conflict := 'ours'));\n" > "$T/scdash/w.sql"
+  QUIET=1 start ":memory:" "" "$(scserve '{"search_path": "warehouse"}')" && fail "a dashboard calling scenario_merge must not be served"
+  grep -q "calls scenario_merge" "$T/out" || fail "the write-function refusal: $(cat "$T/out")"
+  exec 3>&-; wait "${PIDS[-1]}" 2>/dev/null || true; unset 'PIDS[-1]'
+  echo "OK: #1243: scenarios — snapshot copy, branches attached read-only, helpers, undeclared table refused, write functions refused"
+else
+  echo "NOTE: anofox_scenario could not be installed from the community repository; the scenarios checks (#1243) were skipped"
+fi

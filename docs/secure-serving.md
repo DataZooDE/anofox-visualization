@@ -2031,6 +2031,51 @@ the tiles. A static `dashboard --site` doesn't yet: it has no server to ask.
   timing can show at most that *someone* on this server looked at an area.
   Set `cache_mb: 0` if that matters.
 
+### Scenarios, read-only (`options.scenarios`, #1243 S1)
+
+[anofox-scenario](https://github.com/DataZooDE/anofox-scenario) keeps
+Git-like branches of a database inside its file. With the extension loaded
+in the serving session and `options.scenarios`, every scenario of one
+database is attached to the snapshot read-only, and each request gets three
+helpers:
+
+```json
+"search_path": "warehouse",
+"scenarios": {"database": "warehouse", "tables": ["plan", "capacity"], "max_scenarios": 50}
+```
+
+```sql
+SELECT name AS scenario ::DROPDOWN FROM anofox_scenarios();          -- main + every scenario
+SELECT scenario ::XAXIS, sum(qty) AS "Planned" ::BARCHART
+FROM anofox_scenario_rows('plan') GROUP BY 1;                       -- the table per scenario
+SELECT sku ::TABLE, change_type, old_value, new_value
+FROM anofox_scenario_diff('demand_up', 'plan');                     -- what changed (against := 'main')
+```
+
+- **`database`** must be the dashboards' default database
+  (`options.search_path`'s first). `tables` lists the only tables the
+  helpers read; any other name is an error. At most `max_scenarios`
+  (default 50) scenarios are attached, by id, as `scn_<id>`.
+- **Read-only.** The host is attached read-only, so a write through a
+  scenario is refused. A dashboard that calls one of anofox-scenario's
+  write functions (`scenario_create`, `_drop`, `_freeze`, `_unfreeze`,
+  `_merge`, `_migrate`, `_refresh`), directly or as SQL text in a string
+  (`query('…')`), is refused at start whenever the extension is loaded: on
+  a read-only host they still change what the long-lived snapshot reads
+  ([anofox-scenario#66](https://github.com/DataZooDE/anofox-scenario/issues/66)).
+  That check is a stopgap until #66 is fixed: SQL text built at run time
+  isn't seen, so don't serve dashboards that run `query()` on text a
+  viewer can set while anofox-scenario is loaded.
+- A database holding scenarios is snapshotted with the extension's
+  internal schema (the copy allows it for its own duration only), with or
+  without `options.scenarios`.
+- Not yet: a `::SCENARIO` picker that switches what unqualified names read,
+  saving into a scenario, approving one (plan:
+  [plan-scenarios.md](plans/plan-scenarios.md)), and combining
+  `options.scenarios` with an access policy, an agent mapping or
+  `options.preview` (a preview key's SQL could build a write call at run
+  time; anofox-scenario#66).
+
 ## B. Static render — `serve --dashboards <dir>`
 
 The most locked-down option: **no client data API at all**, server-side SVG only.

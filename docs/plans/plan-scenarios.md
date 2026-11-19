@@ -262,6 +262,16 @@ An example dashboard per slice, served e2e like `form-served-e2e.mjs`.
 
 ## 10. Open questions to verify before S1
 
+**Answered 2026-11-19** (anofox_scenario v2026.11.13, DuckDB 1.5.6; details on #1243):
+- Branches in the snapshot work on the copy, attached read-only, if the copy
+  sets `anofox_scenario_allow_internal_writes` for its own duration (with the
+  extension loaded, `COPY FROM DATABASE` is otherwise refused).
+- `search_path` per request reaches a branch's tables under the base's names.
+- Refresh: 5 M rows, 20 scenarios: 1.8 s copy (1.7 s without scenarios),
+  ~60 ms to attach all branches.
+- New: on a read-only host the write functions still change the session's
+  view (anofox-scenario#66), so dashboards may not call them.
+
 - Does `ATTACH … (TYPE scenario)` work in the snapshot instance after the
   databases are copied (`COPY FROM DATABASE` copies the internal schema as
   plain tables), or must the snapshot attach the live file read-only
