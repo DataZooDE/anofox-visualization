@@ -188,6 +188,20 @@ fn setup_temp_macros_reach_the_panels() {
          SELECT coalesce(getvariable('__claim_user'), 'nobody') AS who ::TABLE;\n",
     )
     .unwrap();
+    // nor a macro only the served database has (a view of it reads it)
+    let db = s.0.join("own.duckdb");
+    let made = Command::new("duckdb")
+        .arg(&db)
+        .arg("-c")
+        .arg("CREATE MACRO my_region() AS 'eu'; CREATE VIEW mine AS SELECT my_region() AS r;")
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    std::fs::write(
+        dash.join("r.sql"),
+        "-- @title R\nCREATE TEMP MACRO my_region() AS 'us';\nSELECT r AS region ::TABLE FROM mine;\n",
+    )
+    .unwrap();
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -197,6 +211,8 @@ fn setup_temp_macros_reach_the_panels() {
         Command::new(env!("CARGO_BIN_EXE_serve"))
             .arg("--dashboards")
             .arg(&dash)
+            .arg("--db")
+            .arg(&db)
             .args(["--port", &port.to_string(), "--no-open"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -210,11 +226,17 @@ fn setup_temp_macros_reach_the_panels() {
     }
     let sh = http_get(port, "/d/s");
     assert!(!sh.contains("mallory"), "{sh}");
+    let r = http_get(port, "/d/r");
+    assert!(r.contains(">eu<") && !r.contains(">us<"), "{r}");
     let out = server.finish();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("dashboard 's': setup statement 1 is skipped")
             && stderr.contains("the macro would replace it"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("dashboard 'r': setup statement 1 is skipped"),
         "{stderr}"
     );
     assert!(!stderr.contains("dashboard 'm'"), "{stderr}");

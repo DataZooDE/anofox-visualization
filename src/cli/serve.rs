@@ -1586,9 +1586,18 @@ fn load_dashboards(dir: &Path) -> Vec<Dashboard> {
 /// Only the shapes the locked server allows with a data folder
 /// ([`sv::read_only_statement`], by DuckDB's own parser); any other setup
 /// statement is skipped, as before, with a warning here.
-fn check_setup(dashboards: &mut [Dashboard]) {
-    let mut duck = |sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
-        let json = run_duckdb(":memory:", &["-json"], sql, Duration::from_secs(30))?;
+fn check_setup(dashboards: &mut [Dashboard], db: &str) {
+    // On the served database, with the dashboard's `-- @loads` first, as its
+    // pages render: a TEMP macro's name is checked against every function
+    // those sessions have (#1249 review — an extension's or the database's
+    // own macro included).
+    let duck = |loads: &[String], sql: &str| -> Result<Vec<Vec<Option<String>>>, String> {
+        let mut q = String::new();
+        for ext in loads {
+            q.push_str(&format!("LOAD {ext}; ")); // identifier-validated at parse time
+        }
+        q.push_str(sql);
+        let json = run_duckdb(db, &["-readonly", "-json"], &q, Duration::from_secs(30))?;
         let rows: Vec<serde_json::Map<String, serde_json::Value>> = if json.trim().is_empty() {
             Vec::new()
         } else {
@@ -1627,6 +1636,8 @@ fn check_setup(dashboards: &mut [Dashboard]) {
                 );
                 continue;
             }
+            let loads = d.meta.loads.clone();
+            let mut duck = |sql: &str| duck(&loads, sql);
             match sv::read_only_statement(&p.sql, true, &mut duck) {
                 Ok(()) => {
                     d.setup_ok.insert(i);
@@ -2236,7 +2247,7 @@ fn serve_dashboards(dir: &str, o: &mut Opts) {
         }
     }
     let mut dashboards = load_dashboards(Path::new(dir));
-    check_setup(&mut dashboards);
+    check_setup(&mut dashboards, &db);
     if let Some(h) = &o.home {
         if !dashboards.iter().any(|d| &d.id == h) {
             usage(&format!("--home: no dashboard '{h}' in {dir}"));
