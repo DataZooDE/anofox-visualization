@@ -2571,6 +2571,31 @@ fn route_serve(
     if req.method() != &Method::Get && form.is_none() {
         return reply(req, 405, "method not allowed");
     }
+    // #1294: the modules' browser files (a runtime plugin's only with
+    // --plugin-assets) and the runtime plugins' list, as the authoring
+    // server serves them — after the login, like every page.
+    if req.method() == &Method::Get {
+        if let Some(bytes) = crate::module::asset(path) {
+            respond(req, 200, sv::content_type(path), bytes.to_vec());
+            return 200;
+        }
+        #[cfg(feature = "plugins")]
+        {
+            if path == "/plugins.json" {
+                respond(
+                    req,
+                    200,
+                    "application/json",
+                    crate::plugin::browser_list().into_bytes(),
+                );
+                return 200;
+            }
+            if let Some(bytes) = crate::plugin::browser_wasm(path) {
+                respond(req, 200, "application/wasm", bytes.to_vec());
+                return 200;
+            }
+        }
+    }
     if path == "/" {
         // --home: straight to that dashboard (if this viewer may read it)
         if let Some(h) = st
@@ -2593,7 +2618,8 @@ fn route_serve(
         return 200;
     }
     let Some(rest) = path.strip_prefix("/d/") else {
-        // No /query, no static assets, no SQL — the whole surface is id + params.
+        // No /query, no static assets (but the modules' files above), no
+        // SQL — the whole surface is id + params.
         return reply(req, 404, "not found");
     };
     let id = rest.trim_end_matches('/');
@@ -3533,7 +3559,7 @@ fn render_dashboard_page(
         ));
     }
 
-    let meta = if dash.meta.refresh > 0 {
+    let mut meta = if dash.meta.refresh > 0 {
         format!(
             "<meta http-equiv=\"refresh\" content=\"{}\">",
             dash.meta.refresh
@@ -3541,6 +3567,7 @@ fn render_dashboard_page(
     } else {
         String::new()
     };
+    meta.push_str(&module_asset_tags());
     Ok(page::render(&page::StaticPage {
         theme: &t,
         fallback_title: &dash.meta.title,
@@ -3550,6 +3577,27 @@ fn render_dashboard_page(
         panels_html: panels,
         fit: page::static_fit(&sql::plan(&dash.script)),
     }))
+}
+
+/// #1294: the registered modules' browser files for a dashboard page (a
+/// runtime plugin's only with --plugin-assets), loaded as the builder loads
+/// them (web/plugins.js `loadAssetFiles`): each `.css` as a stylesheet, each
+/// `.js`/`.mjs` as a module script — same origin, so the page's CSP
+/// (`script-src 'self'`) admits them.
+fn module_asset_tags() -> String {
+    let mut out = String::new();
+    for p in crate::module::asset_paths() {
+        let lower = p.to_ascii_lowercase();
+        if lower.ends_with(".css") {
+            out.push_str(&format!("<link rel=\"stylesheet\" href=\"/{}\">", esc(&p)));
+        } else if lower.ends_with(".js") || lower.ends_with(".mjs") {
+            out.push_str(&format!(
+                "<script type=\"module\" src=\"/{}\"></script>",
+                esc(&p)
+            ));
+        }
+    }
+    out
 }
 
 /// The `/` landing page: the dashboards the viewer may read, as cards in

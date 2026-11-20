@@ -514,8 +514,8 @@ fn serve_loads_a_plugin_and_its_browser_files_only_when_allowed() {
             let _ = self.0.wait();
         }
     }
-    // `--dashboards`: the static pages (no module files there); else the
-    // builder, which serves them at /modules/<name>/
+    // `--dashboards`: the static pages; else the builder. Both serve the
+    // plugin's browser files at /modules/<name>/ with --plugin-assets (#1294)
     let serve = |dashboards: bool, assets: bool| -> (Kill, u16, Option<String>) {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -555,6 +555,39 @@ fn serve_loads_a_plugin_and_its_browser_files_only_when_allowed() {
     assert!(
         page.contains("Hello, Ada!"),
         "the plugin draws the panel: {page}"
+    );
+    // #1294: without --plugin-assets the dashboards pages load none of its
+    // browser files, and the server has none
+    assert!(!page.contains("/modules/hello/"), "{page}");
+    assert_eq!(get(port, "/modules/hello/hello.js", None).0, 404);
+    let (status, list) = get(port, "/plugins.json", None);
+    assert_eq!(status, 200, "{list}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&list).unwrap(),
+        serde_json::json!(["modules/hello/plugin.wasm"])
+    );
+    // … with it, the page loads them (as the builder does) and they are served
+    let (_s2, port, _) = serve(true, true);
+    let (status, page) = get(port, "/d/hi", None);
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page.contains(r#"<script type="module" src="/modules/hello/hello.js"></script>"#)
+            && page.contains(r#"<link rel="stylesheet" href="/modules/hello/hello.css">"#),
+        "the page loads the plugin's browser files: {page}"
+    );
+    let (status, js) = get(port, "/modules/hello/hello.js", None);
+    assert_eq!(
+        (status, js.as_str()),
+        (
+            200,
+            "document.documentElement.dataset.helloPlugin = \"loaded\";\n"
+        )
+    );
+    let (status, list) = get(port, "/plugins.json", None);
+    assert_eq!(status, 200, "{list}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&list).unwrap(),
+        serde_json::json!([{"url": "modules/hello/plugin.wasm", "assets": true}])
     );
     let (_b, port, tok) = serve(false, true);
     let (status, css) = get(port, "/modules/hello/hello.css", tok.as_deref());
