@@ -483,3 +483,45 @@ fn embed_locked_var_beats_an_input_default() {
     );
     drop(server);
 }
+
+/// A ::TABLE panel on the script-free page shows its rows: its columns keep
+/// their own names, which the chart path (reading `cN`) never saw, so the
+/// panel came out as an empty heading.
+#[test]
+fn a_table_panel_shows_its_rows() {
+    if !have_duckdb("a_table_panel_shows_its_rows") {
+        return;
+    }
+    let s = Scratch::new("table");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("bom.sql"),
+        "SELECT parent AS \"Parent\", component AS \"Component\", qty AS \"Qty per unit\" ::TABLE,\n\
+                'BOM explosion' ::TITLE\n\
+         FROM (VALUES ('PUMP-H200', 'SHAFT-S20', 2)) t(parent, component, qty);\n",
+    )
+    .unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let resp = http_get(port, "/d/bom");
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = http_body(&resp);
+    for want in ["BOM explosion", "Component", "SHAFT-S20", "Qty per unit"] {
+        assert!(body.contains(want), "{want} missing: {body}");
+    }
+    drop(server);
+}
