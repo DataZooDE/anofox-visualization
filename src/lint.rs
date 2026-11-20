@@ -7728,6 +7728,12 @@ fn role_ignored_diags(roles: &[(usize, Role)], rows: &[Map<String, Value>]) -> V
         ignored(Role::GaugeColors, "on a chart it maps ::CATEGORY levels to colours ('below:bad; above:#9aa3af'); add the ::CATEGORY column");
     }
     ignored(Role::Direction, "it lays out a ::DIAGRAM");
+    if !matches!(kind, Waterfall) {
+        ignored(
+            Role::LowerGood,
+            "it flips a ::WATERFALL's colours; on a KPI use ::DELTA_LOWER_GOOD",
+        );
+    }
     // #1256
     if !matches!(kind, Line | LinePercent | Area | Density) {
         ignored(

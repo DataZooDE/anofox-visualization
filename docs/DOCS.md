@@ -172,6 +172,7 @@ terminal.
 | `::RANGE` |  | modifier | gauge domain 'min,max' (default 0,100); bullet band edges '60,80,100'; a map's colour domain 'lo,hi' (caps outliers) |
 | `::COLORS` | `::COLOURS` | modifier | gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb) |
 | `::LABELS` |  | modifier | gauge zone labels, comma-separated (drawn at each zone) |
+| `::LOWER_GOOD` | `::LOWER_IS_BETTER`, `::LOWER_BETTER` | modifier | a ::WATERFALL where down is good (costs, time, churn): decreases in the positive colour, increases in the negative one — any value but false/0/no |
 | `::DIRECTION` |  | modifier | a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom) |
 | `::ANIMATE` | `::ANIMATION`, `::ENTRANCE` | modifier | entrance animation: 'auto' (lines draw, bars grow, points stagger), 'draw', 'grow', 'reveal' (forward from the ::XLINE, e.g. Today) or 'none' |
 | `::STORY` | `::STORYLINE`, `::NARRATIVE` | annotation | per row: a caption → a story step that lights up the row's x (Step / Play controls, the rest dims) |

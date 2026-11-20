@@ -218,10 +218,26 @@ pub(crate) fn render_waterfall(
     // One layer per colour — totals, increases, decreases — rather than a
     // mapped fill, so each bar's `data-series` stays its step (the selection
     // key a click sets) instead of the colour class.
+    // #1318: `::LOWER_GOOD` — a decrease is the good step (costs, time)
+    let lower_good = cols
+        .iter()
+        .find(|c| c.role == Role::LowerGood)
+        .and_then(|c| c.values.iter().find(|v| !matches!(v, Value::Na)))
+        .is_some_and(|v| {
+            !matches!(
+                value_str(v).trim().to_ascii_lowercase().as_str(),
+                "false" | "0" | "no" | "off" | ""
+            )
+        });
+    let (up, down) = if lower_good {
+        (th.colors.negative, th.colors.positive)
+    } else {
+        (th.colors.positive, th.colors.negative)
+    };
     let classes: [StepClass; 3] = [
         (|s| s.total, o.brand()),
-        (|s| !s.total && s.value >= 0.0, th.colors.positive),
-        (|s| !s.total && s.value < 0.0, th.colors.negative),
+        (|s| !s.total && s.value >= 0.0, up),
+        (|s| !s.total && s.value < 0.0, down),
     ];
     for (is, fill) in classes {
         let idx: Vec<usize> = (0..steps.len()).filter(|&i| is(&steps[i])).collect();
