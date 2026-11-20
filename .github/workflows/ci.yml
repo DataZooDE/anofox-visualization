@@ -195,6 +195,13 @@ jobs:
         run: cargo nextest run --locked --features serve,plugins
       - name: test (core incl. serve) — doctests
         run: cargo test --doc --locked --features serve
+      # #1266: the embedding surface (`anofox_visualization::embed`) as a
+      # library user builds it — default-features = false — and its
+      # dependency tree stays lean (docs/embedding.md).
+      - name: embedding API (crates/embed-host, lean dependencies)
+        run: |
+          scripts/check-embed-deps.sh
+          cargo nextest run --locked -p anofox-embed-host
       # #1218: the bundled plugins (modules/*, outside the workspace)
       - name: bundled plugins (modules/*) — fmt, clippy, tests
         run: |

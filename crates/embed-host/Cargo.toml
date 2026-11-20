@@ -1,0 +1,14 @@
+# #1266: a tiny host that embeds anofox-visualization the way a library user
+# does — `default-features = false`, only `anofox_visualization::embed`. CI
+# builds and tests it, so a change that breaks the embedding surface fails
+# before a release does.
+[package]
+name = "anofox-embed-host"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anofox-visualization = { path = "../..", default-features = false }
+serde_json = "1"

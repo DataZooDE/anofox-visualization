@@ -18,6 +18,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "anofox-embed-host"
+version = "0.0.0"
+dependencies = [
+ "anofox-visualization",
+ "serde_json",
+]
+
+[[package]]
 name = "anofox-visualization"
 version = "2026.11.21"
 dependencies = [
