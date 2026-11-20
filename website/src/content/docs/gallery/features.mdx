@@ -622,4 +622,36 @@ FROM (VALUES ('size', 'Large account'), ('engaged', 'Engaged'), ('discount', 'Go
 </div>
 </div>
 
+<div class="gal-tile">
+
+<div class="gal-text">
+
+### Clarifying a learned graph
+
+An arc the data can't orient (`status` `'undirected'`) has no arrowheads and takes the colour of the bootstrap's lean; one an expert's answer set (`'expert'`) carries a ✓ badge with who, and who, when and why on hover. Experts answer through a `::FORM` and `::SAVE` into an `answers` table.
+
+```sql
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE cg_nodes AS
+SELECT * FROM (VALUES ('smoke', 'Smoker'), ('lung', 'Lung cancer'), ('bronc', 'Bronchitis'), ('dysp', 'Short of breath')) t(id, label),
+              (SELECT 'chance' AS kind, ['yes', 'no'] AS states);
+CREATE TABLE cg_beliefs AS
+SELECT node, s.state, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS probability, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS prior
+FROM (VALUES ('smoke', 0.5), ('lung', 0.055), ('bronc', 0.45), ('dysp', 0.436)) t(node, p), (VALUES ('yes'), ('no')) s(state);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'smoke', 'to': 'lung', 'status': 'expert', 'who': 'dr-a', 'when': '2026-11-12',
+                   'rationale': 'the smoking comes first'},
+                  {'from': 'smoke', 'to': 'bronc', 'status': 'undirected', 'lean': 0.52},
+                  {'from': 'lung', 'to': 'dysp', 'status': 'directed'}, {'from': 'bronc', 'to': 'dysp', 'status': 'directed'}],
+         beliefs := (SELECT list(b) FROM cg_beliefs b))
+       AS "Smoking and bronchitis: which way? The data can't tell"
+FROM cg_nodes n;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBjZ19ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCdzbW9rZScsICdTbW9rZXInKSwgKCdsdW5nJywgJ0x1bmcgY2FuY2VyJyksICgnYnJvbmMnLCAnQnJvbmNoaXRpcycpLCAoJ2R5c3AnLCAnU2hvcnQgb2YgYnJlYXRoJykpIHQoaWQsIGxhYmVsKSwKICAgICAgICAgICAgICAoU0VMRUNUICdjaGFuY2UnIEFTIGtpbmQsIFsneWVzJywgJ25vJ10gQVMgc3RhdGVzKTsKQ1JFQVRFIFRBQkxFIGNnX2JlbGllZnMgQVMKU0VMRUNUIG5vZGUsIHMuc3RhdGUsIENBU0Ugcy5zdGF0ZSBXSEVOICd5ZXMnIFRIRU4gcCBFTFNFIDEgLSBwIEVORCBBUyBwcm9iYWJpbGl0eSwgQ0FTRSBzLnN0YXRlIFdIRU4gJ3llcycgVEhFTiBwIEVMU0UgMSAtIHAgRU5EIEFTIHByaW9yCkZST00gKFZBTFVFUyAoJ3Ntb2tlJywgMC41KSwgKCdsdW5nJywgMC4wNTUpLCAoJ2Jyb25jJywgMC40NSksICgnZHlzcCcsIDAuNDM2KSkgdChub2RlLCBwKSwgKFZBTFVFUyAoJ3llcycpLCAoJ25vJykpIHMoc3RhdGUpOwpTRUxFQ1QgYW5vZm94X3Bsb3RfYmF5ZXNfbmV0KG4sCiAgICAgICAgIGFyY3MgOj0gW3snZnJvbSc6ICdzbW9rZScsICd0byc6ICdsdW5nJywgJ3N0YXR1cyc6ICdleHBlcnQnLCAnd2hvJzogJ2RyLWEnLCAnd2hlbic6ICcyMDI2LTExLTEyJywKICAgICAgICAgICAgICAgICAgICdyYXRpb25hbGUnOiAndGhlIHNtb2tpbmcgY29tZXMgZmlyc3QnfSwKICAgICAgICAgICAgICAgICAgeydmcm9tJzogJ3Ntb2tlJywgJ3RvJzogJ2Jyb25jJywgJ3N0YXR1cyc6ICd1bmRpcmVjdGVkJywgJ2xlYW4nOiAwLjUyfSwKICAgICAgICAgICAgICAgICAgeydmcm9tJzogJ2x1bmcnLCAndG8nOiAnZHlzcCcsICdzdGF0dXMnOiAnZGlyZWN0ZWQnfSwgeydmcm9tJzogJ2Jyb25jJywgJ3RvJzogJ2R5c3AnLCAnc3RhdHVzJzogJ2RpcmVjdGVkJ31dLAogICAgICAgICBiZWxpZWZzIDo9IChTRUxFQ1QgbGlzdChiKSBGUk9NIGNnX2JlbGllZnMgYikpCiAgICAgICBBUyAiU21va2luZyBhbmQgYnJvbmNoaXRpczogd2hpY2ggd2F5PyBUaGUgZGF0YSBjYW4ndCB0ZWxsIgpGUk9NIGNnX25vZGVzIG47Cg==">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
 </div>

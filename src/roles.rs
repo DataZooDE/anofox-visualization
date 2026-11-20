@@ -115,7 +115,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SHAPE", &["NODE_SHAPE"], R::Shape, "encoding", true,
       "a ::DIAGRAM node's mark: box, rect, diamond, double-box, circle, filled-circle, square, filled-square, terminal, text — or a factor graph's kind (factor, variable, data, equality, delta, constant; these make a factor graph: lanes as straight bands, undirected edges) or a Bayesian network's (chance, decision, utility)"),
     e("EDGES", &[], R::Edges, "encoding", true,
-      "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value (or 'width' in px), colour by status, 'tip' the hover text, 'cut': true drawn grey with a break mark, 'color' (a status word, accent, a palette slot or #rrggbb), 'blocked': true a bar across it, 'key' its entry in a legend under the graph ('caption' ends the legend)"),
+      "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value (or 'width' in px), colour by status, 'tip' the hover text, 'cut': true drawn grey with a break mark, 'color' (a status word, accent, a palette slot or #rrggbb), 'blocked': true a bar across it, 'key' its entry in a legend under the graph ('caption' ends the legend), 'undirected': true without an arrowhead"),
     // ── charts (cast the measure column) ───────────────────────────────────
     e("BARCHART", &["BAR"], R::Value(Kind::Bar), "chart", true,
       "bar chart (dodged by CATEGORY)"),
@@ -407,7 +407,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("TOGGLE", &["SWITCH", "CHECKBOX"], R::Input(InputKind::Toggle), "input", false,
       "on/off switch → a BOOLEAN variable (value = default)"),
     e("FORM", &["PARAM_FORM", "PARAMETERS"], R::Input(InputKind::Form), "input", false,
-      "a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/toggle/date/text/preset), value, options, min, max, step, label, unit, help, show_if ('model=normal', 'a=x & b=y | c=z'), source, section, advanced, width (half/full); ::TITLE / ::SUBTITLE / ::FORM_LAYOUT columns style the card; the values come back as one JSON object: getvariable('name')->>'field'"),
+      "a form generated from rows, one per field: the ::FORM column is the field key (its alias names the variable), columns type (number/slider/dropdown/buttons/toggle/date/text/preset), value, options, labels, min, max, step, label, unit, help, show_if ('model=normal', 'a=x & b=y | c=z'), source, section, advanced, width (half/full); ::TITLE / ::SUBTITLE / ::FORM_LAYOUT columns style the card; the values come back as one JSON object: getvariable('name')->>'field'"),
     e("HINT", &[], R::Hint, "input", true, "per-option hint next to a dropdown option"),
     e("OPTION_LABEL", &[], R::OptionLabel, "input", true, "the shown text of a dropdown / button / multiselect option (the variable keeps the value)"),
     e("DEFAULT", &["IS_DEFAULT"], R::InputDefault, "input", true, "true on the default option of a dropdown / buttons (the first marked row) or the default picks of a multiselect (every marked row); without it: the first option / all"),

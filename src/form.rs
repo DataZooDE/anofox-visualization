@@ -41,6 +41,8 @@ pub enum FieldType {
     Number,
     Slider,
     Dropdown,
+    /// A dropdown drawn as a row of buttons, one pressed (#1282).
+    Buttons,
     Toggle,
     Date,
     Text,
@@ -56,6 +58,7 @@ impl FieldType {
         "number",
         "slider",
         "dropdown",
+        "buttons",
         "toggle",
         "date",
         "text",
@@ -68,6 +71,7 @@ impl FieldType {
             "" | "number" | "numeric" | "double" | "integer" => FieldType::Number,
             "slider" | "range" => FieldType::Slider,
             "dropdown" | "select" | "choice" => FieldType::Dropdown,
+            "buttons" | "segmented" | "radio" => FieldType::Buttons,
             "toggle" | "switch" | "checkbox" | "boolean" | "bool" => FieldType::Toggle,
             "date" => FieldType::Date,
             "text" | "string" | "varchar" => FieldType::Text,
@@ -82,6 +86,7 @@ impl FieldType {
             FieldType::Number => "number",
             FieldType::Slider => "slider",
             FieldType::Dropdown => "dropdown",
+            FieldType::Buttons => "buttons",
             FieldType::Toggle => "toggle",
             FieldType::Date => "date",
             FieldType::Text => "text",
@@ -121,6 +126,16 @@ pub struct Field {
     pub half: bool,
     /// A preset's choices: `(label, field → value)`.
     pub presets: Vec<(String, Map<String, Json>)>,
+    /// What a dropdown's / buttons' options show, in their order (#1282);
+    /// the variable keeps the option.
+    pub labels: Vec<String>,
+}
+
+impl FieldType {
+    /// One of its `options` (a dropdown, buttons).
+    fn picks(self) -> bool {
+        matches!(self, FieldType::Dropdown | FieldType::Buttons)
+    }
 }
 
 /// A `show_if`: any group holds when every `(field, allowed values)` in it
@@ -158,6 +173,7 @@ impl Field {
             "advanced": self.advanced,
             "width": if self.half { "half" } else { "full" },
             "presets": self.presets.iter().map(|(l, v)| serde_json::json!({"label": l, "values": v})).collect::<Vec<_>>(),
+            "labels": self.labels,
         })
     }
 }
@@ -416,11 +432,14 @@ pub fn fields(
             },
             _ => text(raw).map_or(Json::Null, Json::String),
         };
-        if kind == FieldType::Dropdown {
+        if kind.picks() {
             if options.is_empty() {
                 issues.push((
                     "form/no-options",
-                    format!("field `{key}`: a dropdown needs `options` (a list)"),
+                    format!(
+                        "field `{key}`: a {} needs `options` (a list)",
+                        kind.as_str()
+                    ),
                 ));
             } else if let Json::String(v) = &value {
                 if !options.contains(v) {
@@ -463,6 +482,27 @@ pub fn fields(
                 format!("field `{key}`: show_if `{t}` — write it as 'field=value', 'field=a|b' or 'a=x & b=y | c=z'"),
             ));
         }
+        // #1282: what each option shows
+        let labels = if kind.picks() {
+            options_of(col(row, "labels"))
+        } else {
+            Vec::new()
+        };
+        if !labels.is_empty() && labels.len() != options.len() {
+            issues.push((
+                "form/bad-labels",
+                format!(
+                    "field `{key}`: {} labels for {} options — one label per option, in their order (the options are shown)",
+                    labels.len(),
+                    options.len()
+                ),
+            ));
+        }
+        let labels = if labels.len() == options.len() {
+            labels
+        } else {
+            Vec::new()
+        };
         let width = text(col(row, "width")).map(|w| w.to_ascii_lowercase());
         if let Some(w) = width.as_deref().filter(|w| *w != "half" && *w != "full") {
             issues.push((
@@ -487,6 +527,7 @@ pub fn fields(
             advanced: col(row, "advanced").is_some_and(truthy),
             half: width.as_deref() == Some("half"),
             presets,
+            labels,
         });
     }
     for f in &out {
@@ -551,7 +592,9 @@ fn value_fits(f: &Field, v: &Json) -> bool {
             .as_f64()
             .is_some_and(|x| f.min.is_none_or(|lo| x >= lo) && f.max.is_none_or(|hi| x <= hi)),
         FieldType::Toggle => v.is_boolean(),
-        FieldType::Dropdown => v.as_str().is_some_and(|s| f.options.iter().any(|o| o == s)),
+        FieldType::Dropdown | FieldType::Buttons => {
+            v.as_str().is_some_and(|s| f.options.iter().any(|o| o == s))
+        }
         FieldType::Date | FieldType::Text => v.is_string() || v.is_null(),
         FieldType::Preset => false,
         FieldType::Distribution => crate::distfield::Dist::parse(v)
@@ -595,6 +638,41 @@ mod tests {
             .iter()
             .map(|r| r.as_object().unwrap().clone())
             .collect()
+    }
+
+    /// #1282: buttons — a dropdown drawn as a row of buttons — with a label
+    /// per option.
+    #[test]
+    fn buttons_fields_with_labels() {
+        let r = rows(serde_json::json!([
+            {"f": "answer", "type": "buttons", "value": "unsure",
+             "options": ["a_to_b", "b_to_a", "no_arc", "unsure"],
+             "labels": ["Smoker → Lung cancer", "Lung cancer → Smoker", "No direct link", "Not sure"]},
+            {"f": "two", "type": "segmented", "value": "x", "options": "a, b", "labels": ["A"]},
+            {"f": "none", "type": "buttons", "value": "a"},
+        ]));
+        let (f, issues) = fields("f", &r);
+        assert_eq!(f[0].kind, FieldType::Buttons);
+        assert_eq!(f[0].labels[1], "Lung cancer → Smoker");
+        let j = f[0].to_json();
+        assert_eq!(j["type"], "buttons");
+        assert_eq!(j["labels"][3], "Not sure");
+        assert!(value_fits(&f[0], &serde_json::json!("no_arc")));
+        assert!(!value_fits(&f[0], &serde_json::json!("No direct link")));
+        // a wrong count of labels is dropped (the options show), and said
+        assert!(f[1].labels.is_empty());
+        let codes: Vec<&str> = issues.iter().map(|(c, _)| *c).collect();
+        assert!(codes.contains(&"form/bad-labels"), "{issues:?}");
+        assert!(
+            codes.contains(&"form/bad-value"),
+            "x is no option: {issues:?}"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|(c, m)| *c == "form/no-options" && m.contains("a buttons needs")),
+            "{issues:?}"
+        );
     }
 
     #[test]

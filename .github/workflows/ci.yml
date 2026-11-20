@@ -946,6 +946,13 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/bayes-decisions-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/bayes-clarify-e2e.mjs (#1282): clarify a learned network —
+      # open arcs without heads, an expert's badge, an answer through
+      # ::FORM + ::SAVE settles the disagreement and the decision.
+      - name: Clarify the graph e2e (#1282)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/bayes-clarify-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/plugins-browser-e2e.mjs (#1213 step 3): runtime plugins in
       # the browser builder — the example plugin draws a panel and its
       # contract macro, a plugin with an import is refused. Its own copies

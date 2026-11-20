@@ -930,6 +930,36 @@ fn a_bayes_net_draws_adjustment_sets_twins_and_structure_diffs() {
     }
 }
 
+/// #1282: a learned network's open arc is drawn without an arrowhead, an
+/// expert-set one with its badge and who / when / why on hover.
+#[test]
+fn a_bayes_net_draws_open_and_expert_arcs() {
+    let node = |id: &str, label: &str| serde_json::json!({"id": id, "label": label, "kind": "chance", "states": ["yes", "no"]});
+    let svg = bayes_net_svg(
+        serde_json::json!([
+            node("smoke", "Smoker"),
+            node("lung", "Lung cancer"),
+            node("bronc", "Bronchitis")
+        ]),
+        serde_json::json!({
+            "arcs": [{"from": "smoke", "to": "lung", "status": "expert", "who": "dr-a", "when": "2026-11-12",
+                      "rationale": "smoking comes first"},
+                     {"from": "smoke", "to": "bronc", "status": "undirected", "lean": 0.52}],
+            "answers": [{"a": "smoke", "b": "lung", "answer": "a_to_b", "who": "dr-a"}],
+        }),
+    );
+    for want in [
+        "data-undirected=\"1\"",
+        ">✓ dr-a<",
+        "Smoker → Lung cancer: set by dr-a on 2026-11-12: smoking comes first",
+        "Smoker → Bronchitis: open: which way? The data lean 52% Smoker → Bronchitis",
+        "direction open: Smoker – Bronchitis",
+    ] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+    assert_eq!(svg.matches("data-part=\"arrow\"").count(), 1, "{svg}");
+}
+
 #[test]
 fn a_bayes_net_needs_node_ids() {
     let svg = bayes_net_svg(serde_json::json!([{"what": 1}]), serde_json::json!({}));

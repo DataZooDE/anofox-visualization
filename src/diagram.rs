@@ -143,6 +143,9 @@ pub struct Edge {
     /// Its line width in px (`::EDGES` `width`, #1275), in place of the
     /// width by value.
     pub width: Option<f64>,
+    /// Undirected (`::EDGES` `undirected`, #1282): no arrowhead — an arc
+    /// whose direction the data can't tell.
+    pub undirected: bool,
     /// Cut (`::EDGES` `cut`, #1276): its child is set by an intervention,
     /// so the parent no longer acts on it — drawn grey with a break mark.
     pub cut: bool,
@@ -843,6 +846,7 @@ impl Diagram {
                                 style,
                                 status,
                                 math: field(o, &["math"]).and_then(J::as_bool).unwrap_or(false),
+                                undirected: field(o, &["undirected"]).and_then(J::as_bool).unwrap_or(false),
                                 cut: field(o, &["cut"]).and_then(J::as_bool).unwrap_or(false),
                                 // #1278
                                 marks: EdgeMarks {
@@ -921,6 +925,7 @@ impl Diagram {
             steps: edge_steps,
             tip,
             width,
+            undirected,
             cut,
             marks,
         } in raw
@@ -951,6 +956,7 @@ impl Diagram {
                     e.math |= math;
                     e.tip = e.tip.take().or(tip);
                     e.width = e.width.or(width);
+                    e.undirected |= undirected;
                     e.cut |= cut;
                     e.marks.color = e.marks.color.or(marks.color);
                     e.marks.blocked |= marks.blocked;
@@ -971,6 +977,7 @@ impl Diagram {
                             math,
                             tip,
                             width,
+                            undirected,
                             cut,
                             marks,
                         });
@@ -1310,6 +1317,7 @@ struct RawEdge {
     math: bool,
     tip: Option<String>,
     width: Option<f64>,
+    undirected: bool,
     cut: bool,
     marks: EdgeMarks,
     /// Story steps along the edge: (order, caption, against the edge,
@@ -1585,6 +1593,16 @@ fn bayes_net_summary(d: &Diagram) -> String {
         if n == 1 { "" } else { "s" },
         if m == 1 { "" } else { "s" }
     )];
+    // #1282: the arcs whose direction is still open
+    let open: Vec<String> = d
+        .edges
+        .iter()
+        .filter(|e| e.undirected)
+        .map(|e| format!("{} – {}", d.nodes[e.from].label, d.nodes[e.to].label))
+        .collect();
+    if !open.is_empty() {
+        parts.push(format!("direction open: {}", list_names(&open)));
+    }
     let evidence: Vec<String> = d
         .nodes
         .iter()
@@ -2049,7 +2067,8 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 _ => 0.5,
             });
             DrawEdge {
-                undirected: factor_graph,
+                // #1282: an arc the data can't orient has no arrowhead
+                undirected: factor_graph || e.undirected,
                 label_at,
                 colour,
                 width: e
@@ -2079,6 +2098,8 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     // #1278: a closed path's bar, the legend entry
                     attr("blocked", e.marks.blocked.then(|| "1".to_string())),
                     attr("key", e.marks.key.clone()),
+                    // #1282: no direction yet
+                    attr("undirected", e.undirected.then(|| "1".to_string())),
                 ],
                 label_attrs: vec![
                     attr("from", Some(a.id.clone())),
@@ -3378,6 +3399,48 @@ mod tests {
         );
         // Cloudy did not move: no change shown, not tinted
         assert!(svg.contains("data-moved=\"0.000\""));
+    }
+
+    /// #1282: an arc whose direction the data can't tell is drawn without
+    /// an arrowhead, marked, and named in the screen-reader text.
+    #[test]
+    fn a_bayes_net_draws_undirected_arcs_without_heads() {
+        let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
+        let st = r#"{"states": [{"state": "yes", "p": 0.5}, {"state": "no", "p": 0.5}]}"#;
+        let cols = vec![
+            Column::new("id", Role::Diagram, v(&["smoke", "lung", "dysp"])),
+            Column::new(
+                "l",
+                Role::Label,
+                v(&["Smoker", "Lung cancer", "Short of breath"]),
+            ),
+            Column::new("b", Role::Belief, vec![s(st), s(st), s(st)]),
+            Column::new(
+                "e",
+                Role::Edges,
+                vec![
+                    s(
+                        r#"[{"from": "smoke", "to": "lung", "undirected": true, "tip": "open"},
+                          {"from": "lung", "to": "dysp", "label": "✓ dr-a"}]"#,
+                    ),
+                    Value::Na,
+                    Value::Na,
+                ],
+            ),
+        ];
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert!(d.edges[0].undirected && !d.edges[1].undirected);
+        let svg = render_with(&cols, 900, 500, &RenderOptions::default()).unwrap();
+        roxmltree::Document::parse(&svg).expect("well-formed");
+        assert!(svg.contains("data-undirected=\"1\""));
+        // one arrowhead: the directed arc's
+        assert_eq!(svg.matches("data-part=\"arrow\"").count(), 1, "{svg}");
+        assert!(svg.contains(">✓ dr-a<"));
+        assert!(
+            svg.contains("Bayesian network: 3 nodes, 2 arcs; direction open: Smoker – Lung cancer"),
+            "{}",
+            &svg[..svg.find('>').unwrap()]
+        );
     }
 
     #[test]

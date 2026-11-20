@@ -63,6 +63,21 @@ impl ColType {
 pub struct TableDecl {
     pub key: Vec<String>,
     pub columns: Vec<(String, ColType)>,
+    /// Columns the server fills on every save, never the page (#1282,
+    /// `"stamp": {"who": "user", "when": "ts"}`): who saved (the login) and
+    /// when. A stamped user column may be part of the key, so each writer
+    /// keeps a row of their own.
+    pub stamp: Vec<(String, Stamp)>,
+}
+
+/// What a stamped column holds (#1282).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stamp {
+    /// The writer's login (`user`).
+    User,
+    /// When the save was made (`ts`): RFC 3339 text, or its day in a DATE
+    /// column.
+    Ts,
 }
 
 impl TableDecl {
@@ -273,9 +288,15 @@ pub fn parse_table(section: &str, name: &str, decl: &Value) -> Result<TableDecl,
     let o = decl.as_object().ok_or_else(|| {
         format!("{section}.tables.{name} must be {{\"key\": […], \"columns\": {{…}}}}")
     })?;
-    if let Some(other) = o.keys().find(|k| !matches!(k.as_str(), "key" | "columns")) {
+    // #1282: `stamp` only where saves are written (not a scenario's table)
+    let stamps = section == "options.writeback";
+    if let Some(other) = o
+        .keys()
+        .find(|k| !matches!(k.as_str(), "key" | "columns") && !(stamps && k.as_str() == "stamp"))
+    {
         return Err(format!(
-            "{section}.tables.{name}: unknown key '{other}' (key, columns)"
+            "{section}.tables.{name}: unknown key '{other}' (key, columns{})",
+            if stamps { ", stamp" } else { "" }
         ));
     }
     let cm = o
@@ -318,7 +339,46 @@ pub fn parse_table(section: &str, name: &str, decl: &Value) -> Result<TableDecl,
             ));
         }
     }
-    Ok(TableDecl { key, columns })
+    let mut stamp = Vec::new();
+    if let Some(st) = o.get("stamp") {
+        let sm = st.as_object().ok_or_else(|| {
+            format!("{section}.tables.{name}.stamp must map columns to \"user\" or \"ts\"")
+        })?;
+        for (c, what) in sm {
+            let ty = columns
+                .iter()
+                .find(|(n, _)| n == c)
+                .map(|(_, t)| *t)
+                .ok_or_else(|| {
+                    format!("{section}.tables.{name}.stamp: '{c}' is not one of its columns")
+                })?;
+            let what = match what.as_str() {
+                Some("user") if ty == ColType::Varchar => Stamp::User,
+                Some("ts") if matches!(ty, ColType::Varchar | ColType::Date) => Stamp::Ts,
+                Some("user" | "ts") => {
+                    return Err(format!(
+                        "{section}.tables.{name}.stamp.{c}: a user is VARCHAR, a ts VARCHAR or DATE"
+                    ))
+                }
+                _ => {
+                    return Err(format!(
+                        "{section}.tables.{name}.stamp.{c}: \"user\" (the login) or \"ts\" (when)"
+                    ))
+                }
+            };
+            if what == Stamp::Ts && key.contains(c) {
+                return Err(format!(
+                    "{section}.tables.{name}.stamp.{c}: a ts can't be part of the key"
+                ));
+            }
+            stamp.push((c.clone(), what));
+        }
+    }
+    Ok(TableDecl {
+        key,
+        columns,
+        stamp,
+    })
 }
 
 /// What [`WritebackOptions::validate_start`] needs from the server.
@@ -471,6 +531,18 @@ pub fn build_changes(
     target: &SaveTarget,
     req: &SaveRequest,
 ) -> Result<Map<String, Value>, String> {
+    build_changes_as(opts, target, req, None)
+}
+
+/// [`build_changes`] as `stamp` = `(user, ts)` saves (#1282): a form row's
+/// stamped columns get the writer's login and the time, whatever the page
+/// sent for them.
+pub fn build_changes_as(
+    opts: &WritebackOptions,
+    target: &SaveTarget,
+    req: &SaveRequest,
+    stamp: Option<(&str, &str)>,
+) -> Result<Map<String, Value>, String> {
     let max = opts.max_rows;
     let text = opts.text_max_chars;
     let mut changes = Vec::new();
@@ -520,7 +592,13 @@ pub fn build_changes(
         }
         SaveTarget::Form { table } => {
             let d = &opts.tables[table];
-            if d.key != ["id"] {
+            // #1282: id, and maybe the stamped login (a row per writer)
+            let own: Vec<&String> = d
+                .key
+                .iter()
+                .filter(|k| !d.stamp.iter().any(|(c, _)| c == *k))
+                .collect();
+            if own != ["id"] {
                 return Err(format!(
                     "'{table}' must be keyed by id to take a form's row (options.writeback)"
                 ));
@@ -536,6 +614,17 @@ pub fn build_changes(
                 .ok_or("pick the row to save first ('key' is empty)")?;
             let mut fields = vals.clone();
             fields.insert("id".into(), Value::String(key.to_string()));
+            // #1282: the server's to fill, never the page's
+            for (c, what) in &d.stamp {
+                fields.remove(c);
+                if let Some(v) = stamp.map(|(user, ts)| match (what, d.col(c)) {
+                    (Stamp::User, _) => user.to_string(),
+                    (Stamp::Ts, Some(ColType::Date)) => ts.chars().take(10).collect(),
+                    (Stamp::Ts, _) => ts.to_string(),
+                }) {
+                    fields.insert(c.clone(), Value::String(v));
+                }
+            }
             changes.push(change(
                 table,
                 "upsert",
@@ -1174,6 +1263,82 @@ mod tests {
         assert!(build_changes(&o, &t, &bad_date).is_err());
         let bad_num = req(json!({"key": "a", "form": {"lt": "NaN"}}));
         assert!(build_changes(&o, &t, &bad_num).is_err());
+    }
+
+    /// #1282: stamped columns — the writer's login and the time, filled by
+    /// the server whatever the page sent; a stamped login in the key keeps
+    /// a row per writer.
+    #[test]
+    fn a_form_row_is_stamped_with_who_and_when() {
+        let o = WritebackOptions::parse(&json!({
+            "path": "/srv/wb/changes.jsonl",
+            "dashboards": ["clarify"],
+            "writers": {"groups": ["experts"]},
+            "tables": {
+                "answers": {"key": ["id", "who"],
+                            "columns": {"id": "VARCHAR", "answer": "VARCHAR", "rationale": "VARCHAR",
+                                        "who": "VARCHAR", "when": "VARCHAR", "day": "DATE"},
+                            "stamp": {"who": "user", "when": "ts", "day": "ts"}}
+            }
+        }))
+        .unwrap();
+        assert_eq!(o.tables["answers"].stamp.len(), 3);
+        let t = save_target(&o, "", "ans", "answers").unwrap();
+        let r = req(json!({"key": "smoke|lung",
+                           "form": {"answer": "a_to_b", "who": "someone else", "when": "1999-01-01"}}));
+        let c = build_changes_as(
+            &o,
+            &t,
+            &r,
+            Some(("ann@example.com", "2026-11-20T10:15:00Z")),
+        )
+        .unwrap();
+        assert_eq!(
+            c["changes"][0]["rows"][0],
+            json!({"id": "smoke|lung", "answer": "a_to_b", "who": "ann@example.com",
+                   "when": "2026-11-20T10:15:00Z", "day": "2026-11-20"})
+        );
+        // two writers, two rows of one question
+        let mut now = TableNow::default();
+        let decl = &o.tables["answers"];
+        let row = |who: &str| {
+            build_changes_as(&o, &t, &r, Some((who, "2026-11-20T10:15:00Z"))).unwrap()["changes"][0]
+                ["rows"][0]
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        apply_change(
+            &mut now,
+            decl,
+            "upsert",
+            [row("ann"), row("bob"), row("ann")].into_iter(),
+        );
+        assert_eq!(now.rows.len(), 2);
+        // without a login (no stamp) the key has no value: refused
+        assert!(build_changes(&o, &t, &r)
+            .unwrap_err()
+            .contains("answers.who"));
+        // what may be stamped, and how
+        let bad = |stamp: Value, key: Value| {
+            WritebackOptions::parse(&json!({
+                "path": "/a/b", "dashboards": ["d"], "writers": {"users": ["u"]},
+                "tables": {"t": {"key": key, "columns": {"id": "VARCHAR", "n": "INTEGER", "at": "VARCHAR"}, "stamp": stamp}}
+            }))
+            .unwrap_err()
+        };
+        assert!(bad(json!({"n": "user"}), json!(["id"])).contains("a user is VARCHAR"));
+        assert!(bad(json!({"x": "user"}), json!(["id"])).contains("'x' is not one of its columns"));
+        assert!(bad(json!({"at": "now"}), json!(["id"])).contains("\"user\" (the login) or \"ts\""));
+        assert!(bad(json!({"at": "ts"}), json!(["id", "at"])).contains("can't be part of the key"));
+        // a scenario's table takes no stamp
+        assert!(parse_table(
+            "options.scenarios",
+            "t",
+            &json!({"key": ["id"], "columns": {"id": "VARCHAR"}, "stamp": {}})
+        )
+        .unwrap_err()
+        .contains("unknown key 'stamp'"));
     }
 
     #[test]

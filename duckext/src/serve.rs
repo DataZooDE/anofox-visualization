@@ -12680,7 +12680,11 @@ fn handle_save(
         cell(spec.form_col),
         cell(spec.tables_col),
     )
-    .and_then(|target| wb::build_changes(&w.opts, &target, &sub));
+    // #1282: a table's stamped columns get the writer's login and the time
+    .and_then(|target| {
+        let ts = access::rfc3339(std::time::SystemTime::now());
+        wb::build_changes_as(&w.opts, &target, &sub, Some((&claims.user, &ts)))
+    });
     let changes = match changes {
         Ok(c) => c,
         Err(e) => {

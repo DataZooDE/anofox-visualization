@@ -249,7 +249,8 @@ impl<'a> Net<'a> {
             .map(|u| {
                 self.arcs
                     .iter()
-                    .filter(|(f, _, _)| at(f) == Some(u))
+                    // #1282: an undirected arc has no direction yet
+                    .filter(|(f, _, a)| at(f) == Some(u) && !crate::clarify::undirected(a))
                     .filter_map(|(_, t, _)| at(t))
                     .collect()
             })
@@ -465,6 +466,8 @@ fn problems(rows: &[Row], options: &Row) -> Result<Vec<String>, String> {
     }
     // #1279: the policy
     out.extend(decisions::problems(&net, options)?);
+    // #1282: arc statuses, leans, the experts' answers
+    out.extend(crate::clarify::problems(rows, options)?);
     Ok(out)
 }
 

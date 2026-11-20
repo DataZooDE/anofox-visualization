@@ -1814,6 +1814,15 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   (nodes: `id, type, label, stage` — the ones the table declares; edges:
   `from, to`), at most `max_rows` rows, no duplicate keys; a form save
   upserts one row of a table keyed by `id`. Never client SQL.
+- **Who and when (#1282).** A table may name columns the server fills on
+  every form save, never the page: `"stamp": {"who": "user", "when": "ts"}`
+  — `user` the writer's login (a `VARCHAR` column), `ts` the save's time
+  (RFC 3339 text in a `VARCHAR` column, its day in a `DATE`). Whatever the
+  page sent for them is dropped. A stamped `user` column may be part of the
+  key next to `id` (`"key": ["id", "who"]`), so each writer keeps a row of
+  their own per key — the experts' `answers` of *Clarifying a learned graph
+  with experts* in `docs/DOCS.md`; a `ts` column can't be. Only in
+  `options.writeback` (not a scenario's table).
 - **Who.** `auth` is required; the viewer must be a personal sign-in (no API
   key, no shared embed identity) listed in `writers` by user or group, and
   the dashboard must be in `dashboards` and in the credential's scope.
