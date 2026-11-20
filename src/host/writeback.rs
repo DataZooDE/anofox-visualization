@@ -68,6 +68,10 @@ pub struct TableDecl {
     /// when. A stamped user column may be part of the key, so each writer
     /// keeps a row of their own.
     pub stamp: Vec<(String, Stamp)>,
+    /// Columns only an approver (`options.writeback.approvers`) may set
+    /// (#1317, `"approver_only": ["decides"]`): a writer who isn't one may
+    /// leave them empty, `false` or `0`, but a save that sets one is refused.
+    pub approver_only: Vec<String>,
 }
 
 /// What a stamped column holds (#1282).
@@ -96,6 +100,10 @@ pub struct WritebackOptions {
     pub dashboards: Vec<String>,
     pub writer_groups: Vec<String>,
     pub writer_users: Vec<String>,
+    /// Who may set a table's `approver_only` columns (#1317); a save needs
+    /// `writers` too.
+    pub approver_groups: Vec<String>,
+    pub approver_users: Vec<String>,
     pub tables: BTreeMap<String, TableDecl>,
     pub max_rows: usize,
     pub text_max_chars: usize,
@@ -113,7 +121,8 @@ pub const DEFAULT_MAX_MB: u64 = 256;
 /// else ever flows through this endpoint.
 pub const SAVE_MAX_BODY: usize = 1 << 20;
 
-const KEYS: &str = "path, dashboards, writers, tables, max_rows, text_max_chars, rate, max_mb";
+const KEYS: &str =
+    "path, dashboards, writers, approvers, tables, max_rows, text_max_chars, rate, max_mb";
 
 impl WritebackOptions {
     pub fn parse(v: &Value) -> Result<WritebackOptions, String> {
@@ -139,6 +148,8 @@ impl WritebackOptions {
             dashboards: Vec::new(),
             writer_groups: Vec::new(),
             writer_users: Vec::new(),
+            approver_groups: Vec::new(),
+            approver_users: Vec::new(),
             tables: BTreeMap::new(),
             max_rows: DEFAULT_MAX_ROWS,
             text_max_chars: crate::host::state::DEFAULT_TEXT_MAX_CHARS,
@@ -159,24 +170,36 @@ impl WritebackOptions {
                     has_path = true;
                 }
                 "dashboards" => o.dashboards = str_list(val, "dashboards")?,
-                "writers" => {
-                    let wm = val.as_object().ok_or(
-                        "options.writeback.writers must be an object like \
-                         {\"groups\": […], \"users\": […]}",
-                    )?;
+                "writers" | "approvers" => {
+                    let wm = val.as_object().ok_or_else(|| {
+                        format!(
+                            "options.writeback.{k} must be an object like \
+                             {{\"groups\": […], \"users\": […]}}"
+                        )
+                    })?;
                     if let Some(other) = wm
                         .keys()
-                        .find(|k| !matches!(k.as_str(), "groups" | "users"))
+                        .find(|x| !matches!(x.as_str(), "groups" | "users"))
                     {
                         return Err(format!(
-                            "options.writeback.writers: unknown key '{other}' (groups, users)"
+                            "options.writeback.{k}: unknown key '{other}' (groups, users)"
                         ));
                     }
-                    if let Some(g) = wm.get("groups") {
-                        o.writer_groups = str_list(g, "writers.groups")?;
-                    }
-                    if let Some(u) = wm.get("users") {
-                        o.writer_users = str_list(u, "writers.users")?;
+                    let groups = match wm.get("groups") {
+                        Some(g) => str_list(g, &format!("{k}.groups"))?,
+                        None => Vec::new(),
+                    };
+                    let users = match wm.get("users") {
+                        Some(u) => str_list(u, &format!("{k}.users"))?,
+                        None => Vec::new(),
+                    };
+                    if k == "writers" {
+                        (o.writer_groups, o.writer_users) = (groups, users);
+                    } else {
+                        if groups.is_empty() && users.is_empty() {
+                            return Err("options.writeback.approvers needs groups or users".into());
+                        }
+                        (o.approver_groups, o.approver_users) = (groups, users);
                     }
                 }
                 "tables" => {
@@ -234,6 +257,19 @@ impl WritebackOptions {
         if o.tables.is_empty() {
             return Err("options.writeback.tables must declare at least one table".into());
         }
+        // #1317: approvers and approver-only columns come together
+        let gated = o.tables.values().any(|t| !t.approver_only.is_empty());
+        let approvers = !o.approver_groups.is_empty() || !o.approver_users.is_empty();
+        if gated && !approvers {
+            return Err("options.writeback.tables name approver_only columns: \
+                        options.writeback.approvers must say who may set them"
+                .into());
+        }
+        if approvers && !gated {
+            return Err("options.writeback.approvers has nothing to approve: \
+                        no table names approver_only columns"
+                .into());
+        }
         Ok(o)
     }
 
@@ -274,9 +310,60 @@ impl WritebackOptions {
                 .any(|g| self.writer_groups.iter().any(|w| w == g))
     }
 
+    /// May this signed-in user set the `approver_only` columns (#1317)?
+    pub fn is_approver(&self, user: &str, groups: &[String]) -> bool {
+        self.approver_users.iter().any(|u| u == user)
+            || groups
+                .iter()
+                .any(|g| self.approver_groups.iter().any(|w| w == g))
+    }
+
+    /// Every `approver_only` column (#1317), for the page: a writer who
+    /// isn't an approver sees those form fields disabled.
+    pub fn approver_only_columns(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self
+            .tables
+            .values()
+            .flat_map(|t| t.approver_only.iter().map(String::as_str))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     pub fn enabled_for(&self, dashboard: &str) -> bool {
         self.dashboards.iter().any(|d| d == dashboard)
     }
+}
+
+/// The first `table.column` a change set sets that only an approver may
+/// (#1317): an `approver_only` column holding anything but `null`, `false`,
+/// `0` or empty text. `None`: nothing in it needs an approver. The server
+/// refuses such a save (`403`) unless the writer is an approver.
+pub fn needs_approver(opts: &WritebackOptions, changes: &Map<String, Value>) -> Option<String> {
+    let set = |v: &Value| match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::String(s) => !s.trim().is_empty(),
+        _ => true,
+    };
+    for c in changes.get("changes")?.as_array()? {
+        let Some(table) = c.get("table").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(d) = opts.tables.get(table) else {
+            continue;
+        };
+        for r in c.get("rows").and_then(Value::as_array).into_iter().flatten() {
+            for col in &d.approver_only {
+                if r.get(col).is_some_and(set) {
+                    return Some(format!("{table}.{col}"));
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn parse_table(section: &str, name: &str, decl: &Value) -> Result<TableDecl, String> {
@@ -288,15 +375,16 @@ pub fn parse_table(section: &str, name: &str, decl: &Value) -> Result<TableDecl,
     let o = decl.as_object().ok_or_else(|| {
         format!("{section}.tables.{name} must be {{\"key\": […], \"columns\": {{…}}}}")
     })?;
-    // #1282: `stamp` only where saves are written (not a scenario's table)
+    // #1282: `stamp` only where saves are written (not a scenario's table);
+    // #1317: `approver_only` too
     let stamps = section == "options.writeback";
-    if let Some(other) = o
-        .keys()
-        .find(|k| !matches!(k.as_str(), "key" | "columns") && !(stamps && k.as_str() == "stamp"))
-    {
+    if let Some(other) = o.keys().find(|k| {
+        !matches!(k.as_str(), "key" | "columns")
+            && !(stamps && matches!(k.as_str(), "stamp" | "approver_only"))
+    }) {
         return Err(format!(
             "{section}.tables.{name}: unknown key '{other}' (key, columns{})",
-            if stamps { ", stamp" } else { "" }
+            if stamps { ", stamp, approver_only" } else { "" }
         ));
     }
     let cm = o
@@ -374,10 +462,32 @@ pub fn parse_table(section: &str, name: &str, decl: &Value) -> Result<TableDecl,
             stamp.push((c.clone(), what));
         }
     }
+    // #1317: columns only an approver may set
+    let mut approver_only = Vec::new();
+    if let Some(ao) = o.get("approver_only") {
+        let bad = || format!("{section}.tables.{name}.approver_only must be an array of column names");
+        for c in ao.as_array().ok_or_else(bad)? {
+            let c = c.as_str().ok_or_else(bad)?;
+            if !columns.iter().any(|(n, _)| n == c) {
+                return Err(format!(
+                    "{section}.tables.{name}.approver_only: '{c}' is not one of its columns"
+                ));
+            }
+            if key.iter().any(|k| k == c) || stamp.iter().any(|(s, _)| s == c) {
+                return Err(format!(
+                    "{section}.tables.{name}.approver_only: '{c}' is a key or stamped column"
+                ));
+            }
+            if !approver_only.iter().any(|x| x == c) {
+                approver_only.push(c.to_string());
+            }
+        }
+    }
     Ok(TableDecl {
         key,
         columns,
         stamp,
+        approver_only,
     })
 }
 
@@ -1271,6 +1381,71 @@ mod tests {
         assert!(build_changes(&o, &t, &bad_date).is_err());
         let bad_num = req(json!({"key": "a", "form": {"lt": "NaN"}}));
         assert!(build_changes(&o, &t, &bad_num).is_err());
+    }
+
+    /// #1317: an `approver_only` column — set only by an approver; a
+    /// writer may leave it empty/false; config errors say why.
+    #[test]
+    fn approver_only_columns_need_an_approver() {
+        let cfg = |extra: Value, table: Value| {
+            let mut v = json!({
+                "path": "/srv/wb/changes.jsonl",
+                "dashboards": ["clarify"],
+                "writers": {"groups": ["experts"]},
+                "tables": {"answers": table}
+            });
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            WritebackOptions::parse(&v)
+        };
+        let table = json!({"key": ["id", "who"],
+                           "columns": {"id": "VARCHAR", "answer": "VARCHAR", "who": "VARCHAR",
+                                       "decides": "BOOLEAN", "n": "INTEGER", "note": "VARCHAR"},
+                           "stamp": {"who": "user"},
+                           "approver_only": ["decides", "n", "note"]});
+        let o = cfg(json!({"approvers": {"users": ["boss"], "groups": ["leads"]}}), table.clone())
+            .unwrap();
+        assert!(o.is_approver("boss", &[]));
+        assert!(o.is_approver("x", &["leads".into()]));
+        assert!(!o.is_approver("ann", &["experts".into()]));
+        assert_eq!(o.approver_only_columns(), ["decides", "n", "note"]);
+        let t = save_target(&o, "", "ans", "answers").unwrap();
+        let ch = |form: Value| {
+            build_changes_as(&o, &t, &req(json!({"key": "q1", "form": form})), Some(("ann", "2026-11-20T10:00:00Z")))
+                .unwrap()
+        };
+        // unset, false, 0, empty: no approver needed
+        for f in [json!({"answer": "a_to_b"}), json!({"decides": false, "n": 0, "note": " "}),
+                  json!({"decides": null}), json!({"decides": "false"})] {
+            assert_eq!(needs_approver(&o, &ch(f.clone())), None, "{f}");
+        }
+        assert_eq!(needs_approver(&o, &ch(json!({"decides": true}))).as_deref(), Some("answers.decides"));
+        assert_eq!(needs_approver(&o, &ch(json!({"decides": "true"}))).as_deref(), Some("answers.decides"));
+        assert_eq!(needs_approver(&o, &ch(json!({"n": 2}))).as_deref(), Some("answers.n"));
+        assert_eq!(needs_approver(&o, &ch(json!({"note": "x"}))).as_deref(), Some("answers.note"));
+        // the config's refusals
+        let err = |extra: Value, table: Value| cfg(extra, table).unwrap_err();
+        assert!(err(json!({}), table.clone()).contains("approvers must say who"));
+        let plain = json!({"key": ["id"], "columns": {"id": "VARCHAR", "decides": "BOOLEAN"}});
+        assert!(err(json!({"approvers": {"users": ["boss"]}}), plain.clone()).contains("nothing to approve"));
+        assert!(err(json!({"approvers": {}}), table.clone()).contains("approvers needs groups or users"));
+        assert!(err(json!({"approvers": {"roles": []}}), table.clone()).contains("unknown key 'roles'"));
+        let mut t2 = plain.clone();
+        t2["approver_only"] = json!(["nope"]);
+        assert!(err(json!({"approvers": {"users": ["b"]}}), t2.clone()).contains("'nope' is not one of its columns"));
+        t2["approver_only"] = json!(["id"]);
+        assert!(err(json!({"approvers": {"users": ["b"]}}), t2.clone()).contains("key or stamped"));
+        t2["approver_only"] = json!("decides");
+        assert!(err(json!({"approvers": {"users": ["b"]}}), t2).contains("must be an array"));
+        // a scenario's table takes no approver_only
+        assert!(parse_table(
+            "options.scenarios",
+            "t",
+            &json!({"key": ["id"], "columns": {"id": "VARCHAR"}, "approver_only": []})
+        )
+        .unwrap_err()
+        .contains("unknown key 'approver_only'"));
     }
 
     /// #1282: stamped columns — the writer's login and the time, filled by

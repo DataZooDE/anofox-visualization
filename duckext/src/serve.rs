@@ -9163,7 +9163,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                         &pv.dash,
                         scope,
                         session,
-                        (false, false, false),
+                        (false, false, false, false),
                         false,
                         false,
                         false,
@@ -9316,6 +9316,14 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                                     && w.opts.is_writer(&c.user, &c.groups)
                             })
                     });
+                    // #1317: and set the approver-only columns? (the page
+                    // disables those fields; /api/save enforces it)
+                    let wb_approver = writer
+                        && st.writeback.as_ref().is_some_and(|w| {
+                            claims
+                                .as_ref()
+                                .is_some_and(|c| w.opts.is_approver(&c.user, &c.groups))
+                        });
                     // #1243 S2/S3: and write or approve scenarios?
                     let scenario_rights = |f: fn(
                         &anofox_visualization::host::scenarios::WriteOptions,
@@ -9366,7 +9374,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                         d,
                         scope,
                         page,
-                        (writer, scenario_writer, scenario_approver),
+                        (writer, wb_approver, scenario_writer, scenario_approver),
                         ask,
                         views,
                         notes_writer,
@@ -12917,6 +12925,19 @@ fn handle_save(
             return reply(req, 400, &e);
         }
     };
+    // #1317: an approver-only column (e.g. "settle the disagreement") is
+    // set by an approver only, whatever the page showed
+    if let Some(col) = wb::needs_approver(&w.opts, &changes) {
+        if !w.opts.is_approver(&claims.user, &claims.groups) {
+            info.deny = Some("not_approver");
+            audit("deny", Some("not_approver"), Some(&dash.id), Some(&spec.name));
+            return reply(
+                req,
+                403,
+                &format!("forbidden: only approvers may set {col} (options.writeback.approvers)"),
+            );
+        }
+    }
 
     // #736: under an access policy, a save into a table it names is
     // checked as the writer (columns, graph replace, rows seen).
@@ -14545,7 +14566,7 @@ fn served_index(
     dash: &Dash,
     scope: Option<&Scope>,
     session: Option<&str>,
-    (writer, scenario_writer, scenario_approver): (bool, bool, bool),
+    (writer, wb_approver, scenario_writer, scenario_approver): (bool, bool, bool, bool),
     ask: bool,
     views: bool,
     notes_writer: bool,
@@ -14656,6 +14677,9 @@ fn served_index(
     cfg["writeback"] = serde_json::json!({
         "enabled": st.writeback.as_ref().is_some_and(|w| w.opts.enabled_for(&dash.id)),
         "writer": writer,
+        // #1317: the columns only approvers may set, and whether this viewer is one
+        "approver": wb_approver,
+        "approverOnly": st.writeback.as_ref().map(|w| w.opts.approver_only_columns()).unwrap_or_default(),
         // #684 slice 4: the generation the page loads at — its saves'
         // `base`, moved on only by its own saves and a 409's answer.
         "gen": st.writeback.as_ref().map(|w| w.store.global_seq()),

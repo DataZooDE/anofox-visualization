@@ -7985,6 +7985,7 @@ const UI_WORDS = {
     all: "Alle", none: "Keine", of: "von", more: "Mehr", custom: "Eigene Werte",
     likely_range: "Wahrscheinlich + Bereich", parameters: "Parameter", most_likely: "Am wahrscheinlichsten",
     between_90: "Zu 90 % zwischen", and: "und", numbers_needed: "Bitte alle Zahlen eingeben.",
+    approver_only: "Das darf nur eine freigebende Person setzen.",
   },
   fr: {
     all: "Tous", none: "Aucun", of: "sur", more: "Plus", custom: "Personnalisé",
@@ -14857,6 +14858,19 @@ function makeFormField(meta, f, vals, commit, commitMany) {
     input.value = cur == null ? "" : String(cur);
     input.onchange = () => commit(f.key, input.value === "" ? null : input.value, input);
   }
+  // #1317: on a locked server, a column only approvers may set
+  // (options.writeback approver_only) is shown disabled to other writers;
+  // /api/save refuses it from them either way
+  const wb = servedMode && window.__served && window.__served.writeback;
+  if (wb && wb.enabled && !wb.approver && (wb.approverOnly || []).includes(f.key)) {
+    input.disabled = true;
+    input.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    row.classList.add("dp-form-approver-only");
+    const note = document.createElement("div");
+    note.className = "dp-form-source";
+    note.textContent = uiWord("approver_only", "Only an approver can set this.");
+    row._approverNote = note;
+  }
   input.id = id;
   input.classList.add("dp-form-input");
   refocus(`form:${meta.varname}:${f.key}`, input);
@@ -14894,6 +14908,7 @@ function makeFormField(meta, f, vals, commit, commitMany) {
     src.textContent = f.source;
     row.appendChild(src);
   }
+  if (row._approverNote) row.appendChild(row._approverNote);
   return row;
 }
 // The form card: its title / subtitle, then its fields — grouped by

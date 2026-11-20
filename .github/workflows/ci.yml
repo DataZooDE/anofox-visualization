@@ -1319,6 +1319,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/save-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/clarify-served-e2e.mjs (#1317): the clarify-the-graph answers
+      # on a locked server — two logins, who/when stamped by the server (a
+      # forged who is overwritten), "settle" only for approvers (disabled in
+      # the page, 403 from the endpoint).
+      - name: Clarify answers, stamp and approvers on a locked server e2e (#1317)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/clarify-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # scripts/views-served-e2e.mjs (#913): saved views on a locked server
       # (options.views) — saved from the header, kept per login, never seen
       # by another viewer, page state only, capped, read back after a restart.

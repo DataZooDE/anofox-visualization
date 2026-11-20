@@ -1828,6 +1828,25 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   server's own, so `text_max_chars` doesn't cap them (a long login still
   saves). Every viewer of a dashboard that reads the stamped table sees
   each writer's login in it; an access policy can mask that column.
+- **Approver-only columns (#1317).** A table may name columns only an
+  approver may set: `"approver_only": ["decides"]`, with
+  `"approvers": {"groups": […], "users": […]}` next to `writers` (both or
+  neither: a config with one and not the other is refused at start). A save
+  whose rows set such a column to anything but `null`, `false`, `0` or
+  empty text is refused with `403` ("only approvers may set
+  answers.decides") unless the writer is also an approver; leaving it unset
+  saves. The check is the server's, on the typed rows it is about to
+  append (`/api/save`, after the stamp and before the policy and conflict
+  checks), so a page that sends the column anyway gets the same `403`.
+  An approver still has to be a writer to save at all. The page shows those
+  form fields disabled to other writers, saying why. Only a column that
+  isn't part of the key or stamped can be approver-only. Use it with a
+  stamped user in the key (`["id", "who"]`): then a writer's save never
+  touches an approver's row; with a plain `id` key any writer's save
+  replaces the row, including a value an approver set. In the browser
+  (DuckDB-Wasm, no logins) there are no approvers: anyone in the tab can
+  set the field, and the row stays in that tab. The *Clarifying a learned
+  graph* example's "settle the disagreement" toggle is such a column.
 - **Who.** `auth` is required; the viewer must be a personal sign-in (no API
   key, no shared embed identity) listed in `writers` by user or group, and
   the dashboard must be in `dashboards` and in the credential's scope.
