@@ -477,18 +477,21 @@ SELECT 'Does the discount keep customers?'::DASHBOARD_TITLE;
 -- ── 1 · Seeing or doing ──────────────────────────────────────────────────────
 SELECT 'Seeing or doing'::TAB;
 
-SELECT 'At a glance'::GROUP;
-SELECT round(100 * probability, 1)::PERCENT, 'renew among customers who got the discount (seeing)'::LABEL
-FROM cz_seeing_doing WHERE node = 'discount' AND value = 'yes' AND mode = 'observe';
-SELECT round(100 * probability, 1)::PERCENT, 'would renew if we gave everyone the discount (doing)'::LABEL
-FROM cz_seeing_doing WHERE node = 'discount' AND value = 'yes' AND mode = 'do';
-SELECT round(100 * (s.probability - n.probability) - 100 * (d.probability - x.probability), 1)::METRIC,
-       'points of the seen gap that are confounding, not the discount'::LABEL
-FROM cz_seeing_doing s, cz_seeing_doing n, cz_seeing_doing d, cz_seeing_doing x
-WHERE s.node = 'discount' AND s.value = 'yes' AND s.mode = 'observe'
-  AND n.node = 'discount' AND n.value = 'no' AND n.mode = 'observe'
-  AND d.node = 'discount' AND d.value = 'yes' AND d.mode = 'do'
-  AND x.node = 'discount' AND x.value = 'no' AND x.mode = 'do';
+-- the difference in renewal with against without, seen and done (points);
+-- what seeing adds over doing is confounding
+CREATE OR REPLACE TEMP VIEW cz_gap AS
+SELECT net, node,
+       100 * (max(probability) FILTER (mode = 'observe' AND value = 'yes') - max(probability) FILTER (mode = 'observe' AND value = 'no')) AS seen,
+       100 * (max(probability) FILTER (mode = 'do' AND value = 'yes') - max(probability) FILTER (mode = 'do' AND value = 'no')) AS done
+FROM cz_seeing_doing GROUP BY net, node;
+
+SELECT 'With the discount against without (points of renewal)'::GROUP;
+SELECT round(seen, 1)::METRIC, 'seen: customers who got it against those who did not'::LABEL
+FROM cz_gap WHERE net = 'discount' AND node = 'discount';
+SELECT round(done, 1)::METRIC, 'done: giving it to everyone against no one'::LABEL
+FROM cz_gap WHERE net = 'discount' AND node = 'discount';
+SELECT round(seen - done, 1)::METRIC, 'confounding: what seeing adds, not the discount'::LABEL
+FROM cz_gap WHERE net = 'discount' AND node = 'discount';
 SELECT 1::ENDGROUP;
 
 SELECT node AS cz_node ::BUTTONS, 'Seeing or doing for'::LABEL, label::OPTION_LABEL
@@ -497,7 +500,7 @@ FROM (VALUES ('discount', 'the discount', 1), ('usage', 'weekly use', 2)) t(node
 SELECT 4::SPAN;
 SELECT '**The question.** Customers who got the renewal discount renewed more often. Does the discount keep them, or does sales just give it to customers who would renew anyway?
 
-**Seeing or doing.** *Seeing* compares the customers who got the discount with those who did not. *Doing* asks what happens if we give it: the network sets the node (do) and cuts its causes. The shaded gap between the two lines is confounding.
+**Seeing or doing.** *Seeing* compares the customers who got the discount with those who did not. *Doing* asks what happens if we give it: the network sets the node (do) and cuts its causes. Each line rises from *without* to *with*; seeing rises more. The extra rise, the shaded wedge between the lines, is confounding.
 
 **The drawing.** **X** is the treatment, **Y** the outcome; the ringed nodes are the adjustment set. A dashed arc is on a back-door path, a way for the two to hang together that does not run through the treatment; red when open, a bar where the set blocks it. Pick another set above the drawing, or **none** to see the path open.
 
@@ -510,12 +513,13 @@ SELECT CASE value WHEN 'yes' THEN 'with' ELSE 'without' END AS "Treatment" ::XAX
        100 * max(probability) FILTER (mode = 'do') AS "doing: renewal rate if we made it happen" ::LINECHART,
        100 * least(max(probability) FILTER (mode = 'observe'), max(probability) FILTER (mode = 'do')) ::BAND_LOWER,
        100 * greatest(max(probability) FILTER (mode = 'observe'), max(probability) FILTER (mode = 'do')) ::BAND_UPPER,
-       CASE WHEN value = 'yes' THEN printf('confounding: %+.0f points',
-         100 * (max(probability) FILTER (mode = 'observe') - max(probability) FILTER (mode = 'do'))) END ::ANNOTATE,
+       CASE WHEN value = 'yes' THEN printf('confounding: %.1f of the %.1f points seen',
+         any_value(g.seen) - any_value(g.done), any_value(g.seen)) END ::ANNOTATE,
        'percent'::YFORMAT,
        'Seeing or doing: P(renewed | X) against P(renewed | do(X))'::TITLE,
-       'The shaded gap is confounding: what seeing adds that doing does not'::SUBTITLE
-FROM cz_seeing_doing
+       'Seeing rises more from without to with than doing; the extra rise, the shaded wedge, is confounding'::SUBTITLE
+FROM cz_seeing_doing sd
+JOIN cz_gap g USING (net, node)
 WHERE net = 'discount' AND node = coalesce(nullif(getvariable('cz_node'), ''), 'discount')
 GROUP BY value ORDER BY value = 'yes';
 

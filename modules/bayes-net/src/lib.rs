@@ -75,8 +75,15 @@ parent_states, option, expected_utility, chosen) draws a decision's policy as a 
 configuration of its informational parents, a column per option with its expected utility, the chosen one marked, \
 the configuration the evidence picks on a band; a click on an option decides it); arcs into a decision are \
 information arcs, drawn dotted; a beliefs row of a utility node with expected_utility and no state is written in \
-its diamond. Lint: cycles, unknown ids, beliefs not summing to 1, unknown states, bad modes or likelihoods, path \
-steps along no arc or out of order, policy options, parent_states and chosen options that do not fit.",
+its diamond. Causal views: adjust := a LIST of (treatment, outcome, set_id, node, kind: minimal | optimal | \
+canonical | front-door) marks the treatment X, the outcome Y, the first set's nodes ringed and front-door mediators \
+M, the back-door paths dashed (red when open, a bar where the set blocks them), the causal paths in the accent \
+colour; beliefs with a world column (factual | counterfactual) draw the twin network, the nodes a do reaches twice \
+(the copy's id ends in *), the rest shared; reference := a LIST of (from, to) draws the learned arcs (strength at or \
+above threshold) against it: matching, extra, reversed, missing dashed, and the structural Hamming distance. Lint: \
+cycles, unknown ids, beliefs not summing to 1, unknown states, bad modes or likelihoods, path steps along no arc or \
+out of order, policy options, parent_states and chosen options that do not fit, adjustment sets that leave a \
+back-door path open or hold a node downstream of the treatment.",
         example: "SELECT anofox_plot_bayes_net(n, arcs := [{'from': 'rain', 'to': 'grass'}], beliefs := \
 [{'node': 'rain', 'state': 'yes', 'probability': 0.2}, {'node': 'rain', 'state': 'no', 'probability': 0.8}]) FROM \
 (VALUES ('rain', 'Rain', 'chance', ['yes', 'no']), ('grass', 'Wet grass', 'chance', ['yes', 'no'])) \

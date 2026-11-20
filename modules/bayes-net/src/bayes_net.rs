@@ -754,6 +754,7 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
     }
     if utilities.iter().any(|u| !u.is_null()) {
         cols.push(col("expected utility", "METRIC", utilities));
+    }
     if lanes.iter().any(|l| !l.is_null()) {
         cols.push(col("lane", "LANE", lanes));
     }
