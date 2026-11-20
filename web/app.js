@@ -13096,7 +13096,9 @@ function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const t0 = performance.now();
   // #1306: drawn by the server (a plugin the page never gets) — shown as
   // it came, scaled to the card
-  const drawn = serverDrawn(rows);
+  // (only a panel with a server-only plugin's role: no data column may
+  // smuggle markup in, #1306 review)
+  const drawn = roles.some((r) => serverRoleTokens().has(String(r[1]).toUpperCase())) ? serverDrawn(rows) : null;
   if (drawn != null) {
     holder.innerHTML = drawn;
     const svg = holder.querySelector(":scope > svg");

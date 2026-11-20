@@ -2185,6 +2185,11 @@ impl LockedOptions {
                 }
             }
         }
+        if let Some(p) = o.server_plugins.iter().find(|p| o.plugins.contains(p)) {
+            return Err(format!(
+                "options.plugins: {p} is listed for the browser and as server-only"
+            ));
+        }
         load_plugins(&o.plugins, o.plugin_assets)?;
         load_server_plugins(&o.server_plugins)?;
         // A response larger than the in-flight budget could never be sent.
@@ -9237,9 +9242,13 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 info,
                 &mut charge,
             )
-            .and_then(|(json, etag, deps)| match &draw {
-                Some(d) => drawn_panel(st, &body, json, etag, d).map(|(j, e)| (j, e, deps)),
-                None => Ok((json, etag, deps)),
+            .and_then(|(json, etag, deps)| {
+                // only the server's own picture may carry the field (#1306)
+                let json = strip_drawn_field(json).map_err(|e| (500, e))?;
+                match &draw {
+                    Some(d) => drawn_panel(st, &body, json, etag, d).map(|(j, e)| (j, e, deps)),
+                    None => Ok((json, etag, deps)),
+                }
             }) {
                 Ok((json, etag, deps)) => {
                     info.bytes = Some(json.len());
@@ -11127,6 +11136,27 @@ fn split_draw(body: &str) -> Result<(String, Option<Draw>), String> {
     ))
 }
 
+/// The last drawn panels (#1306), by ETag (rows, size and context).
+static DRAWN: std::sync::Mutex<Vec<(String, Arc<String>)>> = std::sync::Mutex::new(Vec::new());
+const DRAWN_MAX: usize = 64;
+
+/// A panel's rows without `"__anofox_svg"` (#1306 security review): the page
+/// shows that field as markup, so no query result may carry it — only
+/// [`drawn_panel`] sets it, after this.
+fn strip_drawn_field(json: Arc<String>) -> Result<Arc<String>, String> {
+    if !json.contains("__anofox_svg") {
+        return Ok(json);
+    }
+    let mut rows: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    for r in &mut rows {
+        r.remove("__anofox_svg");
+    }
+    Ok(Arc::new(
+        serde_json::to_string(&rows).map_err(|e| e.to_string())?,
+    ))
+}
+
 /// A panel's answer with its picture (#1306): when a server-only plugin draws
 /// the requested statement, its rows go out as they are, the first one
 /// carrying `"__anofox_svg"` — drawn here at the page's size and context,
@@ -11150,11 +11180,6 @@ fn drawn_panel(
     if rows.is_empty() {
         return Ok((json, etag));
     }
-    let svg =
-        anofox_visualization::host::render_panel_rows(&json, &roles, d.width, d.height, &d.ctx)
-            .map_err(|e| (500, e))?;
-    rows[0].insert("__anofox_svg".into(), serde_json::Value::String(svg));
-    let out = serde_json::to_string(&rows).map_err(|e| (500, e.to_string()))?;
     // the picture follows the size and context, the rows don't
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&(d.width, d.height, &d.ctx), &mut h);
@@ -11163,7 +11188,30 @@ fn drawn_panel(
         etag.trim_end_matches('"'),
         std::hash::Hasher::finish(&h)
     );
-    Ok((Arc::new(out), tag))
+    // the same rows at the same size are drawn once: a viewer can't make the
+    // plugin redraw an unchanged panel in a loop
+    if let Some(hit) = DRAWN
+        .lock()
+        .ok()
+        .and_then(|c| c.iter().find(|(t, _)| *t == tag).map(|(_, j)| j.clone()))
+    {
+        return Ok((hit, tag));
+    }
+    let svg =
+        anofox_visualization::host::render_panel_rows(&json, &roles, d.width, d.height, &d.ctx)
+            .map_err(|e| (500, e))?;
+    rows[0].insert("__anofox_svg".into(), serde_json::Value::String(svg));
+    let out = Arc::new(serde_json::to_string(&rows).map_err(|e| (500, e.to_string()))?);
+    if out.len() > st.opts.max_response {
+        return Err((413, "the drawn panel exceeds max_response_mb".into()));
+    }
+    if let Ok(mut c) = DRAWN.lock() {
+        if c.len() >= DRAWN_MAX {
+            c.remove(0);
+        }
+        c.push((tag.clone(), out.clone()));
+    }
+    Ok((out, tag))
 }
 
 /// [`locked_panel`] for a request already parsed and validated (an export,
@@ -15057,6 +15105,20 @@ mod tests {
         }
         let gone = e(r#"{"plugins": [{"path": "/nonexistent/s.wasm", "browser": false}]}"#);
         assert!(gone.contains("/nonexistent/s.wasm"), "{gone}");
+    }
+
+    #[test]
+    fn query_results_never_carry_the_drawn_field() {
+        // #1306 review: a data column named like the server's picture is dropped
+        let j = Arc::new(r#"[{"c0":1,"__anofox_svg":"<a href=//x>"},{"c0":2}]"#.to_string());
+        let out = strip_drawn_field(j).unwrap();
+        assert!(!out.contains("__anofox_svg"), "{out}");
+        assert!(out.contains(r#""c0":2"#));
+        let plain = Arc::new(r#"[{"c0":1}]"#.to_string());
+        assert!(Arc::ptr_eq(
+            &strip_drawn_field(plain.clone()).unwrap(),
+            &plain
+        ));
     }
 
     #[test]

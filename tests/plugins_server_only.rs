@@ -52,7 +52,12 @@ fn a_server_only_plugin_never_reaches_the_browser() {
             .is_some_and(|r| !r.is_empty()),
         "{list}"
     );
-    assert!(e["manifest"].get("assets").is_none(), "{list}");
+    let keys: Vec<&String> = e["manifest"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        ["name", "roles", "macros"],
+        "only what the page needs: {list}"
+    );
     // nothing of it is served
     assert!(plugin::browser_wasm("/modules/hello/plugin.wasm").is_none());
     assert!(anofox_visualization::module::asset("/modules/hello/hello.js").is_none());

@@ -269,10 +269,12 @@ pub fn load_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static P
     let m: Json = serde_json::from_slice(&live.memory.data(&live.store)[at..at + n])
         .map_err(|e| format!("manifest: malformed JSON ({e})"))?;
     let man = manifest(&m)?;
-    let mut browser_manifest = m.clone();
-    if let Some(o) = browser_manifest.as_object_mut() {
-        o.remove("assets");
-    }
+    // what the page needs to plan and check — nothing else of the manifest
+    let browser_manifest = json!({
+        "name": m.get("name"),
+        "roles": m.get("roles"),
+        "macros": m.get("macros").cloned().unwrap_or(json!([])),
+    });
     if !man.macros.is_empty() && live.render_contract.is_none() {
         return Err("declares macros but exports no anofox_plugin_render_contract".into());
     }
