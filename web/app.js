@@ -12235,6 +12235,13 @@ async function runOnce(fresh = true, pv = preview) {
         // #699 diagramChecksFor)
       } else if (d === "ENDFIGURE") {
         // closes a ::FIGURE — its cells were drawn by the ::FIGURE (#661)
+      } else if (d === "SPAN" && role(s, "HEIGHT")) {
+        // `SELECT 12 ::SPAN, 680 ::HEIGHT;` sets both, each from its own
+        // column (#1286) — firstValue() only reads the first.
+        const r0 = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, s.i))[0] || {};
+        const col = (tok) => r0["c" + s.roles.find((r) => r[1] === tok)[0]];
+        nextSpan = parseInt(col("SPAN")) || 0;
+        nextHeight = heightOf(col("HEIGHT"), nextSpan || defaultSpan, viewScale);
       } else if (d === "SPAN") {
         nextSpan = parseInt(await firstValue(s)) || 0;
       } else if (d === "HEIGHT") {

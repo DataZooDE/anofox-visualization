@@ -3245,20 +3245,19 @@ fn render_dashboard_page(
         // figure's options); phase 2 draws its cells — the statements after
         // it carrying `figure` — as one picture.
         let figure = panel.roles.iter().any(|(_, r)| *r == Role::FigureStart);
-        if matches!(panel.roles[..], [(_, Role::Span)] | [(_, Role::Height)]) {
+        if crate::page::Slot::is_layout(&panel.roles) {
             let q = format!(
-                "{prefix}SELECT * FROM (\n{}\n) LIMIT 1",
-                panel.sql.trim().trim_end_matches(';')
+                "{prefix}{}",
+                crate::page::Slot::query(&panel.roles, &panel.sql)
             );
             let rows: Rows = page_rows(st, &q)?;
-            let cell = rows
-                .first()
-                .and_then(|r| r.values().next())
-                .map(|v| match v {
+            let row = rows.first();
+            slot.read(&panel.roles, |i| {
+                row.and_then(|r| r.get(&format!("c{i}"))).map(|v| match v {
                     serde_json::Value::String(s) => s.clone(),
                     v => v.to_string(),
-                });
-            slot.read(&panel.roles, cell.as_deref());
+                })
+            });
             continue;
         }
         // Skip interactive/layout-only directives (params drive re-render instead).

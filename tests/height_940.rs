@@ -85,3 +85,55 @@ fn lint_names_a_bad_height() {
         assert_eq!(codes(bad), vec!["layout/bad-height"], "{bad}");
     }
 }
+
+/// #1286: `SELECT 12 ::SPAN, 680 ::HEIGHT;` sets both for the next panel,
+/// as two statements do.
+#[test]
+fn span_and_height_in_one_statement() {
+    struct Layout;
+    impl DataProvider for Layout {
+        fn execute(&mut self, _sql: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn query(&mut self, sql: &str) -> Result<Vec<(String, Vec<Value>)>, String> {
+            if sql.contains("AS c1") && !sql.contains("680") {
+                return Ok(vec![
+                    (
+                        "c0".into(),
+                        ["a", "b", "c"].map(|s| Value::Str(s.into())).to_vec(),
+                    ),
+                    ("c1".into(), [1.0, 3.0, 2.0].map(Value::Float).to_vec()),
+                ]);
+            }
+            // a layout statement: one column per value
+            let vals: Vec<&str> = ["12", "680"]
+                .into_iter()
+                .filter(|v| sql.contains(v))
+                .collect();
+            Ok(vals
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (format!("c{i}"), vec![Value::Float(v.parse().unwrap())]))
+                .collect())
+        }
+    }
+    let size = |layout: &str| {
+        let sql = format!("{layout}\nSELECT x::XAXIS, y::BARCHART FROM t;");
+        let svg = render_dashboard_svg(&sql, &mut Layout, &DashboardOptions::default()).unwrap();
+        let root = svg[..svg.find('>').unwrap()].to_string();
+        let attr = |a: &str| -> f64 {
+            root.split(&format!(" {a}=\""))
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        (attr("width"), attr("height"))
+    };
+    let two = size("SELECT 12::SPAN;\nSELECT 680::HEIGHT;");
+    assert_eq!(size("SELECT 12::SPAN, 680::HEIGHT;"), two);
+    assert!(two.1 > size("SELECT 12::SPAN;").1 + 300.0, "{two:?}");
+}

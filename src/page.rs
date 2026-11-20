@@ -87,23 +87,51 @@ pub struct Slot {
 }
 
 impl Slot {
-    /// Take a `::SPAN` / `::HEIGHT` statement's first cell into the slot
-    /// for the next panel; `false` when the statement is neither.
-    pub fn read(&mut self, roles: &[(usize, crate::Role)], first_cell: Option<&str>) -> bool {
-        match roles {
-            [(_, crate::Role::Span)] => {
-                self.span = first_cell
-                    .and_then(|t| t.trim().parse::<f64>().ok())
-                    .filter(|n| n.is_finite() && *n >= 1.0)
-                    .map(|n| (n as u32).min(12));
-                true
-            }
-            [(_, crate::Role::Height)] => {
-                self.height = first_cell.and_then(crate::height::PanelHeight::parse);
-                true
-            }
-            _ => false,
+    /// Is this statement a layout one the slot reads: `::SPAN`, `::HEIGHT`
+    /// or both (`SELECT 12 ::SPAN, 680 ::HEIGHT;`, #1286) and nothing else?
+    pub fn is_layout(roles: &[(usize, crate::Role)]) -> bool {
+        !roles.is_empty()
+            && roles
+                .iter()
+                .all(|(_, r)| matches!(r, crate::Role::Span | crate::Role::Height))
+    }
+
+    /// Take a `::SPAN` / `::HEIGHT` statement into the slot for the next
+    /// panel, each from its own column (`cell(i)`: the first row's cell of
+    /// column `i`); `false` when the statement is no such one.
+    pub fn read(
+        &mut self,
+        roles: &[(usize, crate::Role)],
+        cell: impl Fn(usize) -> Option<String>,
+    ) -> bool {
+        if !Self::is_layout(roles) {
+            return false;
         }
+        for (i, r) in roles {
+            match r {
+                crate::Role::Span => {
+                    self.span = cell(*i)
+                        .and_then(|t| t.trim().parse::<f64>().ok())
+                        .filter(|n| n.is_finite() && *n >= 1.0)
+                        .map(|n| (n as u32).min(12));
+                }
+                _ => self.height = cell(*i).and_then(|t| crate::height::PanelHeight::parse(&t)),
+            }
+        }
+        true
+    }
+
+    /// The SQL that reads a layout statement's cells by position: its
+    /// columns renamed `c0`, `c1`, … so two equal values (`6::SPAN,
+    /// 6::HEIGHT`) don't share a name.
+    pub fn query(roles: &[(usize, crate::Role)], sql: &str) -> String {
+        let n = roles.iter().map(|(i, _)| i + 1).max().unwrap_or(1);
+        let cols: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+        format!(
+            "SELECT * FROM (\n{}\n) AS dp_layout({}) LIMIT 1",
+            sql.trim().trim_end_matches(';'),
+            cols.join(", ")
+        )
     }
 
     /// The drawing size: 460 × 300 as before for a panel without either;
@@ -800,22 +828,41 @@ mod slot_tests {
         let mut s = Slot::default();
         assert_eq!(s.size(), (460, 300));
         assert_eq!(s.class(), "");
-        assert!(s.read(&[(0, Role::Span)], Some("12")));
-        assert!(s.read(&[(0, Role::Height)], Some("680")));
+        assert!(s.read(&[(0, Role::Span)], one("12")));
+        assert!(s.read(&[(0, Role::Height)], one("680")));
         assert_eq!(s.size(), (928, 680));
         assert_eq!(s.class(), " dp-span-12");
         let mut s = Slot::default();
-        s.read(&[(0, Role::Span)], Some("6"));
+        s.read(&[(0, Role::Span)], one("6"));
         assert_eq!(s.size(), (460, 300));
         // a ratio of the width; out-of-range spans clamp; junk is ignored
         let mut s = Slot::default();
-        s.read(&[(0, Role::Span)], Some("40"));
+        s.read(&[(0, Role::Span)], one("40"));
         s.height = Some(PanelHeight::Ratio(0.5));
         assert_eq!(s.size(), (928, 464));
         let mut s = Slot::default();
-        s.read(&[(0, Role::Span)], Some("wide"));
+        s.read(&[(0, Role::Span)], one("wide"));
         assert_eq!(s, Slot::default());
-        assert!(!s.read(&[(0, Role::Title)], Some("x")));
+        assert!(!s.read(&[(0, Role::Title)], one("x")));
+    }
+
+    fn one(v: &str) -> impl Fn(usize) -> Option<String> + '_ {
+        move |i| (i == 0).then(|| v.to_string())
+    }
+
+    /// #1286: one statement may set both, each from its own column.
+    #[test]
+    fn one_statement_sets_span_and_height() {
+        let mut s = Slot::default();
+        let roles = [(0, Role::Span), (1, Role::Height)];
+        assert!(Slot::is_layout(&roles));
+        assert!(s.read(&roles, |i| Some(["12", "680"][i].to_string())));
+        assert_eq!(s.size(), (928, 680));
+        assert!(!Slot::is_layout(&[(0, Role::Span), (1, Role::Title)]));
+        assert_eq!(
+            Slot::query(&roles, "SELECT 6, 6;"),
+            "SELECT * FROM (\nSELECT 6, 6\n) AS dp_layout(c0, c1) LIMIT 1"
+        );
     }
 
     #[test]
