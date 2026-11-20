@@ -1944,20 +1944,26 @@ fn render_titled(
     let svg = format!(
         "{open}{text}<g transform=\"translate(0,{TITLE_BAR_H})\">{body}</g></svg>",
         open = svg_open(Place::Doc, w, body_h + TITLE_BAR_H),
-        text = title_bar_text(title, o),
+        text = title_bar_text(title, None, o),
     );
     Ok(with_warnings_attr(svg, &warnings, o.record_warnings))
 }
 
 /// The `::TITLE` bar's text as a dashboard card draws it
 /// (`dashboard::render_panel_svg`), the title XML-escaped.
-pub(crate) fn title_bar_text(title: &str, o: &RenderOptions) -> String {
+pub(crate) fn title_bar_text(title: &str, fit: Option<u32>, o: &RenderOptions) -> String {
+    // a static page's bar: cut with "…" to its width (#878's rule for a
+    // card's title); anofox_render keeps the title whole (#251)
+    let title = match fit {
+        Some(w) => dashboard::fit_title(title, w as f64 - 28.0),
+        None => title.to_string(),
+    };
     format!(
         "<text x=\"14\" y=\"20\" font-family=\"{font}\" font-size=\"14\" \
          font-weight=\"700\" fill=\"{ink}\">{title}</text>",
         font = format::escape_xml(&o.theme.font.display),
         ink = theme::hex(o.theme.colors.heading),
-        title = format::escape_xml(title),
+        title = format::escape_xml(&title),
     )
 }
 
@@ -1994,7 +2000,7 @@ pub fn render_with_title(
         Some(t) => format!(
             "{open}{text}</svg>{chart}",
             open = svg_open(Place::Doc, clamp_dim(width as u64), TITLE_BAR_H),
-            text = title_bar_text(&t, o),
+            text = title_bar_text(&t, Some(clamp_dim(width as u64)), o),
         ),
         None => chart,
     })

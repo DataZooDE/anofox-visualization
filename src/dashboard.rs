@@ -2022,7 +2022,7 @@ fn heading_svg(t: &ResolvedTheme, place: Place, text: &str, w: f64, h: f64) -> S
 /// is a touch wider than the regular weight the table estimates.
 /// A panel title cut to `avail_px` with "…" (#878): a long title used to
 /// run past its card and be clipped mid-word.
-fn fit_title(title: &str, avail_px: f64) -> String {
+pub(crate) fn fit_title(title: &str, avail_px: f64) -> String {
     truncate_header(title, 14.0, avail_px).unwrap_or_else(|| title.to_string())
 }
 
