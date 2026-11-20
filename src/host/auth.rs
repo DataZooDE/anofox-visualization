@@ -695,10 +695,12 @@ impl Auth {
             // #1284: a loaded plugin (its .wasm and browser files) needs a
             // credential like a page; an embed or share page loads it with
             // its own session
-            && !path.starts_with("/modules/")
-            // the file lookups trim every leading '/', so `//modules/…`
-            // would reach a plugin past the check above (review of #1284)
+            // the file lookups trim every leading '/' (and the server takes
+            // the request target as sent): an origin-form path, exactly one
+            // '/' in front, never a plugin's (review of #1284)
+            && path.starts_with('/')
             && !path.contains("//")
+            && !path.trim_start_matches('/').starts_with("modules/")
             && !path.contains("..")
             && [".js", ".mjs", ".css", ".wasm", ".woff2", ".woff", ".ico"]
                 .iter()

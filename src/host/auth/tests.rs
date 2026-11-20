@@ -526,6 +526,8 @@ fn public_assets_only_with_embed_and_only_code() {
         "//modules/acme/plugin.wasm",
         "///modules/acme/view.js",
         "/pkg//x.js",
+        "modules/acme/plugin.wasm",
+        "app.js",
     ] {
         assert!(!a.public_asset("GET", p), "{p}");
     }

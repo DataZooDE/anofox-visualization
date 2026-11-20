@@ -289,6 +289,10 @@ for f in /modules/acme/plugin.wasm /modules/acme/view.js /modules/acme/view.css 
   [ "$(xget --path-as-is "$H$f")" = 401 ] || fail "$f without a credential should 401"
   [ "$(xget -H "X-Anofox-Session: $sess" "$H$f")" != 401 ] || fail "$f with the page session passes the login"
 done
+# a request target without its leading '/' (the server takes it as sent)
+raw=$(printf 'GET modules/acme/plugin.wasm HTTP/1.1\r\nHost: 127.0.0.1:%s\r\nConnection: close\r\n\r\n' "$PORT" \
+  | curl -s --max-time 5 telnet://127.0.0.1:$PORT 2>/dev/null | head -1 || true)
+case "$raw" in "HTTP/1.1 401"*|"HTTP/1.1 404"*) ;; *) fail "modules/… without a leading / should be refused: $raw" ;; esac
 stop
 echo "OK: exports — SVG/PNG/PDF (dashboard, one tab, variables, inputs' defaults), SVG/PNG/CSV/JSON of a named panel, formula cells neutralised, scope and login"
 
