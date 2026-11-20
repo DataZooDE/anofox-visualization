@@ -33,6 +33,7 @@ impl Plugin for BayesNet {
             ("evidence", "NULL"),
             ("tables", "NULL"),
             ("paths", "NULL"),
+            ("policy", "NULL"),
             ("threshold", "0.5"),
             ("direction", "'TB'"),
             ("width", "900"),
@@ -44,6 +45,7 @@ impl Plugin for BayesNet {
             ContractOption { key: "evidence", param: "evidence", fallback_var: None },
             ContractOption { key: "tables", param: "tables", fallback_var: None },
             ContractOption { key: "paths", param: "paths", fallback_var: None },
+            ContractOption { key: "policy", param: "policy", fallback_var: None },
             ContractOption { key: "threshold", param: "threshold", fallback_var: None },
             ContractOption { key: "direction", param: "direction", fallback_var: None },
         ],
@@ -63,8 +65,13 @@ the node's arcs). layer names tiers, group colours a node's accent. With 'name e
 click on a state observes it (again: retracts), shift-click gives soft evidence, a chip toggles observe / do; \
 getvariable('name') is the evidence as JSON text, getvariable('name_prev') the one before. previous draws each \
 state's change and tints a node by how far it moved; do cuts a node's incoming arcs (a hand on it); hovering a \
-node lights its Markov blanket, or the paths to an anchored node. Lint: cycles, unknown ids, beliefs not summing \
-to 1, unknown states, bad modes or likelihoods, path steps along no arc or out of order.",
+node lights its Markov blanket, or the paths to an anchored node. Influence diagrams: policy := a LIST of (decision, \
+parent_states, option, expected_utility, chosen) draws a decision's policy as a table in its box (a row per \
+configuration of its informational parents, a column per option with its expected utility, the chosen one marked, \
+the configuration the evidence picks on a band; a click on an option decides it); arcs into a decision are \
+information arcs, drawn dotted; a beliefs row of a utility node with expected_utility and no state is written in \
+its diamond. Lint: cycles, unknown ids, beliefs not summing to 1, unknown states, bad modes or likelihoods, path \
+steps along no arc or out of order, policy options, parent_states and chosen options that do not fit.",
         example: "SELECT anofox_plot_bayes_net(n, arcs := [{'from': 'rain', 'to': 'grass'}], beliefs := \
 [{'node': 'rain', 'state': 'yes', 'probability': 0.2}, {'node': 'rain', 'state': 'no', 'probability': 0.8}]) FROM \
 (VALUES ('rain', 'Rain', 'chance', ['yes', 'no']), ('grass', 'Wet grass', 'chance', ['yes', 'no'])) \

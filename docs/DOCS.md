@@ -1119,7 +1119,7 @@ SELECT anofox_plot_prediction(f) FROM ts_forecast_by('sales', id, ds, y, 'AutoET
 | `anofox_plot_matrix(tbl, row := NULL, col := NULL, value := NULL, domain := NULL, mirror := NULL, labels := NULL, cluster := NULL)` | **row, col, value** — also read: `column_a` / `column_b` (and `var1`/`var2`, `row_name`/`col_name`); value also read from `pearson` \| `spearman` \| `kendall` \| `correlation` \| `corr` \| `count` \| `n`; optional `model_id` | a heatmap, one tile per cell: a diverging fill scale around 0, `−1..1` for a correlation measure (`domain :=` overrides); a pair list (anofox-tabular's `profile_correlations` as it comes) is mirrored to the full matrix with a diagonal of 1 (`mirror := false` keeps it as given); cell values are written when there are at most 144 cells (`labels :=` overrides); `value := 'spearman'` picks another measure; `cluster := true` orders a square matrix's rows and columns by hierarchical clustering (\|value\| as the similarity, average linkage), so variables that hang together sit side by side (a pair list needs no mirrored half); a matrix that isn't square is an error. Width 520, height 440 |
 | `anofox_plot_diagram(tbl, edges := NULL, id := NULL, mainstat := NULL, format := 'compact', source := NULL, target := NULL, value := NULL, direction := 'LR', style := NULL)` | `graph`: one row per node — **id**, title, mainstat, status, group, lane, story, x, y, sparkline, seq; `edges :=` a LIST of **source, target**, value, label, style, status (Grafana node-graph names; `stage`, `label`, `from_stage`, `to_stage`, `count` read too; the arguments name any other column) | the `::DIAGRAM` panel (see *Diagrams*): boxes with title, mainstat (in `format`), status pill and sparkline, swimlanes, edges as wide as their value and coloured by status, loops running back; nodes in `seq` order. Width 800, height 400 |
 | `anofox_plot_factor_graph(tbl, edges := NULL, marginals := NULL, schedule := NULL)` — the **factor-graph plugin** (#1218; `SELECT 'factor-graph'::REQUIRES;`, see below) | `factor_graph`: one row per node — **id, kind** (`factor`, `variable`, `data`, `constant`, `equality`, `delta`), name, label, slice, layer, plate; `edges :=` a LIST of **variable, factor**, interface, seq; `marginals :=` a LIST of variable, iteration, mean, sd, family; `schedule :=` a LIST of iteration, step, **variable, factor**, interface, direction (`to_factor` / `to_variable`) | a Forney-style factor graph through `::DIAGRAM` + `::SHAPE`, in one teal with its labels as mathematics: factors as glyph squares (𝒩, Γ, Ber, …), variables as circles, observations as filled terminal squares at the end of their edge (labelled beside), equality nodes small squares, delta nodes filled squares, constants text; a variable on exactly two factors with no marginals is drawn as the edge between them, labelled with its name; layers (control, param, state, obs, pref, …) as straight bands; undirected edges labelled with the interface at the factor; a variable whose only edge is its equality node is drawn as that node; TeX-ish labels (`\theta`, `y_{0}`) as text; the latest marginal as the value (mean, ± sd), a variable's tooltip draws its posterior mean over the iterations and a belief curve over it sharpens as Step goes through the iterations (`::BELIEF`); a prior whose parameters are constants (Beta, Normal, NormalMeanVariance, NormalMeanPrecision, Gamma, GammaShapeRate, GammaShapeScale, Uniform) is drawn as a dashed outline behind it, and the variable's card says what the observations did to it ("4 observations narrowed θ from 0.4 ± 0.2 to 0.56 ± 0.16."); a line under the graph (and its screen-reader text) says what the model learned ("After 4 observations, θ is 0.56 ± 0.16 (prior 0.4 ± 0.2)."); a model with more than 6 slices (`slice`) draws the first and last two, the run between as one `⋯ n more` per band (`slices := 'all'` draws every slice; in the browser a click or Enter on a `⋯` draws them all, kept in the share link as `v.anofox_fg_slices=all`, and *Fewer slices* or Esc collapses it again — the macro's `slices` defaults to `getvariable('anofox_fg_slices')`; a dashboard with `-- @vars` lists `anofox_fg_slices` to allow it on a locked server); with `influence :=`, hovering or selecting a variable widens each observation's edge by how far the variable moves without it (a selection keeps those observations in focus); with `schedule :=`, Step / Play walk the messages in order — each lights its edge, moving the message's way, captioned with the receiving variable's marginal after that iteration; a click or Enter on a node sets `getvariable('selected')` (or a `::SELECT_AS` name), and a graph shrunk to fit zooms with Ctrl/⌘ + wheel (see `::DIAGRAM`'s *Zoom*). Lint: unknown kinds, unknown ids, a variable on more than two factors without an equality node. Width 900, height 420 |
-| `anofox_plot_bayes_net(tbl, arcs := NULL, beliefs := NULL, evidence := NULL, tables := NULL, paths := NULL, threshold := 0.5, direction := 'TB')` — the **bayes-net plugin** (#1275, #1276; `SELECT 'bayes-net'::REQUIRES;`) | `bayes_net`: one row per node — **id**, name, label, kind (`chance`, `observed`, `latent`, `decision`, `utility`, `deterministic`), **states** (a LIST of state names), layer, group; `arcs :=` a LIST of **from, to**, strength (0–1, e.g. a bootstrap frequency), direction, status (`learned`, `required`, `forbidden`); `beliefs :=` a LIST of **node, state, probability**, prior, lo, hi, previous (the belief before the evidence last changed); `evidence :=` a LIST of **node, state** (hard) or node, state, likelihood (soft), mode (`observe` / `do`) — or that list as JSON text, e.g. an evidence selection's variable as it is; `tables :=` a LIST of **node, parent_states** (a LIST, in the order of the node's arcs), **state, probability**; `paths :=` a LIST of **path_id, seq, from, to**, the active paths between nodes given the evidence, a step per row | a directed Bayesian network through `::DIAGRAM` + `::SHAPE` + `::BELIEF`, laid out in layers top to bottom (`direction := 'LR'` left to right), arrows at the child; Netica / GeNIe-style nodes: a box per chance node with a row per state — its name, a bar for its belief, the percentage — and the prior as a faint bar behind it with a tick where it ends; a node with evidence (or of kind `observed`) is shaded, its observed state in bold; a decision is a square-cornered box, a utility a diamond, a deterministic node a double outline; arcs are wider the stronger they are (1.2–2.8 px), dashed below `threshold` (a `required` arc stays solid), their strength, direction and status on hover; `forbidden` arcs are not drawn; `layer` names tiers drawn in their order (first appearance), `group` colours a node's accent bar; hovering a node opens its card — the evidence on it, its belief against the prior per state (with lo–hi when given), and its conditional probability table as a heat table (parent configurations × states, the first 12); the screen-reader text names the evidence and each node's most likely state. **Interactive evidence** (#1276, see *Querying a Bayesian network by clicking*): with `'ev evidence'::SELECT_AS` before it, a click on a state observes it (again: retracts it), alt-click sets it (`do`), shift-click (or Enter on a focused node) opens a panel with a likelihood per state (soft evidence); a chip per node above the graph switches observe / do and retracts; `previous` draws each state's change after its percentage (▲ 21) and tints a node by how far it moved (Jensen–Shannon distance); a `do` node's incoming arcs are drawn cut (grey, a break mark) and the node shows a hand; hovering a node lights its Markov blanket; a click on a node's name anchors it, and hovering another lights the `paths` between them (its card counts them, or says the two are independent given the evidence); a line under the graph — and the screen-reader text — says what the evidence did ("Given Wet grass, Rain rose from 50% to 71%, …"). Lint (`--check`, `module/lint`): cycles, arcs, beliefs, evidence, tables or paths naming unknown ids, beliefs that don't sum to 1 per node (±1e-6), states not among the node's `states`, unknown kinds, evidence modes other than observe / do, a soft evidence with a negative likelihood or none above 0, path steps along no arc or out of `seq` order. Width 900, height 480 |
+| `anofox_plot_bayes_net(tbl, arcs := NULL, beliefs := NULL, evidence := NULL, tables := NULL, paths := NULL, policy := NULL, threshold := 0.5, direction := 'TB')` — the **bayes-net plugin** (#1275, #1276, #1279; `SELECT 'bayes-net'::REQUIRES;`) | `bayes_net`: one row per node — **id**, name, label, kind (`chance`, `observed`, `latent`, `decision`, `utility`, `deterministic`), **states** (a LIST of state names), layer, group; `arcs :=` a LIST of **from, to**, strength (0–1, e.g. a bootstrap frequency), direction, status (`learned`, `required`, `forbidden`); `beliefs :=` a LIST of **node, state, probability**, prior, lo, hi, previous (the belief before the evidence last changed); `evidence :=` a LIST of **node, state** (hard) or node, state, likelihood (soft), mode (`observe` / `do`) — or that list as JSON text, e.g. an evidence selection's variable as it is; `tables :=` a LIST of **node, parent_states** (a LIST, in the order of the node's arcs), **state, probability**; `paths :=` a LIST of **path_id, seq, from, to**, the active paths between nodes given the evidence, a step per row | a directed Bayesian network through `::DIAGRAM` + `::SHAPE` + `::BELIEF`, laid out in layers top to bottom (`direction := 'LR'` left to right), arrows at the child; Netica / GeNIe-style nodes: a box per chance node with a row per state — its name, a bar for its belief, the percentage — and the prior as a faint bar behind it with a tick where it ends; a node with evidence (or of kind `observed`) is shaded, its observed state in bold; a decision is a square-cornered box, a utility a diamond, a deterministic node a double outline; arcs are wider the stronger they are (1.2–2.8 px), dashed below `threshold` (a `required` arc stays solid), their strength, direction and status on hover; `forbidden` arcs are not drawn; `layer` names tiers drawn in their order (first appearance), `group` colours a node's accent bar; hovering a node opens its card — the evidence on it, its belief against the prior per state (with lo–hi when given), and its conditional probability table as a heat table (parent configurations × states, the first 12); the screen-reader text names the evidence and each node's most likely state. **Interactive evidence** (#1276, see *Querying a Bayesian network by clicking*): with `'ev evidence'::SELECT_AS` before it, a click on a state observes it (again: retracts it), alt-click sets it (`do`), shift-click (or Enter on a focused node) opens a panel with a likelihood per state (soft evidence); a chip per node above the graph switches observe / do and retracts; `previous` draws each state's change after its percentage (▲ 21) and tints a node by how far it moved (Jensen–Shannon distance); a `do` node's incoming arcs are drawn cut (grey, a break mark) and the node shows a hand; hovering a node lights its Markov blanket; a click on a node's name anchors it, and hovering another lights the `paths` between them (its card counts them, or says the two are independent given the evidence); a line under the graph — and the screen-reader text — says what the evidence did ("Given Wet grass, Rain rose from 50% to 71%, …"). Lint (`--check`, `module/lint`): cycles, arcs, beliefs, evidence, tables or paths naming unknown ids, beliefs that don't sum to 1 per node (±1e-6), states not among the node's `states`, unknown kinds, evidence modes other than observe / do, a soft evidence with a negative likelihood or none above 0, path steps along no arc or out of `seq` order. **Influence diagrams** (#1279, see *Decisions on a Bayesian network*): `policy :=` a LIST of **decision, parent_states, option, expected_utility**, chosen draws each decision's policy as a table in its box (a row per configuration of its informational parents, a column per option, the chosen one marked, the configuration the evidence picks on a band; a click on an option decides it); arcs into a decision are dotted; a `beliefs` row of a utility node with `expected_utility` is written in its diamond; lint `bayes_net/policy-*`. Width 900, height 480 |
 | `anofox_plot_assignment(tbl, x := NULL)` | one row per item: **bin \| wave, item, size**, capacity, model_id | an optimizer's item → bin/wave assignment (anofox-optimize's `pack_*` / `wave_*`): items stacked per bin/wave (`::CATEGORY` = item, `::BARCHART_STACKED` = size), the capacity as a quiet reference line so the fill level is visible; `x :=` names the bin/wave column when both are present; several `model_id`s are faceted to compare algorithms; a `group_col` (`pack_by`/`wave_by`'s own instance split, kept under its own name) facets too, so two groups' bin 1 never stack into one over-capacity bar — alone, or combined into one `"group · model_id"` facet title when both vary |
 | `anofox_plot_selection(tbl)` | one row per item: **item, selected \| listed**, value, weight, capacity, margin, demand, model_id | which items an optimizer picked (#499; anofox-optimize's knapsack `selected`, assortment `listed`): a bar per item, picked ones first in the theme's good colour, the rest neutral; the bar is `value`, else margin × demand, else margin, else weight; with weight + capacity the default title is "Selected weight 9 of capacity 10 (90 %)"; several `model_id`s and a producer group column facet |
 | `anofox_plot_sequence(tbl)` | one row per position: **position, item**, setup, cumulative_setup, model_id | an optimizer's order (#499; anofox-optimize `opt_sequence_by`): a step line of the cumulative setup over the position (the running sum of `setup` when `cumulative_setup` is absent), each step labelled position · item; several `model_id`s and a group column facet |
@@ -2225,6 +2225,98 @@ FROM v ORDER BY cost;
   where a line chart alone breaks at a missing value.
 - The learned network itself is the `bayes_net` plugin's drawing (#1275).
 
+### Decisions on a Bayesian network: policies, evidence search, troubleshooting
+
+Three decision views (#1279), each from plain tables a producer writes. Two
+examples show them: *Should we drill, and is the seismic test worth paying
+for?* (`web/examples/bayes-oil-drill.sql`, the oil wildcatter as an
+influence diagram) and *The printer won't print: what do we try first?*
+(`web/examples/bayes-printer-fix.sql`, decision-theoretic troubleshooting
+and an evidence search). Both solve their model in plain SQL.
+
+**Influence diagrams.** `anofox_plot_bayes_net` draws decision nodes
+(`kind` `decision`, square boxes) and utility nodes (`utility`, diamonds).
+An arc into a decision is an information arc (what is known when deciding)
+and is drawn dotted. `policy :=` gives each decision its policy:
+
+| Column | Meaning |
+|---|---|
+| decision | the decision node's id |
+| parent_states | the states of its informational parents (the nodes with an arc into it), in the order of those arcs; `[]` for none |
+| option | one of the decision's `states` |
+| expected_utility | the option's expected utility given that configuration |
+| chosen | true for the option the policy picks (optional: the highest expected utility) |
+
+The policy is drawn as a table in the decision's box: a row per
+configuration, a column per option with its expected utility, the chosen
+one bold on a tint. When the evidence observes every informational parent,
+that configuration's row is on a band. A decision's hover card shows the same
+table. A `beliefs` row of a utility node with `expected_utility` (and no
+state) is written in its diamond. With `'ev evidence'::SELECT_AS`, a click
+on an option's column decides it: `{"node": "drill", "state": "drill"}` in
+the evidence, so the producer can follow your choice instead of the policy.
+The maximum expected utility goes on a `::METRIC` tile.
+
+```sql
+SELECT 'oil_ev evidence'::SELECT_AS;
+SELECT anofox_plot_bayes_net(n,
+         arcs := (SELECT list(a ORDER BY a.k) FROM oil_arcs a),
+         beliefs := (SELECT list(b) FROM oil_beliefs b),   -- payoff: expected_utility
+         evidence := (SELECT list(e) FROM oil_evidence e),
+         policy := (SELECT list(p) FROM oil_policy p))       -- decision, parent_states, option, expected_utility, chosen
+FROM oil_nodes n;
+SELECT max(eu)::METRIC, 'Best expected payoff'::LABEL FROM oil_test_policy;
+```
+
+Lint: `bayes_net/policy-not-decision` (the policy names a node that is not
+a decision), `policy-option` (an option that is not one of its states),
+`policy-parents` (`parent_states` of another length than the arcs into the
+decision), `policy-chosen` (more than one chosen option in a
+configuration), `policy-not-best` (the chosen option's expected utility is
+below another's).
+
+**Evidence search.** Which answers would make a target most or least
+likely: a table `evidence_search` (`goal`, `method`, `rank`, the
+configuration, the target's probability, the configuration's own
+probability). `method` says how the producer found it: `exhaustive` (every
+combination) or `greedy` (one finding at a time, each the one that moves
+the target most). Draw it as bars and a table:
+
+```sql
+SELECT CASE method WHEN 'greedy' THEN 'greedy: ' ELSE '' END || answers ::XAXIS,
+       100 * p AS "probability of the fault" ::BARCHART, goal ::CATEGORY, 1::FLIP, 'percent'::YFORMAT
+FROM evidence_search ORDER BY goal DESC, method, rank;
+```
+
+**Troubleshooting plans.** The cheapest order of tests and repairs, and
+how it changes as answers come in. The producer writes `plan`:
+
+| Column | Meaning |
+|---|---|
+| step | 1, 2, … |
+| kind | `test` or `repair` |
+| name | what to do |
+| cost | its cost |
+| p_fix | the chance it fixes the fault if it comes to it |
+| expected_cost_after | the plan's expected cost up to and including the step |
+
+The step list is a `::TABLE`. The cumulative expected cost is a
+`::LINECHART` of `expected_cost_after` over `step`. "Test first" against
+"repair directly" is a `::WATERFALL`: the expected cost of repairing
+directly, plus the test's cost, minus what the better order saves after
+each answer (weighted by the answer's probability), down to the test-first
+total (`'total'::CATEGORY`). Every answer is a dashboard input: with the
+tests and the repairs' outcomes ("fixed" / "still broken") as nodes of the
+network, `'fix_ev evidence'::SELECT_AS` turns a click on an answer into
+evidence, and the producer's SQL plans again from `getvariable('fix_ev')`.
+
+```sql
+SELECT step AS "#" ::TABLE, kind, name, cost ::MONEY, 100 * p_fix AS "fixes it" ::PERCENT,
+       expected_cost_after ::MONEY FROM plan ORDER BY "#";
+SELECT step ::XAXIS, expected_cost_after ::LINECHART FROM plan ORDER BY step;
+SELECT label ::XAXIS, amount ::WATERFALL, kind ::CATEGORY FROM test_first_bridge ORDER BY i;
+```
+
 ### Diagrams: pipelines, lineage and processes (`::DIAGRAM`)
 
 A node/edge diagram drawn from data: boxes for the steps, arrows for what flows
@@ -2263,7 +2355,8 @@ FROM run_manifest ORDER BY seq;
   1.4–7 px, the widest edge 7 px); `status` is a health word (`ok`, `delayed`,
   `slow`, `failed`, `late`, … — the words of a table's badges) that colours the
   edge amber or red. `style` is `'solid'`, `'dashed'`, `'flow'` (moving dashes in the
-  browser) or `'flow-dots'` (dots travelling along the edge); static output
+  browser), `'flow-dots'` (dots travelling along the edge) or `'dotted'`
+  (still dots, e.g. an influence diagram's information arc); static output
   keeps the dashes / dots. Both may be combined; the same `(from, to)` pair is
   one edge. `::LINESTYLE` on a row styles the edges **into** that row's node
   (`'flow'::LINESTYLE` as a constant: every edge); a `style` in `::EDGES`

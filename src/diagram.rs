@@ -24,6 +24,8 @@ use crate::{key_text, svg_open, with_root_attr, Column, MetricFmt, Place, Render
 use ggplot_rs::prelude::Value;
 use serde_json::Value as J;
 
+mod policy;
+
 /// At most this many nodes are drawn (the first ones in row order).
 pub const MAX_NODES: usize = 150;
 /// At most this many edges are drawn.
@@ -38,6 +40,7 @@ pub const EDGE_STYLES: &[&str] = &[
     "flow-dots",
     "flow-volume",
     "flow-dots-volume",
+    "dotted",
 ];
 
 /// Layout direction: layers run left to right or top to bottom.
@@ -67,6 +70,9 @@ pub enum EdgeStyle {
     /// Moving dots (`'flow-dots'`): dots travelling along the edge, still
     /// dots in static output; `true` = speed by volume (`'flow-dots-volume'`).
     Dots(bool),
+    /// Still round dots (`'dotted'`, #1279): an influence diagram's
+    /// information arc.
+    Dotted,
 }
 
 impl EdgeStyle {
@@ -81,6 +87,7 @@ impl EdgeStyle {
             "flow-volume" => EdgeStyle::Flow(true),
             "flow-dots" | "dots" => EdgeStyle::Dots(false),
             "flow-dots-volume" | "dots-volume" => EdgeStyle::Dots(true),
+            "dotted" => EdgeStyle::Dotted,
             _ => return None,
         })
     }
@@ -273,6 +280,8 @@ pub struct States {
     pub evidence: Option<(Option<String>, String)>,
     /// The JSON the browser's card reads (states, evidence, the CPT), as given.
     pub card: String,
+    /// A decision's policy (#1279), drawn as a table in its box.
+    pub policy: Option<policy::Policy>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -331,6 +340,7 @@ impl States {
             rows,
             evidence,
             card: v.to_string(),
+            policy: field(o, &["policy"]).and_then(policy::Policy::parse),
         })
     }
 
@@ -626,7 +636,14 @@ impl Diagram {
                     .and_then(|b| Belief::parse(&b)),
                 states: cell(belief_col)
                     .and_then(text)
-                    .and_then(|b| States::parse(&b)),
+                    .and_then(|b| States::parse(&b))
+                    .map(|mut st| {
+                        // #1279: a policy's numbers in the locale
+                        if let Some(p) = st.policy.as_mut() {
+                            p.localize(locale);
+                        }
+                        st
+                    }),
                 shape: cell(shape_col).and_then(text).and_then(|s| {
                     let shape = shape_of(&s);
                     if shape.is_none() && !bad_shapes.contains(&s) {
@@ -1111,6 +1128,18 @@ fn layout(d: &Diagram) -> Placed {
         .map(|n| match (n.shape, &n.states) {
             (Some(NodeShape::Diamond), _) => diamond_box(&n.label, n.fvalue.as_deref()),
             (Some(shape), _) if !shape.boxed() => node_size(shape, &n.label),
+            // #1279: a decision's policy, a table
+            (
+                _,
+                Some(States {
+                    policy: Some(pol), ..
+                }),
+            ) => ggplot_rs::graph::table_box(
+                &n.label,
+                n.fvalue.as_deref(),
+                n.badge.as_deref(),
+                &pol.table(),
+            ),
             // #1275: a discrete node's states, a row each
             (_, Some(st)) => states_box_with_deltas(
                 &n.label,
@@ -1499,6 +1528,11 @@ fn bayes_net_summary(d: &Diagram) -> String {
     if !beliefs.is_empty() {
         parts.push(format!("most likely: {}", beliefs.join(", ")));
     }
+    // #1279: what each decision's policy chooses
+    parts.extend(d.nodes.iter().filter_map(|nd| {
+        let p = nd.states.as_ref()?.policy.as_ref()?;
+        Some(format!("decide {}: {}", nd.label, p.summary()))
+    }));
     if d.total_nodes > n {
         parts.push(format!("showing {n} of {} nodes", d.total_nodes));
     }
@@ -1735,7 +1769,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             let line = match e.style {
                 EdgeStyle::Solid => EdgeLine::Solid,
                 EdgeStyle::Dashed | EdgeStyle::Flow(_) => EdgeLine::Dashed,
-                EdgeStyle::Dots(_) => EdgeLine::Dots,
+                EdgeStyle::Dots(_) | EdgeStyle::Dotted => EdgeLine::Dots,
             };
             // health first (warn / bad), else a flowing edge in the brand colour
             let colour = match (e.status, e.style) {
@@ -1746,7 +1780,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 _ => fg.as_ref().map_or(muted, |f| f.line),
             };
             let class = match e.style {
-                EdgeStyle::Solid | EdgeStyle::Dashed => None,
+                EdgeStyle::Solid | EdgeStyle::Dashed | EdgeStyle::Dotted => None,
                 EdgeStyle::Flow(_) => Some("dp-flow"),
                 EdgeStyle::Dots(_) => Some("dp-flow dp-dots"),
             };
@@ -1848,6 +1882,10 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     tooltip.push_str(&format!(": {}", rows.join(", ")));
                 }
             }
+            // #1279: what a decision's policy chooses
+            if let Some(p) = nd.states.as_ref().and_then(|st| st.policy.as_ref()) {
+                tooltip.push_str(&format!(": {}", p.summary()));
+            }
             if let Some(b) = &nd.badge {
                 tooltip.push_str(&format!(" ({b})"));
             }
@@ -1888,7 +1926,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 prior: nd.belief.as_ref().and_then(|b| b.prior_heights()).map(|h| (h, muted)),
                 // #1275: a discrete node's states as bars, the prior behind
                 // each; a node with evidence shaded
-                states: nd.states.as_ref().map(|st| {
+                states: nd.states.as_ref().filter(|st| st.policy.is_none()).map(|st| {
                     let rows = st
                         .rows
                         .iter()
@@ -1911,6 +1949,13 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     .as_ref()
                     .filter(|st| st.evidence.is_some() || st.kind.as_deref() == Some("observed"))
                     .map(|_| mix(t.colors.card, t.color(0), 0.16)),
+                // #1279: a decision's policy as a table, the chosen
+                // options tinted
+                table: nd
+                    .states
+                    .as_ref()
+                    .and_then(|st| st.policy.as_ref())
+                    .map(|p| (p.table(), t.color(0))),
                 // #1276: a hand on a node set by an intervention
                 icon: nd
                     .states
