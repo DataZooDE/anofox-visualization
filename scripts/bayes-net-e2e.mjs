@@ -359,10 +359,8 @@ const twin = await page.evaluate(() => {
   return svg ? { summary: svg.getAttribute("data-summary") || "", copies: svg.querySelectorAll('rect[data-node$="*"]').length, hand: !!svg.querySelector('[data-of="discount*"] .dp-node-icon, [data-of="discount*"].dp-node-icon') } : null;
 });
 check(twin && twin.copies === 3 && /^If Got the discount had been set to no: /.test(twin.summary), "the twin: three counterfactual copies, what the change did", twin);
-// a fresh page: after the dropdown change above a slider change does not
-// re-run the tab (#1304)
-await page.goto(causalUrl);
-await page.waitForFunction(() => document.querySelectorAll("svg[data-diagram]").length >= 2, null, { timeout: 120000 });
+// the same page, after the dropdown changes above: the slider still re-runs
+// the tab (#1304 — the diagram reads it through a TEMP VIEW)
 await page.getByText("Did a learner find it", { exact: true }).first().click();
 await page.waitForFunction(() => !!document.querySelector("svg[data-bn-shd]"), null, { timeout: 60000 }).catch(() => {});
 const diff = () =>
