@@ -6,9 +6,17 @@
 //!   LIST of state names);
 //! - `arcs := ` `from, to, strength, direction, status` (status: `learned`,
 //!   `required`, `forbidden`);
-//! - `beliefs := ` `node, state, probability, prior, lo, hi`;
+//! - `beliefs := ` `node, state, probability, prior, lo, hi, previous`
+//!   (`previous`, #1276: the belief before the evidence last changed — its
+//!   change is drawn after the bar, the node tinted by how far it moved);
 //! - `evidence := ` `node, state` (hard) or `node, state, likelihood`
-//!   (soft), `mode` (`observe` | `do`);
+//!   (soft), `mode` (`observe` | `do`: the node's incoming arcs are drawn
+//!   cut, the node with a hand); a LIST of structs or its JSON text (the
+//!   `'name evidence'::SELECT_AS` variable as it is, #1276);
+//! - `paths := ` `path_id, seq, from, to` (#1276): the active paths
+//!   (d-separation) between pairs of nodes given the evidence, a step per
+//!   row in `seq` order — hovering one node while another is selected
+//!   highlights the paths between them;
 //! - `tables := ` `node, parent_states, state, probability`: the
 //!   conditional probability tables, `parent_states` in the order of the
 //!   node's arcs.
@@ -39,6 +47,12 @@ const SUM_TOLERANCE: f64 = 1e-6;
 
 /// At most this many parent configurations of a table go to the card.
 const MAX_TABLE_ROWS: usize = 64;
+
+/// At most this many paths go to the browser.
+const MAX_PATHS: usize = 500;
+
+/// The evidence modes.
+const MODES: &[&str] = &["observe", "do"];
 
 fn text(v: &J) -> Option<String> {
     match v {
@@ -114,6 +128,47 @@ fn list(options: &Row, name: &str) -> Result<Vec<Row>, String> {
         .into_iter()
         .filter_map(|i| i.as_object().cloned())
         .collect())
+}
+
+/// A path: its id and its steps `(from, to)`.
+type Path = (String, Vec<(String, String)>);
+
+/// The paths (`paths :=`): each id's steps `(from, to)` in `seq` order,
+/// paths in first-appearance order.
+fn paths(options: &Row) -> Result<Vec<Path>, String> {
+    // (seq, row, from, to) per path id
+    type Steps = Vec<(f64, usize, String, String)>;
+    let mut out: Vec<(String, Steps)> = Vec::new();
+    for (k, r) in list(options, "paths")?.iter().enumerate() {
+        let (Some(id), Some(f), Some(t)) = (
+            get(r, &["path_id", "path", "id"]),
+            get(r, &["from"]),
+            get(r, &["to"]),
+        ) else {
+            continue;
+        };
+        let seq = num(r, &["seq", "step"]).unwrap_or(k as f64);
+        match out.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, steps)) => steps.push((seq, k, f, t)),
+            None => out.push((id, vec![(seq, k, f, t)])),
+        }
+    }
+    Ok(out
+        .into_iter()
+        .map(|(id, mut steps)| {
+            steps.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            (id, steps.into_iter().map(|(_, _, f, t)| (f, t)).collect())
+        })
+        .collect())
+}
+
+/// The nodes set by an intervention (`mode: do`).
+fn intervened(evidence: &[Row]) -> Vec<String> {
+    evidence
+        .iter()
+        .filter(|e| get(e, &["mode"]).is_some_and(|m| m.eq_ignore_ascii_case("do")))
+        .filter_map(|e| get(e, &["node"]))
+        .collect()
 }
 
 /// The network as read: nodes (id, row) in row order, the drawn arcs.
@@ -238,6 +293,7 @@ fn problems(rows: &[Row], options: &Row) -> Result<Vec<String>, String> {
     let beliefs = list(options, "beliefs")?;
     let evidence = list(options, "evidence")?;
     let tables = list(options, "tables")?;
+    let paths = paths(options)?;
     let net = Net::read(rows, all_arcs.clone());
     let mut out = Vec::new();
     let bad: Vec<String> = rows
@@ -269,9 +325,15 @@ fn problems(rows: &[Row], options: &Row) -> Result<Vec<String>, String> {
             note(id);
         }
     }
+    for (_, steps) in &paths {
+        for (f, t) in steps {
+            note(f.clone());
+            note(t.clone());
+        }
+    }
     if !unknown.is_empty() {
         out.push(format!(
-            "bayes_net/unknown-id: arcs, beliefs, evidence or tables name {} that are not nodes",
+            "bayes_net/unknown-id: arcs, beliefs, evidence, tables or paths name {} that are not nodes",
             unknown.join(", ")
         ));
     }
@@ -321,12 +383,96 @@ fn problems(rows: &[Row], options: &Row) -> Result<Vec<String>, String> {
             strays.join(", ")
         ));
     }
+    // #1276: evidence modes and likelihoods
+    let mut modes: Vec<String> = Vec::new();
+    for e in &evidence {
+        if let Some(m) = get(e, &["mode"]) {
+            if !MODES.contains(&m.to_ascii_lowercase().as_str()) && !modes.contains(&m) {
+                modes.push(m);
+            }
+        }
+    }
+    if !modes.is_empty() {
+        out.push(format!(
+            "bayes_net/bad-mode: evidence mode {} is not observe or do — read as observe",
+            modes.join(", ")
+        ));
+    }
+    let mut lik: Vec<(String, bool, f64)> = Vec::new(); // (node, any negative, sum)
+    for e in &evidence {
+        let (Some(id), Some(l)) = (get(e, &["node"]), num(e, &["likelihood"])) else {
+            continue;
+        };
+        match lik.iter_mut().find(|(i, _, _)| *i == id) {
+            Some(x) => {
+                x.1 |= l < 0.0;
+                x.2 += l.max(0.0);
+            }
+            None => lik.push((id, l < 0.0, l.max(0.0))),
+        }
+    }
+    let bad: Vec<String> = lik
+        .iter()
+        .filter(|(_, neg, sum)| *neg || *sum <= 0.0)
+        .map(|(id, _, _)| id.clone())
+        .collect();
+    if !bad.is_empty() {
+        out.push(format!(
+            "bayes_net/bad-likelihood: the soft evidence on {} has a negative likelihood or none above 0",
+            bad.join(", ")
+        ));
+    }
+    // #1276: a path's steps follow arcs (either way) and join up
+    let arc = |f: &str, t: &str| {
+        net.arcs
+            .iter()
+            .any(|(a, b, _)| (a == f && b == t) || (a == t && b == f))
+    };
+    let (mut off_arc, mut broken): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for (id, steps) in &paths {
+        if steps
+            .iter()
+            .any(|(f, t)| net.has(f) && net.has(t) && !arc(f, t))
+        {
+            off_arc.push(id.clone());
+        }
+        if steps.windows(2).any(|w| w[0].1 != w[1].0) {
+            broken.push(id.clone());
+        }
+    }
+    if !off_arc.is_empty() {
+        out.push(format!(
+            "bayes_net/path-not-arc: path {} takes a step along no arc",
+            off_arc.join(", ")
+        ));
+    }
+    if !broken.is_empty() {
+        out.push(format!(
+            "bayes_net/path-gap: in path {} a step does not start where the one before ends (seq order)",
+            broken.join(", ")
+        ));
+    }
     Ok(out)
 }
 
 /// [`problems`] for the macro's own arguments.
 pub(crate) fn lint(rows: &[Row], options: &Row) -> Vec<String> {
     problems(rows, options).unwrap_or_else(|e| vec![e])
+}
+
+/// `data-*` for the panel's root `<svg>` (#1276): the active paths as
+/// `data-bn-paths`, `[{"id", "steps": [[from, to], …]}]` (only with
+/// `paths :=`; an empty list says no path is active).
+pub(crate) fn root_attrs(options: &Row) -> Result<Vec<(String, String)>, String> {
+    if options.get("paths").is_none_or(J::is_null) {
+        return Ok(Vec::new());
+    }
+    let ps: Vec<J> = paths(options)?
+        .into_iter()
+        .take(MAX_PATHS)
+        .map(|(id, steps)| json!({"id": id, "steps": steps.into_iter().map(|(f, t)| json!([f, t])).collect::<Vec<_>>()}))
+        .collect();
+    Ok(vec![("data-bn-paths".into(), J::Array(ps).to_string())])
 }
 
 /// A number as hover text: at most 3 decimals.
@@ -345,6 +491,7 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
     let beliefs = list(options, "beliefs")?;
     let evidence = list(options, "evidence")?;
     let tables = list(options, "tables")?;
+    let cut = intervened(&evidence);
     let threshold = num(options, &["threshold"]).unwrap_or(0.5);
     let direction = get(options, &["direction"])
         .map(|d| d.to_ascii_uppercase())
@@ -406,6 +553,7 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
                     ("prior", &["prior"][..]),
                     ("lo", &["lo"][..]),
                     ("hi", &["hi"][..]),
+                    ("was", &["previous", "was"][..]),
                 ] {
                     if let Some(v) = b.and_then(|b| num(b, names)) {
                         o.insert(k.into(), json!(v));
@@ -535,6 +683,10 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
             }
             if !tip.is_empty() {
                 o.insert("tip".into(), J::String(tip.join(", ")));
+            }
+            // #1276: an intervention on the child cuts the arc
+            if cut.contains(t) {
+                o.insert("cut".into(), J::Bool(true));
             }
             J::Object(o)
         })
@@ -743,7 +895,7 @@ mod tests {
         assert_eq!(l.len(), 4, "{l:?}");
         assert_eq!(
             l[0],
-            "bayes_net/unknown-id: arcs, beliefs, evidence or tables name ghost that are not nodes"
+            "bayes_net/unknown-id: arcs, beliefs, evidence, tables or paths name ghost that are not nodes"
         );
         assert_eq!(
             l[1],
@@ -783,6 +935,90 @@ mod tests {
             json!({"mode": "soft", "likelihood": {"yes": 0.8, "no": 0.2}})
         );
         assert_eq!(card(1)["evidence"], json!({"state": "no", "mode": "do"}));
+    }
+
+    /// #1276: the belief before the last change, an intervention's cut
+    /// arcs, evidence as the selection's JSON text, the active paths.
+    #[test]
+    fn previous_beliefs_cut_arcs_and_paths() {
+        let (nodes, mut options) = sprinkler();
+        options.insert(
+            "beliefs".into(),
+            json!([{"node": "rain", "state": "yes", "probability": 0.32, "prior": 0.5, "previous": 0.71},
+                   {"node": "rain", "state": "no", "probability": 0.68, "prior": 0.5, "previous": 0.29}]),
+        );
+        // the selection's variable as it is: JSON text
+        options.insert(
+            "evidence".into(),
+            json!(
+                r#"[{"node":"grass","state":"yes"},{"node":"sprinkler","state":"yes","mode":"do"}]"#
+            ),
+        );
+        options.insert(
+            "paths".into(),
+            json!([{"path_id": 1, "seq": 2, "from": "rain", "to": "grass"},
+                   {"path_id": 1, "seq": 1, "from": "cloudy", "to": "rain"}]),
+        );
+        let cols = columns(&nodes, &options).unwrap();
+        let rain: J = serde_json::from_str(col(&cols, "BELIEF")[2].as_str().unwrap()).unwrap();
+        assert_eq!(
+            rain["states"][0],
+            json!({"state": "yes", "p": 0.32, "prior": 0.5, "was": 0.71})
+        );
+        let sprinkler: J = serde_json::from_str(col(&cols, "BELIEF")[1].as_str().unwrap()).unwrap();
+        assert_eq!(sprinkler["evidence"], json!({"state": "yes", "mode": "do"}));
+        let arcs = col(&cols, "EDGES")[0].as_str().unwrap();
+        assert!(
+            arcs.contains(r#"{"from":"cloudy","to":"sprinkler","value":0.9,"width":2.6,"tip":"strength 0.9","cut":true}"#),
+            "{arcs}"
+        );
+        assert!(
+            !arcs.contains(r#""to":"rain","value":0.95,"width":2.7,"tip":"strength 0.95","cut""#),
+            "{arcs}"
+        );
+        assert_eq!(
+            root_attrs(&options).unwrap(),
+            [(
+                "data-bn-paths".to_string(),
+                r#"[{"id":"1","steps":[["cloudy","rain"],["rain","grass"]]}]"#.to_string()
+            )]
+        );
+        // no paths := no attribute; an empty list says none is active
+        assert!(root_attrs(&Row::new()).unwrap().is_empty());
+        assert_eq!(root_attrs(&opts(json!({"paths": []}))).unwrap()[0].1, "[]");
+        assert!(
+            lint(&nodes, &options).is_empty(),
+            "{:?}",
+            lint(&nodes, &options)
+        );
+    }
+
+    #[test]
+    fn lints_modes_likelihoods_and_paths() {
+        let (nodes, mut options) = sprinkler();
+        options.insert(
+            "evidence".into(),
+            json!([{"node": "rain", "state": "yes", "mode": "maybe"},
+                   {"node": "cloudy", "state": "yes", "likelihood": -1.0},
+                   {"node": "cloudy", "state": "no", "likelihood": 0.5}]),
+        );
+        options.insert(
+            "paths".into(),
+            json!([{"path_id": "a", "seq": 1, "from": "cloudy", "to": "grass"},
+                   {"path_id": "b", "seq": 1, "from": "cloudy", "to": "rain"},
+                   {"path_id": "b", "seq": 2, "from": "sprinkler", "to": "grass"}]),
+        );
+        let l = lint(&nodes, &options);
+        assert_eq!(
+            l,
+            [
+                "bayes_net/bad-mode: evidence mode maybe is not observe or do — read as observe",
+                "bayes_net/bad-likelihood: the soft evidence on cloudy has a negative likelihood or none above 0",
+                "bayes_net/path-not-arc: path a takes a step along no arc",
+                "bayes_net/path-gap: in path b a step does not start where the one before ends (seq order)",
+            ],
+            "{l:?}"
+        );
     }
 
     #[test]

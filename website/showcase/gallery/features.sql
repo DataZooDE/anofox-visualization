@@ -178,3 +178,23 @@ SELECT anofox_plot_bayes_net(n,
                     {'node': 'rain', 'parent_states': ['no'], 'state': 'no', 'probability': 0.8}])
        AS "The grass is wet: did it rain?"
 FROM bn_nodes n;
+
+-- @tile Seeing or doing | Click a state to observe it (`'ev evidence'::SELECT_AS`) and the query recomputes the beliefs; the chip switches it to do(). Turning the sprinkler on yourself cuts its arc from the clouds (the hand), so Cloudy is back at 50 %, and each bar shows how far that click moved it.
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE bn_do_nodes AS
+SELECT * FROM (VALUES ('cloudy', 'Cloudy'), ('sprinkler', 'Sprinkler on'), ('rain', 'Rain'), ('grass', 'Wet grass')) t(id, label),
+              (SELECT 'chance' AS kind, ['yes', 'no'] AS states);
+-- the beliefs with the sprinkler set on, do(), and before: seen on
+CREATE TABLE bn_do_beliefs AS
+SELECT node, s.state, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS probability,
+       CASE s.state WHEN 'yes' THEN q ELSE 1 - q END AS prior, CASE s.state WHEN 'yes' THEN w ELSE 1 - w END AS previous
+FROM (VALUES ('cloudy', 0.5, 0.5, 0.1667), ('sprinkler', 1.0, 0.3, 1.0), ('rain', 0.5, 0.5, 0.3), ('grass', 0.945, 0.6471, 0.927)) t(node, p, q, w),
+     (VALUES ('yes'), ('no')) s(state);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'cloudy', 'to': 'sprinkler'}, {'from': 'cloudy', 'to': 'rain'},
+                  {'from': 'sprinkler', 'to': 'grass'}, {'from': 'rain', 'to': 'grass'}],
+         beliefs := (SELECT list(b) FROM bn_do_beliefs b),
+         evidence := [{'node': 'sprinkler', 'state': 'yes', 'mode': 'do'}])
+       AS "Turning the sprinkler on: the clouds stay at 50 %"
+FROM bn_do_nodes n;

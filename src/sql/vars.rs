@@ -105,19 +105,31 @@ pub(crate) fn names_from_sets(sets: &str) -> Vec<String> {
         .collect()
 }
 
-/// `'[prefix:] name [single|multi]'` of a `::SELECT_AS` → the browser's
-/// initial variables: the name itself, `_from` and `_to` (a brush).
+/// `'[prefix:] name [single|multi|evidence]'` of a `::SELECT_AS` → the
+/// browser's initial variables: the name itself, `_from` and `_to` (a
+/// brush). `evidence` (#1276, a Bayesian network's): the name is the
+/// evidence as JSON text, `'[]'` = none, and `_prev` the evidence before
+/// the last change.
 pub(crate) fn select_as_prelude(v: &str) -> Result<String, String> {
     let mut parts = v
         .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
         .filter(|p| !p.is_empty());
     let name = parts.next().unwrap_or("");
     let mode = parts.next().unwrap_or("single").to_ascii_lowercase();
-    if !is_ident(name) || !matches!(mode.as_str(), "single" | "multi") || parts.next().is_some() {
+    if !is_ident(name)
+        || !matches!(mode.as_str(), "single" | "multi" | "evidence")
+        || parts.next().is_some()
+    {
         return Err(format!(
             "::SELECT_AS `{v}` — expected a variable name, optionally followed by \
-             'single' or 'multi' (e.g. 'region' or 'region multi'); the chart keeps \
-             the shared `selected` click"
+             'single', 'multi' or 'evidence' (e.g. 'region', 'region multi' or \
+             'ev evidence'); the chart keeps the shared `selected` click"
+        ));
+    }
+    if mode == "evidence" {
+        return Ok(format!(
+            "SET VARIABLE {n} = '[]';\nSET VARIABLE {n}_prev = '[]';\n",
+            n = name
         ));
     }
     let sel = if mode == "multi" {

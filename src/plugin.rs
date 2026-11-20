@@ -243,6 +243,9 @@ fn asset_path_ok(p: &str) -> bool {
             .any(|e| p.ends_with(e))
 }
 
+/// A root attribute's value (`root_attrs`), at most this many characters.
+const MAX_ROOT_ATTR: usize = 64 << 10;
+
 /// The browser files of a plugin, at most this many bytes together.
 const MAX_ASSETS: usize = 8 << 20;
 
@@ -429,8 +432,9 @@ pub(crate) fn contract_answer(
                             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                 })
                 .filter_map(|(k, v)| {
+                    // #1276: room for a network's active paths (JSON)
                     v.as_str()
-                        .map(|v| (k.clone(), v.chars().take(200).collect()))
+                        .map(|v| (k.clone(), v.chars().take(MAX_ROOT_ATTR).collect()))
                 })
                 .collect()
         })
