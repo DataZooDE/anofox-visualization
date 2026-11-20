@@ -12930,7 +12930,12 @@ fn handle_save(
     if let Some(col) = wb::needs_approver(&w.opts, &changes) {
         if !w.opts.is_approver(&claims.user, &claims.groups) {
             info.deny = Some("not_approver");
-            audit("deny", Some("not_approver"), Some(&dash.id), Some(&spec.name));
+            audit(
+                "deny",
+                Some("not_approver"),
+                Some(&dash.id),
+                Some(&spec.name),
+            );
             return reply(
                 req,
                 403,

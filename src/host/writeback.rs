@@ -355,7 +355,12 @@ pub fn needs_approver(opts: &WritebackOptions, changes: &Map<String, Value>) -> 
         let Some(d) = opts.tables.get(table) else {
             continue;
         };
-        for r in c.get("rows").and_then(Value::as_array).into_iter().flatten() {
+        for r in c
+            .get("rows")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             for col in &d.approver_only {
                 if r.get(col).is_some_and(set) {
                     return Some(format!("{table}.{col}"));
@@ -465,7 +470,8 @@ pub fn parse_table(section: &str, name: &str, decl: &Value) -> Result<TableDecl,
     // #1317: columns only an approver may set
     let mut approver_only = Vec::new();
     if let Some(ao) = o.get("approver_only") {
-        let bad = || format!("{section}.tables.{name}.approver_only must be an array of column names");
+        let bad =
+            || format!("{section}.tables.{name}.approver_only must be an array of column names");
         for c in ao.as_array().ok_or_else(bad)? {
             let c = c.as_str().ok_or_else(bad)?;
             if !columns.iter().any(|(n, _)| n == c) {
@@ -1404,36 +1410,67 @@ mod tests {
                                        "decides": "BOOLEAN", "n": "INTEGER", "note": "VARCHAR"},
                            "stamp": {"who": "user"},
                            "approver_only": ["decides", "n", "note"]});
-        let o = cfg(json!({"approvers": {"users": ["boss"], "groups": ["leads"]}}), table.clone())
-            .unwrap();
+        let o = cfg(
+            json!({"approvers": {"users": ["boss"], "groups": ["leads"]}}),
+            table.clone(),
+        )
+        .unwrap();
         assert!(o.is_approver("boss", &[]));
         assert!(o.is_approver("x", &["leads".into()]));
         assert!(!o.is_approver("ann", &["experts".into()]));
         assert_eq!(o.approver_only_columns(), ["decides", "n", "note"]);
         let t = save_target(&o, "", "ans", "answers").unwrap();
         let ch = |form: Value| {
-            build_changes_as(&o, &t, &req(json!({"key": "q1", "form": form})), Some(("ann", "2026-11-20T10:00:00Z")))
-                .unwrap()
+            build_changes_as(
+                &o,
+                &t,
+                &req(json!({"key": "q1", "form": form})),
+                Some(("ann", "2026-11-20T10:00:00Z")),
+            )
+            .unwrap()
         };
         // unset, false, 0, empty: no approver needed
-        for f in [json!({"answer": "a_to_b"}), json!({"decides": false, "n": 0, "note": " "}),
-                  json!({"decides": null}), json!({"decides": "false"})] {
+        for f in [
+            json!({"answer": "a_to_b"}),
+            json!({"decides": false, "n": 0, "note": " "}),
+            json!({"decides": null}),
+            json!({"decides": "false"}),
+        ] {
             assert_eq!(needs_approver(&o, &ch(f.clone())), None, "{f}");
         }
-        assert_eq!(needs_approver(&o, &ch(json!({"decides": true}))).as_deref(), Some("answers.decides"));
-        assert_eq!(needs_approver(&o, &ch(json!({"decides": "true"}))).as_deref(), Some("answers.decides"));
-        assert_eq!(needs_approver(&o, &ch(json!({"n": 2}))).as_deref(), Some("answers.n"));
-        assert_eq!(needs_approver(&o, &ch(json!({"note": "x"}))).as_deref(), Some("answers.note"));
+        assert_eq!(
+            needs_approver(&o, &ch(json!({"decides": true}))).as_deref(),
+            Some("answers.decides")
+        );
+        assert_eq!(
+            needs_approver(&o, &ch(json!({"decides": "true"}))).as_deref(),
+            Some("answers.decides")
+        );
+        assert_eq!(
+            needs_approver(&o, &ch(json!({"n": 2}))).as_deref(),
+            Some("answers.n")
+        );
+        assert_eq!(
+            needs_approver(&o, &ch(json!({"note": "x"}))).as_deref(),
+            Some("answers.note")
+        );
         // the config's refusals
         let err = |extra: Value, table: Value| cfg(extra, table).unwrap_err();
         assert!(err(json!({}), table.clone()).contains("approvers must say who"));
         let plain = json!({"key": ["id"], "columns": {"id": "VARCHAR", "decides": "BOOLEAN"}});
-        assert!(err(json!({"approvers": {"users": ["boss"]}}), plain.clone()).contains("nothing to approve"));
-        assert!(err(json!({"approvers": {}}), table.clone()).contains("approvers needs groups or users"));
-        assert!(err(json!({"approvers": {"roles": []}}), table.clone()).contains("unknown key 'roles'"));
+        assert!(
+            err(json!({"approvers": {"users": ["boss"]}}), plain.clone())
+                .contains("nothing to approve")
+        );
+        assert!(err(json!({"approvers": {}}), table.clone())
+            .contains("approvers needs groups or users"));
+        assert!(
+            err(json!({"approvers": {"roles": []}}), table.clone()).contains("unknown key 'roles'")
+        );
         let mut t2 = plain.clone();
         t2["approver_only"] = json!(["nope"]);
-        assert!(err(json!({"approvers": {"users": ["b"]}}), t2.clone()).contains("'nope' is not one of its columns"));
+        assert!(err(json!({"approvers": {"users": ["b"]}}), t2.clone())
+            .contains("'nope' is not one of its columns"));
         t2["approver_only"] = json!(["id"]);
         assert!(err(json!({"approvers": {"users": ["b"]}}), t2.clone()).contains("key or stamped"));
         t2["approver_only"] = json!("decides");
