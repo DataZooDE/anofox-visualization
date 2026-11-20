@@ -212,7 +212,7 @@ SELECT '**The question.** Drill, or walk away? A seismic test costs 10 and reads
 
 **Try it.** Click **test** in *Test?*, then **diffuse** in *Seismic*: that row lights up, the oil is likely dry (73 %), walk away. **Closed** instead: soaking is 42 % likely, drill.
 
-The dotted arcs are what is known when deciding.'::MARKDOWN;
+The dotted arcs are what is known when deciding. The *Payoff* diamond leaves out the test''s cost (its own node, *Test cost*), which is why it differs from the best expected payoff above.'::MARKDOWN;
 
 SELECT 8::SPAN;
 SELECT 520::HEIGHT;
