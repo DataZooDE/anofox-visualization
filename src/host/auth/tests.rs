@@ -518,6 +518,11 @@ fn public_assets_only_with_embed_and_only_code() {
         "/examples/x.sql",
         "/pkg/../x.js",
         "/auth/x.js",
+        // #1284: plugin files and the list of them
+        "/modules/acme/plugin.wasm",
+        "/modules/acme/view.js",
+        "/modules/acme/view.css",
+        "/plugins.json",
     ] {
         assert!(!a.public_asset("GET", p), "{p}");
     }

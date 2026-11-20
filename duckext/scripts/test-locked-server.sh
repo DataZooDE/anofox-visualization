@@ -281,6 +281,14 @@ sess=$(curl -s "http://127.0.0.1:$PORT/d/ex" | grep -o '"session":"[^"]*"' | hea
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/ex/totals.csv")" = 200 ] || fail "export csv with the page session"
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/ex/totals.png")" = 200 ] || fail "export panel png with the page session"
 [ "$(xget -H "X-Anofox-Session: $sess" "$X/other/x.png")" = 403 ] || fail "export panel png of another dashboard should 403"
+# #1284: with share (or embed) on, the app's code is public, a plugin's
+# files are not: they need a credential, the page session will do.
+H="http://127.0.0.1:$PORT"
+[ "$(xget "$H/app.js")" = 200 ] || fail "app.js stays public with share links"
+for f in /modules/acme/plugin.wasm /modules/acme/view.js /modules/acme/view.css /plugins.json; do
+  [ "$(xget "$H$f")" = 401 ] || fail "$f without a credential should 401"
+  [ "$(xget -H "X-Anofox-Session: $sess" "$H$f")" != 401 ] || fail "$f with the page session passes the login"
+done
 stop
 echo "OK: exports — SVG/PNG/PDF (dashboard, one tab, variables, inputs' defaults), SVG/PNG/CSV/JSON of a named panel, formula cells neutralised, scope and login"
 

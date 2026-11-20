@@ -86,7 +86,18 @@ globalThis.anofoxPlugins = {
 
 // A module's or plugin's browser files (paths, relative to the page): each
 // .css as a stylesheet, each .js/.mjs as a module script (#1156 D5a).
-export function loadAssetFiles(paths) {
+// `headers` (an embedded or shared page's session, #1284): such a page has
+// no cookie a <link>/<script src> could send, so each file is fetched with
+// them and put inline — the page's CSP takes inline styles and a script
+// carrying its nonce.
+export function loadAssetFiles(paths, headers = {}) {
+  if (Object.keys(headers).length) {
+    for (const p of paths) {
+      if (typeof p !== "string" || !/\.(css|m?js)$/i.test(p)) continue;
+      inlineAssetFile(p, headers).catch((e) => console.warn(`${p}: ${e.message || e}`));
+    }
+    return;
+  }
   for (const p of paths) {
     if (typeof p !== "string") continue;
     if (/\.css$/i.test(p)) {
@@ -103,9 +114,23 @@ export function loadAssetFiles(paths) {
   }
 }
 
+async function inlineAssetFile(p, headers) {
+  const res = await fetch(p, { credentials: "same-origin", headers });
+  if (!res.ok) throw new Error(`${res.status}`);
+  const css = /\.css$/i.test(p);
+  const el = document.createElement(css ? "style" : "script");
+  if (!css) {
+    el.type = "module";
+    el.nonce = document.querySelector("script[nonce]")?.nonce || "";
+  }
+  el.dataset.src = p;
+  el.textContent = await res.text();
+  document.head.appendChild(el);
+}
+
 // Load one plugin from `url`: its name and manifest, or throws why not.
-async function loadOne(url, register) {
-  const res = await fetch(url, { credentials: "same-origin" });
+async function loadOne(url, register, headers) {
+  const res = await fetch(url, { credentials: "same-origin", headers });
   if (!res.ok) throw new Error(`${res.status}`);
   const module = await WebAssembly.compile(await res.arrayBuffer());
   const imports = WebAssembly.Module.imports(module);
@@ -141,12 +166,14 @@ async function loadOne(url, register) {
 // URL, or {url, assets: true} when the server serves its browser files
 // (the operator's --plugin-assets / options.plugin_assets, #1290): then its
 // manifest's `assets` load from modules/<name>/, like a linked module's.
-// `register`: the core's register_plugin. Returns the names loaded; a
-// refused plugin is reported on the console and skipped.
-export async function loadPlugins(register, listUrl = "plugins.json") {
+// `register`: the core's register_plugin. `headers`: sent with every
+// request (an embedded or shared page's session: plugin files need a
+// credential, #1284). Returns the names loaded; a refused plugin is reported
+// on the console and skipped.
+export async function loadPlugins(register, listUrl = "plugins.json", headers = {}) {
   let urls = [];
   try {
-    const res = await fetch(listUrl, { credentials: "same-origin", cache: "no-cache" });
+    const res = await fetch(listUrl, { credentials: "same-origin", cache: "no-cache", headers });
     if (!res.ok) return [];
     urls = await res.json();
   } catch (_) {
@@ -169,7 +196,7 @@ export async function loadPlugins(register, listUrl = "plugins.json") {
       continue;
     }
     try {
-      const { name, assets } = await loadOne(url.href, register);
+      const { name, assets } = await loadOne(url.href, register, headers);
       loaded.push(name);
       if (withAssets && assets.length) {
         const base = new URL(`modules/${encodeURIComponent(name)}/`, document.baseURI);
@@ -180,7 +207,7 @@ export async function loadPlugins(register, listUrl = "plugins.json") {
           // the core checked the paths (no "..", no scheme); stay under base anyway
           if (f.origin === location.origin && f.href.startsWith(base.href)) files.push(f.href);
         }
-        loadAssetFiles(files);
+        loadAssetFiles(files, headers);
       }
     } catch (e) {
       console.warn(`plugin ${u}: ${e.message || e}`);
