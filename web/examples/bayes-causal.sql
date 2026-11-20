@@ -241,7 +241,12 @@ WITH u AS (
   SELECT i, n.id AS node, (hash(i::VARCHAR || '/' || n.id) % 1000000) / 1e6 AS u
   FROM range(8000) r(i), cz_nodes n WHERE n.net = 'discount'
 ),
-p AS (PIVOT u ON node USING any_value(u)),
+p AS (
+  SELECT i, any_value(u) FILTER (node = 'size') AS size, any_value(u) FILTER (node = 'engaged') AS engaged,
+         any_value(u) FILTER (node = 'price') AS price, any_value(u) FILTER (node = 'discount') AS discount,
+         any_value(u) FILTER (node = 'usage') AS usage, any_value(u) FILTER (node = 'stay') AS stay
+  FROM u GROUP BY i
+),
 p_of AS (SELECT node, parent_states, p_yes FROM cz_cpt WHERE net = 'discount'),
 s1 AS (SELECT i, if(size < 0.3, 'yes', 'no') AS size, engaged AS u_engaged, price AS u_price,
               discount AS u_discount, usage AS u_usage, stay AS u_stay FROM p),
@@ -267,8 +272,10 @@ truth AS (
   SELECT "case", product(f) AS w FROM cz_factors WHERE net = 'discount' GROUP BY ALL
 ),
 truth_cases AS (
-  PIVOT (SELECT c."case", c.node, c.state FROM cz_cases c WHERE c.net = 'discount')
-  ON node USING any_value(state)
+  SELECT "case", any_value(state) FILTER (node = 'engaged') AS engaged, any_value(state) FILTER (node = 'price') AS price,
+         any_value(state) FILTER (node = 'discount') AS discount, any_value(state) FILTER (node = 'usage') AS usage,
+         any_value(state) FILTER (node = 'stay') AS stay
+  FROM cz_cases WHERE net = 'discount' GROUP BY "case"
 )
 SELECT 0 AS b, engaged, price, discount, usage, stay, count(*)::DOUBLE AS w FROM cz_sample GROUP BY ALL
 UNION ALL
@@ -317,8 +324,9 @@ WITH e AS (
          100 * sum(pz * (y11 - y10) * (m1 - m0)) AS nie
   FROM cz_by_z GROUP BY b
 )
-UNPIVOT e ON ate, cate_engaged_yes, cate_engaged_no, cate_price_yes, cate_price_no, ett, nde, nie
-INTO NAME effect VALUE pt;
+SELECT b, unnest(['ate', 'cate_engaged_yes', 'cate_engaged_no', 'cate_price_yes', 'cate_price_no', 'ett', 'nde', 'nie']) AS effect,
+       unnest([ate, cate_engaged_yes, cate_engaged_no, cate_price_yes, cate_price_no, ett, nde, nie]) AS pt
+FROM e;
 
 CREATE OR REPLACE TEMP TABLE cz_effects AS
 SELECT effect,
@@ -390,17 +398,19 @@ WITH long AS (
     SELECT w, (SELECT bool_and(CASE s.node WHEN 'discount' THEN c.discount = s.state WHEN 'stay' THEN c.stay = s.state
                                            WHEN 'usage' THEN c.usage = s.state WHEN 'engaged' THEN c.engaged = s.state
                                            ELSE true END) FROM cz_seen s) AS fit,
-           size, engaged, price, discount, usage, stay
+           unnest(['size', 'engaged', 'price', 'discount', 'usage', 'stay']) AS node,
+           unnest([size, engaged, price, discount, usage, stay]) AS state
     FROM cz_worlds c
-  ) UNPIVOT (state FOR node IN (size, engaged, price, discount, usage, stay))
+  )
   UNION ALL
   SELECT w, fit, 'counterfactual', node, state FROM (
     SELECT w, (SELECT bool_and(CASE s.node WHEN 'discount' THEN c.discount = s.state WHEN 'stay' THEN c.stay = s.state
                                            WHEN 'usage' THEN c.usage = s.state WHEN 'engaged' THEN c.engaged = s.state
                                            ELSE true END) FROM cz_seen s) AS fit,
-           size, engaged, price, cf_discount AS discount, cf_usage AS usage, cf_stay AS stay
+           unnest(['size', 'engaged', 'price', 'discount', 'usage', 'stay']) AS node,
+           unnest([size, engaged, price, cf_discount, cf_usage, cf_stay]) AS state
     FROM cz_worlds c
-  ) UNPIVOT (state FOR node IN (size, engaged, price, discount, usage, stay))
+  )
 ),
 agg AS (
   SELECT world, node, state, sum(w) FILTER (fit) AS w_fit, sum(w) AS w_all
@@ -547,10 +557,12 @@ SELECT round(100 * (max(fd) FILTER (x = 'yes') - max(fd) FILTER (x = 'no')), 1):
        'points: the front-door estimate (doing), from discount, weekly use and renewal alone'::LABEL
 FROM (
   WITH j AS (
-    PIVOT (SELECT c."case", c.node, c.state, w.w FROM cz_cases c
-           JOIN (SELECT "case", product(f) AS w FROM cz_factors WHERE net = 'hidden' GROUP BY ALL) w USING ("case")
-           WHERE c.net = 'hidden')
-    ON node USING any_value(state) GROUP BY "case", w
+    SELECT c."case", any_value(w.w) AS w,
+           any_value(c.state) FILTER (c.node = 'discount') AS discount, any_value(c.state) FILTER (c.node = 'usage') AS usage,
+           any_value(c.state) FILTER (c.node = 'stay') AS stay
+    FROM cz_cases c
+    JOIN (SELECT "case", product(f) AS w FROM cz_factors WHERE net = 'hidden' GROUP BY ALL) w USING ("case")
+    WHERE c.net = 'hidden' GROUP BY c."case"
   ),
   pm AS (SELECT discount AS x, usage AS m, sum(w) / sum(sum(w)) OVER (PARTITION BY discount) AS p FROM j GROUP BY discount, usage),
   px AS (SELECT discount AS x, sum(w) AS p FROM j GROUP BY discount),
