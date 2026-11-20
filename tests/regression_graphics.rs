@@ -2094,6 +2094,32 @@ fn waterfall_bridges_start_to_end() {
     assert!(s.matches("<line ").count() + s.matches("<polyline ").count() >= 5);
 }
 
+/// #1318: `::LOWER_GOOD` — a cost waterfall draws a saving (a decrease) in
+/// the positive colour and an increase in the negative one.
+#[test]
+fn a_lower_good_waterfall_flips_its_colours() {
+    let th = anofox_visualization::theme::default_light();
+    let fill = |s: &str, x: &str| {
+        let t = tags_with(s, "data-x", x);
+        let t = t
+            .iter()
+            .find(|t| t.starts_with("<rect"))
+            .unwrap()
+            .to_string();
+        attr_of(&t, "fill").unwrap().to_string()
+    };
+    let mut cols = waterfall_cols();
+    cols.push(Column::new("lg", Role::LowerGood, strs(&["true"])));
+    let s = svg(cols);
+    assert_eq!(fill(&s, "Price"), hexu(th.colors.positive));
+    assert_eq!(fill(&s, "Volume"), hexu(th.colors.negative));
+    // 'no' (or false) keeps the usual colours
+    let mut cols = waterfall_cols();
+    cols.push(Column::new("lg", Role::LowerGood, strs(&["no"])));
+    let s = svg(cols);
+    assert_eq!(fill(&s, "Price"), hexu(th.colors.negative));
+}
+
 #[test]
 fn waterfall_null_and_tagged_rows_are_totals() {
     let s = svg(vec![

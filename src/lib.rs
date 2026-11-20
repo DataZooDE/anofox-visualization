@@ -367,6 +367,10 @@ pub enum Role {
     /// A comparison value where lower is better (`::DELTA_LOWER_GOOD`: churn,
     /// cost, errors) — the same arrow, a rise drawn in the negative colour.
     DeltaLowerGood,
+    /// A step down is good (`::LOWER_GOOD`, #1318): a ::WATERFALL of costs
+    /// draws its decreases in the positive colour, its increases in the
+    /// negative one.
+    LowerGood,
     /// How a KPI's change reads (`::DELTA_FORMAT`): `'pct'` (default),
     /// `'abs'` (the absolute change in the KPI's own format) or `'both'`.
     DeltaFormat,

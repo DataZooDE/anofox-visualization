@@ -298,6 +298,8 @@ pub static REGISTRY: &[RoleSpec] = &[
       "gauge zone colours, comma-separated hex; beside a ::CATEGORY (a chart or a ::MAP) a level map 'Critical:bad; Watch:warn; OK:good' (status colours or #rrggbb)"),
     e("LABELS", &[], R::GaugeLabels, "modifier", true,
       "gauge zone labels, comma-separated (drawn at each zone)"),
+    e("LOWER_GOOD", &["LOWER_IS_BETTER", "LOWER_BETTER"], R::LowerGood, "modifier", true,
+      "a ::WATERFALL where down is good (costs, time, churn): decreases in the positive colour, increases in the negative one — any value but false/0/no"),
     e("DIRECTION", &[], R::Direction, "modifier", true,
       "a ::DIAGRAM's direction: 'LR' (left to right, default) or 'TB' (top to bottom)"),
     e("ANIMATE", &["ANIMATION", "ENTRANCE"], R::Animate, "modifier", true,
@@ -1298,6 +1300,7 @@ mod tests {
             Role::PagedTable,
             Role::Delta,
             Role::DeltaLowerGood,
+            Role::LowerGood,
             Role::DeltaFormat,
             Role::DeltaLabel,
             Role::RefLine,
@@ -1492,6 +1495,7 @@ mod tests {
                 | Role::Metric(_)
                 | Role::Delta
                 | Role::DeltaLowerGood
+                | Role::LowerGood
                 | Role::DeltaFormat
                 | Role::DeltaLabel
                 | Role::RefLine
