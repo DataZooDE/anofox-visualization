@@ -34,6 +34,7 @@ pub mod diagram;
 pub mod diagram_edit;
 pub mod distfield;
 mod downsample;
+pub mod embed;
 pub mod figure;
 pub mod form;
 pub mod format;
